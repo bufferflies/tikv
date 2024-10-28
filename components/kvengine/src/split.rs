@@ -20,7 +20,10 @@ use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use slog_global::info;
 
-use crate::{table::BoundedDataSet, *};
+use crate::{
+    table::{vector_index::VectorIndexes, BoundedDataSet},
+    *,
+};
 
 #[derive(Debug)]
 pub struct CheckMergeResult {
@@ -164,6 +167,14 @@ impl Engine {
                     }
                 }
             }
+            let mut new_vec_indexes = VectorIndexes::default();
+            for vec_index in old_data.vector_indexes.get_all() {
+                for file in &vec_index.files {
+                    if new_shard.overlap_bound(file.data_bound()) {
+                        new_vec_indexes.add_index_file(file.clone());
+                    }
+                }
+            }
             let mut builder = ShardDataBuilder::new(new_shard.get_data());
             builder.set_mem_tbls(new_mem_tbls);
             builder.set_l0_tbls(new_l0s);
@@ -172,6 +183,7 @@ impl Engine {
             builder.set_unloaded_tbls(old_data.unloaded_tbls.clone());
             builder.set_schema_file(schema_file);
             builder.set_columnar_levels(new_col_levels);
+            builder.set_vector_indexes(new_vec_indexes);
             new_shard.set_data(builder.build());
         }
         for shard in new_shards.drain(..) {
@@ -444,6 +456,17 @@ impl Engine {
                 columnar_levels.add_file(columnar_create.level as usize, col);
             }
             columnar_levels.sort();
+            let mut vector_indexes = old_data.vector_indexes.clone();
+            for source_vec_index in source_snap.get_vector_indexes() {
+                for source_vec_idx_file_id in source_vec_index.files.iter().map(|f| f.id) {
+                    let vec_idx_file = source
+                        .vec_index_files
+                        .get(&source_vec_idx_file_id)
+                        .unwrap()
+                        .clone();
+                    vector_indexes.add_index_file(vec_idx_file);
+                }
+            }
             let mut builder = ShardDataBuilder::new(old_data);
             builder.set_range(new_shard.range.clone());
             builder.set_mem_tbls(mem_tbls);
@@ -453,6 +476,7 @@ impl Engine {
             builder.set_unloaded_tbls(unloaded_tbls);
             builder.set_lock_txn_files(lock_txn_files);
             builder.set_columnar_levels(columnar_levels);
+            builder.set_vector_indexes(vector_indexes);
             builder.build()
         } else {
             info!(

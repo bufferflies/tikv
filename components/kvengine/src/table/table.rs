@@ -738,6 +738,16 @@ impl BoundedDataSet for kvenginepb::BlobCreate {
     }
 }
 
+impl BoundedDataSet for kvenginepb::VectorIndexFile {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(
+            InnerKey::from_inner_buf(self.get_smallest()),
+            InnerKey::from_inner_buf(self.get_biggest()),
+            true,
+        )
+    }
+}
+
 pub fn encode_val_to_outer_val_owner(v: Value, outer_val_owner: &mut Vec<u8>) -> Value {
     outer_val_owner.resize(v.encoded_size(), 0);
     v.encode(outer_val_owner.as_mut_slice());

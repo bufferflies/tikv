@@ -9,7 +9,7 @@ use tikv_util::config::ReadableDuration;
 
 use crate::table::{
     blobtable::builder::BlobTableBuildOptions, columnar::ColumnarTableBuildOptions,
-    sstable::BlockCacheType, ChecksumType,
+    sstable::BlockCacheType, vector_index::VectorIndexBuildOptions, ChecksumType,
 };
 
 pub(crate) const DEFAULT_COMPACTION_REQUEST_VERSION: u32 = 3;
@@ -86,6 +86,8 @@ pub struct Config {
     pub blob_table_build_options: BlobTableBuildOptions,
 
     pub columnar_table_build_options: ColumnarTableBuildOptions,
+
+    pub vector_index_build_options: VectorIndexBuildOptions,
     // Note: Fields of simple (not structure) type can not be the last. Otherwise serializing the
     // config will meet the "ValueAfterTable" error.
     // See https://docs.rs/toml/0.5.11/toml/ser/enum.Error.html#variant.ValueAfterTable.
@@ -108,6 +110,7 @@ impl Default for Config {
             blob_table_build_options: Default::default(),
             per_keyspace_configs: vec![],
             columnar_table_build_options: Default::default(),
+            vector_index_build_options: Default::default(),
         }
     }
 }

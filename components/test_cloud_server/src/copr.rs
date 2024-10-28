@@ -7,6 +7,7 @@ use kvengine::table::columnar::{
 };
 use tidb_query_datatype::{
     codec::{
+        data_type::VectorFloat32,
         datum::encode_key,
         row::v2::encoder_for_test::{Column, RowEncoder},
         table::{encode_common_handle_row_key, encode_row_key},
@@ -159,6 +160,14 @@ fn col_val_column(col_info: &ColumnInfo, i: usize) -> Column {
             FieldTypeTp::VarChar => {
                 let str_val = format!("value{:06}", i);
                 Column::new(col_info.get_column_id(), Some(str_val.into_bytes()))
+            }
+            FieldTypeTp::TiDbVectorFloat32 => {
+                let mut f32_vals = vec![];
+                for j in 0..col_info.get_column_len() {
+                    f32_vals.push(i as f32 + j as f32);
+                }
+                let vec_f32 = VectorFloat32::copy_from_f32(&f32_vals);
+                Column::new(col_info.get_column_id(), Some(vec_f32))
             }
             _ => unimplemented!(),
         }

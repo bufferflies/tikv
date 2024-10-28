@@ -12,7 +12,7 @@ use api_version::{
 };
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
-use kvenginepb::{SchemaMeta, TxnFileRef};
+use kvenginepb::{SchemaMeta, TxnFileRef, VectorIndex};
 use protobuf::Message;
 use slog_global::*;
 use util::TxnFileRefExt as _;
@@ -55,6 +55,7 @@ pub struct ShardMeta {
     pub schema_restore_ver: u64,
     pub columnar_snap_version: u64,
     pub unconverted_l0s: Vec<u64>,
+    pub vector_indexes: Vec<kvenginepb::VectorIndex>,
 
     /// The following are memory-based field(s).
     ///
@@ -125,6 +126,15 @@ impl ShardMeta {
             meta.schema_file_id = sm.get_file_id();
             meta.schema_file_ver = sm.get_version();
             meta.schema_restore_ver = sm.get_restore_version();
+        }
+        for vec_idx in snap.get_vector_indexes() {
+            meta.vector_indexes.push(vec_idx.clone());
+            for vec_idx_file in vec_idx.get_files() {
+                meta.add_file(
+                    vec_idx_file.id,
+                    FileMeta::from_vector_index_file(vec_idx_file),
+                );
+            }
         }
         meta
     }
@@ -280,6 +290,10 @@ impl ShardMeta {
         }
         if cs.has_columnar_compaction() {
             self.apply_columnar_compaction(cs.get_columnar_compaction());
+            return;
+        }
+        if cs.has_update_vector_index() {
+            self.apply_update_vector_index(cs.get_update_vector_index());
             return;
         }
         if !cs.get_property_key().is_empty() {
@@ -829,6 +843,19 @@ impl ShardMeta {
                     new_shard.files.insert(*fid, fm.clone());
                 }
             }
+            for vec_idx in &old.vector_indexes {
+                let mut files = vec![];
+                for vec_file in vec_idx.get_files() {
+                    if new_shard_bound.overlap_bound(vec_file.data_bound()) {
+                        files.push(vec_file.clone());
+                    }
+                }
+                if !files.is_empty() {
+                    let mut new_vec_idx = vec_idx.clone();
+                    new_vec_idx.set_files(files.into());
+                    new_shard.vector_indexes.push(new_vec_idx);
+                }
+            }
         }
         new_shards
     }
@@ -862,6 +889,28 @@ impl ShardMeta {
         } else {
             self.columnar_snap_version = self.columnar_snap_version.max(comp.snap_version);
         }
+    }
+
+    pub fn apply_update_vector_index(&mut self, update_vec_idx: &pb::UpdateVectorIndex) {
+        if let Some(old_idx) = self.vector_indexes.iter_mut().find(|vec_idx| {
+            vec_idx.table_id == update_vec_idx.table_id
+                && vec_idx.index_id == update_vec_idx.index_id
+                && vec_idx.col_id == update_vec_idx.col_id
+        }) {
+            let mut old_files = old_idx.take_files().into_vec();
+            old_files.retain(|f| !update_vec_idx.removed.contains(&f.id));
+            old_files.extend_from_slice(update_vec_idx.get_added());
+            old_idx.set_files(old_files.into());
+            return;
+        }
+        let mut vec_idx = kvenginepb::VectorIndex::new();
+        vec_idx.table_id = update_vec_idx.table_id;
+        vec_idx.index_id = update_vec_idx.index_id;
+        vec_idx.col_id = update_vec_idx.col_id;
+        for file in update_vec_idx.get_added() {
+            vec_idx.mut_files().push(file.clone());
+        }
+        self.vector_indexes.push(vec_idx)
     }
 
     pub fn to_change_set(&self) -> pb::ChangeSet {
@@ -910,10 +959,7 @@ impl ShardMeta {
                     blob.set_biggest(v.biggest.to_vec());
                     snap.mut_blob_creates().push(blob);
                 }
-                FileType::VectorIndex => {
-                    // TODO: support vector index
-                    unreachable!("todo")
-                }
+                FileType::VectorIndex => {} // already handled in vector_indexes.
             }
         }
         if self.schema_file_ver > 0 {
@@ -924,6 +970,7 @@ impl ShardMeta {
             snap.set_schema_meta(sm);
         }
         snap.set_unconverted_l0s(self.unconverted_l0s.clone());
+        snap.set_vector_indexes(self.vector_indexes.clone().into());
         cs.set_snapshot(snap);
         if let Some(parent) = &self.parent {
             cs.set_parent(parent.to_change_set());
@@ -1040,7 +1087,9 @@ impl ShardMeta {
 
             // clear all files if exists
             parent.files.clear();
+            parent.vector_indexes.clear();
             self.files.clear();
+            self.vector_indexes.clear();
             // remove DEL_PREFIXES_KEY property if exists
             self.del_property(DEL_PREFIXES_KEY);
         }
@@ -1050,6 +1099,9 @@ impl ShardMeta {
             }
             for (&id, source_file) in &source.files {
                 self.files.insert(id, source_file.clone());
+            }
+            for vec_idx in &source.vector_indexes {
+                self.merge_vector_index(vec_idx);
             }
 
             // `inner_key_off` will be different when merge regions of different keyspaces.
@@ -1092,6 +1144,23 @@ impl ShardMeta {
         self.data_sequence = sequence;
         self.parent = Some(Box::new(parent));
         self.seq = sequence;
+    }
+
+    fn merge_vector_index(&mut self, vec_idx: &VectorIndex) {
+        if let Some(old_idx) = self.vector_indexes.iter_mut().find(|v| {
+            v.table_id == vec_idx.table_id
+                && v.index_id == vec_idx.table_id
+                && v.col_id == vec_idx.col_id
+        }) {
+            let old_file_ids: HashSet<u64> = old_idx.files.iter().map(|f| f.id).collect();
+            for file in vec_idx.files.iter() {
+                if !old_file_ids.contains(&file.id) {
+                    old_idx.files.push(file.clone());
+                }
+            }
+        } else {
+            self.vector_indexes.push(vec_idx.clone());
+        }
     }
 
     pub fn merge_txn_file_ref(&mut self, wb_ref: &TxnFileRef, log_index: u64) {
@@ -1235,13 +1304,13 @@ impl FileMeta {
         )
     }
 
-    pub fn from_vector_index_file(table: &kvenginepb::VectorIndexFile) -> Self {
+    pub fn from_vector_index_file(vec_idx_file: &kvenginepb::VectorIndexFile) -> Self {
         Self::new(
             0,
             0,
             FileType::VectorIndex,
-            table.get_smallest(),
-            table.get_biggest(),
+            vec_idx_file.get_smallest(),
+            vec_idx_file.get_biggest(),
             0,
         )
     }

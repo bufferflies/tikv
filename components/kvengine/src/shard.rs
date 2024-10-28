@@ -26,11 +26,12 @@ use crate::{
     table::{
         self,
         blobtable::blobtable::BlobTable,
-        columnar::{ColumnarFile, SchemaFile},
+        columnar::{ColumnarFile, SchemaFile, VectorIndexDef},
         file::InMemFile,
         memtable::{self, CfTable},
         search,
         sstable::{BlockCache, L0Table, SsTable},
+        vector_index::VectorIndexes,
         BoundedDataSet, DataBound, InnerKey, TxnFile,
     },
     txn_chunk_manager::TxnChunkManager,
@@ -649,6 +650,7 @@ impl Shard {
         let mut files = data.get_all_sst_files();
         files.extend(data.get_txn_chunks());
         files.extend(data.get_all_col_files());
+        files.extend(data.get_all_vec_idx_files());
         files.extend(self.get_schema_file().map(|f| f.get_file_id()));
         files
     }
@@ -666,6 +668,11 @@ impl Shard {
     pub fn get_all_col_files(&self) -> Vec<u64> {
         let data = self.get_data();
         data.get_all_col_files()
+    }
+
+    pub fn get_all_vec_idx_files(&self) -> Vec<u64> {
+        let data = self.get_data();
+        data.get_all_vec_idx_files()
     }
 
     #[inline]
@@ -883,7 +890,7 @@ impl Shard {
                 }
             }
         }
-        let priority = if score > 1.0 {
+        let mut priority = if score > 1.0 {
             let max_pri = if level_with_highest_score == 0 {
                 CompactionPriority::L0 { score }
             } else {
@@ -911,9 +918,13 @@ impl Shard {
                 && (data.get_col_table_counts(1) > MAX_COL_L1_FILE_COUNTS
                     || (col_l0_score < col_l1_score && col_l1_score > 1.0))
             {
-                Some(CompactionPriority::ColumnarL1 {
-                    score: col_l1_score,
-                })
+                if let Some(priority) = Self::maybe_override_by_vector_index(&data) {
+                    Some(priority)
+                } else {
+                    Some(CompactionPriority::ColumnarL1 {
+                        score: col_l1_score,
+                    })
+                }
             } else {
                 let handle_priority_none = || -> Option<CompactionPriority> {
                     if !data.l0_tbls.is_empty() {
@@ -927,8 +938,102 @@ impl Shard {
                 handle_priority_none()
             }
         };
+        if priority.is_none() {
+            // Only build vector index when there is no other compaction task.
+            priority = self.get_vector_index_priority(&data);
+        }
         let mut lock = self.compaction_priority.write().unwrap();
         *lock = priority;
+    }
+
+    // To prevent L1 columnar compaction invalidate existing vector index, we
+    // replace the L1 columnar compaction with update vector index.
+    fn maybe_override_by_vector_index(data: &ShardData) -> Option<CompactionPriority> {
+        if !data.vector_indexes.is_empty() {
+            let first_l1_columnar = data.col_levels.levels[1].files.first().unwrap();
+            let l2_snap_after_compaction = first_l1_columnar.get_l0_version().unwrap();
+            for vec_idx in data.vector_indexes.get_all() {
+                if vec_idx.snap_version() < l2_snap_after_compaction {
+                    return Some(CompactionPriority::UpdateVectorIndex {
+                        score: 2.0,
+                        table_id: vec_idx.table_id,
+                        index_id: vec_idx.index_id,
+                        col_id: vec_idx.col_id,
+                        rebuild: false,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    fn get_vector_index_priority(&self, data: &ShardData) -> Option<CompactionPriority> {
+        if self.get_columnar_snap_version() == 0 {
+            return None;
+        }
+        let schema_file = data.schema_file.as_ref()?;
+        let schemas = schema_file.get_vector_index_schemas();
+        let mut priority = None;
+        let mut max_score = 1.0;
+        for schema in &schemas {
+            for vec_idx in &schema.vector_indexes {
+                let (score, rebuild) = self.vector_index_score(data, schema.table_id, vec_idx);
+                if score > max_score {
+                    max_score = score;
+                    priority = Some(CompactionPriority::UpdateVectorIndex {
+                        score,
+                        table_id: schema.table_id,
+                        index_id: vec_idx.index_id,
+                        col_id: vec_idx.col_id,
+                        rebuild,
+                    });
+                }
+            }
+        }
+        priority
+    }
+
+    fn vector_index_score(
+        &self,
+        data: &ShardData,
+        table_id: i64,
+        vec_idx: &VectorIndexDef,
+    ) -> (f64, bool) {
+        let snap_version = if let Some(vec_idx) =
+            data.vector_indexes
+                .get(table_id, vec_idx.index_id, vec_idx.col_id)
+        {
+            if vec_idx.files.len() >= self.opt.vector_index_build_options.rebuild_file_count {
+                return (1.1, true);
+            }
+            vec_idx.files.first().unwrap().snap_version()
+        } else {
+            0
+        };
+        let mut total_row_count = 0usize;
+        for col_level in &data.col_levels.levels {
+            if col_level.level == 2 && snap_version > 0 {
+                // The level 2 columnar files are already included in vector index.
+                continue;
+            }
+            for file in &col_level.files {
+                if !file.has_table(table_id) {
+                    continue;
+                }
+                if snap_version > 0 && file.get_l0_version().unwrap_or_default() <= snap_version {
+                    continue;
+                }
+                let tbl_meta = file.get_table(table_id);
+                let (_, row_count) = tbl_meta.handle_column.pack_offsets.end_offset();
+                total_row_count += row_count as usize;
+            }
+        }
+        let total_size = total_row_count * vec_idx.dimension * 4;
+        if total_size < self.opt.vector_index_build_options.delta_size {
+            // We don't need to build vector index for small number of vectors.
+            return (0.0, false);
+        }
+        (1.1, snap_version == 0)
     }
 
     pub(crate) fn get_compaction_priority(&self) -> Option<CompactionPriority> {
@@ -1126,6 +1231,7 @@ pub(crate) struct ShardDataBuilder {
     lock_txn_files: Option<Vec<TxnFile>>,
     schema_file: Option<Option<SchemaFile>>,
     columnar_levels: Option<ColumnarLevels>,
+    vector_indexes: Option<VectorIndexes>,
 }
 
 impl ShardDataBuilder {
@@ -1141,6 +1247,7 @@ impl ShardDataBuilder {
             lock_txn_files: None,
             schema_file: None,
             columnar_levels: None,
+            vector_indexes: None,
         }
     }
 
@@ -1180,6 +1287,10 @@ impl ShardDataBuilder {
         self.columnar_levels = Some(columnar_levels);
     }
 
+    pub(crate) fn set_vector_indexes(&mut self, vector_indexes: VectorIndexes) {
+        self.vector_indexes = Some(vector_indexes);
+    }
+
     pub(crate) fn build(mut self) -> ShardData {
         ShardData::new(
             self.range.take().unwrap_or_else(|| self.old.range.clone()),
@@ -1207,6 +1318,9 @@ impl ShardDataBuilder {
             self.columnar_levels
                 .take()
                 .unwrap_or_else(|| self.old.col_levels.clone()),
+            self.vector_indexes
+                .take()
+                .unwrap_or_else(|| self.old.vector_indexes.clone()),
         )
     }
 }
@@ -1260,6 +1374,7 @@ impl ShardData {
             INITIAL_UPDATE_COUNTER,
             None,
             ColumnarLevels::new(),
+            VectorIndexes::default(),
         )
     }
 
@@ -1275,6 +1390,7 @@ impl ShardData {
         update_counter: u64,
         schema_file: Option<SchemaFile>,
         col_levels: ColumnarLevels,
+        vector_indexes: VectorIndexes,
     ) -> Self {
         assert!(!mem_tbls.is_empty());
 
@@ -1291,6 +1407,7 @@ impl ShardData {
                 update_counter,
                 schema_file,
                 col_levels,
+                vector_indexes,
             }),
         }
     }
@@ -1309,6 +1426,7 @@ pub(crate) struct ShardDataCore {
     pub update_counter: u64,
     pub(crate) schema_file: Option<SchemaFile>,
     pub(crate) col_levels: ColumnarLevels,
+    pub(crate) vector_indexes: VectorIndexes,
 }
 
 impl Deref for ShardDataCore {
@@ -1370,6 +1488,16 @@ impl ShardDataCore {
             false
         });
         col_ids
+    }
+
+    pub(crate) fn get_all_vec_idx_files(&self) -> Vec<u64> {
+        let mut vec_idx_file_ids = vec![];
+        for vec_idx in self.vector_indexes.get_all() {
+            for file in &vec_idx.files {
+                vec_idx_file_ids.push(file.file_id())
+            }
+        }
+        vec_idx_file_ids
     }
 
     #[inline]
@@ -2424,12 +2552,6 @@ impl ColumnarLevel {
     pub(crate) fn sort(&mut self) {
         if self.level < 2 {
             self.files.sort_by(|a, b| {
-                if a.get_l0_version().is_none() {
-                    info!("columnar file {} has no l0 version", a.id());
-                }
-                if b.get_l0_version().is_none() {
-                    info!("columnar file {} has no l0 version", b.id());
-                }
                 let a_l0_version = a.get_l0_version().unwrap();
                 let b_l0_version = b.get_l0_version().unwrap();
                 b_l0_version.cmp(&a_l0_version)
@@ -2445,6 +2567,7 @@ impl ColumnarLevel {
 pub(crate) struct ColumnarLevels {
     pub(crate) unconverted_l0s: Vec<L0Table>,
     pub(crate) levels: Vec<ColumnarLevel>,
+    pub(crate) l2_snap_version: u64,
 }
 
 impl ColumnarLevels {
@@ -2456,6 +2579,7 @@ impl ColumnarLevels {
                 ColumnarLevel::new(1),
                 ColumnarLevel::new(2),
             ],
+            l2_snap_version: 0,
         }
     }
 

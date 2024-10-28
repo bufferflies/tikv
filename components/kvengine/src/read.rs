@@ -1368,6 +1368,7 @@ impl SnapAccessCore {
             txn_id_column: None,
             columns: columns.to_vec(),
             pk_col_ids: table_schema.pk_col_ids.clone(),
+            vector_indexes: vec![],
         };
         schema_buf
             .columns

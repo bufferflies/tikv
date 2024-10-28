@@ -8,14 +8,13 @@ use protobuf::Message;
 use tidb_query_datatype::codec::table::{
     decode_table_id, INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
 };
-use tipb::TableInfo;
 
 use crate::table::{
     self,
     columnar::{
         builder::{new_txn_id_column_info, new_version_column_info},
         columnar::Schema,
-        get_primary_key, SchemaBuf,
+        SchemaBuf, VectorIndexDef,
     },
     file::File,
     ChecksumType, InnerKey, NO_COMPRESSION,
@@ -110,26 +109,37 @@ impl SchemaFile {
         let restore_version = data.get_u64_le();
         let mut tables = HashMap::new();
         while !data.is_empty() {
-            let table_info_len = data.get_u32_le() as usize;
-            let mut table_info = TableInfo::new();
-            let table_pb = &data[..table_info_len];
-            table_info.merge_from_bytes(table_pb).unwrap();
-            data.advance(table_info_len);
-            let table_id = table_info.get_table_id();
-            let mut columns = table_info.take_columns().into_vec();
-            let pk_col_ids: Vec<i64> = columns
-                .iter()
-                .filter(|c| get_primary_key(c))
-                .map(|c| c.get_column_id())
-                .collect();
+            let schema_pb_len = data.get_u32_le() as usize;
+            let mut schema_pb = kvenginepb::Schema::new();
+            schema_pb.merge_from_bytes(&data[..schema_pb_len]).unwrap();
+            data.advance(schema_pb_len);
+            let table_id = schema_pb.get_table_id();
+            let mut columns = Vec::with_capacity(schema_pb.columns.len());
+            for col_data in &schema_pb.columns {
+                let mut column_info = tipb::ColumnInfo::new();
+                column_info.merge_from_bytes(col_data).unwrap();
+                columns.push(column_info);
+            }
             let handle_column = columns.pop().unwrap();
+            let vector_indexes = schema_pb
+                .vector_indexes
+                .iter()
+                .map(|vec_idx| {
+                    let vec_col = columns
+                        .iter()
+                        .find(|c| c.get_column_id() == vec_idx.col_id)
+                        .unwrap();
+                    VectorIndexDef::from_pb(vec_col.get_column_len() as usize, vec_idx)
+                })
+                .collect();
             let schema_buf = SchemaBuf {
                 table_id,
                 handle_column,
                 version_column: new_version_column_info(),
                 txn_id_column: Some(new_txn_id_column_info()),
                 columns,
-                pk_col_ids,
+                pk_col_ids: schema_pb.pk_col_ids,
+                vector_indexes,
             };
             tables.insert(table_id, Schema::new(schema_buf));
         }
@@ -147,6 +157,16 @@ impl SchemaFile {
 
     pub fn get_table(&self, table_id: i64) -> Option<&Schema> {
         self.core.tables.get(&table_id)
+    }
+
+    pub fn get_vector_index_schemas(&self) -> Vec<Schema> {
+        let mut schemas = vec![];
+        for schema in self.core.tables.values() {
+            if !schema.vector_indexes.is_empty() {
+                schemas.push(schema.clone())
+            }
+        }
+        schemas
     }
 
     pub fn get_keyspace_id(&self) -> u32 {
@@ -282,12 +302,18 @@ pub fn build_schema_file(
         let mut columns = Vec::with_capacity(schema.columns.len() + 1);
         columns.extend_from_slice(&schema.columns);
         columns.push(schema.handle_column.clone());
-        let mut table_info = TableInfo::new();
-        table_info.set_table_id(schema.table_id);
-        table_info.set_columns(protobuf::RepeatedField::from_vec(columns));
-        let table_info_data = table_info.write_to_bytes().unwrap();
-        data.put_u32_le(table_info_data.len() as u32);
-        data.extend_from_slice(&table_info_data);
+        let mut schema_pb = kvenginepb::Schema::new();
+        schema_pb.table_id = schema.table_id;
+        for col in &columns {
+            schema_pb.mut_columns().push(col.write_to_bytes().unwrap());
+        }
+        schema_pb.set_pk_col_ids(schema.pk_col_ids.clone());
+        for vec_idx in &schema.vector_indexes {
+            schema_pb.mut_vector_indexes().push(vec_idx.to_pb());
+        }
+        let schema_pb_data = schema_pb.write_to_bytes().unwrap();
+        data.put_u32_le(schema_pb_data.len() as u32);
+        data.extend_from_slice(&schema_pb_data);
     }
     let mut footer = SchemaFileFooter::new();
     let checksum_type = ChecksumType::Crc32;
@@ -333,6 +359,7 @@ mod tests {
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, true), new_column_info(4, false)],
             pk_col_ids: vec![],
+            vector_indexes: vec![],
         });
         let schema_2 = Schema::new(SchemaBuf {
             table_id: 20,
@@ -341,6 +368,7 @@ mod tests {
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
             pk_col_ids: vec![],
+            vector_indexes: vec![],
         });
         let schemas = vec![schema_1, schema_2];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
@@ -427,6 +455,7 @@ mod tests {
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, true), new_column_info(4, false)],
             pk_col_ids: vec![],
+            vector_indexes: vec![],
         });
         let schema_2 = Schema::new(SchemaBuf {
             table_id: 20,
@@ -435,6 +464,7 @@ mod tests {
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
             pk_col_ids: vec![],
+            vector_indexes: vec![],
         });
         let schema_3 = Schema::new(SchemaBuf {
             table_id: 30,
@@ -443,6 +473,7 @@ mod tests {
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
             pk_col_ids: vec![],
+            vector_indexes: vec![],
         });
         let schemas = vec![schema_1.clone(), schema_2.clone()];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);

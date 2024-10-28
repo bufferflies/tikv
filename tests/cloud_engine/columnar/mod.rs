@@ -1,6 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod copr;
+mod vector_index;
 
 use std::{
     sync::{Arc, Mutex},
@@ -624,6 +625,7 @@ fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {
             txn_id_column: Some(new_txn_id_column_info()),
             columns: vec![c1, c2],
             pk_col_ids: vec![],
+            vector_indexes: vec![],
         }
         .into();
         schemas.push(schema);

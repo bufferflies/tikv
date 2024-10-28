@@ -29,7 +29,7 @@ use tipb::FieldType;
 use crate::{
     codec::{
         data_type::ScalarValue,
-        mysql::{decimal::DecimalEncoder, json::JsonEncoder},
+        mysql::{decimal::DecimalEncoder, json::JsonEncoder, VectorFloat32Encoder},
         Error, Result,
     },
     expr::EvalContext,
@@ -174,7 +174,9 @@ pub trait RowEncoder: NumberEncoder {
 
 impl<T: BufferWriter> RowEncoder for T {}
 
-pub trait ScalarValueEncoder: NumberEncoder + DecimalEncoder + JsonEncoder {
+pub trait ScalarValueEncoder:
+    NumberEncoder + DecimalEncoder + JsonEncoder + VectorFloat32Encoder
+{
     #[inline]
     fn write_value(&mut self, ctx: &mut EvalContext, col: &Column) -> Result<()> {
         match &col.value {
@@ -194,6 +196,9 @@ pub trait ScalarValueEncoder: NumberEncoder + DecimalEncoder + JsonEncoder {
             }
             ScalarValue::Duration(Some(v)) => self.encode_i64(v.to_nanos()).map_err(Error::from),
             ScalarValue::Json(Some(v)) => self.write_json(v.as_ref()),
+            ScalarValue::VectorFloat32(Some(v)) => {
+                self.write_vector_float32(v.as_ref()).map_err(Error::from)
+            }
             _ => unreachable!(),
         }
     }

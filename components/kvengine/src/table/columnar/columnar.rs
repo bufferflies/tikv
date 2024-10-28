@@ -33,6 +33,46 @@ pub struct SchemaBuf {
     pub txn_id_column: Option<ColumnInfo>,
     pub columns: Vec<ColumnInfo>,
     pub pk_col_ids: Vec<i64>,
+    pub vector_indexes: Vec<VectorIndexDef>,
+}
+
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct VectorIndexDef {
+    pub index_id: i64,
+    pub col_id: i64,
+    pub dimension: usize,
+    pub index_kind: String,
+    pub specs: HashMap<String, Vec<u8>>,
+}
+
+impl VectorIndexDef {
+    pub fn to_pb(&self) -> kvenginepb::VectorIndexDef {
+        let mut vec_idx_pb = kvenginepb::VectorIndexDef::new();
+        vec_idx_pb.set_index_id(self.index_id);
+        vec_idx_pb.set_col_id(self.col_id);
+        vec_idx_pb.set_index_kind(self.index_kind.clone());
+        for (k, v) in &self.specs {
+            vec_idx_pb.mut_spec_keys().push(k.clone());
+            vec_idx_pb.mut_spec_values().push(v.clone());
+        }
+        vec_idx_pb
+    }
+
+    pub fn from_pb(dimension: usize, vec_idx_pb: &kvenginepb::VectorIndexDef) -> Self {
+        let mut specs = HashMap::default();
+        for i in 0..vec_idx_pb.spec_keys.len() {
+            let key = vec_idx_pb.spec_keys[i].clone();
+            let val = vec_idx_pb.spec_values[i].clone();
+            specs.insert(key, val);
+        }
+        Self {
+            index_id: vec_idx_pb.index_id,
+            col_id: vec_idx_pb.col_id,
+            dimension,
+            index_kind: vec_idx_pb.index_kind.clone(),
+            specs,
+        }
+    }
 }
 
 impl SchemaBuf {

@@ -305,6 +305,21 @@ impl Engine {
             }
         }
         initial_flush.set_columnar_snap_version(flush.columnar_snap_version);
+        for vec_idx in flush.shard_data.vector_indexes.get_all() {
+            let mut vec_idx_pb = pb::VectorIndex::new();
+            vec_idx_pb.set_table_id(vec_idx_pb.table_id);
+            vec_idx_pb.set_index_id(vec_idx_pb.index_id);
+            vec_idx_pb.set_col_id(vec_idx_pb.col_id);
+            for vec_idx_file in &vec_idx.files {
+                let mut vec_idx_file_pb = pb::VectorIndexFile::new();
+                vec_idx_file_pb.set_id(vec_idx_file.file_id());
+                vec_idx_file_pb.set_smallest(vec_idx_file.smallest().to_vec());
+                vec_idx_file_pb.set_biggest(vec_idx_file.biggest().to_vec());
+                vec_idx_file_pb.set_snap_version(vec_idx_file.snap_version());
+                vec_idx_pb.mut_files().push(vec_idx_file_pb);
+            }
+            initial_flush.mut_vector_indexes().push(vec_idx_pb);
+        }
 
         let (tx, rx) = mpsc::unbounded();
         let mut send_cnt = 0;

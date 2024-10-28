@@ -13,7 +13,7 @@ use crate::{
         DEFAULT_COMPACTION_REQUEST_VERSION, DEFAULT_COMPACTION_TOMBS_COUNT,
         DEFAULT_COMPACTION_TOMBS_RATIO,
     },
-    table::{blobtable, columnar, sstable},
+    table::{blobtable, columnar, sstable, vector_index::VectorIndexBuildOptions},
     *,
 };
 
@@ -38,6 +38,8 @@ pub struct Options {
     pub blob_table_build_options: blobtable::builder::BlobTableBuildOptions,
 
     pub columnar_build_options: columnar::ColumnarTableBuildOptions,
+
+    pub vector_index_build_options: VectorIndexBuildOptions,
 
     pub remote_compactor_addr: String,
 
@@ -87,6 +89,7 @@ impl Default for Options {
             table_builder_options: Default::default(),
             blob_table_build_options: Default::default(),
             columnar_build_options: Default::default(),
+            vector_index_build_options: Default::default(),
             remote_compactor_addr: Default::default(),
             recovery_concurrency: Default::default(),
             preparation_concurrency: Default::default(),

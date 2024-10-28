@@ -22,7 +22,7 @@ use kvengine::{
         columnar,
         columnar::{
             new_common_handle_column_info, new_int_handle_column_info, new_txn_id_column_info,
-            new_version_column_info, Schema, SchemaBuf, SchemaFile,
+            new_version_column_info, Schema, SchemaBuf, SchemaFile, VectorIndexDef,
         },
         file::{File, LocalFile},
         ChecksumType, NO_COMPRESSION,
@@ -32,15 +32,18 @@ use kvengine::{
 use kvproto::metapb::Store;
 use native_br::common::send_request_to_store_with_retry;
 use rfstore::store::PdIdAllocator;
-use schema::schema::{convert_column_infos_to_tipb, TableInfo};
+use schema::schema::{
+    convert_column_infos_to_tipb, ColumnInfo, IndexInfo, TableInfo, VectorIndexInfo,
+};
 use security::SecurityManager;
+use tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC;
 use tikv_client::{BoundRange, Key, TransactionOptions, Value};
 use tikv_util::{box_err, config::ReadableDuration, debug, error, info};
 
 use crate::{error::Result, get_all_stores_except_tiflash, server::Context};
 
 const DEFAULT_TIMEOUT: ReadableDuration = ReadableDuration::secs(5);
-const KEYSPACE_REFRESH_INTERVAL: ReadableDuration = ReadableDuration::secs(60);
+const KEYSPACE_REFRESH_INTERVAL: ReadableDuration = ReadableDuration::secs(30);
 const SCHEMA_REFRESH_THRESHOLD: u64 = 256 * 1024 * 1024;
 
 const META_FILE_MAGIC: u32 = 0x5E9EDFF4;
@@ -469,6 +472,10 @@ impl SchemaManager {
                     continue;
                 }
             }
+            let need_build_columnar = table_infos.iter().any(|ti| ti.build_columnar());
+            if cur_schema_version == 0 && !need_build_columnar {
+                continue;
+            }
             if cur_schema_version < schema_version {
                 if table_infos.is_empty() {
                     continue;
@@ -729,6 +736,7 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
     } else {
         new_int_handle_column_info()
     };
+    let vector_indexes = parse_vector_indexes(ti_cols, ti.index_info.as_ref());
     SchemaBuf {
         table_id: ti.id,
         handle_column,
@@ -736,6 +744,7 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
         txn_id_column: Some(new_txn_id_column_info()),
         columns,
         pk_col_ids,
+        vector_indexes,
     }
     .into()
 }
@@ -850,6 +859,41 @@ impl schema::KvGetter for SchemaManager {
         }
         Ok(vals)
     }
+}
+
+fn parse_vector_indexes(
+    ti_cols: &[ColumnInfo],
+    idx_infos: Option<&Vec<IndexInfo>>,
+) -> Vec<VectorIndexDef> {
+    let mut vec_idxes = vec![];
+    for col in ti_cols {
+        if let Some(vec_idx_info) = &col.vector_index {
+            vec_idxes.push(new_vec_idx_def(vec_idx_info, 0, col.id));
+        }
+    }
+    if let Some(idx_infos) = idx_infos {
+        for idx_info in idx_infos {
+            if let Some(vec_idx_info) = &idx_info.vector_index {
+                let column_offset = idx_info.idx_cols[0].offset as usize;
+                let col_id = ti_cols[column_offset].id;
+                vec_idxes.push(new_vec_idx_def(vec_idx_info, idx_info.id, col_id));
+            }
+        }
+    }
+    vec_idxes
+}
+
+fn new_vec_idx_def(info: &VectorIndexInfo, index_id: i64, col_id: i64) -> VectorIndexDef {
+    let mut vec_idx_def = VectorIndexDef::default();
+    vec_idx_def.index_id = index_id;
+    vec_idx_def.col_id = col_id;
+    vec_idx_def.dimension = info.dimension as usize;
+    vec_idx_def.index_kind = info.kind.clone();
+    vec_idx_def.specs.insert(
+        VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC.to_string(),
+        info.distance_metric.as_bytes().to_vec(),
+    );
+    vec_idx_def
 }
 
 fn find_latest_schema_file<P: AsRef<Path>>(dir_path: P) -> Result<Option<String>> {
@@ -1048,6 +1092,7 @@ mod tests {
                 txn_id_column: None,
                 columns: vec![new_int_handle_column_info()],
                 pk_col_ids: vec![],
+                vector_indexes: vec![],
             }
             .into();
             schemas.push(schema);
@@ -1062,6 +1107,7 @@ mod tests {
                 txn_id_column: None,
                 columns: vec![new_int_handle_column_info()],
                 pk_col_ids: vec![],
+                vector_indexes: vec![],
             }
             .into(),
         );

@@ -52,6 +52,7 @@ slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global
 slog-term = "2.4"
 tempfile = "3.0"
 thiserror = "1.0"
+tidb_query_datatype = { workspace = true }
 tikv = { path = "../../", default-features = false }
 tikv-client = { workspace = true }
 tikv_util = { path = "../../components/tikv_util" }

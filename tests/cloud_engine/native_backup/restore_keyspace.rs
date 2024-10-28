@@ -1243,6 +1243,7 @@ fn test_restore_keyspace_with_schema() {
             txn_id_column: None,
             columns: vec![new_int_handle_column_info()],
             pk_col_ids: vec![],
+            vector_indexes: vec![],
         }
         .into();
         schemas.push(schema);

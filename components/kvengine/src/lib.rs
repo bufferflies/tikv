@@ -3,6 +3,7 @@
 #![feature(hash_extract_if)]
 #![feature(is_sorted)]
 #![feature(core_intrinsics)]
+#![feature(extract_if)]
 #![feature(assert_matches)]
 #![allow(clippy::diverging_sub_expression)]
 #![allow(internal_features)]

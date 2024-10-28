@@ -1,6 +1,5 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-#![allow(dead_code)]
 use std::{collections::HashSet, ops::Deref, sync::Arc};
 
 use api_version::ApiV2;
@@ -13,7 +12,7 @@ use crate::{
     table::{
         columnar::Block,
         file::{File, MmapData},
-        search, Error,
+        search, BoundedDataSet, DataBound, Error,
         Error::Other,
         InnerKey, Iterator as TableIterator, Result, Value,
     },
@@ -47,7 +46,14 @@ impl VectorIndexes {
                 && index.index_id == vec_idx_file.index_id()
                 && index.col_id == vec_idx_file.column_id()
             {
-                index.files.push(vec_idx_file);
+                if !index
+                    .files
+                    .iter()
+                    .any(|f| f.file_id() == vec_idx_file.file_id())
+                {
+                    index.files.push(vec_idx_file);
+                    index.sort();
+                }
                 return;
             }
         }
@@ -85,6 +91,17 @@ impl VectorIndexes {
             }
         }
         None
+    }
+
+    pub fn get_mut(
+        &mut self,
+        table_id: i64,
+        index_id: i64,
+        col_id: i64,
+    ) -> Option<&mut VectorIndex> {
+        self.indexes
+            .iter_mut()
+            .find(|i| i.table_id == table_id && i.index_id == index_id && i.col_id == col_id)
     }
 
     pub fn sort(&mut self) {
@@ -212,12 +229,12 @@ impl VectorIndexFile {
         self.core.column_id as i64
     }
 
-    pub fn smallest(&self) -> &[u8] {
-        &self.core.smallest
+    pub fn smallest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.core.smallest)
     }
 
-    pub fn biggest(&self) -> &[u8] {
-        &self.core.biggest
+    pub fn biggest(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.core.biggest)
     }
 }
 
@@ -226,6 +243,12 @@ impl Deref for VectorIndexFile {
 
     fn deref(&self) -> &Self::Target {
         &self.core
+    }
+}
+
+impl BoundedDataSet for VectorIndexFile {
+    fn data_bound(&self) -> DataBound<'_> {
+        DataBound::new(self.smallest(), self.biggest(), true)
     }
 }
 
@@ -485,6 +508,27 @@ impl TableIterator for VectorIndexValuesIterator {
 
     fn valid(&self) -> bool {
         self.idx < self.keys.len()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct VectorIndexBuildOptions {
+    // When the size of the non-indexed vector data exceed this value,
+    // a new vector index file is build.
+    pub delta_size: usize,
+    // When the file count of a vector index exceed this value, a new vector index is rebuild to
+    // replace the old vector index files.
+    pub rebuild_file_count: usize,
+}
+
+impl Default for VectorIndexBuildOptions {
+    fn default() -> Self {
+        VectorIndexBuildOptions {
+            delta_size: 16 * 1024 * 1024,
+            rebuild_file_count: 4,
+        }
     }
 }
 

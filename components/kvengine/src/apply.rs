@@ -20,6 +20,7 @@ use crate::{
         columnar::{ColumnarFile, SchemaFile},
         file::File,
         sstable::{BlockCache, L0Table, SsTable},
+        vector_index::{VectorIndexFile, VectorIndexes},
         BoundedDataSet, TxnFile,
     },
     *,
@@ -35,6 +36,7 @@ pub struct ChangeSet {
     pub lock_txn_files: Vec<TxnFile>,
     pub schema_file: Option<SchemaFile>,
     pub col_files: HashMap<u64, ColumnarFile>,
+    pub vec_index_files: HashMap<u64, VectorIndexFile>,
 }
 
 impl Deref for ChangeSet {
@@ -62,6 +64,7 @@ impl ChangeSet {
             lock_txn_files: vec![],
             schema_file: None,
             col_files: HashMap::new(),
+            vec_index_files: HashMap::new(),
         }
     }
 
@@ -92,6 +95,10 @@ impl ChangeSet {
             }
             FileType::Schema => {
                 self.schema_file = Some(SchemaFile::open(file)?);
+            }
+            FileType::VectorIndex => {
+                let file = VectorIndexFile::new(file)?;
+                self.vec_index_files.insert(id, file);
             }
             file_type => unreachable!("unexpected file type {:?}", file_type),
         }
@@ -192,11 +199,24 @@ pub(crate) fn create_snapshot_tables(
         col_levels.unconverted_l0s.push(l0.clone());
     }
     col_levels.sort();
+    let mut vector_indexes = VectorIndexes::default();
+    for vec_idx_pb in snap.get_vector_indexes() {
+        for vec_idx_file_pb in vec_idx_pb.get_files() {
+            let vec_idx_file = tables
+                .vec_index_files
+                .get(&vec_idx_file_pb.get_id())
+                .unwrap()
+                .clone();
+            vector_indexes.add_index_file(vec_idx_file);
+        }
+    }
+    vector_indexes.sort();
     builder.set_l0_tbls(l0_tbls);
     builder.set_blob_tbls(blob_tbl_map);
     builder.set_cfs(scfs);
     builder.set_lock_txn_files(tables.lock_txn_files.clone());
     builder.set_columnar_levels(col_levels);
+    builder.set_vector_indexes(vector_indexes);
 }
 
 impl EngineCore {
@@ -239,6 +259,7 @@ impl EngineCore {
             || cs.has_trim_over_bound()
             || cs.has_major_compaction()
             || cs.has_columnar_compaction()
+            || cs.has_update_vector_index()
         {
             if cs.has_compaction() {
                 self.apply_compaction(&shard, &cs);
@@ -252,6 +273,8 @@ impl EngineCore {
                 self.apply_major_compaction(&shard, &cs);
             } else if cs.has_columnar_compaction() {
                 self.apply_columnar_compaction(&shard, &cs);
+            } else if cs.has_update_vector_index() {
+                self.apply_update_vector_index(&shard, &cs);
             }
             store_bool(&shard.compacting, false);
             self.send_compact_msg(CompactMsg::Applied(IdVer::new(shard.id, shard.ver)));
@@ -856,6 +879,9 @@ impl EngineCore {
         let col_change = col_comp.get_columnar_change();
         let old_data = shard.get_data();
         let mut new_col_levels = old_data.col_levels.clone();
+        if col_comp.target_level == 2 {
+            new_col_levels.l2_snap_version = col_comp.get_snap_version();
+        }
         let deletes: HashSet<u64> = col_change
             .get_table_deletes()
             .iter()
@@ -889,6 +915,28 @@ impl EngineCore {
         builder.set_schema_file(schema_file);
         builder.set_columnar_levels(new_col_levels);
         shard.set_data(builder.build());
-        store_u64(&shard.col_snap_version, col_comp.get_snap_version());
+        if shard.get_columnar_snap_version() < col_comp.get_snap_version()
+            || col_comp.get_snap_version() == 0
+        {
+            store_u64(&shard.col_snap_version, col_comp.get_snap_version());
+        }
+    }
+
+    fn apply_update_vector_index(&self, shard: &Shard, cs: &ChangeSet) {
+        let update_vector_index = cs.get_update_vector_index();
+        let mut vector_indexes = shard.get_data().vector_indexes.clone();
+        for added in &update_vector_index.added {
+            let vec_idx_file = cs.vec_index_files.get(&added.id).unwrap().clone();
+            vector_indexes.add_index_file(vec_idx_file);
+        }
+        vector_indexes.remove_index_file(
+            update_vector_index.table_id,
+            update_vector_index.index_id,
+            update_vector_index.col_id,
+            &update_vector_index.removed,
+        );
+        let mut builder = ShardDataBuilder::new(shard.get_data());
+        builder.set_vector_indexes(vector_indexes);
+        shard.set_data(builder.build());
     }
 }

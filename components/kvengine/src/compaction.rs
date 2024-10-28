@@ -15,6 +15,7 @@ use api_version::{
     api_v2::{KEYSPACE_PREFIX_LEN, TXN_KEY_PREFIX},
     ApiV2,
 };
+use bstr::ByteSlice;
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use http::StatusCode;
@@ -27,9 +28,12 @@ use security::SecurityManager;
 use slog_global::error;
 use table::columnar::{ColumnarFile, ColumnarTableReader, Schema};
 use tidb_query_common::util::convert_to_prefix_next;
-use tidb_query_datatype::codec::table::{
-    decode_common_handle, decode_int_handle, decode_table_id, encode_row_key,
-    encode_row_key_prefix, ID_LEN, TABLE_PREFIX_LEN,
+use tidb_query_datatype::{
+    codec::table::{
+        decode_common_handle, decode_int_handle, decode_table_id, encode_row_key,
+        encode_row_key_prefix, ID_LEN, TABLE_PREFIX_LEN,
+    },
+    VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC,
 };
 use tikv_util::mpsc;
 
@@ -49,6 +53,7 @@ use crate::{
         },
         file::{File, InMemFile, LocalFile},
         sstable::{self, builder::TableBuilderOptions, BlockCache, L0Builder, SsTable},
+        vector_index::VectorIndexBuilder,
         BoundedDataSet, ChecksumType, DataBound, InnerKey,
     },
     Error::{
@@ -449,6 +454,17 @@ pub struct InPlaceCompactionCtx {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
+pub struct VectorIndexUpdate {
+    table_id: i64,
+    index_id: i64,
+    col_id: i64,
+    snap_version: u64,
+    schema_file_id: u64,
+    col_file_ids: Vec<(u64, u32)>,
+    remove_file_ids: Vec<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub enum CompactionType {
     #[default]
     Unknown,
@@ -463,6 +479,7 @@ pub enum CompactionType {
     InPlaceWithColumnar(InPlaceCompactionCtx),
     Columnar(ColumnarCompaction),
     ColumnarMajor(ColumnarMajorCompaction),
+    VectorIndex(VectorIndexUpdate),
 }
 
 const MAX_COMPACTION_EXPAND_SIZE: u64 = 256 * 1024 * 1024;
@@ -569,6 +586,13 @@ impl Engine {
             Some(CompactionPriority::ColumnarClear) => {
                 self.trigger_remove_columnar_compaction(&shard)
             }
+            Some(CompactionPriority::UpdateVectorIndex {
+                table_id,
+                index_id,
+                col_id,
+                rebuild,
+                ..
+            }) => self.trigger_vector_index_update(&shard, table_id, index_id, col_id, rebuild),
             None => {
                 info!("Shard {} is not urgent for compaction", tag);
                 store_bool(&shard.compacting, false);
@@ -1630,6 +1654,7 @@ impl Engine {
         let mut smallest = l0_tbls[0].get_smallest();
         let mut biggest = l0_tbls[0].get_biggest();
         let mut l0_tbl_ids = Vec::with_capacity(l0_tbls.len());
+        let mut snap_version = 0;
         for col in l0_tbls {
             if smallest > col.get_smallest() {
                 smallest = col.get_smallest();
@@ -1637,6 +1662,8 @@ impl Engine {
             if biggest < col.get_biggest() {
                 biggest = col.get_biggest();
             }
+            let l0_version = col.get_l0_version().unwrap();
+            snap_version = snap_version.max(l0_version);
             l0_tbl_ids.push((0, col.get_file().id()));
             total_size += col.get_file().size();
         }
@@ -1648,7 +1675,7 @@ impl Engine {
         let col_compaction = ColumnarCompaction {
             level: 0,
             safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
-            snap_version: shard.get_snap_version(),
+            snap_version,
             source_row_files: vec![],
             source_columnar_files: l0_tbl_ids,
             schema_file_id,
@@ -1689,6 +1716,7 @@ impl Engine {
         let mut smallest = l1_tbls[0].get_smallest();
         let mut biggest = l1_tbls[0].get_biggest();
         let mut l1_tbl_ids = Vec::with_capacity(l1_tbls.len());
+        let mut snap_version = 0;
         for col in l1_tbls {
             if smallest > col.get_smallest() {
                 smallest = col.get_smallest();
@@ -1696,6 +1724,8 @@ impl Engine {
             if biggest < col.get_biggest() {
                 biggest = col.get_biggest();
             }
+            let l0_version = col.get_l0_version().unwrap();
+            snap_version = snap_version.max(l0_version);
             l1_tbl_ids.push((1, col.get_file().id()));
             total_size += col.get_file().size();
         }
@@ -1729,7 +1759,6 @@ impl Engine {
             l1_tbl_ids.len() + l2_tbl_ids.len(),
             estimated_num_files,
         );
-        let snap_version = shard.get_snap_version();
         let schema_file_id = data.schema_file.as_ref().unwrap().get_file_id();
         let columnar_compaction = ColumnarCompaction {
             level,
@@ -1751,6 +1780,60 @@ impl Engine {
         Some(self.comp_client.compact(req))
     }
 
+    pub(crate) fn trigger_vector_index_update(
+        &self,
+        shard: &Shard,
+        table_id: i64,
+        index_id: i64,
+        col_id: i64,
+        rebuild: bool,
+    ) -> Option<Result<pb::ChangeSet>> {
+        let tag = shard.tag();
+        info!("{} trigger vector index update", tag);
+        let data = shard.get_data();
+        let snap_version = shard.get_columnar_snap_version();
+        let schema_file = data.schema_file.as_ref()?;
+        let table_schema = schema_file.get_table(table_id)?;
+        table_schema
+            .vector_indexes
+            .iter()
+            .find(|idx| idx.index_id == index_id && idx.col_id == col_id)?;
+        let mut remove_file_ids = vec![];
+        let old_idx_ver =
+            if let Some(old_vec_idx) = data.vector_indexes.get(table_id, index_id, col_id) {
+                if rebuild {
+                    for file in &old_vec_idx.files {
+                        remove_file_ids.push(file.file_id());
+                    }
+                    0
+                } else {
+                    old_vec_idx.snap_version()
+                }
+            } else {
+                0
+            };
+        let mut col_file_ids = vec![];
+        for col_lvl in &data.col_levels.levels {
+            for col_file in &col_lvl.files {
+                let l0_version = col_file.get_l0_version().unwrap_or(1);
+                if col_file.has_table(table_id) && l0_version > old_idx_ver {
+                    col_file_ids.push((col_file.get_file().id(), col_lvl.level as u32));
+                }
+            }
+        }
+        let mut req = self.new_compact_request_with_shard(shard);
+        req.compaction_tp = CompactionType::VectorIndex(VectorIndexUpdate {
+            table_id,
+            index_id,
+            col_id,
+            snap_version,
+            schema_file_id: schema_file.get_file_id(),
+            col_file_ids,
+            remove_file_ids,
+        });
+        Some(self.comp_client.compact(req))
+    }
+
     pub(crate) fn handle_compact_response(&self, cs: pb::ChangeSet) {
         self.meta_change_listener.on_change_set(cs);
     }
@@ -1758,17 +1841,38 @@ impl Engine {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum CompactionPriority {
-    L0 { score: f64 },
-    L1Plus { cf: isize, score: f64, level: usize },
-    Major { score: f64 },
+    L0 {
+        score: f64,
+    },
+    L1Plus {
+        cf: isize,
+        score: f64,
+        level: usize,
+    },
+    Major {
+        score: f64,
+    },
     DestroyRange,
     TruncateTs,
     TrimOverBound,
     L0ToColumnar,
-    ColumnarL0 { score: f64 },
-    ColumnarL1 { score: f64 },
-    ColumnarMajor { score: f64 },
+    ColumnarL0 {
+        score: f64,
+    },
+    ColumnarL1 {
+        score: f64,
+    },
+    ColumnarMajor {
+        score: f64,
+    },
     ColumnarClear,
+    UpdateVectorIndex {
+        score: f64,
+        table_id: i64,
+        index_id: i64,
+        col_id: i64,
+        rebuild: bool,
+    },
 }
 
 impl CompactionPriority {
@@ -1785,6 +1889,7 @@ impl CompactionPriority {
             CompactionPriority::ColumnarL1 { score } => *score,
             CompactionPriority::ColumnarMajor { score } => *score,
             CompactionPriority::ColumnarClear => f64::MAX,
+            CompactionPriority::UpdateVectorIndex { score, .. } => *score,
         }
     }
 
@@ -1801,6 +1906,7 @@ impl CompactionPriority {
             CompactionPriority::ColumnarL1 { .. } => 1,
             CompactionPriority::ColumnarMajor { .. } => -1,
             CompactionPriority::ColumnarClear => -1,
+            CompactionPriority::UpdateVectorIndex { .. } => -1,
         }
     }
 
@@ -1817,6 +1923,7 @@ impl CompactionPriority {
             CompactionPriority::ColumnarL1 { .. } => -1,
             CompactionPriority::ColumnarMajor { .. } => -1,
             CompactionPriority::ColumnarClear => -1,
+            CompactionPriority::UpdateVectorIndex { .. } => -1,
         }
     }
 }
@@ -2304,6 +2411,9 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
                 columnar_major_compaction,
                 &mut allocate_id,
             )?);
+        }
+        CompactionType::VectorIndex(update_vec_idx) => {
+            cs.set_update_vector_index(update_vector_index(ctx, update_vec_idx, &mut allocate_id)?);
         }
         CompactionType::Unknown => unreachable!(),
     }
@@ -3812,6 +3922,7 @@ fn columnar_major_compact(
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::new();
     ret.set_snap_version(major_compaction.snap_version);
+    ret.set_target_level(2);
     if major_compaction.snap_version == 0 {
         let columnar_changes = ret.mut_columnar_change();
         for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
@@ -3943,6 +4054,7 @@ fn convert_row_file_to_columnar_file(
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::new();
     ret.set_snap_version(columnar_compaction.snap_version);
+    ret.set_target_level(columnar_compaction.level);
     let row_l0s: Vec<u64> = columnar_compaction
         .source_row_files
         .iter()
@@ -4063,6 +4175,7 @@ fn compact_columnar_l0_files(
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::default();
     ret.set_snap_version(columnar_compaction.snap_version);
+    ret.set_target_level(1);
     let tag = ctx.req.get_tag();
     let fs = &ctx.dfs;
     let schema_file_data = load_table_files(
@@ -4190,6 +4303,7 @@ fn compact_columnar_l1_files(
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::default();
     ret.set_snap_version(columnar_compaction.snap_version);
+    ret.set_target_level(2);
     let tag = ctx.req.get_tag();
     let fs = &ctx.dfs;
     let schema_file_data = load_table_files(
@@ -4325,6 +4439,111 @@ fn compact_columnar_l1_files(
         tag, tbl_changes
     );
 
+    Ok(ret)
+}
+
+fn update_vector_index(
+    ctx: &CompactionCtx,
+    update_vec_idx: &VectorIndexUpdate,
+    allocate_id: &mut dyn FnMut() -> u64,
+) -> Result<pb::UpdateVectorIndex> {
+    let fs = &ctx.dfs;
+    let schema_file_data = load_table_files(
+        &[update_vec_idx.schema_file_id],
+        fs.clone(),
+        dfs::Options::default().with_type(FileType::Schema),
+        ctx.local_dir.as_ref(),
+        false,
+    )?
+    .pop()
+    .unwrap();
+    let schema_file = SchemaFile::open(schema_file_data)?;
+    let full_schema = schema_file.get_table(update_vec_idx.table_id).unwrap();
+    let vec_idx_def = full_schema
+        .vector_indexes
+        .iter()
+        .find(|idx| idx.index_id == update_vec_idx.index_id)
+        .unwrap();
+    let mut schema_buf = full_schema.to_schema_buf();
+    schema_buf.txn_id_column = None;
+    schema_buf
+        .columns
+        .retain(|c| c.get_column_id() == vec_idx_def.col_id);
+    let vector_col_schema = Schema::new(schema_buf);
+    let dimension = vector_col_schema.columns[0].get_column_len() as usize;
+    let metric = vec_idx_def
+        .specs
+        .get(VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC)
+        .unwrap()
+        .to_str_lossy();
+    let opts = dfs::Options::default()
+        .with_type(FileType::Columnar)
+        .with_shard(ctx.req.shard_id, ctx.req.shard_ver);
+    let col_file_ids: Vec<u64> = update_vec_idx
+        .col_file_ids
+        .iter()
+        .map(|&(id, _)| id)
+        .collect();
+    let files = load_table_files(
+        &col_file_ids,
+        fs.clone(),
+        opts,
+        ctx.local_dir.as_ref(),
+        false,
+    )?;
+    let mut columnar_files = vec![];
+    for file in files {
+        let columnar_file = ColumnarFile::open(file)?;
+        columnar_files.push(columnar_file);
+    }
+    let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
+    for columnar_file in &columnar_files {
+        let reader = ColumnarTableReader::new(
+            columnar_file,
+            vector_col_schema.clone(),
+            ctx.encryption_key.clone(),
+        );
+        readers.push(Box::new(reader));
+    }
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
+    let mut vec_builder = VectorIndexBuilder::new(
+        dimension,
+        metric.as_ref(),
+        keyspace_id,
+        ctx.req.inner_key_off,
+        update_vec_idx.snap_version,
+        update_vec_idx.table_id,
+        update_vec_idx.index_id,
+        update_vec_idx.col_id,
+        vector_col_schema.is_common_handle(),
+    )?;
+    let mut block = Block::new(&vector_col_schema);
+    let mut merge_reader = ColumnarMergeReader::new(vector_col_schema, readers);
+    merge_reader.seek(&[])?;
+    let mut res = merge_reader.read(&mut block, 1024)?;
+    while res > 0 {
+        vec_builder.add_block(&block, 0)?;
+        block.reset();
+        res = merge_reader.read(&mut block, 1024)?;
+    }
+    let buf = vec_builder.build()?;
+    let file_id = allocate_id();
+    fs.get_runtime().block_on(fs.create(
+        file_id,
+        buf.into(),
+        opts.with_type(FileType::VectorIndex),
+    ))?;
+    let mut vec_idx_file = pb::VectorIndexFile::new();
+    vec_idx_file.id = file_id;
+    vec_idx_file.snap_version = update_vec_idx.snap_version;
+    vec_idx_file.smallest = vec_builder.smallest.clone();
+    vec_idx_file.biggest = vec_builder.biggest.clone();
+    let mut ret = pb::UpdateVectorIndex::new();
+    ret.set_table_id(update_vec_idx.table_id);
+    ret.set_index_id(update_vec_idx.index_id);
+    ret.set_removed(update_vec_idx.remove_file_ids.clone());
+    ret.set_added(vec![vec_idx_file].into());
+    info!("update vector index result {:?}", ret);
     Ok(ret)
 }
 

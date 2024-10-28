@@ -4,10 +4,12 @@
 
 mod eval_type;
 mod field_type;
+mod vector_index;
 
 pub use self::{
     eval_type::EvalType,
     field_type::{Charset, Collation, FieldTypeAccessor, FieldTypeFlag, FieldTypeTp},
+    vector_index::*,
 };
 
 /// Length is unspecified, applicable to `FieldType`'s `flen` and `decimal`.

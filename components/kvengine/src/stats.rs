@@ -46,6 +46,7 @@ pub struct EngineStats {
     pub kv_size: u64,
     pub txn_file_locks: usize,
     pub columnar_levels: Vec<ColumnarLevelStats>,
+    pub vector_indexes: VectorIndexStats,
     pub top_10_write: Vec<ShardStats>,
 }
 
@@ -229,6 +230,7 @@ pub struct ShardStats {
     pub schema_version: i64,
     pub schema_restore_version: u64,
     pub columnar_levels: Vec<ColumnarLevelStats>,
+    pub vector_indexes: VectorIndexStats,
 }
 
 impl ShardStats {
@@ -279,6 +281,14 @@ pub struct CfStats {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct ColumnarLevelStats {
+    pub num_files: usize,
+    pub data_size: u64,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct VectorIndexStats {
     pub num_files: usize,
     pub data_size: u64,
 }
@@ -507,6 +517,13 @@ impl super::Shard {
             columnar_levels[i].num_files = l.files.len();
             columnar_levels[i].data_size = l.files.iter().map(|c| c.get_file().size()).sum();
         }
+        let mut vector_indexes = VectorIndexStats::default();
+        for vi in data.vector_indexes.get_all() {
+            vector_indexes.num_files += vi.files.len();
+            for f in &vi.files {
+                vector_indexes.data_size += f.file_size();
+            }
+        }
         ShardStats {
             id: self.id,
             ver: self.ver,
@@ -555,6 +572,7 @@ impl super::Shard {
             schema_version,
             schema_restore_version,
             columnar_levels,
+            vector_indexes,
         }
     }
 }

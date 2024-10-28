@@ -128,6 +128,15 @@ impl EngineCore {
                 ids.insert(tbl.get_id(), FileMeta::from_table(tbl));
             }
         }
+        if cs.has_update_vector_index() {
+            let update_vec_idx = cs.get_update_vector_index();
+            for vec_idx_file in update_vec_idx.get_added() {
+                ids.insert(
+                    vec_idx_file.get_id(),
+                    FileMeta::from_vector_index_file(vec_idx_file),
+                );
+            }
+        }
         let mut encryption_key = encryption_key;
         if let Some(snap) = snap {
             self.collect_snap_ids(snap, &mut ids);
@@ -206,6 +215,14 @@ impl EngineCore {
         }
         for col in snap.get_columnar_creates() {
             ids.insert(col.id, FileMeta::from_table(col));
+        }
+        for vec_idx in snap.get_vector_indexes() {
+            for vec_idx_file in vec_idx.get_files() {
+                ids.insert(
+                    vec_idx_file.id,
+                    FileMeta::from_vector_index_file(vec_idx_file),
+                );
+            }
         }
     }
 
@@ -324,6 +341,8 @@ impl EngineCore {
                 }
             }
         }
+        // vector index
+        let mut new_vec_indexes = data.vector_indexes.clone();
         for (id, tbl) in load_tables.into_iter() {
             match tbl.file_type {
                 FileType::Sst => {
@@ -346,8 +365,8 @@ impl EngineCore {
                 }
                 FileType::TxnChunk | FileType::Schema => unreachable!("not supported"),
                 FileType::VectorIndex => {
-                    // TODO: implement vector index file loading
-                    unreachable!("todo")
+                    let vec_idx_file = cs.vec_index_files.get(&id).unwrap().clone();
+                    new_vec_indexes.add_index_file(vec_idx_file);
                 }
             }
         }
@@ -358,11 +377,14 @@ impl EngineCore {
             scfs[cf] = scf.build();
         }
         new_columnar_levels.sort();
+        new_vec_indexes.sort();
+
         builder.set_l0_tbls(new_l0s);
         builder.set_blob_tbls(new_blob_tbl_map);
         builder.set_cfs(scfs);
         builder.set_unloaded_tbls(HashMap::new());
         builder.set_columnar_levels(new_columnar_levels);
+        builder.set_vector_indexes(new_vec_indexes);
         shard.set_data(builder.build());
         Ok(())
     }
