@@ -886,6 +886,49 @@ where
     false
 }
 
+/// Return `None` when then the premise is not satisfied.
+/// `retry_idx` starts from 0.
+#[must_use]
+pub fn try_wait_with_premise<T, P, F>(premise: P, mut f: F, seconds: usize) -> Option<bool>
+where
+    P: Fn() -> Option<T>,
+    F: FnMut(&T, usize /* retry_idx */) -> bool,
+{
+    let begin = Instant::now_coarse();
+    let mut retry_idx = 0;
+    let timeout = Duration::from_secs(seconds as u64);
+    while begin.saturating_elapsed() < timeout {
+        let t = premise()?;
+        if f(&t, retry_idx) {
+            return Some(true);
+        }
+        sleep(Duration::from_millis(100));
+        retry_idx += 1;
+    }
+    Some(false)
+}
+
+/// Return `None` when then the premise is not satisfied.
+/// `retry_idx` starts from 0.
+#[must_use]
+pub fn must_wait_with_premise<T, P, F, FnMsg>(
+    premise: P,
+    f: F,
+    seconds: usize,
+    fail_msg: FnMsg,
+) -> Option<()>
+where
+    P: Fn() -> Option<T>,
+    F: FnMut(&T, usize /* retry_idx */) -> bool,
+    FnMsg: FnOnce() -> String,
+{
+    let ok = try_wait_with_premise(premise, f, seconds)?;
+    if !ok {
+        panic!("{}", fail_msg());
+    }
+    Some(())
+}
+
 pub async fn try_wait_async<F>(mut f: F, seconds: usize) -> bool
 where
     F: FnMut() -> futures::future::BoxFuture<'static, bool>,

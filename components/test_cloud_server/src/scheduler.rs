@@ -15,7 +15,7 @@ use rand::Rng;
 use test_pd_client::{PdClientExt, TestPdClient};
 use tikv_util::{info, time::Instant, warn};
 
-use crate::{must_wait, try_wait};
+use crate::{must_wait_with_premise, try_wait};
 
 pub struct Scheduler {
     pub(crate) pd: Arc<TestPdClient>,
@@ -24,12 +24,12 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn move_random_region(&self) {
+    pub fn move_random_region(&self) -> bool {
         let regions = self.pd.get_all_regions();
         let region_idx = rand::thread_rng().gen_range(0..regions.len());
         let region = &regions[region_idx];
         if region.get_peers().len() != 3 {
-            return;
+            return false;
         }
         let &target_store_id = self
             .store_ids
@@ -45,9 +45,9 @@ impl Scheduler {
         let mutex = self.get_region_mutex(region.id);
         let _guard = mutex.lock().unwrap();
         if self.is_region_changed(region) {
-            return;
+            return false;
         }
-        self.move_peer(region.id, target_store_id);
+        self.move_peer(region.id, target_store_id).is_some()
     }
 
     fn is_region_changed(&self, region: &Region) -> bool {
@@ -82,39 +82,25 @@ impl Scheduler {
         stats.ver == region_ver
     }
 
-    fn move_peer(&self, region_id: u64, store_id: u64) {
+    fn move_peer(&self, region_id: u64, store_id: u64) -> Option<()> {
         let peer_id = self.pd.alloc_id().unwrap();
-        // The peer maybe try to merge but not committed yet in the early check and the
-        // merge committed during the move_peer. So we need to tolerate this case. If
-        // the peer destroyed, just return.
-        let mut peer_destroyed = false;
+
+        // Add learner.
         let mut peer = Peer::new();
         peer.store_id = store_id;
         peer.id = peer_id;
         peer.role = PeerRole::Learner;
-        must_wait(
-            || {
-                self.pd.add_peer(region_id, peer.clone());
-                try_wait(
-                    || {
-                        let region = block_on(self.pd.get_region_by_id(region_id)).unwrap();
-                        if region.is_none() {
-                            warn!(
-                                "move_peer: region {} not exists, should be merged",
-                                region_id
-                            );
-                            peer_destroyed = true;
-                            return true;
-                        }
-                        let region = region.unwrap();
-                        let region_ver = region.get_region_epoch().get_version();
-
-                        // Wait until the learner complete restore snapshots, or the raft group will
-                        // lost majority if leader down at this point.
-                        block_on(self.check_region_stats_exists(store_id, region_id, region_ver))
-                    },
-                    1,
-                )
+        let add_learner = || self.pd.add_peer(region_id, peer.clone());
+        must_wait_with_premise(
+            || block_on(self.pd.get_region_by_id(region_id)).unwrap(),
+            |region, retry_idx| {
+                if retry_idx % 10 == 0 {
+                    add_learner();
+                }
+                // Wait until the learner complete restore snapshots, or the raft group will
+                // lost majority if leader down at this point.
+                let region_ver = region.get_region_epoch().get_version();
+                block_on(self.check_region_stats_exists(store_id, region_id, region_ver))
             },
             30,
             || {
@@ -126,36 +112,24 @@ impl Scheduler {
                     block_on(self.pd.get_region_by_id(region_id)).unwrap()
                 )
             },
-        );
-        if peer_destroyed {
-            return;
-        }
+        )?;
+
+        // Add voter.
         let mut peer = Peer::new();
         peer.store_id = store_id;
         peer.id = peer_id;
         peer.role = PeerRole::Voter;
-        must_wait(
-            || {
-                self.pd.add_peer(region_id, peer.clone());
-                try_wait(
-                    || {
-                        let region = block_on(self.pd.get_region_by_id(region_id)).unwrap();
-                        if region.is_none() {
-                            warn!(
-                                "move_peer: region {} not exists, should be merged",
-                                region_id
-                            );
-                            peer_destroyed = true;
-                            return true;
-                        }
-                        region
-                            .unwrap()
-                            .get_peers()
-                            .iter()
-                            .any(|peer| peer.id == peer_id && peer.role == PeerRole::Voter)
-                    },
-                    1,
-                )
+        let add_voter = || self.pd.add_peer(region_id, peer.clone());
+        must_wait_with_premise(
+            || block_on(self.pd.get_region_by_id(region_id)).unwrap(),
+            |region, retry_idx| {
+                if retry_idx % 10 == 0 {
+                    add_voter();
+                }
+                region
+                    .get_peers()
+                    .iter()
+                    .any(|peer| peer.id == peer_id && peer.role == PeerRole::Voter)
             },
             30,
             || {
@@ -167,66 +141,51 @@ impl Scheduler {
                     block_on(self.pd.get_region_by_id(region_id)).unwrap()
                 )
             },
-        );
-        if peer_destroyed {
-            return;
-        }
+        )?;
+
+        // Select target.
         let mut old_leader = Peer::default();
         let mut to_remove = Peer::default();
-        must_wait(
-            || {
-                block_on(self.pd.get_region_leader_by_id(region_id))
-                    .unwrap()
-                    .map(|(region, leader)| {
-                        old_leader = leader.clone();
-                        let target = region
-                            .peers
-                            .iter()
-                            .find(|peer| peer.id != leader.id)
-                            .unwrap();
-                        to_remove = target.clone();
-                        to_remove.id != old_leader.id
-                    })
-                    .unwrap_or(false)
+        must_wait_with_premise(
+            || block_on(self.pd.get_region_leader_by_id(region_id)).unwrap(),
+            |(region, leader), _| {
+                old_leader = leader.clone();
+                let target = region
+                    .peers
+                    .iter()
+                    .find(|peer| peer.id != leader.id)
+                    .unwrap();
+                to_remove = target.clone();
+                to_remove.id != old_leader.id
             },
             20,
             || format!("failed to get target peer, region id {}", region_id),
-        );
+        )?;
 
-        must_wait(
-            || {
-                let target_is_leader = block_on(self.pd.get_region_leader_by_id(region_id))
-                    .unwrap()
-                    .map(|(_, leader)| leader.id == to_remove.id)
-                    .unwrap_or(false);
+        // Remove peer.
+        let transfer_leader = || {
+            self.pd.try_transfer_leader(region_id, old_leader.clone());
+            info!(
+                "move_peer: transfer leader, region id {} old leader id {} to_remove id {}",
+                region_id, old_leader.id, to_remove.id
+            );
+        };
+        let remove_peer = || self.pd.try_remove_peer(region_id, to_remove.clone());
+        must_wait_with_premise(
+            || block_on(self.pd.get_region_leader_by_id(region_id)).unwrap(),
+            |(region, leader), retry_idx| {
+                let target_is_leader = leader.id == to_remove.id;
                 if target_is_leader {
-                    self.pd.try_transfer_leader(region_id, old_leader.clone());
-                    info!(
-                        "move_peer: transfer leader, region id {} old leader id {} to_remove id {}",
-                        region_id, old_leader.id, to_remove.id
-                    );
-                    if !try_wait(
-                        || {
-                            block_on(self.pd.get_region_leader_by_id(region_id))
-                                .unwrap()
-                                .map(|(_, leader)| leader.id != to_remove.id)
-                                .unwrap_or(false)
-                        },
-                        3,
-                    ) {
-                        return false;
+                    if retry_idx % 10 == 0 {
+                        transfer_leader();
                     }
+                    return false;
                 }
-                self.pd.try_remove_peer(region_id, to_remove.clone());
-                try_wait(
-                    || {
-                        let region = block_on(self.pd.get_region_by_id(region_id))
-                            .unwrap()
-                            .unwrap();
-                        region.get_peers().len() == 3
-                    },
-                    3,
-                )
+
+                if retry_idx % 30 == 0 {
+                    remove_peer();
+                }
+                region.get_peers().len() == 3
             },
             30,
             || {
@@ -235,7 +194,7 @@ impl Scheduler {
                     to_remove.id, region_id, old_leader.id
                 )
             },
-        );
+        )
     }
 
     pub fn transfer_random_leader(&self) -> bool {

@@ -104,9 +104,11 @@ pub(crate) fn spawn_move(scheduler: Scheduler, two_node_down: Arc<RwLock<()>>) -
         while start_time.saturating_elapsed() < TIMEOUT {
             sleep(Duration::from_millis(1000));
             let guard = two_node_down.read().unwrap();
-            scheduler.move_random_region();
+            let ok = scheduler.move_random_region();
             drop(guard);
-            MOVE_COUNTER.fetch_add(1, Ordering::SeqCst);
+            if ok {
+                MOVE_COUNTER.fetch_add(1, Ordering::SeqCst);
+            }
         }
         info!("move thread exit");
     })
