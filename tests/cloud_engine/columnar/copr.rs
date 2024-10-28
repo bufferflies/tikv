@@ -57,7 +57,7 @@ fn test_coprocessor() {
     let schema_t1 = test_cloud_server::copr::build_schema(&ddl_t1);
     let schema_t2 = test_cloud_server::copr::build_schema(&ddl_t2);
     let schemas = vec![schema_t1.clone(), schema_t2.clone()];
-    let schema_file_data = build_schema_file(keyspace_id, 10, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, 10, schemas, 0);
     let schema_file_id = 100;
     let opts = dfs::Options::default().with_type(FileType::Schema);
     dfs.get_runtime()

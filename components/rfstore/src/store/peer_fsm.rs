@@ -1526,6 +1526,16 @@ impl<'a> PeerMsgHandler<'a> {
         let update_schema_meta = change_set.mut_update_schema_meta();
         update_schema_meta.set_file_id(schema_file.get_file_id());
         update_schema_meta.set_version(schema_file.get_version());
+        if shard_meta.schema_restore_ver != schema_file.get_restore_version() {
+            info!(
+                "{} skip stale schema file id {}, restore_version not match, expected {}, actual {}",
+                tag,
+                schema_file.get_file_id(),
+                shard_meta.schema_restore_ver,
+                schema_file.get_restore_version()
+            );
+            return;
+        }
         if shard_meta.schema_file_ver >= schema_file.get_version() {
             info!("{} skip stale schema file", tag);
             return;

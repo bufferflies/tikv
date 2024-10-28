@@ -64,6 +64,7 @@ message SchemaMeta {
   uint32 keyspace_id = 1;
   uint64 file_id = 2;
   int64 version = 3;
+  uint64 restore_version = 4;
 }
 
 message ColumnarCompaction {
@@ -160,6 +161,8 @@ message TableChange {
   repeated TableDelete tableDeletes = 1;
   // Tables that created by destroy range / truncate ts.
   repeated TableCreate tableCreates = 2;
+  // For in-place compaction that each deleted file id followed by a created file id.
+  repeated uint64 file_ids_map = 3;
 }
 
 message TxnFileRefs {

@@ -1,6 +1,10 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp::max, collections::HashMap, iter::Iterator};
+use std::{
+    cmp::max,
+    collections::{HashMap, HashSet},
+    iter::Iterator,
+};
 
 use api_version::{
     api_v2::{is_whole_keyspace_range, KEYSPACE_PREFIX_LEN},
@@ -48,6 +52,7 @@ pub struct ShardMeta {
     pub parent: Option<Box<ShardMeta>>,
     pub schema_file_id: u64,
     pub schema_file_ver: i64,
+    pub schema_restore_ver: u64,
     pub columnar_snap_version: u64,
     pub unconverted_l0s: Vec<u64>,
 
@@ -119,6 +124,7 @@ impl ShardMeta {
             let sm = snap.get_schema_meta();
             meta.schema_file_id = sm.get_file_id();
             meta.schema_file_ver = sm.get_version();
+            meta.schema_restore_ver = sm.get_restore_version();
         }
         meta
     }
@@ -269,6 +275,7 @@ impl ShardMeta {
             let sm = cs.get_update_schema_meta();
             self.schema_file_id = sm.get_file_id();
             self.schema_file_ver = sm.get_version();
+            assert_eq!(self.schema_restore_ver, sm.get_restore_version());
             return;
         }
         if cs.has_columnar_compaction() {
@@ -623,6 +630,29 @@ impl ShardMeta {
         }
     }
 
+    fn apply_table_change_to_unconverted_l0s(&mut self, tc: &pb::TableChange) {
+        if self.unconverted_l0s.is_empty() {
+            return;
+        }
+        let mut unconverted_l0s: HashSet<u64> = self.unconverted_l0s.iter().cloned().collect();
+        // `file_ids_map` is sst table file ids that each deleted file id followed by a
+        // created one. If there is no created file for a deleted file, it will not be
+        // contained in the `file_ids_map`.
+        let mut iter = tc.get_file_ids_map().iter();
+        while let (Some(delete_id), Some(create_id)) = (iter.next(), iter.next()) {
+            // Only add the corresponding created file if the deleted file is in the
+            // `unconverted_l0s`.
+            if unconverted_l0s.contains(delete_id) {
+                unconverted_l0s.insert(*create_id);
+            }
+        }
+        for deleted in tc.get_table_deletes() {
+            unconverted_l0s.remove(&deleted.get_id());
+        }
+
+        self.unconverted_l0s = unconverted_l0s.into_iter().collect();
+    }
+
     fn apply_destroy_range(&mut self, cs: &pb::ChangeSet) {
         assert!(cs.has_destroy_range());
         self.apply_table_change(cs.get_destroy_range());
@@ -645,6 +675,11 @@ impl ShardMeta {
         debug!("apply truncate ts in meta {:?}", self.id);
         assert!(cs.has_truncate_ts());
         self.apply_table_change(cs.get_truncate_ts());
+        // During keyspace restoration, truncate_ts will be triggered. We also need
+        // manipulate the unconverted_l0s.
+        // Note: InplaceCompaction is forbidden in server-side if there has
+        // unconverted_l0s.
+        self.apply_table_change_to_unconverted_l0s(cs.get_truncate_ts());
 
         // ChangeSet of TruncateTs contains the corresponding ts which should be cleaned
         // up.
@@ -778,6 +813,7 @@ impl ShardMeta {
             meta.max_ts = self.max_ts;
             meta.schema_file_id = self.schema_file_id;
             meta.schema_file_ver = self.schema_file_ver;
+            meta.schema_restore_ver = self.schema_restore_ver;
             new_shards.push(meta);
         }
         for new_shard in &mut new_shards {
@@ -884,6 +920,7 @@ impl ShardMeta {
             let mut sm = SchemaMeta::new();
             sm.set_file_id(self.schema_file_id);
             sm.set_version(self.schema_file_ver);
+            sm.set_restore_version(self.schema_restore_ver);
             snap.set_schema_meta(sm);
         }
         snap.set_unconverted_l0s(self.unconverted_l0s.clone());

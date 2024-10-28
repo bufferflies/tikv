@@ -227,6 +227,7 @@ pub struct ShardStats {
     pub txn_file_locks: usize,
     // Columnar Stats
     pub schema_version: i64,
+    pub schema_restore_version: u64,
     pub columnar_levels: Vec<ColumnarLevelStats>,
 }
 
@@ -249,6 +250,7 @@ pub struct ShardStatsLite {
     // Total size of all SST files and blobs referenced by the shard (not blob table file size).
     pub total_size: u64,
     pub schema_version: i64,
+    pub schema_restore_version: u64,
 }
 
 impl From<ShardStats> for ShardStatsLite {
@@ -261,6 +263,7 @@ impl From<ShardStats> for ShardStatsLite {
             inner_key_off: s.inner_key_off,
             total_size: s.total_size,
             schema_version: s.schema_version,
+            schema_restore_version: s.schema_restore_version,
         }
     }
 }
@@ -494,6 +497,11 @@ impl super::Shard {
             .as_ref()
             .map(|sf| sf.get_version())
             .unwrap_or_default();
+        let schema_restore_version = data
+            .schema_file
+            .as_ref()
+            .map(|sf| sf.get_restore_version())
+            .unwrap_or_default();
         let mut columnar_levels = vec![ColumnarLevelStats::default(); COLUMNAR_LEVELS];
         for (i, l) in data.col_levels.levels.iter().enumerate() {
             columnar_levels[i].num_files = l.files.len();
@@ -545,6 +553,7 @@ impl super::Shard {
             trim_over_bound: pending_ops.trim_over_bound,
             txn_file_locks,
             schema_version,
+            schema_restore_version,
             columnar_levels,
         }
     }

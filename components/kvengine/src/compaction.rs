@@ -62,7 +62,7 @@ const MAJOR_COMPACTION_MIN_REQUEST_VERSION: u32 = 3;
 
 // Do not skip L1 tables if there are too many small L1 tables.
 const MAX_SKIP_L1_TABLES: usize = 16;
-const INITIAL_SNAP_VERSION: u64 = 1;
+pub const INITIAL_SNAP_VERSION: u64 = 1;
 
 static RETRY_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -2142,6 +2142,8 @@ fn merge_table_change(tb1: pb::TableChange, tb2: pb::TableChange) -> pb::TableCh
         .into_iter()
         .chain(tb2_deletes.into_iter())
         .collect();
+    tb.file_ids_map = tb1.file_ids_map;
+    tb.file_ids_map.extend(tb2.file_ids_map);
     tb
 }
 
@@ -2589,12 +2591,12 @@ fn compact_truncate_ts(
     .map(|file| (file.id(), file))
     .collect();
 
+    let mut table_change = pb::TableChange::new();
     let mut deletes = vec![];
     let mut creates = vec![];
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
         let file = table_files.remove(&id).unwrap();
-
         let mut delete = pb::TableDelete::new();
         delete.set_id(id);
         delete.set_level(level);
@@ -2678,6 +2680,9 @@ fn compact_truncate_ts(
         create.set_smallest(smallest);
         create.set_biggest(biggest);
         creates.push(create);
+
+        table_change.mut_file_ids_map().push(id);
+        table_change.mut_file_ids_map().push(new_id);
     }
 
     let mut errors = creates
@@ -2690,7 +2695,7 @@ fn compact_truncate_ts(
     if !errors.is_empty() {
         return Err(errors.pop().unwrap().into());
     }
-    let mut table_change = pb::TableChange::new();
+
     table_change.set_table_deletes(deletes.into());
     table_change.set_table_creates(creates.into());
     Ok(table_change)

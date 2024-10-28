@@ -34,6 +34,7 @@ pub(crate) struct SchemaFileCore {
     keyspace_id: u32,
     version: i64,
     tables: HashMap<i64, Schema>,
+    restore_version: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,6 +107,7 @@ impl SchemaFile {
         }
         let keyspace_id = data.get_u32_le();
         let schema_version = data.get_i64_le();
+        let restore_version = data.get_u64_le();
         let mut tables = HashMap::new();
         while !data.is_empty() {
             let table_info_len = data.get_u32_le() as usize;
@@ -135,6 +137,7 @@ impl SchemaFile {
             file_id,
             keyspace_id,
             version: schema_version,
+            restore_version,
             tables,
         };
         Ok(SchemaFile {
@@ -152,6 +155,22 @@ impl SchemaFile {
 
     pub fn get_version(&self) -> i64 {
         self.core.version
+    }
+
+    pub fn get_restore_version(&self) -> u64 {
+        self.core.restore_version
+    }
+
+    pub fn set_restore_version(self, restore_version: u64) -> Self {
+        Self {
+            core: Arc::new(SchemaFileCore {
+                file_id: self.core.file_id,
+                keyspace_id: self.core.keyspace_id,
+                version: self.core.version,
+                restore_version,
+                tables: self.core.tables.clone(),
+            }),
+        }
     }
 
     pub fn get_file_id(&self) -> u64 {
@@ -238,12 +257,27 @@ impl SchemaFile {
     pub fn schema_count(&self) -> usize {
         self.core.tables.len()
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        build_schema_file(
+            self.get_keyspace_id(),
+            self.get_version(),
+            self.core.tables.values().cloned().collect(),
+            self.get_restore_version(),
+        )
+    }
 }
 
-pub fn build_schema_file(keyspace_id: u32, schema_version: i64, tables: Vec<Schema>) -> Vec<u8> {
+pub fn build_schema_file(
+    keyspace_id: u32,
+    schema_version: i64,
+    tables: Vec<Schema>,
+    restore_version: u64,
+) -> Vec<u8> {
     let mut data = Vec::new();
     data.put_u32_le(keyspace_id);
     data.put_i64_le(schema_version);
+    data.put_u64_le(restore_version);
     for schema in &tables {
         let mut columns = Vec::with_capacity(schema.columns.len() + 1);
         columns.extend_from_slice(&schema.columns);
@@ -309,7 +343,7 @@ mod tests {
             pk_col_ids: vec![],
         });
         let schemas = vec![schema_1, schema_2];
-        let data = build_schema_file(keyspace_id, schema_version, schemas.clone());
+        let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
         let file = Arc::new(InMemFile::new(100, data.into()));
         let schema_file = SchemaFile::open(file).unwrap();
         assert_eq!(&schemas[0], schema_file.get_table(10).unwrap());
@@ -411,7 +445,7 @@ mod tests {
             pk_col_ids: vec![],
         });
         let schemas = vec![schema_1.clone(), schema_2.clone()];
-        let data = build_schema_file(keyspace_id, schema_version, schemas.clone());
+        let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
         let file = Arc::new(InMemFile::new(100, data.into()));
         let schema_file = SchemaFile::open(file).unwrap();
         assert!(schema_file.contains(&schemas));

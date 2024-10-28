@@ -58,7 +58,7 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     let schema2 = new_schema(table_id2, true);
     let schemas = vec![schema.clone(), schema2.clone()];
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let fs = engine.fs.clone();
     let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
     fs.get_runtime()
@@ -196,7 +196,7 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     let schema2 = new_schema(table_id2, true);
     let schemas = vec![schema.clone(), schema2.clone()];
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let fs = engine.fs.clone();
     let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
     fs.get_runtime()
@@ -353,7 +353,7 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
     let schema = new_schema(table_id, false);
     let schemas = vec![schema.clone()];
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let fs = engine.fs.clone();
     let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
     fs.get_runtime()
@@ -521,7 +521,7 @@ fn test_columnar_destroy_range(#[case] enable_inner_key_off: bool) {
     let schema = new_schema(table_id, true);
     let schemas = vec![schema.clone()];
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let fs = engine.fs.clone();
     let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
     fs.get_runtime()
@@ -631,7 +631,7 @@ fn test_columnar_truncate_ts(#[case] enable_inner_key_off: bool) {
     let schema = new_schema(table_id, false);
     let schemas = vec![schema.clone()];
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let fs = engine.fs.clone();
     let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
     fs.get_runtime()
@@ -746,7 +746,7 @@ fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
     let schema = new_schema(table_id, false);
     let schemas = vec![schema.clone()];
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let fs = engine.fs.clone();
     let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
     fs.get_runtime()

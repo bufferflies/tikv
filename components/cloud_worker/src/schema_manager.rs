@@ -408,15 +408,31 @@ impl SchemaManager {
             // Check the remote schema_version in store shard_stats to ensure the state
             // applied to kvengine.
             if let Ok(Some(schema_file)) = &local_schema_file {
-                if self.check_if_keyspace_restored(keyspace_shard_stats) {
-                    // If the keyspace is just restored, the schema_version in shard will be
-                    // reset to 0 after restoration. In this case, we should remove the old
+                let cur_restore_version = schema_file.get_restore_version();
+                debug!(
+                    "keyspace_id: {}, schema_file_id: {}, schema_version: {}, restore_version: {}",
+                    keyspace_id,
+                    schema_file.get_file_id(),
+                    schema_file.get_version(),
+                    cur_restore_version,
+                );
+                if self.check_if_keyspace_restored(
+                    keyspace_shard_stats,
+                    cur_schema_version.unwrap(),
+                    cur_restore_version,
+                ) {
+                    // If the keyspace is just restored, the schema_restore_version in shard will be
+                    // reset to backup_ts after restoration. In this case, we should remove the old
                     // schema file and try to rebuild it in next loop.
                     if let Some((_, files)) = self.meta_file.remove_keyspace(keyspace_id) {
                         let file_ids: Vec<u64> = files.iter().map(|f| f.0).collect();
                         remove_schema_file_from_local(&self.config.dir, keyspace_id, &file_ids)
                             .unwrap();
                     }
+                    info!(
+                        "keyspace_id: {} is restored, remove local schema files",
+                        keyspace_id
+                    );
                     continue;
                 }
                 if self
@@ -457,9 +473,14 @@ impl SchemaManager {
                 if table_infos.is_empty() {
                     continue;
                 }
+                let schema_restore_version = keyspace_shard_stats
+                    .iter()
+                    .map(|s| s.schema_restore_version)
+                    .max()
+                    .unwrap_or(0);
                 info!(
-                    "schema need to be rebuilt, keyspace: {} cur_schema_version: {} schema_version: {}",
-                    keyspace_id, cur_schema_version, schema_version
+                    "schema need to be rebuilt, keyspace: {} cur_schema_version: {} schema_version: {} schema_restore_version: {}",
+                    keyspace_id, cur_schema_version, schema_version, schema_restore_version
                 );
                 // 3. Build the schema file and upload to S3.
                 let schemas = self.build_new_schema(
@@ -472,8 +493,13 @@ impl SchemaManager {
                     continue;
                 }
 
-                let new_schema_file_data =
-                    columnar::build_schema_file(keyspace_id, schema_version, schemas.unwrap());
+                // build schema file with the schema restore version from shard stats.
+                let new_schema_file_data = columnar::build_schema_file(
+                    keyspace_id,
+                    schema_version,
+                    schemas.unwrap(),
+                    schema_restore_version,
+                );
                 let file_id = *self
                     .id_allocator
                     .alloc_id(1)
@@ -555,8 +581,29 @@ impl SchemaManager {
     }
 
     // return true if the keyspace is just restored.
-    fn check_if_keyspace_restored(&self, keyspace_shard_stats: &[ShardStatsLite]) -> bool {
-        !keyspace_shard_stats.iter().any(|s| s.schema_version != 0)
+    fn check_if_keyspace_restored(
+        &self,
+        keyspace_shard_stats: &[ShardStatsLite],
+        cur_schema_version: i64,
+        cur_restore_version: u64,
+    ) -> bool {
+        let stats_schema_version = keyspace_shard_stats
+            .iter()
+            .map(|s| s.schema_version)
+            .max()
+            .unwrap_or_default();
+        let stats_restore_version = keyspace_shard_stats
+            .iter()
+            .map(|s| s.schema_restore_version)
+            .max()
+            .unwrap_or_default();
+        // If the schema_version in local schema file is larger than shard stats, or the
+        // restore_version is inconsistent, it means the keyspace is just restored.
+        if cur_schema_version > stats_schema_version || stats_restore_version != cur_restore_version
+        {
+            return true;
+        }
+        false
     }
 
     // return true if sent broadcast to stores
@@ -573,13 +620,15 @@ impl SchemaManager {
             let start_key = shard_stats.start.to_vec();
             let end_key = shard_stats.end.to_vec();
             if schema_file.overlap(&start_key, &end_key, keyspace_id)
+                && shard_stats.schema_version > 0
                 && cur_schema_version > shard_stats.schema_version
             {
                 info!(
-                    "store has stale schema version, keyspace_id: {} set cur_schema_version from {} to {}",
-                    keyspace_id, cur_schema_version, shard_stats.schema_version,
+                    "store has stale schema version, keyspace_id: {} shard_id: {} set cur_schema_version from {} to {}",
+                    keyspace_id, shard_stats.id, shard_stats.schema_version, cur_schema_version
                 );
                 need_broadcast = true;
+                break;
             }
         }
         // Broadcast schema update to stores without building schema again.
@@ -1003,7 +1052,7 @@ mod tests {
             .into();
             schemas.push(schema);
         }
-        let schema_file_data = build_schema_file(1234, 100, schemas.clone());
+        let schema_file_data = build_schema_file(1234, 100, schemas.clone(), 0);
         write_schema_file_to_local(dir.path(), 1234, 1000, Bytes::from(schema_file_data)).unwrap();
         schemas.push(
             SchemaBuf {
@@ -1016,7 +1065,7 @@ mod tests {
             }
             .into(),
         );
-        let schema_file_data = build_schema_file(1234, 201, schemas);
+        let schema_file_data = build_schema_file(1234, 201, schemas, 12345);
         write_schema_file_to_local(dir.path(), 1234, 1001, Bytes::from(schema_file_data)).unwrap();
 
         // schema_file is the newest schema file of the keyspace.
@@ -1025,6 +1074,7 @@ mod tests {
             .unwrap();
         assert_eq!(schema_file.get_keyspace_id(), 1234);
         assert_eq!(schema_file.get_version(), 201);
+        assert_eq!(schema_file.get_restore_version(), 12345);
         info!(
             "schema file keyspace_id: {}, schema_version: {}, file_id: {}",
             schema_file.get_keyspace_id(),

@@ -14,6 +14,7 @@ use std::{
 };
 
 use api_version::ApiV2;
+use bytes::Bytes;
 use cloud_encryption::{EncryptionKey, MasterKey};
 use cloud_server::{RestoreShardResponse, TikvServer};
 use file_system::{IoRateLimitMode, IoRateLimiter};
@@ -24,8 +25,8 @@ use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
     limiter::StoreLimiter,
     table::{BoundedDataSet, DataBound, InnerKey},
-    IdVer, LoadTableFilterFn, ShardMeta, ShardRange, ShardStats, ShardTag, ENCRYPTION_KEY,
-    GLOBAL_SHARD_END_KEY,
+    IdAllocator, IdVer, LoadTableFilterFn, ShardMeta, ShardRange, ShardStats, ShardTag,
+    ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY, INITIAL_SNAP_VERSION,
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
@@ -35,8 +36,8 @@ use raft::eraftpb;
 use rfengine::RfEngine;
 use rfenginepb::ClusterBackupMeta;
 use rfstore::store::{
-    parse_raft_cmd, rlog, state::RaftState, ApplyMsgs, PeerTag, PreprocessContext, RegionIdVer,
-    StoreMsg,
+    parse_raft_cmd, rlog, state::RaftState, ApplyMsgs, PdIdAllocator, PeerTag, PreprocessContext,
+    RegionIdVer, StoreMsg,
 };
 use security::SecurityConfig;
 use slog_global::{debug, error, info, warn};
@@ -418,7 +419,7 @@ pub fn restore_keyspace(
         );
 
         // Gather sstables for target regions.
-        let (target_shards, sstables_cnt) = cluster.gather_sstables(aligned_regions);
+        let (target_shards, sstables_cnt) = cluster.gather_all_tables(aligned_regions)?;
         step!(
             "Keyspace {} gather {} SSTables for {} target regions",
             keyspace_tag,
@@ -655,6 +656,7 @@ pub struct BackupCluster {
     // `true` for "check_table" to read data from backup directly.
     load_all_tables: bool,
     // NOTE: New members need to check if need to clear in reset_keyspace.
+    id_allocator: Arc<dyn IdAllocator>,
 }
 
 impl Drop for BackupCluster {
@@ -687,7 +689,7 @@ impl BackupCluster {
         let mut cluster = Self {
             tag: make_keyspace_tag(keyspace_id, target_keyspace_id),
             path,
-            pd_client,
+            pd_client: pd_client.clone(),
             dfs,
             security_conf,
             master_key,
@@ -712,6 +714,7 @@ impl BackupCluster {
             tolerated_err: 0,
             txn_chunk_ids_in_wal: None,
             load_all_tables,
+            id_allocator: Arc::new(PdIdAllocator::new(pd_client)),
         };
 
         let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
@@ -1269,9 +1272,9 @@ impl BackupCluster {
                     continue;
                 }
             }
-            files.extend(shard.meta.all_file_keys().into_iter().map(|id| TableFile {
+            files.extend(shard.meta.all_files().iter().map(|(&id, fm)| TableFile {
                 id,
-                ftype: FileType::Sst,
+                ftype: fm.file_type,
             }));
             files.extend(
                 shard
@@ -1833,13 +1836,43 @@ impl BackupCluster {
         split_keys
     }
 
-    fn gather_sstables(
+    fn update_schema_file_restore_version(&self, schema_file_id: u64) -> Result<u64> {
+        let runtime = self.dfs.get_runtime();
+        let schema_file = runtime.block_on(
+            self.kv_engine
+                .as_ref()
+                .unwrap()
+                .load_schema_file(schema_file_id),
+        )?;
+        info!(
+            "Keyspace {} set schema file {schema_file_id} restore version to {}",
+            self.tag(),
+            self.truncate_ts
+        );
+        let new_schema_file = schema_file.set_restore_version(self.truncate_ts);
+        let new_schema_file_id = *self.id_allocator.alloc_id(1)?.first().unwrap();
+        let schema_data = new_schema_file.to_bytes();
+        let opts = dfs::Options::default().with_type(dfs::FileType::Schema);
+        runtime.block_on(
+            self.dfs
+                .create(new_schema_file_id, Bytes::from(schema_data), opts),
+        )?;
+        info!(
+            "Keyspace {} update schema file {schema_file_id} restore version to {}, new file id {new_schema_file_id}",
+            self.tag(),
+            self.truncate_ts
+        );
+        Ok(new_schema_file_id)
+    }
+
+    fn gather_all_tables(
         &self,
         aligned_regions: Vec<AlignedRegion>,
-    ) -> (Vec<ShardMeta>, usize /* number of sstables */) {
+    ) -> Result<(Vec<ShardMeta>, usize /* number of sstables */)> {
         let mut sstables_cnt = 0;
         let mut target_shards = Vec::with_capacity(aligned_regions.len());
         let inner_key_off = self.inner_key_off();
+        let mut new_schema_file_id = None;
         for region in aligned_regions {
             let mut meta = ShardMeta::default();
             meta.id = region.target_region.id;
@@ -1857,22 +1890,50 @@ impl BackupCluster {
             properties_helper.set_rewrite_range_prefix(!self.is_inplace_restore());
             for shard_id in region.backup_shards_id {
                 let shard = self.get_shard(shard_id).unwrap();
+                let mut all_l0_ssts: HashSet<u64> = HashSet::default();
                 for (&file_id, file_meta) in shard.meta.all_files() {
                     if meta.overlap_bound(file_meta.data_bound()) {
                         meta.add_file(file_id, file_meta.clone());
                         sstables_cnt += 1;
+                        if file_meta.get_level() == 0 && file_meta.is_sst_file() {
+                            all_l0_ssts.insert(file_id);
+                        }
                     }
                 }
+                // Only add the filtered l0s from ShardMeta.unconverted_l0s
+                // to meta.unconverted_l0s
+                meta.unconverted_l0s.extend(
+                    shard
+                        .meta
+                        .unconverted_l0s
+                        .iter()
+                        .filter(|id| all_l0_ssts.contains(id)),
+                );
                 // Use `base_version` as table version, and `data_sequence` is 0.
                 // And they will be adjusted at server side in `restore_shard` procedure.
                 meta.base_version = cmp::max(meta.base_version, shard.table_version());
                 properties_helper.merge_shard_meta(&shard.meta);
+                if shard.meta.schema_file_id > 0 {
+                    if new_schema_file_id.is_none() {
+                        // Get the schema file and update schema_restore_version. Then put the new
+                        // schema file to dfs.
+                        new_schema_file_id = Some(
+                            self.update_schema_file_restore_version(shard.meta.schema_file_id)?,
+                        );
+                    }
+                    meta.schema_file_id = new_schema_file_id.unwrap();
+                    meta.schema_file_ver = shard.meta.schema_file_ver;
+                    meta.schema_restore_ver = self.truncate_ts;
+                    // Update columnar_snap_version to initial value to guarantee the new flushed
+                    // l0s can be added to unconverted_l0s in target shard.
+                    meta.columnar_snap_version = INITIAL_SNAP_VERSION;
+                }
             }
 
             properties_helper.build_to_shard_meta(&mut meta);
             target_shards.push(meta);
         }
-        (target_shards, sstables_cnt)
+        Ok((target_shards, sstables_cnt))
     }
 
     fn truncate_shard_ts(&mut self, shard_id: u64) -> Result<bool /* has_truncate_ts */> {
@@ -1962,10 +2023,9 @@ impl BackupCluster {
             .into_iter()
             .map(|meta| {
                 let mut cs = meta.to_change_set();
-                let mut snap = cs.take_snapshot();
-                // Reset schema meta before restore the shard to server.
-                snap.clear_schema_meta();
+                let snap = cs.take_snapshot();
                 cs.set_restore_shard(snap);
+                info!("{} generate_snapshot cs: {:?}", self.tag, cs);
                 cs
             })
             .collect()

@@ -63,7 +63,7 @@ fn test_schema_file() {
         .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
     let schemas = build_schemas(vec![table_ids[1], table_ids[3]]);
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let schema_file_id = 100;
     let opts = dfs::Options::default().with_type(FileType::Schema);
     dfs.get_runtime()
@@ -96,7 +96,7 @@ fn test_schema_file() {
     // test schema_file will be set to None if not longer overlap.
     let new_schemas = build_schemas(vec![table_ids[1]]);
     let new_schema_version = 11;
-    let new_schema_file_data = build_schema_file(keyspace_id, new_schema_version, new_schemas);
+    let new_schema_file_data = build_schema_file(keyspace_id, new_schema_version, new_schemas, 0);
     let new_schema_file_id = 101;
     dfs.get_runtime()
         .block_on(dfs.create(new_schema_file_id, new_schema_file_data.into(), opts))
@@ -169,7 +169,7 @@ fn test_covert_row_to_columnar() {
     schema_buf.txn_id_column = None;
     let schema = Schema::new(schema_buf);
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let schema_file_id = 100;
     let opts = dfs::Options::default().with_type(FileType::Schema);
     dfs.get_runtime()
@@ -290,7 +290,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
     let mut schema_buf = schemas[0].to_schema_buf();
     schema_buf.txn_id_column = None;
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let schema_file_id = 100;
     let opts = dfs::Options::default().with_type(FileType::Schema);
     dfs.get_runtime()
@@ -474,7 +474,7 @@ fn test_region_merge_with_columnar() {
     schema_buf.txn_id_column = None;
     let schema = Schema::new(schema_buf);
     let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas);
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
     let schema_file_id = 100;
     let opts = dfs::Options::default().with_type(FileType::Schema);
     dfs.get_runtime()

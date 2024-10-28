@@ -1248,26 +1248,30 @@ fn test_restore_keyspace_with_schema() {
         schemas.push(schema);
     }
     let schema_version = 100;
-    let schema_file_data = build_schema_file(KEYSPACE_ID, schema_version, schemas.clone());
-    let file_id = client.pd_client.alloc_id().unwrap();
-    runtime
-        .block_on(s3fs.create(
-            file_id,
-            Bytes::from(schema_file_data),
-            Options::default().with_type(FileType::Schema),
-        ))
-        .unwrap();
-    let stores = client.pd_client.get_all_stores(true).unwrap();
-    let security_mgr = Arc::new(SecurityManager::new(&Default::default()).unwrap());
-    runtime
-        .block_on(broadcast_schema_update_to_all_stores(
-            &stores,
-            security_mgr,
-            time::Duration::from_secs(5),
-            KEYSPACE_ID,
-            file_id,
-        ))
-        .unwrap();
+    let schema_file_data = build_schema_file(KEYSPACE_ID, schema_version, schemas.clone(), 0);
+    let broadcast_schema_update = |schema_file_data: Vec<u8>| {
+        let file_id = client.pd_client.alloc_id().unwrap();
+        runtime
+            .block_on(s3fs.create(
+                file_id,
+                Bytes::from(schema_file_data),
+                Options::default().with_type(FileType::Schema),
+            ))
+            .unwrap();
+        let stores = client.pd_client.get_all_stores(true).unwrap();
+        let security_mgr = Arc::new(SecurityManager::new(&Default::default()).unwrap());
+        runtime
+            .block_on(broadcast_schema_update_to_all_stores(
+                &stores,
+                security_mgr.clone(),
+                time::Duration::from_secs(5),
+                KEYSPACE_ID,
+                file_id,
+            ))
+            .unwrap();
+    };
+    broadcast_schema_update(schema_file_data);
+
     // Check the schema file already installed.
     must_wait(
         || {
@@ -1313,7 +1317,7 @@ fn test_restore_keyspace_with_schema() {
         KEYSPACE_ID,
         &snapshot_backup_name,
         None,
-        s3fs,
+        s3fs.clone(),
         RestoreConfig::default(),
         cluster.get_pd_client(),
         &runtime,
@@ -1322,23 +1326,48 @@ fn test_restore_keyspace_with_schema() {
     )
     .unwrap();
 
-    // Check if the schema file is cleared after restoration.
+    let mut restore_version = 0;
+    // Check if the schema file is update the restore_version after restoration.
     must_wait(
         || {
             let data_stats = cluster.get_data_stats();
-            let mut schema_file_exists = false;
+            let mut has_restore_version = false;
             data_stats.iter_shard_stats(|_, shard_stats| {
-                if shard_stats.schema_version > 0 {
-                    schema_file_exists = true;
+                if shard_stats.schema_restore_version > 0 {
+                    has_restore_version = true;
+                    restore_version = shard_stats.schema_restore_version;
                     return true;
                 }
                 false
             });
-            !schema_file_exists
+            has_restore_version
         },
         10,
-        || "failed to clear schema file".to_string(),
+        || "failed to check schema file restore_version".to_string(),
     );
+
+    // Try to update schema with different restore_version.
+    let schema_file_data =
+        build_schema_file(KEYSPACE_ID, schema_version, schemas, restore_version + 1);
+    broadcast_schema_update(schema_file_data);
+
+    // Check if the schema file is update the restore_version after restoration.
+    let restore_version_changed = try_wait(
+        || {
+            let data_stats = cluster.get_data_stats();
+            let mut version_changed = false;
+            data_stats.iter_shard_stats(|_, shard_stats| {
+                if shard_stats.schema_restore_version > 0 {
+                    version_changed = restore_version != shard_stats.schema_restore_version;
+                    return true;
+                }
+                false
+            });
+            version_changed
+        },
+        5,
+    );
+    assert!(!restore_version_changed);
 
     // Verify restored data.
     client.verify_data_with_ref_store();
