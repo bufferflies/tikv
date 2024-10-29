@@ -303,6 +303,9 @@ fn create_check_table_tasks(
                     if starts_from_table_id.is_some_and(|id| partition_def.id < id) {
                         continue;
                     }
+                    if ends_to_table_id.is_some_and(|id| partition_def.id > id) {
+                        continue;
+                    }
                     tasks.push(CheckTableTask {
                         table_name: tbl.name.o.clone(),
                         table_id: tbl.id,
