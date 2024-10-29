@@ -72,6 +72,9 @@ pub struct CheckTableArgs {
     /// Effective only on first keyspace. Used as partition id as well.
     #[clap(long)]
     pub starts_from_table_id: Option<i64>,
+    /// Effective only on first keyspace. Used as partition id as well.
+    #[clap(long)]
+    pub ends_to_table_id: Option<i64>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -235,7 +238,12 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         } else {
             None
         };
-        let tasks = create_check_table_tasks(dbs, starts_from_table_id);
+        let ends_to_table_id = if idx == 0 {
+            args.ends_to_table_id
+        } else {
+            None
+        };
+        let tasks = create_check_table_tasks(dbs, starts_from_table_id, ends_to_table_id);
         for task in tasks {
             info!("check table {:?}", task);
             run_task(
@@ -262,6 +270,7 @@ struct CheckTableTask {
 fn create_check_table_tasks(
     dbs: Vec<DbInfo>,
     starts_from_table_id: Option<i64>,
+    ends_to_table_id: Option<i64>,
 ) -> Vec<CheckTableTask> {
     let mut tasks = vec![];
     for db in dbs {
@@ -305,6 +314,9 @@ fn create_check_table_tasks(
                 }
             } else {
                 if starts_from_table_id.is_some_and(|id| tbl.id < id) {
+                    continue;
+                }
+                if ends_to_table_id.is_some_and(|id| tbl.id > id) {
                     continue;
                 }
                 tasks.push(CheckTableTask {
@@ -392,9 +404,17 @@ fn run_task(
         let row_file = File::create(row_file_path).unwrap();
         let mut row_writer = BufWriter::new(row_file);
         for (handle, meta) in invalid_rows {
+            let mut idx_strs = vec![];
+            for (i, &idx_id) in meta.idx_ids.iter().enumerate() {
+                let um = meta.idx_metas[i];
+                idx_strs.push(format!("idx_{}:{}:{}", idx_id, um.start_ts, um.commit_ts))
+            }
             let row_str = format!(
-                "{}|{:?}|{}|{}\n",
-                handle, meta.idx_ids, meta.user_meta.start_ts, meta.user_meta.commit_ts
+                "{}|{}|{}|{}\n",
+                handle,
+                meta.user_meta.start_ts,
+                meta.user_meta.commit_ts,
+                idx_strs.join(",")
             );
             row_writer.write_all(row_str.as_bytes()).unwrap();
         }
@@ -506,6 +526,7 @@ impl Handle {
 struct RowMeta {
     user_meta: UserMeta,
     idx_ids: Vec<i16>,
+    idx_metas: Vec<UserMeta>,
 }
 
 #[derive(Debug, Clone)]
@@ -840,6 +861,7 @@ impl TableChecker {
             self.iterate_segment_idx_meta(segment_id, idx_id, |idx_meta| {
                 if let Some(row_meta) = row_metas.get_mut(&idx_meta.handle) {
                     row_meta.idx_ids.push(idx_id);
+                    row_meta.idx_metas.push(idx_meta.user_meta);
                 } else {
                     invalid_indices.push((idx_id, idx_meta));
                 }
@@ -867,6 +889,7 @@ impl TableChecker {
                 RowMeta {
                     user_meta,
                     idx_ids: Vec::with_capacity(self.idx_ids.len()),
+                    idx_metas: Vec::with_capacity(self.idx_ids.len()),
                 },
             );
         }
