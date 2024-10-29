@@ -836,7 +836,7 @@ impl BackupCluster {
         Ok(cluster)
     }
 
-    fn tag(&self) -> &str {
+    pub fn tag(&self) -> &str {
         &self.tag
     }
 

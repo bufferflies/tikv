@@ -14,7 +14,7 @@ use tikv::storage::{
     kv::WriteData,
     mvcc::{CloudReader, Key, MvccTxn, TxnCommitRecord, WriteType},
 };
-use tikv_util::{box_err, info};
+use tikv_util::{box_err, debug, info};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use txn_types::{Lock, ReqType, TimeStamp};
 
@@ -60,7 +60,7 @@ impl LockResolver {
         shard_meta_getter: RegionMetaGetter,
     ) -> Self {
         let shards = Arc::new(Self::collect_shards(&en));
-        info!("{} collect_shards", tag; "shards" => ?shards);
+        debug!("{} collect_shards", tag; "shards" => ?shards);
 
         let apply_locks = ApplyLocks::default();
         let txn_status = TxnStatus {

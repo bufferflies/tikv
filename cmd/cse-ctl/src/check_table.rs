@@ -24,6 +24,7 @@ use kvengine::{
 use kvproto::keyspacepb::{KeyspaceMeta, KeyspaceState};
 use native_br::{
     common::create_pd_client,
+    lock::LockResolver,
     restore::{get_cluster_backup_meta, RestoreConfig},
     restore_keyspace::BackupCluster,
 };
@@ -47,6 +48,7 @@ use txn_types::KvPair;
 use crate::check_table::Handle::{Common, Int};
 
 const TXN_CHUNK_WORKER_POOL_SIZE: usize = 2;
+const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
 
 #[derive(Args)]
 pub struct CheckTableArgs {
@@ -117,6 +119,7 @@ impl CheckTableConfig {
 }
 
 pub(crate) fn execute_check_table(args: CheckTableArgs) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let config = CheckTableConfig::from_args(&args);
     let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_cfg = config.dfs.clone();
@@ -189,7 +192,32 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         cluster_backup.backup_ts
     };
     for (idx, keyspace_id) in keyspace_ids.into_iter().enumerate() {
-        cluster.reset_keyspace(keyspace_id, keyspace_id).unwrap();
+        if idx > 0 {
+            cluster.reset_keyspace(keyspace_id, keyspace_id).unwrap();
+        }
+
+        let lock_resolver = LockResolver::new(
+            cluster.tag(),
+            cluster.get_kvengine(),
+            RESOLVE_LOCKS_BATCH_SIZE,
+            cluster.get_shard_meta_getter(),
+        );
+        let resolved_locks = rt
+            .block_on(lock_resolver.resolve_locks())
+            .unwrap_or_else(|err| {
+                panic!(
+                    "check table: resolve locks failed, keyspace {}, err {:?}",
+                    keyspace_id, err
+                );
+            });
+        info!(
+            "{} resolve {} locks / {} lock_txn_files of shards {:?}",
+            cluster.tag(),
+            resolved_locks.total_normal_locks_cnt,
+            resolved_locks.total_lock_txn_files_cnt,
+            resolved_locks.resolved_shards
+        );
+
         let kv = cluster.get_kvengine();
         let shards = cluster.get_shard_metas_before_flush();
         let backup_reader = Arc::new(BackupReader::new(
@@ -583,7 +611,7 @@ impl BackupReader {
                 tag,
                 self.s3fs.clone(),
                 meta.to_change_set(),
-                false,
+                true,
                 &self.master_key,
                 BlockCache::None,
                 None,
