@@ -4,12 +4,12 @@
 #![feature(thread_id_value)]
 #![feature(box_patterns)]
 #![feature(vec_into_raw_parts)]
-
+#![feature(alloc_error_hook)]
 #[cfg(test)]
 extern crate test;
 
 use std::{
-    cmp,
+    alloc, cmp,
     collections::{
         hash_map::Entry,
         vec_deque::{Iter, VecDeque},
@@ -619,7 +619,10 @@ pub fn set_panic_hook(panic_abort: bool, data_dir: &str) {
                 libc::_exit(1);
             }
         }
-    }))
+    }));
+    alloc::set_alloc_error_hook(|layout| {
+        panic!("memory allocation of {} bytes failed", layout.size());
+    })
 }
 
 /// Checks environment variables that affect TiKV.
