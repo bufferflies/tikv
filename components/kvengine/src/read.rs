@@ -1744,7 +1744,7 @@ mod tests {
             )
         };
         let total_blocks_size = snap.estimated_range_blocks_size(&[build_range_fn(0, 10000)]);
-        assert_eq!(total_blocks_size, 1103598);
+        assert_eq!(total_blocks_size, 1103566);
 
         // verify that many small ranges are properly deduplicated, num blocks never
         // exceed total.
@@ -1754,15 +1754,15 @@ mod tests {
             many_small_ranges.push(small_range);
         }
         let many_small_ranges_blocks_size = snap.estimated_range_blocks_size(&many_small_ranges);
-        assert_eq!(many_small_ranges_blocks_size + 2, total_blocks_size);
+        assert_eq!(many_small_ranges_blocks_size + 112, total_blocks_size);
 
         let half_num_blocks = snap.estimated_range_blocks_size(&[build_range_fn(5000, 10000)]);
-        assert_eq!(half_num_blocks, 548238);
+        assert_eq!(half_num_blocks, 548206);
 
         for i in (100..10000).step_by(100) {
             let blocks_size = snap.estimated_range_blocks_size(&[build_range_fn(i, i + 1)]);
             // some range on level 1 doesn't overlap any table, so blocks_size may vary.
-            assert!(blocks_size == 10543 || blocks_size == 6983);
+            assert!(blocks_size == 11137 || blocks_size == 7577);
         }
 
         let blocks_size = snap.estimated_range_blocks_size(&[
@@ -1772,7 +1772,7 @@ mod tests {
             build_range_fn(4, 5),
         ]);
         // each level only access one block.
-        assert_eq!(blocks_size, 10543);
+        assert_eq!(blocks_size, 11137);
 
         let blocks_size = snap.estimated_range_blocks_size(&[
             build_range_fn(1, 2),
@@ -1781,7 +1781,7 @@ mod tests {
             build_range_fn(4000, 4001),
         ]);
         // each range on each level access one block.
-        assert_eq!(blocks_size, 42172);
+        assert_eq!(blocks_size, 44548);
     }
 
     const MAX_I: usize = 100;

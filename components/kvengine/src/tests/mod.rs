@@ -1005,7 +1005,7 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
         (
             vec![(80, 380), (190, 570)], // more L0 + L1+
             vec![(50, 80), (80, 100), (100, 120)],
-            (Some(333), Some(280)),
+            (Some(330), Some(280)),
         ),
     ];
     let mut id_alloc = 1000;
@@ -1174,19 +1174,19 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
             vec![(100, 400), (200, 500), (300, 600), (400, 700)], // L0 only
             vec![],
             4,
-            (Some(vec![456, 556]), Some(vec![406, 506])),
+            (Some(vec![450, 550]), Some(vec![401, 501])),
         ),
         (
             vec![(100, 400), (150, 550), (300, 700), (200, 800)], // L0 only
             vec![],
             4,
-            (Some(vec![400, 456, 556]), Some(vec![350, 406, 506])),
+            (Some(vec![400, 450, 550]), Some(vec![350, 401, 501])),
         ),
         (
             vec![(100, 800), (200, 900)], // L0 + L1+
             vec![(30, 80), (80, 100), (100, 130)],
             4,
-            (Some(vec![100, 356, 456]), Some(vec![306, 406, 512])),
+            (Some(vec![100, 350, 450]), Some(vec![301, 401, 501])),
         ),
     ];
     let mut id_alloc = 1000;

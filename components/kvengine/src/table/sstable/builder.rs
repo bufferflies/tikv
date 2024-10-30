@@ -567,10 +567,7 @@ impl BlockBuilder {
         let entry_size = /*key_suffix length in bytes*/ 2 + key.len() + encoded_size;
         self.block.entry_sizes.push(entry_size as u32);
         self.block.kv_size += entry_size;
-        if self.block.tmp_keys.length() % 64 == 0 {
-            // Do not need to recalculate common prefix for each entry.
-            self.block.common_prefix_len = self.get_block_common_prefix_len();
-        }
+        self.block.common_prefix_len = self.get_block_common_prefix_len();
     }
 
     fn need_finish_block(&self, target_block_size: usize) -> bool {
