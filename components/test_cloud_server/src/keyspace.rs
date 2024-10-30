@@ -8,15 +8,18 @@ use std::{
 };
 
 use api_version::ApiV2;
-use bytes::{BufMut, BytesMut};
+use bytes::BufMut;
+use codec::number::NumberEncoder;
 use dashmap::{
     mapref::{entry::Entry, one::Ref},
     DashMap,
 };
+use kvengine::table::columnar::Schema;
 use kvproto::kvrpcpb::Op;
 use rand::{
     distributions::Distribution,
     prelude::{IteratorRandom, SliceRandom, ThreadRng},
+    Rng,
 };
 use tikv_client::TimestampExt;
 use tikv_util::info;
@@ -25,7 +28,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use crate::{
     client::{ClusterTxnClient, RefStore, Result},
     table::TableMeta,
-    util::Mutation,
+    util::{build_schemas, Mutation},
 };
 
 #[derive(Clone, Default)]
@@ -57,6 +60,7 @@ impl KeyspaceManagerCore {
         keyspace_names: Vec<String>,
         inner_key_off: usize,
         table_count: usize,
+        enable_schema_ratio: f64,
         need_shuffle: Option<&mut ThreadRng>,
     ) {
         assert_eq!(keyspace_ids.len(), keyspace_names.len());
@@ -64,7 +68,12 @@ impl KeyspaceManagerCore {
             match self.keyspaces.entry(keyspace_id) {
                 Entry::Occupied(_) => panic!("duplicated keyspace {}", keyspace_id),
                 Entry::Vacant(entry) => {
-                    entry.insert(KeyspaceMeta::new(keyspace_name, inner_key_off, table_count));
+                    entry.insert(KeyspaceMeta::new(
+                        keyspace_name,
+                        inner_key_off,
+                        table_count,
+                        enable_schema_ratio,
+                    ));
                 }
             }
         }
@@ -81,9 +90,15 @@ impl KeyspaceManagerCore {
         keyspace_name: String,
         inner_key_off: usize,
         table_count: usize,
+        enable_schema_ratio: f64,
         locked: bool,
     ) -> Option<OwnedRwLockWriteGuard<()>> {
-        let ks_meta = KeyspaceMeta::new(keyspace_name, inner_key_off, table_count);
+        let ks_meta = KeyspaceMeta::new(
+            keyspace_name,
+            inner_key_off,
+            table_count,
+            enable_schema_ratio,
+        );
         let lock_opt = if locked {
             let lock = ks_meta.get_locks();
             Some(lock.mutex_lock().await)
@@ -156,11 +171,20 @@ impl KeyspaceManagerCore {
         &self,
         keyspace_id: u32,
         rng: &mut ThreadRng,
-    ) -> Option<i64 /* table_id */> {
+        include_schema: bool,
+    ) -> Option<TableMeta> {
         self.keyspaces
             .get(&keyspace_id)
             .unwrap()
-            .get_random_available_table(rng)
+            .get_random_available_table(rng, include_schema)
+    }
+
+    pub fn get_table(&self, keyspace_id: u32, table_id: i64) -> Option<TableMeta> {
+        self.keyspaces
+            .get(&keyspace_id)
+            .unwrap()
+            .get_table(table_id)
+            .map(|t| t.clone())
     }
 
     pub fn add_backup(&self, backup: KeyspaceBackup) {
@@ -297,6 +321,8 @@ pub struct KeyspaceMetaCore {
     /// Used to make pending destroy range tasks be able to be backup and
     /// restored.
     pending_destroy_range: Vec<DestroyRangeTask>,
+
+    schemas: Vec<Schema>,
 }
 
 impl fmt::Debug for KeyspaceMetaCore {
@@ -318,12 +344,24 @@ impl fmt::Debug for KeyspaceMetaCore {
 }
 
 impl KeyspaceMeta {
-    pub fn new(name: String, inner_key_off: usize, table_count: usize) -> Self {
+    pub fn new(
+        name: String,
+        inner_key_off: usize,
+        table_count: usize,
+        schema_enable_ratio: f64,
+    ) -> Self {
         let tables = DashMap::default();
+        let mut schema_table_ids = vec![];
         for _ in 0..table_count {
-            let table = TableMeta::new(true);
-            tables.insert(table.id(), table);
+            let is_schema_enabled = rand::thread_rng().gen_bool(schema_enable_ratio);
+            let table = TableMeta::new(true, is_schema_enabled);
+            let table_id = table.id();
+            tables.insert(table_id, table);
+            if is_schema_enabled {
+                schema_table_ids.push(table_id);
+            }
         }
+        let schemas = build_schemas(schema_table_ids);
         Self {
             core: KeyspaceMetaCore {
                 name,
@@ -331,6 +369,7 @@ impl KeyspaceMeta {
                 tables,
                 del_prefixes: kvengine::DeletePrefixes::new_with_inner_key_off(inner_key_off),
                 pending_destroy_range: Default::default(),
+                schemas,
             },
             inner_lock: Default::default(),
             extra_lock: Default::default(),
@@ -344,15 +383,24 @@ impl KeyspaceMeta {
         }
     }
 
-    pub fn get_random_available_table(&self, rng: &mut ThreadRng) -> Option<i64> {
+    pub fn get_random_available_table(
+        &self,
+        rng: &mut ThreadRng,
+        include_schema: bool,
+    ) -> Option<TableMeta> {
         self.tables
             .iter()
-            .filter_map(|x| x.is_available().then_some(*x.key()))
+            .filter_map(|x| {
+                if !include_schema && x.is_schema_enabled() {
+                    return None;
+                }
+                x.is_available().then_some(x.value().clone())
+            })
             .choose(rng)
     }
 
-    pub fn new_table(&self, is_available: bool) -> i64 {
-        let table = TableMeta::new(is_available);
+    pub fn new_table(&self, is_available: bool, is_schema_enabled: bool) -> i64 {
+        let table = TableMeta::new(is_available, is_schema_enabled);
         let table_id = table.id();
         self.tables.insert(table.id(), table);
         table_id
@@ -377,6 +425,10 @@ impl KeyspaceMeta {
 
     pub fn name(&self) -> String {
         self.name.clone()
+    }
+
+    pub fn schemas(&self) -> Vec<Schema> {
+        self.schemas.clone()
     }
 }
 
@@ -644,17 +696,17 @@ const RECORD_PREFIX_SEP: &[u8] = b"_r";
 const INDEX_PREFIX_SEP: &[u8] = b"_i";
 
 pub fn make_key_ext(keyspace_id: u32, table_id: i64, sep: &[u8], user_key: &[u8]) -> Vec<u8> {
-    let mut buf = BytesMut::with_capacity(
+    let mut buf = Vec::with_capacity(
         4 + TABLE_PREFIX.len() + mem::size_of_val(&table_id) + sep.len() + user_key.len(),
     );
     buf.extend_from_slice(&ApiV2::get_txn_keyspace_prefix(keyspace_id));
     buf.put_slice(TABLE_PREFIX);
-    buf.put_i64(table_id);
+    buf.write_i64(table_id).unwrap();
     if !user_key.is_empty() {
         buf.put_slice(sep);
         buf.put_slice(user_key);
     }
-    buf.freeze().to_vec()
+    buf
 }
 
 #[inline]

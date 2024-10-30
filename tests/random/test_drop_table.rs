@@ -22,17 +22,18 @@ pub fn spawn_drop_table(
             let random = || {
                 let mut rng = rand::thread_rng();
                 let keyspace_id = client.keyspace_manager().get_zipf_random_keyspace(&mut rng);
-                let table_id = client
-                    .keyspace_manager()
-                    .get_random_available_table(keyspace_id, &mut rng);
-                (keyspace_id, table_id)
+                let table_meta = client.keyspace_manager().get_random_available_table(
+                    keyspace_id,
+                    &mut rng,
+                    false,
+                );
+                (keyspace_id, table_meta)
             };
-            let (keyspace_id, table_id) = random();
-            let table_id = match table_id {
-                Some(table_id) => table_id,
+            let (keyspace_id, table_meta) = random();
+            let table_id = match table_meta.as_ref() {
+                Some(table_meta) => table_meta.id(),
                 None => continue,
             };
-
             client.drop_table(keyspace_id, table_id).await.unwrap();
             DROP_TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
@@ -41,7 +42,7 @@ pub fn spawn_drop_table(
                 .keyspace_manager()
                 .get_keyspace_meta(keyspace_id)
                 .unwrap()
-                .new_table(true);
+                .new_table(true, table_meta.unwrap().is_schema_enabled());
             TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
             let sleep_time = interval.saturating_sub(loop_start_time.saturating_elapsed());

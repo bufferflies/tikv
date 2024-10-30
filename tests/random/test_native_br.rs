@@ -217,8 +217,14 @@ pub(crate) fn spawn_restore_keyspace(
             let source_keyspace = backup.keyspace_id;
             let branching = enable_inner_key_off && rng.gen_bool(0.5);
             let (target_keyspace, target_keyspace_lock_guard) = if branching {
-                let (new_keyspace, lock_guard) =
-                    runtime.block_on(create_new_keyspace(&pd_client, &keyspace_manager, 0, true));
+                let (new_keyspace, lock_guard) = runtime.block_on(create_new_keyspace(
+                    &pd_client,
+                    &keyspace_manager,
+                    &s3fs,
+                    0,
+                    0.0,
+                    true,
+                ));
                 assert!(lock_guard.is_some());
                 info!(
                     "branching restore {}->{}, create new keyspace",

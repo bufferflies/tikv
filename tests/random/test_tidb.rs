@@ -481,6 +481,7 @@ fn prepare_cluster(
         keyspace_names,
         DEFAULT_INNER_KEY_OFFSET,
         0,
+        0.0,
         Some(&mut rng),
     );
     KEYSPACE_COUNTER.store(initial_keyspace_count, Ordering::Relaxed);

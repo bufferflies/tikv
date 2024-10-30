@@ -14,6 +14,11 @@ pub struct TableMeta {
     /// It is set to `false` when the table is being "load_data" after
     /// "destroy_table".
     is_available: AtomicBool,
+
+    /// `is_schema_enabled` indicates whether the table is schema awareness.
+    /// It is set to `true` when writes table data, mainly used for columnar
+    /// test.
+    is_schema_enabled: AtomicBool,
 }
 
 impl Clone for TableMeta {
@@ -21,6 +26,7 @@ impl Clone for TableMeta {
         Self {
             id: self.id,
             is_available: AtomicBool::new(self.is_available()),
+            is_schema_enabled: AtomicBool::new(self.is_schema_enabled()),
         }
     }
 }
@@ -30,16 +36,18 @@ impl fmt::Debug for TableMeta {
         f.debug_struct("TableMeta")
             .field("id", &self.id)
             .field("is_available", &self.is_available())
+            .field("is_schema_enabled", &self.is_schema_enabled())
             .finish()
     }
 }
 
 impl TableMeta {
-    pub fn new(is_available: bool) -> Self {
+    pub fn new(is_available: bool, is_schema_enabled: bool) -> Self {
         let id = NEXT_TABLE_ID.fetch_add(1, Ordering::SeqCst);
         Self {
             id,
             is_available: AtomicBool::new(is_available),
+            is_schema_enabled: AtomicBool::new(is_schema_enabled),
         }
     }
 
@@ -53,5 +61,9 @@ impl TableMeta {
 
     pub fn set_available(&self, is_available: bool) -> bool {
         self.is_available.swap(is_available, Ordering::SeqCst)
+    }
+
+    pub fn is_schema_enabled(&self) -> bool {
+        self.is_schema_enabled.load(Ordering::SeqCst)
     }
 }

@@ -423,8 +423,9 @@ impl EngineCore {
         }
         std::fs::rename(tmp_file_name, local_file_name).table_ctx(id, "write_local_file.rename")?;
         info!(
-            "write local file {} takes {:?}",
+            "write local file {} size: {} takes {:?}",
             id,
+            data.len(),
             start.saturating_elapsed()
         );
         Ok(())

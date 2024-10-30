@@ -62,7 +62,7 @@ pub(crate) fn spawn_load_data(
             let table_id = keyspace_manager
                 .get_keyspace_meta(keyspace_id)
                 .unwrap()
-                .new_table(false);
+                .new_table(false, false);
             TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
             let success = do_load_data(

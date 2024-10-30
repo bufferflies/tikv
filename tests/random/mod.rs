@@ -23,9 +23,14 @@ use std::{
 
 use api_version::ApiV2;
 use cloud_encryption::KeyspaceEncryptionConfig;
+use codec::number::NumberEncoder;
 use futures::executor::block_on;
 use http::{Request, StatusCode, Uri};
 use hyper::Body;
+use kvengine::{
+    dfs::{self, Dfs, FileType, S3Fs},
+    table::columnar::build_schema_file,
+};
 use kvproto::metapb::Store;
 use pd_client::PdClient;
 use rand::prelude::*;
@@ -38,6 +43,10 @@ use test_cloud_server::{
     try_wait_result, ServerCluster,
 };
 use test_pd_client::TestPdClient;
+use tidb_query_datatype::{
+    codec::row::v2::encoder_for_test::{Column, RowEncoder},
+    expr::EvalContext,
+};
 use tikv::config::TikvConfig;
 use tikv_client::TimestampExt;
 use tikv_util::{box_err, error, info, time::Instant, warn};
@@ -358,23 +367,26 @@ pub(crate) fn spawn_keyspace_write(
 
                 let random = || {
                     let mut rng = rand::thread_rng();
-                    let table_id = client
-                        .keyspace_manager()
-                        .get_random_available_table(keyspace_id, &mut rng);
+                    let table_meta = client.keyspace_manager().get_random_available_table(
+                        keyspace_id,
+                        &mut rng,
+                        true,
+                    );
                     let i = rng.gen_range(begin..end);
                     let put_kv = rng.gen_ratio(2, 3);
-                    (table_id, i, put_kv)
+                    (table_meta, i, put_kv)
                 };
-                let (table_id, i, put_kv) = random();
-                let table_id = match table_id {
-                    Some(table_id) => table_id,
+                let (table_meta, i, put_kv) = random();
+                let table_id = match table_meta.as_ref() {
+                    Some(table_meta) => table_meta.id(),
                     None => continue,
                 };
+                let is_schema_enabled = table_meta.unwrap().is_schema_enabled();
 
                 let ver = client.current_timestamp().await.unwrap().version();
                 info!(
-                    "[{}] thread write on keyspace {}, ver {}",
-                    idx, keyspace_id, ver
+                    "[{}] thread write on keyspace {} table {} schema_enabled {}, ver {}",
+                    idx, keyspace_id, table_id, is_schema_enabled, ver
                 );
 
                 if put_kv {
@@ -383,17 +395,17 @@ pub(crate) fn spawn_keyspace_write(
                             keyspace_id,
                             table_id,
                             i..(i + 10),
-                            i_to_key,
-                            generate_random_string(format!("write-{}-", ver)),
+                            gen_row_key_suffix,
+                            |i| gen_row_val(&mut EvalContext::default(), i, ver),
                         )
                         .await
                         .unwrap();
                 } else {
                     client
-                        .keyspace_del_kv(keyspace_id, table_id, i..(i + 10), i_to_key)
+                        .keyspace_del_kv(keyspace_id, table_id, i..(i + 10), gen_row_key_suffix)
                         .await
                         .unwrap();
-                };
+                }
             }
             WRITE_COUNTER.fetch_add(10, Ordering::SeqCst);
         }
@@ -404,19 +416,24 @@ pub(crate) fn spawn_keyspace_write(
 pub fn spawn_create_keyspace(
     pd_client: Arc<TestPdClient>,
     keyspace_manager: KeyspaceManager,
+    fs: &S3Fs,
     initial_table_count: usize,
+    schema_enable_ratio: f64,
     timeout: Duration,
 ) -> JoinHandle<()> {
+    let fs = fs.clone();
     std::thread::spawn(move || {
         let mut rng = rand::thread_rng();
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < timeout {
             sleep(Duration::from_secs(rng.gen_range(0..5)));
 
-            let _ = block_on(create_new_keyspace(
+            let _ = fs.get_runtime().block_on(create_new_keyspace(
                 &pd_client,
                 &keyspace_manager,
+                &fs,
                 initial_table_count,
+                schema_enable_ratio,
                 false,
             ));
         }
@@ -427,7 +444,9 @@ pub fn spawn_create_keyspace(
 async fn create_new_keyspace(
     pd_client: &Arc<TestPdClient>,
     keyspace_manager: &KeyspaceManager,
+    fs: &S3Fs,
     initial_table_count: usize,
+    schema_enable_ratio: f64,
     locked: bool,
 ) -> (u32, Option<OwnedRwLockWriteGuard<()>>) {
     let random = || -> (u32, bool) {
@@ -448,13 +467,78 @@ async fn create_new_keyspace(
             TidbCluster::keyspace_name(new_keyspace as u16),
             DEFAULT_INNER_KEY_OFFSET,
             initial_table_count,
+            schema_enable_ratio,
             locked,
         )
         .await;
+    // Setup schema file to stores
+    // TODO: support tables with schema enabled created dynamically.
+    let keyspace_meta = keyspace_manager.get_keyspace_meta(new_keyspace).unwrap();
+    let stores = pd_client.get_all_stores(true).unwrap();
+    if !keyspace_meta.schemas().is_empty() {
+        let schema_version = 10;
+        let schema_data =
+            build_schema_file(new_keyspace, schema_version, keyspace_meta.schemas(), 0);
+        let schema_file_id = pd_client.alloc_id().unwrap();
+        fs.create(
+            schema_file_id,
+            schema_data.into(),
+            dfs::Options::default().with_type(FileType::Schema),
+        )
+        .await
+        .unwrap();
+        // Setup schema file to stores.
+        broadcast_schema_file_request(&stores, new_keyspace, schema_file_id).await;
+    }
     KEYSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
     TABLE_COUNTER.fetch_add(initial_table_count, Ordering::Relaxed);
 
     (new_keyspace, lock)
+}
+
+pub async fn broadcast_schema_file_request(
+    stores: &[Store],
+    keyspace_id: u32,
+    schema_file_id: u64,
+) {
+    for store in stores {
+        let status_addr = store.get_status_address();
+        let http_client = hyper::client::Client::new();
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < TIMEOUT {
+            let request = hyper::http::Request::builder()
+                .method(http::method::Method::POST)
+                .uri(format!(
+                    "http://{}/schema_file?keyspace_id={}&file_id={}",
+                    status_addr, keyspace_id, schema_file_id
+                ))
+                .body(Body::empty())
+                .unwrap();
+            if let Ok(resp) = http_client.request(request).await {
+                if resp.status().is_success() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+pub fn gen_row_key_suffix(i: usize) -> Vec<u8> {
+    let mut suffix = vec![];
+    suffix.write_i64(i as i64).unwrap();
+    suffix
+}
+
+pub fn gen_row_val(ctx: &mut EvalContext, i: usize, ver: u64) -> Vec<u8> {
+    let mut row_val = vec![];
+    let str_val = generate_random_string(format!("write-{}-", ver));
+    let cols = vec![
+        Column::new(1, Some(i as i64)),
+        Column::new(2, Some(str_val(10))),
+    ];
+    row_val.write_row(ctx, cols).unwrap();
+    row_val
 }
 
 async fn must_split_region_for_keyspace(

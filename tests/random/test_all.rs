@@ -9,8 +9,8 @@ use api_version::ApiV2;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use kvengine::{
-    dfs::{DFSConfig, S3Fs},
-    table::{sstable::BlockCacheType, ChecksumType},
+    dfs::{self, DFSConfig, FileType, S3Fs},
+    table::{columnar::build_schema_file, sstable::BlockCacheType, ChecksumType},
 };
 use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;
@@ -43,6 +43,7 @@ const INITIAL_KEYSPACE_COUNT: usize = 10;
 const BIG_REGION_SIZE_KEYSPACE_COUNT: usize = 2;
 const BIG_REGION_SIZE_FACTOR_OPTIONS: &[f64] = &[2.0, 3.0, 4.0];
 const INITIAL_TABLE_COUNT: usize = 3;
+const TABLE_SCHEMA_ENABLE_RATIO: f64 = 0.5;
 
 const NODES_COUNT: usize = 4;
 const TIKV_WORKERS_COUNT: usize = 2;
@@ -148,7 +149,9 @@ fn test_random_all() {
         spawn_create_keyspace(
             cluster.get_pd_client(),
             keyspace_manager.clone(),
+            &s3fs,
             INITIAL_TABLE_COUNT,
+            TABLE_SCHEMA_ENABLE_RATIO,
             TIMEOUT,
         ),
         spawn_major_compact(cluster.get_pd_client(), keyspace_manager.clone(), TIMEOUT),
@@ -429,6 +432,7 @@ fn prepare_cluster(
         keyspace_names,
         DEFAULT_INNER_KEY_OFFSET,
         INITIAL_TABLE_COUNT,
+        TABLE_SCHEMA_ENABLE_RATIO,
         Some(&mut rng),
     );
     KEYSPACE_COUNTER.store(initial_keyspace_count, Ordering::Relaxed);
@@ -439,6 +443,36 @@ fn prepare_cluster(
     let res = block_on(pd_client.split_regions_with_retry(data_keys, Duration::from_secs(60)));
     if let Err(err) = res {
         warn!("split regions failed: {:?}", err);
+    }
+
+    let all_keyspaces = cluster.keyspace_manager().get_all_keyspaces();
+    let fs = cluster.get_dfs().unwrap();
+    let runtime = fs.get_runtime();
+    let stores = pd_client.get_all_stores(true).unwrap();
+    for keyspace_id in all_keyspaces {
+        let keyspace_meta = cluster
+            .keyspace_manager()
+            .get_keyspace_meta(keyspace_id)
+            .unwrap();
+        if !keyspace_meta.schemas().is_empty() {
+            let schema_version = 10;
+            let schema_data =
+                build_schema_file(keyspace_id, schema_version, keyspace_meta.schemas(), 0);
+            let schema_file_id = pd_client.alloc_id().unwrap();
+            runtime
+                .block_on(fs.create(
+                    schema_file_id,
+                    schema_data.into(),
+                    dfs::Options::default().with_type(FileType::Schema),
+                ))
+                .unwrap();
+            // Setup schema file to stores.
+            runtime.block_on(broadcast_schema_file_request(
+                &stores,
+                keyspace_id,
+                schema_file_id,
+            ));
+        }
     }
 
     // Scatter regions.

@@ -652,7 +652,7 @@ async fn create_keyspace_and_split_tables(
     keyspace_id: u32,
 ) -> Vec<i64> {
     let km = cluster.keyspace_manager();
-    km.create_single_keyspace(keyspace_id, format!("ks{}", keyspace_id), 4, 4, false)
+    km.create_single_keyspace(keyspace_id, format!("ks{}", keyspace_id), 4, 4, 0.0, false)
         .await;
     let keyspace_split_keys = get_keyspace_split_keys(keyspace_id);
     let pd_client = cluster.get_pd_client();

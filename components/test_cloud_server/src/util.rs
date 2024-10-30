@@ -3,14 +3,18 @@
 use std::{fmt, mem};
 
 use bytes::Bytes;
+use kvengine::table::columnar::{
+    new_int_handle_column_info, new_version_column_info, Schema, SchemaBuf,
+};
 use kvproto::{
     kvrpcpb, metapb,
     metapb::{Peer, RegionEpoch},
 };
 use log_wrappers::Value;
 use rfstore::store::RegionIdVer;
+use tidb_query_datatype::{Collation, FieldTypeTp};
 use tikv_util::codec::bytes::decode_bytes;
-
+use tipb::ColumnInfo;
 pub(crate) const DEFAULT_INNER_KEY_OFFSET: usize = 4;
 
 /// A cheaply cloneable version of `kvrpcpb::Mutation`.
@@ -175,4 +179,30 @@ impl pd_client::util::RegionLike for RawRegion {
     fn end_key(&self) -> &[u8] {
         &self.raw_end
     }
+}
+
+pub fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {
+    let mut schemas = vec![];
+    for &columnar_table_id in &table_ids {
+        let mut c1 = ColumnInfo::new();
+        c1.set_column_id(1);
+        c1.set_tp(FieldTypeTp::LongLong.to_u8().unwrap() as i32);
+        let mut c2 = ColumnInfo::new();
+        c2.set_column_id(2);
+        c2.set_tp(FieldTypeTp::VarChar.to_u8().unwrap() as i32);
+        c2.set_column_len(255);
+        c2.set_collation(Collation::Utf8Mb4Bin as i32);
+        let schema = SchemaBuf {
+            table_id: columnar_table_id,
+            handle_column: new_int_handle_column_info(),
+            version_column: new_version_column_info(),
+            txn_id_column: None,
+            columns: vec![c1, c2],
+            pk_col_ids: vec![],
+            vector_indexes: vec![],
+        }
+        .into();
+        schemas.push(schema);
+    }
+    schemas
 }

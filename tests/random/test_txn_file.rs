@@ -52,8 +52,9 @@ pub(crate) fn spawn_txn_file_write(
                 let _guard = rt.block_on(lock.shared_lock());
 
                 let table_id =
-                    match keyspace_manager.get_random_available_table(keyspace_id, &mut rng) {
-                        Some(table_id) => table_id,
+                    match keyspace_manager.get_random_available_table(keyspace_id, &mut rng, false)
+                    {
+                        Some(table_meta) => table_meta.id(),
                         None => continue,
                     };
                 let i = rng.gen_range(begin..end);
