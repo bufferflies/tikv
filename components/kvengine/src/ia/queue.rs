@@ -60,7 +60,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::{
     ia::{
-        file_segment::EvictTask,
+        manager::EvictTask,
         types::{FileSegmentIdent, FileSegmentInfo, FileSegmentQueueGuard},
     },
     table::{Error, Result},

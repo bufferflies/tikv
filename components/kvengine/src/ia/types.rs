@@ -172,15 +172,16 @@ pub(crate) struct FooterInfo {
 
 impl FooterInfo {
     pub(crate) async fn read_from_local(
-        store: Arc<dyn LocalStore>,
+        store: &dyn LocalStore,
         file_id: u64,
-        on_open: Option<impl FnOnce() + Send + 'static>,
     ) -> Result<(Self, Bytes)> {
-        let on_open = on_open.map(|f| Box::new(f) as _);
         let mut data = Vec::with_capacity(FOOTER_LEN_HINT as usize);
-        store
-            .read_all(file_id, &Self::local_filename(file_id), &mut data, on_open)
+        let res = store
+            .read_all(file_id, &Self::local_filename(file_id), &mut data)
             .await?;
+        if res.is_none() {
+            return Err(Error::IaMgr(format!("footer not found: {file_id}")));
+        }
         let data = Bytes::from(data);
 
         // ver + ftype + total_size
@@ -189,13 +190,13 @@ impl FooterInfo {
         let mut header = data.as_ref();
         let ver = header.get_u8();
         if ver != FOOTER_INFO_VER {
-            return Err(Error::Other(format!(
+            return Err(Error::IaMgr(format!(
                 "invalid footer version, expect {}, got {}, file_id {}, data {:?}",
                 FOOTER_INFO_VER, ver, file_id, data
             )));
         }
         let Some(ftype) = FileType::from_u8(header.get_u8()) else {
-            return Err(Error::Other(format!(
+            return Err(Error::IaMgr(format!(
                 "invalid file type, file_id {}, data {:?}",
                 file_id, data
             )));
@@ -210,11 +211,7 @@ impl FooterInfo {
         Ok((footer_info, footer))
     }
 
-    pub(crate) async fn save_to_local(
-        &self,
-        store: Arc<dyn LocalStore>,
-        footer: &[u8],
-    ) -> Result<()> {
+    pub(crate) async fn save_to_local(&self, store: &dyn LocalStore, footer: &[u8]) -> Result<()> {
         // ver + ftype + total_size + footer
         let mut data = Vec::with_capacity(U8_SIZE + U8_SIZE + U64_SIZE + footer.len());
         data.put_u8(FOOTER_INFO_VER);
@@ -231,10 +228,11 @@ impl FooterInfo {
             .await
     }
 
-    pub(crate) async fn drop_from_local(&self, store: Arc<dyn LocalStore>) -> Result<()> {
-        store
-            .remove(self.file_id, &Self::local_filename(self.file_id))
-            .await
+    pub(crate) async fn drop_from_local(
+        file_id: u64,
+        store: &dyn LocalStore,
+    ) -> Result<Option<()>> {
+        store.remove(file_id, &Self::local_filename(file_id)).await
     }
 
     fn local_filename(file_id: u64) -> String {
@@ -302,11 +300,11 @@ mod tests {
         };
         let footer = b"footer";
         footer_info
-            .save_to_local(store.clone(), footer)
+            .save_to_local(store.as_ref(), footer)
             .await
             .unwrap();
 
-        let (footer_info1, footer1) = FooterInfo::read_from_local(store, 1, None::<fn()>)
+        let (footer_info1, footer1) = FooterInfo::read_from_local(store.as_ref(), 1)
             .await
             .unwrap();
         assert_eq!(footer_info, footer_info1);

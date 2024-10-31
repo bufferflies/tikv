@@ -13,7 +13,7 @@
 //!
 //! See https://github.com/tidbcloud/cloud-storage-engine/issues/1710 for more details.
 
-pub mod file_segment;
+pub mod manager;
 mod queue;
 pub mod types;
 mod util;

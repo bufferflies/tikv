@@ -32,19 +32,19 @@ impl fmt::Debug for EvictTask {
 }
 
 #[derive(Clone)]
-pub struct FileSegmentManager {
-    core: Arc<FileSegmentManagerCore>,
+pub struct IaManager {
+    core: Arc<IaManagerCore>,
 }
 
-impl ops::Deref for FileSegmentManager {
-    type Target = FileSegmentManagerCore;
+impl ops::Deref for IaManager {
+    type Target = IaManagerCore;
 
     fn deref(&self) -> &Self::Target {
         &self.core
     }
 }
 
-impl FileSegmentManager {
+impl IaManager {
     // TODO: specify local store type for small & main queue separately.
     pub async fn new(local_dir: Option<PathBuf>, s3fs: S3Fs) -> Result<Self> {
         let store = if let Some(local_dir) = local_dir {
@@ -53,7 +53,7 @@ impl FileSegmentManager {
             Arc::new(LocalMemoryStore::default()) as Arc<dyn LocalStore>
         };
 
-        let core = Arc::new(FileSegmentManagerCore {
+        let core = Arc::new(IaManagerCore {
             s3fs,
             store,
             footers: Default::default(),
@@ -66,13 +66,13 @@ impl FileSegmentManager {
     }
 }
 
-pub struct FileSegmentManagerCore {
+pub struct IaManagerCore {
     s3fs: S3Fs,
     store: Arc<dyn LocalStore>,
     footers: GuardMap<u64 /* file_id */, Option<FooterInfo>>,
 }
 
-impl FileSegmentManagerCore {
+impl IaManagerCore {
     async fn init(&self) -> Result<()> {
         let mut entries = self.store.init().await?;
         if let Some(footers) = entries.remove("footer") {
@@ -85,7 +85,7 @@ impl FileSegmentManagerCore {
         for k in keys {
             if let Some(file_id) = FooterInfo::parse_local_filename(&k) {
                 let (footer_info, _) =
-                    FooterInfo::read_from_local(self.store.clone(), file_id, None::<fn()>).await?;
+                    FooterInfo::read_from_local(self.store.as_ref(), file_id).await?;
                 self.footers.get_locked(file_id).await.replace(footer_info);
             }
         }
@@ -99,13 +99,7 @@ impl FileSegmentManagerCore {
     ) -> Result<(Bytes, u64 /* total_size */)> {
         let mut guard = self.footers.get_locked(file_id).await;
         if let Some(footer_info) = guard.clone() {
-            match FooterInfo::read_from_local(
-                self.store.clone(),
-                footer_info.file_id,
-                Some(|| drop(guard)),
-            )
-            .await
-            {
+            match FooterInfo::read_from_local(self.store.as_ref(), footer_info.file_id).await {
                 Ok((local_info, footer)) => {
                     debug_assert_eq!(local_info, footer_info);
                     Ok((footer, footer_info.file_total_size))
@@ -132,7 +126,10 @@ impl FileSegmentManagerCore {
                 ftype,
                 file_total_size: total_size,
             };
-            if let Err(err) = footer_info.save_to_local(self.store.clone(), &footer).await {
+            if let Err(err) = footer_info
+                .save_to_local(self.store.as_ref(), &footer)
+                .await
+            {
                 error!("save footer to local failed"; "file_id" => file_id, "err" => ?err);
                 debug_assert!(false);
             } else {
@@ -145,16 +142,24 @@ impl FileSegmentManagerCore {
     /// Use when meet error on opening/reading local footer.
     async fn drop_footer_from_local(&self, file_id: u64) -> Result<()> {
         let mut guard = self.footers.get_locked(file_id).await;
-        if let Some(footer_info) = guard.clone() {
-            let res = footer_info.drop_from_local(self.store.clone()).await;
+        if guard.is_some() {
+            let res = FooterInfo::drop_from_local(file_id, self.store.as_ref()).await;
             *guard = None;
 
-            if let Err(err) = res.as_ref() {
-                warn!("drop footer from local failed";
-                    "footer" => ?footer_info,
-                    "err" => ?err);
+            match res {
+                Ok(Some(())) => Ok(()),
+                Ok(None) => {
+                    warn!("drop footer from local failed: not existed";
+                        "file_id" => file_id);
+                    Ok(())
+                }
+                Err(err) => {
+                    warn!("drop footer from local failed";
+                        "file_id" => file_id,
+                        "err" => ?err);
+                    Err(err)
+                }
             }
-            res
         } else {
             Ok(())
         }

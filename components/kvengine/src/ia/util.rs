@@ -21,7 +21,7 @@ use crate::{
 
 /// LocalStore is used to provide uniform access to both local disk and memory.
 #[async_trait]
-pub(crate) trait LocalStore: Send + Sync {
+pub trait LocalStore: Send + Sync {
     /// Return the path of store. Will be `None` when it's in memory.
     fn path(&self) -> Option<&Path>;
 
@@ -37,8 +37,7 @@ pub(crate) trait LocalStore: Send + Sync {
         key: &str,
         buf: &mut [u8],
         offset: u64,
-        on_open: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<()>;
+    ) -> Result<Option<()>>;
 
     async fn read(
         &self,
@@ -46,26 +45,53 @@ pub(crate) trait LocalStore: Send + Sync {
         key: &str,
         start_off: u64,
         end_off: u64,
-        on_open: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<Bytes>;
+    ) -> Result<Option<Bytes>>;
 
-    async fn read_all(
-        &self,
-        file_id: u64,
-        key: &str,
-        buf: &mut Vec<u8>,
-        on_open: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<()>;
+    async fn read_all(&self, file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<Option<()>>;
 
-    async fn remove(&self, file_id: u64, key: &str) -> Result<()>;
+    async fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>>;
 }
 
-pub(crate) struct LocalFileStore {
+macro_rules! try_open {
+    ($path:expr) => {{
+        match tokio::fs::File::open($path).await {
+            Ok(f) => Ok(f),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(err) => Err(err),
+        }
+    }};
+}
+
+macro_rules! try_remove {
+    ($path:expr) => {{
+        match tokio::fs::remove_file($path).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(err) => Err(err),
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! try_some {
+    ($expr:expr) => {{
+        match $expr {
+            Some(v) => v,
+            None => return Ok(None),
+        }
+    }};
+}
+
+pub struct LocalFileStore {
     dir: PathBuf,
 }
 
 impl LocalFileStore {
-    pub(crate) fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
 
@@ -129,18 +155,10 @@ impl LocalStore for LocalFileStore {
         key: &str,
         buf: &mut [u8],
         offset: u64,
-        on_open: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<()> {
+    ) -> Result<Option<()>> {
         let path = self.dir.join(key);
         debug!("FileDataStore.read_at"; "file_id" => file_id, "key" => key, "path" => ?path);
-        let f = fs::File::open(&path)
-            .await
-            .table_ctx(file_id, format!("open.{key}"));
-        if let Some(cb) = on_open {
-            cb();
-        }
-
-        let mut f = f?;
+        let mut f = try_open!(&path).table_ctx(file_id, format!("open.{key}"))?;
         if offset > 0 {
             f.seek(SeekFrom::Start(offset))
                 .await
@@ -149,7 +167,7 @@ impl LocalStore for LocalFileStore {
         f.read_exact(buf)
             .await
             .table_ctx(file_id, format!("read_exact.{key}"))?;
-        Ok(())
+        Ok(Some(()))
     }
 
     async fn read(
@@ -158,42 +176,25 @@ impl LocalStore for LocalFileStore {
         key: &str,
         start_off: u64,
         end_off: u64,
-        on_open: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<Bytes> {
+    ) -> Result<Option<Bytes>> {
         let mut buf = vec![0; (end_off - start_off) as usize];
-        self.read_at(file_id, key, &mut buf, start_off, on_open)
-            .await?;
-        Ok(Bytes::from(buf))
+        try_some!(self.read_at(file_id, key, &mut buf, start_off).await?);
+        Ok(Some(Bytes::from(buf)))
     }
 
-    async fn read_all(
-        &self,
-        file_id: u64,
-        key: &str,
-        buf: &mut Vec<u8>,
-        on_open: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<()> {
+    async fn read_all(&self, file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<Option<()>> {
         let path = self.dir.join(key);
-        let f = fs::File::open(&path)
-            .await
-            .table_ctx(file_id, format!("open.{key}"));
-        if let Some(cb) = on_open {
-            cb();
-        }
-
-        let mut f = f?;
+        let mut f = try_open!(&path).table_ctx(file_id, format!("open.{key}"))?;
         f.read_to_end(buf)
             .await
             .table_ctx(file_id, format!("read_to_end.{key}"))?;
-        Ok(())
+        Ok(Some(()))
     }
 
-    async fn remove(&self, file_id: u64, key: &str) -> Result<()> {
+    async fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>> {
         let path = self.dir.join(key);
-        fs::remove_file(&path)
-            .await
-            .table_ctx(file_id, format!("remove.{key}"))?;
-        Ok(())
+        try_remove!(&path).table_ctx(file_id, format!("remove.{key}"))?;
+        Ok(Some(()))
     }
 }
 
@@ -203,16 +204,12 @@ pub(crate) struct LocalMemoryStore {
 }
 
 impl LocalMemoryStore {
-    fn get(&self, key: &str) -> Result<Bytes> {
-        if let Some(data) = self.m.get(key) {
-            Ok(data.clone())
-        } else {
-            Err(Error::Io(format!("key not found in store: {}", key)))
-        }
+    fn get(&self, key: &str) -> Option<Bytes> {
+        self.m.get(key).map(|x| x.value().clone())
     }
 
-    fn get_with_check(&self, key: &str, end_off: u64) -> Result<Bytes> {
-        let data = self.get(key)?;
+    fn get_with_check(&self, key: &str, end_off: u64) -> Result<Option<Bytes>> {
+        let data = try_some!(self.get(key));
         if end_off > data.len() as u64 {
             return Err(Error::Io(format!(
                 "read out of range, key: {}, end_off: {}, data length: {}",
@@ -221,7 +218,7 @@ impl LocalMemoryStore {
                 data.len()
             )));
         }
-        Ok(data)
+        Ok(Some(data))
     }
 }
 
@@ -246,17 +243,11 @@ impl LocalStore for LocalMemoryStore {
         key: &str,
         buf: &mut [u8],
         offset: u64,
-        on_open: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<()> {
+    ) -> Result<Option<()>> {
         let end_off = offset + buf.len() as u64;
-        let data = self.get_with_check(key, end_off);
-        if let Some(cb) = on_open {
-            cb();
-        }
-
-        let data = data?;
+        let data = try_some!(self.get_with_check(key, end_off)?);
         buf.copy_from_slice(&data[offset as usize..end_off as usize]);
-        Ok(())
+        Ok(Some(()))
     }
 
     async fn read(
@@ -265,38 +256,20 @@ impl LocalStore for LocalMemoryStore {
         key: &str,
         start_off: u64,
         end_off: u64,
-        on_open: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<Bytes> {
-        let data = self.get_with_check(key, end_off);
-        if let Some(cb) = on_open {
-            cb();
-        }
-
-        let data = data?;
-        Ok(Bytes::copy_from_slice(
+    ) -> Result<Option<Bytes>> {
+        let data = try_some!(self.get_with_check(key, end_off)?);
+        Ok(Some(Bytes::copy_from_slice(
             data.slice(start_off as usize..end_off as usize).chunk(),
-        ))
+        )))
     }
 
-    async fn read_all(
-        &self,
-        _file_id: u64,
-        key: &str,
-        buf: &mut Vec<u8>,
-        on_open: Option<Box<dyn FnOnce() + Send>>,
-    ) -> Result<()> {
-        let data = self.m.get(key).map(|r| r.value().clone());
-        if let Some(cb) = on_open {
-            cb();
-        }
-
-        let data = data.ok_or_else(|| Error::Io(format!("key not found in store: {}", key)))?;
+    async fn read_all(&self, _file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<Option<()>> {
+        let data = try_some!(self.get(key));
         buf.extend_from_slice(&data);
-        Ok(())
+        Ok(Some(()))
     }
 
-    async fn remove(&self, _file_id: u64, key: &str) -> Result<()> {
-        self.m.remove(key);
-        Ok(())
+    async fn remove(&self, _file_id: u64, key: &str) -> Result<Option<()>> {
+        Ok(self.m.remove(key).map(|_| ()))
     }
 }

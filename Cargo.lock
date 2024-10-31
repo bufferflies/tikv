@@ -7987,6 +7987,7 @@ dependencies = [
  "chrono",
  "cloud_server",
  "cloud_worker",
+ "codec",
  "crc32c",
  "crc32fast",
  "dashmap 4.0.2",

@@ -414,6 +414,8 @@ pub enum Error {
     SchemaOutOfDate(String),
     #[error("Need encryption key for txn chunk {chunk_id}, encryption version {encryption_ver}")]
     NeedEncryptionKey { chunk_id: u64, encryption_ver: u32 },
+    #[error("IA manager error: {0}")]
+    IaMgr(String),
     #[error("{0}")]
     Other(String),
 }
