@@ -1,322 +1,556 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! An implementation of S3-FIFO algorithm.
-//!
-//! See https://s3fifo.com/ for the paper and relevant materials.
-//!
-//! Some detail:
-//!
-//! - Access to different files are lock-free by using the lock-free queue ring
-//!   buffer `crossbeam_queue::SegQueue` as underlying data structure.
-//!
-//! - Access to the same file are serialized by two locks:
-//!
-//!   - Cache status (whether it's in local disk/memory) is maintained by
-//!     `FileSegmentInfo.status` to avoid duplicated download from remote and
-//!     save to local. This lock is heavy as the duration of download will be
-//!     long.
-//!
-//!   - Queue status (whether it's in the queue and in which queue) is
-//!     maintained by `FileSegmentInfo.queue_info` to keep consistency of the
-//!     actual position of the item.
-//!
-//! - The reason for using two locks is that in process of enqueue, we need to
-//!   evict some items because the queue is full. The evict process need to
-//!   change queue info of other items, if using only one lock, it is likely to
-//!   deadlock as the lock for cache status is heavy as mentioned above.
-//!
-//! - In enqueue process, we must release the locks of the enqueue item before
-//!   change the queue info of the evicted items. Otherwise, the deadlock would
-//!   happen.
-//!
-//! - The eviction process is async for performance reason, but the channel is
-//!   bounded to limit the excessive capacity usage.
-//!
-//! - About ghost queue:
-//!
-//!   - The ghost queue keep the access frequency after a item has been evicted
-//!     from small queue, and determine whether the item is *WARM* and should
-//!     enqueue to main on next access.
-//!
-//!   - Currently a simplified implementation is used (using an array with
-//!     length the same as the main queue according to the paper, but timestamp
-//!     is not considered), to be cheap for reading & writing. But it may not be
-//!     efficiency enough. Subsequently, we need to evaluate and optimize by
-//!     simulating the load of real environment.
+//! An *Single-Threading* implementation of S3-FIFO algorithm.
 
 // TODO: remove this
 #![allow(dead_code)]
 
 use std::{
-    assert_matches::debug_assert_matches,
-    cmp, fmt,
-    sync::atomic::{AtomicI64, Ordering::Relaxed},
+    cell::Cell,
+    cmp,
+    collections::{HashMap, VecDeque},
+    fmt,
+    sync::Arc,
+    thread::JoinHandle,
     time::Duration,
 };
 
-use crossbeam_queue::SegQueue;
-use tikv_util::time::UnixSecs;
-use tokio::sync::{mpsc, Mutex};
+use bytes::Bytes;
+use tikv_util::{sys::thread::StdThreadBuildWrapper, time::UnixSecs};
 
 use crate::{
     ia::{
-        manager::EvictTask,
-        types::{FileSegmentIdent, FileSegmentInfo, FileSegmentQueueGuard},
+        manager::SegmentDataContext,
+        types::{FileSegmentData, FileSegmentIdent},
     },
     table::{Error, Result},
 };
 
-/// Lifecycle of a segment:
-/// Null -> Small -> Main -> ToEvict -> Null
-#[repr(u8)]
-#[derive(Debug, PartialEq, Default)]
-pub(crate) enum FifoItemPos {
-    #[default]
-    Null, // The item is newly created of has been dropped.
-    Small,
-    Main,
-    ToEvict,
+/// A simple wrapper for `S3Fifo`.
+pub(crate) struct S3FifoHandle {
+    task_tx: crossbeam::channel::Sender<FifoTask>,
+    handle: Option<JoinHandle<()>>,
 }
 
-#[derive(Clone)]
-pub(crate) struct FifoItem {
-    pub(crate) ident: FileSegmentIdent,
-    pub(crate) segment: FileSegmentInfo,
-}
-
-impl fmt::Debug for FifoItem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "FifoItem {{ ident: {}, segment: {:?} }}",
-            self.ident, self.segment
-        )
-    }
-}
-
-impl FifoItem {
-    fn size(&self) -> u64 {
-        self.ident.size()
-    }
-}
-
-type OnEnqueueCallback = Box<dyn FnOnce() + Send>;
-
-pub(crate) struct S3Fifo {
-    main_queue: Queue,
-    small_queue: Queue,
-    ghost_queue: Vec<Mutex<Option<FileSegmentIdent>>>,
-    pub(crate) evict_tx: mpsc::Sender<EvictTask>,
-
-    /// Minimum interval to update `FileSegmentQueueInfo.freq`.
-    freq_update_interval: Duration,
-}
-
-impl S3Fifo {
-    /// `queue_len` is the length of Fifo queue. Currently it is used to
-    /// calculate length of ghost queue. Normally it can be `capacity /
-    /// average item size`.
+impl S3FifoHandle {
+    /// `small_cap` can be `0` to disable small queue for test.
     pub(crate) fn new(
-        capacity: i64,
-        queue_len: usize,
-        evict_tx: mpsc::Sender<EvictTask>,
+        small_cap: i64,
+        main_cap: i64,
+        item_size: i64,
         freq_update_interval: Duration,
+        runtime: tokio::runtime::Handle,
+        segment_data_ctx: SegmentDataContext,
     ) -> Self {
-        let small_cap = capacity / 10;
-        let small_len = queue_len / 10;
-        let mut ghost_queue = vec![];
-        ghost_queue.resize_with(queue_len - small_len, || Mutex::new(None));
+        let (task_tx, task_rx) = crossbeam::channel::unbounded();
+        let task_tx_clone = task_tx.clone();
+        let handle = std::thread::Builder::new()
+            .name("s3fifo".to_string())
+            .spawn_wrapper(move || {
+                let mut fifo = S3Fifo::new(
+                    small_cap,
+                    main_cap,
+                    item_size,
+                    freq_update_interval,
+                    task_tx_clone,
+                    task_rx,
+                    runtime,
+                    segment_data_ctx,
+                );
+                fifo.run()
+            })
+            .unwrap();
         Self {
-            main_queue: Queue::new(capacity - small_cap),
-            small_queue: Queue::new(small_cap),
-            ghost_queue,
-            evict_tx,
-            freq_update_interval,
+            task_tx,
+            handle: Some(handle),
         }
     }
 
-    /// `on_enqueue` will not be invoked if the item is already in the queue.
-    pub(crate) async fn read(
-        &self,
-        item: FifoItem,
-        on_enqueue: Option<OnEnqueueCallback>,
-    ) -> Result<()> {
-        let ident = item.ident.clone();
-        debug!("fifo.read"; "ident" => %ident);
-        if item.ident.size() > self.small_queue.capacity() as u64 {
-            return Err(Error::Other(format!(
-                "too large item, ident: {:?}, size: {}",
-                item.ident,
-                item.ident.size()
-            )));
+    pub(crate) fn stop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.task_tx.send(FifoTask::Stop).unwrap();
+            handle.join().unwrap();
+            info!("s3fifo stopped");
         }
-        let mut queue_info = item.segment.lock_queue_info().await;
-        if matches!(queue_info.pos, FifoItemPos::Main | FifoItemPos::Small) {
-            let now = UnixSecs::now().into_inner();
-            if now.saturating_sub(queue_info.access_time) >= self.freq_update_interval.as_secs() {
-                queue_info.freq = cmp::min(queue_info.freq + 1, 3);
-                queue_info.access_time = now;
-            }
-        } else {
-            queue_info.freq = 0;
-            if self.is_in_ghost(&item.ident).await {
-                self.insert_main(item, queue_info, on_enqueue).await;
-            } else {
-                self.insert_small(item, queue_info, on_enqueue).await;
-            }
-        }
+    }
+
+    pub(crate) fn read(&self, ident: FileSegmentIdent, insert_main: bool) -> Result<()> {
+        self.task_tx
+            .send(FifoTask::Read {
+                ident: ident.clone(),
+                insert_main,
+            })
+            .map_err(|e| Error::IaMgr(format!("read: send failed: {ident}: {e:?}")))?;
         Ok(())
     }
 
-    async fn insert_small(
-        &self,
-        item: FifoItem,
-        mut queue_info: FileSegmentQueueGuard,
-        on_enqueue: Option<OnEnqueueCallback>,
-    ) {
-        let ident = item.ident.clone();
-        queue_info.pos = FifoItemPos::Small;
-        self.small_queue.push(item);
-        drop(queue_info);
-        if let Some(cb) = on_enqueue {
-            cb();
-        }
-
-        self.evict_small(ident).await;
+    pub(crate) async fn get_item(&self, ident: FileSegmentIdent) -> Result<Option<QueueItem>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let cb = Box::new(move |x| {
+            let _ = tx.send(x);
+        });
+        self.task_tx
+            .send(FifoTask::GetItem {
+                ident: ident.clone(),
+                cb,
+            })
+            .map_err(|e| Error::IaMgr(format!("get_item: send failed: {ident}: {e:?}")))?;
+        Ok(rx.await.unwrap())
     }
 
-    async fn evict_small(&self, ident: FileSegmentIdent) {
+    pub(crate) async fn flush_tasks(&self) -> Result<usize /* pending_tasks */> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let cb = Box::new(move |pending_tasks: usize| {
+            let _ = tx.send(pending_tasks);
+        });
+        self.task_tx
+            .send(FifoTask::Flush(cb))
+            .map_err(|e| Error::IaMgr(format!("flush_tasks: send failed: {e:?}")))?;
+        Ok(rx.await.unwrap())
+    }
+}
+
+impl Drop for S3FifoHandle {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+enum FifoTask {
+    Read {
+        ident: FileSegmentIdent,
+        insert_main: bool,
+    },
+    GetItem {
+        ident: FileSegmentIdent,
+        cb: Box<dyn FnOnce(Option<QueueItem>) + Send>,
+    },
+    SavedToMainStore(FileSegmentIdent),
+    Flush(Box<dyn FnOnce(usize /* pending_tasks */) + Send>),
+    Stop,
+}
+
+impl fmt::Debug for FifoTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FifoTask::Read { ident, insert_main } => f
+                .debug_struct("Read")
+                .field("ident", ident)
+                .field("insert_main", insert_main)
+                .finish(),
+            FifoTask::GetItem { ident, cb: _ } => {
+                f.debug_struct("GetItem").field("ident", ident).finish()
+            }
+            FifoTask::SavedToMainStore(ident) => f
+                .debug_struct("SavedToMainStore")
+                .field("ident", ident)
+                .finish(),
+            FifoTask::Flush(..) => f.debug_struct("Flush").finish(),
+            FifoTask::Stop => f.debug_struct("Stop").finish(),
+        }
+    }
+}
+
+struct S3Fifo {
+    // items: HashMap<FileSegmentIdent, Rc<RefCell<FileSegmentQueueInfo>>>,
+    small_queue: Queue,
+    main_queue: Queue,
+    ghost_queue: Vec<Option<FileSegmentIdent>>,
+
+    /// Minimum interval to update `FileSegmentQueueInfo.freq`.
+    freq_update_interval: Duration,
+
+    task_tx: crossbeam::channel::Sender<FifoTask>,
+    task_rx: crossbeam::channel::Receiver<FifoTask>,
+
+    runtime: tokio::runtime::Handle,
+    segment_data_ctx: SegmentDataContext,
+    task_counter: Arc<()>,
+}
+
+impl S3Fifo {
+    /// `small_cap` can be `0` to disable small queue for test.
+    fn new(
+        small_cap: i64,
+        main_cap: i64,
+        avg_item_size: i64,
+        freq_update_interval: Duration,
+        task_tx: crossbeam::channel::Sender<FifoTask>,
+        task_rx: crossbeam::channel::Receiver<FifoTask>,
+        runtime: tokio::runtime::Handle,
+        segment_data_ctx: SegmentDataContext,
+    ) -> Self {
+        #[cfg(not(any(test, feature = "testexport")))]
+        assert!(small_cap > 0);
+
+        let main_queue_len = main_cap / avg_item_size;
+        let mut ghost_queue = vec![];
+        ghost_queue.resize(main_queue_len as usize, None);
+        Self {
+            // items: Default::default(),
+            small_queue: Queue::new(small_cap, avg_item_size),
+            main_queue: Queue::new(main_cap, avg_item_size),
+            ghost_queue,
+            freq_update_interval,
+            task_tx,
+            task_rx,
+            runtime,
+            segment_data_ctx,
+            task_counter: Default::default(),
+        }
+    }
+
+    fn run(&mut self) {
+        info!("s3fifo core started");
+        while let Ok(task) = self.task_rx.recv() {
+            match task {
+                FifoTask::Read { ident, insert_main } => match self.read(&ident, insert_main) {
+                    Ok(pos) => debug!("read"; "ident" => %ident, "pos" => ?pos),
+                    Err(err) => error!("read failed"; "ident" => %ident, "err" => ?err),
+                },
+                FifoTask::GetItem { ident, cb } => {
+                    cb(self.get_item(&ident));
+                }
+                FifoTask::SavedToMainStore(ident) => {
+                    self.post_move_item_to_store(ident);
+                }
+                FifoTask::Flush(cb) => cb(self.pending_tasks()),
+                FifoTask::Stop => {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn get_item(&self, ident: &FileSegmentIdent) -> Option<QueueItem> {
+        self.small_queue
+            .get(ident)
+            .map(|meta| QueueItem::from_small(meta.clone()))
+            .or_else(|| {
+                self.main_queue
+                    .get(ident)
+                    .map(|meta| QueueItem::from_main(meta.clone()))
+            })
+    }
+
+    fn get_item_ref(&self, ident: &FileSegmentIdent) -> Option<(&QueueItemMeta, QueueItemPos)> {
+        self.small_queue
+            .get(ident)
+            .map(|item| (item, QueueItemPos::Small))
+            .or_else(|| {
+                self.main_queue
+                    .get(ident)
+                    .map(|item| (item, QueueItemPos::Main))
+            })
+    }
+
+    fn read(&mut self, ident: &FileSegmentIdent, insert_main: bool) -> Result<QueueItemPos> {
+        debug!("fifo.read"; "ident" => %ident);
+        if self.small_queue.capacity() > 0 && ident.size() > self.small_queue.capacity() as u64 {
+            return Err(Error::IaMgr(format!(
+                "too large item, ident: {:?}, size: {}",
+                ident,
+                ident.size()
+            )));
+        }
+        let pos = if let Some((queue_item, pos)) = self.get_item_ref(ident) {
+            queue_item.access(self.freq_update_interval);
+
+            // Try to fix the mismatch.
+            // Happens when a delay evict make segment data empty but segment in main queue.
+            // Then the next read will lead to segment data in mem but segment still in main
+            // queue.
+            if matches!(pos, QueueItemPos::Main) {
+                self.move_item_to_store(ident.clone());
+            }
+
+            pos
+        } else if insert_main || self.small_queue.capacity() == 0 || self.is_in_ghost(ident) {
+            self.insert_main(ident.clone());
+            QueueItemPos::Main
+        } else {
+            self.insert_small(ident.clone());
+            QueueItemPos::Small
+        };
+        Ok(pos)
+    }
+
+    fn insert_small(&mut self, ident: FileSegmentIdent) {
+        self.small_queue.push(ident.clone());
+        self.evict_small(&ident);
+    }
+
+    fn evict_small(&mut self, ident: &FileSegmentIdent) {
         debug!("fifo.evict_small"; "for" => %ident);
-        let mut evicted_items = vec![];
-
         while self.small_queue.is_oversize() {
-            let Some(tail) = self.small_queue.pop() else {
+            let Some((tail, queue_item)) = self.small_queue.pop() else {
                 break;
             };
 
-            let mut queue_info = tail.segment.lock_queue_info().await;
-            debug_assert_matches!(queue_info.pos, FifoItemPos::Small);
             debug!("fifo.evict_tail (small)";
-                "tail" => %tail.ident,
-                "queue_info" => ?queue_info,
+                "tail" => %tail,
+                "queue_item" => ?queue_item,
                 "for" => %ident);
-            if queue_info.freq > 1 {
-                self.insert_main(tail, queue_info, None).await;
+            if queue_item.freq() > 1 {
+                // Item meta is cleared when move to main queue.
+                self.insert_main(tail.clone());
             } else {
-                self.insert_ghost(tail.ident.clone()).await;
-                queue_info.pos = FifoItemPos::ToEvict;
-                evicted_items.push(tail);
+                self.insert_ghost(tail.clone());
+                self.evict_item(tail);
             };
         }
-
-        if !evicted_items.is_empty() {
-            debug!("fifo.evict_small send evict items"; "for" => %ident, "items" => ?evicted_items);
-            self.send_evict_items(evicted_items).await;
-        }
     }
 
-    async fn insert_main(
-        &self,
-        item: FifoItem,
-        mut queue_info: FileSegmentQueueGuard,
-        on_enqueue: Option<OnEnqueueCallback>,
-    ) {
-        debug!("fifo.insert_main"; "ident" => %item.ident);
-        let ident = item.ident.clone();
+    fn insert_main(&mut self, ident: FileSegmentIdent) {
+        debug!("fifo.insert_main"; "ident" => %ident);
 
-        queue_info.pos = FifoItemPos::Main;
-        self.main_queue.push(item);
-        drop(queue_info);
-        if let Some(cb) = on_enqueue {
-            cb();
-        }
+        self.main_queue.push(ident.clone());
+        self.move_item_to_store(ident.clone());
 
-        self.evict_main(ident).await;
+        self.evict_main(&ident);
     }
 
-    async fn evict_main(&self, ident: FileSegmentIdent) {
+    fn evict_main(&mut self, ident: &FileSegmentIdent) {
         debug!("fifo.evict_main"; "for" => %ident);
-        let mut evicted_items = vec![];
-
         while self.main_queue.is_oversize() {
-            let Some(tail) = self.main_queue.pop() else {
+            let Some((tail, queue_item)) = self.main_queue.pop_with_zero_freq() else {
                 break;
             };
-            let mut queue_info = tail.segment.lock_queue_info().await;
-            debug_assert_matches!(queue_info.pos, FifoItemPos::Main);
+            debug_assert_eq!(queue_item.freq(), 0);
             debug!("fifo.evict_tail (main)";
-                "tail" => %tail.ident,
-                "queue_info" => ?queue_info,
+                "tail" => %tail,
+                "queue_item" => ?queue_item,
                 "for" => %ident);
-            if queue_info.freq > 0 {
-                queue_info.freq -= 1;
-                self.main_queue.push(tail);
-            } else {
-                queue_info.pos = FifoItemPos::ToEvict;
-                evicted_items.push(tail);
-            };
-        }
-
-        if !evicted_items.is_empty() {
-            debug!("fifo.evict_main send evicted items"; "for" => %ident, "items" => ?evicted_items);
-            self.send_evict_items(evicted_items).await;
+            self.evict_item(tail);
         }
     }
 
-    async fn is_in_ghost(&self, ident: &FileSegmentIdent) -> bool {
+    fn is_in_ghost(&self, ident: &FileSegmentIdent) -> bool {
         let fingerprint = ident.fingerprint();
-        self.ghost_queue[fingerprint as usize % self.ghost_queue.len()]
-            .lock()
-            .await
-            .as_ref()
-            .map_or(false, |x| x == ident)
+        let idx = fingerprint as usize % self.ghost_queue.len();
+        self.ghost_queue[idx].as_ref().map_or(false, |x| x == ident)
     }
 
-    async fn insert_ghost(&self, ident: FileSegmentIdent) {
+    fn insert_ghost(&mut self, ident: FileSegmentIdent) {
         let fingerprint = ident.fingerprint();
-        let mut guard = self.ghost_queue[fingerprint as usize % self.ghost_queue.len()]
-            .lock()
-            .await;
-        *guard = Some(ident);
+        let idx = fingerprint as usize % self.ghost_queue.len();
+        self.ghost_queue[idx] = Some(ident);
     }
 
-    async fn send_evict_items(&self, items: Vec<FifoItem>) {
-        if let Err(err) = self.evict_tx.send(EvictTask { items, cb: None }).await {
-            warn!("failed to send evict items to channel"; "err" => ?err);
+    fn evict_item(&self, ident: FileSegmentIdent) {
+        match self.segment_data_ctx.remove_segment_data(&ident) {
+            None => {
+                warn!("evict item: skip, not cached"; "ident" => %ident);
+            }
+            Some(FileSegmentData::InMem(_)) => {
+                debug!("evict item: done, removed from mem"; "ident" => %ident);
+            }
+            Some(FileSegmentData::InStore) => {
+                self.spawn_remove_from_main_store(ident);
+            }
+        }
+    }
+
+    fn spawn_remove_from_main_store(&self, ident: FileSegmentIdent) {
+        let task_counter = self.task_counter.clone();
+        let ctx = self.segment_data_ctx.clone();
+        self.runtime.spawn(async move {
+            match ctx.remove_from_main_store(&ident).await {
+                Ok(Some(())) => {
+                    debug!("remove from main store: done"; "ident" => %ident);
+                }
+                Ok(None) => {
+                    // There should be another evict task for the same segment.
+                    warn!("remove from main store: failed, not in main store"; "ident" => %ident);
+                }
+                Err(err) => {
+                    error!("remove from main store: failed"; "ident" => %ident, "err" => ?err);
+                }
+            }
+            drop(task_counter);
+        });
+    }
+
+    fn move_item_to_store(&self, ident: FileSegmentIdent) {
+        match self.segment_data_ctx.get_segment_data(&ident) {
+            Some(FileSegmentData::InMem(bytes)) => {
+                self.spawn_save_to_main_store(ident, bytes);
+            }
+            Some(FileSegmentData::InStore) => {
+                debug!("move item: skip, already in main store"; "ident" => %ident);
+            }
+            None => {
+                warn!("move item: skip, not cached"; "ident" => %ident);
+            }
+        }
+    }
+
+    fn spawn_save_to_main_store(&self, ident: FileSegmentIdent, bytes: Bytes) {
+        let task_counter = self.task_counter.clone();
+        let ctx = self.segment_data_ctx.clone();
+        let task_tx = self.task_tx.clone();
+        self.runtime.spawn(async move {
+            match ctx.save_to_main_store(&ident, bytes).await {
+                Ok(()) => {
+                    debug!("save to main store: done"; "ident" => %ident);
+                }
+                Err(err) => {
+                    // The main store is full ?
+                    // Still notify to remove data from memory. Otherwise, the memory usage would be
+                    // exceeded.
+                    // `read_segment` can handle the scene that segment is not existed in main
+                    // store.
+                    error!("save to main store: failed"; "ident" => %ident, "err" => ?err);
+                }
+            }
+            if let Err(err) = task_tx.send(FifoTask::SavedToMainStore(ident.clone())) {
+                warn!("save to main store: send task failed"; "ident" => %ident, "err" => ?err);
+            }
+            drop(task_counter);
+        });
+    }
+
+    fn post_move_item_to_store(&self, ident: FileSegmentIdent) {
+        match self
+            .segment_data_ctx
+            .set_segment_data_from_mem_to_store(ident.clone())
+        {
+            Ok(()) => {
+                debug!("post move item: done"; "ident" => %ident);
+            }
+            Err(Some(FileSegmentData::InMem(_))) => unreachable!(),
+            Err(Some(FileSegmentData::InStore)) => {
+                warn!("post move item: duplicated, already in store"; "ident" => %ident);
+            }
+            Err(None) => {
+                // Aggressively remove from main store, as disk usage is more important.
+                warn!("move item: skip, segment has been evicted"; "ident" => %ident);
+                self.spawn_remove_from_main_store(ident);
+            }
+        }
+    }
+
+    fn pending_tasks(&self) -> usize {
+        Arc::strong_count(&self.task_counter) - 1
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct QueueItemMeta {
+    freq: Cell<u8>,
+    access_time: Cell<u64>,
+}
+
+impl fmt::Debug for QueueItemMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueueItemMeta")
+            .field("freq", &self.freq.get())
+            .field("access_time", &self.access_time.get())
+            .finish()
+    }
+}
+
+impl QueueItemMeta {
+    pub(crate) fn freq(&self) -> u8 {
+        self.freq.get()
+    }
+
+    pub(crate) fn freq_desc(&self) {
+        self.freq.update(|x| x - 1);
+    }
+
+    pub(crate) fn access(&self, freq_update_interval: Duration) {
+        let now = UnixSecs::now().into_inner();
+        if now.saturating_sub(self.access_time.get()) >= freq_update_interval.as_secs() {
+            self.access_time.set(now);
+            self.freq.set(cmp::min(self.freq.get() + 1, 3))
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum QueueItemPos {
+    Small,
+    Main,
+}
+
+#[derive(Clone, Debug)]
+pub struct QueueItem {
+    // For debug info.
+    #[allow(dead_code)]
+    pub meta: QueueItemMeta,
+    pub pos: QueueItemPos,
+}
+
+impl QueueItem {
+    pub(crate) fn from_small(meta: QueueItemMeta) -> Self {
+        Self {
+            meta,
+            pos: QueueItemPos::Small,
+        }
+    }
+
+    pub(crate) fn from_main(meta: QueueItemMeta) -> Self {
+        Self {
+            meta,
+            pos: QueueItemPos::Main,
         }
     }
 }
 
 struct Queue {
-    queue: SegQueue<FifoItem>,
+    items: HashMap<FileSegmentIdent, QueueItemMeta>,
+    queue: VecDeque<FileSegmentIdent>,
     cap: i64,
-    total_size: AtomicI64,
+    total_size: i64,
 }
 
 impl Queue {
-    fn new(cap: i64) -> Self {
+    fn new(cap: i64, item_size: i64) -> Self {
         Self {
-            queue: SegQueue::new(),
+            items: HashMap::new(),
+            queue: VecDeque::with_capacity((cap / item_size) as usize),
             cap,
-            total_size: AtomicI64::new(0),
+            total_size: 0,
         }
     }
 
-    fn push(&self, item: FifoItem) {
-        self.total_size.fetch_add(item.size() as i64, Relaxed);
-        self.queue.push(item);
+    fn get(&self, ident: &FileSegmentIdent) -> Option<&QueueItemMeta> {
+        self.items.get(ident)
     }
 
-    fn pop(&self) -> Option<FifoItem> {
-        let tail = self.queue.pop();
-        if let Some(item) = tail.as_ref() {
-            self.total_size.fetch_sub(item.size() as i64, Relaxed);
+    fn push(&mut self, ident: FileSegmentIdent) {
+        self.total_size += ident.size() as i64;
+        self.items.insert(ident.clone(), QueueItemMeta::default());
+        self.queue.push_back(ident);
+    }
+
+    fn pop(&mut self) -> Option<(FileSegmentIdent, QueueItemMeta)> {
+        let ident = self.queue.pop_front()?;
+        self.total_size -= ident.size() as i64;
+        let item = self.items.remove(&ident).unwrap();
+        Some((ident, item))
+    }
+
+    /// Pop item with `freq == 0`. Other items will decrease freq and push to
+    /// queue again.
+    fn pop_with_zero_freq(&mut self) -> Option<(FileSegmentIdent, QueueItemMeta)> {
+        while let Some(ident) = self.queue.pop_front() {
+            let item = self.items.get(&ident).unwrap();
+            if item.freq() > 0 {
+                item.freq_desc();
+                self.queue.push_back(ident);
+            } else {
+                self.total_size -= ident.size() as i64;
+                let item = self.items.remove(&ident).unwrap();
+                return Some((ident, item));
+            }
         }
-        tail
+        None
     }
 
     fn is_oversize(&self) -> bool {
-        self.total_size.load(Relaxed) > self.cap
+        self.total_size > self.cap
     }
 
     fn capacity(&self) -> i64 {

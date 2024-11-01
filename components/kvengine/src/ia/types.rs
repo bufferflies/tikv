@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::{
     dfs::FileType,
-    ia::{queue::FifoItemPos, util::LocalStore},
+    ia::util::LocalStore,
     table::{Error, Result},
 };
 
@@ -71,52 +71,51 @@ impl fmt::Debug for FileSegmentIdent {
     }
 }
 
-/// The status of a file segment to indicate whether it's cached (in local
-/// disk/memory).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct FileSegmentStatus {
-    pub cached: bool,
+#[derive(Clone)]
+pub enum FileSegmentData {
+    InMem(Bytes),
+    InStore,
 }
 
-pub(crate) type FileSegmentGuard = OwnedMutexGuard<FileSegmentStatus>;
-
-/// The information of a file segment in the queue.
-#[derive(Debug, Default)]
-pub(crate) struct FileSegmentQueueInfo {
-    pub(crate) freq: u8,
-    pub(crate) access_time: u64,
-    pub(crate) pos: FifoItemPos,
-}
-
-pub(crate) type FileSegmentQueueGuard = OwnedMutexGuard<FileSegmentQueueInfo>;
-
-#[derive(Clone, Default)]
-pub(crate) struct FileSegmentInfo {
-    // Used to block concurrent operations on the same local file/memory.
-    status: Arc<Mutex<FileSegmentStatus>>,
-
-    queue_info: Arc<Mutex<FileSegmentQueueInfo>>,
-}
-
-impl fmt::Debug for FileSegmentInfo {
+impl fmt::Debug for FileSegmentData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut de = f.debug_struct("FileSegmentInfo");
-        if let Ok(queue_info) = self.queue_info.try_lock() {
-            de.field("queue_info", &queue_info);
-        } else {
-            de.field("queue_info", &"<locked>");
+        match self {
+            Self::InMem(_) => write!(f, "InMem"),
+            Self::InStore => write!(f, "InStore"),
         }
-        de.finish()
     }
 }
 
-impl FileSegmentInfo {
-    pub(crate) async fn lock(&self) -> FileSegmentGuard {
-        self.status.clone().lock_owned().await
+lazy_static::lazy_static! {
+    pub static ref FILE_SEGMENT_DATA_IN_MEMORY: FileSegmentData = FileSegmentData::InMem(Bytes::new());
+}
+
+#[derive(Default)]
+pub(crate) struct LocalSegmentMap {
+    core: DashMap<FileSegmentIdent, FileSegmentData>,
+}
+
+impl ops::Deref for LocalSegmentMap {
+    type Target = DashMap<FileSegmentIdent, FileSegmentData>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl LocalSegmentMap {
+    #[inline]
+    pub(crate) fn get_segment(&self, ident: &FileSegmentIdent) -> Option<FileSegmentData> {
+        self.core.get(ident).map(|x| x.value().clone())
     }
 
-    pub(crate) async fn lock_queue_info(&self) -> FileSegmentQueueGuard {
-        self.queue_info.clone().lock_owned().await
+    #[inline]
+    pub(crate) fn set_segment_data(
+        &self,
+        ident: FileSegmentIdent,
+        segment_data: FileSegmentData,
+    ) -> Option<FileSegmentData> {
+        self.core.insert(ident, segment_data)
     }
 }
 
