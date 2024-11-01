@@ -4,17 +4,24 @@ use std::{collections::HashSet, ops::Deref, sync::Arc};
 
 use api_version::ApiV2;
 use bytes::{Buf, BufMut};
-use tidb_query_datatype::codec::table::{encode_common_handle_row_key, encode_row_key};
+use cloud_encryption::EncryptionKey;
+use tidb_query_datatype::codec::{
+    mysql::{VectorFloat32Encoder, VectorFloat32Ref},
+    table::{encode_common_handle_row_key, encode_row_key},
+};
 use usearch::IndexOptions;
 
 use crate::{
     table,
     table::{
-        columnar::Block,
+        columnar::{
+            get_fixed_size, Block, ColumnarConcatReader, ColumnarLevels, ColumnarMergeReader,
+            ColumnarReader, ColumnarTableReader, Schema,
+        },
         file::{File, MmapData},
         search, BoundedDataSet, DataBound, Error,
         Error::Other,
-        InnerKey, Iterator as TableIterator, Result, Value,
+        InnerKey, Result,
     },
 };
 
@@ -84,13 +91,10 @@ impl VectorIndexes {
         self.indexes.retain(|index| !index.files.is_empty());
     }
 
-    pub fn get(&self, table_id: i64, index_id: i64, col_id: i64) -> Option<VectorIndex> {
-        for index in &self.indexes {
-            if index.table_id == table_id && index.index_id == index_id && index.col_id == col_id {
-                return Some(index.clone());
-            }
-        }
-        None
+    pub fn get(&self, table_id: i64, index_id: i64, col_id: i64) -> Option<&VectorIndex> {
+        self.indexes.iter().find(|vec_idx| {
+            vec_idx.table_id == table_id && vec_idx.index_id == index_id && vec_idx.col_id == col_id
+        })
     }
 
     pub fn get_mut(
@@ -425,7 +429,6 @@ impl VectorIndexFile {
                 .map_err(|e| Other(e.to_string()))?;
             let item = VectorItem {
                 handle: handle.to_vec(),
-                is_common_handle: self.is_common_handle,
                 version,
                 distance: matches.distances[i],
                 value,
@@ -436,9 +439,9 @@ impl VectorIndexFile {
     }
 }
 
+#[derive(Debug)]
 pub struct VectorItem {
     pub handle: Vec<u8>,
-    pub is_common_handle: bool,
     pub version: u64,
     pub distance: f32,
     pub value: Vec<f32>,
@@ -450,64 +453,184 @@ impl VectorItem {
     }
 }
 
-pub struct VectorIndexValuesIterator {
-    pub snap_version: u64,
-    pub keys: Vec<Vec<u8>>,
-    pub vals: Vec<Vec<u8>>,
-    inner_key_off: usize,
+pub(crate) struct VectorItemsReader {
+    schema: Schema,
+    vector_col_idx: usize,
+    items: Vec<VectorItem>,
     idx: usize,
+    // The vector item already has handle, version and vector column.
+    // If we need to read other columns, we can use the inner reader to read them.
+    // The inner reader's schema doesn't contains the vector column.
+    inner_reader: Option<Box<dyn ColumnarReader>>,
 }
 
-impl VectorIndexValuesIterator {
-    pub fn new(
-        snap_version: u64,
-        keys: Vec<Vec<u8>>,
-        vals: Vec<Vec<u8>>,
-        inner_key_off: usize,
-    ) -> Self {
-        VectorIndexValuesIterator {
-            snap_version,
-            keys,
-            vals,
-            inner_key_off,
+impl VectorItemsReader {
+    pub(crate) fn new(
+        schema: Schema,
+        vector_index: &VectorIndex,
+        target: &[f32],
+        top_k: usize,
+        read_ts: u64,
+        start_handle: &[u8],
+        end_handle: Option<&[u8]>,
+        col_levels: &ColumnarLevels,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Result<Self> {
+        let items = Self::search_items(
+            &schema,
+            vector_index,
+            target,
+            top_k,
+            read_ts,
+            start_handle,
+            end_handle,
+        )?;
+        let vector_col_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.get_column_id() == vector_index.col_id)
+            .unwrap();
+        let inner_reader =
+            Self::build_inner_reader(&schema, vector_index, col_levels, encryption_key);
+        Ok(Self {
+            schema,
+            vector_col_idx,
+            items,
             idx: 0,
+            inner_reader,
+        })
+    }
+
+    fn search_items(
+        schema: &Schema,
+        vector_index: &VectorIndex,
+        target: &[f32],
+        top_k: usize,
+        read_ts: u64,
+        start_handle: &[u8],
+        end_handle: Option<&[u8]>,
+    ) -> Result<Vec<VectorItem>> {
+        let mut items = vector_index.search(target, top_k, read_ts)?;
+        if schema.is_common_handle() {
+            let end_handle = end_handle.unwrap();
+            items.retain(|item| {
+                item.handle.as_slice() >= start_handle && item.handle.as_slice() < end_handle
+            });
+            items.sort_by(|a, b| a.handle.cmp(&b.handle));
+        } else {
+            let mut start_handle = start_handle;
+            let start_int_handle = start_handle.get_i64_le();
+            let end_int_handle = end_handle.map(|mut h| h.get_i64_le());
+            items.retain(|item| {
+                let item_handle = item.handle.as_slice().get_i64_le();
+                item_handle >= start_int_handle
+                    && end_int_handle.map_or(true, |end| item_handle < end)
+            });
+            items.sort_by(|a, b| {
+                a.handle
+                    .as_slice()
+                    .get_i64_le()
+                    .cmp(&b.handle.as_slice().get_i64_le())
+            })
+        }
+        Ok(items)
+    }
+
+    fn build_inner_reader(
+        schema: &Schema,
+        vector_index: &VectorIndex,
+        col_levels: &ColumnarLevels,
+        encryption_key: Option<EncryptionKey>,
+    ) -> Option<Box<dyn ColumnarReader>> {
+        if schema.columns.len() == 1 {
+            assert_eq!(schema.columns[0].get_column_id(), vector_index.col_id);
+            return None;
+        }
+        let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
+        let mut inner_schema_buf = schema.to_schema_buf();
+        inner_schema_buf
+            .columns
+            .retain(|c| c.get_column_id() != vector_index.col_id);
+        let inner_schema: Schema = inner_schema_buf.into();
+        for columnar_level in &col_levels.levels {
+            if columnar_level.level == 2 {
+                let concat_reader = ColumnarConcatReader::new(
+                    &columnar_level.files,
+                    inner_schema.clone(),
+                    encryption_key.clone(),
+                );
+                readers.push(Box::new(concat_reader));
+            } else {
+                for file in &columnar_level.files {
+                    if file.get_l0_version().unwrap_or_default() > vector_index.snap_version() {
+                        continue;
+                    }
+                    if !file.has_table(schema.table_id) {
+                        continue;
+                    }
+                    let col_reader = ColumnarTableReader::new(
+                        file,
+                        inner_schema.clone(),
+                        encryption_key.clone(),
+                    );
+                    readers.push(Box::new(col_reader));
+                }
+            }
+        }
+        if readers.len() == 1 {
+            Some(readers.pop().unwrap())
+        } else {
+            Some(Box::new(ColumnarMergeReader::new(
+                inner_schema.clone(),
+                readers,
+            )))
         }
     }
 }
 
-impl TableIterator for VectorIndexValuesIterator {
-    fn next(&mut self) {
-        self.idx += 1;
+impl ColumnarReader for VectorItemsReader {
+    fn schema(&self) -> &Schema {
+        &self.schema
     }
 
-    fn next_version(&mut self) -> bool {
-        false
+    fn seek(&mut self, mut handle: &[u8]) -> Result<()> {
+        self.idx = if get_fixed_size(&self.schema.handle_column) > 0 {
+            let int_handle = handle.get_i64_le();
+            search(self.items.len(), |i| {
+                self.items[i].handle.as_slice().get_i64_le() >= int_handle
+            })
+        } else {
+            search(self.items.len(), |i| {
+                self.items[i].handle.as_slice() >= handle
+            })
+        };
+        Ok(())
     }
 
-    fn rewind(&mut self) {
-        self.idx = 0;
-    }
-
-    fn seek(&mut self, key: InnerKey<'_>) {
-        self.idx = search(self.keys.len(), |i| {
-            let key_data = &self.keys[i];
-            let inner_key = InnerKey::from_outer_key(key_data, self.inner_key_off);
-            inner_key >= key
-        });
-    }
-
-    fn key(&self) -> InnerKey<'_> {
-        let key_data = &self.keys[self.idx];
-        InnerKey::from_outer_key(key_data, self.inner_key_off)
-    }
-
-    fn value(&self) -> Value {
-        let val = &self.vals[self.idx];
-        Value::decode(val)
-    }
-
-    fn valid(&self) -> bool {
-        self.idx < self.keys.len()
+    fn read(&mut self, block: &mut Block, limit: usize) -> Result<usize> {
+        let mut vector_col = block.columns.remove(self.vector_col_idx);
+        let mut vec_val_buf = vec![];
+        let old_idx = self.idx;
+        for _ in 0..limit {
+            if self.idx >= self.items.len() {
+                break;
+            }
+            let item = &self.items[self.idx];
+            let data = VectorFloat32Ref::from_f32(&item.value);
+            vec_val_buf.truncate(0);
+            vec_val_buf.write_vector_float32(data).unwrap();
+            vector_col.push_value(&vec_val_buf);
+            if let Some(inner) = &mut self.inner_reader {
+                inner.seek(&item.handle)?;
+                inner.read(block, 1)?;
+            } else {
+                block.handles.push_value(&item.handle);
+                block.versions.push_version(item.version, false);
+            }
+            self.idx += 1;
+        }
+        block.columns.insert(self.vector_col_idx, vector_col);
+        Ok(self.idx - old_idx)
     }
 }
 

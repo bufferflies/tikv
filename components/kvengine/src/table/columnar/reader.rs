@@ -299,6 +299,9 @@ impl ColumnarColumnReader {
     }
 
     fn load_pack(&mut self, pack_idx: usize) -> crate::table::Result<()> {
+        if pack_idx == self.pack_idx && self.pack_buffer.length() > 0 {
+            return Ok(());
+        }
         let num_packs = self.col_meta.pack_offsets.num_packs();
         if pack_idx >= num_packs {
             self.pack_idx = num_packs;

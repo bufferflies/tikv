@@ -15,7 +15,7 @@ use crate::table::{
     },
     file::File,
     parse_prop_data, search,
-    sstable::PROP_KEY_ENCRYPTION_VER,
+    sstable::{L0Table, PROP_KEY_ENCRYPTION_VER},
     BoundedDataSet, DataBound, InnerKey, LZ4_COMPRESSION,
 };
 
@@ -971,4 +971,65 @@ pub(crate) fn compress_pack(uncompressed_buf: &[u8], compressed_buf: &mut Vec<u8
     let checksum = crc32fast::hash(&compressed_pack);
     compressed_pack.put_u32_le(checksum);
     compressed_pack
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ColumnarLevel {
+    pub(crate) level: usize,
+    pub(crate) files: Vec<ColumnarFile>,
+}
+
+impl ColumnarLevel {
+    pub(crate) fn new(level: usize) -> Self {
+        Self {
+            level,
+            files: vec![],
+        }
+    }
+
+    pub(crate) fn sort(&mut self) {
+        if self.level < 2 {
+            self.files.sort_by(|a, b| {
+                let a_l0_version = a.get_l0_version().unwrap();
+                let b_l0_version = b.get_l0_version().unwrap();
+                b_l0_version.cmp(&a_l0_version)
+            })
+        } else {
+            self.files
+                .sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()))
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ColumnarLevels {
+    pub(crate) unconverted_l0s: Vec<L0Table>,
+    pub(crate) levels: Vec<ColumnarLevel>,
+    pub(crate) l2_snap_version: u64,
+}
+
+impl ColumnarLevels {
+    pub(crate) fn new() -> Self {
+        Self {
+            unconverted_l0s: vec![],
+            levels: vec![
+                ColumnarLevel::new(0),
+                ColumnarLevel::new(1),
+                ColumnarLevel::new(2),
+            ],
+            l2_snap_version: 0,
+        }
+    }
+
+    pub(crate) fn sort(&mut self) {
+        self.levels.iter_mut().for_each(|l| l.sort());
+    }
+
+    pub(crate) fn add_file(&mut self, level: usize, file: ColumnarFile) {
+        self.levels[level].files.push(file);
+    }
+
+    pub(crate) fn retain(&mut self, f: impl Fn(&ColumnarFile) -> bool) {
+        self.levels.iter_mut().for_each(|l| l.files.retain(&f));
+    }
 }

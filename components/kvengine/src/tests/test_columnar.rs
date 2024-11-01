@@ -16,7 +16,7 @@ use crate::{
     compaction::CompactionPriority,
     dfs,
     dfs::FileType,
-    shard::{ColumnarLevels, ShardCf, ShardDataBuilder},
+    shard::{ShardCf, ShardDataBuilder},
     table,
     table::{
         columnar::{
@@ -24,8 +24,8 @@ use crate::{
             tests::{
                 build_table, i_to_common_handle, merge_refs, new_schema, verify_with_ref_rows,
             },
-            Block, ColumnarFile, ColumnarFilterReader, ColumnarReader, ColumnarRowTableReader,
-            Schema, SchemaFile,
+            Block, ColumnarFile, ColumnarFilterReader, ColumnarLevels, ColumnarReader,
+            ColumnarRowTableReader, Schema, SchemaFile,
         },
         file::{File, InMemFile},
         sstable::{BlockCache, SsTable},

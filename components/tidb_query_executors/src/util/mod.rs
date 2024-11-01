@@ -8,8 +8,7 @@ pub mod mock_executor;
 pub mod scan_executor;
 pub mod top_n_heap;
 
-use async_trait::async_trait;
-use tidb_query_common::{storage::IntervalRange, Result};
+use tidb_query_common::Result;
 use tidb_query_datatype::{codec::batch::LazyBatchColumnVec, expr::EvalContext};
 use tidb_query_expr::{RpnExpression, RpnStackNode};
 use tipb::FieldType;
@@ -52,11 +51,4 @@ pub unsafe fn eval_exprs_decoded_no_lifetime(
         )?)
     }
     Ok(())
-}
-
-/// AdvancedScanner use a more efficient way to scan data but may not available.
-#[async_trait]
-pub trait AdvancedScanner: Send {
-    fn take_scanned_range(&mut self) -> IntervalRange;
-    async fn scan<'a>(&'a mut self, scan_rows: usize) -> (LazyBatchColumnVec, Result<bool>);
 }

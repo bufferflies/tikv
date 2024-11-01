@@ -21,7 +21,7 @@ use kvenginepb as pb;
 use slog_global::info;
 
 use crate::{
-    table::{vector_index::VectorIndexes, BoundedDataSet},
+    table::{columnar::ColumnarLevels, vector_index::VectorIndexes, BoundedDataSet},
     *,
 };
 

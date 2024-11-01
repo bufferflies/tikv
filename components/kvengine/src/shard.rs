@@ -26,7 +26,7 @@ use crate::{
     table::{
         self,
         blobtable::blobtable::BlobTable,
-        columnar::{ColumnarFile, SchemaFile, VectorIndexDef},
+        columnar::{ColumnarLevel, ColumnarLevels, SchemaFile, VectorIndexDef},
         file::InMemFile,
         memtable::{self, CfTable},
         search,
@@ -1145,6 +1145,10 @@ impl Shard {
 
     pub fn get_schema_file(&self) -> Option<SchemaFile> {
         self.data.read().unwrap().schema_file.clone()
+    }
+
+    pub fn has_vector_index(&self) -> bool {
+        !self.get_data().vector_indexes.is_empty()
     }
 
     pub(crate) fn ready_to_compact(&self) -> bool {
@@ -2532,67 +2536,6 @@ impl fmt::Debug for ShardRange {
             .field("inner_key_off", &self.inner_key_off)
             .field("keyspace_id", &self.keyspace_id)
             .finish()
-    }
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct ColumnarLevel {
-    pub(crate) level: usize,
-    pub(crate) files: Vec<ColumnarFile>,
-}
-
-impl ColumnarLevel {
-    pub(crate) fn new(level: usize) -> Self {
-        Self {
-            level,
-            files: vec![],
-        }
-    }
-
-    pub(crate) fn sort(&mut self) {
-        if self.level < 2 {
-            self.files.sort_by(|a, b| {
-                let a_l0_version = a.get_l0_version().unwrap();
-                let b_l0_version = b.get_l0_version().unwrap();
-                b_l0_version.cmp(&a_l0_version)
-            })
-        } else {
-            self.files
-                .sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()))
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ColumnarLevels {
-    pub(crate) unconverted_l0s: Vec<L0Table>,
-    pub(crate) levels: Vec<ColumnarLevel>,
-    pub(crate) l2_snap_version: u64,
-}
-
-impl ColumnarLevels {
-    pub(crate) fn new() -> Self {
-        Self {
-            unconverted_l0s: vec![],
-            levels: vec![
-                ColumnarLevel::new(0),
-                ColumnarLevel::new(1),
-                ColumnarLevel::new(2),
-            ],
-            l2_snap_version: 0,
-        }
-    }
-
-    pub(crate) fn sort(&mut self) {
-        self.levels.iter_mut().for_each(|l| l.sort());
-    }
-
-    pub(crate) fn add_file(&mut self, level: usize, file: ColumnarFile) {
-        self.levels[level].files.push(file);
-    }
-
-    pub(crate) fn retain(&mut self, f: impl Fn(&ColumnarFile) -> bool) {
-        self.levels.iter_mut().for_each(|l| l.files.retain(&f));
     }
 }
 

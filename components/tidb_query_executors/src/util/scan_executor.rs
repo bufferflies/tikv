@@ -13,7 +13,7 @@ use tidb_query_common::{
 use tidb_query_datatype::{codec::batch::LazyBatchColumnVec, expr::EvalContext};
 use tipb::{ColumnInfo, FieldType};
 
-use crate::{interface::*, util::AdvancedScanner};
+use crate::{interface::*, util::columnar_scanner::ColumnarScanner};
 
 /// Common interfaces for table scan and index scan implementations.
 pub trait ScanExecutorImpl: Send {
@@ -54,7 +54,7 @@ pub struct ScanExecutor<S: Storage, I: ScanExecutorImpl, F> {
     is_ended: bool,
 
     /// The columnar scanner that scans over column storage.
-    advanced_scanner: Option<Box<dyn AdvancedScanner>>,
+    advanced_scanner: Option<ColumnarScanner>,
 }
 
 pub struct ScanExecutorOptions<S, I> {
@@ -78,7 +78,7 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
             accept_point_range,
             is_scanned_range_aware,
         }: ScanExecutorOptions<S, I>,
-        advanced_scanner: Option<Box<dyn AdvancedScanner>>,
+        advanced_scanner: Option<ColumnarScanner>,
     ) -> Result<Self> {
         tidb_query_datatype::codec::table::check_table_ranges::<F>(&key_ranges)?;
         if is_backward {

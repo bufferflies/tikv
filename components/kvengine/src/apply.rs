@@ -17,7 +17,7 @@ use crate::{
     meta::is_move_down,
     table::{
         blobtable::blobtable::BlobTable,
-        columnar::{ColumnarFile, SchemaFile},
+        columnar::{ColumnarFile, ColumnarLevels, SchemaFile},
         file::File,
         sstable::{BlockCache, L0Table, SsTable},
         vector_index::{VectorIndexFile, VectorIndexes},

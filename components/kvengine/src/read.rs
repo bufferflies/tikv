@@ -35,8 +35,10 @@ use crate::{
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
         sstable::BlockCache,
-        table, BoundedDataSet, DataBound, InnerKey, Iterator as TableIterator,
-        SkipOpTxnFileIterator, TxnFile, TxnFileIterator,
+        table,
+        vector_index::VectorItemsReader,
+        BoundedDataSet, DataBound, InnerKey, Iterator as TableIterator, SkipOpTxnFileIterator,
+        TxnFile, TxnFileIterator,
     },
     txn_chunk_manager::TxnChunkManager,
     *,
@@ -1350,15 +1352,7 @@ impl SnapAccessCore {
         &self.data.limiter
     }
 
-    pub fn new_columnar_mvcc_reader(
-        &self,
-        table_id: i64,
-        columns: &[ColumnInfo],
-        read_ts: u64,
-    ) -> Option<ColumnarMvccReader> {
-        if self.columnar_snap_version == 0 {
-            return None;
-        }
+    pub fn new_schema_from_columns(&self, table_id: i64, columns: &[ColumnInfo]) -> Option<Schema> {
         let schema_file = self.data.schema_file.as_ref()?;
         let table_schema = schema_file.get_table(table_id)?;
         let mut schema_buf = SchemaBuf {
@@ -1368,44 +1362,25 @@ impl SnapAccessCore {
             txn_id_column: None,
             columns: columns.to_vec(),
             pk_col_ids: table_schema.pk_col_ids.clone(),
-            vector_indexes: vec![],
+            vector_indexes: table_schema.vector_indexes.clone(),
         };
         schema_buf
             .columns
             .retain(|c| !c.get_pk_handle() && c.get_column_id() != HANDLE_COL_ID as i64);
-        let schema = Schema::new(schema_buf);
-        let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
-        for mem in &self.data.mem_tbls {
-            let skl = mem.get_cf(WRITE_CF);
-            if !skl.is_empty() {
-                let iter = skl.new_iterator(false);
-                let row_reader = ColumnarRowTableReader::new(
-                    self.data.keyspace_id,
-                    self.data.inner_key_off,
-                    schema.clone(),
-                    iter,
-                    None,
-                    false,
-                    self.encryption_key.clone(),
-                );
-                readers.push(Box::new(row_reader));
-            }
+        Some(Schema::new(schema_buf))
+    }
+
+    pub fn new_columnar_mvcc_reader(
+        &self,
+        table_id: i64,
+        columns: &[ColumnInfo],
+        read_ts: u64,
+    ) -> Option<ColumnarMvccReader> {
+        if self.columnar_snap_version == 0 {
+            return None;
         }
-        for l0 in &self.data.col_levels.unconverted_l0s {
-            if let Some(l0_write) = l0.get_cf(WRITE_CF) {
-                let iter = l0_write.new_iterator(false, true);
-                let row_reader = ColumnarRowTableReader::new(
-                    self.data.keyspace_id,
-                    self.data.inner_key_off,
-                    schema.clone(),
-                    iter,
-                    None,
-                    false,
-                    self.encryption_key.clone(),
-                );
-                readers.push(Box::new(row_reader));
-            }
-        }
+        let schema = self.new_schema_from_columns(table_id, columns)?;
+        let mut readers = self.collect_column_row_readers(&schema);
         for columnar_level in &self.data.col_levels.levels {
             if columnar_level.level == 2 {
                 let concat_reader = ColumnarConcatReader::new(
@@ -1428,6 +1403,103 @@ impl SnapAccessCore {
                 }
             }
         }
+        let merged_reader = ColumnarMergeReader::new(schema.clone(), readers);
+        let mvcc_reader = ColumnarMvccReader::new(Box::new(merged_reader), &schema, read_ts);
+        Some(mvcc_reader)
+    }
+
+    fn collect_column_row_readers(&self, schema: &Schema) -> Vec<Box<dyn ColumnarReader>> {
+        let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
+        for mem in &self.data.mem_tbls {
+            let skl = mem.get_cf(WRITE_CF);
+            if !skl.is_empty() {
+                let iter = skl.new_iterator(false);
+                let row_reader = ColumnarRowTableReader::new(
+                    self.data.keyspace_id,
+                    self.data.inner_key_off,
+                    schema.clone(),
+                    iter,
+                    None,
+                    false,
+                    self.encryption_key.clone(),
+                );
+                readers.push(Box::new(row_reader));
+            }
+        }
+        for l0 in &self.data.col_levels.unconverted_l0s {
+            if let Some(l0_write) = l0.get_cf(WRITE_CF) {
+                info!(
+                    "{} add unconverted l0 columnar file {}",
+                    self.tag,
+                    l0_write.id()
+                );
+                let iter = l0_write.new_iterator(false, true);
+                let row_reader = ColumnarRowTableReader::new(
+                    self.data.keyspace_id,
+                    self.data.inner_key_off,
+                    schema.clone(),
+                    iter,
+                    None,
+                    false,
+                    self.encryption_key.clone(),
+                );
+                readers.push(Box::new(row_reader));
+            }
+        }
+        readers
+    }
+
+    pub fn new_vector_index_reader(
+        &self,
+        table_id: i64,
+        index_id: i64,
+        col_id: i64,
+        target: &[f32],
+        top_k: usize,
+        schema: Schema,
+        read_ts: u64,
+        start_handle: &[u8],
+        end_handle: Option<&[u8]>,
+    ) -> Option<ColumnarMvccReader> {
+        let vector_index = self.data.vector_indexes.get(table_id, index_id, col_id)?;
+        let vector_items_reader = VectorItemsReader::new(
+            schema.clone(),
+            vector_index,
+            target,
+            top_k,
+            read_ts,
+            start_handle,
+            end_handle,
+            &self.data.col_levels,
+            self.encryption_key.clone(),
+        )
+        .map_err(|e| {
+            warn!("{} failed to search vector index {:?}", self.tag, e,);
+            e
+        })
+        .ok()?;
+
+        info!("{} use vector index reader", self.tag);
+        let mut readers = self.collect_column_row_readers(&schema);
+        for columnar_level in &self.data.col_levels.levels {
+            if columnar_level.level == 2 {
+                // level 2 columnar files are all included in the vector index.
+                break;
+            }
+            for file in &columnar_level.files {
+                let snap_version = file.get_l0_version().unwrap_or_default();
+                if snap_version <= vector_index.snap_version() {
+                    continue;
+                }
+                if !file.has_table(schema.table_id) {
+                    continue;
+                }
+                let col_reader =
+                    ColumnarTableReader::new(file, schema.clone(), self.encryption_key.clone());
+                readers.push(Box::new(col_reader));
+            }
+        }
+        readers.push(Box::new(vector_items_reader));
         let merged_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mvcc_reader = ColumnarMvccReader::new(Box::new(merged_reader), &schema, read_ts);
         Some(mvcc_reader)

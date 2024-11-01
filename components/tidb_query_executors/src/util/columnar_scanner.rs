@@ -5,8 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use api_version::{api_v2::KEYSPACE_PREFIX_LEN, KeyMode, KvFormat};
-use async_trait::async_trait;
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2, KeyMode, KvFormat};
 use bytes::buf::Buf;
 use kvengine::table::columnar::{Block, ColumnarFilterReader, ColumnarMvccReader, HANDLE_COL_ID};
 use kvproto::coprocessor::KeyRange;
@@ -24,8 +23,6 @@ use tidb_query_datatype::{
 };
 use tikv_util::buffer_vec::BufferVec;
 use tipb::TableScan;
-
-use crate::util::AdvancedScanner;
 
 pub struct ColumnarScanner {
     // The current scan position.
@@ -73,9 +70,8 @@ impl ColumnarScanner {
     }
 }
 
-#[async_trait]
-impl AdvancedScanner for ColumnarScanner {
-    fn take_scanned_range(&mut self) -> IntervalRange {
+impl ColumnarScanner {
+    pub fn take_scanned_range(&mut self) -> IntervalRange {
         let mut range = IntervalRange::default();
         range.lower_inclusive = self.start_range.clone();
         let schema = self.reader.get_schema();
@@ -105,12 +101,9 @@ impl AdvancedScanner for ColumnarScanner {
         range
     }
 
-    async fn scan(&mut self, scan_rows: usize) -> (LazyBatchColumnVec, Result<bool>) {
-        let mut column_vec: Vec<LazyBatchColumn> = Vec::with_capacity(self.output_offsets.len());
-        for &eval_type in &self.eval_types {
-            let vec_val = LazyBatchColumn::decoded_with_capacity_and_tp(scan_rows, eval_type);
-            column_vec.push(vec_val);
-        }
+    pub async fn scan(&mut self, scan_rows: usize) -> (LazyBatchColumnVec, Result<bool>) {
+        let mut column_vec =
+            new_lazy_batch_columns(&self.output_offsets, &self.eval_types, scan_rows);
         let read_size = self.reader.read_block(&mut self.block, scan_rows).unwrap();
         if read_size > 0 {
             let schema = self.reader.get_schema();
@@ -234,18 +227,45 @@ impl AdvancedScanner for ColumnarScanner {
     }
 }
 
-pub fn build_advanced_scanner(
+fn new_lazy_batch_columns(
+    output_offsets: &[i32],
+    eval_types: &[EvalType],
+    scan_rows: usize,
+) -> Vec<LazyBatchColumn> {
+    let mut columns: Vec<LazyBatchColumn> = Vec::with_capacity(output_offsets.len());
+    for &eval_type in eval_types {
+        let vec_val = LazyBatchColumn::decoded_with_capacity_and_tp(scan_rows, eval_type);
+        columns.push(vec_val);
+    }
+    columns
+}
+
+fn get_output_offsets(table_scan: &TableScan) -> Vec<i32> {
+    let mut output_offsets = vec![];
+    let mut col_offset = 0;
+    for col in table_scan.get_columns() {
+        if col.get_column_id() == HANDLE_COL_ID as i64 || col.get_pk_handle() {
+            output_offsets.push(-1);
+        } else {
+            output_offsets.push(col_offset);
+            col_offset += 1;
+        }
+    }
+    output_offsets
+}
+
+pub fn build_columnar_scanner(
     snap: Option<&kvengine::SnapAccess>,
     key_ranges: &[KeyRange],
     table_scan: &TableScan,
     start_ts: u64,
-) -> Option<Box<dyn AdvancedScanner>> {
+) -> Option<ColumnarScanner> {
     let snap = snap?;
     if key_ranges.len() != 1 {
         return None;
     }
     let key_range = &key_ranges[0];
-    if api_version::ApiV2::parse_key_mode(&key_range.start) != KeyMode::Txn {
+    if ApiV2::parse_key_mode(&key_range.start) != KeyMode::Txn {
         return None;
     }
 
@@ -260,53 +280,62 @@ pub fn build_advanced_scanner(
         return None;
     }
 
-    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&key_range.start).unwrap();
-    let start = &key_range.start[KEYSPACE_PREFIX_LEN..];
-    let end = &key_range.end[KEYSPACE_PREFIX_LEN..];
-
-    let table_id = match table::decode_table_id(start) {
-        Ok(id) => id,
-        Err(e) => {
-            warn!(
-                "build_columnar_scanner, get table id from key range {:?} failed, err: {:?}",
-                key_range, e
-            );
-            return None;
-        }
-    };
-    let mut reader = snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), start_ts)?;
-    let mut output_offsets = vec![];
-    let mut col_offset = 0;
-    for col in table_scan.get_columns() {
-        if col.get_column_id() == HANDLE_COL_ID as i64 || col.get_pk_handle() {
-            output_offsets.push(-1);
-        } else {
-            output_offsets.push(col_offset);
-            col_offset += 1;
-        }
-    }
-    if reader.get_schema().is_common_handle() {
-        let start_handle = table::decode_common_handle(start).ok()?;
-        let end_handle = table::decode_common_handle(end).ok()?;
-        reader.set_handle_range(start_handle, end_handle).ok()?;
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&key_range.start).unwrap();
+    let start_table_key = &key_range.start[KEYSPACE_PREFIX_LEN..];
+    let end_table_key = &key_range.end[KEYSPACE_PREFIX_LEN..];
+    let table_id = table_scan.get_table_id();
+    let schema = snap.new_schema_from_columns(table_id, table_scan.get_columns())?;
+    let (start_handle, end_handle) = if schema.is_common_handle() {
+        let start_handle = table::decode_common_handle(start_table_key).ok()?;
+        let end_handle = table::decode_common_handle(end_table_key).ok()?;
+        (start_handle.to_vec(), Some(end_handle.to_vec()))
     } else {
-        let start_handle = table::decode_int_handle(start).unwrap_or(i64::MIN);
+        let start_handle = table::decode_int_handle(start_table_key).unwrap_or(i64::MIN);
         let end_handle = {
-            let h = table::decode_int_handle(end).unwrap_or(i64::MAX);
-            if h == i64::MAX && end.len() > PREFIX_LEN + 8 {
+            let h = table::decode_int_handle(end_table_key).unwrap_or(i64::MAX);
+            if h == i64::MAX && end_table_key.len() > PREFIX_LEN + 8 {
                 // If the end handle is i64::MAX appended a 0, then we need to include the
                 // i64::MAX value, use None to represent there is no upper bound.
                 None
             } else {
-                Some(h)
+                Some(h.to_le_bytes().to_vec())
             }
         };
-        reader.set_int_handle_range(start_handle, end_handle).ok()?;
+        (start_handle.to_le_bytes().to_vec(), end_handle)
     };
-    Some(Box::new(ColumnarScanner::new(
+    let mut reader = if table_scan.has_ann_query() {
+        let ann_query = table_scan.get_ann_query();
+        let index_id = ann_query.get_index_id();
+        let target = ann_query.get_ref_vec_f32().read_vector_float32().ok()?;
+        snap.new_vector_index_reader(
+            table_id,
+            index_id,
+            ann_query.get_column_id(),
+            target.as_ref().data(),
+            ann_query.get_top_k() as usize,
+            schema.clone(),
+            start_ts,
+            &start_handle,
+            end_handle.as_deref(),
+        )
+        .or_else(|| snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), start_ts))
+    } else {
+        snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), start_ts)
+    }?;
+    if reader.get_schema().is_common_handle() {
+        reader
+            .set_handle_range(&start_handle, end_handle.as_ref().unwrap())
+            .ok()?;
+    } else {
+        let end_handle = end_handle.as_ref().map(|h| h.as_slice().get_i64_le());
+        reader
+            .set_int_handle_range(start_handle.as_slice().get_i64_le(), end_handle)
+            .ok()?;
+    };
+    Some(ColumnarScanner::new(
         reader,
-        output_offsets,
+        get_output_offsets(table_scan),
         keyspace_id,
         key_range.start.clone(),
-    )))
+    ))
 }
