@@ -234,14 +234,8 @@ impl FooterInfo {
         store.remove(file_id, &Self::local_filename(file_id)).await
     }
 
-    fn local_filename(file_id: u64) -> String {
+    pub fn local_filename(file_id: u64) -> String {
         format!("{}.footer", file_id)
-    }
-
-    pub(crate) fn parse_local_filename(filename: &str) -> Option<u64> {
-        filename
-            .strip_suffix(".footer")
-            .and_then(|s| s.parse().ok())
     }
 }
 
@@ -289,7 +283,6 @@ mod tests {
     #[tokio::test]
     async fn test_footer_info() {
         assert_eq!(FooterInfo::local_filename(1), "1.footer");
-        assert_eq!(FooterInfo::parse_local_filename("1.footer"), Some(1));
 
         let store = Arc::new(LocalMemoryStore::default());
         let footer_info = FooterInfo {

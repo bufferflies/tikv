@@ -3,24 +3,28 @@
 // TODO: remote this
 #![allow(dead_code)]
 
-use std::{ops, path::PathBuf, sync::Arc, time::Duration};
+use std::{cmp, ops, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use dashmap::mapref::entry::Entry;
 use engine_traits::GetObjectOptions;
+use tokio::sync::mpsc;
 
 use crate::{
     dfs::{FileType, S3Fs},
     ia::{
         queue::S3FifoHandle,
         types::{
-            FileSegmentData, FileSegmentIdent, FooterInfo, GuardMap, LocalSegmentMap,
+            FileSegmentData, FileSegmentIdent, FooterInfo, LocalSegmentMap,
             FILE_SEGMENT_DATA_IN_MEMORY,
         },
-        util::{LocalFileStore, LocalMemoryStore, LocalStore},
+        util::{new_local_store, LocalStore},
     },
     table::{Error, Result},
 };
+
+pub const SEGMENTS_SUB_DIR: &str = "segment";
+pub const FOOTERS_SUB_DIR: &str = "footer";
 
 /// Note that the capacity is not strictly limited for performance. So some
 /// additional buffer (maybe 10%) should be reserved.
@@ -74,17 +78,25 @@ impl IaManager {
             "small queue must be in memory"
         );
 
-        let main_store: Arc<dyn LocalStore> = if let Some(local_dir) = opts.main_queue.path.as_ref()
-        {
-            Arc::new(LocalFileStore::new(local_dir.to_path_buf())) as _
-        } else {
-            Arc::new(LocalMemoryStore::default()) as _
-        };
+        let main_store = new_local_store(
+            opts.main_queue
+                .path
+                .as_ref()
+                .map(|x| x.join(SEGMENTS_SUB_DIR)),
+        );
         let segments = Arc::new(LocalSegmentMap::default());
         let segment_data_ctx = SegmentDataContext {
             segments: segments.clone(),
             main_store: main_store.clone(),
         };
+
+        let footer_store = new_local_store(
+            opts.main_queue
+                .path
+                .as_ref()
+                .map(|x| x.join(FOOTERS_SUB_DIR)),
+        );
+
         let fifo = S3FifoHandle::new(
             opts.small_queue.cap,
             opts.main_queue.cap,
@@ -99,14 +111,76 @@ impl IaManager {
             s3fs,
             runtime,
             main_store,
+            footer_store,
             segments,
-            footers: Default::default(),
             fifo,
         });
 
         let mgr = Self { core };
         mgr.init().await?;
         Ok(mgr)
+    }
+
+    pub async fn prepare_footers(
+        &self,
+        files: &[(u64 /* file_id */, FileType)],
+        concurrency: usize,
+    ) -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(cmp::min(concurrency, files.len()));
+        let mut errs: Vec<Error> = vec![];
+        let mut msg_count: usize = 0;
+        for &(file_id, ftype) in files {
+            if self
+                .footer_store
+                .exists(file_id, &FooterInfo::local_filename(file_id))
+                .await
+            {
+                continue;
+            }
+
+            let mgr = self.clone();
+            let task = async move {
+                let (footer, total_size) = mgr.read_footer_from_remote(file_id, ftype).await?;
+                let footer_info = FooterInfo {
+                    file_id,
+                    ftype,
+                    file_total_size: total_size,
+                };
+                footer_info
+                    .save_to_local(mgr.footer_store.as_ref(), &footer)
+                    .await?;
+                Ok(())
+            };
+            let tx = tx.clone();
+            self.runtime.spawn(async move {
+                let res = task.await;
+                if let Err(err) = tx.send(res).await {
+                    warn!("prepare footers: send error"; "file_id" => file_id, "err" => ?err);
+                }
+            });
+            msg_count += 1;
+
+            if msg_count >= concurrency {
+                let res = rx.recv().await.unwrap();
+                if let Err(err) = res {
+                    errs.push(err);
+                }
+                msg_count -= 1;
+            }
+        }
+
+        for _ in 0..msg_count {
+            let res = rx.recv().await.unwrap();
+            if let Err(err) = res {
+                errs.push(err);
+            }
+        }
+
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::IaMgr(format!("prepare footers failed: {:?}", errs)))
+        }
     }
 }
 
@@ -115,30 +189,20 @@ pub struct IaManagerCore {
     s3fs: S3Fs,
     runtime: tokio::runtime::Handle,
     main_store: Arc<dyn LocalStore>,
+    footer_store: Arc<dyn LocalStore>,
 
     segments: Arc<LocalSegmentMap>,
-    footers: GuardMap<u64 /* file_id */, Option<FooterInfo>>,
 
     fifo: S3FifoHandle,
 }
 
 impl IaManagerCore {
     async fn init(&self) -> Result<()> {
-        let mut entries = self.main_store.init().await?;
-        if let Some(footers) = entries.remove("footer") {
-            self.init_footers(footers).await?;
-        }
-        Ok(())
-    }
+        self.footer_store.init().await?;
 
-    async fn init_footers(&self, keys: Vec<String>) -> Result<()> {
-        for k in keys {
-            if let Some(file_id) = FooterInfo::parse_local_filename(&k) {
-                let (footer_info, _) =
-                    FooterInfo::read_from_local(self.main_store.as_ref(), file_id).await?;
-                self.footers.get_locked(file_id).await.replace(footer_info);
-            }
-        }
+        self.main_store.init().await?;
+        // TODO: self.main_store.scan() && self.init_segments
+
         Ok(())
     }
 
@@ -147,71 +211,31 @@ impl IaManagerCore {
         file_id: u64,
         ftype: FileType,
     ) -> Result<(Bytes, u64 /* total_size */)> {
-        let mut guard = self.footers.get_locked(file_id).await;
-        if let Some(footer_info) = guard.clone() {
-            match FooterInfo::read_from_local(self.main_store.as_ref(), footer_info.file_id).await {
-                Ok((local_info, footer)) => {
-                    debug_assert_eq!(local_info, footer_info);
-                    Ok((footer, footer_info.file_total_size))
-                }
-                Err(err) => {
-                    error!("read footer from local failed"; "file_id" => file_id, "err" => ?err);
-                    let _ = self.drop_footer_from_local(file_id).await;
-                    Err(err)
-                }
+        match FooterInfo::read_from_local(self.footer_store.as_ref(), file_id).await {
+            Ok((footer_info, footer)) => Ok((footer, footer_info.file_total_size)),
+            Err(err) => {
+                error!("read footer: failed"; "file_id" => file_id, "ftype" => ?ftype, "err" => ?err);
+                let _ = self.drop_footer_from_local(file_id).await;
+                Err(err)
             }
-        } else {
-            let (footer, total_size) = self.read_footer_from_remote(file_id, ftype).await?;
-            if footer.len() != ftype.footer_size() {
-                return Err(Error::Other(format!(
-                    "invalid footer size, expect {}, got {}, file_id {}, footer {:?}",
-                    ftype.footer_size(),
-                    footer.len(),
-                    file_id,
-                    footer,
-                )));
-            }
-            let footer_info = FooterInfo {
-                file_id,
-                ftype,
-                file_total_size: total_size,
-            };
-            if let Err(err) = footer_info
-                .save_to_local(self.main_store.as_ref(), &footer)
-                .await
-            {
-                error!("save footer to local failed"; "file_id" => file_id, "err" => ?err);
-                debug_assert!(false);
-            } else {
-                *guard = Some(footer_info);
-            }
-            Ok((footer, total_size))
         }
     }
 
     /// Use when meet error on opening/reading local footer.
     async fn drop_footer_from_local(&self, file_id: u64) -> Result<()> {
-        let mut guard = self.footers.get_locked(file_id).await;
-        if guard.is_some() {
-            let res = FooterInfo::drop_from_local(file_id, self.main_store.as_ref()).await;
-            *guard = None;
-
-            match res {
-                Ok(Some(())) => Ok(()),
-                Ok(None) => {
-                    warn!("drop footer from local failed: not existed";
-                        "file_id" => file_id);
-                    Ok(())
-                }
-                Err(err) => {
-                    warn!("drop footer from local failed";
-                        "file_id" => file_id,
-                        "err" => ?err);
-                    Err(err)
-                }
+        match FooterInfo::drop_from_local(file_id, self.footer_store.as_ref()).await {
+            Ok(Some(())) => Ok(()),
+            Ok(None) => {
+                warn!("drop footer: failed, not existed";
+                    "file_id" => file_id);
+                Ok(())
             }
-        } else {
-            Ok(())
+            Err(err) => {
+                warn!("drop footer: failed";
+                    "file_id" => file_id,
+                    "err" => ?err);
+                Err(err)
+            }
         }
     }
 
@@ -230,12 +254,20 @@ impl IaManagerCore {
             .s3fs
             .get_object_ext(file_key, filename, opts, true)
             .await?;
-        Ok((footer, total_size.unwrap()))
-    }
 
-    #[cfg(any(test, feature = "testexport"))]
-    pub fn get_footers_file_id(&self) -> Vec<u64> {
-        self.footers.iter().map(|r| *r.key()).collect()
+        let total_size = total_size.unwrap();
+        if footer.len() != ftype.footer_size() {
+            return Err(Error::IaMgr(format!(
+                "invalid footer size, expect {}, got {}, file_id {}, footer {:?}, total_size {}",
+                ftype.footer_size(),
+                footer.len(),
+                file_id,
+                footer,
+                total_size,
+            )));
+        }
+
+        Ok((footer, total_size))
     }
 }
 

@@ -3,7 +3,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering::Relaxed},
+    sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -25,8 +28,10 @@ pub trait LocalStore: Send + Sync {
     /// Return the path of store. Will be `None` when it's in memory.
     fn path(&self) -> Option<&Path>;
 
+    async fn init(&self) -> Result<()>;
+
     /// Return the existed keys & suffixes in the store from last startup.
-    async fn init(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>>;
+    async fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>>;
 
     async fn save(&self, file_id: u64, key: &str, data: Bytes) -> Result<()>;
 
@@ -50,6 +55,16 @@ pub trait LocalStore: Send + Sync {
     async fn read_all(&self, file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<Option<()>>;
 
     async fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>>;
+
+    async fn exists(&self, file_id: u64, key: &str) -> bool;
+}
+
+pub fn new_local_store(path: Option<PathBuf>) -> Arc<dyn LocalStore> {
+    if let Some(path) = path {
+        Arc::new(LocalFileStore::new(path)) as _
+    } else {
+        Arc::new(LocalMemoryStore::default()) as _
+    }
 }
 
 macro_rules! try_open {
@@ -94,6 +109,19 @@ impl LocalFileStore {
     pub fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
+}
+
+#[async_trait]
+impl LocalStore for LocalFileStore {
+    fn path(&self) -> Option<&Path> {
+        Some(&self.dir)
+    }
+
+    async fn init(&self) -> Result<()> {
+        fs::create_dir_all(&self.dir)
+            .await
+            .table_ctx(0, format!("create_dir.{:?}", self.dir))
+    }
 
     async fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
         let mut entries = fs::read_dir(&self.dir)
@@ -109,20 +137,6 @@ impl LocalFileStore {
             }
         }
         Ok(map)
-    }
-}
-
-#[async_trait]
-impl LocalStore for LocalFileStore {
-    fn path(&self) -> Option<&Path> {
-        Some(&self.dir)
-    }
-
-    async fn init(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
-        fs::create_dir_all(&self.dir)
-            .await
-            .table_ctx(0, format!("create_dir.{:?}", self.dir))?;
-        self.scan().await
     }
 
     async fn save(&self, file_id: u64, key: &str, data: Bytes) -> Result<()> {
@@ -196,6 +210,11 @@ impl LocalStore for LocalFileStore {
         try_remove!(&path).table_ctx(file_id, format!("remove.{key}"))?;
         Ok(Some(()))
     }
+
+    async fn exists(&self, _file_id: u64, key: &str) -> bool {
+        let path = self.dir.join(key);
+        tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file())
+    }
 }
 
 #[derive(Default)]
@@ -228,7 +247,11 @@ impl LocalStore for LocalMemoryStore {
         None
     }
 
-    async fn init(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
+    async fn init(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
         Ok(HashMap::new())
     }
 
@@ -271,5 +294,9 @@ impl LocalStore for LocalMemoryStore {
 
     async fn remove(&self, _file_id: u64, key: &str) -> Result<Option<()>> {
         Ok(self.m.remove(key).map(|_| ()))
+    }
+
+    async fn exists(&self, _file_id: u64, key: &str) -> bool {
+        self.m.contains_key(key)
     }
 }
