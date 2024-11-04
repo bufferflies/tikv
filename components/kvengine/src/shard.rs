@@ -820,7 +820,8 @@ impl Shard {
                     in_use_blob_size as f64 / total_blob_size as f64
                 }
             };
-            if blob_table_utilization < self.opt.blob_table_gc_ratio {
+            if blob_table_utilization < self.opt.blob_table_gc_ratio && !data.has_unconverted_l0s()
+            {
                 let mut lock = self.compaction_priority.write().unwrap();
                 *lock = Some(CompactionPriority::Major { score: f64::MAX });
                 return;
@@ -1068,7 +1069,8 @@ impl Shard {
 
         let write_entries = self.entries_write_cf.load(Ordering::Relaxed);
         let tombs_ratio = tombs as f64 / write_entries as f64;
-        if tombs_ratio >= self.opt.compaction_tombs_ratio {
+        if tombs_ratio >= self.opt.compaction_tombs_ratio && !self.get_data().has_unconverted_l0s()
+        {
             let mut priority = self.compaction_priority.write().unwrap();
             if priority.is_some() {
                 return false;
