@@ -18,6 +18,7 @@ use crate::{error::IoContext, table::table};
 // 30 minutes idle file would be closed.
 const FILE_TTL: u64 = 30 * 60;
 
+#[async_trait::async_trait]
 pub trait File: Sync + Send {
     // id returns the id of the file.
     fn id(&self) -> u64;
@@ -46,6 +47,16 @@ pub trait File: Sync + Send {
             return Err(table::Error::InvalidFileSize);
         }
         self.read(size - footer_length as u64, footer_length)
+    }
+
+    /// `read_async` is async version of `read`.
+    async fn read_async(&self, off: u64, length: usize) -> table::Result<Bytes> {
+        self.read(off, length)
+    }
+
+    /// `read_at_async` is async version of `read_at`.
+    async fn read_at_async(&self, buf: &mut [u8], offset: u64) -> table::Result<()> {
+        self.read_at(buf, offset)
     }
 
     /// `expire_open_file` closes the file if it's idle for a long time.

@@ -1,30 +1,68 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-// TODO: remote this
-#![allow(dead_code)]
-
-use std::{cmp, ops, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    cmp, ops,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc,
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use dashmap::mapref::entry::Entry;
 use engine_traits::GetObjectOptions;
+use futures::future::try_join_all;
+use tikv_util::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::{
-    dfs::{FileType, S3Fs},
+    dfs::{Dfs, FileType, S3Fs},
     ia::{
+        ia_file::IaFile,
         queue::S3FifoHandle,
         types::{
-            FileSegmentData, FileSegmentIdent, FooterInfo, LocalSegmentMap,
+            FileSegmentData, FileSegmentIdent, FooterInfo, GuardMap, LocalSegmentMap,
             FILE_SEGMENT_DATA_IN_MEMORY,
         },
-        util::{new_local_store, LocalStore},
+        util::{new_local_store, split_to_segments, LocalStore},
     },
     table::{Error, Result},
+    try_some,
 };
 
 pub const SEGMENTS_SUB_DIR: &str = "segment";
 pub const FOOTERS_SUB_DIR: &str = "footer";
+
+pub(crate) struct ReadAt<'a> {
+    buf: &'a mut [u8],
+    offset: u64,
+}
+
+impl<'a> ReadAt<'a> {
+    pub(crate) fn new(buf: &'a mut [u8], offset: u64) -> Self {
+        Self { buf, offset }
+    }
+
+    fn start_off(&self) -> u64 {
+        self.offset
+    }
+
+    fn end_off(&self) -> u64 {
+        self.offset + self.buf.len() as u64
+    }
+
+    fn read_from_segment_bytes(&mut self, ident: &FileSegmentIdent, seg_data: &Bytes) {
+        let (start_off, end_off) = (self.start_off(), self.end_off());
+        debug_assert!(
+            start_off < end_off && ident.start_off <= start_off && end_off <= ident.end_off
+        );
+        let seg_slice = seg_data
+            .slice((start_off - ident.start_off) as usize..(end_off - ident.start_off) as usize);
+        self.buf.copy_from_slice(&seg_slice);
+    }
+}
 
 /// Note that the capacity is not strictly limited for performance. So some
 /// additional buffer (maybe 10%) should be reserved.
@@ -112,13 +150,97 @@ impl IaManager {
             runtime,
             main_store,
             footer_store,
+            loading_segments: Default::default(),
             segments,
             fifo,
+            cache_hit_counter: Default::default(),
+            cache_miss_counter: Default::default(),
         });
 
         let mgr = Self { core };
         mgr.init().await?;
         Ok(mgr)
+    }
+
+    pub async fn open_file(&self, file_id: u64, ftype: FileType) -> Result<IaFile> {
+        let (footer, total_size) = self.read_footer(file_id, ftype).await?;
+        Ok(IaFile {
+            id: file_id,
+            size: total_size,
+            ftype,
+            footer,
+            mgr: self.clone(),
+        })
+    }
+
+    pub(crate) async fn read_range(
+        &self,
+        file_id: u64,
+        ftype: FileType,
+        total_size: u64,
+        read_at: ReadAt<'_>,
+    ) -> Result<()> {
+        let (start_off, end_off) = (read_at.start_off(), read_at.end_off());
+        let mut segments = split_to_segments(
+            file_id,
+            start_off,
+            end_off,
+            total_size,
+            self.segment_size as u64,
+        );
+        debug!("read_range"; "start_off" => start_off, "end_off" => end_off, "segments" => ?segments);
+        if segments.len() == 1 {
+            self.read_segment(segments.pop().unwrap(), ftype, read_at)
+                .await
+        } else {
+            self.read_from_multi_segments(ftype, start_off, end_off, segments, read_at)
+                .await?;
+            Ok(())
+        }
+    }
+
+    async fn read_from_multi_segments(
+        &self,
+        ftype: FileType,
+        start_off: u64,
+        end_off: u64,
+        segments: Vec<FileSegmentIdent>,
+        read_at: ReadAt<'_>,
+    ) -> Result<()> {
+        let segments_len = segments.len();
+        let mut handles = Vec::with_capacity(segments_len);
+
+        debug!("read_from_multi_segments"; "start_off" => start_off, "end_off" => end_off, "segments" => ?segments);
+        for (idx, ident) in segments.into_iter().enumerate() {
+            let seg_start_off = if idx == 0 { start_off } else { ident.start_off };
+            let seg_end_off = if idx == segments_len - 1 {
+                end_off
+            } else {
+                ident.end_off
+            };
+
+            // We do not limit concurrency here as the segment size should be larger
+            // than block size of file, so there are at most 2 segments.
+            let mgr = self.clone();
+            handles.push(self.runtime.spawn(async move {
+                let mut buf = vec![0; (seg_end_off - seg_start_off) as usize];
+                let read_at = ReadAt::new(buf.as_mut_slice(), seg_start_off);
+                mgr.read_segment(ident, ftype, read_at).await.map(|()| buf)
+            }));
+        }
+
+        let mut buf = read_at.buf;
+        for seg_slice in try_join_all(handles)
+            .await
+            .map_err(|e| Error::IaMgr(format!("read from multi segments: failed: {e:?}")))?
+        {
+            let seg_slice = seg_slice?;
+            let (left, right) = buf.split_at_mut(seg_slice.len());
+            left.copy_from_slice(&seg_slice);
+            buf = right;
+        }
+        debug_assert!(buf.is_empty());
+        Ok(())
     }
 
     pub async fn prepare_footers(
@@ -191,9 +313,12 @@ pub struct IaManagerCore {
     main_store: Arc<dyn LocalStore>,
     footer_store: Arc<dyn LocalStore>,
 
+    loading_segments: GuardMap<FileSegmentIdent, ()>,
     segments: Arc<LocalSegmentMap>,
 
     fifo: S3FifoHandle,
+    cache_hit_counter: AtomicU64,
+    cache_miss_counter: AtomicU64,
 }
 
 impl IaManagerCore {
@@ -201,9 +326,140 @@ impl IaManagerCore {
         self.footer_store.init().await?;
 
         self.main_store.init().await?;
-        // TODO: self.main_store.scan() && self.init_segments
+        let mut entries = self.main_store.scan().await?;
+        if let Some(segments) = entries.remove("seg") {
+            self.init_segments(segments).await?;
+        }
 
         Ok(())
+    }
+
+    // TODO: take snapshot for queue & restore from it.
+    async fn init_segments(&self, keys: Vec<String>) -> Result<()> {
+        for k in keys {
+            if let Some(ident) = FileSegmentIdent::parse_local_filename(&k) {
+                self.segments
+                    .set_segment_data(ident.clone(), FileSegmentData::InStore);
+                self.fifo.read(ident, true)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Offset in `read_at` are absolute offsets of the file.
+    async fn read_segment(
+        &self,
+        ident: FileSegmentIdent,
+        ftype: FileType,
+        mut read_at: ReadAt<'_>,
+    ) -> Result<()> {
+        let (start_off, end_off) = (read_at.start_off(), read_at.end_off());
+        if start_off >= end_off || start_off < ident.start_off || ident.end_off < end_off {
+            debug_assert!(
+                false,
+                "invalid range, segment {:?}, range: {}-{}",
+                ident, start_off, end_off
+            );
+            return Err(Error::IaMgr(format!(
+                "invalid range, ident: {:?}, range: {}-{}",
+                ident, start_off, end_off
+            )));
+        }
+
+        let start_time = Instant::now_coarse();
+        debug!("read segment"; "ident" => %ident, "start_off" => start_off, "end_off" => end_off);
+        if let Some(()) = self.read_segment_from_cache(&ident, &mut read_at).await? {
+            debug!("read segment finished (cache hit)";
+                "ident" => %ident,
+                "elapsed" => ?start_time.saturating_elapsed());
+            return Ok(());
+        }
+
+        let data = {
+            let _loading_guard = self.loading_segments.get_locked(ident.clone()).await;
+
+            // Check cache again. Another thread may have filled the cache.
+            if let Some(()) = self.read_segment_from_cache(&ident, &mut read_at).await? {
+                debug!("read segment finished (cache hit)";
+                    "ident" => %ident,
+                    "elapsed" => ?start_time.saturating_elapsed());
+
+                // Not necessary to remove ident from `loading_segments`, as there must be
+                // another concurrent request read the segment from remote.
+                return Ok(());
+            }
+
+            let data = self.read_segment_from_remote(&ident, ftype).await?;
+            self.segments
+                .set_segment_data(ident.clone(), FileSegmentData::InMem(data.clone()));
+
+            self.loading_segments.remove(&ident);
+
+            data
+        };
+
+        self.fifo.read(ident.clone(), false)?;
+
+        read_at.read_from_segment_bytes(&ident, &data);
+        self.cache_miss_counter.fetch_add(1, Relaxed);
+        debug!("read segment finished (cache missed)";
+            "ident" => %ident,
+            "elapsed" => ?start_time.saturating_elapsed());
+        Ok(())
+    }
+
+    async fn read_segment_from_remote(
+        &self,
+        ident: &FileSegmentIdent,
+        ftype: FileType,
+    ) -> Result<Bytes> {
+        // TODO: rate limit
+
+        let opts = GetObjectOptions {
+            start_off: Some(ident.start_off),
+            end_off: Some(ident.end_off),
+        };
+        let file_key = self.s3fs.file_key(ident.file_id, ftype);
+        let filename = format!("{ident}.seg");
+        let _enter = self.s3fs.get_runtime().enter();
+        Ok(self.s3fs.get_object(file_key, filename, opts).await?)
+    }
+
+    async fn read_segment_from_cache(
+        &self,
+        ident: &FileSegmentIdent,
+        read_at: &mut ReadAt<'_>,
+    ) -> Result<Option<()>> {
+        let segment_data = try_some!(self.segments.get_segment(ident));
+        let res = match &segment_data {
+            FileSegmentData::InMem(data) => {
+                read_at.read_from_segment_bytes(ident, data);
+                Some(())
+            }
+            FileSegmentData::InStore => self.read_segment_from_local_store(ident, read_at).await?,
+        };
+
+        if res.is_some() {
+            self.fifo.read(ident.clone(), false)?;
+            self.cache_hit_counter.fetch_add(1, Relaxed);
+        }
+        Ok(res)
+    }
+
+    async fn read_segment_from_local_store(
+        &self,
+        ident: &FileSegmentIdent,
+        read_at: &mut ReadAt<'_>,
+    ) -> Result<Option<()>> {
+        debug!("read segment from local"; "ident" => %ident);
+        self.main_store
+            .read_at(
+                ident.file_id,
+                &ident.local_filename(),
+                read_at.buf,
+                read_at.offset - ident.start_off,
+            )
+            .await
     }
 
     async fn read_footer(
@@ -268,6 +524,16 @@ impl IaManagerCore {
         }
 
         Ok((footer, total_size))
+    }
+
+    pub fn cache_hit_rate(&self) -> f64 {
+        let hit = self.cache_hit_counter.load(Relaxed);
+        let miss = self.cache_miss_counter.load(Relaxed);
+        if hit + miss > 0 {
+            hit as f64 / (hit + miss) as f64
+        } else {
+            0.0
+        }
     }
 }
 

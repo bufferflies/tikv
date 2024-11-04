@@ -119,7 +119,6 @@ impl LocalSegmentMap {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct GuardMap<K: Eq + Hash, V> {
     core: DashMap<K, Arc<Mutex<V>>>,
 }
@@ -135,22 +134,33 @@ where
     }
 }
 
-impl<K, V> GuardMap<K, V>
+impl<K, V> Default for GuardMap<K, V>
 where
     K: Eq + Hash,
+{
+    fn default() -> Self {
+        Self {
+            core: DashMap::default(),
+        }
+    }
+}
+
+impl<K, V> GuardMap<K, V>
+where
+    K: Eq + Hash + Clone + fmt::Debug,
     V: Default,
 {
     pub(crate) async fn get_locked(&self, key: K) -> OwnedMutexGuard<V> {
         match self.core.entry(key) {
             Entry::Occupied(entry) => {
-                let value = entry.get().clone();
+                let mutex = entry.get().clone();
                 drop(entry);
-                value.lock_owned().await
+                mutex.lock_owned().await
             }
             Entry::Vacant(entry) => {
-                let value = Arc::new(Mutex::new(Default::default()));
-                let guard = value.clone().try_lock_owned().unwrap();
-                entry.insert(value);
+                let mutex = Arc::new(Mutex::new(Default::default()));
+                let guard = mutex.clone().try_lock_owned().unwrap();
+                entry.insert(mutex);
                 guard
             }
         }
