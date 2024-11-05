@@ -3,6 +3,7 @@
 #![feature(test)]
 #![feature(box_patterns)]
 #![feature(custom_test_frameworks)]
+#![feature(assert_matches)]
 #![test_runner(test_util::run_tests)]
 
 use std::{str::FromStr, sync::atomic::AtomicU16};
@@ -21,6 +22,7 @@ mod columnar;
 mod delete_range;
 mod engine_basic;
 mod gc;
+mod ia_file;
 mod load_data;
 mod major_compaction;
 mod merge;

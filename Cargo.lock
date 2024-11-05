@@ -3864,6 +3864,7 @@ dependencies = [
  "url",
  "usearch",
  "xorf",
+ "zipf 7.0.0",
  "zstd-sys",
 ]
 
@@ -8255,6 +8256,7 @@ dependencies = [
  "perfcnt",
  "procinfo",
  "profiler",
+ "proptest",
  "protobuf",
  "raft",
  "raft_log_engine",

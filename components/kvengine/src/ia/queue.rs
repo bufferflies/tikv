@@ -2,9 +2,6 @@
 
 //! An *Single-Threading* implementation of S3-FIFO algorithm.
 
-// TODO: remove this
-#![allow(dead_code)]
-
 use std::{
     cell::Cell,
     cmp,
@@ -125,7 +122,7 @@ enum FifoTask {
         ident: FileSegmentIdent,
         cb: Box<dyn FnOnce(Option<QueueItem>) + Send>,
     },
-    SavedToMainStore(FileSegmentIdent),
+    SavedToMainStore(FileSegmentIdent, Arc<()> /* task counter */),
     Flush(Box<dyn FnOnce(usize /* pending_tasks */) + Send>),
     Stop,
 }
@@ -141,7 +138,7 @@ impl fmt::Debug for FifoTask {
             FifoTask::GetItem { ident, cb: _ } => {
                 f.debug_struct("GetItem").field("ident", ident).finish()
             }
-            FifoTask::SavedToMainStore(ident) => f
+            FifoTask::SavedToMainStore(ident, _) => f
                 .debug_struct("SavedToMainStore")
                 .field("ident", ident)
                 .finish(),
@@ -211,7 +208,7 @@ impl S3Fifo {
                 FifoTask::GetItem { ident, cb } => {
                     cb(self.get_item(&ident));
                 }
-                FifoTask::SavedToMainStore(ident) => {
+                FifoTask::SavedToMainStore(ident, _task_counter) => {
                     self.post_move_item_to_store(ident);
                 }
                 FifoTask::Flush(cb) => cb(self.pending_tasks()),
@@ -403,10 +400,11 @@ impl S3Fifo {
                     error!("save to main store: failed"; "ident" => %ident, "err" => ?err);
                 }
             }
-            if let Err(err) = task_tx.send(FifoTask::SavedToMainStore(ident.clone())) {
+            // Hold the `task_counter` to help detecting there is another new task.
+            if let Err(err) = task_tx.send(FifoTask::SavedToMainStore(ident.clone(), task_counter))
+            {
                 warn!("save to main store: send task failed"; "ident" => %ident, "err" => ?err);
             }
-            drop(task_counter);
         });
     }
 
@@ -555,5 +553,74 @@ impl Queue {
 
     fn capacity(&self) -> i64 {
         self.cap
+    }
+}
+
+#[cfg(test)]
+mod benches {
+    use futures::future::join_all;
+    use rand::prelude::*;
+    use test::black_box;
+
+    use super::*;
+
+    #[bench]
+    fn bench_s3fifo_1(b: &mut test::Bencher) {
+        bench_s3fifo_impl(b, 100, 900, 100000, 10000, 1);
+    }
+
+    #[bench]
+    fn bench_s3fifo_8(b: &mut test::Bencher) {
+        bench_s3fifo_impl(b, 100, 900, 100000, 10000, 8);
+    }
+
+    fn bench_s3fifo_impl(
+        b: &mut test::Bencher,
+        small_cap: i64,
+        main_cap: i64,
+        data_range: usize,
+        data_count: usize,
+        concurrency: usize,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let segment_data_ctx = SegmentDataContext::new_for_test();
+        let fifo = Arc::new(S3FifoHandle::new(
+            small_cap,
+            main_cap,
+            1,
+            Duration::ZERO,
+            runtime.handle().clone(),
+            segment_data_ctx,
+        ));
+
+        let mut access_seqs = vec![];
+        access_seqs.resize_with(concurrency, || {
+            generate_access_seq(data_range, data_count / concurrency)
+        });
+
+        b.iter(|| {
+            let mut handles = Vec::with_capacity(concurrency);
+            for seq in access_seqs.clone() {
+                let fifo = fifo.clone();
+                let h = runtime.spawn_blocking(move || {
+                    for i in seq {
+                        let ident = FileSegmentIdent {
+                            file_id: 42,
+                            start_off: i,
+                            end_off: i + 1,
+                        };
+                        black_box(fifo.read(ident, false)).unwrap();
+                    }
+                });
+                handles.push(h);
+            }
+            runtime.block_on(join_all(handles));
+        })
+    }
+
+    pub(crate) fn generate_access_seq(range: usize, count: usize) -> Vec<u64> {
+        let mut rng = thread_rng();
+        let zipf = zipf::ZipfDistribution::new(range, 1.03).unwrap();
+        (0..count).map(|_| zipf.sample(&mut rng) as u64).collect()
     }
 }

@@ -1,7 +1,5 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-#![allow(dead_code)]
-
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -485,6 +483,89 @@ fn get_disk_capacity(dir: &Path) -> Result<u64> {
     data_disk
         .map(|disk| disk.total_space())
         .ok_or_else(|| Error::Io(format!("Unable to find disk for dir: {:?}", dir)))
+}
+
+#[cfg(any(test, feature = "testexport"))]
+pub mod test_util {
+    use crate::ia::{
+        queue::{QueueItem, QueueItemPos},
+        types::{FileSegmentData, FileSegmentIdent},
+    };
+
+    pub fn verify_local_segments(
+        segments: &[(FileSegmentIdent, FileSegmentData, Option<QueueItem>)],
+        small_cap: i64,
+        main_cap: i64,
+        expected_total_size: Option<u64>,
+    ) {
+        let mut total_size = 0;
+        let mut small_cached_size = 0;
+        let mut main_cached_size = 0;
+        let mut pos_mismatch_cnt = 0;
+        for (ident, segment, queue_item) in segments {
+            debug!("verify_local_segments"; "ident" => ?ident, "segment" => ?segment, "queue_item" => ?queue_item);
+            total_size += ident.size();
+            let expected_pos = match segment {
+                FileSegmentData::InMem(_) => {
+                    small_cached_size += ident.size();
+                    QueueItemPos::Small
+                }
+                FileSegmentData::InStore => {
+                    main_cached_size += ident.size();
+                    QueueItemPos::Main
+                }
+            };
+
+            match queue_item {
+                None => {
+                    warn!("pos mismatch, queue: No, store: {:?}", segment;
+                            "ident" =>?ident, "segment" => ?segment);
+                    panic!("pos mismatch, not in queue: ident: {}", ident);
+                }
+                Some(queue_item) => {
+                    if queue_item.pos != expected_pos {
+                        warn!("pos mismatch, queue: {:?}, store: {:?}", queue_item.pos, segment;
+                            "ident" =>?ident, "segment" => ?segment, "queue_item" => ?queue_item);
+                        pos_mismatch_cnt += 1;
+                    }
+                }
+            }
+        }
+
+        if let Some(expected_total_size) = expected_total_size {
+            assert!(total_size <= expected_total_size);
+        }
+
+        assert_eq!(
+            pos_mismatch_cnt, 0,
+            "pos mismatch: {}, segments: {:?}",
+            pos_mismatch_cnt, segments
+        );
+
+        info!("cached size";
+            "small_cached_size" => small_cached_size,
+            "small_cap" => small_cap,
+            "main_cached_size" => main_cached_size,
+            "main_cap" => main_cap,
+            "total_size" => total_size,
+        );
+        assert!(
+            small_cached_size as i64 <= small_cap,
+            "total_size: {}, small_cached_size: {}, small_cap: {}, segments: {:?}",
+            total_size,
+            small_cached_size,
+            small_cap,
+            segments
+        );
+        assert!(
+            main_cached_size as i64 <= main_cap,
+            "total_size: {}, main_cached_size: {}, main_cap: {}, segments: {:?}",
+            total_size,
+            main_cached_size,
+            main_cap,
+            segments
+        );
+    }
 }
 
 #[cfg(test)]

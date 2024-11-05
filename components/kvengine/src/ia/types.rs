@@ -1,8 +1,5 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-// TODO: remote this
-#![allow(dead_code)]
-
 use std::{fmt, hash::Hash, ops, sync::Arc};
 
 use bytes::{Buf, BufMut, Bytes};
@@ -37,7 +34,7 @@ impl FileSegmentIdent {
         self.end_off - self.start_off
     }
 
-    pub(crate) fn local_filename(&self) -> String {
+    pub fn local_filename(&self) -> String {
         format!("{}-{}-{}.seg", self.file_id, self.start_off, self.end_off)
     }
 
@@ -173,7 +170,7 @@ const FOOTER_INFO_VER: u8 = 0;
 const FOOTER_LEN_HINT: u64 = 64;
 
 #[derive(PartialEq, Debug, Clone)]
-pub(crate) struct FooterInfo {
+pub struct FooterInfo {
     pub(crate) file_id: u64,
     pub(crate) ftype: FileType,
     pub(crate) file_total_size: u64,

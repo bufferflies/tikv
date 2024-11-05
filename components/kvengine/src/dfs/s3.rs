@@ -30,7 +30,7 @@ use rusoto_s3::{
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-use crate::dfs::{self, metrics::*, Dfs, Error, FileType, Options};
+use crate::dfs::{self, config::Config, metrics::*, Dfs, Error, FileType, Options};
 
 const MAX_RETRY_COUNT: u32 = 9;
 const RETRY_SLEEP_MS: u64 = 500;
@@ -66,6 +66,17 @@ impl S3Fs {
             endpoint, key_id, secret_key, region, bucket, prefix,
         ));
         Self { core }
+    }
+
+    pub fn new_from_config(conf: Config) -> Self {
+        Self::new(
+            conf.prefix,
+            conf.s3_endpoint,
+            conf.s3_key_id,
+            conf.s3_secret_key,
+            conf.s3_region,
+            conf.s3_bucket,
+        )
     }
 
     #[cfg(any(test, feature = "testexport"))]

@@ -65,7 +65,7 @@ failpoints = ["fail/failpoints", "tikv/failpoints", "pd_client/failpoints"]
 cloud-aws = ["external_storage_export/cloud-aws"]
 cloud-gcp = ["external_storage_export/cloud-gcp"]
 cloud-azure = ["external_storage_export/cloud-azure"]
-testexport = ["raftstore/testexport", "tikv/testexport", "pd_client/testexport"]
+testexport = ["raftstore/testexport", "tikv/testexport", "pd_client/testexport", "kvengine/testexport"]
 profiling = ["profiler/profiling"]
 
 test-engine-kv-rocksdb = [
@@ -172,6 +172,7 @@ keys = { workspace = true }
 lazy_static = "1.3"
 panic_hook = { workspace = true }
 profiler = { workspace = true }
+proptest = "1.4"
 rand_xorshift = "0.3"
 resource_metering = { workspace = true }
 rstest = "0.18"

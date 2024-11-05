@@ -17,4 +17,4 @@ pub mod ia_file;
 pub mod manager;
 mod queue;
 pub mod types;
-mod util;
+pub mod util;

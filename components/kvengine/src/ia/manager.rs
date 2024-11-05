@@ -537,6 +537,43 @@ impl IaManagerCore {
     }
 }
 
+#[cfg(any(test, feature = "testexport"))]
+impl IaManager {
+    // Flush all tasks and wait for completion.
+    pub async fn flush_tasks(&self, timeout: Duration) -> Result<()> {
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < timeout {
+            let pending_tasks = self.fifo.flush_tasks().await?;
+            if pending_tasks == 0 {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(Error::IaMgr("wait for pending tasks timeout".to_string()))
+    }
+
+    pub async fn get_local_segments(
+        &self,
+    ) -> Vec<(
+        FileSegmentIdent,
+        crate::ia::types::FileSegmentData,
+        Option<crate::ia::queue::QueueItem>,
+    )> {
+        let local_segments = self
+            .segments
+            .iter()
+            .map(|r| (r.key().clone(), r.value().clone()))
+            .collect::<Vec<_>>();
+        let mut segments = Vec::with_capacity(local_segments.len());
+        // TODO: find segments in queue but not in local store.
+        for (ident, segment) in local_segments {
+            let queue_item = self.fifo.get_item(ident.clone()).await.unwrap();
+            segments.push((ident, segment, queue_item));
+        }
+        segments
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SegmentDataContext {
     segments: Arc<LocalSegmentMap>,
@@ -617,5 +654,13 @@ impl SegmentDataContext {
         self.main_store
             .save(ident.file_id, &ident.local_filename(), bytes)
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        Self {
+            main_store: Arc::new(crate::ia::util::LocalMemoryStore::default()),
+            segments: Arc::new(LocalSegmentMap::default()),
+        }
     }
 }
