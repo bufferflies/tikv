@@ -21,7 +21,7 @@ use tikv_util::{error, info, mpsc::Receiver, time::Instant, warn};
 use crate::{
     backup::{backup_file_full_path, IncrementalBackupFile},
     common::{
-        collect_store_wal_rlog_files, create_pd_client, StoreWalRlog, TableFile,
+        collect_store_wal_rlog_files, create_pd_client, StoreRlog, StoreWalRlog, TableFile,
         INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, Result},
@@ -233,6 +233,7 @@ pub struct ArchiveConfig {
     pub start_archive_duration: Duration,
     pub expiration_date: String,
     pub concurrency: usize,
+    pub store_concurrency: usize,
     pub skip_no_meta_days: usize,
     pub skip_shards: Option<HashSet<u64>>,
     pub dry_run: bool,
@@ -251,6 +252,7 @@ impl ArchiveConfig {
             start_archive_duration: Duration::from_secs(0),
             expiration_date,
             concurrency: LOAD_FILE_CONCURRENCY,
+            store_concurrency: RESTORE_RFENGINE_CONCURRENCY,
             skip_no_meta_days: 0,
             skip_shards: None,
             dry_run: true,
@@ -451,7 +453,7 @@ fn write_archive_packages_and_index(
                     collect_store_wal_rlog_files(dfs, &cluster_backup_meta, store_id);
                 let _ = tx.send(store_wal_rlog_files);
             });
-            if msg_count < RESTORE_RFENGINE_CONCURRENCY {
+            if msg_count < config.store_concurrency {
                 msg_count += 1;
             } else {
                 recv_store_wal_rlog_files(&result_rx)?;
@@ -725,14 +727,11 @@ pub async fn get_archived_object(s3fs: &S3Fs, archive_addr: ArchiveAddress) -> R
         })
 }
 
-pub fn get_archived_wals(
-    s3fs: &S3Fs,
-    date: String,
+pub fn get_archived_wal_addresses(
     store_meta: &StoreMeta,
-) -> Result<Vec<(u32, Vec<Bytes>)>> {
+) -> Result<Vec<(u32, Vec<ObjectAddress>)>> {
     let mut wals = Vec::with_capacity(store_meta.wal_metas.len());
-    let mut handles = vec![];
-    let runtime = s3fs.get_runtime();
+    let mut wal_addrs = vec![];
     for wal_meta in &store_meta.wal_metas {
         let epoch = wal_meta.epoch_id;
         for wal_chunk_address in &wal_meta.wal_chunk_addresses {
@@ -741,21 +740,55 @@ pub fn get_archived_wals(
                 wal_chunk_address.package_id,
                 wal_chunk_address.offset,
             );
-            let wal_chunk_archive_addr = ArchiveAddress::new(date.clone(), *wal_chunk_address);
-            let fs = s3fs.clone();
-            handles.push(runtime.spawn(async move {
-                get_archived_object(&fs, wal_chunk_archive_addr)
-                    .await
-                    .map(|data| (key, epoch, data))
-            }));
+            wal_addrs.push((key, epoch, *wal_chunk_address));
         }
     }
-    let mut wal_chunks = vec![];
+    wal_addrs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    let mut last_wal = (0, vec![]);
+    for (_, epoch, addr) in wal_addrs {
+        if epoch == last_wal.0 {
+            last_wal.1.push(addr);
+            continue;
+        }
+        if !last_wal.1.is_empty() {
+            wals.push(last_wal)
+        }
+        last_wal = (epoch, vec![addr]);
+    }
+    if !last_wal.1.is_empty() {
+        wals.push(last_wal)
+    }
+    Ok(wals)
+}
+
+pub fn get_archived_wals_from_addresses(
+    s3fs: &S3Fs,
+    date: &str,
+    addrs: Vec<ObjectAddress>,
+) -> Result<Vec<Bytes>> {
+    let runtime = s3fs.get_runtime();
+    let addrs_len = addrs.len();
+    let mut handles = Vec::with_capacity(addrs_len);
+
+    // There is no rate limit here, as the number of WAL chunks should be limited.
+    // By default, there are 4 chunks per epoch (wal_size/wal_chunk_target_file_size
+    // = 512MB/128MB).
+    for addr in addrs {
+        let wal_chunk_archive_addr = ArchiveAddress::new(date.to_string(), addr);
+        let fs = s3fs.clone();
+        handles.push(
+            runtime.spawn(async move { get_archived_object(&fs, wal_chunk_archive_addr).await }),
+        );
+    }
+
+    let mut wal_chunks = Vec::with_capacity(addrs_len);
     let mut errs = vec![];
+    // `join_all` will keep the order.
     for res in runtime.block_on(futures::future::join_all(handles)) {
         match res.unwrap() {
-            Ok((key, epoch, data)) => {
-                wal_chunks.push((key, epoch, data));
+            Ok(data) => {
+                wal_chunks.push(data);
             }
             Err(err) => {
                 errs.push(err);
@@ -765,20 +798,19 @@ pub fn get_archived_wals(
     if !errs.is_empty() {
         return Err(Error::ArchiveError(format!("{:?}", errs)));
     }
-    wal_chunks.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    let mut last_wal = (0, vec![]);
-    for (_, epoch, data) in wal_chunks.into_iter() {
-        if epoch == last_wal.0 {
-            last_wal.1.push(data);
-            continue;
-        }
-        if !last_wal.1.is_empty() {
-            wals.push(last_wal)
-        }
-        last_wal = (epoch, vec![data]);
-    }
-    if !last_wal.1.is_empty() {
-        wals.push(last_wal)
+    Ok(wal_chunks)
+}
+
+pub fn get_archived_wals(
+    s3fs: &S3Fs,
+    date: &str,
+    store_meta: &StoreMeta,
+) -> Result<Vec<(u32, Vec<Bytes>)>> {
+    let wal_addrs = get_archived_wal_addresses(store_meta)?;
+    let mut wals = Vec::with_capacity(wal_addrs.len());
+    for (epoch, addrs) in wal_addrs {
+        let wal_chunks = get_archived_wals_from_addresses(s3fs, date, addrs)?;
+        wals.push((epoch, wal_chunks));
     }
     Ok(wals)
 }
@@ -1349,8 +1381,8 @@ impl ArchiveReader {
         })
     }
 
-    pub fn get_start_date(&self) -> String {
-        self.start_date.clone()
+    pub fn get_start_date(&self) -> &str {
+        &self.start_date
     }
 
     pub fn get_meta_archive_addr(&self) -> Option<ArchiveAddress> {
@@ -1393,25 +1425,30 @@ impl ArchiveReader {
             )))
     }
 
-    pub fn read_store_wal_rlog_files(
+    pub fn read_store_rlog_files(
         s3fs: &S3Fs,
-        date: String,
-        store_meta: StoreMeta,
-    ) -> Result<StoreWalRlog> {
+        date: &str,
+        store_meta: &StoreMeta,
+    ) -> Result<StoreRlog> {
         let snap_epoch = store_meta.snapshot_epoch_id;
-        let meta_archive_addr = ArchiveAddress::new(date.clone(), store_meta.snapshot_meta_address);
+        let meta_archive_addr =
+            ArchiveAddress::new(date.to_string(), store_meta.snapshot_meta_address);
         let snap_meta = s3fs
             .get_runtime()
             .block_on(get_archived_object(s3fs, meta_archive_addr))?;
-        let rlog_archive_addr = ArchiveAddress::new(date.clone(), store_meta.snapshot_rlog_address);
+        let rlog_archive_addr =
+            ArchiveAddress::new(date.to_string(), store_meta.snapshot_rlog_address);
         let snap_rlog = s3fs
             .get_runtime()
             .block_on(get_archived_object(s3fs, rlog_archive_addr))?;
-        let wals = get_archived_wals(s3fs, date, &store_meta)?;
-        let store_wal_rlog =
-            StoreWalRlog::new(store_meta.store_id, snap_epoch, snap_meta, snap_rlog, wals);
-        info!("read {} done", store_wal_rlog);
-        Ok(store_wal_rlog)
+        let store_rlog = StoreRlog {
+            store_id: store_meta.store_id,
+            snap_epoch,
+            snap_meta,
+            snap_rlog,
+        };
+        info!("read rlog files done: {:?}", store_rlog);
+        Ok(store_rlog)
     }
 
     pub fn get_file_archive_addr(&self, file_id: u64) -> Option<ArchiveAddress> {
@@ -1790,22 +1827,25 @@ mod tests {
             for i in 0..num_stores {
                 let store_id = i;
                 let store_meta = reader.get_store_wal_rlog_meta(store_id).unwrap();
-                let store_wal_rlog = ArchiveReader::read_store_wal_rlog_files(
+                let store_rlog = ArchiveReader::read_store_rlog_files(
                     &reader.s3fs,
                     reader.get_start_date(),
-                    store_meta,
+                    &store_meta,
                 )
                 .unwrap();
-                assert_eq!(store_wal_rlog.snap_epoch, get_snap_epoch(store_id));
+                assert_eq!(store_rlog.snap_epoch, get_snap_epoch(store_id));
                 let mut store_backup_meta = StoreBackupMeta::default();
                 store_backup_meta
-                    .merge_from_bytes(store_wal_rlog.snap_meta.chunk())
+                    .merge_from_bytes(store_rlog.snap_meta.chunk())
                     .unwrap();
                 assert_eq!(store_backup_meta.store_id, store_id);
-                assert_eq!(store_wal_rlog.snap_rlog, get_snap_rlog(store_id));
-                assert_eq!(store_wal_rlog.wals.len(), 1);
-                assert_eq!(store_wal_rlog.wals[0].0, get_wal_epoch(store_id));
-                assert_eq!(store_wal_rlog.wals[0].1[0], get_wal_chunk(store_id));
+                assert_eq!(store_rlog.snap_rlog, get_snap_rlog(store_id));
+
+                let wals =
+                    get_archived_wals(&reader.s3fs, reader.get_start_date(), &store_meta).unwrap();
+                assert_eq!(wals.len(), 1);
+                assert_eq!(wals[0].0, get_wal_epoch(store_id));
+                assert_eq!(wals[0].1[0], get_wal_chunk(store_id));
             }
         }
         for j in 0..NUM_DATES {

@@ -56,6 +56,9 @@ pub struct ArchiveArgs {
     /// Concurrently do s3 requests.
     #[clap(long, default_value_t = LOAD_FILE_CONCURRENCY)]
     pub concurrency: usize,
+    /// Concurrency on number of TiKV stores when perform restoration.
+    #[clap(long, default_value_t = 3)]
+    pub store_concurrency: usize,
     /// Skip days without cluster backup meta.
     #[clap(long, default_value_t = 0)]
     pub skip_no_meta_days: usize,
@@ -99,6 +102,7 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
     config.start_archive_duration = Duration::from(args.start_archive_duration);
     config.expiration_date = args.expiration_date.clone();
     config.concurrency = args.concurrency;
+    config.store_concurrency = args.store_concurrency;
     config.skip_no_meta_days = args.skip_no_meta_days;
     config.dry_run = args.dry_run;
     config.dfs.override_from_env();

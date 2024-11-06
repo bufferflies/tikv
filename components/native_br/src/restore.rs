@@ -25,10 +25,11 @@ use tikv_util::{
 use crate::{
     backup::backup_file_full_path,
     common::{
-        check_store_id_exists, collect_store_wal_rlog_files, generate_etcd_connect_opt,
-        get_latest_backup_meta, replay_wal_logs,
+        check_store_id_exists, collect_snapshot_meta_rlog_files, generate_etcd_connect_opt,
+        get_latest_backup_meta, replay_wal_logs_from_backup,
     },
     error::{Error, Result},
+    restore_keyspace::RESTORE_RFENGINE_CONCURRENCY,
 };
 
 const PD_ROOT_PATH: &str = "/pd";
@@ -249,16 +250,21 @@ fn setup_raft_engine(
     path: &str,
     dfs: Arc<S3Fs>,
 ) -> Result<()> {
-    let wals = if lightweight {
-        let wal_rlog_files = collect_store_wal_rlog_files(dfs.clone(), cluster_backup, store_id)?;
+    let snap_epoch_opt = if lightweight {
+        let rlog_files = collect_snapshot_meta_rlog_files(
+            dfs.clone(),
+            &dfs.get_prefix(),
+            cluster_backup,
+            store_id,
+        )?;
         rfengine::lightweight_restore(
             Path::new(&conf.raft_store.raftdb_path),
-            wal_rlog_files.snap_epoch,
-            wal_rlog_files.snap_meta,
-            wal_rlog_files.snap_rlog,
+            rlog_files.snap_epoch,
+            rlog_files.snap_meta,
+            rlog_files.snap_rlog,
         )
         .map_err(|x| Error::RfEngine(x))?;
-        Some(wal_rlog_files.wals)
+        Some(rlog_files.snap_epoch)
     } else {
         rfengine::restore(
             dfs.clone(),
@@ -273,10 +279,8 @@ fn setup_raft_engine(
     let rf_engine = TikvServer::init_raft_engine(conf)?;
     rf_engine.set_engine_id(store_id);
 
-    if let Some(wals) = wals {
-        // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found,
-        // the `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
-        replay_wal_logs(
+    if lightweight {
+        replay_wal_logs_from_backup(
             Arc::new(MockPdClient {}),
             dfs,
             store_id,
@@ -285,7 +289,7 @@ fn setup_raft_engine(
             true,
             true,
             Duration::from_secs(1), // NOTE: Retry is unnecessary for full restoration.
-            wals,
+            snap_epoch_opt.unwrap(),
         )?;
     }
     setup_raft_engine_new_store_id(&rf_engine, cluster_backup, store_id, alloc_id);
@@ -489,6 +493,8 @@ pub struct RestoreConfig {
     pub timeout_split_regions: ReadableDuration,
     /// The timeout for PD control.
     pub timeout_pd_control: ReadableDuration,
+    /// Concurrency on number of TiKV stores when perform restoration.
+    pub store_concurrency: usize,
 }
 
 impl Default for RestoreConfig {
@@ -508,6 +514,7 @@ impl Default for RestoreConfig {
             max_retry: DEFAULT_RESTORE_MAX_RETRY,
             tolerate_err: 0,
             strict_tolerate: false,
+            store_concurrency: RESTORE_RFENGINE_CONCURRENCY,
         }
     }
 }

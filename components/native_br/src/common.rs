@@ -21,7 +21,7 @@ use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
 use rfengine::{
-    assemble_wal_chunks, find_latest_snapshot, parse_epoch_from_snapshot_key, parse_wal_chunk_key,
+    assemble_wal_chunks, find_latest_snapshot, parse_epoch_from_snapshot_key,
     snapshot_store_meta_key, verify_wal_chunks_integrity, wal_chunk_file_prefix,
     wal_chunk_file_suffix, RfEngine, MAX_EPOCH_BACKWARD,
 };
@@ -32,6 +32,7 @@ use slog_global::{error, warn};
 use tikv_util::{box_err, codec::bytes::decode_bytes, info, time::Instant};
 
 use crate::{
+    archive::{get_archived_wal_addresses, get_archived_wals_from_addresses, StoreMeta},
     backup::IncrementalBackupFile,
     error::{Error, Result},
 };
@@ -353,7 +354,48 @@ pub fn replay_wal_logs(
     complete_wal_chunks: bool,
     full_restore: bool,
     fetch_wal_timeout: Duration,
-    chunks_data: Vec<(u32, Vec<Bytes>)>,
+    archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
+    snap_epoch: u32,
+) -> Result<()> {
+    if let Some((date, store_meta)) = archive_store_meta {
+        replay_wal_logs_from_archive(
+            &date,
+            store_meta,
+            pd_client,
+            dfs,
+            store_id,
+            cluster_backup,
+            rf,
+            complete_wal_chunks,
+            full_restore,
+            fetch_wal_timeout,
+        )?;
+    } else {
+        replay_wal_logs_from_backup(
+            pd_client,
+            dfs,
+            store_id,
+            cluster_backup,
+            rf,
+            complete_wal_chunks,
+            full_restore,
+            fetch_wal_timeout,
+            snap_epoch,
+        )?;
+    }
+    Ok(())
+}
+
+pub fn replay_wal_logs_from_backup(
+    pd_client: Arc<dyn PdClient>,
+    dfs: Arc<S3Fs>,
+    store_id: u64,
+    cluster_backup: &ClusterBackupMeta,
+    rf: &RfEngine,
+    complete_wal_chunks: bool,
+    full_restore: bool,
+    fetch_wal_timeout: Duration,
+    snap_epoch: u32,
 ) -> Result<()> {
     let store_meta = cluster_backup
         .get_stores()
@@ -364,7 +406,13 @@ pub fn replay_wal_logs(
     let backup_offset = store_meta.get_offset();
 
     // Replay epoch wal chunk files in order.
-    for (epoch_id, chunks) in chunks_data.into_iter() {
+    // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
+    // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
+    for epoch_id in snap_epoch + 1..=backup_epoch {
+        let chunks = collect_wal_chunks_with_retry(dfs.clone(), store_id, epoch_id, backup_epoch)?;
+        // Note: the chunks of last epoch (i.e., backup_epoch) can be empty. All chunks
+        // are fetched from online rfengine.
+        // See https://github.com/tidbcloud/cloud-storage-engine/issues/1319.
         replay_wal_chunks(
             pd_client.clone(),
             dfs.clone(),
@@ -379,6 +427,46 @@ pub fn replay_wal_logs(
             fetch_wal_timeout,
         )?;
     }
+    Ok(())
+}
+
+fn replay_wal_logs_from_archive(
+    date: &str,
+    store_meta: StoreMeta,
+    pd_client: Arc<dyn PdClient>,
+    dfs: Arc<S3Fs>,
+    store_id: u64,
+    cluster_backup: &ClusterBackupMeta,
+    rf: &RfEngine,
+    complete_wal_chunks: bool,
+    full_restore: bool,
+    fetch_wal_timeout: Duration,
+) -> Result<()> {
+    let store_backup = cluster_backup
+        .get_stores()
+        .iter()
+        .find(|x| x.store_id == store_id)
+        .expect("store not found");
+    let backup_epoch = store_backup.get_epoch();
+    let backup_offset = store_backup.get_offset();
+
+    let wal_addrs = get_archived_wal_addresses(&store_meta)?;
+    for (epoch, addrs) in wal_addrs {
+        let chunks = get_archived_wals_from_addresses(&dfs, date, addrs)?;
+        replay_wal_chunks(
+            pd_client.clone(),
+            dfs.clone(),
+            store_id,
+            chunks,
+            rf,
+            epoch,
+            backup_epoch,
+            backup_offset,
+            complete_wal_chunks,
+            full_restore,
+            fetch_wal_timeout,
+        )?;
+    }
 
     Ok(())
 }
@@ -386,14 +474,12 @@ pub fn replay_wal_logs(
 pub fn collect_wal_chunks_with_retry(
     dfs: Arc<S3Fs>,
     store_id: u64,
-    snap_epoch: u32,
+    replay_epoch: u32,
     backup_epoch: u32,
-) -> Result<Vec<(u32, Vec<Bytes>)>> {
-    // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found,
-    // the `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
+) -> Result<Vec<Bytes>> {
     let mut collect_wal_retry = 0;
     loop {
-        match collect_wal_chunks(dfs.clone(), store_id, snap_epoch, backup_epoch) {
+        match collect_wal_chunks(dfs.clone(), store_id, replay_epoch, backup_epoch) {
             Ok(wals) => {
                 return Ok(wals);
             }
@@ -423,115 +509,79 @@ pub fn collect_wal_chunks_with_retry(
 pub fn collect_wal_chunks(
     dfs: Arc<S3Fs>,
     store_id: u64,
-    snap_epoch: u32,
+    replay_epoch: u32,
     backup_epoch: u32,
-) -> Result<Vec<(u32, Vec<Bytes>)>> {
-    let mut wal_chunks = vec![];
+) -> Result<Vec<Bytes>> {
     let dfs_prefix = format!("{}/", dfs.get_prefix());
-    for replay_epoch in snap_epoch + 1..=backup_epoch {
-        let scan_prefix = wal_chunk_file_prefix(store_id, replay_epoch);
-        let scan_start = wal_chunk_file_suffix(0, 0);
-        info!(
-            "replay_wal_logs list chunks with prefix {} start_after {} replay_epoch {} backup meta epoch {}",
-            scan_prefix, scan_start, replay_epoch, backup_epoch
-        );
+    let scan_prefix = wal_chunk_file_prefix(store_id, replay_epoch);
+    let scan_start = wal_chunk_file_suffix(0, 0);
+    info!(
+        "replay_wal_logs list chunks with prefix {} start_after {} replay_epoch {} backup meta epoch {}",
+        scan_prefix, scan_start, replay_epoch, backup_epoch
+    );
 
-        match dfs.list_objects(&scan_start, Some(&scan_prefix), None) {
-            Ok((chunks, _)) => {
-                let chunk_keys: Vec<String> = chunks
-                    .iter()
-                    .map(|chunk| {
-                        chunk
-                            .key
-                            .as_str()
-                            .strip_prefix(&dfs_prefix)
-                            .unwrap_or_default()
-                            .to_string()
-                    })
-                    .collect::<Vec<_>>();
-                wal_chunks.push((replay_epoch, chunk_keys));
-            }
-            Err(err) => {
-                error!("list wal chunk files failed: {:?}", err);
-                return Err(box_err!("list wal chunk files failed: {:?}", err));
-            }
+    let chunk_keys = match dfs.list_objects(&scan_start, Some(&scan_prefix), None) {
+        Ok((chunks, _)) => chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .key
+                    .as_str()
+                    .strip_prefix(&dfs_prefix)
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            error!("list wal chunk files failed: {:?}", err);
+            return Err(box_err!("list wal chunk files failed: {:?}", err));
         }
-    }
+    };
 
     // Verify the wal chunk files integrity.
-    for (epoch_id, chunk_keys) in wal_chunks.iter() {
-        if !verify_wal_chunks_integrity(chunk_keys, *epoch_id != backup_epoch) {
-            let err_msg = format!(
-                "wal chunk files integrity check failed, epoch_id: {} backup_epoch: {} chunk_keys: {:?}",
-                epoch_id, backup_epoch, chunk_keys
-            );
-            return Err(Error::WalChunkIntegrityError(err_msg));
-        }
+    if !verify_wal_chunks_integrity(&chunk_keys, replay_epoch != backup_epoch) {
+        let err_msg = format!(
+            "wal chunk files integrity check failed, epoch_id: {} backup_epoch: {} chunk_keys: {:?}",
+            replay_epoch, backup_epoch, chunk_keys
+        );
+        return Err(Error::WalChunkIntegrityError(err_msg));
     }
 
     // Download the wal chunk files concurrently.
-    let chunks_data = collect_all_chunk_files(dfs, wal_chunks)?;
+    let chunks_data = collect_all_chunk_files(dfs, replay_epoch, chunk_keys)?;
 
     Ok(chunks_data)
 }
 
-// Collect wal chunk files concurrently and return the chunks data with order.
-// The data is compressed with lz4 and all chunks data size about 1GB at most,
-// so it's safe to keep all data in memory.
+// Collect wal chunk files of the specified epoch concurrently and return the
+// chunks data in order. The data is compressed with lz4 and all chunks data
+// size about 512MB (see `target_file_size`) at most, so it's safe to keep all
+// data in memory.
 fn collect_all_chunk_files(
     dfs: Arc<S3Fs>,
-    wal_chunks: Vec<(u32, Vec<String>)>,
-) -> Result<Vec<(u32, Vec<Bytes>)>> {
-    // Should keep all epoch ids to properly handle epoch with no chunk.
-    let mut chunks_map: HashMap<u32, Vec<(String, Bytes)>> = HashMap::from_iter(
-        wal_chunks
-            .iter()
-            .map(|(epoch_id, chunks)| (*epoch_id, Vec::with_capacity(chunks.len()))),
-    );
-    let objects_cnt = wal_chunks
-        .iter()
-        .map(|(_, chunks)| chunks.len())
-        .sum::<usize>();
-    let mut all_chunk_keys_with_option = Vec::with_capacity(objects_cnt);
-    for (_, chunk_keys) in wal_chunks.into_iter() {
-        all_chunk_keys_with_option.extend(
-            chunk_keys
-                .into_iter()
-                .map(|key| (key, GetObjectOptions::default()))
-                .collect::<Vec<_>>(),
-        );
-    }
+    epoch_id: u32,
+    chunk_keys: Vec<String>,
+) -> Result<Vec<Bytes>> {
+    let chunk_keys_with_option = chunk_keys
+        .into_iter()
+        .map(|key| (key, GetObjectOptions::default()))
+        .collect::<Vec<_>>();
 
-    let chunks = dfs
-        .get_objects(all_chunk_keys_with_option)
+    let mut chunks = dfs
+        .get_objects(chunk_keys_with_option)
         .map_err(|e| Error::DfsError(dfs::Error::S3(e)))?;
 
-    for (key, value) in chunks.into_iter() {
-        let (epoch_id, ..) = parse_wal_chunk_key(Some(&key)).unwrap();
-
-        info!(
-            "collect wal chunk file {} epoch {} size {}",
-            key,
-            epoch_id,
-            value.len()
-        );
-        chunks_map.get_mut(&epoch_id).unwrap().push((key, value));
-    }
-    let mut sorted_by_epoch = chunks_map.into_iter().collect::<Vec<_>>();
-    sorted_by_epoch.sort_by_key(|k| k.0);
-
-    let chunks_data = sorted_by_epoch
+    chunks.sort_by(|a, b| a.0.cmp(&b.0));
+    let chunks_data = chunks
         .into_iter()
-        .map(|(epoch_id, mut chunks_vec)| {
-            // Sort objects by chunk name.
-            chunks_vec.sort_by(|a, b| a.0.cmp(&b.0));
-            (
+        .map(|(key, data)| {
+            info!(
+                "collect wal chunk file {} epoch {} size {}",
+                key,
                 epoch_id,
-                chunks_vec
-                    .into_iter()
-                    .map(|(_, data)| data)
-                    .collect::<Vec<_>>(),
-            )
+                data.len()
+            );
+            data
         })
         .collect::<Vec<_>>();
     Ok(chunks_data)
@@ -612,9 +662,7 @@ pub fn collect_snapshot_meta_rlog_files(
     prefix: &str,
     cluster_backup: &ClusterBackupMeta,
     store_id: u64,
-) -> Result<(u32, Bytes, Bytes)> {
-    // returns snap_epoch, snap_meta_data, snap_rlog_data
-
+) -> Result<StoreRlog> {
     let store_meta = cluster_backup
         .get_stores()
         .iter()
@@ -647,7 +695,10 @@ pub fn collect_snapshot_meta_rlog_files(
             "no snapshot available from epoch 1 for store {}, create empty snap file",
             store_id
         );
-        return Ok((0, Bytes::default(), Bytes::default()));
+        return Ok(StoreRlog {
+            store_id,
+            ..Default::default()
+        });
     }
     let snap_epoch = snap_epoch.unwrap();
     info!(
@@ -700,7 +751,12 @@ pub fn collect_snapshot_meta_rlog_files(
             );
             Error::DfsError(e)
         })?;
-    Ok((snap_epoch, meta_data, rlog_data))
+    Ok(StoreRlog {
+        store_id,
+        snap_epoch,
+        snap_meta: meta_data,
+        snap_rlog: rlog_data,
+    })
 }
 
 #[derive(Default, Clone)]
@@ -744,13 +800,32 @@ impl StoreWalRlog {
     }
 }
 
+#[derive(Default, Clone)]
+pub struct StoreRlog {
+    pub store_id: u64,
+    pub snap_epoch: u32,
+    pub snap_meta: Bytes,
+    pub snap_rlog: Bytes,
+}
+
+impl fmt::Debug for StoreRlog {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoreRlog")
+            .field("store_id", &self.store_id)
+            .field("snap_epoch", &self.snap_epoch)
+            .field("snap_meta_len", &self.snap_meta.len())
+            .field("snap_rlog_len", &self.snap_rlog.len())
+            .finish()
+    }
+}
+
 pub fn collect_store_wal_rlog_files(
     s3fs: Arc<S3Fs>,
     cluster_backup: &ClusterBackupMeta,
     store_id: u64,
 ) -> Result<StoreWalRlog> {
     // collect snap files.
-    let (snap_epoch, snap_meta, snap_rlog) = collect_snapshot_meta_rlog_files(
+    let store_rlog = collect_snapshot_meta_rlog_files(
         s3fs.clone(),
         &s3fs.get_prefix(),
         cluster_backup,
@@ -764,9 +839,22 @@ pub fn collect_store_wal_rlog_files(
         .find(|x| x.store_id == store_id)
         .expect("store not found");
     let backup_epoch = store_meta.get_epoch();
-    let wals = collect_wal_chunks_with_retry(s3fs, store_id, snap_epoch, backup_epoch)?;
+    let mut wals = Vec::with_capacity((backup_epoch - store_rlog.snap_epoch) as usize);
+    // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
+    // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
+    for epoch_id in store_rlog.snap_epoch + 1..=backup_epoch {
+        let epoch_wals =
+            collect_wal_chunks_with_retry(s3fs.clone(), store_id, epoch_id, backup_epoch)?;
+        wals.push((epoch_id, epoch_wals))
+    }
 
-    let store_wal_rlog_files = StoreWalRlog::new(store_id, snap_epoch, snap_meta, snap_rlog, wals);
+    let store_wal_rlog_files = StoreWalRlog::new(
+        store_id,
+        store_rlog.snap_epoch,
+        store_rlog.snap_meta,
+        store_rlog.snap_rlog,
+        wals,
+    );
     info!("collect {}", store_wal_rlog_files);
     Ok(store_wal_rlog_files)
 }

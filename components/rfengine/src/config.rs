@@ -32,7 +32,7 @@ pub struct Config {
 
     /// Target file size for wal chunk files.
     ///
-    /// Default: "64MB"
+    /// Default: "128MB"
     pub wal_chunk_target_file_size: ReadableSize,
 
     /// Open RfEngine in cli mode used by tools. Skip serde for this field to
@@ -52,7 +52,7 @@ impl Default for Config {
             worker_rate_limit: ReadableSize::mb(125),
             wal_sync_dir: "".to_owned(),
             lightweight_backup: false,
-            wal_chunk_target_file_size: ReadableSize::mb(64),
+            wal_chunk_target_file_size: ReadableSize::mb(128),
             cli_mode: false,
         }
     }

@@ -52,7 +52,7 @@ use crate::{
         ArchiveReader, StoreMeta,
     },
     common::{
-        collect_store_wal_rlog_files, load_peer_raft_state, load_rf_engine_meta, now,
+        collect_snapshot_meta_rlog_files, load_peer_raft_state, load_rf_engine_meta, now,
         replay_wal_logs, retain_sst_files, send_request_to_store, RawRegion, RegionMetaGetter,
         StorePeer, TableFile,
     },
@@ -786,7 +786,7 @@ impl BackupCluster {
             let keyspace_tag = cluster.tag().to_string();
             let archive_store_meta = if let Some(archive_reader) = &cluster.archive_reader {
                 let store_meta = archive_reader.get_store_wal_rlog_meta(store_id)?;
-                Some((archive_reader.get_start_date(), store_meta))
+                Some((archive_reader.get_start_date().to_string(), store_meta))
             } else {
                 None
             };
@@ -810,7 +810,7 @@ impl BackupCluster {
                 let _ = tx.send(res.map(|rf_engine| (store_id, store_config, rf_engine)));
             });
 
-            if msg_count < RESTORE_RFENGINE_CONCURRENCY {
+            if msg_count < restore_conf.store_concurrency {
                 msg_count += 1;
             } else {
                 recv_restore_rfengine(&result_rx)?;
@@ -840,6 +840,70 @@ impl BackupCluster {
         &self.tag
     }
 
+    fn setup_raft_engine_for_lightweight(
+        store_id: u64,
+        cluster_backup: &ClusterBackupMeta,
+        conf: &TikvConfig,
+        pd_client: Arc<dyn PdClient>,
+        dfs: Arc<S3Fs>,
+        fetch_wal_timeout: Duration,
+        archiving: bool,
+        archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
+    ) -> Result<RfEngine> {
+        let rlog_files = if let Some((date, store_meta)) = &archive_store_meta {
+            ArchiveReader::read_store_rlog_files(&dfs, date, store_meta)?
+        } else {
+            collect_snapshot_meta_rlog_files(
+                dfs.clone(),
+                &dfs.get_prefix(),
+                cluster_backup,
+                store_id,
+            )?
+        };
+        rfengine::lightweight_restore(
+            Path::new(&conf.raft_store.raftdb_path),
+            rlog_files.snap_epoch,
+            rlog_files.snap_meta,
+            rlog_files.snap_rlog,
+        )
+        .map_err(|x| Error::RfEngine(x))?;
+
+        let rf_engine = TikvServer::init_raft_engine(conf)?;
+
+        // When archiving, the dfs should have complete wal chunks.
+        let complete_wal_chunks = archiving;
+        replay_wal_logs(
+            pd_client,
+            dfs,
+            store_id,
+            cluster_backup,
+            &rf_engine,
+            complete_wal_chunks,
+            false,
+            fetch_wal_timeout,
+            archive_store_meta,
+            rlog_files.snap_epoch,
+        )?;
+        Ok(rf_engine)
+    }
+
+    fn setup_raft_engine_for_normal(
+        store_id: u64,
+        cluster_backup: &ClusterBackupMeta,
+        conf: &TikvConfig,
+        dfs: Arc<S3Fs>,
+    ) -> Result<RfEngine> {
+        rfengine::restore(
+            dfs.clone(),
+            cluster_backup,
+            store_id,
+            Path::new(&conf.raft_store.raftdb_path),
+            None, // TODO: pass `Some(keyspace_id)` in.
+        );
+        let rf_engine = TikvServer::init_raft_engine(conf)?;
+        Ok(rf_engine)
+    }
+
     pub fn setup_raft_engine(
         store_id: u64,
         cluster_backup: &ClusterBackupMeta,
@@ -850,49 +914,20 @@ impl BackupCluster {
         archiving: bool,
         archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
     ) -> Result<RfEngine> {
-        let wals = if cluster_backup.is_lightweight {
-            let wal_rlog_files = if let Some((date, store_meta)) = archive_store_meta {
-                ArchiveReader::read_store_wal_rlog_files(&dfs, date, store_meta)?
-            } else {
-                collect_store_wal_rlog_files(dfs.clone(), cluster_backup, store_id)?
-            };
-            rfengine::lightweight_restore(
-                Path::new(&conf.raft_store.raftdb_path),
-                wal_rlog_files.snap_epoch,
-                wal_rlog_files.snap_meta,
-                wal_rlog_files.snap_rlog,
-            )
-            .map_err(|x| Error::RfEngine(x))?;
-            Some(wal_rlog_files.wals)
-        } else {
-            rfengine::restore(
-                dfs.clone(),
-                cluster_backup,
+        if cluster_backup.is_lightweight {
+            Self::setup_raft_engine_for_lightweight(
                 store_id,
-                Path::new(&conf.raft_store.raftdb_path),
-                None, // TODO: pass `Some(keyspace_id)` in.
-            );
-            None
-        };
-
-        let rf_engine = TikvServer::init_raft_engine(conf)?;
-
-        if let Some(wals) = wals {
-            // When archiving, the dfs should have complete wal chunks.
-            let complete_wal_chunks = archiving;
-            replay_wal_logs(
-                pd_client.clone(),
+                cluster_backup,
+                conf,
+                pd_client,
                 dfs,
-                store_id,
-                cluster_backup,
-                &rf_engine,
-                complete_wal_chunks,
-                false,
                 fetch_wal_timeout,
-                wals,
-            )?;
+                archiving,
+                archive_store_meta,
+            )
+        } else {
+            Self::setup_raft_engine_for_normal(store_id, cluster_backup, conf, dfs)
         }
-        Ok(rf_engine)
     }
 
     // Take all raw metas to release memory.
