@@ -515,6 +515,30 @@ impl StatusServer {
         }
     }
 
+    // URI: /kvengine/columnar_status?keyspace_id=xxx&table_id=xxx
+    // Collect the columnar replica status of the table
+    async fn collect_columnar_status(
+        req: Request<Body>,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        let keyspace_id = match u32::from_str(query_pairs.get("keyspace_id").unwrap()) {
+            Ok(id) => id,
+            Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
+        };
+        let table_id = match i64::from_str(query_pairs.get("table_id").unwrap()) {
+            Ok(id) => id,
+            Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
+        };
+        let resp = engine.collect_columnar_status(keyspace_id, table_id);
+        let resp_json = serde_json::to_string_pretty(&resp).unwrap();
+        Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(resp_json))
+            .unwrap())
+    }
+
     // URI: /kvengine/snapshot/<shard_id>?start_ts=xxx&shard_ver=xxx
     // dump kvengine shard snapshot with start_ts
     async fn dump_kvengine_snapshot(
@@ -1864,6 +1888,8 @@ impl StatusServer {
                             (Method::GET, path) if path.starts_with("/kvengine") => {
                                 if path.starts_with("/kvengine/snapshot/") {
                                     Self::dump_kvengine_snapshot(req, engine, router).await
+                                } else if path.starts_with("/kvengine/columnar_status") {
+                                    Self::collect_columnar_status(req, engine).await
                                 } else if path.starts_with("/kvengine/meta/") {
                                     Self::dump_kvengine_meta(req, engine).await
                                 } else {

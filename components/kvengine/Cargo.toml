@@ -22,6 +22,7 @@ bytemuck = "1.14.3"
 byteorder = "1.2"
 bytes = "1.0"
 cloud_encryption = { workspace = true }
+codec = { workspace = true }
 collections = { path = "../collections" }
 crc32c = { workspace = true }
 crc32fast = "1.4.0"
@@ -43,6 +44,7 @@ hyper = "0.14"
 hyper-rustls = "0.24.2"
 hyper-tls = "0.5"
 itertools = "0.10"
+keys = { workspace = true }
 kvenginepb = { path = "../kvenginepb", default-features = false }
 kvproto = { workspace = true }
 lazy_static = "1.3"

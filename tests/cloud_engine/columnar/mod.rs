@@ -11,6 +11,7 @@ use std::{
 use api_version::ApiV2;
 use bytes::Buf;
 use dashmap::DashMap;
+use futures::{future::ok, TryStreamExt};
 use hyper::Body;
 use kvengine::{
     dfs,
@@ -23,7 +24,7 @@ use kvengine::{
         },
         sstable::BlockCache,
     },
-    SnapAccess, WRITE_CF,
+    ColumnarStatusResp, SnapAccess, WRITE_CF,
 };
 use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
@@ -144,6 +145,20 @@ fn test_schema_file() {
             assert_eq!(stats.schema_version, new_schema_version);
         }
     }
+
+    // test collect columnar status api
+    let columnar_status = dfs
+        .get_runtime()
+        .block_on(send_collect_columnar_status_request(
+            &status_addr,
+            keyspace_id,
+            table_ids[1],
+        ));
+    assert!(
+        columnar_status.total > 0 && columnar_status.ready == columnar_status.total,
+        "columnar status is not ready, columnar_status: {:#?}",
+        columnar_status
+    );
 }
 
 #[test]
@@ -645,6 +660,34 @@ async fn send_schema_file_request(status_addr: &str, keyspace_id: u32, schema_fi
     let http_client = hyper::client::Client::new();
     let resp = http_client.request(request).await.unwrap();
     assert!(resp.status().is_success());
+}
+
+async fn send_collect_columnar_status_request(
+    status_addr: &str,
+    keyspace_id: u32,
+    table_id: i64,
+) -> ColumnarStatusResp {
+    let request = hyper::http::Request::builder()
+        .method(http::method::Method::GET)
+        .uri(format!(
+            "http://{}/kvengine/columnar_status?keyspace_id={}&table_id={}",
+            status_addr, keyspace_id, table_id
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let http_client = hyper::client::Client::new();
+    let resp = http_client.request(request).await.unwrap();
+    assert!(resp.status().is_success());
+    let mut body = vec![];
+    resp.into_body()
+        .try_for_each(|bytes| {
+            body.extend(bytes);
+            ok(())
+        })
+        .await
+        .unwrap();
+    let columnar_status: ColumnarStatusResp = serde_json::from_slice(&body).unwrap();
+    columnar_status
 }
 
 async fn create_keyspace_and_split_tables(

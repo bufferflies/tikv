@@ -2,11 +2,14 @@
 
 use std::{cmp, collections::HashSet};
 
+use api_version;
 use bytes::Bytes;
+use codec::{buffer::BufferWriter, number::NumberEncoder};
 
 use crate::{
-    metrics::ENGINE_OPEN_FILES, table::BoundedDataSet, IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS,
-    WRITE_CF,
+    metrics::ENGINE_OPEN_FILES,
+    table::{BoundedDataSet, DataBound, InnerKey},
+    IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
 };
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -59,6 +62,16 @@ impl EngineStats {
         stats.level_total_sizes = vec![0; 3];
         stats
     }
+}
+
+#[derive(Default, Debug, Deserialize, Serialize)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ColumnarStatusResp {
+    // Schema file already installed region count.
+    pub ready: u64,
+    // Total region count.
+    pub total: u64,
 }
 
 impl super::Engine {
@@ -171,6 +184,38 @@ impl super::Engine {
         shard_stats.truncate(10);
         engine_stats.top_10_write = shard_stats;
         engine_stats
+    }
+
+    fn append_table_record_prefix(prefix: &mut Vec<u8>, table_id: i64) {
+        prefix.write_bytes(b"t").unwrap();
+        prefix.write_i64(table_id).unwrap();
+        prefix.write_bytes(b"_r").unwrap();
+    }
+
+    pub fn collect_columnar_status(&self, keyspace_id: u32, table_id: i64) -> ColumnarStatusResp {
+        let mut ready = 0;
+        let mut total = 0;
+        let prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+        let mut table_lower_key = prefix.clone();
+        Self::append_table_record_prefix(&mut table_lower_key, table_id);
+        let table_upper_key = keys::next_key(&table_lower_key);
+        self.get_all_shard_id_vers().into_iter().for_each(|id_ver| {
+            if let Some(shard) = self.get_shard(id_ver.id) {
+                let inner_key_off = shard.inner_key_off;
+                let table_bound = DataBound::new(
+                    InnerKey::from_outer_key(&table_lower_key, inner_key_off),
+                    InnerKey::from_outer_end_key(&table_upper_key, inner_key_off),
+                    false,
+                );
+                if shard.get_data().keyspace_id == keyspace_id && shard.overlap_bound(table_bound) {
+                    if shard.get_schema_file().is_some() {
+                        ready += 1;
+                    }
+                    total += 1;
+                }
+            }
+        });
+        ColumnarStatusResp { ready, total }
     }
 }
 
