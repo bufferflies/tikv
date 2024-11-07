@@ -442,7 +442,7 @@ impl LocalFileCheckPointStorage {
     pub fn load_check_point_ctx(&self) -> LoadDataCheckPointCtx {
         let file_data = LocalFileCheckPointStorage::read_file(self.get_file_path());
         let check_point = LocalFileCheckPointStorage::binary_to_check_point(file_data.as_str());
-        info!(
+        debug!(
             "{} [check point store] loaded check point:{:?},",
             self.check_point_ctx.task_id, check_point
         );
