@@ -467,6 +467,12 @@ impl Engine {
                     vector_indexes.add_index_file(vec_idx_file);
                 }
             }
+            let mut schema_file = old_data.schema_file.clone();
+            // If the target shard has no schema file and the source has schema file, we
+            // should merge the schema file to target.
+            if schema_file.is_none() && source.schema_file.is_some() {
+                schema_file = source.schema_file.clone();
+            }
             let mut builder = ShardDataBuilder::new(old_data);
             builder.set_range(new_shard.range.clone());
             builder.set_mem_tbls(mem_tbls);
@@ -476,6 +482,7 @@ impl Engine {
             builder.set_unloaded_tbls(unloaded_tbls);
             builder.set_lock_txn_files(lock_txn_files);
             builder.set_columnar_levels(columnar_levels);
+            builder.set_schema_file(schema_file);
             builder.set_vector_indexes(vector_indexes);
             builder.build()
         } else {
