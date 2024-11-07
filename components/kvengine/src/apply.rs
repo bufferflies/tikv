@@ -385,6 +385,13 @@ impl EngineCore {
             !flushed
         });
         builder.set_mem_tbls(mem_tbls);
+        // Set schema file and col_snap_version is no needed in normal case. We set it
+        // here to ensure the schema file and col_snap_version consistency between
+        // peers in some corner cases. e.g. the parent shard has inconsistency schema
+        // file or col_snap_version.
+        builder.set_schema_file(cs.get_schema_file());
+        let col_snap_version = initial_flush.get_columnar_snap_version();
+        store_u64(&shard.col_snap_version, col_snap_version);
         let new_data = builder.build();
         info!("{} apply_initial_flush", shard.tag(); "seq" => cs.sequence);
         shard.set_data(new_data);

@@ -93,7 +93,12 @@ impl EngineCore {
             snap = Some(cs.get_snapshot());
         }
         if cs.has_initial_flush() {
-            self.collect_snap_ids(cs.get_initial_flush(), &mut ids);
+            let snap = cs.get_initial_flush();
+            self.collect_snap_ids(snap, &mut ids);
+            // Load schema file when prepare initial_flush
+            if snap.has_schema_meta() {
+                schema_meta = Some(snap.get_schema_meta());
+            }
         }
         if cs.has_restore_shard() {
             snap = Some(cs.get_restore_shard());
