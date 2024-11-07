@@ -1548,6 +1548,19 @@ impl<'a> PeerMsgHandler<'a> {
                 return;
             }
         }
+        let kv = self.ctx.global.engines.kv.clone();
+        // Ensure the shard has been initial flushed. If not initial flushed, reject the
+        // proposal. Update schema file will be proposed again by schema manager.
+        if let Some(shard) = kv.get_shard(shard_meta.id) {
+            if !shard.get_initial_flushed() {
+                warn!(
+                    "{} shard not initial flushed, reject propose update schema file {}",
+                    tag,
+                    schema_file.get_file_id()
+                );
+                return;
+            }
+        }
         info!(
             "{} propose update schema file {}",
             tag,
