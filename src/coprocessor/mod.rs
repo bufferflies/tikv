@@ -176,6 +176,7 @@ impl ReqContext {
             Some(range) => range.end.clone(),
             None => vec![],
         };
+        Self::check_ranges(&tag, &context, txn_start_ts, &ranges);
         Self {
             tag,
             context,
@@ -226,6 +227,26 @@ impl ReqContext {
         } else {
             // Otherwise we use the start_ts as the task_id.
             base
+        }
+    }
+
+    fn check_ranges(
+        tag: &ReqTag,
+        ctx: &kvrpcpb::Context,
+        txn_start_ts: TimeStamp,
+        ranges: &[coppb::KeyRange],
+    ) {
+        for ran in ranges.windows(2) {
+            // Ranges should be in order. And this judge can also find disorder.
+            if ran[0].end.is_empty() || ran[0].end > ran[1].start {
+                warn!("coprocessor request range overlapped";
+                    "tag" => ?tag,
+                    "region" => ctx.region_id,
+                    "ts" => ?txn_start_ts,
+                    "ran" => ?ran,
+                );
+                return;
+            }
         }
     }
 }
