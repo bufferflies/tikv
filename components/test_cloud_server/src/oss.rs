@@ -15,8 +15,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context};
-use async_stream::{try_stream, AsyncStream};
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use chrono::{DateTime, Utc};
 use engine_traits::ListObjectContent;
 use futures::{future::ok, StreamExt, TryStreamExt};
@@ -40,10 +39,7 @@ use tokio::{
     sync::oneshot,
     task::JoinHandle,
 };
-use tokio_util::codec::{BytesCodec, FramedRead};
 use url::form_urlencoded;
-
-const GET_OBJECT_BATCH_SIZE: usize = 16 * 1024;
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
 type HttpResult = std::result::Result<Response<Body>, hyper::Error>;
@@ -261,22 +257,26 @@ impl ObjectStorageService {
         let Ok((start, end)) = Self::parse_get_object_req_range(&parts.headers) else {
             return Ok(Self::bad_request("bad range".to_string()));
         };
-        info!(
-            "handle_get_object: file_path {}, range [{:?}, {:?})",
-            file_path.to_str().unwrap(),
-            start,
-            end
-        );
-        let res = if let Ok(mut file) = File::open(file_path).await {
+        let res = if let Ok(mut file) = File::open(&file_path).await {
             ctx.do_delay().await;
+
+            let file_len = file.metadata().await.context("metadata")?.len();
+            info!(
+                "handle_get_object: file_path {}, len {}, range [{:?}, {:?})",
+                file_path.to_str().unwrap(),
+                file_len,
+                start,
+                end
+            );
 
             let (body, content_range) = match (start, end) {
                 (None, None) => {
-                    let stream = FramedRead::new(file, BytesCodec::new());
-                    (Body::wrap_stream(stream), None)
+                    let mut buf = Vec::with_capacity(file_len as usize);
+                    let read_len = file.read_to_end(&mut buf).await.context("read_to_end")?;
+                    assert_eq!(read_len, file_len as usize);
+                    (Body::from(buf), None)
                 }
                 (start, end) => {
-                    let file_len = file.metadata().await.context("metadata")?.len();
                     let (start, end) = match (start, end) {
                         (Some(s), Some(e)) => (s, cmp::min(e, file_len)),
                         (Some(s), None) => (s, file_len),
@@ -295,26 +295,15 @@ impl ObjectStorageService {
 
                     file.seek(SeekFrom::Start(start)).await.context("seek")?;
                     let read_total = end - start;
-                    let batch_size = cmp::min(GET_OBJECT_BATCH_SIZE, read_total as usize);
-                    let mut buf = vec![0u8; batch_size];
-
-                    let stream: AsyncStream<Result<Bytes>, _> = try_stream! {
-                        let mut offset = 0;
-                        while offset < read_total {
-                            let read_size = cmp::min(batch_size, (read_total - offset) as usize);
-                            let read = file.read(&mut buf[..read_size]).await.context("read")?;
-                            if read == 0 {
-                                break;
-                            }
-                            yield Bytes::from(buf[..read].to_vec());
-                            offset += read as u64;
-                        }
-                    };
+                    let mut buf = vec![0; read_total as usize];
+                    file.read_exact(buf.as_mut_slice())
+                        .await
+                        .context("read_exact")?;
 
                     // Ref: https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4, Content-Range.
                     let range_resp = format!("bytes {start}-{end}/{file_len}");
 
-                    (Body::wrap_stream(stream), Some(range_resp))
+                    (Body::from(buf), Some(range_resp))
                 }
             };
             let mut resp = Response::builder();
@@ -816,6 +805,7 @@ mod tests {
         }
 
         runtime.block_on(futures::future::join_all(handles));
+        drop(s3fs);
         oss.graceful_shutdown();
     }
 
@@ -930,6 +920,7 @@ mod tests {
         }
 
         runtime.block_on(futures::future::join_all(handles));
+        drop(s3fs);
         oss.graceful_shutdown();
     }
 
@@ -1064,11 +1055,14 @@ mod tests {
             }
         });
 
+        drop(s3fs);
         oss.graceful_shutdown();
     }
 
     #[test]
     fn test_oss_get_object() {
+        const OBJECT_SIZE: usize = 64 * 1024;
+
         test_util::init_log_for_test();
 
         let base_dir = tempfile::Builder::new()
@@ -1089,12 +1083,12 @@ mod tests {
         );
 
         let mut rng = thread_rng();
-        let data: Vec<u8> = (0..GET_OBJECT_BATCH_SIZE * 4 / U64_SIZE)
+        let data: Vec<u8> = (0..OBJECT_SIZE / U64_SIZE)
             .flat_map(|_| rng.gen::<u64>().to_be_bytes())
             .collect();
         let data = Bytes::from(data);
         let data_len = data.len();
-        assert_eq!(data_len, GET_OBJECT_BATCH_SIZE * 4);
+        assert_eq!(data_len, OBJECT_SIZE);
 
         let runtime = s3fs.get_runtime();
         runtime.block_on(async {
@@ -1123,6 +1117,7 @@ mod tests {
             }
         });
 
+        drop(s3fs);
         oss.graceful_shutdown();
     }
 }
