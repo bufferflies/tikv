@@ -125,7 +125,7 @@ impl Default for Config {
             max_leader_missing_duration: ReadableDuration::hours(2),
             abnormal_leader_missing_duration: ReadableDuration::minutes(10),
             peer_stale_state_check_interval: ReadableDuration::minutes(5),
-            leader_transfer_max_log_lag: 128,
+            leader_transfer_max_log_lag: 512,
             raft_store_max_leader_lease: ReadableDuration::secs(9),
             renew_leader_lease_advance_duration: ReadableDuration::secs(0),
             allow_remove_leader: false,
