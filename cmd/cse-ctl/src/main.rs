@@ -7,6 +7,7 @@ mod archive;
 mod backup;
 mod check_table;
 mod dfsgc;
+mod mvcc;
 mod restore;
 mod sst;
 mod stats;
@@ -27,6 +28,7 @@ use crate::{
     backup::{execute_backup, execute_show_backup, BackupArgs, ShowBackupArgs},
     check_table::{execute_check_table, CheckTableArgs},
     dfsgc::{execute_dfsgc, DfsGcArgs},
+    mvcc::{execute_mvcc, MvccArgs},
     restore::{execute_restore_command, RestoreCommand},
     sst::{execute_scan_bad_table, execute_show_sst, ScanBadTableFileArgs, ShowSstArgs},
     stats::{execute_stats, StatsArgs},
@@ -66,6 +68,7 @@ fn main() {
         CheckTable(args) => {
             execute_check_table(args);
         }
+        Mvcc(args) => execute_mvcc(args),
         Show(args) => {
             execute_show(args);
         }
@@ -129,6 +132,8 @@ pub enum Commands {
     TruncateTs(TruncateTsArgs),
     /// CheckTable check data consistency on each table.
     CheckTable(CheckTableArgs),
+    /// Mvcc gets the mvcc information of given keys.
+    Mvcc(MvccArgs),
     /// Show some information.
     Show(ShowArgs),
 }
