@@ -183,11 +183,11 @@ fn test_random_with_tidb() {
     let global_use_txn_file = global_use_txn_file && rng.gen_bool(ENABLE_GLOBAL_TXN_FILE_RATIO);
 
     info!("global_use_txn_file: {}", global_use_txn_file);
-    if global_use_txn_file {
+    if !global_use_txn_file {
         runtime.block_on(async {
             for keyspace_id in keyspace_manager.get_all_keyspaces() {
                 let pool = connect_tidb(&tc, &keyspace_manager, keyspace_id).await;
-                sqlx::query("SET GLOBAL tidb_enable_txn_file = 'ON'")
+                sqlx::query("SET GLOBAL tidb_disable_txn_file = 'ON'")
                     .execute(&pool)
                     .await
                     .unwrap();
