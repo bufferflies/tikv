@@ -16,7 +16,7 @@ fn test_merge_single() {
     let it = SimpleIterator::new(keys.clone(), vals.clone(), false, 1);
     let mut merge_it = new_merge_iterator(vec![Box::new(it)], false);
     merge_it.rewind();
-    let (n_keys, n_vals) = get_all(merge_it);
+    let (n_keys, n_vals) = get_all(merge_it.as_mut());
     for i in 0..keys.len() {
         assert_eq!(keys[i].as_bytes(), n_keys[i]);
         assert_eq!(vals[i].as_bytes(), n_vals[i]);
@@ -24,13 +24,13 @@ fn test_merge_single() {
 }
 
 #[test]
-fn test_merge_single_resversed() {
+fn test_merge_single_reversed() {
     let keys = vec!["1", "2", "3"];
     let vals = vec!["v1", "v2", "v3"];
     let it = SimpleIterator::new(keys.clone(), vals.clone(), true, 1);
     let mut merge_it = new_merge_iterator(vec![Box::new(it)], true);
     merge_it.rewind();
-    let (n_keys, n_vals) = get_all(merge_it);
+    let (n_keys, n_vals) = get_all(merge_it.as_mut());
     for i in 0..keys.len() {
         let reverse_idx = keys.len() - 1 - i;
         assert_eq!(keys[reverse_idx].as_bytes(), n_keys[i]);
@@ -63,7 +63,7 @@ fn test_merge_more() {
     let expected_keys = ["1", "2", "3", "5", "7", "9"];
     let expected_vals = ["a1", "b2", "a3", "b5", "a7", "d9"];
     merge_it.rewind();
-    let (keys, vals) = get_all(merge_it);
+    let (keys, vals) = get_all(merge_it.as_mut());
     for i in 0..expected_keys.len() {
         assert_eq!(expected_keys[i].as_bytes(), keys[i]);
         assert_eq!(expected_vals[i].as_bytes(), vals[i]);
@@ -78,7 +78,7 @@ fn test_merge_iterator_nested() {
     let merge1 = new_merge_iterator(vec![it], false);
     let mut merge2 = new_merge_iterator(vec![merge1], false);
     merge2.rewind();
-    let (n_keys, n_vals) = get_all(merge2);
+    let (n_keys, n_vals) = get_all(merge2.as_mut());
     for i in 0..keys.len() {
         assert_eq!(keys[i].as_bytes(), n_keys[i]);
         assert_eq!(vals[i].as_bytes(), n_vals[i])
@@ -108,7 +108,7 @@ fn test_merge_iterator_seek() {
     ));
     let mut merge_it = new_merge_iterator(vec![it1, it2, it3, it4], false);
     merge_it.seek(InnerKey::from_inner_buf("4".as_bytes()));
-    let (keys, vals) = get_all(merge_it);
+    let (keys, vals) = get_all(merge_it.as_mut());
     let expected_keys = ["5", "7", "9"];
     let expected_vals = ["b5", "a7", "d9"];
     for i in 0..expected_keys.len() {
@@ -140,7 +140,7 @@ fn test_merge_iterator_seek_reversed() {
     ));
     let mut merge_it = new_merge_iterator(vec![it1, it2, it3, it4], true);
     merge_it.seek(InnerKey::from_inner_buf("5".as_bytes()));
-    let (keys, vals) = get_all(merge_it);
+    let (keys, vals) = get_all(merge_it.as_mut());
     let expected_keys = ["5", "3", "2", "1"];
     let expected_vals = ["b5", "a3", "b2", "a1"];
     for i in 0..expected_keys.len() {
@@ -314,8 +314,10 @@ proptest! {
 
         let mut iters: Vec<Box<dyn Iterator>> = Vec::with_capacity(iters_count);
         for _ in 0..iters_count {
+            let keys = iters_keys.pop().unwrap();
             let iter = SimpleIterator {
-                keys: iters_keys.pop().unwrap(),
+                vals_is_sync: vec![true; keys.len()],
+                keys,
                 vals: iters_vals.pop().unwrap(),
                 idx: 0,
                 reversed,

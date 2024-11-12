@@ -254,6 +254,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-recursion"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b43422f69d8ff38f95f1b2bb76517c91589a924d1559a0e935d7c8ce0274c11"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.52",
+]
+
+[[package]]
 name = "async-speed-limit"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3787,6 +3798,7 @@ dependencies = [
  "anyhow",
  "api_version",
  "arrow-buffer",
+ "async-recursion 1.1.1",
  "async-trait",
  "aws",
  "base64 0.13.0",
@@ -3825,6 +3837,7 @@ dependencies = [
  "libc 0.2.161",
  "log_wrappers",
  "lz4",
+ "maybe-async",
  "memmap2 0.9.5",
  "moka",
  "nix 0.24.3",
@@ -4215,6 +4228,16 @@ name = "matchit"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b87248edafb776e59e6ee64a79086f65890d3510f2c656c000bf2a7e8a0aea40"
+
+[[package]]
+name = "maybe-async"
+version = "0.2.6"
+source = "git+https://github.com/pingyu/maybe-async-rs?branch=cse#2d195177d43abf6cbe185564fa30714c5529c6d4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.107",
+]
 
 [[package]]
 name = "md-5"
@@ -8574,6 +8597,7 @@ dependencies = [
  "log",
  "log_wrappers",
  "match-template",
+ "maybe-async",
  "memory_trace_macros",
  "mime",
  "moka",
@@ -8654,7 +8678,7 @@ name = "tikv-client"
 version = "0.3.0"
 source = "git+https://github.com/pingyu/client-rust.git?branch=txn-file#bc1ac81632507c8f3ed4b94f4fcafe02e5266114"
 dependencies = [
- "async-recursion",
+ "async-recursion 0.3.2",
  "async-trait",
  "derive-new",
  "either",

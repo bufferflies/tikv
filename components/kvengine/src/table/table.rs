@@ -25,19 +25,73 @@ pub struct Row {
     pub value: Vec<u8>,
 }
 
+// Do nothing extra but just to make `maybe_async` works.
+#[macro_export]
+macro_rules! next {
+    ($expr:expr) => {{ $expr.next() }};
+}
+
+#[macro_export]
+macro_rules! next_async {
+    ($expr:expr) => {{
+        if $expr.is_next_sync() {
+            $expr.next()
+        } else {
+            $expr.next_async().await
+        }
+    }};
+}
+
+// Do nothing extra but just to make `maybe_async` works.
+#[macro_export]
+macro_rules! next_version {
+    ($expr:expr) => {{ $expr.next_version() }};
+}
+
+#[macro_export]
+macro_rules! next_version_async {
+    ($expr:expr) => {{
+        if $expr.is_next_version_sync() {
+            $expr.next_version()
+        } else {
+            $expr.next_version_async().await
+        }
+    }};
+}
+
+#[maybe_async::async_trait]
 pub trait Iterator: Send {
     // next returns the next entry with different key on the latest version.
     // If old version is needed, call next_version.
+    // TODO: add `async`. The method without `async` is a special case that generate
+    // stub default implementation as `unimplemented!()`.
+    #[maybe_async]
     fn next(&mut self);
+
+    /// `is_next_sync` indicates that sync version of `next` can be used.
+    fn is_next_sync(&mut self) -> bool {
+        // TODO: remove default implementation.
+        true
+    }
 
     // next_version set the current entry to an older version.
     // The iterator must be valid to call this method.
     // It returns true if there is an older version, returns false if there is no
     // older version. The iterator is still valid and on the same key.
+    #[maybe_async]
     fn next_version(&mut self) -> bool;
 
+    /// `is_next_version_sync` indicates that sync version of `next_version` can
+    /// be used.
+    fn is_next_version_sync(&mut self) -> bool {
+        // TODO: remove default implmentation.
+        true
+    }
+
+    #[maybe_async]
     fn rewind(&mut self);
 
+    #[maybe_async]
     fn seek(&mut self, key: InnerKey<'_>);
 
     fn key(&self) -> InnerKey<'_>;
@@ -46,11 +100,12 @@ pub trait Iterator: Send {
 
     fn valid(&self) -> bool;
 
-    fn seek_to_version(&mut self, version: u64) -> bool {
+    #[maybe_async]
+    async fn seek_to_version(&mut self, version: u64) -> bool {
         if version >= self.value().version {
             return true;
         }
-        while self.next_version() {
+        while next_version!(self).await {
             if version >= self.value().version {
                 return true;
             }
@@ -58,9 +113,10 @@ pub trait Iterator: Send {
         false
     }
 
-    fn next_all_version(&mut self) {
-        if !self.next_version() {
-            self.next()
+    #[maybe_async]
+    async fn next_all_version(&mut self) {
+        if !next_version!(self).await {
+            next!(self).await
         }
     }
 }

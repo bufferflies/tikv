@@ -103,6 +103,7 @@ libloading = "0.7"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
 log_wrappers = { workspace = true }
 match-template = "0.0.1"
+maybe-async = { workspace = true, features = ["is_sync", "is_async"] }
 memory_trace_macros = { workspace = true }
 mime = "0.3.13"
 moka = { workspace = true }
@@ -348,6 +349,7 @@ keys = { path = "components/keys" }
 kvengine = { path = "components/kvengine" }
 kvenginepb = { path = "components/kvenginepb" }
 log_wrappers = { path = "components/log_wrappers" }
+maybe-async = { git = "https://github.com/pingyu/maybe-async-rs", branch = "cse" }
 memory_trace_macros = { path = "components/memory_trace_macros" }
 native_br = { path = "components/native_br" }
 online_config = { path = "components/online_config" }
