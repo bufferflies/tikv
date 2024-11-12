@@ -4,7 +4,10 @@ use std::{
     collections::HashMap,
     fmt,
     fmt::{Debug, Display, Formatter},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering::Relaxed},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -15,7 +18,9 @@ use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
 use raft_proto::eraftpb;
 use slog::{Key, Record, Serializer};
-use tikv_util::{box_err, codec::bytes::decode_bytes, debug, error, time::Instant};
+use tikv_util::{
+    box_err, codec::bytes::decode_bytes, debug, error, sys::thread::Pid, time::Instant,
+};
 
 use crate::{
     store::{ProposalContext, StoreMsg, SPLIT_FLAG_ENCRYPTION_KEYS},
@@ -386,5 +391,101 @@ pub fn remove_dependent(
     let dependent_len = rfengine.remove_dependent(parent_id, dependent_id);
     if dependent_len == 0 {
         router.send_store(StoreMsg::DependentsEmpty(parent_id));
+    }
+}
+
+pub struct CpuUtilCollector {
+    cpu_util: Arc<AtomicUsize>,
+    thread_prefix: String,
+    process_id: Pid,
+    thread_ids: Vec<Pid>,
+    update_time: std::time::Instant,
+    cpu_total: f64,
+}
+
+impl CpuUtilCollector {
+    pub fn new(thread_prefix: String) -> Self {
+        let process_id = tikv_util::sys::thread::process_id();
+        let update_time = std::time::Instant::now();
+        Self {
+            cpu_util: Arc::new(AtomicUsize::new(0)),
+            thread_prefix,
+            process_id,
+            thread_ids: vec![],
+            update_time,
+            cpu_total: 0.0,
+        }
+    }
+
+    pub(crate) fn update(&mut self) {
+        if self.thread_ids.is_empty() {
+            let name_map = tikv_util::sys::thread::THREAD_NAME_HASHMAP.lock().unwrap();
+            for (k, v) in name_map.iter() {
+                if v.starts_with(&self.thread_prefix) {
+                    self.thread_ids.push(*k);
+                }
+            }
+            drop(name_map);
+        }
+        let mut new_cpu_total = 0.0;
+        let now = std::time::Instant::now();
+        for tid in &self.thread_ids {
+            if let Ok(stat) = tikv_util::sys::thread::thread_stat(self.process_id, *tid) {
+                new_cpu_total += stat.total_cpu_time();
+            }
+        }
+        let delta_cpu_time = new_cpu_total - self.cpu_total;
+        let delta_duration = now.saturating_duration_since(self.update_time);
+        let cpu_util = (delta_cpu_time * 100.0 / delta_duration.as_secs_f64()) as usize;
+        self.cpu_util.store(cpu_util, Relaxed);
+        self.update_time = now;
+        self.cpu_total = new_cpu_total;
+    }
+
+    pub(crate) fn get_cpu_util_ref(&self) -> Arc<AtomicUsize> {
+        self.cpu_util.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tikv_util::sys::thread::StdThreadBuildWrapper;
+
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn test_cpu_util_collector() {
+        let mut collector = CpuUtilCollector::new("cpu_util_test".to_string());
+        let mut handles = vec![];
+        let sleep_micros = Arc::new(AtomicUsize::new(10));
+        for i in 0..3 {
+            let sleep_micros = sleep_micros.clone();
+            let handle = std::thread::Builder::new()
+                .name(format!("cpu_util_test_{}", i))
+                .spawn_wrapper(move || {
+                    let mut counter = 0u64;
+                    loop {
+                        // Busy work: incrementing a counter
+                        counter = counter.wrapping_add(1);
+                        if counter % (1 << 20) == 0 {
+                            let us = sleep_micros.load(Relaxed);
+                            std::thread::sleep(Duration::from_micros(us as u64));
+                        }
+                    }
+                })
+                .unwrap();
+            handles.push(handle);
+        }
+        let cpu_ref = collector.get_cpu_util_ref();
+        for sleep_dur in [10, 100, 1000] {
+            sleep_micros.store(sleep_dur, Relaxed);
+            println!("sleep {}us", sleep_dur);
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(100));
+                collector.update();
+                println!("cpu:{}", cpu_ref.load(Relaxed));
+            }
+        }
     }
 }

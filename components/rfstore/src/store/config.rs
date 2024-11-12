@@ -5,10 +5,7 @@ use std::time::Duration;
 use online_config::OnlineConfig;
 use raftstore::coprocessor;
 use serde::{Deserialize, Serialize};
-use tikv_util::{
-    config::{ReadableDuration, ReadableSize},
-    info,
-};
+use tikv_util::config::{ReadableDuration, ReadableSize};
 use time::Duration as TimeDuration;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
@@ -106,6 +103,10 @@ pub struct Config {
     pub enable_inner_key_offset: bool,
 
     pub aux_worker_count: usize,
+
+    pub main_worker_max_util: usize,
+
+    pub aux_worker_max_util: usize,
 }
 
 impl Default for Config {
@@ -150,6 +151,13 @@ impl Default for Config {
             apply_follower_pool_size: 2,
             enable_inner_key_offset: false,
             aux_worker_count: 0,
+            // The CPU utilization determines how many aux worker we use.
+            // When the main raft worker utilization exceeds this value, we use aux worker
+            // to help.
+            main_worker_max_util: 80,
+            // The aux worker's max CPU utilization is lower because it must sync with main
+            // worker.
+            aux_worker_max_util: 60,
         }
     }
 }
@@ -207,18 +215,8 @@ impl Config {
         cfg.enable_region_bucket = old_cop.enable_region_bucket;
         cfg.region_bucket_size = old_cop.region_bucket_size;
 
-        cfg.aux_worker_count = old.store_batch_system.pool_size.saturating_sub(1);
-        if cfg.aux_worker_count == 0 {
-            let num_cpus = tikv_util::sys::SysQuota::cpu_cores_quota();
-            if num_cpus >= 32.0 {
-                // automatically enable aux worker on large machines.
-                cfg.aux_worker_count = num_cpus as usize / 16 - 1;
-                info!(
-                    "set aux worker count to {} for large machine",
-                    cfg.aux_worker_count
-                );
-            }
-        }
+        let num_cpus = tikv_util::sys::SysQuota::cpu_cores_quota() as usize;
+        cfg.aux_worker_count = num_cpus / 8;
         cfg.apply_pool_size = old.apply_batch_system.pool_size;
         cfg.apply_follower_pool_size = old.apply_batch_system.low_priority_pool_size;
 
@@ -233,6 +231,12 @@ impl Config {
                 cfg.local_file_gc_timeout.0 = cfg.raft_base_tick_interval.0 * 60 * 30;
                 cfg.local_file_gc_tick_interval.0 = cfg.raft_base_tick_interval.0 * 60 * 10;
             }
+            // cover aux worker in test
+            if cfg.aux_worker_count == 0 {
+                cfg.aux_worker_count = 1;
+            }
+            cfg.main_worker_max_util = 16;
+            cfg.aux_worker_max_util = 12;
         }
 
         cfg.capacity = old.capacity;

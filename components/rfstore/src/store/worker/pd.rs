@@ -49,7 +49,7 @@ use yatp::Remote;
 use crate::{
     store::{
         encode_split_flag_encryption_keys, raw_end_key, raw_start_key, Callback, CasualMessage,
-        PeerMsg, PeerTag, RegionIdVer, RegionMap, StoreInfo, StoreMsg,
+        CpuUtilCollector, PeerMsg, PeerTag, RegionIdVer, RegionMap, StoreInfo, StoreMsg,
     },
     RaftRouter, RaftStoreRouter,
 };
@@ -149,6 +149,7 @@ pub enum PdTask {
         region_id: u64,
         role: StateRole,
     },
+    UpdateRaftCpuUtil,
 }
 
 #[derive(Default, Clone)]
@@ -351,6 +352,7 @@ impl Display for PdTask {
             PdTask::RoleChanged { region_id, role } => {
                 write!(f, "region {} change role to {:?}", region_id, role)
             }
+            PdTask::UpdateRaftCpuUtil => write!(f, "update raft cpu utilization"),
         }
     }
 }
@@ -377,6 +379,7 @@ pub struct PdRunner {
     concurrency_manager: ConcurrencyManager,
     remote: Remote<yatp::task::future::TaskCell>,
     kv: kvengine::Engine,
+    raft_cpu_collector: CpuUtilCollector,
 }
 
 const HOTSPOT_KEY_RATE_THRESHOLD: u64 = 128;
@@ -419,6 +422,7 @@ impl PdRunner {
         concurrency_manager: ConcurrencyManager,
         remote: Remote<yatp::task::future::TaskCell>,
         kv: kvengine::Engine,
+        raft_cpu_collector: CpuUtilCollector,
     ) -> PdRunner {
         // TODO(x): support stats monitor.
         let cluster_id = pd_client.get_cluster_id().unwrap();
@@ -438,6 +442,7 @@ impl PdRunner {
             concurrency_manager,
             remote,
             kv,
+            raft_cpu_collector,
         }
     }
 
@@ -1484,6 +1489,9 @@ impl Runnable for PdRunner {
             }
             PdTask::RoleChanged { region_id, role } => {
                 self.handle_role_changed(region_id, role);
+            }
+            PdTask::UpdateRaftCpuUtil => {
+                self.raft_cpu_collector.update();
             }
         };
     }

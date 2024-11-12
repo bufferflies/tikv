@@ -164,6 +164,8 @@ impl RaftBatchSystem {
             store_handler.register(peer);
         }
         let store_id = ctx.store.get_id();
+        let raft_cpu_util_collector = CpuUtilCollector::new("raftstore_".to_string());
+        let cpu_util_ref = raft_cpu_util_collector.get_cpu_util_ref();
         let pd_runner = PdRunner::new(
             store_id,
             pd_client,
@@ -173,6 +175,7 @@ impl RaftBatchSystem {
             concurrency_manager,
             workers.pd_worker.remote(),
             ctx.engines.kv.clone(),
+            raft_cpu_util_collector,
         );
         assert!(workers.pd_worker.start(pd_runner));
         self.workers = Some(workers);
@@ -199,6 +202,7 @@ impl RaftBatchSystem {
             ctx.router.clone(),
             io_sender,
             store_fsm,
+            cpu_util_ref,
         );
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()
@@ -797,6 +801,13 @@ impl<'a> StoreMsgHandler<'a> {
         }
         if self.store.ticker.is_on_store_tick(STORE_TICK_LOCAL_FILE_GC) {
             self.on_local_file_gc();
+        }
+        if self.ctx.cfg.aux_worker_count > 0 {
+            let _ = self
+                .ctx
+                .global
+                .pd_scheduler
+                .schedule(PdTask::UpdateRaftCpuUtil);
         }
     }
 

@@ -4,7 +4,10 @@ use std::{
     cmp::min,
     collections::{hash_map::Entry, HashMap},
     mem,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering::Relaxed},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -144,14 +147,16 @@ pub(crate) struct RaftWorker {
     aux_res_receivers: Vec<Receiver<()>>,
     sent_aux_task: Vec<bool>,
     aux_handles: Vec<std::thread::JoinHandle<()>>,
+    // The cpu usage percent for sum of raft worker thread and aux threads.
+    // It is updated by background threads and checked in raft thread to update active aux
+    // worker count.
+    cpu_util: Arc<AtomicUsize>,
+    active_aux_count: usize,
 }
 
 const MAX_BATCH_COUNT: usize = 1024;
 const MAX_BATCH_SIZE: usize = 1024 * 1024;
 const PEER_INBOX_STATISTIC_COUNT: usize = 5;
-
-// The inbox count is 1 or 2 in most of the cases.
-const AUX_MIN_INBOX_COUNT: usize = 2;
 
 impl RaftWorker {
     pub(crate) fn new(
@@ -160,6 +165,7 @@ impl RaftWorker {
         router: RaftRouter,
         io_sender: Sender<Option<IoTask>>,
         store_fsm: StoreFsm,
+        cpu_util: Arc<AtomicUsize>,
     ) -> (Self, Vec<Receiver<Option<ApplyBatch>>>) {
         let all_apply_pool_size = ctx.cfg.apply_pool_size + ctx.cfg.apply_follower_pool_size;
         let mut apply_senders = Vec::with_capacity(all_apply_pool_size);
@@ -186,6 +192,8 @@ impl RaftWorker {
                 aux_res_receivers: vec![],
                 sent_aux_task: vec![],
                 aux_handles: vec![],
+                cpu_util,
+                active_aux_count: 0,
             },
             apply_receivers,
         )
@@ -248,6 +256,7 @@ impl RaftWorker {
             }
             persist_states(&mut self.ctx, &self.io_sender);
             batch_end(&mut self.ctx, loop_start.saturating_elapsed());
+            self.update_active_aux_count();
         }
     }
 
@@ -257,19 +266,19 @@ impl RaftWorker {
             // avoid race.
             return;
         }
-        if self.ctx.cfg.aux_worker_count == 0 {
+        if self.active_aux_count == 0 {
             return;
         }
-        if inboxes.len() <= AUX_MIN_INBOX_COUNT {
+        if inboxes.len() <= 1 {
             // The aux worker is helpful only when the main raft worker is busy.
-            // When the inboxes.len() is small, redirect the task to aux worker doesn't
+            // When there only one inbox, redirect the task to aux worker doesn't
             // have any benefit but increase the latency.
             return;
         }
         let mut aux_inboxes = vec![];
         let mut aux_msg_count = 0;
         let mut aux_worker_idx = 0;
-        let target_aux_msg_count = self.batch_msg_count / (self.ctx.cfg.aux_worker_count + 1);
+        let target_aux_msg_count = self.batch_msg_count / (self.active_aux_count + 1);
         while let Some(inbox) = inboxes.pop() {
             aux_msg_count += inbox.msgs.len();
             aux_inboxes.push(inbox);
@@ -280,7 +289,7 @@ impl RaftWorker {
                 self.sent_aux_task[aux_worker_idx] = true;
                 aux_msg_count = 0;
                 aux_worker_idx += 1;
-                if aux_worker_idx == self.ctx.cfg.aux_worker_count {
+                if aux_worker_idx == self.active_aux_count {
                     break;
                 }
             }
@@ -456,6 +465,31 @@ impl RaftWorker {
             self.apply_senders[peer_fsm.apply_worker_idx]
                 .send(Some(peer_batch))
                 .unwrap();
+        }
+    }
+
+    fn update_active_aux_count(&mut self) {
+        let cfg = &self.ctx.cfg;
+        if cfg.aux_worker_count == 0 {
+            return;
+        }
+        let cpu_usage = self.cpu_util.load(Relaxed);
+        let origin_active_aux_count = self.active_aux_count;
+        if cpu_usage < cfg.main_worker_max_util {
+            self.active_aux_count = 0;
+        } else {
+            let expect_aux_usage = cpu_usage - cfg.main_worker_max_util;
+            self.active_aux_count = ((expect_aux_usage + cfg.aux_worker_max_util - 1)
+                / cfg.aux_worker_max_util)
+                .min(cfg.aux_worker_count);
+        }
+        if self.active_aux_count != origin_active_aux_count {
+            debug!(
+                "{}: update use aux worker count to {} on usage {}",
+                self.ctx.store_id(),
+                self.active_aux_count,
+                cpu_usage
+            );
         }
     }
 }
