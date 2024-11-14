@@ -49,6 +49,10 @@ impl File for IaFile {
         self.size
     }
 
+    fn is_sync(&self) -> bool {
+        false
+    }
+
     fn read(&self, _off: u64, _length: usize) -> Result<Bytes> {
         unimplemented!()
     }

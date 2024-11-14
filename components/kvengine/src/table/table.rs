@@ -84,7 +84,7 @@ pub trait Iterator: Send {
     /// `is_next_version_sync` indicates that sync version of `next_version` can
     /// be used.
     fn is_next_version_sync(&mut self) -> bool {
-        // TODO: remove default implmentation.
+        // TODO: remove default implementation.
         true
     }
 

@@ -4,7 +4,6 @@ use std::{
     cmp::Ordering,
     fmt,
     future::Future,
-    iter::Iterator as StdIterator,
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
@@ -18,12 +17,12 @@ use xorf::{BinaryFuse8, Filter};
 
 use super::{builder::*, iterator::TableIterator};
 use crate::{
+    next_version, next_version_async,
     table::{
         file::{File, TtlCache},
         table::{Iterator, Result},
         *,
     },
-    util::evenly_distribute,
     IoContext,
 };
 
@@ -55,23 +54,26 @@ impl fmt::Debug for SsTable {
             .field("max_ts", &self.max_ts)
             .field("kv_size", &self.kv_size)
             .field("l0_version", &self.l0_version)
+            .field("is_sync", &self.is_sync())
             .finish()
     }
 }
 
 impl SsTable {
-    pub fn new(
+    #[maybe_async::both]
+    pub async fn new(
         file: Arc<dyn File>,
         cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let size = file.size();
-        let core = SsTableCore::new(file, 0, size, cache, encryption_key)?;
+        let core = SsTableCore::new(file, 0, size, cache, encryption_key).await?;
         Ok(Self {
             core: Arc::new(core),
         })
     }
 
+    // L0 does not use IA files.
     pub fn new_l0_cf(
         file: Arc<dyn File>,
         start: u64,
@@ -85,8 +87,9 @@ impl SsTable {
         })
     }
 
-    pub fn new_iterator(&self, reversed: bool, fill_cache: bool) -> Box<TableIterator> {
-        let it = TableIterator::new(self.clone(), reversed, fill_cache);
+    #[maybe_async::both]
+    pub async fn new_iterator(&self, reversed: bool, fill_cache: bool) -> Box<TableIterator> {
+        let it = TableIterator::new(self.clone(), reversed, fill_cache).await;
         Box::new(it)
     }
 
@@ -94,7 +97,8 @@ impl SsTable {
     // It is caller's responsibility to maintain the lifetime of the returned value.
     // Value will be filled in out_val_owner , while the returned value is a parsed
     // slice of it.
-    pub fn get(
+    #[maybe_async::both]
+    pub async fn get(
         &self,
         key: InnerKey<'_>,
         version: u64,
@@ -107,25 +111,18 @@ impl SsTable {
         let small_value = self.kv_size < self.entries as u64 * SMALL_VALUE_SIZE;
         let skip_filter = small_value && level == 3;
         if self.filter_size() > 0 && !skip_filter {
-            let filter = self
-                .filter
-                .get(|| {
-                    let filter_data = self.read_filter_data_from_file()?;
-                    let filter = self.decode_filter(&filter_data)?;
-                    Ok(filter)
-                })
-                .expect("load filter");
+            let filter = self.get_filter().await;
             if !filter.contains(&key_hash) {
                 return table::Value::new();
             }
         }
-        let mut it = self.new_iterator(false, true);
-        it.seek(key);
+        let mut it = self.new_iterator(false, true).await;
+        it.seek(key).await;
         if !it.valid() || key != it.key() {
             return table::Value::new();
         }
         while it.value().version > version {
-            if !it.next_version() {
+            if !next_version!(it).await {
                 return table::Value::new();
             }
         }
@@ -136,19 +133,21 @@ impl SsTable {
         Value::decode(out_val_owner.as_slice())
     }
 
-    pub fn has_overlap(&self, data_bound: DataBound<'_>) -> bool {
+    #[maybe_async::both]
+    pub async fn has_overlap(&self, data_bound: DataBound<'_>) -> bool {
         if !self.data_bound().overlap_bound(data_bound) {
             return false;
         }
-        let mut it = self.new_iterator(false, true);
-        it.seek(data_bound.lower_bound);
+        let mut it = self.new_iterator(false, true).await;
+        it.seek(data_bound.lower_bound).await;
         if !it.valid() {
             return it.error().is_some();
         }
         !data_bound.less_than_key(it.key())
     }
 
-    pub fn get_newer(
+    #[maybe_async::both]
+    pub async fn get_newer(
         &self,
         key: InnerKey<'_>,
         version: u64,
@@ -159,7 +158,9 @@ impl SsTable {
         if self.max_ts < version {
             return table::Value::new();
         }
-        let val = self.get(key, u64::MAX, key_hash, out_val_owner, level);
+        let val = self
+            .get(key, u64::MAX, key_hash, out_val_owner, level)
+            .await;
         if val.version >= version {
             return val;
         }
@@ -176,6 +177,10 @@ impl SsTable {
 
     pub const fn footer_size() -> usize {
         FOOTER_SIZE
+    }
+
+    pub fn is_sync(&self) -> bool {
+        self.file.is_sync()
     }
 }
 
@@ -208,7 +213,8 @@ pub struct SsTableCore {
 }
 
 impl SsTableCore {
-    pub fn new(
+    #[maybe_async::both]
+    pub async fn new(
         file: Arc<dyn File>,
         start_off: u64,
         end_off: u64,
@@ -223,18 +229,20 @@ impl SsTableCore {
             if size < FOOTER_SIZE as u64 {
                 return Err(table::Error::InvalidFileSize);
             }
-            file.read(end_off - FOOTER_SIZE as u64, FOOTER_SIZE)?
+            file.read(end_off - FOOTER_SIZE as u64, FOOTER_SIZE).await?
         };
         footer.unmarshal(footer_data.chunk());
         if footer.magic != MAGIC_NUMBER && footer.magic != MAGIC_NUMBER_SPLIT_L0 {
             return Err(table::Error::InvalidMagicNumber);
         }
-        let props_data = file.read(
-            start_off + footer.properties_offset as u64,
-            footer.properties_len(size as usize),
-        )?;
+        let props_data = file
+            .read(
+                start_off + footer.properties_offset as u64,
+                footer.properties_len(size as usize),
+            )
+            .await?;
         let mut prop_slice = props_data.chunk();
-        validate_checksum_with_fix(prop_slice, &footer, file.clone(), encryption_key.as_ref())?;
+        validate_checksum_with_fix(prop_slice, &footer, file.as_ref(), encryption_key.as_ref())?;
         prop_slice = &prop_slice[4..];
         let mut smallest_buf = Bytes::new();
         let mut biggest_buf = Bytes::new();
@@ -271,10 +279,11 @@ impl SsTableCore {
                 l0_version = LittleEndian::read_u64(val);
             }
         }
+        let is_sync = file.is_sync();
         let core = Self {
             file,
             cache,
-            filter: TtlCache::default(),
+            filter: TtlCache::new(is_sync),
             start_off,
             end_off,
             footer,
@@ -286,8 +295,8 @@ impl SsTableCore {
             tombs,
             kv_size: kv_size.unwrap_or(size),
             in_use_total_blob_size,
-            idx: TtlCache::default(),
-            old_idx: TtlCache::default(),
+            idx: TtlCache::new(is_sync),
+            old_idx: TtlCache::new(is_sync),
             encryption_ver,
             encryption_key,
             l0_version,
@@ -295,11 +304,12 @@ impl SsTableCore {
         Ok(core)
     }
 
-    pub fn init_index(&self, offset: u32, length: usize) -> Result<Index> {
+    #[maybe_async::both]
+    pub async fn init_index(&self, offset: u32, length: usize) -> Result<Index> {
         let idx_data = self
             .file
             .read(self.start_off + offset as u64, length)
-            .unwrap();
+            .await?;
         self.validate_checksum_with_fix(idx_data.chunk())?;
         Index::new(idx_data)
     }
@@ -310,9 +320,27 @@ impl SsTableCore {
             .expect("load index")
     }
 
+    // TODO: handle error properly.
+    pub async fn load_index_async(&self) -> Arc<Index> {
+        self.idx
+            .get_async(self.init_index_async(self.footer.index_offset, self.footer.index_len()))
+            .await
+            .expect("load index")
+    }
+
     pub fn load_old_index(&self) -> Arc<Index> {
         self.old_idx
             .get(|| self.init_index(self.footer.old_index_offset, self.footer.old_index_len()))
+            .expect("load old index")
+    }
+
+    // TODO: handle error properly.
+    pub async fn load_old_index_async(&self) -> Arc<Index> {
+        self.old_idx
+            .get_async(
+                self.init_index_async(self.footer.old_index_offset, self.footer.old_index_len()),
+            )
+            .await
             .expect("load old index")
     }
 
@@ -327,7 +355,8 @@ impl SsTableCore {
         self.file.is_open()
     }
 
-    pub fn load_block(
+    #[maybe_async::both]
+    pub async fn load_block(
         &self,
         idx: &Index,
         pos: usize,
@@ -343,6 +372,7 @@ impl SsTableCore {
             self.start_off as usize + self.footer.data_len() - addr.curr_off as usize
         };
         self.load_block_by_addr_len(addr, length, buf, decryption_buf, fill_cache)
+            .await
     }
 
     fn load_block_by_addr_len(
@@ -361,7 +391,26 @@ impl SsTableCore {
         )
     }
 
-    fn read_block_from_file(
+    async fn load_block_by_addr_len_async(
+        &self,
+        addr: BlockAddress,
+        length: usize,
+        buf: &mut Vec<u8>,
+        decryption_buf: &mut Vec<u8>,
+        fill_cache: bool,
+    ) -> Result<Bytes> {
+        let cache_key = BlockCacheKey::new(addr.origin_fid, addr.origin_off);
+        self.cache
+            .try_get_with_ext_async(
+                cache_key,
+                self.read_block_from_file_async(addr, length, buf, decryption_buf),
+                fill_cache,
+            )
+            .await
+    }
+
+    #[maybe_async::both]
+    async fn read_block_from_file(
         &self,
         addr: BlockAddress,
         length: usize,
@@ -370,7 +419,7 @@ impl SsTableCore {
     ) -> Result<Bytes> {
         let compression_type = self.footer.compression_type;
         if compression_type == NO_COMPRESSION {
-            let mut raw_block = self.file.read(addr.curr_off as u64, length)?;
+            let mut raw_block = self.file.read(addr.curr_off as u64, length).await?;
             if let Some(encryption_key) = &self.encryption_key {
                 let mut block = Vec::with_capacity(length + encryption_key.encryption_block_size());
                 encryption_key.decrypt(
@@ -388,7 +437,9 @@ impl SsTableCore {
         buf.resize(length, 0);
         if let Some(encryption_key) = &self.encryption_key {
             decryption_buf.resize(length, 0);
-            self.file.read_at(decryption_buf, addr.curr_off as u64)?;
+            self.file
+                .read_at(decryption_buf, addr.curr_off as u64)
+                .await?;
             buf.truncate(0);
             encryption_key.decrypt(
                 decryption_buf,
@@ -398,7 +449,7 @@ impl SsTableCore {
                 buf,
             );
         } else {
-            self.file.read_at(buf, addr.curr_off as u64)?;
+            self.file.read_at(buf, addr.curr_off as u64).await?;
         }
         self.validate_checksum_with_fix(buf)?;
         let content = &buf[4..];
@@ -432,7 +483,8 @@ impl SsTableCore {
         }
     }
 
-    pub fn load_old_block(
+    #[maybe_async::both]
+    pub async fn load_old_block(
         &self,
         old_idx: &Index,
         pos: usize,
@@ -448,12 +500,37 @@ impl SsTableCore {
             self.start_off as usize + self.footer.index_offset as usize - addr.curr_off as usize
         };
         self.load_block_by_addr_len(addr, length, buf, decryption_buf, fill_cache)
+            .await
     }
 
-    fn read_filter_data_from_file(&self) -> Result<Bytes> {
+    fn get_filter(&self) -> Arc<BinaryFuse8> {
+        self.filter
+            .get(|| {
+                let filter_data = self.read_filter_data_from_file()?;
+                let filter = self.decode_filter(&filter_data)?;
+                Ok(filter)
+            })
+            .expect("load filter")
+    }
+
+    // TODO: handle error properly.
+    async fn get_filter_async(&self) -> Arc<BinaryFuse8> {
+        self.filter
+            .get_async(async {
+                let filter_data = self.read_filter_data_from_file_async().await?;
+                let filter = self.decode_filter(&filter_data)?;
+                Ok(filter)
+            })
+            .await
+            .expect("load filter")
+    }
+
+    #[maybe_async::both]
+    async fn read_filter_data_from_file(&self) -> Result<Bytes> {
         let mut data = self
             .file
-            .read(self.filter_offset() as u64, self.filter_size() as usize)?;
+            .read(self.filter_offset() as u64, self.filter_size() as usize)
+            .await?;
         self.validate_checksum_with_fix(data.chunk())?;
         data.get_u32_le();
         assert_eq!(data.get_u32_le(), AUX_INDEX_BINARY_FUSE8);
@@ -519,46 +596,6 @@ impl SsTableCore {
         InnerKey::from_inner_buf(self.biggest_buf.chunk())
     }
 
-    pub fn get_suggest_split_key(
-        &self,
-        start: Option<InnerKey<'_>>,
-        end: Option<InnerKey<'_>>,
-    ) -> Option<Bytes> {
-        // Get the key at 1/2 as split key.
-        // Use `test_get_split_keys` to see the result when adjust the split point.
-        let split_keys = self.get_evenly_split_keys(start, end, 2);
-        split_keys.into_iter().nth(1)
-    }
-
-    /// Get evenly split keys by blocks.
-    ///
-    /// Length of return vector would be less than `count` when number of blocks
-    /// less than count.
-    ///
-    /// The first value of return is the first key of the first block in range.
-    pub fn get_evenly_split_keys(
-        &self,
-        start: Option<InnerKey<'_>>,
-        end: Option<InnerKey<'_>>,
-        count: usize,
-    ) -> Vec<Bytes> {
-        debug_assert!(count > 0);
-        let idx = self.load_index();
-        let left = start.map_or(0, |start| idx.seek_block_bigger_or_equal(start.deref()));
-        let right = end.map_or(idx.num_blocks(), |end| {
-            idx.seek_block_bigger_or_equal(end.deref())
-        });
-        let num_blocks = right - left;
-        let steps = evenly_distribute(num_blocks, count);
-        let mut block_idx = left;
-        let mut split_keys = Vec::with_capacity(steps.len());
-        for step in steps {
-            split_keys.push(idx.block_key(block_idx));
-            block_idx += step;
-        }
-        split_keys
-    }
-
     pub fn compression_type(&self) -> u8 {
         self.footer.compression_type
     }
@@ -576,7 +613,7 @@ impl SsTableCore {
         validate_checksum_with_fix(
             data,
             &self.footer,
-            self.file.clone(),
+            self.file.as_ref(),
             self.encryption_key.as_ref(),
         )
     }
@@ -817,6 +854,22 @@ impl BlockCache {
         }
     }
 
+    pub async fn try_get_with_ext_async(
+        &self,
+        key: BlockCacheKey,
+        init: impl Future<Output = Result<Bytes>>,
+        fill_cache: bool,
+    ) -> Result<Bytes> {
+        if fill_cache {
+            self.try_get_with_async(key, init).await
+        } else if let Some(block) = self.get(&key) {
+            Ok(block)
+        } else {
+            self.report_cache_miss();
+            init.await
+        }
+    }
+
     pub fn weighted_size(&self) -> u64 {
         match self {
             Self::Moka(cache) => cache.weighted_size(),
@@ -871,10 +924,10 @@ fn validate_checksum(file: &dyn File, data: &[u8], footer: &Footer) -> Result<()
 fn validate_checksum_with_fix(
     data: &[u8],
     footer: &Footer,
-    file: Arc<dyn File>,
+    file: &dyn File,
     encryption_key: Option<&EncryptionKey>,
 ) -> Result<()> {
-    match validate_checksum(file.as_ref(), data, footer) {
+    match validate_checksum(file, data, footer) {
         Ok(()) => Ok(()),
         Err(err) => {
             if let Some(file_path) = file.path() {
@@ -884,6 +937,7 @@ fn validate_checksum_with_fix(
                     file.path(),
                     encryption_key
                 );
+                // TODO: add `remove` to `File` to remove `IaFile`.
                 // Just remove the sst file in local and download from dfs during next restart.
                 std::fs::remove_file(file_path)
                     .table_ctx(file.id(), "sst.validate_checksum.remove_file")?;
@@ -928,80 +982,89 @@ pub fn new_filename(id: u64, dir: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-pub(crate) static TEST_ID_ALLOC: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+pub(crate) mod test_util {
+    use std::sync::Arc;
 
-#[cfg(test)]
-pub(crate) fn get_test_value(n: usize) -> String {
-    format!("{}", n)
-}
+    use crate::table::{
+        file,
+        sstable::{BlockCache, BlockCacheType, Builder, SsTable},
+        ChecksumType, InnerKey, Value, NO_COMPRESSION,
+    };
 
-#[cfg(test)]
-pub(crate) fn generate_key_values(prefix: &str, n: usize) -> Vec<(String, String)> {
-    assert!(n <= 10000);
-    let mut results = Vec::with_capacity(n);
-    for i in 0..n {
-        let k = get_test_key(prefix, i);
-        let v = get_test_value(i);
-        results.push((k, v));
-    }
-    results
-}
+    pub(crate) static TEST_ID_ALLOC: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
 
-#[cfg(test)]
-pub(crate) fn build_test_table_with_kvs(kvs: &Vec<(String, String)>) -> SsTable {
-    let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let mut sst_builder = new_table_builder_for_test(sst_fid);
-    let meta = 0u8;
-
-    for (k, v) in kvs {
-        let value_buf = Value::encode_buf(meta, &[0], 0, v.as_bytes());
-        let value = &mut Value::decode(value_buf.as_slice());
-        sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), value, None);
+    pub(crate) fn get_test_value(n: usize) -> String {
+        format!("{}", n)
     }
 
-    let mut buf = Vec::with_capacity(sst_builder.estimated_size());
-    sst_builder.finish(0, &mut buf);
-    let sst_file = file::InMemFile::new(sst_fid, buf.into());
+    pub(crate) fn generate_key_values(prefix: &str, n: usize) -> Vec<(String, String)> {
+        assert!(n <= 10000);
+        let mut results = Vec::with_capacity(n);
+        for i in 0..n {
+            let k = get_test_key(prefix, i);
+            let v = get_test_value(i);
+            results.push((k, v));
+        }
+        results
+    }
 
-    SsTable::new(Arc::new(sst_file), new_test_cache(), None).unwrap()
-}
+    #[maybe_async::both]
+    pub(crate) async fn build_test_table_with_kvs(kvs: &Vec<(String, String)>) -> SsTable {
+        let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let mut sst_builder = new_table_builder_for_test(sst_fid);
+        let meta = 0u8;
 
-#[cfg(test)]
-pub(crate) fn new_table_builder_for_test(sst_fid: u64) -> Builder {
-    Builder::new(
-        sst_fid,
-        4096,
-        NO_COMPRESSION,
-        0,
-        ChecksumType::default(),
-        None,
-    )
-}
+        for (k, v) in kvs {
+            let value_buf = Value::encode_buf(meta, &[0], 0, v.as_bytes());
+            let value = &mut Value::decode(value_buf.as_slice());
+            sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), value, None);
+        }
 
-#[cfg(test)]
-pub(crate) fn build_test_table_with_prefix(
-    prefix: &str,
-    n: usize,
-) -> (SsTable, Vec<(String, String)>) {
-    let kvs = generate_key_values(prefix, n);
-    (build_test_table_with_kvs(&kvs), kvs)
-}
+        let mut buf = Vec::with_capacity(sst_builder.estimated_size());
+        sst_builder.finish(0, &mut buf);
+        let sst_file = file::InMemFile::new(sst_fid, buf.into()).await;
 
-#[cfg(test)]
-pub(crate) fn new_test_cache() -> BlockCache {
-    BlockCache::new(BlockCacheType::Quick, 1024, 16)
-}
+        SsTable::new(Arc::new(sst_file), new_test_cache(), None)
+            .await
+            .unwrap()
+    }
 
-#[cfg(test)]
-pub(crate) fn get_test_key(prefix: &str, i: usize) -> String {
-    format!("{}{:04}", prefix, i)
-}
+    pub(crate) fn new_table_builder_for_test(sst_fid: u64) -> Builder {
+        Builder::new(
+            sst_fid,
+            4096,
+            NO_COMPRESSION,
+            0,
+            ChecksumType::default(),
+            None,
+        )
+    }
 
-#[cfg(test)]
-pub(crate) fn create_sst_table(prefix: &str, n: usize) -> (SsTable, Vec<(String, String)>) {
-    let kvs = generate_key_values(prefix, n);
-    (build_test_table_with_kvs(&kvs), kvs)
+    pub(crate) fn build_test_table_with_prefix(
+        prefix: &str,
+        n: usize,
+    ) -> (SsTable, Vec<(String, String)>) {
+        let kvs = generate_key_values(prefix, n);
+        (build_test_table_with_kvs(&kvs), kvs)
+    }
+
+    pub(crate) fn new_test_cache() -> BlockCache {
+        BlockCache::new(BlockCacheType::Quick, 1024, 16)
+    }
+
+    pub(crate) fn get_test_key(prefix: &str, i: usize) -> String {
+        format!("{}{:04}", prefix, i)
+    }
+
+    #[maybe_async::both]
+    pub(crate) async fn create_sst_table(
+        prefix: &str,
+        n: usize,
+    ) -> (SsTable, Vec<(String, String)>) {
+        let kvs = generate_key_values(prefix, n);
+        (build_test_table_with_kvs(&kvs).await, kvs)
+    }
 }
 
 #[cfg(test)]
@@ -1011,10 +1074,11 @@ mod tests {
     use bytes::BytesMut;
     use rand::Rng;
 
-    use super::*;
-    use crate::Iterator;
+    use super::{test_util::*, *};
+    use crate::{next, next_async, Iterator};
 
-    fn create_multi_version_sst(mut kvs: Vec<(String, String)>) -> (SsTable, usize) {
+    #[maybe_async::both]
+    async fn create_multi_version_sst(mut kvs: Vec<(String, String)>) -> (SsTable, usize) {
         let sst_fid = TEST_ID_ALLOC.fetch_add(1, Ordering::Relaxed) + 1;
         let mut sst_builder = new_table_builder_for_test(sst_fid);
         kvs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1044,69 +1108,75 @@ mod tests {
         }
         let mut sst_buf = Vec::with_capacity(sst_builder.estimated_size());
         sst_builder.finish(0, &mut sst_buf);
-        let sst_file = Arc::new(file::InMemFile::new(sst_fid, sst_buf.into()));
+        let sst_file = Arc::new(file::InMemFile::new(sst_fid, sst_buf.into()).await);
         (
-            SsTable::new(sst_file, new_test_cache(), None).unwrap(),
+            SsTable::new(sst_file, new_test_cache(), None)
+                .await
+                .unwrap(),
             all_cnt,
         )
     }
 
-    #[test]
-    fn test_table_iterator() {
+    #[maybe_async::test]
+    async fn test_table_iterator() {
         for n in 99..=101 {
-            let (t, _) = create_sst_table("key", n);
-            let mut it = t.new_iterator(false, true);
+            let (t, _) = create_sst_table("key", n).await;
+            let mut it = t.new_iterator(false, true).await;
             let mut count = 0;
-            it.rewind();
+            it.rewind().await;
             while it.valid() {
                 let k = it.key();
                 assert_eq!(k.deref(), get_test_key("key", count).as_bytes());
                 let v = it.value();
                 assert_eq!(v.get_value(), get_test_value(count).as_bytes());
                 count += 1;
-                it.next()
+                next!(it).await;
             }
         }
     }
 
-    #[test]
-    fn test_point_get() {
-        let (t, _) = create_sst_table("key", 8000);
+    #[maybe_async::test]
+    async fn test_point_get() {
+        let (t, _) = create_sst_table("key", 8000).await;
         for i in 0..8000 {
             let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut owned_v = vec![];
-            let v = t.get(
-                InnerKey::from_inner_buf(k.as_bytes()),
-                u64::MAX,
-                k_h,
-                &mut owned_v,
-                1,
-            );
+            let v = t
+                .get(
+                    InnerKey::from_inner_buf(k.as_bytes()),
+                    u64::MAX,
+                    k_h,
+                    &mut owned_v,
+                    1,
+                )
+                .await;
             assert!(!v.is_empty())
         }
         for i in 8000..10000 {
             let k = get_test_key("key", i);
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut owned_v = vec![];
-            let v = t.get(
-                InnerKey::from_inner_buf(k.as_bytes()),
-                u64::MAX,
-                k_h,
-                &mut owned_v,
-                1,
-            );
+            let v = t
+                .get(
+                    InnerKey::from_inner_buf(k.as_bytes()),
+                    u64::MAX,
+                    k_h,
+                    &mut owned_v,
+                    1,
+                )
+                .await;
             assert!(v.is_empty())
         }
     }
 
-    #[test]
-    fn test_seek_to_first() {
+    #[maybe_async::test]
+    async fn test_seek_to_first() {
         let nums = &[99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let (t, _) = create_sst_table("key", *n);
-            let mut it = t.new_iterator(false, true);
-            it.rewind();
+            let (t, _) = create_sst_table("key", *n).await;
+            let mut it = t.new_iterator(false, true).await;
+            it.rewind().await;
             assert!(it.valid());
             let v = it.value();
             assert_eq!(v.get_value(), get_test_value(0).as_bytes());
@@ -1129,19 +1199,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_seek_to_last() {
+    #[maybe_async::test]
+    async fn test_seek_to_last() {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let (t, _) = create_sst_table("key", n);
-            let mut it = t.new_iterator(true, true);
-            it.rewind();
+            let (t, _) = create_sst_table("key", n).await;
+            let mut it = t.new_iterator(true, true).await;
+            it.rewind().await;
             assert!(it.valid());
             let v = it.value();
             assert_eq!(v.get_value(), get_test_value(n - 1).as_bytes());
             assert!(!v.is_blob_ref());
             assert_eq!(v.user_meta(), &[0u8]);
-            it.next();
+            next!(it).await;
             assert!(it.valid());
             let v = it.value();
             assert_eq!(v.get_value(), get_test_value(n - 2).as_bytes());
@@ -1150,8 +1220,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_seek_basic() {
+    #[maybe_async::test]
+    async fn test_seek_basic() {
         let test_datas: Vec<TestData> = vec![
             TestData::new("abc", true, "k0000"),
             TestData::new("k0100", true, "k0100"),
@@ -1161,10 +1231,10 @@ mod tests {
             TestData::new("k9999", true, "k9999"),
             TestData::new("z", false, ""),
         ];
-        let (t, _) = create_sst_table("k", 10000);
-        let mut it = t.new_iterator(false, true);
+        let (t, _) = create_sst_table("k", 10000).await;
+        let mut it = t.new_iterator(false, true).await;
         for td in test_datas {
-            it.seek(InnerKey::from_inner_buf(td.input.as_bytes()));
+            it.seek(InnerKey::from_inner_buf(td.input.as_bytes())).await;
             if !td.valid {
                 assert!(!it.valid());
                 continue;
@@ -1174,8 +1244,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_seek_for_prev() {
+    #[maybe_async::test]
+    async fn test_seek_for_prev() {
         let test_datas: Vec<TestData> = vec![
             TestData::new("abc", false, ""),
             TestData::new("k0100", true, "k0100"),
@@ -1185,10 +1255,10 @@ mod tests {
             TestData::new("k9999", true, "k9999"),
             TestData::new("z", true, "k9999"),
         ];
-        let (t, _) = create_sst_table("k", 10000);
-        let mut it = t.new_iterator(true, true);
+        let (t, _) = create_sst_table("k", 10000).await;
+        let mut it = t.new_iterator(true, true).await;
         for td in test_datas {
-            it.seek(InnerKey::from_inner_buf(td.input.as_bytes()));
+            it.seek(InnerKey::from_inner_buf(td.input.as_bytes())).await;
             if !td.valid {
                 assert!(!it.valid());
                 continue;
@@ -1198,14 +1268,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_iterate_from_start() {
+    #[maybe_async::test]
+    async fn test_iterate_from_start() {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let (t, _) = create_sst_table("key", n);
-            let mut it = t.new_iterator(false, true);
+            let (t, _) = create_sst_table("key", n).await;
+            let mut it = t.new_iterator(false, true).await;
             let mut count = 0;
-            it.rewind();
+            it.rewind().await;
             assert!(it.valid());
             while it.valid() {
                 let k = it.key();
@@ -1214,102 +1284,105 @@ mod tests {
                 assert_eq!(v.get_value(), get_test_value(count).as_bytes());
                 assert!(!v.is_blob_ref());
                 count += 1;
-                it.next()
+                next!(it).await
             }
         }
     }
 
-    #[test]
-    fn test_iterate_from_end() {
+    #[maybe_async::test]
+    async fn test_iterate_from_end() {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
-            let (t, _) = create_sst_table("key", n);
-            let mut it = t.new_iterator(true, true);
-            it.seek(InnerKey::from_inner_buf("zzzzzz".as_bytes())); // Seek to end, an invalid element.
+            let (t, _) = create_sst_table("key", n).await;
+            let mut it = t.new_iterator(true, true).await;
+            it.seek(InnerKey::from_inner_buf("zzzzzz".as_bytes())).await; // Seek to end, an invalid element.
             assert!(it.valid());
-            it.rewind();
+            it.rewind().await;
             for i in (0..n).rev() {
                 assert!(it.valid());
                 let v = it.value();
                 assert_eq!(v.get_value(), get_test_value(i).as_bytes());
                 assert!(!v.is_blob_ref());
-                it.next();
+                next!(it).await;
             }
-            it.next();
+            next!(it).await;
             assert!(!it.valid());
         }
     }
 
-    #[test]
-    fn test_table() {
-        let (t, _) = create_sst_table("key", 10000);
-        let mut it = t.new_iterator(false, true);
+    #[maybe_async::test]
+    async fn test_table() {
+        let (t, _) = create_sst_table("key", 10000).await;
+        let mut it = t.new_iterator(false, true).await;
         let mut kid = 1010_usize;
         let seek = get_test_key("key", kid);
-        it.seek(InnerKey::from_inner_buf(seek.as_bytes()));
+        it.seek(InnerKey::from_inner_buf(seek.as_bytes())).await;
         while it.valid() {
             assert_eq!(it.key().deref(), get_test_key("key", kid).as_bytes());
             kid += 1;
-            it.next()
+            next!(it).await;
         }
         assert_eq!(kid, 10000);
 
         it.seek(InnerKey::from_inner_buf(
             get_test_key("key", 99999).as_bytes(),
-        ));
+        ))
+        .await;
         assert!(!it.valid());
 
-        it.seek(InnerKey::from_inner_buf(get_test_key("kex", 0).as_bytes()));
+        it.seek(InnerKey::from_inner_buf(get_test_key("kex", 0).as_bytes()))
+            .await;
         assert!(it.valid());
         assert_eq!(it.key().deref(), get_test_key("key", 0).as_bytes());
     }
 
-    #[test]
-    fn test_iterate_back_and_forth() {
-        let (t, _) = create_sst_table("key", 10000);
+    #[maybe_async::test]
+    async fn test_iterate_back_and_forth() {
+        let (t, _) = create_sst_table("key", 10000).await;
         let seek = get_test_key("key", 1010);
-        let mut it = t.new_iterator(false, true);
-        it.seek(InnerKey::from_inner_buf(seek.as_bytes()));
+        let mut it = t.new_iterator(false, true).await;
+        it.seek(InnerKey::from_inner_buf(seek.as_bytes())).await;
         assert!(it.valid());
         assert_eq!(it.key().deref(), seek.as_bytes());
 
         it.set_reversed(true);
-        it.next();
-        it.next();
+        next!(it).await;
+        next!(it).await;
         assert!(it.valid());
         assert_eq!(it.key().deref(), get_test_key("key", 1008).as_bytes());
 
         it.set_reversed(false);
-        it.next();
-        it.next();
+        next!(it).await;
+        next!(it).await;
         assert_eq!(it.valid(), true);
         assert_eq!(it.key().deref(), get_test_key("key", 1010).as_bytes());
 
         it.seek(InnerKey::from_inner_buf(
             get_test_key("key", 2000).as_bytes(),
-        ));
+        ))
+        .await;
         assert_eq!(it.valid(), true);
         assert_eq!(it.key().deref(), get_test_key("key", 2000).as_bytes());
 
         it.set_reversed(true);
-        it.next();
+        next!(it).await;
         assert_eq!(it.valid(), true);
         assert_eq!(it.key().deref(), get_test_key("key", 1999).as_bytes());
 
         it.set_reversed(false);
-        it.rewind();
+        it.rewind().await;
         assert_eq!(it.key().deref(), get_test_key("key", 0).as_bytes());
     }
 
-    #[test]
-    fn test_iterate_multi_version() {
+    #[maybe_async::test]
+    async fn test_iterate_multi_version() {
         let num = 4000;
         let kvs = generate_key_values("key", num);
-        let (t, all_cnt) = create_multi_version_sst(kvs);
-        let mut it = t.new_iterator(false, true);
+        let (t, all_cnt) = create_multi_version_sst(kvs).await;
+        let mut it = t.new_iterator(false, true).await;
         let mut it_cnt = 0;
         let mut last_key = BytesMut::new();
-        it.rewind();
+        it.rewind().await;
         while it.valid() {
             if !last_key.is_empty() {
                 assert!(last_key < it.key().deref());
@@ -1317,10 +1390,10 @@ mod tests {
             last_key.truncate(0);
             last_key.extend_from_slice(it.key().deref());
             it_cnt += 1;
-            while it.next_version() {
+            while next_version!(it).await {
                 it_cnt += 1;
             }
-            it.next();
+            next!(it).await;
         }
         assert_eq!(it_cnt, all_cnt);
         let mut r = rand::thread_rng();
@@ -1329,32 +1402,34 @@ mod tests {
             let ver = 5 + r.gen_range(0..5) as u64;
             let k_h = farmhash::fingerprint64(k.as_bytes());
             let mut owned_v = vec![];
-            let val = t.get(
-                InnerKey::from_inner_buf(k.as_bytes()),
-                ver,
-                k_h,
-                &mut owned_v,
-                1,
-            );
+            let val = t
+                .get(
+                    InnerKey::from_inner_buf(k.as_bytes()),
+                    ver,
+                    k_h,
+                    &mut owned_v,
+                    1,
+                )
+                .await;
             if !val.is_empty() {
                 assert!(val.version <= ver);
             }
         }
-        let mut rev_it = t.new_iterator(true, true);
+        let mut rev_it = t.new_iterator(true, true).await;
         last_key.truncate(0);
-        rev_it.rewind();
+        rev_it.rewind().await;
         while rev_it.valid() {
             if !last_key.is_empty() {
                 assert!(last_key > rev_it.key().deref());
             }
             last_key.truncate(0);
             last_key.extend_from_slice(rev_it.key().deref());
-            rev_it.next();
+            next!(rev_it).await;
         }
         for _ in 0..1000 {
             let k = get_test_key("key", r.gen_range(0..num));
             // reverse iterator never seek to the same key with smaller version.
-            rev_it.seek(InnerKey::from_inner_buf(k.as_bytes()));
+            rev_it.seek(InnerKey::from_inner_buf(k.as_bytes())).await;
             if !rev_it.valid() {
                 continue;
             }
@@ -1363,161 +1438,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_uni_iterator() {
-        let (t, _) = create_sst_table("key", 10000);
+    #[maybe_async::test]
+    async fn test_uni_iterator() {
+        let (t, _) = create_sst_table("key", 10000).await;
         {
-            let mut it = t.new_iterator(false, true);
+            let mut it = t.new_iterator(false, true).await;
             let mut cnt = 0;
-            it.rewind();
+            it.rewind().await;
             while it.valid() {
                 let v = it.value();
                 assert_eq!(v.get_value(), get_test_value(cnt).as_bytes());
                 assert!(!v.is_blob_ref());
                 cnt += 1;
-                it.next();
+                next!(it).await;
             }
             assert_eq!(cnt, 10000);
         }
         {
-            let mut it = t.new_iterator(true, true);
+            let mut it = t.new_iterator(true, true).await;
             let mut cnt = 0;
-            it.rewind();
+            it.rewind().await;
             while it.valid() {
                 let v = it.value();
                 assert_eq!(v.get_value(), get_test_value(10000 - 1 - cnt).as_bytes());
                 assert!(!v.is_blob_ref());
                 cnt += 1;
-                it.next();
+                next!(it).await;
             }
         }
     }
 
     // For https://github.com/tidbcloud/cloud-storage-engine/issues/1957
-    #[test]
-    fn test_reset_old_block_iter() {
+    #[maybe_async::test]
+    async fn test_reset_old_block_iter() {
         let kvs = generate_key_values("key", 10);
-        let (t, _) = create_multi_version_sst(kvs.clone());
-        let mut it = t.new_iterator(false, true);
+        let (t, _) = create_multi_version_sst(kvs.clone()).await;
+        let mut it = t.new_iterator(false, true).await;
 
         for (k, _) in kvs {
-            it.seek(InnerKey::from_inner_buf(k.as_bytes()));
+            it.seek(InnerKey::from_inner_buf(k.as_bytes())).await;
             assert!(it.valid());
-            it.next_version();
-            it.next_version(); // Reach the second version in old block.
+            next_version!(it).await;
+            next_version!(it).await; // Reach the second version in old block.
 
-            it.seek(InnerKey::from_inner_buf(k.as_bytes()));
+            it.seek(InnerKey::from_inner_buf(k.as_bytes())).await;
             assert!(it.valid());
             // If old block iterator is not reset, it will point to the second version and
             // panic for version not match.
-            it.next_version();
-        }
-    }
-
-    #[test]
-    fn test_get_split_keys() {
-        let cases = vec![
-            (
-                10000,               // number of kvs
-                49,                  // expected number of blocks, about 200 kvs per block
-                None,                // range start,
-                None,                // range end,
-                3,                   // split count
-                vec![0, 3514, 6767], // expected evenly split keys
-                Some(5136),          // expected suggest split key
-            ),
-            (
-                10000,
-                49,
-                None,
-                None,
-                10,
-                vec![0, 1072, 2088, 3104, 4120, 5136, 6152, 7168, 8184, 9206],
-                Some(5136),
-            ),
-            (
-                10000,
-                49,
-                Some(2000),
-                Some(8000),
-                10,
-                vec![2088, 2703, 3309, 3924, 4530, 5136, 5751, 6357, 6972, 7578],
-                Some(5136),
-            ),
-            (1, 1, None, None, 1, vec![0], None), // 1 block
-            (1, 1, None, None, 2, vec![0], None),
-            (1, 1, None, None, 3, vec![0], None),
-            (300, 2, None, None, 1, vec![0], Some(222)), // 2 blocks
-            (300, 2, None, None, 2, vec![0, 222], Some(222)),
-            (300, 2, None, None, 3, vec![0, 222], Some(222)),
-            (500, 3, None, None, 1, vec![0], Some(438)), // 3 blocks
-            (500, 3, None, None, 2, vec![0, 438], Some(438)),
-            (500, 3, None, None, 3, vec![0, 222, 438], Some(438)),
-            (500, 3, None, None, 4, vec![0, 222, 438], Some(438)),
-            (2000, 10, None, None, 3, vec![0, 870, 1482], Some(1072)), // 10 blocks
-            (
-                2000,
-                10,
-                None,
-                None,
-                4,
-                vec![0, 654, 1277, 1687],
-                Some(1072),
-            ),
-            (
-                2000,
-                10,
-                None,
-                None,
-                8,
-                vec![0, 438, 870, 1072, 1277, 1482, 1687, 1892],
-                Some(1072),
-            ),
-            (2000, 10, Some(2000), Some(3000), 4, vec![], None), // with range
-            (
-                2000,
-                10,
-                Some(1000),
-                Some(3000),
-                4,
-                vec![1072, 1482, 1687, 1892],
-                Some(1687),
-            ),
-        ];
-
-        let prefix = "key";
-        for (i, (n, blocks, start, end, count, evenly_split_keys, suggest_split_key)) in
-            cases.into_iter().enumerate()
-        {
-            let (sst, _) = create_sst_table(prefix, n);
-            assert_eq!(sst.load_index().num_blocks(), blocks);
-
-            let start = start.map(|x| get_test_key(prefix, x));
-            let start = start
-                .as_ref()
-                .map(|x| InnerKey::from_inner_buf(x.as_bytes()));
-            let end = end.map(|x| get_test_key(prefix, x));
-            let end = end.as_ref().map(|x| InnerKey::from_inner_buf(x.as_bytes()));
-
-            let evenly_split_keys = evenly_split_keys
-                .into_iter()
-                .map(|x| get_test_key(prefix, x).as_bytes().to_vec())
-                .collect::<Vec<_>>();
-            assert_eq!(
-                sst.get_evenly_split_keys(start, end, count),
-                evenly_split_keys,
-                "case {}",
-                i
-            );
-
-            let suggest_split_key = suggest_split_key
-                .map(|x| Bytes::copy_from_slice(get_test_key(prefix, x).as_bytes()));
-            assert_eq!(
-                sst.get_suggest_split_key(start, end),
-                suggest_split_key,
-                "{}",
-                i
-            );
+            next_version!(it).await;
         }
     }
 

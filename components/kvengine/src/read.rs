@@ -1751,7 +1751,7 @@ mod tests {
             self,
             file::InMemFile,
             memtable::CfTable,
-            sstable::{build_test_table_with_kvs, BlockCache},
+            sstable::{test_util::build_test_table_with_kvs, BlockCache},
             InnerKey, NoPrefixKey, OwnedInnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile,
             TxnFileId, OP_PUT,
         },

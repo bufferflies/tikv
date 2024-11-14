@@ -271,6 +271,7 @@ async fn get_all(it: &mut dyn Iterator) -> (Vec<Bytes>, Vec<Bytes>) {
     }
     (keys, vals)
 }
+
 #[allow(dead_code)]
 #[maybe_async::both]
 async fn get_all_versions(it: &mut dyn Iterator) -> (Vec<Bytes>, Vec<Bytes>, Vec<u64>) {

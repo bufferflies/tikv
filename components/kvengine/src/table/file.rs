@@ -1,11 +1,13 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    fmt,
+    future::Future,
     ops::Deref,
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
     },
 };
@@ -13,7 +15,10 @@ use std::{
 use bytes::Bytes;
 use memmap2::Mmap;
 
-use crate::{error::IoContext, table::table};
+use crate::{
+    error::IoContext,
+    table::{table, Error},
+};
 
 // 30 minutes idle file would be closed.
 const FILE_TTL: u64 = 30 * 60;
@@ -29,6 +34,12 @@ pub trait File: Sync + Send {
     /// `path` returns the file path.
     fn path(&self) -> Option<PathBuf> {
         None
+    }
+
+    /// `is_sync` indicates that whether the whole file is local and can always
+    /// be read by sync methods.
+    fn is_sync(&self) -> bool {
+        true
     }
 
     /// `read` reads the data at given offset.
@@ -106,7 +117,7 @@ impl LocalFile {
             id,
             size: meta.size(),
             path: path.to_path_buf(),
-            fd: TtlCache::default(),
+            fd: TtlCache::new(true),
             mmap: Mutex::new(None),
         };
         Ok(local_file)
@@ -171,15 +182,54 @@ pub struct InMemFile {
     pub id: u64,
     data: Bytes,
     pub size: u64,
+    is_sync: bool,
+}
+
+impl fmt::Debug for InMemFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InMemFile")
+            .field("id", &self.id)
+            .field("size", &self.size)
+            .finish()
+    }
 }
 
 impl InMemFile {
     pub fn new(id: u64, data: Bytes) -> Self {
         let size = data.len() as u64;
-        Self { id, data, size }
+        Self {
+            id,
+            data,
+            size,
+            is_sync: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn new_async(id: u64, data: Bytes) -> Self {
+        let size = data.len() as u64;
+        Self {
+            id,
+            data,
+            size,
+            is_sync: false,
+        }
+    }
+
+    fn read_inner(&self, off: u64, length: usize) -> table::Result<Bytes> {
+        let off_usize = off as usize;
+        Ok(self.data.slice(off_usize..off_usize + length))
+    }
+
+    fn read_at_inner(&self, buf: &mut [u8], offset: u64) -> table::Result<()> {
+        let off_usize = offset as usize;
+        let length = buf.len();
+        buf.copy_from_slice(&self.data[off_usize..off_usize + length]);
+        Ok(())
     }
 }
 
+#[async_trait::async_trait]
 impl File for InMemFile {
     fn id(&self) -> u64 {
         self.id
@@ -189,16 +239,42 @@ impl File for InMemFile {
         self.size
     }
 
-    fn read(&self, off: u64, length: usize) -> table::Result<Bytes> {
-        let off_usize = off as usize;
-        Ok(self.data.slice(off_usize..off_usize + length))
+    fn is_sync(&self) -> bool {
+        self.is_sync
     }
 
+    #[inline]
+    fn read(&self, off: u64, length: usize) -> table::Result<Bytes> {
+        debug_assert!(self.is_sync);
+        self.read_inner(off, length)
+    }
+
+    #[inline]
     fn read_at(&self, buf: &mut [u8], offset: u64) -> table::Result<()> {
-        let off_usize = offset as usize;
-        let length = buf.len();
-        buf.copy_from_slice(&self.data[off_usize..off_usize + length]);
-        Ok(())
+        debug_assert!(self.is_sync);
+        self.read_at_inner(buf, offset)
+    }
+
+    fn read_footer(&self, footer_length: usize) -> table::Result<Bytes> {
+        let Some(off) = self.size().checked_sub(footer_length as u64) else {
+            error!("read footer: invalid size"; "file" => ?self, "footer_length" => footer_length);
+            return Err(Error::InvalidFileSize);
+        };
+        self.read_inner(off, footer_length)
+    }
+
+    #[cfg(test)]
+    #[inline]
+    async fn read_async(&self, off: u64, length: usize) -> table::Result<Bytes> {
+        debug_assert!(!self.is_sync);
+        self.read_inner(off, length)
+    }
+
+    #[cfg(test)]
+    #[inline]
+    async fn read_at_async(&self, buf: &mut [u8], offset: u64) -> table::Result<()> {
+        debug_assert!(!self.is_sync);
+        self.read_at_inner(buf, offset)
     }
 
     fn mmap(&self) -> table::Result<MmapData> {
@@ -206,30 +282,89 @@ impl File for InMemFile {
     }
 }
 
-pub struct TtlCache<T> {
-    access_ns: AtomicU64,
-    data: Mutex<Option<Arc<T>>>,
+enum TtlCacheMutex<T> {
+    Sync(std::sync::Mutex<T>),
+    Async(tokio::sync::Mutex<T>),
 }
 
-impl<T> Default for TtlCache<T> {
-    fn default() -> Self {
-        Self {
-            access_ns: AtomicU64::new(0),
-            data: Mutex::new(None),
-        }
-    }
+pub struct TtlCache<T> {
+    access_ns: AtomicU64,
+    data: TtlCacheMutex<Option<Arc<T>>>,
+    has_type_error: AtomicBool,
 }
 
 impl<T> TtlCache<T> {
+    pub fn new(is_sync: bool) -> Self {
+        Self {
+            access_ns: AtomicU64::new(0),
+            data: if is_sync {
+                TtlCacheMutex::Sync(Default::default())
+            } else {
+                TtlCacheMutex::Async(Default::default())
+            },
+            has_type_error: AtomicBool::new(false),
+        }
+    }
+
     pub fn get(&self, init: impl FnOnce() -> table::Result<T>) -> table::Result<Arc<T>> {
         let now_ns = time::precise_time_ns();
         self.access_ns.store(now_ns, Relaxed);
-        let mut guard = self.data.lock().unwrap();
-        if guard.is_none() {
-            let data = init()?;
-            *guard = Some(Arc::new(data));
+        match &self.data {
+            TtlCacheMutex::Sync(mu) => {
+                let mut guard = mu.lock().unwrap();
+                if guard.is_none() {
+                    let data = init()?;
+                    *guard = Some(Arc::new(data));
+                }
+                Ok(guard.as_ref().unwrap().clone())
+            }
+            _ => {
+                self.handle_type_error(false);
+                let data = init()?;
+                Ok(Arc::new(data))
+            }
         }
-        Ok(guard.as_ref().unwrap().clone())
+    }
+
+    pub async fn get_async(
+        &self,
+        init: impl Future<Output = table::Result<T>>,
+    ) -> table::Result<Arc<T>> {
+        let now_ns = time::precise_time_ns();
+        self.access_ns.store(now_ns, Relaxed);
+        match &self.data {
+            TtlCacheMutex::Async(mu) => {
+                let mut guard = mu.lock().await;
+                if guard.is_none() {
+                    let data = init.await?;
+                    *guard = Some(Arc::new(data));
+                }
+                Ok(guard.as_ref().unwrap().clone())
+            }
+            _ => {
+                self.handle_type_error(true);
+                let data = init.await?;
+                Ok(Arc::new(data))
+            }
+        }
+    }
+
+    // TODO: remove when stable enough
+    fn handle_type_error(&self, is_sync: bool) {
+        debug_assert!(
+            false,
+            "incorrect TtlCache type: is_sync: {}, bt: {:?}",
+            is_sync,
+            backtrace::Backtrace::new(),
+        );
+        if self
+            .has_type_error
+            .compare_exchange_weak(false, true, Relaxed, Relaxed)
+            .is_ok()
+        {
+            let bt = backtrace::Backtrace::new();
+            error!("incorrect TtlCache type"; "is_sync" => is_sync, "bt" => ?bt);
+        }
     }
 
     pub fn expire(&self, dur_secs: u64) {
@@ -237,8 +372,20 @@ impl<T> TtlCache<T> {
         let now_ns = time::precise_time_ns();
         let dur_nanos = dur_secs * 1_000_000_000;
         if access_ns > 0 && now_ns.saturating_sub(access_ns) > dur_nanos {
-            self.data.lock().unwrap().take();
-            self.access_ns.store(0, Relaxed);
+            match &self.data {
+                TtlCacheMutex::Sync(mu) => {
+                    if let Ok(mut data) = mu.try_lock() {
+                        data.take();
+                        self.access_ns.store(0, Relaxed);
+                    }
+                }
+                TtlCacheMutex::Async(mu) => {
+                    if let Ok(mut data) = mu.try_lock() {
+                        data.take();
+                        self.access_ns.store(0, Relaxed);
+                    }
+                }
+            }
         }
     }
 
@@ -249,15 +396,18 @@ impl<T> TtlCache<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{intrinsics::black_box, ops::Deref, time::Duration};
+
+    use futures::{executor::block_on, future};
 
     use crate::table::file::TtlCache;
 
     #[test]
     fn test_ttl_cache() {
-        let cache: TtlCache<Vec<u8>> = TtlCache::default();
+        let cache: TtlCache<Vec<u8>> = TtlCache::new(true);
         assert!(!cache.is_loaded());
-        cache.get(|| Ok(vec![1, 2, 3, 4])).unwrap();
+        let data = cache.get(|| Ok(vec![1, 2, 3, 4])).unwrap();
+        assert_eq!(data.deref(), &[1, 2, 3, 4]);
         assert!(cache.is_loaded());
         cache.expire(1);
         assert!(cache.is_loaded());
@@ -266,11 +416,39 @@ mod tests {
         assert!(!cache.is_loaded());
     }
 
+    #[tokio::test]
+    async fn test_ttl_cache_async() {
+        let cache: TtlCache<Vec<u8>> = TtlCache::new(false);
+        assert!(!cache.is_loaded());
+        let data = cache.get_async(future::ok(vec![1, 2, 3, 4])).await.unwrap();
+        assert_eq!(data.deref(), &[1, 2, 3, 4]);
+        assert!(cache.is_loaded());
+        cache.expire(1);
+        assert!(cache.is_loaded());
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        cache.expire(1);
+        assert!(!cache.is_loaded());
+    }
+
     #[bench]
     fn bench_ttl_cache(b: &mut test::Bencher) {
-        let cache: TtlCache<u64> = TtlCache::default();
+        let cache: TtlCache<u64> = TtlCache::new(true);
         b.iter(|| {
-            cache.get(|| Ok(1)).unwrap();
+            for _ in 0..1000 {
+                black_box(cache.get(|| Ok(1)).unwrap());
+            }
+        });
+    }
+
+    #[bench]
+    fn bench_ttl_cache_async(b: &mut test::Bencher) {
+        let cache: TtlCache<u64> = TtlCache::new(false);
+        b.iter(|| {
+            block_on(async {
+                for _ in 0..1000 {
+                    black_box(cache.get_async(future::ok(1)).await.unwrap());
+                }
+            });
         });
     }
 }

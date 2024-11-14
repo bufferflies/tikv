@@ -6,7 +6,7 @@ use super::*;
 use crate::table::{
     blobtable::{blobtable::BlobTable, builder::BlobTableBuilder, BlobRef},
     file::InMemFile,
-    sstable::{get_test_key, new_table_builder_for_test, new_test_cache, SsTable, TEST_ID_ALLOC},
+    sstable::{test_util::*, SsTable},
     Iterator,
 };
 

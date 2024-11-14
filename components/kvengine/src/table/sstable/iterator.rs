@@ -15,6 +15,7 @@ use crate::table::{
 
 #[derive(Default)]
 pub struct BlockIterator {
+    num_entries: usize,
     b: Bytes,
     idx: i32,
     err: Option<table::Error>,
@@ -31,6 +32,16 @@ pub struct BlockIterator {
     entry_offs: Bytes,
     common_prefix_addr: LocalAddr,
     entries_data_addr: LocalAddr,
+}
+
+impl fmt::Debug for BlockIterator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BlockIterator")
+            .field("num_entries", &self.num_entries)
+            .field("idx", &self.idx)
+            .field("err", &self.err)
+            .finish()
+    }
 }
 
 impl BlockIterator {
@@ -54,8 +65,8 @@ impl BlockIterator {
     fn load_entries(&mut self) {
         let mut data = self.b.clone();
         assert_eq!(data.get_u32_le(), BLOCK_FORMAT_V1);
-        let num_entries = data.get_u32_le() as usize;
-        self.entry_offs = data.slice(..num_entries * mem::size_of::<u32>());
+        self.num_entries = data.get_u32_le() as usize;
+        self.entry_offs = data.slice(..self.num_entries * mem::size_of::<u32>());
         data.advance(self.entry_offs.len());
         let common_prefix_len = data.get_u16_le() as usize;
         let common_prefix_off = self.b.len() - data.len();
@@ -65,7 +76,7 @@ impl BlockIterator {
     }
 
     fn num_entries(&self) -> usize {
-        self.entry_offs.len() / mem::size_of::<u32>()
+        self.num_entries
     }
 
     fn get_entry_off(&self, i: usize) -> usize {
@@ -200,17 +211,21 @@ impl fmt::Debug for TableIterator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TableIterator")
             .field("b_pos", &self.b_pos)
+            .field("bi", &self.bi)
             .field("old_b_pos", &self.old_b_pos)
+            .field("old_bi", &self.old_bi)
             .field("reversed", &self.reversed)
             .field("err", &self.err)
             .field("key_buf", &self.key_buf)
+            .field("is_sync", &self.t.is_sync())
             .finish()
     }
 }
 
 impl TableIterator {
-    pub fn new(t: SsTable, reversed: bool, fill_cache: bool) -> Self {
-        let idx = t.load_index();
+    #[maybe_async::both]
+    pub async fn new(t: SsTable, reversed: bool, fill_cache: bool) -> Self {
+        let idx = t.load_index().await;
         Self {
             t,
             idx,
@@ -240,7 +255,8 @@ impl TableIterator {
         &self.err
     }
 
-    fn set_block(&mut self, b_pos: i32) -> bool {
+    #[maybe_async::both]
+    async fn set_block(&mut self, b_pos: i32) -> bool {
         self.b_pos = b_pos;
         let block = self
             .t
@@ -251,21 +267,27 @@ impl TableIterator {
                 &mut self.decryption_buf,
                 self.fill_cache,
             )
+            .await
             .unwrap();
         self.bi.set_block(block);
         true
     }
 
-    fn set_old_block(&mut self, b_pos: i32) -> bool {
+    #[maybe_async::both]
+    async fn set_old_block(&mut self, b_pos: i32) -> bool {
         self.old_b_pos = b_pos;
-        let old_block = self.get_old_idx();
-        let block = match self.t.load_old_block(
-            &old_block,
-            self.old_b_pos as usize,
-            &mut self.block_buf,
-            &mut self.decryption_buf,
-            self.fill_cache,
-        ) {
+        let old_block = self.get_old_idx().await;
+        let block = match self
+            .t
+            .load_old_block(
+                &old_block,
+                self.old_b_pos as usize,
+                &mut self.block_buf,
+                &mut self.decryption_buf,
+                self.fill_cache,
+            )
+            .await
+        {
             Ok(b) => b,
             Err(e) => {
                 self.err = Some(e);
@@ -276,44 +298,48 @@ impl TableIterator {
         true
     }
 
-    fn seek_to_first(&mut self) {
+    #[maybe_async::both]
+    async fn seek_to_first(&mut self) {
         self.reset();
         let num_blocks = self.idx.num_blocks();
         if num_blocks == 0 {
             self.err = Some(table::Error::Eof);
             return;
         }
-        if !self.set_block(0) {
+        if !self.set_block(0).await {
             return;
         }
         self.bi.seek_to_first();
         self.sync_block_iterator();
     }
 
-    fn seek_to_last(&mut self) {
+    #[maybe_async::both]
+    async fn seek_to_last(&mut self) {
         self.reset();
         let num_blocks = self.idx.num_blocks();
         if num_blocks == 0 {
             self.err = Some(table::Error::Eof);
             return;
         }
-        if !self.set_block(num_blocks as i32 - 1) {
+        if !self.set_block(num_blocks as i32 - 1).await {
             return;
         }
         self.bi.seek_to_last();
         self.sync_block_iterator();
     }
 
-    fn seek_in_block(&mut self, b_pos: usize, key: &[u8]) {
-        if !self.set_block(b_pos as i32) {
+    #[maybe_async::both]
+    async fn seek_in_block(&mut self, b_pos: usize, key: &[u8]) {
+        if !self.set_block(b_pos as i32).await {
             return;
         }
         self.bi.seek(key);
         self.sync_block_iterator();
     }
 
-    fn seek_from_offset(&mut self, b_pos: usize, offset: usize, key: &[u8]) {
-        if !self.set_block(b_pos as i32) {
+    #[maybe_async::both]
+    async fn seek_from_offset(&mut self, b_pos: usize, offset: usize, key: &[u8]) {
+        if !self.set_block(b_pos as i32).await {
             return;
         }
         self.bi.set_idx(offset as i32);
@@ -325,13 +351,14 @@ impl TableIterator {
         self.sync_block_iterator();
     }
 
-    fn seek_inner(&mut self, key: &[u8]) {
+    #[maybe_async::both]
+    async fn seek_inner(&mut self, key: &[u8]) {
         self.reset();
         let idx = self.idx.seek_block(key);
         if idx == 0 {
             // The smallest key in our table is already strictly > key. We can return that.
             // This is like a SeekToFirst.
-            self.seek_from_offset(0, 0, key);
+            self.seek_from_offset(0, 0, key).await;
             return;
         }
 
@@ -341,7 +368,7 @@ impl TableIterator {
         // 1) Everything in block[idx-1] is strictly < key. In this case, we should go
         // to the first    element of block[idx].
         // 2) Some element in block[idx-1] is >= key. We should go to that element.
-        self.seek_in_block(idx - 1, key);
+        self.seek_in_block(idx - 1, key).await;
         if self.err.is_some() {
             // Case 1. Need to visit block[idx].
             if idx == self.idx.num_blocks() {
@@ -353,21 +380,23 @@ impl TableIterator {
             self.err = None;
             // Since block[idx].smallest is > key. This is essentially a
             // block[idx].SeekToFirst.
-            self.seek_from_offset(idx, 0, key);
+            self.seek_from_offset(idx, 0, key).await;
         }
         // Case 2: No need to do anything. We already did the seek in
         // block[idx-1].
     }
 
-    fn seek_for_prev(&mut self, key: &[u8]) {
+    #[maybe_async::both]
+    async fn seek_for_prev(&mut self, key: &[u8]) {
         // TODO: Optimize this. We shouldn't have to take a Prev step.
-        self.seek_inner(key);
+        self.seek_inner(key).await;
         if self.key_buf.chunk() != key {
-            self.prev_inner();
+            self.prev_inner().await;
         }
     }
 
-    fn next_inner(&mut self) {
+    #[maybe_async::both(Recursion)]
+    async fn next_inner(&mut self) {
         self.err = None;
         self.iter_state = IterState::NewVersion;
         if self.b_pos >= self.idx.num_blocks() as i32 {
@@ -375,7 +404,7 @@ impl TableIterator {
             return;
         }
         if self.bi.b.is_empty() {
-            if !self.set_block(self.b_pos) {
+            if !self.set_block(self.b_pos).await {
                 return;
             }
             self.bi.seek_to_first();
@@ -387,11 +416,16 @@ impl TableIterator {
         if self.err.is_some() {
             self.b_pos += 1;
             self.bi.b.clear();
-            self.next_inner();
+            self.next_inner().await;
         }
     }
 
-    fn prev_inner(&mut self) {
+    fn is_next_sync_inner(&self) -> bool {
+        !self.bi.b.is_empty() && self.bi.idx + 1 < self.bi.num_entries() as i32
+    }
+
+    #[maybe_async::both(Recursion)]
+    async fn prev_inner(&mut self) {
         self.err = None;
         self.iter_state = IterState::NewVersion;
         if self.b_pos < 0 {
@@ -399,7 +433,7 @@ impl TableIterator {
             return;
         }
         if self.bi.b.is_empty() {
-            if !self.set_block(self.b_pos) {
+            if !self.set_block(self.b_pos).await {
                 return;
             }
             self.bi.seek_to_last();
@@ -412,8 +446,12 @@ impl TableIterator {
         if self.err.is_some() {
             self.b_pos -= 1;
             self.bi.b.clear();
-            self.prev_inner();
+            self.prev_inner().await;
         }
+    }
+
+    fn is_prev_sync_inner(&self) -> bool {
+        !self.bi.b.is_empty() && self.bi.idx > 0
     }
 
     fn sync_block_iterator(&mut self) {
@@ -436,23 +474,25 @@ impl TableIterator {
             && &key[prefix_len..] == self.old_bi.get_diff_key()
     }
 
-    fn get_old_idx(&mut self) -> Arc<Index> {
+    #[maybe_async::both]
+    async fn get_old_idx(&mut self) -> Arc<Index> {
         if self.old_idx.is_none() {
-            let old_idx = self.t.load_old_index();
+            let old_idx = self.t.load_old_index().await;
             self.old_idx = Some(old_idx);
         }
         self.old_idx.as_ref().unwrap().clone()
     }
 
-    fn seek_old_block(&mut self) -> Option<table::Error> {
+    #[maybe_async::both]
+    async fn seek_old_block(&mut self) -> Option<table::Error> {
         assert!(self.iter_state == IterState::NewVersion);
-        let old_idx = self.get_old_idx();
+        let old_idx = self.get_old_idx().await;
         let mut old_b_pos = old_idx.seek_block(self.key_buf.chunk()) as i32 - 1;
         if old_b_pos == -1 {
             old_b_pos = 0;
         }
         if (self.old_bi.b.is_empty() || old_b_pos != self.old_b_pos)
-            && !self.set_old_block(old_b_pos)
+            && !self.set_old_block(old_b_pos).await
         {
             return self.old_bi.err.clone();
         }
@@ -468,16 +508,33 @@ impl TableIterator {
     }
 }
 
+#[maybe_async::async_trait]
 impl table::Iterator for TableIterator {
-    fn next(&mut self) {
+    #[maybe_async]
+    async fn next(&mut self) {
         if !self.reversed {
-            self.next_inner();
+            self.next_inner().await;
         } else {
-            self.prev_inner();
+            self.prev_inner().await;
         }
     }
 
-    fn next_version(&mut self) -> bool {
+    // Note: when `is_next_sync` is true, the next `next()` must be valid (i.e.,
+    // `valid()` returns true). Correctness of `ConcatIterator.is_next_sync`
+    // depends on this.
+    fn is_next_sync(&mut self) -> bool {
+        if self.t.is_sync() {
+            return true;
+        }
+        if !self.reversed {
+            self.is_next_sync_inner()
+        } else {
+            self.is_prev_sync_inner()
+        }
+    }
+
+    #[maybe_async]
+    async fn next_version(&mut self) -> bool {
         if self.bi.old_ver == 0 {
             return false;
         }
@@ -506,24 +563,33 @@ impl table::Iterator for TableIterator {
             self.iter_state = IterState::OldVersion;
             return true;
         }
-        self.err = self.seek_old_block();
+        self.err = self.seek_old_block().await;
         assert!(self.err.is_none());
         true
     }
 
-    fn rewind(&mut self) {
+    fn is_next_version_sync(&mut self) -> bool {
+        if self.t.is_sync() {
+            return true;
+        }
+        self.same_old_key()
+    }
+
+    #[maybe_async]
+    async fn rewind(&mut self) {
         if !self.reversed {
-            self.seek_to_first();
+            self.seek_to_first().await;
         } else {
-            self.seek_to_last();
+            self.seek_to_last().await;
         }
     }
 
-    fn seek(&mut self, key: InnerKey<'_>) {
+    #[maybe_async]
+    async fn seek(&mut self, key: InnerKey<'_>) {
         if !self.reversed {
-            self.seek_inner(key.deref());
+            self.seek_inner(key.deref()).await;
         } else {
-            self.seek_for_prev(key.deref());
+            self.seek_for_prev(key.deref()).await;
         }
     }
 

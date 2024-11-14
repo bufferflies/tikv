@@ -663,12 +663,13 @@ impl TxnChunkInner {
             prop_slice = remained;
         }
         let index = TxnChunkIndex::new(idx_data);
+        let is_sync = file.is_sync();
         let chunk = Self {
             file,
             cache,
             footer,
             index,
-            hash_index: TtlCache::default(),
+            hash_index: TtlCache::new(is_sync),
             check_non_exists,
             inserts,
             encryption_key,
@@ -1828,7 +1829,7 @@ mod tests {
     use crate::{
         table::{
             file::InMemFile,
-            sstable::{get_test_value, BlockCache},
+            sstable::{test_util::get_test_value, BlockCache},
             txn_file::{
                 TxnChunk, TxnChunkBuilder, TxnChunkIterator, OP_CHECK_NOT_EXIST, OP_INSERT, OP_PUT,
             },

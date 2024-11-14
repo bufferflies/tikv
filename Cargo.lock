@@ -3801,6 +3801,7 @@ dependencies = [
  "async-recursion 1.1.1",
  "async-trait",
  "aws",
+ "backtrace",
  "base64 0.13.0",
  "bincode",
  "bstr",
@@ -4233,7 +4234,7 @@ checksum = "b87248edafb776e59e6ee64a79086f65890d3510f2c656c000bf2a7e8a0aea40"
 [[package]]
 name = "maybe-async"
 version = "0.2.6"
-source = "git+https://github.com/pingyu/maybe-async-rs?branch=cse#2d195177d43abf6cbe185564fa30714c5529c6d4"
+source = "git+https://github.com/pingyu/maybe-async-rs?branch=cse#a48a423009593f443046724aa88d6b5408ec5d1b"
 dependencies = [
  "proc-macro2",
  "quote",

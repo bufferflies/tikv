@@ -172,10 +172,7 @@ mod tests {
     use crate::{
         concat_iterator::ConcatIterator,
         table::{
-            sstable::{
-                build_test_table_with_kvs, build_test_table_with_prefix, get_test_key,
-                get_test_value, SsTable,
-            },
+            sstable::{test_util::*, SsTable},
             InnerKey, Iterator,
         },
     };
