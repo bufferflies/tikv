@@ -584,7 +584,13 @@ impl StatusServer {
         let mut res = match fut.await {
             Ok(res) => res,
             Err(e) => {
-                let err_msg = format!("{} check leader channel error: {:?}", shard_id, e);
+                let err_msg = format!(
+                    "{}:{}:{} check leader channel error: {:?}",
+                    engine.get_engine_id(),
+                    shard_id,
+                    shard_ver,
+                    e
+                );
                 error!("{}", err_msg);
                 return Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, err_msg));
             }
@@ -626,7 +632,7 @@ impl StatusServer {
                     return Ok(make_ok_response(body));
                 }
                 let mem_data = snap_access.build_mem_data(&outer_ranges, start_ts);
-                let (_, snap_data) = shard.new_snap_access().marshal(
+                let (_, snap_data) = snap_access.marshal(
                     &[(shard.outer_start.clone(), shard.outer_end.clone())],
                     false,
                     false,

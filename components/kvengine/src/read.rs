@@ -2,6 +2,7 @@
 
 use core::panic;
 use std::{
+    collections::HashSet,
     fmt::{Debug, Formatter},
     iter::Iterator as _,
     marker::PhantomData,
@@ -810,6 +811,7 @@ impl SnapAccessCore {
         snap.set_properties(properties);
         let mut count = 0;
         let mut overlapped_count = 0;
+        let mut l0_ids = HashSet::new();
         for v in &self.data.l0_tbls {
             count += 1;
             if ignore_locks {
@@ -842,6 +844,7 @@ impl SnapAccessCore {
             l0.set_smallest(v.smallest().to_vec());
             l0.set_biggest(v.biggest().to_vec());
             snap.mut_l0_creates().push(l0);
+            l0_ids.insert(v.id());
         }
         for (k, v) in self.data.blob_tbl_map.iter() {
             assert_eq!(k, &v.id());
@@ -918,6 +921,12 @@ impl SnapAccessCore {
             }
             false
         });
+        self.data.col_levels.unconverted_l0s.iter().for_each(|l0| {
+            // l0 may be skip due to non-overlap
+            if l0_ids.contains(&l0.id()) {
+                snap.mut_unconverted_l0s().push(l0.id());
+            }
+        });
         if let Some(schema_file) = &self.data.schema_file {
             let mut schema_meta = SchemaMeta::default();
             schema_meta.set_file_id(schema_file.get_file_id());
@@ -928,10 +937,11 @@ impl SnapAccessCore {
         snap.set_columnar_snap_version(self.columnar_snap_version);
 
         info!(
-            "convert snap access to change set for {}, total files {}, overlapped files {}",
+            "convert snap access to change set for {}, total files {}, overlapped files {}, unconverted_l0s {}",
             self.get_tag(),
             count,
             overlapped_count,
+            snap.get_unconverted_l0s().len(),
         );
         cs
     }
