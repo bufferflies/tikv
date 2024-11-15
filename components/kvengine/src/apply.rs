@@ -190,13 +190,15 @@ pub(crate) fn create_snapshot_tables(
         }
     }
     for &l0_id in snap.get_unconverted_l0s() {
-        let l0 = match l0_tbls.iter().find(|l0| l0.id() == l0_id) {
-            Some(l0) => l0.clone(),
-            None => {
-                panic!("l0_id: {}, l0 tables: {:?}", l0_id, snap);
-            }
-        };
-        col_levels.unconverted_l0s.push(l0.clone());
+        if let Some(unconverted_l0) = l0_tbls.iter().find(|l0| l0.id() == l0_id) {
+            col_levels.unconverted_l0s.push(unconverted_l0.clone());
+        } else {
+            assert!(
+                not_all_tables_loaded,
+                "unconverted_l0: {:?}, tables: {:?}",
+                l0_id, tables
+            );
+        }
     }
     col_levels.sort();
     let mut vector_indexes = VectorIndexes::default();
