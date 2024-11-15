@@ -158,7 +158,7 @@ pub(crate) fn spawn_backup(
 fn is_backup_error_retryable(err: &Error) -> bool {
     match err {
         Error::MetaNotFound(_)
-        | Error::HttpError(_)
+        | Error::HttpRequestError(_)
         | Error::IncrementalBackupToleratedError(_) => true,
         Error::SharedError(err) => is_backup_error_retryable(err.inner()),
         _ => false,
@@ -285,7 +285,7 @@ pub(crate) fn spawn_restore_keyspace(
                         warn!("{} backup is empty, retry", tag);
                         continue 'next_restore;
                     }
-                    Err(Error::RfengineHttpError(err)) => {
+                    Err(Error::RfengineHttpRequestError(err)) => {
                         // We would still meet `RfengineHttpError` even thought `tolerate_err` > 0,
                         // as there are chances that restoration is performed across the restart of
                         // more than one store.

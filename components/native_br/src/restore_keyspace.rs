@@ -54,7 +54,7 @@ use crate::{
     common::{
         collect_snapshot_meta_rlog_files, load_peer_raft_state, load_rf_engine_meta, now,
         replay_wal_logs, retain_sst_files, send_request_to_store, RawRegion, RegionMetaGetter,
-        StorePeer, TableFile,
+        ReplayWalLogsContext, StorePeer, TableFile,
     },
     error::{
         Error,
@@ -73,8 +73,6 @@ const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_
 const REPLICAS: usize = 3; // Number of replicas for each region.
 
 const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
-
-pub const WAL_CHUNK_INTEGRITY_CHECK_COUNT: usize = 3;
 
 pub const RESTORE_RFENGINE_CONCURRENCY: usize = 3;
 
@@ -686,8 +684,9 @@ impl BackupCluster {
         };
         let security_conf = restore_conf.security.clone();
         let master_key = dfs.get_runtime().block_on(security_conf.new_master_key());
+        let tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
         let mut cluster = Self {
-            tag: make_keyspace_tag(keyspace_id, target_keyspace_id),
+            tag: tag.clone(),
             path,
             pd_client: pd_client.clone(),
             dfs,
@@ -729,7 +728,7 @@ impl BackupCluster {
         let fetch_wal_timeout = restore_conf.timeout_fetch_wal.0;
 
         let is_error_can_tolerate = |err: &Error| -> bool {
-            if matches!(err, Error::RfengineHttpError(_)) {
+            if matches!(err, Error::RfengineHttpRequestError(_)) {
                 true
             } else if !restore_conf.strict_tolerate {
                 crate::metrics::NATIVE_BR_RESTORE_ERROR
@@ -777,6 +776,7 @@ impl BackupCluster {
 
         for store in &cluster_meta.stores {
             let store_id = store.get_store_id();
+            let tag = format!("{tag}:{store_id}");
             let store_config = cluster.generate_store_config(store_id);
 
             let tx = result_tx.clone();
@@ -792,6 +792,7 @@ impl BackupCluster {
             };
             std::thread::spawn(move || {
                 let res = BackupCluster::setup_raft_engine(
+                    &tag,
                     store_id,
                     &cluster_backup_meta,
                     &store_config,
@@ -801,10 +802,10 @@ impl BackupCluster {
                     archiving,
                     archive_store_meta,
                 );
-                if res.is_err() {
+                if let Err(err) = &res {
                     warn!(
-                        "Keyspace {} setup raft engine for store {} failed",
-                        keyspace_tag, store_id
+                        "Keyspace {} setup raft engine for store {} failed: {:?}",
+                        keyspace_tag, store_id, err,
                     );
                 }
                 let _ = tx.send(res.map(|rf_engine| (store_id, store_config, rf_engine)));
@@ -841,6 +842,7 @@ impl BackupCluster {
     }
 
     fn setup_raft_engine_for_lightweight(
+        tag: &str,
         store_id: u64,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
@@ -872,18 +874,17 @@ impl BackupCluster {
 
         // When archiving, the dfs should have complete wal chunks.
         let complete_wal_chunks = archiving;
-        replay_wal_logs(
+        let ctx = ReplayWalLogsContext {
             pd_client,
             dfs,
             store_id,
             cluster_backup,
-            &rf_engine,
+            rf_engine: &rf_engine,
             complete_wal_chunks,
-            false,
+            full_restore: false,
             fetch_wal_timeout,
-            archive_store_meta,
-            rlog_files.snap_epoch,
-        )?;
+        };
+        replay_wal_logs(tag, ctx, archive_store_meta, rlog_files.snap_epoch)?;
         Ok(rf_engine)
     }
 
@@ -905,6 +906,7 @@ impl BackupCluster {
     }
 
     pub fn setup_raft_engine(
+        tag: &str,
         store_id: u64,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
@@ -916,6 +918,7 @@ impl BackupCluster {
     ) -> Result<RfEngine> {
         if cluster_backup.is_lightweight {
             Self::setup_raft_engine_for_lightweight(
+                tag,
                 store_id,
                 cluster_backup,
                 conf,
@@ -2522,7 +2525,7 @@ async fn request_restore_snapshot(
         let req = Request::post(uri)
             .body(Body::from(post_data.clone()))
             .unwrap();
-        match send_request_to_store(req, &store, security_mgr).await {
+        match send_request_to_store(req, &store, security_mgr.as_ref()).await {
             Ok(resp) => {
                 let resp: RestoreShardResponse = serde_json::from_slice(&resp).unwrap();
                 debug!("{} request_restore_snapshot succeed", tag);

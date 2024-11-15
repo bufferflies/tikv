@@ -12,7 +12,7 @@ use std::{
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
-use kvengine::dfs::{DFSConfig, S3Fs};
+use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
 use slog_global::*;
 use tikv_util::mpsc::{Receiver, Sender};
 
@@ -57,7 +57,7 @@ pub(crate) struct ObjectStorageWorker {
     start_off: u64, // The start offset of the current chunk.
     sync_off: u64,  // The offset of the syncing of current wal.
     s3fs: Arc<S3Fs>,
-    healthy: Arc<AtomicBool>,
+    healthy: Healthy,
 }
 
 impl ObjectStorageWorker {
@@ -65,7 +65,7 @@ impl ObjectStorageWorker {
         config: ObjectStorageConfig,
         epoch_id: u32,
         engine_id: Arc<AtomicU64>,
-        dfs_worker_healthy: Arc<AtomicBool>,
+        dfs_worker_healthy: Healthy,
         task_rx: Receiver<ObjectStorageTask>,
         callback: Sender<Task>,
     ) -> Self {
@@ -99,7 +99,7 @@ impl ObjectStorageWorker {
     // found in the epoch range from `epoch_id - 3` to `epoch_id`, trigger an
     // instant rfengine snapshot.
     fn init(&mut self) -> Result<bool> {
-        self.set_healthy();
+        self.healthy.set_healthy();
         let mut need_snapshot = false;
         // Wait for node bootstrapped.
         info!("dfs worker wait for store bootstrapped.");
@@ -171,13 +171,13 @@ impl ObjectStorageWorker {
             Err(err) => {
                 // Disable lightweight backup if init failed.
                 error!("dfs worker init failed, set unhealthy"; "err" => ?err);
-                self.set_unhealthy();
+                self.healthy.set_unhealthy();
             }
         }
         while let Ok(task) = self.task_rx.recv() {
             // If dfs worker be marked unhealthy, skip handle all tasks. Downgrade to
             // disable lightweight backup and do not try to auto-recover.
-            if !self.is_healthy() {
+            if !self.healthy.is_healthy() {
                 if matches!(task, ObjectStorageTask::Close) {
                     info!("ObjectStorageWorker close");
                     return;
@@ -188,7 +188,7 @@ impl ObjectStorageWorker {
                 ObjectStorageTask::Sync { epoch_id, file_off } => {
                     if let Err(err) = self.handle_sync(epoch_id, file_off) {
                         error!("dfs worker handle_sync failed, set unhealthy"; "err" => ?err);
-                        self.set_unhealthy()
+                        self.healthy.set_unhealthy()
                     }
                 }
                 ObjectStorageTask::Rotate { epoch_id, file_off } => {
@@ -199,26 +199,26 @@ impl ObjectStorageWorker {
                         );
                         if let Err(err) = self.handle_sync(epoch_id, file_off) {
                             error!("dfs worker handle_sync failed, set unhealthy"; "err" => ?err);
-                            self.set_unhealthy();
+                            self.healthy.set_unhealthy();
                             return;
                         }
                     }
                     if let Err(err) = self.handle_rotate(epoch_id) {
                         error!("dfs worker handle_rotate failed, set unhealthy"; "err" => ?err);
-                        self.set_unhealthy()
+                        self.healthy.set_unhealthy();
                     }
                 }
                 ObjectStorageTask::Snapshot { snapshot_objects } => {
                     if let Err(err) = self.handle_snapshot(snapshot_objects) {
                         error!("dfs worker handle_snapshot failed, set unhealthy"; "err" => ?err);
-                        self.set_unhealthy()
+                        self.healthy.set_unhealthy();
                     }
                 }
                 ObjectStorageTask::Flush => {
                     // Send flush task before close in normal case. If close without flush, we can
                     // construct the case for wal chunk recovery in random test.
                     if !self.buf.is_empty() && self.next_chunk(false).is_err() {
-                        self.set_unhealthy()
+                        self.healthy.set_unhealthy();
                     }
                 }
                 ObjectStorageTask::Close => {
@@ -253,10 +253,14 @@ impl ObjectStorageWorker {
         let file_key = last_wal_chunk_file_key(store_id, self.epoch_id, self.start_off, file_off);
         let chunk = self.take_chunk_data();
 
-        if let Err(err) = self.s3fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
-            error!("put wal chunk failed"; "err" => ?err);
-            return Err(Error::Other(err));
-        }
+        let fs = self.s3fs.clone();
+        let healthy = self.healthy.clone();
+        self.s3fs.get_runtime().spawn_blocking(move || {
+            if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
+                error!("{} put wal chunk failed", store_id; "err" => ?err);
+                healthy.set_unhealthy();
+            }
+        });
 
         // Reset the offset and buf after rebuild one epoch.
         self.start_off = 0;
@@ -340,22 +344,28 @@ impl ObjectStorageWorker {
 
     // This function should be called after compact done.
     fn handle_snapshot(&mut self, snapshot_objects: Vec<(String, Bytes)>) -> Result<()> {
+        let store_id = self.get_engine_id();
         debug!(
             "{}: handle_snapshot epoch {} objects {}",
-            self.get_engine_id(),
+            store_id,
             self.epoch_id,
             snapshot_objects.len()
         );
         if snapshot_objects.is_empty() {
             return Ok(());
         }
-        // Snapshot objects should be put in order.
-        for obj in snapshot_objects {
-            if let Err(err) = self.s3fs.put_objects(vec![obj]) {
-                error!("put snapshot object failed"; "err" => ?err);
-                return Err(Error::Other(err));
+        let fs = self.s3fs.clone();
+        let healthy = self.healthy.clone();
+        self.s3fs.get_runtime().spawn_blocking(move || {
+            // Snapshot objects should be put in order.
+            for obj in snapshot_objects {
+                if let Err(err) = fs.put_objects(vec![obj]) {
+                    error!("{} put snapshot object failed", store_id; "err" => ?err);
+                    healthy.set_unhealthy();
+                    return;
+                }
             }
-        }
+        });
 
         Ok(())
     }
@@ -406,10 +416,15 @@ impl ObjectStorageWorker {
             ChunkHeader::len() + buf_len,
             chunk.len()
         );
-        if let Err(err) = self.s3fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
-            error!("put wal chunk failed"; "err" => ?err);
-            return Err(Error::Other(err));
-        }
+        let fs = self.s3fs.clone();
+        let healthy = self.healthy.clone();
+        self.s3fs.get_runtime().spawn_blocking(move || {
+            if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
+                error!("{} put wal chunk failed", store_id, ; "err" => ?err);
+                healthy.set_unhealthy();
+            }
+        });
+
         self.start_off = self.sync_off;
         self.chunk_id += 1;
         self.buf.clear();
@@ -427,20 +442,6 @@ impl ObjectStorageWorker {
 
     fn get_engine_id(&self) -> u64 {
         self.engine_id.load(Ordering::Acquire)
-    }
-
-    fn set_healthy(&mut self) {
-        RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(1);
-        self.healthy.store(true, Ordering::Release)
-    }
-
-    fn set_unhealthy(&mut self) {
-        RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(0);
-        self.healthy.store(false, Ordering::Release)
-    }
-
-    fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
     }
 }
 
@@ -568,12 +569,37 @@ pub(crate) enum ObjectStorageTask {
     Close,
 }
 
+#[derive(Clone)]
+pub(crate) struct Healthy(Arc<AtomicBool>);
+
+impl Default for Healthy {
+    fn default() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+}
+
+impl Healthy {
+    pub(crate) fn set_healthy(&self) {
+        RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(1);
+        self.0.store(true, Ordering::Release)
+    }
+
+    pub(crate) fn set_unhealthy(&self) {
+        RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(0);
+        self.0.store(false, Ordering::Release)
+    }
+
+    pub(crate) fn is_healthy(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
     use rand::Rng;
 
-    use crate::{assemble_wal_chunks, ChunkHeader, CompressionType, ObjectStorageWorker};
+    use super::*;
 
     #[test]
     fn test_chunk_header() {
@@ -598,7 +624,7 @@ mod tests {
             ),
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            Healthy::default(),
             rx,
             tx,
         );

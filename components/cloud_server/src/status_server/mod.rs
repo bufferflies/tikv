@@ -51,7 +51,7 @@ use profile::*;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use rfengine::{
-    load_store_ident, raft_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
+    load_store_ident, raft_state_key, Error, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
     RAFT_TRUNCATED_STATE_KEY,
 };
 use rfstore::{
@@ -888,6 +888,10 @@ impl StatusServer {
         Ok(match future.await {
             Ok(resp) => match resp {
                 Ok(chunk) => Response::builder().body(Body::from(chunk)).unwrap(),
+                Err(Error::WalEpochOverwritten { epoch_id }) => make_response(
+                    StatusCode::GONE,
+                    format!("WAL epoch {epoch_id} is overwritten"),
+                ),
                 Err(err) => {
                     error!("rfengine_wal_chunk error: {}", err);
                     make_response(StatusCode::BAD_REQUEST, format!("bad request {}", err))

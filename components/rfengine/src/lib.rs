@@ -59,6 +59,8 @@ pub enum Error {
         offset: u64,
         data: Vec<u8>,
     },
+    #[error("WAL Epoch {epoch_id} is overwritten")]
+    WalEpochOverwritten { epoch_id: u32 },
     #[error("Other error: {0}")]
     Other(String),
 }

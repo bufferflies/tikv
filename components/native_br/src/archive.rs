@@ -237,6 +237,7 @@ pub struct ArchiveConfig {
     pub skip_no_meta_days: usize,
     pub skip_shards: Option<HashSet<u64>>,
     pub dry_run: bool,
+    pub fetch_wal_timeout: Duration,
 }
 
 impl ArchiveConfig {
@@ -256,6 +257,7 @@ impl ArchiveConfig {
             skip_no_meta_days: 0,
             skip_shards: None,
             dry_run: true,
+            fetch_wal_timeout: Duration::from_secs(600), // 10 minutes
         }
     }
 
@@ -391,7 +393,7 @@ fn archive_backup_files(
                 .unwrap()
                 .eq(&backup_date)
         {
-            write_archive_packages_and_index(config, s3fs, old_archive_backup, &files)?
+            write_archive_packages_and_index(config, &pd_client, s3fs, old_archive_backup, &files)?
         } else {
             return Err(Error::ArchiveError(format!(
                 "old backup {} is not {}'s last day",
@@ -404,6 +406,7 @@ fn archive_backup_files(
 
 fn write_archive_packages_and_index(
     config: ArchiveConfig,
+    pd_client: &Arc<dyn PdClient>,
     s3fs: Arc<S3Fs>,
     archive_backup: ArchiveBackup,
     next_day_files: &HashMap<u64, FileType>,
@@ -432,7 +435,7 @@ fn write_archive_packages_and_index(
             config.max_archive_file_size,
             config.concurrency,
             s3fs.clone(),
-            format_date,
+            format_date.clone(),
             archive_backup.meta_data,
         );
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(cluster_backup.stores.len());
@@ -445,12 +448,20 @@ fn write_archive_packages_and_index(
         let mut msg_count = 0;
         for store in &cluster_backup.stores {
             let store_id = store.get_store_id();
+            let pd_client = pd_client.clone();
             let dfs = s3fs.clone();
             let cluster_backup_meta = cluster_backup.clone();
             let tx = result_tx.clone();
+            let tag = format!("archive:{format_date}:{store_id}");
             std::thread::spawn(move || {
-                let store_wal_rlog_files =
-                    collect_store_wal_rlog_files(dfs, &cluster_backup_meta, store_id);
+                let store_wal_rlog_files = collect_store_wal_rlog_files(
+                    &tag,
+                    pd_client,
+                    dfs,
+                    &cluster_backup_meta,
+                    store_id,
+                    config.fetch_wal_timeout,
+                );
                 let _ = tx.send(store_wal_rlog_files);
             });
             if msg_count < config.store_concurrency {
@@ -772,8 +783,8 @@ pub fn get_archived_wals_from_addresses(
     let mut handles = Vec::with_capacity(addrs_len);
 
     // There is no rate limit here, as the number of WAL chunks should be limited.
-    // By default, there are 4 chunks per epoch (wal_size/wal_chunk_target_file_size
-    // = 512MB/128MB).
+    // By default, there are 8 chunks per epoch (wal_size/wal_chunk_target_file_size
+    // = 512MB/64MB).
     for addr in addrs {
         let wal_chunk_archive_addr = ArchiveAddress::new(date.to_string(), addr);
         let fs = s3fs.clone();

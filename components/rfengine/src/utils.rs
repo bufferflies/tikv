@@ -146,12 +146,19 @@ pub fn parse_wal_chunk_key(key: Option<&str>) -> Option<(u32, u64, u64, bool /* 
     })
 }
 
-pub fn verify_wal_chunks_integrity(chunks: &[String], check_last: bool) -> bool {
+pub fn verify_wal_chunks_integrity(
+    chunks: &[String],
+    check_last: bool,
+) -> std::result::Result<u64 /* last_end_off */, String> {
     if chunks.is_empty() {
         // `check_last` is true, it means the chunks belongs to a previous epoch, empty
         // chunks is invalid. `check_last` is false, it means the chunks belongs
         // to the current epoch, it is valid before the first chunk put to S3.
-        return !check_last;
+        return if check_last {
+            Err("no chunk".to_string())
+        } else {
+            Ok(0)
+        };
     }
 
     let wal_epoch;
@@ -161,30 +168,34 @@ pub fn verify_wal_chunks_integrity(chunks: &[String], check_last: bool) -> bool 
     let first_chunk = chunks.first().unwrap();
     if let Some((epoch, start_off, end_off, last)) = parse_wal_chunk_key(Some(first_chunk)) {
         if start_off != 0 {
-            return false;
+            return Err("miss first chunk".to_string());
         }
         wal_epoch = epoch;
         last_end_off = end_off;
         has_last_chunk = last;
     } else {
-        return false;
+        return Err(format!("invalid pattern: {first_chunk}"));
     }
 
     for chunk in &chunks[1..] {
         if let Some((epoch, start_off, end_off, last)) = parse_wal_chunk_key(Some(chunk)) {
             if epoch != wal_epoch {
-                return false;
+                return Err(format!("epoch mismatch: {epoch} != {wal_epoch}"));
             }
             if start_off != last_end_off {
-                return false;
+                return Err(format!("miss chunk: offset {last_end_off}"));
             }
             last_end_off = end_off;
             has_last_chunk = last;
         } else {
-            return false;
+            return Err(format!("invalid pattern: {chunk}"));
         }
     }
-    if !check_last { true } else { has_last_chunk }
+    if check_last && !has_last_chunk {
+        Err("miss last chunk".to_string())
+    } else {
+        Ok(last_end_off)
+    }
 }
 
 pub fn wal_chunk_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
@@ -357,77 +368,90 @@ pub mod tests {
 
     #[test]
     fn test_verify_wal_chunks_integrity() {
-        let cases = vec![
-            (vec![], false, true),                                  // empty
-            (vec![wal_chunk_file_key(1, 1, 0, 100)], false, true),  // only has one chunk
-            (vec![wal_chunk_file_key(1, 1, 1, 100)], false, false), // start_off is not 0
+        let cases: Vec<(
+            Vec<String>,                  // keys
+            bool,                         // check_last
+            std::result::Result<u64, ()>, // expected
+        )> = vec![
+            (vec![], false, Ok(0)),                                   // empty
+            (vec![wal_chunk_file_key(1, 1, 0, 100)], false, Ok(100)), // only has one chunk
+            (vec![wal_chunk_file_key(1, 1, 1, 100)], false, Err(())), // start_off is not 0
             (
+                // start_off is not 0
                 vec![
                     wal_chunk_file_key(1, 1, 1, 100),
                     wal_chunk_file_key(1, 1, 100, 200),
                 ],
                 false,
-                false,
-            ), // start_off is not 0
+                Err(()),
+            ),
             (
+                // offset is not continuous
                 vec![
                     wal_chunk_file_key(1, 1, 0, 100),
                     wal_chunk_file_key(1, 1, 150, 200),
                     wal_chunk_file_key(1, 1, 200, 300),
                 ],
                 false,
-                false,
-            ), // offset is not continuous
+                Err(()),
+            ),
             (
+                // epoch is not consistent
                 vec![
                     wal_chunk_file_key(1, 1, 0, 100),
                     wal_chunk_file_key(1, 1, 100, 200),
                     wal_chunk_file_key(1, 2, 200, 300),
                 ],
                 false,
-                false,
-            ), // epoch is not consistent
+                Err(()),
+            ),
             (
+                // last chunk is not last, ignore the last check
                 vec![
                     wal_chunk_file_key(1, 1, 0, 100),
                     wal_chunk_file_key(1, 1, 100, 200),
                     wal_chunk_file_key(1, 1, 200, 300),
                 ],
                 false,
-                true,
-            ), /* last chunk is not last,
-                                                                     * ignore the last check */
+                Ok(300),
+            ),
             (
+                // last chunk is not last, check the last
                 vec![
                     wal_chunk_file_key(1, 1, 0, 100),
                     wal_chunk_file_key(1, 1, 100, 200),
                     wal_chunk_file_key(1, 1, 200, 300),
                 ],
                 true,
-                false,
-            ), // last chunk is not last, check the last
+                Err(()),
+            ),
             (
+                // last chunk is last, ignore the last check
                 vec![
                     wal_chunk_file_key(1, 1, 0, 100),
                     wal_chunk_file_key(1, 1, 100, 200),
                     last_wal_chunk_file_key(1, 1, 200, 300),
                 ],
                 false,
-                true,
-            ), // last chunk is last, ignore the last check
+                Ok(300),
+            ),
             (
+                // last chunk is last, check the last
                 vec![
                     wal_chunk_file_key(1, 1, 0, 100),
                     wal_chunk_file_key(1, 1, 100, 200),
                     last_wal_chunk_file_key(1, 1, 200, 300),
                 ],
                 true,
-                true,
-            ), // last chunk is last, check the last
+                Ok(300),
+            ),
         ];
 
-        for case in cases {
-            assert_eq!(verify_wal_chunks_integrity(&case.0, case.1), case.2);
+        for (keys, check_last, expected) in cases {
+            assert_eq!(
+                verify_wal_chunks_integrity(&keys, check_last).map_err(|_| ()),
+                expected
+            );
         }
     }
 }

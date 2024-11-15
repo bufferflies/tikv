@@ -54,8 +54,10 @@ pub enum Error {
     RegionVerNotMatch { expected: u64, actual: u64 },
     #[error("Region {0} not found or no leader")]
     RegionNotFoundOrNoLeader(u64 /* region id */),
-    #[error("HTTP error {0}")]
-    HttpError(#[from] hyper::Error),
+    #[error("HTTP request error {0}")]
+    HttpRequestError(#[from] hyper::Error),
+    #[error("HTTP error {0}:{1}")]
+    HttpError(http::StatusCode, String),
     #[error("Retry limit exceeded, last error {0}")]
     RetryLimitExceeded(Box<Error>),
     #[error("Keyspace {0} inner_key_off not enabled")]
@@ -80,8 +82,12 @@ pub enum Error {
     // last backup having tolerated error of one store, but we meet the error of another store.
     #[error("Incremental backup tolerated error for store {0}")]
     IncrementalBackupToleratedError(u64 /* store id */),
-    #[error("Fetch RfEngine WAL chunk HTTP error {0}")]
-    RfengineHttpError(hyper::Error),
+    #[error("Fetch RfEngine WAL chunk HTTP request error {0}")]
+    RfengineHttpRequestError(hyper::Error),
+    #[error("Fetch RfEngine WAL chunk service error {0}")]
+    RfengineHttpSvrError(String),
+    #[error("Fetch RfEngine WAL chunk error due to epoch {epoch_id} overwritten")]
+    RfengineWalEpochOverwritten { epoch_id: u32 },
 }
 
 impl From<dfs::Error> for Error {

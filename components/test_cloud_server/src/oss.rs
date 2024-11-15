@@ -17,6 +17,7 @@ use std::{
 use anyhow::{anyhow, bail, Context};
 use bytes::Buf;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use engine_traits::ListObjectContent;
 use futures::{future::ok, StreamExt, TryStreamExt};
 use glob::glob;
@@ -43,11 +44,13 @@ use url::form_urlencoded;
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
 type HttpResult = std::result::Result<Response<Body>, hyper::Error>;
+type DelayRules = Arc<DashMap<String /* path keyword */, u64 /* delay ms */>>;
 
 struct ServiceContext {
     store_path: PathBuf,
     tagging: Mutex<HashMap<String, Tagging>>, // file path -> Tagging
     delay_ms: Arc<AtomicU32>,
+    put_delay_rules: DelayRules,
 }
 
 impl ServiceContext {
@@ -82,6 +85,20 @@ impl ServiceContext {
             tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
         }
     }
+
+    async fn do_put_delay(&self, path: &str) {
+        let mut delay_ms: Option<u64> = None;
+        for r in self.put_delay_rules.iter() {
+            if path.contains(r.key()) {
+                delay_ms = Some(*r.value());
+                break;
+            }
+        }
+
+        if let Some(delay_ms) = delay_ms {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+    }
 }
 
 pub struct ObjectStorageService {
@@ -92,6 +109,7 @@ pub struct ObjectStorageService {
     port: Arc<AtomicU16>,
     runtime: Runtime,
     delay_ms: Arc<AtomicU32>,
+    put_delay_rules: DelayRules,
 }
 
 impl ObjectStorageService {
@@ -110,6 +128,7 @@ impl ObjectStorageService {
             port: Default::default(),
             runtime,
             delay_ms: Default::default(),
+            put_delay_rules: Default::default(),
         }
     }
 
@@ -120,6 +139,11 @@ impl ObjectStorageService {
     pub fn set_delay(&self, delay: Duration) {
         self.delay_ms
             .store(delay.as_millis() as u32, Ordering::Relaxed);
+    }
+
+    pub fn set_put_delay(&self, keyword: &str, delay: Duration) {
+        self.put_delay_rules
+            .insert(keyword.to_string(), delay.as_millis() as u64);
     }
 
     fn make_file_path(store_path: &Path, uri: &str) -> PathBuf {
@@ -149,6 +173,7 @@ impl ObjectStorageService {
         };
 
         ctx.do_delay().await;
+        ctx.do_put_delay(parts.uri.path()).await;
 
         fs::create_dir_all(parent).await?;
         let mut file = File::create(&tmp_file_path).await?;
@@ -598,6 +623,7 @@ impl ObjectStorageService {
             store_path: self.store_path.clone(),
             tagging: Default::default(),
             delay_ms: self.delay_ms.clone(),
+            put_delay_rules: self.put_delay_rules.clone(),
         });
         let make_svc = make_service_fn(move |_conn| {
             let ctx = ctx.clone();

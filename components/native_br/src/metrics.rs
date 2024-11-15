@@ -10,4 +10,10 @@ lazy_static! {
         &["type"],
     )
     .unwrap();
+    pub static ref NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR: IntCounter =
+        register_int_counter!(
+            "native_br_restore_rfengine_wal_epoch_overwritten_error",
+            "Number of errors that epoch of rfengine WAL is overwritten"
+        )
+        .unwrap();
 }

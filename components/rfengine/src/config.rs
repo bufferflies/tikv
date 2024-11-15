@@ -52,7 +52,7 @@ impl Default for Config {
             worker_rate_limit: ReadableSize::mb(125),
             wal_sync_dir: "".to_owned(),
             lightweight_backup: false,
-            wal_chunk_target_file_size: ReadableSize::mb(128),
+            wal_chunk_target_file_size: ReadableSize::mb(64),
             cli_mode: false,
         }
     }

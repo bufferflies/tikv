@@ -390,7 +390,7 @@ async fn backup_store(
     info!("Start backup with config {}", config);
     let json_string = serde_json::to_string(&config).unwrap();
     let req = Request::post(uri).body(Body::from(json_string)).unwrap();
-    match send_request_to_store(req, &store, security_mgr).await {
+    match send_request_to_store(req, &store, security_mgr.as_ref()).await {
         Ok(resp) => {
             let mut store_backup_meta = StoreBackupMeta::default();
             store_backup_meta.merge_from_bytes(&resp).unwrap();

@@ -105,7 +105,7 @@ impl WalIterator {
                 if header.epoch_id != self.epoch_id {
                     return Err(Error::Corruption {
                         msg: format!(
-                            "epoch mismatch: header.epoch_id {} != self.epoch_id {}",
+                            "check wal header: epoch mismatch: header.epoch_id {} != self.epoch_id {}",
                             header.epoch_id, self.epoch_id
                         ),
                         epoch_id: header.epoch_id,
@@ -146,7 +146,7 @@ impl WalIterator {
         if epoch_id != self.epoch_id {
             return Err(Error::Corruption {
                 msg: format!(
-                    "epoch mismatch: header.epoch_id {} != self.epoch_id {}",
+                    "read batch: epoch mismatch: header.epoch_id {} != self.epoch_id {}",
                     epoch_id, self.epoch_id
                 ),
                 epoch_id,

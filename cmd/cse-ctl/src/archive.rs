@@ -67,6 +67,9 @@ pub struct ArchiveArgs {
     pub skip_abnormal_shards: Option<String>,
     #[clap(long)]
     pub dry_run: bool,
+    /// The timeout for fetching WAL chunks.
+    #[clap(long, default_value = "10m")]
+    pub fetch_wal_timeout: ReadableDuration,
 }
 
 pub fn execute_archive(args: ArchiveArgs) {
@@ -108,6 +111,7 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
     config.dfs.override_from_env();
     config.security.master_key.override_from_env();
     config.data_dir = args.data_dir.clone();
+    config.fetch_wal_timeout = args.fetch_wal_timeout.0;
     config.check_data_dir();
     config
 }

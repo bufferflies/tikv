@@ -8,7 +8,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicU32, Ordering},
         Arc,
     },
     thread,
@@ -49,7 +49,7 @@ pub(crate) struct Worker {
     buf: Vec<u8>,
     compacted_epoch: Arc<AtomicU32>,
     async_wal_writer: Option<WalWriter>,
-    dfs_worker_healthy: Arc<AtomicBool>,
+    dfs_worker_healthy: dfs_worker::Healthy,
 }
 
 impl Worker {
@@ -61,7 +61,7 @@ impl Worker {
         compacted_epoch: Arc<AtomicU32>,
         async_wal_writer: Option<WalWriter>,
         object_storage_config: Option<ObjectStorageConfig>,
-        dfs_worker_healthy: Arc<AtomicBool>,
+        dfs_worker_healthy: dfs_worker::Healthy,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
         let dfs_worker_handle = if let Some(config) = object_storage_config {
@@ -108,7 +108,7 @@ impl Worker {
     }
 
     fn is_dfs_worker_healthy(&self) -> bool {
-        self.dfs_worker_healthy.load(Ordering::Acquire)
+        self.dfs_worker_healthy.is_healthy()
     }
 
     pub(crate) fn run(&mut self) {
@@ -186,29 +186,29 @@ impl Worker {
         callback: Box<dyn FnOnce(Result<Bytes>) + Send>,
     ) {
         if let Some(writer) = self.async_wal_writer.as_ref() {
+            let store_id = self.manifest.get_engine_id();
             // Check the WAL chunk meta is valid.
-            if epoch_id > writer.epoch_id || epoch_id + 3 < writer.epoch_id || start_off >= end_off
-            {
+            if epoch_id > writer.epoch_id || start_off >= end_off {
                 let msg = format!(
                     "{}: invalid dump wal chunk epoch {} start_off {} end_off {} writer epoch {}, file_off {}",
-                    self.manifest.get_engine_id(),
-                    epoch_id,
-                    start_off,
-                    end_off,
-                    writer.epoch_id,
-                    writer.file_off
+                    store_id, epoch_id, start_off, end_off, writer.epoch_id, writer.file_off
                 );
                 error!("{}", msg);
                 callback(Err(Error::Other(msg)));
                 return;
+            } else if epoch_id + 3 < writer.epoch_id {
+                // The epoch_id is too old and has been overwritten.
+                info!(
+                    "{}: handle dump: epoch is overwritten: epoch {} writer epoch {}",
+                    store_id, epoch_id, writer.epoch_id
+                );
+                callback(Err(Error::WalEpochOverwritten { epoch_id }));
+                return;
             }
             // Dump the WAL chunk from offset start_off to end_off.
             info!(
-                "{}: dump latest wal epoch {} start_off {} end_off {}",
-                self.manifest.get_engine_id(),
-                epoch_id,
-                start_off,
-                end_off,
+                "{}: dump latest wal epoch {} start_off {} end_off {} writer epoch {}",
+                store_id, epoch_id, start_off, end_off, writer.epoch_id,
             );
             match dump_wal_chunk(&self.dir, epoch_id, start_off, end_off) {
                 Ok(chunk) => callback(Ok(chunk)),
@@ -859,7 +859,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs, iter,
-        sync::atomic::{AtomicBool, AtomicU32, AtomicU64},
+        sync::atomic::{AtomicU32, AtomicU64},
     };
 
     use bytes::Buf;
@@ -870,6 +870,7 @@ mod tests {
     use tikv_util::defer;
 
     use crate::{
+        dfs_worker,
         log_batch::{RaftLogOp, RaftLogs},
         manifest::{persist_change_set, Manifest},
         raft_log_file_name, region_state_key, store_raft_log_file_key,
@@ -922,7 +923,7 @@ mod tests {
             AtomicU32::new(0).into(),
             None,
             None,
-            std::sync::Arc::new(AtomicBool::new(true)),
+            dfs_worker::Healthy::default(),
         );
         let epoch = 990;
         let mut cs = ChangeSet::new();
@@ -1036,7 +1037,7 @@ mod tests {
             AtomicU32::new(0).into(),
             None,
             None,
-            std::sync::Arc::new(AtomicBool::new(true)),
+            dfs_worker::Healthy::default(),
         );
         let mut cs = ChangeSet::new();
         let mut peer_data_map = HashMap::new();

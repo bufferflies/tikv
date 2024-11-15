@@ -26,7 +26,7 @@ use crate::{
     backup::backup_file_full_path,
     common::{
         check_store_id_exists, collect_snapshot_meta_rlog_files, generate_etcd_connect_opt,
-        get_latest_backup_meta, replay_wal_logs_from_backup,
+        get_latest_backup_meta, replay_wal_logs_from_backup, ReplayWalLogsContext,
     },
     error::{Error, Result},
     restore_keyspace::RESTORE_RFENGINE_CONCURRENCY,
@@ -64,6 +64,7 @@ pub fn restore_tikv(
     new_store_id_delta: u64,
     path: &str,
 ) {
+    let tag = format!("restore_tikv:{store_id}");
     let dfs_conf = config.dfs.clone();
     let s3fs = S3Fs::new(
         dfs_conf.prefix,
@@ -113,6 +114,7 @@ pub fn restore_tikv(
             );
         }
         setup_raft_engine(
+            &tag,
             store_id,
             alloc_id,
             &cluster_backup,
@@ -242,6 +244,7 @@ fn generate_store_config(path: &str, wal_target_size: ReadableSize) -> TikvConfi
 }
 
 fn setup_raft_engine(
+    tag: &str,
     store_id: u64,
     alloc_id: u64,
     cluster_backup: &ClusterBackupMeta,
@@ -280,17 +283,18 @@ fn setup_raft_engine(
     rf_engine.set_engine_id(store_id);
 
     if lightweight {
-        replay_wal_logs_from_backup(
-            Arc::new(MockPdClient {}),
+        let ctx = ReplayWalLogsContext {
+            pd_client: Arc::new(MockPdClient {}),
             dfs,
             store_id,
             cluster_backup,
-            &rf_engine,
-            true,
-            true,
-            Duration::from_secs(1), // NOTE: Retry is unnecessary for full restoration.
-            snap_epoch_opt.unwrap(),
-        )?;
+            rf_engine: &rf_engine,
+            complete_wal_chunks: true,
+            full_restore: true,
+            fetch_wal_timeout: Duration::from_secs(1), /* NOTE: Retry is unnecessary for full
+                                                        * restoration. */
+        };
+        replay_wal_logs_from_backup(tag, &ctx, snap_epoch_opt.unwrap())?;
     }
     setup_raft_engine_new_store_id(&rf_engine, cluster_backup, store_id, alloc_id);
 
@@ -456,7 +460,7 @@ async fn restore_pd_keyspace_meta(
 const DEFAULT_WAL_TARGET_SIZE: ReadableSize = ReadableSize::mb(512);
 pub const DEFAULT_TIMEOUT_WAIT_FLUSH: ReadableDuration = ReadableDuration::minutes(10);
 pub const DEFAULT_TIMEOUT_RESTORE_SNAPSHOT: ReadableDuration = ReadableDuration::minutes(10);
-pub const DEFAULT_TIMEOUT_FETCH_WAL: ReadableDuration = ReadableDuration::secs(30);
+pub const DEFAULT_TIMEOUT_FETCH_WAL: ReadableDuration = ReadableDuration::minutes(10);
 pub const DEFAULT_TIMEOUT_SPLIT_REGIONS: ReadableDuration = ReadableDuration::secs(30);
 pub const DEFAULT_TIMEOUT_PD_CONTROL: ReadableDuration = ReadableDuration::secs(10);
 pub const DEFAULT_RESTORE_MAX_RETRY: usize = 30;

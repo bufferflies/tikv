@@ -9,7 +9,7 @@ use kvproto::metapb::Store;
 use pd_client::{pd_control::PdControl, PdClient};
 use security::SecurityManager;
 use slog_global::{error, info};
-use tikv_util::{box_err, time::Instant};
+use tikv_util::{box_err, retry::sleep_async, time::Instant};
 
 use crate::{
     common::{get_tiflash_storage_stores, send_request_to_store},
@@ -30,7 +30,7 @@ pub struct TiFlashSycnRegionResp {
 async fn get_tiflash_keyspace_status(
     keyspace_id: u32,
     store: Store,
-    security_mgr: Arc<SecurityManager>,
+    security_mgr: &SecurityManager,
 ) -> Result<TiFlashSycnRegionResp> {
     let uri = security_mgr.build_uri(format!(
         "{}/tiflash/sync-region/keyspace/{}",
@@ -55,17 +55,17 @@ async fn wait_tiflash_replica_removed(
         .map(|s| (s.id, s))
         .collect();
     let mut last_err = None;
+    let security_mgr = pd_client.get_security_mgr();
     let start = Instant::now();
     while Instant::now().duration_since(start) < WAIT_TIFLASH_REMOVE_REPLICA_TIMEOUT {
         // wait a while for tiflash replica to be removed.
-        std::thread::sleep(WAIT_TIFLASH_REMOVE_REPLICA_INTERVAL);
+        sleep_async(WAIT_TIFLASH_REMOVE_REPLICA_INTERVAL).await;
 
-        let security_mgr = pd_client.get_security_mgr();
         let mut handles = Vec::with_capacity(stores.len());
         for (id, store) in stores.clone() {
             let security_mgr = security_mgr.clone();
             handles.push(async move {
-                get_tiflash_keyspace_status(keyspace_id, store, security_mgr.clone())
+                get_tiflash_keyspace_status(keyspace_id, store, security_mgr.as_ref())
                     .await
                     .map(|r| (id, r))
             })

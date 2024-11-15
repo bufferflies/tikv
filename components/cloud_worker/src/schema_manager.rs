@@ -1005,7 +1005,6 @@ pub async fn broadcast_schema_update_to_all_stores(
     file_id: u64,
 ) -> Result<()> {
     for store in stores {
-        let security_mgr = security_mgr.clone();
         let status_addr = store.get_status_address();
         let uri = security_mgr
             .build_uri(format!(
@@ -1014,7 +1013,8 @@ pub async fn broadcast_schema_update_to_all_stores(
             ))
             .unwrap();
         let req = || Request::post(uri.clone()).body(Body::empty()).unwrap();
-        if let Err(err) = send_request_to_store_with_retry(req, store, security_mgr, timeout).await
+        if let Err(err) =
+            send_request_to_store_with_retry(req, store, security_mgr.as_ref(), timeout).await
         {
             return Err(box_err!(
                 "broadcast schema update to store {} failed: {:?}",
@@ -1036,7 +1036,8 @@ async fn get_keyspace_stats_from_store(
         .build_uri(format!("{}/kvengine/active_lite", status_addr))
         .unwrap();
     let req = || Request::get(uri.clone()).body(Body::empty()).unwrap();
-    let resp_bytes = send_request_to_store_with_retry(req, store, security_mgr, timeout).await?;
+    let resp_bytes =
+        send_request_to_store_with_retry(req, store, security_mgr.as_ref(), timeout).await?;
     let resp: Vec<ShardStatsLite> = serde_json::from_slice(&resp_bytes)?;
     Ok(resp)
 }

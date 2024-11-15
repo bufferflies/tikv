@@ -9,7 +9,7 @@ use std::{
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
     thread::{self, JoinHandle},
@@ -179,7 +179,7 @@ impl RfEngineCore {
             writer_type,
         );
 
-        let dfs_worker_healthy = Arc::new(AtomicBool::new(true));
+        let dfs_worker_healthy = dfs_worker::Healthy::default();
         let mut en = Self {
             dir: dir.to_owned(),
             wal_sync_dir,
@@ -215,8 +215,7 @@ impl RfEngineCore {
                 if data_dir.is_some() && panic_mark_dfs_worker_file_exists(data_dir.unwrap()) {
                     // If panic_mark_dfs_worker_file exists, skip init dfs worker thread and mark
                     // dfs worker unhealthy.
-                    dfs_worker_healthy.store(false, Ordering::Release);
-                    RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(0);
+                    dfs_worker_healthy.set_unhealthy();
                     error!(
                         "lightweight backup is enabled, but panic_mark_dfs_worker_file exists, skip init dfs worker thread"
                     );

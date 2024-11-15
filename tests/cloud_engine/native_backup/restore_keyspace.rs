@@ -23,6 +23,7 @@ use kvproto::metapb;
 use native_br::{
     archive, backup,
     common::now,
+    metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
     restore::RestoreConfig,
     restore_keyspace,
     restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
@@ -1191,6 +1192,119 @@ fn test_restore_keyspace_with_no_chunk() {
         reporter,
     )
     .unwrap();
+
+    // Verify restored data.
+    client.verify_data_with_ref_store();
+    cluster.stop();
+    oss.shutdown();
+}
+
+/// This test is to verify that `restore_keyspace` can properly handle when DFS
+/// is slow.
+///
+/// See https://github.com/tidbcloud/cloud-storage-engine/issues/1977.
+#[test]
+fn test_restore_keyspace_with_slow_dfs() {
+    const KEYSPACE_ID: u32 = 1;
+
+    test_util::init_log_for_test();
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
+    let reporter = Arc::new(DummyStepReporter::default());
+    let runtime = Runtime::new().unwrap();
+
+    let mut cluster = ServerCluster::new(
+        alloc_node_id_vec(NODES_COUNT),
+        |_, conf: &mut TikvConfig| {
+            conf.dfs = dfs_config.clone();
+            conf.rfengine.target_file_size = ReadableSize::kb(512);
+            conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(32);
+            conf.rfengine.lightweight_backup = true;
+            conf.enable_inner_key_offset = true;
+        },
+    );
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+    client.split(&get_keyspace_prefix(KEYSPACE_ID));
+    client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
+
+    // Import data.
+    let i_to_key = gen_keyspace_key(KEYSPACE_ID);
+    for i in 0..100 {
+        client.put_kv(i * 10..(i + 1) * 10, &i_to_key, i_to_val(BASIC_DATA_LEN));
+    }
+    client.verify_data_with_ref_store();
+
+    // Workload to continuously generate WAL.
+    let (tx, rx) = std::sync::mpsc::sync_channel(0);
+    {
+        let mut client = cluster.new_client();
+        std::thread::spawn(move || {
+            while let Err(std::sync::mpsc::TryRecvError::Empty) = rx.try_recv() {
+                let _ = client.try_put_kv(
+                    10000..10050,
+                    &i_to_key,
+                    i_to_val(POST_BACKUP_DATA_LEN),
+                    MutateOptions::default(),
+                );
+                let _ = client.try_del_kv(10000..10050, &i_to_key, MutateOptions::default());
+            }
+        });
+    }
+
+    // Delay "wal_chunks" but not snapshots.
+    oss.set_put_delay("wal_chunks", Duration::from_secs(3));
+
+    // Perform backup.
+    let snapshot_backup_name = generate_backup_name();
+    {
+        let backup_ts = client.get_ts().into_inner();
+        let backup_config = backup::BackupConfig {
+            dfs: dfs_config.clone(),
+            skip_keyspace_meta: true,
+            ..Default::default()
+        };
+        let (_, backup_meta) = backup::backup_cluster_with_ts(
+            backup_config,
+            backup::BackupType::Lightweight,
+            snapshot_backup_name.clone(),
+            cluster.get_pd_client().as_ref(),
+            backup_ts,
+            None,
+        )
+        .expect("backup::backup_cluster");
+        info!("backup_cluster result: {:?}", backup_meta);
+    }
+
+    NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR.reset();
+    let mut ok = false;
+    for _ in 0..30 {
+        // Restore keyspace.
+        restore_keyspace::restore_keyspace(
+            KEYSPACE_ID,
+            KEYSPACE_ID,
+            &snapshot_backup_name,
+            None,
+            s3fs.clone(),
+            RestoreConfig::default(),
+            cluster.get_pd_client(),
+            &runtime,
+            None,
+            reporter.clone(),
+        )
+        .unwrap();
+
+        // Note: the counter is not reliable enough that the error must happen, as there
+        // are other concurrent test cases. But it's enough to verify the
+        // process.
+        if NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR.get() > 0 {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    assert!(ok);
+    tx.send(()).unwrap();
 
     // Verify restored data.
     client.verify_data_with_ref_store();
