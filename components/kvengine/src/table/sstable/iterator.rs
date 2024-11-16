@@ -572,7 +572,7 @@ impl table::Iterator for TableIterator {
         if self.t.is_sync() {
             return true;
         }
-        self.same_old_key()
+        self.bi.old_ver == 0 || self.iter_state == IterState::OldVersioDone || self.same_old_key()
     }
 
     #[maybe_async]

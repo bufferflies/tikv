@@ -1489,6 +1489,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_is_next_version_sync_on_not_valid() {
+        // No old version.
+        {
+            let (t, _) = create_sst_table_async("key", 10).await;
+            let mut it = t.new_iterator_async(false, true).await;
+            it.rewind_async().await;
+            assert!(it.is_next_version_sync());
+            assert!(!next_version_async!(it));
+        }
+
+        // No more version.
+        {
+            let kvs = generate_key_values("key", 10);
+            let (t, _) = create_multi_version_sst_async(kvs).await;
+            let mut it = t.new_iterator_async(false, true).await;
+            it.rewind_async().await;
+            while next_version_async!(it) {}
+            assert!(it.is_next_version_sync());
+            assert!(!next_version_async!(it));
+        }
+    }
+
     #[bench]
     fn bench_decode_filter(b: &mut test::Bencher) {
         let (t, _) = create_sst_table("key", 10000);
