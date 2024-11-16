@@ -522,7 +522,7 @@ impl table::Iterator for TableIterator {
     // Note: when `is_next_sync` is true, the next `next()` must be valid (i.e.,
     // `valid()` returns true). Correctness of `ConcatIterator.is_next_sync`
     // depends on this.
-    fn is_next_sync(&mut self) -> bool {
+    fn is_next_sync(&self) -> bool {
         if self.t.is_sync() {
             return true;
         }
@@ -568,7 +568,7 @@ impl table::Iterator for TableIterator {
         true
     }
 
-    fn is_next_version_sync(&mut self) -> bool {
+    fn is_next_version_sync(&self) -> bool {
         if self.t.is_sync() {
             return true;
         }

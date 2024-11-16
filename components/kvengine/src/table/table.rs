@@ -69,7 +69,7 @@ pub trait Iterator: Send {
     fn next(&mut self);
 
     /// `is_next_sync` indicates that sync version of `next` can be used.
-    fn is_next_sync(&mut self) -> bool {
+    fn is_next_sync(&self) -> bool {
         // TODO: remove default implementation.
         true
     }
@@ -83,7 +83,7 @@ pub trait Iterator: Send {
 
     /// `is_next_version_sync` indicates that sync version of `next_version` can
     /// be used.
-    fn is_next_version_sync(&mut self) -> bool {
+    fn is_next_version_sync(&self) -> bool {
         // TODO: remove default implementation.
         true
     }
@@ -568,6 +568,15 @@ pub fn new_merge_iterator<'a>(
             new_merge_iterator(vec![first_it, second_it], reverse)
         }
     }
+}
+
+#[cfg(test)]
+pub async fn new_merge_iterator_async<'a>(
+    iters: Vec<Box<dyn Iterator + 'a>>,
+    reverse: bool,
+) -> Box<dyn Iterator + 'a> {
+    use crate::table::AsyncMergeIterator;
+    Box::new(AsyncMergeIterator::new(iters, reverse, false))
 }
 
 #[derive(Clone, Copy, PartialOrd, PartialEq, Ord, Eq)]

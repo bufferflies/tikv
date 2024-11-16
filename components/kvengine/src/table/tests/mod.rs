@@ -6,10 +6,11 @@ mod test_merge_iter;
 use std::{cmp::Ordering::*, iter::Iterator as _, ops::Deref};
 
 use bytes::{Buf, Bytes};
+use proptest::{prelude::*, test_runner::TestCaseResult};
 use rand::Rng;
 
 use super::table::*;
-use crate::{next, next_async};
+use crate::{next, next_async, next_version, next_version_async};
 
 #[derive(Debug)]
 struct SimpleIterator {
@@ -26,6 +27,25 @@ struct SimpleIterator {
 
 impl SimpleIterator {
     fn new(keys: Vec<&'static str>, vals: Vec<&'static str>, reversed: bool, version: u64) -> Self {
+        Self::new_inner(keys, vals, reversed, version, true)
+    }
+
+    async fn new_async(
+        keys: Vec<&'static str>,
+        vals: Vec<&'static str>,
+        reversed: bool,
+        version: u64,
+    ) -> Self {
+        Self::new_inner(keys, vals, reversed, version, false)
+    }
+
+    fn new_inner(
+        keys: Vec<&'static str>,
+        vals: Vec<&'static str>,
+        reversed: bool,
+        version: u64,
+        is_sync: bool,
+    ) -> Self {
         let length = keys.len();
         let mut ks: Vec<Bytes> = vec![];
         let mut vs = vec![];
@@ -35,7 +55,7 @@ impl SimpleIterator {
             ks.push(Bytes::from(keys[i]));
             let val = Value::encode_buf(0, &[], version, vals[i].as_bytes());
             vs.push(val);
-            syncs.push(true);
+            syncs.push(is_sync);
             latest_off.push(i);
         }
         Self {
@@ -50,6 +70,14 @@ impl SimpleIterator {
     }
 
     fn new_multi_version(max_ver: u64, min_ver: u64, reversed: bool) -> Self {
+        Self::new_multi_version_inner(max_ver, min_ver, reversed, true)
+    }
+
+    async fn new_multi_version_async(max_ver: u64, min_ver: u64, reversed: bool) -> Self {
+        Self::new_multi_version_inner(max_ver, min_ver, reversed, false)
+    }
+
+    fn new_multi_version_inner(max_ver: u64, min_ver: u64, reversed: bool, is_sync: bool) -> Self {
         let mut last_offs = vec![];
         let mut keys = vec![];
         let mut vals = vec![];
@@ -63,7 +91,7 @@ impl SimpleIterator {
                 keys.push(key.clone());
                 let val = Value::encode_buf(0, &[], j, key.chunk());
                 vals.push(val);
-                syncs.push(true);
+                syncs.push(is_sync);
                 if rng.gen_range(0..4) == 0 {
                     break;
                 }
@@ -177,7 +205,7 @@ impl Iterator for SimpleIterator {
         }
     }
 
-    fn is_next_sync(&mut self) -> bool {
+    fn is_next_sync(&self) -> bool {
         let idx = if !self.reversed {
             self.idx + 1
         } else {
@@ -216,7 +244,7 @@ impl Iterator for SimpleIterator {
         ok
     }
 
-    fn is_next_version_sync(&mut self) -> bool {
+    fn is_next_version_sync(&self) -> bool {
         // Versions of the same key are usually in the same block (old block).
         // So the `ver_idx` out of bound is considered as sync.
         self.entry_idx_inner(self.idx, self.ver_idx + 1)
@@ -295,6 +323,161 @@ fn i_to_key(i: usize) -> String {
 
 fn i_to_val(i: usize, ver: u64) -> String {
     format!("{i:04}-{ver:04}")
+}
+
+#[derive(Debug)]
+struct ArbSimpleIterators {
+    iters: Vec<SimpleIterator>,
+    ref_iter: SimpleIterator,
+    max_key: usize,
+}
+
+/// Generate arbitrary simple iterators.
+///
+/// - The number of iterators is in `[2, max_iters_count]`.
+/// - The range of keys is `[1, max_key]`.
+/// - The number of versions (distinct key & version) is in `[1,
+///   max_versions_count]`.
+fn arb_simple_iterators(
+    max_iters_count: usize,
+    max_key: usize,
+    max_versions_count: usize,
+    reverse: bool,
+    random_sync: bool,
+) -> impl Strategy<Value = ArbSimpleIterators> {
+    (2..=max_iters_count, 1..=max_versions_count)
+        .prop_flat_map(move |(iters_count, versions_count)| {
+            (
+                Just(iters_count),
+                Just(max_key),
+                prop::collection::vec(1..=max_key, versions_count), // keys
+                prop::collection::vec(0..iters_count, versions_count), // keys_pos
+                prop::collection::vec(
+                    if random_sync {
+                        any::<bool>().boxed()
+                    } else {
+                        Just(true).boxed()
+                    },
+                    versions_count,
+                ), // syncs
+            )
+        })
+        .prop_map(move |(iters_count, max_key, keys, keys_pos, syncs)| {
+            // keys_pos: indicates that the key is in which iterator.
+
+            let versions_count = keys.len();
+
+            let mut iters_kvs = Vec::with_capacity(iters_count);
+            let mut all_kvs = Vec::with_capacity(versions_count);
+            for _ in 0..iters_count {
+                iters_kvs.push(vec![]);
+            }
+
+            // Generate kvs for all iterators.
+            for (idx, (k, (pos, is_sync))) in keys
+                .into_iter()
+                .zip(keys_pos.into_iter().zip(syncs.into_iter()))
+                .enumerate()
+            {
+                let ver = (versions_count - idx) as u64;
+                let key = i_to_key(k);
+                let val = i_to_val(k, ver);
+                let value = Value::encode_buf(0, &[], ver, val.as_bytes());
+                iters_kvs[pos].push((Bytes::from(key), value, is_sync))
+            }
+
+            let mut iters: Vec<SimpleIterator> = Vec::with_capacity(iters_count);
+            for mut iter_kvs in iters_kvs {
+                // Must be stable sort.
+                iter_kvs.sort_by(|a, b| a.0.cmp(&b.0));
+                all_kvs.extend_from_slice(&iter_kvs);
+
+                let iter = SimpleIterator::from_kvs(iter_kvs, reverse);
+                iters.push(iter);
+            }
+
+            // Gather all kvs to generate one `SimpleIterator` as reference iterator.
+            // Must be stable sort to keep order of versions.
+            all_kvs.sort_by(|a, b| {
+                a.0.cmp(&b.0).then_with(|| {
+                    let val_a = Value::decode(&a.1);
+                    let val_b = Value::decode(&b.1);
+                    val_b.version.cmp(&val_a.version)
+                })
+            });
+            let ref_iter = SimpleIterator::from_kvs(all_kvs, reverse);
+
+            ArbSimpleIterators {
+                iters,
+                ref_iter,
+                max_key,
+            }
+        })
+}
+
+fn verify_kv(it: &dyn Iterator, ref_it: &SimpleIterator) -> TestCaseResult {
+    prop_assert_eq!(it.key(), ref_it.key());
+
+    let val = it.value();
+    let ref_val = ref_it.value();
+    prop_assert_eq!(val.get_value(), ref_val.get_value());
+    prop_assert_eq!(val.version, ref_val.version);
+    Ok(())
+}
+
+#[maybe_async::both]
+async fn verify_iter_core(
+    it: &mut dyn Iterator,
+    ref_it: &mut SimpleIterator,
+    check_versions: bool,
+) -> TestCaseResult {
+    while it.valid() {
+        prop_assert!(ref_it.valid());
+        verify_kv(it, ref_it)?;
+
+        if check_versions {
+            while next_version!(it).await {
+                let ok = next_version!(ref_it).await;
+                prop_assert!(ok);
+                verify_kv(it, ref_it)?;
+            }
+            let ok = next_version!(ref_it).await;
+            prop_assert!(!ok);
+        }
+
+        next!(it).await;
+        next!(ref_it).await;
+    }
+    prop_assert!(!ref_it.valid());
+    Ok(())
+}
+
+#[maybe_async::both]
+async fn init_iter(
+    it: &mut dyn Iterator,
+    ref_iter: &mut SimpleIterator,
+    seek_key: Option<InnerKey<'_>>,
+) {
+    if let Some(key) = seek_key {
+        it.seek(key).await;
+        ref_iter.seek(key).await;
+    } else {
+        it.rewind().await;
+        ref_iter.rewind().await;
+    }
+}
+
+#[maybe_async::both]
+async fn verify_iter(
+    it: &mut dyn Iterator,
+    ref_iter: &mut SimpleIterator,
+    seek_key: Option<InnerKey<'_>>,
+) -> TestCaseResult {
+    for check_version in [false, true] {
+        init_iter(it, ref_iter, seek_key).await;
+        verify_iter_core(it, ref_iter, check_version).await?;
+    }
+    Ok(())
 }
 
 #[test]
