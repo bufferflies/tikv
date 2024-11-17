@@ -922,7 +922,7 @@ impl LoadTaskWorker {
     }
 
     // Recover readers from checkpoint.
-    fn recover_readers(&mut self, check_point_ctx: LoadDataCheckPointCtx) {
+    fn recover_readers(&mut self, check_point_ctx: &LoadDataCheckPointCtx) {
         let paths = check_point_ctx.get_local_file_infos();
         for local_file_info in paths.iter() {
             let reader = reload_reader(local_file_info, self.task_ctx.clone());
@@ -1551,15 +1551,14 @@ impl LoadTaskWorker {
 
             let check_point_store_mutex = Arc::clone(&self.check_point_store);
             let check_point_store_guard = check_point_store_mutex.lock().unwrap();
-            if check_point_store_guard.check_point_ctx.get_is_recover()
-                && !check_point_store_guard.check_point_ctx.canceled
+            let check_point_ctx = &check_point_store_guard.check_point_ctx;
+            if check_point_ctx.get_is_recover() && !check_point_store_guard.check_point_ctx.canceled
             {
-                let check_point_ctx = check_point_store_guard.load_check_point_ctx();
-                info!("{} [check point] recover readers", self.task_ctx.task_id);
-                if let Err(err) =
-                    self.set_inner_key_off_and_encryption_key(check_point_ctx.get_first_key())
-                {
-                    self.scheduler.cancel(format!("{:?}", err))
+                let first_key = check_point_ctx.get_first_key();
+                if !first_key.is_empty() {
+                    if let Err(err) = self.set_inner_key_off_and_encryption_key(first_key) {
+                        self.scheduler.cancel(format!("{:?}", err))
+                    }
                 }
                 self.recover_readers(check_point_ctx);
             }
