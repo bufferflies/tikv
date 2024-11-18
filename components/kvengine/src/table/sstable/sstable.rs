@@ -983,7 +983,9 @@ pub fn new_filename(id: u64, dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 pub(crate) mod test_util {
-    use std::sync::Arc;
+    use std::sync::{atomic::Ordering, Arc};
+
+    use rand::Rng;
 
     use crate::table::{
         file,
@@ -1041,12 +1043,13 @@ pub(crate) mod test_util {
         )
     }
 
-    pub(crate) fn build_test_table_with_prefix(
+    #[maybe_async::both]
+    pub(crate) async fn build_test_table_with_prefix(
         prefix: &str,
         n: usize,
     ) -> (SsTable, Vec<(String, String)>) {
         let kvs = generate_key_values(prefix, n);
-        (build_test_table_with_kvs(&kvs), kvs)
+        (build_test_table_with_kvs(&kvs).await, kvs)
     }
 
     pub(crate) fn new_test_cache() -> BlockCache {
@@ -1065,28 +1068,16 @@ pub(crate) mod test_util {
         let kvs = generate_key_values(prefix, n);
         (build_test_table_with_kvs(&kvs).await, kvs)
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use std::{iter::Iterator as StdIterator, sync::atomic::Ordering};
-
-    use bytes::BytesMut;
-    use rand::Rng;
-
-    use super::{test_util::*, *};
-    use crate::{next, next_async, Iterator};
-
+    // `kvs` must be sorted by key.
     #[maybe_async::both]
-    async fn create_multi_version_sst(mut kvs: Vec<(String, String)>) -> (SsTable, usize) {
+    pub(crate) async fn create_multi_version_sst(kvs: &[(String, String)]) -> (SsTable, usize) {
         let sst_fid = TEST_ID_ALLOC.fetch_add(1, Ordering::Relaxed) + 1;
         let mut sst_builder = new_table_builder_for_test(sst_fid);
-        kvs.sort_by(|a, b| a.0.cmp(&b.0));
         let mut all_cnt = kvs.len();
         let meta = 0u8;
-        for (k, v) in &kvs {
-            let val_str = format!("{}_{}", v, 9);
-            let val_buf = Value::encode_buf(meta, &[0], 9, val_str.as_bytes());
+        for (k, v) in kvs {
+            let val_buf = Value::encode_buf(meta, &[0], 9, v.as_bytes());
             sst_builder.add(
                 InnerKey::from_inner_buf(k.as_bytes()),
                 &Value::decode(val_buf.as_slice()),
@@ -1094,7 +1085,8 @@ mod tests {
             );
             let mut r = rand::thread_rng();
             for i in (1..=8).rev() {
-                if r.gen_range(0..4) == 0usize {
+                // A lower probability than 1/8 to generate more entries with no old version.
+                if r.gen_ratio(1, 10) {
                     let val_str = format!("{}_{}", v, i);
                     let val_buf = Value::encode_buf(meta, &[0], i, val_str.as_bytes());
                     sst_builder.add(
@@ -1116,6 +1108,17 @@ mod tests {
             all_cnt,
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::iter::Iterator as StdIterator;
+
+    use bytes::BytesMut;
+    use rand::Rng;
+
+    use super::{test_util::*, *};
+    use crate::{next, next_async, Iterator};
 
     #[maybe_async::test]
     async fn test_table_iterator() {
@@ -1378,7 +1381,7 @@ mod tests {
     async fn test_iterate_multi_version() {
         let num = 4000;
         let kvs = generate_key_values("key", num);
-        let (t, all_cnt) = create_multi_version_sst(kvs).await;
+        let (t, all_cnt) = create_multi_version_sst(&kvs).await;
         let mut it = t.new_iterator(false, true).await;
         let mut it_cnt = 0;
         let mut last_key = BytesMut::new();
@@ -1472,7 +1475,7 @@ mod tests {
     #[maybe_async::test]
     async fn test_reset_old_block_iter() {
         let kvs = generate_key_values("key", 10);
-        let (t, _) = create_multi_version_sst(kvs.clone()).await;
+        let (t, _) = create_multi_version_sst(&kvs).await;
         let mut it = t.new_iterator(false, true).await;
 
         for (k, _) in kvs {
@@ -1503,7 +1506,7 @@ mod tests {
         // No more version.
         {
             let kvs = generate_key_values("key", 10);
-            let (t, _) = create_multi_version_sst_async(kvs).await;
+            let (t, _) = create_multi_version_sst_async(&kvs).await;
             let mut it = t.new_iterator_async(false, true).await;
             it.rewind_async().await;
             while next_version_async!(it) {}
