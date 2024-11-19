@@ -78,15 +78,24 @@ impl EngineCore {
             for t in cs.get_destroy_range().get_table_creates() {
                 ids.insert(t.id, FileMeta::from_table(t));
             }
+            for col in cs.get_destroy_range().get_columnar_creates() {
+                ids.insert(col.id, FileMeta::from_columnar_table(col));
+            }
         }
         if cs.has_truncate_ts() {
             for t in cs.get_truncate_ts().get_table_creates() {
                 ids.insert(t.id, FileMeta::from_table(t));
             }
+            for col in cs.get_truncate_ts().get_columnar_creates() {
+                ids.insert(col.id, FileMeta::from_columnar_table(col));
+            }
         }
         if cs.has_trim_over_bound() {
             for t in cs.get_trim_over_bound().get_table_creates() {
                 ids.insert(t.id, FileMeta::from_table(t));
+            }
+            for col in cs.get_trim_over_bound().get_columnar_creates() {
+                ids.insert(col.id, FileMeta::from_columnar_table(col));
             }
         }
         if cs.has_snapshot() {
@@ -129,8 +138,8 @@ impl EngineCore {
         }
         if cs.has_columnar_compaction() {
             let columnar_comp = cs.get_columnar_compaction();
-            for tbl in columnar_comp.get_columnar_change().get_table_creates() {
-                ids.insert(tbl.get_id(), FileMeta::from_table(tbl));
+            for tbl in columnar_comp.get_columnar_change().get_columnar_creates() {
+                ids.insert(tbl.get_id(), FileMeta::from_columnar_table(tbl));
             }
         }
         if cs.has_update_vector_index() {
@@ -219,7 +228,7 @@ impl EngineCore {
             ids.insert(ln.id, FileMeta::from_table(ln));
         }
         for col in snap.get_columnar_creates() {
-            ids.insert(col.id, FileMeta::from_table(col));
+            ids.insert(col.id, FileMeta::from_columnar_table(col));
         }
         for vec_idx in snap.get_vector_indexes() {
             for vec_idx_file in vec_idx.get_files() {

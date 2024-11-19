@@ -196,7 +196,6 @@ pub fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {
             table_id: columnar_table_id,
             handle_column: new_int_handle_column_info(),
             version_column: new_version_column_info(),
-            txn_id_column: None,
             columns: vec![c1, c2],
             pk_col_ids: vec![],
             vector_indexes: vec![],

@@ -300,7 +300,7 @@ impl Shard {
                 ids.insert(blob.id, FileMeta::from_blob_table(blob));
             }
             for columnar in snap.get_columnar_creates() {
-                ids.insert(columnar.id, FileMeta::from_table(columnar));
+                ids.insert(columnar.id, FileMeta::from_columnar_table(columnar));
             }
             if snap.has_schema_meta() {
                 ids.insert(

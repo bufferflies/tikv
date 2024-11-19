@@ -102,7 +102,7 @@ message Snapshot {
   repeated BlobCreate BlobCreates = 9;
   uint64 max_ts = 10;
   uint32 inner_key_off = 11;
-  repeated TableCreate columnarCreates = 12;
+  repeated ColumnarCreate columnarCreates = 12;
   SchemaMeta schema_meta = 13;
   uint64 columnar_snap_version = 14;
   repeated uint64 unconverted_l0s = 15;
@@ -122,19 +122,32 @@ message BlobCreate {
 }
 
 message TableCreate {
+  reserved 6; // deprecated field.
   uint64 ID = 1;
   uint32 level = 2;
   int32 CF = 3;
   bytes smallest = 4;
   bytes biggest = 5;
-  uint32 columnar_tables = 6;
+  uint32 index_offset = 7;
 }
 
 message TableDelete {
   uint64 ID = 1;
   uint32 level = 2;
   int32 CF = 3;
-  uint32 columnar_tables = 4;
+}
+
+message ColumnarCreate {
+  uint64 ID = 1;
+  uint32 level = 2;
+  bytes smallest = 3;
+  bytes biggest = 4;
+  uint32 index_offset = 5;
+}
+
+message ColumnarDelete {
+  uint64 ID = 1;
+  uint32 level = 2;
 }
 
 message Split {
@@ -163,6 +176,10 @@ message TableChange {
   repeated TableCreate tableCreates = 2;
   // For in-place compaction that each deleted file id followed by a created file id.
   repeated uint64 file_ids_map = 3;
+  // Columnar Tables that deleted by destroy range / truncate ts / compaction / trim over bound.
+  repeated ColumnarDelete columnarDeletes = 4;
+  // Columnar Tables that created by destroy range / truncate ts / compaction / trim over bound.
+  repeated ColumnarCreate columnarCreates = 5;
 }
 
 message TxnFileRefs {

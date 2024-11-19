@@ -572,6 +572,10 @@ impl SsTableCore {
         (idx_in_mem + old_idx_in_mem) as u64
     }
 
+    pub fn index_offset(&self) -> u32 {
+        self.footer.index_offset
+    }
+
     fn filter_offset(&self) -> u32 {
         self.start_off as u32 + self.footer.aux_index_offset
     }

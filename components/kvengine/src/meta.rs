@@ -115,7 +115,7 @@ impl ShardMeta {
             meta.add_file(tbl.id, FileMeta::from_table(tbl));
         }
         for col in snap.get_columnar_creates() {
-            meta.add_file(col.get_id(), FileMeta::from_table(col));
+            meta.add_file(col.get_id(), FileMeta::from_columnar_table(col));
         }
         if cs.has_parent() {
             let parent_meta = Box::new(Self::new(engine_id, cs.get_parent()));
@@ -941,15 +941,16 @@ impl ShardMeta {
                         tbl.set_level(v.get_level());
                         tbl.set_smallest(v.smallest.to_vec());
                         tbl.set_biggest(v.biggest.to_vec());
+                        tbl.set_index_offset(v.index_offset);
                         snap.mut_table_creates().push(tbl);
                     }
                 }
                 FileType::TxnChunk | FileType::Schema => unreachable!("not loaded to file meta"),
                 FileType::Columnar => {
-                    let mut col_file = pb::TableCreate::new();
+                    let mut col_file = pb::ColumnarCreate::new();
                     col_file.set_id(*k);
                     col_file.set_level(v.get_level());
-                    col_file.set_columnar_tables(v.columnar_tables);
+                    col_file.set_index_offset(v.index_offset);
                     snap.mut_columnar_creates().push(col_file);
                 }
                 FileType::Blob => {
@@ -1222,7 +1223,7 @@ pub struct FileMeta {
     pub cf: i8,
     pub level: u8,
     pub file_type: FileType,
-    pub columnar_tables: u32,
+    pub index_offset: u32,
     pub smallest: Bytes,
     pub biggest: Bytes,
 }
@@ -1234,13 +1235,13 @@ impl FileMeta {
         file_type: FileType,
         smallest: &[u8],
         biggest: &[u8],
-        columnar_tables: u32,
+        index_offset: u32,
     ) -> Self {
         Self {
             cf: cf as i8,
             level: level as u8,
             file_type,
-            columnar_tables,
+            index_offset,
             smallest: Bytes::copy_from_slice(smallest),
             biggest: Bytes::copy_from_slice(biggest),
         }
@@ -1278,18 +1279,24 @@ impl FileMeta {
     }
 
     pub fn from_table(table: &kvenginepb::TableCreate) -> Self {
-        let file_type = if table.columnar_tables > 0 {
-            FileType::Columnar
-        } else {
-            FileType::Sst
-        };
         Self::new(
             table.cf,
             table.level,
-            file_type,
+            FileType::Sst,
             table.get_smallest(),
             table.get_biggest(),
-            table.columnar_tables,
+            table.index_offset,
+        )
+    }
+
+    pub fn from_columnar_table(table: &kvenginepb::ColumnarCreate) -> Self {
+        Self::new(
+            0,
+            table.level,
+            FileType::Columnar,
+            table.get_smallest(),
+            table.get_biggest(),
+            table.index_offset,
         )
     }
 

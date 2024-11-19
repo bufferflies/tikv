@@ -21,7 +21,7 @@ use cloud_encryption::{EncryptionKey, MasterKey};
 use http::StatusCode;
 use hyper::Client;
 use itertools::{Either, Itertools};
-use kvenginepb::{self as pb, TableDelete};
+use kvenginepb::{self as pb, ColumnarCreate};
 use pb::{BlobCreate, TableCreate};
 use protobuf::Message;
 use security::SecurityManager;
@@ -714,15 +714,14 @@ impl Engine {
             false
         });
 
+        let mut columnar_deletes = vec![];
         data.for_each_columnar_level(|cl| {
             for t in cl.files.iter() {
                 if del_prefixes.cover_range(t.get_smallest(), t.get_biggest()) {
-                    let mut delete = pb::TableDelete::default();
+                    let mut delete = pb::ColumnarDelete::default();
                     delete.set_id(t.id());
                     delete.set_level(cl.level as u32);
-                    delete.set_cf(WRITE_CF as i32);
-                    delete.set_columnar_tables(t.table_count() as u32);
-                    deletes.push(delete);
+                    columnar_deletes.push(delete);
                 } else if del_prefixes.inner_delete_bounds().any(|bound| {
                     let start = bound.lower_bound;
                     let trim_keyspace_start =
@@ -756,7 +755,7 @@ impl Engine {
             "start destroying range for {}, {:?}, destroyed: {}, overlaps: {}, columnar overlaps: {}",
             shard.tag(),
             del_prefixes,
-            deletes.len(),
+            deletes.len() + columnar_deletes.len(),
             overlaps.len(),
             col_overlaps.len(),
         );
@@ -921,18 +920,17 @@ impl Engine {
             }
             false
         });
+        let mut columnar_deletes = vec![];
         data.for_each_columnar_level(|cl| {
             for t in cl.files.iter() {
                 let table_bound = t.data_bound();
                 if !shard_bound.overlap_bound(table_bound) {
                     // -----smallest-----biggest-----[start----------end)
                     // [start----------end)-----smallest-----biggest-----
-                    let mut delete = pb::TableDelete::default();
+                    let mut delete = pb::ColumnarDelete::default();
                     delete.set_id(t.id());
                     delete.set_level(cl.level as u32);
-                    delete.set_cf(WRITE_CF as i32);
-                    delete.set_columnar_tables(t.table_count() as u32);
-                    deletes.push(delete);
+                    columnar_deletes.push(delete);
                 } else if !shard_bound.contains_bound(table_bound) {
                     // -----smallest-----[start----------end)-----biggest-----
                     col_overlaps.push((t.id(), cl.level as u32));
@@ -1229,6 +1227,7 @@ impl Engine {
             table_create.set_cf(WRITE_CF as i32);
             table_create.set_smallest(l0_write_cf_tbl.smallest().to_vec());
             table_create.set_biggest(l0_write_cf_tbl.biggest().to_vec());
+            table_create.set_index_offset(l0_write_cf_tbl.index_offset());
             move_down_l0s.push(table_create);
         }
         if move_down_l0s.is_empty() {
@@ -1384,6 +1383,7 @@ impl Engine {
                     tbl_create.set_level(level as u32 + 1);
                     tbl_create.set_smallest(top_tbl.smallest().to_vec());
                     tbl_create.set_biggest(top_tbl.biggest().to_vec());
+                    tbl_create.set_index_offset(top_tbl.index_offset());
                     tbl_create
                 })
                 .collect::<Vec<_>>();
@@ -2235,22 +2235,17 @@ pub(crate) struct CompactionCtx {
     for_restore: bool,
 }
 
-fn merge_table_change(tb1: pb::TableChange, tb2: pb::TableChange) -> pb::TableChange {
+fn merge_table_change(
+    mut row_tbl: pb::TableChange,
+    mut col_tbl: pb::TableChange,
+) -> pb::TableChange {
     let mut tb = pb::TableChange::new();
-    let tb1_creates = tb1.table_creates;
-    let tb2_creates = tb2.table_creates;
-    tb.table_creates = tb1_creates
-        .into_iter()
-        .chain(tb2_creates.into_iter())
-        .collect();
-    let tb1_deletes = tb1.table_deletes;
-    let tb2_deletes = tb2.table_deletes;
-    tb.table_deletes = tb1_deletes
-        .into_iter()
-        .chain(tb2_deletes.into_iter())
-        .collect();
-    tb.file_ids_map = tb1.file_ids_map;
-    tb.file_ids_map.extend(tb2.file_ids_map);
+    tb.set_table_deletes(row_tbl.take_table_deletes());
+    tb.set_table_creates(row_tbl.take_table_creates());
+    tb.set_columnar_deletes(col_tbl.take_columnar_deletes());
+    tb.set_columnar_creates(col_tbl.take_columnar_creates());
+    tb.file_ids_map = row_tbl.file_ids_map;
+    tb.file_ids_map.extend(col_tbl.file_ids_map);
     tb
 }
 
@@ -2457,7 +2452,7 @@ fn compact_destroy_range(
         delete.set_cf(cf);
         deletes.push(delete);
         let file = table_files.remove(&id).unwrap();
-        let (data, smallest, biggest) = if level == 0 {
+        let (data, smallest, biggest, index_offset) = if level == 0 {
             let t =
                 sstable::L0Table::new(file, BlockCache::None, false, ctx.encryption_key.clone())
                     .unwrap()
@@ -2489,7 +2484,7 @@ fn compact_destroy_range(
                 continue;
             }
             let (mut l0_create, data) = builder.finish();
-            (data, l0_create.take_smallest(), l0_create.take_biggest())
+            (data, l0_create.take_smallest(), l0_create.take_biggest(), 0)
         } else {
             let t =
                 sstable::SsTable::new(file, BlockCache::None, ctx.encryption_key.clone()).unwrap();
@@ -2518,7 +2513,7 @@ fn compact_destroy_range(
             }
             let mut buf = Vec::with_capacity(builder.estimated_size());
             let res = builder.finish(0, &mut buf);
-            (buf.into(), res.smallest, res.biggest)
+            (buf.into(), res.smallest, res.biggest, res.index_offset)
         };
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
@@ -2531,6 +2526,7 @@ fn compact_destroy_range(
         create.set_cf(cf);
         create.set_smallest(smallest);
         create.set_biggest(biggest);
+        create.set_index_offset(index_offset);
         creates.push(create);
     }
     let mut errors = creates
@@ -2602,11 +2598,9 @@ fn compact_destroy_range_for_columnar(
         let columnar_file = ColumnarFile::open(file).unwrap();
         let overlap_tables =
             schema_file.overlap_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
-        let mut delete = pb::TableDelete::new();
+        let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
-        delete.set_cf(WRITE_CF as i32);
-        delete.set_columnar_tables(overlap_tables.len() as u32);
         deletes.push(delete);
         if overlap_tables.is_empty() {
             continue;
@@ -2672,8 +2666,8 @@ fn compact_destroy_range_for_columnar(
         return Err(errors.pop().unwrap().into());
     }
     let mut destroy = pb::TableChange::new();
-    destroy.set_table_deletes(deletes.into());
-    destroy.set_table_creates(creates.into());
+    destroy.set_columnar_deletes(deletes.into());
+    destroy.set_columnar_creates(creates.into());
     Ok(destroy)
 }
 
@@ -2713,7 +2707,7 @@ fn compact_truncate_ts(
         delete.set_cf(cf);
         deletes.push(delete);
 
-        let (data, smallest, biggest) = if level == 0 {
+        let (data, smallest, biggest, index_offset) = if level == 0 {
             let t =
                 sstable::L0Table::new(file, BlockCache::None, false, ctx.encryption_key.clone())
                     .unwrap()
@@ -2745,7 +2739,7 @@ fn compact_truncate_ts(
                 continue;
             }
             let (mut l0_create, data) = builder.finish();
-            (data, l0_create.take_smallest(), l0_create.take_biggest())
+            (data, l0_create.take_smallest(), l0_create.take_biggest(), 0)
         } else {
             let t =
                 sstable::SsTable::new(file, BlockCache::None, ctx.encryption_key.clone()).unwrap();
@@ -2774,7 +2768,7 @@ fn compact_truncate_ts(
             }
             let mut buf = Vec::with_capacity(builder.estimated_size());
             let res = builder.finish(0, &mut buf);
-            (buf.into(), res.smallest, res.biggest)
+            (buf.into(), res.smallest, res.biggest, res.index_offset)
         };
 
         let tx = tx.clone();
@@ -2789,6 +2783,7 @@ fn compact_truncate_ts(
         create.set_cf(cf);
         create.set_smallest(smallest);
         create.set_biggest(biggest);
+        create.set_index_offset(index_offset);
         creates.push(create);
 
         table_change.mut_file_ids_map().push(id);
@@ -2863,11 +2858,9 @@ fn compact_truncate_ts_for_columnar(
         let columnar_file = ColumnarFile::open(file).unwrap();
         let overlap_tables =
             schema_file.overlap_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
-        let mut delete = pb::TableDelete::new();
+        let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
-        delete.set_cf(WRITE_CF as i32);
-        delete.set_columnar_tables(overlap_tables.len() as u32);
         deletes.push(delete);
 
         if overlap_tables.is_empty() {
@@ -2923,8 +2916,8 @@ fn compact_truncate_ts_for_columnar(
         return Err(errors.pop().unwrap().into());
     }
     let mut table_change = pb::TableChange::new();
-    table_change.set_table_deletes(deletes.into());
-    table_change.set_table_creates(creates.into());
+    table_change.set_columnar_deletes(deletes.into());
+    table_change.set_columnar_creates(creates.into());
     info!(
         "finish columnar truncate_ts compaction, table_change {:?}",
         table_change
@@ -2969,7 +2962,7 @@ fn compact_trim_over_bound(
         delete.set_cf(cf);
         deletes.push(delete);
 
-        let (data, smallest, biggest) = if level == 0 {
+        let (data, smallest, biggest, index_offset) = if level == 0 {
             let t =
                 sstable::L0Table::new(file, BlockCache::None, false, ctx.encryption_key.clone())
                     .unwrap()
@@ -2999,7 +2992,7 @@ fn compact_trim_over_bound(
                 continue;
             }
             let (mut l0_create, data) = builder.finish();
-            (data, l0_create.take_smallest(), l0_create.take_biggest())
+            (data, l0_create.take_smallest(), l0_create.take_biggest(), 0)
         } else {
             let t =
                 sstable::SsTable::new(file, BlockCache::None, ctx.encryption_key.clone()).unwrap();
@@ -3026,7 +3019,7 @@ fn compact_trim_over_bound(
             }
             let mut buf = Vec::with_capacity(builder.estimated_size());
             let res = builder.finish(0, &mut buf);
-            (buf.into(), res.smallest, res.biggest)
+            (buf.into(), res.smallest, res.biggest, res.index_offset)
         };
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
@@ -3040,6 +3033,7 @@ fn compact_trim_over_bound(
         create.set_cf(cf);
         create.set_smallest(smallest);
         create.set_biggest(biggest);
+        create.set_index_offset(index_offset);
         creates.push(create);
     }
 
@@ -3111,11 +3105,9 @@ fn compact_trim_over_bound_for_columnar(
         let columnar_file = ColumnarFile::open(file).unwrap();
         let overlap_tables =
             schema_file.overlap_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
-        let mut delete = pb::TableDelete::new();
+        let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
-        delete.set_cf(WRITE_CF as i32);
-        delete.set_columnar_tables(overlap_tables.len() as u32);
         deletes.push(delete);
         if overlap_tables.is_empty() {
             continue;
@@ -3219,8 +3211,8 @@ fn compact_trim_over_bound_for_columnar(
         return Err(errors.pop().unwrap().into());
     }
     let mut table_change = pb::TableChange::new();
-    table_change.set_table_deletes(deletes.into());
-    table_change.set_table_creates(creates.into());
+    table_change.set_columnar_deletes(deletes.into());
+    table_change.set_columnar_creates(creates.into());
     info!(
         "finish columnar trim over bound compaction, table_change: {:?}",
         table_change
@@ -3250,6 +3242,7 @@ fn persist_sst(
     tbl_create.set_level(target_lvl);
     tbl_create.set_smallest(res.smallest);
     tbl_create.set_biggest(res.biggest);
+    tbl_create.set_index_offset(res.index_offset);
 
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
@@ -3291,25 +3284,25 @@ fn persist_blob_table(
 fn persist_columnar_file(
     target_lvl: u32,
     builder: &mut ColumnarFileBuilder,
-    tx: mpsc::Sender<dfs::Result<pb::TableCreate>>,
+    tx: mpsc::Sender<dfs::Result<pb::ColumnarCreate>>,
     fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
 ) {
     let id = builder.file_id;
-    let buf = builder.build();
-    let mut table_create = pb::TableCreate::new();
-    table_create.set_id(id);
-    table_create.set_smallest(builder.smallest.clone());
-    table_create.set_biggest(builder.biggest.clone());
-    table_create.set_columnar_tables(builder.num_tables() as u32);
-    table_create.set_level(target_lvl);
+    let (buf, index_offset) = builder.build();
+    let mut columnar_create = pb::ColumnarCreate::new();
+    columnar_create.set_id(id);
+    columnar_create.set_smallest(builder.smallest.clone());
+    columnar_create.set_biggest(builder.biggest.clone());
+    columnar_create.set_level(target_lvl);
+    columnar_create.set_index_offset(index_offset as u32);
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
         tx.send(
             fs_clone
                 .create(id, buf.into(), opts.with_type(FileType::Columnar))
                 .await
-                .map(|_| table_create),
+                .map(|_| columnar_create),
         )
         .unwrap();
     });
@@ -3788,7 +3781,7 @@ fn compact_table_for_columnar(
     schema: &Schema,
     target_lvl: u32,
     cnt: &mut usize,
-    tx: mpsc::Sender<dfs::Result<pb::TableCreate>>,
+    tx: mpsc::Sender<dfs::Result<pb::ColumnarCreate>>,
     columnar_config: &ColumnarTableBuildOptions,
     allocate_id: &mut dyn FnMut() -> u64,
 ) -> Result<()> {
@@ -3847,7 +3840,7 @@ fn transform_for_columnar(
     target_lvl: u32,
     columnar_config: &ColumnarTableBuildOptions,
     allocate_id: &mut dyn FnMut() -> u64,
-) -> Result<Vec<TableCreate>> {
+) -> Result<Vec<ColumnarCreate>> {
     let fs = &ctx.dfs;
     let opts = dfs::Options::default()
         .with_shard(ctx.req.shard_id, ctx.req.shard_ver)
@@ -3926,11 +3919,10 @@ fn columnar_major_compact(
     if major_compaction.snap_version == 0 {
         let columnar_changes = ret.mut_columnar_change();
         for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
-            let mut tbl_delete = pb::TableDelete::new();
-            tbl_delete.set_cf(0);
+            let mut tbl_delete = pb::ColumnarDelete::new();
             tbl_delete.set_level(level as u32);
             tbl_delete.set_id(file_id);
-            columnar_changes.mut_table_deletes().push(tbl_delete);
+            columnar_changes.mut_columnar_deletes().push(tbl_delete);
         }
         return Ok(ret);
     }
@@ -4008,11 +4000,10 @@ fn columnar_major_compact(
     }
 
     for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
-        let mut tbl_delete = pb::TableDelete::new();
-        tbl_delete.set_cf(0);
+        let mut tbl_delete = pb::ColumnarDelete::new();
         tbl_delete.set_level(level as u32);
         tbl_delete.set_id(file_id);
-        columnar_changes.mut_table_deletes().push(tbl_delete);
+        columnar_changes.mut_columnar_deletes().push(tbl_delete);
     }
 
     let columnar_creates = transform_for_columnar(
@@ -4026,7 +4017,9 @@ fn columnar_major_compact(
         allocate_id,
     )?;
     for columnar_create in columnar_creates {
-        columnar_changes.mut_table_creates().push(columnar_create);
+        columnar_changes
+            .mut_columnar_creates()
+            .push(columnar_create);
     }
     info!(
         "{} columnar_major_compaction, tbl_changes: {:?}",
@@ -4145,8 +4138,8 @@ fn convert_row_file_to_columnar_file(
     for _ in 0..cnt {
         match rx.recv().unwrap() {
             Err(err) => errors.push(err),
-            Ok(tbl_create) => {
-                change.mut_table_creates().push(tbl_create);
+            Ok(col_create) => {
+                change.mut_columnar_creates().push(col_create);
             }
         }
     }
@@ -4201,10 +4194,10 @@ fn compact_columnar_l0_files(
         })
         .collect();
     for id in &col_file_ids {
-        let mut tbl_delete = TableDelete::default();
-        tbl_delete.set_id(*id);
-        tbl_delete.set_level(0);
-        tbl_changes.mut_table_deletes().push(tbl_delete);
+        let mut col_delete = pb::ColumnarDelete::default();
+        col_delete.set_id(*id);
+        col_delete.set_level(0);
+        tbl_changes.mut_columnar_deletes().push(col_delete);
     }
     let col_files = load_table_files(
         &col_file_ids,
@@ -4281,8 +4274,8 @@ fn compact_columnar_l0_files(
     for _ in 0..cnt {
         match rx.recv().unwrap() {
             Err(err) => errors.push(err),
-            Ok(tbl_create) => {
-                tbl_changes.mut_table_creates().push(tbl_create);
+            Ok(col_create) => {
+                tbl_changes.mut_columnar_creates().push(col_create);
             }
         }
     }
@@ -4346,10 +4339,10 @@ fn compact_columnar_l1_files(
     let mut smallest = l1_tbls.iter().map(|f| f.get_smallest()).min().unwrap();
     let mut biggest = l1_tbls.iter().map(|f| f.get_biggest()).max().unwrap();
     for tbl in &l1_tbls {
-        let mut tbl_delete = pb::TableDelete::default();
-        tbl_delete.set_id(tbl.get_file().id());
-        tbl_delete.set_level(1);
-        tbl_changes.mut_table_deletes().push(tbl_delete);
+        let mut col_delete = pb::ColumnarDelete::default();
+        col_delete.set_id(tbl.get_file().id());
+        col_delete.set_level(1);
+        tbl_changes.mut_columnar_deletes().push(col_delete);
     }
 
     let l2_tbl_files = load_table_files(
@@ -4364,10 +4357,10 @@ fn compact_columnar_l1_files(
     for tbl in &l2_tbls {
         smallest = smallest.min(tbl.get_smallest());
         biggest = biggest.max(tbl.get_biggest());
-        let mut tbl_delete = pb::TableDelete::default();
-        tbl_delete.set_id(tbl.get_file().id());
-        tbl_delete.set_level(2);
-        tbl_changes.mut_table_deletes().push(tbl_delete);
+        let mut col_delete = pb::ColumnarDelete::default();
+        col_delete.set_id(tbl.get_file().id());
+        col_delete.set_level(2);
+        tbl_changes.mut_columnar_deletes().push(col_delete);
     }
 
     let mut overlap_tables = schema_file.overlap_tables(smallest, biggest);
@@ -4426,8 +4419,8 @@ fn compact_columnar_l1_files(
     for _ in 0..cnt {
         match rx.recv().unwrap() {
             Err(err) => errors.push(err),
-            Ok(tbl_create) => {
-                tbl_changes.mut_table_creates().push(tbl_create);
+            Ok(col_create) => {
+                tbl_changes.mut_columnar_creates().push(col_create);
             }
         }
     }
@@ -4465,7 +4458,6 @@ fn update_vector_index(
         .find(|idx| idx.index_id == update_vec_idx.index_id)
         .unwrap();
     let mut schema_buf = full_schema.to_schema_buf();
-    schema_buf.txn_id_column = None;
     schema_buf
         .columns
         .retain(|c| c.get_column_id() == vec_idx_def.col_id);

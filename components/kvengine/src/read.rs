@@ -887,6 +887,7 @@ impl SnapAccessCore {
                 tbl.set_level(lh.level as u32);
                 tbl.set_smallest(v.smallest().to_vec());
                 tbl.set_biggest(v.biggest().to_vec());
+                tbl.set_index_offset(v.index_offset());
                 snap.mut_table_creates().push(tbl);
             }
             false
@@ -910,13 +911,12 @@ impl SnapAccessCore {
                     continue;
                 }
                 overlapped_count += 1;
-                let mut tbl = pb::TableCreate::new();
+                let mut tbl = pb::ColumnarCreate::new();
                 tbl.set_id(col_file.id());
-                tbl.set_cf(WRITE_CF as i32);
                 tbl.set_level(cl.level as u32);
                 tbl.set_smallest(col_file.get_smallest().to_vec());
                 tbl.set_biggest(col_file.get_biggest().to_vec());
-                tbl.set_columnar_tables(col_file.table_count() as u32);
+                tbl.set_index_offset(col_file.get_index_offset());
                 snap.mut_columnar_creates().push(tbl);
             }
             false
@@ -1369,7 +1369,6 @@ impl SnapAccessCore {
             table_id,
             handle_column: table_schema.handle_column.clone(),
             version_column: table_schema.version_column.clone(),
-            txn_id_column: None,
             columns: columns.to_vec(),
             pk_col_ids: table_schema.pk_col_ids.clone(),
             vector_indexes: table_schema.vector_indexes.clone(),

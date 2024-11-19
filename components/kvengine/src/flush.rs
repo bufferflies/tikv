@@ -248,6 +248,7 @@ impl Engine {
                 tbl_create.set_level(lvl.level as u32);
                 tbl_create.set_smallest(tbl.smallest().to_vec());
                 tbl_create.set_biggest(tbl.biggest().to_vec());
+                tbl_create.set_index_offset(tbl.index_offset());
                 initial_flush.mut_table_creates().push(tbl_create);
             }
             false
@@ -291,13 +292,12 @@ impl Engine {
                 flush.shard_data.for_each_columnar_level(|cl| {
                     for col_file in cl.files.iter() {
                         // TODO: check col_file has_overlap with task.range to avoid useless flush.
-                        let mut tbl = pb::TableCreate::new();
+                        let mut tbl = pb::ColumnarCreate::new();
                         tbl.set_id(col_file.id());
-                        tbl.set_cf(WRITE_CF as i32);
                         tbl.set_level(cl.level as u32);
                         tbl.set_smallest(col_file.get_smallest().to_vec());
                         tbl.set_biggest(col_file.get_biggest().to_vec());
-                        tbl.set_columnar_tables(col_file.table_count() as u32);
+                        tbl.set_index_offset(col_file.get_index_offset());
                         initial_flush.mut_columnar_creates().push(tbl);
                     }
                     false

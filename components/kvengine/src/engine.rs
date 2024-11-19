@@ -652,6 +652,7 @@ impl EngineCore {
                         tbl_create.set_level(level);
                         tbl_create.set_smallest(res.smallest);
                         tbl_create.set_biggest(res.biggest);
+                        tbl_create.set_index_offset(res.index_offset);
                         ingest_files.mut_table_creates().push(tbl_create);
                     }
                     tbl_cnt += 1;

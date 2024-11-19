@@ -10,7 +10,7 @@ use tipb::ColumnInfo;
 
 use crate::table::{
     columnar::builder::{
-        TableOffset, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
+        TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
         PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
     },
     file::File,
@@ -21,7 +21,6 @@ use crate::table::{
 
 pub const HANDLE_COL_ID: i32 = -1;
 pub(crate) const VERSION_COL_ID: i32 = -1024;
-pub(crate) const TXN_ID_COL_ID: i32 = -1034;
 
 pub const COLUMNAR_MAGIC: u32 = 0xc01e32ae;
 
@@ -30,7 +29,6 @@ pub struct SchemaBuf {
     pub table_id: i64,
     pub handle_column: ColumnInfo,
     pub version_column: ColumnInfo,
-    pub txn_id_column: Option<ColumnInfo>,
     pub columns: Vec<ColumnInfo>,
     pub pk_col_ids: Vec<i64>,
     pub vector_indexes: Vec<VectorIndexDef>,
@@ -200,7 +198,6 @@ pub(crate) struct TableMeta {
     pub(crate) handle_index: HandleIndex,
     pub(crate) handle_column: Arc<ColumnMeta>,
     pub(crate) version_column: Arc<ColumnMeta>,
-    pub(crate) txn_id_column: Arc<ColumnMeta>,
     pub(crate) columns: HashMap<i32, Arc<ColumnMeta>>,
 }
 
@@ -210,8 +207,6 @@ impl TableMeta {
         let (handle_column, remained) = ColumnMeta::parse(buf);
         buf = remained;
         let (version_column, remained) = ColumnMeta::parse(buf);
-        buf = remained;
-        let (txn_id_column, remained) = ColumnMeta::parse(buf);
         buf = remained;
         let mut columns = HashMap::default();
         let mut pk_col_ids = vec![];
@@ -243,7 +238,6 @@ impl TableMeta {
             handle_index,
             handle_column: Arc::new(handle_column),
             version_column: Arc::new(version_column),
-            txn_id_column: Arc::new(txn_id_column),
             columns,
         }
     }
@@ -440,16 +434,11 @@ impl ColumnarFile {
         let footer_data = file.read_footer(footer_len)?;
         let footer = ColumnarFileFooter::parse(&footer_data);
 
-        let table_offsets_size = footer.number_tables as u64 * TableOffset::compute_size() as u64;
+        let table_offsets_size = TableOffsets::compute_size(footer.number_tables as usize) as u64;
         let table_offsets_offset = footer_offset - table_offsets_size;
         let mut buf = vec![0; table_offsets_size as usize];
         file.read_at(&mut buf, table_offsets_offset)?;
-        let mut table_offsets = vec![];
-        for i in 0..footer.number_tables {
-            let offset = i as usize * TableOffset::compute_size();
-            let table_offset = TableOffset::parse(&buf[offset..]);
-            table_offsets.push(table_offset);
-        }
+        let table_offsets = TableOffsets::parse(&buf, footer.number_tables);
         let mut smallest_key = vec![];
         let mut biggest_key = vec![];
         let mut max_version = 0;
@@ -475,12 +464,13 @@ impl ColumnarFile {
             prop_remain = remain;
         }
         let mut tables = HashMap::default();
-        for table_offset in table_offsets {
-            let index_size = table_offset.end_offset - table_offset.index_offset;
-            let mut table_index_buf = vec![0; index_size as usize];
-            file.read_at(&mut table_index_buf, table_offset.index_offset as u64)?;
-            let table_meta = TableMeta::parse(table_offset.table_id, &table_index_buf);
-            tables.insert(table_offset.table_id, Arc::new(table_meta));
+        let index_offset = table_offsets.index_offset();
+        for i in 0..footer.number_tables as usize {
+            let (idx_start, idx_end) = table_offsets.get_index_range(i);
+            let mut table_index_buf = vec![0; (idx_end - idx_start) as usize];
+            file.read_at(&mut table_index_buf, (index_offset + idx_start) as u64)?;
+            let table_meta = TableMeta::parse(table_offsets.table_ids[i], &table_index_buf);
+            tables.insert(table_offsets.table_ids[i], Arc::new(table_meta));
         }
         Ok(Self {
             core: Arc::new(ColumnarFileCore {
@@ -491,6 +481,7 @@ impl ColumnarFile {
                 l0_version,
                 tables,
                 encryption_ver,
+                index_offset,
             }),
         })
     }
@@ -517,6 +508,10 @@ impl ColumnarFile {
 
     pub fn get_biggest(&self) -> InnerKey<'_> {
         InnerKey::from_inner_buf(&self.core.biggest_key)
+    }
+
+    pub fn get_index_offset(&self) -> u32 {
+        self.core.index_offset
     }
 
     pub fn has_data_in_range(&self, start_key: InnerKey<'_>, end_key: InnerKey<'_>) -> bool {
@@ -558,6 +553,7 @@ struct ColumnarFileCore {
     l0_version: Option<u64>,
     tables: HashMap<i64, Arc<TableMeta>>,
     encryption_ver: u32,
+    index_offset: u32,
 }
 
 pub struct ColumnBuffer {
@@ -696,7 +692,7 @@ impl ColumnBuffer {
     }
 
     pub fn get_version(&self, idx: usize) -> u64 {
-        debug_assert!(self.col_id == VERSION_COL_ID || self.col_id == TXN_ID_COL_ID);
+        debug_assert!(self.col_id == VERSION_COL_ID);
         (&self.data_buf[idx * 8..]).get_u64_le()
     }
 
@@ -804,7 +800,6 @@ impl ColumnBuffer {
 pub struct Block {
     pub(crate) handles: ColumnBuffer,
     pub(crate) versions: ColumnBuffer,
-    pub(crate) txn_ids: Option<ColumnBuffer>,
     pub(crate) columns: Vec<ColumnBuffer>,
 }
 
@@ -812,10 +807,6 @@ impl Block {
     pub fn new(schema: &Schema) -> Self {
         let handles = ColumnBuffer::new_from_col_info(&schema.handle_column);
         let versions = ColumnBuffer::new_from_col_info(&schema.version_column);
-        let txn_ids = schema
-            .txn_id_column
-            .as_ref()
-            .map(|x| ColumnBuffer::new_from_col_info(x));
         let mut columns = vec![];
         for col_info in &schema.columns {
             if col_info.get_column_id() == schema.handle_column.get_column_id() {
@@ -826,7 +817,6 @@ impl Block {
         Self {
             handles,
             versions,
-            txn_ids,
             columns,
         }
     }
@@ -834,18 +824,12 @@ impl Block {
     pub(crate) fn reset(&mut self) {
         self.handles.reset();
         self.versions.reset();
-        if let Some(txn_ids) = self.txn_ids.as_mut() {
-            txn_ids.reset();
-        }
         self.columns.iter_mut().for_each(|col| col.reset());
     }
 
     pub(crate) fn truncate(&mut self, length: usize) {
         self.handles.truncate(length);
         self.versions.truncate(length);
-        if let Some(txn_ids) = self.txn_ids.as_mut() {
-            txn_ids.truncate(length);
-        }
         for col in &mut self.columns {
             col.truncate(length);
         }
@@ -856,9 +840,6 @@ impl Block {
             .append(&other.handles, row_offset, row_end_offset);
         self.versions
             .append(&other.versions, row_offset, row_end_offset);
-        if let Some(txn_ids) = self.txn_ids.as_mut() {
-            txn_ids.append(other.txn_ids.as_ref().unwrap(), row_offset, row_end_offset);
-        }
         for (col, other_col) in self.columns.iter_mut().zip(&other.columns) {
             col.append(other_col, row_offset, row_end_offset);
         }

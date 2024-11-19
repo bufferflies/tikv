@@ -1354,7 +1354,6 @@ fn test_restore_keyspace_with_schema() {
             table_id: i,
             handle_column: new_int_handle_column_info(),
             version_column: new_version_column_info(),
-            txn_id_column: None,
             columns: vec![new_int_handle_column_info()],
             pk_col_ids: vec![],
             vector_indexes: vec![],

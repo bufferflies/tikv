@@ -37,21 +37,18 @@ use tikv_util::codec::{
 };
 use tipb::ColumnInfo;
 
-use crate::{
-    table::{
-        self,
-        blobtable::blobtable::BlobTable,
+use crate::table::{
+    self,
+    blobtable::blobtable::BlobTable,
+    columnar::{
         columnar::{
-            columnar::{
-                decompress_pack, get_fixed_size, Block, ColumnBuffer, ColumnMeta, ColumnarFile,
-                Schema, TableMeta,
-            },
-            get_primary_key,
+            decompress_pack, get_fixed_size, Block, ColumnBuffer, ColumnMeta, ColumnarFile, Schema,
+            TableMeta,
         },
-        file::File,
-        search, InnerKey,
+        get_primary_key,
     },
-    UserMeta,
+    file::File,
+    search, InnerKey,
 };
 
 pub const GLOBAL_COMMON_HANDLE_END: &[u8] = &[255];
@@ -67,7 +64,6 @@ pub(crate) struct ColumnarTableReader {
     schema: Schema,
     handle_reader: ColumnarColumnReader,
     version_reader: ColumnarColumnReader,
-    txn_id_reader: Option<ColumnarColumnReader>,
     columns_readers: Vec<ColumnarColumnReader>,
 }
 
@@ -96,15 +92,6 @@ impl ColumnarTableReader {
             encryption_key.clone(),
             encryption_ver,
         );
-        let txn_id_reader = schema.txn_id_column.is_some().then(|| {
-            ColumnarColumnReader::new(
-                file.clone(),
-                table_meta.txn_id_column.clone(),
-                false,
-                encryption_key.clone(),
-                encryption_ver,
-            )
-        });
         let columns_readers = schema
             .columns
             .iter()
@@ -135,7 +122,6 @@ impl ColumnarTableReader {
             schema,
             handle_reader,
             version_reader,
-            txn_id_reader,
             columns_readers,
         }
     }
@@ -165,9 +151,6 @@ impl ColumnarReader for ColumnarTableReader {
         self.handle_reader.row_idx_in_pack = row_idx_in_pack;
         let row_idx = self.handle_reader.pack_row_start + row_idx_in_pack;
         self.version_reader.set_row_idx(row_idx)?;
-        if let Some(txn_id_reader) = &mut self.txn_id_reader {
-            txn_id_reader.set_row_idx(row_idx)?;
-        }
         for col_reader in &mut self.columns_readers {
             col_reader.set_row_idx(row_idx)?;
         }
@@ -177,9 +160,6 @@ impl ColumnarReader for ColumnarTableReader {
     fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
         let read_row = self.handle_reader.read(&mut block.handles, limit)?;
         self.version_reader.read(&mut block.versions, limit)?;
-        if let Some(txn_id_reader) = &mut self.txn_id_reader {
-            txn_id_reader.read(block.txn_ids.as_mut().unwrap(), limit)?;
-        }
         for (i, col) in self.columns_readers.iter_mut().enumerate() {
             col.read(&mut block.columns[i], limit)?;
         }
@@ -459,9 +439,6 @@ impl ColumnarFilter {
             self.filter_block
                 .versions
                 .append(&block.versions, start, end);
-            if let Some(filter_txn_ids) = &mut self.filter_block.txn_ids {
-                filter_txn_ids.append(block.txn_ids.as_ref().unwrap(), start, end);
-            }
             for (i, col) in self.filter_block.columns.iter_mut().enumerate() {
                 col.append(&block.columns[i], start, end);
             }
@@ -1328,17 +1305,6 @@ impl ColumnarReader for ColumnarRowTableReader {
             }
             let value = self.iter.value();
             let version = value.version;
-            assert_eq!(self.schema.txn_id_column.is_some(), block.txn_ids.is_some());
-            if let Some(txn_id_col) = block.txn_ids.as_mut() {
-                let user_meta = value.user_meta();
-                let txn_id = if user_meta.is_empty() {
-                    0u64
-                } else {
-                    let um = UserMeta::from_slice(value.user_meta());
-                    um.start_ts
-                };
-                txn_id_col.push_value(&txn_id.to_le_bytes());
-            }
             let mut handle_row_value = |reader: &mut Self, row_value: &[u8]| -> table::Result<()> {
                 let is_deleted = row_value.is_empty();
                 block.versions.push_version(version, is_deleted);
@@ -1488,8 +1454,8 @@ pub mod tests {
             columnar::{
                 builder::{
                     new_common_handle_column_info, new_int_handle_column_info,
-                    new_txn_id_column_info, new_version_column_info, ColumnarFileBuilder,
-                    ColumnarTableBuildOptions, ColumnarTableBuilder,
+                    new_version_column_info, ColumnarFileBuilder, ColumnarTableBuildOptions,
+                    ColumnarTableBuilder,
                 },
                 columnar::ColumnarFile,
                 reader::{ColumnarMvccReader, ColumnarReader, ColumnarTableReader},
@@ -1554,7 +1520,6 @@ pub mod tests {
             schema_buf.handle_column = new_int_handle_column_info();
         }
         schema_buf.version_column = new_version_column_info();
-        schema_buf.txn_id_column = Some(new_txn_id_column_info());
         let mut col_1 = new_column_info(1);
         col_1.set_tp(FieldTypeTp::LongLong as i32);
         let mut col_2 = new_column_info(2);
@@ -1672,7 +1637,7 @@ pub mod tests {
             None,
         );
         file_builder.add_table(table_builder);
-        let file_data = file_builder.build();
+        let (file_data, _) = file_builder.build();
         (
             Arc::new(InMemFile::new(file_id, file_data.into())),
             ref_rows,

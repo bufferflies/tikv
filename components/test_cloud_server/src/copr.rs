@@ -2,8 +2,7 @@
 
 use api_version::ApiV2;
 use kvengine::table::columnar::{
-    new_common_handle_column_info, new_int_handle_column_info, new_txn_id_column_info, Schema,
-    SchemaBuf,
+    new_common_handle_column_info, new_int_handle_column_info, Schema, SchemaBuf,
 };
 use tidb_query_datatype::{
     codec::{
@@ -69,7 +68,6 @@ pub fn build_schema(ddl: &str) -> Schema {
     } else {
         schema_buf.handle_column = new_common_handle_column_info();
     }
-    schema_buf.txn_id_column = Some(new_txn_id_column_info());
     let mut pk_columns = vec![];
     for (col_id, col_type, notnull) in col_defs {
         let mut col_info = make_column_info(col_id, col_type, notnull);

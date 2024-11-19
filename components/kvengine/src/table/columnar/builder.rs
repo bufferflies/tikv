@@ -14,7 +14,7 @@ use crate::table::{
     add_property,
     columnar::columnar::{
         compress_pack, get_unsigned, Block, ColumnBuffer, ColumnMeta, ColumnarFileFooter, Schema,
-        COLUMNAR_MAGIC, HANDLE_COL_ID, TXN_ID_COL_ID, VERSION_COL_ID,
+        COLUMNAR_MAGIC, HANDLE_COL_ID, VERSION_COL_ID,
     },
     sstable::PROP_KEY_ENCRYPTION_VER,
     ChecksumType, LZ4_COMPRESSION,
@@ -35,15 +35,6 @@ pub fn new_version_column_info() -> ColumnInfo {
     col_info.set_column_id(VERSION_COL_ID as i64);
     col_info.set_tp(FieldTypeTp::LongLong as i32);
     let flag = FieldTypeFlag::UNSIGNED.bits();
-    col_info.set_flag(flag as i32);
-    col_info
-}
-
-pub fn new_txn_id_column_info() -> ColumnInfo {
-    let mut col_info = ColumnInfo::new();
-    col_info.set_column_id(TXN_ID_COL_ID as i64);
-    col_info.set_tp(FieldTypeTp::LongLong as i32);
-    let flag = FieldTypeFlag::UNSIGNED.bits() | FieldTypeFlag::NOT_NULL.bits();
     col_info.set_flag(flag as i32);
     col_info
 }
@@ -78,47 +69,56 @@ pub struct ColumnarFileBuilder {
 }
 
 #[derive(Debug)]
-pub(crate) struct TableOffset {
-    pub(crate) table_id: i64,
-    pub(crate) offset: u32,
-    pub(crate) index_offset: u32,
-    pub(crate) end_offset: u32,
+pub(crate) struct TableOffsets {
+    pub(crate) table_ids: Vec<i64>,
+    pub(crate) packs_offsets: Vec<u32>,
+    pub(crate) index_offsets: Vec<u32>,
 }
 
-impl TableOffset {
-    fn new(table_id: i64, offset: usize, data_sizes: DataSizeTuple) -> Self {
-        let index_offset = offset + data_sizes.packs_data_size;
-        let end_offset = index_offset + data_sizes.index_size;
+impl TableOffsets {
+    fn new() -> Self {
         Self {
-            table_id,
-            offset: offset as u32,
-            index_offset: index_offset as u32,
-            end_offset: end_offset as u32,
+            table_ids: vec![],
+            packs_offsets: vec![0],
+            index_offsets: vec![0],
         }
     }
 
-    pub(crate) fn parse(mut buf: &[u8]) -> Self {
-        let table_id = buf.get_i64_le();
-        let offset = buf.get_u32_le();
-        let index_offset = buf.get_u32_le();
-        let end_offset = buf.get_u32_le();
-        TableOffset {
-            table_id,
-            offset,
-            index_offset,
-            end_offset,
-        }
+    fn push(&mut self, table_id: i64, packs_end_offset: usize, index_end_offset: usize) {
+        self.table_ids.push(table_id);
+        self.packs_offsets.push(packs_end_offset as u32);
+        self.index_offsets.push(index_end_offset as u32);
     }
 
-    pub(crate) fn compute_size() -> usize {
-        20
+    pub(crate) fn parse(mut buf: &[u8], num_tables: u32) -> Self {
+        let mut table_offsets = TableOffsets::new();
+        for _ in 0..num_tables {
+            let table_id = buf.get_i64_le();
+            let packs_offset = buf.get_u32_le();
+            let index_offset = buf.get_u32_le();
+            table_offsets.push(table_id, packs_offset as usize, index_offset as usize);
+        }
+        table_offsets
+    }
+
+    pub(crate) fn compute_size(num_tables: usize) -> usize {
+        num_tables * 16
     }
 
     pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
-        buf.put_i64_le(self.table_id);
-        buf.put_u32_le(self.offset);
-        buf.put_u32_le(self.index_offset);
-        buf.put_u32_le(self.end_offset);
+        for i in 0..self.table_ids.len() {
+            buf.put_i64_le(self.table_ids[i]);
+            buf.put_u32_le(self.packs_offsets[i + 1]);
+            buf.put_u32_le(self.index_offsets[i + 1]);
+        }
+    }
+
+    pub(crate) fn get_index_range(&self, i: usize) -> (u32, u32) {
+        (self.index_offsets[i], self.index_offsets[i + 1])
+    }
+
+    pub(crate) fn index_offset(&self) -> u32 {
+        *self.packs_offsets.last().unwrap()
     }
 }
 
@@ -172,23 +172,24 @@ impl ColumnarFileBuilder {
         self.tables.push(table);
     }
 
-    pub fn build(&mut self) -> Vec<u8> {
+    pub fn build(&mut self) -> (Vec<u8>, usize) {
         if self.tables.is_empty() {
-            return vec![];
+            return (vec![], 0);
         }
         self.tables
             .sort_by(|a, b| a.schema.table_id.cmp(&b.schema.table_id));
-        let mut tables_offsets = vec![];
-        let mut total_size = 0;
+
         let mut max_version = 0;
+        let mut packs_total_size = 0;
+        let mut index_total_size = 0;
+        let mut tables_offsets = TableOffsets::new();
         for table in &mut self.tables {
             table.finish_table();
             max_version = max_version.max(table.max_version);
             let table_size = table.compute_size();
-            let sum_table_size = table_size.packs_data_size + table_size.index_size;
-            let table_offset = TableOffset::new(table.schema.table_id, total_size, table_size);
-            tables_offsets.push(table_offset);
-            total_size += sum_table_size;
+            packs_total_size += table_size.packs_data_size;
+            index_total_size += table_size.index_size;
+            tables_offsets.push(table.schema.table_id, packs_total_size, index_total_size);
         }
         let mut property_buf = vec![];
         let (smallest, biggest) = self.build_smallest_biggest();
@@ -223,17 +224,20 @@ impl ColumnarFileBuilder {
                 &encryption_key.current_ver.to_le_bytes(),
             );
         }
-        total_size += property_buf.len();
-        total_size += tables_offsets.len() * TableOffset::compute_size();
-        total_size += ColumnarFileFooter::compute_size();
-        let mut file_buffer = Vec::with_capacity(total_size);
+        let file_total_size = packs_total_size
+            + index_total_size
+            + property_buf.len()
+            + TableOffsets::compute_size(self.tables.len())
+            + ColumnarFileFooter::compute_size();
+        let mut file_buffer = Vec::with_capacity(file_total_size);
         for tbl in &mut self.tables {
-            tbl.build(&mut file_buffer);
+            tbl.build_packs(&mut file_buffer);
+        }
+        for tbl in &mut self.tables {
+            tbl.build_index(&mut file_buffer);
         }
         file_buffer.extend_from_slice(&property_buf);
-        for table_offset in &tables_offsets {
-            table_offset.write_to(&mut file_buffer);
-        }
+        tables_offsets.write_to(&mut file_buffer);
         let footer = ColumnarFileFooter {
             number_tables: self.tables.len() as u32,
             properties_size: property_buf.len() as u32,
@@ -244,7 +248,7 @@ impl ColumnarFileBuilder {
         };
         footer.write_to(&mut file_buffer);
         debug_assert_eq!(file_buffer.capacity(), file_buffer.len());
-        file_buffer
+        (file_buffer, packs_total_size)
     }
 
     fn build_smallest_biggest(&self) -> (Vec<u8>, Vec<u8>) {
@@ -293,7 +297,6 @@ pub struct ColumnarTableBuilder {
     schema: Schema,
     handle_builder: ColumnarColumnBuilder,
     version_builder: ColumnarColumnBuilder,
-    txn_id_builder: ColumnarColumnBuilder,
     column_builders: Vec<ColumnarColumnBuilder>,
     compressed_handle_index: Vec<u8>,
     properties: Vec<u8>,
@@ -332,14 +335,10 @@ impl ColumnarTableBuilder {
             pack_max_size,
             false,
         );
-        let txn_id_col = schema.txn_id_column.as_ref().unwrap().clone();
-        let txn_id_builder =
-            ColumnarColumnBuilder::new(txn_id_col, pack_max_row_count, pack_max_size, false);
         Self {
             schema,
             handle_builder,
             version_builder,
-            txn_id_builder,
             column_builders,
             compressed_handle_index: vec![],
             properties: vec![],
@@ -356,9 +355,6 @@ impl ColumnarTableBuilder {
             .append_handle(&block.handles, start_offset, end_offset);
         self.version_builder
             .append(&block.versions, start_offset, end_offset);
-        let txn_id_buf = block.txn_ids.as_ref().unwrap();
-        self.txn_id_builder
-            .append(txn_id_buf, start_offset, end_offset);
         for (i, col_buf) in block.columns.iter().enumerate() {
             let col_builder = &mut self.column_builders[i];
             col_builder.append(col_buf, start_offset, end_offset);
@@ -388,7 +384,6 @@ impl ColumnarTableBuilder {
         };
         self.compressed_handle_index = self.handle_builder.build_handle_index();
         self.version_builder.finish_pack();
-        self.txn_id_builder.finish_pack();
         for col_builder in &mut self.column_builders {
             col_builder.finish_pack();
         }
@@ -411,8 +406,6 @@ impl ColumnarTableBuilder {
         total_size.add(handle_col_size);
         let version_col_size = self.version_builder.compute_size();
         total_size.add(version_col_size);
-        let txn_id_col_size = self.txn_id_builder.compute_size();
-        total_size.add(txn_id_col_size);
         for col_builder in &self.column_builders {
             let col_size = col_builder.compute_size();
             total_size.add(col_size);
@@ -424,8 +417,7 @@ impl ColumnarTableBuilder {
         total_size
     }
 
-    pub(crate) fn build(&mut self, output_buf: &mut Vec<u8>) {
-        // pack data part:
+    pub(crate) fn build_packs(&mut self, output_buf: &mut Vec<u8>) {
         self.handle_builder
             .col_meta
             .pack_offsets
@@ -450,18 +442,6 @@ impl ColumnarTableBuilder {
             }
         }
 
-        self.txn_id_builder
-            .col_meta
-            .pack_offsets
-            .update_base(output_buf.len() as u32);
-        for pack in &self.txn_id_builder.compressed_packs {
-            if let Some(encryption_key) = &self.encryption_key {
-                encryption_key.encrypt(pack, self.file_id, output_buf.len() as u32, output_buf);
-            } else {
-                output_buf.extend_from_slice(pack);
-            }
-        }
-
         for column in &mut self.column_builders {
             column
                 .col_meta
@@ -475,13 +455,13 @@ impl ColumnarTableBuilder {
                 }
             }
         }
+    }
 
-        // index part:
+    pub(crate) fn build_index(&mut self, output_buf: &mut Vec<u8>) {
         let num_columns = self.column_builders.len() as u32 + 3;
         output_buf.put_u32_le(num_columns);
         self.handle_builder.col_meta.write_to(output_buf);
         self.version_builder.col_meta.write_to(output_buf);
-        self.txn_id_builder.col_meta.write_to(output_buf);
         for column in &mut self.column_builders {
             column.col_meta.write_to(output_buf);
         }
@@ -492,9 +472,8 @@ impl ColumnarTableBuilder {
     }
 
     pub(crate) fn get_estimated_size(&self) -> usize {
-        let mut estimated_size = self.handle_builder.estimated_size
-            + self.version_builder.estimated_size
-            + self.txn_id_builder.estimated_size;
+        let mut estimated_size =
+            self.handle_builder.estimated_size + self.version_builder.estimated_size;
         for cb in &self.column_builders {
             estimated_size += cb.estimated_size;
         }

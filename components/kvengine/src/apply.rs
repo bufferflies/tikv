@@ -552,52 +552,24 @@ impl EngineCore {
     ) {
         let mut new_l0s = data.l0_tbls.clone();
         let mut new_cfs = data.cfs.clone();
-        let mut new_col_levels = data.col_levels.clone();
         // Group files by cf and level.
         let mut grouped = HashMap::new();
-        let mut all_deletes = HashSet::new();
         for deleted in tc.get_table_deletes() {
             grouped
-                .entry((
-                    deleted.get_cf(),
-                    deleted.get_level() as usize,
-                    deleted.columnar_tables > 0,
-                ))
+                .entry((deleted.get_cf(), deleted.get_level() as usize))
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .0
                 .push(deleted.get_id());
-            all_deletes.insert(deleted.get_id());
-        }
-        for col_level in &mut new_col_levels.levels {
-            col_level
-                .files
-                .retain(|c| !all_deletes.contains(&c.get_file().id()));
         }
         for created in tc.get_table_creates() {
-            if created.columnar_tables > 0 {
-                let col_file = cs.col_files.get(&created.get_id()).unwrap().clone();
-                new_col_levels.add_file(created.get_level() as usize, col_file);
-                continue;
-            }
             grouped
-                .entry((
-                    created.get_cf(),
-                    created.get_level() as usize,
-                    created.columnar_tables > 0,
-                ))
+                .entry((created.get_cf(), created.get_level() as usize))
                 .or_insert_with(|| (Vec::new(), Vec::new()))
                 .1
                 .push(created.get_id());
         }
-        new_col_levels.sort();
 
-        for ((cf, level, is_columnar), (deletes, creates)) in grouped {
-            if is_columnar {
-                new_col_levels.levels[level]
-                    .files
-                    .retain(|col| !deletes.contains(&col.id()));
-                continue;
-            }
+        for ((cf, level), (deletes, creates)) in grouped {
             if level == 0 {
                 new_l0s.retain(|l0| {
                     let is_deleted = deletes.contains(&l0.id());
@@ -635,6 +607,22 @@ impl EngineCore {
         }
         buidler.set_l0_tbls(new_l0s);
         buidler.set_cfs(new_cfs);
+
+        let mut new_col_levels = data.col_levels.clone();
+        let mut columnar_deletes = HashSet::new();
+        for deleted in tc.get_columnar_deletes() {
+            columnar_deletes.insert(deleted.get_id());
+        }
+        for col_level in &mut new_col_levels.levels {
+            col_level
+                .files
+                .retain(|c| !columnar_deletes.contains(&c.get_file().id()));
+        }
+        for created in tc.get_columnar_creates() {
+            let col_file = cs.col_files.get(&created.get_id()).unwrap().clone();
+            new_col_levels.add_file(created.get_level() as usize, col_file);
+        }
+        new_col_levels.sort();
         buidler.set_columnar_levels(new_col_levels);
     }
 
@@ -892,12 +880,12 @@ impl EngineCore {
             new_col_levels.l2_snap_version = col_comp.get_snap_version();
         }
         let deletes: HashSet<u64> = col_change
-            .get_table_deletes()
+            .get_columnar_deletes()
             .iter()
             .map(|del| del.get_id())
             .collect();
         new_col_levels.retain(|c| !deletes.contains(&c.get_file().id()));
-        for create in col_change.get_table_creates() {
+        for create in col_change.get_columnar_creates() {
             let col_file = cs.col_files.get(&create.get_id()).unwrap().clone();
             new_col_levels.add_file(create.get_level() as usize, col_file);
         }
