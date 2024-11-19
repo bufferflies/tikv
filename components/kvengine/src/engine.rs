@@ -24,7 +24,7 @@ use file_system::IoRateLimiter;
 use fslock;
 use security::SecurityManager;
 use slog_global::info;
-use tikv_util::{box_err, mpsc, sys::thread::StdThreadBuildWrapper};
+use tikv_util::{box_err, mpsc, sys::thread::StdThreadBuildWrapper, HandyRwLock};
 use txn_chunk_manager::with_pool_size;
 
 use crate::{
@@ -704,6 +704,26 @@ impl EngineCore {
             .iter()
             .map(|x| IdVer::new(x.id, x.ver))
             .collect()
+    }
+
+    // get shards has compaction priority, return Vec<(shard_id, keyspace_id)>.
+    pub fn get_pending_compaction_shards(&self) -> Vec<(u64, u32)> {
+        let id_vers = self.get_all_shard_id_vers();
+        id_vers
+            .iter()
+            .filter_map(|id_ver| {
+                let shard = self.get_shard(id_ver.id)?;
+                let priority = shard.compaction_priority.rl();
+                if priority.is_none() {
+                    return None;
+                }
+                Some((id_ver.id, shard.keyspace_id))
+            })
+            .collect()
+    }
+
+    pub fn unblock_keyspace_compaction(&self) {
+        self.send_compact_msg(CompactMsg::UnblockKeyspace);
     }
 
     // meta_committed should be called when a change set is committed in the raft

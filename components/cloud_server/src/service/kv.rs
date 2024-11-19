@@ -1435,6 +1435,9 @@ fn future_get<L: LockManager, F: KvFormat>(
     storage: &Storage<RaftKv, L, F>,
     mut req: GetRequest,
 ) -> impl Future<Output = ServerResult<GetResponse>> {
+    if recovery::check_request_rejected(req.get_context().keyspace_id) {
+        return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
+    }
     let start = Instant::now();
     let v = storage.get(
         req.take_context(),
@@ -1468,12 +1471,16 @@ fn future_get<L: LockManager, F: KvFormat>(
         }
         Ok(resp)
     }
+    .boxed()
 }
 
 fn future_scan<L: LockManager, F: KvFormat>(
     storage: &Storage<RaftKv, L, F>,
     mut req: ScanRequest,
 ) -> impl Future<Output = ServerResult<ScanResponse>> {
+    if recovery::check_request_rejected(req.get_context().keyspace_id) {
+        return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
+    }
     let end_key = Key::from_raw_maybe_unbounded(req.get_end_key());
     let rev_range = if req.reverse && req.version == u64::MAX {
         Some((req.start_key.clone(), req.end_key.clone()))
@@ -1527,12 +1534,16 @@ fn future_scan<L: LockManager, F: KvFormat>(
         }
         Ok(resp)
     }
+    .boxed()
 }
 
 fn future_batch_get<L: LockManager, F: KvFormat>(
     storage: &Storage<RaftKv, L, F>,
     mut req: BatchGetRequest,
 ) -> impl Future<Output = ServerResult<BatchGetResponse>> {
+    if recovery::check_request_rejected(req.get_context().keyspace_id) {
+        return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
+    }
     let start = Instant::now();
     let keys = req.get_keys().iter().map(|x| Key::from_raw(x)).collect();
     let v = storage.batch_get(req.take_context(), keys, req.get_version().into());
@@ -1568,12 +1579,16 @@ fn future_batch_get<L: LockManager, F: KvFormat>(
         }
         Ok(resp)
     }
+    .boxed()
 }
 
 fn future_scan_lock<L: LockManager, F: KvFormat>(
     storage: &Storage<RaftKv, L, F>,
     mut req: ScanLockRequest,
 ) -> impl Future<Output = ServerResult<ScanLockResponse>> {
+    if recovery::check_request_rejected(req.get_context().keyspace_id) {
+        return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
+    }
     let start_key = Key::from_raw_maybe_unbounded(req.get_start_key());
     let end_key = Key::from_raw_maybe_unbounded(req.get_end_key());
 
@@ -1598,6 +1613,7 @@ fn future_scan_lock<L: LockManager, F: KvFormat>(
         }
         Ok(resp)
     }
+    .boxed()
 }
 
 async fn future_gc(_: GcRequest) -> ServerResult<GcResponse> {
@@ -1610,6 +1626,9 @@ fn future_delete_range<L: LockManager, F: KvFormat>(
     storage: &Storage<RaftKv, L, F>,
     mut req: DeleteRangeRequest,
 ) -> impl Future<Output = ServerResult<DeleteRangeResponse>> {
+    if recovery::check_request_rejected(req.get_context().keyspace_id) {
+        return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
+    }
     let (cb, f) = paired_future_callback();
     let res = storage.delete_range(
         req.take_context(),
@@ -1632,6 +1651,7 @@ fn future_delete_range<L: LockManager, F: KvFormat>(
         }
         Ok(resp)
     }
+    .boxed()
 }
 
 fn future_copr<E: Engine>(
@@ -1639,8 +1659,11 @@ fn future_copr<E: Engine>(
     peer: Option<String>,
     req: Request,
 ) -> impl Future<Output = ServerResult<MemoryTraceGuard<Response>>> {
+    if recovery::check_request_rejected(req.get_context().keyspace_id) {
+        return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
+    }
     let ret = copr.parse_and_handle_unary_request(req, peer);
-    async move { Ok(ret.await) }
+    async move { Ok(ret.await) }.boxed()
 }
 
 macro_rules! txn_command_future {

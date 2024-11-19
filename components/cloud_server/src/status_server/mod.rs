@@ -1272,6 +1272,28 @@ impl StatusServer {
         })
     }
 
+    async fn handle_recovery(
+        req: Request<Body>,
+        engine: kvengine::Engine,
+        data_dir: &str,
+    ) -> hyper::Result<Response<Body>> {
+        let path = req.uri().path();
+        match path {
+            "/recovery/mode" => Ok(recovery::handle_mode(req, || {
+                engine.unblock_keyspace_compaction()
+            })),
+            "/recovery/rejected" => {
+                let pending_compact_shards = engine.get_pending_compaction_shards();
+                Ok(recovery::handle_rejected(req, pending_compact_shards))
+            }
+            "/recovery/white_list" => Ok(recovery::handle_while_list(req, || {
+                engine.unblock_keyspace_compaction()
+            })),
+            "/recovery/black_list" => Ok(recovery::handle_black_list(req, data_dir)),
+            _ => Ok(make_response(StatusCode::NOT_FOUND, "Not Found")),
+        }
+    }
+
     async fn backup_rfengine(
         req: Request<Body>,
         engine: rfengine::RfEngine,
@@ -1949,6 +1971,10 @@ impl StatusServer {
                             (Method::POST, path) if path.starts_with("/dfs/") => {
                                 Self::handle_dfs_file_create(req, engine).await
                             }
+                            (Method::GET | Method::POST, path) if path.starts_with("/recovery/") => {
+                                let data_dir = &cfg_controller.get_current().storage.data_dir;
+                                Self::handle_recovery(req, engine, data_dir).await
+                            },
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }
                     }

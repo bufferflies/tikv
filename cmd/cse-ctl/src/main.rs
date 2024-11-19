@@ -6,8 +6,11 @@ extern crate serde_derive;
 mod archive;
 mod backup;
 mod check_table;
+mod common;
 mod dfsgc;
+mod http;
 mod mvcc;
+mod recovery;
 mod restore;
 mod sst;
 mod stats;
@@ -28,7 +31,9 @@ use crate::{
     backup::{execute_backup, execute_show_backup, BackupArgs, ShowBackupArgs},
     check_table::{execute_check_table, CheckTableArgs},
     dfsgc::{execute_dfsgc, DfsGcArgs},
+    http::HttpArgs,
     mvcc::{execute_mvcc, MvccArgs},
+    recovery::{execute_recovery, RecoveryArgs},
     restore::{execute_restore_command, RestoreCommand},
     sst::{execute_scan_bad_table, execute_show_sst, ScanBadTableFileArgs, ShowSstArgs},
     stats::{execute_stats, StatsArgs},
@@ -71,6 +76,12 @@ fn main() {
         Mvcc(args) => execute_mvcc(args),
         Show(args) => {
             execute_show(args);
+        }
+        Http(args) => {
+            http::execute_http(args);
+        }
+        Recovery(args) => {
+            execute_recovery(args);
         }
     }
 }
@@ -136,6 +147,10 @@ pub enum Commands {
     Mvcc(MvccArgs),
     /// Show some information.
     Show(ShowArgs),
+    /// Execute recovery mode commands.
+    Recovery(RecoveryArgs),
+    /// Run HTTP requests to stores.
+    Http(HttpArgs),
 }
 
 #[derive(Args)]

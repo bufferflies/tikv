@@ -4570,6 +4570,9 @@ pub(crate) enum CompactMsg {
     /// `seq` is the maximum log index sequence of scheduled compactions.
     Pause { id_ver: IdVer, seq: u64 },
 
+    /// Resume compaction for previously blocked keyspace shards.
+    UnblockKeyspace,
+
     /// Stop background compact thread.
     Stop,
 }
@@ -4595,6 +4598,9 @@ pub(crate) struct CompactRunner {
     /// `paused_seq` is used to indicate that compaction should be paused until
     /// `Shard::meta_seq >= paused_seq`.
     paused_seq: HashMap<IdVer, u64>,
+
+    /// blocked contains the keyspace shards that are blocked for compaction.
+    blocked: HashMap<u32, HashSet<IdVer>>,
 }
 
 impl CompactRunner {
@@ -4607,6 +4613,7 @@ impl CompactRunner {
             notified: Default::default(),
             pending: Default::default(),
             paused_seq: Default::default(),
+            blocked: Default::default(),
         }
     }
 
@@ -4639,6 +4646,8 @@ impl CompactRunner {
                     );
                 }
 
+                CompactMsg::UnblockKeyspace => self.schedule_unblocked_compaction(),
+
                 CompactMsg::Stop => {
                     info!(
                         "Engine {} compaction worker receive stop msg and stop now",
@@ -4668,7 +4677,15 @@ impl CompactRunner {
                 return;
             }
         };
-
+        if is_compaction_blocked(shard.keyspace_id) {
+            self.blocked
+                .entry(shard.keyspace_id)
+                .or_default()
+                .insert(id_ver);
+            let tag = ShardTag::new(self.engine.get_engine_id(), id_ver);
+            info!("{} compaction blocked", tag);
+            return;
+        }
         if self.is_paused(id_ver, shard.get_meta_sequence()) {
             return;
         }
@@ -4815,4 +4832,25 @@ impl CompactRunner {
             Entry::Vacant(_) => false,
         }
     }
+
+    fn schedule_unblocked_compaction(&mut self) {
+        if self.blocked.is_empty() {
+            return;
+        }
+        for (_, blocked_ids) in self
+            .blocked
+            .extract_if(|keyspace_id, _| !is_compaction_blocked(*keyspace_id))
+        {
+            for id_ver in blocked_ids {
+                let tag = ShardTag::new(self.engine.get_engine_id(), id_ver);
+                info!("{} compaction unblocked", tag);
+                self.pending.insert(id_ver);
+            }
+        }
+        self.schedule_pending_compaction();
+    }
+}
+
+fn is_compaction_blocked(keyspace_id: u32) -> bool {
+    recovery::is_in_recovery_mode() && !recovery::in_white_list(keyspace_id)
 }

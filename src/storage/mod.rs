@@ -1439,6 +1439,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         };
 
         let cmd: Command = cmd.into();
+        if recovery::check_request_rejected(cmd.ctx().keyspace_id) {
+            callback(Err(box_err!("rejected in recovery mode")));
+            return Ok(());
+        }
 
         match &cmd {
             Command::Prewrite(Prewrite { mutations, .. }) => {

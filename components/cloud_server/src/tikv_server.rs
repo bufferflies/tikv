@@ -1113,7 +1113,7 @@ impl TikvServer {
         let rf_engine = Self::init_raft_engine(conf).unwrap();
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
         let mut meta_iter = recoverer.clone();
-        if let Some(mut black_list) = load_black_list(&conf.black_list_path) {
+        if let Some(mut black_list) = load_black_list(conf) {
             black_list.add_regions(black_list_regions);
             meta_iter.set_black_list(black_list);
         } else if !black_list_regions.is_empty() {
@@ -1244,19 +1244,34 @@ struct BlackListConfig {
     region_ids: Vec<u64>,
 }
 
-fn load_black_list(black_list_path: &str) -> Option<BlackList> {
-    if black_list_path.is_empty() {
+fn load_black_list(conf: &TikvConfig) -> Option<BlackList> {
+    if conf.recovery_mode {
+        recovery::set_recovery_mode(true);
+    }
+    let recovery_black_list = recovery::load_black_list(&conf.storage.data_dir);
+    if conf.black_list_path.is_empty() && recovery_black_list.is_empty() {
         return None;
     }
-    if let Ok(data) = fs::read(black_list_path) {
+    let mut black_list_conf = BlackListConfig::default();
+    if let Ok(data) = fs::read(&conf.black_list_path) {
         match serde_json::from_slice::<BlackListConfig>(&data) {
-            Ok(config) => return Some(BlackList::new(config.keyspace_ids, config.region_ids)),
+            Ok(config) => {
+                black_list_conf = config;
+            }
             Err(err) => {
                 error!("failed to load black list file {:?}", err);
             }
         }
     }
-    None
+    black_list_conf
+        .keyspace_ids
+        .extend_from_slice(&recovery_black_list);
+    black_list_conf.keyspace_ids.sort();
+    black_list_conf.keyspace_ids.dedup();
+    Some(BlackList::new(
+        black_list_conf.keyspace_ids,
+        black_list_conf.region_ids,
+    ))
 }
 
 fn _get_store_regions(

@@ -67,6 +67,7 @@ protobuf = "2.8"
 quick-xml = { version = "0.23.1", features = ["serialize"] }
 quick_cache = "0.6.9"
 rand = "0.8"
+recovery = { workspace = true }
 regex = "1"
 rusoto_core = "0.46.0"
 rusoto_credential = "0.46.0"
