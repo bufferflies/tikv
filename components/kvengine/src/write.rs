@@ -22,21 +22,31 @@ pub struct WriteBatch {
     inner_key_off: usize,
 }
 
-impl WriteBatch {
-    pub fn new(shard_id: u64, inner_key_off: usize) -> Self {
+impl Default for WriteBatch {
+    fn default() -> Self {
         let cf_batches = [
             memtable::WriteBatch::new(),
             memtable::WriteBatch::new(),
             memtable::WriteBatch::new(),
         ];
         Self {
-            shard_id,
+            shard_id: 0,
             cf_batches,
             properties: HashMap::new(),
-            sequence: 1,
+            sequence: 0,
             switch_mem_table: false,
-            inner_key_off,
+            inner_key_off: 0,
         }
+    }
+}
+
+impl WriteBatch {
+    #[cfg(test)]
+    pub(crate) fn new(shard_id: u64, inner_key_off: usize) -> Self {
+        let mut wb = Self::default();
+        wb.shard_id = shard_id;
+        wb.inner_key_off = inner_key_off;
+        wb
     }
 
     pub fn put(
@@ -95,13 +105,15 @@ impl WriteBatch {
         num
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self, shard_id: u64, inner_key_off: usize) {
         for wb in &mut self.cf_batches {
             wb.reset();
         }
+        self.shard_id = shard_id;
         self.sequence = 0;
         self.properties.clear();
         self.switch_mem_table = false;
+        self.inner_key_off = inner_key_off;
     }
 
     pub fn get_cf_mut(&mut self, cf: usize) -> &mut memtable::WriteBatch {

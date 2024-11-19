@@ -1,9 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use kvenginepb::ChangeSet;
 use tikv_util::{
@@ -44,33 +41,6 @@ impl From<Engines> for engine_traits::Engines<kvengine::Engine, rfengine::RfEngi
             kv: engines.kv.clone(),
             raft: engines.raft,
         }
-    }
-}
-
-pub struct KvWriteBatch {
-    batches: HashMap<u64, kvengine::WriteBatch>,
-}
-
-impl KvWriteBatch {
-    pub(crate) fn new() -> Self {
-        Self {
-            batches: HashMap::new(),
-        }
-    }
-
-    pub(crate) fn get_engine_wb(
-        &mut self,
-        region_id: u64,
-        inner_key_off: usize,
-    ) -> &mut kvengine::WriteBatch {
-        match self.batches.entry(region_id) {
-            Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(kvengine::WriteBatch::new(region_id, inner_key_off)),
-        }
-    }
-
-    pub(crate) fn remove_engine_wb(&mut self, region_id: u64) -> Option<kvengine::WriteBatch> {
-        self.batches.remove(&region_id)
     }
 }
 

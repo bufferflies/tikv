@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cell::{RefCell, RefMut},
     cmp::min,
     collections::{vec_deque, HashMap, VecDeque},
     fmt::{self, Debug, Formatter},
@@ -17,7 +18,7 @@ use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvengine::{
     encode_extra_txn_status_key, get_shard_property, mvcc, table::InnerKey, util::PropertiesHelper,
-    ChangeSet, Engine, SnapAccess, UserMeta, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF,
+    ChangeSet, Engine, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF,
     MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND,
     TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
 };
@@ -647,9 +648,8 @@ impl Applier {
                     .inner_key_off,
             );
         }
-        let wb = ctx
-            .wb
-            .get_engine_wb(self.region.get_id(), self.inner_key_offset.unwrap());
+        let mut wb_ref = ctx.get_engine_wb(self.region.get_id(), self.inner_key_offset.unwrap());
+        let wb = &mut wb_ref;
         let engine = &ctx.engine;
         let log_index = ctx.exec_log_index;
         wb.set_sequence(log_index);
@@ -725,7 +725,7 @@ impl Applier {
             _ => panic!("unknown custom log type"),
         }
         let mem_table_size = ctx.engine.write(wb);
-        wb.reset();
+        drop(wb_ref);
         let mem_states = self.mut_mem_table_state(engine);
         if mem_states.mem_table_size > 0 && mem_table_size == 0 {
             mem_states.set_switch_time(timer);
@@ -807,7 +807,6 @@ impl Applier {
                     // ['x001', 'x002') and region a ['x002', 'x003'). Region a's inner_key_offset
                     // will change from 0 to 4 if inner key enabled.
                     self.inner_key_offset = None;
-                    ctx.wb.remove_engine_wb(self.region_id());
                 }
                 ExecResult::DeleteRange { .. } => {}
                 ExecResult::UnsafeDestroy { .. } => {}
@@ -2258,7 +2257,9 @@ pub(crate) struct ApplyContext {
     pub(crate) router: Option<RaftRouter>, // None in recover mode.
     pub(crate) exec_log_index: u64,
     pub(crate) exec_log_term: u64,
-    pub(crate) wb: KvWriteBatch,
+    // NOTE: `wb` must be `reset` before use.
+    // Use `RefCell` to work around the borrow check.
+    wb: RefCell<WriteBatch>,
     pub(crate) apply_wait: LocalHistogram,
     pub(crate) apply_time: LocalHistogram,
 }
@@ -2270,10 +2271,20 @@ impl ApplyContext {
             router,
             exec_log_index: Default::default(),
             exec_log_term: Default::default(),
-            wb: KvWriteBatch::new(),
+            wb: RefCell::new(WriteBatch::default()),
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
             apply_time: APPLY_TIME_HISTOGRAM.local(),
         }
+    }
+
+    pub(crate) fn get_engine_wb(
+        &self,
+        region_id: u64,
+        inner_key_off: usize,
+    ) -> RefMut<'_, WriteBatch> {
+        let mut wb = self.wb.borrow_mut();
+        wb.reset(region_id, inner_key_off);
+        wb
     }
 
     pub fn finish_for(&self, applier: &mut Applier, results: VecDeque<ExecResult>) {
