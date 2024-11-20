@@ -191,9 +191,9 @@ fn test_build_vector_index() {
             Some(&decode_int_handle(&end_table_key).unwrap().to_le_bytes()),
         )
         .unwrap();
-    vector_reader.set_int_handle_range(0, Some(1000)).unwrap();
+    block_on(vector_reader.set_int_handle_range(0, Some(1000))).unwrap();
     let mut block = Block::new(&schema);
-    let cnt = vector_reader.read_block(&mut block, 5).unwrap();
+    let cnt = block_on(vector_reader.read_block(&mut block, 5)).unwrap();
     assert!(cnt >= 3);
     let handle_buf = block.get_handle_buf();
     let vec_col_buf = &block.get_columns()[0];

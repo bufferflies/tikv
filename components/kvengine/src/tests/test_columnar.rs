@@ -8,6 +8,7 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
+use futures::executor::block_on;
 use rand::prelude::*;
 use rstest::rstest;
 use tidb_query_datatype::{codec::table::encode_row_key, expr::EvalContext};
@@ -136,11 +137,10 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     let mut mvcc_reader = snap
         .new_columnar_mvcc_reader(table_id, &schema.columns, 500)
         .unwrap();
-    mvcc_reader
-        .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
+    block_on(mvcc_reader.set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100)))
         .unwrap();
     let mut block = Block::new(&schema);
-    mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
     let tbl_refs = merge_refs(
         vec![l0_tbl_0_ref, l0_tbl_1_ref, l0_tbl_2_ref, l1_tbl_0_ref],
         1,
@@ -154,11 +154,10 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     let mut mvcc_reader2 = snap
         .new_columnar_mvcc_reader(table_id2, &schema2.columns, 500)
         .unwrap();
-    mvcc_reader2
-        .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
+    block_on(mvcc_reader2.set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100)))
         .unwrap();
     let mut block2 = Block::new(&schema2);
-    mvcc_reader2.read_block(&mut block2, usize::MAX).unwrap();
+    block_on(mvcc_reader2.read_block(&mut block2, usize::MAX)).unwrap();
     let tbl_refs2 = merge_refs(
         vec![l0_tbl_3_ref, l1_tbl_1_ref],
         1,
@@ -283,11 +282,10 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     let mut mvcc_reader = snap
         .new_columnar_mvcc_reader(table_id, &schema.columns, 500)
         .unwrap();
-    mvcc_reader
-        .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
+    block_on(mvcc_reader.set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100)))
         .unwrap();
     let mut block = Block::new(&schema);
-    mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
     let tbl_refs = merge_refs(
         vec![
             l1_tbl_0_ref,
@@ -307,11 +305,10 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     let mut mvcc_reader2 = snap
         .new_columnar_mvcc_reader(table_id2, &schema2.columns, 600)
         .unwrap();
-    mvcc_reader2
-        .set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100))
+    block_on(mvcc_reader2.set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100)))
         .unwrap();
     let mut block2 = Block::new(&schema2);
-    mvcc_reader2.read_block(&mut block2, usize::MAX).unwrap();
+    block_on(mvcc_reader2.read_block(&mut block2, usize::MAX)).unwrap();
     let tbl_refs2 = merge_refs(
         vec![l1_tbl_3_ref, l2_tbl_2_ref],
         2,
@@ -432,11 +429,9 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
         .unwrap();
     // Use a random end int handle
     let end_handle = thread_rng().gen_range(500..2100);
-    mvcc_reader
-        .set_int_handle_range(0, Some(end_handle))
-        .unwrap();
+    block_on(mvcc_reader.set_int_handle_range(0, Some(end_handle))).unwrap();
     let mut block = Block::new(&schema);
-    let mvcc_reader_counts = mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    let mvcc_reader_counts = block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
     info!("mvcc_reader read block with {} rows", mvcc_reader_counts);
     let inner_key_off = if enable_inner_key_off { 4 } else { 0 };
     let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
@@ -455,13 +450,10 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
     }
     let merged_reader = ColumnarMergeReader::new(schema.clone(), columnar_readers);
     let mut mvcc_row_reader = ColumnarMvccReader::new(Box::new(merged_reader), &schema, 500);
-    mvcc_row_reader
-        .set_int_handle_range(0, Some(end_handle))
-        .unwrap();
+    block_on(mvcc_row_reader.set_int_handle_range(0, Some(end_handle))).unwrap();
     let mut row_block = Block::new(&schema);
-    let merge_reader_counts = mvcc_row_reader
-        .read_block(&mut row_block, usize::MAX)
-        .unwrap();
+    let merge_reader_counts =
+        block_on(mvcc_row_reader.read_block(&mut row_block, usize::MAX)).unwrap();
     info!("merge_reader read block with {} rows", merge_reader_counts);
     verify_columnar_with_blocks(&row_block, &block);
 
@@ -704,9 +696,9 @@ fn test_columnar_truncate_ts(#[case] enable_inner_key_off: bool) {
     let mut mvcc_reader = snap
         .new_columnar_mvcc_reader(table_id, &schema.columns, u64::MAX)
         .unwrap();
-    mvcc_reader.set_int_handle_range(0, Some(3000)).unwrap();
+    block_on(mvcc_reader.set_int_handle_range(0, Some(3000))).unwrap();
     let mut block = Block::new(&schema);
-    let counts = mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    let counts = block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
     for i in 0..counts {
         assert_eq!(100, block.versions.get_version(i));
     }
@@ -816,9 +808,9 @@ fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
     let mut mvcc_reader = snap
         .new_columnar_mvcc_reader(table_id, &schema.columns, u64::MAX)
         .unwrap();
-    mvcc_reader.set_int_handle_range(0, Some(3000)).unwrap();
+    block_on(mvcc_reader.set_int_handle_range(0, Some(3000))).unwrap();
     let mut block = Block::new(&schema);
-    let read_before_trim = mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    let read_before_trim = block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
 
     let id_ver = shard.id_ver();
     shard.pending_ops.write().unwrap().trim_over_bound = true;
@@ -836,9 +828,9 @@ fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
     let mut mvcc_reader = snap
         .new_columnar_mvcc_reader(table_id, &schema.columns, u64::MAX)
         .unwrap();
-    mvcc_reader.set_int_handle_range(0, Some(3000)).unwrap();
+    block_on(mvcc_reader.set_int_handle_range(0, Some(3000))).unwrap();
     let mut block = Block::new(&schema);
-    let read_after_trim = mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    let read_after_trim = block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
     info!(
         "read_before_trim: {}, read_after_trim: {}",
         read_before_trim, read_after_trim
@@ -858,9 +850,9 @@ fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
     let mut mvcc_reader = snap
         .new_columnar_mvcc_reader(table_id, &schema.columns, 300)
         .unwrap();
-    mvcc_reader.set_int_handle_range(0, Some(3000)).unwrap();
+    block_on(mvcc_reader.set_int_handle_range(0, Some(3000))).unwrap();
     let mut block = Block::new(&schema);
-    let read_old_version = mvcc_reader.read_block(&mut block, usize::MAX).unwrap();
+    let read_old_version = block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
     for i in 0..read_old_version {
         let handle = i64::from_le_bytes(
             std::convert::TryInto::try_into(block.handles.get_not_null_value(i)).unwrap(),

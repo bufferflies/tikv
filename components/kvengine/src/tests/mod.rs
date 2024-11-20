@@ -16,6 +16,7 @@ use std::{
 };
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
+use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use file_system::IoRateLimiter;
@@ -1463,6 +1464,7 @@ impl RecoverHandler for EngineTester {
     }
 }
 
+#[async_trait]
 impl IdAllocator for EngineTesterCore {
     fn alloc_id(&self, count: usize) -> Result<Vec<u64>> {
         let start_id = self
@@ -1475,6 +1477,10 @@ impl IdAllocator for EngineTesterCore {
             ids.push(id);
         }
         Ok(ids)
+    }
+
+    async fn alloc_id_async(&self, count: usize) -> Result<Vec<u64>> {
+        self.alloc_id(count)
     }
 }
 

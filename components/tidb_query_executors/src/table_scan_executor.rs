@@ -49,7 +49,7 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
         is_scanned_range_aware: bool,
         snap: Option<SnapAccess>,
     ) -> Result<Self> {
-        let advanced_scanner = build_columnar_scanner(
+        let columnar_scanner = build_columnar_scanner(
             snap.as_ref(),
             &key_ranges,
             &table_scan,
@@ -116,7 +116,7 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
                 accept_point_range: no_common_handle,
                 is_scanned_range_aware,
             },
-            advanced_scanner,
+            columnar_scanner,
         )?;
         Ok(Self(wrapper))
     }

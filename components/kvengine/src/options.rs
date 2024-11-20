@@ -2,6 +2,7 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use dyn_clone::DynClone;
 
 use self::config::{
@@ -159,9 +160,12 @@ impl From<&FlowControlOptions> for limiter::LimiterOptions {
     }
 }
 
+#[async_trait]
 pub trait IdAllocator: Sync + Send {
     // alloc_id returns the last id, and last_id - count is valid.
     fn alloc_id(&self, count: usize) -> Result<Vec<u64>>;
+
+    async fn alloc_id_async(&self, count: usize) -> Result<Vec<u64>>;
 }
 
 pub trait RecoverHandler: Clone + Send {

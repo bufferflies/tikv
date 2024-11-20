@@ -18,6 +18,7 @@ use api_version::{
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
+use futures::executor::block_on;
 use http::StatusCode;
 use hyper::Client;
 use itertools::{Either, Itertools};
@@ -2249,6 +2250,44 @@ fn merge_table_change(
     tb
 }
 
+struct LocalIdAllocator {
+    id_allocator: Arc<dyn IdAllocator>,
+    file_ids: Vec<u64>,
+    num_files_quota: usize,
+}
+
+impl LocalIdAllocator {
+    fn new(id_allocator: Arc<dyn IdAllocator>, file_ids: Vec<u64>) -> Self {
+        let num_files_quota = 4096usize.saturating_sub(file_ids.len());
+        Self {
+            id_allocator,
+            file_ids,
+            num_files_quota,
+        }
+    }
+
+    async fn alloc_id(&mut self) -> u64 {
+        if self.file_ids.is_empty() && self.num_files_quota > 0 {
+            let allocated = self
+                .id_allocator
+                .alloc_id_async(std::cmp::min(64, self.num_files_quota))
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("failed to allocate id: {:?}", e);
+                });
+            self.file_ids.extend_from_slice(&allocated);
+            self.num_files_quota -= allocated.len();
+        }
+        self.file_ids.pop().unwrap_or_else(|| {
+            panic!("compaction runs out of file ids");
+        })
+    }
+
+    fn block_on_alloc_id(&mut self) -> u64 {
+        block_on(self.alloc_id())
+    }
+}
+
 fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
     let req = &ctx.req;
     if req.compactor_version != CURRENT_COMPACTOR_VERSION {
@@ -2262,27 +2301,7 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
     cs.set_shard_ver(req.shard_ver);
     let tag = ShardTag::from_comp_req(req);
     info!("start compaction for {}, req {:?}", tag, req);
-    let mut file_ids = req.file_ids.clone();
-    let mut num_files_quota = if 4096 > file_ids.len() {
-        4096 - req.file_ids.len()
-    } else {
-        0
-    };
-    let id_allocator = ctx.id_allocator.clone();
-    let mut allocate_id = move || {
-        if file_ids.is_empty() && num_files_quota > 0 {
-            let allocated = id_allocator
-                .alloc_id(std::cmp::min(64, num_files_quota))
-                .unwrap_or_else(|e| {
-                    panic!("failed to allocate id: {:?}", e);
-                });
-            file_ids.extend_from_slice(&allocated);
-            num_files_quota -= allocated.len();
-        }
-        file_ids.pop().unwrap_or_else(|| {
-            panic!("compaction runs out of file ids");
-        })
-    };
+    let mut id_allocator = LocalIdAllocator::new(ctx.id_allocator.clone(), req.file_ids.clone());
     match &req.compaction_tp {
         // For backward compatibility, remove InPlace compaction when tikv-server is upgraded
         CompactionType::InPlace {
@@ -2326,14 +2345,14 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
                     pb::TableChange::new()
                 };
                 let col_tb = if !col_file_ids.is_empty() {
-                    compact_destroy_range_for_columnar(
+                    block_on(compact_destroy_range_for_columnar(
                         ctx,
                         columnar_build_opts,
                         col_file_ids,
-                        &mut allocate_id,
+                        &mut id_allocator,
                         *schema_file_id,
                         del_prefix,
-                    )?
+                    ))?
                 } else {
                     pb::TableChange::new()
                 };
@@ -2346,13 +2365,13 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
                     pb::TableChange::new()
                 };
                 let col_tb = if !col_file_ids.is_empty() {
-                    compact_trim_over_bound_for_columnar(
+                    block_on(compact_trim_over_bound_for_columnar(
                         ctx,
                         columnar_build_opts,
                         col_file_ids,
-                        &mut allocate_id,
+                        &mut id_allocator,
                         *schema_file_id,
-                    )?
+                    ))?
                 } else {
                     pb::TableChange::new()
                 };
@@ -2365,14 +2384,14 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
                     pb::TableChange::new()
                 };
                 let col_tb = if !col_file_ids.is_empty() {
-                    compact_truncate_ts_for_columnar(
+                    block_on(compact_truncate_ts_for_columnar(
                         ctx,
                         columnar_build_opts,
                         col_file_ids,
-                        &mut allocate_id,
+                        &mut id_allocator,
                         *schema_file_id,
                         *truncate_ts,
-                    )?
+                    ))?
                 } else {
                     pb::TableChange::new()
                 };
@@ -2381,34 +2400,38 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             InPlaceCompaction::Unknown => unreachable!(),
         },
         CompactionType::L0(l0_compaction) => {
-            cs.set_compaction(l0_compact_v3(ctx, l0_compaction, &mut allocate_id)?);
+            cs.set_compaction(l0_compact_v3(ctx, l0_compaction, &mut id_allocator)?);
         }
         CompactionType::L1Plus(l1_plus_compaction) => {
             cs.set_compaction(l1_plus_compact_v3(
                 ctx,
                 l1_plus_compaction,
-                &mut allocate_id,
+                &mut id_allocator,
             )?);
         }
         CompactionType::Major(major_compaction) => {
-            cs.set_major_compaction(major_compact_v3(ctx, major_compaction, &mut allocate_id)?);
+            cs.set_major_compaction(major_compact_v3(ctx, major_compaction, &mut id_allocator)?);
         }
         CompactionType::Columnar(columnar_compaction) => {
-            cs.set_columnar_compaction(columnar_compact(
+            cs.set_columnar_compaction(block_on(columnar_compact(
                 ctx,
                 columnar_compaction,
-                &mut allocate_id,
-            )?);
+                &mut id_allocator,
+            ))?);
         }
         CompactionType::ColumnarMajor(columnar_major_compaction) => {
-            cs.set_columnar_compaction(columnar_major_compact(
+            cs.set_columnar_compaction(block_on(columnar_major_compact(
                 ctx,
                 columnar_major_compaction,
-                &mut allocate_id,
-            )?);
+                &mut id_allocator,
+            ))?);
         }
         CompactionType::VectorIndex(update_vec_idx) => {
-            cs.set_update_vector_index(update_vector_index(ctx, update_vec_idx, &mut allocate_id)?);
+            cs.set_update_vector_index(block_on(update_vector_index(
+                ctx,
+                update_vec_idx,
+                &mut id_allocator,
+            ))?);
         }
         CompactionType::Unknown => unreachable!(),
     }
@@ -2545,11 +2568,11 @@ fn compact_destroy_range(
     Ok(destroy)
 }
 
-fn compact_destroy_range_for_columnar(
+async fn compact_destroy_range_for_columnar(
     ctx: &CompactionCtx,
     columnar_build_opts: &ColumnarTableBuildOptions,
     files: &[(u64, u32)],
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
     schema_file_id: Option<u64>,
     del_prefix: &[u8],
 ) -> Result<pb::TableChange> {
@@ -2606,7 +2629,7 @@ fn compact_destroy_range_for_columnar(
             continue;
         }
         let mut file_builder = ColumnarFileBuilder::new(
-            allocate_id(),
+            id_allocator.alloc_id().await,
             keyspace_id,
             req.inner_key_off,
             columnar_file.get_l0_version(),
@@ -2635,7 +2658,7 @@ fn compact_destroy_range_for_columnar(
             );
             let mut compact_reader =
                 ColumnarCompactReader::new(Box::new(reader), level, schema, req.safe_ts);
-            compact_reader.set_unbounded_handle_range()?;
+            compact_reader.set_unbounded_handle_range().await?;
             compact_table_for_columnar(
                 ctx,
                 &mut compact_reader,
@@ -2645,8 +2668,9 @@ fn compact_destroy_range_for_columnar(
                 &mut cnt,
                 tx.clone(),
                 columnar_build_opts,
-                allocate_id,
-            )?;
+                id_allocator,
+            )
+            .await?;
         }
         if file_builder.num_tables() > 0 {
             cnt += 1;
@@ -2806,11 +2830,11 @@ fn compact_truncate_ts(
     Ok(table_change)
 }
 
-fn compact_truncate_ts_for_columnar(
+async fn compact_truncate_ts_for_columnar(
     ctx: &CompactionCtx,
     columnar_build_opts: &ColumnarTableBuildOptions,
     files: &[(u64, u32)],
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
     schema_file_id: Option<u64>,
     truncate_ts: u64,
 ) -> Result<pb::TableChange> {
@@ -2867,7 +2891,7 @@ fn compact_truncate_ts_for_columnar(
             continue;
         }
         let mut file_builder = ColumnarFileBuilder::new(
-            allocate_id(),
+            id_allocator.alloc_id().await,
             keyspace_id,
             req.inner_key_off,
             columnar_file.get_l0_version(),
@@ -2885,7 +2909,7 @@ fn compact_truncate_ts_for_columnar(
             );
             let mut truncate_ts_reader =
                 ColumnarTruncateTsReader::new(Box::new(reader), schema, truncate_ts);
-            truncate_ts_reader.set_unbounded_handle_range()?;
+            truncate_ts_reader.set_unbounded_handle_range().await?;
             compact_table_for_columnar(
                 ctx,
                 &mut truncate_ts_reader,
@@ -2895,8 +2919,9 @@ fn compact_truncate_ts_for_columnar(
                 &mut cnt,
                 tx.clone(),
                 columnar_build_opts,
-                allocate_id,
-            )?;
+                id_allocator,
+            )
+            .await?;
         }
         if file_builder.num_tables() > 0 {
             cnt += 1;
@@ -3053,11 +3078,11 @@ fn compact_trim_over_bound(
     Ok(table_change)
 }
 
-fn compact_trim_over_bound_for_columnar(
+async fn compact_trim_over_bound_for_columnar(
     ctx: &CompactionCtx,
     columnar_build_opts: &ColumnarTableBuildOptions,
     files: &[(u64, u32)],
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
     schema_file_id: Option<u64>,
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
@@ -3128,7 +3153,7 @@ fn compact_trim_over_bound_for_columnar(
             &req.outer_end
         };
         let mut file_builder = ColumnarFileBuilder::new(
-            allocate_id(),
+            id_allocator.alloc_id().await,
             keyspace_id,
             req.inner_key_off,
             columnar_file.get_l0_version(),
@@ -3166,7 +3191,9 @@ fn compact_trim_over_bound_for_columnar(
                 } else {
                     GLOBAL_COMMON_HANDLE_END
                 };
-                compact_reader.set_handle_range(start_handle, end_handle)?;
+                compact_reader
+                    .set_handle_range(start_handle, end_handle)
+                    .await?;
             } else {
                 let start_handle = if bound_start > row_key_prefix.as_slice() {
                     decode_int_handle(bound_start).unwrap()
@@ -3178,7 +3205,9 @@ fn compact_trim_over_bound_for_columnar(
                 } else {
                     None
                 };
-                compact_reader.set_int_handle_range(start_handle, end_handle)?;
+                compact_reader
+                    .set_int_handle_range(start_handle, end_handle)
+                    .await?;
             }
             compact_table_for_columnar(
                 ctx,
@@ -3189,8 +3218,9 @@ fn compact_trim_over_bound_for_columnar(
                 &mut cnt,
                 tx.clone(),
                 columnar_build_opts,
-                allocate_id,
-            )?;
+                id_allocator,
+            )
+            .await?;
         }
         if file_builder.num_tables() > 0 {
             cnt += 1;
@@ -3319,7 +3349,7 @@ fn compact_for_cf(
     bt_config: &Option<BlobTableBuildOptions>,
     keep_latest_obsolete_tombstone: bool,
     blob_tables: &HashMap<u64, BlobTable>,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<(Vec<TableCreate>, Vec<BlobCreate>)> {
     let shard_id = ctx.req.shard_id;
     let start = ctx.req.inner_start();
@@ -3328,7 +3358,7 @@ fn compact_for_cf(
     let compression_lvl = ctx.compression_lvl;
     let checksum_tp = ctx.checksum_type;
     let (tx, rx) = tikv_util::mpsc::bounded(ctx.req.file_ids.len());
-    let mut cur_sst_id = allocate_id();
+    let mut cur_sst_id = id_allocator.block_on_alloc_id();
 
     let mut sst_builder = sstable::Builder::new(
         cur_sst_id,
@@ -3344,7 +3374,7 @@ fn compact_for_cf(
     let mut decompressed_blob_buf = vec![];
     let mut decryption_buf = vec![];
     let mut blob_table_builder = if let Some(config) = bt_config {
-        cur_blob_table_id = allocate_id();
+        cur_blob_table_id = id_allocator.block_on_alloc_id();
         Some((
             config,
             BlobTableBuilder::new(
@@ -3391,7 +3421,7 @@ fn compact_for_cf(
                         fs.clone(),
                         opts,
                     );
-                    cur_sst_id = allocate_id();
+                    cur_sst_id = id_allocator.block_on_alloc_id();
                     sst_builder.reset(cur_sst_id);
                 }
                 if let Some((bt_config, bt_builder)) = &mut blob_table_builder {
@@ -3404,7 +3434,7 @@ fn compact_for_cf(
                             fs.clone(),
                             opts,
                         );
-                        cur_blob_table_id = allocate_id();
+                        cur_blob_table_id = id_allocator.block_on_alloc_id();
                         bt_builder.reset(cur_blob_table_id);
                     }
                 }
@@ -3560,7 +3590,7 @@ fn compact_for_cf(
 fn l0_compact_v3(
     ctx: &CompactionCtx,
     l0_compaction: &L0Compaction,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::Compaction> {
     let req = &ctx.req;
     let fs = &ctx.dfs;
@@ -3622,7 +3652,7 @@ fn l0_compact_v3(
             //&None,
             true,
             &HashMap::new(),
-            allocate_id,
+            id_allocator,
         )?;
         all_sst_creates.extend(sst_creates);
         all_bt_creates.extend(bt_creates);
@@ -3635,7 +3665,7 @@ fn l0_compact_v3(
 fn l1_plus_compact_v3(
     ctx: &CompactionCtx,
     l1_plus_compaction: &L1PlusCompaction,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::Compaction> {
     let req = &ctx.req;
     let fs = &ctx.dfs;
@@ -3673,7 +3703,7 @@ fn l1_plus_compact_v3(
         &None,
         l1_plus_compaction.keep_latest_obsolete_tombstone,
         &HashMap::new(),
-        allocate_id,
+        id_allocator,
     )?;
     let mut comp = pb::Compaction::new();
     comp.set_top_deletes(l1_plus_compaction.upper_level.clone());
@@ -3687,7 +3717,7 @@ fn l1_plus_compact_v3(
 fn major_compact_v3(
     ctx: &CompactionCtx,
     major_compaction: &MajorCompaction,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::MajorCompaction> {
     let req = &ctx.req;
     let fs = &ctx.dfs;
@@ -3760,7 +3790,7 @@ fn major_compact_v3(
             &major_compaction.bt_config,
             false,
             &blob_tables,
-            allocate_id,
+            id_allocator,
         )?;
         for sst_create in sst_creates {
             ret.mut_sstable_change()
@@ -3774,7 +3804,7 @@ fn major_compact_v3(
     Ok(ret)
 }
 
-fn compact_table_for_columnar(
+async fn compact_table_for_columnar(
     ctx: &CompactionCtx,
     reader: &mut dyn ColumnarFilterReader,
     file_builder: &mut ColumnarFileBuilder,
@@ -3783,14 +3813,16 @@ fn compact_table_for_columnar(
     cnt: &mut usize,
     tx: mpsc::Sender<dfs::Result<pb::ColumnarCreate>>,
     columnar_config: &ColumnarTableBuildOptions,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<()> {
     let fs = &ctx.dfs;
     let opts = dfs::Options::default()
         .with_type(FileType::Columnar)
         .with_shard(ctx.req.shard_id, ctx.req.shard_ver);
     let mut block = Block::new(schema);
-    let mut res = reader.read_block(&mut block, columnar_config.pack_max_row_count)?;
+    let mut res = reader
+        .read_block(&mut block, columnar_config.pack_max_row_count)
+        .await?;
     let mut row_count = 0;
     let mut tbl_builder = ColumnarTableBuilder::new(
         schema.clone(),
@@ -3810,7 +3842,7 @@ fn compact_table_for_columnar(
                 file_builder.add_table(tbl_builder);
                 *cnt += 1;
                 persist_columnar_file(target_lvl, file_builder, tx.clone(), fs.clone(), opts);
-                file_builder.reset(allocate_id());
+                file_builder.reset(id_allocator.alloc_id().await);
                 tbl_builder = ColumnarTableBuilder::new(
                     schema.clone(),
                     *columnar_config,
@@ -3822,7 +3854,9 @@ fn compact_table_for_columnar(
         } else {
             block.reset();
             block_offset = 0;
-            res = reader.read_block(&mut block, columnar_config.pack_max_row_count)?;
+            res = reader
+                .read_block(&mut block, columnar_config.pack_max_row_count)
+                .await?;
         }
     }
     if row_count > 0 {
@@ -3831,7 +3865,7 @@ fn compact_table_for_columnar(
     Ok(())
 }
 
-fn transform_for_columnar(
+async fn transform_for_columnar(
     ctx: &CompactionCtx,
     tbls: &Vec<SsTable>,
     blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
@@ -3839,7 +3873,7 @@ fn transform_for_columnar(
     schema_file: &SchemaFile,
     target_lvl: u32,
     columnar_config: &ColumnarTableBuildOptions,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<Vec<ColumnarCreate>> {
     let fs = &ctx.dfs;
     let opts = dfs::Options::default()
@@ -3848,7 +3882,7 @@ fn transform_for_columnar(
     let (tx, rx) = tikv_util::mpsc::bounded(ctx.req.file_ids.len());
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut file_builder = ColumnarFileBuilder::new(
-        allocate_id(),
+        id_allocator.alloc_id().await,
         keyspace_id,
         ctx.req.inner_key_off,
         None,
@@ -3874,7 +3908,7 @@ fn transform_for_columnar(
         let merge_reader = ColumnarMergeReader::new(schema.clone(), columnar_readers);
         let mut compact_reader =
             ColumnarCompactReader::new(Box::new(merge_reader), target_lvl, schema, ctx.req.safe_ts);
-        compact_reader.set_unbounded_handle_range()?;
+        compact_reader.set_unbounded_handle_range().await?;
         compact_table_for_columnar(
             ctx,
             &mut compact_reader,
@@ -3884,8 +3918,9 @@ fn transform_for_columnar(
             &mut cnt,
             tx.clone(),
             columnar_config,
-            allocate_id,
-        )?;
+            id_allocator,
+        )
+        .await?;
     }
     if file_builder.num_tables() > 0 {
         cnt += 1;
@@ -3908,10 +3943,10 @@ fn transform_for_columnar(
     Ok(columnar_creates)
 }
 
-fn columnar_major_compact(
+async fn columnar_major_compact(
     ctx: &CompactionCtx,
     major_compaction: &ColumnarMajorCompaction,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::new();
     ret.set_snap_version(major_compaction.snap_version);
@@ -4014,8 +4049,9 @@ fn columnar_major_compact(
         &schema_file,
         2,
         &major_compaction.columnar_config,
-        allocate_id,
-    )?;
+        id_allocator,
+    )
+    .await?;
     for columnar_create in columnar_creates {
         columnar_changes
             .mut_columnar_creates()
@@ -4028,22 +4064,22 @@ fn columnar_major_compact(
     Ok(ret)
 }
 
-fn columnar_compact(
+async fn columnar_compact(
     ctx: &CompactionCtx,
     columnar_compaction: &ColumnarCompaction,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     if !columnar_compaction.source_row_files.is_empty() {
-        convert_row_file_to_columnar_file(ctx, columnar_compaction, allocate_id)
+        convert_row_file_to_columnar_file(ctx, columnar_compaction, id_allocator).await
     } else {
-        compact_columnar_files(ctx, columnar_compaction, allocate_id)
+        compact_columnar_files(ctx, columnar_compaction, id_allocator).await
     }
 }
 
-fn convert_row_file_to_columnar_file(
+async fn convert_row_file_to_columnar_file(
     ctx: &CompactionCtx,
     columnar_compaction: &ColumnarCompaction,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::new();
     ret.set_snap_version(columnar_compaction.snap_version);
@@ -4084,7 +4120,7 @@ fn convert_row_file_to_columnar_file(
     }
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut file_builder = ColumnarFileBuilder::new(
-        allocate_id(),
+        id_allocator.alloc_id().await,
         keyspace_id,
         ctx.req.inner_key_off,
         Some(columnar_compaction.snap_version),
@@ -4116,7 +4152,7 @@ fn convert_row_file_to_columnar_file(
         let merge_reader = ColumnarMergeReader::new(schema.clone(), columnar_readers);
         let mut compact_reader =
             ColumnarCompactReader::new(Box::new(merge_reader), 0, schema, ctx.req.safe_ts);
-        compact_reader.set_unbounded_handle_range()?;
+        compact_reader.set_unbounded_handle_range().await?;
         compact_table_for_columnar(
             ctx,
             &mut compact_reader,
@@ -4126,8 +4162,9 @@ fn convert_row_file_to_columnar_file(
             &mut cnt,
             tx.clone(),
             &columnar_compaction.columnar_config,
-            allocate_id,
-        )?;
+            id_allocator,
+        )
+        .await?;
     }
     if file_builder.num_tables() > 0 {
         cnt += 1;
@@ -4149,22 +4186,22 @@ fn convert_row_file_to_columnar_file(
     Ok(ret)
 }
 
-fn compact_columnar_files(
+async fn compact_columnar_files(
     ctx: &CompactionCtx,
     columnar_compaction: &ColumnarCompaction,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     if columnar_compaction.level == 0 {
-        compact_columnar_l0_files(ctx, columnar_compaction, allocate_id)
+        compact_columnar_l0_files(ctx, columnar_compaction, id_allocator).await
     } else {
-        compact_columnar_l1_files(ctx, columnar_compaction, allocate_id)
+        compact_columnar_l1_files(ctx, columnar_compaction, id_allocator).await
     }
 }
 
-fn compact_columnar_l0_files(
+async fn compact_columnar_l0_files(
     ctx: &CompactionCtx,
     columnar_compaction: &ColumnarCompaction,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::default();
     ret.set_snap_version(columnar_compaction.snap_version);
@@ -4228,7 +4265,7 @@ fn compact_columnar_l0_files(
     }
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut file_builder = ColumnarFileBuilder::new(
-        allocate_id(),
+        id_allocator.alloc_id().await,
         keyspace_id,
         ctx.req.inner_key_off,
         Some(snap_version),
@@ -4253,7 +4290,7 @@ fn compact_columnar_l0_files(
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mut compact_reader =
             ColumnarCompactReader::new(Box::new(merge_reader), 1, schema, ctx.req.safe_ts);
-        compact_reader.set_unbounded_handle_range()?;
+        compact_reader.set_unbounded_handle_range().await?;
         compact_table_for_columnar(
             ctx,
             &mut compact_reader,
@@ -4263,8 +4300,9 @@ fn compact_columnar_l0_files(
             &mut cnt,
             tx.clone(),
             &columnar_compaction.columnar_config,
-            allocate_id,
-        )?;
+            id_allocator,
+        )
+        .await?;
     }
     if file_builder.num_tables() > 0 {
         cnt += 1;
@@ -4289,10 +4327,10 @@ fn compact_columnar_l0_files(
     Ok(ret)
 }
 
-fn compact_columnar_l1_files(
+async fn compact_columnar_l1_files(
     ctx: &CompactionCtx,
     columnar_compaction: &ColumnarCompaction,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::default();
     ret.set_snap_version(columnar_compaction.snap_version);
@@ -4370,7 +4408,7 @@ fn compact_columnar_l1_files(
     overlap_tables.sort();
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut file_builder = ColumnarFileBuilder::new(
-        allocate_id(),
+        id_allocator.alloc_id().await,
         keyspace_id,
         ctx.req.inner_key_off,
         None,
@@ -4398,7 +4436,7 @@ fn compact_columnar_l1_files(
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mut compact_reader =
             ColumnarCompactReader::new(Box::new(merge_reader), 2, schema, ctx.req.safe_ts);
-        compact_reader.set_unbounded_handle_range()?;
+        compact_reader.set_unbounded_handle_range().await?;
         compact_table_for_columnar(
             ctx,
             &mut compact_reader,
@@ -4408,8 +4446,9 @@ fn compact_columnar_l1_files(
             &mut cnt,
             tx.clone(),
             &columnar_compaction.columnar_config,
-            allocate_id,
-        )?;
+            id_allocator,
+        )
+        .await?;
     }
     if file_builder.num_tables() > 0 {
         cnt += 1;
@@ -4435,10 +4474,10 @@ fn compact_columnar_l1_files(
     Ok(ret)
 }
 
-fn update_vector_index(
+async fn update_vector_index(
     ctx: &CompactionCtx,
     update_vec_idx: &VectorIndexUpdate,
-    allocate_id: &mut dyn FnMut() -> u64,
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::UpdateVectorIndex> {
     let fs = &ctx.dfs;
     let schema_file_data = load_table_files(
@@ -4511,20 +4550,17 @@ fn update_vector_index(
     )?;
     let mut block = Block::new(&vector_col_schema);
     let mut merge_reader = ColumnarMergeReader::new(vector_col_schema, readers);
-    merge_reader.seek(&[])?;
-    let mut res = merge_reader.read(&mut block, 1024)?;
+    merge_reader.seek(&[]).await?;
+    let mut res = merge_reader.read(&mut block, 1024).await?;
     while res > 0 {
         vec_builder.add_block(&block, 0)?;
         block.reset();
-        res = merge_reader.read(&mut block, 1024)?;
+        res = merge_reader.read(&mut block, 1024).await?;
     }
     let buf = vec_builder.build()?;
-    let file_id = allocate_id();
-    fs.get_runtime().block_on(fs.create(
-        file_id,
-        buf.into(),
-        opts.with_type(FileType::VectorIndex),
-    ))?;
+    let file_id = id_allocator.alloc_id().await;
+    fs.create(file_id, buf.into(), opts.with_type(FileType::VectorIndex))
+        .await?;
     let mut vec_idx_file = pb::VectorIndexFile::new();
     vec_idx_file.id = file_id;
     vec_idx_file.snap_version = update_vec_idx.snap_version;

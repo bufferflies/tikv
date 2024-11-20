@@ -35,6 +35,7 @@ pub struct ColumnarScanner {
     working_end_handle: Option<Vec<u8>>,
     // TODO: support backward scan
     _scan_backward_in_range: bool,
+    handle_range: Option<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
 impl ColumnarScanner {
@@ -43,6 +44,7 @@ impl ColumnarScanner {
         output_offsets: Vec<i32>,
         keyspace_id: u32,
         start_range: Vec<u8>,
+        handle_range: (Vec<u8>, Option<Vec<u8>>),
     ) -> Self {
         let schema = reader.get_schema();
         let mut eval_types = vec![];
@@ -66,6 +68,7 @@ impl ColumnarScanner {
             start_range,
             working_end_handle: None,
             _scan_backward_in_range: false,
+            handle_range: Some(handle_range),
         }
     }
 }
@@ -102,9 +105,27 @@ impl ColumnarScanner {
     }
 
     pub async fn scan(&mut self, scan_rows: usize) -> (LazyBatchColumnVec, Result<bool>) {
+        if let Some((start_handle, end_handle)) = self.handle_range.take() {
+            if self.reader.get_schema().is_common_handle() {
+                self.reader
+                    .set_handle_range(&start_handle, &end_handle.unwrap())
+                    .await
+                    .unwrap();
+            } else {
+                let end_handle = end_handle.as_ref().map(|h| h.as_slice().get_i64_le());
+                self.reader
+                    .set_int_handle_range(start_handle.as_slice().get_i64_le(), end_handle)
+                    .await
+                    .unwrap();
+            }
+        }
         let mut column_vec =
             new_lazy_batch_columns(&self.output_offsets, &self.eval_types, scan_rows);
-        let read_size = self.reader.read_block(&mut self.block, scan_rows).unwrap();
+        let read_size = self
+            .reader
+            .read_block(&mut self.block, scan_rows)
+            .await
+            .unwrap();
         if read_size > 0 {
             let schema = self.reader.get_schema();
             let mut eval_ctx = EvalContext::default();
@@ -303,7 +324,7 @@ pub fn build_columnar_scanner(
         };
         (start_handle.to_le_bytes().to_vec(), end_handle)
     };
-    let mut reader = if table_scan.has_ann_query() {
+    let reader = if table_scan.has_ann_query() {
         let ann_query = table_scan.get_ann_query();
         let index_id = ann_query.get_index_id();
         let target = ann_query.get_ref_vec_f32().read_vector_float32().ok()?;
@@ -322,20 +343,11 @@ pub fn build_columnar_scanner(
     } else {
         snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), start_ts)
     }?;
-    if reader.get_schema().is_common_handle() {
-        reader
-            .set_handle_range(&start_handle, end_handle.as_ref().unwrap())
-            .ok()?;
-    } else {
-        let end_handle = end_handle.as_ref().map(|h| h.as_slice().get_i64_le());
-        reader
-            .set_int_handle_range(start_handle.as_slice().get_i64_le(), end_handle)
-            .ok()?;
-    };
     Some(ColumnarScanner::new(
         reader,
         get_output_offsets(table_scan),
         keyspace_id,
         key_range.start.clone(),
+        (start_handle, end_handle),
     ))
 }

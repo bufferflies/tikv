@@ -3,6 +3,7 @@
 use std::{collections::HashSet, ops::Deref, sync::Arc};
 
 use api_version::ApiV2;
+use async_trait::async_trait;
 use bytes::{Buf, BufMut};
 use cloud_encryption::EncryptionKey;
 use tidb_query_datatype::codec::{
@@ -588,12 +589,13 @@ impl VectorItemsReader {
     }
 }
 
+#[async_trait]
 impl ColumnarReader for VectorItemsReader {
     fn schema(&self) -> &Schema {
         &self.schema
     }
 
-    fn seek(&mut self, mut handle: &[u8]) -> Result<()> {
+    async fn seek(&mut self, mut handle: &[u8]) -> Result<()> {
         self.idx = if get_fixed_size(&self.schema.handle_column) > 0 {
             let int_handle = handle.get_i64_le();
             search(self.items.len(), |i| {
@@ -607,7 +609,7 @@ impl ColumnarReader for VectorItemsReader {
         Ok(())
     }
 
-    fn read(&mut self, block: &mut Block, limit: usize) -> Result<usize> {
+    async fn read(&mut self, block: &mut Block, limit: usize) -> Result<usize> {
         let mut vector_col = block.columns.remove(self.vector_col_idx);
         let mut vec_val_buf = vec![];
         let old_idx = self.idx;
@@ -621,8 +623,8 @@ impl ColumnarReader for VectorItemsReader {
             vec_val_buf.write_vector_float32(data).unwrap();
             vector_col.push_value(&vec_val_buf);
             if let Some(inner) = &mut self.inner_reader {
-                inner.seek(&item.handle)?;
-                inner.read(block, 1)?;
+                inner.seek(&item.handle).await?;
+                inner.read(block, 1).await?;
             } else {
                 block.handles.push_value(&item.handle);
                 block.versions.push_version(item.version, false);

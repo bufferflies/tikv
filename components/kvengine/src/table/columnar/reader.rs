@@ -13,6 +13,7 @@ use api_version::{
     ApiV2,
 };
 use arrow_buffer::i256;
+use async_trait::async_trait;
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use tidb_query_datatype::{
@@ -53,10 +54,11 @@ use crate::table::{
 
 pub const GLOBAL_COMMON_HANDLE_END: &[u8] = &[255];
 
+#[async_trait]
 pub trait ColumnarReader: Send {
     fn schema(&self) -> &Schema;
-    fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()>;
-    fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
+    async fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()>;
+    async fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
 }
 
 pub(crate) struct ColumnarTableReader {
@@ -127,14 +129,15 @@ impl ColumnarTableReader {
     }
 }
 
+#[async_trait]
 impl ColumnarReader for ColumnarTableReader {
     fn schema(&self) -> &Schema {
         &self.schema
     }
 
-    fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
+    async fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
         let pack_idx = self.table_meta.handle_index.search_pack_idx(handle);
-        self.handle_reader.load_pack(pack_idx)?;
+        self.handle_reader.load_pack(pack_idx).await?;
         let handle_buffer = &self.handle_reader.pack_buffer;
         let row_idx_in_pack = if handle.is_empty() {
             0
@@ -150,18 +153,18 @@ impl ColumnarReader for ColumnarTableReader {
         };
         self.handle_reader.row_idx_in_pack = row_idx_in_pack;
         let row_idx = self.handle_reader.pack_row_start + row_idx_in_pack;
-        self.version_reader.set_row_idx(row_idx)?;
+        self.version_reader.set_row_idx(row_idx).await?;
         for col_reader in &mut self.columns_readers {
-            col_reader.set_row_idx(row_idx)?;
+            col_reader.set_row_idx(row_idx).await?;
         }
         Ok(())
     }
 
-    fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
-        let read_row = self.handle_reader.read(&mut block.handles, limit)?;
-        self.version_reader.read(&mut block.versions, limit)?;
+    async fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+        let read_row = self.handle_reader.read(&mut block.handles, limit).await?;
+        self.version_reader.read(&mut block.versions, limit).await?;
         for (i, col) in self.columns_readers.iter_mut().enumerate() {
-            col.read(&mut block.columns[i], limit)?;
+            col.read(&mut block.columns[i], limit).await?;
         }
         Ok(read_row)
     }
@@ -209,7 +212,7 @@ impl ColumnarColumnReader {
         }
     }
 
-    pub(crate) fn set_row_idx(&mut self, row_idx: usize) -> crate::table::Result<()> {
+    pub(crate) async fn set_row_idx(&mut self, row_idx: usize) -> crate::table::Result<()> {
         if self.is_default_val {
             self.row_idx_in_pack = row_idx;
             return Ok(());
@@ -227,12 +230,12 @@ impl ColumnarColumnReader {
             .col_meta
             .pack_offsets
             .search_pack_idx(from_pack_idx, row_idx as u32);
-        self.load_pack(pack_idx)?;
+        self.load_pack(pack_idx).await?;
         self.row_idx_in_pack = row_idx - self.pack_row_start;
         Ok(())
     }
 
-    pub(crate) fn read(
+    pub(crate) async fn read(
         &mut self,
         to: &mut ColumnBuffer,
         limit: usize,
@@ -249,7 +252,7 @@ impl ColumnarColumnReader {
                 if next_pack_idx >= num_packs {
                     break;
                 }
-                self.load_pack(next_pack_idx)?;
+                self.load_pack(next_pack_idx).await?;
                 self.row_idx_in_pack = 0;
                 continue;
             }
@@ -278,7 +281,7 @@ impl ColumnarColumnReader {
         Ok(limit)
     }
 
-    fn load_pack(&mut self, pack_idx: usize) -> crate::table::Result<()> {
+    async fn load_pack(&mut self, pack_idx: usize) -> crate::table::Result<()> {
         if pack_idx == self.pack_idx && self.pack_buffer.length() > 0 {
             return Ok(());
         }
@@ -294,12 +297,14 @@ impl ColumnarColumnReader {
         }
         let ((pack_start, pack_row_start), (pack_end, pack_row_end)) =
             self.col_meta.get_pack_offset(pack_idx);
-        self.pack_loader.load_pack(
-            &mut self.pack_buffer,
-            pack_start,
-            pack_end,
-            &mut self.decryption_buf,
-        )?;
+        self.pack_loader
+            .load_pack(
+                &mut self.pack_buffer,
+                pack_start,
+                pack_end,
+                &mut self.decryption_buf,
+            )
+            .await?;
         self.pack_idx = pack_idx;
         self.pack_row_start = pack_row_start as usize;
         self.pack_row_end = pack_row_end as usize;
@@ -330,7 +335,7 @@ impl PackLoader {
         }
     }
 
-    pub fn load_pack(
+    pub async fn load_pack(
         &mut self,
         col_buf: &mut ColumnBuffer,
         pack_offset: u32,
@@ -360,24 +365,25 @@ impl PackLoader {
     }
 }
 
+#[async_trait]
 pub trait ColumnarFilterReader: Send {
-    fn set_handle_range(
+    async fn set_handle_range(
         &mut self,
         start_handle: &[u8],
         end_handle: &[u8],
     ) -> crate::table::Result<()>;
-    fn set_int_handle_range(
+    async fn set_int_handle_range(
         &mut self,
         start_handle: i64,
         end_handle: Option<i64>,
     ) -> crate::table::Result<()>;
     fn get_schema(&self) -> &Schema;
-    fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
-    fn set_unbounded_handle_range(&mut self) -> crate::table::Result<()> {
+    async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
+    async fn set_unbounded_handle_range(&mut self) -> crate::table::Result<()> {
         if self.get_schema().is_common_handle() {
-            self.set_handle_range(&[], GLOBAL_COMMON_HANDLE_END)?;
+            self.set_handle_range(&[], GLOBAL_COMMON_HANDLE_END).await?;
         } else {
-            self.set_int_handle_range(i64::MIN, None)?;
+            self.set_int_handle_range(i64::MIN, None).await?;
         }
         Ok(())
     }
@@ -473,25 +479,26 @@ impl ColumnarMvccReader {
     }
 }
 
+#[async_trait]
 impl ColumnarFilterReader for ColumnarMvccReader {
-    fn set_handle_range(
+    async fn set_handle_range(
         &mut self,
         start_handle: &[u8],
         end_handle: &[u8],
     ) -> crate::table::Result<()> {
         self.end_handle = end_handle.to_vec();
-        self.src.seek(start_handle)?;
+        self.src.seek(start_handle).await?;
         self.filter.clear();
         Ok(())
     }
 
-    fn set_int_handle_range(
+    async fn set_int_handle_range(
         &mut self,
         start_handle: i64,
         end_handle: Option<i64>,
     ) -> crate::table::Result<()> {
         self.end_int_handle = end_handle;
-        self.src.seek(&start_handle.to_le_bytes())?;
+        self.src.seek(&start_handle.to_le_bytes()).await?;
         self.filter.clear();
         Ok(())
     }
@@ -500,10 +507,10 @@ impl ColumnarFilterReader for ColumnarMvccReader {
         self.src.schema()
     }
 
-    fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+    async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
         self.filter.clear();
         block.reset();
-        let read_row = self.src.read(block, limit)?;
+        let read_row = self.src.read(block, limit).await?;
         if read_row == 0 {
             return Ok(0);
         }
@@ -589,25 +596,26 @@ impl ColumnarCompactReader {
     }
 }
 
+#[async_trait]
 impl ColumnarFilterReader for ColumnarCompactReader {
-    fn set_handle_range(
+    async fn set_handle_range(
         &mut self,
         start_handle: &[u8],
         end_handle: &[u8],
     ) -> crate::table::Result<()> {
         self.end_handle = end_handle.to_vec();
-        self.src.seek(start_handle)?;
+        self.src.seek(start_handle).await?;
         self.filter.clear();
         Ok(())
     }
 
-    fn set_int_handle_range(
+    async fn set_int_handle_range(
         &mut self,
         start_handle: i64,
         end_handle: Option<i64>,
     ) -> crate::table::Result<()> {
         self.end_int_handle = end_handle;
-        self.src.seek(&start_handle.to_le_bytes())?;
+        self.src.seek(&start_handle.to_le_bytes()).await?;
         self.filter.clear();
         Ok(())
     }
@@ -616,10 +624,10 @@ impl ColumnarFilterReader for ColumnarCompactReader {
         self.src.schema()
     }
 
-    fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+    async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
         self.filter.clear();
         block.reset();
-        let read_row = self.src.read(block, limit)?;
+        let read_row = self.src.read(block, limit).await?;
         if read_row == 0 {
             return Ok(0);
         }
@@ -699,25 +707,26 @@ impl ColumnarTruncateTsReader {
     }
 }
 
+#[async_trait]
 impl ColumnarFilterReader for ColumnarTruncateTsReader {
-    fn set_handle_range(
+    async fn set_handle_range(
         &mut self,
         start_handle: &[u8],
         end_handle: &[u8],
     ) -> crate::table::Result<()> {
         self.end_handle = end_handle.to_vec();
-        self.src.seek(start_handle)?;
+        self.src.seek(start_handle).await?;
         self.filter.clear();
         Ok(())
     }
 
-    fn set_int_handle_range(
+    async fn set_int_handle_range(
         &mut self,
         start_handle: i64,
         end_handle: Option<i64>,
     ) -> crate::table::Result<()> {
         self.end_int_handle = end_handle;
-        self.src.seek(&start_handle.to_le_bytes())?;
+        self.src.seek(&start_handle.to_le_bytes()).await?;
         self.filter.clear();
         Ok(())
     }
@@ -726,10 +735,10 @@ impl ColumnarFilterReader for ColumnarTruncateTsReader {
         self.src.schema()
     }
 
-    fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+    async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
         self.filter.clear();
         block.reset();
-        let read_row = self.src.read(block, limit)?;
+        let read_row = self.src.read(block, limit).await?;
         if read_row == 0 {
             return Ok(0);
         }
@@ -785,9 +794,9 @@ pub(crate) struct ColumnarReaderBuffer {
 }
 
 impl ColumnarReaderBuffer {
-    pub fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
-        self.reader.seek(handle)?;
-        self.reader.read(&mut self.block, 1024)?;
+    pub async fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
+        self.reader.seek(handle).await?;
+        self.reader.read(&mut self.block, 1024).await?;
         self.row_idx = 0;
         Ok(())
     }
@@ -808,9 +817,9 @@ impl ColumnarReaderBuffer {
         self.row_idx < self.block.handles.length()
     }
 
-    pub fn read_block(&mut self) -> crate::table::Result<()> {
+    pub async fn read_block(&mut self) -> crate::table::Result<()> {
         self.block.reset();
-        self.reader.read(&mut self.block, 1024)?;
+        self.reader.read(&mut self.block, 1024).await?;
         self.row_idx = 0;
         Ok(())
     }
@@ -930,14 +939,15 @@ impl ColumnarMergeReader {
     }
 }
 
+#[async_trait]
 impl ColumnarReader for ColumnarMergeReader {
     fn schema(&self) -> &Schema {
         &self.schema
     }
 
-    fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
+    async fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
         for reader in &mut self.heap {
-            reader.seek(handle)?;
+            reader.seek(handle).await?;
         }
         self.heap.retain(|r| r.valid());
         if !self.heap.is_empty() {
@@ -946,7 +956,7 @@ impl ColumnarReader for ColumnarMergeReader {
         Ok(())
     }
 
-    fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+    async fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
         let mut read_row = 0;
         while read_row < limit {
             if self.heap.is_empty() {
@@ -961,7 +971,7 @@ impl ColumnarReader for ColumnarMergeReader {
             first.row_idx += remain;
             read_row += remain;
             if first.row_idx == first.block.handles.length() {
-                first.read_block()?;
+                first.read_block().await?;
                 if !first.valid() {
                     self.heap.swap_remove(0);
                     if self.heap.is_empty() {
@@ -1269,12 +1279,13 @@ impl ColumnarRowTableReader {
     }
 }
 
+#[async_trait]
 impl ColumnarReader for ColumnarRowTableReader {
     fn schema(&self) -> &Schema {
         &self.schema
     }
 
-    fn seek(&mut self, handle: &[u8]) -> table::Result<()> {
+    async fn seek(&mut self, handle: &[u8]) -> table::Result<()> {
         let row_key = if self.is_int_handle && !handle.is_empty() {
             encode_row_key(self.schema.table_id, (&handle[..]).get_i64_le())
         } else {
@@ -1284,7 +1295,7 @@ impl ColumnarReader for ColumnarRowTableReader {
         Ok(())
     }
 
-    fn read(&mut self, block: &mut Block, limit: usize) -> table::Result<usize> {
+    async fn read(&mut self, block: &mut Block, limit: usize) -> table::Result<usize> {
         let mut read_rows = 0;
         while self.iter.valid() && read_rows < limit {
             let key = self.iter.key();
@@ -1373,12 +1384,13 @@ impl ColumnarConcatReader {
     }
 }
 
+#[async_trait]
 impl ColumnarReader for ColumnarConcatReader {
     fn schema(&self) -> &Schema {
         &self.schema
     }
 
-    fn seek(&mut self, handle: &[u8]) -> table::Result<()> {
+    async fn seek(&mut self, handle: &[u8]) -> table::Result<()> {
         if self.files.is_empty() {
             return Ok(());
         }
@@ -1399,7 +1411,7 @@ impl ColumnarReader for ColumnarConcatReader {
             }
             let mut reader =
                 ColumnarTableReader::new(file, self.schema.clone(), self.encryption_key.clone());
-            reader.seek(handle)?;
+            reader.seek(handle).await?;
             self.reader = Some(reader);
             self.idx = i;
             return Ok(());
@@ -1408,11 +1420,11 @@ impl ColumnarReader for ColumnarConcatReader {
         Ok(())
     }
 
-    fn read(&mut self, block: &mut Block, limit: usize) -> table::Result<usize> {
+    async fn read(&mut self, block: &mut Block, limit: usize) -> table::Result<usize> {
         let mut read_rows = 0;
         while self.idx < self.files.len() && read_rows < limit {
             let reader = self.reader.as_mut().unwrap();
-            let cnt = reader.read(block, limit - read_rows)?;
+            let cnt = reader.read(block, limit - read_rows).await?;
             if cnt == 0 {
                 self.idx += 1;
                 if self.idx < self.files.len() {
@@ -1422,7 +1434,7 @@ impl ColumnarReader for ColumnarConcatReader {
                         self.schema.clone(),
                         self.encryption_key.clone(),
                     );
-                    reader.seek(&[])?;
+                    reader.seek(&[]).await?;
                     self.reader = Some(reader);
                 }
                 continue;
@@ -1437,6 +1449,7 @@ impl ColumnarReader for ColumnarConcatReader {
 pub mod tests {
     use std::sync::Arc;
 
+    use futures::executor::block_on;
     use proptest::{arbitrary::any, proptest};
     use rand::Rng;
     use rstest::rstest;
@@ -1613,7 +1626,7 @@ pub mod tests {
         opts.pack_max_size = 256;
         let mut table_builder =
             ColumnarTableBuilder::new(schema.clone(), opts, true, encryption_key, file_id);
-        row_tbl_reader.seek(&ref_rows[0].handle).unwrap();
+        block_on(row_tbl_reader.seek(&ref_rows[0].handle)).unwrap();
         let mut append_rows = 0;
         let mut block_off = 0;
         while append_rows < ref_rows.len() {
@@ -1621,7 +1634,7 @@ pub mod tests {
                 block_off = 0;
                 block.reset();
                 let limit = rng.gen_range(2..10);
-                let read = row_tbl_reader.read(&mut block, limit).unwrap();
+                let read = block_on(row_tbl_reader.read(&mut block, limit)).unwrap();
                 if read == 0 {
                     break;
                 }
@@ -1684,9 +1697,9 @@ pub mod tests {
             let (file, ref_rows) = build_table(1, true, &schema, 100, 150, 100);
             let columnar_file = ColumnarFile::open(file).unwrap();
             let mut reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None);
-            reader.seek(&0u64.to_le_bytes()).unwrap();
+            block_on(reader.seek(&0u64.to_le_bytes())).unwrap();
             let mut block = Block::new(&schema);
-            reader.read(&mut block, 100).unwrap();
+            block_on(reader.read(&mut block, 100)).unwrap();
             verify_with_ref_rows(&block, &ref_rows);
         }
     }
@@ -1843,15 +1856,15 @@ pub mod tests {
                 if common_handle {
                     let common_start_handle = i_to_common_handle(start_handle as i32);
                     let common_end_handle = i_to_common_handle(end_handle as i32);
-                    mvcc_reader
-                        .set_handle_range(&common_start_handle, &common_end_handle)
-                        .unwrap();
+                    block_on(
+                        mvcc_reader.set_handle_range(&common_start_handle, &common_end_handle),
+                    )
+                    .unwrap();
                 } else {
-                    mvcc_reader
-                        .set_int_handle_range(start_handle, Some(end_handle))
+                    block_on(mvcc_reader.set_int_handle_range(start_handle, Some(end_handle)))
                         .unwrap();
                 }
-                mvcc_reader.read_block(&mut block, 500).unwrap();
+                block_on(mvcc_reader.read_block(&mut block, 500)).unwrap();
                 let range_bound = if common_handle {
                     (
                         i_to_common_handle(start_handle as i32),
@@ -1893,15 +1906,15 @@ pub mod tests {
                 if common_handle {
                     let common_start_handle = i_to_common_handle(start_handle as i32);
                     let common_end_handle = i_to_common_handle(end_handle as i32);
-                    mvcc_reader
-                        .set_handle_range(&common_start_handle, &common_end_handle)
+                    block_on(mvcc_reader
+                        .set_handle_range(&common_start_handle, &common_end_handle))
                         .unwrap();
                 } else {
-                    mvcc_reader
-                        .set_int_handle_range(start_handle, Some(end_handle))
+                    block_on(mvcc_reader
+                        .set_int_handle_range(start_handle, Some(end_handle)))
                         .unwrap();
                 }
-                mvcc_reader.read_block(&mut block, 500).unwrap();
+                block_on(mvcc_reader.read_block(&mut block, 500)).unwrap();
                 let range_bound = if common_handle {
                     (
                         i_to_common_handle(start_handle as i32),
@@ -1941,15 +1954,15 @@ pub mod tests {
                 if common_handle {
                     let common_start_handle = i_to_common_handle(start_handle as i32);
                     let common_end_handle = i_to_common_handle(end_handle as i32);
-                    compact_reader
-                        .set_handle_range(&common_start_handle, &common_end_handle)
+                    block_on(compact_reader
+                        .set_handle_range(&common_start_handle, &common_end_handle))
                         .unwrap();
                 } else {
-                    compact_reader
-                        .set_int_handle_range(start_handle, Some(end_handle))
+                    block_on(compact_reader
+                        .set_int_handle_range(start_handle, Some(end_handle)))
                         .unwrap();
                 }
-                compact_reader.read_block(&mut block, 1000).unwrap();
+                block_on(compact_reader.read_block(&mut block, 1000)).unwrap();
                 let range_bound = if common_handle {
                     (
                         i_to_common_handle(start_handle as i32),

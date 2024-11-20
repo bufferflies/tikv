@@ -11,15 +11,22 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use bytes::{Buf, BufMut};
 use cloud_encryption::EncryptionKey;
 use futures::executor::block_on;
+use futures_util::compat::Future01CompatExt;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
 use raft_proto::eraftpb;
 use slog::{Key, Record, Serializer};
 use tikv_util::{
-    box_err, codec::bytes::decode_bytes, debug, error, sys::thread::Pid, time::Instant,
+    box_err,
+    codec::bytes::decode_bytes,
+    debug, error,
+    sys::thread::Pid,
+    time::{Instant, InstantExt},
+    timer::GLOBAL_TIMER_HANDLE,
 };
 
 use crate::{
@@ -357,6 +364,7 @@ impl PdIdAllocator {
     }
 }
 
+#[async_trait]
 impl kvengine::IdAllocator for PdIdAllocator {
     fn alloc_id(&self, count: usize) -> kvengine::Result<Vec<u64>> {
         let start = Instant::now();
@@ -370,6 +378,31 @@ impl kvengine::IdAllocator for PdIdAllocator {
                 Err(err) => {
                     error!("failed to allocate file id from PD {:?}", err);
                     std::thread::sleep(Duration::from_secs(3));
+                    if start.saturating_elapsed() > ALLOCATE_ID_TIMEOUT {
+                        return Err(kvengine::Error::ErrAllocId(
+                            "allocate file id timeout".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    async fn alloc_id_async(&self, count: usize) -> kvengine::Result<Vec<u64>> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.pd.batch_get_tso(count as u32).await {
+                Ok(ts) => {
+                    let last = ts.into_inner();
+                    let first = last - count as u64 + 1;
+                    return Ok((first..=last).collect());
+                }
+                Err(err) => {
+                    error!("failed to allocate file id from PD {:?}", err);
+                    let _ = GLOBAL_TIMER_HANDLE
+                        .delay(std::time::Instant::now() + Duration::from_secs(3))
+                        .compat()
+                        .await;
                     if start.saturating_elapsed() > ALLOCATE_ID_TIMEOUT {
                         return Err(kvengine::Error::ErrAllocId(
                             "allocate file id timeout".to_string(),

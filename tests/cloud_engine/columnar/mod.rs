@@ -11,7 +11,7 @@ use std::{
 use api_version::ApiV2;
 use bytes::Buf;
 use dashmap::DashMap;
-use futures::{future::ok, TryStreamExt};
+use futures::{executor::block_on, future::ok, TryStreamExt};
 use hyper::Body;
 use kvengine::{
     dfs,
@@ -263,9 +263,9 @@ fn test_covert_row_to_columnar() {
     let mut columnar_reader = snap_access
         .new_columnar_mvcc_reader(schema.table_id, &schema.columns, ts)
         .unwrap();
-    columnar_reader.set_int_handle_range(0, Some(190)).unwrap();
+    block_on(columnar_reader.set_int_handle_range(0, Some(190))).unwrap();
     let mut block = columnar::Block::new(&schema);
-    let read_rows = columnar_reader.read_block(&mut block, 200).unwrap();
+    let read_rows = block_on(columnar_reader.read_block(&mut block, 200)).unwrap();
     assert_eq!(read_rows, 190);
     for i in 0..read_rows {
         let handle = block.get_handle_buf().get_int_handle_value(i);
@@ -578,9 +578,9 @@ fn test_region_merge_with_columnar() {
     let mut columnar_reader = snap_access
         .new_columnar_mvcc_reader(schema.table_id, &schema.columns, ts)
         .unwrap();
-    columnar_reader.set_int_handle_range(0, Some(190)).unwrap();
+    block_on(columnar_reader.set_int_handle_range(0, Some(190))).unwrap();
     let mut block = columnar::Block::new(&schema);
-    let read_rows = columnar_reader.read_block(&mut block, 200).unwrap();
+    let read_rows = block_on(columnar_reader.read_block(&mut block, 200)).unwrap();
     assert_eq!(read_rows, 190);
     for i in 0..read_rows {
         let handle = block.get_handle_buf().get_int_handle_value(i);
