@@ -1143,6 +1143,13 @@ impl ShardMeta {
         let target_mem_tbl_version = self.base_version + sequence;
         self.base_version = max(source_mem_tbl_version, target_mem_tbl_version) - sequence;
         self.data_sequence = sequence;
+        if self.columnar_snap_version == 0 && self.schema_file_id > 0 {
+            // Target shard is waiting for columnar major compaction, do
+            // nothing.
+        } else {
+            self.columnar_snap_version =
+                max(self.columnar_snap_version, source.columnar_snap_version);
+        }
         self.parent = Some(Box::new(parent));
         self.seq = sequence;
     }

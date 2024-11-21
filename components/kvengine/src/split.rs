@@ -382,6 +382,23 @@ impl Engine {
             &new_shard.base_version,
             max(source_mem_tbl_version, target_mem_tbl_version) - sequence,
         );
+        let source_snap_version = source_snap.get_base_version() + source_snap.get_data_sequence();
+        store_u64(
+            &new_shard.snap_version,
+            max(old_shard.get_snap_version(), source_snap_version),
+        );
+        if old_shard.get_columnar_snap_version() == 0 && old_shard.get_schema_file().is_some() {
+            // Target shard is waiting for columnar major compaction, do
+            // nothing.
+        } else {
+            store_u64(
+                &new_shard.col_snap_version,
+                max(
+                    old_shard.get_columnar_snap_version(),
+                    source_snap.get_columnar_snap_version(),
+                ),
+            );
+        }
 
         let data = if !clear_source {
             if clear_target {
