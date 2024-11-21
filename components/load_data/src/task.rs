@@ -79,6 +79,7 @@ const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
 // the following constants are used to calculate RU consumption
 const DEFAULT_AVG_BATCH_PROPORTION: f64 = 0.5;
 const REPLICA_NUMS: f64 = 3.0;
+const TXN_FILE_RU_DISCOUNT_RATIO: f64 = 0.125;
 
 pub struct LoadTaskWorker {
     config: LoadDataConfig,
@@ -994,9 +995,15 @@ impl LoadTaskWorker {
                 // In the formula, we use the default value of `avg_batch_proportion` and
                 // `replica_nums`, which are 0.5 (same as the default value of
                 // `avg_batch_proportion` in pd) and 3.0 respectively.
+                //
+                // Set import billing same as txn file, though the underlying mechanisms are not
+                // the same.
                 wru = ru_config.write_base_cost
                     + ru_config.write_per_batch_base_cost * DEFAULT_AVG_BATCH_PROPORTION
-                    + ru_config.write_cost_per_byte * data_size as f64 * REPLICA_NUMS;
+                    + ru_config.write_cost_per_byte
+                        * data_size as f64
+                        * TXN_FILE_RU_DISCOUNT_RATIO
+                        * REPLICA_NUMS;
 
                 LOAD_DATA_WRU_COST_COUNTER
                     .with_label_values(&[&keyspace_id, &self.task_ctx.task_id])
