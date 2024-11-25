@@ -3,6 +3,7 @@
 use std::{
     borrow::ToOwned,
     io,
+    num::ParseIntError,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -11,7 +12,11 @@ use chrono::Local;
 use clap::ArgMatches;
 use collections::HashMap;
 use tikv::config::{check_critical_config, persist_config, MetricConfig, TikvConfig};
-use tikv_util::{self, config, logger};
+use tikv_util::{
+    self,
+    config::{self, ReadableDuration},
+    logger,
+};
 
 // A workaround for checking if log is initialized.
 pub static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -299,6 +304,18 @@ pub fn overwrite_config_with_cmd_args(config: &mut TikvConfig, matches: &ArgMatc
 
     if matches.value_of("metrics-addr").is_some() {
         warn!("metrics push is not supported any more.");
+    }
+
+    if let Some(addr) = matches.value_of("push-metrics-addr") {
+        config.server.push_metrics_addr = addr.to_owned();
+    }
+
+    if let Some(interval) = matches.value_of("push-metrics-interval") {
+        let push_metrics_interval =
+            ReadableDuration::secs(interval.parse().unwrap_or_else(|e: ParseIntError| {
+                fatal!("invalid push-metrics-interval: {}", e);
+            }));
+        config.server.push_metrics_interval = push_metrics_interval;
     }
 }
 

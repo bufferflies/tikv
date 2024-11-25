@@ -145,6 +145,27 @@ fn main() {
                 .value_name("Bool")
                 .help("enable load data check point"),
         )
+        .arg(
+            Arg::with_name("push-metrics-addr")
+                .long("push-metrics-addr")
+                .value_name("ADDR")
+                .help("Sets Prometheus Pushgateway address")
+                .long_help(
+                    "Sets push address to the Prometheus Pushgateway, \
+                     leaves it empty will disable Prometheus push",
+                ),
+        )
+        .arg(
+            Arg::with_name("push-metrics-interval")
+                .long("push-metrics-interval")
+                .hidden(false)
+                .help("Sets Prometheus Pushgateway push interval, in seconds")
+                .default_value("30")
+                .long_help(
+                    "Sets push interval to the Prometheus Pushgateway, \
+                     default is 30(s)",
+                ),
+        )
         .get_matches();
 
     let mut config_file_path = None;
@@ -277,5 +298,14 @@ fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
 
     if let Some(enable_check_point) = matches.value_of("enable-load-data-check-point") {
         config.enable_load_data_check_point = enable_check_point == "true";
+    }
+
+    if let Some(push_metrics_addr) = matches.value_of("push-metrics-addr") {
+        config.push_metrics_addr = push_metrics_addr.to_string();
+    }
+
+    if let Some(push_metrics_interval) = matches.value_of("push-metrics-interval") {
+        config.push_metrics_interval =
+            ReadableDuration::secs(push_metrics_interval.parse().unwrap());
     }
 }

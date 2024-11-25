@@ -155,6 +155,27 @@ fn main() {
                      leaves it empty will disable Prometheus push",
                 ),
         )
+        .arg(
+            Arg::with_name("push-metrics-addr")
+                .long("push-metrics-addr")
+                .value_name("ADDR")
+                .help("Sets Prometheus Pushgateway address")
+                .long_help(
+                    "Sets push address to the Prometheus Pushgateway, \
+                     leaves it empty will disable Prometheus push",
+                ),
+        )
+        .arg(
+            Arg::with_name("push-metrics-interval")
+                .long("push-metrics-interval")
+                .hidden(false)
+                .help("Sets Prometheus Pushgateway push interval, in seconds")
+                .default_value("30")
+                .long_help(
+                    "Sets push interval to the Prometheus Pushgateway, \
+                     default is 30(s)",
+                ),
+        )
         .get_matches();
 
     if matches.is_present("print-sample-config") {

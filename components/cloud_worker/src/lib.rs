@@ -22,7 +22,10 @@ use std::{
     time::Duration,
 };
 
-use ::load_data::task::{LoadDataConfig, ResourceGroupConfig};
+use ::load_data::{
+    metrics::LOAD_DATA_WRU_COST_COUNTER,
+    task::{LoadDataConfig, ResourceGroupConfig},
+};
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use dashmap::DashMap;
 use kvengine::{
@@ -37,11 +40,12 @@ use kvproto::metapb::Store;
 #[cfg(feature = "testexport")]
 pub use metrics::REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM;
 use pd_client::PdClient;
+use prometheus::labels;
 pub use schema_manager::broadcast_schema_update_to_all_stores;
 use schema_manager::{SchemaManager, SchemaManagerConfig};
 use security::{SecurityConfig, SecurityManager};
 pub use server::get_cop_req_tag;
-use slog_global::{error, info};
+use slog_global::{error, info, warn};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     quota_limiter::QuotaLimiter,
@@ -304,7 +308,46 @@ fn start_server(
         }
     });
 
+    if !config.push_metrics_addr.is_empty() && !config.push_metrics_interval.is_zero() {
+        run_prometheus_push(
+            thread_pool,
+            config.push_metrics_addr,
+            config.push_metrics_interval.0,
+        );
+    }
+
     ServerFuture::new(server, cop_server_opt)
+}
+
+fn run_prometheus_push(
+    thread_pool: Arc<Runtime>,
+    push_metrics_addr: String,
+    push_metrics_interval: Duration,
+) {
+    let pod_name: String = std::env::var("HOSTNAME").unwrap_or_default();
+    if pod_name.is_empty() {
+        warn!("failed to get pod name, metrics push will be disabled");
+        return;
+    }
+    let container_name: String =
+        std::env::var("CONTAINER_NAME").unwrap_or("tikv-worker".to_owned());
+    info!("start to push metrics to prometheus");
+    thread_pool.spawn(async move {
+            loop {
+                tokio::time::sleep(push_metrics_interval).await;
+                let res = prometheus::push_collector(
+                    "tikv-worker",
+                    labels! {"pod".to_owned() => pod_name.clone(), "container".to_owned() => container_name.clone()},
+                    &push_metrics_addr,
+                    vec![Box::new(LOAD_DATA_WRU_COST_COUNTER.clone())
+                        as Box<dyn prometheus::core::Collector>],
+                    None,
+                );
+                if let Err(e) = res {
+                    error!("failed to push metrics to prometheus: {}", e);
+                }
+            }
+        });
 }
 
 pub struct CloudWorker {
@@ -542,6 +585,9 @@ pub struct Config {
 
     pub txn_chunk_manager: TxnChunkManagerConfig,
     pub txn_chunk_target_block_entries: usize,
+
+    pub push_metrics_addr: String,
+    pub push_metrics_interval: ReadableDuration,
 }
 
 impl Default for Config {
@@ -572,6 +618,8 @@ impl Default for Config {
             schema_manager: SchemaManagerConfig::default(),
             txn_chunk_manager: TxnChunkManagerConfig::default(),
             txn_chunk_target_block_entries: txn_chunk::TARGET_BLOCK_ENTRIES_DEF,
+            push_metrics_addr: String::default(),
+            push_metrics_interval: ReadableDuration::secs(30),
         }
     }
 }

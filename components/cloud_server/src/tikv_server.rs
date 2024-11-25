@@ -43,7 +43,10 @@ use kvproto::{
 };
 use nix::NixPath;
 use overload_protector::{OverloadProtector, OverloadProtectorWorker};
-use pd_client::{pd_control::PdControl, PdClient, RpcClient, INVALID_ID};
+use pd_client::{
+    metrics::STORE_SIZE_GAUGE_VEC, pd_control::PdControl, PdClient, RpcClient, INVALID_ID,
+};
+use prometheus::labels;
 use protobuf::Message;
 use raftstore::{
     coprocessor::{
@@ -360,6 +363,11 @@ impl TikvServer {
         if self.config.gc.enable_safe_point_v2 {
             self.run_watch_ks_gc_safepoint();
         }
+        if !self.config.server.push_metrics_addr.is_empty()
+            && !self.config.server.push_metrics_interval.is_zero()
+        {
+            self.run_prometheus_push();
+        }
     }
 
     fn run_watch_ks_gc_safepoint(&mut self) {
@@ -367,6 +375,31 @@ impl TikvServer {
         self.background_worker.remote().spawn(async move {
             pd_clone.watch_gc_safepoint_v2().await;
         });
+    }
+
+    fn run_prometheus_push(&mut self) {
+        let interval = self.config.server.push_metrics_interval;
+        let push_addr = self.config.server.push_metrics_addr.clone();
+        let pod_name = std::env::var("HOSTNAME").unwrap_or("".to_owned());
+        if pod_name.is_empty() {
+            warn!("failed to get pod name, metrics push will be disabled");
+            return;
+        }
+        info!("start to push metrics to prometheus");
+        self.background_worker
+            .spawn_interval_task(interval.0, move || {
+                let res = prometheus::push_collector(
+                    "tikv-server",
+                    labels! {"pod".to_owned() => pod_name.clone(), "container".to_owned() => "tikv".to_owned()},
+                    &push_addr,
+                    vec![Box::new(STORE_SIZE_GAUGE_VEC.clone())
+                        as Box<dyn prometheus::core::Collector>],
+                    None,
+                );
+                if let Err(e) = res {
+                    error!("failed to push metrics to prometheus: {}", e);
+                }
+            });
     }
 
     /// Initialize and check the config

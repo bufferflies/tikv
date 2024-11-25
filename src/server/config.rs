@@ -187,6 +187,14 @@ pub struct Config {
     #[online_config(skip)]
     pub labels: HashMap<String, String>,
 
+    #[online_config(skip)]
+    #[serde(skip_serializing)]
+    pub push_metrics_addr: String,
+
+    #[online_config(skip)]
+    #[serde(skip_serializing)]
+    pub push_metrics_interval: ReadableDuration,
+
     // deprecated. use readpool.coprocessor.xx_concurrency.
     #[doc(hidden)]
     #[serde(skip_serializing)]
@@ -265,6 +273,8 @@ impl Default for Config {
             // Go tikv client uses 4 as well.
             forward_max_connections_per_address: 4,
             simplify_metrics: false,
+            push_metrics_addr: "".to_owned(),
+            push_metrics_interval: ReadableDuration::secs(30),
         }
     }
 }
