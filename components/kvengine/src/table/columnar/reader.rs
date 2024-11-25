@@ -1286,12 +1286,18 @@ impl ColumnarReader for ColumnarRowTableReader {
     }
 
     async fn seek(&mut self, handle: &[u8]) -> table::Result<()> {
+        let mut prefix = if self.inner_key_off == 0 {
+            api_version::ApiV2::get_txn_keyspace_prefix(self.keyspace_id)
+        } else {
+            vec![]
+        };
         let row_key = if self.is_int_handle && !handle.is_empty() {
             encode_row_key(self.schema.table_id, (&handle[..]).get_i64_le())
         } else {
             encode_common_handle_row_key(self.schema.table_id, handle)
         };
-        self.iter.seek(InnerKey::from_inner_buf(&row_key));
+        prefix.extend_from_slice(&row_key);
+        self.iter.seek(InnerKey::from_inner_buf(&prefix));
         Ok(())
     }
 
@@ -1551,10 +1557,30 @@ pub mod tests {
         end: i32,
         version: u64,
     ) -> (Arc<dyn File>, Vec<RefRow>) {
+        let (tbl, mut refs) = build_table_with_encryption(
+            file_id,
+            enable_inner_key_off,
+            &[schema.clone()],
+            start,
+            end,
+            version,
+            None,
+        );
+        (tbl, refs.pop().unwrap())
+    }
+
+    pub fn build_mixed_table(
+        file_id: u64,
+        enable_inner_key_off: bool,
+        schemas: &[Schema],
+        start: i32,
+        end: i32,
+        version: u64,
+    ) -> (Arc<dyn File>, Vec<Vec<RefRow>>) {
         build_table_with_encryption(
             file_id,
             enable_inner_key_off,
-            schema,
+            schemas,
             start,
             end,
             version,
@@ -1569,91 +1595,111 @@ pub mod tests {
     pub fn build_table_with_encryption(
         file_id: u64,
         enable_inner_key_off: bool,
-        schema: &Schema,
+        schemas: &[Schema],
         start: i32,
         end: i32,
         version: u64,
         encryption_key: Option<EncryptionKey>,
-    ) -> (Arc<dyn File>, Vec<RefRow>) {
+    ) -> (Arc<dyn File>, Vec<Vec<RefRow>>) {
         let mut rng = rand::thread_rng();
-        let mut ref_rows: Vec<RefRow> = vec![];
         let inner_key_off = if enable_inner_key_off { 4 } else { 0 };
         let keyspace_id = 1;
         let keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
-        let is_common_handle = get_fixed_size(&schema.handle_column) == 0;
-        for i in start..end {
-            ref_rows.push(new_ref_row(i, version, is_common_handle));
-            if rng.gen_ratio(1, 8) {
-                ref_rows.push(new_ref_row(i, version - 1, is_common_handle));
-            }
-            if rng.gen_ratio(1, 16) {
-                ref_rows.push(new_ref_row(i, version - 2, is_common_handle));
-            }
-        }
-        let mut eval_ctx = EvalContext::default();
-        let mut wb = WriteBatch::new();
-        for ref_row in ref_rows.iter().rev() {
-            let row_key = if is_common_handle {
-                encode_common_handle_row_key(schema.table_id, ref_row.handle.as_slice())
-            } else {
-                encode_row_key(schema.table_id, ref_row.handle.as_slice().get_i64_le())
-            };
-            let inner_buf = if enable_inner_key_off {
-                row_key
-            } else {
-                [keyspace_prefix.clone(), row_key].concat()
-            };
-            let inner_key = InnerKey::from_inner_buf(&inner_buf);
-            let mut row_val = vec![];
-            let cols = vec![
-                Column::new(1, ref_row.c0),
-                Column::new(2, ref_row.c1.clone()),
-            ];
-            if !ref_row.is_deleted {
-                row_val.write_row(&mut eval_ctx, cols).unwrap();
-            }
-            let user_meta = UserMeta::new(ref_row.txn_id, ref_row.version).to_array();
-            wb.put(inner_key, 0, &user_meta, ref_row.version, &row_val);
-        }
-        let cf_tbl = CfTable::new();
-        cf_tbl.get_cf(WRITE_CF).put_batch(&mut wb, None, WRITE_CF);
-        let iter = cf_tbl.get_cf(WRITE_CF).new_iterator(false);
-        let mut row_tbl_reader =
-            ColumnarRowTableReader::new(1, inner_key_off, schema.clone(), iter, None, false, None);
-        let mut block = Block::new(schema);
-        let mut opts = ColumnarTableBuildOptions::default();
-        opts.pack_max_row_count = 8;
-        opts.pack_max_size = 256;
-        let mut table_builder =
-            ColumnarTableBuilder::new(schema.clone(), opts, true, encryption_key, file_id);
-        block_on(row_tbl_reader.seek(&ref_rows[0].handle)).unwrap();
-        let mut append_rows = 0;
-        let mut block_off = 0;
-        while append_rows < ref_rows.len() {
-            if block_off == block.length() {
-                block_off = 0;
-                block.reset();
-                let limit = rng.gen_range(2..10);
-                let read = block_on(row_tbl_reader.read(&mut block, limit)).unwrap();
-                if read == 0 {
-                    break;
-                }
-            }
-            block_off = table_builder.append_block(&block, block_off);
-            append_rows += block.length() - block_off;
-        }
         let mut file_builder = ColumnarFileBuilder::new(
             file_id,
             keyspace_id,
             inner_key_off,
             Some(version), // use version as l0_version for test
-            None,
+            encryption_key.clone(),
         );
-        file_builder.add_table(table_builder);
+        let cf_tbl = CfTable::new();
+        let mut tables_ref_rows = vec![];
+        for schema in schemas {
+            let mut ref_rows = vec![];
+            let is_common_handle = get_fixed_size(&schema.handle_column) == 0;
+            for i in start..end {
+                ref_rows.push(new_ref_row(i, version, is_common_handle));
+                if rng.gen_ratio(1, 8) {
+                    ref_rows.push(new_ref_row(i, version - 1, is_common_handle));
+                }
+                if rng.gen_ratio(1, 16) {
+                    ref_rows.push(new_ref_row(i, version - 2, is_common_handle));
+                }
+            }
+            let mut eval_ctx = EvalContext::default();
+            let mut wb = WriteBatch::new();
+            for ref_row in ref_rows.iter().rev() {
+                let row_key = if is_common_handle {
+                    encode_common_handle_row_key(schema.table_id, ref_row.handle.as_slice())
+                } else {
+                    encode_row_key(schema.table_id, ref_row.handle.as_slice().get_i64_le())
+                };
+                let inner_buf = if enable_inner_key_off {
+                    row_key
+                } else {
+                    [keyspace_prefix.clone(), row_key].concat()
+                };
+                let inner_key = InnerKey::from_inner_buf(&inner_buf);
+                let mut row_val = vec![];
+                let cols = vec![
+                    Column::new(1, ref_row.c0),
+                    Column::new(2, ref_row.c1.clone()),
+                ];
+                if !ref_row.is_deleted {
+                    row_val.write_row(&mut eval_ctx, cols).unwrap();
+                }
+                let user_meta = UserMeta::new(ref_row.txn_id, ref_row.version).to_array();
+                wb.put(inner_key, 0, &user_meta, ref_row.version, &row_val);
+            }
+            cf_tbl.get_cf(WRITE_CF).put_batch(&mut wb, None, WRITE_CF);
+            tables_ref_rows.push(ref_rows);
+        }
+        for (i, schema) in schemas.iter().enumerate() {
+            let iter = cf_tbl.get_cf(WRITE_CF).new_iterator(false);
+            let mut row_tbl_reader = ColumnarRowTableReader::new(
+                1,
+                inner_key_off,
+                schema.clone(),
+                iter,
+                None,
+                false,
+                encryption_key.clone(),
+            );
+            let mut block = Block::new(schema);
+            let mut opts = ColumnarTableBuildOptions::default();
+            opts.pack_max_row_count = 8;
+            opts.pack_max_size = 256;
+            let mut table_builder = ColumnarTableBuilder::new(
+                schema.clone(),
+                opts,
+                true,
+                encryption_key.clone(),
+                file_id,
+            );
+            block_on(row_tbl_reader.seek(&tables_ref_rows[i][0].handle)).unwrap();
+            let mut append_rows = 0;
+            let mut block_off = 0;
+            while append_rows < tables_ref_rows[i].len() {
+                if block_off == block.length() {
+                    block_off = 0;
+                    block.reset();
+                    let limit = rng.gen_range(2..10);
+                    let read = block_on(row_tbl_reader.read(&mut block, limit)).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                }
+                let block_off_before = block_off;
+                block_off = table_builder.append_block(&block, block_off);
+                append_rows += block_off - block_off_before;
+            }
+            file_builder.add_table(table_builder);
+        }
+
         let (file_data, _) = file_builder.build();
         (
             Arc::new(InMemFile::new(file_id, file_data.into())),
-            ref_rows,
+            tables_ref_rows,
         )
     }
 
@@ -1817,35 +1863,39 @@ pub mod tests {
         }
         for common_handle in options {
             let schema = new_schema(1, common_handle);
-            let (file_1, ref_1) = build_table_with_encryption(
+            let (file_1, mut ref_1) = build_table_with_encryption(
                 1,
                 true,
-                &schema,
+                &[schema.clone()],
                 100,
                 150,
                 100,
                 encryption_key.clone(),
             );
-            let (file_2, ref_2) = build_table_with_encryption(
+            let (file_2, mut ref_2) = build_table_with_encryption(
                 2,
                 true,
-                &schema,
+                &[schema.clone()],
                 140,
                 190,
                 110,
                 encryption_key.clone(),
             );
-            let (file_3, ref_3) = build_table_with_encryption(
+            let (file_3, mut ref_3) = build_table_with_encryption(
                 3,
                 true,
-                &schema,
+                &[schema.clone()],
                 185,
                 240,
                 120,
                 encryption_key.clone(),
             );
             let files = vec![file_1, file_2, file_3];
-            let ref_rows = vec![ref_1, ref_2, ref_3];
+            let ref_rows = vec![
+                ref_1.pop().unwrap(),
+                ref_2.pop().unwrap(),
+                ref_3.pop().unwrap(),
+            ];
             let mut block = Block::new(&schema);
             let mut rng = rand::thread_rng();
             for read_ts in [90, 100, 110, 120] {
@@ -1977,6 +2027,27 @@ pub mod tests {
                 let merged_refs = merge_refs(ref_rows.clone(), 2, None, Some(250), Some(range_bound));
                 verify_with_ref_rows(&block, &merged_refs);
             }
+        }
+    }
+
+    #[rstest]
+    #[case::enable_inner_key_off(true)]
+    #[case::disable_inner_key_off(false)]
+    fn test_reader_with_multi_tables(#[case] enable_inner_key_off: bool) {
+        init_log_for_test();
+        let schema_1 = new_schema(1, false);
+        let schema_2 = new_schema(2, false);
+        let schemas = vec![schema_1.clone(), schema_2.clone()];
+        let (file_1, ref_rows) = build_mixed_table(1, enable_inner_key_off, &schemas, 0, 100, 100);
+
+        for (i, schema) in schemas.iter().enumerate() {
+            let mut block = Block::new(schema);
+            let ref_row = ref_rows[i].clone();
+            let mut mvcc_reader = new_mvcc_reader(schema, &[file_1.clone()], 110, None);
+            block_on(mvcc_reader.set_unbounded_handle_range()).unwrap();
+            block_on(mvcc_reader.read_block(&mut block, 500)).unwrap();
+            let merged_refs = merge_refs(vec![ref_row], 0, Some(110), None, None);
+            verify_with_ref_rows(&block, &merged_refs);
         }
     }
 }
