@@ -969,7 +969,10 @@ impl Dfs for S3Fs {
         self.get_object(
             self.file_key(file_id, opts.file_type),
             format!("{}.{}", file_id, opts.file_type.suffix()),
-            GetObjectOptions::default(),
+            GetObjectOptions {
+                start_off: Some(opts.start_off),
+                end_off: None,
+            },
         )
         .await
     }

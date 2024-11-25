@@ -7,7 +7,7 @@ mod s3;
 use std::{
     convert::TryFrom,
     fmt::{Debug, Display, Formatter},
-    io::{self, BufReader, Read, Write},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     ops::Deref,
     path::{Path, PathBuf},
     result,
@@ -30,11 +30,14 @@ use thiserror::Error;
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-use crate::table::{
-    blobtable::blobtable::BlobTable,
-    columnar::{ColumnarFileFooter, SchemaFileFooter},
-    sstable::{L0Table, SsTable},
-    TxnChunk,
+use crate::{
+    table::{
+        blobtable::blobtable::BlobTable,
+        columnar::{ColumnarFileFooter, SchemaFileFooter},
+        sstable::{L0Table, SsTable},
+        TxnChunk,
+    },
+    IoContext,
 };
 
 // DFS represents a distributed file system.
@@ -92,9 +95,9 @@ impl InMemFs {
 
 #[async_trait]
 impl Dfs for InMemFs {
-    async fn read_file(&self, file_id: u64, _opts: Options) -> Result<Bytes> {
+    async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         if let Some(file) = self.files.get(&file_id).as_deref() {
-            return Ok(file.clone());
+            return Ok(file.slice(opts.start_off as usize..));
         }
         Err(Error::NotExists(file_id))
     }
@@ -224,7 +227,13 @@ impl CacheFs {
             .cache
             .try_get_with(file_id, async move {
                 cache_miss_clone.store(true, atomic::Ordering::Relaxed);
-                s3_fs.read_file(file_id, opts).await
+                let full_range_opts = Options {
+                    file_type: opts.file_type,
+                    shard_id: opts.shard_id,
+                    shard_ver: opts.shard_ver,
+                    start_off: 0,
+                };
+                s3_fs.read_file(file_id, full_range_opts).await
             })
             .await
             .map_err(|e| e.as_ref().clone())?;
@@ -240,15 +249,18 @@ impl CacheFs {
                 .with_label_values(&["hit"])
                 .inc();
         }
-        Ok(file)
+        Ok(file.slice(opts.start_off as usize..))
     }
 }
 
 #[async_trait]
 impl Dfs for CacheFs {
+    /// Note: `CacheFs` will cache the whole object, even if `read_file` just
+    /// read part of it.
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         self.read_file_inner(file_id, opts).await
     }
+
     async fn create(&self, _file_id: u64, _data: Bytes, _opts: Options) -> Result<()> {
         panic!("Do not call");
     }
@@ -365,10 +377,14 @@ impl LocalFsCore {
 impl Dfs for LocalFs {
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         let local_file_name = self.local_file_path(file_id, opts.file_type);
-        let fd = std::fs::File::open(local_file_name)?;
+        let mut fd = std::fs::File::open(local_file_name).dfs_ctx(file_id, "open")?;
+        if opts.start_off > 0 {
+            fd.seek(SeekFrom::Start(opts.start_off))
+                .dfs_ctx(file_id, "seek")?;
+        }
         let mut reader = BufReader::new(fd);
         let mut buf = Vec::new();
-        reader.read_to_end(&mut buf)?;
+        reader.read_to_end(&mut buf).dfs_ctx(file_id, "read")?;
         KVENGINE_DFS_THROUGHPUT_VEC
             .with_label_values(&["read"])
             .inc_by(buf.len() as u64);
@@ -417,6 +433,7 @@ pub struct Options {
     pub file_type: FileType,
     pub shard_id: u64,
     pub shard_ver: u64,
+    pub start_off: u64,
 }
 
 impl Default for Options {
@@ -425,25 +442,26 @@ impl Default for Options {
             file_type: FileType::Sst,
             shard_id: 0,
             shard_ver: 0,
+            start_off: 0,
         }
     }
 }
 
 impl Options {
-    pub fn with_shard(&self, shard_id: u64, shard_ver: u64) -> Self {
-        Self {
-            file_type: self.file_type,
-            shard_id,
-            shard_ver,
-        }
+    pub fn with_shard(mut self, shard_id: u64, shard_ver: u64) -> Self {
+        self.shard_id = shard_id;
+        self.shard_ver = shard_ver;
+        self
     }
 
-    pub fn with_type(&self, file_type: FileType) -> Self {
-        Self {
-            file_type,
-            shard_id: self.shard_id,
-            shard_ver: self.shard_ver,
-        }
+    pub fn with_type(mut self, file_type: FileType) -> Self {
+        self.file_type = file_type;
+        self
+    }
+
+    pub fn with_start_off(mut self, start_off: u64) -> Self {
+        self.start_off = start_off;
+        self
     }
 }
 

@@ -783,6 +783,14 @@ mod tests {
                 let read_data = fs.read_file(file_id, options).await.unwrap();
                 assert_eq!(write_data, read_data);
 
+                {
+                    let partial_read_data = fs
+                        .read_file(file_id, options.with_start_off(range.0 as u64))
+                        .await
+                        .unwrap();
+                    assert_eq!(write_data.slice(range.0..), partial_read_data);
+                }
+
                 let key = fs.file_key(file_id, FileType::Sst);
                 let exist = fs.exist(key.clone(), file_id.to_string()).await.unwrap();
                 assert!(exist);

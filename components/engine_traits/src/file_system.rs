@@ -56,9 +56,11 @@ impl FileSystemInspector for EngineFileSystemInspector {
     }
 }
 
-/// Note:
-/// * `start_off` is `None` & `end_off` is `Some(n)`: read last n bytes.
-/// * Both `start_off` & `end_off` are `None`: read total object.
+/// (`start_off`, `end_off`):
+/// * (None, None): read total object.
+/// * (Some(s), Some(e)): read range [s, e).
+/// * (Some(s), None): read from `s` to end of object.
+/// * (None, Some(n)): read last `n` bytes.
 #[derive(Debug, Default)]
 pub struct GetObjectOptions {
     pub start_off: Option<u64>,

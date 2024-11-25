@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     iter::Iterator,
     os::unix::fs::MetadataExt,
     path::PathBuf,
@@ -464,10 +464,16 @@ impl EngineCore {
         Ok(())
     }
 
-    pub fn read_local_file(&self, id: u64, file_type: FileType) -> Result<Bytes> {
+    pub fn read_local_file(&self, id: u64, file_type: FileType, start_off: u64) -> Result<Bytes> {
         let _guard = self.lock_file(id);
         let path = self.local_file_path(id, file_type);
-        let data = fs::read(path).table_ctx(id, "read_local_file")?;
+        let mut f = fs::File::open(path).table_ctx(id, "read_local_file.open")?;
+        if start_off > 0 {
+            f.seek(SeekFrom::Start(start_off))
+                .table_ctx(id, "read_local_file.seek")?;
+        }
+        let mut data = vec![];
+        f.read_to_end(&mut data).table_ctx(id, "read_local_file")?;
         Ok(data.into())
     }
 

@@ -158,13 +158,13 @@ impl BuiltinDfs {
     async fn read_file_from_store(
         &self,
         file_id: u64,
-        file_type: FileType,
+        opts: Options,
         store_id: u64,
     ) -> dfs::Result<Bytes> {
         let store_addr = self.get_store_addr(store_id).await?;
         let uri = Uri::try_from(format!(
-            "http://{}/dfs/{}?file_type={}",
-            store_addr, file_id, file_type
+            "http://{}/dfs/{}?file_type={}&start_off={}",
+            store_addr, file_id, opts.file_type, opts.start_off
         ))
         .unwrap();
         let resp = self.http_client.get(uri).await?;
@@ -183,10 +183,7 @@ impl BuiltinDfs {
         stores.shuffle(&mut rand::thread_rng());
         let mut errs = vec![];
         for store_id in stores {
-            match self
-                .read_file_from_store(file_id, opts.file_type, store_id)
-                .await
-            {
+            match self.read_file_from_store(file_id, opts, store_id).await {
                 Ok(data) => return Ok(data),
                 Err(err) => errs.push(format!("read file failed: {}", err)),
             }

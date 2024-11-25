@@ -7,11 +7,15 @@ use std::{
     time::Duration,
 };
 
+use bstr::ByteSlice;
+use bytes::BytesMut;
 use futures::executor::block_on;
+use kvengine::dfs;
 use pd_client::{
     pd_control::{CreateKeyspaceParams, SchedulerStatus},
     PdClient,
 };
+use rand::prelude::*;
 use security::{RestfulClient, SecurityConfig, SecurityManager};
 use test_pd_client::PdWrapper;
 use tikv_client::TimestampExt;
@@ -584,6 +588,45 @@ fn test_tikv_worker() {
 
     cluster.stop();
     oss.shutdown();
+}
+
+#[test]
+fn test_builtin_dfs() {
+    test_util::init_log_for_test();
+    let node_ids = alloc_node_id_vec(3);
+    let cluster = ServerCluster::new(node_ids.clone(), |_, conf| {
+        conf.dfs.s3_endpoint = "local".to_string();
+    });
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+    let region = client.get_region_by_key(b"");
+
+    let fs = cluster.get_dfs().unwrap();
+
+    let mut rng = thread_rng();
+    let mut write_data = BytesMut::new();
+    write_data.resize(64, 0);
+    rng.fill_bytes(write_data.as_bytes_mut());
+    let write_data = write_data.freeze();
+
+    let start_off = rng.gen_range(0..write_data.len());
+
+    let rt = fs.get_runtime().handle().clone();
+    rt.block_on(async move {
+        let opts = dfs::Options::default()
+            .with_shard(region.id, region.epoch.version)
+            .with_type(dfs::FileType::Sst);
+        fs.create(42, write_data.clone(), opts).await.unwrap();
+
+        let read_data = fs.read_file(42, opts).await.unwrap();
+        assert_eq!(read_data, write_data);
+
+        let partial_read_data = fs
+            .read_file(42, opts.with_start_off(start_off as u64))
+            .await
+            .unwrap();
+        assert_eq!(partial_read_data, write_data.slice(start_off..));
+    })
 }
 
 static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);

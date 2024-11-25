@@ -95,6 +95,10 @@ pub trait IoContext<T> {
     where
         C: Display + Send + Sync + 'static,
         F: FnOnce() -> (u64, C);
+
+    fn dfs_ctx<C>(self, file_id: u64, ctx: C) -> dfs::Result<T>
+    where
+        C: Display + Send + Sync + 'static;
 }
 
 impl<T> IoContext<T> for io::Result<T> {
@@ -135,6 +139,13 @@ impl<T> IoContext<T> for io::Result<T> {
             let (file_id, ctx) = ctx_fn();
             table::Error::Io(table_ctx_to_str(file_id, ctx, err))
         })
+    }
+
+    fn dfs_ctx<C>(self, file_id: u64, ctx: C) -> dfs::Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+    {
+        self.map_err(|err| dfs::Error::Io(table_ctx_to_str(file_id, ctx, err)))
     }
 }
 

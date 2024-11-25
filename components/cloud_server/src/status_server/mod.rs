@@ -1201,15 +1201,23 @@ impl StatusServer {
         u64::from_str(last).ok()
     }
 
-    fn get_dfs_file_type(req: &Request<Body>) -> FileType {
+    fn get_dfs_read_args(req: &Request<Body>) -> (FileType, u64 /* start_off */) {
+        let mut file_type: Option<FileType> = None;
+        let mut start_off: Option<u64> = None;
         if let Some(query) = req.uri().query() {
             let query_pairs: HashMap<_, _> =
                 url::form_urlencoded::parse(query.as_bytes()).collect();
-            if let Some(file_type_str) = query_pairs.get("file_type") {
-                return file_type_str.as_ref().try_into().unwrap_or(FileType::Sst);
-            }
+            file_type = query_pairs
+                .get("file_type")
+                .and_then(|s| s.as_ref().try_into().ok());
+            start_off = query_pairs
+                .get("start_off")
+                .and_then(|s| s.parse::<u64>().ok());
         }
-        FileType::Sst
+        (
+            file_type.unwrap_or(FileType::Sst),
+            start_off.unwrap_or_default(),
+        )
     }
 
     async fn handle_dfs_file_read(
@@ -1221,12 +1229,15 @@ impl StatusServer {
             return Ok(make_response(StatusCode::BAD_REQUEST, "invalid file id"));
         }
         let id = id_opt.unwrap();
-        let file_type = Self::get_dfs_file_type(&req);
+        let (file_type, start_off) = Self::get_dfs_read_args(&req);
         let (callback, future) = paired_future_callback();
         std::thread::spawn(move || {
             let res = match file_type {
-                FileType::TxnChunk => engine.get_txn_chunk_manager().read_local_chunk(id),
-                _ => engine.read_local_file(id, file_type),
+                FileType::TxnChunk => {
+                    debug_assert_eq!(start_off, 0);
+                    engine.get_txn_chunk_manager().read_local_chunk(id)
+                }
+                _ => engine.read_local_file(id, file_type, start_off),
             };
             callback(res);
         });
@@ -1252,7 +1263,7 @@ impl StatusServer {
             return Ok(make_response(StatusCode::BAD_REQUEST, "invalid file id"));
         }
         let id = id_opt.unwrap();
-        let file_type = Self::get_dfs_file_type(&req);
+        let (file_type, _) = Self::get_dfs_read_args(&req);
         let data = hyper::body::to_bytes(req.into_body()).await?;
         let (callback, future) = paired_future_callback();
         std::thread::spawn(move || {
