@@ -1,7 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    cmp, ops,
+    ops,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -13,27 +13,23 @@ use std::{
 use bytes::Bytes;
 use dashmap::mapref::entry::Entry;
 use engine_traits::GetObjectOptions;
-use futures::future::try_join_all;
 use tikv_util::time::Instant;
-use tokio::sync::mpsc;
 
 use crate::{
     dfs::{Dfs, FileType, S3Fs},
     ia::{
-        ia_file::IaFile,
         queue::S3FifoHandle,
         types::{
-            FileSegmentData, FileSegmentIdent, FooterInfo, GuardMap, LocalSegmentMap,
+            FileSegmentData, FileSegmentIdent, GuardMap, LocalSegmentMap,
             FILE_SEGMENT_DATA_IN_MEMORY,
         },
-        util::{new_local_store, split_to_segments, LocalStore},
+        util::{new_local_store, LocalStore},
     },
     table::{Error, Result},
     try_some,
 };
 
 pub const SEGMENTS_SUB_DIR: &str = "segment";
-pub const FOOTERS_SUB_DIR: &str = "footer";
 
 pub(crate) struct ReadAt<'a> {
     buf: &'a mut [u8],
@@ -45,11 +41,11 @@ impl<'a> ReadAt<'a> {
         Self { buf, offset }
     }
 
-    fn start_off(&self) -> u64 {
+    pub(crate) fn start_off(&self) -> u64 {
         self.offset
     }
 
-    fn end_off(&self) -> u64 {
+    pub(crate) fn end_off(&self) -> u64 {
         self.offset + self.buf.len() as u64
     }
 
@@ -128,28 +124,19 @@ impl IaManager {
             main_store: main_store.clone(),
         };
 
-        let footer_store = new_local_store(
-            opts.main_queue
-                .path
-                .as_ref()
-                .map(|x| x.join(FOOTERS_SUB_DIR)),
-        );
-
         let fifo = S3FifoHandle::new(
             opts.small_queue.cap,
             opts.main_queue.cap,
             opts.segment_size,
             opts.freq_update_interval,
-            runtime.clone(),
+            runtime,
             segment_data_ctx,
         );
 
         let core = Arc::new(IaManagerCore {
             segment_size: opts.segment_size,
             s3fs,
-            runtime,
             main_store,
-            footer_store,
             loading_segments: Default::default(),
             segments,
             fifo,
@@ -161,157 +148,12 @@ impl IaManager {
         mgr.init().await?;
         Ok(mgr)
     }
-
-    pub async fn open_file(&self, file_id: u64, ftype: FileType) -> Result<IaFile> {
-        let (footer, total_size) = self.read_footer(file_id, ftype).await?;
-        Ok(IaFile {
-            id: file_id,
-            size: total_size,
-            ftype,
-            footer,
-            mgr: self.clone(),
-        })
-    }
-
-    pub(crate) async fn read_range(
-        &self,
-        file_id: u64,
-        ftype: FileType,
-        total_size: u64,
-        read_at: ReadAt<'_>,
-    ) -> Result<()> {
-        let (start_off, end_off) = (read_at.start_off(), read_at.end_off());
-        let mut segments = split_to_segments(
-            file_id,
-            start_off,
-            end_off,
-            total_size,
-            self.segment_size as u64,
-        );
-        debug!("read_range"; "start_off" => start_off, "end_off" => end_off, "segments" => ?segments);
-        if segments.len() == 1 {
-            self.read_segment(segments.pop().unwrap(), ftype, read_at)
-                .await
-        } else {
-            self.read_from_multi_segments(ftype, start_off, end_off, segments, read_at)
-                .await?;
-            Ok(())
-        }
-    }
-
-    async fn read_from_multi_segments(
-        &self,
-        ftype: FileType,
-        start_off: u64,
-        end_off: u64,
-        segments: Vec<FileSegmentIdent>,
-        read_at: ReadAt<'_>,
-    ) -> Result<()> {
-        let segments_len = segments.len();
-        let mut handles = Vec::with_capacity(segments_len);
-
-        debug!("read_from_multi_segments"; "start_off" => start_off, "end_off" => end_off, "segments" => ?segments);
-        for (idx, ident) in segments.into_iter().enumerate() {
-            let seg_start_off = if idx == 0 { start_off } else { ident.start_off };
-            let seg_end_off = if idx == segments_len - 1 {
-                end_off
-            } else {
-                ident.end_off
-            };
-
-            // We do not limit concurrency here as the segment size should be larger
-            // than block size of file, so there are at most 2 segments.
-            let mgr = self.clone();
-            handles.push(self.runtime.spawn(async move {
-                let mut buf = vec![0; (seg_end_off - seg_start_off) as usize];
-                let read_at = ReadAt::new(buf.as_mut_slice(), seg_start_off);
-                mgr.read_segment(ident, ftype, read_at).await.map(|()| buf)
-            }));
-        }
-
-        let mut buf = read_at.buf;
-        for seg_slice in try_join_all(handles)
-            .await
-            .map_err(|e| Error::IaMgr(format!("read from multi segments: failed: {e:?}")))?
-        {
-            let seg_slice = seg_slice?;
-            let (left, right) = buf.split_at_mut(seg_slice.len());
-            left.copy_from_slice(&seg_slice);
-            buf = right;
-        }
-        debug_assert!(buf.is_empty());
-        Ok(())
-    }
-
-    pub async fn prepare_footers(
-        &self,
-        files: &[(u64 /* file_id */, FileType)],
-        concurrency: usize,
-    ) -> Result<()> {
-        let (tx, mut rx) = mpsc::channel(cmp::min(concurrency, files.len()));
-        let mut errs: Vec<Error> = vec![];
-        let mut msg_count: usize = 0;
-        for &(file_id, ftype) in files {
-            if self
-                .footer_store
-                .exists(file_id, &FooterInfo::local_filename(file_id))
-                .await
-            {
-                continue;
-            }
-
-            let mgr = self.clone();
-            let task = async move {
-                let (footer, total_size) = mgr.read_footer_from_remote(file_id, ftype).await?;
-                let footer_info = FooterInfo {
-                    file_id,
-                    ftype,
-                    file_total_size: total_size,
-                };
-                footer_info
-                    .save_to_local(mgr.footer_store.as_ref(), &footer)
-                    .await?;
-                Ok(())
-            };
-            let tx = tx.clone();
-            self.runtime.spawn(async move {
-                let res = task.await;
-                if let Err(err) = tx.send(res).await {
-                    warn!("prepare footers: send error"; "file_id" => file_id, "err" => ?err);
-                }
-            });
-            msg_count += 1;
-
-            if msg_count >= concurrency {
-                let res = rx.recv().await.unwrap();
-                if let Err(err) = res {
-                    errs.push(err);
-                }
-                msg_count -= 1;
-            }
-        }
-
-        for _ in 0..msg_count {
-            let res = rx.recv().await.unwrap();
-            if let Err(err) = res {
-                errs.push(err);
-            }
-        }
-
-        if errs.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::IaMgr(format!("prepare footers failed: {:?}", errs)))
-        }
-    }
 }
 
 pub struct IaManagerCore {
     segment_size: i64,
     s3fs: S3Fs,
-    runtime: tokio::runtime::Handle,
     main_store: Arc<dyn LocalStore>,
-    footer_store: Arc<dyn LocalStore>,
 
     loading_segments: GuardMap<FileSegmentIdent, ()>,
     segments: Arc<LocalSegmentMap>,
@@ -322,9 +164,11 @@ pub struct IaManagerCore {
 }
 
 impl IaManagerCore {
-    async fn init(&self) -> Result<()> {
-        self.footer_store.init().await?;
+    pub(crate) fn segment_size(&self) -> i64 {
+        self.segment_size
+    }
 
+    async fn init(&self) -> Result<()> {
         self.main_store.init().await?;
         let mut entries = self.main_store.scan().await?;
         if let Some(segments) = entries.remove("seg") {
@@ -347,7 +191,7 @@ impl IaManagerCore {
     }
 
     /// Offset in `read_at` are absolute offsets of the file.
-    async fn read_segment(
+    pub(crate) async fn read_segment(
         &self,
         ident: FileSegmentIdent,
         ftype: FileType,
@@ -368,7 +212,7 @@ impl IaManagerCore {
 
         let start_time = Instant::now_coarse();
         debug!("read segment"; "ident" => %ident, "start_off" => start_off, "end_off" => end_off);
-        if let Some(()) = self.read_segment_from_cache(&ident, &mut read_at).await? {
+        if let Some(()) = self.read_segment_from_cache(&ident, &mut read_at)? {
             debug!("read segment finished (cache hit)";
                 "ident" => %ident,
                 "elapsed" => ?start_time.saturating_elapsed());
@@ -379,7 +223,7 @@ impl IaManagerCore {
             let _loading_guard = self.loading_segments.get_locked(ident.clone()).await;
 
             // Check cache again. Another thread may have filled the cache.
-            if let Some(()) = self.read_segment_from_cache(&ident, &mut read_at).await? {
+            if let Some(()) = self.read_segment_from_cache(&ident, &mut read_at)? {
                 debug!("read segment finished (cache hit)";
                     "ident" => %ident,
                     "elapsed" => ?start_time.saturating_elapsed());
@@ -425,7 +269,7 @@ impl IaManagerCore {
         Ok(self.s3fs.get_object(file_key, filename, opts).await?)
     }
 
-    async fn read_segment_from_cache(
+    fn read_segment_from_cache(
         &self,
         ident: &FileSegmentIdent,
         read_at: &mut ReadAt<'_>,
@@ -436,7 +280,7 @@ impl IaManagerCore {
                 read_at.read_from_segment_bytes(ident, data);
                 Some(())
             }
-            FileSegmentData::InStore => self.read_segment_from_local_store(ident, read_at).await?,
+            FileSegmentData::InStore => self.read_segment_from_local_store(ident, read_at)?,
         };
 
         if res.is_some() {
@@ -446,84 +290,18 @@ impl IaManagerCore {
         Ok(res)
     }
 
-    async fn read_segment_from_local_store(
+    fn read_segment_from_local_store(
         &self,
         ident: &FileSegmentIdent,
         read_at: &mut ReadAt<'_>,
     ) -> Result<Option<()>> {
         debug!("read segment from local"; "ident" => %ident);
-        self.main_store
-            .read_at(
-                ident.file_id,
-                &ident.local_filename(),
-                read_at.buf,
-                read_at.offset - ident.start_off,
-            )
-            .await
-    }
-
-    async fn read_footer(
-        &self,
-        file_id: u64,
-        ftype: FileType,
-    ) -> Result<(Bytes, u64 /* total_size */)> {
-        match FooterInfo::read_from_local(self.footer_store.as_ref(), file_id).await {
-            Ok((footer_info, footer)) => Ok((footer, footer_info.file_total_size)),
-            Err(err) => {
-                error!("read footer: failed"; "file_id" => file_id, "ftype" => ?ftype, "err" => ?err);
-                let _ = self.drop_footer_from_local(file_id).await;
-                Err(err)
-            }
-        }
-    }
-
-    /// Use when meet error on opening/reading local footer.
-    async fn drop_footer_from_local(&self, file_id: u64) -> Result<()> {
-        match FooterInfo::drop_from_local(file_id, self.footer_store.as_ref()).await {
-            Ok(Some(())) => Ok(()),
-            Ok(None) => {
-                warn!("drop footer: failed, not existed";
-                    "file_id" => file_id);
-                Ok(())
-            }
-            Err(err) => {
-                warn!("drop footer: failed";
-                    "file_id" => file_id,
-                    "err" => ?err);
-                Err(err)
-            }
-        }
-    }
-
-    async fn read_footer_from_remote(
-        &self,
-        file_id: u64,
-        ftype: FileType,
-    ) -> Result<(Bytes, u64 /* total_size */)> {
-        let opts = GetObjectOptions {
-            start_off: None,
-            end_off: Some(ftype.footer_size() as u64),
-        };
-        let file_key = self.s3fs.file_key(file_id, ftype);
-        let filename = format!("{}.{}.footer", file_id, ftype.suffix());
-        let (footer, total_size) = self
-            .s3fs
-            .get_object_ext(file_key, filename, opts, true)
-            .await?;
-
-        let total_size = total_size.unwrap();
-        if footer.len() != ftype.footer_size() {
-            return Err(Error::IaMgr(format!(
-                "invalid footer size, expect {}, got {}, file_id {}, footer {:?}, total_size {}",
-                ftype.footer_size(),
-                footer.len(),
-                file_id,
-                footer,
-                total_size,
-            )));
-        }
-
-        Ok((footer, total_size))
+        self.main_store.read_at(
+            ident.file_id,
+            &ident.local_filename(),
+            read_at.buf,
+            read_at.offset - ident.start_off,
+        )
     }
 
     pub fn cache_hit_rate(&self) -> f64 {
@@ -636,13 +414,9 @@ impl SegmentDataContext {
     }
 
     #[inline]
-    pub(crate) async fn remove_from_main_store(
-        &self,
-        ident: &FileSegmentIdent,
-    ) -> Result<Option<()>> {
+    pub(crate) fn remove_from_main_store(&self, ident: &FileSegmentIdent) -> Result<Option<()>> {
         self.main_store
             .remove(ident.file_id, &ident.local_filename())
-            .await
     }
 
     #[inline]

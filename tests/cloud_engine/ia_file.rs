@@ -1,19 +1,20 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{assert_matches::assert_matches, path::PathBuf, time::Duration};
+use std::{assert_matches::assert_matches, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::{Buf, Bytes};
 use kvengine::{
     dfs::{FileType, S3Fs},
     ia::{
-        manager::{IaManager, FOOTERS_SUB_DIR, SEGMENTS_SUB_DIR},
-        types::{FileSegmentData, FileSegmentIdent, FooterInfo},
+        ia_file::{table_meta_file_local_path, IaFile},
+        manager::{IaManager, SEGMENTS_SUB_DIR},
+        types::{FileSegmentData, FileSegmentIdent},
         util::{
             test_util::verify_local_segments, IaCapacity, IaManagerOptionsBuilder, LocalFileStore,
             LocalStore,
         },
     },
-    table::file::File,
+    table::{file::InMemFile, sstable, ChecksumType, InnerKey, Value, NO_COMPRESSION},
 };
 use proptest::prelude::*;
 use rand::prelude::*;
@@ -22,9 +23,9 @@ use test_cloud_server::oss::prepare_dfs;
 use test_util::init_log_for_test;
 use tikv_util::{debug, info};
 
-const SEGMENT_SIZE: i64 = 10;
+const BLOCK_SIZE: usize = 32;
+const SEGMENT_SIZE: i64 = 64;
 const FREQ_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
-const PREPARE_CONCURRENCY: usize = 2;
 
 prop_compose! {
     fn arb_range_args(min: u64, max: u64)
@@ -40,14 +41,12 @@ prop_compose! {
 }
 
 #[rstest]
-#[case(IaCapacity::MemoryAndDiskCap(80, PathBuf::from("ia"), 720))]
-#[case::memory(IaCapacity::MemoryCap(800))]
-#[case::big_cap(IaCapacity::MemoryAndDiskCap(200, PathBuf::from("ia"), 1800))]
-#[case::small_cap(IaCapacity::MemoryAndDiskCap(20, PathBuf::from("ia"), 180))]
+#[case(IaCapacity::MemoryAndDiskCap(300, PathBuf::from("ia"), 3000))]
+#[case::memory(IaCapacity::MemoryCap(3000))]
+#[case::big_cap(IaCapacity::MemoryAndDiskCap(1000, PathBuf::from("ia"), 10000))]
+#[case::small_cap(IaCapacity::MemoryAndDiskCap(128, PathBuf::from("ia"), 1024))]
 fn test_read(#[case] mut ia_cap: IaCapacity) {
     init_log_for_test();
-
-    const FILE_SIZE: u64 = 1024;
 
     let (temp_dir, mut oss, dfs_conf) = prepare_dfs("test");
     let temp_dir = temp_dir.path();
@@ -71,54 +70,52 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
     let (small_cap, main_cap) = (options.small_queue.cap, options.main_queue.cap);
 
     let rt = runtime.handle().clone();
-    let (mgr, file_data, ia_file) = runtime.block_on(async move {
+    let (mgr, user_data, ia_file) = runtime.block_on(async move {
         let file_id = 42;
         let file_type = FileType::Sst;
-        let file_data = {
-            let mut rng = thread_rng();
-            Bytes::from(
-                (0..FILE_SIZE / 8)
-                    .flat_map(|_| rng.gen::<u64>().to_le_bytes())
-                    .collect::<Vec<_>>(),
-            )
-        };
-        assert_eq!(file_data.len(), FILE_SIZE as usize);
+        // user_data: About 6.8 KiB.
+        let (file_data, user_data, table_meta_off) =
+            make_sstable(file_id, BLOCK_SIZE, 200, 7, 5, thread_rng().gen_ratio(1, 2));
+        info!("make sstable"; "file size" => file_data.len(), "user data size" => user_data.len());
 
         s3fs.put_object(
             s3fs.file_key(file_id, file_type),
-            file_data.clone(),
+            file_data,
             format!("{}.{}", file_id, file_type.suffix()),
         )
         .await
         .unwrap();
 
         let mgr = IaManager::new(options, s3fs.clone(), rt).await.unwrap();
-        mgr.prepare_footers(&[(file_id, file_type)], PREPARE_CONCURRENCY)
-            .await
-            .unwrap();
-        let ia_file = mgr.open_file(file_id, file_type).await.unwrap();
+        let table_meta_data =
+            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, temp_dir, &s3fs)
+                .await
+                .unwrap();
+        let table_meta_file = InMemFile::new(file_id, table_meta_data);
+        let ia_file =
+            IaFile::open(file_id, file_type, Arc::new(table_meta_file), mgr.clone()).unwrap();
 
-        let seg = ia_file.read_async(0, file_data.len()).await.unwrap();
-        assert_eq!(seg, file_data);
+        let seg = ia_file.multi_read_async(0, user_data.len()).await.unwrap();
+        assert_eq!(seg, user_data);
 
-        let mut buf = vec![0; file_data.len()];
-        ia_file.read_at_async(&mut buf, 0).await.unwrap();
-        assert_eq!(buf, file_data.chunk());
+        let mut buf = vec![0; user_data.len()];
+        ia_file.multi_read_at_async(&mut buf, 0).await.unwrap();
+        assert_eq!(buf, user_data.chunk());
 
-        (mgr, file_data, ia_file)
+        (mgr, user_data, ia_file)
     });
 
     proptest!(|(
-        (start_off, end_off) in arb_range_args(0, file_data.len() as u64)
+        (start_off, end_off) in arb_range_args(0, user_data.len() as u64)
     )| {
         debug!("test_read: start_off: {}, end_off: {}", start_off, end_off);
-        let expected = file_data.slice(start_off as usize..end_off as usize);
+        let expected = user_data.slice(start_off as usize..end_off as usize);
 
-        let seg = runtime.block_on(ia_file.read_async(start_off, (end_off-start_off) as usize)).unwrap();
+        let seg = runtime.block_on(ia_file.multi_read_async(start_off, (end_off-start_off) as usize)).unwrap();
         prop_assert_eq!(&seg, &expected);
 
         let mut buf = vec![0; (end_off-start_off) as usize];
-        runtime.block_on(ia_file.read_at_async(&mut buf, start_off)).unwrap();
+        runtime.block_on(ia_file.multi_read_at_async(&mut buf, start_off)).unwrap();
         prop_assert_eq!(buf, expected.chunk());
     });
 
@@ -126,7 +123,7 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
         mgr.flush_tasks(Duration::from_secs(5)).await.unwrap();
 
         let segments = mgr.get_local_segments().await;
-        verify_local_segments(&segments, small_cap, main_cap, Some(FILE_SIZE));
+        verify_local_segments(&segments, small_cap, main_cap, Some(user_data.len() as u64));
     });
 
     info!("cache hit rate: {}", mgr.cache_hit_rate());
@@ -151,43 +148,51 @@ fn test_init() {
     let rt = runtime.handle().clone();
     runtime.block_on(async move {
         let local_path = temp_dir.join("ia");
-        let ia_cap = IaCapacity::MemoryAndDiskCap(0, local_path, 1000);
+        let ia_cap = IaCapacity::MemoryAndDiskCap(0, local_path.clone(), 1000);
         let options = IaManagerOptionsBuilder::default()
             .capacity(ia_cap)
             .segment_size(SEGMENT_SIZE)
             .freq_update_interval(FREQ_UPDATE_INTERVAL)
             .build()
             .unwrap();
+
+        let file_type = FileType::Sst;
+
         {
             let mgr = IaManager::new(options.clone(), s3fs.clone(), rt.clone())
                 .await
                 .unwrap();
 
+            let mut files = Vec::with_capacity(10);
             for i in 1..10 {
                 let file_id = i as u64;
-                let file_type = FileType::Sst;
-                let file_data = Bytes::from((0u8..100).collect::<Vec<_>>());
+                let (file_data, _, table_meta_off) =
+                    make_sstable(file_id, BLOCK_SIZE, 10, 7, 5, false);
+
                 s3fs.put_object(
                     s3fs.file_key(file_id, file_type),
-                    file_data.clone(),
+                    file_data,
                     format!("{}.{}", file_id, file_type.suffix()),
                 )
                 .await
                 .unwrap();
+
+                files.push((file_id, file_type, table_meta_off));
             }
 
-            let files = (1..10).map(|i| (i, FileType::Sst)).collect::<Vec<_>>();
-            mgr.prepare_footers(&files, PREPARE_CONCURRENCY)
-                .await
-                .unwrap();
+            for (file_id, file_type, table_meta_off) in files {
+                IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &s3fs)
+                    .await
+                    .unwrap();
+            }
 
-            let ia1 = mgr.open_file(1, FileType::Sst).await.unwrap();
-            let _ = ia1.read_async(5, 10).await.unwrap();
-            let _ = ia1.read_async(5, 10).await.unwrap();
+            let ia1 = IaFile::open_in_path(1, file_type, &local_path, mgr.clone()).unwrap();
+            let _ = ia1.multi_read_async(5, 10).await.unwrap();
+            let _ = ia1.multi_read_async(5, 10).await.unwrap();
 
-            let ia2 = mgr.open_file(2, FileType::Sst).await.unwrap();
-            let _ = ia2.read_async(20, 20).await.unwrap();
-            let _ = ia2.read_async(20, 20).await.unwrap();
+            let ia2 = IaFile::open_in_path(2, file_type, &local_path, mgr.clone()).unwrap();
+            let _ = ia2.multi_read_async(100, 64).await.unwrap();
+            let _ = ia2.multi_read_async(100, 64).await.unwrap();
 
             // To make sure that segments are written to local store.
             mgr.flush_tasks(Duration::from_secs(5)).await.unwrap();
@@ -200,10 +205,9 @@ fn test_init() {
             segments_ident.sort_by(|(m_ident, ..), (n_ident, ..)| m_ident.cmp(n_ident));
             let expected_segments = [
                 // file_id, start_off, end_off
-                (1u64, 0u64, 10u64),
-                (1, 10, 20),
-                (2, 20, 30),
-                (2, 30, 40),
+                (1, 0, 66),
+                (2, 66, 132),
+                (2, 132, 198),
             ]
             .iter()
             .map(|&(file_id, start_off, end_off)| FileSegmentIdent {
@@ -212,7 +216,12 @@ fn test_init() {
                 end_off,
             })
             .collect::<Vec<_>>();
-            assert_eq!(segments_ident.len(), expected_segments.len());
+            assert_eq!(
+                segments_ident.len(),
+                expected_segments.len(),
+                "{:?}",
+                segments_ident
+            );
             for ((ident, segment, _), expected) in segments_ident
                 .into_iter()
                 .zip(expected_segments.into_iter())
@@ -221,9 +230,9 @@ fn test_init() {
                 assert_matches!(segment, FileSegmentData::InStore);
             }
 
-            // Open file to verify footers exist.
+            // Open file to verify meta exist.
             for file_id in 1..10 {
-                let _ = mgr.open_file(file_id, FileType::Sst).await.unwrap();
+                let _ = IaFile::open_in_path(file_id, file_type, &local_path, mgr.clone()).unwrap();
             }
         }
     });
@@ -247,15 +256,11 @@ fn test_abnormal_local_file() {
     runtime.block_on(async move {
         let file_id = 42;
         let file_type = FileType::Sst;
-        let file_data = {
-            let mut rng = thread_rng();
-            let mut buf = vec![0u8; 64];
-            rng.fill_bytes(buf.as_mut_slice());
-            Bytes::from(buf)
-        };
+        let (file_data, user_data, table_meta_off) =
+            make_sstable(file_id, BLOCK_SIZE, 10, 7, 5, false);
         s3fs.put_object(
             s3fs.file_key(file_id, file_type),
-            file_data.clone(),
+            file_data,
             format!("{}.{}", file_id, file_type.suffix()),
         )
         .await
@@ -271,19 +276,20 @@ fn test_abnormal_local_file() {
         let mgr = IaManager::new(options, s3fs.clone(), rt).await.unwrap();
 
         {
-            mgr.prepare_footers(&[(file_id, file_type)], PREPARE_CONCURRENCY)
-                .await
-                .unwrap();
-            let ia_file = mgr.open_file(file_id, file_type).await.unwrap();
-            let seg = ia_file.read_async(0, file_data.len()).await.unwrap();
-            assert_eq!(seg, file_data);
+            let table_meta_data =
+                IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &s3fs)
+                    .await
+                    .unwrap();
+            let table_meta_file = InMemFile::new(file_id, table_meta_data);
+            let ia_file =
+                IaFile::open(file_id, file_type, Arc::new(table_meta_file), mgr.clone()).unwrap();
+            let seg = ia_file.multi_read_async(0, user_data.len()).await.unwrap();
+            assert_eq!(seg, user_data);
         }
 
-        // Remove the local footer & segment.
+        // Remove the local meta & segment.
         {
-            let footer_store = LocalFileStore::new(local_path.join(FOOTERS_SUB_DIR));
-            footer_store
-                .remove(file_id, &FooterInfo::local_filename(file_id))
+            tokio::fs::remove_file(table_meta_file_local_path(file_id, file_type, &local_path))
                 .await
                 .unwrap();
 
@@ -298,24 +304,71 @@ fn test_abnormal_local_file() {
                     }
                     .local_filename(),
                 )
-                .await
                 .unwrap();
         }
 
         {
-            // First open file failed due to local footer not found.
-            mgr.open_file(file_id, file_type).await.unwrap_err();
-            // Check another prepare can restore the lost footer.
-            mgr.prepare_footers(&[(file_id, file_type)], PREPARE_CONCURRENCY)
+            // First open file failed due to local meta not found.
+            IaFile::open_in_path(file_id, file_type, &local_path, mgr.clone()).unwrap_err();
+            // Prepare again.
+            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &s3fs)
                 .await
                 .unwrap();
-            let ia_file = mgr.open_file(file_id, file_type).await.unwrap();
+            let ia_file =
+                IaFile::open_in_path(file_id, file_type, &local_path, mgr.clone()).unwrap();
 
             // Read can handle local segment not found by retry to get from remote.
-            let seg = ia_file.read_async(0, file_data.len()).await.unwrap();
-            assert_eq!(seg, file_data);
+            let seg = ia_file.multi_read_async(0, user_data.len()).await.unwrap();
+            assert_eq!(seg, user_data);
         }
     });
 
     oss.shutdown();
+}
+
+fn make_sstable(
+    file_id: u64,
+    block_size: usize,
+    n: usize,
+    key_len: usize,
+    val_len: usize,
+    multi_ver: bool,
+) -> (
+    Bytes, // file_data
+    Bytes, // user_data
+    u64,   // meta_off
+) {
+    let mut rng = thread_rng();
+
+    let mut builder = sstable::Builder::new(
+        file_id,
+        block_size,
+        NO_COMPRESSION,
+        0,
+        ChecksumType::default(),
+        None,
+    );
+    let mut val = vec![0; val_len];
+    let mut ver = n as u64;
+    let mut i = 0;
+    for _ in 0..n {
+        let key = format!("{:0key_len$}", i).into_bytes();
+        rng.fill_bytes(val.as_mut_slice());
+        let value_buf = Value::encode_buf(0u8, &[0], ver, &val);
+        let value = Value::decode(&value_buf);
+        builder.add(InnerKey::from_inner_buf(&key), &value, None);
+
+        if multi_ver && rng.gen_ratio(1, 4) {
+            ver -= 1;
+        } else {
+            i += 1;
+            ver = n as u64;
+        }
+    }
+
+    let mut buf = Vec::with_capacity(builder.estimated_size());
+    let res = builder.finish(0, &mut buf);
+    let file_data = Bytes::from(buf);
+    let user_data = file_data.slice(0..res.meta_offset as usize);
+    (file_data, user_data, res.meta_offset as u64)
 }

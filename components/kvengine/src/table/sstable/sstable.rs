@@ -60,14 +60,13 @@ impl fmt::Debug for SsTable {
 }
 
 impl SsTable {
-    #[maybe_async::both]
-    pub async fn new(
+    pub fn new(
         file: Arc<dyn File>,
         cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
         let size = file.size();
-        let core = SsTableCore::new(file, 0, size, cache, encryption_key).await?;
+        let core = SsTableCore::new(file, 0, size, cache, encryption_key)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -87,9 +86,8 @@ impl SsTable {
         })
     }
 
-    #[maybe_async::both]
-    pub async fn new_iterator(&self, reversed: bool, fill_cache: bool) -> Box<TableIterator> {
-        let it = TableIterator::new(self.clone(), reversed, fill_cache).await;
+    pub fn new_iterator(&self, reversed: bool, fill_cache: bool) -> Box<TableIterator> {
+        let it = TableIterator::new(self.clone(), reversed, fill_cache);
         Box::new(it)
     }
 
@@ -111,12 +109,12 @@ impl SsTable {
         let small_value = self.kv_size < self.entries as u64 * SMALL_VALUE_SIZE;
         let skip_filter = small_value && level == 3;
         if self.filter_size() > 0 && !skip_filter {
-            let filter = self.get_filter().await;
+            let filter = self.get_filter();
             if !filter.contains(&key_hash) {
                 return table::Value::new();
             }
         }
-        let mut it = self.new_iterator(false, true).await;
+        let mut it = self.new_iterator(false, true);
         it.seek(key).await;
         if !it.valid() || key != it.key() {
             return table::Value::new();
@@ -138,7 +136,7 @@ impl SsTable {
         if !self.data_bound().overlap_bound(data_bound) {
             return false;
         }
-        let mut it = self.new_iterator(false, true).await;
+        let mut it = self.new_iterator(false, true);
         it.seek(data_bound.lower_bound).await;
         if !it.valid() {
             return it.error().is_some();
@@ -213,8 +211,7 @@ pub struct SsTableCore {
 }
 
 impl SsTableCore {
-    #[maybe_async::both]
-    pub async fn new(
+    pub fn new(
         file: Arc<dyn File>,
         start_off: u64,
         end_off: u64,
@@ -229,18 +226,17 @@ impl SsTableCore {
             if size < FOOTER_SIZE as u64 {
                 return Err(table::Error::InvalidFileSize);
             }
-            file.read(end_off - FOOTER_SIZE as u64, FOOTER_SIZE).await?
+            // It's a L0 sst, and must be sync.
+            file.read(end_off - FOOTER_SIZE as u64, FOOTER_SIZE)?
         };
         footer.unmarshal(footer_data.chunk());
         if footer.magic != MAGIC_NUMBER && footer.magic != MAGIC_NUMBER_SPLIT_L0 {
             return Err(table::Error::InvalidMagicNumber);
         }
-        let props_data = file
-            .read(
-                start_off + footer.properties_offset as u64,
-                footer.properties_len(size as usize),
-            )
-            .await?;
+        let props_data = file.read_table_meta(
+            start_off + footer.properties_offset as u64,
+            footer.properties_len(size as usize),
+        )?;
         let mut prop_slice = props_data.chunk();
         validate_checksum_with_fix(prop_slice, &footer, file.as_ref(), encryption_key.as_ref())?;
         prop_slice = &prop_slice[4..];
@@ -279,11 +275,10 @@ impl SsTableCore {
                 l0_version = LittleEndian::read_u64(val);
             }
         }
-        let is_sync = file.is_sync();
         let core = Self {
             file,
             cache,
-            filter: TtlCache::new(is_sync),
+            filter: TtlCache::default(),
             start_off,
             end_off,
             footer,
@@ -295,8 +290,8 @@ impl SsTableCore {
             tombs,
             kv_size: kv_size.unwrap_or(size),
             in_use_total_blob_size,
-            idx: TtlCache::new(is_sync),
-            old_idx: TtlCache::new(is_sync),
+            idx: TtlCache::default(),
+            old_idx: TtlCache::default(),
             encryption_ver,
             encryption_key,
             l0_version,
@@ -304,12 +299,10 @@ impl SsTableCore {
         Ok(core)
     }
 
-    #[maybe_async::both]
-    pub async fn init_index(&self, offset: u32, length: usize) -> Result<Index> {
+    pub fn init_index(&self, offset: u32, length: usize) -> Result<Index> {
         let idx_data = self
             .file
-            .read(self.start_off + offset as u64, length)
-            .await?;
+            .read_table_meta(self.start_off + offset as u64, length)?;
         self.validate_checksum_with_fix(idx_data.chunk())?;
         Index::new(idx_data)
     }
@@ -320,27 +313,9 @@ impl SsTableCore {
             .expect("load index")
     }
 
-    // TODO: handle error properly.
-    pub async fn load_index_async(&self) -> Arc<Index> {
-        self.idx
-            .get_async(self.init_index_async(self.footer.index_offset, self.footer.index_len()))
-            .await
-            .expect("load index")
-    }
-
     pub fn load_old_index(&self) -> Arc<Index> {
         self.old_idx
             .get(|| self.init_index(self.footer.old_index_offset, self.footer.old_index_len()))
-            .expect("load old index")
-    }
-
-    // TODO: handle error properly.
-    pub async fn load_old_index_async(&self) -> Arc<Index> {
-        self.old_idx
-            .get_async(
-                self.init_index_async(self.footer.old_index_offset, self.footer.old_index_len()),
-            )
-            .await
             .expect("load old index")
     }
 
@@ -513,24 +488,10 @@ impl SsTableCore {
             .expect("load filter")
     }
 
-    // TODO: handle error properly.
-    async fn get_filter_async(&self) -> Arc<BinaryFuse8> {
-        self.filter
-            .get_async(async {
-                let filter_data = self.read_filter_data_from_file_async().await?;
-                let filter = self.decode_filter(&filter_data)?;
-                Ok(filter)
-            })
-            .await
-            .expect("load filter")
-    }
-
-    #[maybe_async::both]
-    async fn read_filter_data_from_file(&self) -> Result<Bytes> {
+    fn read_filter_data_from_file(&self) -> Result<Bytes> {
         let mut data = self
             .file
-            .read(self.filter_offset() as u64, self.filter_size() as usize)
-            .await?;
+            .read_table_meta(self.filter_offset() as u64, self.filter_size() as usize)?;
         self.validate_checksum_with_fix(data.chunk())?;
         data.get_u32_le();
         assert_eq!(data.get_u32_le(), AUX_INDEX_BINARY_FUSE8);
@@ -570,6 +531,12 @@ impl SsTableCore {
             0
         };
         (idx_in_mem + old_idx_in_mem) as u64
+    }
+
+    /// The offset of first table meta (index).
+    #[inline]
+    pub fn meta_offset(&self) -> u32 {
+        self.index_offset()
     }
 
     pub fn index_offset(&self) -> u32 {
@@ -632,7 +599,7 @@ pub struct Index {
 }
 
 impl Index {
-    fn new(mut data: Bytes) -> Result<Self> {
+    pub(crate) fn new(mut data: Bytes) -> Result<Self> {
         let _checksum = data.get_u32_le();
         assert_eq!(data.get_u32_le(), INDEX_FORMAT_V1);
         let num_blocks = data.get_u32_le() as usize;
@@ -925,7 +892,7 @@ fn validate_checksum(file: &dyn File, data: &[u8], footer: &Footer) -> Result<()
 }
 
 #[inline]
-fn validate_checksum_with_fix(
+pub(crate) fn validate_checksum_with_fix(
     data: &[u8],
     footer: &Footer,
     file: &dyn File,
@@ -1031,9 +998,7 @@ pub(crate) mod test_util {
         sst_builder.finish(0, &mut buf);
         let sst_file = file::InMemFile::new(sst_fid, buf.into()).await;
 
-        SsTable::new(Arc::new(sst_file), new_test_cache(), None)
-            .await
-            .unwrap()
+        SsTable::new(Arc::new(sst_file), new_test_cache(), None).unwrap()
     }
 
     pub(crate) fn new_table_builder_for_test(sst_fid: u64) -> Builder {
@@ -1106,9 +1071,7 @@ pub(crate) mod test_util {
         sst_builder.finish(0, &mut sst_buf);
         let sst_file = Arc::new(file::InMemFile::new(sst_fid, sst_buf.into()).await);
         (
-            SsTable::new(sst_file, new_test_cache(), None)
-                .await
-                .unwrap(),
+            SsTable::new(sst_file, new_test_cache(), None).unwrap(),
             all_cnt,
         )
     }
@@ -1128,7 +1091,7 @@ mod tests {
     async fn test_table_iterator() {
         for n in 99..=101 {
             let (t, _) = create_sst_table("key", n).await;
-            let mut it = t.new_iterator(false, true).await;
+            let mut it = t.new_iterator(false, true);
             let mut count = 0;
             it.rewind().await;
             while it.valid() {
@@ -1182,7 +1145,7 @@ mod tests {
         let nums = &[99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
             let (t, _) = create_sst_table("key", *n).await;
-            let mut it = t.new_iterator(false, true).await;
+            let mut it = t.new_iterator(false, true);
             it.rewind().await;
             assert!(it.valid());
             let v = it.value();
@@ -1211,7 +1174,7 @@ mod tests {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
             let (t, _) = create_sst_table("key", n).await;
-            let mut it = t.new_iterator(true, true).await;
+            let mut it = t.new_iterator(true, true);
             it.rewind().await;
             assert!(it.valid());
             let v = it.value();
@@ -1239,7 +1202,7 @@ mod tests {
             TestData::new("z", false, ""),
         ];
         let (t, _) = create_sst_table("k", 10000).await;
-        let mut it = t.new_iterator(false, true).await;
+        let mut it = t.new_iterator(false, true);
         for td in test_datas {
             it.seek(InnerKey::from_inner_buf(td.input.as_bytes())).await;
             if !td.valid {
@@ -1263,7 +1226,7 @@ mod tests {
             TestData::new("z", true, "k9999"),
         ];
         let (t, _) = create_sst_table("k", 10000).await;
-        let mut it = t.new_iterator(true, true).await;
+        let mut it = t.new_iterator(true, true);
         for td in test_datas {
             it.seek(InnerKey::from_inner_buf(td.input.as_bytes())).await;
             if !td.valid {
@@ -1280,7 +1243,7 @@ mod tests {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
             let (t, _) = create_sst_table("key", n).await;
-            let mut it = t.new_iterator(false, true).await;
+            let mut it = t.new_iterator(false, true);
             let mut count = 0;
             it.rewind().await;
             assert!(it.valid());
@@ -1301,7 +1264,7 @@ mod tests {
         let nums = vec![99, 100, 101, 199, 200, 250, 9999, 10000];
         for n in nums {
             let (t, _) = create_sst_table("key", n).await;
-            let mut it = t.new_iterator(true, true).await;
+            let mut it = t.new_iterator(true, true);
             it.seek(InnerKey::from_inner_buf("zzzzzz".as_bytes())).await; // Seek to end, an invalid element.
             assert!(it.valid());
             it.rewind().await;
@@ -1320,7 +1283,7 @@ mod tests {
     #[maybe_async::test]
     async fn test_table() {
         let (t, _) = create_sst_table("key", 10000).await;
-        let mut it = t.new_iterator(false, true).await;
+        let mut it = t.new_iterator(false, true);
         let mut kid = 1010_usize;
         let seek = get_test_key("key", kid);
         it.seek(InnerKey::from_inner_buf(seek.as_bytes())).await;
@@ -1347,7 +1310,7 @@ mod tests {
     async fn test_iterate_back_and_forth() {
         let (t, _) = create_sst_table("key", 10000).await;
         let seek = get_test_key("key", 1010);
-        let mut it = t.new_iterator(false, true).await;
+        let mut it = t.new_iterator(false, true);
         it.seek(InnerKey::from_inner_buf(seek.as_bytes())).await;
         assert!(it.valid());
         assert_eq!(it.key().deref(), seek.as_bytes());
@@ -1386,7 +1349,7 @@ mod tests {
         let num = 4000;
         let kvs = generate_key_values("key", num);
         let (t, all_cnt) = create_multi_version_sst(&kvs).await;
-        let mut it = t.new_iterator(false, true).await;
+        let mut it = t.new_iterator(false, true);
         let mut it_cnt = 0;
         let mut last_key = BytesMut::new();
         it.rewind().await;
@@ -1422,7 +1385,7 @@ mod tests {
                 assert!(val.version <= ver);
             }
         }
-        let mut rev_it = t.new_iterator(true, true).await;
+        let mut rev_it = t.new_iterator(true, true);
         last_key.truncate(0);
         rev_it.rewind().await;
         while rev_it.valid() {
@@ -1449,7 +1412,7 @@ mod tests {
     async fn test_uni_iterator() {
         let (t, _) = create_sst_table("key", 10000).await;
         {
-            let mut it = t.new_iterator(false, true).await;
+            let mut it = t.new_iterator(false, true);
             let mut cnt = 0;
             it.rewind().await;
             while it.valid() {
@@ -1462,7 +1425,7 @@ mod tests {
             assert_eq!(cnt, 10000);
         }
         {
-            let mut it = t.new_iterator(true, true).await;
+            let mut it = t.new_iterator(true, true);
             let mut cnt = 0;
             it.rewind().await;
             while it.valid() {
@@ -1480,7 +1443,7 @@ mod tests {
     async fn test_reset_old_block_iter() {
         let kvs = generate_key_values("key", 10);
         let (t, _) = create_multi_version_sst(&kvs).await;
-        let mut it = t.new_iterator(false, true).await;
+        let mut it = t.new_iterator(false, true);
 
         for (k, _) in kvs {
             it.seek(InnerKey::from_inner_buf(k.as_bytes())).await;
@@ -1501,7 +1464,7 @@ mod tests {
         // No old version.
         {
             let (t, _) = create_sst_table_async("key", 10).await;
-            let mut it = t.new_iterator_async(false, true).await;
+            let mut it = t.new_iterator(false, true);
             it.rewind_async().await;
             assert!(it.is_next_version_sync());
             assert!(!next_version_async!(it));
@@ -1511,7 +1474,7 @@ mod tests {
         {
             let kvs = generate_key_values("key", 10);
             let (t, _) = create_multi_version_sst_async(&kvs).await;
-            let mut it = t.new_iterator_async(false, true).await;
+            let mut it = t.new_iterator(false, true);
             it.rewind_async().await;
             while next_version_async!(it) {}
             assert!(it.is_next_version_sync());

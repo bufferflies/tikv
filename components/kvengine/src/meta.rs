@@ -941,7 +941,7 @@ impl ShardMeta {
                         tbl.set_level(v.get_level());
                         tbl.set_smallest(v.smallest.to_vec());
                         tbl.set_biggest(v.biggest.to_vec());
-                        tbl.set_index_offset(v.index_offset);
+                        tbl.set_meta_offset(v.table_meta_off);
                         snap.mut_table_creates().push(tbl);
                     }
                 }
@@ -950,7 +950,7 @@ impl ShardMeta {
                     let mut col_file = pb::ColumnarCreate::new();
                     col_file.set_id(*k);
                     col_file.set_level(v.get_level());
-                    col_file.set_index_offset(v.index_offset);
+                    col_file.set_meta_offset(v.table_meta_off);
                     snap.mut_columnar_creates().push(col_file);
                 }
                 FileType::Blob => {
@@ -1230,9 +1230,11 @@ pub struct FileMeta {
     pub cf: i8,
     pub level: u8,
     pub file_type: FileType,
-    pub index_offset: u32,
     pub smallest: Bytes,
     pub biggest: Bytes,
+
+    // Available ONLY for SST (level 1+) & Columnar.
+    pub table_meta_off: u32,
 }
 
 impl FileMeta {
@@ -1242,15 +1244,15 @@ impl FileMeta {
         file_type: FileType,
         smallest: &[u8],
         biggest: &[u8],
-        index_offset: u32,
+        table_meta_off: u32,
     ) -> Self {
         Self {
             cf: cf as i8,
             level: level as u8,
             file_type,
-            index_offset,
             smallest: Bytes::copy_from_slice(smallest),
             biggest: Bytes::copy_from_slice(biggest),
+            table_meta_off,
         }
     }
 
@@ -1292,7 +1294,7 @@ impl FileMeta {
             FileType::Sst,
             table.get_smallest(),
             table.get_biggest(),
-            table.index_offset,
+            table.meta_offset,
         )
     }
 
@@ -1303,7 +1305,7 @@ impl FileMeta {
             FileType::Columnar,
             table.get_smallest(),
             table.get_biggest(),
-            table.index_offset,
+            table.meta_offset,
         )
     }
 

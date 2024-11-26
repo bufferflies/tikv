@@ -223,9 +223,8 @@ impl fmt::Debug for TableIterator {
 }
 
 impl TableIterator {
-    #[maybe_async::both]
-    pub async fn new(t: SsTable, reversed: bool, fill_cache: bool) -> Self {
-        let idx = t.load_index().await;
+    pub fn new(t: SsTable, reversed: bool, fill_cache: bool) -> Self {
+        let idx = t.load_index();
         Self {
             t,
             idx,
@@ -276,7 +275,7 @@ impl TableIterator {
     #[maybe_async::both]
     async fn set_old_block(&mut self, b_pos: i32) -> bool {
         self.old_b_pos = b_pos;
-        let old_block = self.get_old_idx().await;
+        let old_block = self.get_old_idx();
         let block = match self
             .t
             .load_old_block(
@@ -474,10 +473,9 @@ impl TableIterator {
             && &key[prefix_len..] == self.old_bi.get_diff_key()
     }
 
-    #[maybe_async::both]
-    async fn get_old_idx(&mut self) -> Arc<Index> {
+    fn get_old_idx(&mut self) -> Arc<Index> {
         if self.old_idx.is_none() {
-            let old_idx = self.t.load_old_index().await;
+            let old_idx = self.t.load_old_index();
             self.old_idx = Some(old_idx);
         }
         self.old_idx.as_ref().unwrap().clone()
@@ -486,7 +484,7 @@ impl TableIterator {
     #[maybe_async::both]
     async fn seek_old_block(&mut self) -> Option<table::Error> {
         assert!(self.iter_state == IterState::NewVersion);
-        let old_idx = self.get_old_idx().await;
+        let old_idx = self.get_old_idx();
         let mut old_b_pos = old_idx.seek_block(self.key_buf.chunk()) as i32 - 1;
         if old_b_pos == -1 {
             old_b_pos = 0;

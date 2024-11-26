@@ -351,8 +351,8 @@ impl S3Fifo {
     fn spawn_remove_from_main_store(&self, ident: FileSegmentIdent) {
         let task_counter = self.task_counter.clone();
         let ctx = self.segment_data_ctx.clone();
-        self.runtime.spawn(async move {
-            match ctx.remove_from_main_store(&ident).await {
+        self.runtime.spawn_blocking(move || {
+            match ctx.remove_from_main_store(&ident) {
                 Ok(Some(())) => {
                     debug!("remove from main store: done"; "ident" => %ident);
                 }

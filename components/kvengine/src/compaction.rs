@@ -1228,7 +1228,7 @@ impl Engine {
             table_create.set_cf(WRITE_CF as i32);
             table_create.set_smallest(l0_write_cf_tbl.smallest().to_vec());
             table_create.set_biggest(l0_write_cf_tbl.biggest().to_vec());
-            table_create.set_index_offset(l0_write_cf_tbl.index_offset());
+            table_create.set_meta_offset(l0_write_cf_tbl.meta_offset());
             move_down_l0s.push(table_create);
         }
         if move_down_l0s.is_empty() {
@@ -1384,7 +1384,7 @@ impl Engine {
                     tbl_create.set_level(level as u32 + 1);
                     tbl_create.set_smallest(top_tbl.smallest().to_vec());
                     tbl_create.set_biggest(top_tbl.biggest().to_vec());
-                    tbl_create.set_index_offset(top_tbl.index_offset());
+                    tbl_create.set_meta_offset(top_tbl.meta_offset());
                     tbl_create
                 })
                 .collect::<Vec<_>>();
@@ -2475,7 +2475,7 @@ fn compact_destroy_range(
         delete.set_cf(cf);
         deletes.push(delete);
         let file = table_files.remove(&id).unwrap();
-        let (data, smallest, biggest, index_offset) = if level == 0 {
+        let (data, smallest, biggest, meta_offset) = if level == 0 {
             let t =
                 sstable::L0Table::new(file, BlockCache::None, false, ctx.encryption_key.clone())
                     .unwrap()
@@ -2536,7 +2536,7 @@ fn compact_destroy_range(
             }
             let mut buf = Vec::with_capacity(builder.estimated_size());
             let res = builder.finish(0, &mut buf);
-            (buf.into(), res.smallest, res.biggest, res.index_offset)
+            (buf.into(), res.smallest, res.biggest, res.meta_offset)
         };
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
@@ -2549,7 +2549,7 @@ fn compact_destroy_range(
         create.set_cf(cf);
         create.set_smallest(smallest);
         create.set_biggest(biggest);
-        create.set_index_offset(index_offset);
+        create.set_meta_offset(meta_offset);
         creates.push(create);
     }
     let mut errors = creates
@@ -2731,7 +2731,7 @@ fn compact_truncate_ts(
         delete.set_cf(cf);
         deletes.push(delete);
 
-        let (data, smallest, biggest, index_offset) = if level == 0 {
+        let (data, smallest, biggest, meta_offset) = if level == 0 {
             let t =
                 sstable::L0Table::new(file, BlockCache::None, false, ctx.encryption_key.clone())
                     .unwrap()
@@ -2792,7 +2792,7 @@ fn compact_truncate_ts(
             }
             let mut buf = Vec::with_capacity(builder.estimated_size());
             let res = builder.finish(0, &mut buf);
-            (buf.into(), res.smallest, res.biggest, res.index_offset)
+            (buf.into(), res.smallest, res.biggest, res.meta_offset)
         };
 
         let tx = tx.clone();
@@ -2807,7 +2807,7 @@ fn compact_truncate_ts(
         create.set_cf(cf);
         create.set_smallest(smallest);
         create.set_biggest(biggest);
-        create.set_index_offset(index_offset);
+        create.set_meta_offset(meta_offset);
         creates.push(create);
 
         table_change.mut_file_ids_map().push(id);
@@ -2987,7 +2987,7 @@ fn compact_trim_over_bound(
         delete.set_cf(cf);
         deletes.push(delete);
 
-        let (data, smallest, biggest, index_offset) = if level == 0 {
+        let (data, smallest, biggest, meta_offset) = if level == 0 {
             let t =
                 sstable::L0Table::new(file, BlockCache::None, false, ctx.encryption_key.clone())
                     .unwrap()
@@ -3044,7 +3044,7 @@ fn compact_trim_over_bound(
             }
             let mut buf = Vec::with_capacity(builder.estimated_size());
             let res = builder.finish(0, &mut buf);
-            (buf.into(), res.smallest, res.biggest, res.index_offset)
+            (buf.into(), res.smallest, res.biggest, res.meta_offset)
         };
         let tx = tx.clone();
         let dfs_clone = dfs.clone();
@@ -3058,7 +3058,7 @@ fn compact_trim_over_bound(
         create.set_cf(cf);
         create.set_smallest(smallest);
         create.set_biggest(biggest);
-        create.set_index_offset(index_offset);
+        create.set_meta_offset(meta_offset);
         creates.push(create);
     }
 
@@ -3272,7 +3272,7 @@ fn persist_sst(
     tbl_create.set_level(target_lvl);
     tbl_create.set_smallest(res.smallest);
     tbl_create.set_biggest(res.biggest);
-    tbl_create.set_index_offset(res.index_offset);
+    tbl_create.set_meta_offset(res.meta_offset);
 
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
@@ -3319,13 +3319,13 @@ fn persist_columnar_file(
     opts: dfs::Options,
 ) {
     let id = builder.file_id;
-    let (buf, index_offset) = builder.build();
+    let (buf, meta_offset) = builder.build();
     let mut columnar_create = pb::ColumnarCreate::new();
     columnar_create.set_id(id);
     columnar_create.set_smallest(builder.smallest.clone());
     columnar_create.set_biggest(builder.biggest.clone());
     columnar_create.set_level(target_lvl);
-    columnar_create.set_index_offset(index_offset as u32);
+    columnar_create.set_meta_offset(meta_offset as u32);
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
         tx.send(

@@ -336,6 +336,7 @@ impl Shard {
             let fm = fm.clone();
             let tag = tag.clone();
             runtime.spawn(async move {
+                // TODO: prepare_table_meta for IA.
                 let res = fs.read_file(id, opts.with_type(fm.file_type)).await;
                 if tx.send(res.map(|data| (id, fm, data))).is_err() {
                     error!("failed to send result"; "tag" => tag, "file_id" => id);
@@ -347,6 +348,7 @@ impl Shard {
         for _ in 0..msg_count {
             match result_rx.recv().await.unwrap() {
                 Ok((id, fm, data)) => {
+                    // TODO: create IaFile with table meta for IA.
                     let file = Arc::new(InMemFile::new(id, data));
                     cs.add_file(id, file, &fm, block_cache.clone(), encryption_key.clone())?;
                     if fm.is_schema_file() {

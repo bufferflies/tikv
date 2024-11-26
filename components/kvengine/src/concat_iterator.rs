@@ -82,8 +82,7 @@ impl ConcatIterator {
         } else {
             let mut iter = self
                 .get_table(idx as usize)
-                .new_iterator(self.reversed, self.fill_cache)
-                .await;
+                .new_iterator(self.reversed, self.fill_cache);
             iter.rewind().await;
             self.iter = Some(iter);
         }

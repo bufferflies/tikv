@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -16,16 +17,10 @@ use dashmap::DashMap;
 use nix::NixPath;
 use sysinfo::{DiskExt, System as Sys, SystemExt};
 use tikv_util::sys::SysQuota;
-use tokio::{
-    fs,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
-};
+use tokio::io::AsyncWriteExt;
 
 use crate::{
-    ia::{
-        manager::{IaManagerOptions, QueueOptions},
-        types::FileSegmentIdent,
-    },
+    ia::manager::{IaManagerOptions, QueueOptions},
     table::{Error, Result},
     IoContext,
 };
@@ -44,27 +39,11 @@ pub trait LocalStore: Send + Sync {
     async fn save(&self, file_id: u64, key: &str, data: Bytes) -> Result<()>;
 
     /// Read exactly `buf.len()` bytes into `buf` starting at `offset`.
-    async fn read_at(
-        &self,
-        file_id: u64,
-        key: &str,
-        buf: &mut [u8],
-        offset: u64,
-    ) -> Result<Option<()>>;
+    fn read_at(&self, file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<Option<()>>;
 
-    async fn read(
-        &self,
-        file_id: u64,
-        key: &str,
-        start_off: u64,
-        end_off: u64,
-    ) -> Result<Option<Bytes>>;
+    fn read(&self, file_id: u64, key: &str, start_off: u64, end_off: u64) -> Result<Option<Bytes>>;
 
-    async fn read_all(&self, file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<Option<()>>;
-
-    async fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>>;
-
-    async fn exists(&self, file_id: u64, key: &str) -> bool;
+    fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>>;
 }
 
 pub fn new_local_store(path: Option<PathBuf>) -> Arc<dyn LocalStore> {
@@ -75,9 +54,9 @@ pub fn new_local_store(path: Option<PathBuf>) -> Arc<dyn LocalStore> {
     }
 }
 
-macro_rules! try_open {
-    ($path:expr) => {{
-        match tokio::fs::File::open($path).await {
+macro_rules! try_fs {
+    ($e:expr) => {{
+        match $e {
             Ok(f) => Ok(f),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None);
@@ -87,16 +66,8 @@ macro_rules! try_open {
     }};
 }
 
-macro_rules! try_remove {
-    ($path:expr) => {{
-        match tokio::fs::remove_file($path).await {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(err) => Err(err),
-        }
-    }};
+macro_rules! try_open {
+    ($path:expr) => {{ try_fs!(std::fs::File::open($path)) }};
 }
 
 #[macro_export]
@@ -126,13 +97,13 @@ impl LocalStore for LocalFileStore {
     }
 
     async fn init(&self) -> Result<()> {
-        fs::create_dir_all(&self.dir)
+        tokio::fs::create_dir_all(&self.dir)
             .await
             .table_ctx(0, format!("create_dir.{:?}", self.dir))
     }
 
     async fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
-        let mut entries = fs::read_dir(&self.dir)
+        let mut entries = tokio::fs::read_dir(&self.dir)
             .await
             .table_ctx(0, format!("read_dir.{:?}", self.dir))?;
         let mut map = HashMap::new();
@@ -154,7 +125,7 @@ impl LocalStore for LocalFileStore {
 
         let tmp_filename = format!("{}.{}.tmp", key, TMP_ID.fetch_add(1, Relaxed));
         let tmp_path = self.dir.join(tmp_filename);
-        let mut f = fs::File::create(&tmp_path)
+        let mut f = tokio::fs::File::create(&tmp_path)
             .await
             .table_ctx(file_id, format!("create_tmp.{key}"))?;
 
@@ -163,7 +134,7 @@ impl LocalStore for LocalFileStore {
             .table_ctx(file_id, format!("write_tmp.{key}"))?;
 
         let path = self.dir.join(key);
-        fs::rename(&tmp_path, &path)
+        tokio::fs::rename(&tmp_path, &path)
             .await
             .table_ctx(file_id, format!("rename.{key}"))?;
 
@@ -171,57 +142,29 @@ impl LocalStore for LocalFileStore {
         Ok(())
     }
 
-    async fn read_at(
-        &self,
-        file_id: u64,
-        key: &str,
-        buf: &mut [u8],
-        offset: u64,
-    ) -> Result<Option<()>> {
+    fn read_at(&self, file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<Option<()>> {
         let path = self.dir.join(key);
         debug!("FileDataStore.read_at"; "file_id" => file_id, "key" => key, "path" => ?path);
         let mut f = try_open!(&path).table_ctx(file_id, format!("open.{key}"))?;
         if offset > 0 {
             f.seek(SeekFrom::Start(offset))
-                .await
                 .table_ctx(file_id, format!("seek.{key}"))?;
         }
         f.read_exact(buf)
-            .await
             .table_ctx(file_id, format!("read_exact.{key}"))?;
         Ok(Some(()))
     }
 
-    async fn read(
-        &self,
-        file_id: u64,
-        key: &str,
-        start_off: u64,
-        end_off: u64,
-    ) -> Result<Option<Bytes>> {
+    fn read(&self, file_id: u64, key: &str, start_off: u64, end_off: u64) -> Result<Option<Bytes>> {
         let mut buf = vec![0; (end_off - start_off) as usize];
-        try_some!(self.read_at(file_id, key, &mut buf, start_off).await?);
+        try_some!(self.read_at(file_id, key, &mut buf, start_off)?);
         Ok(Some(Bytes::from(buf)))
     }
 
-    async fn read_all(&self, file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<Option<()>> {
+    fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>> {
         let path = self.dir.join(key);
-        let mut f = try_open!(&path).table_ctx(file_id, format!("open.{key}"))?;
-        f.read_to_end(buf)
-            .await
-            .table_ctx(file_id, format!("read_to_end.{key}"))?;
+        try_fs!(std::fs::remove_file(path)).table_ctx(file_id, format!("remove.{key}"))?;
         Ok(Some(()))
-    }
-
-    async fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>> {
-        let path = self.dir.join(key);
-        try_remove!(&path).table_ctx(file_id, format!("remove.{key}"))?;
-        Ok(Some(()))
-    }
-
-    async fn exists(&self, _file_id: u64, key: &str) -> bool {
-        let path = self.dir.join(key);
-        tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file())
     }
 }
 
@@ -268,20 +211,14 @@ impl LocalStore for LocalMemoryStore {
         Ok(())
     }
 
-    async fn read_at(
-        &self,
-        _file_id: u64,
-        key: &str,
-        buf: &mut [u8],
-        offset: u64,
-    ) -> Result<Option<()>> {
+    fn read_at(&self, _file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<Option<()>> {
         let end_off = offset + buf.len() as u64;
         let data = try_some!(self.get_with_check(key, end_off)?);
         buf.copy_from_slice(&data[offset as usize..end_off as usize]);
         Ok(Some(()))
     }
 
-    async fn read(
+    fn read(
         &self,
         _file_id: u64,
         key: &str,
@@ -294,55 +231,9 @@ impl LocalStore for LocalMemoryStore {
         )))
     }
 
-    async fn read_all(&self, _file_id: u64, key: &str, buf: &mut Vec<u8>) -> Result<Option<()>> {
-        let data = try_some!(self.get(key));
-        buf.extend_from_slice(&data);
-        Ok(Some(()))
-    }
-
-    async fn remove(&self, _file_id: u64, key: &str) -> Result<Option<()>> {
+    fn remove(&self, _file_id: u64, key: &str) -> Result<Option<()>> {
         Ok(self.m.remove(key).map(|_| ()))
     }
-
-    async fn exists(&self, _file_id: u64, key: &str) -> bool {
-        self.m.contains_key(key)
-    }
-}
-
-/// Split the range [start_off, end_off) into segments with size `segment_size`.
-///
-/// Align to integer times of `segment_size`.
-///
-/// The last segment is rounded to the total_size as half segment size.
-///
-/// E.g.: With regard to segment size of 100, last segment of file with total
-/// size of 1024 [900, 1024], while for file with total size of 1050 it is
-/// [1000, 1050].
-pub(crate) fn split_to_segments(
-    file_id: u64,
-    start_off: u64,
-    end_off: u64,
-    total_size: u64,
-    segment_size: u64,
-) -> Vec<FileSegmentIdent> {
-    debug_assert!(start_off < end_off && end_off <= total_size);
-
-    let start_floor = start_off / segment_size * segment_size;
-    let end_ceil = (end_off + segment_size - 1) / segment_size * segment_size;
-    let mut segs = (start_floor..end_ceil)
-        .step_by(segment_size as usize)
-        .map(|start_off| FileSegmentIdent {
-            file_id,
-            start_off,
-            end_off: start_off + segment_size,
-        })
-        .collect::<Vec<_>>();
-
-    debug_assert!(!segs.is_empty());
-    if total_size < end_ceil {
-        segs.last_mut().unwrap().end_off = total_size;
-    }
-    segs
 }
 
 const FILE_SEGMENT_SIZE_DEF: i64 = 1 << 20; // 1MiB
@@ -573,45 +464,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-
-    #[test]
-    fn test_split_to_segments() {
-        let segment_size = 10;
-        let cases = vec![
-            // start_off, end_off, total_size, expected
-            (0, 1, 5, vec![(0, 5)]),
-            (1, 5, 5, vec![(0, 5)]),
-            (0, 1, 100, vec![(0, 10)]),
-            (0, 1, 100, vec![(0, 10)]),
-            (0, 10, 100, vec![(0, 10)]),
-            (0, 5, 100, vec![(0, 10)]),
-            (0, 15, 100, vec![(0, 10), (10, 20)]),
-            (5, 15, 20, vec![(0, 10), (10, 20)]),
-            (5, 15, 30, vec![(0, 10), (10, 20)]),
-            (5, 25, 28, vec![(0, 10), (10, 20), (20, 28)]),
-            (5, 25, 30, vec![(0, 10), (10, 20), (20, 30)]),
-            (5, 25, 34, vec![(0, 10), (10, 20), (20, 30)]),
-            (5, 25, 35, vec![(0, 10), (10, 20), (20, 30)]),
-            (1020, 1021, 1024, vec![(1020, 1024)]),
-            (1010, 1021, 1021, vec![(1010, 1020), (1020, 1021)]),
-            (1010, 1024, 1024, vec![(1010, 1020), (1020, 1024)]),
-            (1010, 1025, 1025, vec![(1010, 1020), (1020, 1025)]),
-        ];
-        for (start, end, total_size, expected) in cases {
-            let expected = expected
-                .into_iter()
-                .map(|(start_off, end_off)| FileSegmentIdent {
-                    file_id: 1,
-                    start_off,
-                    end_off,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                split_to_segments(1, start, end, total_size, segment_size),
-                expected,
-            );
-        }
-    }
 
     #[test]
     fn test_ia_capacity() {

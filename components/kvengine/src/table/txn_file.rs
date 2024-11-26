@@ -663,13 +663,12 @@ impl TxnChunkInner {
             prop_slice = remained;
         }
         let index = TxnChunkIndex::new(idx_data);
-        let is_sync = file.is_sync();
         let chunk = Self {
             file,
             cache,
             footer,
             index,
-            hash_index: TtlCache::new(is_sync),
+            hash_index: TtlCache::default(),
             check_non_exists,
             inserts,
             encryption_key,

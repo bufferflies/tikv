@@ -248,7 +248,7 @@ impl Engine {
                 tbl_create.set_level(lvl.level as u32);
                 tbl_create.set_smallest(tbl.smallest().to_vec());
                 tbl_create.set_biggest(tbl.biggest().to_vec());
-                tbl_create.set_index_offset(tbl.index_offset());
+                tbl_create.set_meta_offset(tbl.meta_offset());
                 initial_flush.mut_table_creates().push(tbl_create);
             }
             false
@@ -297,7 +297,7 @@ impl Engine {
                         tbl.set_level(cl.level as u32);
                         tbl.set_smallest(col_file.get_smallest().to_vec());
                         tbl.set_biggest(col_file.get_biggest().to_vec());
-                        tbl.set_index_offset(col_file.get_index_offset());
+                        tbl.set_meta_offset(col_file.get_meta_offset());
                         initial_flush.mut_columnar_creates().push(tbl);
                     }
                     false

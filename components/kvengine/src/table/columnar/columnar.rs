@@ -510,6 +510,12 @@ impl ColumnarFile {
         InnerKey::from_inner_buf(&self.core.biggest_key)
     }
 
+    /// The offset of first table meta (index).
+    #[inline]
+    pub fn get_meta_offset(&self) -> u32 {
+        self.get_index_offset()
+    }
+
     pub fn get_index_offset(&self) -> u32 {
         self.core.index_offset
     }

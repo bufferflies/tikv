@@ -317,7 +317,7 @@ impl Builder {
 
         BuildResult {
             id: self.sst_fid,
-            index_offset: footer.index_offset,
+            meta_offset: footer.index_offset,
             smallest: self.smallest.clone(),
             biggest: self.biggest.clone(),
         }
@@ -745,7 +745,7 @@ impl BlockAddress {
 
 pub struct BuildResult {
     pub id: u64,
-    pub index_offset: u32,
+    pub meta_offset: u32,
     pub smallest: Vec<u8>,
     pub biggest: Vec<u8>,
 }

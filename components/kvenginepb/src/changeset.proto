@@ -128,7 +128,7 @@ message TableCreate {
   int32 CF = 3;
   bytes smallest = 4;
   bytes biggest = 5;
-  uint32 index_offset = 7;
+  uint32 meta_offset = 7;
 }
 
 message TableDelete {
@@ -142,7 +142,7 @@ message ColumnarCreate {
   uint32 level = 2;
   bytes smallest = 3;
   bytes biggest = 4;
-  uint32 index_offset = 5;
+  uint32 meta_offset = 5;
 }
 
 message ColumnarDelete {

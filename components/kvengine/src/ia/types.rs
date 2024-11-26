@@ -2,16 +2,9 @@
 
 use std::{fmt, hash::Hash, ops, sync::Arc};
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::Bytes;
 use dashmap::{mapref::entry::Entry, DashMap};
-use tikv_util::codec::number::{U64_SIZE, U8_SIZE};
 use tokio::sync::{Mutex, OwnedMutexGuard};
-
-use crate::{
-    dfs::FileType,
-    ia::util::LocalStore,
-    table::{Error, Result},
-};
 
 /// The identifier of a file segment.
 #[repr(C)]
@@ -164,92 +157,9 @@ where
     }
 }
 
-/// Version tag used to marshall footer info. Reserved for future use.
-const FOOTER_INFO_VER: u8 = 0;
-/// It's a hint for the footer length which should be enough for most cases.
-const FOOTER_LEN_HINT: u64 = 64;
-
-#[derive(PartialEq, Debug, Clone)]
-pub struct FooterInfo {
-    pub(crate) file_id: u64,
-    pub(crate) ftype: FileType,
-    pub(crate) file_total_size: u64,
-}
-
-impl FooterInfo {
-    pub(crate) async fn read_from_local(
-        store: &dyn LocalStore,
-        file_id: u64,
-    ) -> Result<(Self, Bytes)> {
-        let mut data = Vec::with_capacity(FOOTER_LEN_HINT as usize);
-        let res = store
-            .read_all(file_id, &Self::local_filename(file_id), &mut data)
-            .await?;
-        if res.is_none() {
-            return Err(Error::IaMgr(format!("footer not found: {file_id}")));
-        }
-        let data = Bytes::from(data);
-
-        // ver + ftype + total_size
-        let footer = data.slice(U8_SIZE + U8_SIZE + U64_SIZE..);
-
-        let mut header = data.as_ref();
-        let ver = header.get_u8();
-        if ver != FOOTER_INFO_VER {
-            return Err(Error::IaMgr(format!(
-                "invalid footer version, expect {}, got {}, file_id {}, data {:?}",
-                FOOTER_INFO_VER, ver, file_id, data
-            )));
-        }
-        let Some(ftype) = FileType::from_u8(header.get_u8()) else {
-            return Err(Error::IaMgr(format!(
-                "invalid file type, file_id {}, data {:?}",
-                file_id, data
-            )));
-        };
-        let file_total_size = header.get_u64_le();
-        let footer_info = Self {
-            file_id,
-            ftype,
-            file_total_size,
-        };
-
-        Ok((footer_info, footer))
-    }
-
-    pub(crate) async fn save_to_local(&self, store: &dyn LocalStore, footer: &[u8]) -> Result<()> {
-        // ver + ftype + total_size + footer
-        let mut data = Vec::with_capacity(U8_SIZE + U8_SIZE + U64_SIZE + footer.len());
-        data.put_u8(FOOTER_INFO_VER);
-        data.put_u8(self.ftype as u8);
-        data.put_u64_le(self.file_total_size);
-        data.put(footer);
-
-        store
-            .save(
-                self.file_id,
-                &Self::local_filename(self.file_id),
-                Bytes::from(data),
-            )
-            .await
-    }
-
-    pub(crate) async fn drop_from_local(
-        file_id: u64,
-        store: &dyn LocalStore,
-    ) -> Result<Option<()>> {
-        store.remove(file_id, &Self::local_filename(file_id)).await
-    }
-
-    pub fn local_filename(file_id: u64) -> String {
-        format!("{}.footer", file_id)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ia::util::LocalMemoryStore;
 
     #[test]
     fn test_file_segment_ident() {
@@ -285,28 +195,5 @@ mod tests {
             .fingerprint(),
             fingerprint
         );
-    }
-
-    #[tokio::test]
-    async fn test_footer_info() {
-        assert_eq!(FooterInfo::local_filename(1), "1.footer");
-
-        let store = Arc::new(LocalMemoryStore::default());
-        let footer_info = FooterInfo {
-            file_id: 1,
-            ftype: FileType::Sst,
-            file_total_size: 100,
-        };
-        let footer = b"footer";
-        footer_info
-            .save_to_local(store.as_ref(), footer)
-            .await
-            .unwrap();
-
-        let (footer_info1, footer1) = FooterInfo::read_from_local(store.as_ref(), 1)
-            .await
-            .unwrap();
-        assert_eq!(footer_info, footer_info1);
-        assert_eq!(footer, footer1.as_ref());
     }
 }

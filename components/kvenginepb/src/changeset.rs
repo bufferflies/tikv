@@ -4792,7 +4792,7 @@ pub struct TableCreate {
     pub cf: i32,
     pub smallest: ::std::vec::Vec<u8>,
     pub biggest: ::std::vec::Vec<u8>,
-    pub index_offset: u32,
+    pub meta_offset: u32,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -4906,19 +4906,19 @@ impl TableCreate {
         ::std::mem::replace(&mut self.biggest, ::std::vec::Vec::new())
     }
 
-    // uint32 index_offset = 7;
+    // uint32 meta_offset = 7;
 
 
-    pub fn get_index_offset(&self) -> u32 {
-        self.index_offset
+    pub fn get_meta_offset(&self) -> u32 {
+        self.meta_offset
     }
-    pub fn clear_index_offset(&mut self) {
-        self.index_offset = 0;
+    pub fn clear_meta_offset(&mut self) {
+        self.meta_offset = 0;
     }
 
     // Param is passed by value, moved
-    pub fn set_index_offset(&mut self, v: u32) {
-        self.index_offset = v;
+    pub fn set_meta_offset(&mut self, v: u32) {
+        self.meta_offset = v;
     }
 }
 
@@ -4963,7 +4963,7 @@ impl ::protobuf::Message for TableCreate {
                         return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
                     }
                     let tmp = is.read_uint32()?;
-                    self.index_offset = tmp;
+                    self.meta_offset = tmp;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -4992,8 +4992,8 @@ impl ::protobuf::Message for TableCreate {
         if !self.biggest.is_empty() {
             my_size += ::protobuf::rt::bytes_size(5, &self.biggest);
         }
-        if self.index_offset != 0 {
-            my_size += ::protobuf::rt::value_size(7, self.index_offset, ::protobuf::wire_format::WireTypeVarint);
+        if self.meta_offset != 0 {
+            my_size += ::protobuf::rt::value_size(7, self.meta_offset, ::protobuf::wire_format::WireTypeVarint);
         }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
@@ -5016,8 +5016,8 @@ impl ::protobuf::Message for TableCreate {
         if !self.biggest.is_empty() {
             os.write_bytes(5, &self.biggest)?;
         }
-        if self.index_offset != 0 {
-            os.write_uint32(7, self.index_offset)?;
+        if self.meta_offset != 0 {
+            os.write_uint32(7, self.meta_offset)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -5087,9 +5087,9 @@ impl ::protobuf::Message for TableCreate {
                     |m: &mut TableCreate| { &mut m.biggest },
                 ));
                 fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
-                    "index_offset",
-                    |m: &TableCreate| { &m.index_offset },
-                    |m: &mut TableCreate| { &mut m.index_offset },
+                    "meta_offset",
+                    |m: &TableCreate| { &m.meta_offset },
+                    |m: &mut TableCreate| { &mut m.meta_offset },
                 ));
                 ::protobuf::reflect::MessageDescriptor::new::<TableCreate>(
                     "TableCreate",
@@ -5118,7 +5118,7 @@ impl ::protobuf::Clear for TableCreate {
         self.cf = 0;
         self.smallest.clear();
         self.biggest.clear();
-        self.index_offset = 0;
+        self.meta_offset = 0;
         self.unknown_fields.clear();
     }
 }
@@ -5133,7 +5133,7 @@ impl ::protobuf::PbPrint for TableCreate {
         ::protobuf::PbPrint::fmt(&self.cf, "cf", buf);
         ::protobuf::PbPrint::fmt(&self.smallest, "smallest", buf);
         ::protobuf::PbPrint::fmt(&self.biggest, "biggest", buf);
-        ::protobuf::PbPrint::fmt(&self.index_offset, "index_offset", buf);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -5149,7 +5149,7 @@ impl ::std::fmt::Debug for TableCreate {
         ::protobuf::PbPrint::fmt(&self.cf, "cf", &mut s);
         ::protobuf::PbPrint::fmt(&self.smallest, "smallest", &mut s);
         ::protobuf::PbPrint::fmt(&self.biggest, "biggest", &mut s);
-        ::protobuf::PbPrint::fmt(&self.index_offset, "index_offset", &mut s);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -5418,7 +5418,7 @@ pub struct ColumnarCreate {
     pub level: u32,
     pub smallest: ::std::vec::Vec<u8>,
     pub biggest: ::std::vec::Vec<u8>,
-    pub index_offset: u32,
+    pub meta_offset: u32,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -5517,19 +5517,19 @@ impl ColumnarCreate {
         ::std::mem::replace(&mut self.biggest, ::std::vec::Vec::new())
     }
 
-    // uint32 index_offset = 5;
+    // uint32 meta_offset = 5;
 
 
-    pub fn get_index_offset(&self) -> u32 {
-        self.index_offset
+    pub fn get_meta_offset(&self) -> u32 {
+        self.meta_offset
     }
-    pub fn clear_index_offset(&mut self) {
-        self.index_offset = 0;
+    pub fn clear_meta_offset(&mut self) {
+        self.meta_offset = 0;
     }
 
     // Param is passed by value, moved
-    pub fn set_index_offset(&mut self, v: u32) {
-        self.index_offset = v;
+    pub fn set_meta_offset(&mut self, v: u32) {
+        self.meta_offset = v;
     }
 }
 
@@ -5567,7 +5567,7 @@ impl ::protobuf::Message for ColumnarCreate {
                         return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
                     }
                     let tmp = is.read_uint32()?;
-                    self.index_offset = tmp;
+                    self.meta_offset = tmp;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -5593,8 +5593,8 @@ impl ::protobuf::Message for ColumnarCreate {
         if !self.biggest.is_empty() {
             my_size += ::protobuf::rt::bytes_size(4, &self.biggest);
         }
-        if self.index_offset != 0 {
-            my_size += ::protobuf::rt::value_size(5, self.index_offset, ::protobuf::wire_format::WireTypeVarint);
+        if self.meta_offset != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.meta_offset, ::protobuf::wire_format::WireTypeVarint);
         }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
@@ -5614,8 +5614,8 @@ impl ::protobuf::Message for ColumnarCreate {
         if !self.biggest.is_empty() {
             os.write_bytes(4, &self.biggest)?;
         }
-        if self.index_offset != 0 {
-            os.write_uint32(5, self.index_offset)?;
+        if self.meta_offset != 0 {
+            os.write_uint32(5, self.meta_offset)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -5680,9 +5680,9 @@ impl ::protobuf::Message for ColumnarCreate {
                     |m: &mut ColumnarCreate| { &mut m.biggest },
                 ));
                 fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
-                    "index_offset",
-                    |m: &ColumnarCreate| { &m.index_offset },
-                    |m: &mut ColumnarCreate| { &mut m.index_offset },
+                    "meta_offset",
+                    |m: &ColumnarCreate| { &m.meta_offset },
+                    |m: &mut ColumnarCreate| { &mut m.meta_offset },
                 ));
                 ::protobuf::reflect::MessageDescriptor::new::<ColumnarCreate>(
                     "ColumnarCreate",
@@ -5710,7 +5710,7 @@ impl ::protobuf::Clear for ColumnarCreate {
         self.level = 0;
         self.smallest.clear();
         self.biggest.clear();
-        self.index_offset = 0;
+        self.meta_offset = 0;
         self.unknown_fields.clear();
     }
 }
@@ -5724,7 +5724,7 @@ impl ::protobuf::PbPrint for ColumnarCreate {
         ::protobuf::PbPrint::fmt(&self.level, "level", buf);
         ::protobuf::PbPrint::fmt(&self.smallest, "smallest", buf);
         ::protobuf::PbPrint::fmt(&self.biggest, "biggest", buf);
-        ::protobuf::PbPrint::fmt(&self.index_offset, "index_offset", buf);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -5739,7 +5739,7 @@ impl ::std::fmt::Debug for ColumnarCreate {
         ::protobuf::PbPrint::fmt(&self.level, "level", &mut s);
         ::protobuf::PbPrint::fmt(&self.smallest, "smallest", &mut s);
         ::protobuf::PbPrint::fmt(&self.biggest, "biggest", &mut s);
-        ::protobuf::PbPrint::fmt(&self.index_offset, "index_offset", &mut s);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -9223,18 +9223,18 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\
     \x01(\x0cB\0:\0\"C\n\nBlobCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\
     \x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\
-    \x03\x20\x01(\x0cB\0:\0\"{\n\x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\
+    \x03\x20\x01(\x0cB\0:\0\"z\n\x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\
     \x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\
     \x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\x20\x01(\x0cB\0\
-    \x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0\x12\x16\n\x0cindex_offset\
+    \x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\
     \x18\x07\x20\x01(\rB\0:\0\"<\n\x0bTableDelete\x12\x0c\n\x02ID\x18\x01\
     \x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02C\
-    F\x18\x03\x20\x01(\x05B\0:\0\"p\n\x0eColumnarCreate\x12\x0c\n\x02ID\x18\
+    F\x18\x03\x20\x01(\x05B\0:\0\"o\n\x0eColumnarCreate\x12\x0c\n\x02ID\x18\
     \x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x12\n\
     \x08smallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\
-    \x01(\x0cB\0\x12\x16\n\x0cindex_offset\x18\x05\x20\x01(\rB\0:\0\"1\n\x0e\
-    ColumnarDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05leve\
-    l\x18\x02\x20\x01(\rB\0:\0\"D\n\x05Split\x12)\n\tnewShards\x18\x01\x20\
+    \x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x05\x20\x01(\rB\0:\0\"1\n\x0eC\
+    olumnarDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\
+    \x18\x02\x20\x01(\rB\0:\0\"D\n\x05Split\x12)\n\tnewShards\x18\x01\x20\
     \x03(\x0b2\x14.enginepb.PropertiesB\0\x12\x0e\n\x04Keys\x18\x03\x20\x03(\
     \x0cB\0:\0\"\xd2\x01\n\x0bIngestFiles\x12'\n\tl0Creates\x18\x01\x20\x03(\
     \x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\

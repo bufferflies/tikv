@@ -887,7 +887,7 @@ impl SnapAccessCore {
                 tbl.set_level(lh.level as u32);
                 tbl.set_smallest(v.smallest().to_vec());
                 tbl.set_biggest(v.biggest().to_vec());
-                tbl.set_index_offset(v.index_offset());
+                tbl.set_meta_offset(v.meta_offset());
                 snap.mut_table_creates().push(tbl);
             }
             false
@@ -916,7 +916,7 @@ impl SnapAccessCore {
                 tbl.set_level(cl.level as u32);
                 tbl.set_smallest(col_file.get_smallest().to_vec());
                 tbl.set_biggest(col_file.get_biggest().to_vec());
-                tbl.set_index_offset(col_file.get_index_offset());
+                tbl.set_meta_offset(col_file.get_meta_offset());
                 snap.mut_columnar_creates().push(tbl);
             }
             false

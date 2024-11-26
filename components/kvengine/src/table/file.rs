@@ -2,12 +2,11 @@
 
 use std::{
     fmt,
-    future::Future,
     ops::Deref,
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
     },
 };
@@ -15,10 +14,7 @@ use std::{
 use bytes::Bytes;
 use memmap2::Mmap;
 
-use crate::{
-    error::IoContext,
-    table::{table, Error},
-};
+use crate::{error::IoContext, table::table};
 
 // 30 minutes idle file would be closed.
 const FILE_TTL: u64 = 30 * 60;
@@ -48,16 +44,21 @@ pub trait File: Sync + Send {
     /// `read_at` reads the data to the buffer.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> table::Result<()>;
 
-    /// `read_footer` reads last `footer_length` bytes of the file by default.
+    /// `read_table_meta` read meta (e.g, index, filter) of tables.
     ///
-    /// Some implementation can have better performance (e.g. `IaFile`).
+    /// `read_table_meta` has the same result of `read`. But some implementation
+    /// can have better performance (e.g. `IaFile`).
+    fn read_table_meta(&self, off: u64, length: usize) -> table::Result<Bytes> {
+        self.read(off, length)
+    }
+
     fn read_footer(&self, footer_length: usize) -> table::Result<Bytes> {
         let size = self.size();
-        if size < footer_length as u64 {
+        let Some(off) = size.checked_sub(footer_length as u64) else {
             error!("invalid file size"; "file_id" => self.id(), "size" => size, "footer_length" => footer_length);
             return Err(table::Error::InvalidFileSize);
-        }
-        self.read(size - footer_length as u64, footer_length)
+        };
+        self.read_table_meta(off, footer_length)
     }
 
     /// `read_async` is async version of `read`.
@@ -117,7 +118,7 @@ impl LocalFile {
             id,
             size: meta.size(),
             path: path.to_path_buf(),
-            fd: TtlCache::new(true),
+            fd: TtlCache::default(),
             mmap: Mutex::new(None),
         };
         Ok(local_file)
@@ -255,12 +256,9 @@ impl File for InMemFile {
         self.read_at_inner(buf, offset)
     }
 
-    fn read_footer(&self, footer_length: usize) -> table::Result<Bytes> {
-        let Some(off) = self.size().checked_sub(footer_length as u64) else {
-            error!("read footer: invalid size"; "file" => ?self, "footer_length" => footer_length);
-            return Err(Error::InvalidFileSize);
-        };
-        self.read_inner(off, footer_length)
+    fn read_table_meta(&self, off: u64, length: usize) -> table::Result<Bytes> {
+        // Skip the `is_sync` checking.
+        self.read_inner(off, length)
     }
 
     #[cfg(test)]
@@ -282,89 +280,30 @@ impl File for InMemFile {
     }
 }
 
-enum TtlCacheMutex<T> {
-    Sync(std::sync::Mutex<T>),
-    Async(tokio::sync::Mutex<T>),
-}
-
 pub struct TtlCache<T> {
     access_ns: AtomicU64,
-    data: TtlCacheMutex<Option<Arc<T>>>,
-    has_type_error: AtomicBool,
+    data: Mutex<Option<Arc<T>>>,
+}
+
+impl<T> Default for TtlCache<T> {
+    fn default() -> Self {
+        Self {
+            access_ns: AtomicU64::new(0),
+            data: Default::default(),
+        }
+    }
 }
 
 impl<T> TtlCache<T> {
-    pub fn new(is_sync: bool) -> Self {
-        Self {
-            access_ns: AtomicU64::new(0),
-            data: if is_sync {
-                TtlCacheMutex::Sync(Default::default())
-            } else {
-                TtlCacheMutex::Async(Default::default())
-            },
-            has_type_error: AtomicBool::new(false),
-        }
-    }
-
     pub fn get(&self, init: impl FnOnce() -> table::Result<T>) -> table::Result<Arc<T>> {
         let now_ns = time::precise_time_ns();
         self.access_ns.store(now_ns, Relaxed);
-        match &self.data {
-            TtlCacheMutex::Sync(mu) => {
-                let mut guard = mu.lock().unwrap();
-                if guard.is_none() {
-                    let data = init()?;
-                    *guard = Some(Arc::new(data));
-                }
-                Ok(guard.as_ref().unwrap().clone())
-            }
-            _ => {
-                self.handle_type_error(false);
-                let data = init()?;
-                Ok(Arc::new(data))
-            }
+        let mut guard = self.data.lock().unwrap();
+        if guard.is_none() {
+            let data = init()?;
+            *guard = Some(Arc::new(data));
         }
-    }
-
-    pub async fn get_async(
-        &self,
-        init: impl Future<Output = table::Result<T>>,
-    ) -> table::Result<Arc<T>> {
-        let now_ns = time::precise_time_ns();
-        self.access_ns.store(now_ns, Relaxed);
-        match &self.data {
-            TtlCacheMutex::Async(mu) => {
-                let mut guard = mu.lock().await;
-                if guard.is_none() {
-                    let data = init.await?;
-                    *guard = Some(Arc::new(data));
-                }
-                Ok(guard.as_ref().unwrap().clone())
-            }
-            _ => {
-                self.handle_type_error(true);
-                let data = init.await?;
-                Ok(Arc::new(data))
-            }
-        }
-    }
-
-    // TODO: remove when stable enough
-    fn handle_type_error(&self, is_sync: bool) {
-        debug_assert!(
-            false,
-            "incorrect TtlCache type: is_sync: {}, bt: {:?}",
-            is_sync,
-            backtrace::Backtrace::new(),
-        );
-        if self
-            .has_type_error
-            .compare_exchange_weak(false, true, Relaxed, Relaxed)
-            .is_ok()
-        {
-            let bt = backtrace::Backtrace::new();
-            error!("incorrect TtlCache type"; "is_sync" => is_sync, "bt" => ?bt);
-        }
+        Ok(guard.as_ref().unwrap().clone())
     }
 
     pub fn expire(&self, dur_secs: u64) {
@@ -372,19 +311,9 @@ impl<T> TtlCache<T> {
         let now_ns = time::precise_time_ns();
         let dur_nanos = dur_secs * 1_000_000_000;
         if access_ns > 0 && now_ns.saturating_sub(access_ns) > dur_nanos {
-            match &self.data {
-                TtlCacheMutex::Sync(mu) => {
-                    if let Ok(mut data) = mu.try_lock() {
-                        data.take();
-                        self.access_ns.store(0, Relaxed);
-                    }
-                }
-                TtlCacheMutex::Async(mu) => {
-                    if let Ok(mut data) = mu.try_lock() {
-                        data.take();
-                        self.access_ns.store(0, Relaxed);
-                    }
-                }
+            if let Ok(mut data) = self.data.try_lock() {
+                data.take();
+                self.access_ns.store(0, Relaxed);
             }
         }
     }
@@ -398,13 +327,11 @@ impl<T> TtlCache<T> {
 mod tests {
     use std::{intrinsics::black_box, ops::Deref, time::Duration};
 
-    use futures::{executor::block_on, future};
-
     use crate::table::file::TtlCache;
 
     #[test]
     fn test_ttl_cache() {
-        let cache: TtlCache<Vec<u8>> = TtlCache::new(true);
+        let cache: TtlCache<Vec<u8>> = TtlCache::default();
         assert!(!cache.is_loaded());
         let data = cache.get(|| Ok(vec![1, 2, 3, 4])).unwrap();
         assert_eq!(data.deref(), &[1, 2, 3, 4]);
@@ -416,39 +343,13 @@ mod tests {
         assert!(!cache.is_loaded());
     }
 
-    #[tokio::test]
-    async fn test_ttl_cache_async() {
-        let cache: TtlCache<Vec<u8>> = TtlCache::new(false);
-        assert!(!cache.is_loaded());
-        let data = cache.get_async(future::ok(vec![1, 2, 3, 4])).await.unwrap();
-        assert_eq!(data.deref(), &[1, 2, 3, 4]);
-        assert!(cache.is_loaded());
-        cache.expire(1);
-        assert!(cache.is_loaded());
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        cache.expire(1);
-        assert!(!cache.is_loaded());
-    }
-
     #[bench]
     fn bench_ttl_cache(b: &mut test::Bencher) {
-        let cache: TtlCache<u64> = TtlCache::new(true);
+        let cache: TtlCache<u64> = TtlCache::default();
         b.iter(|| {
             for _ in 0..1000 {
                 black_box(cache.get(|| Ok(1)).unwrap());
             }
-        });
-    }
-
-    #[bench]
-    fn bench_ttl_cache_async(b: &mut test::Bencher) {
-        let cache: TtlCache<u64> = TtlCache::new(false);
-        b.iter(|| {
-            block_on(async {
-                for _ in 0..1000 {
-                    black_box(cache.get_async(future::ok(1)).await.unwrap());
-                }
-            });
         });
     }
 }
