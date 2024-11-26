@@ -19,6 +19,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    thread,
     time::Duration,
 };
 
@@ -309,21 +310,13 @@ fn start_server(
     });
 
     if !config.push_metrics_addr.is_empty() && !config.push_metrics_interval.is_zero() {
-        run_prometheus_push(
-            thread_pool,
-            config.push_metrics_addr,
-            config.push_metrics_interval.0,
-        );
+        run_prometheus_push(config.push_metrics_addr, config.push_metrics_interval.0);
     }
 
     ServerFuture::new(server, cop_server_opt)
 }
 
-fn run_prometheus_push(
-    thread_pool: Arc<Runtime>,
-    push_metrics_addr: String,
-    push_metrics_interval: Duration,
-) {
+fn run_prometheus_push(push_metrics_addr: String, push_metrics_interval: Duration) {
     let pod_name: String = std::env::var("HOSTNAME").unwrap_or_default();
     if pod_name.is_empty() {
         warn!("failed to get pod name, metrics push will be disabled");
@@ -331,23 +324,23 @@ fn run_prometheus_push(
     }
     let container_name: String =
         std::env::var("CONTAINER_NAME").unwrap_or("tikv-worker".to_owned());
-    info!("start to push metrics to prometheus");
-    thread_pool.spawn(async move {
-            loop {
-                tokio::time::sleep(push_metrics_interval).await;
-                let res = prometheus::push_collector(
-                    "tikv-worker",
-                    labels! {"pod".to_owned() => pod_name.clone(), "container".to_owned() => container_name.clone()},
-                    &push_metrics_addr,
-                    vec![Box::new(LOAD_DATA_WRU_COST_COUNTER.clone())
-                        as Box<dyn prometheus::core::Collector>],
-                    None,
-                );
-                if let Err(e) = res {
-                    error!("failed to push metrics to prometheus: {}", e);
-                }
+    thread::spawn(move || {
+        info!("start to push metrics to prometheus");
+        loop {
+            thread::sleep(push_metrics_interval);
+            let res = prometheus::push_collector(
+                "tikv-worker",
+                labels! {"pod".to_owned() => pod_name.clone(), "container".to_owned() => container_name.clone()},
+                &push_metrics_addr,
+                vec![Box::new(LOAD_DATA_WRU_COST_COUNTER.clone())
+                    as Box<dyn prometheus::core::Collector>],
+                None,
+            );
+            if let Err(e) = res {
+                error!("failed to push metrics to prometheus: {}", e);
             }
-        });
+        }
+    });
 }
 
 pub struct CloudWorker {

@@ -19,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{atomic::AtomicU64, Arc, Once},
-    u64,
+    thread, u64,
 };
 
 use api_version::{dispatch_api_version, KvFormat};
@@ -385,9 +385,10 @@ impl TikvServer {
             warn!("failed to get pod name, metrics push will be disabled");
             return;
         }
-        info!("start to push metrics to prometheus");
-        self.background_worker
-            .spawn_interval_task(interval.0, move || {
+        thread::spawn(move || {
+            info!("start to push metrics to prometheus");
+            loop {
+                thread::sleep(interval.0);
                 let res = prometheus::push_collector(
                     "tikv-server",
                     labels! {"pod".to_owned() => pod_name.clone(), "container".to_owned() => "tikv".to_owned()},
@@ -399,7 +400,8 @@ impl TikvServer {
                 if let Err(e) = res {
                     error!("failed to push metrics to prometheus: {}", e);
                 }
-            });
+            }
+        });
     }
 
     /// Initialize and check the config
