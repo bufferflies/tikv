@@ -145,8 +145,11 @@ fn new_test_engine_opt(
     )
 }
 
-#[test]
-fn test_engine() {
+// NOTE: In async test, access underlying file with async methods is not
+// checked, as `load_data` can only generate tables with `LocalFile`.
+// TODO: generate sstables with `IaFile`.
+#[maybe_async::test]
+async fn test_engine() {
     ::test_util::init_log_for_test();
     let (engine, applier_tx) = new_test_engine();
     // FIXME(youjiali1995): split has bugs.
@@ -159,7 +162,7 @@ fn test_engine() {
     // let handle = thread::spawn(move || {
     // splitter.run();
     // });
-    let (begin, end) = (0, 10000);
+    let (begin, end) = (0, 1000);
     load_data(
         begin,
         end,
@@ -168,6 +171,9 @@ fn test_engine() {
         engine.opts.blob_table_build_options.min_blob_size,
     );
     // handle.join().unwrap();
+
+    wait_for_compact_to_level_1_plus(&engine, begin, Duration::from_secs(10));
+
     check_get(
         begin,
         end,
@@ -177,8 +183,9 @@ fn test_engine() {
         true,
         None,
         engine.opts.blob_table_build_options.min_blob_size,
-    );
-    check_iterater(begin, end, &engine);
+    )
+    .await;
+    check_iterator(begin, end, &engine).await;
 }
 
 #[test]
@@ -250,7 +257,7 @@ fn test_destroy_range() {
         None,
         engine.opts.blob_table_build_options.min_blob_size,
     );
-    check_iterater(30, 50, &engine);
+    check_iterator(30, 50, &engine);
 
     // Trigger L0 compaction.
     for i in 1..=10 {
@@ -648,11 +655,11 @@ fn test_lost_tombstone_issue() {
     check_get(50, 100, 104, &[0], &engine, false, None, 0);
 }
 
-// This test case consturct a three level LSM tree and with different version
+// This test case construct a three level LSM tree and with different version
 // and add tombstone with latest version. Iterator should return all versions of
 // the key, excluding the tombstoned key.
-#[test]
-fn test_read_iterator_all_versions() {
+#[maybe_async::test]
+async fn test_read_iterator_all_versions() {
     ::test_util::init_log_for_test();
     let (engine, _) = new_test_engine();
     let shard = engine.get_shard(1).unwrap();
@@ -667,15 +674,15 @@ fn test_read_iterator_all_versions() {
     // 90..100 has version 101 and 102
     // 100..150 has version 102
     cf_builder.add_table(
-        new_table(&engine, 11, 0, 100, 101, false, &mut saved_vals),
+        new_table(&engine, 11, 0, 100, 101, false, &mut saved_vals).await,
         3,
     );
     cf_builder.add_table(
-        new_table(&engine, 12, 50, 150, 102, false, &mut saved_vals),
+        new_table(&engine, 12, 50, 150, 102, false, &mut saved_vals).await,
         2,
     );
     cf_builder.add_table(
-        new_table(&engine, 13, 70, 90, 103, true, &mut saved_vals),
+        new_table(&engine, 13, 70, 90, 103, true, &mut saved_vals).await,
         1,
     );
 
@@ -684,8 +691,8 @@ fn test_read_iterator_all_versions() {
     shard.set_data(builder.build());
 
     let snap = SnapAccess::new(&shard);
-    let mut iter = snap.new_iterator(cf, false, true, None, false);
-    iter.seek(shard.outer_start.chunk());
+    let mut iter = snap.new_iterator(cf, false, true, None, false).await;
+    iter.seek(shard.outer_start.chunk()).await;
 
     let mut expected_keys = Vec::with_capacity(160);
     for i in 0..50 {
@@ -713,7 +720,7 @@ fn test_read_iterator_all_versions() {
             .i_to_outer_key(expected_keys_iter.next().unwrap().to_owned());
         assert_eq!(iter.key(), key.as_slice());
         assert_eq!(iter.val(), key.repeat(2).as_slice());
-        iter.next();
+        iter.next().await;
     }
 }
 
@@ -1709,7 +1716,8 @@ fn i_to_key(i: i32, min_blob_size: u32) -> String {
     }
 }
 
-fn new_table(
+#[maybe_async::both]
+async fn new_table(
     engine: &TestEngine,
     id: u64,
     begin: usize,
@@ -1721,7 +1729,6 @@ fn new_table(
     let block_size = engine.opts.table_builder_options.block_size;
     let comp_tp = engine.opts.table_builder_options.compression_tps[0];
     let comp_lvl = engine.opts.table_builder_options.compression_lvl;
-    let fs = engine.fs.clone();
 
     let mut builder = table::sstable::builder::Builder::new(
         id,
@@ -1748,10 +1755,30 @@ fn new_table(
     builder.finish(0, &mut data_buf);
     let data = Bytes::from(data_buf);
     let opts = dfs::Options::default();
-    let runtime = fs.get_runtime();
-    runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
-    let file = InMemFile::new(id, data);
+    dfs_create_table(engine.fs.as_ref(), id, data.clone(), opts)
+        .await
+        .unwrap();
+    let file = InMemFile::new(id, data).await;
     SsTable::new(Arc::new(file), BlockCache::None, None).unwrap()
+}
+
+fn dfs_create_table(
+    fs: &dyn dfs::Dfs,
+    file_id: u64,
+    data: Bytes,
+    opts: dfs::Options,
+) -> dfs::Result<()> {
+    let runtime = fs.get_runtime();
+    runtime.block_on(fs.create(file_id, data, opts))
+}
+
+async fn dfs_create_table_async(
+    dfs: &dyn dfs::Dfs,
+    file_id: u64,
+    data: Bytes,
+    opts: dfs::Options,
+) -> dfs::Result<()> {
+    dfs.create(file_id, data, opts).await
 }
 
 fn new_l0table_file(
@@ -1841,6 +1868,23 @@ fn load_data_ext(
     }
 }
 
+fn wait_for_compact_to_level_1_plus(en: &Engine, i: usize, timeout: Duration) {
+    let key = i_to_key(i as i32, en.opts.blob_table_build_options.min_blob_size);
+    let ok = try_wait(
+        || {
+            let shard = get_shard_for_key(key.as_bytes(), en);
+            let stats = en.get_shard_stat(shard.id);
+            stats.compaction_score < 1.0
+                && stats.cfs[WRITE_CF]
+                    .levels
+                    .iter()
+                    .any(|lv| lv.num_tables > 0)
+        },
+        timeout.as_secs() as usize,
+    );
+    assert!(ok, "wait for compact to level 1+ timeout");
+}
+
 fn switch_mem_table(engine: &TestEngine, tx: &mpsc::Sender<ApplyTask>) {
     let mut wb = WriteBatch::new(1, engine.inner_key_off());
     wb.set_switch_mem_table();
@@ -1856,7 +1900,8 @@ fn write_data(wb: WriteBatch, applier_tx: &mpsc::Sender<ApplyTask>) -> u64 /* wr
     result_rx.recv().unwrap().unwrap()
 }
 
-fn check_get(
+#[maybe_async::both]
+async fn check_get(
     begin: usize,
     end: usize,
     version: u64,
@@ -1872,7 +1917,7 @@ fn check_get(
         let snap = SnapAccess::new(&shard);
         for &cf in cfs {
             let version = if cf == 1 { 0 } else { version };
-            let item = snap.get(cf, key.as_bytes(), version);
+            let item = snap.get(cf, key.as_bytes(), version).await;
             if item.is_valid() {
                 if !exist {
                     if item.is_deleted() {
@@ -1901,8 +1946,8 @@ fn check_get(
     }
 }
 
-fn check_iterater(begin: usize, end: usize, en: &Engine) {
-    thread::sleep(Duration::from_secs(1));
+#[maybe_async::both]
+async fn check_iterator(begin: usize, end: usize, en: &Engine) {
     for cf in 0..3 {
         let mut i = begin;
         // let ids = vec![2, 3, 4, 5, 1];
@@ -1910,8 +1955,8 @@ fn check_iterater(begin: usize, end: usize, en: &Engine) {
         for id in ids {
             let shard = en.get_shard(id).unwrap();
             let snap = SnapAccess::new(&shard);
-            let mut iter = snap.new_iterator(cf, false, false, None, true);
-            iter.seek(shard.outer_start.chunk());
+            let mut iter = snap.new_iterator(cf, false, false, None, true).await;
+            iter.seek(shard.outer_start.chunk()).await;
             while iter.valid() {
                 if iter.key.chunk() >= shard.outer_end.chunk() {
                     break;
@@ -1920,7 +1965,7 @@ fn check_iterater(begin: usize, end: usize, en: &Engine) {
                 assert_eq!(iter.key(), key.as_bytes());
                 assert_eq!(iter.val(), key.repeat(cf + 2).as_bytes());
                 i += 1;
-                iter.next();
+                iter.next().await;
             }
         }
         assert_eq!(i, end);

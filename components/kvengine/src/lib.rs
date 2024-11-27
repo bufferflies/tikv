@@ -21,6 +21,7 @@ pub use config::{
     Config as KvEngineConfig, PerKeyspaceConfig as KvEnginePerKeyspaceConfig,
     MEM_TABLE_MAX_SIZE as KV_ENGINE_MEM_TABLE_MAX_SIZE,
 };
+pub mod context;
 pub mod dfs;
 pub mod engine;
 pub mod engine_trait;

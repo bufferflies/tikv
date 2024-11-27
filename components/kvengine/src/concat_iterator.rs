@@ -36,7 +36,6 @@ impl fmt::Debug for ConcatIterator {
     }
 }
 
-#[allow(dead_code)]
 impl ConcatIterator {
     pub(crate) fn new(level: LevelHandler, reversed: bool, fill_cache: bool) -> Self {
         let is_tables_sync = level.tables.iter().all(|f| f.is_sync());

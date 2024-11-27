@@ -11,8 +11,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use cloud_encryption::{EncryptionKey, MasterKey};
-use dashmap::DashMap;
+use cloud_encryption::EncryptionKey;
 use kvenginepb as pb;
 use kvenginepb::TxnFileRefs;
 use log_wrappers::Value as LogValue;
@@ -26,20 +25,19 @@ use tipb::ColumnInfo;
 use txn_types::Lock;
 
 use crate::{
+    context::SnapCtx,
     limiter::RegionLimiter,
     table::{
         blobtable::blobtable::BlobPrefetcher,
         columnar::{
             ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader, ColumnarReader,
-            ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf, SchemaFile,
-            HANDLE_COL_ID,
+            ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf, HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
-        sstable::BlockCache,
         table,
         vector_index::VectorItemsReader,
-        BoundedDataSet, DataBound, InnerKey, Iterator as TableIterator, SkipOpTxnFileIterator,
-        TxnFile, TxnFileIterator,
+        AsyncMergeIterator, BoundedDataSet, DataBound, InnerKey, Iterator as TableIterator,
+        SkipOpTxnFileIterator, TxnFile, TxnFileIterator,
     },
     txn_chunk_manager::TxnChunkManager,
     *,
@@ -110,67 +108,32 @@ impl SnapAccess {
 
     pub async fn from_change_set(
         tag: String,
-        dfs: Arc<dyn dfs::Dfs>,
+        ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         ignore_lock: bool,
-        master_key: &MasterKey,
-        block_cache: BlockCache,
-        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
-        txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
         let core = Arc::new(
-            SnapAccessCore::from_change_set(
-                tag,
-                dfs,
-                change_set,
-                vec![],
-                ignore_lock,
-                master_key,
-                block_cache,
-                schema_files,
-                txn_chunk_manager,
-            )
-            .await?,
+            SnapAccessCore::from_change_set(tag, ctx, change_set, vec![], ignore_lock).await?,
         );
         Ok(Self { core })
     }
 
     async fn from_change_set_and_memtable_data(
         tag: String,
-        dfs: Arc<dyn dfs::Dfs>,
+        ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         mem_tbls: Vec<CfTable>,
-        master_key: &MasterKey,
-        block_cache: BlockCache,
-        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
-        txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
-        let core = Arc::new(
-            SnapAccessCore::from_change_set(
-                tag,
-                dfs,
-                change_set,
-                mem_tbls,
-                true,
-                master_key,
-                block_cache,
-                schema_files,
-                txn_chunk_manager,
-            )
-            .await?,
-        );
+        let core =
+            Arc::new(SnapAccessCore::from_change_set(tag, ctx, change_set, mem_tbls, true).await?);
         Ok(Self { core })
     }
 
     pub async fn construct_snapshot<'a>(
         tag: String,
-        dfs: Arc<dyn dfs::Dfs>,
+        ctx: &SnapCtx,
         mem_table_data: &[u8],
         snapshot: &[u8],
-        master_key: &MasterKey,
-        block_cache: BlockCache,
-        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>, // schema files cache
-        txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
         let mut change_set = kvenginepb::ChangeSet::default();
         change_set.merge_from_bytes(snapshot).unwrap();
@@ -182,7 +145,7 @@ impl SnapAccess {
         let snap = change_set.get_snapshot();
         let inner_key_off = snap.get_inner_key_off() as usize;
         let encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-            .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+            .map(|v| ctx.master_key.decrypt_encryption_key(&v).unwrap());
 
         let shard_id = change_set.shard_id;
         let shard_ver = change_set.shard_ver;
@@ -191,21 +154,11 @@ impl SnapAccess {
             shard_ver,
             mem_table_data,
             inner_key_off,
-            txn_chunk_manager.clone(),
+            &ctx.txn_chunk_manager,
             encryption_key,
         )
         .await?;
-        Self::from_change_set_and_memtable_data(
-            tag,
-            dfs,
-            change_set,
-            mem_tbls,
-            master_key,
-            block_cache,
-            schema_files,
-            txn_chunk_manager,
-        )
-        .await
+        Self::from_change_set_and_memtable_data(tag, ctx, change_set, mem_tbls).await
     }
 
     async fn construct_memtables(
@@ -213,7 +166,7 @@ impl SnapAccess {
         shard_ver: u64,
         mut mem_table_data: &[u8],
         inner_key_off: usize,
-        txn_chunk_manager: TxnChunkManager,
+        txn_chunk_manager: &TxnChunkManager,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Vec<CfTable>> {
         if mem_table_data.is_empty() {
@@ -271,7 +224,7 @@ impl SnapAccess {
         shard_ver: u64,
         mut mem_data: &[u8],
         inner_key_off: usize,
-        txn_chunk_manager: TxnChunkManager,
+        txn_chunk_manager: &TxnChunkManager,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Vec<CfTable>> {
         let mut mem_tbl = CfTable::new();
@@ -291,6 +244,7 @@ impl SnapAccess {
         box_try!(txn_file_refs.merge_from_bytes(msg_data));
 
         let worker_pool = txn_chunk_manager.worker_pool().clone();
+        let txn_chunk_manager = txn_chunk_manager.clone();
         let txn_files = worker_pool
             .spawn_blocking(move || {
                 txn_chunk_manager.load_txn_files_from_refs(
@@ -349,11 +303,14 @@ pub struct SnapAccessCore {
 
 impl SnapAccessCore {
     pub fn new(shard: &Shard) -> Self {
+        Self::new_from_shard_data(shard, shard.get_data())
+    }
+
+    pub(crate) fn new_from_shard_data(shard: &Shard, data: ShardData) -> Self {
         let base_version = shard.get_base_version();
         let meta_seq = shard.get_meta_sequence();
         let write_sequence = shard.get_write_sequence();
         let columnar_snap_version = shard.get_columnar_snap_version();
-        let data = shard.get_data();
         Self {
             tag: shard.tag(),
             write_sequence,
@@ -371,31 +328,17 @@ impl SnapAccessCore {
 
     pub async fn from_change_set(
         tag: String,
-        dfs: Arc<dyn dfs::Dfs>,
+        ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         mem_tbls: Vec<CfTable>,
         ignore_lock: bool,
-        master_key: &MasterKey,
-        block_cache: BlockCache,
-        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
-        txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
-        let shard = Shard::from_change_set(
-            tag,
-            dfs,
-            change_set,
-            mem_tbls,
-            ignore_lock,
-            master_key,
-            block_cache,
-            schema_files,
-            txn_chunk_manager,
-        )
-        .await?;
+        let shard = Shard::from_change_set(tag, ctx, change_set, mem_tbls, ignore_lock).await?;
         Ok(Self::new(&shard))
     }
 
-    pub fn new_iterator_skip_blob(
+    #[maybe_async::both]
+    pub async fn new_iterator_skip_blob(
         &self,
         cf: usize,
         reversed: bool,
@@ -419,14 +362,17 @@ impl SnapAccessCore {
             read_ts,
             key,
             val: table::Value::new(),
-            inner: self.new_table_iterator(cf, reversed, fill_cache, None),
+            inner: self
+                .new_table_iterator(cf, reversed, fill_cache, None)
+                .await,
             blob_prefetcher: None,
             data,
             range: None,
         }
     }
 
-    pub fn new_iterator(
+    #[maybe_async::both]
+    pub async fn new_iterator(
         &self,
         cf: usize,
         reversed: bool,
@@ -448,7 +394,9 @@ impl SnapAccessCore {
             read_ts: self.get_read_ts(cf, read_ts),
             key,
             val: table::Value::new(),
-            inner: self.new_table_iterator(cf, reversed, fill_cache, None),
+            inner: self
+                .new_table_iterator(cf, reversed, fill_cache, None)
+                .await,
             blob_prefetcher,
             data,
             range: None,
@@ -513,7 +461,8 @@ impl SnapAccessCore {
     /// get an Item by key. Caller need to call is_some() before get_value.
     /// We don't return Option because we may need AccessPath even if the item
     /// is none.
-    pub fn get(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
+    #[maybe_async::both]
+    pub async fn get(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
         let mut version = version;
         if version == 0 {
             version = u64::MAX;
@@ -523,14 +472,16 @@ impl SnapAccessCore {
         let inner_key = InnerKey::from_outer_key(key, self.data.inner_key_off);
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
-        item.val = self.get_value(
-            cf,
-            inner_key,
-            version,
-            &mut item.path,
-            item.owned_val.as_mut().unwrap(),
-            &self.data.lock_txn_files,
-        );
+        item.val = self
+            .get_value(
+                cf,
+                inner_key,
+                version,
+                &mut item.path,
+                item.owned_val.as_mut().unwrap(),
+                &self.data.lock_txn_files,
+            )
+            .await;
         if item.val.is_blob_ref() {
             item.owned_blob = Some(self.fetch_blob(inner_key, &item.val));
             item.val.fill_in_blob(item.owned_blob.as_ref().unwrap());
@@ -553,7 +504,8 @@ impl SnapAccessCore {
         item
     }
 
-    fn get_value(
+    #[maybe_async::both]
+    async fn get_value(
         &self,
         cf: usize,
         inner_key: InnerKey<'_>,
@@ -602,7 +554,12 @@ impl SnapAccessCore {
         }
         let scf = self.data.get_cf(cf);
         for lh in &scf.levels {
-            let v = lh.get(inner_key, version, key_hash, out_val_owner);
+            #[allow(clippy::if_same_then_else)]
+            let v = if cf == WRITE_CF {
+                lh.get(inner_key, version, key_hash, out_val_owner).await
+            } else {
+                lh.get(inner_key, version, key_hash, out_val_owner)
+            };
             path.ln += 1;
             if v.is_valid() {
                 return v;
@@ -670,6 +627,53 @@ impl SnapAccessCore {
         table::new_merge_iterator(iters, reversed)
     }
 
+    // This methods is actually sync but mark as async to corporate with
+    // #[maybe_async]
+    async fn new_table_iterator_async(
+        &self,
+        cf: usize,
+        reversed: bool,
+        fill_cache: bool,
+        skip_txn_file_with_start_ts: Option<u64>,
+    ) -> Box<dyn table::Iterator> {
+        if cf != WRITE_CF {
+            return self.new_table_iterator(cf, reversed, fill_cache, skip_txn_file_with_start_ts);
+        }
+
+        let sync_merge_iter: Box<dyn table::Iterator> = {
+            let mut sync_iters: Vec<Box<dyn table::Iterator>> =
+                Vec::with_capacity(self.data.mem_tbls.len() + self.data.l0_tbls.len());
+            for mem_tbl in &self.data.mem_tbls {
+                sync_iters.push(mem_tbl.get_cf(cf).new_iterator(reversed));
+            }
+            for l0 in &self.data.l0_tbls {
+                if let Some(tbl) = &l0.get_cf(cf) {
+                    sync_iters.push(tbl.new_iterator(reversed, fill_cache));
+                }
+            }
+            Box::new(AsyncMergeIterator::new(sync_iters, reversed, true)) as _
+        };
+
+        let mut iters = vec![sync_merge_iter];
+
+        let scf = self.data.get_cf(cf);
+        for lh in scf.levels.as_slice() {
+            if lh.tables.len() == 0 {
+                continue;
+            }
+            if lh.tables.len() == 1 {
+                iters.push(lh.tables[0].new_iterator(reversed, fill_cache));
+                continue;
+            }
+            iters.push(Box::new(ConcatIterator::new(
+                lh.clone(),
+                reversed,
+                fill_cache,
+            )));
+        }
+        Box::new(AsyncMergeIterator::new(iters, reversed, false))
+    }
+
     pub fn new_mem_table_iterator(&self, cf: usize, reversed: bool) -> Box<dyn table::Iterator> {
         let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
         for mem_tbl in &self.data.mem_tbls {
@@ -678,6 +682,7 @@ impl SnapAccessCore {
         table::new_merge_iterator(iters, reversed)
     }
 
+    // TODO: support async (for write process).
     pub fn new_delta_write_iterator(&self, since_ts: u64) -> Box<dyn table::Iterator> {
         let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
         for mem_tbl in &self.data.mem_tbls {
@@ -758,6 +763,8 @@ impl SnapAccessCore {
         self.meta_seq
     }
 
+    // TODO: support async (for write process).
+    // Or skip when it's an IA shard.
     pub(crate) fn contains_in_older_table(&self, key: InnerKey<'_>, cf: usize) -> bool {
         let key_hash = farmhash::fingerprint64(key.deref());
         let mut outer_val_owner = vec![];
@@ -865,6 +872,7 @@ impl SnapAccessCore {
                 if ignore_locks && cf == WRITE_CF && v.size() == 0 {
                     continue;
                 }
+                // TODO: skip check overlap when `!v.is_sync()`.
                 let mut overlap = false;
                 for (outer_start, outer_end) in outer_ranges {
                     let inner_start =
@@ -1097,11 +1105,14 @@ impl SnapAccessCore {
         self.data.schema_file.is_some()
     }
 
-    pub fn get_newer(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
+    #[maybe_async::both]
+    pub async fn get_newer(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
         let inner_key = InnerKey::from_outer_key(key, self.data.inner_key_off);
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
-        item.val = self.get_newer_val(cf, inner_key, version, item.owned_val.as_mut().unwrap());
+        item.val = self
+            .get_newer_val(cf, inner_key, version, item.owned_val.as_mut().unwrap())
+            .await;
         if item.val.is_blob_ref() {
             item.owned_blob = Some(self.fetch_blob(inner_key, &item.val));
             item.val.fill_in_blob(item.owned_blob.as_ref().unwrap());
@@ -1109,7 +1120,8 @@ impl SnapAccessCore {
         item
     }
 
-    fn get_newer_val(
+    #[maybe_async::both]
+    async fn get_newer_val(
         &self,
         cf: usize,
         inner_key: InnerKey<'_>,
@@ -1134,7 +1146,9 @@ impl SnapAccessCore {
         }
         let scf = self.data.get_cf(cf);
         for lh in &scf.levels {
-            let v = lh.get_newer(inner_key, version, key_hash, out_val_owner);
+            let v = lh
+                .get_newer(inner_key, version, key_hash, out_val_owner)
+                .await;
             if v.is_valid() {
                 return v;
             }
@@ -1142,7 +1156,8 @@ impl SnapAccessCore {
         table::Value::new()
     }
 
-    pub fn has_data_in_prefix<'a>(&'a self, mut prefix: &'a [u8]) -> bool {
+    #[maybe_async::both]
+    pub async fn has_data_in_prefix<'a>(&'a self, mut prefix: &'a [u8]) -> bool {
         let shard_prefix = self.data.prefix();
 
         let min_off = std::cmp::min(prefix.len(), self.data.inner_key_off);
@@ -1161,8 +1176,10 @@ impl SnapAccessCore {
         if self.deleting_prefixes.cover_prefix(inner_prefix) {
             return false;
         }
-        let mut it = self.new_iterator(0, false, false, Some(u64::MAX), true);
-        it.seek(prefix);
+        let mut it = self
+            .new_iterator(0, false, false, Some(u64::MAX), true)
+            .await;
+        it.seek(prefix).await;
         if !it.valid() {
             return false;
         }
@@ -1210,6 +1227,7 @@ impl SnapAccessCore {
         }
     }
 
+    // TODO: support async (for write process).
     pub fn get_txn_file_conflict_lock(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, Lock)> {
         if txn_file.is_empty() {
             return None;
@@ -1274,6 +1292,7 @@ impl SnapAccessCore {
     // Get writes with `commit_ts` LARGER than `txn_file.start_ts()`.
     // These writes are not seen by clients and should be considered as conflicts.
     // Ref: `SnapAccessCore::get_newer`.
+    // TODO: support async (for write process).
     pub fn get_txn_file_conflict_write(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, UserMeta)> {
         if txn_file.is_empty() {
             return None;
@@ -1312,6 +1331,7 @@ impl SnapAccessCore {
         None
     }
 
+    // TODO: support async (for write process).
     pub fn check_txn_file_constraint(
         &self,
         txn_file: &TxnFile,
@@ -1564,17 +1584,18 @@ impl Iterator {
         self.key.starts_with(prefix)
     }
 
-    pub fn next(&mut self) {
+    #[maybe_async::both]
+    pub async fn next(&mut self) {
         if self.all_versions
             && self.valid()
-            && self.inner.next_version()
+            && next_version!(self.inner).await
             && !self.inner.value().is_deleted()
         {
             self.update_item();
             return;
         }
-        self.inner.next();
-        self.parse_item();
+        next!(self.inner).await;
+        self.parse_item().await;
     }
 
     fn update_item(&mut self) {
@@ -1583,18 +1604,19 @@ impl Iterator {
         self.val = self.inner.value();
     }
 
-    fn parse_item(&mut self) {
+    #[maybe_async::both]
+    async fn parse_item(&mut self) {
         while self.inner.valid() {
             if self.is_inner_key_over_bound() {
                 break;
             }
             let val = self.inner.value();
-            if val.version > self.read_ts && !self.inner.seek_to_version(self.read_ts) {
-                self.inner.next();
+            if val.version > self.read_ts && !self.inner.seek_to_version(self.read_ts).await {
+                next!(self.inner).await;
                 continue;
             }
             if self.inner.value().is_deleted() {
-                self.inner.next();
+                next!(self.inner).await;
                 continue;
             }
             self.update_item();
@@ -1606,35 +1628,38 @@ impl Iterator {
     // seek would seek to the provided key if present. If absent, it would seek to
     // the next smallest key greater than provided if iterating in the forward
     // direction. Behavior would be reversed is iterating backwards.
-    pub fn seek(&mut self, key: &[u8]) {
+    #[maybe_async::both]
+    pub async fn seek(&mut self, key: &[u8]) {
         if key.len() <= self.data.inner_key_off {
-            self.inner.rewind();
+            self.inner.rewind().await;
         } else {
             self.inner
-                .seek(InnerKey::from_outer_key(key, self.data.inner_key_off));
+                .seek(InnerKey::from_outer_key(key, self.data.inner_key_off))
+                .await;
         }
-        self.parse_item();
+        self.parse_item().await;
     }
 
     // rewind would rewind the iterator cursor all the way to zero-th position,
     // which would be the smallest key if iterating forward, and largest if
     // iterating backward. It does not keep track of whether the cursor started
     // with a seek().
-    pub fn rewind(&mut self) {
-        self.inner.rewind();
+    #[maybe_async::both]
+    pub async fn rewind(&mut self) {
+        self.inner.rewind().await;
         if self.inner.valid() {
             if self.reversed {
                 if self.inner.key() >= self.data.inner_end() {
-                    self.inner.seek(self.data.inner_end());
+                    self.inner.seek(self.data.inner_end()).await;
                     if self.inner.key() == self.data.inner_end() {
-                        self.inner.next();
+                        next!(self.inner).await;
                     }
                 }
             } else if self.inner.key() < self.data.inner_start() {
-                self.inner.seek(self.data.inner_start())
+                self.inner.seek(self.data.inner_start()).await
             }
         }
-        self.parse_item();
+        self.parse_item().await;
     }
 
     pub fn set_all_versions(&mut self, all_versions: bool) {
@@ -1647,8 +1672,9 @@ impl Iterator {
 
     // set the new range of the iterator, it the range is monotonic, we can avoid
     // seek. return true if seek is performed.
+    #[maybe_async::both]
     #[allow(clippy::collapsible_else_if)]
-    pub fn set_range(
+    pub async fn set_range(
         &mut self,
         outer_lower_bound_include: Bytes,
         outer_upper_bound_exclude: Bytes,
@@ -1667,18 +1693,18 @@ impl Iterator {
                     // If the new inner_upper_bound is greater than the current key, we can
                     // continue to use the current key to iterate backward, avoid the seek.
                     if self.inner.key() > inner_upper_bound {
-                        self.inner.seek(inner_upper_bound);
+                        self.inner.seek(inner_upper_bound).await;
                         seeked = true;
                     }
                     // the upper bound is exclusive, so we need to skip the current key.
                     if self.inner.key() == inner_upper_bound {
-                        self.inner.next();
+                        next!(self.inner).await;
                     }
                 } else {
                     // If the new inner_lower_bound is greater than or equal to the current key,
                     // we can continue to use the current key to iterate forward, avoid the seek.
                     if self.inner.key() < inner_lower_bound {
-                        self.inner.seek(inner_lower_bound);
+                        self.inner.seek(inner_lower_bound).await;
                         seeked = true;
                     }
                 }
@@ -1686,17 +1712,17 @@ impl Iterator {
         } else {
             // always seek if not reset monotonic range.
             if self.reversed {
-                self.inner.seek(inner_upper_bound);
+                self.inner.seek(inner_upper_bound).await;
                 if self.inner.valid() && self.inner.key() == inner_upper_bound {
-                    self.inner.next();
+                    next!(self.inner).await;
                 }
             } else {
-                self.inner.seek(inner_lower_bound);
+                self.inner.seek(inner_lower_bound).await;
             }
             seeked = true;
         }
         self.range = Some((outer_lower_bound_include, outer_upper_bound_exclude));
-        self.parse_item();
+        self.parse_item().await;
         seeked
     }
 
@@ -1753,6 +1779,7 @@ mod tests {
 
     use crate::{
         apply::create_snapshot_tables,
+        context::{IaCtx, SnapCtx},
         dfs::{self, Dfs, InMemFs},
         read::MEM_DATA_FORMAT_V1,
         shard::ShardDataBuilder,
@@ -1968,6 +1995,14 @@ mod tests {
             }
 
             // Deserialize
+            let snap_ctx = SnapCtx {
+                dfs,
+                master_key,
+                block_cache: BlockCache::None,
+                schema_files: None,
+                txn_chunk_manager,
+                ia_ctx: IaCtx::Disabled,
+            };
             let mut snap_pb = kvenginepb::Snapshot::default();
             snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32 * enable_inner_key_off as u32);
             let props = snap_pb.mut_properties();
@@ -1980,7 +2015,7 @@ mod tests {
             cs.set_shard_ver(shard_ver);
             cs.set_snapshot(snap_pb);
             let snap_bin = cs.write_to_bytes().unwrap();
-            let remote_snap = block_on(SnapAccess::construct_snapshot("test".to_owned(), dfs, &mem_bin, &snap_bin, &master_key, BlockCache::None, None, txn_chunk_manager)).unwrap();
+            let remote_snap = block_on(SnapAccess::construct_snapshot("test".to_owned(), &snap_ctx, &mem_bin, &snap_bin)).unwrap();
 
             let inner_ranges = inner_ranges.iter().map(|(start, end)| (start.as_ref(), end.as_ref())).collect::<Vec<_>>();
             let ref_store_in_ranges = ref_store.new_in_ranges(&inner_ranges);

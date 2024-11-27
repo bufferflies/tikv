@@ -1263,6 +1263,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.ctx.global.pd_scheduler.schedule(task).unwrap();
     }
 
+    // TODO: support async (or split by block keys ?)
     fn split_by_iterate(&mut self, shard: Arc<Shard>) {
         let split_keys = self.ctx.cfg.region_split_keys;
         let split_max_keys = split_keys * 3 / 2;

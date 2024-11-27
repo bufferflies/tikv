@@ -288,6 +288,7 @@ pub struct CloudStoreScanner {
 }
 
 impl CloudStoreScanner {
+    // TODO: support async.
     pub fn new(
         snap: SnapAccess,
         desc: bool,

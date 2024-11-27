@@ -30,6 +30,7 @@ use ::load_data::{
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use dashmap::DashMap;
 use kvengine::{
+    context::IaCtx,
     dfs::{DFSConfig, Dfs, S3Fs},
     table::{
         sstable::{BlockCache, BlockCacheType},
@@ -252,6 +253,7 @@ fn start_server(
         schema_files: Some(Arc::new(DashMap::new())),
         worker_limiter,
         txn_chunk_manager,
+        ia_ctx: IaCtx::Disabled, // TODO: enable by config.
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);

@@ -115,7 +115,8 @@ impl Tikv for CopService {
         delegate_req.set_ranges(key_ranges.into());
         delegate_req.set_start_ts(req.get_start_ts());
         let max_handle_duration = self.cfg.max_handle_duration;
-        let m_ctx = self.ctx.clone();
+        let snap_ctx = self.ctx.get_snap_ctx(false);
+        let quota_limiter = self.ctx.quota_limiter.clone();
         let peer = Some(ctx.peer());
         let future = async move {
             let mut resp = client
@@ -125,13 +126,9 @@ impl Tikv for CopService {
                 .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
             let snap_access = kvengine::SnapAccess::construct_snapshot(
                 tag,
-                m_ctx.cache_fs.clone(),
+                &snap_ctx,
                 &resp.take_mem_table_data(),
                 &resp.take_snapshot(),
-                &m_ctx.master_key,
-                m_ctx.block_cache.clone(),
-                m_ctx.schema_files.clone(),
-                m_ctx.txn_chunk_manager.clone(),
             )
             .await
             .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
@@ -140,7 +137,7 @@ impl Tikv for CopService {
                 req,
                 peer,
                 max_handle_duration,
-                m_ctx.quota_limiter.clone(),
+                quota_limiter.clone(),
                 snapshot,
             )
             .await

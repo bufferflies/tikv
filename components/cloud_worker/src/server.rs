@@ -22,6 +22,7 @@ use hyper::{
     Body,
 };
 use kvengine::{
+    context::{IaCtx, SnapCtx},
     dfs,
     dfs::{CacheFs, S3Fs},
     table::{columnar::SchemaFile, sstable::BlockCache, ChecksumType},
@@ -75,6 +76,26 @@ pub(crate) struct Context {
     pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
     pub worker_limiter: WorkerLimiter,
     pub txn_chunk_manager: TxnChunkManager,
+    pub ia_ctx: IaCtx,
+}
+
+impl Context {
+    pub(crate) fn get_snap_ctx(&self, use_cache_fs: bool) -> SnapCtx {
+        let dfs: Arc<dyn dfs::Dfs> = if use_cache_fs {
+            self.cache_fs.clone() as _
+        } else {
+            self.s3fs.clone() as _
+        };
+
+        SnapCtx {
+            dfs,
+            master_key: self.master_key.clone(),
+            block_cache: self.block_cache.clone(),
+            schema_files: self.schema_files.clone(),
+            txn_chunk_manager: self.txn_chunk_manager.clone(),
+            ia_ctx: self.ia_ctx.clone(),
+        }
+    }
 }
 
 #[macro_export]
@@ -212,21 +233,10 @@ async fn handle_remote_coprocessor(
     let _permit = res.unwrap();
     let req_type = cop_req.get_tp();
     let snap_start = Instant::now();
-    let dfs: Arc<dyn dfs::Dfs> = match req_type {
-        REQ_TYPE_DAG => ctx.cache_fs.clone(),
-        _ => ctx.s3fs.clone(),
-    };
-    let snap_access_res = SnapAccess::construct_snapshot(
-        tag.clone(),
-        dfs,
-        mem_data,
-        snap_data,
-        &ctx.master_key,
-        ctx.block_cache.clone(),
-        ctx.schema_files.clone(),
-        ctx.txn_chunk_manager.clone(),
-    )
-    .await;
+    let use_cache_fs = matches!(req_type, REQ_TYPE_DAG if !ctx.ia_ctx.is_enabled());
+    let snap_ctx = ctx.get_snap_ctx(use_cache_fs);
+    let snap_access_res =
+        SnapAccess::construct_snapshot(tag.clone(), &snap_ctx, mem_data, snap_data).await;
     if let Err(err) = snap_access_res.as_ref() {
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());

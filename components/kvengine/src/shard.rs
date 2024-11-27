@@ -22,6 +22,8 @@ use slog_global::*;
 use tikv_util::{box_err, box_try, codec::number::U64_SIZE};
 
 use crate::{
+    context::{IaCtx, SnapCtx},
+    ia::ia_file::IaFile,
     limiter::RegionLimiter,
     table::{
         self,
@@ -30,11 +32,10 @@ use crate::{
         file::InMemFile,
         memtable::{self, CfTable},
         search,
-        sstable::{BlockCache, L0Table, SsTable},
+        sstable::{L0Table, SsTable},
         vector_index::VectorIndexes,
         BoundedDataSet, DataBound, InnerKey, TxnFile,
     },
-    txn_chunk_manager::TxnChunkManager,
     util::{evenly_distribute, TxnFileRefPropertyHelper},
     *,
 };
@@ -273,14 +274,10 @@ impl Shard {
 
     pub async fn from_change_set(
         tag: String,
-        dfs: Arc<dyn dfs::Dfs>,
+        ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         mut mem_tbls: Vec<CfTable>,
         ignore_lock: bool,
-        master_key: &MasterKey,
-        block_cache: BlockCache,
-        schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
-        txn_chunk_manager: TxnChunkManager,
     ) -> Result<Self> {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
@@ -313,46 +310,76 @@ impl Shard {
             }
             box_try!(
                 get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-                    .map(|v| master_key.decrypt_encryption_key(&v))
+                    .map(|v| ctx.master_key.decrypt_encryption_key(&v))
                     .transpose()
             )
         } else {
             None
         };
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = dfs.get_runtime();
+        let runtime = ctx.dfs.get_runtime();
         let opts = dfs::Options::default().with_shard(cs.shard_id, cs.shard_ver);
         let mut msg_count = 0;
         for (&id, fm) in &ids {
-            if fm.is_schema_file() && schema_files.is_some() {
-                if let Some(schema_file) = schema_files.as_ref().unwrap().get(&id) {
+            if fm.is_schema_file() && ctx.schema_files.is_some() {
+                if let Some(schema_file) = ctx.schema_files.as_ref().unwrap().get(&id) {
                     cs.set_schema_file(Some(schema_file.clone()));
                     continue;
                 }
             }
 
-            let fs = dfs.clone();
+            let fs = ctx.dfs.clone();
             let tx = result_tx.clone();
             let fm = fm.clone();
             let tag = tag.clone();
+            let ia_ctx = if fm.can_use_ia() {
+                ctx.ia_ctx.clone()
+            } else {
+                IaCtx::Disabled
+            };
             runtime.spawn(async move {
-                // TODO: prepare_table_meta for IA.
-                let res = fs.read_file(id, opts.with_type(fm.file_type)).await;
-                if tx.send(res.map(|data| (id, fm, data))).is_err() {
-                    error!("failed to send result"; "tag" => tag, "file_id" => id);
+                let res = match ia_ctx {
+                    IaCtx::Disabled => fs
+                        .read_file(id, opts.with_type(fm.file_type))
+                        .await
+                        .map(|data| (data, None))
+                        .map_err(|err| err.into()),
+                    IaCtx::Enabled(ia_mgr, data_dir) => IaFile::prepare_table_meta(
+                        id,
+                        fm.file_type,
+                        fm.table_meta_off as u64,
+                        data_dir.deref(),
+                        fs.as_ref(),
+                    )
+                    .await
+                    .map(|data| (data, Some(ia_mgr)))
+                    .map_err(|err| err.into()),
+                };
+                if let Err(err) = tx.send(res.map(|(data, ia_mgr)| (id, fm, data, ia_mgr))) {
+                    error!("failed to send result"; "tag" => tag, "file_id" => id, "err" => %err);
                 }
             });
             msg_count += 1;
         }
-        let mut errors = vec![];
+        let mut errors: Vec<Error> = vec![];
         for _ in 0..msg_count {
             match result_rx.recv().await.unwrap() {
-                Ok((id, fm, data)) => {
-                    // TODO: create IaFile with table meta for IA.
-                    let file = Arc::new(InMemFile::new(id, data));
-                    cs.add_file(id, file, &fm, block_cache.clone(), encryption_key.clone())?;
+                Ok((id, fm, data, ia_mgr)) => {
+                    let file = if let Some(ia_mgr) = ia_mgr {
+                        let table_meta_file = Arc::new(InMemFile::new(id, data));
+                        Arc::new(IaFile::open(id, fm.file_type, table_meta_file, ia_mgr)?) as _
+                    } else {
+                        Arc::new(InMemFile::new(id, data)) as _
+                    };
+                    cs.add_file(
+                        id,
+                        file,
+                        &fm,
+                        ctx.block_cache.clone(),
+                        encryption_key.clone(),
+                    )?;
                     if fm.is_schema_file() {
-                        if let Some(schema_files) = schema_files.as_ref() {
+                        if let Some(schema_files) = ctx.schema_files.as_ref() {
                             schema_files.insert(id, cs.get_schema_file().unwrap());
                         }
                     }
@@ -369,9 +396,10 @@ impl Shard {
 
         // Load lock_txn_files:
         if !lock_txn_file_refs.is_empty() {
-            let worker_pool = txn_chunk_manager.worker_pool().clone();
+            let worker_pool = ctx.txn_chunk_manager.worker_pool().clone();
             let shard_id = cs.shard_id;
             let shard_ver = cs.shard_ver;
+            let txn_chunk_manager = ctx.txn_chunk_manager.clone();
             cs.lock_txn_files = box_try!(
                 worker_pool
                     .spawn_blocking(move || {
@@ -387,7 +415,8 @@ impl Shard {
             );
         }
 
-        let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), master_key);
+        let mut shard =
+            Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), &ctx.master_key);
         let mut builder = ShardDataBuilder::new(shard.get_data());
         builder.set_mem_tbls(mem_tbls);
         create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, ignore_lock);
@@ -1140,7 +1169,7 @@ impl Shard {
     }
 
     pub fn data_all_persisted(&self) -> bool {
-        self.data.read().unwrap().all_presisted()
+        self.data.read().unwrap().all_persisted()
     }
 
     pub fn tag(&self) -> ShardTag {
@@ -1638,7 +1667,7 @@ impl ShardDataCore {
         is_bound && !self.data_bound().contains_bound(tbl.data_bound())
     }
 
-    pub fn all_presisted(&self) -> bool {
+    pub fn all_persisted(&self) -> bool {
         self.mem_tbls.len() == 1 && self.mem_tbls[0].size() == 0
     }
 
@@ -1853,29 +1882,34 @@ impl LevelHandler {
         }
     }
 
-    pub fn get(
+    #[maybe_async::both]
+    pub async fn get(
         &self,
         key: InnerKey<'_>,
         version: u64,
         key_hash: u64,
         out_val_owner: &mut Vec<u8>,
     ) -> table::Value {
-        self.get_in_table(key, version, key_hash, self.get_table(key), out_val_owner)
+        match self.get_table(key) {
+            Some(t) => {
+                self.get_in_table(key, version, key_hash, t, out_val_owner)
+                    .await
+            }
+            None => table::Value::new(),
+        }
     }
 
-    fn get_in_table(
+    #[maybe_async::both]
+    async fn get_in_table(
         &self,
         key: InnerKey<'_>,
         version: u64,
         key_hash: u64,
-        tbl: Option<&SsTable>,
+        tbl: &SsTable,
         out_val_owner: &mut Vec<u8>,
     ) -> table::Value {
-        if tbl.is_none() {
-            return table::Value::new();
-        }
-        tbl.unwrap()
-            .get(key, version, key_hash, out_val_owner, self.level)
+        tbl.get(key, version, key_hash, out_val_owner, self.level)
+            .await
     }
 
     // Note: the `key` may be on the left outside the returned sstable.
@@ -1924,7 +1958,8 @@ impl LevelHandler {
         }
     }
 
-    pub(crate) fn get_newer(
+    #[maybe_async::both]
+    pub(crate) async fn get_newer(
         &self,
         key: InnerKey<'_>,
         version: u64,
@@ -1935,7 +1970,9 @@ impl LevelHandler {
             return table::Value::new();
         }
         if let Some(tbl) = self.get_table(key) {
-            return tbl.get_newer(key, version, key_hash, out_val_owner, self.level);
+            return tbl
+                .get_newer(key, version, key_hash, out_val_owner, self.level)
+                .await;
         }
         table::Value::new()
     }

@@ -2,10 +2,10 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use cloud_encryption::MasterKey;
 use codec::prelude::NumberEncoder;
 use futures::executor::block_on;
 use kvengine::{
+    context::{IaCtx, SnapCtx},
     table::{sstable::BlockCache, table::Row},
     txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
     SnapAccess,
@@ -2245,9 +2245,8 @@ struct DagTest<'a> {
     table: &'a ProductTable,
     cluster: ServerCluster,
     pub client: ClusterClient,
-    master_key: MasterKey,
-    txn_chunk_manager: TxnChunkManager,
     ctx: DagTestContext,
+    snap_ctx: SnapCtx,
 }
 
 #[cfg(test)]
@@ -2287,13 +2286,21 @@ impl<'a> DagTest<'a> {
             },
         );
 
+        let snap_ctx = SnapCtx {
+            dfs: cluster.get_dfs().unwrap(),
+            master_key,
+            block_cache: BlockCache::None,
+            schema_files: None,
+            txn_chunk_manager,
+            ia_ctx: IaCtx::Disabled,
+        };
+
         Self {
             table,
             cluster,
             client,
-            master_key,
-            txn_chunk_manager,
             ctx,
+            snap_ctx,
         }
     }
 
@@ -2481,13 +2488,9 @@ impl<'a> DagTest<'a> {
         let f = async {
             let snap_access = SnapAccess::construct_snapshot(
                 tag,
-                self.cluster.get_dfs().unwrap(),
+                &self.snap_ctx,
                 &snapshot.memtable_rows,
                 &snapshot.cs,
-                &self.master_key,
-                BlockCache::None,
-                None,
-                self.txn_chunk_manager.clone(),
             )
             .await
             .unwrap();

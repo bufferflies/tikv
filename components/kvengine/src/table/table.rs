@@ -88,11 +88,15 @@ pub trait Iterator: Send {
         true
     }
 
-    #[maybe_async]
     fn rewind(&mut self);
+    async fn rewind_async(&mut self) {
+        self.rewind();
+    }
 
-    #[maybe_async]
     fn seek(&mut self, key: InnerKey<'_>);
+    async fn seek_async(&mut self, key: InnerKey<'_>) {
+        self.seek(key);
+    }
 
     fn key(&self) -> InnerKey<'_>;
 

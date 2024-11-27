@@ -403,6 +403,7 @@ where
     Ok(default_cursor.value(&mut statistics.data).to_vec())
 }
 
+// TODO: support async (for write process).
 pub fn has_data_in_range<S: Snapshot>(
     snapshot: S,
     cf: CfName,

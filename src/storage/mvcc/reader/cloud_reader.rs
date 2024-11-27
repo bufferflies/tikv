@@ -43,6 +43,7 @@ impl CloudReader {
 
     /// Note: This method is also used by resolving locks during restoring
     /// keyspace.
+    // TODO: support async (for write process).
     pub fn get_txn_commit_record(
         &mut self,
         key: &Key,
@@ -258,6 +259,7 @@ impl CloudReader {
     }
 
     /// Return the first committed key for which `start_ts` equals to `ts`
+    // TODO: support async.
     pub fn seek_ts(&mut self, ts: TimeStamp) -> Result<Option<Key>> {
         let mut it = self
             .snapshot

@@ -247,6 +247,7 @@ impl TxnFileCommand {
     }
 
     #[allow(dead_code)]
+    // TODO: support async (for write process).
     fn check_constraint_by_linear_match(
         &self,
         snap_access: &SnapAccess,

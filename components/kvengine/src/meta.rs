@@ -1276,6 +1276,14 @@ impl FileMeta {
         self.file_type == FileType::Sst
     }
 
+    pub fn can_use_ia(&self) -> bool {
+        match self.file_type {
+            FileType::Sst if (self.cf as usize == WRITE_CF && self.level > 0) => true,
+            FileType::Columnar => false, // TODO: support columnar.
+            _ => false,
+        }
+    }
+
     pub fn from_l0_table(table: &kvenginepb::L0Create) -> Self {
         Self::new(
             -1,

@@ -16,6 +16,7 @@ use clap::Args;
 use cloud_encryption::MasterKey;
 use futures::executor::block_on;
 use kvengine::{
+    context::{IaCtx, SnapCtx},
     dfs::{DFSConfig, Dfs, S3Fs},
     table::sstable::BlockCache,
     txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
@@ -543,11 +544,9 @@ struct IndexMeta {
 pub(crate) struct BackupReader {
     ts: u64,
     kv: Engine,
+    snap_ctx: SnapCtx,
     metas: Arc<Vec<ShardMeta>>,
-    s3fs: Arc<S3Fs>,
     snap_cache: Arc<Mutex<Option<SnapAccess>>>,
-    master_key: MasterKey,
-    txn_chunk_manager: TxnChunkManager,
 }
 
 impl BackupReader {
@@ -559,14 +558,20 @@ impl BackupReader {
         master_key: MasterKey,
         txn_chunk_manager: TxnChunkManager,
     ) -> Self {
+        let snap_ctx = SnapCtx {
+            dfs: s3fs as _,
+            master_key,
+            block_cache: BlockCache::None,
+            schema_files: None,
+            txn_chunk_manager,
+            ia_ctx: IaCtx::Disabled,
+        };
         Self {
             ts,
             kv,
+            snap_ctx,
             metas: Arc::new(metas),
-            s3fs,
             snap_cache: Arc::new(Mutex::new(None)),
-            master_key,
-            txn_chunk_manager,
         }
     }
 
@@ -628,18 +633,14 @@ impl BackupReader {
                 return snap;
             }
         }
-        let runtime = self.s3fs.get_runtime();
+        let runtime = self.snap_ctx.dfs.get_runtime();
         let tag = format!("backup_reader_{}", meta.tag());
         let snap = runtime
             .block_on(SnapAccess::from_change_set(
                 tag,
-                self.s3fs.clone(),
+                &self.snap_ctx,
                 meta.to_change_set(),
                 true,
-                &self.master_key,
-                BlockCache::None,
-                None,
-                self.txn_chunk_manager.clone(),
             ))
             .unwrap();
         let mut guard = self.snap_cache.lock().unwrap();

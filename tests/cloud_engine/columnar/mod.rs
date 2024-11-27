@@ -14,6 +14,7 @@ use dashmap::DashMap;
 use futures::{executor::block_on, future::ok, TryStreamExt};
 use hyper::Body;
 use kvengine::{
+    context::{IaCtx, SnapCtx},
     dfs,
     dfs::FileType,
     table::{
@@ -332,16 +333,16 @@ fn test_get_snapshot_from_leader_by_status_api() {
     );
     let master_key = kvengine.get_master_key();
     let mut client = cluster.new_client();
-    let ctx = Mutex::new(EvalContext::default());
+    let eval_ctx = Mutex::new(EvalContext::default());
     client.put_kv(
         0..100,
         |i: usize| gen_row_key(keyspace_id, table_id, i),
-        |i: usize| gen_row_val(&ctx, i),
+        |i: usize| gen_row_val(&eval_ctx, i),
     );
     client.put_kv(
         100..200,
         |i: usize| gen_row_key(keyspace_id, table_id, i),
-        |i: usize| gen_row_val(&ctx, i),
+        |i: usize| gen_row_val(&eval_ctx, i),
     );
     must_wait(
         || {
@@ -395,17 +396,21 @@ fn test_get_snapshot_from_leader_by_status_api() {
         .merge_from_bytes(&snapshot_from_remote)
         .unwrap();
     let schema_files = Arc::new(DashMap::new());
+    let snap_ctx = SnapCtx {
+        dfs: dfs.clone(),
+        master_key,
+        block_cache: BlockCache::None,
+        schema_files: Some(schema_files.clone()),
+        txn_chunk_manager: kvengine.get_txn_chunk_manager(),
+        ia_ctx: IaCtx::Disabled,
+    };
     let snap_access = dfs
         .get_runtime()
         .block_on(SnapAccess::construct_snapshot(
             "test".to_owned(),
-            dfs.clone(),
+            &snap_ctx,
             delegate_resp.get_mem_table_data(),
             delegate_resp.get_snapshot(),
-            &master_key,
-            BlockCache::None,
-            Some(schema_files.clone()),
-            kvengine.get_txn_chunk_manager(),
         ))
         .unwrap();
     assert!(snap_access.has_schema_file());
@@ -416,7 +421,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
     let mut i = 0;
     while iter.valid() {
         assert_eq!(iter.key(), &gen_row_key(keyspace_id, table_id, i));
-        assert_eq!(iter.val(), &gen_row_val(&ctx, i));
+        assert_eq!(iter.val(), &gen_row_val(&eval_ctx, i));
         iter.next();
         i += 1;
     }
@@ -429,7 +434,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         .try_put_kv(
             0..100,
             |i: usize| gen_row_key(keyspace_id, table_id, i),
-            |i: usize| gen_row_val(&ctx, i),
+            |i: usize| gen_row_val(&eval_ctx, i),
             opts,
         )
         .unwrap();

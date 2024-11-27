@@ -397,7 +397,12 @@ impl Iterator for AsyncMergeIterator<'_> {
     #[maybe_async]
     async fn rewind(&mut self) {
         for n in self.heap.iter_mut() {
-            n.iter.rewind().await;
+            #[allow(clippy::if_same_then_else)]
+            if self.is_always_sync {
+                n.iter.rewind();
+            } else {
+                n.iter.rewind().await;
+            }
             n.reset()
         }
         self.init_heap();
@@ -406,7 +411,12 @@ impl Iterator for AsyncMergeIterator<'_> {
     #[maybe_async]
     async fn seek(&mut self, key: InnerKey<'_>) {
         for n in self.heap.iter_mut() {
-            n.iter.seek(key).await;
+            #[allow(clippy::if_same_then_else)]
+            if self.is_always_sync {
+                n.iter.seek(key);
+            } else {
+                n.iter.seek(key).await;
+            }
             n.reset();
         }
         self.init_heap();
