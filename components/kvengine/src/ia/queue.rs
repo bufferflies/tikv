@@ -80,7 +80,10 @@ impl S3FifoHandle {
             .map_err(|e| Error::IaMgr(format!("read: send failed: {ident}: {e:?}")))?;
         Ok(())
     }
+}
 
+#[cfg(any(test, feature = "testexport"))]
+impl S3FifoHandle {
     pub(crate) async fn get_item(&self, ident: FileSegmentIdent) -> Result<Option<QueueItem>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let cb = Box::new(move |x| {
@@ -118,13 +121,16 @@ enum FifoTask {
         ident: FileSegmentIdent,
         insert_main: bool,
     },
+    SavedToMainStore(FileSegmentIdent, Arc<()> /* task counter */),
+    Stop,
+
+    #[cfg(any(test, feature = "testexport"))]
     GetItem {
         ident: FileSegmentIdent,
         cb: Box<dyn FnOnce(Option<QueueItem>) + Send>,
     },
-    SavedToMainStore(FileSegmentIdent, Arc<()> /* task counter */),
+    #[cfg(any(test, feature = "testexport"))]
     Flush(Box<dyn FnOnce(usize /* pending_tasks */) + Send>),
-    Stop,
 }
 
 impl fmt::Debug for FifoTask {
@@ -135,15 +141,18 @@ impl fmt::Debug for FifoTask {
                 .field("ident", ident)
                 .field("insert_main", insert_main)
                 .finish(),
-            FifoTask::GetItem { ident, cb: _ } => {
-                f.debug_struct("GetItem").field("ident", ident).finish()
-            }
             FifoTask::SavedToMainStore(ident, _) => f
                 .debug_struct("SavedToMainStore")
                 .field("ident", ident)
                 .finish(),
-            FifoTask::Flush(..) => f.debug_struct("Flush").finish(),
             FifoTask::Stop => f.debug_struct("Stop").finish(),
+
+            #[cfg(any(test, feature = "testexport"))]
+            FifoTask::GetItem { ident, cb: _ } => {
+                f.debug_struct("GetItem").field("ident", ident).finish()
+            }
+            #[cfg(any(test, feature = "testexport"))]
+            FifoTask::Flush(..) => f.debug_struct("Flush").finish(),
         }
     }
 }
@@ -205,29 +214,21 @@ impl S3Fifo {
                     Ok(pos) => debug!("read"; "ident" => %ident, "pos" => ?pos),
                     Err(err) => error!("read failed"; "ident" => %ident, "err" => ?err),
                 },
-                FifoTask::GetItem { ident, cb } => {
-                    cb(self.get_item(&ident));
-                }
                 FifoTask::SavedToMainStore(ident, _task_counter) => {
                     self.post_move_item_to_store(ident);
                 }
-                FifoTask::Flush(cb) => cb(self.pending_tasks()),
                 FifoTask::Stop => {
                     break;
                 }
+
+                #[cfg(any(test, feature = "testexport"))]
+                FifoTask::GetItem { ident, cb } => {
+                    cb(self.get_item(&ident));
+                }
+                #[cfg(any(test, feature = "testexport"))]
+                FifoTask::Flush(cb) => cb(self.pending_tasks()),
             }
         }
-    }
-
-    fn get_item(&self, ident: &FileSegmentIdent) -> Option<QueueItem> {
-        self.small_queue
-            .get(ident)
-            .map(|meta| QueueItem::from_small(meta.clone()))
-            .or_else(|| {
-                self.main_queue
-                    .get(ident)
-                    .map(|meta| QueueItem::from_main(meta.clone()))
-            })
     }
 
     fn get_item_ref(&self, ident: &FileSegmentIdent) -> Option<(&QueueItemMeta, QueueItemPos)> {
@@ -427,6 +428,20 @@ impl S3Fifo {
             }
         }
     }
+}
+
+#[cfg(any(test, feature = "testexport"))]
+impl S3Fifo {
+    fn get_item(&self, ident: &FileSegmentIdent) -> Option<QueueItem> {
+        self.small_queue
+            .get(ident)
+            .map(|meta| QueueItem::from_small(meta.clone()))
+            .or_else(|| {
+                self.main_queue
+                    .get(ident)
+                    .map(|meta| QueueItem::from_main(meta.clone()))
+            })
+    }
 
     fn pending_tasks(&self) -> usize {
         Arc::strong_count(&self.task_counter) - 1
@@ -480,6 +495,7 @@ pub struct QueueItem {
     pub pos: QueueItemPos,
 }
 
+#[cfg(any(test, feature = "testexport"))]
 impl QueueItem {
     pub(crate) fn from_small(meta: QueueItemMeta) -> Self {
         Self {

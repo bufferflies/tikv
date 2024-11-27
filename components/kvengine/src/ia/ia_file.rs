@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use log_wrappers::Value as LogValue;
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
     },
     new_columnar_filename, new_sst_filename,
     table::{
-        file::{File, LocalFile, MmapData},
+        file::{File, MmapData},
         search, sstable,
         sstable::SsTable,
         Error, Result,
@@ -354,6 +354,8 @@ pub fn table_meta_file_local_path(file_id: u64, file_type: FileType, data_dir: &
 #[cfg(any(test, feature = "testexport"))]
 impl IaFile {
     pub fn open_in_path(id: u64, ftype: FileType, data_dir: &Path, mgr: IaManager) -> Result<Self> {
+        use crate::table::file::LocalFile;
+
         // mtime is set during prepare.
         let table_meta_file =
             LocalFile::open(id, &table_meta_file_local_path(id, ftype, data_dir), false).map_err(
@@ -401,6 +403,8 @@ impl IaFile {
     }
 
     pub async fn multi_read_at_async(&self, mut buf: &mut [u8], off: u64) -> Result<()> {
+        use bytes::BufMut as _;
+
         let mut segments = vec![];
         let end_off = off + buf.len() as u64;
         let mut seg_off = off;
