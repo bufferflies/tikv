@@ -49,12 +49,20 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
         is_scanned_range_aware: bool,
         snap: Option<SnapAccess>,
     ) -> Result<Self> {
-        let columnar_scanner = build_columnar_scanner(
+        let columnar_scanner = match build_columnar_scanner(
             snap.as_ref(),
             &key_ranges,
             &table_scan,
             storage.get_read_ts(),
-        );
+        ) {
+            Some(res) => match res {
+                Ok(scanner) => Some(scanner),
+                Err(e) => {
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
         let columns_info = table_scan.take_columns();
         let primary_column_ids = table_scan.get_primary_column_ids().to_vec();
         let primary_prefix_column_ids = table_scan.get_primary_prefix_column_ids().to_vec();

@@ -167,6 +167,9 @@ fn handle_qe_response(
         Err(err) => match *err.0 {
             ErrorInner::Storage(err) => Err(err.into()),
             ErrorInner::Evaluate(EvaluateError::DeadlineExceeded) => Err(Error::DeadlineExceeded),
+            ErrorInner::Evaluate(EvaluateError::KeyIsLocked(lock_info)) => {
+                Err(Error::Locked(lock_info))
+            }
             ErrorInner::Evaluate(err) => {
                 let mut resp = Response::default();
                 let mut sel_resp = SelectResponse::default();
@@ -200,6 +203,9 @@ fn handle_qe_stream_response(
         Err(err) => match *err.0 {
             ErrorInner::Storage(err) => Err(err.into()),
             ErrorInner::Evaluate(EvaluateError::DeadlineExceeded) => Err(Error::DeadlineExceeded),
+            ErrorInner::Evaluate(EvaluateError::KeyIsLocked(lock_info)) => {
+                Err(Error::Locked(lock_info))
+            }
             ErrorInner::Evaluate(err) => {
                 let mut resp = Response::default();
                 let mut s_resp = StreamResponse::default();

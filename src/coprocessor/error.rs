@@ -57,7 +57,10 @@ impl From<tidb_query_common::error::StorageError> for Error {
 
 impl From<tidb_query_common::error::EvaluateError> for Error {
     fn from(err: tidb_query_common::error::EvaluateError) -> Self {
-        Error::Other(err.to_string())
+        match err {
+            tidb_query_common::error::EvaluateError::KeyIsLocked(info) => Error::Locked(info),
+            _ => Error::Other(err.to_string()),
+        }
     }
 }
 

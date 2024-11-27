@@ -1,15 +1,25 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    borrow::Cow,
     convert::{TryFrom, TryInto},
     sync::Arc,
 };
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2, KeyMode, KvFormat};
-use bytes::buf::Buf;
-use kvengine::table::columnar::{Block, ColumnarFilterReader, ColumnarMvccReader, HANDLE_COL_ID};
-use kvproto::coprocessor::KeyRange;
-use tidb_query_common::{storage::IntervalRange, util::convert_to_prefix_next, Result};
+use bytes::{buf::Buf, Bytes};
+use kvengine::{
+    read::Iterator,
+    table::columnar::{Block, ColumnarFilterReader, ColumnarMvccReader, HANDLE_COL_ID},
+    LOCK_CF,
+};
+use kvproto::{coprocessor::KeyRange, kvrpcpb::IsolationLevel};
+use tidb_query_common::{
+    error::{ErrorInner, EvaluateError},
+    storage::IntervalRange,
+    util::convert_to_prefix_next,
+    Result,
+};
 use tidb_query_datatype::{
     codec::{
         batch::{LazyBatchColumn, LazyBatchColumnVec},
@@ -23,6 +33,7 @@ use tidb_query_datatype::{
 };
 use tikv_util::buffer_vec::BufferVec;
 use tipb::TableScan;
+use txn_types::{Key, Lock, TsSet};
 
 pub struct ColumnarScanner {
     // The current scan position.
@@ -280,7 +291,7 @@ pub fn build_columnar_scanner(
     key_ranges: &[KeyRange],
     table_scan: &TableScan,
     start_ts: u64,
-) -> Option<ColumnarScanner> {
+) -> Option<Result<ColumnarScanner>> {
     let snap = snap?;
     if key_ranges.len() != 1 {
         return None;
@@ -324,6 +335,16 @@ pub fn build_columnar_scanner(
         };
         (start_handle.to_le_bytes().to_vec(), end_handle)
     };
+    // Check locks before create columnar reader. Or the locks may be committed
+    // after the reader created. It will result to data loss.
+    let mut lock_iter = snap.new_iterator(LOCK_CF, false, false, None, true);
+    lock_iter.set_range(
+        Bytes::copy_from_slice(key_range.get_start()),
+        Bytes::copy_from_slice(key_range.get_end()),
+    );
+    if let Err(e) = check_locks(&mut lock_iter, start_ts) {
+        return Some(Err(e));
+    }
     let reader = if table_scan.has_ann_query() {
         let ann_query = table_scan.get_ann_query();
         let index_id = ann_query.get_index_id();
@@ -343,11 +364,36 @@ pub fn build_columnar_scanner(
     } else {
         snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), start_ts)
     }?;
-    Some(ColumnarScanner::new(
+    Some(Ok(ColumnarScanner::new(
         reader,
         get_output_offsets(table_scan),
         keyspace_id,
         key_range.start.clone(),
         (start_handle, end_handle),
-    ))
+    )))
+}
+
+fn check_locks(lock_iter: &mut Iterator, read_ts: u64) -> Result<()> {
+    while lock_iter.valid() {
+        let raw_key = lock_iter.key();
+        let key = Key::from_raw(raw_key);
+        let val = lock_iter.val();
+        let lock = Lock::parse(val)
+            .map_err(|e| ErrorInner::Evaluate(EvaluateError::Other(e.to_string())))?;
+        Lock::check_ts_conflict(
+            Cow::Borrowed(&lock),
+            &key,
+            read_ts.into(),
+            &TsSet::default(),
+            IsolationLevel::Si,
+        )
+        .map_err(|e| match *e.0 {
+            txn_types::ErrorInner::KeyIsLocked(info) => {
+                ErrorInner::Evaluate(EvaluateError::KeyIsLocked(info))
+            }
+            _ => ErrorInner::Evaluate(EvaluateError::Other(e.to_string())),
+        })?;
+        lock_iter.next();
+    }
+    Ok(())
 }

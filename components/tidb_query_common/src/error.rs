@@ -13,6 +13,9 @@ pub enum EvaluateError {
     #[error("Invalid {charset} character string")]
     InvalidCharacterString { charset: String },
 
+    #[error("Key is locked (will clean up) {0:?}")]
+    KeyIsLocked(kvproto::kvrpcpb::LockInfo),
+
     /// This variant is only a compatible layer for existing CodecError.
     /// Ideally each error kind should occupy an enum variant.
     #[error("{msg}")]
@@ -30,6 +33,7 @@ impl EvaluateError {
             EvaluateError::DeadlineExceeded => 9007,
             EvaluateError::Custom { code, .. } => *code,
             EvaluateError::Other(_) => 10000,
+            EvaluateError::KeyIsLocked(_) => 11001, // TODO
         }
     }
 }
@@ -80,6 +84,7 @@ impl ErrorCodeExt for EvaluateError {
             EvaluateError::InvalidCharacterString { .. } => {
                 error_code::coprocessor::INVALID_CHARACTER_STRING
             }
+            EvaluateError::KeyIsLocked(_) => error_code::coprocessor::LOCKED,
             EvaluateError::Custom { .. } => error_code::coprocessor::EVAL,
             EvaluateError::Other(_) => error_code::UNKNOWN,
         }
