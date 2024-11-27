@@ -251,7 +251,7 @@ impl ObjectStorageWorker {
         debug_assert_eq!(bytes_read, sync_len as usize);
 
         let file_key = last_wal_chunk_file_key(store_id, self.epoch_id, self.start_off, file_off);
-        let chunk = self.take_chunk_data();
+        let chunk = self.take_chunk_data()?;
 
         let fs = self.s3fs.clone();
         let healthy = self.healthy.clone();
@@ -386,18 +386,21 @@ impl ObjectStorageWorker {
         self.buf = buf;
     }
 
-    pub(crate) fn take_chunk_data(&mut self) -> Vec<u8> {
+    pub(crate) fn take_chunk_data(&mut self) -> Result<Vec<u8>> {
         let chunk_header = ChunkHeader::new(self.compression_type());
         let buf_len = self.buf.len();
         let mut chunk = Vec::with_capacity(ChunkHeader::len() + buf_len);
         chunk_header.encode_to(&mut chunk);
         // Get slice of the buffer but keep the memory.
         if self.need_compression() {
-            let _ = compress_lz4(&self.buf, &mut chunk).unwrap();
+            let _ = compress_lz4(&self.buf, &mut chunk).map_err(|err| {
+                error!("{} take chunk data: compress_lz4 failed", self.get_engine_id(); "err" => ?err);
+                err
+            })?;
         } else {
             chunk.extend_from_slice(self.buf.as_slice());
         };
-        chunk
+        Ok(chunk)
     }
 
     fn next_chunk(&mut self, rotate: bool) -> Result<()> {
@@ -408,7 +411,7 @@ impl ObjectStorageWorker {
             wal_chunk_file_key(store_id, self.epoch_id, self.start_off, self.sync_off)
         };
         let buf_len = self.buf.len();
-        let chunk = self.take_chunk_data();
+        let chunk = self.take_chunk_data()?;
         info!(
             "{}: put wal chunk {} len {} compress len {}",
             store_id,
@@ -637,13 +640,13 @@ mod tests {
             // Save buf to data first.
             origin_data.extend_from_slice(&buf);
             worker.set_buf(buf);
-            let chunk = worker.take_chunk_data();
+            let chunk = worker.take_chunk_data().unwrap();
             // Save chunk data to chunks_data.
             chunks_data.push(Bytes::from(chunk));
         }
         // Append empty chunk to chunks_data should not affect the result.
         worker.set_buf(vec![]);
-        let chunk = worker.take_chunk_data();
+        let chunk = worker.take_chunk_data().unwrap();
         chunks_data.push(Bytes::from(chunk));
 
         // Assemble chunk data and verify with origin data.
