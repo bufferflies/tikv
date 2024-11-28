@@ -213,31 +213,8 @@ mod tests {
 
     use std::{fs::OpenOptions, sync::atomic::Ordering, time::Duration};
 
-    use bytes::{BufMut, BytesMut};
-    use raft_proto::eraftpb;
-
     use super::{config::Config, *};
-    use crate::tests::{init_logger, try_wait};
-
-    fn make_log_data(index: u64, size: usize) -> eraftpb::Entry {
-        let mut entry = eraftpb::Entry::new();
-        entry.set_entry_type(eraftpb::EntryType::EntryConfChange);
-        entry.set_index(index);
-        entry.set_term(1);
-
-        let mut data = BytesMut::with_capacity(size);
-        data.resize(size, 0);
-        entry.set_data(data.freeze());
-        entry
-    }
-
-    fn make_state_kv(key_byte: u8, idx: u64) -> (BytesMut, BytesMut) {
-        let mut key = BytesMut::new();
-        key.put_u8(key_byte);
-        let mut val = BytesMut::new();
-        val.put_u64_le(idx);
-        (key, val)
-    }
+    use crate::test_util::{init_logger, make_log_data, make_state_kv, try_wait};
 
     fn prepare_rfengine(engine: &RfEngine) {
         let mut wb = WriteBatch::new();

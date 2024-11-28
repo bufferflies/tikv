@@ -70,6 +70,12 @@ lazy_static! {
         exponential_buckets(0.0005, 1.8, 26).unwrap()
     )
     .unwrap();
+    pub static ref ENGINE_TAKE_SNAPSHOT_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "raft_engine_take_snapshot_duration_seconds",
+        "Bucketed histogram of Raft Engine take snapshot duration",
+        exponential_buckets(0.0005, 1.8, 26).unwrap()
+    )
+    .unwrap();
     pub static ref ENGINE_REGION_WRITE_BATCH_SIZE_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_region_write_batch_size",
         "Bucketed histogram of Raft Engine region write batch size",

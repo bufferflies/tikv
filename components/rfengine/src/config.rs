@@ -42,6 +42,18 @@ pub struct Config {
     /// Default: false
     #[serde(skip)]
     pub cli_mode: bool,
+
+    /// Rlog file cache capacity. Available only when `lightweight_backup` is
+    /// enabled.
+    ///
+    /// Default: "128MB"
+    pub rlog_cache_capacity: ReadableSize,
+
+    /// Size of rlog files not more that this threshold will be cached in memory
+    /// for performance.
+    ///
+    /// Default: "4KB"
+    pub rlog_cache_size_threshold: ReadableSize,
 }
 
 impl Default for Config {
@@ -54,12 +66,15 @@ impl Default for Config {
             lightweight_backup: false,
             wal_chunk_target_file_size: ReadableSize::mb(64),
             cli_mode: false,
+            rlog_cache_capacity: ReadableSize::mb(128),
+            rlog_cache_size_threshold: ReadableSize::kb(4),
         }
     }
 }
 
+#[cfg(test)]
 impl Config {
-    pub fn new(target_file_size: usize) -> Self {
+    pub(crate) fn new(target_file_size: usize) -> Self {
         let mut cfg = Self::default();
         cfg.target_file_size = ReadableSize(target_file_size as u64);
         cfg

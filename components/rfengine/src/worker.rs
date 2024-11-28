@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    borrow::Cow,
     cmp::min,
     collections::HashMap,
     fmt::{Display, Formatter},
@@ -20,6 +21,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
 use kvproto::raft_serverpb::RegionLocalState;
 use protobuf::Message;
+use quick_cache::unsync::Cache as QuickCache;
 use rfenginepb::{
     KeySpaceBackupMeta, RaftLogBackupFile, RaftLogFile, StoreBackupMeta, StoreRaftLogBackupMeta,
     WalChunk,
@@ -50,6 +52,9 @@ pub(crate) struct Worker {
     compacted_epoch: Arc<AtomicU32>,
     async_wal_writer: Option<WalWriter>,
     dfs_worker_healthy: dfs_worker::Healthy,
+
+    // Used to cache small rlogs to reduce disk IO when taking snapshot.
+    rlog_cache: RlogCache,
 }
 
 impl Worker {
@@ -60,15 +65,18 @@ impl Worker {
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
         async_wal_writer: Option<WalWriter>,
-        object_storage_config: Option<ObjectStorageConfig>,
+        lightweight_backup_cfg: Option<LightweightBackupConfig>,
         dfs_worker_healthy: dfs_worker::Healthy,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
-        let dfs_worker_handle = if let Some(config) = object_storage_config {
+        let (dfs_worker_handle, rlog_cache) = if let Some(config) = lightweight_backup_cfg {
             assert!(
                 async_wal_writer.is_some(),
                 "async wal writer must be enabled"
             );
+
+            let rlog_cache =
+                RlogCache::new(config.rlog_cache_capacity, config.rlog_cache_size_threshold);
 
             let (tx, rx) = tikv_util::mpsc::unbounded();
             let epoch_id = manifest.epoch_id + 1;
@@ -84,12 +92,15 @@ impl Worker {
                 .name(DFS_WORKER_THREAD_NAME.to_string())
                 .spawn_wrapper(move || object_storage_worker.run())
                 .unwrap();
-            Some(ObjectStorageWorkerHandle {
-                task_sender: tx,
-                handle,
-            })
+            (
+                Some(ObjectStorageWorkerHandle {
+                    task_sender: tx,
+                    handle,
+                }),
+                rlog_cache,
+            )
         } else {
-            None
+            (None, RlogCache::none())
         };
         Self {
             dir,
@@ -100,6 +111,7 @@ impl Worker {
             compacted_epoch,
             async_wal_writer,
             dfs_worker_healthy,
+            rlog_cache,
         }
     }
 
@@ -311,6 +323,7 @@ impl Worker {
         let mut change_set = rfenginepb::ChangeSet::default();
         change_set.set_epoch_id(epoch_id);
         let mut generated_files = 0;
+        let mut cached_files = 0;
         for (_, mut peer_batch) in batch.peers {
             let mut peer_meta_pb = rfenginepb::PeerMeta::default();
             peer_meta_pb.set_peer_id(peer_batch.peer_id);
@@ -324,24 +337,30 @@ impl Worker {
             }
             peer_batch.truncate(peer_batch.truncated_idx);
             if !peer_batch.raft_logs.is_empty() {
-                let file = self.write_raft_log_file(peer_batch)?;
+                let (file, is_cached) = self.write_raft_log_file(peer_batch)?;
                 peer_meta_pb.mut_files().push(file);
                 generated_files += 1;
+                cached_files += is_cached as usize;
             }
             change_set.mut_peers().push(peer_meta_pb);
         }
         let _ = file_system::sync_dir(self.dir.as_path());
+
+        self.manifest.handle_compaction(change_set)?;
+
         let engine_id = self.manifest.get_engine_id();
         let duration = timer.saturating_elapsed();
         let pending_tasks = self.task_rx.len();
+        let cache_size = self.rlog_cache.cache_size();
         info!(
             "{}: compact wal", engine_id;
             "size" => it.offset,
             "generated_files" => generated_files,
+            "cached_files" => cached_files,
+            "cache_size" => cache_size,
             "takes" => ?duration,
-            "pending_tasks"  => pending_tasks,
+            "pending_tasks" => pending_tasks,
         );
-        self.manifest.handle_compaction(change_set)?;
         ENGINE_COMPACT_WAL_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
         self.compacted_epoch.store(epoch_id, Ordering::SeqCst);
         Ok(())
@@ -349,7 +368,10 @@ impl Worker {
 
     // rfenginepb::RaftLogFile format:
     // RlogHeader + [endoffset] + [RaftLogOp + checksum]
-    fn write_raft_log_file(&mut self, peer_batch: PeerBatch) -> Result<rfenginepb::RaftLogFile> {
+    fn write_raft_log_file(
+        &mut self,
+        peer_batch: PeerBatch,
+    ) -> Result<(rfenginepb::RaftLogFile, bool /* is_cached */)> {
         let first = peer_batch.raft_logs.front().unwrap().index;
         let last = peer_batch.raft_logs.back().unwrap().index;
         let filename = raft_log_file_name(self.dir.as_path(), peer_batch.peer_id, first, last);
@@ -374,7 +396,11 @@ impl Worker {
         let mut file = rfenginepb::RaftLogFile::default();
         file.first_index = first;
         file.last_index = last;
-        Ok(file)
+
+        let is_cached = self
+            .rlog_cache
+            .add_rlog(peer_batch.peer_id, &file, &self.buf);
+        Ok((file, is_cached))
     }
 
     fn backup_callback(
@@ -393,6 +419,7 @@ impl Worker {
     }
 
     fn snapshot_backup(&mut self) -> Result<Vec<(String, Bytes)>> {
+        let timer = Instant::now_coarse();
         let engine_id = self.manifest.get_engine_id();
         info!("{}: start snapshot task", engine_id);
         let mut backup_meta = StoreBackupMeta::default();
@@ -408,11 +435,14 @@ impl Worker {
         // manifest epoch id already increased by 1.
         let epoch_id = manifest.get_epoch_id();
         backup_meta.set_manifest(manifest);
+        let duration = timer.saturating_elapsed();
         info!(
-            "snapshot backup write file size: {}, raft meta offset {}",
+            "snapshot backup write file size: {}, raft meta offset {}, takes {:?}",
             rlog_obj.1.len(),
             backup_meta.raft_meta_start_off,
+            duration,
         );
+        ENGINE_TAKE_SNAPSHOT_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
 
         // Also need snapshot backup_meta.
         let meta_key = snapshot_store_meta_key(engine_id, epoch_id);
@@ -513,8 +543,15 @@ impl Worker {
             let mut files = Vec::with_capacity(peer_files.len());
             for f in peer_files {
                 files.push((peer_id, f));
-                let file_name = raft_log_file_name(&self.dir, peer_id, f.first_index, f.last_index);
-                raft_log_size += fs::metadata(file_name)?.len();
+
+                let rlog_size = if let Some(rlog_size) = self.rlog_cache.get_rlog_size(peer_id, f) {
+                    rlog_size
+                } else {
+                    let file_name =
+                        raft_log_file_name(&self.dir, peer_id, f.first_index, f.last_index);
+                    fs::metadata(file_name)?.len() as usize
+                };
+                raft_log_size += rlog_size;
             }
             keyspace_map
                 .entry(keyspace_id)
@@ -527,28 +564,45 @@ impl Worker {
             store_raft_log_file_key(store_id, manifest.get_epoch_id())
         };
         // Reserve 10MB for `rlog_meta`, which should be enough in most scenarios.
-        let mut object = BytesMut::with_capacity(raft_log_size as usize + 10 * 1024 * 1024);
+        let mut object = BytesMut::with_capacity(raft_log_size + 10 * 1024 * 1024);
         let mut rlog_meta = StoreRaftLogBackupMeta::default();
         rlog_meta.mut_header().version = 1;
+
         // Aggregate the raft log data with keyspace id.
+        let (mut total_file_cnt, mut cached_file_cnt, mut cached_file_size) = (0, 0, 0);
         for (keyspace_id, files) in keyspace_map {
             let mut keyspace_meta = KeySpaceBackupMeta::default();
             keyspace_meta.keyspace_id = keyspace_id;
             for (peer_id, file) in files {
-                let file_name =
-                    raft_log_file_name(&self.dir, peer_id, file.first_index, file.last_index);
-                let data = fs::read(file_name)?;
+                let data = if let Some(data) = self.rlog_cache.get_rlog_data(peer_id, file) {
+                    cached_file_cnt += 1;
+                    cached_file_size += data.len();
+                    Cow::from(data)
+                } else {
+                    let file_name =
+                        raft_log_file_name(&self.dir, peer_id, file.first_index, file.last_index);
+                    let data = fs::read(file_name)?;
+                    self.rlog_cache.add_rlog(peer_id, file, &data);
+                    Cow::from(data)
+                };
                 let mut backup_file = RaftLogBackupFile::default();
                 backup_file.peer_id = peer_id;
                 backup_file.start_off = object.len() as u64;
-                object.put_slice(&data);
+                object.put_slice(data.as_ref());
                 backup_file.end_off = object.len() as u64;
                 backup_file.first_index = file.first_index;
                 backup_file.last_index = file.last_index;
                 keyspace_meta.mut_files().push(backup_file);
+
+                total_file_cnt += 1;
             }
             rlog_meta.mut_raft_logs().insert(keyspace_id, keyspace_meta);
         }
+
+        info!("{}: backup raft log files", store_id;
+            "total_file" => total_file_cnt, "total_size" => object.len(),
+            "cached_file" => cached_file_cnt, "cached_size" => cached_file_size);
+
         store_meta.raft_meta_start_off = object.len() as u64;
         let meta = rlog_meta.write_to_bytes().unwrap();
         object.put_slice(&meta);
@@ -854,6 +908,100 @@ impl BackupTask {
     }
 }
 
+struct RlogCache {
+    size_threshold: usize,
+    inner: Option<QuickCache<RlogCacheKey, RlogCacheValue, RlogWeighter>>,
+}
+
+#[derive(Clone)]
+struct RlogWeighter;
+
+impl quick_cache::Weighter<RlogCacheKey, RlogCacheValue> for RlogWeighter {
+    fn weight(&self, _: &RlogCacheKey, val: &RlogCacheValue) -> u64 {
+        val.data.len() as u64
+    }
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct RlogCacheKey {
+    peer_id: u64,
+    first_index: u64,
+}
+
+struct RlogCacheValue {
+    last_index: u64, // For verification.
+    data: Bytes,
+}
+
+impl RlogCache {
+    fn new(capacity: usize, size_threshold: usize) -> Self {
+        // Consider `size_threshold / 2` as average rlog size.
+        let inner =
+            QuickCache::with_weighter(capacity * 2 / size_threshold, capacity as u64, RlogWeighter);
+        Self {
+            size_threshold,
+            inner: Some(inner),
+        }
+    }
+
+    fn none() -> Self {
+        Self {
+            size_threshold: 0,
+            inner: None,
+        }
+    }
+
+    fn cache_size(&self) -> u64 {
+        self.inner.as_ref().map(|x| x.weight()).unwrap_or_default()
+    }
+
+    fn add_rlog(&mut self, peer_id: u64, rlog: &RaftLogFile, rlog_data: &[u8]) -> bool /* is_cached */
+    {
+        if let Some(inner) = self.inner.as_mut() {
+            if rlog_data.len() > self.size_threshold {
+                return false;
+            }
+
+            let k = RlogCacheKey {
+                peer_id,
+                first_index: rlog.first_index,
+            };
+            let v = RlogCacheValue {
+                last_index: rlog.last_index,
+                data: Bytes::copy_from_slice(rlog_data),
+            };
+            inner.insert(k, v);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    fn get_rlog_size(&self, peer_id: u64, rlog: &RaftLogFile) -> Option<usize> {
+        self.get_rlog_data(peer_id, rlog).map(|x| x.len())
+    }
+
+    fn get_rlog_data(&self, peer_id: u64, rlog: &RaftLogFile) -> Option<&[u8]> {
+        let inner = self.inner.as_ref()?;
+        let k = RlogCacheKey {
+            peer_id,
+            first_index: rlog.first_index,
+        };
+        let v = inner.get(&k)?;
+        if v.last_index == rlog.last_index {
+            Some(&v.data)
+        } else {
+            debug_assert!(
+                false,
+                "rlog cache: last_index not match, peer_id {}, rlog {:?}, cache.last_index {}",
+                peer_id, rlog, v.last_index
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -869,19 +1017,22 @@ mod tests {
     use rfenginepb::{ChangeSet, PeerState, StoreBackupMeta, StoreRaftLogBackupMeta};
     use tikv_util::defer;
 
+    use super::*;
     use crate::{
         dfs_worker,
         log_batch::{RaftLogOp, RaftLogs},
         manifest::{persist_change_set, Manifest},
         raft_log_file_name, region_state_key, store_raft_log_file_key,
-        tests::{get_txn_endkey_prefix, get_txn_startkey_prefix, init_logger},
+        test_util::{get_txn_endkey_prefix, get_txn_startkey_prefix, init_logger},
         write_batch::PeerBatch,
         RfEngine, RfEngineConfig, WalWriter, Worker, WriterType,
     };
 
+    const RANDOM_STR_MAX_LEN: usize = 1024;
+
     fn generate_random_str() -> Vec<u8> {
         let mut rng = rand::thread_rng();
-        let len = rng.gen::<usize>() % 1024 + 1;
+        let len = rng.gen::<usize>() % RANDOM_STR_MAX_LEN + 1;
         iter::repeat(())
             .map(|()| rng.sample(Alphanumeric))
             .take(len)
@@ -906,8 +1057,10 @@ mod tests {
         peer_meta.mut_states().push(state);
     }
 
-    #[test]
-    fn test_backup_raft_log_files() {
+    #[rstest::rstest]
+    #[case(false)]
+    #[case::with_cache(true)]
+    fn test_backup_raft_log_files(#[case] with_cache: bool) {
         init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let tmp_path = tmp_dir.path();
@@ -925,11 +1078,18 @@ mod tests {
             None,
             dfs_worker::Healthy::default(),
         );
+        worker.rlog_cache = if with_cache {
+            RlogCache::new(RANDOM_STR_MAX_LEN * 80, RANDOM_STR_MAX_LEN / 2)
+        } else {
+            RlogCache::none()
+        };
+
         let epoch = 990;
         let mut cs = ChangeSet::new();
         cs.epoch_id = epoch;
         let mut peer_rlog_files = HashMap::new();
         let mut total_file_cnt = 0;
+        let mut cached_file_cnt = 0;
         for i in 100..203 {
             // peers
             let peer_id = i;
@@ -947,16 +1107,22 @@ mod tests {
                 let last_index = (j + 1) * 100;
                 raft_log_file.set_first_index(first_index);
                 raft_log_file.set_last_index(last_index);
-                meta_pb.mut_files().push(raft_log_file);
                 let file_name = raft_log_file_name(tmp_path, peer_id, first_index, last_index);
                 let content = generate_random_str();
                 fs::write(file_name, &content).unwrap();
+                let is_cached = worker
+                    .rlog_cache
+                    .add_rlog(peer_id, &raft_log_file, &content);
+                cached_file_cnt += is_cached as usize;
+                meta_pb.mut_files().push(raft_log_file);
                 files.push(content);
                 total_file_cnt += 1;
             }
             peer_rlog_files.insert(peer_id, files);
             cs.mut_peers().push(meta_pb);
         }
+        assert!(!with_cache || cached_file_cnt > 0);
+
         let mut store_meta = StoreBackupMeta::default();
         let (key, object) = worker
             .backup_raft_log_files(&cs, &mut store_meta, false)
@@ -1004,7 +1170,7 @@ mod tests {
         region_id: u64,
         first_index: u64,
         last_index: u64,
-    ) -> rfenginepb::RaftLogFile {
+    ) -> (rfenginepb::RaftLogFile, bool /* is_cached */) {
         let mut peer_batch = PeerBatch::new(peer_id, region_id);
         for index in first_index..=last_index {
             let op = RaftLogOp {
@@ -1020,8 +1186,10 @@ mod tests {
         worker.write_raft_log_file(peer_batch).unwrap()
     }
 
-    #[test]
-    fn test_backup_and_load_raft_log_files() {
+    #[rstest::rstest]
+    #[case(false)]
+    #[case::with_cache(true)]
+    fn test_backup_and_load_raft_log_files(#[case] with_cache: bool) {
         init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let tmp_path = tmp_dir.path();
@@ -1039,10 +1207,17 @@ mod tests {
             None,
             dfs_worker::Healthy::default(),
         );
+        worker.rlog_cache = if with_cache {
+            RlogCache::new(RANDOM_STR_MAX_LEN * 100 * 5, RANDOM_STR_MAX_LEN * 100 / 2)
+        } else {
+            RlogCache::none()
+        };
+
         let mut cs = ChangeSet::new();
         let mut peer_data_map = HashMap::new();
         let peers_range = 100..150;
         let mut total_file_cnt = 0;
+        let mut cached_file_cnt = 0;
         for i in peers_range.clone() {
             let peer_id = i;
             let region_id = peer_id * 2;
@@ -1056,7 +1231,7 @@ mod tests {
             for j in 0..10 {
                 let first_index = j * 100 + 1;
                 let last_index = (j + 1) * 100;
-                let raft_log_file = generate_rlog_files(
+                let (raft_log_file, is_cached) = generate_rlog_files(
                     &mut worker,
                     &mut peer_raft_log,
                     peer_id,
@@ -1066,11 +1241,14 @@ mod tests {
                 );
                 meta_pb.mut_files().push(raft_log_file);
                 total_file_cnt += 1;
+                cached_file_cnt += is_cached as usize;
             }
             cs.mut_peers().push(meta_pb);
             cs.epoch_id += 1;
             peer_data_map.insert(peer_id, peer_raft_log);
         }
+        assert!(!with_cache || cached_file_cnt > 0);
+
         // 1. backup
         let mut store_meta = StoreBackupMeta::default();
         let (key, object) = worker

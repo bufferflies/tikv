@@ -211,7 +211,9 @@ impl RfEngineCore {
                 None
             };
 
-            let object_storage_config: Option<ObjectStorageConfig> = if cfg.lightweight_backup {
+            let lightweight_backup_config: Option<LightweightBackupConfig> = if cfg
+                .lightweight_backup
+            {
                 if data_dir.is_some() && panic_mark_dfs_worker_file_exists(data_dir.unwrap()) {
                     // If panic_mark_dfs_worker_file exists, skip init dfs worker thread and mark
                     // dfs worker unhealthy.
@@ -221,11 +223,13 @@ impl RfEngineCore {
                     );
                     None
                 } else {
-                    Some(ObjectStorageConfig::new(
+                    Some(LightweightBackupConfig::new(
                         dir.to_owned(),
                         cfg.wal_chunk_target_file_size.0 as usize,
                         CompressionType::Lz4Compression,
                         dfs_conf.unwrap(),
+                        cfg.rlog_cache_capacity.0 as usize,
+                        cfg.rlog_cache_size_threshold.0 as usize,
                     ))
                 }
             } else {
@@ -239,7 +243,7 @@ impl RfEngineCore {
                 manifest,
                 compacted_epoch,
                 async_wal_writer,
-                object_storage_config,
+                lightweight_backup_config,
                 dfs_worker_healthy,
             );
             let join_handle = thread::spawn(move || worker.run());
@@ -1135,15 +1139,20 @@ impl Display for PeerTag {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs::OpenOptions, io::BufReader, os::unix::prelude::FileExt};
+    use std::{
+        collections::HashMap, fs::OpenOptions, io::BufReader, os::unix::prelude::FileExt,
+        time::Duration,
+    };
 
-    use bytes::{BufMut, BytesMut};
     use engine_traits::Error as TraitError;
-    use eraftpb::{Entry, EntryType};
+    use eraftpb::EntryType;
     use protobuf::Message;
 
     use super::*;
-    use crate::{log_batch::RaftLogOp, tests::init_logger};
+    use crate::{
+        log_batch::RaftLogOp,
+        test_util::{init_logger, make_log_data, make_region_state, make_state_kv, new_raft_entry},
+    };
 
     #[test]
     fn test_rfengine() {
@@ -1234,38 +1243,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    fn make_log_data(index: u64, size: usize) -> eraftpb::Entry {
-        let mut entry = eraftpb::Entry::new();
-        entry.set_entry_type(eraftpb::EntryType::EntryConfChange);
-        entry.set_index(index);
-        entry.set_term(1);
-
-        let mut data = BytesMut::with_capacity(size);
-        data.resize(size, 0);
-        entry.set_data(data.freeze());
-        entry
-    }
-
-    fn make_state_kv(key_byte: u8, idx: u64) -> (BytesMut, BytesMut) {
-        let mut key = BytesMut::new();
-        key.put_u8(key_byte);
-        let mut val = BytesMut::new();
-        val.put_u64_le(idx);
-        (key, val)
-    }
-
-    fn new_raft_entry(tp: EntryType, term: u64, index: u64, data: &[u8], context: u8) -> Entry {
-        let mut entry = Entry::new();
-        entry.set_entry_type(tp);
-        entry.set_term(term);
-        entry.set_index(index);
-        entry.set_data(data.to_vec().into());
-        if context > 0 {
-            entry.set_context(vec![context].into());
-        }
-        entry
     }
 
     #[test]
@@ -1622,52 +1599,38 @@ mod tests {
         let wal_size = 4096 * 10;
         let cfg = Config::new(wal_size);
         let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
+        {
+            let mut wb = WriteBatch::new();
+            let (key, val) = make_region_state(10, 42);
+            wb.set_state(1, 2, &key, &val);
+            engine.write(wb).unwrap();
+        }
         for i in 1..=50 {
             let mut wb = WriteBatch::new();
             wb.append_raft_log(1, 2, &make_log_data(i, 128));
             engine.write(wb).unwrap();
         }
+
+        // Truncate all index.
         let mut wb = WriteBatch::new();
         wb.truncate_raft_log(1, 2, TRUNCATE_ALL_INDEX);
         engine.write(wb).unwrap();
-        // Trigger WAL rotation twice to compact older WALs.
-        let mut wb = WriteBatch::new();
-        wb.append_raft_log(2, 3, &make_log_data(1, wal_size));
-        wb.append_raft_log(2, 3, &make_log_data(2, wal_size));
-        engine.write(wb).unwrap();
-        // Waiting for compacting WAL.
-        for _ in 0..10 {
-            let wal_cnt = engine
-                .dir
-                .read_dir()
-                .unwrap()
-                .filter(|p| {
-                    p.as_ref()
-                        .unwrap()
-                        .path()
-                        .extension()
-                        .map_or(false, |e| e == "wal")
-                })
-                .count();
-            if wal_cnt <= 2 {
-                break;
-            }
-            thread::sleep(std::time::Duration::from_secs(1));
+
+        // Write more batch to trigger WAL compaction.
+        {
+            let mut wb = WriteBatch::new();
+            let (key, val) = make_region_state(11, 43);
+            wb.set_state(2, 3, &key, &val);
+            engine.write(wb).unwrap();
         }
-        // Check no file of region 1 left.
-        assert_eq!(
-            engine
-                .dir
-                .read_dir()
-                .unwrap()
-                .filter(|p| {
-                    let path = p.as_ref().unwrap().path().to_str().unwrap().to_owned();
-                    let parts: Vec<_> = path.split('_').collect();
-                    parts.len() == 4 && parts[1] == format!("{:016x}", 1)
-                })
-                .count(),
-            0
-        );
+        for i in 1..=10 {
+            let mut wb = WriteBatch::new();
+            wb.append_raft_log(2, 3, &make_log_data(i, wal_size));
+            engine.write(wb).unwrap();
+        }
+
+        // Check no file of peer 1 left.
+        wait_for_rlogs_truncated(&engine, 1, 10);
     }
 
     #[test]
@@ -1716,5 +1679,29 @@ mod tests {
         // init_wal_files again should recover from the interrupted upgrade.
         init_wal_files(tmp_dir.path(), Some(&wal_sync_dir)).unwrap();
         check_files();
+    }
+
+    fn wait_for_rlogs_truncated(en: &RfEngine, peer_id: u64, seconds: usize) {
+        let mut ok = false;
+        let peer_id_str = format!("{:016x}", peer_id);
+
+        let start_time = Instant::now_coarse();
+        let timeout = Duration::from_secs(seconds as u64);
+        while start_time.saturating_elapsed() < timeout {
+            let read_dir = en.dir.read_dir().unwrap();
+            let found = read_dir.into_iter().any(|entry| {
+                let filename = entry.unwrap().file_name();
+                let filename = filename.to_string_lossy();
+                let parts: Vec<_> = filename.as_ref().split('_').collect();
+                parts.len() == 3 && parts[0] == peer_id_str
+            });
+            if !found {
+                ok = true;
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+
+        assert!(ok);
     }
 }

@@ -22,31 +22,38 @@ use crate::{
     wal_chunk_file_prefix, wal_file_name, Error, Result, Task,
 };
 
-pub(crate) struct ObjectStorageConfig {
+pub(crate) struct LightweightBackupConfig {
     pub(crate) dir: PathBuf,
     pub(crate) wal_chunk_target_file_size: usize,
     pub(crate) compression_type: CompressionType,
     pub(crate) dfs_config: DFSConfig,
+
+    pub(crate) rlog_cache_capacity: usize,
+    pub(crate) rlog_cache_size_threshold: usize,
 }
 
-impl ObjectStorageConfig {
+impl LightweightBackupConfig {
     pub(crate) fn new(
         dir: PathBuf,
         wal_chunk_target_file_size: usize,
         compression_type: CompressionType,
         dfs_config: DFSConfig,
+        rlog_cache_capacity: usize,
+        rlog_cache_size_threshold: usize,
     ) -> Self {
         Self {
             dir,
             wal_chunk_target_file_size,
             compression_type,
             dfs_config,
+            rlog_cache_capacity,
+            rlog_cache_size_threshold,
         }
     }
 }
 
 pub(crate) struct ObjectStorageWorker {
-    config: ObjectStorageConfig,
+    config: LightweightBackupConfig,
     engine_id: Arc<AtomicU64>,
     task_rx: Receiver<ObjectStorageTask>,
     callback: Sender<Task>, // Callback to worker.
@@ -62,7 +69,7 @@ pub(crate) struct ObjectStorageWorker {
 
 impl ObjectStorageWorker {
     pub(crate) fn new(
-        config: ObjectStorageConfig,
+        config: LightweightBackupConfig,
         epoch_id: u32,
         engine_id: Arc<AtomicU64>,
         dfs_worker_healthy: Healthy,
@@ -619,11 +626,13 @@ mod tests {
         let (tx, _) = tikv_util::mpsc::unbounded();
         let dfs_config = kvengine::dfs::DFSConfig::default();
         let mut worker = ObjectStorageWorker::new(
-            crate::ObjectStorageConfig::new(
+            crate::LightweightBackupConfig::new(
                 std::env::temp_dir(),
                 1024 * 1024,
                 CompressionType::Lz4Compression,
                 dfs_config,
+                1024 * 1024,
+                4096,
             ),
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),

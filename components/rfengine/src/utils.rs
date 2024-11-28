@@ -237,22 +237,18 @@ pub fn wal_chunk_file_suffix(start_off: u64, end_off: u64) -> String {
 }
 
 #[cfg(test)]
-pub mod tests {
+pub mod test_util {
     use std::{sync::Once, time::Duration};
 
-    use api_version::{
-        api_v2::{self, TXN_KEY_PREFIX},
-        ApiV2,
-    };
+    use api_version::api_v2::TXN_KEY_PREFIX;
     use byteorder::{BigEndian, ByteOrder};
-    use kvproto::metapb::Region;
+    use bytes::{BufMut, BytesMut};
+    use kvproto::raft_serverpb::RegionLocalState;
+    use protobuf::Message;
+    use raft_proto::{eraftpb, eraftpb::EntryType};
     use tikv_util::time::Instant;
 
-    use crate::{
-        get_region_keyspace_id, get_region_keyspace_id_str, last_wal_chunk_file_key,
-        parse_epoch_from_snapshot_key, parse_wal_chunk_key, snapshot_rlog_key,
-        verify_wal_chunks_integrity, wal_chunk_file_key,
-    };
+    use crate::region_state_key;
 
     static INIT: Once = Once::new();
 
@@ -275,6 +271,84 @@ pub mod tests {
         }
         false
     }
+
+    pub fn get_txn_startkey_prefix(keyspace_id: u32) -> [u8; 4] {
+        let mut keyspace_id_buf = [0u8; 4];
+        BigEndian::write_u32(&mut keyspace_id_buf, keyspace_id);
+        keyspace_id_buf[0] = TXN_KEY_PREFIX;
+        keyspace_id_buf
+    }
+
+    pub fn get_txn_endkey_prefix(keyspace_id: u32) -> [u8; 4] {
+        let mut keyspace_id_buf = get_txn_startkey_prefix(keyspace_id);
+        keyspace_id_buf[3] += 1;
+        keyspace_id_buf
+    }
+
+    pub fn make_log_data(index: u64, size: usize) -> eraftpb::Entry {
+        let mut entry = eraftpb::Entry::new();
+        entry.set_entry_type(eraftpb::EntryType::EntryConfChange);
+        entry.set_index(index);
+        entry.set_term(1);
+
+        let mut data = BytesMut::with_capacity(size);
+        data.resize(size, 0);
+        entry.set_data(data.freeze());
+        entry
+    }
+
+    pub fn make_state_kv(key_byte: u8, idx: u64) -> (BytesMut, BytesMut) {
+        let mut key = BytesMut::new();
+        key.put_u8(key_byte);
+        let mut val = BytesMut::new();
+        val.put_u64_le(idx);
+        (key, val)
+    }
+
+    pub fn make_region_state(region_epoch: u64, keyspace_id: u32) -> (Vec<u8>, Vec<u8>) {
+        let key = region_state_key(region_epoch).to_vec();
+
+        let mut local_stat = RegionLocalState::default();
+        local_stat.mut_region().start_key = get_txn_startkey_prefix(keyspace_id).to_vec();
+        local_stat.mut_region().end_key = get_txn_endkey_prefix(keyspace_id).to_vec();
+        let val = local_stat.write_to_bytes().unwrap();
+
+        (key, val)
+    }
+
+    pub fn new_raft_entry(
+        tp: EntryType,
+        term: u64,
+        index: u64,
+        data: &[u8],
+        context: u8,
+    ) -> eraftpb::Entry {
+        let mut entry = eraftpb::Entry::new();
+        entry.set_entry_type(tp);
+        entry.set_term(term);
+        entry.set_index(index);
+        entry.set_data(data.to_vec().into());
+        if context > 0 {
+            entry.set_context(vec![context].into());
+        }
+        entry
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api_version::{
+        api_v2::{self},
+        ApiV2,
+    };
+    use kvproto::metapb::Region;
+
+    use crate::{
+        get_region_keyspace_id, get_region_keyspace_id_str, last_wal_chunk_file_key,
+        parse_epoch_from_snapshot_key, parse_wal_chunk_key, snapshot_rlog_key,
+        test_util::{get_txn_endkey_prefix, get_txn_startkey_prefix},
+        verify_wal_chunks_integrity, wal_chunk_file_key,
+    };
 
     #[test]
     fn test_get_region_keyspace_id() {
@@ -300,19 +374,6 @@ pub mod tests {
         region.start_key = vec![];
         assert!(get_region_keyspace_id_str(&region).is_none());
         assert_eq!(get_region_keyspace_id(&region), api_v2::UNKNOWN_KEYSPACE_ID);
-    }
-
-    pub fn get_txn_startkey_prefix(keyspace_id: u32) -> [u8; 4] {
-        let mut keyspace_id_buf = [0u8; 4];
-        BigEndian::write_u32(&mut keyspace_id_buf, keyspace_id);
-        keyspace_id_buf[0] = TXN_KEY_PREFIX;
-        keyspace_id_buf
-    }
-
-    pub fn get_txn_endkey_prefix(keyspace_id: u32) -> [u8; 4] {
-        let mut keyspace_id_buf = get_txn_startkey_prefix(keyspace_id);
-        keyspace_id_buf[3] += 1;
-        keyspace_id_buf
     }
 
     #[test]
