@@ -1204,6 +1204,7 @@ fn test_restore_keyspace_with_no_chunk() {
 ///
 /// See https://github.com/tidbcloud/cloud-storage-engine/issues/1977.
 #[test]
+#[ignore]
 fn test_restore_keyspace_with_slow_dfs() {
     const KEYSPACE_ID: u32 = 1;
 

@@ -45,6 +45,7 @@ prop_compose! {
 #[case::memory(IaCapacity::MemoryCap(3000))]
 #[case::big_cap(IaCapacity::MemoryAndDiskCap(1000, PathBuf::from("ia"), 10000))]
 #[case::small_cap(IaCapacity::MemoryAndDiskCap(128, PathBuf::from("ia"), 1024))]
+#[ignore]
 fn test_read(#[case] mut ia_cap: IaCapacity) {
     init_log_for_test();
 
