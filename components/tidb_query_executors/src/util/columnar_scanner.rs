@@ -252,10 +252,7 @@ impl ColumnarScanner {
             }
         }
         // Update scanned keys end.
-        (
-            LazyBatchColumnVec::from(column_vec),
-            Ok(read_size < scan_rows),
-        )
+        (LazyBatchColumnVec::from(column_vec), Ok(read_size == 0))
     }
 }
 

@@ -507,61 +507,73 @@ impl ColumnarFilterReader for ColumnarMvccReader {
         self.src.schema()
     }
 
+    // Return size may be less than limit, and it doesn't mean the reader is drained
+    // if the return size above 0.
     async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
-        self.filter.clear();
-        block.reset();
-        let read_row = self.src.read(block, limit).await?;
-        if read_row == 0 {
-            return Ok(0);
-        }
-        if block.handles.fixed_size > 0 {
-            for i in 0..block.handles.length() {
-                let handle = block.handles.get_int_handle_value(i);
-                let version = block.versions.get_version(i);
-                if version > self.read_ts
-                    || (self.prev_int_handle.is_some() && handle == self.prev_int_handle.unwrap())
-                {
-                    self.filter.finish_range(i);
-                    continue;
-                }
-                if block.versions.is_null(i) {
+        loop {
+            self.filter.clear();
+            block.reset();
+            let read_row = self.src.read(block, limit).await?;
+            if read_row == 0 {
+                // Return 0 rows means the reader is drained.
+                return Ok(0);
+            }
+            if block.handles.fixed_size > 0 {
+                for i in 0..block.handles.length() {
+                    let handle = block.handles.get_int_handle_value(i);
+                    let version = block.versions.get_version(i);
+                    if version > self.read_ts
+                        || (self.prev_int_handle.is_some()
+                            && handle == self.prev_int_handle.unwrap())
+                    {
+                        self.filter.finish_range(i);
+                        continue;
+                    }
+                    if block.versions.is_null(i) {
+                        self.prev_int_handle = Some(handle);
+                        self.filter.finish_range(i);
+                        continue;
+                    }
+                    if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
+                        self.filter.finish_range(i);
+                        break;
+                    }
+                    self.filter.start_range(i);
                     self.prev_int_handle = Some(handle);
-                    self.filter.finish_range(i);
-                    continue;
                 }
-                if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
-                    self.filter.finish_range(i);
-                    break;
-                }
-                self.filter.start_range(i);
-                self.prev_int_handle = Some(handle);
-            }
-        } else {
-            let length = block.handles.length();
-            let last_handle = block.handles.get_not_null_value(length - 1);
-            let check_handle = last_handle >= self.end_handle.as_slice();
-            for i in 0..block.handles.length() {
-                let handle = block.handles.get_not_null_value(i);
-                let version = block.versions.get_version(i);
-                if version > self.read_ts || handle == self.prev_common_handle {
-                    self.filter.finish_range(i);
-                    continue;
-                }
-                if block.versions.is_null(i) {
+            } else {
+                let length = block.handles.length();
+                let last_handle = block.handles.get_not_null_value(length - 1);
+                let check_handle = last_handle >= self.end_handle.as_slice();
+                for i in 0..block.handles.length() {
+                    let handle = block.handles.get_not_null_value(i);
+                    let version = block.versions.get_version(i);
+                    if version > self.read_ts || handle == self.prev_common_handle {
+                        self.filter.finish_range(i);
+                        continue;
+                    }
+                    if block.versions.is_null(i) {
+                        self.prev_common_handle = handle.to_vec();
+                        self.filter.finish_range(i);
+                        continue;
+                    }
+                    if check_handle && handle >= self.end_handle.as_slice() {
+                        self.filter.finish_range(i);
+                        break;
+                    }
+                    self.filter.start_range(i);
                     self.prev_common_handle = handle.to_vec();
-                    self.filter.finish_range(i);
-                    continue;
                 }
-                if check_handle && handle >= self.end_handle.as_slice() {
-                    self.filter.finish_range(i);
-                    break;
-                }
-                self.filter.start_range(i);
-                self.prev_common_handle = handle.to_vec();
             }
+            self.filter.finish_range(read_row);
+            let filtered_rows = self.filter.do_filter(read_row, block);
+            // If all rows are filtered, we should try to read next block.
+            if filtered_rows == 0 {
+                info!("mvcc_reader read_block: all rows are filtered, try to read next block");
+                continue;
+            }
+            return Ok(filtered_rows);
         }
-        self.filter.finish_range(read_row);
-        Ok(self.filter.do_filter(read_row, block))
     }
 }
 
