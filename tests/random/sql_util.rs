@@ -2,13 +2,15 @@
 
 //! Common utilities for building workload run by SQLs.
 
-use anyhow::Context;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
 use rand::{
     prelude::{SliceRandom, ThreadRng},
     Rng,
 };
-use sqlx::{Connection, Row};
-use tikv_util::error;
+use sqlx::{Connection, MySql, Row};
+use tikv_util::{error, info, time::Instant};
 
 use crate::test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE};
 
@@ -91,6 +93,56 @@ pub(crate) fn gen_padding(rows: usize, rng: &mut ThreadRng, buf: &mut [u8]) -> u
     let row_size = (trans_size + rows - 1) / rows;
     rng.fill(&mut buf[..row_size]);
     row_size
+}
+
+pub async fn query_tiflash_or_columnar_progress<'a, E>(
+    executor: E,
+    db: &str,
+    tb: &str,
+) -> Result<(bool /* available */, f64 /* progress */)>
+where
+    E: sqlx::Executor<'a, Database = MySql>,
+{
+    let sql = format!(
+        "select available, progress from information_schema.tiflash_replica where TABLE_SCHEMA='{db}' and TABLE_NAME='{tb}'"
+    );
+    let row = sqlx::query(&sql).fetch_one(executor).await.context(sql)?;
+    let available: i32 = row.get("available");
+    let progress: f64 = row.get("progress");
+    Ok((available != 0, progress))
+}
+
+pub async fn wait_tiflash_or_columnar_replicas_available(
+    tag: &str,
+    pool: &sqlx::pool::Pool<MySql>,
+    db: &str,
+    tb: &str,
+    timeout: Duration,
+) {
+    let start = Instant::now_coarse();
+    while start.saturating_elapsed() < timeout {
+        let (available, progress) = query_tiflash_or_columnar_progress(pool, db, tb)
+            .await
+            .unwrap();
+        if available {
+            info!("{} TiFlash replicas available", tag; "db" => db, "tb" => tb, "progress" => progress);
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let (available, progress) = query_tiflash_or_columnar_progress(pool, db, tb)
+        .await
+        .unwrap();
+    panic!(
+        "{} TiFlash replicas not available, db {}, tb {}, available {}, progress {}",
+        tag, db, tb, available, progress,
+    );
+}
+
+// Hint: /*+ READ_FROM_STORAGE(TIFLASH[t1], TIKV[t2]) */
+pub fn get_engine_hint(use_tiflash: bool, tb: &str) -> String {
+    let engine = if use_tiflash { "TIFLASH" } else { "TIKV" };
+    format!("/*+ READ_FROM_STORAGE({engine}[{tb}]) */")
 }
 
 pub struct Transaction {

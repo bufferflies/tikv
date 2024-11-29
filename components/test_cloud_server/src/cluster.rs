@@ -2,9 +2,12 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU16, Ordering::Relaxed},
+        atomic::{
+            AtomicU16,
+            Ordering::{self, Relaxed},
+        },
         Arc, Mutex,
     },
     thread::sleep,
@@ -81,6 +84,7 @@ pub struct ServerCluster {
     keyspace_manager: KeyspaceManager,
     nodes_count: usize,
     tikv_workers: HashMap<u16 /* idx */, CloudWorker>,
+    schema_manager: Option<CloudWorker>,
 }
 
 impl ServerCluster {
@@ -123,6 +127,7 @@ impl ServerCluster {
             keyspace_manager: Default::default(),
             nodes_count: nodes.len(),
             tikv_workers: Default::default(),
+            schema_manager: None,
         };
         for node_id in nodes {
             cluster.start_node(node_id, &update_conf);
@@ -726,6 +731,31 @@ impl ServerCluster {
             worker.start();
             self.tikv_workers.insert(idx, worker);
         }
+    }
+
+    pub fn start_schema_manager(&mut self) {
+        let tikv_config = self.confs.iter().next().unwrap().1;
+        let idx = TIKV_WORKER_IDX_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
+        let worker_config = cloud_worker::Config {
+            addr: tikv_worker_addr(idx),
+            cop_addr: "".to_string(),
+            pd: pd_client::Config::new(self.pd_endpoints().to_vec()),
+            security: tikv_config.security.clone(),
+            dfs: tikv_config.dfs.clone(),
+            schema_manager: cloud_worker::SchemaManagerConfig {
+                dir: PathBuf::from(tikv_config.storage.data_dir.clone()),
+                schema_refresh_threshold: 1,
+                enabled: true,
+                keyspace_refresh_interval: ReadableDuration::secs(3),
+                http_timeout: ReadableDuration::secs(3),
+            },
+            ..Default::default()
+        };
+
+        let mut schema_manager =
+            CloudWorker::new(worker_config, None, 1, self.get_pure_pd_client());
+        schema_manager.start();
+        self.schema_manager = Some(schema_manager);
     }
 
     pub fn new_txn_client_helper(&self, max_chunk_size: usize) -> Option<Arc<TxnFileHelper>> {

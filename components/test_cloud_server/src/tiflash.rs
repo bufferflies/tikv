@@ -52,7 +52,13 @@ impl TiFlashServers {
         format!("127.0.0.1:{}", TIFLASH_PROXY_STATUS_PORT_BASE + idx)
     }
 
-    pub fn start(&self, idx: u16, dfs: DFSConfig, pd_endpoints: &[String]) {
+    pub fn start(
+        &self,
+        idx: u16,
+        dfs: DFSConfig,
+        pd_endpoints: &[String],
+        tiflash_compute_mode: bool,
+    ) {
         let data_dir = self.data_path.join(format!("tiflash-{idx}"));
         let log_file = self.data_path.join(format!("tiflash-{idx}.log"));
         let error_log_file = self.data_path.join(format!("tiflash-error-{idx}.log"));
@@ -63,12 +69,18 @@ impl TiFlashServers {
         let proxy_config_file = self.data_path.join(format!("tiflash-proxy-{idx}.toml"));
 
         let service_addr = format!("127.0.0.1:{}", TIFLASH_SERVICE_PORT_BASE + idx);
+        let role = if tiflash_compute_mode {
+            "tiflash_compute".to_string()
+        } else {
+            "".to_string()
+        };
 
         let config = TiFlashConfig {
             http_port: TIFLASH_HTTP_PORT_BASE + idx,
             tcp_port: TIFLASH_TCP_PORT_BASE + idx,
             flash: FlashConfig {
                 service_addr: service_addr.clone(),
+                disaggregated_mode: role,
                 proxy: ProxyConfig {
                     addr: format!("127.0.0.1:{}", TIFLASH_PROXY_PORT_BASE + idx),
                     status_addr: self.status_addr(idx),
@@ -212,6 +224,8 @@ impl Default for TiFlashConfig {
 #[serde(rename_all = "snake_case")]
 struct FlashConfig {
     service_addr: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    disaggregated_mode: String,
     proxy: ProxyConfig,
 }
 

@@ -10,7 +10,10 @@ use test_cloud_server::{keyspace::KeyspaceManager, tidb::TidbCluster};
 use tikv_util::{error, info, time::Instant};
 
 use crate::{
-    sql_util::{gen_padding, is_db_error_retryable, DEADLOCK_ERR_MSG, MAX_PADDING_SIZE},
+    sql_util::{
+        gen_padding, get_engine_hint, is_db_error_retryable,
+        wait_tiflash_or_columnar_replicas_available, DEADLOCK_ERR_MSG, MAX_PADDING_SIZE,
+    },
     JEPSEN_BANK_TXN_COUNTER, JEPSEN_BANK_TXN_RETRY_COUNTER,
 };
 
@@ -67,7 +70,7 @@ pub(crate) async fn prepare_jepsen_bank(
     }
 
     if tiflash_replicas.is_some() {
-        wait_tiflash_replicas_available(
+        wait_tiflash_or_columnar_replicas_available(
             &tag,
             &pool,
             BANK_DB_NAME,
@@ -281,50 +284,4 @@ where
         })
         .collect::<Vec<_>>();
     Ok(accounts)
-}
-
-// Hint: /*+ READ_FROM_STORAGE(TIFLASH[t1], TIKV[t2]) */
-fn get_engine_hint(use_tiflash: bool, tb: &str) -> String {
-    let engine = if use_tiflash { "TIFLASH" } else { "TIKV" };
-    format!("/*+ READ_FROM_STORAGE({engine}[{tb}]) */")
-}
-
-async fn query_tiflash_progress<'a, E>(
-    executor: E,
-    db: &str,
-    tb: &str,
-) -> Result<(bool /* available */, f64 /* progress */)>
-where
-    E: sqlx::Executor<'a, Database = MySql>,
-{
-    let sql = format!(
-        "select available, progress from information_schema.tiflash_replica where TABLE_SCHEMA='{db}' and TABLE_NAME='{tb}'"
-    );
-    let row = sqlx::query(&sql).fetch_one(executor).await.context(sql)?;
-    let available: i32 = row.get("available");
-    let progress: f64 = row.get("progress");
-    Ok((available != 0, progress))
-}
-
-async fn wait_tiflash_replicas_available(
-    tag: &str,
-    pool: &sqlx::pool::Pool<MySql>,
-    db: &str,
-    tb: &str,
-    timeout: Duration,
-) {
-    let start = Instant::now_coarse();
-    while start.saturating_elapsed() < timeout {
-        let (available, progress) = query_tiflash_progress(pool, db, tb).await.unwrap();
-        if available {
-            info!("{} TiFlash replicas available", tag; "db" => db, "tb" => tb, "progress" => progress);
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    let (available, progress) = query_tiflash_progress(pool, db, tb).await.unwrap();
-    panic!(
-        "{} TiFlash replicas not available, db {}, tb {}, available {}, progress {}",
-        tag, db, tb, available, progress,
-    );
 }

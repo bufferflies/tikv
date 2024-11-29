@@ -28,6 +28,7 @@ use tikv_util::{
 };
 
 use crate::{
+    test_columnar::{prepare_columnar, run_columnar_workload},
     test_jepsen::*,
     test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE},
     test_unique::*,
@@ -83,6 +84,9 @@ const JEPSEN_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
 
 const UNIQUE_WORKLOAD_SWITCH_ENV_KEY: &str = "UNIQUE_WORKLOAD";
 const UNIQUE_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
+
+const COLUMNAR_WORKLOAD_SWITCH_ENV_KEY: &str = "COLUMNAR_WORKLOAD";
+const COLUMNAR_WORKLOAD_KEYSPACE: u32 = 1;
 
 const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -140,6 +144,9 @@ fn test_random_with_tidb() {
     let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
     check_tpc_binary(&tpc_bin);
 
+    let columnar_switch_on = env_switch_opt(COLUMNAR_WORKLOAD_SWITCH_ENV_KEY, 0);
+    info!("columnar_switch_on: {}", columnar_switch_on);
+
     let start_tidb = {
         let tc = tc.clone();
         let tikv_worker_addr = cluster.tikv_worker_endpoints().pop().unwrap();
@@ -152,6 +159,7 @@ fn test_random_with_tidb() {
                     tikv_worker_addr,
                     txn_chunk_max_size: TXN_CHUNK_MAX_SIZE as u64,
                     txn_file_min_mutation_size: Some(TXN_FILE_MIN_SIZE as u64),
+                    tiflash_compute_mode: columnar_switch_on,
                 },
             )
             .await
@@ -164,6 +172,7 @@ fn test_random_with_tidb() {
                 TIFLASH_SERVER_COUNT as u16,
                 &dfs_config,
                 TIFLASH_HEALTHY_TIMEOUT,
+                columnar_switch_on,
             );
         })
     };
@@ -221,6 +230,14 @@ fn test_random_with_tidb() {
             UNIQUE_WORKLOAD_KEYSPACE,
         )));
     }
+    if columnar_switch_on {
+        info!("prepare_columnar");
+        prepare_tasks.push(runtime.spawn(prepare_columnar(
+            tc.clone(),
+            keyspace_manager.clone(),
+            COLUMNAR_WORKLOAD_KEYSPACE,
+        )));
+    }
     runtime.block_on(futures::future::join_all(prepare_tasks));
 
     let mut async_handles = vec![];
@@ -249,9 +266,17 @@ fn test_random_with_tidb() {
     if unique_workload_switch_on {
         async_handles.push(runtime.spawn(run_unique_workload(
             tc.clone(),
-            keyspace_manager,
+            keyspace_manager.clone(),
             UNIQUE_WORKLOAD_KEYSPACE,
             global_use_txn_file,
+            TEST_DURATION,
+        )));
+    }
+    if columnar_switch_on {
+        async_handles.push(runtime.spawn(run_columnar_workload(
+            tc.clone(),
+            keyspace_manager,
+            COLUMNAR_WORKLOAD_KEYSPACE,
             TEST_DURATION,
         )));
     }
@@ -451,6 +476,7 @@ fn prepare_cluster(
             ..Default::default()
         },
     );
+    cluster.start_schema_manager();
     cluster.wait_region_replicated(&[], 3);
 
     let mut keyspaces: Vec<u32> = vec![];

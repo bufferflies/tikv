@@ -26,6 +26,7 @@ JEPSEN_TXNS_THRESHOLD=100
 LOAD_DATA_TASK_TIMEOUT_SEC=60
 
 UNIQUE_WORKLOAD=0
+COLUMNAR_WORKLOAD=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -72,6 +73,9 @@ while [ $# -gt 0 ]; do
     --unique-workload)
         UNIQUE_WORKLOAD=1
         ;;
+    --columnar-workload)
+        COLUMNAR_WORKLOAD=1
+        ;;
     *)
         echo "Usage: $0 DOCKER_ID TESTNAME [--keep-tmp-on-error] [--log-path LOG_PATH] [--memory-profile]"
         exit 1
@@ -101,6 +105,7 @@ export JEPSEN_TXNS_THRESHOLD
 export LOAD_DATA_TASK_TIMEOUT_SEC
 
 export UNIQUE_WORKLOAD
+export COLUMNAR_WORKLOAD
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs
 for i in $(seq -w 1 100000); do

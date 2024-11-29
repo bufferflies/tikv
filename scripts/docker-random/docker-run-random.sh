@@ -102,6 +102,9 @@ while [[ $# -gt 0 ]]; do
 	--unique-workload)
 		RUN_ARGS+=("--unique-workload")
 		;;
+    --columnar-workload)
+        RUN_ARGS+=("--columnar-workload")
+        ;;
 	--help)
 		show_help
 		exit 0

@@ -43,8 +43,9 @@ use kvproto::metapb::Store;
 pub use metrics::REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM;
 use pd_client::PdClient;
 use prometheus::labels;
-pub use schema_manager::broadcast_schema_update_to_all_stores;
-use schema_manager::{SchemaManager, SchemaManagerConfig};
+pub use schema_manager::{
+    broadcast_schema_update_to_all_stores, SchemaManager, SchemaManagerConfig,
+};
 use security::{SecurityConfig, SecurityManager};
 pub use server::get_cop_req_tag;
 use slog_global::{error, info, warn};

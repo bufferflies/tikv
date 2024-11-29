@@ -399,6 +399,18 @@ impl TidbServers {
             config.tikv_client.txn_chunk_max_size = options.txn_chunk_max_size;
             config.tikv_client.txn_file_min_mutation_size = txn_file_min_mutation_size;
         }
+        if options.tiflash_compute_mode {
+            config.disaggregated_tiflash = true;
+            config.use_autoscaler = false;
+            config.tiflash_replicas.group_id = "tiflash_group".to_string();
+            config.tiflash_replicas.extra_s3_rule = false;
+            config.tiflash_replicas.min_count = 1;
+            config.tiflash_replicas.constraints = vec![TiFlashReplicasConstraints {
+                key: "engine".to_string(),
+                op: "in".to_string(),
+                values: vec!["tiflash".to_string()],
+            }];
+        }
         let toml = toml::to_string(&config).unwrap();
         fs::write(&config_file, toml).unwrap();
 
@@ -551,6 +563,7 @@ pub struct StartTidbOptions {
     pub tikv_worker_addr: String,
     pub txn_chunk_max_size: u64,
     pub txn_file_min_mutation_size: Option<u64>,
+    pub tiflash_compute_mode: bool,
 }
 
 pub struct TidbClusterCore {
@@ -584,13 +597,23 @@ impl TidbClusterCore {
         self.tidb.must_all_healthy(timeout).await;
     }
 
-    pub fn start_tiflash(&self, count: u16, dfs: &DFSConfig, timeout: Duration) {
+    pub fn start_tiflash(
+        &self,
+        count: u16,
+        dfs: &DFSConfig,
+        timeout: Duration,
+        tiflash_compute_mode: bool,
+    ) {
         let pd_endpoints = self.pd.endpoints();
         for idx in 0..count {
-            self.tiflash.start(idx, dfs.clone(), &pd_endpoints);
+            self.tiflash
+                .start(idx, dfs.clone(), &pd_endpoints, tiflash_compute_mode);
         }
         block_on(self.tiflash.must_all_healthy(timeout));
-        self.wait_tiflash_up(count, timeout);
+        // TiFlash compute node may not register self to pd.
+        if !tiflash_compute_mode {
+            self.wait_tiflash_up(count, timeout);
+        }
     }
 
     pub fn wait_tiflash_up(&self, count: u16, timeout: Duration) {
@@ -684,7 +707,27 @@ struct TsoSvcStatus {
 #[serde(rename_all = "kebab-case")]
 struct TidbConfig {
     keyspace_name: String,
+    disaggregated_tiflash: bool,
+    use_autoscaler: bool,
     tikv_client: TikvClientConfig,
+    tiflash_replicas: TiFlashReplicas,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct TiFlashReplicas {
+    group_id: String,
+    extra_s3_rule: bool,
+    min_count: usize,
+    constraints: Vec<TiFlashReplicasConstraints>,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct TiFlashReplicasConstraints {
+    key: String,
+    op: String,
+    values: Vec<String>,
 }
 
 #[derive(Default, Serialize)]

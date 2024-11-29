@@ -2,6 +2,7 @@
 
 mod sql_util;
 mod test_all;
+mod test_columnar;
 mod test_drop_table;
 mod test_jepsen;
 mod test_load_data;
@@ -78,6 +79,8 @@ lazy_static::lazy_static! {
     pub static ref JEPSEN_BANK_TXN_RETRY_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref UNIQUE_WORKLOAD_TXN_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref UNIQUE_WORKLOAD_CONFLICT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref COLUMNAR_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref COLUMNAR_RETRY_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(90);
