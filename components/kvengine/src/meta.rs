@@ -670,6 +670,7 @@ impl ShardMeta {
     fn apply_destroy_range(&mut self, cs: &pb::ChangeSet) {
         assert!(cs.has_destroy_range());
         self.apply_table_change(cs.get_destroy_range());
+        self.apply_table_change_to_unconverted_l0s(cs.get_destroy_range());
         // ChangeSet of DestroyRange contains the corresponding delete-prefixes which
         // should be cleaned up.
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
@@ -691,8 +692,6 @@ impl ShardMeta {
         self.apply_table_change(cs.get_truncate_ts());
         // During keyspace restoration, truncate_ts will be triggered. We also need
         // manipulate the unconverted_l0s.
-        // Note: InplaceCompaction is forbidden in server-side if there has
-        // unconverted_l0s.
         self.apply_table_change_to_unconverted_l0s(cs.get_truncate_ts());
 
         // ChangeSet of TruncateTs contains the corresponding ts which should be cleaned
@@ -721,6 +720,7 @@ impl ShardMeta {
         debug!("apply changeset.trim_over_bound in meta {:?}", self.id);
         assert!(cs.has_trim_over_bound());
         self.apply_table_change(cs.get_trim_over_bound());
+        self.apply_table_change_to_unconverted_l0s(cs.get_trim_over_bound());
         self.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
     }
 

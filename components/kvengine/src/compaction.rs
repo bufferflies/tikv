@@ -1442,10 +1442,22 @@ impl Engine {
                 MAJOR_COMPACTION_MIN_REQUEST_VERSION
             ))));
         }
+        let data = shard.get_data();
+        // We checked the unconverted_l0s in `refresh_compaction_priority`, but new l0s
+        // may be added after the check. The comapct is running in the background, so we
+        // need to check it again.
+        if data.has_unconverted_l0s() {
+            info!(
+                "{} trigger_major_compaction skipped due to unconverted_l0s {:?}",
+                shard.tag(),
+                data.get_unconverted_l0s()
+            );
+            store_bool(&shard.compacting, false);
+            return None;
+        }
         let mut req = self.new_compact_request_with_shard(shard);
         let mut ln_tables: HashMap<usize, Vec<(usize, Vec<u64>)>> = HashMap::new();
         let mut total_size = 0;
-        let data = shard.get_data();
         let mut num_ln_files = 0;
         for (cf, shard_cf) in data.cfs.iter().enumerate() {
             let mut ssts_for_cf = vec![];
@@ -2464,6 +2476,7 @@ fn compact_destroy_range(
     .map(|file| (file.id(), file))
     .collect();
 
+    let mut destroy = pb::TableChange::new();
     let mut deletes = vec![];
     let mut creates = vec![];
     let del_prefixes = DeletePrefixes::unmarshal(del_prefix, req.inner_key_off);
@@ -2551,6 +2564,9 @@ fn compact_destroy_range(
         create.set_biggest(biggest);
         create.set_meta_offset(meta_offset);
         creates.push(create);
+
+        destroy.mut_file_ids_map().push(id);
+        destroy.mut_file_ids_map().push(new_id);
     }
     let mut errors = creates
         .iter()
@@ -2562,7 +2578,7 @@ fn compact_destroy_range(
     if !errors.is_empty() {
         return Err(errors.pop().unwrap().into());
     }
-    let mut destroy = pb::TableChange::new();
+
     destroy.set_table_deletes(deletes.into());
     destroy.set_table_creates(creates.into());
     Ok(destroy)
@@ -2975,6 +2991,7 @@ fn compact_trim_over_bound(
     .map(|file| (file.id(), file))
     .collect();
 
+    let mut table_change = pb::TableChange::new();
     let mut deletes = vec![];
     let mut creates = vec![];
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
@@ -3060,6 +3077,9 @@ fn compact_trim_over_bound(
         create.set_biggest(biggest);
         create.set_meta_offset(meta_offset);
         creates.push(create);
+
+        table_change.mut_file_ids_map().push(id);
+        table_change.mut_file_ids_map().push(new_id);
     }
 
     let mut errors = creates
@@ -3072,7 +3092,7 @@ fn compact_trim_over_bound(
     if !errors.is_empty() {
         return Err(errors.pop().unwrap().into());
     }
-    let mut table_change = pb::TableChange::new();
+
     table_change.set_table_deletes(deletes.into());
     table_change.set_table_creates(creates.into());
     Ok(table_change)

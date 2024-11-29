@@ -609,6 +609,35 @@ impl EngineCore {
         buidler.set_cfs(new_cfs);
 
         let mut new_col_levels = data.col_levels.clone();
+        if !tc.get_file_ids_map().is_empty() {
+            // Update unconverted_l0s
+            let unconverted_l0_ids: Vec<u64> = new_col_levels
+                .unconverted_l0s
+                .iter()
+                .map(|l0| l0.id())
+                .collect();
+            let l0s: HashMap<u64, L0Table> = data
+                .l0_tbls
+                .iter()
+                .map(|l0| (l0.id(), l0.clone()))
+                .collect();
+            let mut iter = tc.get_file_ids_map().iter();
+            while let (Some(delete_id), Some(create_id)) = (iter.next(), iter.next()) {
+                // Only add the corresponding created file if the deleted file is in the
+                // `unconverted_l0s`.
+                if unconverted_l0_ids.contains(delete_id) {
+                    new_col_levels
+                        .unconverted_l0s
+                        .push(l0s.get(create_id).unwrap().clone());
+                }
+            }
+            for deleted in tc.get_table_deletes() {
+                new_col_levels
+                    .unconverted_l0s
+                    .retain(|l0| l0.id() != deleted.get_id());
+            }
+        }
+
         let mut columnar_deletes = HashSet::new();
         for deleted in tc.get_columnar_deletes() {
             columnar_deletes.insert(deleted.get_id());

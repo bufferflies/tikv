@@ -787,8 +787,6 @@ impl Shard {
                 .inner_delete_bounds()
                 .any(|bound| mem_tbl.has_data_in_bound(bound))
         })
-        // No unconverted_l0s in the shard.
-        && !shard_data.has_unconverted_l0s()
     }
 
     fn ready_to_truncate_ts(truncate_ts: &Option<TruncateTs>, shard_data: &ShardData) -> bool {
@@ -797,14 +795,10 @@ impl Shard {
         && !shard_data.mem_tbls.iter().any(|mem_tbl| {
             mem_tbl.data_max_ts() > truncate_ts.unwrap().inner()
         })
-        // No unconverted_l0s in the shard.
-        && !shard_data.has_unconverted_l0s()
     }
 
     fn ready_to_trim_over_bound(trim_over_bound: bool, shard_data: &ShardData) -> bool {
-        trim_over_bound
-            && !shard_data.has_mem_over_bound_data()
-            && !shard_data.has_unconverted_l0s_over_bound_data()
+        trim_over_bound && !shard_data.has_mem_over_bound_data()
     }
 
     fn refresh_compaction_priority(&self) {
@@ -1178,6 +1172,10 @@ impl Shard {
 
     pub fn get_schema_file(&self) -> Option<SchemaFile> {
         self.data.read().unwrap().schema_file.clone()
+    }
+
+    pub fn has_unconverted_l0s(&self) -> bool {
+        self.get_data().has_unconverted_l0s()
     }
 
     pub fn has_vector_index(&self) -> bool {
@@ -1678,16 +1676,6 @@ impl ShardDataCore {
                 if skl.has_over_bound_data(self.inner_start(), self.inner_end()) {
                     return true;
                 }
-            }
-        }
-        false
-    }
-
-    pub(crate) fn has_unconverted_l0s_over_bound_data(&self) -> bool {
-        let shard_bound = self.data_bound();
-        for l0 in &self.col_levels.unconverted_l0s {
-            if !shard_bound.contains_bound(l0.data_bound()) {
-                return true;
             }
         }
         false
