@@ -6,6 +6,7 @@ mod test_stats;
 
 use std::{thread, time::Duration};
 
+use api_version::ApiV2;
 use bytes::Bytes;
 use futures::executor::block_on;
 use kvengine::SnapAccess;
@@ -121,8 +122,11 @@ fn test_cloud_store_reverse_scan() {
     let node_id = alloc_node_id();
     let cluster = ServerCluster::new(vec![node_id], |_, _| {});
     let mut client = cluster.new_client();
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key("x123".as_bytes()).unwrap();
+    client.split_keyspace(keyspace_id);
+    cluster.wait_pd_region_count(3);
     client.put_kv(1..6, i_to_key, i_to_val);
-    let region_id = client.get_region_id(&[]);
+    let region_id = client.get_region_id("x123".as_bytes());
     let engine = cluster.get_kvengine(node_id);
     let snapshot = engine.get_snap_access(region_id).unwrap();
     for rev in [true, false] {

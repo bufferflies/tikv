@@ -6,7 +6,6 @@ use std::{
     fs,
     io::Write,
     mem,
-    ops::Deref,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
@@ -241,6 +240,7 @@ pub struct TaskContext {
     pub inner_key_off: Option<usize>,
     pub outer_key_prefix: Vec<u8>,
     pub encryption_key: Option<EncryptionKey>,
+    pub prepend_keyspace_id: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -564,6 +564,10 @@ impl LoadTaskWorker {
                 GET_SHARD_META_TIMEOUT,
             ))?;
             let snapshot = shard_meta.get_snapshot();
+            let mut prepend_keyspace_id = None;
+            if snapshot.inner_key_off == 0 {
+                prepend_keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&snapshot.outer_start)
+            }
             self.task_ctx.inner_key_off = Some(snapshot.inner_key_off as usize);
             self.task_ctx.outer_key_prefix =
                 first_key.slice(..snapshot.inner_key_off as usize).to_vec();
@@ -574,6 +578,7 @@ impl LoadTaskWorker {
                         .decrypt_encryption_key(&exported_key)
                         .unwrap()
                 });
+            self.task_ctx.prepend_keyspace_id = prepend_keyspace_id;
         }
         Ok(())
     }
@@ -1190,6 +1195,7 @@ impl LoadTaskWorker {
         let um = UserMeta::new(self.task_ctx.start_ts, self.task_ctx.commit_ts);
         let mut val_buf = Value::encode_buf(0, &um.to_array(), self.task_ctx.commit_ts, &[]);
         let base_val_len = val_buf.len();
+        let prepend_keyspace_id = self.task_ctx.prepend_keyspace_id;
 
         self.ctx.runtime.spawn(async move {
             info!("{} start build sst file {}", task_id, file_id);
@@ -1200,6 +1206,7 @@ impl LoadTaskWorker {
                 ZSTD_COMPRESSION_LEVEL,
                 checksum_type,
                 encryption_key,
+                prepend_keyspace_id,
             );
             let mut entries = 0;
             let mut offset = 0;
@@ -1357,7 +1364,6 @@ impl LoadTaskWorker {
         info!("{} start ingest", self.task_ctx.task_id);
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
         let outer_key_prefix = self.task_ctx.outer_key_prefix.to_vec();
-        let inner_key_off = self.task_ctx.inner_key_off.unwrap();
         let coarse_split_keys = gen_split_keys(
             &outer_key_prefix,
             &sst_metas,
@@ -1374,8 +1380,8 @@ impl LoadTaskWorker {
             let raw_start_key = decode_bytes(&mut encoded_start_key, false).unwrap();
             let mut encoded_end_key = coarse_split_keys[i + 1].as_slice();
             let raw_end_key = decode_bytes(&mut encoded_end_key, false).unwrap();
-            let inner_start_key = InnerKey::from_outer_key(&raw_start_key, inner_key_off);
-            let inner_end_key = InnerKey::from_outer_end_key(&raw_end_key, inner_key_off);
+            let inner_start_key = InnerKey::from_outer_key(&raw_start_key);
+            let inner_end_key = InnerKey::from_outer_end_key(&raw_end_key);
             let group_ssts = get_ssts_in_range(&sst_metas, inner_start_key, inner_end_key);
             assert!(
                 !group_ssts.is_empty(),
@@ -1810,12 +1816,12 @@ fn new_region_key(outer_key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
 
 fn get_ssts_in_range(ssts: &[SstMeta], start: InnerKey<'_>, end: InnerKey<'_>) -> Vec<SstMeta> {
     let position = ssts
-        .binary_search_by(|sst| sst.smallest.as_slice().cmp(start.deref()))
+        .binary_search_by(|sst| InnerKey::from_inner_buf(&sst.smallest).cmp(&start))
         .unwrap();
     let mut matched = vec![];
     for i in position..ssts.len() {
         let sst = &ssts[i];
-        if !end.is_empty() && sst.smallest.as_slice() >= end.deref() {
+        if !end.is_empty() && InnerKey::from_inner_buf(&sst.smallest) >= end {
             break;
         }
         matched.push(sst.clone())

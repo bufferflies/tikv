@@ -374,6 +374,7 @@ impl Engine {
                 0,
                 checksum_type,
                 task.encryption_key.clone(),
+                task.range.prepend_keyspace_id(),
             );
             write_cf_builder.set_l0_version(m.get_version());
             let mut it = m.get_cf(WRITE_CF).new_iterator(false);
@@ -413,6 +414,7 @@ impl Engine {
             m.get_version(),
             checksum_type,
             task.encryption_key.clone(),
+            task.range.prepend_keyspace_id(),
         );
         for cf in l0_builder_start_cf..NUM_CFS {
             let skl = m.get_cf(cf);

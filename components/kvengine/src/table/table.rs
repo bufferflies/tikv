@@ -2,17 +2,16 @@
 
 use std::{
     cmp::Ordering,
-    fmt::{self, Debug, Formatter},
+    fmt::{Debug, Formatter},
     iter::Iterator as StdIterator,
     mem::size_of,
     ops::Deref,
     ptr, result, slice,
 };
 
-use api_version::{api_v2, ApiV2, KeyMode, KvFormat};
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::BufMut;
-use log_wrappers::Value as LogValue;
+use bytes::{Buf, BufMut};
 use thiserror::Error;
 
 use super::blobtable::BlobRef;
@@ -596,24 +595,38 @@ impl Debug for InnerKey<'_> {
 
 impl<'a> InnerKey<'a> {
     pub fn from_inner_buf(key: &'a [u8]) -> Self {
-        Self { key }
+        Self { key }.trim_keyspace()
     }
 
-    pub fn from_outer_key<'b: 'a>(outer_key: &'b [u8], inner_offset: usize) -> Self {
-        debug_assert!(inner_offset <= outer_key.len());
-        let key = &outer_key[inner_offset..];
-        Self { key }
+    pub fn from_outer_key<'b: 'a>(outer_key: &'b [u8]) -> Self {
+        Self { key: outer_key }.trim_keyspace()
     }
 
-    pub fn from_outer_end_key<'b: 'a>(outer_end_key: &'b [u8], inner_offset: usize) -> Self {
-        debug_assert!(inner_offset <= outer_end_key.len());
-        if outer_end_key.len() == inner_offset {
+    pub fn from_outer_end_key<'b: 'a>(outer_end_key: &'b [u8]) -> Self {
+        let is_keyspace_end_key =
+            ApiV2::is_txn_key(outer_end_key) && outer_end_key.len() == KEYSPACE_PREFIX_LEN;
+        if outer_end_key.is_empty() || is_keyspace_end_key {
             Self {
                 key: GLOBAL_SHARD_END_KEY,
             }
         } else {
-            let key = &outer_end_key[inner_offset..];
-            Self { key }
+            Self::from_outer_key(outer_end_key)
+        }
+    }
+
+    fn trim_keyspace(&self) -> Self {
+        if ApiV2::is_txn_key(self.key) {
+            Self {
+                key: &self.key[KEYSPACE_PREFIX_LEN..],
+            }
+        } else {
+            *self
+        }
+    }
+
+    pub fn slice(&self, start: usize, end: usize) -> Self {
+        Self {
+            key: &self.key[start..end],
         }
     }
 }
@@ -638,7 +651,10 @@ impl Debug for OwnedInnerKey {
 }
 
 impl OwnedInnerKey {
-    pub fn new(inner: bytes::Bytes) -> Self {
+    pub fn new(mut inner: bytes::Bytes) -> Self {
+        if ApiV2::is_txn_key(inner.chunk()) {
+            inner = inner.slice(KEYSPACE_PREFIX_LEN..);
+        }
         Self { inner }
     }
 
@@ -652,43 +668,6 @@ impl OwnedInnerKey {
 
     pub fn to_vec(&self) -> Vec<u8> {
         self.inner.to_vec()
-    }
-}
-
-/// The user key without keyspace prefix.
-///
-/// A simple wrapper to make sure that the key and interface is properly used.
-///
-/// Currently used for building txn chunks as the hash index is always using
-/// keys without keyspace prefix, no matter whether inner key offset is enabled
-/// or not.
-///
-/// No prefix key is required to be a valid TiDB key (starts with "t" or "m") to
-/// make conversion from `InnerKey` work.
-#[derive(PartialEq)]
-pub struct NoPrefixKey<'a>(pub &'a [u8]);
-
-impl fmt::Debug for NoPrefixKey<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", LogValue::key(self.0))
-    }
-}
-
-impl Deref for NoPrefixKey<'_> {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-impl<'a> NoPrefixKey<'a> {
-    pub fn from_inner_key(inner_key: &'a InnerKey<'a>) -> Option<Self> {
-        match ApiV2::parse_key_mode(inner_key.deref()) {
-            KeyMode::Txn => Some(Self(&inner_key.deref()[api_v2::KEYSPACE_PREFIX_LEN..])),
-            KeyMode::Tidb => Some(Self(inner_key.deref())),
-            _ => None,
-        }
     }
 }
 
@@ -940,24 +919,5 @@ mod tests {
         let buf = vec![128, 0, 255];
         let inner_key = InnerKey::from_inner_buf(&buf);
         assert_eq!(format!("{:?}", inner_key), "8000FF".to_string());
-    }
-
-    #[test]
-    fn test_no_prefix_key() {
-        let cases: Vec<(&[u8], Option<&[u8]>)> = vec![
-            (b"tkey1", Some(b"tkey1")),
-            (b"m0n0n", Some(b"m0n0n")),
-            (b"x123tkey1", Some(b"tkey1")),
-            (b"", None),
-            (b"a", None),
-            (b"r123", None),
-        ];
-
-        for (inner_key, expected) in cases {
-            let inner_key = InnerKey::from_inner_buf(inner_key);
-            let no_prefix = NoPrefixKey::from_inner_key(&inner_key);
-            let expected = expected.map(|x| NoPrefixKey(x));
-            assert_eq!(no_prefix, expected);
-        }
     }
 }

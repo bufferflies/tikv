@@ -71,6 +71,7 @@ impl KeyspaceManagerCore {
                     entry.insert(KeyspaceMeta::new(
                         keyspace_name,
                         inner_key_off,
+                        keyspace_id,
                         table_count,
                         enable_schema_ratio,
                     ));
@@ -96,6 +97,7 @@ impl KeyspaceManagerCore {
         let ks_meta = KeyspaceMeta::new(
             keyspace_name,
             inner_key_off,
+            keyspace_id,
             table_count,
             enable_schema_ratio,
         );
@@ -134,7 +136,6 @@ impl KeyspaceManagerCore {
         self.max_keyspace_id
             .fetch_add(delta, std::sync::atomic::Ordering::AcqRel)
             + delta
-            - 1 // to generate keyspace id starts from 0.
     }
 
     pub fn get_all_keyspaces(&self) -> Vec<u32> {
@@ -347,6 +348,7 @@ impl KeyspaceMeta {
     pub fn new(
         name: String,
         inner_key_off: usize,
+        keyspace_id: u32,
         table_count: usize,
         schema_enable_ratio: f64,
     ) -> Self {
@@ -367,7 +369,7 @@ impl KeyspaceMeta {
                 name,
                 inner_key_off,
                 tables,
-                del_prefixes: kvengine::DeletePrefixes::new_with_inner_key_off(inner_key_off),
+                del_prefixes: kvengine::DeletePrefixes::new_with_keyspace_id(keyspace_id),
                 pending_destroy_range: Default::default(),
                 schemas,
             },

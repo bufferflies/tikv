@@ -663,7 +663,7 @@ impl EngineCore {
         let mut builder = ShardDataBuilder::new(data.clone());
         self.get_tables_from_table_change(&mut builder, &data, cs, tc, &mut del_files);
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
-        let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.inner_key_off);
+        let done = DeletePrefixes::unmarshal(cs.get_property_value(), shard.keyspace_id);
         shard.set_data(builder.build());
         let del_prefixes = shard.get_del_prefixes();
         let new_del_prefixes = del_prefixes.split(&done);

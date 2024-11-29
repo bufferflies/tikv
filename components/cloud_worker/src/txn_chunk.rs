@@ -11,7 +11,7 @@ use hyper::Body;
 use kvengine::{
     dfs::{self, Dfs},
     get_shard_property,
-    table::{txn_file::TxnChunkBuilder, ChecksumType, NoPrefixKey},
+    table::{txn_file::TxnChunkBuilder, ChecksumType, InnerKey},
     ENCRYPTION_KEY,
 };
 use load_data::task::get_shard_meta;
@@ -147,7 +147,7 @@ pub(crate) async fn create_txn_chunk(
         let val_len = body_buf.get_u32_le() as usize;
         let val = &body_buf[..val_len];
         body_buf.advance(val_len);
-        txn_chunk_builder.add_entry(NoPrefixKey(key), op, val);
+        txn_chunk_builder.add_entry(InnerKey::from_outer_key(key), op, val);
     }
     drop(body);
     let mut txn_chunk_buf = vec![];

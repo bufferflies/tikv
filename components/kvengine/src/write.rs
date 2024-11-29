@@ -19,7 +19,6 @@ pub struct WriteBatch {
     properties: HashMap<String, BytesMut>,
     sequence: u64,
     switch_mem_table: bool,
-    inner_key_off: usize,
 }
 
 impl Default for WriteBatch {
@@ -35,17 +34,15 @@ impl Default for WriteBatch {
             properties: HashMap::new(),
             sequence: 0,
             switch_mem_table: false,
-            inner_key_off: 0,
         }
     }
 }
 
 impl WriteBatch {
     #[cfg(test)]
-    pub(crate) fn new(shard_id: u64, inner_key_off: usize) -> Self {
+    pub(crate) fn new(shard_id: u64) -> Self {
         let mut wb = Self::default();
         wb.shard_id = shard_id;
-        wb.inner_key_off = inner_key_off;
         wb
     }
 
@@ -59,7 +56,7 @@ impl WriteBatch {
         version: u64,
     ) {
         self.validate_version(cf, version);
-        let inner_key = InnerKey::from_outer_key(key, self.inner_key_off);
+        let inner_key = InnerKey::from_outer_key(key);
         self.get_cf_mut(cf)
             .put(inner_key, meta, user_meta, version, val);
     }
@@ -76,7 +73,7 @@ impl WriteBatch {
 
     pub fn delete(&mut self, cf: usize, key: &[u8], version: u64) {
         self.validate_version(cf, version);
-        let inner_key = InnerKey::from_outer_key(key, self.inner_key_off);
+        let inner_key = InnerKey::from_outer_key(key);
         self.get_cf_mut(cf)
             .put(inner_key, table::BIT_DELETE, &[], version, &[]);
     }
@@ -105,7 +102,7 @@ impl WriteBatch {
         num
     }
 
-    pub fn reset(&mut self, shard_id: u64, inner_key_off: usize) {
+    pub fn reset(&mut self, shard_id: u64) {
         for wb in &mut self.cf_batches {
             wb.reset();
         }
@@ -113,7 +110,6 @@ impl WriteBatch {
         self.sequence = 0;
         self.properties.clear();
         self.switch_mem_table = false;
-        self.inner_key_off = inner_key_off;
     }
 
     pub fn get_cf_mut(&mut self, cf: usize) -> &mut memtable::WriteBatch {
@@ -189,8 +185,7 @@ impl Engine {
                     // Use property value, other than merged del_prefixes, to make switch mem-table
                     // determined. As shard.get_del_prefixes() among peers may not be the same.
                     let prefix = v.chunk();
-                    let mut del_prefixes =
-                        DeletePrefixes::new_with_inner_key_off(shard.inner_key_off);
+                    let mut del_prefixes = DeletePrefixes::new_with_keyspace_id(shard.keyspace_id);
                     del_prefixes.merge_prefix_in_place(prefix);
                     if del_prefixes
                         .inner_delete_bounds()

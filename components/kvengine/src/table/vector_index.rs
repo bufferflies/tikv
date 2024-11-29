@@ -2,7 +2,6 @@
 
 use std::{collections::HashSet, ops::Deref, sync::Arc};
 
-use api_version::ApiV2;
 use async_trait::async_trait;
 use bytes::{Buf, BufMut};
 use cloud_encryption::EncryptionKey;
@@ -682,8 +681,6 @@ impl VectorIndexBuilder {
     pub fn new(
         dimension: usize,
         metric: &str,
-        keyspace_id: u32,
-        inner_key_off: usize,
         snap_version: u64,
         table_id: i64,
         index_id: i64,
@@ -700,11 +697,6 @@ impl VectorIndexBuilder {
         let mut header = VectorIndexFileFooter::default();
         header.magic_number = MAGIC_NUMBER;
         let index = usearch::Index::new(&opts).map_err(|e| Other(e.to_string()))?;
-        let prefix = if inner_key_off == 0 {
-            ApiV2::get_txn_keyspace_prefix(keyspace_id)
-        } else {
-            vec![]
-        };
         Ok(VectorIndexBuilder {
             index,
             int_handles: vec![],
@@ -722,8 +714,8 @@ impl VectorIndexBuilder {
             biggest_int_handle: i64::MIN,
             smallest_common_handle: vec![],
             biggest_common_handle: vec![],
-            smallest: prefix.clone(),
-            biggest: prefix.clone(),
+            smallest: vec![],
+            biggest: vec![],
         })
     }
 
@@ -957,8 +949,7 @@ mod tests {
         snap_version: u64,
     ) -> VectorIndexFile {
         let mut builder =
-            VectorIndexBuilder::new(3, "cosine", 1, 4, snap_version, 1, 1, 1, common_handle)
-                .unwrap();
+            VectorIndexBuilder::new(3, "cosine", snap_version, 1, 1, 1, common_handle).unwrap();
         let mut schema_buf = SchemaBuf::default();
         if common_handle {
             schema_buf.handle_column = new_common_handle_column_info();

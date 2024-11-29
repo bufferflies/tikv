@@ -491,8 +491,7 @@ impl TxnFileCommand {
         snap_access: &SnapAccess,
     ) -> crate::storage::mvcc::Result<()> {
         let is_primary_txn_file = || {
-            let primary_inner =
-                InnerKey::from_outer_key(&lock.primary, snap_access.get_inner_key_offset());
+            let primary_inner = InnerKey::from_outer_key(&lock.primary);
             lock_txn_file.lower_bound() <= primary_inner
                 && primary_inner < lock_txn_file.upper_bound()
         };

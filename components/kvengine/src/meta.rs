@@ -301,14 +301,15 @@ impl ShardMeta {
                 // Now only DEL_PREFIXES_KEY is mergeable.
                 assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
                 let prefix = cs.get_property_value();
-                let inner_key_off = self.range.inner_key_off;
                 self.properties.set(
                     DEL_PREFIXES_KEY,
                     &self
                         .properties
                         .get(DEL_PREFIXES_KEY)
-                        .map(|b| DeletePrefixes::unmarshal(b.chunk(), inner_key_off))
-                        .unwrap_or_else(|| DeletePrefixes::new_with_inner_key_off(inner_key_off))
+                        .map(|b| DeletePrefixes::unmarshal(b.chunk(), self.range.keyspace_id))
+                        .unwrap_or_else(|| {
+                            DeletePrefixes::new_with_keyspace_id(self.range.keyspace_id)
+                        })
                         .merge_prefix(prefix)
                         .marshal(),
                 );
@@ -675,8 +676,8 @@ impl ShardMeta {
         // should be cleaned up.
         assert_eq!(cs.get_property_key(), DEL_PREFIXES_KEY);
         if let Some(data) = self.properties.get(DEL_PREFIXES_KEY) {
-            let old = DeletePrefixes::unmarshal(data.chunk(), self.range.inner_key_off);
-            let done = DeletePrefixes::unmarshal(cs.get_property_value(), self.range.inner_key_off);
+            let old = DeletePrefixes::unmarshal(data.chunk(), self.range.keyspace_id);
+            let done = DeletePrefixes::unmarshal(cs.get_property_value(), self.range.keyspace_id);
             let new = old.split(&done);
             self.properties.set(DEL_PREFIXES_KEY, &new.marshal());
             info!(
@@ -1117,7 +1118,7 @@ impl ShardMeta {
             if let Some(new_del_prefixes) = merge_del_prefixes_if_needed(
                 source_del_prefixes,
                 parent_del_prefixes,
-                self.range.inner_key_off,
+                self.range.keyspace_id,
             ) {
                 self.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
             }
@@ -1582,9 +1583,9 @@ mod tests {
 
     fn test_table_overlap_helper(enable_inner_key_off: bool) {
         let range = if enable_inner_key_off {
-            ShardRange::new(&[1, 2, 3, 4, 10], &[1, 2, 3, 4, 20], 4)
+            ShardRange::new(&[b'x', 2, 3, 4, 10], &[b'x', 2, 3, 4, 20], 4)
         } else {
-            ShardRange::new(&[10], &[20], 0)
+            ShardRange::new(&[b'x', 2, 3, 4, 10], &[b'x', 2, 3, 4, 20], 0)
         };
         let meta = ShardMeta {
             range,

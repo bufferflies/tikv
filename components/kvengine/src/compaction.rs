@@ -368,15 +368,26 @@ pub struct CompactionRequest {
 
 impl CompactionRequest {
     pub fn inner_start(&self) -> InnerKey<'_> {
-        InnerKey::from_outer_key(&self.outer_start, self.inner_key_off)
+        InnerKey::from_outer_key(&self.outer_start)
     }
 
     pub fn inner_end(&self) -> InnerKey<'_> {
-        InnerKey::from_outer_end_key(&self.outer_end, self.inner_key_off)
+        InnerKey::from_outer_end_key(&self.outer_end)
     }
 
     pub fn get_tag(&self) -> String {
         format!("[{}:{}:{}]", self.engine_id, self.shard_id, self.shard_ver)
+    }
+
+    pub fn prepend_keyspace_id(&self) -> Option<u32> {
+        if self.inner_key_off > 0 {
+            return None;
+        }
+        ApiV2::get_u32_keyspace_id_by_key(&self.outer_start)
+    }
+
+    pub fn keyspace_id(&self) -> u32 {
+        ApiV2::get_u32_keyspace_id_by_key(&self.outer_start).unwrap_or_default()
     }
 }
 
@@ -2479,7 +2490,7 @@ fn compact_destroy_range(
     let mut destroy = pb::TableChange::new();
     let mut deletes = vec![];
     let mut creates = vec![];
-    let del_prefixes = DeletePrefixes::unmarshal(del_prefix, req.inner_key_off);
+    let del_prefixes = DeletePrefixes::unmarshal(del_prefix, req.keyspace_id());
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
         let mut delete = pb::TableDelete::new();
@@ -2499,6 +2510,7 @@ fn compact_destroy_range(
                 t.version(),
                 checksum_type,
                 ctx.encryption_key.clone(),
+                ctx.req.prepend_keyspace_id(),
             );
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
@@ -2531,6 +2543,7 @@ fn compact_destroy_range(
                 compression_lvl,
                 ctx.checksum_type,
                 ctx.encryption_key.clone(),
+                ctx.req.prepend_keyspace_id(),
             );
             let mut iter = t.new_iterator(false, false);
             iter.seek(req.inner_start());
@@ -2627,7 +2640,7 @@ async fn compact_destroy_range_for_columnar(
 
     let mut deletes = vec![];
     let mut creates = vec![];
-    let del_prefixes = Arc::new(DeletePrefixes::unmarshal(del_prefix, req.inner_key_off));
+    let del_prefixes = Arc::new(DeletePrefixes::unmarshal(del_prefix, req.keyspace_id()));
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     let mut cnt = 0;
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&req.outer_start).unwrap_or_default();
@@ -2646,8 +2659,6 @@ async fn compact_destroy_range_for_columnar(
         }
         let mut file_builder = ColumnarFileBuilder::new(
             id_allocator.alloc_id().await,
-            keyspace_id,
-            req.inner_key_off,
             columnar_file.get_l0_version(),
             ctx.encryption_key.clone(),
         );
@@ -2659,7 +2670,7 @@ async fn compact_destroy_range_for_columnar(
             .concat();
             // destroy range used by drop table in TiDB, if the row key be covered by delete
             // prefixes, it means the table is dropped.
-            let inner_key = InnerKey::from_outer_key(&table_row_key_prefix, req.inner_key_off);
+            let inner_key = InnerKey::from_outer_key(&table_row_key_prefix);
             if del_prefixes.cover_prefix(inner_key) {
                 continue;
             }
@@ -2758,6 +2769,7 @@ fn compact_truncate_ts(
                 t.version(),
                 checksum_type,
                 ctx.encryption_key.clone(),
+                ctx.req.prepend_keyspace_id(),
             );
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
@@ -2790,6 +2802,7 @@ fn compact_truncate_ts(
                 compression_lvl,
                 checksum_type,
                 ctx.encryption_key.clone(),
+                ctx.req.prepend_keyspace_id(),
             );
             let mut iter = t.new_iterator(false, false);
             iter.rewind();
@@ -2891,7 +2904,6 @@ async fn compact_truncate_ts_for_columnar(
     let mut creates = vec![];
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     let mut cnt = 0;
-    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&req.outer_start).unwrap_or_default();
     for &(id, level) in files.iter() {
         let schema_file = schema_file.as_ref().unwrap();
         let file = columnar_files.remove(&id).unwrap();
@@ -2908,8 +2920,6 @@ async fn compact_truncate_ts_for_columnar(
         }
         let mut file_builder = ColumnarFileBuilder::new(
             id_allocator.alloc_id().await,
-            keyspace_id,
-            req.inner_key_off,
             columnar_file.get_l0_version(),
             ctx.encryption_key.clone(),
         );
@@ -3015,6 +3025,7 @@ fn compact_trim_over_bound(
                 t.version(),
                 checksum_tp,
                 ctx.encryption_key.clone(),
+                ctx.req.prepend_keyspace_id(),
             );
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
@@ -3045,6 +3056,7 @@ fn compact_trim_over_bound(
                 compression_lvl,
                 checksum_tp,
                 ctx.encryption_key.clone(),
+                ctx.req.prepend_keyspace_id(),
             );
             let mut iter = t.new_iterator(false, false);
             iter.seek(req.inner_start());
@@ -3143,7 +3155,6 @@ async fn compact_trim_over_bound_for_columnar(
     let mut creates = vec![];
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     let mut cnt = 0;
-    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&req.outer_start).unwrap_or_default();
     for &(id, level) in files.iter() {
         let schema_file = schema_file.as_ref().unwrap();
         let file = columnar_files.remove(&id).unwrap();
@@ -3174,8 +3185,6 @@ async fn compact_trim_over_bound_for_columnar(
         };
         let mut file_builder = ColumnarFileBuilder::new(
             id_allocator.alloc_id().await,
-            keyspace_id,
-            req.inner_key_off,
             columnar_file.get_l0_version(),
             ctx.encryption_key.clone(),
         );
@@ -3360,7 +3369,7 @@ fn persist_columnar_file(
 
 fn compact_for_cf(
     ctx: &CompactionCtx,
-    iter: &mut Box<dyn Iterator>,
+    iter: &mut Box<dyn table::Iterator>,
     safe_ts: u64,
     opts: dfs::Options,
     cf: usize,
@@ -3387,6 +3396,7 @@ fn compact_for_cf(
         compression_lvl,
         checksum_tp,
         ctx.encryption_key.clone(),
+        ctx.req.prepend_keyspace_id(),
     );
     let mut cur_blob_table_id = 0;
     // Owns the decompressed blob value while reading from the orginal blob
@@ -3900,11 +3910,8 @@ async fn transform_for_columnar(
         .with_shard(ctx.req.shard_id, ctx.req.shard_ver)
         .with_type(FileType::Columnar);
     let (tx, rx) = tikv_util::mpsc::bounded(ctx.req.file_ids.len());
-    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
-        keyspace_id,
-        ctx.req.inner_key_off,
         None,
         ctx.encryption_key.clone(),
     );
@@ -3915,8 +3922,6 @@ async fn transform_for_columnar(
         for tbl in tbls {
             let iter = tbl.new_iterator(false, false);
             let reader = ColumnarRowTableReader::new(
-                keyspace_id,
-                ctx.req.inner_key_off,
                 schema.clone(),
                 iter,
                 blob_tbls.clone(),
@@ -4138,11 +4143,8 @@ async fn convert_row_file_to_columnar_file(
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
-    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
-        keyspace_id,
-        ctx.req.inner_key_off,
         Some(columnar_compaction.snap_version),
         ctx.encryption_key.clone(),
     );
@@ -4155,8 +4157,6 @@ async fn convert_row_file_to_columnar_file(
             if let Some(tbl) = l0_tbl.get_cf(WRITE_CF) {
                 let iter = tbl.new_iterator(false, false);
                 let reader = ColumnarRowTableReader::new(
-                    keyspace_id,
-                    ctx.req.inner_key_off,
                     schema.clone(),
                     iter,
                     None,
@@ -4283,11 +4283,8 @@ async fn compact_columnar_l0_files(
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
-    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
-        keyspace_id,
-        ctx.req.inner_key_off,
         Some(snap_version),
         ctx.encryption_key.clone(),
     );
@@ -4426,11 +4423,8 @@ async fn compact_columnar_l1_files(
         return Ok(ret);
     }
     overlap_tables.sort();
-    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
-        keyspace_id,
-        ctx.req.inner_key_off,
         None,
         ctx.encryption_key.clone(),
     );
@@ -4556,12 +4550,9 @@ async fn update_vector_index(
         );
         readers.push(Box::new(reader));
     }
-    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&ctx.req.outer_start).unwrap_or_default();
     let mut vec_builder = VectorIndexBuilder::new(
         dimension,
         metric.as_ref(),
-        keyspace_id,
-        ctx.req.inner_key_off,
         update_vec_idx.snap_version,
         update_vec_idx.table_id,
         update_vec_idx.index_id,

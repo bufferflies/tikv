@@ -544,7 +544,7 @@ mod tests {
     use super::*;
     use crate::{
         dfs::InMemFs,
-        table::{sstable::BlockCacheType, NoPrefixKey, TxnChunkBuilder, OP_PUT},
+        table::{sstable::BlockCacheType, InnerKey, TxnChunkBuilder, OP_PUT},
     };
 
     #[rstest]
@@ -567,7 +567,11 @@ mod tests {
             let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None, 0, true);
             for i in 0..100 {
                 let key = format!("{:02}/{:02}", chunk_id, i);
-                chunk_builder.add_entry(NoPrefixKey(key.as_bytes()), OP_PUT, key.as_bytes());
+                chunk_builder.add_entry(
+                    InnerKey::from_outer_key(key.as_bytes()),
+                    OP_PUT,
+                    key.as_bytes(),
+                );
             }
             let mut buf = vec![];
             chunk_builder.finish(&mut buf);

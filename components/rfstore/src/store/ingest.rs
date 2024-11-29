@@ -22,8 +22,7 @@ pub(crate) fn convert_sst(
     info!("{} convert sst {:?}", shard_meta.tag(), req);
     let region_id = req.get_header().get_region_id();
     let region_ver = req.get_header().get_region_epoch().get_version();
-    let (ingest_id, entries_iter) =
-        build_entries_iterator(&importer, req, shard_meta.range.inner_key_off)?;
+    let (ingest_id, entries_iter) = build_entries_iterator(&importer, req)?;
     let cs = kv.build_ingest_files(
         region_id,
         region_ver,
@@ -61,7 +60,6 @@ fn collect_default_values(
 fn build_entries_iterator(
     importer: &SstImporter,
     req: &RaftCmdRequest,
-    inner_key_offset: usize,
 ) -> crate::Result<(Vec<u8>, EntriesIterator)> {
     let default_values = Arc::new(collect_default_values(importer, req)?);
     let mut sst_metas = vec![];
@@ -101,7 +99,7 @@ fn build_entries_iterator(
             iter.next()?;
         }
     }
-    Ok((ingest_id, EntriesIterator::new(entries, inner_key_offset)))
+    Ok((ingest_id, EntriesIterator::new(entries)))
 }
 
 struct Entry {
@@ -124,16 +122,11 @@ fn encode_table_value(user_meta: UserMeta, val: &[u8]) -> Vec<u8> {
 struct EntriesIterator {
     entries: Vec<Entry>,
     idx: usize,
-    inner_key_offset: usize,
 }
 
 impl EntriesIterator {
-    fn new(entries: Vec<Entry>, inner_key_offset: usize) -> Self {
-        Self {
-            entries,
-            idx: 0,
-            inner_key_offset,
-        }
+    fn new(entries: Vec<Entry>) -> Self {
+        Self { entries, idx: 0 }
     }
 }
 
@@ -155,7 +148,7 @@ impl table::Iterator for EntriesIterator {
     }
 
     fn key(&self) -> InnerKey<'_> {
-        InnerKey::from_outer_key(&self.entries[self.idx].key, self.inner_key_offset)
+        InnerKey::from_outer_key(&self.entries[self.idx].key)
     }
 
     fn value(&self) -> Value {

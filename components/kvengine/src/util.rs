@@ -52,16 +52,16 @@ impl PropertiesHelper {
     pub fn new_from_shard_meta(meta: &ShardMeta) -> Self {
         Self::new(
             meta.get_property(DEL_PREFIXES_KEY),
-            meta.range.inner_key_off,
-            meta.range.prefix().to_owned(),
+            meta.range.keyspace_id,
+            meta.range.keyspace_prefix().to_owned(),
         )
     }
 
-    fn new(del_prefixes_bytes: Option<Bytes>, inner_key_off: usize, range_prefix: Vec<u8>) -> Self {
+    fn new(del_prefixes_bytes: Option<Bytes>, keyspace_id: u32, range_prefix: Vec<u8>) -> Self {
         let del_prefixes = if let Some(bs) = del_prefixes_bytes {
-            DeletePrefixes::unmarshal(bs.chunk(), inner_key_off)
+            DeletePrefixes::unmarshal(bs.chunk(), keyspace_id)
         } else {
-            DeletePrefixes::new_with_inner_key_off(inner_key_off)
+            DeletePrefixes::new_with_keyspace_id(keyspace_id)
         };
         Self {
             del_prefixes,
@@ -79,20 +79,20 @@ impl PropertiesHelper {
             other
                 .get_property(DEL_PREFIXES_KEY)
                 .map(|prop| prop.to_vec()),
-            other.range.inner_key_off,
+            other.range.keyspace_id,
         );
     }
 
     // TODO: pub fn merge_shard(..)
 
-    fn merge(&mut self, del_prefixes_bytes: Option<Vec<u8>>, inner_key_off: usize) {
+    fn merge(&mut self, del_prefixes_bytes: Option<Vec<u8>>, keyspace_id: u32) {
         // `self.del_prefixes.inner_key_off` & `inner_key_off` are not necessarily
         // equal.
         if let Some(bs) = del_prefixes_bytes {
-            let mut del_prefixes = DeletePrefixes::unmarshal(&bs, inner_key_off);
+            let mut del_prefixes = DeletePrefixes::unmarshal(&bs, keyspace_id);
             if self.rewrite_range_prefix
-                && inner_key_off > 0
-                && inner_key_off == self.range_prefix.len()
+                && del_prefixes.keyspace_prefix_len > 0
+                && del_prefixes.keyspace_prefix_len == self.range_prefix.len()
             {
                 del_prefixes.rewrite_range_prefix(&self.range_prefix);
             }
@@ -112,8 +112,7 @@ impl PropertiesHelper {
     }
 
     fn split(&self, start_key: &[u8], end_key: &[u8]) -> DeletePrefixes {
-        self.del_prefixes
-            .build_split(start_key, end_key, self.del_prefixes.inner_key_off)
+        self.del_prefixes.build_split(start_key, end_key)
     }
 
     pub fn split_to_properties(
@@ -347,15 +346,13 @@ pub mod test_util {
         }
 
         pub fn i_to_inner_key(&self, i: usize) -> OwnedInnerKey {
-            let v = if self.enable_inner_key_off {
-                self.i_to_key(i)
-            } else {
-                self.i_to_outer_key(i)
-            };
-            OwnedInnerKey::new(Bytes::from(v))
+            OwnedInnerKey::new(Bytes::from(self.i_to_key(i)))
         }
 
         pub fn i_to_outer_key(&self, i: usize) -> Vec<u8> {
+            if self.keyspace_id == 0 {
+                return self.i_to_key(i);
+            }
             let mut key = ApiV2::get_txn_keyspace_prefix(self.keyspace_id);
             key.extend_from_slice(&self.i_to_key(i));
             key
@@ -380,12 +377,7 @@ pub mod test_util {
         }
 
         pub fn gen_row_inner_key(&self, table_id: i64, i: usize) -> OwnedInnerKey {
-            let v = if self.enable_inner_key_off {
-                self.gen_row_key(table_id, i)
-            } else {
-                self.gen_row_outer_key(table_id, i)
-            };
-            OwnedInnerKey::new(Bytes::from(v))
+            OwnedInnerKey::new(self.gen_row_key(table_id, i).into())
         }
 
         pub fn gen_row_outer_key(&self, table_id: i64, i: usize) -> Vec<u8> {
@@ -415,8 +407,6 @@ pub mod test_util {
 
 #[cfg(test)]
 mod tests {
-    use api_version::api_v2::KEYSPACE_PREFIX_LEN;
-
     use super::*;
 
     #[test]
@@ -438,21 +428,17 @@ mod tests {
 
     #[test]
     fn test_properties_helper() {
-        let dp0 = DeletePrefixes::new_with_inner_key_off(KEYSPACE_PREFIX_LEN)
+        let dp0 = DeletePrefixes::new_with_keyspace_id(1)
             .merge_prefix(b"x000101")
             .merge_prefix(b"x000103");
 
-        let dp1 = DeletePrefixes::new_with_inner_key_off(KEYSPACE_PREFIX_LEN)
+        let dp1 = DeletePrefixes::new_with_keyspace_id(1)
             .merge_prefix(b"x0101033")
             .merge_prefix(b"x0101066");
 
-        let mut helper = PropertiesHelper::new(
-            Some(dp0.marshal().into()),
-            KEYSPACE_PREFIX_LEN,
-            b"x000".to_vec(),
-        );
+        let mut helper = PropertiesHelper::new(Some(dp0.marshal().into()), 1, b"x000".to_vec());
         helper.set_rewrite_range_prefix(true);
-        helper.merge(Some(dp1.marshal()), KEYSPACE_PREFIX_LEN);
+        helper.merge(Some(dp1.marshal()), 1);
         assert_eq!(
             helper.del_prefixes.prefixes,
             vec![
@@ -463,10 +449,10 @@ mod tests {
         );
 
         helper.set_rewrite_range_prefix(false);
-        let dp2 = DeletePrefixes::new_with_inner_key_off(KEYSPACE_PREFIX_LEN)
+        let dp2 = DeletePrefixes::new_with_keyspace_id(1)
             .merge_prefix(b"x020101")
             .merge_prefix(b"x0201077");
-        helper.merge(Some(dp2.marshal()), KEYSPACE_PREFIX_LEN);
+        helper.merge(Some(dp2.marshal()), 1);
         assert_eq!(
             helper.del_prefixes.prefixes,
             vec![

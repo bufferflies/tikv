@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use api_version::ApiV2;
 use bstr::ByteSlice;
 use bytes::BytesMut;
 use futures::executor::block_on;
@@ -216,6 +217,10 @@ fn test_txn_client() {
         },
         pd_wrapper,
     );
+    let mut client = cluster.new_client();
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
+    cluster.wait_pd_region_count(3);
 
     Runtime::new().unwrap().block_on(async {
         let mut txn_client = cluster.new_txn_client().await;
@@ -245,7 +250,7 @@ fn test_txn_client() {
             for split_key in &split_keys {
                 client.split(split_key);
             }
-            cluster.wait_pd_region_count(4);
+            cluster.wait_pd_region_count(6);
             client.verify_data_with_ref_store();
         }
         let mut ref_store = client.dump_ref_store();
@@ -529,6 +534,10 @@ fn test_tikv_worker() {
         pd_wrapper,
     );
     cluster.start_tikv_workers(2, TikvWorkerOptions::default());
+    let mut client = cluster.new_client();
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
+    cluster.wait_pd_region_count(3);
 
     let rt = Runtime::new().unwrap();
 

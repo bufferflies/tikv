@@ -110,8 +110,7 @@ impl Engine {
                 // We need to use the old shard's DEL_PREFIXES_KEY to overwrite the new shard's
                 // DEL_PREFIXES_KEY. because the destroy_range compaction may have not
                 // applied to the shard.
-                let new_del_prefixes =
-                    old_del_prefixes.build_split(start_key, end_key, old_shard.inner_key_off);
+                let new_del_prefixes = old_del_prefixes.build_split(start_key, end_key);
                 if !new_del_prefixes.is_empty() {
                     new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes.marshal());
                 }
@@ -414,7 +413,7 @@ impl Engine {
             if let Some(new_del_prefixes) = merge_del_prefixes_if_needed(
                 source_del_prefixes,
                 old_del_prefixes,
-                source_snap.inner_key_off as usize,
+                new_shard.keyspace_id,
             ) {
                 new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
             }

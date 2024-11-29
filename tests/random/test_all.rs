@@ -415,7 +415,7 @@ fn prepare_cluster(
         }
     }
     keys.push(ApiV2::get_txn_keyspace_prefix(
-        initial_keyspace_count as u32,
+        initial_keyspace_count as u32 + 1,
     ));
     let encoded_keys = keys
         .iter()

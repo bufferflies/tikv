@@ -210,6 +210,7 @@ pub(crate) async fn handle_load_data(
                     inner_key_off: None,
                     outer_key_prefix: vec![],
                     encryption_key: None,
+                    prepend_keyspace_id: None,
                 };
                 // step 1: on start, client call init task
                 manager.init_task(task_ctx);
@@ -379,6 +380,7 @@ impl LoadDataManager {
             inner_key_off: None,
             outer_key_prefix: vec![],
             encryption_key: None,
+            prepend_keyspace_id: None,
         };
         let mut worker = LoadTaskWorker::new(
             self.config.clone(),

@@ -10,7 +10,6 @@ use std::{
 use bytes::{Buf, Bytes};
 use futures::executor::block_on;
 use rand::prelude::*;
-use rstest::rstest;
 use tidb_query_datatype::{codec::table::encode_row_key, expr::EvalContext};
 
 use crate::{
@@ -39,10 +38,8 @@ use crate::{
     DeletePrefixes, IdVer, LevelHandler, TruncateTs, DEL_PREFIXES_KEY, EXTRA_CF, LOCK_CF, WRITE_CF,
 };
 
-#[rstest]
-#[case::inner_key_off_enable(true)]
-#[case::inner_key_off_disable(false)]
-fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_columnar_l0_compaction() {
     ::test_util::init_log_for_test();
     let keyspace_id = 1;
     let table_id = 30;
@@ -52,7 +49,7 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
+    let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
@@ -75,24 +72,12 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
         .unwrap();
     let schema_file = SchemaFile::open(schema_raw_file).unwrap();
     let opts = dfs::Options::default().with_type(FileType::Columnar);
-    let (l0_tbl_0, l0_tbl_0_ref) =
-        build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 300);
-    let (l0_tbl_1, l0_tbl_1_ref) =
-        build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 400);
-    let (l0_tbl_2, l0_tbl_2_ref) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        2000,
-        400,
-    );
-    let (l0_tbl_3, l0_tbl_3_ref) =
-        build_table(allocate_id(), enable_inner_key_off, &schema2, 0, 600, 300);
-    let (l1_tbl_0, l1_tbl_0_ref) =
-        build_table(allocate_id(), enable_inner_key_off, &schema, 0, 100, 100);
-    let (l1_tbl_1, l1_tbl_1_ref) =
-        build_table(allocate_id(), enable_inner_key_off, &schema2, 0, 100, 100);
+    let (l0_tbl_0, l0_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 600, 300);
+    let (l0_tbl_1, l0_tbl_1_ref) = build_table(allocate_id(), &schema, 300, 900, 400);
+    let (l0_tbl_2, l0_tbl_2_ref) = build_table(allocate_id(), &schema, 1000, 2000, 400);
+    let (l0_tbl_3, l0_tbl_3_ref) = build_table(allocate_id(), &schema2, 0, 600, 300);
+    let (l1_tbl_0, l1_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 100, 100);
+    let (l1_tbl_1, l1_tbl_1_ref) = build_table(allocate_id(), &schema2, 0, 100, 100);
     for file in [
         &l0_tbl_0, &l0_tbl_1, &l0_tbl_2, &l0_tbl_3, &l1_tbl_0, &l1_tbl_1,
     ] {
@@ -169,10 +154,8 @@ fn test_columnar_l0_compaction(#[case] enable_inner_key_off: bool) {
     verify_with_ref_rows(&block2, &tbl_refs2);
 }
 
-#[rstest]
-#[case::inner_key_off_enable(true)]
-#[case::inner_key_off_disable(false)]
-fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_columnar_l1_compaction() {
     ::test_util::init_log_for_test();
     let keyspace_id = 1;
     let table_id = 30;
@@ -182,7 +165,7 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
+    let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
@@ -205,38 +188,13 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
         .unwrap();
     let schema_file = SchemaFile::open(schema_raw_file).unwrap();
     let opts = dfs::Options::default().with_type(FileType::Columnar);
-    let (l1_tbl_0, l1_tbl_0_ref) =
-        build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 300);
-    let (l1_tbl_1, l1_tbl_1_ref) =
-        build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 400);
-    let (l1_tbl_2, l1_tbl_2_ref) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        1500,
-        400,
-    );
-    let (l1_tbl_3, l1_tbl_3_ref) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema2,
-        300,
-        1200,
-        500,
-    );
-    let (l2_tbl_0, l2_tbl_0_ref) =
-        build_table(allocate_id(), enable_inner_key_off, &schema, 0, 1000, 100);
-    let (l2_tbl_1, l2_tbl_1_ref) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        2000,
-        100,
-    );
-    let (l2_tbl_2, l2_tbl_2_ref) =
-        build_table(allocate_id(), enable_inner_key_off, &schema2, 0, 1000, 200);
+    let (l1_tbl_0, l1_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 600, 300);
+    let (l1_tbl_1, l1_tbl_1_ref) = build_table(allocate_id(), &schema, 300, 900, 400);
+    let (l1_tbl_2, l1_tbl_2_ref) = build_table(allocate_id(), &schema, 1000, 1500, 400);
+    let (l1_tbl_3, l1_tbl_3_ref) = build_table(allocate_id(), &schema2, 300, 1200, 500);
+    let (l2_tbl_0, l2_tbl_0_ref) = build_table(allocate_id(), &schema, 0, 1000, 100);
+    let (l2_tbl_1, l2_tbl_1_ref) = build_table(allocate_id(), &schema, 1000, 2000, 100);
+    let (l2_tbl_2, l2_tbl_2_ref) = build_table(allocate_id(), &schema2, 0, 1000, 200);
     for file in [
         &l1_tbl_0, &l1_tbl_1, &l1_tbl_2, &l1_tbl_3, &l2_tbl_0, &l2_tbl_1, &l2_tbl_2,
     ] {
@@ -320,10 +278,8 @@ fn test_columnar_l1_compaction(#[case] enable_inner_key_off: bool) {
     verify_with_ref_rows(&block2, &tbl_refs2);
 }
 
-#[rstest]
-#[case::inner_key_off_enable(true)]
-#[case::inner_key_off_disable(false)]
-fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_columnar_major_compaction() {
     use crate::table::columnar::{ColumnarMergeReader, ColumnarMvccReader};
 
     ::test_util::init_log_for_test();
@@ -334,7 +290,7 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
+    let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, false);
@@ -433,19 +389,10 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
     let mut block = Block::new(&schema);
     let mvcc_reader_counts = block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
     info!("mvcc_reader read block with {} rows", mvcc_reader_counts);
-    let inner_key_off = if enable_inner_key_off { 4 } else { 0 };
     let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
     for tbl in [l1_tbl_0, l1_tbl_1, l2_tbl_0, l2_tbl_1] {
         let iter = tbl.new_iterator(false, false);
-        let reader = ColumnarRowTableReader::new(
-            keyspace_id,
-            inner_key_off,
-            schema.clone(),
-            iter,
-            None,
-            false,
-            None,
-        );
+        let reader = ColumnarRowTableReader::new(schema.clone(), iter, None, false, None);
         columnar_readers.push(Box::new(reader));
     }
     let merged_reader = ColumnarMergeReader::new(schema.clone(), columnar_readers);
@@ -481,10 +428,8 @@ fn test_columnar_major_compaction(#[case] enable_inner_key_off: bool) {
     assert!(shard.get_data().schema_file.is_none());
 }
 
-#[rstest]
-#[case::inner_key_off_enable(true)]
-#[case::inner_key_off_disable(false)]
-fn test_columnar_destroy_range(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_columnar_destroy_range() {
     ::test_util::init_log_for_test();
     let keyspace_id = 1;
     let table_id = 30;
@@ -493,7 +438,7 @@ fn test_columnar_destroy_range(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
+    let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
@@ -515,35 +460,14 @@ fn test_columnar_destroy_range(#[case] enable_inner_key_off: bool) {
         .unwrap();
     let schema_file = SchemaFile::open(schema_raw_file).unwrap();
     let opts = dfs::Options::default().with_type(FileType::Columnar);
-    let (l0_tbl_0, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 500);
-    let (l0_tbl_1, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 500);
-    let (l0_tbl_2, _) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        2000,
-        500,
-    );
-    let (l1_tbl_0, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 300);
-    let (l1_tbl_1, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 400);
-    let (l1_tbl_2, _) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        1500,
-        400,
-    );
-    let (l2_tbl_0, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 0, 1000, 100);
-    let (l2_tbl_1, _) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        2000,
-        100,
-    );
+    let (l0_tbl_0, _) = build_table(allocate_id(), &schema, 0, 600, 500);
+    let (l0_tbl_1, _) = build_table(allocate_id(), &schema, 300, 900, 500);
+    let (l0_tbl_2, _) = build_table(allocate_id(), &schema, 1000, 2000, 500);
+    let (l1_tbl_0, _) = build_table(allocate_id(), &schema, 0, 600, 300);
+    let (l1_tbl_1, _) = build_table(allocate_id(), &schema, 300, 900, 400);
+    let (l1_tbl_2, _) = build_table(allocate_id(), &schema, 1000, 1500, 400);
+    let (l2_tbl_0, _) = build_table(allocate_id(), &schema, 0, 1000, 100);
+    let (l2_tbl_1, _) = build_table(allocate_id(), &schema, 1000, 2000, 100);
     for file in [
         &l0_tbl_0, &l0_tbl_1, &l0_tbl_2, &l1_tbl_0, &l1_tbl_1, &l1_tbl_2, &l2_tbl_0, &l2_tbl_1,
     ] {
@@ -566,7 +490,7 @@ fn test_columnar_destroy_range(#[case] enable_inner_key_off: bool) {
     builder.set_schema_file(Some(schema_file));
     builder.set_columnar_levels(col_levels);
     shard.set_data(builder.build());
-    let mut del_prefixes = DeletePrefixes::new_with_inner_key_off(shard.inner_key_off);
+    let mut del_prefixes = DeletePrefixes::new_with_keyspace_id(shard.keyspace_id);
     let mut table_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
     table_prefix.extend_from_slice(b"t");
     del_prefixes.merge_prefix_in_place(&table_prefix);
@@ -591,10 +515,8 @@ fn test_columnar_destroy_range(#[case] enable_inner_key_off: bool) {
     assert!(ok, "columnar destroy range compaction failed");
 }
 
-#[rstest]
-#[case::inner_key_off_enable(true)]
-#[case::inner_key_off_disable(false)]
-fn test_columnar_truncate_ts(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_columnar_truncate_ts() {
     ::test_util::init_log_for_test();
     let keyspace_id = KEYSPACE_ID;
     let table_id = 30;
@@ -603,7 +525,7 @@ fn test_columnar_truncate_ts(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
+    let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, false);
@@ -625,35 +547,14 @@ fn test_columnar_truncate_ts(#[case] enable_inner_key_off: bool) {
         .unwrap();
     let schema_file = SchemaFile::open(schema_raw_file).unwrap();
     let opts = dfs::Options::default().with_type(FileType::Columnar);
-    let (l0_tbl_0, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 500);
-    let (l0_tbl_1, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 500);
-    let (l0_tbl_2, _) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        2000,
-        500,
-    );
-    let (l1_tbl_0, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 300);
-    let (l1_tbl_1, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 400);
-    let (l1_tbl_2, _) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        1500,
-        400,
-    );
-    let (l2_tbl_0, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 0, 1000, 100);
-    let (l2_tbl_1, _) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        2000,
-        100,
-    );
+    let (l0_tbl_0, _) = build_table(allocate_id(), &schema, 0, 600, 500);
+    let (l0_tbl_1, _) = build_table(allocate_id(), &schema, 300, 900, 500);
+    let (l0_tbl_2, _) = build_table(allocate_id(), &schema, 1000, 2000, 500);
+    let (l1_tbl_0, _) = build_table(allocate_id(), &schema, 0, 600, 300);
+    let (l1_tbl_1, _) = build_table(allocate_id(), &schema, 300, 900, 400);
+    let (l1_tbl_2, _) = build_table(allocate_id(), &schema, 1000, 1500, 400);
+    let (l2_tbl_0, _) = build_table(allocate_id(), &schema, 0, 1000, 100);
+    let (l2_tbl_1, _) = build_table(allocate_id(), &schema, 1000, 2000, 100);
     for file in [
         &l0_tbl_0, &l0_tbl_1, &l0_tbl_2, &l1_tbl_0, &l1_tbl_1, &l1_tbl_2, &l2_tbl_0, &l2_tbl_1,
     ] {
@@ -704,10 +605,8 @@ fn test_columnar_truncate_ts(#[case] enable_inner_key_off: bool) {
     }
 }
 
-#[rstest]
-#[case::inner_key_off_enable(true)]
-#[case::inner_key_off_disable(false)]
-fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_columnar_trim_over_bound() {
     ::test_util::init_log_for_test();
     let keyspace_id = KEYSPACE_ID;
     let table_id = 30;
@@ -716,7 +615,7 @@ fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
         file_id += 1;
         file_id
     };
-    let (engine, apply_tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, "");
+    let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, false);
@@ -738,35 +637,14 @@ fn test_columnar_trim_over_bound(#[case] enable_inner_key_off: bool) {
         .unwrap();
     let schema_file = SchemaFile::open(schema_raw_file).unwrap();
     let opts = dfs::Options::default().with_type(FileType::Columnar);
-    let (l0_tbl_0, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 500);
-    let (l0_tbl_1, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 600);
-    let (l0_tbl_2, _) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        2000,
-        510,
-    );
-    let (l1_tbl_0, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 0, 600, 300);
-    let (l1_tbl_1, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 300, 900, 410);
-    let (l1_tbl_2, _) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        1500,
-        420,
-    );
-    let (l2_tbl_0, _) = build_table(allocate_id(), enable_inner_key_off, &schema, 0, 1000, 100);
-    let (l2_tbl_1, _) = build_table(
-        allocate_id(),
-        enable_inner_key_off,
-        &schema,
-        1000,
-        2000,
-        110,
-    );
+    let (l0_tbl_0, _) = build_table(allocate_id(), &schema, 0, 600, 500);
+    let (l0_tbl_1, _) = build_table(allocate_id(), &schema, 300, 900, 600);
+    let (l0_tbl_2, _) = build_table(allocate_id(), &schema, 1000, 2000, 510);
+    let (l1_tbl_0, _) = build_table(allocate_id(), &schema, 0, 600, 300);
+    let (l1_tbl_1, _) = build_table(allocate_id(), &schema, 300, 900, 410);
+    let (l1_tbl_2, _) = build_table(allocate_id(), &schema, 1000, 1500, 420);
+    let (l2_tbl_0, _) = build_table(allocate_id(), &schema, 0, 1000, 100);
+    let (l2_tbl_1, _) = build_table(allocate_id(), &schema, 1000, 2000, 110);
     for file in [
         &l0_tbl_0, &l0_tbl_1, &l0_tbl_2, &l1_tbl_0, &l1_tbl_1, &l1_tbl_2, &l2_tbl_0, &l2_tbl_1,
     ] {
@@ -908,6 +786,7 @@ fn new_sst_table_for_columnar(
         comp_tp,
         comp_lvl,
         ChecksumType::Crc32,
+        None,
         None,
     );
     let ctx = Mutex::new(EvalContext::default());

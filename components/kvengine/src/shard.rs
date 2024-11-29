@@ -12,7 +12,7 @@ use std::{
     },
 };
 
-use api_version::ApiV2;
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
@@ -34,7 +34,7 @@ use crate::{
         search,
         sstable::{L0Table, SsTable},
         vector_index::VectorIndexes,
-        BoundedDataSet, DataBound, InnerKey, TxnFile,
+        BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, TxnFile,
     },
     util::{evenly_distribute, TxnFileRefPropertyHelper},
     *,
@@ -49,9 +49,9 @@ pub(crate) struct ShardPendingOperations {
 }
 
 impl ShardPendingOperations {
-    fn new(inner_key_off: usize) -> Self {
+    fn new(keyspace_id: u32) -> Self {
         Self {
-            del_prefixes: Arc::new(DeletePrefixes::new_with_inner_key_off(inner_key_off)),
+            del_prefixes: Arc::new(DeletePrefixes::new_with_keyspace_id(keyspace_id)),
             truncate_ts: None,
             trim_over_bound: false,
             manual_major_compaction: false,
@@ -189,7 +189,7 @@ impl Shard {
             ver,
             range: range.clone(),
             parent_id: 0,
-            pending_ops: RwLock::new(ShardPendingOperations::new(range.inner_key_off)),
+            pending_ops: RwLock::new(ShardPendingOperations::new(range.keyspace_id)),
             data: RwLock::new(ShardData::new_empty(range, limiter)),
             opt,
             active: Default::default(),
@@ -215,7 +215,7 @@ impl Shard {
         {
             let mut pending_ops = shard.pending_ops.write().unwrap();
             if let Some(val) = get_shard_property(DEL_PREFIXES_KEY, props) {
-                let mut del_prefixes = DeletePrefixes::unmarshal(&val, shard.inner_key_off);
+                let mut del_prefixes = DeletePrefixes::unmarshal(&val, shard.keyspace_id);
                 del_prefixes.schedule_at = shard.gen_rand_schedule_del_range_time();
                 pending_ops.del_prefixes = Arc::new(del_prefixes);
             }
@@ -509,10 +509,10 @@ impl Shard {
         let mut pending_ops = self.pending_ops.write().unwrap();
         if val.is_empty() {
             pending_ops.del_prefixes =
-                Arc::new(DeletePrefixes::new_with_inner_key_off(self.inner_key_off));
+                Arc::new(DeletePrefixes::new_with_keyspace_id(self.keyspace_id));
             return;
         }
-        let mut del_prefixes = DeletePrefixes::unmarshal(val, self.inner_key_off);
+        let mut del_prefixes = DeletePrefixes::unmarshal(val, self.keyspace_id);
         del_prefixes.schedule_at = self.gen_rand_schedule_del_range_time();
         pending_ops.del_prefixes = Arc::new(del_prefixes);
     }
@@ -560,14 +560,14 @@ impl Shard {
             return None;
         }
         let split_idx = candidate_keys.len() * 2 / 3;
-        Some(self.to_outer_key(candidate_keys[split_idx].chunk()))
+        Some(self.to_outer_key(candidate_keys[split_idx].as_ref()))
     }
 
-    fn to_outer_key(&self, inner_key: &[u8]) -> Bytes {
-        [self.key_prefix(), inner_key].concat().into()
+    fn to_outer_key(&self, inner_key: InnerKey<'_>) -> Bytes {
+        [self.keyspace_prefix(), inner_key.deref()].concat().into()
     }
 
-    fn get_candidate_inner_keys(&self) -> Vec<Bytes> {
+    fn get_candidate_inner_keys(&self) -> Vec<OwnedInnerKey> {
         let data = self.get_data();
         let mut ln_tables = 0;
         data.for_each_level(|_, lvl| {
@@ -582,7 +582,7 @@ impl Shard {
                 for tbl in lvl.tables.iter() {
                     if tbl.smallest() > data.inner_start() {
                         // table smallest must be less than inner_end or it will not be included.
-                        candidate_inner_keys.push(tbl.clone_smallest())
+                        candidate_inner_keys.push(OwnedInnerKey::new(tbl.clone_smallest()));
                     }
                 }
             }
@@ -602,9 +602,9 @@ impl Shard {
                         continue;
                     }
                     for i in (step..idx.num_blocks()).step_by(step) {
-                        let sample_key = idx.block_key(i);
-                        if sample_key.chunk() > data.inner_start().deref()
-                            && sample_key.chunk() < data.inner_end().deref()
+                        let sample_key = idx.clone_block_key(i);
+                        if sample_key.as_ref() > data.inner_start()
+                            && sample_key.as_ref() < data.inner_end()
                         {
                             candidate_inner_keys.push(sample_key);
                         }
@@ -612,7 +612,7 @@ impl Shard {
                 }
             }
         }
-        candidate_inner_keys.sort_unstable();
+        candidate_inner_keys.sort_by(|a, b| a.as_ref().cmp(&b.as_ref()));
         candidate_inner_keys
     }
 
@@ -629,7 +629,7 @@ impl Shard {
         let mut split_keys = Vec::with_capacity(count - 1);
         let mut key_idx = steps[0];
         for step in steps.into_iter().skip(1) {
-            let split_key = self.to_outer_key(candidate_inner_keys[key_idx].chunk());
+            let split_key = self.to_outer_key(candidate_inner_keys[key_idx].as_ref());
             split_keys.push(split_key);
             key_idx += step;
         }
@@ -1211,9 +1211,9 @@ impl Shard {
         self.set_data(builder.build());
     }
 
-    pub(crate) fn key_prefix(&self) -> &[u8] {
-        if self.inner_key_off > 0 {
-            return &self.outer_start[0..self.inner_key_off];
+    pub(crate) fn keyspace_prefix(&self) -> &[u8] {
+        if self.keyspace_id > 0 {
+            return &self.outer_start[0..KEYSPACE_PREFIX_LEN];
         }
         &[]
     }
@@ -1974,17 +1974,13 @@ impl LevelHandler {
         Some(DataBound::new(first.smallest(), last.biggest(), true))
     }
 
-    pub(crate) fn range_blocks_size(
-        &self,
-        ranges: &[(Bytes, Bytes)],
-        inner_key_off: usize,
-    ) -> usize {
+    pub(crate) fn range_blocks_size(&self, ranges: &[(Bytes, Bytes)]) -> usize {
         let mut blocks_size = 0;
         let mut prev_table_id = 0;
         let mut prev_block_right = 0;
         for ran in ranges {
-            let start_key = InnerKey::from_outer_key(&ran.0, inner_key_off);
-            let end_key = InnerKey::from_outer_end_key(&ran.1, inner_key_off);
+            let start_key = InnerKey::from_outer_key(&ran.0);
+            let end_key = InnerKey::from_outer_end_key(&ran.1);
             let bound = DataBound::new(start_key, end_key, false);
             let (left, right) = bound.get_overlap_data_sets(&self.tables);
             if left == right {
@@ -1994,9 +1990,9 @@ impl LevelHandler {
             let first_table = overlap_tables.first().unwrap();
             let first_idx = first_table.load_index();
             let first_avg_block_size = first_table.kv_size as usize / first_idx.num_blocks();
-            let first_block_left = first_idx.seek_block(start_key.as_ref()).saturating_sub(1);
+            let first_block_left = first_idx.seek_block(start_key).saturating_sub(1);
             let first_block_right = if overlap_tables.len() == 1 {
-                first_idx.seek_block_bigger_or_equal(end_key.as_ref())
+                first_idx.seek_block_bigger_or_equal(end_key)
             } else {
                 first_idx.num_blocks()
             };
@@ -2018,7 +2014,7 @@ impl LevelHandler {
             }
             let last_table = overlap_tables.last().unwrap();
             let last_idx = last_table.load_index();
-            let last_block_right = last_idx.seek_block_bigger_or_equal(end_key.as_ref());
+            let last_block_right = last_idx.seek_block_bigger_or_equal(end_key);
             let last_avg_block_size = last_table.kv_size as usize / last_idx.num_blocks();
             blocks_size += last_block_right * last_avg_block_size;
             prev_table_id = last_table.id();
@@ -2139,7 +2135,7 @@ pub struct DeletePrefixes {
     // the range that should be destroyed.
     prefixes_nexts: Vec<Vec<u8>>,
     pub(crate) schedule_at: u64,
-    pub(crate) inner_key_off: usize,
+    pub(crate) keyspace_prefix_len: usize,
 }
 
 impl std::fmt::Debug for DeletePrefixes {
@@ -2162,20 +2158,29 @@ impl std::fmt::Debug for DeletePrefixes {
                     .collect::<Vec<_>>(),
             )
             .field("schedule_at", &self.schedule_at)
-            .field("inner_key_off", &self.inner_key_off)
+            .field("keyspace_prefix_len", &self.keyspace_prefix_len)
             .finish()
     }
 }
 
 impl DeletePrefixes {
-    pub fn new_with_inner_key_off(inner_key_off: usize) -> Self {
+    pub fn new_with_keyspace_id(keyspace_id: u32) -> Self {
         Self {
             prefixes: vec![],
             prefixes_nexts: vec![],
             schedule_at: 0,
-            inner_key_off,
+            keyspace_prefix_len: Self::keyspace_id_to_keyspace_prefix_len(keyspace_id),
         }
     }
+
+    fn keyspace_id_to_keyspace_prefix_len(keyspace_id: u32) -> usize {
+        if keyspace_id > 0 {
+            KEYSPACE_PREFIX_LEN
+        } else {
+            0
+        }
+    }
+
     fn gen_prefixes_nexts(prefixes: &[Vec<u8>]) -> Vec<Vec<u8>> {
         prefixes
             .iter()
@@ -2197,7 +2202,7 @@ impl DeletePrefixes {
 
     #[must_use]
     pub fn merge_prefix(&self, prefix: &[u8]) -> Self {
-        assert!(prefix.len() >= self.inner_key_off);
+        assert!(prefix.len() >= self.keyspace_prefix_len);
 
         let mut new_prefixes = vec![];
         for old_prefix in &self.prefixes {
@@ -2218,7 +2223,7 @@ impl DeletePrefixes {
             prefixes: new_prefixes,
             prefixes_nexts: new_prefixes_nexts,
             schedule_at: 0,
-            inner_key_off: self.inner_key_off,
+            keyspace_prefix_len: self.keyspace_prefix_len,
         }
     }
 
@@ -2281,7 +2286,7 @@ impl DeletePrefixes {
             prefixes: new_prefixes,
             prefixes_nexts: new_prefixes_nexts,
             schedule_at: self.schedule_at,
-            inner_key_off: self.inner_key_off,
+            keyspace_prefix_len: self.keyspace_prefix_len,
         }
     }
 
@@ -2310,7 +2315,7 @@ impl DeletePrefixes {
         buf
     }
 
-    pub fn unmarshal(mut data: &[u8], inner_key_off: usize) -> Self {
+    pub fn unmarshal(mut data: &[u8], keyspace_id: u32) -> Self {
         let mut prefixes = vec![];
         while !data.is_empty() {
             let len = data.get_u16_le() as usize;
@@ -2322,11 +2327,11 @@ impl DeletePrefixes {
             prefixes,
             prefixes_nexts,
             schedule_at: 0,
-            inner_key_off,
+            keyspace_prefix_len: Self::keyspace_id_to_keyspace_prefix_len(keyspace_id),
         }
     }
 
-    pub fn build_split(&self, start: &[u8], end: &[u8], inner_key_off: usize) -> Self {
+    pub fn build_split(&self, start: &[u8], end: &[u8]) -> Self {
         let prefixes: Vec<_> = self
             .prefixes
             .iter()
@@ -2341,14 +2346,14 @@ impl DeletePrefixes {
             prefixes,
             prefixes_nexts,
             schedule_at: scheduled_at,
-            inner_key_off,
+            keyspace_prefix_len: self.keyspace_prefix_len,
         }
     }
 
     pub(crate) fn cover_full_keyspace(&self, keyspace_prefix: &[u8]) -> bool {
-        let inner_key_off = self.inner_key_off;
+        let keyspace_prefix_len = self.keyspace_prefix_len;
         self.prefixes.iter().any(|p| {
-            if inner_key_off >= p.len() {
+            if keyspace_prefix_len >= p.len() {
                 return true;
             }
             keyspace_prefix.starts_with(p.as_slice())
@@ -2356,34 +2361,34 @@ impl DeletePrefixes {
     }
 
     pub(crate) fn cover_prefix(&self, inner_prefix: InnerKey<'_>) -> bool {
-        let inner_key_off = self.inner_key_off;
+        let keyspace_prefix_len = self.keyspace_prefix_len;
         self.prefixes.iter().any(|p| {
-            if inner_key_off >= p.len() {
+            if keyspace_prefix_len >= p.len() {
                 return true;
             }
-            let inner_p = InnerKey::from_outer_key(p, inner_key_off);
+            let inner_p = InnerKey::from_outer_key(p);
             inner_prefix.starts_with(inner_p.deref())
         })
     }
 
     pub(crate) fn cover_range(&self, inner_start: InnerKey<'_>, inner_end: InnerKey<'_>) -> bool {
-        let inner_key_off = self.inner_key_off;
+        let keyspace_prefix_len = self.keyspace_prefix_len;
         self.prefixes.iter().any(|p| {
-            if inner_key_off >= p.len() {
+            if keyspace_prefix_len >= p.len() {
                 return true;
             }
-            let inner_p = InnerKey::from_outer_key(p, inner_key_off);
+            let inner_p = InnerKey::from_outer_key(p);
             inner_start.starts_with(inner_p.deref()) && inner_end.starts_with(inner_p.deref())
         })
     }
 
     pub(crate) fn inner_delete_bounds(&self) -> impl Iterator<Item = DataBound<'_>> {
-        let inner_key_off = self.inner_key_off;
+        let keyspace_prefix_len = self.keyspace_prefix_len;
         self.prefixes
             .iter()
             .zip(self.prefixes_nexts.iter())
             .map(move |(p, p_n)| {
-                if inner_key_off >= p.len() {
+                if keyspace_prefix_len >= p.len() {
                     DataBound::new(
                         InnerKey::from_inner_buf(&[]),
                         InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY),
@@ -2391,8 +2396,8 @@ impl DeletePrefixes {
                     )
                 } else {
                     DataBound::new(
-                        InnerKey::from_outer_key(p, inner_key_off),
-                        InnerKey::from_outer_end_key(p_n, inner_key_off),
+                        InnerKey::from_outer_key(p),
+                        InnerKey::from_outer_end_key(p_n),
                         false,
                     )
                 }
@@ -2429,13 +2434,17 @@ impl DeletePrefixes {
     }
 
     pub fn rewrite_range_prefix(&mut self, prefix: &[u8]) {
-        assert_eq!(prefix.len(), self.inner_key_off, "unexpected prefix.len()");
+        assert_eq!(
+            prefix.len(),
+            self.keyspace_prefix_len,
+            "unexpected prefix.len()"
+        );
 
         // If the prefixes is empty or the prefixes no need to update, return.
         if self.prefixes.is_empty() || self.prefixes.first().unwrap().starts_with(prefix) {
             return;
         }
-        let offset = self.inner_key_off;
+        let offset = self.keyspace_prefix_len;
         self.prefixes.iter_mut().for_each(|p| {
             p[0..offset].copy_from_slice(prefix);
         });
@@ -2448,18 +2457,18 @@ impl DeletePrefixes {
 pub fn merge_del_prefixes_if_needed(
     first: Option<Bytes>,
     second: Option<Bytes>,
-    inner_key_off: usize,
+    keyspace_id: u32,
 ) -> Option<Vec<u8>> {
     if first.is_none() && second.is_none() {
         return None;
     }
 
     let mut first_prefixes = first
-        .map(|b| DeletePrefixes::unmarshal(b.chunk(), inner_key_off))
-        .unwrap_or_else(|| DeletePrefixes::new_with_inner_key_off(inner_key_off));
+        .map(|b| DeletePrefixes::unmarshal(b.chunk(), keyspace_id))
+        .unwrap_or_else(|| DeletePrefixes::new_with_keyspace_id(keyspace_id));
     let second_prefixes = second
-        .map(|b| DeletePrefixes::unmarshal(b.chunk(), inner_key_off))
-        .unwrap_or_else(|| DeletePrefixes::new_with_inner_key_off(inner_key_off));
+        .map(|b| DeletePrefixes::unmarshal(b.chunk(), keyspace_id))
+        .unwrap_or_else(|| DeletePrefixes::new_with_keyspace_id(keyspace_id));
     for prefix in &second_prefixes.prefixes {
         first_prefixes = first_prefixes.merge_prefix(prefix);
     }
@@ -2535,19 +2544,31 @@ impl ShardRange {
     }
 
     pub fn inner_start(&self) -> InnerKey<'_> {
-        InnerKey::from_outer_key(&self.outer_start, self.inner_key_off)
+        InnerKey::from_outer_key(&self.outer_start)
     }
 
     pub fn inner_end(&self) -> InnerKey<'_> {
-        InnerKey::from_outer_end_key(&self.outer_end, self.inner_key_off)
+        InnerKey::from_outer_end_key(&self.outer_end)
     }
 
-    pub(crate) fn prefix(&self) -> &[u8] {
-        &self.outer_start[..self.inner_key_off]
+    pub(crate) fn keyspace_prefix(&self) -> &[u8] {
+        &self.outer_start[..self.keyspace_prefix_len()]
+    }
+
+    pub(crate) fn keyspace_prefix_len(&self) -> usize {
+        if self.keyspace_id > 0 {
+            KEYSPACE_PREFIX_LEN
+        } else {
+            0
+        }
     }
 
     pub fn to_outer_key(&self, inner_key: InnerKey<'_>) -> Vec<u8> {
-        [self.prefix(), inner_key.deref()].concat()
+        [self.keyspace_prefix(), inner_key.deref()].concat()
+    }
+
+    pub(crate) fn prepend_keyspace_id(&self) -> Option<u32> {
+        (self.keyspace_id > 0 && self.inner_key_off == 0).then_some(self.keyspace_id)
     }
 }
 
@@ -2574,7 +2595,7 @@ mod tests {
 
     #[test]
     fn test_del_prefixes() {
-        for inner_key_off in [0, 4] {
+        for keyspace_id in [0, 1] {
             let assert_prefix_invariant = |del_prefix: &DeletePrefixes| {
                 assert_eq!(del_prefix.prefixes.len(), del_prefix.prefixes_nexts.len());
                 assert_eq!(
@@ -2588,7 +2609,7 @@ mod tests {
                 }));
             };
 
-            let mut del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+            let mut del_prefix = DeletePrefixes::new_with_keyspace_id(keyspace_id);
             assert_prefix_invariant(&del_prefix);
             assert!(del_prefix.is_empty());
             del_prefix = del_prefix.merge_prefix("0000101".as_bytes());
@@ -2596,26 +2617,26 @@ mod tests {
             assert_eq!(del_prefix.prefixes.len(), 1);
             assert_prefix_invariant(&del_prefix);
             for prefix in ["00001010", "0000101"] {
-                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes());
                 assert!(del_prefix.cover_prefix(inner_prefix));
             }
             for prefix in ["000010", "0000103"] {
-                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes());
                 assert!(!del_prefix.cover_prefix(inner_prefix));
             }
 
             del_prefix = del_prefix.merge_prefix("0000105".as_bytes());
             assert_prefix_invariant(&del_prefix);
             let bin = del_prefix.marshal();
-            del_prefix = DeletePrefixes::unmarshal(&bin, inner_key_off);
+            del_prefix = DeletePrefixes::unmarshal(&bin, keyspace_id);
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 2);
             for prefix in ["00001010", "0000101", "00001050", "0000105"] {
-                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes());
                 assert!(del_prefix.cover_prefix(inner_prefix));
             }
             for prefix in ["000010", "0000103"] {
-                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes());
                 assert!(!del_prefix.cover_prefix(inner_prefix));
             }
 
@@ -2623,21 +2644,21 @@ mod tests {
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 1);
             for prefix in ["000010", "0000101", "0000103", "0000104"] {
-                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes());
                 assert!(del_prefix.cover_prefix(inner_prefix));
             }
             for prefix in ["00001", "000011"] {
-                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes(), inner_key_off);
+                let inner_prefix = InnerKey::from_outer_key(prefix.as_bytes());
                 assert!(!del_prefix.cover_prefix(inner_prefix));
             }
 
-            del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+            del_prefix = DeletePrefixes::new_with_keyspace_id(keyspace_id);
             del_prefix = del_prefix.merge_prefix("0000101".as_bytes());
             del_prefix = del_prefix.merge_prefix("0000102".as_bytes());
             assert_prefix_invariant(&del_prefix);
             for (start, end) in [("0000101", "00001011"), ("0000102", "00001022")] {
-                let inner_start = InnerKey::from_outer_key(start.as_bytes(), inner_key_off);
-                let inner_end = InnerKey::from_outer_key(end.as_bytes(), inner_key_off);
+                let inner_start = InnerKey::from_outer_key(start.as_bytes());
+                let inner_end = InnerKey::from_outer_key(end.as_bytes());
                 assert!(del_prefix.cover_range(inner_start, inner_end));
             }
             for (start, end) in [
@@ -2645,12 +2666,12 @@ mod tests {
                 ("0000101", "0000102"),
                 ("0000102", "0000103"),
             ] {
-                let inner_start = InnerKey::from_outer_key(start.as_bytes(), inner_key_off);
-                let inner_end = InnerKey::from_outer_key(end.as_bytes(), inner_key_off);
+                let inner_start = InnerKey::from_outer_key(start.as_bytes());
+                let inner_end = InnerKey::from_outer_key(end.as_bytes());
                 assert!(!del_prefix.cover_range(inner_start, inner_end));
             }
 
-            del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+            del_prefix = DeletePrefixes::new_with_keyspace_id(keyspace_id);
             del_prefix = del_prefix.merge_prefix("0000101".as_bytes());
             del_prefix = del_prefix.merge_prefix("00001033".as_bytes());
             del_prefix = del_prefix.merge_prefix("00001055".as_bytes());
@@ -2658,81 +2679,60 @@ mod tests {
             assert_prefix_invariant(&del_prefix);
 
             let split_del_range =
-                del_prefix.build_split("00001033".as_bytes(), "00001055".as_bytes(), inner_key_off);
+                del_prefix.build_split("00001033".as_bytes(), "00001055".as_bytes());
             assert_prefix_invariant(&split_del_range);
             assert_eq!(split_del_range.prefixes.len(), 1);
             assert_eq!(&split_del_range.prefixes[0], "00001033".as_bytes());
 
             let split_del_range =
-                del_prefix.build_split("00001034".as_bytes(), "00001055".as_bytes(), inner_key_off);
+                del_prefix.build_split("00001034".as_bytes(), "00001055".as_bytes());
             assert_prefix_invariant(&split_del_range);
             assert_eq!(split_del_range.prefixes.len(), 0);
 
-            let split_del_range = del_prefix.build_split(
-                "000010334".as_bytes(),
-                "000010555".as_bytes(),
-                inner_key_off,
-            );
+            let split_del_range =
+                del_prefix.build_split("000010334".as_bytes(), "000010555".as_bytes());
             assert_prefix_invariant(&split_del_range);
             assert_eq!(split_del_range.prefixes.len(), 2);
             assert_eq!(&split_del_range.prefixes[0], "00001033".as_bytes());
             assert_eq!(&split_del_range.prefixes[1], "00001055".as_bytes());
 
-            del_prefix = DeletePrefixes::new_with_inner_key_off(inner_key_off)
+            del_prefix = DeletePrefixes::new_with_keyspace_id(keyspace_id)
                 .merge_prefix("0000100".as_bytes())
                 .merge_prefix("0000200".as_bytes())
                 .merge_prefix("0000300".as_bytes());
             assert_prefix_invariant(&del_prefix);
             del_prefix = del_prefix.split(
-                &DeletePrefixes::new_with_inner_key_off(inner_key_off)
+                &DeletePrefixes::new_with_keyspace_id(keyspace_id)
                     .merge_prefix("0000100".as_bytes()),
             );
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 2);
-            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key(
-                "0000100".as_bytes(),
-                inner_key_off
-            )));
-            assert!(del_prefix.cover_prefix(InnerKey::from_outer_key(
-                "0000200".as_bytes(),
-                inner_key_off
-            )));
-            assert!(del_prefix.cover_prefix(InnerKey::from_outer_key(
-                "0000300".as_bytes(),
-                inner_key_off
-            )));
+            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key("0000100".as_bytes(),)));
+            assert!(del_prefix.cover_prefix(InnerKey::from_outer_key("0000200".as_bytes(),)));
+            assert!(del_prefix.cover_prefix(InnerKey::from_outer_key("0000300".as_bytes(),)));
             del_prefix = del_prefix.split(
-                &DeletePrefixes::new_with_inner_key_off(inner_key_off)
+                &DeletePrefixes::new_with_keyspace_id(keyspace_id)
                     .merge_prefix("0000200".as_bytes())
                     .merge_prefix("0000300".as_bytes()),
             );
             assert_prefix_invariant(&del_prefix);
             assert_eq!(del_prefix.prefixes.len(), 0);
-            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key(
-                "0000100".as_bytes(),
-                inner_key_off
-            )));
-            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key(
-                "0000200".as_bytes(),
-                inner_key_off
-            )));
-            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key(
-                "0000300".as_bytes(),
-                inner_key_off
-            )));
+            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key("0000100".as_bytes(),)));
+            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key("0000200".as_bytes(),)));
+            assert!(!del_prefix.cover_prefix(InnerKey::from_outer_key("0000300".as_bytes(),)));
         }
     }
 
     #[test]
     fn test_del_prefixes_merge_prefix() {
-        for inner_key_off in [0, 4] {
-            let mut first = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+        for keyspace_id in [0, 1] {
+            let mut first = DeletePrefixes::new_with_keyspace_id(keyspace_id);
             first = first.merge_prefix("0000101".as_bytes());
             first = first.merge_prefix("00001033".as_bytes());
             first = first.merge_prefix("00001055".as_bytes());
             first = first.merge_prefix("0000107".as_bytes());
 
-            let mut second = DeletePrefixes::new_with_inner_key_off(inner_key_off);
+            let mut second = DeletePrefixes::new_with_keyspace_id(keyspace_id);
             second = second.merge_prefix("0000101".as_bytes());
             second = second.merge_prefix("00001022".as_bytes());
             second = second.merge_prefix("00001044".as_bytes());
@@ -2742,10 +2742,10 @@ mod tests {
             let merged = merge_del_prefixes_if_needed(
                 Some(Bytes::from(first.marshal())),
                 Some(Bytes::from(second.marshal())),
-                inner_key_off,
+                keyspace_id,
             )
             .unwrap();
-            let merged_del_prefixes = DeletePrefixes::unmarshal(&merged, inner_key_off);
+            let merged_del_prefixes = DeletePrefixes::unmarshal(&merged, keyspace_id);
             assert_eq!(
                 merged_del_prefixes.prefixes,
                 vec![
@@ -2762,10 +2762,10 @@ mod tests {
             let rev_merged = merge_del_prefixes_if_needed(
                 Some(Bytes::from(second.marshal())),
                 Some(Bytes::from(first.marshal())),
-                inner_key_off,
+                keyspace_id,
             );
             let rev_merged_del_prefixes =
-                DeletePrefixes::unmarshal(&rev_merged.unwrap(), inner_key_off);
+                DeletePrefixes::unmarshal(&rev_merged.unwrap(), keyspace_id);
             assert_eq!(
                 merged_del_prefixes.prefixes,
                 rev_merged_del_prefixes.prefixes,
@@ -2794,7 +2794,7 @@ mod tests {
             (vec!["00001"], vec!["0000", "0001"]),
         ];
 
-        let mut del_prefix = DeletePrefixes::new_with_inner_key_off(4);
+        let mut del_prefix = DeletePrefixes::new_with_keyspace_id(1);
         for (idx, (sorted_prefixes, expected_prefixes)) in cases.into_iter().enumerate() {
             del_prefix.schedule_at = idx as u64;
             del_prefix = del_prefix.merge_prefixes(sorted_prefixes.iter().map(|p| p.as_bytes()));
@@ -2804,13 +2804,13 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(del_prefix.prefixes, expected_prefixes, "case {}", idx);
             assert_eq!(del_prefix.schedule_at, idx as u64);
-            assert_eq!(del_prefix.inner_key_off, 4);
+            assert_eq!(del_prefix.keyspace_prefix_len, 4);
         }
     }
 
     #[test]
     fn test_del_prefixes_complementary_ranges() {
-        let mut del_prefix = DeletePrefixes::new_with_inner_key_off(4);
+        let mut del_prefix = DeletePrefixes::new_with_keyspace_id(1);
         del_prefix = del_prefix.merge_prefix("0000-1".as_bytes());
         del_prefix = del_prefix.merge_prefix("0000-2".as_bytes());
         del_prefix = del_prefix.merge_prefix("0000-33".as_bytes());
@@ -2884,7 +2884,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_range_prefix() {
-        let mut del_prefix = DeletePrefixes::new_with_inner_key_off(4);
+        let mut del_prefix = DeletePrefixes::new_with_keyspace_id(1);
         del_prefix = del_prefix.merge_prefix("0000-01".as_bytes());
         del_prefix = del_prefix.merge_prefix("0000-10".as_bytes());
         del_prefix = del_prefix.merge_prefix("0000-21".as_bytes());

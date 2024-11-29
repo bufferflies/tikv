@@ -1792,7 +1792,6 @@ impl BackupCluster {
         sorted_backup_shards_id: &[u64],
         backup_shards: &HashMap<u64, BackupShard>,
         sorted_target_regions: Vec<RawRegion>,
-        inner_key_off: usize,
     ) -> Vec<AlignedRegion> {
         let mut aligned_regions = Vec::with_capacity(sorted_target_regions.len());
         let mut idx = 0;
@@ -1800,7 +1799,7 @@ impl BackupCluster {
         // NOTE: use inner_key to check overlapping, target_regions may belongs to
         // a new keyspace.
         let key_in_shard = |key: &[u8], shard: &BackupShard| {
-            let inner_key = InnerKey::from_outer_key(key, inner_key_off);
+            let inner_key = InnerKey::from_outer_key(key);
             shard.data_bound().overlap_key(inner_key)
         };
 
@@ -1812,8 +1811,7 @@ impl BackupCluster {
             if idx > 0 && key_in_shard(target_region.get_start_key(), get_backup_shard(idx - 1)) {
                 idx -= 1;
             }
-            let target_inner_end =
-                InnerKey::from_outer_end_key(target_region.get_end_key(), inner_key_off);
+            let target_inner_end = InnerKey::from_outer_end_key(target_region.get_end_key());
             let mut aligned_shards_id = vec![];
             while idx < sorted_backup_shards_id.len()
                 && get_backup_shard(idx).inner_start() < target_inner_end
@@ -1838,13 +1836,8 @@ impl BackupCluster {
         Vec<AlignedRegion>,
         usize, // number of trimmed shards
     )> {
-        let inner_key_off = self.inner_key_off();
-        let aligned_regions = Self::align_target_regions_impl(
-            &self.sorted_shards,
-            &self.shards,
-            target_regions,
-            inner_key_off,
-        );
+        let aligned_regions =
+            Self::align_target_regions_impl(&self.sorted_shards, &self.shards, target_regions);
         let trimmed_shards_cnt = self.trim_over_bound_shards(&aligned_regions)?;
         Ok((aligned_regions, trimmed_shards_cnt))
     }
@@ -2775,7 +2768,7 @@ mod tests {
         } else {
             0
         };
-        let key_prefix = b"x00";
+        let key_prefix = b"x000";
         let cases: Vec<(Vec<&[u8]>, Vec<&[u8]>, Vec<Vec<u64>>)> = vec![
             (
                 vec![b"0", b"1"], // backup_regions_boundary_keys, the index is the region id.
@@ -2858,7 +2851,6 @@ mod tests {
                 &backup_shards_id,
                 &backup_shards,
                 target_regions,
-                inner_key_off,
             );
             assert_eq!(aligned_regions, expected, "case: {}", case_idx);
         }

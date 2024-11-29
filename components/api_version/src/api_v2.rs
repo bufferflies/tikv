@@ -326,6 +326,11 @@ impl ApiV2 {
         }
     }
 
+    #[inline]
+    pub fn is_txn_key(key: &[u8]) -> bool {
+        key.len() >= KEYSPACE_PREFIX_LEN && key[0] == TXN_KEY_PREFIX
+    }
+
     pub const ENCODED_LOGICAL_DELETE: [u8; 1] = [ValueMeta::DELETE_FLAG.bits];
 }
 

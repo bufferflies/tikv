@@ -10,7 +10,7 @@ use kvengine::{
     dfs::{self, Dfs, FileType},
     table::{
         txn_file::{TxnChunkBuilder, OP_PUT},
-        NoPrefixKey,
+        InnerKey,
     },
 };
 use kvproto::{
@@ -1300,7 +1300,7 @@ fn build_txn_files(
     for i in start..end {
         let key = i_to_tidb_key(i);
         let val = i_to_val(i);
-        txn_chunk_builder.add_entry(NoPrefixKey(&key), OP_PUT, &val);
+        txn_chunk_builder.add_entry(InnerKey::from_outer_key(&key), OP_PUT, &val);
         if (i + 1) % 100 == 0 {
             let mut data_buf = vec![];
             txn_chunk_builder.finish(&mut data_buf);

@@ -143,7 +143,6 @@ impl SnapAccess {
         }
 
         let snap = change_set.get_snapshot();
-        let inner_key_off = snap.get_inner_key_off() as usize;
         let encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
             .map(|v| ctx.master_key.decrypt_encryption_key(&v).unwrap());
 
@@ -153,7 +152,6 @@ impl SnapAccess {
             shard_id,
             shard_ver,
             mem_table_data,
-            inner_key_off,
             &ctx.txn_chunk_manager,
             encryption_key,
         )
@@ -165,7 +163,6 @@ impl SnapAccess {
         shard_id: u64,
         shard_ver: u64,
         mut mem_table_data: &[u8],
-        inner_key_off: usize,
         txn_chunk_manager: &TxnChunkManager,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Vec<CfTable>> {
@@ -176,14 +173,13 @@ impl SnapAccess {
         let format_version = mem_table_data.get_u32_le();
         if format_version == MEM_DATA_FORMAT_V1 {
             let mut mem_tbl = CfTable::new();
-            Self::construct_skip_list(mem_table_data, inner_key_off, &mut mem_tbl)?;
+            Self::construct_skip_list(mem_table_data, &mut mem_tbl)?;
             Ok(vec![mem_tbl])
         } else if format_version == MEM_DATA_FORMAT_V2 {
             Self::construct_memtables_format_v2(
                 shard_id,
                 shard_ver,
                 mem_table_data,
-                inner_key_off,
                 txn_chunk_manager,
                 encryption_key,
             )
@@ -196,17 +192,13 @@ impl SnapAccess {
         }
     }
 
-    fn construct_skip_list(
-        skl_data: &[u8],
-        inner_key_off: usize,
-        mem_tbl: &mut CfTable,
-    ) -> Result<()> {
+    fn construct_skip_list(skl_data: &[u8], mem_tbl: &mut CfTable) -> Result<()> {
         let mut wb = WriteBatch::new();
         let rows: Vec<table::Row> = bincode::deserialize(skl_data).map_err(|e| {
             Error::RemoteRead(format!("failed to deserialize mem table data: {}", e))
         })?;
         for row in rows {
-            let key = InnerKey::from_outer_key(&row.key, inner_key_off);
+            let key = InnerKey::from_outer_key(&row.key);
             wb.put(
                 key,
                 0,
@@ -223,7 +215,6 @@ impl SnapAccess {
         shard_id: u64,
         shard_ver: u64,
         mut mem_data: &[u8],
-        inner_key_off: usize,
         txn_chunk_manager: &TxnChunkManager,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Vec<CfTable>> {
@@ -233,7 +224,7 @@ impl SnapAccess {
         let mem_size = mem_data.get_u64_le() as usize;
         let skl_data = &mem_data[..mem_size];
         mem_data.advance(mem_size);
-        Self::construct_skip_list(skl_data, inner_key_off, &mut mem_tbl)?;
+        Self::construct_skip_list(skl_data, &mut mem_tbl)?;
 
         // Txn file refs:
         let msg_len = mem_data.get_u32_le() as usize;
@@ -355,7 +346,7 @@ impl SnapAccessCore {
         };
         let data = self.data.clone();
         let mut key = BytesMut::new();
-        key.extend_from_slice(data.prefix());
+        key.extend_from_slice(data.keyspace_prefix());
         Iterator {
             all_versions,
             reversed,
@@ -387,7 +378,7 @@ impl SnapAccessCore {
         ));
         let data = self.data.clone();
         let mut key = BytesMut::new();
-        key.extend_from_slice(data.prefix());
+        key.extend_from_slice(data.keyspace_prefix());
         Iterator {
             all_versions,
             reversed,
@@ -412,7 +403,7 @@ impl SnapAccessCore {
     ) -> Iterator {
         let data = self.data.clone();
         let mut key = BytesMut::new();
-        key.extend_from_slice(data.prefix());
+        key.extend_from_slice(data.keyspace_prefix());
         Iterator {
             all_versions,
             reversed,
@@ -468,8 +459,7 @@ impl SnapAccessCore {
             version = u64::MAX;
         }
 
-        debug_assert_eq!(self.data.prefix(), &key[..self.data.inner_key_off]);
-        let inner_key = InnerKey::from_outer_key(key, self.data.inner_key_off);
+        let inner_key = InnerKey::from_outer_key(key);
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
         item.val = self
@@ -490,7 +480,7 @@ impl SnapAccessCore {
     }
 
     pub fn get_non_txn_file_lock(&self, key: &[u8]) -> Item<'_> {
-        let inner_key = InnerKey::from_outer_key(key, self.data.inner_key_off);
+        let inner_key = InnerKey::from_outer_key(key);
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
         item.val = self.get_value(
@@ -832,10 +822,8 @@ impl SnapAccessCore {
             }
             let mut overlap = false;
             for (outer_start, outer_end) in outer_ranges {
-                let inner_start =
-                    InnerKey::from_outer_key(outer_start, self.data.range.inner_key_off);
-                let inner_end =
-                    InnerKey::from_outer_end_key(outer_end, self.data.range.inner_key_off);
+                let inner_start = InnerKey::from_outer_key(outer_start);
+                let inner_end = InnerKey::from_outer_end_key(outer_end);
                 let bound = DataBound::new(inner_start, inner_end, false);
                 if v.has_data_in_bound(bound) {
                     overlap = true;
@@ -875,10 +863,8 @@ impl SnapAccessCore {
                 // TODO: skip check overlap when `!v.is_sync()`.
                 let mut overlap = false;
                 for (outer_start, outer_end) in outer_ranges {
-                    let inner_start =
-                        InnerKey::from_outer_key(outer_start, self.data.range.inner_key_off);
-                    let inner_end =
-                        InnerKey::from_outer_end_key(outer_end, self.data.range.inner_key_off);
+                    let inner_start = InnerKey::from_outer_key(outer_start);
+                    let inner_end = InnerKey::from_outer_end_key(outer_end);
                     let data_bound = DataBound::new(inner_start, inner_end, false);
                     if v.has_overlap(data_bound) {
                         overlap = true;
@@ -906,10 +892,8 @@ impl SnapAccessCore {
                 // check overlap
                 let mut overlap = false;
                 for (outer_start, outer_end) in outer_ranges {
-                    let inner_start =
-                        InnerKey::from_outer_key(outer_start, self.data.range.inner_key_off);
-                    let inner_end =
-                        InnerKey::from_outer_end_key(outer_end, self.data.range.inner_key_off);
+                    let inner_start = InnerKey::from_outer_key(outer_start);
+                    let inner_end = InnerKey::from_outer_end_key(outer_end);
                     if col_file.has_data_in_range(inner_start, inner_end) {
                         overlap = true;
                         break;
@@ -983,8 +967,8 @@ impl SnapAccessCore {
             .iter()
             .map(|range| {
                 DataBound::new(
-                    InnerKey::from_outer_key(&range.0, self.data.inner_key_off),
-                    InnerKey::from_outer_key(&range.1, self.data.inner_key_off),
+                    InnerKey::from_outer_key(&range.0),
+                    InnerKey::from_outer_key(&range.1),
                     false,
                 )
             })
@@ -1023,7 +1007,7 @@ impl SnapAccessCore {
 
         let data = self.data.clone();
         let mut key = BytesMut::new();
-        key.extend_from_slice(data.prefix());
+        key.extend_from_slice(data.keyspace_prefix());
         let mut mem_iterator = Iterator {
             all_versions: false,
             reversed: false,
@@ -1107,7 +1091,7 @@ impl SnapAccessCore {
 
     #[maybe_async::both]
     pub async fn get_newer(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
-        let inner_key = InnerKey::from_outer_key(key, self.data.inner_key_off);
+        let inner_key = InnerKey::from_outer_key(key);
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
         item.val = self
@@ -1158,21 +1142,21 @@ impl SnapAccessCore {
 
     #[maybe_async::both]
     pub async fn has_data_in_prefix<'a>(&'a self, mut prefix: &'a [u8]) -> bool {
-        let shard_prefix = self.data.prefix();
+        let keyspace_prefix = self.data.keyspace_prefix();
 
-        let min_off = std::cmp::min(prefix.len(), self.data.inner_key_off);
+        let min_off = std::cmp::min(prefix.len(), keyspace_prefix.len());
         if min_off > 0 {
-            if prefix[0..min_off] != shard_prefix[0..min_off] {
+            if prefix[0..min_off] != keyspace_prefix[0..min_off] {
                 return false;
             }
-            if prefix.len() < self.data.inner_key_off {
-                // If prefix is less than inner_key_off, the data in shard always have
-                // `shard_prefix`, just update prefix to shard_prefix.
-                prefix = shard_prefix;
+            if prefix.len() < keyspace_prefix.len() {
+                // If prefix is less than keyspace_prefix_len, the data in shard always have
+                // `keyspace_prefix`, just update prefix to keyspace_prefix.
+                prefix = keyspace_prefix;
             }
         }
 
-        let inner_prefix = InnerKey::from_outer_key(prefix, self.data.inner_key_off);
+        let inner_prefix = InnerKey::from_outer_key(prefix);
         if self.deleting_prefixes.cover_prefix(inner_prefix) {
             return false;
         }
@@ -1196,11 +1180,10 @@ impl SnapAccessCore {
 
     pub fn estimated_range_blocks_size(&self, ranges: &[(Bytes, Bytes)]) -> usize {
         // ignore L0 tables, only estimate L1+ for simplicity and performance.
-        let inner_key_off = self.data.inner_key_off;
         let mut blocks_size = 0;
         let write_cf = &self.data.cfs[0];
         for lvl in &write_cf.levels {
-            blocks_size += lvl.range_blocks_size(ranges, inner_key_off);
+            blocks_size += lvl.range_blocks_size(ranges);
         }
         blocks_size
     }
@@ -1253,7 +1236,7 @@ impl SnapAccessCore {
                 if lock_val.is_valid() && !lock_val.is_deleted() {
                     let conflict_lock = Lock::parse(lock_val.get_value()).unwrap();
                     // Return outer key.
-                    let mut key = self.data.prefix().to_vec();
+                    let mut key = self.data.keyspace_prefix().to_vec();
                     key.extend_from_slice(txn_file_key.deref());
                     return Some((key, conflict_lock));
                 }
@@ -1280,7 +1263,7 @@ impl SnapAccessCore {
             {
                 let conflict_lock = Lock::parse(lock_iter_val.get_value()).unwrap();
                 // Return outer key.
-                let mut key = self.data.prefix().to_vec();
+                let mut key = self.data.keyspace_prefix().to_vec();
                 key.extend_from_slice(lock_iter.key().as_ref());
                 return Some((key, conflict_lock));
             }
@@ -1321,7 +1304,7 @@ impl SnapAccessCore {
                 let um = UserMeta::from_slice(write_iter_val.user_meta());
                 if um.commit_ts > txn_file.start_ts() {
                     // Return outer key.
-                    let mut key = self.data.prefix().to_vec();
+                    let mut key = self.data.keyspace_prefix().to_vec();
                     key.extend_from_slice(write_iter.key().as_ref());
                     return Some((key, um));
                 }
@@ -1444,8 +1427,6 @@ impl SnapAccessCore {
             if !skl.is_empty() {
                 let iter = skl.new_iterator(false);
                 let row_reader = ColumnarRowTableReader::new(
-                    self.data.keyspace_id,
-                    self.data.inner_key_off,
                     schema.clone(),
                     iter,
                     None,
@@ -1464,8 +1445,6 @@ impl SnapAccessCore {
                 );
                 let iter = l0_write.new_iterator(false, true);
                 let row_reader = ColumnarRowTableReader::new(
-                    self.data.keyspace_id,
-                    self.data.inner_key_off,
                     schema.clone(),
                     iter,
                     None,
@@ -1599,7 +1578,7 @@ impl Iterator {
     }
 
     fn update_item(&mut self) {
-        self.key.truncate(self.data.inner_key_off);
+        self.key.truncate(self.data.keyspace_prefix_len());
         self.key.extend_from_slice(self.inner.key().deref());
         self.val = self.inner.value();
     }
@@ -1633,9 +1612,7 @@ impl Iterator {
         if key.len() <= self.data.inner_key_off {
             self.inner.rewind().await;
         } else {
-            self.inner
-                .seek(InnerKey::from_outer_key(key, self.data.inner_key_off))
-                .await;
+            self.inner.seek(InnerKey::from_outer_key(key)).await;
         }
         self.parse_item().await;
     }
@@ -1679,10 +1656,8 @@ impl Iterator {
         outer_lower_bound_include: Bytes,
         outer_upper_bound_exclude: Bytes,
     ) -> bool {
-        let inner_lower_bound =
-            InnerKey::from_outer_key(&outer_lower_bound_include, self.data.inner_key_off);
-        let inner_upper_bound =
-            InnerKey::from_outer_end_key(&outer_upper_bound_exclude, self.data.inner_key_off);
+        let inner_lower_bound = InnerKey::from_outer_key(&outer_lower_bound_include);
+        let inner_upper_bound = InnerKey::from_outer_end_key(&outer_upper_bound_exclude);
         let mut seeked = false;
         // reset monotonic range can be optimized to avoid seek.
         if self.is_reset_monotonic_range(inner_lower_bound, inner_upper_bound) {
@@ -1733,11 +1708,9 @@ impl Iterator {
     ) -> bool {
         if let Some((outer_old_lower, outer_old_upper)) = &self.range {
             if self.reversed {
-                inner_upper_bound
-                    <= InnerKey::from_outer_key(outer_old_lower, self.data.inner_key_off)
+                inner_upper_bound <= InnerKey::from_outer_key(outer_old_lower)
             } else {
-                InnerKey::from_outer_end_key(outer_old_upper, self.data.inner_key_off)
-                    <= inner_lower_bound
+                InnerKey::from_outer_end_key(outer_old_upper) <= inner_lower_bound
             }
         } else {
             false
@@ -1748,11 +1721,9 @@ impl Iterator {
         if let Some((outer_lower, outer_upper)) = &self.range {
             if self.inner.valid() {
                 if self.reversed {
-                    self.inner.key()
-                        < InnerKey::from_outer_key(outer_lower, self.data.inner_key_off)
+                    self.inner.key() < InnerKey::from_outer_key(outer_lower)
                 } else {
-                    self.inner.key()
-                        >= InnerKey::from_outer_end_key(outer_upper, self.data.inner_key_off)
+                    self.inner.key() >= InnerKey::from_outer_end_key(outer_upper)
                 }
             } else {
                 true
@@ -1788,8 +1759,7 @@ mod tests {
             file::InMemFile,
             memtable::CfTable,
             sstable::{test_util::build_test_table_with_kvs, BlockCache},
-            InnerKey, NoPrefixKey, OwnedInnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile,
-            TxnFileId, OP_PUT,
+            InnerKey, OwnedInnerKey, TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, OP_PUT,
         },
         txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
         util::test_util::KeyBuilder,
@@ -2121,7 +2091,11 @@ mod tests {
                         for &i in chunk {
                             let key = kb.i_to_inner_key(i);
                             let val = kb.i_to_val(start_ts as usize + i);
-                            builder.add_entry(NoPrefixKey(&kb.i_to_key(i)), OP_PUT, val.as_bytes());
+                            builder.add_entry(
+                                InnerKey::from_outer_key(&kb.i_to_key(i)),
+                                OP_PUT,
+                                val.as_bytes(),
+                            );
                             ref_store.put(key, val);
                         }
                         let mut chunk_data = vec![];

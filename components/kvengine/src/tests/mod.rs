@@ -81,10 +81,6 @@ impl Drop for TestEngine {
 }
 
 impl TestEngine {
-    fn inner_key_off(&self) -> usize {
-        KEYSPACE_PREFIX_LEN * self.key_builder.get_enable_inner_key_off() as usize
-    }
-
     fn key_builder(&self) -> &KeyBuilder {
         &self.key_builder
     }
@@ -135,7 +131,8 @@ fn new_test_engine_opt(
     thread::spawn(move || {
         applier.run();
     });
-    let key_builder = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, key_prefix);
+    let keyspace_id = if enable_inner_key_off { 1 } else { 0 };
+    let key_builder = KeyBuilder::new(keyspace_id, enable_inner_key_off, key_prefix);
     (
         TestEngine {
             engine,
@@ -202,7 +199,7 @@ fn test_destroy_range() {
     );
     // Unsafe destroy keys [10, 30).
     for prefix in [10, 20] {
-        let mut wb = WriteBatch::new(1, 0);
+        let mut wb = WriteBatch::new(1);
         let key = i_to_key(prefix, engine.opts.blob_table_build_options.min_blob_size);
         wb.set_property(DEL_PREFIXES_KEY, key[..key.len() - 1].as_bytes());
         write_data(wb, &applier_tx);
@@ -268,7 +265,7 @@ fn test_destroy_range() {
             applier_tx.clone(),
             engine.opts.blob_table_build_options.min_blob_size,
         );
-        let mut wb = WriteBatch::new(1, 0);
+        let mut wb = WriteBatch::new(1);
         wb.set_switch_mem_table();
         write_data(wb, &applier_tx);
     }
@@ -281,7 +278,7 @@ fn test_destroy_range() {
     }
     assert!(engine.get_shard_stat(1).l0_table_count < 10);
     // Unsafe destroy keys [100, 150).
-    let mut wb = WriteBatch::new(1, 0);
+    let mut wb = WriteBatch::new(1);
     let key = i_to_key(100, engine.opts.blob_table_build_options.min_blob_size);
     wb.set_property(DEL_PREFIXES_KEY, key[..key.len() - 2].as_bytes());
     write_data(wb, &applier_tx);
@@ -308,7 +305,7 @@ fn test_destroy_range() {
     );
 
     // Clean all data.
-    let mut wb = WriteBatch::new(1, 0);
+    let mut wb = WriteBatch::new(1);
     wb.set_property(DEL_PREFIXES_KEY, b"key");
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
@@ -324,7 +321,7 @@ fn test_destroy_range() {
     );
 
     // No data exists and delete-prefixes can be cleaned too.
-    let mut wb = WriteBatch::new(1, 0);
+    let mut wb = WriteBatch::new(1);
     wb.set_property(DEL_PREFIXES_KEY, b"key");
     write_data(wb, &applier_tx);
     wait_for_destroying_range();
@@ -346,7 +343,7 @@ fn test_truncate_ts_request() {
     // In case auto truncate_ts compaction finishes too fast.
     engine.get_shard(1).unwrap().set_active(false);
     // truncate ts.
-    let mut wb = WriteBatch::new(1, 0);
+    let mut wb = WriteBatch::new(1);
     let truncate_ts = TruncateTs::from(version + 10);
     wb.set_property(TRUNCATE_TS_KEY, truncate_ts.marshal().as_slice());
     write_data(wb, &applier_tx);
@@ -398,7 +395,7 @@ fn test_truncate_ts() {
     // In this scene, truncate ts may have been done before we check
     // `ShardData.truncate_ts`.
     let set_truncate_ts = |ts: u64, tolerate_none: bool| {
-        let mut wb = WriteBatch::new(1, 0);
+        let mut wb = WriteBatch::new(1);
         let truncate_ts = TruncateTs::from(ts);
         wb.set_property(TRUNCATE_TS_KEY, truncate_ts.marshal().as_slice());
         write_data(wb, &applier_tx);
@@ -827,7 +824,7 @@ fn test_lock_cf_repeatable_read() {
             enable_inner_key_off,
         );
         let primary = kb.i_to_outer_key(150);
-        let mut wb = WriteBatch::new(1, engine.inner_key_off());
+        let mut wb = WriteBatch::new(1);
         let txn_file_refs = make_txn_file_refs(
             6000, // useless
             vec![chunk_id],
@@ -850,7 +847,7 @@ fn test_lock_cf_repeatable_read() {
 
     // Write more mem table data.
     {
-        switch_mem_table(&engine, &applier_tx);
+        switch_mem_table(&applier_tx);
         load_data_ext(
             &engine,
             [0, 160, 0],
@@ -973,14 +970,10 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
         Vec<(usize, usize)>,
         Vec<(usize, usize)>, // table ranges
         // expected suggest split key, inner key off (enable,disable)
-        (Option<usize>, Option<usize>),
+        Option<usize>,
     )> = vec![
-        (vec![], vec![(20, 50)], (None, None)),
-        (
-            vec![],
-            vec![(20, 50), (100, 150), (150, 180)],
-            (Some(150), Some(150)),
-        ),
+        (vec![], vec![(20, 50)], None),
+        (vec![], vec![(20, 50), (100, 150), (150, 180)], Some(150)),
         (
             vec![],
             vec![
@@ -990,7 +983,7 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
                 (180, 300), // in range
                 (300, 400),
             ],
-            (Some(180), Some(180)),
+            Some(180),
         ),
         (
             vec![],
@@ -998,22 +991,22 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
                 (20, 50),
                 (100, 150), // in range, key in block
             ],
-            (Some(100), Some(100)),
+            Some(100),
         ),
         (
             vec![(50, 400), (60, 460), (70, 670)], // L0 only
             vec![],
-            (Some(320), Some(270)),
+            Some(320),
         ),
         (
             vec![(70, 370)], // L0 + L1+
             vec![(50, 80), (80, 100), (100, 120)],
-            (Some(100), Some(100)),
+            Some(100),
         ),
         (
             vec![(80, 380), (190, 570)], // more L0 + L1+
             vec![(50, 80), (80, 100), (100, 120)],
-            (Some(330), Some(280)),
+            Some(330),
         ),
     ];
     let mut id_alloc = 1000;
@@ -1057,11 +1050,6 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
         shard.set_data_opt(builder.build(), false);
 
         let key = shard.get_suggest_split_key();
-        let expect_split_key = if enable_inner_key_off {
-            expect_split_key.0
-        } else {
-            expect_split_key.1
-        };
         assert_eq!(
             key.map(|k| k.to_vec()),
             expect_split_key.map(|i| engine.key_builder.i_to_outer_key(i)),
@@ -1097,16 +1085,16 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
         Vec<(usize, usize)>, // l0 ranges
         Vec<(usize, usize)>, // table ranges
         usize,               // split count
-        // expected evenly split keys, inner key off (enable,disable)
-        (Option<Vec<usize>>, Option<Vec<usize>>),
+        // expected evenly split keys
+        Option<Vec<usize>>,
     )> = vec![
-        (vec![], vec![(20, 50), (50, 100)], 1, (None, None)),
-        (vec![], vec![(20, 50), (50, 100)], 2, (None, None)),
+        (vec![], vec![(20, 50), (50, 100)], 1, None),
+        (vec![], vec![(20, 50), (50, 100)], 2, None),
         (
             vec![],
             vec![(0, 20), (20, 50), (100, 150), (150, 180)],
             2,
-            (Some(vec![150]), Some(vec![150])),
+            Some(vec![150]),
         ),
         (
             vec![],
@@ -1118,7 +1106,7 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
                 (300, 400),
             ],
             1,
-            (None, None),
+            None,
         ),
         (
             vec![],
@@ -1129,7 +1117,7 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
                 (180, 300), // in range
             ],
             2,
-            (Some(vec![180]), Some(vec![180])),
+            Some(vec![180]),
         ),
         (
             vec![],
@@ -1140,7 +1128,7 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
                 (180, 300), // in range
             ],
             3,
-            (Some(vec![150, 180]), Some(vec![150, 180])),
+            Some(vec![150, 180]),
         ),
         (
             vec![],
@@ -1152,7 +1140,7 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
                 (300, 400),
             ],
             4,
-            (Some(vec![150, 180, 300]), Some(vec![150, 180, 300])),
+            Some(vec![150, 180, 300]),
         ),
         (
             vec![],
@@ -1164,7 +1152,7 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
                 (300, 400),
             ],
             5,
-            (Some(vec![150, 180, 300]), Some(vec![150, 180, 300])),
+            Some(vec![150, 180, 300]),
         ),
         (
             vec![],
@@ -1176,25 +1164,25 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
                 (300, 400),
             ],
             6,
-            (Some(vec![150, 180, 300]), Some(vec![150, 180, 300])),
+            Some(vec![150, 180, 300]),
         ),
         (
             vec![(100, 400), (200, 500), (300, 600), (400, 700)], // L0 only
             vec![],
             4,
-            (Some(vec![450, 550]), Some(vec![401, 501])),
+            Some(vec![450, 550]),
         ),
         (
             vec![(100, 400), (150, 550), (300, 700), (200, 800)], // L0 only
             vec![],
             4,
-            (Some(vec![400, 450, 550]), Some(vec![350, 401, 501])),
+            Some(vec![400, 450, 550]),
         ),
         (
             vec![(100, 800), (200, 900)], // L0 + L1+
             vec![(30, 80), (80, 100), (100, 130)],
             4,
-            (Some(vec![100, 350, 450]), Some(vec![301, 401, 501])),
+            Some(vec![100, 350, 450]),
         ),
     ];
     let mut id_alloc = 1000;
@@ -1240,11 +1228,6 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
         shard.set_data_opt(builder.build(), false);
 
         let split_keys = shard.get_evenly_split_keys(split_count);
-        let expect_split_keys = if enable_inner_key_off {
-            expect_split_keys.0
-        } else {
-            expect_split_keys.1
-        };
         assert_eq!(
             split_keys.map(|keys| keys.into_iter().map(|k| k.to_vec()).collect::<Vec<_>>()),
             expect_split_keys.map(|keys| keys
@@ -1737,6 +1720,7 @@ async fn new_table(
         comp_lvl,
         ChecksumType::Crc32,
         None,
+        None,
     );
     for i in begin..end {
         let key = engine.key_builder.i_to_inner_key(i);
@@ -1792,7 +1776,7 @@ fn new_l0table_file(
     let block_size = engine.opts.table_builder_options.block_size;
     let fs = engine.fs.clone();
 
-    let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32, None);
+    let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32, None, None);
     for cf in 0..NUM_CFS {
         for i in begin[cf]..end[cf] {
             let key = engine.key_builder.i_to_inner_key(i);
@@ -1820,7 +1804,7 @@ fn load_data(
     tx: mpsc::Sender<ApplyTask>,
     min_blob_size: u32,
 ) {
-    let mut wb = WriteBatch::new(1, 0);
+    let mut wb = WriteBatch::new(1);
     for i in begin..end {
         let key = i_to_key(i as i32, min_blob_size);
         for cf in 0..3 {
@@ -1831,7 +1815,7 @@ fn load_data(
         if i % 100 == 99 {
             info!("load data {}:{}", i - 99, i);
             write_data(wb, &tx);
-            wb = WriteBatch::new(1, 0);
+            wb = WriteBatch::new(1);
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -1848,7 +1832,7 @@ fn load_data_ext(
     del: [bool; NUM_CFS],
     tx: &mpsc::Sender<ApplyTask>,
 ) -> u64 {
-    let mut wb = WriteBatch::new(1, engine.inner_key_off());
+    let mut wb = WriteBatch::new(1);
     for cf in 0..NUM_CFS {
         for i in begin[cf]..end[cf] {
             let key = engine.key_builder.i_to_outer_key(i);
@@ -1885,8 +1869,8 @@ fn wait_for_compact_to_level_1_plus(en: &Engine, i: usize, timeout: Duration) {
     assert!(ok, "wait for compact to level 1+ timeout");
 }
 
-fn switch_mem_table(engine: &TestEngine, tx: &mpsc::Sender<ApplyTask>) {
-    let mut wb = WriteBatch::new(1, engine.inner_key_off());
+fn switch_mem_table(tx: &mpsc::Sender<ApplyTask>) {
+    let mut wb = WriteBatch::new(1);
     wb.set_switch_mem_table();
     write_data(wb, tx);
 }

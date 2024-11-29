@@ -897,7 +897,7 @@ impl Iterator for SkIterator {
 
 #[cfg(test)]
 mod tests {
-    use byteorder::{ByteOrder, LittleEndian};
+    use bytes::BufMut;
     use rand::Rng;
 
     use super::*;
@@ -1288,13 +1288,13 @@ mod tests {
     }
 
     fn random_key() -> Vec<u8> {
-        let mut key = vec![0u8; 8];
-        let buf = key.as_mut_slice();
+        let mut key = vec![];
+        key.put_u8(b't');
         let mut rng = rand::thread_rng();
         let n1 = rng.gen::<u32>();
         let n2 = rng.gen::<u32>();
-        LittleEndian::write_u32(buf, n1);
-        LittleEndian::write_u32(&mut buf[4..], n2);
+        key.put_u32_le(n1);
+        key.put_u32_le(n2);
         key
     }
 

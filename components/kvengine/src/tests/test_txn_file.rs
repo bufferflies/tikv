@@ -12,8 +12,8 @@ use crate::{
     dfs,
     dfs::FileType,
     table::{
-        InnerKey, NoPrefixKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, OP_CHECK_NOT_EXIST,
-        OP_INSERT, OP_PUT,
+        InnerKey, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, OP_CHECK_NOT_EXIST, OP_INSERT,
+        OP_PUT,
     },
     tests::{
         generate_encryption_key, new_test_engine_opt, write_data, TestEngine, DEF_BLOCK_SIZE,
@@ -77,7 +77,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     let chunk_id = 200;
     build_chunk(200, 300, chunk_id);
     let primary = kb.i_to_outer_key(0);
-    let mut wb = WriteBatch::new(1, kb.inner_key_off());
+    let mut wb = WriteBatch::new(1);
     let txn_file_refs = make_txn_file_refs(
         1000,
         vec![chunk_id],
@@ -96,7 +96,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
 
     // rollback: start_ts: 1000
     let txn_file_refs = make_txn_file_refs(1000, vec![chunk_id], vec![], make_user_meta(1000, 0));
-    let mut wb = WriteBatch::new(1, kb.inner_key_off());
+    let mut wb = WriteBatch::new(1);
     wb.set_property(TXN_FILE_REF, &txn_file_refs);
     write_data(wb, &tx);
     let shard = engine.get_shard(1).unwrap();
@@ -114,7 +114,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
         make_lock_prefix(primary.clone(), txn1_start_ts),
         vec![],
     );
-    let mut wb = WriteBatch::new(1, kb.inner_key_off());
+    let mut wb = WriteBatch::new(1);
     wb.set_property(TXN_FILE_REF, &txn1_lock);
     engine
         .txn_chunk_mgr
@@ -131,7 +131,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
         make_lock_prefix(primary.clone(), txn2_start_ts),
         vec![],
     );
-    let mut wb = WriteBatch::new(1, kb.inner_key_off());
+    let mut wb = WriteBatch::new(1);
     wb.set_property(TXN_FILE_REF, &txn2_lock);
     engine
         .txn_chunk_mgr
@@ -147,7 +147,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
         vec![],
         make_user_meta(txn1_start_ts, txn1_start_ts + 2),
     );
-    let mut wb = WriteBatch::new(1, kb.inner_key_off());
+    let mut wb = WriteBatch::new(1);
     wb.set_property(TXN_FILE_REF, &txn1_commit);
     // commit: [200, 300), 1003 -> 1005
     write_data(wb, &tx);
@@ -213,7 +213,7 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
         vec![],
         make_user_meta(txn2_start_ts, txn2_start_ts + 2),
     );
-    let mut wb = WriteBatch::new(1, kb.inner_key_off());
+    let mut wb = WriteBatch::new(1);
     wb.set_property(TXN_FILE_REF, &txn2_commit);
     // commit: [300, 400), 1004 -> 1006
     write_data(wb, &tx);
@@ -307,7 +307,7 @@ fn test_txn_file_multiple(
             enable_inner_key_off,
         );
     }
-    let mut wb = WriteBatch::new(1, 0);
+    let mut wb = WriteBatch::new(1);
     let txn_file_refs = make_txn_file_refs(
         start_ts,
         chunks_id.clone(),
@@ -328,7 +328,7 @@ fn test_txn_file_multiple(
         vec![],
         make_user_meta(start_ts, start_ts + 2),
     );
-    let mut wb = WriteBatch::new(1, 0);
+    let mut wb = WriteBatch::new(1);
     wb.set_property(TXN_FILE_REF, &txn4_commit);
     write_data(wb, &tx);
     verify_write(&engine, 100, 500, kb);
@@ -348,7 +348,7 @@ pub(crate) fn build_txn_chunk<OpF: Fn(usize) -> u8>(
         TxnChunkBuilder::new(id, 10, enc_key.cloned(), KEYSPACE_ID, enable_inner_key_off);
     for i in start..end {
         let key = kb.i_to_key(i);
-        chunk_builder.add_entry(NoPrefixKey(&key), op_fn(i), &key);
+        chunk_builder.add_entry(InnerKey::from_outer_key(&key), op_fn(i), &key);
     }
     let mut buf = vec![];
     chunk_builder.finish(&mut buf);

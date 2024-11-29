@@ -8,10 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use api_version::{
-    api_v2::{KEYSPACE_ID_LEN, TXN_KEY_PREFIX},
-    ApiV2,
-};
+use api_version::ApiV2;
 use arrow_buffer::i256;
 use async_trait::async_trait;
 use bytes::Buf;
@@ -1049,36 +1046,21 @@ pub struct ColumnarRowTableReader {
     default_vals: Vec<Option<Vec<u8>>>,
     is_int_handle: bool,
     check_schema: bool,
-    keyspace_id: u32,
     max_col_id: i32,
-    inner_key_off: usize,
     encryption_key: Option<EncryptionKey>,
     decryption_buf: Vec<u8>,
 }
 
 impl ColumnarRowTableReader {
     pub fn new(
-        keyspace_id: u32,
-        inner_key_off: usize,
         schema: Schema,
         iter: Box<dyn table::Iterator>,
         blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
         check_schema: bool,
         encryption_key: Option<EncryptionKey>,
     ) -> ColumnarRowTableReader {
-        let mut prefix = if inner_key_off > 0 {
-            encode_row_key(schema.table_id, 0)
-        } else {
-            let mut keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
-            let row_key = encode_row_key(schema.table_id, 0);
-            keyspace_prefix.extend_from_slice(&row_key);
-            keyspace_prefix
-        };
-        prefix.truncate(if inner_key_off > 0 {
-            PREFIX_LEN
-        } else {
-            KEYSPACE_ID_LEN + PREFIX_LEN
-        });
+        let mut prefix = encode_row_key(schema.table_id, 0);
+        prefix.truncate(PREFIX_LEN);
         let is_int_handle = get_fixed_size(&schema.handle_column) > 0;
         let default_vals = schema
             .columns
@@ -1092,7 +1074,6 @@ impl ColumnarRowTableReader {
             .max()
             .unwrap_or_default() as i32;
         ColumnarRowTableReader {
-            keyspace_id,
             schema,
             iter,
             blob_tbls,
@@ -1101,7 +1082,6 @@ impl ColumnarRowTableReader {
             is_int_handle,
             check_schema,
             max_col_id,
-            inner_key_off,
             encryption_key,
             decryption_buf: vec![],
         }
@@ -1112,10 +1092,7 @@ impl ColumnarRowTableReader {
         if self.check_schema {
             let row_max_col_id = row_slice.max_col_id();
             if self.max_col_id < row_max_col_id {
-                let err_info = format!(
-                    "ks:{} tbl:{} col:{}",
-                    self.keyspace_id, self.schema.table_id, row_max_col_id
-                );
+                let err_info = format!("tbl:{} col:{}", self.schema.table_id, row_max_col_id);
                 return Err(table::Error::SchemaOutOfDate(err_info));
             }
         }
@@ -1298,18 +1275,12 @@ impl ColumnarReader for ColumnarRowTableReader {
     }
 
     async fn seek(&mut self, handle: &[u8]) -> table::Result<()> {
-        let mut prefix = if self.inner_key_off == 0 {
-            api_version::ApiV2::get_txn_keyspace_prefix(self.keyspace_id)
-        } else {
-            vec![]
-        };
         let row_key = if self.is_int_handle && !handle.is_empty() {
             encode_row_key(self.schema.table_id, (&handle[..]).get_i64_le())
         } else {
             encode_common_handle_row_key(self.schema.table_id, handle)
         };
-        prefix.extend_from_slice(&row_key);
-        self.iter.seek(InnerKey::from_inner_buf(&prefix));
+        self.iter.seek(InnerKey::from_inner_buf(&row_key));
         Ok(())
     }
 
@@ -1317,19 +1288,14 @@ impl ColumnarReader for ColumnarRowTableReader {
         let mut read_rows = 0;
         while self.iter.valid() && read_rows < limit {
             let key = self.iter.key();
-            if !key.deref().starts_with(&self.prefix) {
+            if !key.starts_with(&self.prefix) {
                 break;
             }
-            let table_key = if self.inner_key_off == 0 && key[0] == TXN_KEY_PREFIX {
-                &key.deref()[4..]
-            } else {
-                key.deref()
-            };
             if self.is_int_handle {
-                let int_handle = decode_int_handle(table_key).unwrap();
+                let int_handle = decode_int_handle(key.deref()).unwrap();
                 block.handles.push_value(&int_handle.to_le_bytes());
             } else {
-                let common_handle = decode_common_handle(table_key).unwrap();
+                let common_handle = decode_common_handle(key.deref()).unwrap();
                 block.handles.push_value(common_handle);
             }
             let value = self.iter.value();
@@ -1563,41 +1529,24 @@ pub mod tests {
 
     pub fn build_table(
         file_id: u64,
-        enable_inner_key_off: bool,
         schema: &Schema,
         start: i32,
         end: i32,
         version: u64,
     ) -> (Arc<dyn File>, Vec<RefRow>) {
-        let (tbl, mut refs) = build_table_with_encryption(
-            file_id,
-            enable_inner_key_off,
-            &[schema.clone()],
-            start,
-            end,
-            version,
-            None,
-        );
+        let (tbl, mut refs) =
+            build_table_with_encryption(file_id, &[schema.clone()], start, end, version, None);
         (tbl, refs.pop().unwrap())
     }
 
     pub fn build_mixed_table(
         file_id: u64,
-        enable_inner_key_off: bool,
         schemas: &[Schema],
         start: i32,
         end: i32,
         version: u64,
     ) -> (Arc<dyn File>, Vec<Vec<RefRow>>) {
-        build_table_with_encryption(
-            file_id,
-            enable_inner_key_off,
-            schemas,
-            start,
-            end,
-            version,
-            None,
-        )
+        build_table_with_encryption(file_id, schemas, start, end, version, None)
     }
 
     fn new_test_encryption_key() -> EncryptionKey {
@@ -1606,7 +1555,6 @@ pub mod tests {
 
     pub fn build_table_with_encryption(
         file_id: u64,
-        enable_inner_key_off: bool,
         schemas: &[Schema],
         start: i32,
         end: i32,
@@ -1614,13 +1562,8 @@ pub mod tests {
         encryption_key: Option<EncryptionKey>,
     ) -> (Arc<dyn File>, Vec<Vec<RefRow>>) {
         let mut rng = rand::thread_rng();
-        let inner_key_off = if enable_inner_key_off { 4 } else { 0 };
-        let keyspace_id = 1;
-        let keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
         let mut file_builder = ColumnarFileBuilder::new(
             file_id,
-            keyspace_id,
-            inner_key_off,
             Some(version), // use version as l0_version for test
             encryption_key.clone(),
         );
@@ -1646,12 +1589,7 @@ pub mod tests {
                 } else {
                     encode_row_key(schema.table_id, ref_row.handle.as_slice().get_i64_le())
                 };
-                let inner_buf = if enable_inner_key_off {
-                    row_key
-                } else {
-                    [keyspace_prefix.clone(), row_key].concat()
-                };
-                let inner_key = InnerKey::from_inner_buf(&inner_buf);
+                let inner_key = InnerKey::from_inner_buf(&row_key);
                 let mut row_val = vec![];
                 let cols = vec![
                     Column::new(1, ref_row.c0),
@@ -1669,8 +1607,6 @@ pub mod tests {
         for (i, schema) in schemas.iter().enumerate() {
             let iter = cf_tbl.get_cf(WRITE_CF).new_iterator(false);
             let mut row_tbl_reader = ColumnarRowTableReader::new(
-                1,
-                inner_key_off,
                 schema.clone(),
                 iter,
                 None,
@@ -1752,7 +1688,7 @@ pub mod tests {
         init_log_for_test();
         for common_handle in [true, true] {
             let schema = new_schema(1, common_handle);
-            let (file, ref_rows) = build_table(1, true, &schema, 100, 150, 100);
+            let (file, ref_rows) = build_table(1, &schema, 100, 150, 100);
             let columnar_file = ColumnarFile::open(file).unwrap();
             let mut reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None);
             block_on(reader.seek(&0u64.to_le_bytes())).unwrap();
@@ -1877,7 +1813,6 @@ pub mod tests {
             let schema = new_schema(1, common_handle);
             let (file_1, mut ref_1) = build_table_with_encryption(
                 1,
-                true,
                 &[schema.clone()],
                 100,
                 150,
@@ -1886,7 +1821,6 @@ pub mod tests {
             );
             let (file_2, mut ref_2) = build_table_with_encryption(
                 2,
-                true,
                 &[schema.clone()],
                 140,
                 190,
@@ -1895,7 +1829,6 @@ pub mod tests {
             );
             let (file_3, mut ref_3) = build_table_with_encryption(
                 3,
-                true,
                 &[schema.clone()],
                 185,
                 240,
@@ -1952,9 +1885,9 @@ pub mod tests {
         ) {
             init_log_for_test();
             let schema = new_schema(1, common_handle);
-            let (file_1, ref_1) = build_table(1, true, &schema, 100, 150, 100);
-            let (file_2, ref_2) = build_table(2, true, &schema, 160, 190, 100);
-            let (file_3, ref_3) = build_table(3, true, &schema, 191, 240, 100);
+            let (file_1, ref_1) = build_table(1, &schema, 100, 150, 100);
+            let (file_2, ref_2) = build_table(2, &schema, 160, 190, 100);
+            let (file_3, ref_3) = build_table(3, &schema, 191, 240, 100);
             let files = vec![file_1, file_2, file_3];
             let ref_rows = vec![ref_1, ref_2, ref_3];
             let col_files: Vec<ColumnarFile> = files.iter().map(|f| ColumnarFile::open(f.clone()).unwrap()).collect();
@@ -1998,13 +1931,12 @@ pub mod tests {
         #[test]
         fn test_compact_reader(
             common_handle in any::<bool>(),
-            enable_inner_key_off in any::<bool>(),
         ) {
             init_log_for_test();
             let schema = new_schema(1, common_handle);
-            let (file_1, ref_1) = build_table(1, enable_inner_key_off, &schema, 100, 200, 100);
-            let (file_2, ref_2) = build_table(2, enable_inner_key_off, &schema, 150, 250, 200);
-            let (file_3, ref_3) = build_table(3, enable_inner_key_off, &schema, 200, 300, 300);
+            let (file_1, ref_1) = build_table(1, &schema, 100, 200, 100);
+            let (file_2, ref_2) = build_table(2, &schema, 150, 250, 200);
+            let (file_3, ref_3) = build_table(3, &schema, 200, 300, 300);
             let files = vec![file_1, file_2, file_3];
             let ref_rows = vec![ref_1, ref_2, ref_3];
             for _ in 0..50 {
@@ -2042,15 +1974,13 @@ pub mod tests {
         }
     }
 
-    #[rstest]
-    #[case::enable_inner_key_off(true)]
-    #[case::disable_inner_key_off(false)]
-    fn test_reader_with_multi_tables(#[case] enable_inner_key_off: bool) {
+    #[test]
+    fn test_reader_with_multi_tables() {
         init_log_for_test();
         let schema_1 = new_schema(1, false);
         let schema_2 = new_schema(2, false);
         let schemas = vec![schema_1.clone(), schema_2.clone()];
-        let (file_1, ref_rows) = build_mixed_table(1, enable_inner_key_off, &schemas, 0, 100, 100);
+        let (file_1, ref_rows) = build_mixed_table(1, &schemas, 0, 100, 100);
 
         for (i, schema) in schemas.iter().enumerate() {
             let mut block = Block::new(schema);

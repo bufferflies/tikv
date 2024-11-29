@@ -459,7 +459,7 @@ mod tests {
             let v = it.value();
 
             prop_assert!(it.valid());
-            prop_assert_eq!(k.deref(), ref_key.as_bytes());
+            prop_assert_eq!(k, InnerKey::from_inner_buf(ref_key.as_bytes()));
             prop_assert_eq!(v.get_value(), ref_val.as_bytes());
 
             next!(it).await;
@@ -490,7 +490,7 @@ mod tests {
             let v = it.value();
 
             prop_assert!(it.valid());
-            prop_assert_eq!(k.deref(), ref_key.as_bytes());
+            prop_assert_eq!(k, InnerKey::from_inner_buf(ref_key.as_bytes()));
             prop_assert_eq!(v.get_value(), ref_val.as_bytes());
             total_vers += 1;
 
@@ -498,7 +498,7 @@ mod tests {
                 let k = it.key();
                 let v = it.value();
 
-                prop_assert_eq!(k.deref(), ref_key.as_bytes());
+                prop_assert_eq!(k, InnerKey::from_inner_buf(ref_key.as_bytes()));
                 let ver = v.version;
                 let expect_val = format!("{}_{}", ref_val, ver);
                 prop_assert_eq!(v.get_value(), expect_val.as_bytes());

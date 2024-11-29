@@ -259,8 +259,6 @@ pub(crate) struct Applier {
 
     buckets: Option<BucketStat>,
 
-    inner_key_offset: Option<usize>,
-
     encryption_key: Option<EncryptionKey>,
     decryption_buf: Vec<u8>,
 
@@ -537,8 +535,7 @@ impl Applier {
             let lock_txn_file = lock_txn_file_opt.unwrap();
             let lock = txn_types::Lock::parse(lock_txn_file.get_lock_val_prefix()).unwrap();
             let primary_key = lock.primary.as_slice();
-            let inner_primary_key =
-                InnerKey::from_outer_key(primary_key, snap.get_inner_key_offset());
+            let inner_primary_key = InnerKey::from_outer_key(primary_key);
             let is_primary = lock_txn_file.lower_bound() <= inner_primary_key
                 && inner_primary_key < lock_txn_file.upper_bound();
             if is_primary {
@@ -640,15 +637,7 @@ impl Applier {
         ctx: &mut ApplyContext,
         cl: &CustomRaftLog<'_>,
     ) -> Result<(RaftCmdResponse, ApplyResult)> {
-        if self.inner_key_offset.is_none() {
-            self.inner_key_offset = Some(
-                ctx.engine
-                    .get_shard(self.region.get_id())
-                    .unwrap()
-                    .inner_key_off,
-            );
-        }
-        let mut wb_ref = ctx.get_engine_wb(self.region.get_id(), self.inner_key_offset.unwrap());
+        let mut wb_ref = ctx.get_engine_wb(self.region.get_id());
         let wb = &mut wb_ref;
         let engine = &ctx.engine;
         let log_index = ctx.exec_log_index;
@@ -802,11 +791,6 @@ impl Applier {
                 }
                 ExecResult::SplitRegion { regions } => {
                     self.region = regions.last().unwrap().clone();
-                    // `inner_key_off` of the region may be updated after split, reset applier's
-                    // to None after split done. E.g. region a ['x001', 'x003') split to region b
-                    // ['x001', 'x002') and region a ['x002', 'x003'). Region a's inner_key_offset
-                    // will change from 0 to 4 if inner key enabled.
-                    self.inner_key_offset = None;
                 }
                 ExecResult::DeleteRange { .. } => {}
                 ExecResult::UnsafeDestroy { .. } => {}
@@ -2277,13 +2261,9 @@ impl ApplyContext {
         }
     }
 
-    pub(crate) fn get_engine_wb(
-        &self,
-        region_id: u64,
-        inner_key_off: usize,
-    ) -> RefMut<'_, WriteBatch> {
+    pub(crate) fn get_engine_wb(&self, region_id: u64) -> RefMut<'_, WriteBatch> {
         let mut wb = self.wb.borrow_mut();
-        wb.reset(region_id, inner_key_off);
+        wb.reset(region_id);
         wb
     }
 

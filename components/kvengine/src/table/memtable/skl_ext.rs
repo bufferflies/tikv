@@ -209,7 +209,7 @@ mod tests {
             memtable::{skl_ext::SkipListExt, SkipList, WriteBatch},
             sstable::BlockCache,
             txn_file::{TxnChunk, TxnChunkBuilder, TxnCtx, TxnFile, TxnFileId, OP_PUT},
-            InnerKey, NoPrefixKey,
+            InnerKey,
         },
         util::test_util::KeyBuilder,
         UserMeta, GLOBAL_SHARD_END_KEY, WRITE_CF,
@@ -254,7 +254,7 @@ mod tests {
         for i in keys {
             let key = kb.i_to_key(i);
             let val = new_val(i);
-            batch_builder.add_entry(NoPrefixKey(&key), OP_PUT, val.as_bytes());
+            batch_builder.add_entry(InnerKey::from_outer_key(&key), OP_PUT, val.as_bytes());
         }
         let mut data_buf = vec![];
         batch_builder.finish(&mut data_buf);

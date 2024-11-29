@@ -201,10 +201,9 @@ impl super::Engine {
         let table_upper_key = keys::next_key(&table_lower_key);
         self.get_all_shard_id_vers().into_iter().for_each(|id_ver| {
             if let Some(shard) = self.get_shard(id_ver.id) {
-                let inner_key_off = shard.inner_key_off;
                 let table_bound = DataBound::new(
-                    InnerKey::from_outer_key(&table_lower_key, inner_key_off),
-                    InnerKey::from_outer_end_key(&table_upper_key, inner_key_off),
+                    InnerKey::from_outer_key(&table_lower_key),
+                    InnerKey::from_outer_end_key(&table_upper_key),
                     false,
                 );
                 if shard.get_data().keyspace_id == keyspace_id && shard.overlap_bound(table_bound) {

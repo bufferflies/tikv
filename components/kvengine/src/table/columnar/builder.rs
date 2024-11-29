@@ -63,8 +63,6 @@ pub struct ColumnarFileBuilder {
     pub(crate) estimated_size: usize,
     pub(crate) smallest: Vec<u8>,
     pub(crate) biggest: Vec<u8>,
-    pub(crate) keyspace_prefix: Vec<u8>,
-    pub(crate) inner_key_off: usize,
     encryption_key: Option<EncryptionKey>,
 }
 
@@ -149,8 +147,6 @@ impl Default for ColumnarTableBuildOptions {
 impl ColumnarFileBuilder {
     pub fn new(
         file_id: u64,
-        keyspace_id: u32,
-        inner_key_off: usize,
         snap_version: Option<u64>,
         encryption_key: Option<EncryptionKey>,
     ) -> Self {
@@ -161,8 +157,6 @@ impl ColumnarFileBuilder {
             tables: vec![],
             smallest: vec![],
             biggest: vec![],
-            keyspace_prefix: api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id),
-            inner_key_off,
             encryption_key,
         }
     }
@@ -272,14 +266,7 @@ impl ColumnarFileBuilder {
         } else {
             encode_common_handle_row_key(biggest_table_id, biggest_handle)
         };
-        if self.inner_key_off == 0 {
-            (
-                [self.keyspace_prefix.clone(), smallest_key].concat(),
-                [self.keyspace_prefix.clone(), biggest_key].concat(),
-            )
-        } else {
-            (smallest_key, biggest_key)
-        }
+        (smallest_key, biggest_key)
     }
 
     pub(crate) fn num_tables(&self) -> usize {

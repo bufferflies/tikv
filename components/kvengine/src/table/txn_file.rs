@@ -16,8 +16,7 @@ use crate::{
         file::{File, TtlCache},
         search,
         sstable::{key_diff_idx, BlockCache, BlockCacheKey, EntrySlice},
-        BoundedDataSet, ChecksumType, DataBound, Error, InnerKey, Iterator, NoPrefixKey, Result,
-        Value,
+        BoundedDataSet, ChecksumType, DataBound, Error, InnerKey, Iterator, Result, Value,
     },
     UserMeta, USER_META_SIZE,
 };
@@ -169,10 +168,10 @@ impl TxnFile {
         let first_chunk = chunks.first().unwrap();
         let first_block_idx = first_chunk
             .index
-            .seek_block(txn_ctx.lower_bound().deref())
+            .seek_block(txn_ctx.lower_bound())
             .saturating_sub(1);
         let last_chunk = chunks.last().unwrap();
-        let last_block_idx = last_chunk.index.seek_block(txn_ctx.upper_bound().deref());
+        let last_block_idx = last_chunk.index.seek_block(txn_ctx.upper_bound());
         let overlapped_num_blocks =
             total_blocks - first_block_idx - (last_chunk.index.num_blocks - last_block_idx);
         let size = avg_block_size * overlapped_num_blocks;
@@ -449,24 +448,22 @@ impl TxnChunk {
     }
 
     fn get_value(&self, key: InnerKey<'_>) -> Option<TxnChunkIterator> {
-        let no_prefix_key = NoPrefixKey::from_inner_key(&key)?;
-        let key_hash = farmhash::fingerprint64(no_prefix_key.deref());
+        let key_hash = farmhash::fingerprint64(key.deref());
         let hash_index = self.load_hash_index().unwrap();
         if let Some(key_addr) = hash_index.get_entry(key_hash) {
             let mut iter = TxnChunkIterator::new(self.clone(), false);
             iter.locate_key(key_addr);
             debug_assert!(
                 iter.valid(),
-                "txn chunk: {:?}, iter: {:?}, key: {:?}, no_prefix_key: {:?}, addr: {:?}",
+                "txn chunk: {:?}, iter: {:?}, key: {:?}, addr: {:?}",
                 self,
                 iter,
                 key,
-                no_prefix_key,
                 key_addr,
             );
             if iter.key() != key {
                 // There may be hash conflict.
-                warn!("hash conflict"; "iter.key" => ?iter.key(), "key" => ?key, "no_prefix_key" => ?no_prefix_key, "file" => self.file.id());
+                warn!("hash conflict"; "iter.key" => ?iter.key(), "key" => ?key, "file" => self.file.id());
                 iter.seek(key);
             }
             if iter.valid() && iter.key() == key {
@@ -494,7 +491,7 @@ impl TxnChunk {
     {
         let mut iter = TxnChunkIterator::new(self.clone(), false);
         let start_block = if let Some(key) = seek_key {
-            self.index.seek_block(key.deref()).saturating_sub(1)
+            self.index.seek_block(key).saturating_sub(1)
         } else {
             0
         };
@@ -506,7 +503,7 @@ impl TxnChunk {
             iter.block_pos = block_pos;
             iter.load_block();
             if let Some(key) = seek_key.take() {
-                iter.block_iter.seek(key.deref());
+                iter.block_iter.seek(key);
             } else {
                 iter.block_iter.set_idx(0);
             }
@@ -594,14 +591,20 @@ impl TxnChunkIndex {
         (&self.key_offs[i * U32_SIZE..]).get_u32_le() as usize
     }
 
+    fn inner_block_key(&self, i: usize) -> InnerKey<'_> {
+        let start_off = self.get_block_key_off(i);
+        let end_off = self.get_block_key_off(i + 1);
+        InnerKey::from_inner_buf(&self.keys[start_off..end_off])
+    }
+
     fn block_key(&self, i: usize) -> &[u8] {
         let start_off = self.get_block_key_off(i);
         let end_off = self.get_block_key_off(i + 1);
         &self.keys[start_off..end_off]
     }
 
-    fn seek_block(&self, key: &[u8]) -> usize {
-        search(self.num_blocks, |i| self.block_key(i) > key)
+    fn seek_block(&self, inner_key: InnerKey<'_>) -> usize {
+        search(self.num_blocks, |i| self.inner_block_key(i) > inner_key)
     }
 
     fn get_block_off(&self, i: usize) -> usize {
@@ -609,7 +612,7 @@ impl TxnChunkIndex {
     }
 
     pub fn smallest(&self) -> InnerKey<'_> {
-        InnerKey::from_inner_buf(self.block_key(0))
+        self.inner_block_key(0)
     }
 
     pub fn biggest(&self) -> InnerKey<'_> {
@@ -1118,7 +1121,7 @@ impl TxnChunkIterator {
         }
     }
 
-    fn seek_inner(&mut self, key: &[u8]) {
+    fn seek_inner(&mut self, key: InnerKey<'_>) {
         self.block_pos = self.chunk.index.seek_block(key).saturating_sub(1);
         self.load_block();
         self.block_iter.seek(key);
@@ -1214,7 +1217,7 @@ impl TxnChunkIterator {
                 return;
             }
         }
-        self.seek_inner(key.deref());
+        self.seek_inner(key);
         if self.reverse {
             if self.block_iter.valid() && self.key() > key {
                 self.prev_inner();
@@ -1279,8 +1282,12 @@ impl TxnChunkBlockIterator {
         self.block_data = block;
     }
 
-    fn seek(&mut self, key: &[u8]) {
-        let common_prefix = &self.key_buf[..self.common_prefix_len];
+    fn get_common_prefix(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(&self.key_buf[..self.common_prefix_len])
+    }
+
+    fn seek(&mut self, key: InnerKey<'_>) {
+        let common_prefix = self.get_common_prefix();
         if key.len() <= common_prefix.len() {
             if key <= common_prefix {
                 self.set_idx(0);
@@ -1290,7 +1297,7 @@ impl TxnChunkBlockIterator {
             return;
         }
         use std::cmp::Ordering::*;
-        match &key[..common_prefix.len()].cmp(common_prefix) {
+        match key.slice(0, common_prefix.len()).cmp(&common_prefix) {
             Less => {
                 self.set_idx(0);
                 return;
@@ -1397,15 +1404,15 @@ impl TxnChunkBuilder {
         }
     }
 
-    pub fn add_entry(&mut self, no_prefix_key: NoPrefixKey<'_>, op: u8, val: &[u8]) {
-        let key_hash = farmhash::fingerprint64(no_prefix_key.deref());
+    pub fn add_entry(&mut self, inner_key: InnerKey<'_>, op: u8, val: &[u8]) {
+        let key_hash = farmhash::fingerprint64(inner_key.deref());
 
         let key = if let Some(entry_key_buf) = self.entry_key_buf.as_mut() {
             entry_key_buf.truncate(KEYSPACE_PREFIX_LEN);
-            entry_key_buf.extend_from_slice(no_prefix_key.deref());
+            entry_key_buf.extend_from_slice(inner_key.deref());
             entry_key_buf.as_slice()
         } else {
-            no_prefix_key.deref()
+            inner_key.deref()
         };
 
         let block_idx = self.block_offsets.len() as u16;
@@ -1832,8 +1839,8 @@ mod tests {
             txn_file::{
                 TxnChunk, TxnChunkBuilder, TxnChunkIterator, OP_CHECK_NOT_EXIST, OP_INSERT, OP_PUT,
             },
-            BlockBitmap, DataBound, InnerKey, Iterator, NoPrefixKey, OwnedInnerKey,
-            SkipOpTxnFileIterator, TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_DELETE, OP_LOCK,
+            BlockBitmap, DataBound, InnerKey, Iterator, OwnedInnerKey, SkipOpTxnFileIterator,
+            TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_DELETE, OP_LOCK,
         },
         tests::generate_encryption_key,
         util::test_util::KeyBuilder,
@@ -2058,7 +2065,7 @@ mod tests {
             let key = kb.i_to_key(i);
             let val = get_test_value(i);
             let op = op_fn(i);
-            chunk_builder.add_entry(NoPrefixKey(&key), op, val.as_bytes());
+            chunk_builder.add_entry(InnerKey::from_outer_key(&key), op, val.as_bytes());
         }
         let mut chunk_data = vec![];
         chunk_builder.finish(&mut chunk_data);

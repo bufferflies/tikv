@@ -10,7 +10,7 @@ use crate::table::{
     search,
     sstable::{Index, BLOCK_FORMAT_V1},
     table::{self, is_old_version, Value, VALUE_VERSION_LEN},
-    InnerKey, LocalAddr,
+    InnerKey, Iterator, LocalAddr,
 };
 
 #[derive(Default)]
@@ -83,15 +83,15 @@ impl BlockIterator {
         (&self.entry_offs[i * mem::size_of::<u32>()..]).get_u32_le() as usize
     }
 
-    fn get_common_prefix(&self) -> &[u8] {
-        self.common_prefix_addr.get(self.b.chunk())
+    fn get_common_prefix(&self) -> InnerKey<'_> {
+        InnerKey::from_inner_buf(self.common_prefix_addr.get(self.b.chunk()))
     }
 
     fn get_diff_key(&self) -> &[u8] {
         self.diff_key_addr.get(self.b.chunk())
     }
 
-    fn seek(&mut self, key: &[u8]) {
+    fn seek(&mut self, key: InnerKey<'_>) {
         let common_prefix = self.get_common_prefix();
         if key.len() <= common_prefix.len() {
             if key <= common_prefix {
@@ -102,7 +102,7 @@ impl BlockIterator {
             return;
         }
         use std::cmp::Ordering::*;
-        match &key[..common_prefix.len()].cmp(common_prefix.chunk()) {
+        match key.slice(0, common_prefix.len()).cmp(&common_prefix) {
             Less => {
                 self.set_idx(0);
                 return;
@@ -328,7 +328,7 @@ impl TableIterator {
     }
 
     #[maybe_async::both]
-    async fn seek_in_block(&mut self, b_pos: usize, key: &[u8]) {
+    async fn seek_in_block(&mut self, b_pos: usize, key: InnerKey<'_>) {
         if !self.set_block(b_pos as i32).await {
             return;
         }
@@ -337,13 +337,13 @@ impl TableIterator {
     }
 
     #[maybe_async::both]
-    async fn seek_from_offset(&mut self, b_pos: usize, offset: usize, key: &[u8]) {
+    async fn seek_from_offset(&mut self, b_pos: usize, offset: usize, key: InnerKey<'_>) {
         if !self.set_block(b_pos as i32).await {
             return;
         }
         self.bi.set_idx(offset as i32);
         self.sync_block_iterator();
-        if self.key_buf.chunk() >= key {
+        if self.key() >= key {
             return;
         }
         self.bi.seek(key);
@@ -351,7 +351,7 @@ impl TableIterator {
     }
 
     #[maybe_async::both]
-    async fn seek_inner(&mut self, key: &[u8]) {
+    async fn seek_inner(&mut self, key: InnerKey<'_>) {
         self.reset();
         let idx = self.idx.seek_block(key);
         if idx == 0 {
@@ -386,10 +386,10 @@ impl TableIterator {
     }
 
     #[maybe_async::both]
-    async fn seek_for_prev(&mut self, key: &[u8]) {
+    async fn seek_for_prev(&mut self, key: InnerKey<'_>) {
         // TODO: Optimize this. We shouldn't have to take a Prev step.
         self.seek_inner(key).await;
-        if self.key_buf.chunk() != key {
+        if self.key() != key {
             self.prev_inner().await;
         }
     }
@@ -456,7 +456,8 @@ impl TableIterator {
     fn sync_block_iterator(&mut self) {
         if self.bi.err.is_none() {
             self.key_buf.truncate(0);
-            self.key_buf.extend_from_slice(self.bi.get_common_prefix());
+            self.key_buf
+                .extend_from_slice(self.bi.get_common_prefix().deref());
             self.key_buf.extend_from_slice(self.bi.get_diff_key());
         } else {
             self.err = self.bi.err.clone();
@@ -464,13 +465,13 @@ impl TableIterator {
     }
 
     fn same_old_key(&self) -> bool {
-        let prefix_len = self.old_bi.common_prefix_addr.len();
-        let key = self.key_buf.chunk();
-        if prefix_len + self.old_bi.diff_key_addr.len() != key.len() {
+        let key = self.key();
+        let old_common_prefix = self.old_bi.get_common_prefix();
+        if old_common_prefix.len() + self.old_bi.diff_key_addr.len() != key.len() {
             return false;
         }
-        &key[..prefix_len] == self.old_bi.get_common_prefix()
-            && &key[prefix_len..] == self.old_bi.get_diff_key()
+        key.slice(0, old_common_prefix.len()) == old_common_prefix
+            && &key[old_common_prefix.len()..] == self.old_bi.get_diff_key()
     }
 
     fn get_old_idx(&mut self) -> Arc<Index> {
@@ -485,7 +486,7 @@ impl TableIterator {
     async fn seek_old_block(&mut self) -> Option<table::Error> {
         assert!(self.iter_state == IterState::NewVersion);
         let old_idx = self.get_old_idx();
-        let mut old_b_pos = old_idx.seek_block(self.key_buf.chunk()) as i32 - 1;
+        let mut old_b_pos = old_idx.seek_block(self.key()) as i32 - 1;
         if old_b_pos == -1 {
             old_b_pos = 0;
         }
@@ -494,7 +495,8 @@ impl TableIterator {
         {
             return self.old_bi.err.clone();
         }
-        self.old_bi.seek(self.key_buf.chunk());
+        self.old_bi
+            .seek(InnerKey::from_inner_buf(self.key_buf.chunk()));
         assert!(self.old_bi.err.is_none());
         assert!(self.bi.old_ver == self.old_bi.ver);
         self.iter_state = IterState::OldVersion;
@@ -585,9 +587,9 @@ impl table::Iterator for TableIterator {
     #[maybe_async]
     async fn seek(&mut self, key: InnerKey<'_>) {
         if !self.reversed {
-            self.seek_inner(key.deref()).await;
+            self.seek_inner(key).await;
         } else {
-            self.seek_for_prev(key.deref()).await;
+            self.seek_for_prev(key).await;
         }
     }
 

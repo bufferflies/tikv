@@ -121,7 +121,7 @@ pub(crate) async fn request_major_compact_on_store(
 pub(crate) fn i_to_key_with_keyspace(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
     move |i: usize| -> Vec<u8> {
         let mut key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
-        key.extend(format!("xkey{:08}", i).into_bytes());
+        key.extend(format!("tkey{:08}", i).into_bytes());
         key
     }
 }
