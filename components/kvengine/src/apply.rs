@@ -616,19 +616,19 @@ impl EngineCore {
                 .iter()
                 .map(|l0| l0.id())
                 .collect();
-            let l0s: HashMap<u64, L0Table> = data
-                .l0_tbls
-                .iter()
-                .map(|l0| (l0.id(), l0.clone()))
-                .collect();
             let mut iter = tc.get_file_ids_map().iter();
             while let (Some(delete_id), Some(create_id)) = (iter.next(), iter.next()) {
                 // Only add the corresponding created file if the deleted file is in the
                 // `unconverted_l0s`.
                 if unconverted_l0_ids.contains(delete_id) {
-                    new_col_levels
-                        .unconverted_l0s
-                        .push(l0s.get(create_id).unwrap().clone());
+                    new_col_levels.unconverted_l0s.push(
+                        cs.l0_tables
+                            .get(create_id)
+                            .unwrap_or_else(|| {
+                                panic!("create id {} not prepared, cs: {:?}", create_id, cs)
+                            })
+                            .clone(),
+                    );
                 }
             }
             for deleted in tc.get_table_deletes() {
