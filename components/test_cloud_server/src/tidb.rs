@@ -402,14 +402,17 @@ impl TidbServers {
         if options.tiflash_compute_mode {
             config.disaggregated_tiflash = true;
             config.use_autoscaler = false;
-            config.tiflash_replicas.group_id = "tiflash_group".to_string();
-            config.tiflash_replicas.extra_s3_rule = false;
-            config.tiflash_replicas.min_count = 1;
-            config.tiflash_replicas.constraints = vec![TiFlashReplicasConstraints {
-                key: "engine".to_string(),
-                op: "in".to_string(),
-                values: vec!["tiflash".to_string()],
-            }];
+            let tiflash_replicas_config = TiFlashReplicas {
+                group_id: "tiflash_group".to_string(),
+                extra_s3_rule: false,
+                min_count: 1,
+                constraints: vec![TiFlashReplicasConstraints {
+                    key: "engine".to_string(),
+                    op: "in".to_string(),
+                    values: vec!["tiflash".to_string()],
+                }],
+            };
+            config.tiflash_replicas = Some(tiflash_replicas_config);
         }
         let toml = toml::to_string(&config).unwrap();
         fs::write(&config_file, toml).unwrap();
@@ -710,10 +713,10 @@ struct TidbConfig {
     disaggregated_tiflash: bool,
     use_autoscaler: bool,
     tikv_client: TikvClientConfig,
-    tiflash_replicas: TiFlashReplicas,
+    tiflash_replicas: Option<TiFlashReplicas>,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
 struct TiFlashReplicas {
     group_id: String,
@@ -722,7 +725,7 @@ struct TiFlashReplicas {
     constraints: Vec<TiFlashReplicasConstraints>,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
 struct TiFlashReplicasConstraints {
     key: String,
