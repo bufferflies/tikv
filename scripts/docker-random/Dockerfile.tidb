@@ -1,8 +1,9 @@
-ARG VERSION=v7.1.0
+ARG TIDB_VERSION=v7.5.0
+ARG PD_VERSION=v8.1.0
 ARG TIFLASH_VERSION=v7.5.0
 
-FROM hub-new.pingcap.net/keyspace/tidb:${VERSION} as tidb
-FROM hub-new.pingcap.net/keyspace/pd:${VERSION} as pd
+FROM hub-new.pingcap.net/keyspace/tidb:${TIDB_VERSION} as tidb
+FROM hub-new.pingcap.net/keyspace/pd:${PD_VERSION} as pd
 FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
 

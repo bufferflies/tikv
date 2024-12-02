@@ -14,7 +14,7 @@ TMP_PATH=""
 LOG_PATH=""
 PATH_SUFFIX=""
 TESTNAME="all"
-TIDB_VERSION="v7.1.0"
+TIDB_VERSION="v7.5.0"
 REBUILD_IMAGE=1
 declare -a RUN_ARGS
 RUN_ARGS=()
@@ -102,9 +102,9 @@ while [[ $# -gt 0 ]]; do
 	--unique-workload)
 		RUN_ARGS+=("--unique-workload")
 		;;
-    --columnar-workload)
-        RUN_ARGS+=("--columnar-workload")
-        ;;
+	--columnar-workload)
+		RUN_ARGS+=("--columnar-workload")
+		;;
 	--help)
 		show_help
 		exit 0
@@ -127,7 +127,7 @@ if [ "$TESTNAME" = "with_tidb" ]; then
 	if [ "$REBUILD_IMAGE" -eq 1 ]; then
 		BUILD_TIDB_IMAGE_ARGS+=" --pull --no-cache"
 	fi
-	docker build $BUILD_TIDB_IMAGE_ARGS -t random-tidb --build-arg VERSION="$TIDB_VERSION" - <Dockerfile.tidb
+	docker build $BUILD_TIDB_IMAGE_ARGS -t random-tidb --build-arg TIDB_VERSION="$TIDB_VERSION" - <Dockerfile.tidb
 	IMAGE="random-tidb"
 elif [ "$MEMORY_PROFILE" -eq 1 ]; then
 	# Parse profile dumps in an environment different with container for random test would fail to translate the addresses to symbols.
