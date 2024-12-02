@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use prometheus::*;
 use tikv_util::info;
 
-use crate::check_point_storage::LoadDataWorkerState;
+use crate::checkpoint::LoadDataWorkerState;
 
 lazy_static! {
     pub static ref LOAD_DATA_HANDLE_ADD_CHUNK_TIME_MILLIS: IntCounterVec =

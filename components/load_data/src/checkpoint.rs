@@ -28,12 +28,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub const CHECKPOINT_WORKER_PREFIX: &str = "LOAD_DATA_CHECK_POINT_";
 
 // The expiration time of the canceled task file.
-pub const CANCELLED_CHECK_POINT_FILE_EXPIRE_SEC: u64 = 30 * 60;
+pub const CANCELLED_CHECKPOINT_FILE_EXPIRE_SEC: u64 = 30 * 60;
 
 pub const CANCELLED_TASK_METRIC_EXPIRE_SEC: i64 = 2 * 60;
 
 // The interval between each attempt to clean the checkpoint file.
-pub const CLEAN_CHECK_POINT_FILE_INTERVAL_SEC: u64 = 2 * 60;
+pub const CLEAN_CHECKPOINT_FILE_INTERVAL_SEC: u64 = 2 * 60;
 lazy_static::lazy_static! {
     static ref FILE_LOCK: Mutex<()> = Mutex::new(());
 }
@@ -113,7 +113,7 @@ impl LoadDataWorkerState {
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 #[serde(default)]
-pub struct LoadDataCheckPointCtx {
+pub struct LoadDataCheckpointCtx {
     // From TaskContext.
     pub task_id: String, // Comes from TaskContext.
     start_ts: u64,       // Comes from TaskContext, Used to recover readers.
@@ -148,7 +148,7 @@ pub struct LocalFileInfo {
     pub kv_count: usize,
 }
 
-impl LoadDataCheckPointCtx {
+impl LoadDataCheckpointCtx {
     pub fn new(task_ctx: TaskContext) -> Self {
         let now = Utc::now();
         let millis = now.timestamp_millis();
@@ -232,33 +232,33 @@ impl LoadDataCheckPointCtx {
     }
 }
 
-pub struct LocalFileCheckPointStorage {
+pub struct LocalFileCheckpointStorage {
     data_path: PathBuf,
     file_name: String,
-    pub check_point_ctx: LoadDataCheckPointCtx,
+    pub checkpoint_ctx: LoadDataCheckpointCtx,
 }
 
-impl LocalFileCheckPointStorage {
+impl LocalFileCheckpointStorage {
     pub fn get_file_name_by_taskid(task_id: String) -> String {
         CHECKPOINT_WORKER_PREFIX.to_string() + &task_id
     }
-    pub fn new(check_point_ctx: LoadDataCheckPointCtx, data_path: PathBuf) -> Result<Self> {
+    pub fn new(checkpoint_ctx: LoadDataCheckpointCtx, data_path: PathBuf) -> Result<Self> {
         let file_name =
-            LocalFileCheckPointStorage::get_file_name_by_taskid(check_point_ctx.clone().task_id);
+            LocalFileCheckpointStorage::get_file_name_by_taskid(checkpoint_ctx.clone().task_id);
 
         Ok(Self {
             data_path,
             file_name,
-            check_point_ctx,
+            checkpoint_ctx,
         })
     }
 
-    fn check_point_ctx_to_binary(&self) -> Vec<u8> {
-        let res = serde_json::to_string(&self.check_point_ctx.clone()).unwrap();
+    fn checkpoint_ctx_to_binary(&self) -> Vec<u8> {
+        let res = serde_json::to_string(&self.checkpoint_ctx.clone()).unwrap();
         res.as_bytes().to_owned()
     }
 
-    pub fn binary_to_check_point(json_str: &str) -> LoadDataCheckPointCtx {
+    pub fn binary_to_checkpoint(json_str: &str) -> LoadDataCheckpointCtx {
         serde_json::from_str(json_str).unwrap()
     }
 
@@ -281,20 +281,21 @@ impl LocalFileCheckPointStorage {
         Ok(())
     }
 
-    pub fn clean_check_point_data(&self) {
+    pub fn clean_checkpoint_data(&self) {
+        let task_id = &self.checkpoint_ctx.task_id;
         let file_path = self.get_file_path();
-        info!("remove check point data :{:?}", file_path);
-        if let Err(e) = fs::remove_file(file_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                error!("failed to delete check point file: {}", e);
+        info!("{} remove checkpoint data :{:?}", task_id, file_path);
+        if let Err(err) = fs::remove_file(file_path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                error!("{} failed to delete checkpoint file: {}", task_id, err);
             }
         }
     }
 
     pub fn update_cancel_and_errmsg(&mut self, canceled: bool, errmsg: String) -> Result<()> {
-        self.check_point_ctx.canceled = canceled;
-        self.check_point_ctx.error = errmsg;
-        self.flush_check_point_ctx()?;
+        self.checkpoint_ctx.canceled = canceled;
+        self.checkpoint_ctx.error = errmsg;
+        self.flush_checkpoint_ctx()?;
         Ok(())
     }
 
@@ -307,36 +308,36 @@ impl LocalFileCheckPointStorage {
     }
 
     fn transition(&mut self, new_state: LoadDataWorkerState) -> bool {
-        let old_state = self.check_point_ctx.state;
-        let is_succ = self.check_point_ctx.state.transition(new_state);
+        let old_state = self.checkpoint_ctx.state;
+        let is_succ = self.checkpoint_ctx.state.transition(new_state);
         if old_state != new_state {
             let now = Utc::now();
             let millis = now.timestamp_millis();
             LOAD_DATA_TASK_STATE
-                .with_label_values(&[&self.check_point_ctx.task_id, new_state.as_str()])
+                .with_label_values(&[&self.checkpoint_ctx.task_id, new_state.as_str()])
                 .set(millis as f64);
         }
         if !is_succ {
             error!(
-                "{} [check point] transition try check state failed, from {:?} to {:?}",
-                self.check_point_ctx.task_id, old_state, new_state
+                "{} [checkpoint] transition try check state failed, from {:?} to {:?}",
+                self.checkpoint_ctx.task_id, old_state, new_state
             );
         } else {
             info!(
-                "{} [check point] transition try check state succeed, from {:?} to {:?}",
-                self.check_point_ctx.task_id, old_state, new_state
+                "{} [checkpoint] transition try check state succeed, from {:?} to {:?}",
+                self.checkpoint_ctx.task_id, old_state, new_state
             );
         }
         is_succ
     }
 
     pub fn get_sst_meta(&self) -> Vec<SstMeta> {
-        self.check_point_ctx.sst_metas.clone()
+        self.checkpoint_ctx.sst_metas.clone()
     }
 
     pub fn update_build_msg(&mut self, compression_type: u8) -> Result<()> {
-        self.check_point_ctx.compression = compression_type;
-        self.flush_check_point_ctx_with_state(LoadDataWorkerState::BuildingSst)?;
+        self.checkpoint_ctx.compression = compression_type;
+        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::BuildingSst)?;
         Ok(())
     }
 
@@ -350,7 +351,7 @@ impl LocalFileCheckPointStorage {
         // Update flushed chunk ids.
         for (writer_id, chunk_id) in handled_chunk_ids {
             let flushed_chunk_id = self
-                .check_point_ctx
+                .checkpoint_ctx
                 .flushed_chunk_ids
                 .entry(writer_id)
                 .or_insert(0);
@@ -359,20 +360,20 @@ impl LocalFileCheckPointStorage {
         }
 
         // Update flushed file idx.
-        self.check_point_ctx.flushed_file_idx = file_idx;
+        self.checkpoint_ctx.flushed_file_idx = file_idx;
 
         // Update local file infos.
         for local_file_info in local_file_infos {
-            self.check_point_ctx.local_file_infos.push(local_file_info);
+            self.checkpoint_ctx.local_file_infos.push(local_file_info);
             debug!(
-                "{} [check point store] update local_file_infos {:?}",
-                self.check_point_ctx.task_id,
-                self.check_point_ctx.local_file_infos.clone()
+                "{} [checkpoint store] update local_file_infos {:?}",
+                self.checkpoint_ctx.task_id,
+                self.checkpoint_ctx.local_file_infos.clone()
             );
         }
-        self.check_point_ctx.key_comm_prefix = key_comm_prefix;
+        self.checkpoint_ctx.key_comm_prefix = key_comm_prefix;
 
-        self.flush_check_point_ctx_with_state(LoadDataWorkerState::AddingChunks)?;
+        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::AddingChunks)?;
         Ok(())
     }
 
@@ -381,9 +382,9 @@ impl LocalFileCheckPointStorage {
         first_key: Bytes,
         key_comm_prefix: Vec<u8>,
     ) -> Result<()> {
-        self.check_point_ctx.first_key = first_key;
-        self.check_point_ctx.key_comm_prefix = key_comm_prefix;
-        self.flush_check_point_ctx()?;
+        self.checkpoint_ctx.first_key = first_key;
+        self.checkpoint_ctx.key_comm_prefix = key_comm_prefix;
+        self.flush_checkpoint_ctx()?;
         Ok(())
     }
 
@@ -392,21 +393,21 @@ impl LocalFileCheckPointStorage {
         sst_metas: Vec<SstMeta>,
         duplicated_entries: Vec<DuplicateEntry>,
     ) -> Result<()> {
-        self.check_point_ctx.sst_metas = sst_metas;
-        self.check_point_ctx.duplicated_entries = duplicated_entries;
-        self.flush_check_point_ctx()?;
+        self.checkpoint_ctx.sst_metas = sst_metas;
+        self.checkpoint_ctx.duplicated_entries = duplicated_entries;
+        self.flush_checkpoint_ctx()?;
         Ok(())
     }
 
     pub fn get_local_file_infos(&self) -> Vec<LocalFileInfo> {
-        self.check_point_ctx.local_file_infos.clone()
+        self.checkpoint_ctx.local_file_infos.clone()
     }
 
     pub fn get_state(&self) -> LoadDataWorkerState {
-        self.check_point_ctx.get_state()
+        self.checkpoint_ctx.get_state()
     }
 
-    pub fn flush_check_point_ctx_with_state(
+    pub fn flush_checkpoint_ctx_with_state(
         &mut self,
         new_state: LoadDataWorkerState,
     ) -> Result<()> {
@@ -415,59 +416,59 @@ impl LocalFileCheckPointStorage {
         if !is_succ {
             return Err(Error::CheckError("transition state err".to_string()));
         }
-        self.check_point_ctx.state = new_state;
-        self.flush_check_point_ctx()?;
+        self.checkpoint_ctx.state = new_state;
+        self.flush_checkpoint_ctx()?;
         Ok(())
     }
 
-    pub fn flush_check_point_ctx(&mut self) -> Result<()> {
-        let value: Value = self.check_point_ctx_to_binary().to_vec();
+    pub fn flush_checkpoint_ctx(&mut self) -> Result<()> {
+        let value: Value = self.checkpoint_ctx_to_binary().to_vec();
         self.write_atomic_file(value.as_slice())?;
         self.print_log();
         Ok(())
     }
 
     pub fn print_log(&self) {
-        let cp = self.check_point_ctx.clone();
+        let cp = self.checkpoint_ctx.clone();
         let duplicated_entries_size = cp.duplicated_entries.len();
         debug!(
-            "{} [check point store] check point context:{:?},duplicated_entries_size:{},sst_metas.len():{},",
-            self.check_point_ctx.task_id,
+            "{} [checkpoint store] checkpoint context: {:?}, duplicated_entries_size: {}, sst_metas.len(): {},",
+            self.checkpoint_ctx.task_id,
             cp,
             duplicated_entries_size,
             cp.sst_metas.len()
         );
     }
 
-    pub fn load_check_point_ctx(&self) -> LoadDataCheckPointCtx {
-        let file_data = LocalFileCheckPointStorage::read_file(self.get_file_path());
-        let check_point = LocalFileCheckPointStorage::binary_to_check_point(file_data.as_str());
+    pub fn load_checkpoint_ctx(&self) -> LoadDataCheckpointCtx {
+        let file_data = LocalFileCheckpointStorage::read_file(self.get_file_path());
+        let checkpoint = LocalFileCheckpointStorage::binary_to_checkpoint(file_data.as_str());
         debug!(
-            "{} [check point store] loaded check point:{:?},",
-            self.check_point_ctx.task_id, check_point
+            "{} [checkpoint store] loaded checkpoint:{:?},",
+            self.checkpoint_ctx.task_id, checkpoint
         );
-        check_point
+        checkpoint
     }
 }
 
-// spawn_clean_check_point_files_worker scan the check point files under the
+// spawn_clean_checkpoint_files_worker scan the checkpoint files under the
 // directory and clean up the cancel status files which have exceeded the
 // waiting time.
-pub fn spawn_clean_check_point_files_worker(
-    check_point_dir: PathBuf,
-    cancelled_task_check_point_file_expire_sec: u64,
-    clean_check_point_file_interval_sec: u64,
+pub fn spawn_clean_checkpoint_files_worker(
+    checkpoint_dir: PathBuf,
+    cancelled_task_checkpoint_file_expire_sec: u64,
+    clean_checkpoint_file_interval_sec: u64,
     ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (timestamp,
                                                                * Option<keyspace_id>) */
 ) {
     std::thread::spawn(move || {
         loop {
             remove_load_data_metrics(ended_tasks.clone());
-            try_clean_check_point_files(
-                check_point_dir.clone(),
-                cancelled_task_check_point_file_expire_sec,
+            try_clean_checkpoint_files(
+                checkpoint_dir.clone(),
+                cancelled_task_checkpoint_file_expire_sec,
             );
-            std::thread::sleep(Duration::from_secs(clean_check_point_file_interval_sec));
+            std::thread::sleep(Duration::from_secs(clean_checkpoint_file_interval_sec));
         }
     });
 }
@@ -490,11 +491,11 @@ pub fn remove_load_data_metrics(ended_tasks: Arc<DashMap<String, (i64, Option<St
     }
 }
 
-fn try_clean_check_point_files(
-    check_point_dir: PathBuf,
-    cancelled_task_check_point_file_expire_sec: u64,
+fn try_clean_checkpoint_files(
+    checkpoint_dir: PathBuf,
+    cancelled_task_checkpoint_file_expire_sec: u64,
 ) {
-    let files = fs::read_dir(check_point_dir).unwrap();
+    let files = fs::read_dir(checkpoint_dir).unwrap();
     let dir_entries: Vec<fs::DirEntry> = files.filter_map(|r| r.ok()).collect();
     for file in &dir_entries {
         let file_name = file.file_name();
@@ -502,31 +503,28 @@ fn try_clean_check_point_files(
         if str_file_name.starts_with(CHECKPOINT_WORKER_PREFIX) {
             let path = file.path();
 
-            let file_data = LocalFileCheckPointStorage::read_file(path.clone());
-            let check_point_ctx =
-                LocalFileCheckPointStorage::binary_to_check_point(file_data.as_str());
+            let file_data = LocalFileCheckpointStorage::read_file(path.clone());
+            let checkpoint_ctx =
+                LocalFileCheckpointStorage::binary_to_checkpoint(file_data.as_str());
 
-            if check_point_ctx.canceled {
-                try_clean_check_point_file(
-                    path.clone(),
-                    cancelled_task_check_point_file_expire_sec,
-                );
+            if checkpoint_ctx.canceled {
+                try_clean_checkpoint_file(path.clone(), cancelled_task_checkpoint_file_expire_sec);
             }
         }
     }
 }
 
 // Clean up files that have exceeded the wait time.
-pub fn try_clean_check_point_file(path: PathBuf, cancelled_task_check_point_file_expire_sec: u64) {
+pub fn try_clean_checkpoint_file(path: PathBuf, cancelled_task_checkpoint_file_expire_sec: u64) {
     let metadata = fs::metadata(path.clone()).unwrap();
     let modified_time = metadata.modified().unwrap();
     let time_since_modified = SystemTime::now().duration_since(modified_time).unwrap();
     let time_since_modified = time_since_modified.as_secs();
-    if time_since_modified > cancelled_task_check_point_file_expire_sec {
+    if time_since_modified > cancelled_task_checkpoint_file_expire_sec {
         fs::remove_file(path.clone()).unwrap();
         info!(
-            "[check point store] {:?} check point file has been removed due to being modified over {} sec ago.",
-            path, cancelled_task_check_point_file_expire_sec
+            "[checkpoint store] {:?} checkpoint file has been removed due to being modified over {} sec ago.",
+            path, cancelled_task_checkpoint_file_expire_sec
         );
     }
 }
@@ -549,16 +547,14 @@ mod tests {
             encryption_key: None,
             prepend_keyspace_id: None,
         };
-        let check_point = LoadDataCheckPointCtx::new(task_ctx);
+        let checkpoint = LoadDataCheckpointCtx::new(task_ctx);
 
         let data_dir = "tikv_worker_dir";
         fs::create_dir_all(data_dir).unwrap();
         let mut store =
-            LocalFileCheckPointStorage::new(check_point, PathBuf::from(data_dir)).unwrap();
-        store
-            .flush_check_point_ctx_with_state(expect_state)
-            .unwrap();
-        let loaddata_checkpoint_msg = store.load_check_point_ctx();
+            LocalFileCheckpointStorage::new(checkpoint, PathBuf::from(data_dir)).unwrap();
+        store.flush_checkpoint_ctx_with_state(expect_state).unwrap();
+        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
         let res_task_id = loaddata_checkpoint_msg.task_id;
 
         assert_eq!(
@@ -579,13 +575,13 @@ mod tests {
         store
             .update_first_key_and_prefix(expect_first_key.clone(), expect_first_key.to_vec())
             .unwrap();
-        let loaddata_checkpoint_msg = store.load_check_point_ctx();
+        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
         assert_eq!(expect_first_key, loaddata_checkpoint_msg.first_key);
 
         let expect_is_recover = true;
-        store.check_point_ctx.set_is_recover(true);
-        store.flush_check_point_ctx().unwrap();
-        let loaddata_checkpoint_msg = store.load_check_point_ctx();
+        store.checkpoint_ctx.set_is_recover(true);
+        store.flush_checkpoint_ctx().unwrap();
+        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
         assert_eq!(expect_is_recover, loaddata_checkpoint_msg.is_recover);
 
         // update_flushed_info
@@ -620,7 +616,7 @@ mod tests {
                 key_comm_prefix.clone(),
             )
             .unwrap();
-        let loaddata_checkpoint_msg = store.load_check_point_ctx();
+        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
         assert_eq!(max_file_idx, loaddata_checkpoint_msg.flushed_file_idx);
 
         let get_local_file_infos = loaddata_checkpoint_msg.local_file_infos;
@@ -640,7 +636,7 @@ mod tests {
 
         // update_build_msg
         store.update_build_msg(compression_type).unwrap();
-        let loaddata_checkpoint_msg = store.load_check_point_ctx();
+        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
         assert_eq!(compression_type, loaddata_checkpoint_msg.compression);
 
         // update_sst_meta
@@ -665,7 +661,7 @@ mod tests {
         let entries = vec![entry.clone()];
 
         store.update_build_result(sst_metas, entries).unwrap();
-        let loaddata_checkpoint_msg = store.load_check_point_ctx();
+        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
         assert_eq!(sst_meta, loaddata_checkpoint_msg.sst_metas[0]);
         assert_eq!(entry, loaddata_checkpoint_msg.duplicated_entries[0]);
 
@@ -701,29 +697,29 @@ mod tests {
     // exceeded.
     #[test]
     fn test_clean_file() {
-        let check_point_dir = String::from("/tmp/test_check_point/");
-        if PathBuf::from(check_point_dir.clone()).is_dir() {
-            fs::remove_dir_all(check_point_dir.clone()).unwrap();
+        let checkpoint_dir = String::from("/tmp/test_checkpoint/");
+        if PathBuf::from(checkpoint_dir.clone()).is_dir() {
+            fs::remove_dir_all(checkpoint_dir.clone()).unwrap();
         }
-        fs::create_dir(check_point_dir.clone()).unwrap();
-        let cancelled_task_check_point_file_expire_sec = 1;
+        fs::create_dir(checkpoint_dir.clone()).unwrap();
+        let cancelled_task_checkpoint_file_expire_sec = 1;
 
         let task_id1 = "task_id_001".to_string();
-        let store1 = make_test_check_point_storage(check_point_dir.clone(), task_id1);
+        let store1 = make_test_checkpoint_storage(checkpoint_dir.clone(), task_id1);
 
         // Sleep a while, wait file update time exceeds the expected wait time.
         std::thread::sleep(Duration::from_secs(
-            cancelled_task_check_point_file_expire_sec + 2,
+            cancelled_task_checkpoint_file_expire_sec + 2,
         ));
 
         // The file corresponding to path2 did not pass the wait time and was not
         // cleaned
         let task_id2 = "task_id_002".to_string();
-        let store2 = make_test_check_point_storage(check_point_dir.clone(), task_id2);
+        let store2 = make_test_checkpoint_storage(checkpoint_dir.clone(), task_id2);
 
-        try_clean_check_point_files(
-            PathBuf::from(check_point_dir.clone()),
-            cancelled_task_check_point_file_expire_sec,
+        try_clean_checkpoint_files(
+            PathBuf::from(checkpoint_dir.clone()),
+            cancelled_task_checkpoint_file_expire_sec,
         );
 
         // The file of task_id1 should be deleted.
@@ -732,13 +728,13 @@ mod tests {
         // reached.
         assert_eq!(true, store2.get_file_path().exists());
 
-        fs::remove_dir_all(check_point_dir).unwrap();
+        fs::remove_dir_all(checkpoint_dir).unwrap();
     }
 
-    fn make_test_check_point_storage(
-        check_point_dir: String,
+    fn make_test_checkpoint_storage(
+        checkpoint_dir: String,
         task_id: String,
-    ) -> LocalFileCheckPointStorage {
+    ) -> LocalFileCheckpointStorage {
         let task_ctx = TaskContext {
             task_id,
             start_ts: 1_u64,
@@ -749,16 +745,16 @@ mod tests {
             prepend_keyspace_id: None,
         };
 
-        let mut check_point = LoadDataCheckPointCtx::new(task_ctx);
-        check_point.canceled = true;
+        let mut checkpoint = LoadDataCheckpointCtx::new(task_ctx);
+        checkpoint.canceled = true;
         let mut store =
-            LocalFileCheckPointStorage::new(check_point, PathBuf::from(check_point_dir)).unwrap();
-        store.flush_check_point_ctx().unwrap();
+            LocalFileCheckpointStorage::new(checkpoint, PathBuf::from(checkpoint_dir)).unwrap();
+        store.flush_checkpoint_ctx().unwrap();
         store
     }
 
     #[test]
-    fn test_check_point_default() {
-        let _ = LocalFileCheckPointStorage::binary_to_check_point("{}");
+    fn test_checkpoint_default() {
+        let _ = LocalFileCheckpointStorage::binary_to_checkpoint("{}");
     }
 }

@@ -170,7 +170,7 @@ fn start_server(
     let is_load_data_worker = std::env::var(LOAD_DATA_WORKER_ENV).is_ok();
     let mut worker_scaler_opt: Option<WorkerScaler> = None;
     let mut load_data_config = LoadDataConfig::default();
-    load_data_config.enable_check_point = config.enable_load_data_check_point;
+    load_data_config.enable_checkpoint = config.enable_load_data_check_point;
     load_data_config.checksum_type = checksum_type;
     if is_load_data_worker {
         load_data_config.max_in_mem_size = std::env::var(LOAD_DATA_WORKER_MAX_IN_MEM_SIZE_ENV)
@@ -270,7 +270,7 @@ fn start_server(
     }
 
     // try recover task from checkpoint
-    load_manager.try_recover_or_clean_tasks_by_check_point();
+    load_manager.try_recover_or_clean_tasks_by_checkpoint();
 
     if config.register {
         let remote_compact_url = security_mgr

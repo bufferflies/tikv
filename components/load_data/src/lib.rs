@@ -4,7 +4,7 @@
 
 mod error;
 pub use error::*;
-pub mod check_point_storage;
+pub mod checkpoint;
 mod kv;
 pub mod metrics;
 pub mod task;

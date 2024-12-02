@@ -12,12 +12,12 @@ use kvengine::{
     table::{LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION},
 };
 use load_data::{
-    check_point_storage,
-    check_point_storage::{
-        spawn_clean_check_point_files_worker, LoadDataCheckPointCtx,
+    checkpoint,
+    checkpoint::{
+        spawn_clean_checkpoint_files_worker, LoadDataCheckpointCtx,
         LoadDataWorkerState::{BuildingSst, IngestedSst},
-        LocalFileCheckPointStorage, CANCELLED_CHECK_POINT_FILE_EXPIRE_SEC,
-        CLEAN_CHECK_POINT_FILE_INTERVAL_SEC,
+        LocalFileCheckpointStorage, CANCELLED_CHECKPOINT_FILE_EXPIRE_SEC,
+        CLEAN_CHECKPOINT_FILE_INTERVAL_SEC,
     },
     task::{
         FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
@@ -298,55 +298,55 @@ impl LoadDataManager {
         }
     }
 
-    fn recover_task_by_check_point_file(&self, path: PathBuf) {
-        let file_data = LocalFileCheckPointStorage::read_file(path);
-        let mut check_point_ctx =
-            LocalFileCheckPointStorage::binary_to_check_point(file_data.as_str());
-        check_point_ctx.set_is_recover(true);
+    fn recover_task_by_checkpoint_file(&self, path: PathBuf) {
+        let file_data = LocalFileCheckpointStorage::read_file(path);
+        let mut checkpoint_ctx =
+            LocalFileCheckpointStorage::binary_to_checkpoint(file_data.as_str());
+        checkpoint_ctx.set_is_recover(true);
         debug!(
-            "[check point] try recover task from checkpoint, file exists {}",
+            "[checkpoint] try recover task from checkpoint, file exists {}",
             file_data
         );
 
-        self.exec_task_by_check_point(check_point_ctx.clone());
+        self.exec_task_by_checkpoint(checkpoint_ctx.clone());
 
-        if check_point_ctx.get_state() >= BuildingSst
-            && check_point_ctx.get_state() < IngestedSst
-            && !check_point_ctx.canceled
+        if checkpoint_ctx.get_state() >= BuildingSst
+            && checkpoint_ctx.get_state() < IngestedSst
+            && !checkpoint_ctx.canceled
         {
             self.build(
-                check_point_ctx.get_task_id().as_str(),
-                LoadDataManager::compression_num_to_str(check_point_ctx.clone().get_compression()),
+                checkpoint_ctx.get_task_id().as_str(),
+                LoadDataManager::compression_num_to_str(checkpoint_ctx.clone().get_compression()),
             );
         }
     }
 
-    pub fn try_recover_or_clean_tasks_by_check_point(&self) {
-        let mut check_point_dir = self.ctx.dir.clone();
-        if check_point_dir.as_os_str().is_empty() {
-            check_point_dir = PathBuf::from(".");
+    pub fn try_recover_or_clean_tasks_by_checkpoint(&self) {
+        let mut checkpoint_dir = self.ctx.dir.clone();
+        if checkpoint_dir.as_os_str().is_empty() {
+            checkpoint_dir = PathBuf::from(".");
         }
         // spawn a worker to clean checkpoint files
-        spawn_clean_check_point_files_worker(
-            check_point_dir.clone(),
-            CANCELLED_CHECK_POINT_FILE_EXPIRE_SEC,
-            CLEAN_CHECK_POINT_FILE_INTERVAL_SEC,
+        spawn_clean_checkpoint_files_worker(
+            checkpoint_dir.clone(),
+            CANCELLED_CHECKPOINT_FILE_EXPIRE_SEC,
+            CLEAN_CHECKPOINT_FILE_INTERVAL_SEC,
             self.ended_tasks.clone(),
         );
 
-        if !self.config.enable_check_point {
+        if !self.config.enable_checkpoint {
             return;
         }
         // recover tasks from checkpoint files
-        let files = fs::read_dir(check_point_dir).unwrap();
+        let files = fs::read_dir(checkpoint_dir).unwrap();
         let dir_entries: Vec<fs::DirEntry> = files.filter_map(|r| r.ok()).collect();
         for file in dir_entries {
             let file_name = file.file_name();
             let str_file_name = file_name.to_string_lossy();
 
-            if str_file_name.starts_with(check_point_storage::CHECKPOINT_WORKER_PREFIX) {
+            if str_file_name.starts_with(checkpoint::CHECKPOINT_WORKER_PREFIX) {
                 let path = file.path();
-                self.recover_task_by_check_point_file(path.clone());
+                self.recover_task_by_checkpoint_file(path.clone());
             }
         }
     }
@@ -372,11 +372,11 @@ impl LoadDataManager {
         self.running_tasks.contains_key(task_id)
     }
 
-    pub(crate) fn exec_task_by_check_point(&self, check_point_ctx: LoadDataCheckPointCtx) {
+    pub(crate) fn exec_task_by_checkpoint(&self, checkpoint_ctx: LoadDataCheckpointCtx) {
         let task_context = TaskContext {
-            task_id: check_point_ctx.get_task_id(),
-            start_ts: check_point_ctx.get_start_ts(),
-            commit_ts: check_point_ctx.get_commit_ts(),
+            task_id: checkpoint_ctx.get_task_id(),
+            start_ts: checkpoint_ctx.get_start_ts(),
+            commit_ts: checkpoint_ctx.get_commit_ts(),
             inner_key_off: None,
             outer_key_prefix: vec![],
             encryption_key: None,
@@ -386,7 +386,7 @@ impl LoadDataManager {
             self.config.clone(),
             self.ctx.clone(),
             task_context.clone(),
-            check_point_ctx,
+            checkpoint_ctx,
             self.ended_tasks.clone(),
         );
         let mut scheduler = worker.get_scheduler();
@@ -405,12 +405,12 @@ impl LoadDataManager {
                 info!("task {} already exists", task_id);
             }
             Entry::Vacant(entry) => {
-                let check_point = LoadDataCheckPointCtx::new(task_ctx.clone());
+                let checkpint_ctx = LoadDataCheckpointCtx::new(task_ctx.clone());
                 let mut worker = LoadTaskWorker::new(
                     self.config.clone(),
                     self.ctx.clone(),
                     task_ctx,
-                    check_point,
+                    checkpint_ctx,
                     self.ended_tasks.clone(),
                 );
                 let mut scheduler = worker.get_scheduler();

@@ -121,7 +121,7 @@ fn test_random_all() {
             sst_file_size: tikv_config.rocksdb.writecf.target_file_size_base.0 as usize,
             region_size,
             coarse_split_size: region_size * 4,
-            enable_check_point: false,
+            enable_checkpoint: false,
             rg_config: None,
             checksum_type: ChecksumType::Crc32,
         }

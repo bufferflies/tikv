@@ -5,7 +5,7 @@ use std::{collections::HashMap, mem, sync::Arc, time::Duration};
 use bytes::{BufMut, BytesMut};
 use futures::executor::block_on;
 use load_data::{
-    check_point_storage::LoadDataCheckPointCtx,
+    checkpoint::LoadDataCheckpointCtx,
     task::{
         FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
         LoadTaskWorker, TaskContext,
@@ -31,13 +31,13 @@ pub fn init_task(
         encryption_key: None,
         prepend_keyspace_id: None,
     };
-    let check_point_ctx = LoadDataCheckPointCtx::new(task_ctx.clone());
+    let checkpoint_ctx = LoadDataCheckpointCtx::new(task_ctx.clone());
 
     let mut worker = LoadTaskWorker::new(
         config,
         ctx,
         task_ctx,
-        check_point_ctx,
+        checkpoint_ctx,
         Arc::new(dashmap::DashMap::default()),
     );
     let scheduler = worker.get_scheduler();

@@ -44,8 +44,8 @@ use tikv_util::{
 };
 
 use crate::{
-    check_point_storage::{
-        LoadDataCheckPointCtx, LoadDataWorkerState, LocalFileCheckPointStorage, LocalFileInfo,
+    checkpoint::{
+        LoadDataCheckpointCtx, LoadDataWorkerState, LocalFileCheckpointStorage, LocalFileInfo,
     },
     error::{Error, Result},
     kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator, SstMeta},
@@ -62,7 +62,7 @@ const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
 const DEFAULT_SST_FILE_SIZE: usize = 48 * 1024 * 1024; // 48MB
 const DEFAULT_REGION_SIZE: usize = 750 * 1024 * 1024; // 750MB
 const DEFAULT_COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
-const DEFAULT_ENABLE_CHECK_POINT: bool = false;
+const DEFAULT_ENABLE_CHECKPOINT: bool = false;
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const FLUSH_FILE_CONCURRENCY: usize = 8;
@@ -96,7 +96,7 @@ pub struct LoadTaskWorker {
     cached_file_ids: Vec<u64>,
     file_tx: Sender<UnhandledReader>,
     file_rx: Receiver<UnhandledReader>,
-    check_point_store: Arc<Mutex<LocalFileCheckPointStorage>>,
+    check_point_store: Arc<Mutex<LocalFileCheckpointStorage>>,
     key_comm_prefix: Vec<u8>,
 }
 
@@ -186,7 +186,7 @@ pub struct LoadDataConfig {
     pub sst_file_size: usize,
     pub region_size: usize,
     pub coarse_split_size: usize,
-    pub enable_check_point: bool,
+    pub enable_checkpoint: bool,
     pub rg_config: Option<ResourceGroupConfig>,
     pub checksum_type: ChecksumType,
 }
@@ -200,7 +200,7 @@ impl Default for LoadDataConfig {
             sst_file_size: DEFAULT_SST_FILE_SIZE,
             region_size: DEFAULT_REGION_SIZE,
             coarse_split_size: DEFAULT_COARSE_SPLIT_SIZE,
-            enable_check_point: DEFAULT_ENABLE_CHECK_POINT,
+            enable_checkpoint: DEFAULT_ENABLE_CHECKPOINT,
             rg_config: None,
             checksum_type: ChecksumType::Crc32,
         }
@@ -249,7 +249,7 @@ pub struct LoadTaskScheduler {
     pub states: Arc<Mutex<LoadTaskStates>>,
     pub writers: Arc<Mutex<WritersStates>>,
     pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
-    pub check_point_store: Arc<Mutex<LocalFileCheckPointStorage>>,
+    pub check_point_store: Arc<Mutex<LocalFileCheckpointStorage>>,
     pub ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (end_time,
                                                                    * Option<keyspace_id>) */
     pub keyspace_id: Arc<Mutex<Option<String>>>,
@@ -269,7 +269,7 @@ impl LoadTaskScheduler {
         states.error = err;
 
         let ts = Utc::now().timestamp();
-        let task_id = check_point_store_guard.check_point_ctx.task_id.clone();
+        let task_id = check_point_store_guard.checkpoint_ctx.task_id.clone();
         LOAD_DATA_TASK_STATE
             .with_label_values(&[&task_id, "cancel"])
             .set(ts as f64);
@@ -399,7 +399,7 @@ impl LoadTaskWorker {
         config: LoadDataConfig,
         context: LoadDataContext,
         task_ctx: TaskContext,
-        check_point_ctx: LoadDataCheckPointCtx,
+        check_point_ctx: LoadDataCheckpointCtx,
         ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (end_time,
                                                                    * Option<keyspace_id>) */
     ) -> Self {
@@ -436,9 +436,9 @@ impl LoadTaskWorker {
 
         // Init checkpoint info.
         let mut check_point_store =
-            LocalFileCheckPointStorage::new(check_point_ctx.clone(), context.dir.clone()).unwrap();
+            LocalFileCheckpointStorage::new(check_point_ctx.clone(), context.dir.clone()).unwrap();
         if !check_point_ctx.get_is_recover() {
-            check_point_store.flush_check_point_ctx().unwrap();
+            check_point_store.flush_checkpoint_ctx().unwrap();
             check_point_store.print_log();
         }
         let check_point_store_arc = Arc::new(Mutex::new(check_point_store));
@@ -808,7 +808,7 @@ impl LoadTaskWorker {
 
     fn handle_readers(
         &mut self,
-        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckpointStorage>,
     ) -> Result<()> {
         self.unhandled_readers
             .sort_by(|a, b| a.file_idx.cmp(&b.file_idx));
@@ -879,7 +879,7 @@ impl LoadTaskWorker {
 
     fn try_recv_reader(
         &mut self,
-        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckpointStorage>,
     ) -> Result<()> {
         while let Ok(reader) = self.file_rx.try_recv() {
             self.unhandled_readers.push(reader);
@@ -891,7 +891,7 @@ impl LoadTaskWorker {
     fn recv_reader(
         &mut self,
         mut recv_count: usize,
-        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckpointStorage>,
     ) -> Result<()> {
         while recv_count != 0 {
             let reader = self.file_rx.recv().unwrap();
@@ -928,7 +928,7 @@ impl LoadTaskWorker {
     }
 
     // Recover readers from checkpoint.
-    fn recover_readers(&mut self, check_point_ctx: &LoadDataCheckPointCtx) {
+    fn recover_readers(&mut self, check_point_ctx: &LoadDataCheckpointCtx) {
         let paths = check_point_ctx.get_local_file_infos();
         for local_file_info in paths.iter() {
             let reader = reload_reader(local_file_info, self.task_ctx.clone());
@@ -954,12 +954,12 @@ impl LoadTaskWorker {
                 compression_type,
             )?;
             check_point_store_guard
-                .flush_check_point_ctx_with_state(LoadDataWorkerState::IngestingSst)?;
+                .flush_checkpoint_ctx_with_state(LoadDataWorkerState::IngestingSst)?;
         }
 
         // Begin ingest sst.
         if check_point_store_guard.get_state() == LoadDataWorkerState::IngestingSst {
-            if check_point_store_guard.check_point_ctx.get_is_recover() {
+            if check_point_store_guard.checkpoint_ctx.get_is_recover() {
                 sst_metas = check_point_store_guard.get_sst_meta();
             }
             let keyspace_id = if !sst_metas.is_empty() {
@@ -983,7 +983,7 @@ impl LoadTaskWorker {
             self.ingest(
                 sst_metas,
                 check_point_store_guard
-                    .check_point_ctx
+                    .checkpoint_ctx
                     .get_duplicated_entries(),
                 &mut check_point_store_guard,
             )?;
@@ -1063,7 +1063,7 @@ impl LoadTaskWorker {
 
     fn flush(
         &mut self,
-        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckpointStorage>,
     ) -> Result<()> {
         if !self.reader_errs.is_empty() {
             return Err(self.reader_errs.pop().unwrap());
@@ -1082,7 +1082,7 @@ impl LoadTaskWorker {
 
     fn build_sst(
         &mut self,
-        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckpointStorage>,
         sst_metas: &mut Vec<SstMeta>,
         compression_type: u8,
     ) -> Result<()> {
@@ -1356,7 +1356,7 @@ impl LoadTaskWorker {
         &mut self,
         mut sst_metas: Vec<SstMeta>,
         dup_entries: Vec<DuplicateEntry>,
-        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckPointStorage>,
+        check_point_store_guard: &mut MutexGuard<'_, LocalFileCheckpointStorage>,
     ) -> Result<()> {
         if sst_metas.is_empty() {
             return Ok(());
@@ -1397,7 +1397,7 @@ impl LoadTaskWorker {
         self.scheduler.set_finished(dup_entries);
         info!("{} finished ingest", self.task_ctx.task_id);
         check_point_store_guard
-            .flush_check_point_ctx_with_state(LoadDataWorkerState::IngestedSst)?;
+            .flush_checkpoint_ctx_with_state(LoadDataWorkerState::IngestedSst)?;
         Ok(())
     }
 
@@ -1558,14 +1558,14 @@ impl LoadTaskWorker {
                 self.scheduler.cancel(format!("{:?}", err))
             }
         } else {
-            if !self.config.enable_check_point {
+            if !self.config.enable_checkpoint {
                 return;
             }
 
             let check_point_store_mutex = Arc::clone(&self.check_point_store);
             let check_point_store_guard = check_point_store_mutex.lock().unwrap();
-            let check_point_ctx = &check_point_store_guard.check_point_ctx;
-            if check_point_ctx.get_is_recover() && !check_point_store_guard.check_point_ctx.canceled
+            let check_point_ctx = &check_point_store_guard.checkpoint_ctx;
+            if check_point_ctx.get_is_recover() && !check_point_store_guard.checkpoint_ctx.canceled
             {
                 let first_key = check_point_ctx.get_first_key();
                 if !first_key.is_empty() {
@@ -1582,7 +1582,7 @@ impl LoadTaskWorker {
         self.check_point_store
             .lock()
             .unwrap()
-            .clean_check_point_data();
+            .clean_checkpoint_data();
 
         if let Err(err) = fs::remove_dir_all(&self.task_dir) {
             error!("failed to remove task {}, {:?}", self.task_ctx.task_id, err);
