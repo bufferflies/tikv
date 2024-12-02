@@ -1850,6 +1850,7 @@ pub struct UnifiedReadPoolConfig {
     pub max_tasks_per_worker: usize,
     pub auto_adjust_pool_size: bool,
     // FIXME: Add more configs when they are effective in yatp
+    pub use_tokio: bool,
 }
 
 impl UnifiedReadPoolConfig {
@@ -1905,6 +1906,7 @@ impl Default for UnifiedReadPoolConfig {
             stack_size: ReadableSize::mb(DEFAULT_READPOOL_STACK_SIZE_MB),
             max_tasks_per_worker: DEFAULT_READPOOL_MAX_TASKS_PER_WORKER,
             auto_adjust_pool_size: false,
+            use_tokio: true,
         }
     }
 }
@@ -1921,6 +1923,7 @@ mod unified_read_pool_tests {
             stack_size: ReadableSize::mb(2),
             max_tasks_per_worker: 2000,
             auto_adjust_pool_size: false,
+            use_tokio: true,
         };
         cfg.validate().unwrap();
         let cfg = UnifiedReadPoolConfig {
@@ -2260,6 +2263,7 @@ mod readpool_tests {
             stack_size: ReadableSize::mb(0),
             max_tasks_per_worker: 0,
             auto_adjust_pool_size: false,
+            use_tokio: true,
         };
         unified.validate().unwrap_err();
         let storage = StorageReadPoolConfig {

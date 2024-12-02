@@ -1031,7 +1031,9 @@ impl BackupCluster {
                 };
                 Some(Arc::new(table_filter))
             };
-            kv_engine.load_shards(metas, recoverer, table_filter)?;
+            tikv_util::init_task_local_sync(|| {
+                kv_engine.load_shards(metas, recoverer, table_filter)
+            })?;
         }
         Ok(())
     }

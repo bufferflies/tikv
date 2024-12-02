@@ -1822,7 +1822,7 @@ impl StatusServer {
             let router = router.clone();
             let engine = engine.clone();
             let rfengine = rfengine.clone();
-            async move {
+            tikv_util::init_task_local(async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
                     let start = Instant::now();
@@ -1990,7 +1990,7 @@ impl StatusServer {
                         }
                     }
                 }))
-            }
+            })
         }));
 
         let rx = self.rx.take().unwrap();

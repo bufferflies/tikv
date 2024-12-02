@@ -70,7 +70,7 @@ impl PeerInbox {
         let msg_len = self.msgs.len();
         let region_id = peer_fsm.region_id();
         let start = tikv_util::time::Instant::now_coarse();
-        tikv_util::set_current_region(region_id);
+        tikv_util::set_current_region_thread_local(region_id);
         PeerMsgHandler::new(&mut peer_fsm, ctx).handle_msgs(&mut self.msgs);
         peer_fsm.peer.handle_raft_ready(ctx, None);
         if !ctx.apply_msgs.msgs.is_empty() {
@@ -567,7 +567,7 @@ impl ApplyWorker {
                 timer.saturating_duration_since(batch.send_time),
             ));
             let mut applier = batch.applier.lock().unwrap();
-            tikv_util::set_current_region(applier.region_id());
+            tikv_util::set_current_region_thread_local(applier.region_id());
             for msg in batch.msgs.drain(..) {
                 applier.handle_msg(&mut self.ctx, msg);
             }

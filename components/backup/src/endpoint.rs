@@ -874,7 +874,7 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
         let sst_max_size = self.config_manager.0.read().unwrap().sst_max_size.0;
         let limit = self.softlimit.limit();
 
-        self.pool.borrow_mut().spawn(async move {
+        self.pool.borrow_mut().spawn(tikv_util::init_task_local(async move {
             loop {
                 // when get the guard, release it until we finish scanning a batch,
                 // because if we were suspended during scanning,
@@ -979,7 +979,7 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
                     }
                 }
             }
-        });
+        }));
     }
 
     fn get_progress_by_req(

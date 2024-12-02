@@ -123,7 +123,7 @@ where
 {
     let server = builder.serve(make_service_fn(move |_| {
         let ctx = ctx.clone();
-        async move {
+        tikv_util::init_task_local(async move {
             // Create a status service.
             Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
                 let ctx = ctx.clone();
@@ -190,7 +190,7 @@ where
                     }
                 }
             }))
-        }
+        })
     }));
     Box::new(server)
 }

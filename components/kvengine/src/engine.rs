@@ -121,7 +121,8 @@ impl Engine {
             with_pool_size(opts.txn_file_worker_pool_size),
             TxnChunkManagerConfig::default(),
         );
-        let (metas, files_in_blacklist) = EngineCore::read_meta(meta_iter)?;
+        let (metas, files_in_blacklist) =
+            tikv_util::init_task_local_sync(|| EngineCore::read_meta(meta_iter))?;
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
             shards: DashMap::new(),
@@ -163,7 +164,7 @@ impl Engine {
         };
 
         info!("engine load {} shards", metas.len());
-        en.load_shards(metas, recoverer, None)?;
+        tikv_util::init_task_local_sync(|| en.load_shards(metas, recoverer, None))?;
         en.loaded.store(true, Ordering::Relaxed);
         let flush_en = en.clone();
         thread::Builder::new()

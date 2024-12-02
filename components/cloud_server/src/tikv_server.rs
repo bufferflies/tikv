@@ -69,13 +69,12 @@ use sysinfo::{DiskExt, System as Sys, SystemExt};
 use tikv::{
     config::{ConfigController, TikvConfig},
     coprocessor, coprocessor_v2,
-    read_pool::{build_yatp_read_pool, ReadPool},
+    read_pool::{build_tokio_pool, build_yatp_read_pool},
     server::{
         config::Config as ServerConfig, lock_manager::LockManager, raftkv::ReplicaReadLockChecker,
         CPU_CORES_QUOTA_GAUGE, DEFAULT_CLUSTER_ID, GRPC_THREAD_PREFIX,
     },
     storage::{
-        self,
         mvcc::MvccConsistencyCheckObserver,
         txn::flow_controller::{FlowController, CLOUD_MIN_THROTTLE_SPEED},
         SCHED_WRITE_FLOW_GAUGE,
@@ -591,14 +590,15 @@ impl TikvServer {
         let pd_sender = pd_worker.scheduler();
         let flow_reporter = rfstore::store::worker::FlowStatsReporter::new(pd_sender.clone());
 
-        let unified_read_pool = if self.config.readpool.is_unified_pool_enabled() {
-            Some(build_yatp_read_pool(
+        let unified_pool_cfg = &self.config.readpool.unified;
+        let unified_read_pool = if unified_pool_cfg.use_tokio {
+            build_tokio_pool(&self.config.readpool.unified, engines.engine.clone())
+        } else {
+            build_yatp_read_pool(
                 &self.config.readpool.unified,
                 flow_reporter.clone(),
                 engines.engine.clone(),
-            ))
-        } else {
-            None
+            )
         };
 
         // The `DebugService` and `DiagnosticsService` will share the same thread pool
@@ -652,16 +652,7 @@ impl TikvServer {
             Box::new(overload_cfg_manager),
         );
 
-        let storage_read_pool_handle = if self.config.readpool.storage.use_unified_pool() {
-            unified_read_pool.as_ref().unwrap().handle()
-        } else {
-            let storage_read_pools = ReadPool::from(storage::build_read_pool(
-                &self.config.readpool.storage,
-                flow_reporter.clone(),
-                engines.engine.clone(),
-            ));
-            storage_read_pools.handle()
-        };
+        let storage_read_pool_handle = unified_read_pool.handle();
         let reporter = rfstore::store::FlowStatsReporter::new(pd_sender);
         let storage = create_raft_storage::<_, F>(
             engines.engine.clone(),
@@ -682,16 +673,7 @@ impl TikvServer {
             .register(self.coprocessor_host.as_mut().unwrap());
 
         // Create coprocessor endpoint.
-        let cop_read_pool_handle = if self.config.readpool.coprocessor.use_unified_pool() {
-            unified_read_pool.as_ref().unwrap().handle()
-        } else {
-            let cop_read_pools = ReadPool::from(coprocessor::readpool_impl::build_read_pool(
-                &self.config.readpool.coprocessor,
-                flow_reporter,
-                engines.engine.clone(),
-            ));
-            cop_read_pools.handle()
-        };
+        let cop_read_pool_handle = unified_read_pool.handle();
 
         let server_config = Arc::new(VersionTrack::new(self.config.server.clone()));
 
@@ -744,7 +726,6 @@ impl TikvServer {
             self.router.clone(),
             self.resolver.clone(),
             self.env.clone(),
-            unified_read_pool,
             debug_thread_pool,
         )
         .unwrap_or_else(|e| fatal!("failed to create server: {}", e));

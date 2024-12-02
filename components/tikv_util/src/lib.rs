@@ -17,6 +17,7 @@ use std::{
     convert::AsRef,
     env, fs,
     fs::File,
+    future::Future,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{
@@ -32,6 +33,7 @@ use nix::{
     unistd::{fork, ForkResult},
 };
 use rand::rngs::ThreadRng;
+use tokio::task_local;
 
 use crate::sys::thread::StdThreadBuildWrapper;
 
@@ -150,12 +152,43 @@ thread_local! {
     static CURRENT_REGION: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
 
+task_local! {
+    static TASK_CURRENT_REGION: std::cell::Cell<u64>;
+}
+
 pub fn set_current_region(region_id: u64) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        debug_assert!(TASK_CURRENT_REGION.try_with(|c| c.set(region_id)).is_ok());
+    } else {
+        CURRENT_REGION.with(|c| c.set(region_id))
+    }
+}
+
+pub fn set_current_region_thread_local(region_id: u64) {
     CURRENT_REGION.with(|c| c.set(region_id))
 }
 
+pub async fn init_task_local<F: Future>(f: F) -> F::Output {
+    TASK_CURRENT_REGION
+        .scope(std::cell::Cell::<u64>::new(0), f)
+        .await
+}
+
+pub fn init_task_local_sync<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    TASK_CURRENT_REGION.sync_scope(std::cell::Cell::<u64>::new(0), f)
+}
+
 pub fn get_current_region() -> u64 {
-    CURRENT_REGION.with(|c| c.get())
+    if tokio::runtime::Handle::try_current().is_ok() {
+        TASK_CURRENT_REGION
+            .try_with(|c| c.get())
+            .unwrap_or_default()
+    } else {
+        CURRENT_REGION.with(|c| c.get())
+    }
 }
 
 pub const PANIC_REGION_FILE_PREFIX: &str = "panic_region_";

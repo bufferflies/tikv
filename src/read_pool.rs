@@ -2,7 +2,11 @@
 
 use std::{
     future::Future,
-    sync::{mpsc::SyncSender, Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::SyncSender,
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -13,7 +17,7 @@ use online_config::{ConfigChange, ConfigManager, ConfigValue, Result as CfgResul
 use prometheus::{IntCounter, IntGauge};
 use thiserror::Error;
 use tikv_util::{
-    sys::{cpu_time::ProcessStat, SysQuota},
+    sys::{cpu_time::ProcessStat, thread::ThreadBuildWrapper, SysQuota},
     time::Instant,
     worker::{Runnable, RunnableWithTimer, Scheduler, Worker},
     yatp_pool::{self, FuturePool, PoolTicker, YatpPoolBuilder},
@@ -53,6 +57,12 @@ pub enum ReadPool {
         max_tasks: usize,
         pool_size: usize,
     },
+    Tokio {
+        runtime: Arc<tokio::runtime::Runtime>,
+        running_tasks: IntGauge,
+        max_tasks: usize,
+        pool_size: usize,
+    },
 }
 
 impl ReadPool {
@@ -80,6 +90,17 @@ impl ReadPool {
                 max_tasks: *max_tasks,
                 pool_size: *pool_size,
             },
+            ReadPool::Tokio {
+                runtime,
+                running_tasks,
+                max_tasks,
+                pool_size,
+            } => ReadPoolHandle::Tokio {
+                runtime: runtime.clone(),
+                running_tasks: running_tasks.clone(),
+                max_tasks: *max_tasks,
+                pool_size: *pool_size,
+            },
         }
     }
 }
@@ -95,6 +116,12 @@ pub enum ReadPoolHandle {
         remote: Remote<TaskCell>,
         running_tasks: IntGauge,
         running_threads: IntGauge,
+        max_tasks: usize,
+        pool_size: usize,
+    },
+    Tokio {
+        runtime: Arc<tokio::runtime::Runtime>,
+        running_tasks: IntGauge,
         max_tasks: usize,
         pool_size: usize,
     },
@@ -150,6 +177,27 @@ impl ReadPoolHandle {
                 );
                 remote.spawn(task_cell);
             }
+            ReadPoolHandle::Tokio {
+                runtime,
+                running_tasks,
+                max_tasks,
+                ..
+            } => {
+                let running_tasks = running_tasks.clone();
+                // Note that the running task number limit is not strict.
+                // If several tasks are spawned at the same time while the running task number
+                // is close to the limit, they may all pass this check and the number of running
+                // tasks may exceed the limit.
+                if running_tasks.get() as usize >= *max_tasks {
+                    return Err(ReadPoolError::UnifiedReadPoolFull);
+                }
+                running_tasks.inc();
+                let tracked = TrackedFuture::new(async move {
+                    tikv_util::init_task_local(f).await;
+                    running_tasks.dec();
+                });
+                runtime.spawn(tracked);
+            }
         }
         Ok(())
     }
@@ -185,6 +233,7 @@ impl ReadPoolHandle {
                 read_pool_normal, ..
             } => read_pool_normal.get_pool_size(),
             ReadPoolHandle::Yatp { pool_size, .. } => *pool_size,
+            ReadPoolHandle::Tokio { pool_size, .. } => *pool_size,
         }
     }
 
@@ -194,6 +243,11 @@ impl ReadPoolHandle {
                 read_pool_normal, ..
             } => read_pool_normal.get_running_task_count() / read_pool_normal.get_pool_size(),
             ReadPoolHandle::Yatp {
+                running_tasks,
+                pool_size,
+                ..
+            } => running_tasks.get() as usize / *pool_size,
+            ReadPoolHandle::Tokio {
                 running_tasks,
                 pool_size,
                 ..
@@ -220,6 +274,7 @@ impl ReadPoolHandle {
                 running_threads.set(max_thread_count as i64);
                 *pool_size = max_thread_count;
             }
+            ReadPoolHandle::Tokio { .. } => {}
         }
     }
 }
@@ -244,7 +299,7 @@ impl<R: FlowStatsReporter> ReporterTicker<R> {
 
 #[cfg(test)]
 fn get_unified_read_pool_name() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     format!(
@@ -291,6 +346,37 @@ pub fn build_yatp_read_pool<E: Engine, R: FlowStatsReporter>(
         running_tasks: UNIFIED_READ_POOL_RUNNING_TASKS
             .with_label_values(&[&unified_read_pool_name]),
         running_threads: UNIFIED_READ_POOL_RUNNING_THREADS
+            .with_label_values(&[&unified_read_pool_name]),
+        max_tasks: config
+            .max_tasks_per_worker
+            .saturating_mul(config.max_thread_count),
+        pool_size: config.max_thread_count,
+    }
+}
+
+pub fn build_tokio_pool<E: Engine>(config: &UnifiedReadPoolConfig, engine: E) -> ReadPool {
+    let unified_read_pool_name = get_unified_read_pool_name();
+    let raftkv = Arc::new(Mutex::new(engine));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_name_fn(|| {
+            static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+            let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+            format!("unified_read_pool_{}", id)
+        })
+        .worker_threads(config.max_thread_count)
+        .after_start_wrapper(move || {
+            let engine = raftkv.lock().unwrap().clone();
+            set_tls_engine(engine);
+        })
+        .before_stop_wrapper(|| unsafe {
+            destroy_tls_engine::<E>();
+        })
+        .enable_all()
+        .build()
+        .unwrap();
+    ReadPool::Tokio {
+        runtime: Arc::new(runtime),
+        running_tasks: UNIFIED_READ_POOL_RUNNING_TASKS
             .with_label_values(&[&unified_read_pool_name]),
         max_tasks: config
             .max_tasks_per_worker
