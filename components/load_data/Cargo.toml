@@ -44,3 +44,5 @@ tikv-client = { workspace = true }
 tikv_util = { path = "../tikv_util" }
 tokio = { version = "1.12", features = ["full"] }
 
+[dev-dependencies]
+proptest = "1.4"

@@ -148,6 +148,16 @@ pub struct LocalFileInfo {
     pub kv_count: usize,
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug, Default, Eq, PartialEq)]
+#[serde(default)]
+pub struct FileMeta {
+    pub file_path: PathBuf,
+    pub kv_count: usize,
+    pub kv_size: usize,
+    pub first_key: Vec<u8>,
+    pub last_key: Vec<u8>,
+}
+
 impl LoadDataCheckpointCtx {
     pub fn new(task_ctx: TaskContext) -> Self {
         let now = Utc::now();

@@ -4148,6 +4148,7 @@ dependencies = [
  "lazy_static",
  "pd_client",
  "prometheus",
+ "proptest",
  "protobuf",
  "rand 0.8.5",
  "rfengine",
