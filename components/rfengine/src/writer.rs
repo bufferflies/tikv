@@ -16,7 +16,7 @@ use std::{
 
 use bytes::{Buf, BufMut};
 use file_system::open_direct_file;
-use tikv_util::time::Instant;
+use tikv_util::{time::Instant, warn};
 
 use crate::{write_batch::PeerBatch, *};
 
@@ -401,6 +401,10 @@ impl WalWriter {
         // Check should_rotate or should_chunk after put this write batch to buf avoid
         // file size overflow.
         if self.should_rotate() {
+            while !self.safe_to_rotate() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                warn!("epoch {} is not safe to rotate", self.epoch_id);
+            }
             self.rotate()?;
             // Writer epoch increased, also need update epoch_id in buf
             self.buf.as_mut().put_u32_le(self.epoch_id);
@@ -458,12 +462,14 @@ impl WalWriter {
         // Force rotation at least once a day
         let force_rotation = chrono::Utc::now().gt(&self.next_day);
         let current_size = self.buf.len() + self.file_off as usize;
+        (current_size > self.wal_size || force_rotation) && self.writer_type != WriterType::Async
+    }
+
+    // If the current epoch id is 5, the rotated epoch id is 6, it would overwrite
+    // epoch 2 wal, so we need to make sure epoch 2 is compacted.
+    fn safe_to_rotate(&self) -> bool {
         let compacted_epoch = self.compacted_epoch.load(Ordering::SeqCst);
-        // If the current epoch id is 5, the rotated epoch id is 6, it would overwrite
-        // epoch 2 wal, so we need to make sure epoch 2 is compacted.
-        (current_size > self.wal_size || force_rotation)
-            && compacted_epoch + 4 > self.epoch_id
-            && self.writer_type != WriterType::Async
+        compacted_epoch + 4 > self.epoch_id
     }
 
     pub(crate) fn rotate(&mut self) -> Result<()> {
