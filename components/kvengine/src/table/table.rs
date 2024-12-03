@@ -519,7 +519,7 @@ pub(crate) fn parse_prop_data(mut prop_data: &[u8]) -> (&[u8], &[u8], &[u8]) {
     (key, val, remained)
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct LocalAddr {
     pub start: usize,
     pub end: usize,

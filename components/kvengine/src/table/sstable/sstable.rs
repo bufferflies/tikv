@@ -1104,7 +1104,9 @@ mod tests {
     use std::iter::Iterator as StdIterator;
 
     use bytes::BytesMut;
+    use futures::executor::block_on;
     use rand::Rng;
+    use rstest::rstest;
 
     use super::{test_util::*, *};
     use crate::{next, next_async, Iterator};
@@ -1460,10 +1462,20 @@ mod tests {
         }
     }
 
-    // For https://github.com/tidbcloud/cloud-storage-engine/issues/1957
-    #[maybe_async::test]
-    async fn test_reset_old_block_iter() {
-        let kvs = generate_key_values("key", 10);
+    // For:
+    // https://github.com/tidbcloud/cloud-storage-engine/issues/1957
+    // https://github.com/tidbcloud/cloud-storage-engine/issues/2062
+    #[rstest]
+    #[case::n1(1)]
+    #[case::n10(10)]
+    fn test_reset_old_block_iter(#[case] n: usize) {
+        test_reset_old_block_iter_impl(n);
+        block_on(test_reset_old_block_iter_impl_async(n));
+    }
+
+    #[maybe_async::both]
+    async fn test_reset_old_block_iter_impl(n: usize) {
+        let kvs = generate_key_values("key", n);
         let (t, _) = create_multi_version_sst(&kvs).await;
         let mut it = t.new_iterator(false, true);
 

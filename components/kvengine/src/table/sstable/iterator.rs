@@ -4,6 +4,7 @@ use std::{fmt, mem, ops::Deref, sync::Arc};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
+use log_wrappers::Value as LogValue;
 
 use super::SsTable;
 use crate::table::{
@@ -38,8 +39,16 @@ impl fmt::Debug for BlockIterator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlockIterator")
             .field("num_entries", &self.num_entries)
+            .field("b", &LogValue::value(&self.b))
             .field("idx", &self.idx)
             .field("err", &self.err)
+            .field("diff_key_addr", &self.diff_key_addr)
+            .field("ver", &self.ver)
+            .field("old_ver", &self.old_ver)
+            .field("val_addr", &self.val_addr)
+            .field("entry_offs", &self.entry_offs)
+            .field("common_prefix_addr", &self.common_prefix_addr)
+            .field("entries_data_addr", &self.entries_data_addr)
             .finish()
     }
 }
@@ -183,7 +192,7 @@ impl BlockIterator {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum IterState {
     NewVersion,
     OldVersion,
@@ -217,6 +226,7 @@ impl fmt::Debug for TableIterator {
             .field("reversed", &self.reversed)
             .field("err", &self.err)
             .field("key_buf", &self.key_buf)
+            .field("iter_state", &self.iter_state)
             .field("is_sync", &self.t.is_sync())
             .finish()
     }
@@ -465,6 +475,15 @@ impl TableIterator {
     }
 
     fn same_old_key(&self) -> bool {
+        if self.old_bi.ver == 0 {
+            // Return false when old block is not initialized.
+            // When there is only one entry in old block, the common prefix will be equal to
+            // the key of the entry. Without this check, the function will return true
+            // before other fields are corectly set.
+            // See https://github.com/tidbcloud/cloud-storage-engine/issues/2062.
+            return false;
+        }
+
         let key = self.key();
         let old_common_prefix = self.old_bi.get_common_prefix();
         if old_common_prefix.len() + self.old_bi.diff_key_addr.len() != key.len() {
@@ -546,7 +565,7 @@ impl table::Iterator for TableIterator {
                 // If it's the first time call, and the key is the same,
                 // the old version key must be iterated by a previous key, we should not call
                 // next.
-                assert!(self.bi.old_ver == self.old_bi.ver);
+                assert_eq!(self.bi.old_ver, self.old_bi.ver, "{:?}", self);
             } else {
                 // It's the successive call of next_version, we need to move to the next
                 // version.
