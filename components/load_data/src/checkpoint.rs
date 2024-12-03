@@ -542,6 +542,8 @@ pub fn try_clean_checkpoint_file(path: PathBuf, cancelled_task_checkpoint_file_e
 #[cfg(test)]
 mod tests {
 
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -559,10 +561,9 @@ mod tests {
         };
         let checkpoint = LoadDataCheckpointCtx::new(task_ctx);
 
-        let data_dir = "tikv_worker_dir";
-        fs::create_dir_all(data_dir).unwrap();
+        let checkpoint_dir = TempDir::new().unwrap();
         let mut store =
-            LocalFileCheckpointStorage::new(checkpoint, PathBuf::from(data_dir)).unwrap();
+            LocalFileCheckpointStorage::new(checkpoint, checkpoint_dir.path().to_owned()).unwrap();
         store.flush_checkpoint_ctx_with_state(expect_state).unwrap();
         let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
         let res_task_id = loaddata_checkpoint_msg.task_id;
@@ -674,8 +675,6 @@ mod tests {
         let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
         assert_eq!(sst_meta, loaddata_checkpoint_msg.sst_metas[0]);
         assert_eq!(entry, loaddata_checkpoint_msg.duplicated_entries[0]);
-
-        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
@@ -707,15 +706,12 @@ mod tests {
     // exceeded.
     #[test]
     fn test_clean_file() {
-        let checkpoint_dir = String::from("/tmp/test_checkpoint/");
-        if PathBuf::from(checkpoint_dir.clone()).is_dir() {
-            fs::remove_dir_all(checkpoint_dir.clone()).unwrap();
-        }
-        fs::create_dir(checkpoint_dir.clone()).unwrap();
+        let checkpoint_dir = TempDir::new().unwrap();
+        let path = checkpoint_dir.path();
         let cancelled_task_checkpoint_file_expire_sec = 1;
 
         let task_id1 = "task_id_001".to_string();
-        let store1 = make_test_checkpoint_storage(checkpoint_dir.clone(), task_id1);
+        let store1 = make_test_checkpoint_storage(path.to_owned(), task_id1);
 
         // Sleep a while, wait file update time exceeds the expected wait time.
         std::thread::sleep(Duration::from_secs(
@@ -725,24 +721,19 @@ mod tests {
         // The file corresponding to path2 did not pass the wait time and was not
         // cleaned
         let task_id2 = "task_id_002".to_string();
-        let store2 = make_test_checkpoint_storage(checkpoint_dir.clone(), task_id2);
+        let store2 = make_test_checkpoint_storage(path.to_owned(), task_id2);
 
-        try_clean_checkpoint_files(
-            PathBuf::from(checkpoint_dir.clone()),
-            cancelled_task_checkpoint_file_expire_sec,
-        );
+        try_clean_checkpoint_files(path.to_owned(), cancelled_task_checkpoint_file_expire_sec);
 
         // The file of task_id1 should be deleted.
         assert_eq!(false, store1.get_file_path().exists());
         // The file of task_id2 was not cleaned up because the wait time was not
         // reached.
         assert_eq!(true, store2.get_file_path().exists());
-
-        fs::remove_dir_all(checkpoint_dir).unwrap();
     }
 
     fn make_test_checkpoint_storage(
-        checkpoint_dir: String,
+        checkpoint_dir: PathBuf,
         task_id: String,
     ) -> LocalFileCheckpointStorage {
         let task_ctx = TaskContext {
@@ -757,8 +748,7 @@ mod tests {
 
         let mut checkpoint = LoadDataCheckpointCtx::new(task_ctx);
         checkpoint.canceled = true;
-        let mut store =
-            LocalFileCheckpointStorage::new(checkpoint, PathBuf::from(checkpoint_dir)).unwrap();
+        let mut store = LocalFileCheckpointStorage::new(checkpoint, checkpoint_dir).unwrap();
         store.flush_checkpoint_ctx().unwrap();
         store
     }
