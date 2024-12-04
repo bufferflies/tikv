@@ -154,7 +154,9 @@ fn test_build_vector_index() {
             let all_ids_vers = kvengine.get_all_shard_id_vers();
             let mut vector_shard_count = 0;
             for &id_ver in &all_ids_vers {
-                let shard = kvengine.get_shard(id_ver.id).unwrap();
+                let Some(shard) = kvengine.get_shard(id_ver.id) else {
+                    continue;
+                };
                 let mut vec_idx_files = shard.get_all_vec_idx_files();
                 if !vec_idx_files.is_empty() {
                     vector_shard_count += 1;
