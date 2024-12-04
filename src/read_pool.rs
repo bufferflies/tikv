@@ -1,7 +1,9 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cell::UnsafeCell,
     future::Future,
+    ptr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc::SyncSender,
@@ -354,8 +356,13 @@ pub fn build_yatp_read_pool<E: Engine, R: FlowStatsReporter>(
     }
 }
 
-pub fn build_tokio_pool<E: Engine>(config: &UnifiedReadPoolConfig, engine: E) -> ReadPool {
+pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
+    config: &UnifiedReadPoolConfig,
+    reporter: R,
+    engine: E,
+) -> ReadPool {
     let unified_read_pool_name = get_unified_read_pool_name();
+    let ticker = yatp_pool::TickerWrapper::new(ReporterTicker { reporter });
     let raftkv = Arc::new(Mutex::new(engine));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name_fn(|| {
@@ -367,9 +374,14 @@ pub fn build_tokio_pool<E: Engine>(config: &UnifiedReadPoolConfig, engine: E) ->
         .after_start_wrapper(move || {
             let engine = raftkv.lock().unwrap().clone();
             set_tls_engine(engine);
+            set_reporter_ticker(ticker.clone());
         })
         .before_stop_wrapper(|| unsafe {
             destroy_tls_engine::<E>();
+            destroy_reporter_ticker::<R>();
+        })
+        .on_thread_park(move || unsafe {
+            try_tick_reporter_ticker::<R>();
         })
         .enable_all()
         .build()
@@ -655,6 +667,38 @@ mod metrics {
         )
         .unwrap();
     }
+}
+
+thread_local! {
+    static REPORTER_TICKER: UnsafeCell<*mut ()> = UnsafeCell::new(std::ptr::null_mut());
+}
+
+fn set_reporter_ticker<R: FlowStatsReporter>(ticker: yatp_pool::TickerWrapper<ReporterTicker<R>>) {
+    REPORTER_TICKER.with(move |t| unsafe {
+        if (*t.get()).is_null() {
+            let ticker = Box::into_raw(Box::new(ticker)) as *mut ();
+            *t.get() = ticker;
+        }
+    });
+}
+
+unsafe fn destroy_reporter_ticker<R: FlowStatsReporter>() {
+    REPORTER_TICKER.with(|t| {
+        let ptr = *t.get();
+        if !ptr.is_null() {
+            drop(Box::from_raw(
+                ptr as *mut yatp_pool::TickerWrapper<ReporterTicker<R>>,
+            ));
+            *t.get() = ptr::null_mut();
+        }
+    });
+}
+
+unsafe fn try_tick_reporter_ticker<R: FlowStatsReporter>() {
+    REPORTER_TICKER.with(|e| {
+        let ticker = &mut *(*e.get() as *mut yatp_pool::TickerWrapper<ReporterTicker<R>>);
+        ticker.try_tick();
+    })
 }
 
 #[cfg(test)]

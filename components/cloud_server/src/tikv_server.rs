@@ -592,7 +592,11 @@ impl TikvServer {
 
         let unified_pool_cfg = &self.config.readpool.unified;
         let unified_read_pool = if unified_pool_cfg.use_tokio {
-            build_tokio_pool(&self.config.readpool.unified, engines.engine.clone())
+            build_tokio_pool(
+                &self.config.readpool.unified,
+                flow_reporter,
+                engines.engine.clone(),
+            )
         } else {
             build_yatp_read_pool(
                 &self.config.readpool.unified,

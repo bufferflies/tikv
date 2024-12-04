@@ -1961,7 +1961,7 @@ mod tests {
 
     fn new_read_pool_handle<E: Engine>(engine: E) -> ReadPoolHandle {
         let read_pool_cfg = UnifiedReadPoolConfig::default();
-        build_tokio_pool(&read_pool_cfg, engine.clone()).handle()
+        build_tokio_pool(&read_pool_cfg, DummyReporter, engine.clone()).handle()
     }
 
     #[test]
