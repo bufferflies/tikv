@@ -24,7 +24,7 @@ pub struct StorageConfigManger<E: Engine, K: KvEngine, L: LockManager> {
     shared_block_cache: bool,
     ttl_checker_scheduler: Scheduler<TtlCheckerTask>,
     flow_controller: Arc<FlowController>,
-    scheduler: TxnScheduler<E, L>,
+    _scheduler: TxnScheduler<E, L>,
 }
 
 unsafe impl<E: Engine, K: KvEngine, L: LockManager> Send for StorageConfigManger<E, K, L> {}
@@ -43,7 +43,7 @@ impl<E: Engine, K: KvEngine, L: LockManager> StorageConfigManger<E, K, L> {
             shared_block_cache,
             ttl_checker_scheduler,
             flow_controller,
-            scheduler,
+            _scheduler: scheduler,
         }
     }
 }
@@ -84,9 +84,6 @@ impl<EK: Engine, K: KvEngine, L: LockManager> ConfigManager for StorageConfigMan
                 );
                 self.flow_controller.enable(enable);
             }
-        } else if let Some(v) = change.get("scheduler_worker_pool_size") {
-            let pool_size: usize = v.into();
-            self.scheduler.scale_pool_size(pool_size);
         }
         if let Some(ConfigValue::Module(mut io_rate_limit)) = change.remove("io_rate_limit") {
             let limiter = match get_io_rate_limiter() {

@@ -4189,7 +4189,6 @@ mod tests {
     use futures::executor::block_on;
     use grpcio::ResourceQuota;
     use itertools::Itertools;
-    use kvproto::kvrpcpb::CommandPri;
     use raftstore::coprocessor::region_info_accessor::MockRegionInfoProvider;
     use slog::Level;
     use tempfile::Builder;
@@ -4949,56 +4948,6 @@ mod tests {
             None => unreachable!(),
             Some(TtlCheckerTask::UpdatePollInterval(d)) => assert_eq!(d, Duration::from_secs(10)),
         }
-    }
-
-    #[test]
-    fn test_change_store_scheduler_worker_pool_size() {
-        let (mut cfg, _dir) = TikvConfig::with_tmp().unwrap();
-        cfg.storage.scheduler_worker_pool_size = 4;
-        cfg.validate().unwrap();
-        let (storage, cfg_controller, ..) = new_engines::<ApiV1>(cfg);
-        let scheduler = storage.get_scheduler();
-
-        let max_pool_size = std::cmp::max(4, SysQuota::cpu_cores_quota() as usize);
-
-        let check_scale_pool_size = |size: usize, ok: bool| {
-            let origin_pool_size = scheduler
-                .get_sched_pool(CommandPri::Normal)
-                .pool
-                .get_pool_size();
-            let origin_pool_size_high = scheduler
-                .get_sched_pool(CommandPri::High)
-                .pool
-                .get_pool_size();
-            let res = cfg_controller
-                .update_config("storage.scheduler-worker-pool-size", &format!("{}", size));
-            let (expected_size, expected_size_high) = if ok {
-                res.unwrap();
-                (size, std::cmp::max(size / 2, 1))
-            } else {
-                res.unwrap_err();
-                (origin_pool_size, origin_pool_size_high)
-            };
-            assert_eq!(
-                scheduler
-                    .get_sched_pool(CommandPri::Normal)
-                    .pool
-                    .get_pool_size(),
-                expected_size
-            );
-            assert_eq!(
-                scheduler
-                    .get_sched_pool(CommandPri::High)
-                    .pool
-                    .get_pool_size(),
-                expected_size_high
-            );
-        };
-
-        check_scale_pool_size(0, false);
-        check_scale_pool_size(max_pool_size + 1, false);
-        check_scale_pool_size(1, true);
-        check_scale_pool_size(max_pool_size, true);
     }
 
     #[test]

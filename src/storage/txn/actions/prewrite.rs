@@ -726,7 +726,24 @@ fn async_commit_timestamps(
 ) -> Result<TimeStamp> {
     // This operation should not block because the latch makes sure only one thread
     // is operating on this key.
-    let key_guard = ::futures_executor::block_on(txn.concurrency_manager.lock_key(key));
+    let key_guard = if let Some(key_guard) =
+        tikv_util::future::try_poll(txn.concurrency_manager.lock_key(key))
+    {
+        key_guard
+    } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let key = key.clone();
+        let concurrency_manager = txn.concurrency_manager.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        handle.spawn_blocking(move || {
+            tx.send(futures_executor::block_on(
+                concurrency_manager.lock_key(&key),
+            ))
+            .unwrap();
+        });
+        rx.recv().unwrap()
+    } else {
+        futures_executor::block_on(txn.concurrency_manager.lock_key(key))
+    };
 
     let final_min_commit_ts = key_guard.with_lock(|l| {
         let max_ts = txn.concurrency_manager.max_ts();

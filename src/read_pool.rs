@@ -676,47 +676,6 @@ mod tests {
     }
 
     #[test]
-    fn test_yatp_full() {
-        let config = UnifiedReadPoolConfig {
-            min_thread_count: 1,
-            max_thread_count: 2,
-            max_tasks_per_worker: 1,
-            ..Default::default()
-        };
-        // max running tasks number should be 2*1 = 2
-
-        let engine = TestEngineBuilder::new().build().unwrap();
-        let pool = build_yatp_read_pool(&config, DummyReporter, engine);
-
-        let gen_task = || {
-            let (tx, rx) = oneshot::channel::<()>();
-            let task = async move {
-                let _ = rx.await;
-            };
-            (task, tx)
-        };
-
-        let handle = pool.handle();
-        let (task1, tx1) = gen_task();
-        let (task2, _tx2) = gen_task();
-        let (task3, _tx3) = gen_task();
-        let (task4, _tx4) = gen_task();
-
-        handle.spawn(task1, CommandPri::Normal, 1).unwrap();
-        handle.spawn(task2, CommandPri::Normal, 2).unwrap();
-
-        thread::sleep(Duration::from_millis(300));
-        match handle.spawn(task3, CommandPri::Normal, 3) {
-            Err(ReadPoolError::UnifiedReadPoolFull) => {}
-            _ => panic!("should return full error"),
-        }
-        tx1.send(()).unwrap();
-
-        thread::sleep(Duration::from_millis(300));
-        handle.spawn(task4, CommandPri::Normal, 4).unwrap();
-    }
-
-    #[test]
     fn test_yatp_scale_up() {
         let config = UnifiedReadPoolConfig {
             min_thread_count: 1,

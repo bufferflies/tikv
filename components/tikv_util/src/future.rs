@@ -197,16 +197,28 @@ impl ArcWake for PollAtWake {
     }
 }
 
+use task::{RawWaker, RawWakerVTable};
+static DUMMY_V_TABLE: RawWakerVTable = RawWakerVTable::new(dummy_clone, no_op, no_op, no_op);
+fn no_op(_: *const ()) {}
+fn dummy_clone(_: *const ()) -> task::RawWaker {
+    RawWaker::new(std::ptr::null(), &DUMMY_V_TABLE)
+}
+
+fn new_dummy_waker() -> task::Waker {
+    unsafe { task::Waker::from_raw(dummy_clone(std::ptr::null())) }
+}
+
 /// Poll the future immediately. If the future is ready, returns the result.
 /// Otherwise just ignore the future.
 #[inline]
-pub fn try_poll<T>(f: impl Future<Output = T>) -> Option<T> {
-    futures::executor::block_on(async move {
-        futures::select_biased! {
-            res = f.fuse() => Some(res),
-            _ = futures::future::ready(()).fuse() => None,
-        }
-    })
+pub fn try_poll<T>(mut f: impl Future<Output = T>) -> Option<T> {
+    let waker = new_dummy_waker();
+    let mut cx = Context::from_waker(&waker);
+    let pinned_fut = unsafe { std::pin::Pin::new_unchecked(&mut f) };
+    match pinned_fut.poll(&mut cx) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
+    }
 }
 
 #[cfg(test)]

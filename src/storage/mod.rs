@@ -284,6 +284,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             resource_tag_factory.clone(),
             Arc::clone(&quota_limiter),
             feature_gate,
+            read_pool.clone(),
         );
 
         info!("Storage started.");
@@ -1516,13 +1517,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
     // TODO: separate the txn and raw commands if needed in the future.
     fn sched_raw_command<T>(&self, tag: CommandKind, future: T) -> Result<()>
     where
-        T: Future + Send + 'static,
+        T: Future<Output = ()> + Send + 'static,
     {
         SCHED_STAGE_COUNTER_VEC.get(tag).new.inc();
         self.sched
-            .get_sched_pool(CommandPri::Normal)
-            .pool
-            .spawn(future)
+            .get_sched_pool()
+            .spawn(future, CommandPri::Normal, 0)
             .map_err(|_| Error::from(ErrorInner::SchedTooBusy))
     }
 

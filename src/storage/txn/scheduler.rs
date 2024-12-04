@@ -46,7 +46,7 @@ use kvproto::{
 };
 use parking_lot::{Mutex, MutexGuard, RwLockWriteGuard};
 use pd_client::{Feature, FeatureGate};
-use raftstore::store::TxnExt;
+use raftstore::store::{FlowStatsReporter, TxnExt};
 use resource_metering::{FutureExt, ResourceTagFactory};
 use smallvec::{smallvec, SmallVec};
 use tikv_kv::{Modify, Snapshot, SnapshotExt, WriteData, WriteEvent};
@@ -60,15 +60,13 @@ use tracker::{get_tls_tracker_token, set_tls_tracker_token, TrackerToken};
 use txn_types::TimeStamp;
 
 use crate::{
+    read_pool::ReadPoolHandle,
     server::lock_manager::waiter_manager,
     storage::{
         config::Config,
         errors::SharedError,
         get_causal_ts, get_priority_tag, get_raw_key_guard,
-        kv::{
-            self, with_tls_engine, Engine, FlowStatsReporter, Result as EngineResult, SnapContext,
-            Statistics,
-        },
+        kv::{self, with_tls_engine, Engine, Result as EngineResult, SnapContext, Statistics},
         lock_manager::{
             self,
             lock_wait_context::{LockWaitContext, PessimisticLockKeyCallback},
@@ -85,7 +83,7 @@ use crate::{
             flow_controller::{FlowControlHelper, FlowController},
             latch::Lock,
             region_latch::GlobalLatches,
-            sched_pool::{tls_collect_query, tls_collect_scan_details, SchedPool},
+            sched_pool::{tls_collect_query, tls_collect_scan_details},
             Error, ErrorInner, ProcessResult,
         },
         types::StorageCallback,
@@ -263,14 +261,7 @@ struct SchedulerInner<L: LockManager> {
     sched_pending_write_threshold: usize,
 
     // worker pool
-    worker_pool: SchedPool,
-
-    // high priority commands and system commands will be delivered to this pool
-    high_priority_pool: SchedPool,
-
-    // low priority pool for high throughput but latency insensitive workloads.
-    // TODO: Remove `Option`.
-    low_priority_pool: Option<SchedPool>,
+    worker_pool: ReadPoolHandle,
 
     // used to control write flow
     running_write_bytes: CachePadded<AtomicUsize>,
@@ -414,13 +405,6 @@ impl<L: LockManager> SchedulerInner<L> {
     fn dump_wait_for_entries(&self, cb: waiter_manager::Callback) {
         self.lock_mgr.dump_wait_for_entries(cb);
     }
-
-    fn scale_pool_size(&self, pool_size: usize) {
-        self.worker_pool.pool.scale_pool_size(pool_size);
-        self.high_priority_pool
-            .pool
-            .scale_pool_size(std::cmp::max(1, pool_size / 2));
-    }
 }
 
 /// Scheduler which schedules the execution of `storage::Command`s.
@@ -444,10 +428,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         dynamic_configs: DynamicConfigs,
         flow_controller: Arc<FlowController>,
         causal_ts_provider: Option<Arc<CausalTsProviderImpl>>,
-        reporter: R,
+        _reporter: R,
         resource_tag_factory: ResourceTagFactory,
         quota_limiter: Arc<QuotaLimiter>,
         feature_gate: FeatureGate,
+        read_pool_handle: ReadPoolHandle,
     ) -> Self {
         let t = Instant::now_coarse();
         let mut task_slots = Vec::with_capacity(TASKS_SLOTS_NUM);
@@ -457,19 +442,6 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
         let lock_wait_queues = LockWaitQueues::new(lock_mgr.clone());
 
-        let low_priority_pool_size = config
-            .scheduler_low_priority_worker_pool_size
-            .unwrap_or_default();
-        let low_priority_pool = (low_priority_pool_size > 0).then(|| {
-            SchedPool::new(
-                engine.clone(),
-                low_priority_pool_size,
-                reporter.clone(),
-                feature_gate.clone(),
-                "sched-low-pri-pool",
-            )
-        });
-
         let inner = Arc::new(SchedulerInner {
             task_slots,
             id_alloc: AtomicU64::new(0).into(),
@@ -477,21 +449,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             engine: engine.get_kvengine(),
             running_write_bytes: AtomicUsize::new(0).into(),
             sched_pending_write_threshold: config.scheduler_pending_write_threshold.0 as usize,
-            worker_pool: SchedPool::new(
-                engine.clone(),
-                config.scheduler_worker_pool_size,
-                reporter.clone(),
-                feature_gate.clone(),
-                "sched-worker-pool",
-            ),
-            high_priority_pool: SchedPool::new(
-                engine,
-                std::cmp::max(1, config.scheduler_worker_pool_size / 2),
-                reporter,
-                feature_gate.clone(),
-                "sched-high-pri-pool",
-            ),
-            low_priority_pool,
+            worker_pool: read_pool_handle,
             lock_mgr,
             concurrency_manager,
             pipelined_pessimistic_lock: dynamic_configs.pipelined_pessimistic_lock,
@@ -518,10 +476,6 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
     pub fn dump_wait_for_entries(&self, cb: waiter_manager::Callback) {
         self.inner.dump_wait_for_entries(cb);
-    }
-
-    pub fn scale_pool_size(&self, pool_size: usize) {
-        self.inner.scale_pool_size(pool_size)
     }
 
     pub(in crate::storage) fn run_cmd(&self, cmd: Command, callback: StorageCallback) {
@@ -612,10 +566,9 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         deadline: Deadline,
     ) {
         let sched = self.clone();
-        self.inner
-            .high_priority_pool
-            .pool
-            .spawn(async move {
+        let pool = self.get_sched_pool();
+        pool.spawn(
+            async move {
                 match unsafe {
                     with_tls_engine(|engine: &mut E| engine.precheck_write_with_ctx(&cmd_ctx))
                 } {
@@ -655,8 +608,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         }
                     }
                 }
-            })
-            .unwrap();
+            },
+            CommandPri::High,
+            cid,
+        )
+        .unwrap();
     }
 
     /// Tries to acquire all the necessary latches. If all the necessary latches
@@ -675,11 +631,14 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 let this = self.clone();
                 self.inner
                     .worker_pool
-                    .pool
-                    .spawn(async move {
-                        tikv_util::set_current_region(region_id);
-                        this.finish_with_err(cid, err);
-                    })
+                    .spawn(
+                        async move {
+                            tikv_util::set_current_region(region_id);
+                            this.finish_with_err(cid, err);
+                        },
+                        CommandPri::Normal,
+                        cid,
+                    )
                     .unwrap();
             }
         }
@@ -708,25 +667,19 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     }
 
     // pub for test
-    pub fn get_sched_pool(&self, priority: CommandPri) -> &SchedPool {
-        match priority {
-            CommandPri::Normal => &self.inner.worker_pool,
-            CommandPri::High => &self.inner.high_priority_pool,
-            CommandPri::Low => self
-                .inner
-                .low_priority_pool
-                .as_ref()
-                .unwrap_or(&self.inner.worker_pool),
-        }
+    pub fn get_sched_pool(&self) -> &ReadPoolHandle {
+        &self.inner.worker_pool
     }
 
     /// Executes the task in the sched pool.
     fn execute(&self, mut task: Task) {
         set_tls_tracker_token(task.tracker);
         let sched = self.clone();
-        self.get_sched_pool(task.cmd.priority())
-            .pool
-            .spawn(async move {
+        let pri = task.cmd.priority();
+        let cid = task.cid;
+        let pool = self.get_sched_pool();
+        pool.spawn(
+            async move {
                 fail_point!("scheduler_start_execute");
                 if sched.check_task_deadline_exceeded(&task) {
                     return;
@@ -736,8 +689,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 SCHED_STAGE_COUNTER_VEC.get(tag).snapshot.inc();
 
                 if !task.cmd.readonly() {
-                    // TiDB may incorrectly set `replica_read` to true when retrying even for write
-                    // commands. So we fix the flags here.
+                    // TiDB may incorrectly set `replica_read` to true when retrying even for
+                    // write commands. So we fix the flags here.
                     // See https://github.com/tidbcloud/cloud-storage-engine/issues/1211.
                     let ctx = task.cmd.ctx_mut();
                     ctx.set_replica_read(false);
@@ -794,8 +747,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         sched.finish_with_err(task.cid, Error::from(err));
                     }
                 }
-            })
-            .unwrap();
+            },
+            pri,
+            cid,
+        )
+        .unwrap();
     }
 
     /// Calls the callback with an error.
@@ -1040,9 +996,9 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         delayed_wake_up_futures: impl IntoIterator<Item = DelayedNotifyAllFuture> + Send + 'static,
     ) {
         let self1 = self.clone();
-        self.get_sched_pool(CommandPri::High)
-            .pool
-            .spawn(async move {
+        let pool = self.get_sched_pool();
+        pool.spawn(
+            async move {
                 for (lock_info, released_lock) in legacy_wake_up_list {
                     let cb = lock_info.key_cb.unwrap().into_inner();
                     let e = StorageError::from(Error::from(MvccError::from(
@@ -1061,22 +1017,29 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 for f in delayed_wake_up_futures {
                     let self2 = self1.clone();
                     self1
-                        .get_sched_pool(CommandPri::High)
-                        .pool
-                        .spawn(async move {
-                            let res = f.await;
-                            if let Some(resumable_lock_wait_entry) = res {
-                                self2.schedule_awakened_pessimistic_locks(
-                                    None,
-                                    None,
-                                    smallvec![resumable_lock_wait_entry],
-                                );
-                            }
-                        })
+                        .inner
+                        .worker_pool
+                        .spawn(
+                            async move {
+                                let res = f.await;
+                                if let Some(resumable_lock_wait_entry) = res {
+                                    self2.schedule_awakened_pessimistic_locks(
+                                        None,
+                                        None,
+                                        smallvec![resumable_lock_wait_entry],
+                                    );
+                                }
+                            },
+                            CommandPri::High,
+                            0,
+                        )
                         .unwrap();
                 }
-            })
-            .unwrap();
+            },
+            CommandPri::High,
+            0,
+        )
+        .unwrap();
     }
 
     fn is_undetermined_error(_e: &tikv_kv::Error) -> bool {
@@ -1792,10 +1755,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let manager = self.inner.engine.as_ref().unwrap().get_txn_chunk_manager();
         let worker_pool = manager.worker_pool().clone();
         let mut start = Instant::now();
+        let pri = cmd.priority();
         sched
             .clone()
-            .get_sched_pool(cmd.priority())
-            .pool
+            .inner.worker_pool
             .spawn(async move {
                 let region_id = cmd.ctx().get_region_id();
                 tikv_util::set_current_region(region_id);
@@ -1873,7 +1836,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         });
                     }
                 }
-            })
+            }, pri, cid)
             .unwrap();
     }
 }
@@ -1937,18 +1900,22 @@ mod tests {
     use txn_types::{Key, TimeStamp};
 
     use super::*;
-    use crate::storage::{
-        kv::{Error as KvError, ErrorInner as KvErrorInner},
-        lock_manager::{MockLockManager, WaitTimeout},
-        mvcc::{self, Mutation},
-        test_util::latest_feature_gate,
-        txn::{
-            commands,
-            commands::TypedCommand,
-            flow_controller::{EngineFlowController, FlowController},
-            latch::*,
+    use crate::{
+        config::UnifiedReadPoolConfig,
+        read_pool::build_tokio_pool,
+        storage::{
+            kv::{Error as KvError, ErrorInner as KvErrorInner},
+            lock_manager::{MockLockManager, WaitTimeout},
+            mvcc::{self, Mutation},
+            test_util::latest_feature_gate,
+            txn::{
+                commands,
+                commands::TypedCommand,
+                flow_controller::{EngineFlowController, FlowController},
+                latch::*,
+            },
+            RocksEngine, TestEngineBuilder, TxnStatus,
         },
-        RocksEngine, TestEngineBuilder, TxnStatus,
     };
 
     #[derive(Clone)]
@@ -1986,9 +1953,15 @@ mod tests {
                 ResourceTagFactory::new_for_test(),
                 Arc::new(QuotaLimiter::default()),
                 latest_feature_gate(),
+                new_read_pool_handle(engine.clone()),
             ),
             engine,
         )
+    }
+
+    fn new_read_pool_handle<E: Engine>(engine: E) -> ReadPoolHandle {
+        let read_pool_cfg = UnifiedReadPoolConfig::default();
+        build_tokio_pool(&read_pool_cfg, engine.clone()).handle()
     }
 
     #[test]
@@ -2132,6 +2105,7 @@ mod tests {
             enable_async_apply_prewrite: false,
             ..Default::default()
         };
+        let read_pool = new_read_pool_handle(engine.clone());
         let scheduler = Scheduler::new(
             engine,
             MockLockManager::new(),
@@ -2148,6 +2122,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
+            read_pool,
         );
 
         let mut lock = Lock::new(0, &[Key::from_raw(b"b")]);
@@ -2238,6 +2213,7 @@ mod tests {
             enable_async_apply_prewrite: false,
             ..Default::default()
         };
+        let read_pool = new_read_pool_handle(engine.clone());
         let scheduler = Scheduler::new(
             engine,
             MockLockManager::new(),
@@ -2254,14 +2230,19 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
+            read_pool,
         );
 
         // Spawn a task that sleeps for 500ms to occupy the pool. The next request
         // cannot run within 500ms.
         scheduler
-            .get_sched_pool(CommandPri::Normal)
-            .pool
-            .spawn(async { thread::sleep(Duration::from_millis(500)) })
+            .inner
+            .worker_pool
+            .spawn(
+                async { thread::sleep(Duration::from_millis(500)) },
+                CommandPri::Normal,
+                1,
+            )
             .unwrap();
 
         let mut req = BatchRollbackRequest::default();
@@ -2298,6 +2279,7 @@ mod tests {
             enable_async_apply_prewrite: false,
             ..Default::default()
         };
+        let read_pool = new_read_pool_handle(engine.clone());
         let scheduler = Scheduler::new(
             engine,
             MockLockManager::new(),
@@ -2314,6 +2296,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
+            read_pool,
         );
 
         let mut req = CheckTxnStatusRequest::default();
@@ -2366,6 +2349,7 @@ mod tests {
             enable_async_apply_prewrite: false,
             ..Default::default()
         };
+        let read_pool = new_read_pool_handle(engine.clone());
         let scheduler = Scheduler::new(
             engine,
             MockLockManager::new(),
@@ -2382,6 +2366,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
+            read_pool,
         );
 
         let mut lock = Lock::new(0, &[Key::from_raw(b"b")]);
@@ -2429,6 +2414,7 @@ mod tests {
         let feature_gate = FeatureGate::default();
         feature_gate.set_version("6.0.0").unwrap();
 
+        let read_pool = new_read_pool_handle(engine.clone());
         let scheduler = Scheduler::new(
             engine,
             MockLockManager::new(),
@@ -2445,6 +2431,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             feature_gate.clone(),
+            read_pool,
         );
         // Use sync mode if pipelined_pessimistic_lock is false.
         assert_eq!(scheduler.pessimistic_lock_mode(), PessimisticLockMode::Sync);
