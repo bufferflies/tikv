@@ -322,6 +322,10 @@ impl LoadDataManager {
     }
 
     pub fn try_recover_or_clean_tasks_by_checkpoint(&self) {
+        if !self.config.enable_checkpoint {
+            return;
+        }
+
         let mut checkpoint_dir = self.ctx.dir.clone();
         if checkpoint_dir.as_os_str().is_empty() {
             checkpoint_dir = PathBuf::from(".");
@@ -334,9 +338,6 @@ impl LoadDataManager {
             self.ended_tasks.clone(),
         );
 
-        if !self.config.enable_checkpoint {
-            return;
-        }
         // recover tasks from checkpoint files
         let files = fs::read_dir(checkpoint_dir).unwrap();
         let dir_entries: Vec<fs::DirEntry> = files.filter_map(|r| r.ok()).collect();
