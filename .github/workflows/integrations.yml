@@ -47,7 +47,7 @@ jobs:
       - name: Run integrations tests
         env:
           CARGO_INCREMENTAL: "0"
-#          LOG_FILE: ${{ runner.temp }}/run.log
+          LOG_FILE: ${{ runner.temp }}/run.log
           LOG_APPEND: "1"
         working-directory: ./
         run: |
