@@ -88,7 +88,8 @@ pub async fn remote_request(
             warn!("{} send remote coprocessor response failed", tag);
         }
     });
-    rx.await.unwrap()
+    rx.await
+        .map_err(|err| Error::Other(format!("receive response failed: {:?}", err)))?
 }
 
 pub async fn remote_handle_request(
