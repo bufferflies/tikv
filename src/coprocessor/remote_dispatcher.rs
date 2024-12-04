@@ -163,7 +163,7 @@ pub struct RemoteContextCore {
     pub remote_worker_url: String,
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
     pub cop_min_blocks_size: usize,
-    pub runtime: Arc<tokio::runtime::Runtime>,
+    pub runtime: tokio::runtime::Handle,
     pub remote_request_cache: moka::future::Cache<String, Result<Vec<u8>>>,
     pub client: security::HttpClient,
 }
@@ -191,18 +191,11 @@ impl RemoteContext {
         cop_worker_url: String,
         cop_min_blocks_size: usize,
         security_mgr: Arc<SecurityManager>,
+        runtime: tokio::runtime::Handle,
     ) -> Option<Self> {
         if remote_worker_url.is_empty() && cop_worker_url.is_empty() {
             return None;
         }
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .thread_name("remote_coprocessor")
-                .build()
-                .unwrap(),
-        );
         let client = security_mgr
             .http_client(hyper::Client::builder().pool_max_idle_per_host(0).clone())
             .unwrap();

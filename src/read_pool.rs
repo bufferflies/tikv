@@ -60,7 +60,7 @@ pub enum ReadPool {
         pool_size: usize,
     },
     Tokio {
-        runtime: Arc<tokio::runtime::Runtime>,
+        runtime: tokio::runtime::Runtime,
         running_tasks: IntGauge,
         max_tasks: usize,
         pool_size: usize,
@@ -98,11 +98,17 @@ impl ReadPool {
                 max_tasks,
                 pool_size,
             } => ReadPoolHandle::Tokio {
-                runtime: runtime.clone(),
+                runtime: runtime.handle().clone(),
                 running_tasks: running_tasks.clone(),
                 max_tasks: *max_tasks,
                 pool_size: *pool_size,
             },
+        }
+    }
+
+    pub fn shutdown(self) {
+        if let ReadPool::Tokio { runtime, .. } = self {
+            runtime.shutdown_background();
         }
     }
 }
@@ -122,7 +128,7 @@ pub enum ReadPoolHandle {
         pool_size: usize,
     },
     Tokio {
-        runtime: Arc<tokio::runtime::Runtime>,
+        runtime: tokio::runtime::Handle,
         running_tasks: IntGauge,
         max_tasks: usize,
         pool_size: usize,
@@ -393,7 +399,7 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
         .build()
         .unwrap();
     ReadPool::Tokio {
-        runtime: Arc::new(runtime),
+        runtime,
         running_tasks: UNIFIED_READ_POOL_RUNNING_TASKS
             .with_label_values(&[&unified_read_pool_name]),
         max_tasks: config

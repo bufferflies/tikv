@@ -95,6 +95,8 @@ pub struct Endpoint<E: Engine> {
 
     remote_ctx: Option<RemoteContext>,
 
+    remote_pool: Option<Arc<tokio::runtime::Runtime>>,
+
     pub overload_protector: Option<OverloadProtector>,
 
     security_mgr: Arc<SecurityManager>,
@@ -137,6 +139,7 @@ impl<E: Engine> Endpoint<E> {
             _phantom: Default::default(),
             quota_limiter,
             remote_ctx: None,
+            remote_pool: None,
             overload_protector,
             security_mgr,
         }
@@ -148,12 +151,22 @@ impl<E: Engine> Endpoint<E> {
         remote_cop_url: String,
         remote_cop_min_blocks_size: usize,
     ) {
+        let pool = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .thread_name("remote_coprocessor")
+                .build()
+                .unwrap(),
+        );
         self.remote_ctx = RemoteContext::new(
             remote_worker_url,
             remote_cop_url,
             remote_cop_min_blocks_size,
             self.security_mgr.clone(),
+            pool.handle().clone(),
         );
+        self.remote_pool = Some(pool);
     }
 
     fn check_memory_locks(

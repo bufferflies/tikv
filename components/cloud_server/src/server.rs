@@ -30,6 +30,7 @@ use thiserror::Error;
 use tikv::{
     coprocessor::Endpoint,
     coprocessor_v2,
+    read_pool::ReadPool,
     server::{
         load_statistics::*,
         metrics::{MEMORY_USAGE_GAUGE, SERVER_INFO_GAUGE_VEC},
@@ -141,6 +142,7 @@ pub struct Server<T: RaftStoreRouter + 'static, S: StoreAddrResolver + 'static> 
     // Currently load statistics is done in the thread.
     stats_pool: Option<Runtime>,
     grpc_thread_load: Arc<ThreadLoadPool>,
+    read_pool: Option<ReadPool>,
     debug_thread_pool: Arc<Runtime>,
     health_service: HealthService,
     timer: Handle,
@@ -158,6 +160,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         raft_router: T,
         resolver: S,
         env: Arc<Environment>,
+        read_pool: ReadPool,
         debug_thread_pool: Arc<Runtime>,
     ) -> Result<Self> {
         // A helper thread (or pool) for transport layer.
@@ -235,6 +238,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             _raft_router: raft_router,
             stats_pool,
             grpc_thread_load,
+            read_pool: Some(read_pool),
             debug_thread_pool,
             health_service,
             timer: GLOBAL_TIMER_HANDLE.clone(),
@@ -346,6 +350,9 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         }
         if let Some(pool) = self.stats_pool.take() {
             pool.shutdown_background();
+        }
+        if let Some(read_pool) = self.read_pool.take() {
+            read_pool.shutdown();
         }
         self.health_service
             .set_serving_status("", ServingStatus::NotServing);

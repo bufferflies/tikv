@@ -730,6 +730,7 @@ impl TikvServer {
             self.router.clone(),
             self.resolver.clone(),
             self.env.clone(),
+            unified_read_pool,
             debug_thread_pool,
         )
         .unwrap_or_else(|e| fatal!("failed to create server: {}", e));
