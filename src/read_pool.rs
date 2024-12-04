@@ -364,6 +364,7 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
     let unified_read_pool_name = get_unified_read_pool_name();
     let ticker = yatp_pool::TickerWrapper::new(ReporterTicker { reporter });
     let raftkv = Arc::new(Mutex::new(engine));
+    let props = tikv_util::thread_group::current_properties();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name_fn(|| {
             static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
@@ -375,10 +376,15 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
             let engine = raftkv.lock().unwrap().clone();
             set_tls_engine(engine);
             set_reporter_ticker(ticker.clone());
+            tikv_alloc::add_thread_memory_accessor();
+            tikv_util::thread_group::set_properties(props.clone());
         })
-        .before_stop_wrapper(|| unsafe {
-            destroy_tls_engine::<E>();
-            destroy_reporter_ticker::<R>();
+        .before_stop_wrapper(|| {
+            unsafe {
+                destroy_tls_engine::<E>();
+                destroy_reporter_ticker::<R>();
+            }
+            tikv_alloc::remove_thread_memory_accessor();
         })
         .on_thread_park(move || unsafe {
             try_tick_reporter_ticker::<R>();
