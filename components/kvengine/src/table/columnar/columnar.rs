@@ -436,8 +436,7 @@ impl ColumnarFile {
 
         let table_offsets_size = TableOffsets::compute_size(footer.number_tables as usize) as u64;
         let table_offsets_offset = footer_offset - table_offsets_size;
-        let mut buf = vec![0; table_offsets_size as usize];
-        file.read_at(&mut buf, table_offsets_offset)?;
+        let buf = file.read_table_meta(table_offsets_offset, table_offsets_size as usize)?;
         let table_offsets = TableOffsets::parse(&buf, footer.number_tables);
         let mut smallest_key = vec![];
         let mut biggest_key = vec![];
@@ -445,9 +444,9 @@ impl ColumnarFile {
         let mut l0_version = None;
         let mut encryption_ver = 0;
         let property_offset = table_offsets_offset - footer.properties_size as u64;
-        let mut property_buf = vec![0; footer.properties_size as usize];
-        file.read_at(&mut property_buf, property_offset)?;
-        let mut prop_remain = property_buf.as_slice();
+        let property_buf =
+            file.read_table_meta(property_offset, footer.properties_size as usize)?;
+        let mut prop_remain = property_buf.as_ref();
         while !prop_remain.is_empty() {
             let (key, mut val, remain) = parse_prop_data(prop_remain);
             if key == PROP_KEY_SMALLEST.as_bytes() {
@@ -467,8 +466,10 @@ impl ColumnarFile {
         let index_offset = table_offsets.index_offset();
         for i in 0..footer.number_tables as usize {
             let (idx_start, idx_end) = table_offsets.get_index_range(i);
-            let mut table_index_buf = vec![0; (idx_end - idx_start) as usize];
-            file.read_at(&mut table_index_buf, (index_offset + idx_start) as u64)?;
+            let table_index_buf = file.read_table_meta(
+                (index_offset + idx_start) as u64,
+                (idx_end - idx_start) as usize,
+            )?;
             let table_meta = TableMeta::parse(table_offsets.table_ids[i], &table_index_buf);
             tables.insert(table_offsets.table_ids[i], Arc::new(table_meta));
         }

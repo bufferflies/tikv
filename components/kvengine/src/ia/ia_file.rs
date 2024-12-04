@@ -19,6 +19,7 @@ use crate::{
     },
     new_columnar_filename, new_sst_filename,
     table::{
+        columnar::{ColumnarFileFooter, TableMeta, TableOffsets},
         file::{File, MmapData},
         search, sstable,
         sstable::SsTable,
@@ -58,9 +59,9 @@ impl IaFile {
         table_meta_file: Arc<dyn File>,
         mgr: IaManager,
     ) -> Result<Self> {
-        // TODO: support columnar.
         match ftype {
             FileType::Sst => Self::open_for_sst(id, ftype, table_meta_file, mgr),
+            FileType::Columnar => Self::open_for_columnar(id, table_meta_file, mgr),
             _ => Err(Error::IaMgr(format!(
                 "{id} open: file type not supported: {ftype:?}"
             ))),
@@ -135,6 +136,49 @@ impl IaFile {
         }
 
         debug!("{} open for sst: {:?}", id, f);
+        Ok(f)
+    }
+
+    fn open_for_columnar(id: u64, table_meta_file: Arc<dyn File>, mgr: IaManager) -> Result<Self> {
+        let footer_data = table_meta_file.read_footer(ColumnarFileFooter::compute_size())?;
+        let footer = ColumnarFileFooter::parse(&footer_data);
+        let meta_size = table_meta_file.size();
+        let table_offsets_size = TableOffsets::compute_size(footer.number_tables as usize) as u64;
+        let table_offsets_offset =
+            meta_size - ColumnarFileFooter::compute_size() as u64 - table_offsets_size;
+        let table_offsets_data =
+            table_meta_file.read_table_meta(table_offsets_offset, table_offsets_size as usize)?;
+        let table_offsets = TableOffsets::parse(&table_offsets_data, footer.number_tables);
+        let table_meta_off = table_offsets.index_offset() as u64;
+        let segment_size = mgr.segment_size();
+        let mut f = Self {
+            id,
+            size: table_meta_off + meta_size,
+            ftype: FileType::Columnar,
+            table_meta_off,
+            segment_offsets: vec![],
+            table_meta_file: table_meta_file.clone(),
+            mgr,
+        };
+
+        // Generate segment offsets.
+        {
+            let mut builder = SegmentOffsetsBuilder::new(segment_size as u64);
+            for i in 0..footer.number_tables {
+                let (idx_start, idx_end) = table_offsets.get_index_range(i as usize);
+                let table_index_data = f.read_table_meta(
+                    table_meta_off + idx_start as u64,
+                    (idx_end - idx_start) as usize,
+                )?;
+                let table_meta =
+                    TableMeta::parse(table_offsets.table_ids[i as usize], &table_index_data);
+                builder.push_from_columnar_table_meta(&table_meta);
+                builder.push_boundary(table_meta_off);
+            }
+            f.segment_offsets = builder.finish();
+        }
+
+        debug!("{} ia open for columnar: {:?}", id, f);
         Ok(f)
     }
 
@@ -293,6 +337,27 @@ impl SegmentOffsetsBuilder {
         for pos in 0..idx.num_blocks() {
             let addr = idx.get_block_addr(pos);
             self.push_block_off(addr.curr_off as u64);
+        }
+    }
+
+    fn push_from_columnar_table_meta(&mut self, meta: &TableMeta) {
+        // Since the workload likely to read the whole column, we split the segment by
+        // the column boundary.
+        // handle column
+        let (pack_start, _) = meta.handle_column.pack_offsets.get(0);
+        self.push_block_off(pack_start as u64);
+        // version column
+        let (pack_start, _) = meta.version_column.pack_offsets.get(0);
+        self.push_block_off(pack_start as u64);
+        // columns
+        let mut unordered_offsets = vec![];
+        for col in meta.columns.values() {
+            let (pack_start, _) = col.pack_offsets.get(0);
+            unordered_offsets.push(pack_start as u64);
+        }
+        unordered_offsets.sort();
+        for off in unordered_offsets {
+            self.push_block_off(off);
         }
     }
 

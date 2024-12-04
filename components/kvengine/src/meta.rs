@@ -1280,7 +1280,7 @@ impl FileMeta {
     pub fn can_use_ia(&self) -> bool {
         match self.file_type {
             FileType::Sst if (self.cf as usize == WRITE_CF && self.level > 0) => true,
-            FileType::Columnar => false, // TODO: support columnar.
+            FileType::Columnar => true,
             _ => false,
         }
     }

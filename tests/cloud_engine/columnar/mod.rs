@@ -16,7 +16,11 @@ use hyper::Body;
 use kvengine::{
     context::{IaCtx, SnapCtx},
     dfs,
-    dfs::FileType,
+    dfs::{FileType, S3Fs},
+    ia::{
+        manager::IaManager,
+        util::{IaCapacity, IaManagerOptionsBuilder},
+    },
     table::{
         columnar,
         columnar::{
@@ -30,6 +34,7 @@ use kvengine::{
 use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
 use protobuf::Message;
+use rand::Rng;
 use test_cloud_server::{
     client::{CommitAction, MutateOptions},
     must_wait,
@@ -595,6 +600,162 @@ fn test_region_merge_with_columnar() {
         let str_val = gen_str_val(i);
         assert_eq!(columns[1].get_not_null_value(i), &str_val);
     }
+}
+
+#[test]
+fn test_columnar_ia_file() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    // prepare dfs
+    let (temp_dir, mut oss, dfs_config) = prepare_dfs("test_columnar_ia_file");
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.enable_inner_key_offset = true;
+        conf.kvengine
+            .columnar_table_build_options
+            .max_columnar_table_size = 1024;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 9;
+        conf.dfs = dfs_config.clone();
+    });
+    let dfs = cluster.get_dfs().unwrap();
+    let runtime = dfs.get_runtime();
+    let keyspace_id = 7;
+    let table_ids = dfs
+        .get_runtime()
+        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+    let table_id = table_ids[1];
+    let schemas = build_schemas(vec![table_id]);
+    let schema = schemas[0].clone();
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
+    let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    runtime
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    let status_addr = cluster.status_addr(node_id);
+    runtime.block_on(send_schema_file_request(
+        &status_addr,
+        keyspace_id,
+        schema_file_id,
+    ));
+    let kvengine = cluster.get_kvengine(node_id);
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if shard.get_schema_file().is_some() {
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build schema file".to_string(),
+    );
+    let master_key = kvengine.get_master_key();
+    let mut client = cluster.new_client();
+    let eval_ctx = Mutex::new(EvalContext::default());
+    let rows_count = 2000 + rand::thread_rng().gen::<usize>() % 3000;
+    client.put_kv(
+        0..rows_count,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&eval_ctx, i),
+    );
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    let snap_version = shard.get_snap_version();
+                    let columnar_snap_version = shard.get_columnar_snap_version();
+                    if snap_version == columnar_snap_version {
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build columnar file".to_string(),
+    );
+
+    let pd_client = cluster.get_pd_client();
+    let shard = pd_client
+        .get_region(&encode_bytes(&gen_row_key(keyspace_id, table_id, 0)))
+        .unwrap();
+
+    let store_id = kvengine.get_engine_id();
+    let store = pd_client.get_store(store_id).unwrap();
+    let start_ts = client.get_ts().into_inner();
+
+    let snapshot_from_remote = dfs.get_runtime().block_on(request_dump_snapshot_on_store(
+        &store,
+        shard.id,
+        shard.region_epoch.as_ref().unwrap().version,
+        start_ts,
+    ));
+    let mut delegate_resp = DelegateResponse::default();
+    delegate_resp
+        .merge_from_bytes(&snapshot_from_remote)
+        .unwrap();
+    let schema_files = Arc::new(DashMap::new());
+    let local_path = temp_dir.path().join("ia");
+    let ia_cap = IaCapacity::MemoryAndDiskCap(0, local_path.clone(), 1000);
+    let options = IaManagerOptionsBuilder::default()
+        .capacity(ia_cap)
+        .segment_size(64)
+        .build()
+        .unwrap();
+    let s3fs = S3Fs::new_from_config(dfs_config);
+    let ia_mgr = runtime
+        .block_on(IaManager::new(
+            options,
+            s3fs.clone(),
+            runtime.handle().clone(),
+        ))
+        .unwrap();
+    let ia_ctx = IaCtx::Enabled(ia_mgr, Arc::new(local_path));
+    let snap_ctx = SnapCtx {
+        dfs: dfs.clone(),
+        master_key,
+        block_cache: BlockCache::None,
+        schema_files: Some(schema_files.clone()),
+        txn_chunk_manager: kvengine.get_txn_chunk_manager(),
+        ia_ctx,
+    };
+    let snap_access = runtime
+        .block_on(SnapAccess::construct_snapshot(
+            "test".to_owned(),
+            &snap_ctx,
+            delegate_resp.get_mem_table_data(),
+            delegate_resp.get_snapshot(),
+        ))
+        .unwrap();
+    assert!(snap_access.has_schema_file());
+    assert!(schema_files.contains_key(&schema_file_id));
+    let ts = client.get_ts().into_inner();
+    let mut columnar_reader = snap_access
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, ts)
+        .unwrap();
+    block_on(columnar_reader.set_unbounded_handle_range()).unwrap();
+    let mut block = columnar::Block::new(&schema);
+    let read_rows = block_on(columnar_reader.read_block(&mut block, 5000)).unwrap();
+    assert_eq!(read_rows, rows_count);
+    for i in 0..read_rows {
+        let handle = block.get_handle_buf().get_int_handle_value(i);
+        assert_eq!(handle, i as i64);
+        let columns = block.get_columns();
+        assert_eq!(columns[0].get_not_null_value(i).get_i64_le(), i as i64);
+        let str_val = gen_str_val(i);
+        assert_eq!(columns[1].get_not_null_value(i), &str_val);
+    }
+
+    cluster.stop();
+    oss.shutdown();
 }
 
 fn gen_row_key(keyspace_id: u32, table_id: i64, i: usize) -> Vec<u8> {

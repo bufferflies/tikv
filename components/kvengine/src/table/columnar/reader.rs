@@ -342,7 +342,14 @@ impl PackLoader {
         let length = (pack_end_offset - pack_offset) as usize;
         if let Some(encryption_key) = &self.encryption_key {
             decryption_buf.resize(length, 0);
-            self.file.read_at(decryption_buf, pack_offset as u64)?;
+            if self.file.is_sync() {
+                // InMemFile should always be sync.
+                self.file.read_at(decryption_buf, pack_offset as u64)?;
+            } else {
+                self.file
+                    .read_at_async(decryption_buf, pack_offset as u64)
+                    .await?;
+            }
             self.compressed_buf.clear();
             encryption_key.decrypt(
                 decryption_buf,
@@ -353,8 +360,15 @@ impl PackLoader {
             );
         } else {
             self.compressed_buf.resize(length, 0);
-            self.file
-                .read_at(&mut self.compressed_buf, pack_offset as u64)?;
+            if self.file.is_sync() {
+                // InMemFile should always be sync.
+                self.file
+                    .read_at(&mut self.compressed_buf, pack_offset as u64)?;
+            } else {
+                self.file
+                    .read_at_async(&mut self.compressed_buf, pack_offset as u64)
+                    .await?;
+            }
         }
         decompress_pack(&self.compressed_buf, &mut self.uncompressed_buf);
         col_buf.parse(&self.uncompressed_buf);
