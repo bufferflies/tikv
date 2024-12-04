@@ -739,6 +739,10 @@ impl SnapAccessCore {
         self.data.range.inner_key_off
     }
 
+    pub fn prepend_keyspace_id(&self) -> Option<u32> {
+        self.data.prepend_keyspace_id()
+    }
+
     pub fn get_tag(&self) -> ShardTag {
         self.tag
     }

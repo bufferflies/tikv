@@ -92,8 +92,9 @@ impl TxnFileCommand {
         txn_file_ref.set_shard_ver(req.get_ctx().get_region_epoch().get_version());
         txn_file_ref.set_start_ts(req.start_ts.into_inner());
         txn_file_ref.set_chunk_ids(req.txn_file_chunks.clone());
-        txn_file_ref.set_inner_lower_bound(snap.get_inner_start().to_vec());
-        txn_file_ref.set_inner_upper_bound(snap.get_inner_end().to_vec());
+        // Prepend keyspace to generate TxnFileRef the same as txn chunk files.
+        txn_file_ref.set_inner_lower_bound(Self::prepend_keyspace(snap.get_inner_start(), snap));
+        txn_file_ref.set_inner_upper_bound(Self::prepend_keyspace(snap.get_inner_end(), snap));
         txn_file_ref
     }
 
@@ -211,11 +212,24 @@ impl TxnFileCommand {
     ) {
         if let Some(txn_file) = snap.get_lock_txn_file(start_ts) {
             txn_file_ref.set_chunk_ids(txn_file.chunk_ids());
-            txn_file_ref.set_inner_lower_bound(txn_file.lower_bound().to_vec());
-            txn_file_ref.set_inner_upper_bound(txn_file.upper_bound().to_vec());
+            txn_file_ref
+                .set_inner_lower_bound(Self::prepend_keyspace(txn_file.lower_bound(), snap));
+            txn_file_ref
+                .set_inner_upper_bound(Self::prepend_keyspace(txn_file.upper_bound(), snap));
         } else {
-            txn_file_ref.set_inner_lower_bound(snap.get_inner_start().to_vec());
-            txn_file_ref.set_inner_upper_bound(snap.get_inner_end().to_vec());
+            txn_file_ref
+                .set_inner_lower_bound(Self::prepend_keyspace(snap.get_inner_start(), snap));
+            txn_file_ref.set_inner_upper_bound(Self::prepend_keyspace(snap.get_inner_end(), snap));
+        }
+    }
+
+    fn prepend_keyspace(key: InnerKey<'_>, snap: &SnapAccess) -> Vec<u8> {
+        if let Some(keyspace_id) = snap.prepend_keyspace_id() {
+            let mut buf = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+            buf.extend_from_slice(key.deref());
+            buf
+        } else {
+            key.to_vec()
         }
     }
 

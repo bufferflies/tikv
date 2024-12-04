@@ -671,6 +671,14 @@ impl OwnedInnerKey {
     }
 }
 
+impl From<InnerKey<'_>> for OwnedInnerKey {
+    fn from(key: InnerKey<'_>) -> Self {
+        OwnedInnerKey {
+            inner: bytes::Bytes::copy_from_slice(key.deref()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DataBound<'a> {
     pub lower_bound: InnerKey<'a>,

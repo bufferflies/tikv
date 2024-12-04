@@ -16,7 +16,8 @@ use crate::{
         file::{File, TtlCache},
         search,
         sstable::{key_diff_idx, BlockCache, BlockCacheKey, EntrySlice},
-        BoundedDataSet, ChecksumType, DataBound, Error, InnerKey, Iterator, Result, Value,
+        BoundedDataSet, ChecksumType, DataBound, Error, InnerKey, Iterator, OwnedInnerKey, Result,
+        Value,
     },
     UserMeta, USER_META_SIZE,
 };
@@ -60,8 +61,8 @@ pub struct TxnCtx {
     lock_val_prefix: Bytes,
     // The version of data, i.e. data_sequence for lock CF, commit_ts for write CF.
     version: u64,
-    lower_bound_buf: Bytes,
-    upper_bound_buf: Bytes,
+    lower_bound: OwnedInnerKey,
+    upper_bound: OwnedInnerKey,
 }
 
 impl fmt::Debug for TxnCtx {
@@ -80,6 +81,7 @@ impl fmt::Debug for TxnCtx {
 }
 
 impl TxnCtx {
+    #[cfg(any(test, feature = "testexport"))]
     pub fn new(
         user_meta: Bytes,
         lock_val_prefix: Bytes,
@@ -91,8 +93,8 @@ impl TxnCtx {
             user_meta,
             lock_val_prefix,
             version,
-            lower_bound_buf: Bytes::copy_from_slice(lower_bound.deref()),
-            upper_bound_buf: Bytes::copy_from_slice(upper_bound.deref()),
+            lower_bound: lower_bound.into(),
+            upper_bound: upper_bound.into(),
         }
     }
 
@@ -107,17 +109,19 @@ impl TxnCtx {
             user_meta: txn_file_ref.user_meta.clone().into(),
             lock_val_prefix: txn_file_ref.lock_val_prefix.clone().into(),
             version,
-            lower_bound_buf: txn_file_ref.inner_lower_bound.clone().into(),
-            upper_bound_buf: txn_file_ref.inner_upper_bound.clone().into(),
+            lower_bound: OwnedInnerKey::new(Bytes::from(txn_file_ref.inner_lower_bound.clone())),
+            upper_bound: OwnedInnerKey::new(Bytes::from(txn_file_ref.inner_upper_bound.clone())),
         }
     }
 
+    // Keyspace ID is not prepend here, as the generated `TxnFileRef` is only used
+    // by remote coprocessor, which can handle the inner key correctly.
     pub fn to_txn_file_ref(&self, txn_file_ref: &mut kvenginepb::TxnFileRef) {
         txn_file_ref.set_user_meta(self.user_meta.to_vec());
         txn_file_ref.set_lock_val_prefix(self.lock_val_prefix.to_vec());
         txn_file_ref.set_version(self.version);
-        txn_file_ref.set_inner_lower_bound(self.lower_bound_buf.to_vec());
-        txn_file_ref.set_inner_upper_bound(self.upper_bound_buf.to_vec());
+        txn_file_ref.set_inner_lower_bound(self.lower_bound.to_vec());
+        txn_file_ref.set_inner_upper_bound(self.upper_bound.to_vec());
     }
 
     pub fn is_lock(&self) -> bool {
@@ -125,11 +129,11 @@ impl TxnCtx {
     }
 
     pub fn lower_bound(&self) -> InnerKey<'_> {
-        InnerKey::from_inner_buf(&self.lower_bound_buf)
+        self.lower_bound.as_ref()
     }
 
     pub fn upper_bound(&self) -> InnerKey<'_> {
-        InnerKey::from_inner_buf(&self.upper_bound_buf)
+        self.upper_bound.as_ref()
     }
 
     pub fn set_lock_val_prefix(&mut self, lock_val_prefix: Bytes) {
