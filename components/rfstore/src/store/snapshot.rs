@@ -46,6 +46,11 @@ impl RegionSnapshot {
     pub fn get_end_key(&self) -> &[u8] {
         self.snap.get_end_key()
     }
+
+    #[inline]
+    pub fn is_sync(&self) -> bool {
+        self.snap.is_sync()
+    }
 }
 
 impl Clone for RegionSnapshot {

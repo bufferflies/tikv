@@ -3,6 +3,7 @@
 mod test_blob_store;
 mod test_remote_coprocessor;
 mod test_stats;
+mod test_store;
 
 use std::{thread, time::Duration};
 

@@ -3,6 +3,7 @@
 use std::{fmt::Debug, marker::PhantomData, time::Duration};
 
 use api_version::{api_v2::KeyspaceId, KvFormat};
+use paste::paste;
 use tikv_util::time::Instant;
 use yatp::task::future::reschedule;
 
@@ -134,6 +135,52 @@ impl Debug for IndexedKvPair {
     }
 }
 
+/// These macros helps to use existed sync codes when IA is not enabled.
+///
+/// TODO: remove the macros and always use async methods.
+///
+/// `try_sync(storage, get, (key))` will generate:
+///
+/// ```text
+/// if storage.is_sync() {
+///     storage.get(key)
+/// } else {
+///     storage.get_async(key).await
+/// }
+/// ```
+macro_rules! try_sync {
+    ($expr:expr, $fn:ident) => {{
+        if $expr.is_sync() {
+            $expr.$fn()
+        } else {
+            paste! {$expr.[<$fn _async>]().await }
+        }
+    }};
+    ($expr:expr, $fn:ident, ($($args:expr),*)) => {{
+        if $expr.is_sync() {
+            $expr.$fn($($args),*)
+        } else {
+            paste! {$expr.[<$fn _async>]($($args),*).await }
+        }
+    }};
+}
+
+macro_rules! begin_scan {
+    ($expr:expr, ($($args:expr),*)) => {{
+        try_sync!($expr, begin_scan, ($($args),*))
+    }};
+}
+
+macro_rules! scan_next {
+    ($expr:expr) => {{ try_sync!($expr, scan_next) }};
+}
+
+macro_rules! get {
+    ($expr:expr, ($($args:expr),*)) => {{
+        try_sync!($expr, get, ($($args),*))
+    }};
+}
+
 impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
     pub fn new(
         RangesScannerOptions {
@@ -188,20 +235,22 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
                     }
                     self.ranges_iter.notify_drained();
                     self.scanned_rows_per_range.push(0);
-                    self.storage.get(self.is_key_only, r)?
+                    get!(self.storage, (self.is_key_only, r))?
                 }
                 IterStatus::NewRange(Range::Interval(r)) => {
                     if self.is_scanned_range_aware {
                         self.update_scanned_range_from_new_range(&r);
                     }
                     self.scanned_rows_per_range.push(0);
-                    self.storage
-                        .begin_scan(self.scan_backward_in_range, self.is_key_only, r)?;
-                    self.storage.scan_next()?
+                    begin_scan!(
+                        self.storage,
+                        (self.scan_backward_in_range, self.is_key_only, r)
+                    )?;
+                    scan_next!(self.storage)?
                 }
                 IterStatus::Continue => {
                     force_check = false;
-                    self.storage.scan_next()?
+                    scan_next!(self.storage)?
                 }
                 IterStatus::Drained => {
                     if self.is_scanned_range_aware {

@@ -27,17 +27,20 @@ pub struct CloudStore<S: Snapshot> {
 const WRITE_CF: usize = 0;
 const LOCK_CF: usize = 1;
 
+#[maybe_async::async_trait]
 impl<S: Snapshot> super::Store for CloudStore<S> {
     type Scanner = CloudStoreScanner;
 
-    fn get(&self, user_key: &Key, statistics: &mut Statistics) -> Result<Option<Value>> {
+    #[maybe_async]
+    async fn get(&self, user_key: &Key, statistics: &mut Statistics) -> Result<Option<Value>> {
         let item = Self::get_inner(
             user_key,
             &self.snapshot,
             self.start_ts,
             &self.bypass_locks,
             statistics,
-        )?;
+        )
+        .await?;
         if item.value_len() > 0 {
             Ok(Some(item.get_value().to_vec()))
         } else {
@@ -45,7 +48,8 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
         }
     }
 
-    fn incremental_get(&mut self, user_key: &Key) -> Result<Option<Value>> {
+    #[maybe_async]
+    async fn incremental_get(&mut self, user_key: &Key) -> Result<Option<Value>> {
         let stat = &mut self.stats;
         let item = Self::get_inner(
             user_key,
@@ -53,7 +57,8 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             self.start_ts,
             &self.bypass_locks,
             stat,
-        )?;
+        )
+        .await?;
         if item.value_len() > 0 {
             Ok(Some(item.get_value().to_vec()))
         } else {
@@ -69,7 +74,8 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
         NewerTsCheckState::Unknown
     }
 
-    fn batch_get(
+    #[maybe_async]
+    async fn batch_get(
         &self,
         keys: &[Key],
         statistics: &mut Vec<Statistics>,
@@ -77,15 +83,16 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
         let mut res_vec = Vec::with_capacity(keys.len());
         for key in keys {
             let mut stats = Statistics::default();
-            let res = self.get(key, &mut stats);
+            let res = self.get(key, &mut stats).await;
             res_vec.push(res);
             statistics.push(stats);
         }
         Ok(res_vec)
     }
 
-    fn scanner(
-        &self,
+    #[maybe_async]
+    async fn scanner(
+        &mut self,
         desc: bool,
         _key_only: bool,
         _check_has_newer_ts_data: bool,
@@ -93,10 +100,15 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
         upper_bound: Option<Key>,
     ) -> Result<Self::Scanner> {
         self.scanner_inner(desc, lower_bound, upper_bound, false)
+            .await
     }
 
     fn get_kvengine_snap(&self) -> Option<kvengine::SnapAccess> {
         Some(self.snapshot.clone())
+    }
+
+    fn is_sync(&self) -> bool {
+        self.snapshot.is_sync()
     }
 
     fn get_read_ts(&self) -> u64 {
@@ -116,7 +128,8 @@ impl<S: Snapshot> CloudStore<S> {
         }
     }
 
-    fn get_inner<'a>(
+    #[maybe_async::both]
+    async fn get_inner<'a>(
         user_key: &Key,
         snap: &'a kvengine::SnapAccess,
         start_ts: u64,
@@ -152,7 +165,7 @@ impl<S: Snapshot> CloudStore<S> {
             );
             return Ok(Item::default());
         }
-        let item = snap.get(WRITE_CF, &raw_key, start_ts);
+        let item = snap.get(WRITE_CF, &raw_key, start_ts).await;
         statistics.write.get += 1;
         statistics.write.flow_stats.read_keys += 1;
         statistics.write.flow_stats.read_bytes += user_key.len() + item.value_len();
@@ -181,7 +194,8 @@ impl<S: Snapshot> CloudStore<S> {
             .new_memtable_iterator(WRITE_CF, false, false, Some(self.start_ts))
     }
 
-    fn scanner_inner(
+    #[maybe_async::both]
+    async fn scanner_inner(
         &self,
         desc: bool,
         lower_bound: Option<Key>,
@@ -199,6 +213,7 @@ impl<S: Snapshot> CloudStore<S> {
             upper_bound,
             output_delete,
         )
+        .await
     }
 }
 
@@ -288,8 +303,8 @@ pub struct CloudStoreScanner {
 }
 
 impl CloudStoreScanner {
-    // TODO: support async.
-    pub fn new(
+    #[maybe_async::both]
+    pub async fn new(
         snap: SnapAccess,
         desc: bool,
         fill_cache: bool,
@@ -301,7 +316,9 @@ impl CloudStoreScanner {
     ) -> Result<Self> {
         let stats = Statistics::default();
         let lock_iter = snap.new_iterator(LOCK_CF, desc, false, None, fill_cache);
-        let iter = snap.new_iterator(WRITE_CF, desc, false, Some(start_ts), fill_cache);
+        let iter = snap
+            .new_iterator(WRITE_CF, desc, false, Some(start_ts), fill_cache)
+            .await;
         let (lower_bound, upper_bound) = verify_range(&snap, lower_bound, upper_bound)?;
         Ok(Self {
             snap,
@@ -316,7 +333,9 @@ impl CloudStoreScanner {
             output_delete,
         })
     }
-    fn init(&mut self) -> Result<()> {
+
+    #[maybe_async::both]
+    async fn init(&mut self) -> Result<()> {
         if self
             .lock_iter
             .set_range(self.lower_bound.clone(), self.upper_bound.clone())
@@ -332,17 +351,19 @@ impl CloudStoreScanner {
         if self
             .iter
             .set_range(self.lower_bound.clone(), self.upper_bound.clone())
+            .await
         {
             self.stats.write.seek += 1;
         }
         Ok(())
     }
 
-    fn next_inner(&mut self) -> Result<Option<(Key, UserMeta, Value)>> {
+    #[maybe_async::both]
+    async fn next_inner(&mut self) -> Result<Option<(Key, UserMeta, Value)>> {
         if self.is_started {
-            self.iter.next();
+            self.iter.next().await;
         } else {
-            self.init()?;
+            self.init().await?;
             self.is_started = true;
         }
         loop {
@@ -364,7 +385,7 @@ impl CloudStoreScanner {
             }
             self.stats.write.next_tombstone += 1;
             // Skip delete record.
-            self.iter.next();
+            self.iter.next().await;
             continue;
         }
     }
@@ -374,9 +395,14 @@ impl CloudStoreScanner {
     }
 }
 
+#[maybe_async::async_trait]
 impl super::Scanner for CloudStoreScanner {
-    fn next(&mut self) -> Result<Option<(Key, Value)>> {
-        Ok(self.next_inner()?.map(|(key, _user_meta, val)| (key, val)))
+    #[maybe_async]
+    async fn next(&mut self) -> Result<Option<(Key, Value)>> {
+        Ok(self
+            .next_inner()
+            .await?
+            .map(|(key, _user_meta, val)| (key, val)))
     }
 
     fn met_newer_ts_data(&self) -> NewerTsCheckState {

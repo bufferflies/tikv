@@ -236,9 +236,10 @@ impl LocalStore for LocalMemoryStore {
     }
 }
 
-const FILE_SEGMENT_SIZE_DEF: i64 = 1 << 20; // 1MiB
+pub const IA_SEGMENT_SIZE_DEF: i64 = 1 << 20; // 1MiB
+pub const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(60);
+
 const MAIN_QUEUE_CAPACITY_FACTOR: i64 = 10; // Main queue is 10x larger than small queue.
-const FREQ_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 
 pub enum IaCapacity {
     Manual {
@@ -352,8 +353,10 @@ impl IaManagerOptionsBuilder {
         let cap = self.capacity.take().unwrap_or_default();
         cap.build_options(&mut options)?;
 
-        options.segment_size = self.segment_size.unwrap_or(FILE_SEGMENT_SIZE_DEF);
-        options.freq_update_interval = self.freq_update_interval.unwrap_or(FREQ_UPDATE_INTERVAL);
+        options.segment_size = self.segment_size.unwrap_or(IA_SEGMENT_SIZE_DEF);
+        options.freq_update_interval = self
+            .freq_update_interval
+            .unwrap_or(IA_FREQ_UPDATE_INTERVAL_DEF);
 
         Ok(options)
     }

@@ -18,3 +18,4 @@ pub mod manager;
 mod queue;
 pub mod types;
 pub mod util;
+pub use util::{IA_FREQ_UPDATE_INTERVAL_DEF, IA_SEGMENT_SIZE_DEF};

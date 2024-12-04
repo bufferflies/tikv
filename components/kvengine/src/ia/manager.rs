@@ -29,8 +29,6 @@ use crate::{
     try_some,
 };
 
-pub const SEGMENTS_SUB_DIR: &str = "segment";
-
 pub(crate) struct ReadAt<'a> {
     buf: &'a mut [u8],
     offset: u64,
@@ -112,12 +110,8 @@ impl IaManager {
             "small queue must be in memory"
         );
 
-        let main_store = new_local_store(
-            opts.main_queue
-                .path
-                .as_ref()
-                .map(|x| x.join(SEGMENTS_SUB_DIR)),
-        );
+        info!("create IA manager"; "opts" => ?opts);
+        let main_store = new_local_store(opts.main_queue.path);
         let segments = Arc::new(LocalSegmentMap::default());
         let segment_data_ctx = SegmentDataContext {
             segments: segments.clone(),

@@ -290,6 +290,7 @@ pub struct SnapAccessCore {
     blob_table_prefetch_size: usize,
     deleting_prefixes: Arc<DeletePrefixes>,
     encryption_key: Option<EncryptionKey>,
+    is_sync: bool,
 }
 
 impl SnapAccessCore {
@@ -314,6 +315,7 @@ impl SnapAccessCore {
             blob_table_prefetch_size: shard.opt.blob_prefetch_size,
             deleting_prefixes: shard.get_del_prefixes(),
             encryption_key: shard.encryption_key.clone(),
+            is_sync: shard.is_sync(),
         }
     }
 
@@ -617,8 +619,8 @@ impl SnapAccessCore {
         table::new_merge_iterator(iters, reversed)
     }
 
-    // This methods is actually sync but mark as async to corporate with
-    // #[maybe_async]
+    // This method is actually sync but mark as async to corporate with
+    // `maybe_async`.
     async fn new_table_iterator_async(
         &self,
         cf: usize,
@@ -1511,6 +1513,10 @@ impl SnapAccessCore {
         let merged_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mvcc_reader = ColumnarMvccReader::new(Box::new(merged_reader), &schema, read_ts);
         Some(mvcc_reader)
+    }
+
+    pub fn is_sync(&self) -> bool {
+        self.is_sync
     }
 }
 

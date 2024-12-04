@@ -8473,6 +8473,8 @@ dependencies = [
  "kvproto",
  "lazy_static",
  "log_wrappers",
+ "maybe-async",
+ "paste",
  "prometheus",
  "prometheus-static-metric",
  "serde_json",

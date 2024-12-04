@@ -17,7 +17,7 @@ use kvengine::{
     table::columnar::{
         build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
     },
-    ShardStats, WRITE_CF,
+    WRITE_CF,
 };
 use kvproto::metapb;
 use native_br::{
@@ -41,10 +41,9 @@ use test_cloud_server::{
     oss::prepare_dfs,
     try_wait, ServerCluster, TikvWorkerOptions,
 };
-use test_pd_client::{PdWrapper, TestPdClient};
+use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::{
-    codec::bytes::encode_bytes,
     config::{ReadableDuration, ReadableSize},
     debug, info,
     store::new_learner_peer,
@@ -53,7 +52,9 @@ use tikv_util::{
 use tokio::runtime::Runtime;
 use txn_types::TimeStamp;
 
-use crate::{alloc_node_id_vec, new_security_config, request_major_compact_on_store};
+use crate::{
+    alloc_node_id_vec, new_security_config, request_major_compaction, wait_for_keyspace_stats,
+};
 
 const BASIC_DATA_COUNT: usize = 10;
 const RANDOM_VALUE_LEN: usize = 64;
@@ -1009,8 +1010,10 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
         &pd_client,
         KEYSPACE_ID,
         |stats| stats.cfs[WRITE_CF].levels.iter().any(|l| l.num_tables > 0),
+        false,
         Duration::from_secs(10),
-    );
+    )
+    .unwrap();
 
     // Import data by txn file
     // Note that txn file does not support async commit.
@@ -1102,8 +1105,10 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
         &pd_client,
         KEYSPACE_ID,
         |stats| stats.cfs[WRITE_CF].levels.iter().all(|l| l.num_tables == 0),
+        false,
         Duration::from_secs(10),
-    );
+    )
+    .unwrap();
     std::thread::sleep(Duration::from_secs(10));
 
     // Verify restored data.
@@ -1817,64 +1822,6 @@ fn check_learners(
 fn generate_backup_name() -> String {
     static BACKUP_ID: AtomicUsize = AtomicUsize::new(0);
     format!("{:04}", BACKUP_ID.fetch_add(1, Ordering::Relaxed))
-}
-
-fn request_major_compaction(runtime: &Runtime, pd_client: &TestPdClient, keyspace_id: u32) {
-    let stores = pd_client.get_all_stores(true).unwrap();
-    let mut handles = Vec::with_capacity(stores.len());
-    for store in stores {
-        handles.push(runtime.spawn(async move {
-            let query = format!("major_compact=true&keyspace_id={}", keyspace_id);
-            request_major_compact_on_store(&store, query.as_str(), true).await;
-        }));
-    }
-    for handle in handles {
-        runtime.block_on(handle).unwrap();
-    }
-}
-
-/// Wait for stats of all regions in a keyspace to be expected.
-///
-/// Note that when any peer has the expected stats, the region will be
-/// considered as expected. In the scene of restoration, as we restore from
-/// rfengine of leader peer, when any peer become expected, the rfengine meta of
-/// leader must be expected.
-fn wait_for_keyspace_stats(
-    runtime: &Runtime,
-    cluster: &ServerCluster,
-    pd_client: &TestPdClient,
-    keyspace_id: u32,
-    expect: impl Fn(&ShardStats) -> bool,
-    timeout: Duration,
-) {
-    let regions = runtime
-        .block_on(pd_client.scan_regions(
-            encode_bytes(&get_keyspace_prefix(keyspace_id)),
-            encode_bytes(&get_keyspace_prefix(keyspace_id + 1)),
-            100,
-        ))
-        .unwrap();
-    info!("regions {:?}", regions);
-    let node_ids = cluster.get_nodes();
-    let get_stats = |region_id: u64| -> Vec<ShardStats> {
-        node_ids
-            .iter()
-            .filter_map(|id| cluster.get_kvengine(*id).get_shard_stat_opt(region_id))
-            .collect()
-    };
-    for region in regions {
-        let region_id = region.get_region().id;
-        let ok = try_wait(
-            || get_stats(region_id).iter().any(|stats| expect(stats)),
-            timeout.as_secs() as usize,
-        );
-        assert!(
-            ok,
-            "wait_for_keyspace_stats timeout, region_id: {}, stats: {:?}",
-            region_id,
-            get_stats(region_id)
-        );
-    }
 }
 
 #[derive(Default)]

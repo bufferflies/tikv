@@ -123,11 +123,10 @@ where
 {
     let server = builder.serve(make_service_fn(move |_| {
         let ctx = ctx.clone();
-        tikv_util::init_task_local(async move {
-            // Create a status service.
+        async move {
             Ok::<_, hyper::Error>(service_fn(move |req: hyper::Request<hyper::Body>| {
                 let ctx = ctx.clone();
-                async move {
+                tikv_util::init_task_local(async move {
                     let path = req.uri().path().to_owned();
                     match path.as_ref() {
                         "/healthz" => Ok(hyper::Response::builder()
@@ -188,9 +187,9 @@ where
                             .body(hyper::Body::from("Not Found"))
                             .unwrap()),
                     }
-                }
+                })
             }))
-        })
+        }
     }));
     Box::new(server)
 }

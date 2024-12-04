@@ -13,11 +13,13 @@ pub type OwnedKvPair = (Vec<u8>, Vec<u8>);
 
 /// The abstract storage interface. The table scan and index scan executor
 /// relies on a `Storage` implementation to provide source data.
+#[maybe_async::async_trait]
 pub trait Storage: Send {
     type Statistics;
 
     // TODO: Use const generics.
     // TODO: Use reference is better.
+    #[maybe_async]
     fn begin_scan(
         &mut self,
         is_backward_scan: bool,
@@ -25,10 +27,12 @@ pub trait Storage: Send {
         range: IntervalRange,
     ) -> Result<()>;
 
+    #[maybe_async]
     fn scan_next(&mut self) -> Result<Option<OwnedKvPair>>;
 
     // TODO: Use const generics.
     // TODO: Use reference is better.
+    #[maybe_async]
     fn get(&mut self, is_key_only: bool, range: PointRange) -> Result<Option<OwnedKvPair>>;
 
     fn met_uncacheable_data(&self) -> Option<bool>;
@@ -37,6 +41,10 @@ pub trait Storage: Send {
 
     fn get_read_ts(&self) -> u64 {
         u64::MAX
+    }
+
+    fn is_sync(&self) -> bool {
+        true
     }
 }
 

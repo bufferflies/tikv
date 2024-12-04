@@ -13,15 +13,18 @@ use crate::storage::{
     },
 };
 
+#[maybe_async::async_trait]
 pub trait Store: Send {
     /// The scanner type returned by `scanner()`.
     type Scanner: Scanner;
 
     /// Fetch the provided key.
+    #[maybe_async]
     fn get(&self, key: &Key, statistics: &mut Statistics) -> Result<Option<Value>>;
 
     /// Re-use last cursor to incrementally (if possible) fetch the provided
     /// key.
+    #[maybe_async]
     fn incremental_get(&mut self, key: &Key) -> Result<Option<Value>>;
 
     /// Take the statistics. Currently only available for `incremental_get`.
@@ -31,6 +34,7 @@ pub trait Store: Send {
     fn incremental_get_met_newer_ts_data(&self) -> NewerTsCheckState;
 
     /// Fetch the provided set of keys.
+    #[maybe_async]
     fn batch_get(
         &self,
         keys: &[Key],
@@ -38,8 +42,9 @@ pub trait Store: Send {
     ) -> Result<Vec<Result<Option<Value>>>>;
 
     /// Retrieve a scanner over the bounds.
+    #[maybe_async]
     fn scanner(
-        &self,
+        &mut self,
         desc: bool,
         key_only: bool,
         check_has_newer_ts_data: bool,
@@ -51,6 +56,10 @@ pub trait Store: Send {
         None
     }
 
+    fn is_sync(&self) -> bool {
+        true
+    }
+
     fn get_read_ts(&self) -> u64 {
         u64::MAX
     }
@@ -60,19 +69,22 @@ pub trait Store: Send {
 ///
 /// Commonly they are obtained as a result of a [`scanner`](Store::scanner)
 /// operation.
+#[maybe_async::async_trait]
 pub trait Scanner: Send {
     /// Get the next [`KvPair`](KvPair) if it exists.
+    #[maybe_async]
     fn next(&mut self) -> Result<Option<(Key, Value)>>;
 
     /// Get the next [`KvPair`](KvPair)s up to `limit` if they exist.
     /// If `sample_step` is greater than 0, skips `sample_step - 1` number of
     /// keys after each returned key.
-    fn scan(&mut self, limit: usize, sample_step: usize) -> Result<Vec<Result<KvPair>>> {
+    #[maybe_async]
+    async fn scan(&mut self, limit: usize, sample_step: usize) -> Result<Vec<Result<KvPair>>> {
         debug!("scan limit {}", limit);
         let mut row_count = 0;
         let mut results = Vec::with_capacity(limit);
         while results.len() < limit {
-            match self.next() {
+            match self.next().await {
                 Ok(Some((k, v))) => {
                     if sample_step > 0 {
                         row_count += 1;
@@ -394,7 +406,7 @@ impl<S: Snapshot> Store for SnapshotStore<S> {
 
     #[inline]
     fn scanner(
-        &self,
+        &mut self,
         desc: bool,
         key_only: bool,
         check_has_newer_ts_data: bool,
@@ -595,7 +607,7 @@ impl Store for FixtureStore {
 
     #[inline]
     fn scanner(
-        &self,
+        &mut self,
         desc: bool,
         key_only: bool,
         _: bool,
@@ -921,7 +933,7 @@ mod tests {
     fn test_snapshot_store_scan() {
         let key_num = 100;
         let store = TestStore::new(key_num);
-        let snapshot_store = store.store();
+        let mut snapshot_store = store.store();
         let key = format!("{}{}", KEY_PREFIX, START_ID);
         let start_key = Key::from_raw(key.as_bytes());
         let mut scanner = snapshot_store
@@ -943,7 +955,7 @@ mod tests {
     fn test_snapshot_store_reverse_scan() {
         let key_num = 100;
         let store = TestStore::new(key_num);
-        let snapshot_store = store.store();
+        let mut snapshot_store = store.store();
 
         let half = (key_num / 2) as usize;
         let key = format!("{}{}", KEY_PREFIX, START_ID + (half as u64) - 1);
@@ -969,7 +981,7 @@ mod tests {
     fn test_scan_with_bound() {
         let key_num = 100;
         let store = TestStore::new(key_num);
-        let snapshot_store = store.store();
+        let mut snapshot_store = store.store();
 
         let lower_bound = Key::from_raw(format!("{}{}", KEY_PREFIX, START_ID + 10).as_bytes());
         let upper_bound = Key::from_raw(format!("{}{}", KEY_PREFIX, START_ID + 20).as_bytes());
@@ -1011,7 +1023,7 @@ mod tests {
     fn test_scanner_verify_bound() {
         // Store with a limited range
         let snap = MockRangeSnapshot::new(b"b".to_vec(), b"c".to_vec());
-        let store = SnapshotStore::new(
+        let mut store = SnapshotStore::new(
             snap,
             TimeStamp::zero(),
             IsolationLevel::Si,
@@ -1064,7 +1076,7 @@ mod tests {
 
         // Store with whole range
         let snap2 = MockRangeSnapshot::new(b"".to_vec(), b"".to_vec());
-        let store2 = SnapshotStore::new(
+        let mut store2 = SnapshotStore::new(
             snap2,
             TimeStamp::zero(),
             IsolationLevel::Si,
@@ -1182,7 +1194,7 @@ mod tests {
 
     #[test]
     fn test_fixture_scanner() {
-        let store = gen_fixture_store();
+        let mut store = gen_fixture_store();
 
         let mut scanner = store.scanner(false, false, false, None, None).unwrap();
         assert_eq!(
@@ -1495,9 +1507,9 @@ mod benches {
             let user_key = gen_payload(64);
             data.insert(Key::from_raw(&user_key), Ok(gen_payload(100)));
         }
-        let store = FixtureStore::new(data);
+        let mut store = FixtureStore::new(data);
         b.iter(|| {
-            let store = test::black_box(&store);
+            let store = test::black_box(&mut store);
             let scanner = store
                 .scanner(
                     test::black_box(true),
@@ -1518,9 +1530,9 @@ mod benches {
             let user_key = gen_payload(64);
             data.insert(Key::from_raw(&user_key), Ok(gen_payload(100)));
         }
-        let store = FixtureStore::new(data);
+        let mut store = FixtureStore::new(data);
         b.iter(|| {
-            let store = test::black_box(&store);
+            let store = test::black_box(&mut store);
             let mut scanner = store
                 .scanner(
                     test::black_box(true),
@@ -1544,9 +1556,9 @@ mod benches {
             let user_key = gen_payload(64);
             data.insert(Key::from_raw(&user_key), Ok(gen_payload(100)));
         }
-        let store = FixtureStore::new(data);
+        let mut store = FixtureStore::new(data);
         b.iter(|| {
-            let store = test::black_box(&store);
+            let store = test::black_box(&mut store);
             let mut scanner = store
                 .scanner(
                     test::black_box(true),

@@ -109,6 +109,8 @@ pub struct Shard {
     // outdated_schema_ver is used to record the last schema outdated error in convert L0 to
     // columnar if the schema is not updated, we skip retrying the convert.
     pub(crate) outdated_schema_ver: AtomicI64,
+
+    is_sync: bool,
 }
 
 // Note: when add new property, consider whether to add it to following process:
@@ -211,6 +213,7 @@ impl Shard {
             compaction_priority: RwLock::new(None),
             encryption_key,
             outdated_schema_ver: Default::default(),
+            is_sync: true,
         };
         {
             let mut pending_ops = shard.pending_ops.write().unwrap();
@@ -282,6 +285,7 @@ impl Shard {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
         let mut lock_txn_file_refs: Vec<TxnFileRef> = vec![];
+        let mut is_sync = true;
         if mem_tbls.is_empty() {
             mem_tbls.push(CfTable::new());
         }
@@ -366,6 +370,7 @@ impl Shard {
             match result_rx.recv().await.unwrap() {
                 Ok((id, fm, data, ia_mgr)) => {
                     let file = if let Some(ia_mgr) = ia_mgr {
+                        is_sync = false;
                         let table_meta_file = Arc::new(InMemFile::new(id, data));
                         Arc::new(IaFile::open(id, fm.file_type, table_meta_file, ia_mgr)?) as _
                     } else {
@@ -422,6 +427,7 @@ impl Shard {
         create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, ignore_lock);
         builder.set_schema_file(cs.schema_file.clone());
         shard.id = cs.shard_id;
+        shard.is_sync = is_sync;
         shard.set_data(builder.build());
         Ok(shard)
     }
@@ -1246,6 +1252,10 @@ impl Shard {
 
     pub(crate) fn set_outdated_schema_ver(&self, ver: i64) {
         self.outdated_schema_ver.store(ver, Ordering::Release);
+    }
+
+    pub(crate) fn is_sync(&self) -> bool {
+        self.is_sync
     }
 }
 

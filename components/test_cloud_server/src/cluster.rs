@@ -66,6 +66,13 @@ const TXN_CHUNK_MGR_GC_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 const TXN_CHUNK_MGR_GC_TTL: ReadableDuration = ReadableDuration::secs(10);
 const TXN_CHUNK_TARGET_BLOCK_ENTRIES: usize = 64;
 
+const BLOCK_SIZE_DEF: u64 = 4096;
+
+const IA_SEGMENT_SIZE_DEF: i64 = BLOCK_SIZE_DEF as i64 * 8; // 32 KiB
+const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(3);
+const IA_MEM_CAP_DEF: i64 = 1 << 20; // 1 MiB
+const IA_DISK_CAP_DEF: i64 = 10 << 20; // 10 MiB
+
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[allow(dead_code)]
@@ -703,6 +710,11 @@ impl ServerCluster {
         let tikv_config = self.confs.iter().next().unwrap().1;
         for _ in 0..workers_cnt {
             let idx = TIKV_WORKER_IDX_ALLOCATOR.fetch_add(1, Relaxed);
+
+            let data_dir = self.tmp_dir.path().join(format!("worker-{idx}"));
+            std::fs::create_dir_all(&data_dir)
+                .unwrap_or_else(|e| panic!("create dir {:?} failed: {:?}", data_dir, e));
+
             let tikv_worker_conf = cloud_worker::Config {
                 addr: tikv_worker_addr(idx),
                 cop_addr: "".to_string(),
@@ -719,6 +731,11 @@ impl ServerCluster {
                 cop_block_cache_size: opts.cop_block_cache_size,
                 cop_block_cache_type: opts.cop_block_cache_type,
                 cop_block_size: tikv_config.rocksdb.writecf.block_size,
+                data_dir: data_dir.to_string_lossy().into_owned(),
+                ia_segment_size: opts.ia_segment_size,
+                ia_freq_update_interval: ReadableDuration(opts.ia_freq_update_interval),
+                ia_mem_cap: ReadableSize(opts.ia_mem_cap as u64),
+                ia_disk_cap: ReadableSize(opts.ia_disk_cap as u64),
                 ..Default::default()
             };
 
@@ -798,7 +815,7 @@ pub fn new_test_config(base_dir: &Path, node_id: u16, nodes_count: usize) -> Tik
     config.raft_store.max_peer_down_duration = ReadableDuration::secs(4);
     config.raft_store.store_batch_system.pool_size = 2;
     config.rocksdb.writecf.write_buffer_size = ReadableSize::kb(16);
-    config.rocksdb.writecf.block_size = ReadableSize::kb(4);
+    config.rocksdb.writecf.block_size = ReadableSize(BLOCK_SIZE_DEF);
     config.rocksdb.writecf.target_file_size_base = ReadableSize::kb(32);
     config.rocksdb.max_background_jobs = 2;
     config.rocksdb.max_sub_compactions = 1;
@@ -863,6 +880,10 @@ pub struct TikvWorkerOptions {
     pub cop_block_cache_size: ReadableSize,
     pub cop_block_cache_type: BlockCacheType,
     pub register: bool,
+    pub ia_segment_size: i64,
+    pub ia_freq_update_interval: Duration,
+    pub ia_mem_cap: i64,
+    pub ia_disk_cap: i64,
 }
 
 impl Default for TikvWorkerOptions {
@@ -872,6 +893,10 @@ impl Default for TikvWorkerOptions {
             cop_block_cache_size: ReadableSize::mb(8),
             cop_block_cache_type: BlockCacheType::Quick,
             register: true,
+            ia_segment_size: IA_SEGMENT_SIZE_DEF,
+            ia_freq_update_interval: IA_FREQ_UPDATE_INTERVAL_DEF,
+            ia_mem_cap: IA_MEM_CAP_DEF,
+            ia_disk_cap: IA_DISK_CAP_DEF,
         }
     }
 }

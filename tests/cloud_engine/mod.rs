@@ -6,17 +6,21 @@
 #![feature(assert_matches)]
 #![test_runner(test_util::run_tests)]
 
-use std::{str::FromStr, sync::atomic::AtomicU16};
+use std::{str::FromStr, sync::atomic::AtomicU16, time::Duration};
 
 use api_version::ApiV2;
 use bytes::Bytes;
 use http::Uri;
 use hyper::{Body, Request};
+use kvengine::ShardStats;
 use kvproto::{kvrpcpb::UnsafeDestroyRangeRequest, metapb::Store};
+use pd_client::PdClient;
 use security::SecurityConfig;
-use test_cloud_server::client::ClusterClient;
+use test_cloud_server::{client::ClusterClient, try_wait, ServerCluster};
+use test_pd_client::TestPdClient;
 use tidb_query_common::util::convert_to_prefix_next;
-use tikv_util::info;
+use tikv_util::{codec::bytes::encode_bytes, info};
+use tokio::runtime::Runtime;
 mod backup;
 mod columnar;
 mod delete_range;
@@ -174,4 +178,78 @@ pub(crate) fn new_security_config() -> SecurityConfig {
     conf.master_key.vendor = "test".to_string();
     conf.master_key.key_id = "random".to_string();
     conf
+}
+
+pub(crate) fn request_major_compaction(
+    runtime: &Runtime,
+    pd_client: &TestPdClient,
+    keyspace_id: u32,
+) {
+    let stores = pd_client.get_all_stores(true).unwrap();
+    let mut handles = Vec::with_capacity(stores.len());
+    for store in stores {
+        handles.push(runtime.spawn(async move {
+            let query = format!("major_compact=true&keyspace_id={}", keyspace_id);
+            request_major_compact_on_store(&store, query.as_str(), true).await;
+        }));
+    }
+    for handle in handles {
+        runtime.block_on(handle).unwrap();
+    }
+}
+
+/// Wait for stats of all regions in a keyspace to be expected.
+///
+/// Note that when `expect_all = false`, any peer has the expected stats, the
+/// region will be considered as expected. This can be used in the scene of
+/// restoration, as we restore from rfengine of leader peer, when any peer
+/// become expected, the rfengine meta of leader must be expected.
+fn wait_for_keyspace_stats(
+    runtime: &Runtime,
+    cluster: &ServerCluster,
+    pd_client: &TestPdClient,
+    keyspace_id: u32,
+    expect: impl Fn(&ShardStats) -> bool,
+    expect_all: bool,
+    timeout: Duration,
+) -> std::result::Result<(), String> {
+    let regions = runtime
+        .block_on(pd_client.scan_regions(
+            encode_bytes(&get_keyspace_prefix(keyspace_id)),
+            encode_bytes(&get_keyspace_prefix(keyspace_id + 1)),
+            100,
+        ))
+        .unwrap();
+    info!("regions {:?}", regions);
+    let node_ids = cluster.get_nodes();
+    let get_stats = |region_id: u64| -> Vec<ShardStats> {
+        node_ids
+            .iter()
+            .filter_map(|id| cluster.get_kvengine(*id).get_shard_stat_opt(region_id))
+            .collect()
+    };
+    for region in regions {
+        let region_id = region.get_region().id;
+        let ok = try_wait(
+            || {
+                let stats = get_stats(region_id);
+                if expect_all {
+                    stats.iter().all(|stats| expect(stats))
+                } else {
+                    stats.iter().any(|stats| expect(stats))
+                }
+            },
+            timeout.as_secs() as usize,
+        );
+
+        if !ok {
+            let err = format!(
+                "wait_for_keyspace_stats timeout, region_id: {}, stats: {:?}",
+                region_id,
+                get_stats(region_id),
+            );
+            return Err(err);
+        }
+    }
+    Ok(())
 }

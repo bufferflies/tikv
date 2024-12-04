@@ -1,14 +1,22 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use codec::prelude::NumberEncoder;
 use futures::executor::block_on;
 use kvengine::{
     context::{IaCtx, SnapCtx},
-    table::{sstable::BlockCache, table::Row},
+    dfs::S3Fs,
+    ia::{
+        manager::IaManager,
+        util::{IaCapacity, IaManagerOptionsBuilder},
+    },
+    table::{
+        sstable::{BlockCache, BlockCacheType},
+        table::Row,
+    },
     txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
-    SnapAccess,
+    ShardStats, SnapAccess, WRITE_CF,
 };
 use kvproto::{
     coprocessor::{self as coppb, Request},
@@ -42,18 +50,15 @@ use tikv_util::{
 };
 use tipb::{Chunk, Executor, Expr, ExprType, ScalarFuncSig};
 
-use crate::alloc_node_id;
+use crate::{alloc_node_id, request_major_compaction, wait_for_keyspace_stats};
 
-#[cfg(test)]
 const FLAG_IGNORE_TRUNCATE: u64 = 1;
-#[cfg(test)]
 const FLAG_TRUNCATE_AS_WARNING: u64 = 1 << 1;
-#[cfg(test)]
 const MAX_INSERT_BATCH_SIZE: i64 = 200;
+const MAJOR_COMPACTION_DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 // sort_by sorts the `$v`(a vector of `Vec<Datum>`) by the $index elements in
-/// `Vec<Datum>`
-#[cfg(test)]
+// `Vec<Datum>`
 macro_rules! sort_by {
     ($v:ident, $index:expr, $t:ident) => {
         $v.sort_by(|a, b| match (&a[$index], &b[$index]) {
@@ -67,10 +72,8 @@ macro_rules! sort_by {
 }
 
 // FIXME: The break points don't work and so the test fails.
-#[cfg(test)]
 pub struct ProductTable(test_coprocessor::Table);
 
-#[cfg(test)]
 impl ProductTable {
     pub fn new() -> ProductTable {
         let id = ColumnBuilder::new()
@@ -96,14 +99,12 @@ impl ProductTable {
     }
 }
 
-#[cfg(test)]
 impl Default for ProductTable {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(test)]
 impl std::ops::Deref for ProductTable {
     type Target = Table;
 
@@ -112,7 +113,6 @@ impl std::ops::Deref for ProductTable {
     }
 }
 
-#[cfg(test)]
 fn check_chunk_datum_count(chunks: &[Chunk], datum_limit: usize) {
     let mut iter = chunks.iter();
     let res = iter.any(|x| datum::decode(&mut x.get_rows_data()).unwrap().len() != datum_limit);
@@ -121,13 +121,15 @@ fn check_chunk_datum_count(chunks: &[Chunk], datum_limit: usize) {
     }
 }
 
-#[test]
-fn test_basic() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_basic(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_rows(1002);
 
     let select_key_ranges = vec![dag_test.get_key_range(10, 15)];
@@ -136,14 +138,19 @@ fn test_basic() {
     snapshot.print_to_info();
 }
 
-#[test]
-fn test_analyze() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_analyze(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
-
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_rows(1001);
+
+    if enable_ia {
+        dag_test.perform_major_compaction();
+    }
 
     let mut col_req = tipb::AnalyzeColumnsReq::default();
     col_req.set_columns_info(dag_test.table.columns_info().into());
@@ -169,16 +176,23 @@ fn test_analyze() {
         Ok(_) => info!("Analyze Ok."),
         Err(e) => panic!("Analyze failed: {:?}!", e),
     }
+    dag_test.check_ia();
 }
 
-#[test]
-fn test_checksum() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_checksum(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_rows(1000);
+
+    if enable_ia {
+        dag_test.perform_major_compaction();
+    }
 
     let checksum = tipb::ChecksumRequest::default();
     let mut req = coppb::Request::default();
@@ -198,10 +212,13 @@ fn test_checksum() {
         Ok(_) => info!("Checksum Ok."),
         Err(e) => panic!("Checksum failed: {:?}!", e),
     }
+    dag_test.check_ia();
 }
 
-#[test]
-fn test_stack_guard() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_stack_guard(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -214,7 +231,7 @@ fn test_stack_guard() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let req = {
@@ -244,9 +261,11 @@ fn test_stack_guard() {
 }
 
 #[rstest]
-#[case(false)]
-#[case::txn_file(true)]
-fn test_select_all_scan(#[case] use_txn_file: bool) {
+#[case(false, false)]
+#[case::ia(false, true)]
+#[case::txn_file(true, false)]
+#[case::txn_file_ia(true, true)]
+fn test_select_all_scan(#[case] use_txn_file: bool, #[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let make_row = |i| -> (i64, Option<String>, i64) {
@@ -268,11 +287,17 @@ fn test_select_all_scan(#[case] use_txn_file: bool) {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
+    dag_test.setup_ia(enable_ia);
     let _enter = dag_test.enter_runtime();
 
     let mut rows = write_rows(&mut dag_test, 1, 7, false);
     rows.append(&mut write_rows(&mut dag_test, 11, 17, use_txn_file));
     rows.append(&mut write_rows(&mut dag_test, 21, 27, false));
+    rows.append(&mut write_rows(&mut dag_test, 100, 400, false));
+
+    if enable_ia {
+        dag_test.perform_major_compaction();
+    }
 
     let select_key_range = dag_test.get_key_range_all();
     let snapshot = dag_test.fetch_snapshot(dag_test.get_ts().into_inner(), vec![select_key_range]);
@@ -286,7 +311,7 @@ fn test_select_all_scan(#[case] use_txn_file: bool) {
     };
 
     let quota_limiter = Arc::new(QuotaLimiter::default());
-    quota_limiter.set_read_bandwidth_limit(ReadableSize::kb(1), true);
+    quota_limiter.set_read_bandwidth_limit(ReadableSize::mb(1), true);
 
     let cop_resp = match dag_test.execute(snapshot, quota_limiter.clone(), req) {
         Ok(resp) => resp,
@@ -316,10 +341,13 @@ fn test_select_all_scan(#[case] use_txn_file: bool) {
         quota_limiter.total_read_bytes_consumed(true),
         total_chunk_size
     ); // the consume_sample is called due to read bytes quota
+    dag_test.check_ia();
 }
 
-#[test]
-fn test_batch_row_limit() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_batch_row_limit(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -333,7 +361,7 @@ fn test_batch_row_limit() {
     let chunk_datum_limit = batch_row_limit * 3; // we have 3 fields.
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     // let mut cfg = Config::default();
@@ -361,8 +389,10 @@ fn test_batch_row_limit() {
     }
 }
 
-#[test]
-fn test_group_by() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_group_by(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -374,7 +404,7 @@ fn test_group_by() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     // for dag
@@ -402,8 +432,10 @@ fn test_group_by() {
     assert_eq!(row_count, 3);
 }
 
-#[test]
-fn test_aggr_count() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_aggr_count(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -417,7 +449,7 @@ fn test_aggr_count() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let exp = vec![
@@ -486,8 +518,10 @@ fn test_aggr_count() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_aggr_first() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_aggr_first(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -505,7 +539,7 @@ fn test_aggr_first() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let exp = vec![
@@ -575,8 +609,10 @@ fn test_aggr_first() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_aggr_avg() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_aggr_avg(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -590,7 +626,7 @@ fn test_aggr_avg() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let mut row_cache = dag_test.get_row_cache();
@@ -641,8 +677,10 @@ fn test_aggr_avg() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_aggr_sum() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_aggr_sum(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -656,7 +694,7 @@ fn test_aggr_sum() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let exp = vec![
@@ -689,8 +727,10 @@ fn test_aggr_sum() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_aggr_extra() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_aggr_extra(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -704,7 +744,7 @@ fn test_aggr_extra() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let mut txn = Txn::new();
@@ -729,6 +769,17 @@ fn test_aggr_extra() {
     txn.prewrite(dag_test.get_inserter(), row_cache);
     txn.commit();
 
+    for i in 1..4 {
+        let rows: Vec<_> = (i * 100..(i + 1) * 100)
+            .map(|i| (i, Some("name:zzz"), i))
+            .collect();
+        dag_test.insert_and_commit(&rows);
+    }
+
+    if enable_ia {
+        dag_test.perform_major_compaction();
+    }
+
     let exp = vec![
         (Datum::Null, Datum::I64(4), Datum::I64(4)),
         (
@@ -747,6 +798,11 @@ fn test_aggr_extra() {
             Datum::I64(4),
         ),
         (Datum::Bytes(b"name:6".to_vec()), Datum::Null, Datum::Null),
+        (
+            Datum::Bytes(b"name:zzz".to_vec()),
+            Datum::I64(399),
+            Datum::I64(100),
+        ),
     ];
 
     // for dag
@@ -773,10 +829,13 @@ fn test_aggr_extra() {
         row_count += 1;
     }
     assert_eq!(row_count, exp_len);
+    dag_test.check_ia();
 }
 
-#[test]
-fn test_aggr_bit_ops() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_aggr_bit_ops(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -790,7 +849,7 @@ fn test_aggr_bit_ops() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let mut txn = Txn::new();
@@ -869,8 +928,10 @@ fn test_aggr_bit_ops() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_order_by_column() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_order_by_column(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -885,7 +946,7 @@ fn test_order_by_column() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let exp = vec![
@@ -920,8 +981,10 @@ fn test_order_by_column() {
     assert_eq!(row_count, 5);
 }
 
-#[test]
-fn test_limit() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_limit(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let mut rows = vec![
@@ -935,7 +998,7 @@ fn test_limit() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let expect: Vec<_> = rows.drain(..5).collect();
@@ -961,8 +1024,10 @@ fn test_limit() {
     assert_eq!(row_count, 5);
 }
 
-#[test]
-fn test_reverse() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_reverse(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let mut rows = vec![
@@ -976,6 +1041,7 @@ fn test_reverse() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     rows.reverse();
@@ -1005,8 +1071,10 @@ fn test_reverse() {
     assert_eq!(row_count, 5);
 }
 
-#[test]
-fn test_limit_oom() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_limit_oom(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -1020,6 +1088,7 @@ fn test_limit_oom() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     // for dag
@@ -1040,26 +1109,44 @@ fn test_limit_oom() {
     assert_eq!(row_count, 6);
 }
 
-#[test]
-fn test_order_by_pk_with_select_from_index() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_order_by_pk_with_select_from_index(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let mut rows = vec![
-        (8, Some("name:0"), 2),
-        (7, Some("name:3"), 3),
-        (6, Some("name:0"), 1),
-        (5, Some("name:6"), 4),
-        (4, Some("name:5"), 4),
-        (3, Some("name:4"), 4),
-        (2, None, 4),
+        (1008, Some("name:100"), 2),
+        (1007, Some("name:103"), 3),
+        (1006, Some("name:100"), 1),
+        (1005, Some("name:106"), 4),
+        (1004, Some("name:105"), 4),
+        (1003, Some("name:104"), 4),
+        (1002, None, 4),
     ];
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let expect: Vec<_> = rows.drain(..5).collect();
+
+    if enable_ia {
+        // Insert more data to flush mem table.
+        for i in 0..3 {
+            let rows: Vec<_> = (i * 100..(i + 1) * 100)
+                .map(|i| (i, format!("name:{}", i % 100), i))
+                .collect();
+            let rows: Vec<_> = rows
+                .iter()
+                .map(|(id, name, count)| (*id, Some(name.as_str()), *count))
+                .collect();
+            dag_test.insert_and_commit(&rows);
+        }
+
+        dag_test.perform_major_compaction();
+    }
 
     // for dag
     let req = DagSelect::from_index(&product, &product["name"])
@@ -1082,10 +1169,13 @@ fn test_order_by_pk_with_select_from_index() {
         row_count += 1;
     }
     assert_eq!(row_count, 5);
+    dag_test.check_ia();
 }
 
-#[test]
-fn test_index() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_index(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -1099,6 +1189,7 @@ fn test_index() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     // for dag
@@ -1118,8 +1209,10 @@ fn test_index() {
     assert_eq!(row_count, 6);
 }
 
-#[test]
-fn test_index_reverse_limit() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_index_reverse_limit(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let mut rows = vec![
@@ -1133,6 +1226,7 @@ fn test_index_reverse_limit() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     rows.reverse();
@@ -1158,8 +1252,10 @@ fn test_index_reverse_limit() {
     assert_eq!(row_count, 5);
 }
 
-#[test]
-fn test_index_group_by() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_index_group_by(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -1171,6 +1267,7 @@ fn test_index_group_by() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     // for dag
@@ -1198,8 +1295,10 @@ fn test_index_group_by() {
     assert_eq!(row_count, 3);
 }
 
-#[test]
-fn test_index_aggr_count() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_index_aggr_count(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -1213,7 +1312,7 @@ fn test_index_aggr_count() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     // for dag
@@ -1295,8 +1394,10 @@ fn test_index_aggr_count() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_index_aggr_first() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_index_aggr_first(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -1310,7 +1411,7 @@ fn test_index_aggr_first() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let exp = vec![
@@ -1349,8 +1450,10 @@ fn test_index_aggr_first() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_index_aggr_avg() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_index_aggr_avg(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -1364,7 +1467,7 @@ fn test_index_aggr_avg() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let mut txn = Txn::new();
@@ -1416,8 +1519,10 @@ fn test_index_aggr_avg() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_index_aggr_sum() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_index_aggr_sum(#[case] enable_ia: bool) {
     test_util::init_log_for_test();
 
     let rows = vec![
@@ -1431,7 +1536,7 @@ fn test_index_aggr_sum() {
 
     let product = ProductTable::new();
     let mut dag_test = DagTest::new(&product);
-
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(&rows);
 
     let exp = vec![
@@ -1464,8 +1569,10 @@ fn test_index_aggr_sum() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_index_aggr_extre() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_index_aggr_extre(#[case] enable_ia: bool) {
     let rows = vec![
         (1, Some("name:0"), 2),
         (2, Some("name:3"), 3),
@@ -1476,7 +1583,7 @@ fn test_index_aggr_extre() {
     ];
 
     let product = ProductTable::new();
-    let mut dag_test = init_with_data(&product, &rows);
+    let mut dag_test = init_with_data(&product, &rows, enable_ia);
 
     let mut txn = Txn::new();
     let mut row_cache = dag_test.get_row_cache();
@@ -1543,8 +1650,10 @@ fn test_index_aggr_extre() {
     assert_eq!(row_count, exp_len);
 }
 
-#[test]
-fn test_where() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_where(#[case] enable_ia: bool) {
     use tidb_query_datatype::{FieldTypeAccessor, FieldTypeTp};
 
     let rows = vec![
@@ -1555,7 +1664,7 @@ fn test_where() {
     ];
 
     let product = ProductTable::new();
-    let mut endpoint = init_with_data(&product, &rows);
+    let mut endpoint = init_with_data(&product, &rows, enable_ia);
     let cols = product.columns_info();
     let cond = {
         let mut col = Expr::default();
@@ -1613,8 +1722,10 @@ fn test_where() {
     assert_eq!(spliter.next().is_none(), true);
 }
 
-#[test]
-fn test_handle_truncate() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_handle_truncate(#[case] enable_ia: bool) {
     use tidb_query_datatype::{FieldTypeAccessor, FieldTypeTp};
 
     let rows = vec![
@@ -1625,7 +1736,7 @@ fn test_handle_truncate() {
     ];
 
     let product = ProductTable::new();
-    let mut endpoint = init_with_data(&product, &rows);
+    let mut endpoint = init_with_data(&product, &rows, enable_ia);
     let cols = product.columns_info();
     let cases = vec![
         {
@@ -1772,8 +1883,10 @@ fn test_handle_truncate() {
     }
 }
 
-#[test]
-fn test_default_val() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_default_val(#[case] enable_ia: bool) {
     let mut rows = vec![
         (1, Some("name:0"), 2),
         (2, Some("name:3"), 3),
@@ -1796,7 +1909,7 @@ fn test_default_val() {
         .build();
     tbl.id = product.id;
 
-    let mut endpoint = init_with_data(&product, &rows);
+    let mut endpoint = init_with_data(&product, &rows, enable_ia);
     let expect: Vec<_> = rows.drain(..5).collect();
     let req = DagSelect::from(&tbl)
         .limit(5)
@@ -1819,8 +1932,10 @@ fn test_default_val() {
     assert_eq!(row_count, 5);
 }
 
-#[test]
-fn test_output_offsets() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_output_offsets(#[case] enable_ia: bool) {
     let rows = vec![
         (1, Some("name:0"), 2),
         (2, Some("name:4"), 3),
@@ -1829,7 +1944,7 @@ fn test_output_offsets() {
     ];
 
     let product = ProductTable::new();
-    let mut endpoint = init_with_data(&product, &rows);
+    let mut endpoint = init_with_data(&product, &rows, enable_ia);
 
     let req = DagSelect::from(&product)
         .output_offsets(Some(vec![1]))
@@ -1846,8 +1961,10 @@ fn test_output_offsets() {
     }
 }
 
-#[test]
-fn test_output_counts() {
+#[rstest]
+#[case(false)]
+#[case::ia(true)]
+fn test_output_counts(#[case] enable_ia: bool) {
     let rows = vec![
         (1, Some("name:0"), 2),
         (2, Some("name:4"), 3),
@@ -1856,7 +1973,7 @@ fn test_output_counts() {
     ];
 
     let product = ProductTable::new();
-    let mut endpoint = init_with_data(&product, &rows);
+    let mut endpoint = init_with_data(&product, &rows, enable_ia);
 
     let req = DagSelect::from(&product)
         .start_ts(endpoint.get_ts())
@@ -1865,8 +1982,7 @@ fn test_output_counts() {
     assert_eq!(resp.get_output_counts(), &[rows.len() as i64]);
 }
 
-#[cfg(test)]
-struct RowCache<'a>(&'a Table, Vec<BTreeMap<i64, Datum>>);
+pub(crate) struct RowCache<'a>(&'a Table, Vec<BTreeMap<i64, Datum>>);
 
 impl<'a> RowCache<'a> {
     pub fn new(table: &'a Table) -> Self {
@@ -1927,7 +2043,6 @@ impl<'a> RowCache<'a> {
     }
 }
 
-#[cfg(test)]
 pub struct Insert<'a> {
     client: &'a mut ClusterClient,
     use_txn_file: bool,
@@ -2027,13 +2142,10 @@ impl<'a> Insert<'a> {
     }
 }
 
-#[cfg(test)]
 pub struct Delete<'a> {
     client: &'a mut ClusterClient,
 }
 
-#[allow(dead_code)]
-#[cfg(test)]
 impl<'a> Delete<'a> {
     pub fn new(client: &'a mut ClusterClient) -> Self {
         Self { client }
@@ -2098,9 +2210,8 @@ impl<'a> Delete<'a> {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone)]
-struct DagTestSnapshot {
+pub struct DagTestSnapshot {
     memtable_rows: Vec<u8>,
     cs: Vec<u8>,
     ctx: kvproto::kvrpcpb::Context,
@@ -2128,28 +2239,23 @@ impl DagTestSnapshot {
     }
 }
 
-#[cfg(test)]
 #[derive(Default)]
-enum Dml<'a> {
+pub(crate) enum Dml<'a> {
     Ins(Insert<'a>),
-    #[allow(dead_code)]
     Del(Delete<'a>),
     #[default]
     Empty,
 }
 
-#[cfg(test)]
-#[cfg(test)]
-struct Txn<'a> {
+pub(crate) struct Txn<'a> {
     started: bool,
     committed: bool,
     start_ts: txn_types::TimeStamp,
     prewrites: Vec<(Dml<'a>, Vec<Mutation>)>,
 }
 
-#[cfg(test)]
 impl<'a> Txn<'a> {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             started: false,
             committed: false,
@@ -2171,7 +2277,7 @@ impl<'a> Txn<'a> {
         }
     }
 
-    fn begin(&mut self, start_ts: txn_types::TimeStamp) -> &Self {
+    pub fn begin(&mut self, start_ts: txn_types::TimeStamp) -> &Self {
         assert!(!self.started);
         self.started = true;
         self.start_ts = start_ts;
@@ -2189,14 +2295,14 @@ impl<'a> Txn<'a> {
         }
     }
 
-    fn prewrite(&mut self, mut dml: Dml<'a>, row_cache: RowCache<'_>) {
+    pub fn prewrite(&mut self, mut dml: Dml<'a>, row_cache: RowCache<'_>) {
         assert!(self.started);
         assert!(!self.committed);
         let r = self.prewrite_execute(&mut dml, row_cache);
         self.prewrites.push((dml, r));
     }
 
-    fn commit(&mut self) {
+    pub fn commit(&mut self) {
         assert!(self.started);
         assert!(!self.committed);
 
@@ -2217,39 +2323,51 @@ impl<'a> Txn<'a> {
         }
         self.committed = true;
     }
+
+    pub fn into_prewrites(self) -> Vec<(Dml<'a>, Vec<Mutation>)> {
+        self.prewrites
+    }
 }
 
-struct DagTestContext {
-    _temp_dir: TempDir,
+pub(crate) struct DagTestContext {
+    temp_dir: TempDir,
     _oss: ObjectStorageService,
-    rt: tokio::runtime::Runtime,
+    pub(crate) rt: tokio::runtime::Runtime,
+    s3fs: S3Fs,
 }
 
 impl DagTestContext {
     fn new() -> (Self, kvengine::dfs::DFSConfig) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (temp_dir, oss, dfs_cfg) = prepare_dfs("oss_");
+        let dfs_conf = dfs_cfg.clone();
+        let s3fs = S3Fs::new_from_config(dfs_conf);
         (
             Self {
-                _temp_dir: temp_dir,
+                temp_dir,
                 _oss: oss,
                 rt,
+                s3fs,
             },
             dfs_cfg,
         )
     }
 }
 
-#[cfg(test)]
-struct DagTest<'a> {
+const KEYSPACE_ID: u32 = 1;
+
+const MEM_TABLE_SIZE: usize = 256;
+const BLOCK_SIZE: usize = 256;
+const IA_SEGMENT_SIZE: i64 = 1024;
+
+pub(crate) struct DagTest<'a> {
     table: &'a ProductTable,
     cluster: ServerCluster,
     pub client: ClusterClient,
-    ctx: DagTestContext,
+    pub ctx: DagTestContext,
     snap_ctx: SnapCtx,
 }
 
-#[cfg(test)]
 impl<'a> DagTest<'a> {
     pub fn new(table: &'a ProductTable) -> Self {
         let node_id = alloc_node_id();
@@ -2264,6 +2382,8 @@ impl<'a> DagTest<'a> {
                 conf.dfs = dfs_cfg.clone();
                 conf.enable_inner_key_offset = node_id % 2 == 0;
                 conf.security = security_conf.clone();
+                conf.rocksdb.writecf.write_buffer_size = ReadableSize(MEM_TABLE_SIZE as u64);
+                conf.rocksdb.writecf.block_size = ReadableSize(BLOCK_SIZE as u64);
             },
             pd,
         );
@@ -2273,23 +2393,24 @@ impl<'a> DagTest<'a> {
             txn_file_max_chunk_size: Some(1024),
             ..Default::default()
         });
-        client.split_keyspace(1);
+        client.split_keyspace(KEYSPACE_ID);
         let master_key = cluster.get_kvengine(node_id).get_master_key();
+        let block_cache =
+            BlockCache::new(BlockCacheType::Quick, 64 * BLOCK_SIZE as u64, BLOCK_SIZE);
         let txn_chunk_manager = TxnChunkManager::new(
             None,
             cluster.get_dfs().unwrap(),
-            BlockCache::None,
+            block_cache.clone(),
             with_pool_size(2),
             TxnChunkManagerConfig {
                 gc_interval: ReadableDuration::secs(1),
                 gc_ttl: ReadableDuration::secs(1),
             },
         );
-
         let snap_ctx = SnapCtx {
             dfs: cluster.get_dfs().unwrap(),
             master_key,
-            block_cache: BlockCache::None,
+            block_cache,
             schema_files: None,
             txn_chunk_manager,
             ia_ctx: IaCtx::Disabled,
@@ -2312,7 +2433,7 @@ impl<'a> DagTest<'a> {
         self.client.get_ts()
     }
 
-    fn get_inserter(&mut self) -> Dml<'_> {
+    pub fn get_inserter(&mut self) -> Dml<'_> {
         self.get_inserter_opt(false)
     }
 
@@ -2325,7 +2446,7 @@ impl<'a> DagTest<'a> {
         Dml::Del(Delete::new(&mut self.client))
     }
 
-    fn get_row_cache(&self) -> RowCache<'a> {
+    pub fn get_row_cache(&self) -> RowCache<'a> {
         RowCache::new(self.table)
     }
 
@@ -2485,7 +2606,7 @@ impl<'a> DagTest<'a> {
     ) -> Result<coppb::Response, tikv::coprocessor::Error> {
         req.mut_context().set_api_version(ApiVersion::V2);
         let tag = cloud_worker::get_cop_req_tag(&req);
-        let f = async {
+        let f = tikv_util::init_task_local(async {
             let snap_access = SnapAccess::construct_snapshot(
                 tag,
                 &self.snap_ctx,
@@ -2495,26 +2616,109 @@ impl<'a> DagTest<'a> {
             .await
             .unwrap();
             let snap = RegionSnapshot::from_snapshot(snap_access);
-            let (tx, rx) = tokio::sync::oneshot::channel();
 
-            std::thread::spawn(move || {
-                let f = tikv::coprocessor::parse_request_and_handle_remote_cop::<RegionSnapshot>(
-                    req,
-                    None,
-                    std::time::Duration::new(1, 0),
-                    quota_limiter,
-                    snap,
-                );
-                let result = futures::executor::block_on(f);
-                tx.send(result).unwrap();
-            });
+            tikv::coprocessor::parse_request_and_handle_remote_cop::<RegionSnapshot>(
+                req,
+                None,
+                std::time::Duration::new(1, 0),
+                quota_limiter,
+                snap,
+            )
+            .await
+            .map(|mut data| data.consume())
+        });
+        self.ctx.rt.block_on(f)
+    }
 
-            match rx.await.unwrap() {
-                Ok(mut data) => Ok(data.consume()),
-                Err(e) => Err(e),
-            }
+    pub fn get_snap_access(
+        &mut self,
+        start_ts: u64,
+        key_ranges: Vec<coppb::KeyRange>,
+    ) -> SnapAccess {
+        let snapshot = self.fetch_snapshot(start_ts, key_ranges);
+        let f = async {
+            SnapAccess::construct_snapshot(
+                "snapshot".to_string(),
+                &self.snap_ctx,
+                &snapshot.memtable_rows,
+                &snapshot.cs,
+            )
+            .await
+            .unwrap()
         };
-        futures::executor::block_on(f)
+        self.ctx.rt.block_on(f)
+    }
+
+    pub fn setup_ia(&mut self, enable: bool) {
+        let ia_ctx = if enable {
+            let path = self.ctx.temp_dir.path();
+            let cap = IaCapacity::MemoryAndDiskCap(
+                100 * IA_SEGMENT_SIZE,
+                path.join("seg"),
+                1000 * IA_SEGMENT_SIZE,
+            );
+            let opts = IaManagerOptionsBuilder::default()
+                .capacity(cap)
+                .segment_size(IA_SEGMENT_SIZE)
+                .freq_update_interval(Duration::from_secs(1))
+                .build()
+                .unwrap();
+            let ia_mgr = self
+                .ctx
+                .rt
+                .block_on(IaManager::new(
+                    opts,
+                    self.ctx.s3fs.clone(),
+                    self.ctx.rt.handle().clone(),
+                ))
+                .unwrap();
+            IaCtx::Enabled(ia_mgr, Arc::new(path.join("meta")))
+        } else {
+            IaCtx::Disabled
+        };
+        self.snap_ctx.ia_ctx = ia_ctx;
+    }
+
+    // Check IA logics have been reached.
+    pub fn check_ia(&self) {
+        if let IaCtx::Enabled(mgr, _) = &self.snap_ctx.ia_ctx {
+            let compacted = wait_for_keyspace_stats(
+                &self.ctx.rt,
+                &self.cluster,
+                &self.cluster.get_pd_client(),
+                KEYSPACE_ID,
+                Self::expect_compacted,
+                true,
+                Duration::from_millis(500),
+            )
+            .is_ok();
+
+            if compacted {
+                let segments = block_on(mgr.get_local_segments());
+                info!("segments: {:?}", segments);
+                assert!(!segments.is_empty());
+            }
+        }
+    }
+
+    pub fn perform_major_compaction(&self) {
+        let pd_client = self.cluster.get_pd_client();
+        request_major_compaction(&self.ctx.rt, pd_client.as_ref(), KEYSPACE_ID);
+
+        wait_for_keyspace_stats(
+            &self.ctx.rt,
+            &self.cluster,
+            pd_client.as_ref(),
+            KEYSPACE_ID,
+            Self::expect_compacted,
+            true,
+            MAJOR_COMPACTION_DEFAULT_TIMEOUT,
+        )
+        .unwrap();
+    }
+
+    pub fn expect_compacted(stats: &ShardStats) -> bool {
+        stats.compaction_score < 1.0 && stats.cfs[WRITE_CF].levels.iter().any(|l| l.num_tables > 0)
     }
 }
 
@@ -2532,9 +2736,14 @@ fn handle_select(
     dag_test.select_all(req, index_id)
 }
 
-fn init_with_data<'a>(tbl: &'a ProductTable, rows: &[(i64, Option<&str>, i64)]) -> DagTest<'a> {
+fn init_with_data<'a>(
+    tbl: &'a ProductTable,
+    rows: &[(i64, Option<&str>, i64)],
+    enable_ia: bool,
+) -> DagTest<'a> {
     test_util::init_log_for_test();
     let mut dag_test = DagTest::new(tbl);
+    dag_test.setup_ia(enable_ia);
     dag_test.insert_and_commit(rows);
     dag_test
 }

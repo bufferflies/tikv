@@ -32,6 +32,11 @@ use dashmap::DashMap;
 use kvengine::{
     context::IaCtx,
     dfs::{DFSConfig, Dfs, S3Fs},
+    ia::{
+        manager::IaManager,
+        util::{IaCapacity, IaManagerOptionsBuilder},
+        IA_FREQ_UPDATE_INTERVAL_DEF, IA_SEGMENT_SIZE_DEF,
+    },
     table::{
         sstable::{BlockCache, BlockCacheType},
         ChecksumType,
@@ -228,6 +233,9 @@ fn start_server(
 
     let worker_limiter = WorkerLimiter::new(config.worker_limiter.clone());
 
+    let ia_ctx =
+        create_ia_ctx(&config, &s3fs, thread_pool.handle()).expect("create IA context failed");
+
     // Create `TxnChunkManager` using `thread_pool`. Otherwise, as `TxnChunkManager`
     // is hold in async context, we will meet the panic of dropping tokio
     // runtime in async context.
@@ -254,7 +262,7 @@ fn start_server(
         schema_files: Some(Arc::new(DashMap::new())),
         worker_limiter,
         txn_chunk_manager,
-        ia_ctx: IaCtx::Disabled, // TODO: enable by config.
+        ia_ctx,
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
@@ -344,6 +352,51 @@ fn run_prometheus_push(push_metrics_addr: String, push_metrics_interval: Duratio
             }
         }
     });
+}
+
+fn create_ia_ctx(
+    config: &Config,
+    s3fs: &S3Fs,
+    runtime: &tokio::runtime::Handle,
+) -> Result<IaCtx, String> {
+    if config.is_ia_enabled() {
+        let ia_path = PathBuf::from(&config.data_dir).join("ia");
+
+        let segment_path = ia_path.join("segment");
+        fs::create_dir_all(&segment_path)
+            .map_err(|err| format!("create segment path failed: {err:?}"))?;
+        let cap = if config.ia_mem_cap.0 > 0 && config.ia_disk_cap.0 > 0 {
+            IaCapacity::MemoryAndDiskCap(
+                config.ia_mem_cap.0 as i64,
+                segment_path,
+                config.ia_disk_cap.0 as i64,
+            )
+        } else {
+            IaCapacity::MemoryAndDiskRatio(
+                config.ia_mem_cap_ratio,
+                segment_path,
+                config.ia_disk_cap_ratio,
+            )
+        };
+        let opts = IaManagerOptionsBuilder::default()
+            .capacity(cap)
+            .segment_size(config.ia_segment_size)
+            .freq_update_interval(config.ia_freq_update_interval.0)
+            .build()
+            .map_err(|err| format!("build IA options failed: {err:?}"))?;
+
+        let rt = runtime.clone();
+        let ia_mgr = runtime
+            .block_on(IaManager::new(opts, s3fs.clone(), rt))
+            .map_err(|err| format!("create IA manager failed: {err:?}"))?;
+
+        let meta_path = ia_path.join("meta");
+        fs::create_dir_all(&meta_path)
+            .map_err(|err| format!("create meta path failed: {err:?}"))?;
+        Ok(IaCtx::Enabled(ia_mgr, Arc::new(meta_path)))
+    } else {
+        Ok(IaCtx::Disabled)
+    }
 }
 
 pub struct CloudWorker {
@@ -582,6 +635,19 @@ pub struct Config {
     pub txn_chunk_manager: TxnChunkManagerConfig,
     pub txn_chunk_target_block_entries: usize,
 
+    /// The memory & disk capacity usage ratio for IA (Infrequent Access) of
+    /// remote coprocessor.
+    ///
+    /// Enable IA by setting `!data_dir.is_empty() && ia_mem_cap_ratio > 0 &&
+    /// ia_disk_cap_ratio > 0`.
+    pub ia_mem_cap_ratio: f64,
+    pub ia_disk_cap_ratio: f64,
+    pub ia_segment_size: i64,
+    pub ia_freq_update_interval: ReadableDuration,
+    /// The followings are mainly used for test purpose.
+    pub ia_mem_cap: ReadableSize,
+    pub ia_disk_cap: ReadableSize,
+
     pub push_metrics_addr: String,
     pub push_metrics_interval: ReadableDuration,
 }
@@ -614,6 +680,12 @@ impl Default for Config {
             schema_manager: SchemaManagerConfig::default(),
             txn_chunk_manager: TxnChunkManagerConfig::default(),
             txn_chunk_target_block_entries: txn_chunk::TARGET_BLOCK_ENTRIES_DEF,
+            ia_mem_cap_ratio: 0.0,
+            ia_disk_cap_ratio: 0.0,
+            ia_segment_size: IA_SEGMENT_SIZE_DEF,
+            ia_freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
+            ia_mem_cap: ReadableSize::default(),
+            ia_disk_cap: ReadableSize::default(),
             push_metrics_addr: String::default(),
             push_metrics_interval: ReadableDuration::secs(30),
         }
@@ -651,5 +723,16 @@ impl Config {
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.worker_limiter.validate()?;
         Ok(())
+    }
+
+    pub fn is_remote_cop_enabled(&self) -> bool {
+        !self.addr.is_empty() || !self.cop_addr.is_empty()
+    }
+
+    pub fn is_ia_enabled(&self) -> bool {
+        self.is_remote_cop_enabled()
+            && !self.data_dir.is_empty()
+            && (self.ia_mem_cap_ratio > 0.0 && self.ia_disk_cap_ratio > 0.0
+                || self.ia_mem_cap.0 > 0 && self.ia_disk_cap.0 > 0)
     }
 }

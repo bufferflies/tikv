@@ -90,6 +90,10 @@ impl Snapshot for rfstore::store::RegionSnapshot {
     fn get_kvengine_snap(&self) -> Option<&SnapAccess> {
         Some(&self.snap)
     }
+
+    fn is_sync(&self) -> bool {
+        self.snap.is_sync()
+    }
 }
 
 #[allow(dead_code)]

@@ -7,7 +7,7 @@ use kvengine::{
     dfs::{FileType, S3Fs},
     ia::{
         ia_file::{table_meta_file_local_path, IaFile},
-        manager::{IaManager, SEGMENTS_SUB_DIR},
+        manager::IaManager,
         types::{FileSegmentData, FileSegmentIdent},
         util::{
             test_util::verify_local_segments, IaCapacity, IaManagerOptionsBuilder, LocalFileStore,
@@ -294,7 +294,7 @@ fn test_abnormal_local_file() {
                 .await
                 .unwrap();
 
-            let main_store = LocalFileStore::new(local_path.join(SEGMENTS_SUB_DIR));
+            let main_store = LocalFileStore::new(local_path.clone());
             main_store
                 .remove(
                     file_id,

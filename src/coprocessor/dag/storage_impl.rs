@@ -37,10 +37,12 @@ impl<S: Store> TikvStorage<S> {
     }
 }
 
+#[maybe_async::async_trait]
 impl<S: Store> Storage for TikvStorage<S> {
     type Statistics = Statistics;
 
-    fn begin_scan(
+    #[maybe_async]
+    async fn begin_scan(
         &mut self,
         is_backward_scan: bool,
         is_key_only: bool,
@@ -71,6 +73,7 @@ impl<S: Store> Storage for TikvStorage<S> {
                     lower,
                     upper,
                 )
+                .await
                 .map_err(Error::from)?,
             // There is no transform from storage error to QE's StorageError,
             // so an intermediate error is needed.
@@ -78,20 +81,33 @@ impl<S: Store> Storage for TikvStorage<S> {
         Ok(())
     }
 
-    fn scan_next(&mut self) -> QeResult<Option<OwnedKvPair>> {
+    #[maybe_async]
+    async fn scan_next(&mut self) -> QeResult<Option<OwnedKvPair>> {
         // Unwrap is fine because we must have called `reset_range` before calling
         // `scan_next`.
-        let kv = self.scanner.as_mut().unwrap().next().map_err(Error::from)?;
+        let kv = self
+            .scanner
+            .as_mut()
+            .unwrap()
+            .next()
+            .await
+            .map_err(Error::from)?;
         Ok(kv.map(|(k, v)| (k.into_raw().unwrap(), v)))
     }
 
-    fn get(&mut self, _is_key_only: bool, range: PointRange) -> QeResult<Option<OwnedKvPair>> {
+    #[maybe_async]
+    async fn get(
+        &mut self,
+        _is_key_only: bool,
+        range: PointRange,
+    ) -> QeResult<Option<OwnedKvPair>> {
         // TODO: Default CF does not need to be accessed if KeyOnly.
         // TODO: No need to check newer ts data if self.scanner has met newer ts data.
         let key = range.0;
         let value = self
             .store
             .incremental_get(&Key::from_raw(&key))
+            .await
             .map_err(Error::from)?;
         Ok(value.map(move |v| (key, v)))
     }
@@ -125,5 +141,9 @@ impl<S: Store> Storage for TikvStorage<S> {
 
     fn get_read_ts(&self) -> u64 {
         self.store.get_read_ts()
+    }
+
+    fn is_sync(&self) -> bool {
+        self.store.is_sync()
     }
 }

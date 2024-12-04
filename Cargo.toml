@@ -469,9 +469,9 @@ overflow-checks = true
 [profile.bench]
 opt-level = 3
 debug = false
-codegen-units = 1
+codegen-units = 16
 lto = 'thin'
-incremental = false
+incremental = true
 debug-assertions = false
 overflow-checks = false
 rpath = false

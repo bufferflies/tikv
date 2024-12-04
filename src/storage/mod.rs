@@ -1229,7 +1229,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     let begin_instant = Instant::now();
                     let buckets = snapshot.ext().get_buckets();
 
-                    let snap_store = CloudStore::new(
+                    let mut snap_store = CloudStore::new(
                         snapshot,
                         start_ts.into_inner(),
                         bypass_locks,
