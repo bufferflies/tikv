@@ -78,16 +78,17 @@ fn test_schema_file() {
         .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
         .unwrap();
     let status_addr = cluster.status_addr(node_id);
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        schema_file_id,
-    ));
+
     let kvengine = cluster.get_kvengine(node_id);
     let all_ids_vers = kvengine.get_all_shard_id_vers();
     assert_eq!(all_ids_vers.len(), 7);
     must_wait(
         || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
             let mut shard_with_schema_file_count = 0;
             for &id_ver in &all_ids_vers {
                 let shard = kvengine.get_shard(id_ver.id).unwrap();
@@ -109,13 +110,14 @@ fn test_schema_file() {
     dfs.get_runtime()
         .block_on(dfs.create(new_schema_file_id, new_schema_file_data.into(), opts))
         .unwrap();
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        new_schema_file_id,
-    ));
+
     must_wait(
         || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                new_schema_file_id,
+            ));
             let mut shard_with_schema_file_ids = vec![];
             for &id_ver in &all_ids_vers {
                 let shard = kvengine.get_shard(id_ver.id).unwrap();
@@ -341,14 +343,15 @@ fn test_covert_row_to_columnar() {
         .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
         .unwrap();
     let status_addr = cluster.status_addr(node_id);
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        schema_file_id,
-    ));
+
     let kvengine = cluster.get_kvengine(node_id);
     must_wait(
         || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
@@ -460,14 +463,15 @@ fn test_get_snapshot_from_leader_by_status_api() {
         .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
         .unwrap();
     let status_addr = cluster.status_addr(node_id);
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        schema_file_id,
-    ));
+
     let kvengine = cluster.get_kvengine(node_id);
     must_wait(
         || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
@@ -646,14 +650,15 @@ fn test_region_merge_with_columnar() {
         .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
         .unwrap();
     let status_addr = cluster.status_addr(node_id);
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        schema_file_id,
-    ));
+
     let kvengine = cluster.get_kvengine(node_id);
     must_wait(
         || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {

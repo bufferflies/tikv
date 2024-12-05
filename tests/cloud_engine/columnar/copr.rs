@@ -64,16 +64,17 @@ fn test_coprocessor() {
         .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
         .unwrap();
     let status_addr = cluster.status_addr(node_id);
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        schema_file_id,
-    ));
+
     let kvengine = cluster.get_kvengine(node_id);
     let all_ids_vers = kvengine.get_all_shard_id_vers();
     assert_eq!(all_ids_vers.len(), 7);
     must_wait(
         || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
             let mut shard_with_schema_file_count = 0;
             for &id_ver in &all_ids_vers {
                 let shard = kvengine.get_shard(id_ver.id).unwrap();
