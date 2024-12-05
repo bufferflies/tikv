@@ -192,9 +192,11 @@ impl TikvServer {
             SecurityManager::new(&config.security)
                 .unwrap_or_else(|e| fatal!("failed to create security manager: {}", e)),
         );
+        let cpu_cores = SysQuota::cpu_cores_quota() as usize;
+        let grpc_concurrency = (cpu_cores / 3).max(1);
         let env = Arc::new(
             EnvBuilder::new()
-                .cq_count(config.server.grpc_concurrency)
+                .cq_count(grpc_concurrency)
                 .name_prefix(thd_name!(GRPC_THREAD_PREFIX))
                 .build(),
         );

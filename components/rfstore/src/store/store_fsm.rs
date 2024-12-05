@@ -218,7 +218,7 @@ impl RaftBatchSystem {
             let thread_name = if i < apply_pool_size {
                 format!("apply_{}", i)
             } else {
-                format!("follower_apply_{}", i - apply_pool_size)
+                format!("apply_follower_{}", i - apply_pool_size)
             };
             let props = tikv_util::thread_group::current_properties();
             let mut aw =

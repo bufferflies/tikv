@@ -367,6 +367,8 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
     reporter: R,
     engine: E,
 ) -> ReadPool {
+    let num_cores = SysQuota::cpu_cores_quota() as usize;
+    let worker_threads = num_cores.max(1);
     let unified_read_pool_name = get_unified_read_pool_name();
     let ticker = yatp_pool::TickerWrapper::new(ReporterTicker { reporter });
     let raftkv = Arc::new(Mutex::new(engine));
@@ -377,7 +379,7 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
             let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
             format!("unified_read_pool_{}", id)
         })
-        .worker_threads(config.max_thread_count)
+        .worker_threads(worker_threads)
         .after_start_wrapper(move || {
             let engine = raftkv.lock().unwrap().clone();
             set_tls_engine(engine);
@@ -402,10 +404,8 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
         runtime,
         running_tasks: UNIFIED_READ_POOL_RUNNING_TASKS
             .with_label_values(&[&unified_read_pool_name]),
-        max_tasks: config
-            .max_tasks_per_worker
-            .saturating_mul(config.max_thread_count),
-        pool_size: config.max_thread_count,
+        max_tasks: config.max_tasks_per_worker.saturating_mul(worker_threads),
+        pool_size: worker_threads,
     }
 }
 
