@@ -9,11 +9,17 @@ use tidb_query_datatype::codec::table::{
     decode_table_id, INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
 };
 
-use crate::table::{
-    self,
-    columnar::{builder::new_version_column_info, columnar::Schema, SchemaBuf, VectorIndexDef},
-    file::File,
-    ChecksumType, InnerKey, NO_COMPRESSION,
+use crate::{
+    table::{
+        self,
+        columnar::{
+            builder::new_version_column_info, columnar::Schema, SchemaBuf, VectorIndexDef,
+            UNSPECIFIED_STORAGE_CLASS,
+        },
+        file::File,
+        ChecksumType, InnerKey, NO_COMPRESSION,
+    },
+    Properties,
 };
 
 pub const SCHEMA_FILE_MAGIC: u32 = 0x5353484D;
@@ -110,32 +116,34 @@ impl SchemaFile {
             schema_pb.merge_from_bytes(&data[..schema_pb_len]).unwrap();
             data.advance(schema_pb_len);
             let table_id = schema_pb.get_table_id();
+            let mut schema_buf = SchemaBuf::default();
+            schema_buf.table_id = table_id;
+            schema_buf.properties = Properties::new().apply_schema_pb(&schema_pb);
             let mut columns = Vec::with_capacity(schema_pb.columns.len());
-            for col_data in &schema_pb.columns {
-                let mut column_info = tipb::ColumnInfo::new();
-                column_info.merge_from_bytes(col_data).unwrap();
-                columns.push(column_info);
+            if !schema_pb.columns.is_empty() {
+                for col_data in &schema_pb.columns {
+                    let mut column_info = tipb::ColumnInfo::new();
+                    column_info.merge_from_bytes(col_data).unwrap();
+                    columns.push(column_info);
+                }
+                let handle_column = columns.pop().unwrap();
+                let vector_indexes = schema_pb
+                    .vector_indexes
+                    .iter()
+                    .map(|vec_idx| {
+                        let vec_col = columns
+                            .iter()
+                            .find(|c| c.get_column_id() == vec_idx.col_id)
+                            .unwrap();
+                        VectorIndexDef::from_pb(vec_col.get_column_len() as usize, vec_idx)
+                    })
+                    .collect();
+                schema_buf.handle_column = handle_column;
+                schema_buf.version_column = new_version_column_info();
+                schema_buf.columns = columns;
+                schema_buf.pk_col_ids = schema_pb.pk_col_ids;
+                schema_buf.vector_indexes = vector_indexes;
             }
-            let handle_column = columns.pop().unwrap();
-            let vector_indexes = schema_pb
-                .vector_indexes
-                .iter()
-                .map(|vec_idx| {
-                    let vec_col = columns
-                        .iter()
-                        .find(|c| c.get_column_id() == vec_idx.col_id)
-                        .unwrap();
-                    VectorIndexDef::from_pb(vec_col.get_column_len() as usize, vec_idx)
-                })
-                .collect();
-            let schema_buf = SchemaBuf {
-                table_id,
-                handle_column,
-                version_column: new_version_column_info(),
-                columns,
-                pk_col_ids: schema_pb.pk_col_ids,
-                vector_indexes,
-            };
             tables.insert(table_id, Schema::new(schema_buf));
         }
         let core = SchemaFileCore {
@@ -211,6 +219,23 @@ impl SchemaFile {
         }
         let start_table_id = decode_table_id(start_key).unwrap_or(0);
         let mut end_table_id = decode_table_id(end_key).unwrap_or(i64::MAX);
+        let end_lt_index = end_key.len() >= TABLE_PREFIX_KEY_LEN
+            && &end_key[TABLE_PREFIX_KEY_LEN..] < INDEX_PREFIX_SEP;
+        for schema in self.core.tables.values() {
+            let table_id = schema.table_id;
+            if schema.get_storage_class() > UNSPECIFIED_STORAGE_CLASS {
+                if start_table_id == end_table_id && table_id == start_table_id {
+                    return true;
+                }
+                if start_table_id < end_table_id
+                    && start_table_id <= table_id
+                    && (end_lt_index && table_id < end_table_id
+                        || !end_lt_index && table_id <= end_table_id)
+                {
+                    return true;
+                }
+            }
+        }
         if end_key.len() >= TABLE_PREFIX_KEY_LEN
             && &end_key[TABLE_PREFIX_KEY_LEN..] < RECORD_PREFIX_SEP
         {
@@ -234,14 +259,59 @@ impl SchemaFile {
         false
     }
 
-    pub fn overlap_tables(&self, smallest: InnerKey<'_>, biggest: InnerKey<'_>) -> Vec<i64> {
+    pub fn overlap_columnar_tables(
+        &self,
+        smallest: InnerKey<'_>,
+        biggest: InnerKey<'_>,
+    ) -> Vec<i64> {
         let start_table_id = decode_table_id(smallest.deref()).unwrap_or(0);
         let end_table_id = decode_table_id(biggest.deref()).unwrap_or(i64::MAX);
         self.core
             .tables
-            .keys()
-            .filter(|&&tid| start_table_id <= tid && tid <= end_table_id)
-            .copied()
+            .values()
+            .filter_map(|schema| {
+                if schema.with_columnar()
+                    && start_table_id <= schema.table_id
+                    && schema.table_id <= end_table_id
+                {
+                    Some(schema.table_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn overlap_storage_class_tables(
+        &self,
+        mut start_key: &[u8],
+        mut end_key: &[u8],
+        storage_class: u8,
+    ) -> Vec<i64> {
+        start_key.advance(KEYSPACE_PREFIX_LEN);
+        end_key.advance(KEYSPACE_PREFIX_LEN);
+        let start_table_id = decode_table_id(start_key).unwrap_or(0);
+        let end_table_id = decode_table_id(end_key).unwrap_or(i64::MAX);
+        let end_lt_index = end_key.len() >= TABLE_PREFIX_KEY_LEN
+            && &end_key[TABLE_PREFIX_KEY_LEN..] < INDEX_PREFIX_SEP;
+        self.core
+            .tables
+            .values()
+            .filter_map(|schema| {
+                if schema.get_storage_class() == storage_class {
+                    if start_table_id == end_table_id && schema.table_id == start_table_id {
+                        return Some(schema.table_id);
+                    }
+                    if start_table_id < end_table_id
+                        && start_table_id <= schema.table_id
+                        && (end_lt_index && schema.table_id < end_table_id
+                            || !end_lt_index && schema.table_id <= end_table_id)
+                    {
+                        return Some(schema.table_id);
+                    }
+                }
+                None
+            })
             .collect()
     }
 
@@ -294,17 +364,19 @@ pub fn build_schema_file(
     data.put_i64_le(schema_version);
     data.put_u64_le(restore_version);
     for schema in &tables {
-        let mut columns = Vec::with_capacity(schema.columns.len() + 1);
-        columns.extend_from_slice(&schema.columns);
-        columns.push(schema.handle_column.clone());
-        let mut schema_pb = kvenginepb::Schema::new();
+        let mut schema_pb = schema.properties.to_schema_pb();
         schema_pb.table_id = schema.table_id;
-        for col in &columns {
-            schema_pb.mut_columns().push(col.write_to_bytes().unwrap());
-        }
-        schema_pb.set_pk_col_ids(schema.pk_col_ids.clone());
-        for vec_idx in &schema.vector_indexes {
-            schema_pb.mut_vector_indexes().push(vec_idx.to_pb());
+        if schema.with_columnar() {
+            let mut columns = Vec::with_capacity(schema.columns.len() + 1);
+            columns.extend_from_slice(&schema.columns);
+            columns.push(schema.handle_column.clone());
+            for col in &columns {
+                schema_pb.mut_columns().push(col.write_to_bytes().unwrap());
+            }
+            schema_pb.set_pk_col_ids(schema.pk_col_ids.clone());
+            for vec_idx in &schema.vector_indexes {
+                schema_pb.mut_vector_indexes().push(vec_idx.to_pb());
+            }
         }
         let schema_pb_data = schema_pb.write_to_bytes().unwrap();
         data.put_u32_le(schema_pb_data.len() as u32);
@@ -326,9 +398,15 @@ mod tests {
     use tikv_util::codec::number::NumberEncoder;
 
     use super::*;
-    use crate::table::{
-        columnar::builder::{new_common_handle_column_info, new_int_handle_column_info},
-        file::InMemFile,
+    use crate::{
+        table::{
+            columnar::{
+                builder::{new_common_handle_column_info, new_int_handle_column_info},
+                IA_STORAGE_CLASS, STANDARD_STORAGE_CLASS,
+            },
+            file::InMemFile,
+        },
+        Properties,
     };
 
     fn new_column_info(id: i64, is_int: bool) -> tipb::ColumnInfo {
@@ -344,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_file() {
+    fn test_schema_file_with_columnar() {
         let keyspace_id = 1;
         let schema_version = 1234i64;
         let schema_1 = Schema::new(SchemaBuf {
@@ -354,6 +432,7 @@ mod tests {
             columns: vec![new_column_info(3, true), new_column_info(4, false)],
             pk_col_ids: vec![],
             vector_indexes: vec![],
+            properties: Properties::default(),
         });
         let schema_2 = Schema::new(SchemaBuf {
             table_id: 20,
@@ -362,6 +441,7 @@ mod tests {
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
             pk_col_ids: vec![],
             vector_indexes: vec![],
+            properties: Properties::default(),
         });
         let schemas = vec![schema_1, schema_2];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
@@ -438,6 +518,215 @@ mod tests {
     }
 
     #[test]
+    fn test_schema_file_with_storage_class() {
+        let keyspace_id = 1;
+        let schema_version = 1234i64;
+        let mut schema_buf_1 = SchemaBuf::default();
+        schema_buf_1.table_id = 10;
+        schema_buf_1.set_storage_class(IA_STORAGE_CLASS);
+        let schema_1 = Schema::new(schema_buf_1);
+        let mut schema_buf_2 = SchemaBuf::default();
+        schema_buf_2.table_id = 20;
+        schema_buf_2.set_storage_class(STANDARD_STORAGE_CLASS);
+        let schema_2 = Schema::new(schema_buf_2);
+        let schemas = vec![schema_1, schema_2];
+        let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
+        let file = Arc::new(InMemFile::new(100, data.into()));
+        let schema_file = SchemaFile::open(file).unwrap();
+        assert_eq!(&schemas[0], schema_file.get_table(10).unwrap());
+        assert_eq!(&schemas[1], schema_file.get_table(20).unwrap());
+        assert_eq!(schema_version, schema_file.get_version());
+
+        for case in vec![
+            OverlapCase {
+                start_key: ApiV2::get_txn_keyspace_prefix(keyspace_id),
+                end_key: encode_meta_key(keyspace_id, b"def"),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: ApiV2::get_txn_keyspace_prefix(keyspace_id),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 19, true, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 21, false, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_meta_key(keyspace_id, b"abc"),
+                end_key: encode_meta_key(keyspace_id, b"def"),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_meta_key(keyspace_id, b"abc"),
+                end_key: encode_table_key(keyspace_id, 13, true, b""),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 1, true, b""),
+                end_key: encode_table_key(keyspace_id, 9, true, b""),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 1, true, b""),
+                end_key: encode_table_key(keyspace_id, 10, false, b""),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, true, b""),
+                end_key: encode_table_key(keyspace_id, 13, false, b""),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 10, false, b"123"),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 10, true, b"123"),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, true, b"012"),
+                end_key: encode_table_key(keyspace_id, 10, true, b"123"),
+                overlap: true,
+            },
+        ] {
+            assert_eq!(
+                schema_file.overlap(&case.start_key, &case.end_key, keyspace_id),
+                case.overlap,
+                "{:?}",
+                case
+            );
+        }
+    }
+
+    #[test]
+    fn test_schema_file_with_columnar_and_storage_class() {
+        let keyspace_id = 1;
+        let schema_version = 1234i64;
+        let schema_1 = Schema::new(SchemaBuf {
+            table_id: 10,
+            handle_column: new_common_handle_column_info(),
+            version_column: new_version_column_info(),
+            columns: vec![new_column_info(3, true), new_column_info(4, false)],
+            pk_col_ids: vec![],
+            vector_indexes: vec![],
+            properties: Properties::default(),
+        });
+        let mut schema_buf_2 = SchemaBuf {
+            table_id: 20,
+            handle_column: new_int_handle_column_info(),
+            version_column: new_version_column_info(),
+            columns: vec![new_column_info(3, false), new_column_info(4, true)],
+            pk_col_ids: vec![],
+            vector_indexes: vec![],
+            properties: Properties::default(),
+        };
+        schema_buf_2.set_storage_class(STANDARD_STORAGE_CLASS);
+        let schema_2 = Schema::new(schema_buf_2);
+        let mut schema_buf_3 = SchemaBuf::default();
+        schema_buf_3.table_id = 30;
+        schema_buf_3.set_storage_class(IA_STORAGE_CLASS);
+        let schema_3 = Schema::new(schema_buf_3);
+        let schemas = vec![schema_1, schema_2, schema_3];
+        let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
+        let file = Arc::new(InMemFile::new(100, data.into()));
+        let schema_file = SchemaFile::open(file).unwrap();
+        assert_eq!(&schemas[0], schema_file.get_table(10).unwrap());
+        assert_eq!(&schemas[1], schema_file.get_table(20).unwrap());
+        assert_eq!(&schemas[2], schema_file.get_table(30).unwrap());
+        assert_eq!(schema_version, schema_file.get_version());
+
+        for case in vec![
+            OverlapCase {
+                start_key: ApiV2::get_txn_keyspace_prefix(keyspace_id),
+                end_key: encode_meta_key(keyspace_id, b"def"),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: ApiV2::get_txn_keyspace_prefix(keyspace_id),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 29, true, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 31, false, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_meta_key(keyspace_id, b"abc"),
+                end_key: encode_meta_key(keyspace_id, b"def"),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_meta_key(keyspace_id, b"abc"),
+                end_key: encode_table_key(keyspace_id, 23, true, b""),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 11, false, b""),
+                end_key: encode_table_key(keyspace_id, 19, true, b""),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 11, true, b""),
+                end_key: encode_table_key(keyspace_id, 20, false, b""),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 20, true, b""),
+                end_key: encode_table_key(keyspace_id, 23, false, b""),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 19, true, b"012"),
+                end_key: encode_table_key(keyspace_id, 19, true, b"123"),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 20, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 20, false, b"123"),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 20, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 20, true, b"123"),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 20, true, b"012"),
+                end_key: encode_table_key(keyspace_id, 20, true, b"123"),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 21, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 21, false, b"123"),
+                overlap: false,
+            },
+        ] {
+            assert_eq!(
+                schema_file.overlap(&case.start_key, &case.end_key, keyspace_id),
+                case.overlap,
+                "{:?}",
+                case
+            );
+        }
+    }
+
+    #[test]
     fn test_contains_schema() {
         let keyspace_id = 1;
         let schema_version = 1234i64;
@@ -448,6 +737,7 @@ mod tests {
             columns: vec![new_column_info(3, true), new_column_info(4, false)],
             pk_col_ids: vec![],
             vector_indexes: vec![],
+            properties: Properties::default(),
         });
         let schema_2 = Schema::new(SchemaBuf {
             table_id: 20,
@@ -456,6 +746,7 @@ mod tests {
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
             pk_col_ids: vec![],
             vector_indexes: vec![],
+            properties: Properties::default(),
         });
         let schema_3 = Schema::new(SchemaBuf {
             table_id: 30,
@@ -464,6 +755,7 @@ mod tests {
             columns: vec![new_column_info(3, false), new_column_info(4, true)],
             pk_col_ids: vec![],
             vector_indexes: vec![],
+            properties: Properties::default(),
         });
         let schemas = vec![schema_1.clone(), schema_2.clone()];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);

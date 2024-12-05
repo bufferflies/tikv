@@ -2648,8 +2648,8 @@ async fn compact_destroy_range_for_columnar(
         let schema_file = schema_file.as_ref().unwrap();
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file).unwrap();
-        let overlap_tables =
-            schema_file.overlap_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
+        let overlap_tables = schema_file
+            .overlap_columnar_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
         let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
@@ -2908,8 +2908,8 @@ async fn compact_truncate_ts_for_columnar(
         let schema_file = schema_file.as_ref().unwrap();
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file).unwrap();
-        let overlap_tables =
-            schema_file.overlap_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
+        let overlap_tables = schema_file
+            .overlap_columnar_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
         let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
@@ -3159,8 +3159,8 @@ async fn compact_trim_over_bound_for_columnar(
         let schema_file = schema_file.as_ref().unwrap();
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file).unwrap();
-        let overlap_tables =
-            schema_file.overlap_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
+        let overlap_tables = schema_file
+            .overlap_columnar_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
         let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
@@ -4051,7 +4051,7 @@ async fn columnar_major_compact(
     if tbls.is_empty() {
         return Ok(ret);
     }
-    let overlap_tables = schema_file.overlap_tables(
+    let overlap_tables = schema_file.overlap_columnar_tables(
         InnerKey::from_inner_buf(smallest.as_ref().unwrap()),
         InnerKey::from_inner_buf(biggest.as_ref().unwrap()),
     );
@@ -4139,7 +4139,7 @@ async fn convert_row_file_to_columnar_file(
     let l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     let smallest = l0_tbls.iter().map(|l0| l0.smallest()).min().unwrap();
     let biggest = l0_tbls.iter().map(|l0| l0.biggest()).max().unwrap();
-    let overlap_tables = schema_file.overlap_tables(smallest, biggest);
+    let overlap_tables = schema_file.overlap_columnar_tables(smallest, biggest);
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
@@ -4279,7 +4279,7 @@ async fn compact_columnar_l0_files(
             biggest = columnar_file.get_biggest();
         }
     }
-    let overlap_tables = schema_file.overlap_tables(smallest, biggest);
+    let overlap_tables = schema_file.overlap_columnar_tables(smallest, biggest);
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
@@ -4418,7 +4418,7 @@ async fn compact_columnar_l1_files(
         tbl_changes.mut_columnar_deletes().push(col_delete);
     }
 
-    let mut overlap_tables = schema_file.overlap_tables(smallest, biggest);
+    let mut overlap_tables = schema_file.overlap_columnar_tables(smallest, biggest);
     if overlap_tables.is_empty() {
         return Ok(ret);
     }

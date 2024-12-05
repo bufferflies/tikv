@@ -25,11 +25,11 @@ use kvengine::{
         columnar,
         columnar::{
             build_schema_file, new_int_handle_column_info, new_version_column_info,
-            ColumnarFilterReader, Schema, SchemaBuf,
+            ColumnarFilterReader, Schema, SchemaBuf, IA_STORAGE_CLASS, STANDARD_STORAGE_CLASS,
         },
         sstable::BlockCache,
     },
-    ColumnarStatusResp, SnapAccess, WRITE_CF,
+    ColumnarStatusResp, Properties, SnapAccess, WRITE_CF,
 };
 use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
@@ -165,6 +165,151 @@ fn test_schema_file() {
         "columnar status is not ready, columnar_status: {:#?}",
         columnar_status
     );
+}
+
+#[test]
+fn test_schema_file_with_storage_class() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let cluster = ServerCluster::new(vec![node_id], |_, _| {});
+    let dfs = cluster.get_dfs().unwrap();
+    let keyspace_id = 9;
+    let km = cluster.keyspace_manager();
+    let pd_client = cluster.get_pd_client();
+    dfs.get_runtime().block_on(async move {
+        km.create_single_keyspace(keyspace_id, format!("ks{}", keyspace_id), 4, 4, 0.0, false)
+            .await;
+        let keyspace_split_keys = get_keyspace_split_keys(keyspace_id);
+        pd_client
+            .split_regions_with_retry(keyspace_split_keys, Duration::from_secs(10))
+            .await
+            .unwrap();
+    });
+    let ks_meta = km.get_keyspace_meta(keyspace_id).unwrap();
+    let table_ids = ks_meta.get_all_available_tables();
+    let mut schemas = vec![];
+    for table_id in [table_ids[1], table_ids[3]] {
+        let mut schema_buf = SchemaBuf::default();
+        schema_buf.table_id = table_id;
+        schema_buf.set_storage_class(IA_STORAGE_CLASS);
+        schemas.push(schema_buf.into());
+    }
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
+    let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    dfs.get_runtime()
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    let kvengine = cluster.get_kvengine(node_id);
+    assert_eq!(kvengine.get_all_shard_id_vers().len(), 3);
+    let status_addr = cluster.status_addr(node_id);
+    dfs.get_runtime().block_on(send_schema_file_request(
+        &status_addr,
+        keyspace_id,
+        schema_file_id,
+    ));
+    must_wait(
+        || {
+            let all_ids_vers = kvengine.get_all_shard_id_vers();
+            all_ids_vers.len() == 7
+        },
+        10,
+        || "failed to split ia table".to_string(),
+    );
+    dfs.get_runtime().block_on(send_schema_file_request(
+        &status_addr,
+        keyspace_id,
+        schema_file_id,
+    ));
+    must_wait(
+        || {
+            let mut shard_with_schema_file_count = 0;
+            let mut shard_with_ia_count = 0;
+            for &id_ver in &kvengine.get_all_shard_id_vers() {
+                let shard = kvengine.get_shard(id_ver.id).unwrap();
+                if shard.get_schema_file().is_some() {
+                    shard_with_schema_file_count += 1;
+                    if shard.get_storage_class() == IA_STORAGE_CLASS {
+                        shard_with_ia_count += 1;
+                    }
+                }
+            }
+            shard_with_schema_file_count == 2 && shard_with_ia_count == 2
+        },
+        10,
+        || "failed to wait storage class".to_string(),
+    );
+
+    // convert IA to STANDARD.
+    let mut new_schemas = vec![];
+    let mut schema_buf_0 = SchemaBuf::default();
+    schema_buf_0.table_id = table_ids[1];
+    schema_buf_0.set_storage_class(IA_STORAGE_CLASS);
+    new_schemas.push(schema_buf_0.into());
+    let mut schema_buf_1 = SchemaBuf::default();
+    schema_buf_1.table_id = table_ids[3];
+    schema_buf_1.set_storage_class(STANDARD_STORAGE_CLASS);
+    new_schemas.push(schema_buf_1.into());
+    let new_schema_version = 11;
+    let new_schema_file_data = build_schema_file(keyspace_id, new_schema_version, new_schemas, 0);
+    let new_schema_file_id = 101;
+    dfs.get_runtime()
+        .block_on(dfs.create(new_schema_file_id, new_schema_file_data.into(), opts))
+        .unwrap();
+    dfs.get_runtime().block_on(send_schema_file_request(
+        &status_addr,
+        keyspace_id,
+        new_schema_file_id,
+    ));
+
+    must_wait(
+        || {
+            let mut shard_with_schema_file_ids = vec![];
+            let mut shard_with_ia_count = 0;
+            let mut shard_with_standard_count = 0;
+            for &id_ver in &kvengine.get_all_shard_id_vers() {
+                let shard = kvengine.get_shard(id_ver.id).unwrap();
+                if shard.get_schema_file().is_some() {
+                    let schema_file_id = shard.get_schema_file().unwrap().get_file_id();
+                    shard_with_schema_file_ids.push(schema_file_id);
+                    if shard.get_storage_class() == IA_STORAGE_CLASS {
+                        shard_with_ia_count += 1;
+                    } else if shard.get_storage_class() == STANDARD_STORAGE_CLASS {
+                        shard_with_standard_count += 1;
+                    }
+                }
+            }
+            shard_with_schema_file_ids.len() == 2
+                && shard_with_schema_file_ids[0] == new_schema_file_id
+                && shard_with_schema_file_ids[1] == new_schema_file_id
+                && shard_with_ia_count == 1
+                && shard_with_standard_count == 1
+        },
+        10,
+        || "failed to wait storage class".to_string(),
+    );
+
+    // test schema file will not update if version is older.
+    dfs.get_runtime().block_on(send_schema_file_request(
+        &status_addr,
+        keyspace_id,
+        schema_file_id,
+    ));
+    std::thread::sleep(Duration::from_secs(3));
+    for &id_ver in &kvengine.get_all_shard_id_vers() {
+        let shard = kvengine.get_shard(id_ver.id).unwrap();
+        if shard.get_schema_file().is_some() {
+            let sf = shard.get_schema_file().unwrap();
+            if sf.is_tombstone() {
+                assert_eq!(sf.get_version(), new_schema_version);
+            } else {
+                assert_eq!(sf.get_file_id(), new_schema_file_id);
+            }
+            let stats = shard.get_stats();
+            assert_eq!(stats.schema_version, new_schema_version);
+        }
+    }
 }
 
 #[test]
@@ -800,6 +945,7 @@ fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {
             columns: vec![c1, c2],
             pk_col_ids: vec![],
             vector_indexes: vec![],
+            properties: Properties::default(),
         }
         .into();
         schemas.push(schema);

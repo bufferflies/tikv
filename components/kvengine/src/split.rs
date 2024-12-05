@@ -19,9 +19,17 @@ use collections::HashSet;
 use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use slog_global::info;
+use tidb_query_datatype::codec::table::{
+    decode_table_id, INDEX_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
+};
+use tikv_util::codec::{bytes::encode_bytes, number::NumberEncoder};
 
 use crate::{
-    table::{columnar::ColumnarLevels, vector_index::VectorIndexes, BoundedDataSet},
+    table::{
+        columnar::{ColumnarLevels, IA_STORAGE_CLASS},
+        vector_index::VectorIndexes,
+        BoundedDataSet,
+    },
     *,
 };
 
@@ -36,6 +44,9 @@ pub struct CheckMergeResult {
 
     // source and target shards belong to same keyspace but with different encryption key.
     pub inconsistent_encryption_key: bool,
+    // source and target shards belong to same keyspace but with different specified storage
+    // class.
+    pub inconsistent_storage_class: bool,
 }
 
 impl Engine {
@@ -57,6 +68,7 @@ impl Engine {
             old_data.lock_txn_files
         );
         let old_del_prefixes = old_shard.pending_ops.read().unwrap().del_prefixes.clone();
+        let storage_class = old_shard.get_property(STORAGE_CLASS_KEY);
         for i in 0..=split.keys.len() {
             let (start_key, end_key) = get_splitting_start_end(
                 old_shard.outer_start.chunk(),
@@ -114,6 +126,9 @@ impl Engine {
                 if !new_del_prefixes.is_empty() {
                     new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes.marshal());
                 }
+            }
+            if let Some(storage_class) = &storage_class {
+                new_shard.set_property(STORAGE_CLASS_KEY, storage_class);
             }
             new_shards.push(Arc::new(new_shard));
         }
@@ -248,11 +263,13 @@ impl Engine {
         if source_shard.has_txn_file_locks() {
             return Err(Error::CheckMerge("source has txn file locks".to_string()));
         }
+        let source_storage_class = source_shard.get_property(STORAGE_CLASS_KEY);
 
         let target_shard = self.get_shard_with_ver(target_id, target_ver)?;
         if !target_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("target not initial flushed".to_string()));
         }
+        let target_storage_class = target_shard.get_property(STORAGE_CLASS_KEY);
 
         let belongs_to_same_keyspace = ApiV2::is_belongs_to_same_keyspace(
             &source_shard.outer_start,
@@ -273,6 +290,30 @@ impl Engine {
                     .as_ref()
                     .map(|k| k.cipher_text.clone());
 
+        let inconsistent_storage_class = if belongs_to_same_keyspace {
+            if source_storage_class.is_none() && target_storage_class.is_none() {
+                false
+            } else {
+                let source_ia = source_storage_class
+                    .map(|val| val.eq(&[IA_STORAGE_CLASS].to_vec()))
+                    .unwrap_or_default();
+                let target_ia = target_storage_class
+                    .map(|val| val.eq(&[IA_STORAGE_CLASS].to_vec()))
+                    .unwrap_or_default();
+                if source_ia && target_ia {
+                    let source_table_prefix =
+                        &source_shard.outer_start[0..KEYSPACE_PREFIX_LEN + 1 + 8];
+                    let target_table_prefix =
+                        &target_shard.outer_start[0..KEYSPACE_PREFIX_LEN + 1 + 8];
+                    !source_table_prefix.eq(target_table_prefix)
+                } else {
+                    true
+                }
+            }
+        } else {
+            source_storage_class.is_some() || target_storage_class.is_some()
+        };
+
         let (clear_source, clear_target) =
             need_clear_region_data_on_merge(&source_shard.outer_start, &target_shard.outer_start);
         let shard_is_empty = |shard: &Shard| -> bool {
@@ -290,6 +331,7 @@ impl Engine {
             source_require_empty,
             target_require_empty,
             inconsistent_encryption_key,
+            inconsistent_storage_class,
         })
     }
 
@@ -338,10 +380,22 @@ impl Engine {
         self.prepare_update_shard_version(&old_shard, sequence, true);
         let source_snap = source.get_snapshot();
 
+        let mut source_properties = Properties::new();
+        source_properties = source_properties.apply_pb(source_snap.get_properties());
+        let source_storage_class = source_properties.get(STORAGE_CLASS_KEY);
+        let old_storage_class = old_shard.get_property(STORAGE_CLASS_KEY);
+
         let belongs_to_same_keyspace =
             ApiV2::is_belongs_to_same_keyspace(&source_snap.outer_start, &old_shard.outer_start);
         if !belongs_to_same_keyspace {
             old_shard.del_property(ENCRYPTION_KEY);
+        } else if source_storage_class.is_some() && old_storage_class.is_some() {
+            let source_storage_class = source_storage_class.unwrap();
+            let target_storage_class = old_storage_class.unwrap();
+            // If two shards have storage class property, only the same IA table can be
+            // merged in the previous merge check.
+            assert!(source_storage_class.eq(&target_storage_class));
+            old_shard.set_property(STORAGE_CLASS_KEY, &target_storage_class);
         }
 
         let (clear_source, clear_target) =
@@ -605,9 +659,59 @@ pub fn need_clear_region_data_on_merge(
     )
 }
 
+pub fn get_split_keys_for_exclusive_tables(
+    mut outer_start_key: &[u8],
+    mut outer_end_key: &[u8],
+    keyspace_id: u32,
+    mut exclusive_tables: Vec<i64>,
+) -> Vec<Vec<u8>> {
+    assert!(
+        (ApiV2::get_u32_keyspace_id_by_key(outer_end_key).unwrap()
+            - ApiV2::get_u32_keyspace_id_by_key(outer_start_key).unwrap())
+            < 2
+    );
+    assert!(!exclusive_tables.is_empty());
+    exclusive_tables.sort();
+    outer_start_key.advance(KEYSPACE_PREFIX_LEN);
+    outer_end_key.advance(KEYSPACE_PREFIX_LEN);
+    let start_table_id = decode_table_id(outer_start_key).unwrap_or(0);
+    let end_table_id = decode_table_id(outer_end_key).unwrap_or(i64::MAX);
+    let end_lt_index = outer_end_key.len() >= TABLE_PREFIX_KEY_LEN
+        && &outer_end_key[TABLE_PREFIX_KEY_LEN..] < INDEX_PREFIX_SEP;
+    if end_table_id - start_table_id > 1 || (end_table_id - start_table_id == 1 && !end_lt_index) {
+        let mut split_keys: Vec<Vec<u8>> = Vec::new();
+        let mut prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+        prefix.extend_from_slice(TABLE_PREFIX);
+        let mut last_table_id = start_table_id;
+        for table_id in exclusive_tables {
+            if table_id != last_table_id {
+                let mut table_start = prefix.clone();
+                table_start.encode_i64(table_id).unwrap();
+                let encoded_table_start = encode_bytes(&table_start);
+                split_keys.push(encoded_table_start);
+            }
+            if (table_id + 1 < end_table_id) || ((table_id + 1 == end_table_id) && !end_lt_index) {
+                let mut table_end = prefix.clone();
+                table_end.encode_i64(table_id + 1).unwrap();
+                let encoded_table_end = encode_bytes(&table_end);
+                split_keys.push(encoded_table_end);
+            }
+            last_table_id = table_id + 1;
+        }
+        return split_keys;
+    }
+    Vec::default()
+}
+
 #[cfg(test)]
 mod tests {
     use std::iter::Iterator;
+
+    use api_version::api_v2::TIDB_META_KEY_PREFIX;
+    use bytes::BufMut;
+    use tidb_query_datatype::codec::table::{
+        INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX_KEY_LEN,
+    };
 
     use super::*;
 
@@ -645,5 +749,412 @@ mod tests {
             let res = need_clear_region_data_on_merge(source_outer_start, target_outer_start);
             assert_eq!(res, expected, "case {}", idx);
         }
+    }
+
+    #[test]
+    fn test_get_split_keys_for_exclusive_tables() {
+        let keyspace_id: u32 = 3;
+        let (start_key, end_key) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        let meta_key = get_meta_key(keyspace_id, b"abc");
+        let table_10 = get_table_key(keyspace_id, 10);
+        let table_10_with_index = get_table_key_with_suffix(keyspace_id, 10, false, b"123");
+        let table_10_with_record = get_table_key_with_suffix(keyspace_id, 10, true, b"123");
+        let table_11 = get_table_key(keyspace_id, 11);
+        let table_11_with_index = get_table_key_with_suffix(keyspace_id, 11, false, b"123");
+        let table_12 = get_table_key(keyspace_id, 12);
+        let table_12_with_index = get_table_key_with_suffix(keyspace_id, 12, false, b"123");
+        let table_13 = get_table_key(keyspace_id, 13);
+        let table_13_with_index = get_table_key_with_suffix(keyspace_id, 13, false, b"123");
+        // outer_start_key, outer_end_key, exclusive_tables, expected_split_keys
+        let cases: Vec<(&[u8], &[u8], Vec<i64>, Vec<Vec<u8>>)> = vec![
+            // keyspace range
+            (
+                &start_key,
+                &end_key,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11].to_vec()),
+            ),
+            (
+                &start_key,
+                &end_key,
+                [10, 11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11, 12].to_vec()),
+            ),
+            (
+                &start_key,
+                &end_key,
+                [10, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11, 12, 13].to_vec()),
+            ),
+            (
+                &start_key,
+                &end_key,
+                [10, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11, 13, 14].to_vec()),
+            ),
+            (
+                &start_key,
+                &end_key,
+                [10, 11, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11, 12, 13].to_vec()),
+            ),
+            (
+                &start_key,
+                &end_key,
+                [10, 11, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11, 12, 13, 14].to_vec()),
+            ),
+            (
+                &start_key,
+                &end_key,
+                [10, 12, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11, 12, 13, 14].to_vec()),
+            ),
+            (
+                &start_key,
+                &end_key,
+                [10, 11, 12, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11, 12, 13, 14].to_vec()),
+            ),
+            // meta range
+            (
+                &meta_key,
+                &end_key,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11].to_vec()),
+            ),
+            (
+                &meta_key,
+                &table_11,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10].to_vec()),
+            ),
+            (
+                &meta_key,
+                &table_11_with_index,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11].to_vec()),
+            ),
+            // keyspace range and table range
+            (
+                &table_10,
+                &end_key,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &end_key,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &start_key,
+                &table_11,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10].to_vec()),
+            ),
+            (
+                &start_key,
+                &table_11_with_index,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [10, 11].to_vec()),
+            ),
+            // same table
+            (
+                &table_10,
+                &table_10_with_record,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [].to_vec()),
+            ),
+            (
+                &table_10_with_index,
+                &table_10_with_record,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [].to_vec()),
+            ),
+            // one table range
+            (
+                &table_10,
+                &table_11,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_11,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [].to_vec()),
+            ),
+            // two table range
+            (
+                &table_10_with_record,
+                &table_11_with_index,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_11_with_index,
+                [11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_11_with_index,
+                [10, 11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_12,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_12,
+                [11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_12,
+                [10, 11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            // three table range
+            (
+                &table_10_with_record,
+                &table_12_with_index,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_12_with_index,
+                [11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_12_with_index,
+                [12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_12_with_index,
+                [10, 11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_12_with_index,
+                [10, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_12_with_index,
+                [11, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_12_with_index,
+                [10, 11, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13,
+                [11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13,
+                [12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13,
+                [10, 11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13,
+                [10, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13,
+                [11, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13,
+                [10, 11, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            // four table range
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [10].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [12, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [10, 11].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [10, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [10, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [11, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [11, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [12, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [12, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [10, 11, 12].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [10, 11, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [10, 12, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [11, 12, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12, 13].to_vec()),
+            ),
+            (
+                &table_10_with_record,
+                &table_13_with_index,
+                [10, 11, 12, 13].to_vec(),
+                get_encoded_table_keys(keyspace_id, [11, 12, 13].to_vec()),
+            ),
+        ];
+
+        for (idx, (outer_start_key, outer_end_key, exclusive_tables, expected)) in
+            cases.into_iter().enumerate()
+        {
+            let res = get_split_keys_for_exclusive_tables(
+                outer_start_key,
+                outer_end_key,
+                keyspace_id,
+                exclusive_tables,
+            );
+            assert_eq!(res, expected, "case {}", idx);
+        }
+    }
+
+    fn get_encoded_table_keys(keyspace_id: u32, table_ids: Vec<i64>) -> Vec<Vec<u8>> {
+        let mut encoded_table_keys = Vec::with_capacity(table_ids.len());
+        for table_id in table_ids {
+            let table_key = get_table_key(keyspace_id, table_id);
+            encoded_table_keys.push(encode_bytes(&table_key));
+        }
+        encoded_table_keys
+    }
+
+    fn get_table_key(keyspace_id: u32, table_id: i64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(KEYSPACE_PREFIX_LEN + TABLE_PREFIX_KEY_LEN);
+        key.put(ApiV2::get_txn_keyspace_prefix(keyspace_id).as_slice());
+        key.put(TABLE_PREFIX);
+        key.encode_i64(table_id).unwrap();
+        key
+    }
+
+    fn get_table_key_with_suffix(
+        keyspace_id: u32,
+        table_id: i64,
+        is_row: bool,
+        suffix: &[u8],
+    ) -> Vec<u8> {
+        let mut key = Vec::with_capacity(KEYSPACE_PREFIX_LEN + TABLE_PREFIX_KEY_LEN);
+        key.put(ApiV2::get_txn_keyspace_prefix(keyspace_id).as_slice());
+        key.put(TABLE_PREFIX);
+        key.encode_i64(table_id).unwrap();
+        if is_row {
+            key.put(RECORD_PREFIX_SEP);
+        } else {
+            key.put(INDEX_PREFIX_SEP);
+        }
+        key.put(suffix);
+        key
+    }
+
+    fn get_meta_key(keyspace_id: u32, suffix: &[u8]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(KEYSPACE_PREFIX_LEN + TABLE_PREFIX_KEY_LEN);
+        key.put(ApiV2::get_txn_keyspace_prefix(keyspace_id).as_slice());
+        key.push(TIDB_META_KEY_PREFIX);
+        key.put(suffix);
+        key
     }
 }

@@ -53,6 +53,10 @@ pub struct TableInfo {
 }
 
 impl TableInfo {
+    pub fn with_columnar(&self) -> bool {
+        !self.cols.as_ref().map(|c| c.is_empty()).unwrap_or(true) && self.build_columnar()
+    }
+
     pub fn build_columnar(&self) -> bool {
         if self.comment.contains("columnar_engine") {
             return true;
@@ -63,6 +67,20 @@ impl TableInfo {
             }
         }
         false
+    }
+
+    pub fn with_storage_class(&self) -> bool {
+        self.comment.contains("storage_class")
+    }
+
+    pub fn storage_class(&self) -> Option<String> {
+        if self.comment.contains("storage_class=IA") {
+            Some("IA".to_string())
+        } else if self.comment.contains("storage_class") {
+            Some("Standard".to_string())
+        } else {
+            None
+        }
     }
 }
 

@@ -12,12 +12,15 @@ use std::{
     u64,
 };
 
+use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    table::columnar::SchemaFile, CheckMergeResult, IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY,
-    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE,
+    get_split_keys_for_exclusive_tables,
+    table::columnar::{SchemaFile, IA_STORAGE_CLASS, STANDARD_STORAGE_CLASS},
+    CheckMergeResult, IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION,
+    MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE, STORAGE_CLASS_KEY,
     TRUNCATE_TS_KEY,
 };
 use kvproto::{
@@ -35,6 +38,7 @@ use raft::{self, eraftpb::MessageType, GetEntriesContext, Storage};
 use raft_proto::eraftpb;
 use raftstore::store::util;
 use rand::{thread_rng, Rng};
+use tidb_query_datatype::codec::table::decode_table_id;
 use tikv_util::{
     box_err,
     codec::bytes::decode_bytes,
@@ -852,6 +856,7 @@ impl<'a> PeerMsgHandler<'a> {
                 source_require_empty,
                 target_require_empty,
                 inconsistent_encryption_key,
+                inconsistent_storage_class,
             } = check_result;
 
             // If the two regions belongs to different keyspaces,
@@ -859,6 +864,15 @@ impl<'a> PeerMsgHandler<'a> {
             if inconsistent_encryption_key {
                 return Err(kvengine::Error::CheckMerge(format!(
                     "shards have inconsistent encryption key, source:{:?}, target:{:?}",
+                    IdVer::new(id, version),
+                    IdVer::new(target_id, target_version)
+                ))
+                .into());
+            }
+
+            if inconsistent_storage_class {
+                return Err(kvengine::Error::CheckMerge(format!(
+                    "shards have inconsistent storage classes, source:{:?}, target:{:?}",
                     IdVer::new(id, version),
                     IdVer::new(target_id, target_version)
                 ))
@@ -1187,9 +1201,12 @@ impl<'a> PeerMsgHandler<'a> {
     fn on_split_region_check_tick(&mut self) -> bool /* should_split */ {
         self.ticker.schedule(PEER_TICK_SPLIT_CHECK);
         if let Some(shard) = self.ctx.global.engines.kv.get_shard(self.region_id()) {
-            let estimated_size = shard.get_estimated_size();
+            let mut estimated_size = shard.get_estimated_size();
             let estimated_entries = shard.get_estimated_entries();
             let estimated_kv_size = shard.get_estimated_kv_size();
+            if shard.get_storage_class() == IA_STORAGE_CLASS {
+                estimated_size = cmp::max(estimated_size, self.ctx.cfg.region_split_size.0);
+            }
             // use 1 for empty size as 0 is for unknown size in PD.
             self.peer.peer_stat.approximate_size = cmp::max(estimated_size, 1);
             self.peer.peer_stat.approximate_keys = estimated_entries;
@@ -1547,6 +1564,67 @@ impl<'a> PeerMsgHandler<'a> {
                 update_schema_meta.set_file_id(0);
             } else {
                 return;
+            }
+        }
+        let ia_storage_class_tables = schema_file.overlap_storage_class_tables(
+            &shard_meta.range.outer_start,
+            &shard_meta.range.outer_end,
+            IA_STORAGE_CLASS,
+        );
+        if !ia_storage_class_tables.is_empty() {
+            let ia_tables_len = ia_storage_class_tables.len();
+            let split_keys = get_split_keys_for_exclusive_tables(
+                &shard_meta.range.outer_start,
+                &shard_meta.range.outer_end,
+                shard_meta.range.keyspace_id,
+                ia_storage_class_tables,
+            );
+            if !split_keys.is_empty() {
+                info!(
+                    "schedule ask split";
+                    "tag" => tag,
+                    "peer_id" => self.fsm.peer_id(),
+                    "ia_tables" => ia_tables_len,
+                );
+                self.schedule_ask_split(split_keys);
+                return;
+            } else if ia_tables_len == 1 {
+                let update_storage_class =
+                    if let Some(v) = shard_meta.get_property(STORAGE_CLASS_KEY) {
+                        v.chunk()[0] != IA_STORAGE_CLASS
+                    } else {
+                        true
+                    };
+                if update_storage_class {
+                    change_set.set_property_key(STORAGE_CLASS_KEY.to_string());
+                    change_set.set_property_value([IA_STORAGE_CLASS].to_vec());
+                }
+            }
+        } else {
+            let standard_storage_class_tables = schema_file.overlap_storage_class_tables(
+                &shard_meta.range.outer_start,
+                &shard_meta.range.outer_end,
+                STANDARD_STORAGE_CLASS,
+            );
+            if standard_storage_class_tables.len() == 1 {
+                let mut start_key: &[u8] = &shard_meta.range.outer_start;
+                let mut end_key: &[u8] = &shard_meta.range.outer_end;
+                start_key.advance(KEYSPACE_PREFIX_LEN);
+                end_key.advance(KEYSPACE_PREFIX_LEN);
+                let start_table_id = decode_table_id(start_key).unwrap_or(0);
+                let end_table_id = decode_table_id(end_key).unwrap_or(i64::MAX);
+                if end_table_id - start_table_id < 2 {
+                    let update_storage_class =
+                        if let Some(v) = shard_meta.get_property(STORAGE_CLASS_KEY) {
+                            v.chunk()[0] != STANDARD_STORAGE_CLASS
+                        } else {
+                            true
+                        };
+                    if update_storage_class {
+                        change_set.set_property_key(STORAGE_CLASS_KEY.to_string());
+                        change_set.set_property_value([STANDARD_STORAGE_CLASS].to_vec());
+                    }
+                }
             }
         }
         let kv = self.ctx.global.engines.kv.clone();

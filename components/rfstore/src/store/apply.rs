@@ -1831,6 +1831,7 @@ pub(crate) fn is_property_change_set(cs: &kvenginepb::ChangeSet) -> bool {
         && !cs.has_destroy_range()
         && !cs.has_truncate_ts()
         && !cs.has_trim_over_bound()
+        && !cs.has_update_schema_meta()
 }
 
 struct MemTableState {

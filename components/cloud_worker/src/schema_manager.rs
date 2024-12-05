@@ -22,12 +22,13 @@ use kvengine::{
         columnar,
         columnar::{
             new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
-            Schema, SchemaBuf, SchemaFile, VectorIndexDef,
+            Schema, SchemaBuf, SchemaFile, VectorIndexDef, IA_STORAGE_CLASS,
+            STANDARD_STORAGE_CLASS, UNSPECIFIED_STORAGE_CLASS,
         },
         file::{File, LocalFile},
         ChecksumType, NO_COMPRESSION,
     },
-    IdAllocator, ShardStatsLite,
+    IdAllocator, Properties, ShardStatsLite,
 };
 use kvproto::metapb::Store;
 use native_br::common::send_request_to_store_with_retry;
@@ -679,11 +680,7 @@ impl SchemaManager {
         };
         let mut to_be_removed = vec![];
         for ti in table_infos {
-            if ti.cols.as_ref().map(|c| c.is_empty()).unwrap_or(true) {
-                to_be_removed.push(ti.id);
-                continue;
-            }
-            if !ti.build_columnar() {
+            if !ti.with_columnar() && !ti.with_storage_class() {
                 to_be_removed.push(ti.id);
                 continue;
             }
@@ -709,6 +706,21 @@ impl SchemaManager {
 }
 
 fn table_info_to_schema(ti: &TableInfo) -> Schema {
+    let storage_class = if let Some(storage_class) = ti.storage_class() {
+        if storage_class.eq("IA") {
+            IA_STORAGE_CLASS
+        } else {
+            STANDARD_STORAGE_CLASS
+        }
+    } else {
+        UNSPECIFIED_STORAGE_CLASS
+    };
+    if !ti.with_columnar() {
+        let mut schema_buf = SchemaBuf::default();
+        schema_buf.table_id = ti.id;
+        schema_buf.set_storage_class(storage_class);
+        return schema_buf.into();
+    }
     let ti_cols = ti.cols.as_ref().unwrap();
     let mut ti_pk_cols = vec![];
     if let Some(idx_info) = ti.index_info.as_ref() {
@@ -737,15 +749,17 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
         new_int_handle_column_info()
     };
     let vector_indexes = parse_vector_indexes(ti_cols, ti.index_info.as_ref());
-    SchemaBuf {
+    let mut schema_buf = SchemaBuf {
         table_id: ti.id,
         handle_column,
         version_column: new_version_column_info(),
         columns,
         pk_col_ids,
         vector_indexes,
-    }
-    .into()
+        properties: Properties::default(),
+    };
+    schema_buf.set_storage_class(storage_class);
+    schema_buf.into()
 }
 
 pub struct SchemaManagerCore {
@@ -1046,11 +1060,14 @@ mod tests {
     use std::fs;
 
     use bytes::Bytes;
-    use kvengine::table::{
-        columnar::{
-            build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
+    use kvengine::{
+        table::{
+            columnar::{
+                build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
+            },
+            file::LocalFile,
         },
-        file::LocalFile,
+        Properties,
     };
     use tikv_util::info;
 
@@ -1092,6 +1109,7 @@ mod tests {
                 columns: vec![new_int_handle_column_info()],
                 pk_col_ids: vec![],
                 vector_indexes: vec![],
+                properties: Properties::default(),
             }
             .into();
             schemas.push(schema);
@@ -1106,6 +1124,7 @@ mod tests {
                 columns: vec![new_int_handle_column_info()],
                 pk_col_ids: vec![],
                 vector_indexes: vec![],
+                properties: Properties::default(),
             }
             .into(),
         );

@@ -3,8 +3,9 @@
 use std::{fmt, mem};
 
 use bytes::Bytes;
-use kvengine::table::columnar::{
-    new_int_handle_column_info, new_version_column_info, Schema, SchemaBuf,
+use kvengine::{
+    table::columnar::{new_int_handle_column_info, new_version_column_info, Schema, SchemaBuf},
+    Properties,
 };
 use kvproto::{
     kvrpcpb, metapb,
@@ -199,6 +200,7 @@ pub fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {
             columns: vec![c1, c2],
             pk_col_ids: vec![],
             vector_indexes: vec![],
+            properties: Properties::default(),
         }
         .into();
         schemas.push(schema);

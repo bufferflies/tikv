@@ -7905,6 +7905,8 @@ pub struct Schema {
     pub columns: ::protobuf::RepeatedField<::std::vec::Vec<u8>>,
     pub pk_col_ids: ::std::vec::Vec<i64>,
     pub vector_indexes: ::protobuf::RepeatedField<VectorIndexDef>,
+    pub keys: ::protobuf::RepeatedField<::std::string::String>,
+    pub values: ::protobuf::RepeatedField<::std::vec::Vec<u8>>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -8010,6 +8012,56 @@ impl Schema {
     pub fn take_vector_indexes(&mut self) -> ::protobuf::RepeatedField<VectorIndexDef> {
         ::std::mem::replace(&mut self.vector_indexes, ::protobuf::RepeatedField::new())
     }
+
+    // repeated string keys = 5;
+
+
+    pub fn get_keys(&self) -> &[::std::string::String] {
+        &self.keys
+    }
+    pub fn clear_keys(&mut self) {
+        self.keys.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keys(&mut self, v: ::protobuf::RepeatedField<::std::string::String>) {
+        self.keys = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_keys(&mut self) -> &mut ::protobuf::RepeatedField<::std::string::String> {
+        &mut self.keys
+    }
+
+    // Take field
+    pub fn take_keys(&mut self) -> ::protobuf::RepeatedField<::std::string::String> {
+        ::std::mem::replace(&mut self.keys, ::protobuf::RepeatedField::new())
+    }
+
+    // repeated bytes values = 6;
+
+
+    pub fn get_values(&self) -> &[::std::vec::Vec<u8>] {
+        &self.values
+    }
+    pub fn clear_values(&mut self) {
+        self.values.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_values(&mut self, v: ::protobuf::RepeatedField<::std::vec::Vec<u8>>) {
+        self.values = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_values(&mut self) -> &mut ::protobuf::RepeatedField<::std::vec::Vec<u8>> {
+        &mut self.values
+    }
+
+    // Take field
+    pub fn take_values(&mut self) -> ::protobuf::RepeatedField<::std::vec::Vec<u8>> {
+        ::std::mem::replace(&mut self.values, ::protobuf::RepeatedField::new())
+    }
 }
 
 impl ::protobuf::Message for Schema {
@@ -8042,6 +8094,12 @@ impl ::protobuf::Message for Schema {
                 4 => {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.vector_indexes)?;
                 },
+                5 => {
+                    ::protobuf::rt::read_repeated_string_into(wire_type, is, &mut self.keys)?;
+                },
+                6 => {
+                    ::protobuf::rt::read_repeated_bytes_into(wire_type, is, &mut self.values)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -8067,6 +8125,12 @@ impl ::protobuf::Message for Schema {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         };
+        for value in &self.keys {
+            my_size += ::protobuf::rt::string_size(5, &value);
+        };
+        for value in &self.values {
+            my_size += ::protobuf::rt::bytes_size(6, &value);
+        };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -8086,6 +8150,12 @@ impl ::protobuf::Message for Schema {
             os.write_tag(4, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
+        };
+        for v in &self.keys {
+            os.write_string(5, &v)?;
+        };
+        for v in &self.values {
+            os.write_bytes(6, &v)?;
         };
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -8149,6 +8219,16 @@ impl ::protobuf::Message for Schema {
                     |m: &Schema| { &m.vector_indexes },
                     |m: &mut Schema| { &mut m.vector_indexes },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "keys",
+                    |m: &Schema| { &m.keys },
+                    |m: &mut Schema| { &mut m.keys },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "values",
+                    |m: &Schema| { &m.values },
+                    |m: &mut Schema| { &mut m.values },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Schema>(
                     "Schema",
                     fields,
@@ -8175,6 +8255,8 @@ impl ::protobuf::Clear for Schema {
         self.columns.clear();
         self.pk_col_ids.clear();
         self.vector_indexes.clear();
+        self.keys.clear();
+        self.values.clear();
         self.unknown_fields.clear();
     }
 }
@@ -8188,6 +8270,8 @@ impl ::protobuf::PbPrint for Schema {
         ::protobuf::PbPrint::fmt(&self.columns, "columns", buf);
         ::protobuf::PbPrint::fmt(&self.pk_col_ids, "pk_col_ids", buf);
         ::protobuf::PbPrint::fmt(&self.vector_indexes, "vector_indexes", buf);
+        ::protobuf::PbPrint::fmt(&self.keys, "keys", buf);
+        ::protobuf::PbPrint::fmt(&self.values, "values", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -8202,6 +8286,8 @@ impl ::std::fmt::Debug for Schema {
         ::protobuf::PbPrint::fmt(&self.columns, "columns", &mut s);
         ::protobuf::PbPrint::fmt(&self.pk_col_ids, "pk_col_ids", &mut s);
         ::protobuf::PbPrint::fmt(&self.vector_indexes, "vector_indexes", &mut s);
+        ::protobuf::PbPrint::fmt(&self.keys, "keys", &mut s);
+        ::protobuf::PbPrint::fmt(&self.values, "values", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -9255,20 +9341,22 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\x04\x20\x01(\x0cB\0\x12\x19\n\
     \x0flock_val_prefix\x18\x05\x20\x01(\x0cB\0\x12\x13\n\tshard_ver\x18\x06\
     \x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_bound\x18\x07\x20\x01(\x0cB\0\
-    \x12\x1b\n\x11inner_upper_bound\x18\x08\x20\x01(\x0cB\0:\0\"{\n\x06Schem\
-    a\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x11\n\x07columns\x18\
-    \x02\x20\x03(\x0cB\0\x12\x14\n\npk_col_ids\x18\x03\x20\x03(\x03B\0\x122\
-    \n\x0evector_indexes\x18\x04\x20\x03(\x0b2\x18.enginepb.VectorIndexDefB\
-    \0:\0\"u\n\x0bVectorIndex\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\
-    \x12\x12\n\x08index_id\x18\x02\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\
-    \x03\x20\x01(\x03B\0\x12*\n\x05files\x18\x04\x20\x03(\x0b2\x19.enginepb.\
-    VectorIndexFileB\0:\0\"`\n\x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\
-    \x20\x01(\x04B\0\x12\x16\n\x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\
-    \x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\
-    \x20\x01(\x0cB\0:\0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\
-    \x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\n\
-    index_kind\x18\x03\x20\x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\t\
-    B\0\x12\x15\n\x0bspec_values\x18\x05\x20\x03(\x0cB\0:\0B\0b\x06proto3\
+    \x12\x1b\n\x11inner_upper_bound\x18\x08\x20\x01(\x0cB\0:\0\"\x9d\x01\n\
+    \x06Schema\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x11\n\x07co\
+    lumns\x18\x02\x20\x03(\x0cB\0\x12\x14\n\npk_col_ids\x18\x03\x20\x03(\x03\
+    B\0\x122\n\x0evector_indexes\x18\x04\x20\x03(\x0b2\x18.enginepb.VectorIn\
+    dexDefB\0\x12\x0e\n\x04keys\x18\x05\x20\x03(\tB\0\x12\x10\n\x06values\
+    \x18\x06\x20\x03(\x0cB\0:\0\"u\n\x0bVectorIndex\x12\x12\n\x08table_id\
+    \x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\x03B\0\
+    \x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05files\x18\x04\x20\
+    \x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"`\n\x0fVectorIndexFile\
+    \x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\x0csnap_version\x18\
+    \x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\x12\
+    \x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\0\"z\n\x0eVectorIndexDef\x12\
+    \x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x02\
+    \x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\x13\n\t\
+    spec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\x20\x03\
+    (\x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

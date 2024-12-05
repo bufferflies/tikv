@@ -8,19 +8,26 @@ use protobuf::Message;
 use tidb_query_datatype::{FieldTypeAccessor, FieldTypeFlag, FieldTypeTp};
 use tipb::ColumnInfo;
 
-use crate::table::{
-    columnar::builder::{
-        TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
-        PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
+use crate::{
+    table::{
+        columnar::builder::{
+            TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
+            PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
+        },
+        file::File,
+        parse_prop_data, search,
+        sstable::{L0Table, PROP_KEY_ENCRYPTION_VER},
+        BoundedDataSet, DataBound, InnerKey, LZ4_COMPRESSION,
     },
-    file::File,
-    parse_prop_data, search,
-    sstable::{L0Table, PROP_KEY_ENCRYPTION_VER},
-    BoundedDataSet, DataBound, InnerKey, LZ4_COMPRESSION,
+    Properties, STORAGE_CLASS_KEY,
 };
 
 pub const HANDLE_COL_ID: i32 = -1;
 pub(crate) const VERSION_COL_ID: i32 = -1024;
+
+pub const UNSPECIFIED_STORAGE_CLASS: u8 = 0;
+pub const STANDARD_STORAGE_CLASS: u8 = 1;
+pub const IA_STORAGE_CLASS: u8 = 2;
 
 pub const COLUMNAR_MAGIC: u32 = 0xc01e32ae;
 
@@ -32,6 +39,7 @@ pub struct SchemaBuf {
     pub columns: Vec<ColumnInfo>,
     pub pk_col_ids: Vec<i64>,
     pub vector_indexes: Vec<VectorIndexDef>,
+    pub properties: Properties,
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -78,6 +86,14 @@ impl SchemaBuf {
         let handle_col_id = self.handle_column.get_column_id();
         self.columns.retain(|c| c.get_column_id() != handle_col_id);
     }
+
+    pub fn set_storage_class(&mut self, storage_class: u8) {
+        if storage_class > UNSPECIFIED_STORAGE_CLASS {
+            self.properties.set(STORAGE_CLASS_KEY, &[storage_class]);
+        } else {
+            self.properties.remove(STORAGE_CLASS_KEY)
+        }
+    }
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -108,6 +124,20 @@ impl Schema {
 
     pub fn is_common_handle(&self) -> bool {
         get_fixed_size(&self.handle_column) == 0
+    }
+
+    pub fn with_columnar(&self) -> bool {
+        self.handle_column.has_column_id()
+            || !self.columns.is_empty()
+            || !self.pk_col_ids.is_empty()
+            || !self.vector_indexes.is_empty()
+    }
+
+    pub fn get_storage_class(&self) -> u8 {
+        self.properties
+            .get(STORAGE_CLASS_KEY)
+            .map(|v| v.first().copied().unwrap())
+            .unwrap_or_default()
     }
 
     pub fn find_column_by_id(&self, id: i64) -> Option<&ColumnInfo> {

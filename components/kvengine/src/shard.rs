@@ -28,7 +28,9 @@ use crate::{
     table::{
         self,
         blobtable::blobtable::BlobTable,
-        columnar::{ColumnarLevel, ColumnarLevels, SchemaFile, VectorIndexDef},
+        columnar::{
+            ColumnarLevel, ColumnarLevels, SchemaFile, VectorIndexDef, UNSPECIFIED_STORAGE_CLASS,
+        },
         file::InMemFile,
         memtable::{self, CfTable},
         search,
@@ -46,6 +48,7 @@ pub(crate) struct ShardPendingOperations {
     pub(crate) truncate_ts: Option<TruncateTs>,
     pub(crate) trim_over_bound: bool,
     pub(crate) manual_major_compaction: bool,
+    pub(crate) storage_class: u8,
 }
 
 impl ShardPendingOperations {
@@ -55,6 +58,7 @@ impl ShardPendingOperations {
             truncate_ts: None,
             trim_over_bound: false,
             manual_major_compaction: false,
+            storage_class: UNSPECIFIED_STORAGE_CLASS,
         }
     }
 }
@@ -133,6 +137,7 @@ pub const TXN_FILE_REF: &str = "_txn_file_ref";
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
 pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
 pub const ENCRYPTION_KEY: &str = "_encryption";
+pub const STORAGE_CLASS_KEY: &str = "_storage_class";
 
 // Note: TERM_KEY should not be flushed during initial flush, to keep
 // `ShardMeta.data_sequence` consistent with `TERM_KEY`.
@@ -236,6 +241,13 @@ impl Shard {
             if let Some(val) = get_shard_property(MANUAL_MAJOR_COMPACTION, props) {
                 if !val.is_empty() {
                     pending_ops.manual_major_compaction = true;
+                }
+            }
+            if let Some(val) = get_shard_property(STORAGE_CLASS_KEY, props) {
+                if !val.is_empty() {
+                    pending_ops.storage_class = val[0];
+                } else {
+                    pending_ops.storage_class = UNSPECIFIED_STORAGE_CLASS
                 }
             }
         }
@@ -669,6 +681,14 @@ impl Shard {
             MANUAL_MAJOR_COMPACTION => {
                 let mut pending_ops = self.pending_ops.write().unwrap();
                 pending_ops.manual_major_compaction = !val.is_empty();
+            }
+            STORAGE_CLASS_KEY => {
+                let mut pending_ops = self.pending_ops.write().unwrap();
+                if !val.is_empty() {
+                    pending_ops.storage_class = val[0];
+                } else {
+                    pending_ops.storage_class = UNSPECIFIED_STORAGE_CLASS;
+                }
             }
             _ => {}
         }
@@ -1166,6 +1186,10 @@ impl Shard {
 
     pub fn get_manual_major_compaction(&self) -> bool {
         self.pending_ops.read().unwrap().manual_major_compaction
+    }
+
+    pub fn get_storage_class(&self) -> u8 {
+        self.pending_ops.read().unwrap().storage_class
     }
 
     pub fn data_all_persisted(&self) -> bool {
@@ -2092,6 +2116,26 @@ impl Properties {
         self
     }
 
+    pub fn to_schema_pb(&self) -> kvenginepb::Schema {
+        let mut schema = kvenginepb::Schema::new();
+        self.m.iter().for_each(|r| {
+            schema.keys.push(r.key().clone());
+            schema.values.push(r.value().to_vec());
+        });
+        schema
+    }
+
+    pub fn apply_schema_pb(self, schema: &kvenginepb::Schema) -> Self {
+        let keys = schema.get_keys();
+        let vals = schema.get_values();
+        for i in 0..keys.len() {
+            let key = &keys[i];
+            let val = &vals[i];
+            self.set(key, val.as_slice());
+        }
+        self
+    }
+
     // Complement properties from `props` if it's currently not set in self.
     pub fn complement_merge(&mut self, props: Self) {
         for (k, v) in props.m.into_iter() {
@@ -2099,6 +2143,20 @@ impl Properties {
                 e.insert(v);
             }
         }
+    }
+}
+
+impl PartialEq for Properties {
+    fn eq(&self, other: &Self) -> bool {
+        if self.m.len() != other.m.len() {
+            return false;
+        }
+        self.m.iter().all(|kv| {
+            other
+                .m
+                .get(kv.key())
+                .map_or(false, |other_kv| kv.value() == other_kv.value())
+        })
     }
 }
 

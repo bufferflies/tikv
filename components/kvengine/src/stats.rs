@@ -268,6 +268,7 @@ pub struct ShardStats {
     pub ready_to_destroy_range: bool,
     pub truncate_ts: Option<u64>,
     pub trim_over_bound: bool,
+    pub storage_class: u8,
     // Txn File Stats
     pub txn_file_locks: usize,
     // Columnar Stats
@@ -612,6 +613,7 @@ impl super::Shard {
             ready_to_destroy_range: Self::ready_to_destroy_range(&pending_ops.del_prefixes, &data),
             truncate_ts: pending_ops.truncate_ts.map(|x| x.inner()),
             trim_over_bound: pending_ops.trim_over_bound,
+            storage_class: pending_ops.storage_class,
             txn_file_locks,
             schema_version,
             schema_restore_version,

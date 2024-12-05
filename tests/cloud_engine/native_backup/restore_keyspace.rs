@@ -17,7 +17,7 @@ use kvengine::{
     table::columnar::{
         build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
     },
-    WRITE_CF,
+    Properties, WRITE_CF,
 };
 use kvproto::metapb;
 use native_br::{
@@ -1363,6 +1363,7 @@ fn test_restore_keyspace_with_schema() {
             columns: vec![new_int_handle_column_info()],
             pk_col_ids: vec![],
             vector_indexes: vec![],
+            properties: Properties::default(),
         }
         .into();
         schemas.push(schema);

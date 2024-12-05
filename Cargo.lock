@@ -6419,6 +6419,7 @@ dependencies = [
  "slog-term",
  "sst_importer",
  "thiserror",
+ "tidb_query_datatype",
  "tikv_alloc",
  "tikv_util",
  "time",

@@ -286,6 +286,10 @@ impl ShardMeta {
             self.schema_file_id = sm.get_file_id();
             self.schema_file_ver = sm.get_version();
             assert_eq!(self.schema_restore_ver, sm.get_restore_version());
+            if !cs.get_property_key().is_empty() {
+                assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
+                self.set_property(STORAGE_CLASS_KEY, cs.get_property_value());
+            }
             return;
         }
         if cs.has_columnar_compaction() {
@@ -785,6 +789,7 @@ impl ShardMeta {
         enable_inner_key_offset: bool,
     ) -> Vec<ShardMeta> {
         let old = self;
+        let old_storage_class = old.get_property(STORAGE_CLASS_KEY);
         let new_shards_len = split.get_new_shards().len();
         let mut new_shards = Vec::with_capacity(new_shards_len);
         let new_ver = old.ver + new_shards_len as u64 - 1;
@@ -829,6 +834,9 @@ impl ShardMeta {
             meta.schema_file_id = self.schema_file_id;
             meta.schema_file_ver = self.schema_file_ver;
             meta.schema_restore_ver = self.schema_restore_ver;
+            if let Some(storage_class) = &old_storage_class {
+                meta.set_property(STORAGE_CLASS_KEY, storage_class);
+            }
             new_shards.push(meta);
         }
         for new_shard in &mut new_shards {
@@ -1065,12 +1073,21 @@ impl ShardMeta {
     }
 
     pub fn commit_merge(&mut self, source: &ShardMeta, sequence: u64) {
+        let source_storage_class = source.get_property(STORAGE_CLASS_KEY);
+        let old_storage_class = self.get_property(STORAGE_CLASS_KEY);
+
         // If the regions are not belong to the same keyspace, reset the encryption_key
         // property.
         let belongs_to_same_keyspace =
             ApiV2::is_belongs_to_same_keyspace(&source.range.outer_start, &self.range.outer_start);
         if !belongs_to_same_keyspace {
             self.del_property(ENCRYPTION_KEY);
+        } else if source_storage_class.is_some() && old_storage_class.is_some() {
+            let source_storage_class = source_storage_class.unwrap();
+            let target_storage_class = old_storage_class.unwrap();
+            if source_storage_class.eq(&target_storage_class) {
+                self.set_property(STORAGE_CLASS_KEY, &target_storage_class);
+            }
         }
 
         let (clear_source, clear_target) =

@@ -176,9 +176,10 @@ fn schema_diff_key(keyspace_id: u32, ver: i64) -> Vec<u8> {
     let mut raw_key = TIDB_SCHEMA_DIFF_PREFIX.to_vec();
     raw_key.push(b':');
     raw_key.extend_from_slice(ver_str.as_bytes());
-    key.reserve(raw_key.len() + 1 + 1 + 8);
+    let encoded_key = encode_bytes(&raw_key);
+    key.reserve(encoded_key.len() + 1 + 8);
     key.push(TIDB_META_KEY_PREFIX);
-    key.extend_from_slice(&encode_bytes(&raw_key));
+    key.extend_from_slice(&encoded_key);
     key.encode_u64(STRING_DATA_TYPE as u64).unwrap();
     key
 }
@@ -187,7 +188,7 @@ fn schema_data_key(keyspace_id: u32, db_id: i64, table_id: i64) -> Vec<u8> {
     let mut key = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
     let enc_db_key = encode_bytes(format!("DB:{}", db_id).as_bytes());
     let enc_table_key = encode_bytes(format!("Table:{}", table_id).as_bytes());
-    key.reserve(enc_db_key.len() + enc_table_key.len() + 1);
+    key.reserve(enc_db_key.len() + enc_table_key.len() + 1 + 8);
     key.push(TIDB_META_KEY_PREFIX);
     key.extend_from_slice(&enc_db_key);
     key.encode_u64(HASH_DATA_TYPE as u64).unwrap();

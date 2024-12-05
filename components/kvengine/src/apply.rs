@@ -898,6 +898,10 @@ impl EngineCore {
         let mut builder = ShardDataBuilder::new(old_data);
         builder.set_schema_file(cs.schema_file.clone());
         shard.set_data(builder.build());
+        if !cs.get_property_key().is_empty() {
+            assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
+            shard.set_property(STORAGE_CLASS_KEY, cs.get_property_value());
+        }
     }
 
     fn apply_columnar_compaction(&self, shard: &Shard, cs: &ChangeSet) {

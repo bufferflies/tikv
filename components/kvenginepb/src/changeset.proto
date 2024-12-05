@@ -210,6 +210,8 @@ message Schema {
   repeated bytes columns = 2;
   repeated int64 pk_col_ids = 3;
   repeated VectorIndexDef vector_indexes = 4;
+  repeated string keys = 5;
+  repeated bytes values = 6;
 }
 
 message VectorIndex {
