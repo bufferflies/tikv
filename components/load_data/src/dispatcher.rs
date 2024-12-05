@@ -2,7 +2,7 @@
 
 use crate::checkpoint::FileMeta;
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Debug)]
 struct RangesGroup {
     ranges: Vec<FileMeta>,
     start_key: Vec<u8>,

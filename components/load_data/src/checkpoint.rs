@@ -113,31 +113,57 @@ impl LoadDataWorkerState {
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 #[serde(default)]
+pub struct FileMeta {
+    pub file_path: PathBuf,
+    pub kv_count: usize,
+    pub kv_size: usize,
+    pub first_key: Vec<u8>,
+    pub last_key: Vec<u8>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(default)]
+pub struct KvPairsWorkerCtx {
+    pub key_comm_prefix: Vec<u8>,
+    pub flushed_chunk_ids: HashMap<u64, u64>,
+    pub l0_file_metas: Vec<FileMeta>,
+    pub l1_file_metas: Vec<FileMeta>,
+    pub duplicated_entries: Vec<DuplicateEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(default)]
+pub struct BuildingWorkerCtx {
+    pub sst_metas: Vec<SstMeta>,
+    pub duplicated_entries: Vec<DuplicateEntry>,
+    pub ingested: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(default)]
 pub struct LoadDataCheckpointCtx {
-    // From TaskContext.
-    pub task_id: String, // Comes from TaskContext.
-    start_ts: u64,       // Comes from TaskContext, Used to recover readers.
-    commit_ts: u64,      // Comes from TaskContext, Used to recover readers.
+    // TaskContext
+    pub task_id: String,
+    start_ts: u64,
+    commit_ts: u64,
+    first_key: Bytes,
 
-    local_file_infos: Vec<LocalFileInfo>, // Used to recover readers.
-
-    first_key: Bytes, // Used to update inner_key_off and encrytion_key.
-
-    compression: u8, // Comes from build request, Used to build sst.
-
-    state: LoadDataWorkerState,
-    sst_metas: Vec<SstMeta>,                 // Used to ingest.
-    duplicated_entries: Vec<DuplicateEntry>, // Used to ingest.
-    is_recover: bool,                        /* If is_recover is true, it means that the
-                                              * task is recovered using checkpoint
-                                              * information. */
-
+    // LoadDataWorker
+    local_file_infos: Vec<LocalFileInfo>,
+    sst_metas: Vec<SstMeta>,
     flushed_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
     flushed_file_idx: usize,
     key_comm_prefix: Vec<u8>,
 
-    // Used to recover LoadTaskStates.The lightning service periodically obtains the execution
-    // progress from LoadTaskStates.
+    // KVPairsWorker & BuildingWorker
+    kvpairs_workers_ctx: HashMap<u64 /* worker_id */, KvPairsWorkerCtx>,
+    building_workers_ctx: HashMap<u64 /* worker_id */, BuildingWorkerCtx>,
+
+    // common
+    compression: u8,
+    state: LoadDataWorkerState,
+    duplicated_entries: Vec<DuplicateEntry>,
+    is_recover: bool,
     pub canceled: bool,
     pub error: String,
 }
@@ -146,16 +172,6 @@ pub struct LoadDataCheckpointCtx {
 pub struct LocalFileInfo {
     pub path: PathBuf,
     pub kv_count: usize,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug, Default, Eq, PartialEq)]
-#[serde(default)]
-pub struct FileMeta {
-    pub file_path: PathBuf,
-    pub kv_count: usize,
-    pub kv_size: usize,
-    pub first_key: Vec<u8>,
-    pub last_key: Vec<u8>,
 }
 
 impl LoadDataCheckpointCtx {
@@ -182,6 +198,8 @@ impl LoadDataCheckpointCtx {
             key_comm_prefix: vec![],
             canceled: false,
             error: "".to_string(),
+            kvpairs_workers_ctx: HashMap::default(),
+            building_workers_ctx: HashMap::default(),
         }
     }
 
@@ -239,6 +257,18 @@ impl LoadDataCheckpointCtx {
 
     pub fn get_task_id(&self) -> String {
         self.task_id.clone()
+    }
+
+    pub fn get_kvpairs_worker_ctx(&mut self, worker_id: u64) -> &KvPairsWorkerCtx {
+        self.kvpairs_workers_ctx.entry(worker_id).or_default()
+    }
+
+    pub fn get_building_worker_ctx(&mut self, worker_id: u64) -> &BuildingWorkerCtx {
+        self.building_workers_ctx.entry(worker_id).or_default()
+    }
+
+    pub fn recover_from_old_model(&self) -> bool {
+        self.is_recover && !self.key_comm_prefix.is_empty()
     }
 }
 
@@ -305,8 +335,7 @@ impl LocalFileCheckpointStorage {
     pub fn update_cancel_and_errmsg(&mut self, canceled: bool, errmsg: String) -> Result<()> {
         self.checkpoint_ctx.canceled = canceled;
         self.checkpoint_ctx.error = errmsg;
-        self.flush_checkpoint_ctx()?;
-        Ok(())
+        self.flush_checkpoint_ctx()
     }
 
     fn get_file_path(&self) -> PathBuf {
@@ -458,6 +487,87 @@ impl LocalFileCheckpointStorage {
             self.checkpoint_ctx.task_id, checkpoint
         );
         checkpoint
+    }
+}
+
+// The following methods are used by KvPairsWorker & BuildingWorker.
+impl LocalFileCheckpointStorage {
+    pub fn get_is_recover(&self) -> bool {
+        self.checkpoint_ctx.get_is_recover()
+    }
+
+    pub fn update_first_key(&mut self, first_key: Bytes) -> Result<()> {
+        self.checkpoint_ctx.first_key = first_key;
+        self.flush_checkpoint_ctx()
+    }
+
+    pub fn update_l0_flushed_info(
+        &mut self,
+        worker_id: u64,
+        handled_chunk_ids: HashMap<u64, u64>,
+        mut l0_file_metas: Vec<FileMeta>,
+        key_comm_prefix: Vec<u8>,
+    ) -> Result<()> {
+        let worker_ctx = self
+            .checkpoint_ctx
+            .kvpairs_workers_ctx
+            .get_mut(&worker_id)
+            .unwrap();
+        worker_ctx.flushed_chunk_ids = handled_chunk_ids;
+        worker_ctx.key_comm_prefix = key_comm_prefix;
+        worker_ctx.l0_file_metas.append(&mut l0_file_metas);
+
+        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::AddingChunks)
+    }
+
+    pub fn update_l1_flushed_info(
+        &mut self,
+        worker_id: u64,
+        l1_file_metas: Vec<FileMeta>,
+        duplicated_entries: Vec<DuplicateEntry>,
+    ) -> Result<()> {
+        let worker_ctx = self
+            .checkpoint_ctx
+            .kvpairs_workers_ctx
+            .get_mut(&worker_id)
+            .unwrap();
+        worker_ctx.l1_file_metas = l1_file_metas;
+        worker_ctx.duplicated_entries = duplicated_entries;
+
+        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::BuildingSst)
+    }
+
+    pub fn update_sst_metas(
+        &mut self,
+        worker_id: u64,
+        sst_metas: Vec<SstMeta>,
+        duplicated_entries: Vec<DuplicateEntry>,
+    ) -> Result<()> {
+        let worker_ctx = self
+            .checkpoint_ctx
+            .building_workers_ctx
+            .get_mut(&worker_id)
+            .unwrap();
+
+        worker_ctx.sst_metas = sst_metas;
+        worker_ctx.duplicated_entries = duplicated_entries;
+        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::BuildingSst)
+    }
+
+    pub fn set_worker_ingested(&mut self, worker_id: u64) -> Result<()> {
+        let worker_ctx = self
+            .checkpoint_ctx
+            .building_workers_ctx
+            .get_mut(&worker_id)
+            .unwrap();
+        worker_ctx.ingested = true;
+        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::BuildingSst)
+    }
+
+    pub fn set_ingested(&mut self, duplicated_entries: Vec<DuplicateEntry>) -> Result<()> {
+        self.checkpoint_ctx.duplicated_entries = duplicated_entries;
+        self.checkpoint_ctx.state = LoadDataWorkerState::IngestedSst;
+        self.flush_checkpoint_ctx()
     }
 }
 
