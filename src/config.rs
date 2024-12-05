@@ -2166,7 +2166,10 @@ const DEFAULT_STORAGE_READPOOL_MAX_CONCURRENCY: usize = 8;
 // about 0.001 * x secs to be actual started. A server-is-busy error will
 // trigger 2 seconds backoff. So when it needs to wait for more than 2 seconds,
 // return error won't causse larger latency.
-const DEFAULT_READPOOL_MAX_TASKS_PER_WORKER: usize = 2 * 1000;
+// const DEFAULT_READPOOL_MAX_TASKS_PER_WORKER: usize = 2 * 1000;
+
+// Use double pool size as it's used for both read & write.
+const DEFAULT_READPOOL_MAX_TASKS_PER_WORKER: usize = 4 * 1000;
 
 const MIN_READPOOL_STACK_SIZE_MB: u64 = 2;
 const DEFAULT_READPOOL_STACK_SIZE_MB: u64 = 10;

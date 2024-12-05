@@ -24,6 +24,7 @@
 //! which is transparent to the scheduler.
 
 use std::{
+    future::Future,
     marker::PhantomData,
     mem,
     sync::{
@@ -566,8 +567,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         deadline: Deadline,
     ) {
         let sched = self.clone();
-        let pool = self.get_sched_pool();
-        pool.spawn(
+        // Force spawn as we just re-enqueue the task here.
+        self.force_spawn(
             async move {
                 match unsafe {
                     with_tls_engine(|engine: &mut E| engine.precheck_write_with_ctx(&cmd_ctx))
@@ -609,10 +610,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     }
                 }
             },
-            CommandPri::High,
             cid,
-        )
-        .unwrap();
+        );
     }
 
     /// Tries to acquire all the necessary latches. If all the necessary latches
@@ -629,17 +628,14 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 // Spawn the finish task to the pool to avoid stack overflow
                 // when many queuing tasks fail successively.
                 let this = self.clone();
-                self.inner
-                    .worker_pool
-                    .spawn(
-                        async move {
-                            tikv_util::set_current_region(region_id);
-                            this.finish_with_err(cid, err);
-                        },
-                        CommandPri::Normal,
-                        cid,
-                    )
-                    .unwrap();
+                // Force spawn, otherwise we may directly invoke `finish_with_err`.
+                self.force_spawn(
+                    async move {
+                        tikv_util::set_current_region(region_id);
+                        this.finish_with_err(cid, err);
+                    },
+                    cid,
+                );
             }
         }
     }
@@ -671,21 +667,41 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         &self.inner.worker_pool
     }
 
+    fn try_spawn<F>(&self, f: F, priority: CommandPri, cid: u64, tag: CommandKind)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if let Err(err) = self.get_sched_pool().spawn(f, priority, cid) {
+            debug!("try spawn task failed"; "cid" => cid, "err" => ?err);
+            SCHED_TOO_BUSY_COUNTER_VEC.get(tag).inc();
+            self.finish_with_err(cid, StorageError::from(StorageErrorInner::SchedTooBusy));
+        }
+    }
+
+    fn force_spawn<F>(&self, f: F, cid: u64)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        // Spawn high priority task must succeed.
+        self.get_sched_pool()
+            .spawn(f, CommandPri::High, cid)
+            .unwrap()
+    }
+
     /// Executes the task in the sched pool.
     fn execute(&self, mut task: Task) {
         set_tls_tracker_token(task.tracker);
         let sched = self.clone();
         let pri = task.cmd.priority();
         let cid = task.cid;
-        let pool = self.get_sched_pool();
-        pool.spawn(
+        let tag = task.cmd.tag();
+        self.try_spawn(
             async move {
                 fail_point!("scheduler_start_execute");
                 if sched.check_task_deadline_exceeded(&task) {
                     return;
                 }
 
-                let tag = task.cmd.tag();
                 SCHED_STAGE_COUNTER_VEC.get(tag).snapshot.inc();
 
                 if !task.cmd.readonly() {
@@ -750,8 +766,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             },
             pri,
             cid,
-        )
-        .unwrap();
+            tag,
+        );
     }
 
     /// Calls the callback with an error.
@@ -996,8 +1012,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         delayed_wake_up_futures: impl IntoIterator<Item = DelayedNotifyAllFuture> + Send + 'static,
     ) {
         let self1 = self.clone();
-        let pool = self.get_sched_pool();
-        pool.spawn(
+        // Force spawn for internal tasks.
+        self.force_spawn(
             async move {
                 for (lock_info, released_lock) in legacy_wake_up_list {
                     let cb = lock_info.key_cb.unwrap().into_inner();
@@ -1016,30 +1032,23 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
                 for f in delayed_wake_up_futures {
                     let self2 = self1.clone();
-                    self1
-                        .inner
-                        .worker_pool
-                        .spawn(
-                            async move {
-                                let res = f.await;
-                                if let Some(resumable_lock_wait_entry) = res {
-                                    self2.schedule_awakened_pessimistic_locks(
-                                        None,
-                                        None,
-                                        smallvec![resumable_lock_wait_entry],
-                                    );
-                                }
-                            },
-                            CommandPri::High,
-                            0,
-                        )
-                        .unwrap();
+                    self1.force_spawn(
+                        async move {
+                            let res = f.await;
+                            if let Some(resumable_lock_wait_entry) = res {
+                                self2.schedule_awakened_pessimistic_locks(
+                                    None,
+                                    None,
+                                    smallvec![resumable_lock_wait_entry],
+                                );
+                            }
+                        },
+                        0,
+                    );
                 }
             },
-            CommandPri::High,
             0,
-        )
-        .unwrap();
+        );
     }
 
     fn is_undetermined_error(_e: &tikv_kv::Error) -> bool {
@@ -1755,11 +1764,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let manager = self.inner.engine.as_ref().unwrap().get_txn_chunk_manager();
         let worker_pool = manager.worker_pool().clone();
         let mut start = Instant::now();
-        let pri = cmd.priority();
-        sched
-            .clone()
-            .inner.worker_pool
-            .spawn(async move {
+        // Force spawn as we just re-enqueue the tasks. Besides, as the task has not
+        // been inserted to task slot, `finish_with_err` will fail.
+        sched.clone().force_spawn(
+            async move {
                 let region_id = cmd.ctx().get_region_id();
                 tikv_util::set_current_region(region_id);
 
@@ -1836,8 +1844,9 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         });
                     }
                 }
-            }, pri, cid)
-            .unwrap();
+            },
+            cid,
+        );
     }
 }
 

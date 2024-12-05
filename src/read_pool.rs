@@ -165,7 +165,7 @@ impl ReadPoolHandle {
                 // If several tasks are spawned at the same time while the running task number
                 // is close to the limit, they may all pass this check and the number of running
                 // tasks may exceed the limit.
-                if running_tasks.get() as usize >= *max_tasks {
+                if priority != CommandPri::High && running_tasks.get() as usize >= *max_tasks {
                     return Err(ReadPoolError::UnifiedReadPoolFull);
                 }
 
@@ -196,7 +196,7 @@ impl ReadPoolHandle {
                 // If several tasks are spawned at the same time while the running task number
                 // is close to the limit, they may all pass this check and the number of running
                 // tasks may exceed the limit.
-                if running_tasks.get() as usize >= *max_tasks {
+                if priority != CommandPri::High && running_tasks.get() as usize >= *max_tasks {
                     return Err(ReadPoolError::UnifiedReadPoolFull);
                 }
                 running_tasks.inc();
