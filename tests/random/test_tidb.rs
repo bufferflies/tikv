@@ -117,9 +117,11 @@ fn test_random_with_tidb() {
     } else {
         BlockCacheType::Quick
     };
+    let columnar_switch_on = env_switch_opt(COLUMNAR_WORKLOAD_SWITCH_ENV_KEY, 0);
     info!("switches";
         "enable_inner_key_off" => enable_inner_key_off,
         "use_remote_cop" => use_remote_cop,
+        "columnar_switch" => columnar_switch_on,
         "block_cache_type" => ?block_cache_type,
     );
 
@@ -134,6 +136,7 @@ fn test_random_with_tidb() {
         INITIAL_KEYSPACE_COUNT,
         enable_inner_key_off,
         use_remote_cop,
+        columnar_switch_on,
         block_cache_type,
         Some(&tc),
     );
@@ -143,9 +146,6 @@ fn test_random_with_tidb() {
 
     let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
     check_tpc_binary(&tpc_bin);
-
-    let columnar_switch_on = env_switch_opt(COLUMNAR_WORKLOAD_SWITCH_ENV_KEY, 0);
-    info!("columnar_switch_on: {}", columnar_switch_on);
 
     let start_tidb = {
         let tc = tc.clone();
@@ -422,6 +422,7 @@ fn prepare_cluster(
     initial_keyspace_count: usize,
     enable_inner_key_off: bool,
     use_remote_cop: bool,
+    enable_schema_manager: bool,
     block_cache_type: BlockCacheType,
     tc: Option<&TidbCluster>,
 ) -> ServerCluster {
@@ -476,7 +477,9 @@ fn prepare_cluster(
             ..Default::default()
         },
     );
-    cluster.start_schema_manager();
+    if enable_schema_manager {
+        cluster.start_schema_manager();
+    }
     cluster.wait_region_replicated(&[], 3);
 
     let mut keyspaces: Vec<u32> = vec![];
