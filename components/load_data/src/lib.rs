@@ -9,3 +9,4 @@ pub mod dispatcher;
 mod kv;
 pub mod metrics;
 pub mod task;
+mod worker;

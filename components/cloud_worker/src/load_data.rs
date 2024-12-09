@@ -355,7 +355,7 @@ impl LoadDataManager {
     pub(crate) fn get_task_states(&self, task_id: &str) -> Option<LoadTaskStates> {
         self.running_tasks.get(task_id).map(|x| {
             x.check_task_thread_finished();
-            x.states.lock().unwrap().clone()
+            x.states.read().unwrap().clone()
         })
     }
 
@@ -364,7 +364,7 @@ impl LoadDataManager {
             .iter()
             .map(|x| {
                 x.check_task_thread_finished();
-                x.states.lock().unwrap().clone()
+                x.states.read().unwrap().clone()
             })
             .collect()
     }

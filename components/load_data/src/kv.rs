@@ -259,6 +259,10 @@ impl MergeIterator {
         self.heap[0].row_id()
     }
 
+    pub fn prev_key(&self) -> &[u8] {
+        self.prev_key.as_slice()
+    }
+
     pub fn valid(&self) -> bool {
         !self.heap.is_empty()
     }
@@ -339,6 +343,7 @@ impl MergeIterator {
 mod tests {
     use std::{path::PathBuf, thread::sleep, time::Duration};
 
+    use api_version::api_v2::KEYSPACE_PREFIX_LEN;
     use bytes::Bytes;
     use chrono::Utc;
     use rand::{seq::SliceRandom, thread_rng};
@@ -450,7 +455,7 @@ mod tests {
             task_id: "mock_load_data_id".to_string(),
             start_ts: 0,
             commit_ts: 0,
-            inner_key_off: None,
+            inner_key_off: Some(KEYSPACE_PREFIX_LEN),
             outer_key_prefix: vec![],
             encryption_key: None,
             prepend_keyspace_id: None,

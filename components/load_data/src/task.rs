@@ -7,7 +7,7 @@ use std::{
     io::Write,
     mem,
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, RwLock},
     time::Duration,
 };
 
@@ -65,7 +65,7 @@ const DEFAULT_COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
 const DEFAULT_ENABLE_CHECKPOINT: bool = false;
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
-const FLUSH_FILE_CONCURRENCY: usize = 8;
+pub const FLUSH_FILE_CONCURRENCY: usize = 8;
 const CREATE_FILE_CONCURRENCY: usize = 32;
 const INGEST_CONCURRENCY: usize = 4;
 
@@ -246,7 +246,7 @@ pub struct TaskContext {
 #[derive(Clone)]
 pub struct LoadTaskScheduler {
     pub sender: Sender<LoadTaskMsg>,
-    pub states: Arc<Mutex<LoadTaskStates>>,
+    pub states: Arc<RwLock<LoadTaskStates>>,
     pub writers: Arc<Mutex<WritersStates>>,
     pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
     pub check_point_store: Arc<Mutex<LocalFileCheckpointStorage>>,
@@ -259,7 +259,7 @@ impl LoadTaskScheduler {
     pub fn cancel(&self, err: String) {
         warn!("canceled {}", err);
 
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.write().unwrap();
         let check_point_store_mutex = Arc::clone(&self.check_point_store);
         let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
         check_point_store_guard
@@ -297,48 +297,53 @@ impl LoadTaskScheduler {
     }
 
     pub fn is_canceled(&self) -> bool {
-        let states = self.states.lock().unwrap();
+        let states = self.states.read().unwrap();
         states.canceled
     }
 
     pub fn error_msg(&self) -> String {
-        let states = self.states.lock().unwrap();
+        let states = self.states.read().unwrap();
         states.error.clone()
     }
 
     pub fn states(&self) -> LoadTaskStates {
-        let states = self.states.lock().unwrap();
+        let states = self.states.read().unwrap();
         states.clone()
     }
 
     pub(crate) fn add_created_files_count(&self) {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.write().unwrap();
         states.created_files += 1;
     }
 
     pub(crate) fn add_ingested_regions(&self) {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.write().unwrap();
         states.ingested_regions += 1;
     }
 
     pub(crate) fn set_finished(&self, dup_entries: Vec<DuplicateEntry>) {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.write().unwrap();
         states.finished = true;
         states.duplicated_entries = dup_entries;
     }
 
     pub fn is_finished(&self) -> bool {
-        let states = self.states.lock().unwrap();
+        let states = self.states.read().unwrap();
         states.finished
     }
 
+    pub(crate) fn add_flushed_files(&self, n: usize) {
+        let mut states = self.states.write().unwrap();
+        states.flushed_files += n;
+    }
+
     pub(crate) fn set_flushed_files(&self, flushed_files: usize) {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.write().unwrap();
         states.flushed_files = flushed_files;
     }
 
     pub(crate) fn set_total_kvs(&self, total_kvs: usize) {
-        let mut states = self.states.lock().unwrap();
+        let mut states = self.states.write().unwrap();
         states.total_kvs = total_kvs;
     }
 
@@ -374,11 +379,6 @@ impl LoadTaskScheduler {
         let flushed_chunk_id = writers.flushed_chunk_ids.entry(writer_id).or_insert(0);
         assert!(*flushed_chunk_id <= chunk_id);
         *flushed_chunk_id = chunk_id;
-        let states = self.states.lock().unwrap();
-        debug!(
-            "{} update flushed chunk by writer_id:{},chunk_id:{}",
-            states.task_id, writer_id, chunk_id
-        )
     }
 
     pub fn set_thread_handle(&mut self, thread_handle: std::thread::JoinHandle<()>) {
@@ -446,7 +446,7 @@ impl LoadTaskWorker {
         states.task_id = task_ctx.task_id.clone();
         let scheduler = LoadTaskScheduler {
             sender,
-            states: Arc::new(Mutex::new(states)),
+            states: Arc::new(RwLock::new(states)),
             writers: Arc::new(Mutex::new(writers)),
             thread_handle: None,
             check_point_store: Arc::clone(&check_point_store_arc),
@@ -496,7 +496,11 @@ impl LoadTaskWorker {
                             self.reader_errs.first().unwrap().to_string()
                         };
                         self.scheduler.cancel(err_msg);
-                        if self.file_idx > self.reader_errs.len() + self.readers.len() {
+                        if self.file_idx
+                            > self.reader_errs.len()
+                                + self.readers.len()
+                                + self.unhandled_readers.len()
+                        {
                             let recv_count = self.file_idx
                                 - self.reader_errs.len()
                                 - self.readers.len()
