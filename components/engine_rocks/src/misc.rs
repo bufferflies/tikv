@@ -2,7 +2,8 @@
 
 use engine_traits::{
     CfNamesExt, DeleteStrategy, ImportExt, IterOptions, Iterable, Iterator, MiscExt, Mutable,
-    Range, Result, SstWriter, SstWriterBuilder, WriteBatch, WriteBatchExt, ALL_CFS,
+    Range, Result, SstWriter, SstWriterBuilder, StatisticsReporter, WriteBatch, WriteBatchExt,
+    ALL_CFS,
 };
 use rocksdb::Range as RocksRange;
 use tikv_util::{box_try, keybuilder::KeyBuilder};
@@ -125,11 +126,34 @@ impl RocksEngine {
     }
 }
 
+pub struct FakeReporter;
+
+impl StatisticsReporter<RocksEngine> for FakeReporter {
+    fn new(_name: &str) -> Self {
+        panic!()
+    }
+
+    fn collect(&mut self, _engine: &RocksEngine) {
+        panic!()
+    }
+
+    fn flush(&mut self) {
+        panic!()
+    }
+}
+
 impl MiscExt for RocksEngine {
-    fn flush_cfs(&self, wait: bool) -> Result<()> {
+    type StatisticsReporter = FakeReporter;
+
+    fn flush_cfs(&self, cfs: &[&str], wait: bool) -> Result<()> {
         let mut handles = vec![];
-        for cf in self.cf_names() {
+        for cf in cfs {
             handles.push(util::get_cf_handle(self.as_inner(), cf)?);
+        }
+        if handles.is_empty() {
+            for cf in self.cf_names() {
+                handles.push(util::get_cf_handle(self.as_inner(), cf)?);
+            }
         }
         self.as_inner().flush_cfs(&handles, wait).map_err(r2e)
     }
@@ -137,6 +161,26 @@ impl MiscExt for RocksEngine {
     fn flush_cf(&self, cf: &str, wait: bool) -> Result<()> {
         let handle = util::get_cf_handle(self.as_inner(), cf)?;
         self.as_inner().flush_cf(handle, wait).map_err(r2e)
+    }
+
+    fn get_sst_key_ranges(&self, _cf: &str, _level: usize) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        unimplemented!()
+    }
+
+    fn pause_background_work(&self) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn continue_background_work(&self) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn locked(_path: &str) -> Result<bool> {
+        unimplemented!()
+    }
+
+    fn get_num_keys(&self) -> Result<u64> {
+        unimplemented!()
     }
 
     fn delete_ranges_cf(

@@ -31,7 +31,8 @@ use crate::{
         blobtable::blobtable::BlobPrefetcher,
         columnar::{
             ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader, ColumnarReader,
-            ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf, HANDLE_COL_ID,
+            ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf, SchemaFile,
+            HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
         table,
@@ -1093,6 +1094,11 @@ impl SnapAccessCore {
 
     pub fn has_schema_file(&self) -> bool {
         self.data.schema_file.is_some()
+    }
+
+    // Used by proxy kvengine.
+    pub fn get_schema_file(&self) -> Option<SchemaFile> {
+        self.data.schema_file.clone()
     }
 
     #[maybe_async::both]

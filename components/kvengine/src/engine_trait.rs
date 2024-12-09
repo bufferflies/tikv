@@ -8,8 +8,8 @@ use engine_traits::{
     IngestExternalFileOptions, IterOptions, Iterable, KvEngine, MiscExt, Mutable, MvccProperties,
     MvccPropertiesExt, Peekable, PerfContext, PerfContextExt, PerfContextKind, PerfLevel, Range,
     RangePropertiesExt, ReadOptions, Snapshot, SstCompressionType, SstExt, SstWriterBuilder,
-    SyncMutable, TablePropertiesExt, TitanCfOptions, TtlProperties, TtlPropertiesExt,
-    WriteBatchExt, WriteOptions,
+    StatisticsReporter, SyncMutable, TablePropertiesExt, TitanCfOptions, TtlProperties,
+    TtlPropertiesExt, WriteBatchExt, WriteOptions,
 };
 
 use crate::*;
@@ -361,12 +361,38 @@ impl FlowControlFactorsExt for Engine {
     }
 }
 
-impl MiscExt for Engine {
-    fn flush_cfs(&self, _wait: bool) -> engine_traits::Result<()> {
+pub struct EngineReporter;
+
+impl StatisticsReporter<Engine> for EngineReporter {
+    fn new(_name: &str) -> Self {
         panic!()
     }
 
-    fn flush_cf(&self, _cf: &str, _sync: bool) -> TraitsResult<()> {
+    fn collect(&mut self, _engine: &Engine) {
+        panic!()
+    }
+
+    fn flush(&mut self) {
+        panic!()
+    }
+}
+
+impl MiscExt for Engine {
+    type StatisticsReporter = EngineReporter;
+
+    fn flush_cfs(&self, _cf: &[&str], _wait: bool) -> TraitsResult<()> {
+        panic!()
+    }
+
+    fn flush_cf(&self, _cf: &str, _wait: bool) -> TraitsResult<()> {
+        panic!()
+    }
+
+    fn get_sst_key_ranges(
+        &self,
+        _cf: &str,
+        _level: usize,
+    ) -> engine_traits::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         panic!()
     }
 
@@ -435,6 +461,22 @@ impl MiscExt for Engine {
     fn is_stalled_or_stopped(&self) -> bool {
         panic!()
     }
+
+    fn pause_background_work(&self) -> TraitsResult<()> {
+        panic!()
+    }
+
+    fn continue_background_work(&self) -> TraitsResult<()> {
+        panic!()
+    }
+
+    fn locked(_path: &str) -> TraitsResult<bool> {
+        panic!()
+    }
+
+    fn get_num_keys(&self) -> TraitsResult<u64> {
+        panic!()
+    }
 }
 
 impl MvccPropertiesExt for Engine {
@@ -452,7 +494,7 @@ impl MvccPropertiesExt for Engine {
 impl PerfContextExt for Engine {
     type PerfContext = EnginePerfContext;
 
-    fn get_perf_context(&self, _level: PerfLevel, _kind: PerfContextKind) -> Self::PerfContext {
+    fn get_perf_context(_level: PerfLevel, _kind: PerfContextKind) -> Self::PerfContext {
         EnginePerfContext
     }
 }

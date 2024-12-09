@@ -1,6 +1,6 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{ops::Deref, sync::Arc};
+use std::{convert::TryInto, ops::Deref, sync::Arc};
 
 use bytes::{Buf, BufMut};
 use collections::HashMap;
@@ -634,6 +634,11 @@ impl ColumnBuffer {
         self.data_buf.len()
     }
 
+    // Used by proxy.
+    pub fn col_id(&self) -> i32 {
+        self.col_id
+    }
+
     pub fn get_end_idx_in_size_limit(&self, from_idx: usize, size_limit: usize) -> usize {
         if self.fixed_size > 0 {
             return self.length();
@@ -832,6 +837,233 @@ impl ColumnBuffer {
         buf.extend_from_slice(&self.data_buf);
         buf.extend_from_slice(&self.nulls);
     }
+
+    fn write_var_u64<B: BufMut>(buf: &mut B, mut value: u64) {
+        loop {
+            if value < 0x80 {
+                buf.put_u8(value as u8);
+                break;
+            } else {
+                buf.put_u8(((value & 0x7F) | 0x80) as u8);
+                value >>= 7;
+            }
+        }
+    }
+
+    fn compute_size_for_tiflash(&self, tp: FieldTypeTp, prec: u8) -> usize {
+        let data_size = match tp {
+            FieldTypeTp::NewDecimal => {
+                let item_size = match prec {
+                    0..=9 => 4,
+                    10..=18 => 8,
+                    19..=38 => 16,
+                    39..=65 => 32,
+                    _ => panic!("unsupported precision: {}", prec),
+                };
+                item_size * self.length()
+            }
+            FieldTypeTp::String
+            | FieldTypeTp::VarChar
+            | FieldTypeTp::VarString
+            | FieldTypeTp::Blob
+            | FieldTypeTp::TinyBlob
+            | FieldTypeTp::MediumBlob
+            | FieldTypeTp::LongBlob
+            | FieldTypeTp::Json => self.offsets.last().copied().unwrap() as usize + self.length() * 4 /* varint */,
+            FieldTypeTp::Tiny => self.length(),
+            FieldTypeTp::Short => self.length() * 2,
+            FieldTypeTp::Int24 | FieldTypeTp::Long => self.length() * 4,
+            FieldTypeTp::LongLong
+            | FieldTypeTp::Double
+            | FieldTypeTp::Date
+            | FieldTypeTp::DateTime
+            | FieldTypeTp::Timestamp
+            | FieldTypeTp::Bit
+            | FieldTypeTp::Set
+            | FieldTypeTp::Enum
+            | FieldTypeTp::Duration => self.length() * 8,
+            FieldTypeTp::Float => self.length() * 4,
+            FieldTypeTp::Year => self.length() * 2,
+            FieldTypeTp::Null => self.length(),
+            FieldTypeTp::NewDate => {
+                unimplemented!();
+            }
+            FieldTypeTp::Unspecified => self.length(),
+            _ => unreachable!(),
+        };
+        if self.is_nullable() {
+            self.length() /* nulls map */ + data_size
+        } else {
+            data_size
+        }
+    }
+
+    // Used by proxy.
+    pub fn serialize_for_tiflash(
+        &self,
+        buf: &mut Vec<u8>,
+        tp: i32,           // column type
+        is_unsigned: bool, // used by integer number types
+        prec: u8,
+    ) {
+        buf.clear();
+        let tp = FieldTypeTp::from_u8(tp as u8).unwrap();
+        let target_size = self.compute_size_for_tiflash(tp, prec);
+        buf.reserve(target_size);
+        if self.is_nullable() {
+            buf.extend_from_slice(&self.nulls);
+        }
+        match tp {
+            FieldTypeTp::NewDecimal => {
+                let null_bytes: &'static [u8] = match prec {
+                    0..=9 => &[0; 4],
+                    10..=18 => &[0; 8],
+                    19..=38 => &[0; 16],
+                    39..=65 => &[0; 32],
+                    _ => panic!("unsupported precision: {}", prec),
+                };
+                for idx in 0..self.length() {
+                    match self.get_value(idx) {
+                        Some(v) => {
+                            buf.extend_from_slice(v);
+                        }
+                        None => {
+                            buf.extend_from_slice(null_bytes);
+                        }
+                    }
+                }
+            }
+            FieldTypeTp::String
+            | FieldTypeTp::VarChar
+            | FieldTypeTp::VarString
+            | FieldTypeTp::Blob
+            | FieldTypeTp::TinyBlob
+            | FieldTypeTp::MediumBlob
+            | FieldTypeTp::LongBlob
+            | FieldTypeTp::Json => {
+                for idx in 0..self.length() {
+                    match self.get_value(idx) {
+                        Some(v) => {
+                            let val_len = v.len() as u64;
+                            Self::write_var_u64(buf, val_len);
+                            buf.extend_from_slice(v);
+                        }
+                        None => {
+                            buf.push(0);
+                        }
+                    }
+                }
+            }
+            FieldTypeTp::Tiny => {
+                for idx in 0..self.length() {
+                    match self.get_value(idx) {
+                        Some(v) => {
+                            if is_unsigned {
+                                let i_val = u64::from_le_bytes(v.try_into().unwrap()) as u8;
+                                buf.extend_from_slice(&i_val.to_le_bytes());
+                            } else {
+                                let i_val = i64::from_le_bytes(v.try_into().unwrap()) as i8;
+                                buf.extend_from_slice(&i_val.to_le_bytes());
+                            }
+                        }
+                        None => {
+                            buf.push(0);
+                        }
+                    }
+                }
+            }
+            FieldTypeTp::Short => {
+                for idx in 0..self.length() {
+                    match self.get_value(idx) {
+                        Some(v) => {
+                            if is_unsigned {
+                                let i_val = u64::from_le_bytes(v.try_into().unwrap()) as u16;
+                                buf.extend_from_slice(&i_val.to_le_bytes());
+                            } else {
+                                let i_val = i64::from_le_bytes(v.try_into().unwrap()) as i16;
+                                buf.extend_from_slice(&i_val.to_le_bytes());
+                            }
+                        }
+                        None => {
+                            buf.extend_from_slice(&[0; 2]);
+                        }
+                    }
+                }
+            }
+            FieldTypeTp::Int24 | FieldTypeTp::Long => {
+                for idx in 0..self.length() {
+                    match self.get_value(idx) {
+                        Some(v) => {
+                            if is_unsigned {
+                                let i_val = u64::from_le_bytes(v.try_into().unwrap()) as u32;
+                                buf.extend_from_slice(&i_val.to_le_bytes());
+                            } else {
+                                let i_val = i64::from_le_bytes(v.try_into().unwrap()) as i32;
+                                buf.extend_from_slice(&i_val.to_le_bytes());
+                            }
+                        }
+                        None => {
+                            buf.extend_from_slice(&[0; 4]);
+                        }
+                    }
+                }
+            }
+            FieldTypeTp::LongLong
+            | FieldTypeTp::Double
+            | FieldTypeTp::Date
+            | FieldTypeTp::DateTime
+            | FieldTypeTp::Timestamp
+            | FieldTypeTp::Bit
+            | FieldTypeTp::Set
+            | FieldTypeTp::Enum
+            | FieldTypeTp::Duration => {
+                buf.extend_from_slice(&self.data_buf);
+            }
+
+            FieldTypeTp::Float => {
+                for idx in 0..self.length() {
+                    match self.get_value(idx) {
+                        Some(v) => {
+                            let f_val = f64::from_le_bytes(v.try_into().unwrap()) as f32;
+                            buf.extend_from_slice(&f_val.to_le_bytes());
+                        }
+                        None => {
+                            buf.extend_from_slice(&[0; 4]);
+                        }
+                    }
+                }
+            }
+            FieldTypeTp::Year => {
+                for idx in 0..self.length() {
+                    match self.get_value(idx) {
+                        Some(v) => {
+                            let i_val = i64::from_le_bytes(v.try_into().unwrap()) as u16;
+                            buf.extend_from_slice(&i_val.to_le_bytes());
+                        }
+                        None => {
+                            buf.extend_from_slice(&[0; 2]);
+                        }
+                    }
+                }
+            }
+            FieldTypeTp::Null => {
+                buf.resize(buf.len() + self.length(), 0);
+            }
+            FieldTypeTp::NewDate => {
+                // TODO
+                unimplemented!();
+            }
+
+            FieldTypeTp::Unspecified => {}
+            _ => unreachable!(),
+        }
+        debug!(
+            "serialize_for_tiflash tp: {} length: {} data size: {}",
+            tp,
+            self.length(),
+            buf.len()
+        );
+    }
 }
 
 pub struct Block {
@@ -858,7 +1090,8 @@ impl Block {
         }
     }
 
-    pub(crate) fn reset(&mut self) {
+    // Also used in proxy kvengine.
+    pub fn reset(&mut self) {
         self.handles.reset();
         self.versions.reset();
         self.columns.iter_mut().for_each(|col| col.reset());
@@ -896,6 +1129,15 @@ impl Block {
 
     pub fn get_columns(&self) -> &[ColumnBuffer] {
         &self.columns
+    }
+
+    pub fn get_column(&self, col_id: i64) -> &ColumnBuffer {
+        for col in &self.columns {
+            if col.col_id() == col_id as i32 {
+                return col;
+            }
+        }
+        unreachable!()
     }
 }
 

@@ -64,7 +64,7 @@ impl RaftEngineReadOnly for RfEngine {
 impl PerfContextExt for RfEngine {
     type PerfContext = PerfContext;
 
-    fn get_perf_context(&self, _level: PerfLevel, _kind: PerfContextKind) -> Self::PerfContext {
+    fn get_perf_context(_level: PerfLevel, _kind: PerfContextKind) -> Self::PerfContext {
         panic!()
     }
 }

@@ -268,6 +268,16 @@ impl TxnFileLocks {
         self.seq
     }
 
+    // Used by proxy to handle marshal & unmarshal.
+    #[inline]
+    pub fn get_locks(&self) -> &HashMap<u64, Bytes> {
+        &self.inner
+    }
+
+    pub fn new(inner: HashMap<u64, Bytes>) -> Self {
+        Self { seq: 0, inner }
+    }
+
     // Duplication should be checked before insert.
     #[inline]
     pub fn insert(&mut self, seq: u64, start_ts: u64, lock_val_prefix: &[u8]) {

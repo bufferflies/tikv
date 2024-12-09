@@ -468,7 +468,7 @@ where
             committed_count: 0,
             sync_log_hint: false,
             use_delete_range: cfg.use_delete_range,
-            perf_context: engine.get_perf_context(cfg.perf_level, PerfContextKind::RaftstoreApply),
+            perf_context: EK::get_perf_context(cfg.perf_level, PerfContextKind::RaftstoreApply),
             yield_duration: cfg.apply_yield_duration.0,
             yield_msg_size: cfg.apply_yield_write_size.0,
             delete_ssts: vec![],

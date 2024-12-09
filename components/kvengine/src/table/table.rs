@@ -351,7 +351,7 @@ impl Value {
     }
 
     #[inline(always)]
-    pub(crate) fn is_deleted(&self) -> bool {
+    pub fn is_deleted(&self) -> bool {
         is_deleted(self.meta)
     }
 
