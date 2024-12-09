@@ -634,10 +634,17 @@ impl ShardMeta {
         tc.get_table_deletes()
             .iter()
             .any(|deleted| !self.has_file_at_level(deleted.get_id(), deleted.get_level()))
+            || tc
+                .get_columnar_deletes()
+                .iter()
+                .any(|deleted| !self.has_file_at_level(deleted.get_id(), deleted.get_level()))
     }
 
     pub fn is_empty_table_change(tc: &pb::TableChange) -> bool {
-        tc.get_table_deletes().is_empty() && tc.get_table_creates().is_empty()
+        tc.get_table_deletes().is_empty()
+            && tc.get_table_creates().is_empty()
+            && tc.get_columnar_deletes().is_empty()
+            && tc.get_columnar_creates().is_empty()
     }
 
     fn apply_table_change(&mut self, tc: &pb::TableChange) {
@@ -645,7 +652,13 @@ impl ShardMeta {
             self.delete_file(deleted.get_id(), deleted.get_level());
         }
         for created in tc.get_table_creates() {
-            self.add_file(created.id, FileMeta::from_table(created));
+            self.add_file(created.get_id(), FileMeta::from_table(created));
+        }
+        for deleted in tc.get_columnar_deletes() {
+            self.delete_file(deleted.get_id(), deleted.get_level());
+        }
+        for created in tc.get_columnar_creates() {
+            self.add_file(created.get_id(), FileMeta::from_columnar_table(created));
         }
     }
 
@@ -871,11 +884,13 @@ impl ShardMeta {
 
     pub fn apply_columnar_compaction(&mut self, comp: &pb::ColumnarCompaction) {
         let col_change = comp.get_columnar_change();
-        for col_create in col_change.get_table_creates() {
-            self.files
-                .insert(col_create.get_id(), FileMeta::from_table(col_create));
+        for col_create in col_change.get_columnar_creates() {
+            self.files.insert(
+                col_create.get_id(),
+                FileMeta::from_columnar_table(col_create),
+            );
         }
-        for col_delete in col_change.get_table_deletes() {
+        for col_delete in col_change.get_columnar_deletes() {
             self.files.remove(&col_delete.get_id());
         }
         self.unconverted_l0s
