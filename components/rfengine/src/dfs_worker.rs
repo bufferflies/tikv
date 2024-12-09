@@ -182,13 +182,10 @@ impl ObjectStorageWorker {
             }
         }
         while let Ok(task) = self.task_rx.recv() {
-            // If dfs worker be marked unhealthy, skip handle all tasks. Downgrade to
-            // disable lightweight backup and do not try to auto-recover.
-            if !self.healthy.is_healthy() {
-                if matches!(task, ObjectStorageTask::Close) {
-                    info!("ObjectStorageWorker close");
-                    return;
-                }
+            // If dfs worker is unhealthy, skip handle some tasks and downgrade to disable
+            // lightweight backup.
+            // Try to recover when receive snapshot task.
+            if !self.healthy.is_healthy() && !task.can_be_handled_under_unhealthy() {
                 continue;
             }
             match task {
@@ -216,9 +213,17 @@ impl ObjectStorageWorker {
                     }
                 }
                 ObjectStorageTask::Snapshot { snapshot_objects } => {
-                    if let Err(err) = self.handle_snapshot(snapshot_objects) {
-                        error!("dfs worker handle_snapshot failed, set unhealthy"; "err" => ?err);
-                        self.healthy.set_unhealthy();
+                    match self.handle_snapshot(snapshot_objects) {
+                        Ok(()) => {
+                            if !self.healthy.is_healthy() {
+                                self.healthy.set_healthy();
+                                info!("dfs worker recover to healthy");
+                            }
+                        }
+                        Err(err) => {
+                            error!("dfs worker handle_snapshot failed, set unhealthy"; "err" => ?err);
+                            self.healthy.set_unhealthy();
+                        }
                     }
                 }
                 ObjectStorageTask::Flush => {
@@ -577,6 +582,12 @@ pub(crate) enum ObjectStorageTask {
     }, // Persist snapshot objects.
     Flush, // Trigger flush the last chunk, mainly for test.
     Close,
+}
+
+impl ObjectStorageTask {
+    fn can_be_handled_under_unhealthy(&self) -> bool {
+        matches!(self, Self::Snapshot { .. } | Self::Close)
+    }
 }
 
 #[derive(Clone)]
