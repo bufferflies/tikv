@@ -1,14 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    ops::{Add, Deref},
-    sync::Arc,
-    time::Duration,
-};
+use std::{ops::Deref, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
-use futures_util::compat::Future01CompatExt;
 use kvengine::{SnapAccess, LOCK_CF};
 use kvproto::{coprocessor::Response, kvrpcpb::ExecDetailsV2};
 use protobuf::Message;
@@ -16,7 +11,7 @@ use security::SecurityManager;
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::MemoryTraceGuard;
 use tikv_kv::Statistics;
-use tikv_util::{deadline::Deadline, time::Instant, timer::GLOBAL_TIMER_HANDLE};
+use tikv_util::{backoff::ExponentialBackoff, deadline::Deadline, retry::sleep_async};
 use tipb::DagRequest;
 use txn_types::{TimeStamp, TsSet};
 
@@ -35,34 +30,35 @@ pub const INCOMPLETE_MESSAGE: &str = "connection closed before message completed
 
 pub const REMOTE_COP_FORMAT_V1: u32 = 1;
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-#[serde(rename_all = "kebab-case")]
+const RETRY_MAX_ATTEMPTS: usize = 10;
+const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+
+#[derive(Default, Debug)]
 pub struct RemoteRequest {
     pub key: String,
     pub cop_req: Vec<u8>,
-    pub req_body: Vec<u8>,
+    pub req_body: Bytes,
 }
 
 pub async fn remote_request(
-    remote_ctx: RemoteContext,
-    remote_addr: String,
-    tag: String,
-    req_body: Vec<u8>,
-    deadline: Instant,
+    remote_ctx: &RemoteContext,
+    remote_addr: &str,
+    tag: &str,
+    req_body: Bytes,
+    deadline: Deadline,
 ) -> Result<Vec<u8>> {
     let req = hyper::Request::builder()
         .method(hyper::Method::POST)
-        .uri(&remote_addr)
+        .uri(remote_addr)
         .header("content-type", "application/octet-stream")
         .body(hyper::Body::from(req_body))
         .map_err(|e| Error::Other(e.to_string()))?;
     let client = remote_ctx.client.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    remote_ctx.runtime.spawn(async move {
-        let res = tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now_coarse()),
-            async move {
+    remote_ctx
+        .runtime
+        .spawn(async move {
+            tokio::time::timeout_at(deadline.to_tokio_instant(), async move {
                 let response = client.request(req).await.map_err(|e| {
                     if e.is_incomplete_message() {
                         Error::Other(INCOMPLETE_MESSAGE.to_string())
@@ -80,39 +76,33 @@ pub async fn remote_request(
                     ));
                 }
                 Ok(body.to_vec())
-            },
-        )
+            })
+            .await
+            .map_err(|_| Error::DeadlineExceeded)?
+        })
         .await
-        .unwrap_or_else(|_| Err(Error::DeadlineExceeded));
-        if let Err(_err) = tx.send(res) {
-            warn!("{} send remote coprocessor response failed", tag);
-        }
-    });
-    rx.await
-        .map_err(|err| Error::Other(format!("receive response failed: {:?}", err)))?
+        .map_err(|err| Error::Other(format!("{tag} join remote request task failed: {err:?}")))?
 }
 
 pub async fn remote_handle_request(
-    req_type: String,
-    tag: String,
-    remote_ctx: RemoteContext,
-    remote_req: RemoteRequest,
+    req_type: &str,
+    tag: &str,
+    remote_ctx: &RemoteContext,
+    remote_req: &RemoteRequest,
+    deadline: Deadline,
 ) -> Result<Response> {
-    info!("handle {} request, {}", req_type, tag.clone());
-    let ctx = remote_ctx.clone();
-    let remote_request_cache = remote_ctx.remote_request_cache.clone();
-    let remote_req = remote_req.clone();
+    info!("handle {} request, {}", req_type, tag);
     let key = remote_req.key.clone();
-    let req_body = remote_req.req_body;
-    let result = remote_request_cache
-        .clone()
+    let req_body = remote_req.req_body.clone();
+    let result = remote_ctx
+        .remote_request_cache
         .get_with(key, async move {
             remote_request(
-                ctx,
-                remote_ctx.remote_worker_url.clone(),
+                remote_ctx,
+                &remote_ctx.remote_worker_url,
                 tag,
                 req_body,
-                Instant::now_coarse().add(REMOTE_REQUEST_TIMEOUT),
+                deadline,
             )
             .await
         })
@@ -138,13 +128,44 @@ pub async fn remote_handle_request(
             "{} other failed, incomplete message error, invalidate cached value for the key [:{}]",
             req_type, key,
         );
-        remote_request_cache.invalidate(key).await;
+        remote_ctx.remote_request_cache.invalidate(key).await;
     }
     ret.map(|resp_body| {
         let mut resp = Response::default();
         resp.merge_from_bytes(&resp_body).unwrap();
         resp
     })
+}
+
+pub async fn remote_handle_request_with_retry(
+    req_type: &str,
+    tag: &str,
+    remote_ctx: &RemoteContext,
+    remote_req: &RemoteRequest,
+) -> Result<Response> {
+    let deadline = Deadline::from_now(REMOTE_REQUEST_TIMEOUT);
+    let mut backoff =
+        ExponentialBackoff::new(RETRY_BASE_DELAY, RETRY_MAX_DELAY, RETRY_MAX_ATTEMPTS);
+    loop {
+        match remote_handle_request(req_type, tag, remote_ctx, remote_req, deadline).await {
+            Ok(resp) => return Ok(resp),
+            Err(err @ Error::DeadlineExceeded) => return Err(err),
+            Err(err) => {
+                if deadline.check().is_err() {
+                    warn!("{}:{}: deadline is exceeded", tag, req_type);
+                    return Err(err);
+                }
+
+                // TODO: distinguish from retryable and not retryable error.
+                if let Ok(delay) = backoff.next_delay() {
+                    sleep_async(delay).await;
+                } else {
+                    warn!("{}:{}: retry limit exceeded", tag, req_type; "backoff" => ?backoff);
+                    return Err(err);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -335,9 +356,8 @@ impl RemoteDagDispatcher {
         Ok(())
     }
 
-    async fn dispatch(&self, deadline: Instant) -> Result<Vec<u8>> {
+    async fn dispatch(&self, deadline: Deadline) -> Result<Vec<u8>> {
         let cop_req: Vec<u8> = self.req.write_to_bytes().unwrap();
-        let tag = self.tag.clone();
         let (_, req_body) = encode_remote_request_body(
             &cop_req,
             &self.ranges,
@@ -345,38 +365,41 @@ impl RemoteDagDispatcher {
             &self.snap,
             false,
         );
-        remote_request(
-            self.remote_ctx.clone(),
-            self.worker_addr.clone(),
-            tag,
-            req_body,
-            deadline,
-        )
-        .await
-    }
+        let req_body = Bytes::from(req_body);
 
-    async fn dispatch_with_retry(&self, deadline: Deadline) -> Result<Vec<u8>> {
-        let mut retry = 0;
+        let mut backoff = ExponentialBackoff::new(RETRY_BASE_DELAY, RETRY_MAX_DELAY, usize::MAX);
         loop {
-            let res = self.dispatch(deadline.inner()).await;
-            match res {
-                Ok(data) => {
-                    return Ok(data);
-                }
-                Err(Error::DeadlineExceeded) => return Err(Error::DeadlineExceeded),
+            match remote_request(
+                &self.remote_ctx,
+                &self.worker_addr,
+                &self.tag,
+                req_body.clone(),
+                deadline,
+            )
+            .await
+            {
+                Ok(data) => return Ok(data),
+                Err(err @ Error::DeadlineExceeded) => return Err(err),
                 Err(err) => {
+                    error!(
+                        "{} dispatch remote coprocessor error {:?}, attempts {}",
+                        self.tag,
+                        err,
+                        backoff.current_attempts(),
+                    );
+
                     if deadline.check().is_err() {
                         return Err(Error::DeadlineExceeded);
                     }
-                    retry += 1;
-                    error!(
-                        "{} remote coprocessor error {:?}, retry {}",
-                        self.tag, err, retry
-                    );
-                    let _ = GLOBAL_TIMER_HANDLE
-                        .delay(std::time::Instant::now().add(Duration::from_secs(5)))
-                        .compat()
-                        .await;
+
+                    // TODO: distinguish from retryable and not retryable error.
+                    if let Ok(delay) = backoff.next_delay() {
+                        sleep_async(delay).await;
+                    } else {
+                        // Should not reach here. But still handle the error for safety.
+                        error!("{} dispatch remote coprocessor: retry limit exceeded", self.tag; "backoff" => ?backoff);
+                        return Err(err);
+                    }
                 }
             }
         }
@@ -387,7 +410,7 @@ impl RemoteDagDispatcher {
 impl RequestHandler for RemoteDagDispatcher {
     async fn handle_request(&mut self) -> Result<MemoryTraceGuard<kvproto::coprocessor::Response>> {
         self.check_locks()?;
-        let ret = self.dispatch_with_retry(self.deadline).await;
+        let ret = self.dispatch(self.deadline).await;
         match ret {
             Ok(data) => {
                 let memory_size = data.capacity();

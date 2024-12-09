@@ -365,9 +365,8 @@ impl<E: Engine> Endpoint<E> {
 
                 let quota_limiter = self.quota_limiter.clone();
                 let remote_req = RemoteRequest {
-                    key: String::default(),
                     cop_req,
-                    req_body: Vec::new(),
+                    ..Default::default()
                 };
                 let remote_ctx = self.remote_ctx.clone();
                 builder = Box::new(move |snap, req_ctx| {
@@ -416,9 +415,8 @@ impl<E: Engine> Endpoint<E> {
                 Endpoint::<E>::check_memory_locks(&self.concurrency_manager, &req_ctx)?;
 
                 let remote_req = RemoteRequest {
-                    key: String::default(),
                     cop_req,
-                    req_body: Vec::new(),
+                    ..Default::default()
                 };
                 let remote_ctx = self.remote_ctx.clone();
                 builder = Box::new(move |snap, req_ctx| {

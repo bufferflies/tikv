@@ -47,7 +47,9 @@ use super::{cmsketch::CmSketch, fmsketch::FmSketch, histogram::Histogram};
 use crate::{
     coprocessor::{
         dag::TikvStorage,
-        remote_dispatcher::{encode_remote_cop_request, remote_handle_request, RemoteContext},
+        remote_dispatcher::{
+            encode_remote_cop_request, remote_handle_request_with_retry, RemoteContext,
+        },
         MEMTRACE_ANALYZE, *,
     },
     storage::{txn::CloudStore, Snapshot, Statistics},
@@ -55,7 +57,6 @@ use crate::{
 
 const ANALYZE_VERSION_V1: i32 = 1;
 const ANALYZE_VERSION_V2: i32 = 2;
-const MAX_RETRY_COUNT: usize = 30;
 
 // `AnalyzeContext` is used to handle `AnalyzeReq`
 pub struct AnalyzeContext<S: Snapshot, F: KvFormat> {
@@ -101,7 +102,7 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
                 &snap_bytes,
             );
             remote_req.key = format!("analyze:{}", key);
-            remote_req.req_body = req_body;
+            remote_req.req_body = Bytes::from(req_body);
             ctx
         });
         let store = CloudStore::new(
@@ -344,27 +345,7 @@ impl<S: Snapshot, F: KvFormat> RequestHandler for AnalyzeContext<S, F> {
             .unwrap_or_default();
         let tag = format!("is remote {}{}", is_remote, remote_tag);
         let ret = if let Some(remote_ctx) = &self.remote_ctx {
-            let mut retry = 0;
-            loop {
-                let ret = remote_handle_request(
-                    "analyze".to_string(),
-                    tag.clone(),
-                    remote_ctx.clone(),
-                    self.remote_req.clone(),
-                )
-                .await;
-                if ret.is_ok() || retry > MAX_RETRY_COUNT {
-                    break ret;
-                }
-                retry += 1;
-                error!(
-                    "Analyze failed {} time(s). Keep retrying..., {} error {}",
-                    retry,
-                    tag,
-                    ret.err().unwrap()
-                );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            remote_handle_request_with_retry("analyze", &tag, remote_ctx, &self.remote_req).await
             // Do not fallback to local if remote analyze failed. Or else it may
             // cause server overloaded.
         } else {

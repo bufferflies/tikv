@@ -58,6 +58,11 @@ impl Deadline {
     pub fn to_std_instant(&self) -> std::time::Instant {
         std::time::Instant::now() + self.deadline.duration_since(Instant::now_coarse())
     }
+
+    #[inline]
+    pub fn to_tokio_instant(&self) -> tokio::time::Instant {
+        tokio::time::Instant::from_std(self.to_std_instant())
+    }
 }
 
 const DEADLINE_EXCEEDED: &str = "deadline is exceeded";

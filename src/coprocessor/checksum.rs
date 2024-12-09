@@ -20,7 +20,8 @@ use crate::{
     coprocessor::{
         dag::TikvStorage,
         remote_dispatcher::{
-            encode_remote_request_body, remote_handle_request, RemoteContext, RemoteRequest,
+            encode_remote_request_body, remote_handle_request_with_retry, RemoteContext,
+            RemoteRequest,
         },
         *,
     },
@@ -63,7 +64,7 @@ impl<S: Snapshot> ChecksumContext<S> {
                 true,
             );
             remote_req.key = format!("checksum:{}", key);
-            remote_req.req_body = req_body;
+            remote_req.req_body = Bytes::from(req_body);
             ctx
         });
         let store = CloudStore::new(
@@ -149,13 +150,7 @@ impl<S: Snapshot> RequestHandler for ChecksumContext<S> {
             .unwrap_or_default();
         let tag = format!("is remote {}{}", is_remote, remote_tag);
         let ret = if let Some(remote_ctx) = &self.remote_ctx {
-            remote_handle_request(
-                "checksum".to_string(),
-                tag.clone(),
-                remote_ctx.clone(),
-                self.remote_req.clone(),
-            )
-            .await
+            remote_handle_request_with_retry("checksum", &tag, remote_ctx, &self.remote_req).await
             // Do not fallback to local if remote checksum failed. Or else it
             // may cause server overloaded.
         } else {
