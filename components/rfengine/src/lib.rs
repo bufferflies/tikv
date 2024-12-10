@@ -61,6 +61,8 @@ pub enum Error {
     },
     #[error("WAL Epoch {epoch_id} is overwritten")]
     WalEpochOverwritten { epoch_id: u32 },
+    #[error("Snapshot is oversize: {0}")]
+    SnapshotOversize(u64),
     #[error("Other error: {0}")]
     Other(String),
 }

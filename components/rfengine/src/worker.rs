@@ -43,6 +43,11 @@ use crate::{
 };
 
 const MAX_WAL_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
+
+// Maximum size of snapshot. This size is determined by maximum object size of
+// S3, which is 5 GiB.
+const MAX_SNAPSHOT_SIZE: u64 = 4500 * 1024 * 1024; // 4.5 GiB
+
 pub(crate) struct Worker {
     dir: PathBuf,
     manifest: Manifest,
@@ -285,10 +290,19 @@ impl Worker {
             Err(err) => {
                 let engine_id = self.manifest.get_engine_id();
                 let epoch_id = self.manifest.epoch_id;
-                error!(
-                    "{}: failed to snapshot epoch {} {:?}",
-                    engine_id, epoch_id, err
-                );
+
+                if let Error::SnapshotOversize(_) = err {
+                    self.dfs_worker_healthy.set_unhealthy();
+                    error!(
+                        "{}: failed to snapshot epoch {}, dfs worker set unhealthy",
+                        engine_id, epoch_id; "err" => ?err
+                    );
+                } else {
+                    error!(
+                        "{}: failed to snapshot epoch {}",
+                        engine_id, epoch_id; "err" => ?err
+                    );
+                }
             }
         }
     }
@@ -552,6 +566,14 @@ impl Worker {
                     fs::metadata(file_name)?.len() as usize
                 };
                 raft_log_size += rlog_size;
+
+                if raft_log_size as u64 > MAX_SNAPSHOT_SIZE {
+                    // The size is limited by maximum size of S3 objects (5 GiB).
+                    // The alternative solution is to split the snapshot to multiple chunks. But as
+                    // we (will) have flow control on WAL size, exceeds the limitation should be
+                    // rare.
+                    return Err(Error::SnapshotOversize(raft_log_size as u64));
+                }
             }
             keyspace_map
                 .entry(keyspace_id)
