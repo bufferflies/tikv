@@ -1989,6 +1989,7 @@ mod tests {
                 schema_files: None,
                 txn_chunk_manager,
                 ia_ctx: IaCtx::Disabled,
+                for_columnar: false,
             };
             let mut snap_pb = kvenginepb::Snapshot::default();
             snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32 * enable_inner_key_off as u32);

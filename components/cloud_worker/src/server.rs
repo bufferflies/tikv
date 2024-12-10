@@ -94,6 +94,7 @@ impl Context {
             schema_files: self.schema_files.clone(),
             txn_chunk_manager: self.txn_chunk_manager.clone(),
             ia_ctx: self.ia_ctx.clone(),
+            for_columnar: false,
         }
     }
 }

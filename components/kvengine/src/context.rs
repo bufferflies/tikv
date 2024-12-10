@@ -20,6 +20,7 @@ pub struct SnapCtx {
     pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
     pub txn_chunk_manager: TxnChunkManager,
     pub ia_ctx: IaCtx,
+    pub for_columnar: bool,
 }
 
 #[derive(Clone)]

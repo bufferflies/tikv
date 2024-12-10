@@ -287,6 +287,38 @@ impl Shard {
         shard
     }
 
+    fn collect_ids_from_snapshot(
+        snap: &pb::Snapshot,
+        for_columnar: bool,
+    ) -> HashMap<u64, FileMeta> {
+        let mut ids = HashMap::new();
+        let unconverted_l0s: HashSet<u64> = snap.get_unconverted_l0s().iter().copied().collect();
+        for l0 in snap.get_l0_creates() {
+            if for_columnar && !unconverted_l0s.contains(&l0.id) {
+                continue;
+            }
+            ids.insert(l0.id, FileMeta::from_l0_table(l0));
+        }
+        if !for_columnar {
+            for ln in snap.get_table_creates() {
+                ids.insert(ln.id, FileMeta::from_table(ln));
+            }
+            for blob in snap.get_blob_creates() {
+                ids.insert(blob.id, FileMeta::from_blob_table(blob));
+            }
+        }
+        for columnar in snap.get_columnar_creates() {
+            ids.insert(columnar.id, FileMeta::from_columnar_table(columnar));
+        }
+        if snap.has_schema_meta() {
+            ids.insert(
+                snap.get_schema_meta().get_file_id(),
+                FileMeta::from_schema_meta(),
+            );
+        }
+        ids
+    }
+
     pub async fn from_change_set(
         tag: String,
         ctx: &SnapCtx,
@@ -303,24 +335,7 @@ impl Shard {
         }
         let encryption_key = if cs.has_snapshot() {
             let snap = cs.get_snapshot();
-            for l0 in snap.get_l0_creates() {
-                ids.insert(l0.id, FileMeta::from_l0_table(l0));
-            }
-            for ln in snap.get_table_creates() {
-                ids.insert(ln.id, FileMeta::from_table(ln));
-            }
-            for blob in snap.get_blob_creates() {
-                ids.insert(blob.id, FileMeta::from_blob_table(blob));
-            }
-            for columnar in snap.get_columnar_creates() {
-                ids.insert(columnar.id, FileMeta::from_columnar_table(columnar));
-            }
-            if snap.has_schema_meta() {
-                ids.insert(
-                    snap.get_schema_meta().get_file_id(),
-                    FileMeta::from_schema_meta(),
-                );
-            }
+            ids = Self::collect_ids_from_snapshot(snap, ctx.for_columnar);
             if !ignore_lock {
                 lock_txn_file_refs = collect_snap_lock_txn_file_refs(snap);
             }

@@ -5,6 +5,7 @@ mod metrics;
 mod s3;
 
 use std::{
+    any::Any,
     convert::TryFrom,
     fmt::{Debug, Display, Formatter},
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
@@ -42,7 +43,7 @@ use crate::{
 
 // DFS represents a distributed file system.
 #[async_trait]
-pub trait Dfs: Sync + Send {
+pub trait Dfs: Any + Sync + Send {
     /// read_file reads the whole file to memory.
     /// It can be used by remote compaction server that doesn't have local disk.
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes>;

@@ -557,6 +557,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         schema_files: Some(schema_files.clone()),
         txn_chunk_manager: kvengine.get_txn_chunk_manager(),
         ia_ctx: IaCtx::Disabled,
+        for_columnar: false,
     };
     let snap_access = dfs
         .get_runtime()
@@ -876,6 +877,7 @@ fn test_columnar_ia_file() {
         schema_files: Some(schema_files.clone()),
         txn_chunk_manager: kvengine.get_txn_chunk_manager(),
         ia_ctx,
+        for_columnar: false,
     };
     let snap_access = runtime
         .block_on(SnapAccess::construct_snapshot(
