@@ -20,6 +20,9 @@ use tikv_util::{time::Instant, warn};
 
 use crate::{write_batch::PeerBatch, *};
 
+// WAL file will be rotated and overwritten on every `EPOCH_ROTATE_LEN` epoches.
+pub(crate) const EPOCH_ROTATE_LEN: u32 = 4;
+
 pub const BATCH_HEADER_SIZE: usize = 4 /* epoch_id */ + 4 /* checksum */ + 4 /* batch_len */;
 pub(crate) const INITIAL_BUF_SIZE: usize = 8 * 1024 * 1024;
 
@@ -508,7 +511,7 @@ pub(crate) fn write_eof(buf: &mut DmaBuffer) {
 }
 
 pub(crate) fn epoch_to_idx(epoch_id: u32) -> usize {
-    (epoch_id % 4) as usize
+    (epoch_id % EPOCH_ROTATE_LEN) as usize
 }
 
 #[cfg(test)]

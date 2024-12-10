@@ -1,6 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use tikv_util::config::ReadableSize;
+use tikv_util::config::{AbsoluteOrPercentSize, ReadableSize};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -54,6 +54,11 @@ pub struct Config {
     ///
     /// Default: "4KB"
     pub rlog_cache_size_threshold: ReadableSize,
+
+    /// Memory limit of DFS worker.
+    ///
+    /// Default: "10%"
+    pub dfs_worker_memory_limit: AbsoluteOrPercentSize,
 }
 
 impl Default for Config {
@@ -68,6 +73,7 @@ impl Default for Config {
             cli_mode: false,
             rlog_cache_capacity: ReadableSize::mb(128),
             rlog_cache_size_threshold: ReadableSize::kb(4),
+            dfs_worker_memory_limit: AbsoluteOrPercentSize::Percent(10.0),
         }
     }
 }

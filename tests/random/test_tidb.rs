@@ -432,8 +432,12 @@ fn prepare_cluster(
     let cpu_cores = SysQuota::cpu_cores_quota() as usize;
     let update_conf_fn = move |node_id: u16, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
+        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.security = security_conf.clone();
+
         conf.coprocessor.region_split_size = REGION_SIZE;
         conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
+
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(5);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(15);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(25);
@@ -441,18 +445,21 @@ fn prepare_cluster(
         conf.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(500);
         conf.raft_store.pd_heartbeat_tick_interval = ReadableDuration::secs(5);
         conf.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(500);
+
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
+
         conf.rfengine.target_file_size = ReadableSize::mb(8);
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
-        conf.enable_inner_key_offset = enable_inner_key_off;
-        conf.security = security_conf.clone();
+        conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
+
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.block_cache_type = block_cache_type;
+
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
 

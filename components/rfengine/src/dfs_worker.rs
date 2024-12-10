@@ -5,7 +5,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -22,6 +22,7 @@ use crate::{
     wal_chunk_file_prefix, wal_file_name, Error, Result, Task,
 };
 
+#[derive(Debug)]
 pub(crate) struct LightweightBackupConfig {
     pub(crate) dir: PathBuf,
     pub(crate) wal_chunk_target_file_size: usize,
@@ -30,6 +31,7 @@ pub(crate) struct LightweightBackupConfig {
 
     pub(crate) rlog_cache_capacity: usize,
     pub(crate) rlog_cache_size_threshold: usize,
+    pub(crate) memory_limit: usize,
 }
 
 impl LightweightBackupConfig {
@@ -40,6 +42,7 @@ impl LightweightBackupConfig {
         dfs_config: DFSConfig,
         rlog_cache_capacity: usize,
         rlog_cache_size_threshold: usize,
+        memory_limit: usize,
     ) -> Self {
         Self {
             dir,
@@ -48,6 +51,7 @@ impl LightweightBackupConfig {
             dfs_config,
             rlog_cache_capacity,
             rlog_cache_size_threshold,
+            memory_limit,
         }
     }
 }
@@ -65,6 +69,7 @@ pub(crate) struct ObjectStorageWorker {
     sync_off: u64,  // The offset of the syncing of current wal.
     s3fs: Arc<S3Fs>,
     healthy: Healthy,
+    memory_limiter: MemoryLimiter,
 }
 
 impl ObjectStorageWorker {
@@ -76,16 +81,11 @@ impl ObjectStorageWorker {
         task_rx: Receiver<ObjectStorageTask>,
         callback: Sender<Task>,
     ) -> Self {
+        info!("dfs worker config: {:?}", config);
         let dfs_config = config.dfs_config.clone();
         let wal_chunk_target_file_size = config.wal_chunk_target_file_size;
-        let s3fs = Arc::new(kvengine::dfs::S3Fs::new(
-            dfs_config.prefix.clone(),
-            dfs_config.s3_endpoint.clone(),
-            dfs_config.s3_key_id.clone(),
-            dfs_config.s3_secret_key.clone(),
-            dfs_config.s3_region.clone(),
-            dfs_config.s3_bucket,
-        ));
+        let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
+        let memory_limiter = MemoryLimiter::new(config.memory_limit);
         Self {
             config,
             epoch_id,
@@ -99,6 +99,7 @@ impl ObjectStorageWorker {
             sync_off: 0,
             s3fs,
             healthy: dfs_worker_healthy,
+            memory_limiter,
         }
     }
 
@@ -267,11 +268,13 @@ impl ObjectStorageWorker {
 
         let fs = self.s3fs.clone();
         let healthy = self.healthy.clone();
+        let acquired = self.memory_limiter.acquire(chunk.len())?;
         self.s3fs.get_runtime().spawn_blocking(move || {
             if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
                 error!("{} put wal chunk failed", store_id; "err" => ?err);
                 healthy.set_unhealthy();
             }
+            drop(acquired);
         });
 
         // Reset the offset and buf after rebuild one epoch.
@@ -368,6 +371,9 @@ impl ObjectStorageWorker {
         }
         let fs = self.s3fs.clone();
         let healthy = self.healthy.clone();
+        let acquired = self
+            .memory_limiter
+            .acquire(snapshot_objects.iter().map(|x| x.1.len()).sum::<usize>());
         self.s3fs.get_runtime().spawn_blocking(move || {
             // Snapshot objects should be put in order.
             for obj in snapshot_objects {
@@ -377,6 +383,7 @@ impl ObjectStorageWorker {
                     return;
                 }
             }
+            drop(acquired);
         });
 
         Ok(())
@@ -433,11 +440,13 @@ impl ObjectStorageWorker {
         );
         let fs = self.s3fs.clone();
         let healthy = self.healthy.clone();
+        let acquired = self.memory_limiter.acquire(chunk.len());
         self.s3fs.get_runtime().spawn_blocking(move || {
             if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
                 error!("{} put wal chunk failed", store_id, ; "err" => ?err);
                 healthy.set_unhealthy();
             }
+            drop(acquired);
         });
 
         self.start_off = self.sync_off;
@@ -615,6 +624,49 @@ impl Healthy {
     }
 }
 
+#[derive(Clone)]
+struct MemoryLimiter {
+    available: Arc<AtomicI64>, // Use i64 to avoid overflow.
+}
+
+impl MemoryLimiter {
+    fn new(cap: usize) -> Self {
+        Self {
+            available: Arc::new(AtomicI64::new(cap as i64)),
+        }
+    }
+
+    // Mutable ref to ensure that it's used in single threading-context. As the
+    // get-and-set is not atomic.
+    fn acquire(&mut self, request: usize) -> Result<MemoryLimiterGuard> {
+        let available = self.available.load(Ordering::Acquire);
+        if available >= request as i64 {
+            self.available.fetch_sub(request as i64, Ordering::AcqRel);
+            Ok(MemoryLimiterGuard {
+                limiter: self.clone(),
+                request,
+            })
+        } else {
+            Err(Error::MemoryLimitExceed { request, available })
+        }
+    }
+
+    fn release(&self, request: usize) {
+        self.available.fetch_add(request as i64, Ordering::AcqRel);
+    }
+}
+
+struct MemoryLimiterGuard {
+    limiter: MemoryLimiter,
+    request: usize,
+}
+
+impl Drop for MemoryLimiterGuard {
+    fn drop(&mut self) {
+        self.limiter.release(self.request);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -644,6 +696,7 @@ mod tests {
                 dfs_config,
                 1024 * 1024,
                 4096,
+                1 << 20,
             ),
             1,
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),

@@ -63,6 +63,8 @@ pub enum Error {
     WalEpochOverwritten { epoch_id: u32 },
     #[error("Snapshot is oversize: {0}")]
     SnapshotOversize(u64),
+    #[error("Memory limit exceed, request {request}, available {available}")]
+    MemoryLimitExceed { request: usize, available: i64 },
     #[error("Other error: {0}")]
     Other(String),
 }

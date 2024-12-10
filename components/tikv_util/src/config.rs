@@ -23,7 +23,7 @@ use serde::{
 use thiserror::Error;
 
 use super::time::Instant;
-use crate::slow_log;
+use crate::{slow_log, sys::SysQuota};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -252,6 +252,125 @@ impl<'de> Deserialize<'de> for ReadableSize {
         }
 
         deserializer.deserialize_any(SizeVisitor)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AbsoluteOrPercentSize {
+    Abs(ReadableSize),
+    Percent(f64),
+}
+
+impl Serialize for AbsoluteOrPercentSize {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Abs(size) => size.serialize(serializer),
+            Self::Percent(percent) => serializer.serialize_str(&format!("{percent}%")),
+        }
+    }
+}
+
+impl FromStr for AbsoluteOrPercentSize {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<AbsoluteOrPercentSize, String> {
+        let size_str = s.trim();
+        if size_str.is_empty() {
+            return Err(format!("{:?} is not a valid absolute or percent size.", s));
+        }
+
+        if let Some(percent_str) = size_str.strip_suffix('%') {
+            let Ok(percent) = percent_str.parse::<f64>() else {
+                return Err(format!("{:?} is not a valid percent.", s));
+            };
+            Ok(AbsoluteOrPercentSize::Percent(percent))
+        } else {
+            let size = ReadableSize::from_str(s)?;
+            Ok(AbsoluteOrPercentSize::Abs(size))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AbsoluteOrPercentSize {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SizeVisitor;
+
+        impl<'de> Visitor<'de> for SizeVisitor {
+            type Value = AbsoluteOrPercentSize;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("valid absolute or percent size")
+            }
+
+            fn visit_i64<E>(self, size: i64) -> Result<AbsoluteOrPercentSize, E>
+            where
+                E: de::Error,
+            {
+                if size >= 0 {
+                    self.visit_u64(size as u64)
+                } else {
+                    Err(E::invalid_value(Unexpected::Signed(size), &self))
+                }
+            }
+
+            fn visit_u64<E>(self, size: u64) -> Result<AbsoluteOrPercentSize, E>
+            where
+                E: de::Error,
+            {
+                Ok(AbsoluteOrPercentSize::Abs(ReadableSize(size)))
+            }
+
+            fn visit_str<E>(self, size_str: &str) -> Result<AbsoluteOrPercentSize, E>
+            where
+                E: de::Error,
+            {
+                size_str.parse().map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(SizeVisitor)
+    }
+}
+
+impl AbsoluteOrPercentSize {
+    pub fn absolute(&self, total: u64) -> u64 {
+        match self {
+            Self::Abs(size) => size.0,
+            Self::Percent(percent) => (total as f64 * percent / 100.0) as u64,
+        }
+    }
+
+    /// Consider as config of memory size, i.e. absolute memory size, or percent
+    /// of total memory.
+    pub fn as_memory_size(&self) -> u64 {
+        match self {
+            Self::Abs(size) => size.0,
+            Self::Percent(_) => self.absolute(SysQuota::memory_limit_in_bytes()),
+        }
+    }
+}
+
+impl From<ReadableSize> for AbsoluteOrPercentSize {
+    fn from(s: ReadableSize) -> Self {
+        Self::Abs(s)
+    }
+}
+
+impl From<u64> for AbsoluteOrPercentSize {
+    fn from(s: u64) -> Self {
+        Self::from(ReadableSize(s))
+    }
+}
+
+impl From<f64> for AbsoluteOrPercentSize {
+    fn from(percent: f64) -> Self {
+        Self::Percent(percent)
     }
 }
 
@@ -1686,6 +1805,51 @@ mod tests {
         for src in illegal_cases {
             let src_str = format!("s = {:?}", src);
             assert!(toml::from_str::<SizeHolder>(&src_str).is_err(), "{}", src);
+        }
+    }
+
+    #[test]
+    fn test_readable_size_or_percent() {
+        #[derive(Serialize, Deserialize)]
+        struct Holder {
+            s: AbsoluteOrPercentSize,
+        }
+
+        {
+            let size_cases = vec![(0, "0KiB"), (2 * KIB, "2KiB"), (4 * MIB, "4MiB")];
+            for (size, exp) in size_cases {
+                let size = ReadableSize(size);
+                let c = Holder {
+                    s: AbsoluteOrPercentSize::Abs(size),
+                };
+                let res_str = toml::to_string(&c).unwrap();
+                let exp_str = format!("s = {:?}\n", exp);
+                assert_eq!(res_str, exp_str);
+                let res_size: Holder = toml::from_str(&exp_str).unwrap();
+                assert_eq!(res_size.s, AbsoluteOrPercentSize::Abs(size));
+            }
+        }
+
+        {
+            let percent_cases = vec![(0.0, "0%"), (99.5, "99.5%"), (50.25, "50.25%")];
+            for (percent, exp) in percent_cases {
+                let c = Holder {
+                    s: AbsoluteOrPercentSize::Percent(percent),
+                };
+                let res_str = toml::to_string(&c).unwrap();
+                let exp_str = format!("s = {:?}\n", exp);
+                assert_eq!(res_str, exp_str);
+                let res_size: Holder = toml::from_str(&exp_str).unwrap();
+                assert_eq!(res_size.s, AbsoluteOrPercentSize::Percent(percent));
+            }
+        }
+
+        {
+            let percent = AbsoluteOrPercentSize::Percent(10.0);
+            assert_eq!(percent.absolute(1000), 100);
+
+            let abs = AbsoluteOrPercentSize::Abs(ReadableSize(10));
+            assert_eq!(abs.absolute(1000), 10);
         }
     }
 

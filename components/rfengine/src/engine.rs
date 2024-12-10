@@ -230,6 +230,7 @@ impl RfEngineCore {
                         dfs_conf.unwrap(),
                         cfg.rlog_cache_capacity.0 as usize,
                         cfg.rlog_cache_size_threshold.0 as usize,
+                        cfg.dfs_worker_memory_limit.as_memory_size() as usize,
                     ))
                 }
             } else {

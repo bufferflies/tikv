@@ -356,26 +356,33 @@ fn prepare_cluster(
 
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
+        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.security = security_conf.clone();
+
         conf.coprocessor.region_split_size = ReadableSize::kb(256);
         conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
+
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
+
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(96);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
+
         conf.rfengine.target_file_size = ReadableSize::mb(8);
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
-        conf.enable_inner_key_offset = enable_inner_key_off;
-        conf.security = security_conf.clone();
+        conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
+
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.flush_split_l0 = true;
         conf.kvengine.per_keyspace_configs = per_keyspace_configs.clone();
         conf.kvengine.block_cache_type = block_cache_type;
+
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
     };
