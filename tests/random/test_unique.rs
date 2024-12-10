@@ -234,10 +234,20 @@ pub(crate) async fn run_unique_workload(
 
     join_all(handles).await;
 
-    let mut conn = sqlx::MySqlConnection::connect(&conn_string).await.unwrap();
-    verify_unique(&conn_string).await.unwrap();
-    let (rows, _) = list_rows(&mut conn).await.unwrap();
-    info!("unique rows: {:?}", rows);
+    let mut retry = 0;
+    while retry <= 30 {
+        retry += 1;
+        let check = async {
+            verify_unique(&conn_string).await.context("verify")?;
+            let mut conn = sqlx::MySqlConnection::connect(&conn_string).await.unwrap();
+            let (rows, _) = list_rows(&mut conn).await.context("list")?;
+            info!("unique rows: {:?}", rows);
+            Ok(())
+        };
+        retry_or_panic!(check.await);
+        return;
+    }
+    panic!("unique: final check retry limit exceeded");
 }
 
 async fn do_sql(tag: &str, conn_string: &str, sql: &str, optimistic_txn: bool) -> Result<()> {

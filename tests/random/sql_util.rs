@@ -20,7 +20,7 @@ pub(crate) const DEADLOCK_ERR_MSG: &str = "Deadlock found";
 const RETRYABLE_DB_ERR_MSGS: &[&str] = &[
     TIDB_TXN_RETRYABLE_MARK,
     "Write conflict",
-    "Region is unavailable", // Happens when region merged but PD is low.
+    "Region is unavailable", // Reason: region merged / server is busy.
     // TODO: verify following errors.
     DEADLOCK_ERR_MSG,
     "Information schema is out of date",

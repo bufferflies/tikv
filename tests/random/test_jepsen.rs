@@ -11,7 +11,7 @@ use tikv_util::{error, info, time::Instant};
 
 use crate::{
     sql_util::{
-        gen_padding, get_engine_hint, is_db_error_retryable,
+        gen_padding, get_engine_hint, is_error_retryable, retry_or_panic,
         wait_tiflash_or_columnar_replicas_available, DEADLOCK_ERR_MSG, MAX_PADDING_SIZE,
     },
     JEPSEN_BANK_TXN_COUNTER, JEPSEN_BANK_TXN_RETRY_COUNTER,
@@ -123,11 +123,11 @@ pub(crate) async fn run_jepsen_bank(
                 let (from, to, amount, padding_len, use_txn_file) = random();
                 let padding = &padding[..padding_len];
 
-                let ok = bank_transfer(&tag, &pool, from, to, amount, use_txn_file, padding)
-                    .await
-                    .unwrap_or_else(|err| {
-                        panic!("{} bank_transfer error: {:?}", tag, err);
-                    });
+                let ok = retry_or_panic!(
+                    bank_transfer(&tag, &pool, from, to, amount, use_txn_file, padding)
+                        .await
+                        .context("bank_transfer")
+                );
                 if ok {
                     JEPSEN_BANK_TXN_COUNTER.fetch_add(1, Relaxed);
                 } else {
@@ -142,25 +142,47 @@ pub(crate) async fn run_jepsen_bank(
     handles.push(tokio::spawn(async move {
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < timeout {
-            verify_bank_accounts(&pool_copy, false).await.unwrap();
-            if use_tiflash {
-                verify_bank_accounts(&pool_copy, true).await.unwrap();
-            }
+            let check = async {
+                verify_bank_accounts(&pool_copy, false)
+                    .await
+                    .context("verify")?;
+                if use_tiflash {
+                    verify_bank_accounts(&pool_copy, true)
+                        .await
+                        .context("verify_tiflash")?;
+                }
+                Ok(())
+            };
+            retry_or_panic!(check.await);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }));
 
     join_all(handles).await;
 
-    verify_bank_accounts(&pool, false).await.unwrap();
-    let accounts = list_bank_accounts(&pool, false).await.unwrap();
-    info!("accounts: {:?}", accounts);
-    if use_tiflash {
-        verify_bank_accounts(&pool, true).await.unwrap();
-        let tiflash_accounts = list_bank_accounts(&pool, true).await.unwrap();
-        info!("accounts from TiFlash: {:?}", accounts);
-        assert_eq!(accounts, tiflash_accounts);
+    let mut retry = 0;
+    while retry <= 30 {
+        retry += 1;
+        let check = async {
+            verify_bank_accounts(&pool, false).await.context("verify")?;
+            let accounts = list_bank_accounts(&pool, false).await.context("list")?;
+            info!("accounts: {:?}", accounts);
+            if use_tiflash {
+                verify_bank_accounts(&pool, true)
+                    .await
+                    .context("verify_tiflash")?;
+                let tiflash_accounts = list_bank_accounts(&pool, true)
+                    .await
+                    .context("list_tiflash")?;
+                info!("accounts from TiFlash: {:?}", accounts);
+                assert_eq!(accounts, tiflash_accounts);
+            }
+            Ok(())
+        };
+        retry_or_panic!(check.await);
+        return;
     }
+    panic!("jepsen_bank: final check retry limit exceeded");
 }
 
 async fn bank_transfer(
@@ -209,10 +231,6 @@ async fn bank_transfer(
     }
     match sqlx::query("commit").execute(&mut conn).await {
         Ok(_) => Ok(true),
-        Err(err) if is_db_error_retryable(&err) => {
-            info!("{} bank_transfer: commit ignore retryable error", tag; "err" => ?err);
-            Ok(false)
-        }
         Err(err) => {
             error!("{} bank_transfer: commit failed", tag; "err" => ?err);
             Err(err).context("bank_transfer commit")
