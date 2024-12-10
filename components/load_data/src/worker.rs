@@ -1,7 +1,7 @@
-// Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
+// Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 //
 use std::{
-    cmp::Ordering,
+    cmp::{max, min, Ordering},
     collections::HashMap,
     fs,
     fs::File,
@@ -9,14 +9,23 @@ use std::{
     mem,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
+use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut, Bytes};
 use encryption::{DecrypterReader, EncrypterWriter, Iv};
-use kvproto::encryptionpb::EncryptionMethod;
+use kvengine::{
+    dfs::Options,
+    table::{sstable::Builder, InnerKey, Value},
+    UserMeta,
+};
+use kvproto::{encryptionpb::EncryptionMethod, metapb};
 use rfengine::compress_lz4;
 use tikv_util::{
+    codec::bytes::decode_bytes,
     error, info,
+    merge_range::MergeRanges,
     mpsc::{Receiver, Sender},
     time::Instant,
     warn,
@@ -25,10 +34,15 @@ use tikv_util::{
 use crate::{
     checkpoint::{FileMeta, LocalFileCheckpointStorage},
     error::{Error, Result},
-    kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator},
+    kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator, SstMeta},
+    metrics::LOAD_DATA_WRU_COST_COUNTER,
     task::{
-        get_common_prefix, FlushResult, FlushStates, LoadDataConfig, LoadDataContext,
-        LoadTaskScheduler, PutChunkResult, TaskContext, FLUSH_FILE_CONCURRENCY,
+        build_ingest_files, gen_split_keys, get_common_prefix, get_ssts_in_range,
+        ingest_files_to_leader, new_region_key, verify_regions_boundary, FlushResult, FlushStates,
+        LoadDataConfig, LoadDataContext, LoadTaskScheduler, PutChunkResult, TaskContext,
+        ALLOCATE_ID_TIMEOUT, CREATE_FILE_CONCURRENCY, DEFAULT_AVG_BATCH_PROPORTION,
+        FLUSH_FILE_CONCURRENCY, INGEST_CONCURRENCY, MAX_RETRY_TIMES, MAX_SLEEP_DURATION,
+        REPLICA_NUMS, RETRY_SLEEP_DURATION, TXN_FILE_RU_DISCOUNT_RATIO, ZSTD_COMPRESSION_LEVEL,
     },
 };
 
@@ -52,7 +66,6 @@ pub enum KvPairsWorkerMsg {
     Cleanup,
 }
 
-#[allow(dead_code)]
 pub struct UnhandledFlushFile {
     pub handled_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
     pub file_idx: usize,
@@ -672,9 +685,14 @@ impl KvPairsWorker {
         let mut sent_count = 0;
         let mut recv_count = 0;
 
-        let task_ctx = self.task_ctx.clone();
         let file_metas = mem::take(&mut self.l0_file_metas);
-        let readers = build_readers(task_ctx, file_metas);
+        let readers = build_readers(
+            &self.task_ctx,
+            file_metas,
+            self.key_comm_prefix.len(),
+            vec![],
+            vec![],
+        );
         let mut merge_iter = MergeIterator::new(
             readers,
             &self.task_ctx.outer_key_prefix,
@@ -1000,7 +1018,741 @@ fn flush_l0_file_to_local(
 }
 
 #[allow(dead_code)]
-fn build_readers(task_ctx: TaskContext, file_metas: Vec<FileMeta>) -> Vec<KvPairsReader> {
+pub enum BuildingWorkerMsg {
+    Build {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        file_metas: Vec<FileMeta>,
+        compression_type: u8,
+        cb: Box<dyn FnOnce(Vec<DuplicateEntry>) + Send>,
+    },
+    Ingest {
+        cb: Box<dyn FnOnce() + Send>,
+    },
+    Cleanup,
+}
+
+#[allow(dead_code)]
+pub struct BuildingWorker {
+    worker_id: u64,
+    config: LoadDataConfig,
+    ctx: LoadDataContext,
+    task_ctx: TaskContext,
+    scheduler: LoadTaskScheduler,
+    receiver: Receiver<BuildingWorkerMsg>,
+    cached_file_ids: Vec<u64>,
+
+    key_comm_prefix: Vec<u8>,
+    checkpoint_store: Arc<Mutex<LocalFileCheckpointStorage>>,
+
+    // the following fields need to be persisted
+    sst_metas: Vec<SstMeta>,
+    dup_entries: Vec<DuplicateEntry>,
+    ingested: bool,
+}
+
+#[allow(dead_code)]
+impl BuildingWorker {
+    pub fn new(
+        worker_id: u64,
+        config: LoadDataConfig,
+        ctx: LoadDataContext,
+        task_ctx: TaskContext,
+        key_comm_prefix: Vec<u8>,
+        receiver: Receiver<BuildingWorkerMsg>,
+        scheduler: LoadTaskScheduler,
+        checkpoint_store: Arc<Mutex<LocalFileCheckpointStorage>>,
+    ) -> Self {
+        let mut checkpoint_guard = checkpoint_store.lock().unwrap();
+        let worker_ctx = checkpoint_guard
+            .checkpoint_ctx
+            .get_building_worker_ctx(worker_id);
+
+        let sst_metas = worker_ctx.sst_metas.clone();
+        let ingested = worker_ctx.ingested;
+        let dup_entries = worker_ctx.duplicated_entries.clone();
+        drop(checkpoint_guard);
+
+        Self {
+            worker_id,
+            config,
+            ctx,
+            task_ctx,
+            receiver,
+            scheduler,
+            cached_file_ids: vec![],
+            key_comm_prefix,
+            checkpoint_store,
+            sst_metas,
+            dup_entries,
+            ingested,
+        }
+    }
+
+    pub fn run(&mut self) {
+        info!(
+            "{} run building worker-{}, key comm prefix: {:?}, sst metas: {}, duplicated entries: {}",
+            self.task_ctx.task_id,
+            self.worker_id,
+            self.key_comm_prefix,
+            self.sst_metas.len(),
+            self.dup_entries.len(),
+        );
+        while let Ok(msg) = self.receiver.recv() {
+            match msg {
+                BuildingWorkerMsg::Build {
+                    start_key,
+                    end_key,
+                    file_metas,
+                    compression_type,
+                    cb,
+                } => match self.build(file_metas, start_key, end_key, compression_type) {
+                    Ok(dup_entries) => {
+                        cb(dup_entries);
+                    }
+                    Err(err) => {
+                        error!(
+                            "{} worker-{} failed to build sst files, error: {:?}",
+                            self.task_ctx.task_id, self.worker_id, err
+                        );
+                        cb(vec![]);
+                        self.scheduler.cancel(format!(
+                            "{} worker-{} error: {:?}",
+                            self.task_ctx.task_id, self.worker_id, err
+                        ));
+                    }
+                },
+                BuildingWorkerMsg::Ingest { cb } => {
+                    if let Err(err) = self.ingest() {
+                        error!(
+                            "{} worker-{} failed to ingest sst files, error: {:?}",
+                            self.task_ctx.task_id, self.worker_id, err
+                        );
+                        self.scheduler.cancel(format!(
+                            "{} worker-{} error: {:?}",
+                            self.task_ctx.task_id, self.worker_id, err
+                        ));
+                    }
+                    cb();
+                }
+                BuildingWorkerMsg::Cleanup => {
+                    return;
+                }
+            }
+        }
+    }
+
+    fn ingest(&mut self) -> Result<()> {
+        if self.scheduler.is_canceled() || self.scheduler.is_finished() {
+            warn!(
+                "{} worker-{} skip building sst, canceled: {}, finished: {}, error message: {}",
+                self.task_ctx.task_id,
+                self.worker_id,
+                self.scheduler.is_canceled(),
+                self.scheduler.is_finished(),
+                self.scheduler.error_msg(),
+            );
+            return Ok(());
+        }
+
+        if self.ingested {
+            return Ok(());
+        }
+
+        if self.sst_metas.is_empty() {
+            info!(
+                "{} worker-{} skip ingesting empty data",
+                self.task_ctx.task_id, self.worker_id
+            );
+            let mut checkpoint_guard = self.checkpoint_store.lock().unwrap();
+            checkpoint_guard.set_worker_ingested(self.worker_id)?;
+            return Ok(());
+        }
+
+        let start = Instant::now();
+        let mut data_size = 0;
+        let mut total_kvs = 0;
+        for sst_meta in &self.sst_metas {
+            data_size += sst_meta.uncompressed_size;
+            total_kvs += sst_meta.keys;
+        }
+        let sst_metas = mem::take(&mut self.sst_metas);
+        self.ingest_sst(sst_metas)?;
+        self.scheduler.add_total_kvs(total_kvs);
+
+        let mut wru = 0.0;
+        if let (Some(ru_config), Some(keyspace_id)) =
+            (&self.config.rg_config, self.task_ctx.keyspace_id)
+        {
+            let request_unit = &ru_config.request_unit;
+            // The calculation formula is a reference to the pd's ru consumption,
+            // ref https://github.com/tikv/pd/blob/master/client/resource_group/controller/model.go#L103.
+            //
+            // `write_base_cost + write_per_batch_base_cost * avg_batch_proportion +
+            // write_cost_per_byte * data_size * replica_nums`
+            //
+            // In the formula, we use the default value of `avg_batch_proportion` and
+            // `replica_nums`, which are 0.5 (same as the default value of
+            // `avg_batch_proportion` in pd) and 3.0 respectively.
+            //
+            // Set import billing same as txn file, though the underlying mechanisms are not
+            // the same.
+            wru = request_unit.write_base_cost
+                + request_unit.write_per_batch_base_cost * DEFAULT_AVG_BATCH_PROPORTION
+                + request_unit.write_cost_per_byte
+                    * data_size as f64
+                    * TXN_FILE_RU_DISCOUNT_RATIO
+                    * REPLICA_NUMS;
+
+            LOAD_DATA_WRU_COST_COUNTER
+                .with_label_values(&[&keyspace_id.to_string(), &self.task_ctx.task_id])
+                .inc_by(wru as u64);
+        }
+
+        let mut checkpoint_guard = self.checkpoint_store.lock().unwrap();
+        checkpoint_guard.set_worker_ingested(self.worker_id)?;
+        info!(
+            "{} worker-{} finish ingesting, data size: {}, kvs: {}, ru consumption: {}, keyspace id: {:?}, takes {:?}",
+            self.task_ctx.task_id,
+            self.worker_id,
+            data_size,
+            total_kvs,
+            wru,
+            self.task_ctx.keyspace_id,
+            start.saturating_elapsed(),
+        );
+        Ok(())
+    }
+
+    fn build(
+        &mut self,
+        file_metas: Vec<FileMeta>,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        compression_type: u8,
+    ) -> Result<Vec<DuplicateEntry>> {
+        if self.scheduler.is_canceled() || self.scheduler.is_finished() {
+            warn!(
+                "{} worker-{} skip building sst, canceled: {}, finished: {}, error message: {}",
+                self.task_ctx.task_id,
+                self.worker_id,
+                self.scheduler.is_canceled(),
+                self.scheduler.is_finished(),
+                self.scheduler.error_msg(),
+            );
+            return Ok(vec![]);
+        }
+        if !self.sst_metas.is_empty() {
+            return Ok(mem::take(&mut self.dup_entries));
+        }
+        if file_metas.is_empty() {
+            info!(
+                "{} worker-{} skip building empty data",
+                self.task_ctx.task_id, self.worker_id
+            );
+            return Ok(vec![]);
+        }
+
+        info!(
+            "{} worker-{} start to build sst with key common prefix {:?}",
+            self.task_ctx.task_id, self.worker_id, self.key_comm_prefix
+        );
+        let start = Instant::now();
+        let readers = build_readers(
+            &self.task_ctx,
+            file_metas,
+            self.key_comm_prefix.len(),
+            start_key,
+            end_key,
+        );
+        let (tx, rx) = tikv_util::mpsc::unbounded();
+        let mut sent_count = 0;
+        let mut recv_count = 0;
+        let mut merge_iter = MergeIterator::new(
+            readers,
+            &self.task_ctx.outer_key_prefix,
+            self.key_comm_prefix.len(),
+        )?;
+
+        let mut errs = vec![];
+        while merge_iter.valid() {
+            let batch = self.read_batch(&mut merge_iter, self.config.sst_file_size)?;
+            if batch.is_empty() {
+                break;
+            }
+            let file_id = self.alloc_file_id();
+            if let Err(err) = file_id {
+                errs.push(err);
+                break;
+            }
+            self.spawn_build_file(file_id.unwrap(), batch, tx.clone(), compression_type);
+            sent_count += 1;
+            if sent_count > CREATE_FILE_CONCURRENCY {
+                recv_count += 1;
+                match rx.recv().unwrap() {
+                    Err(err) => {
+                        errs.push(err);
+                        break;
+                    }
+                    Ok(sst_meta) => {
+                        self.sst_metas.push(sst_meta);
+                    }
+                }
+            }
+        }
+        for _ in 0..(sent_count - recv_count) {
+            match rx.recv().unwrap() {
+                Err(err) => {
+                    error!(
+                        "{} worker-{} failed to create sst file, error: {}",
+                        self.task_ctx.task_id, self.worker_id, err
+                    );
+                    errs.push(err);
+                }
+                Ok(sst_meta) => {
+                    self.sst_metas.push(sst_meta);
+                }
+            }
+        }
+        if !errs.is_empty() {
+            return Err(errs.pop().unwrap());
+        }
+        if !merge_iter.duplicated_entries.is_empty() {
+            info!(
+                "{} worker-{} got {} duplicated entries, size {}",
+                self.task_ctx.task_id,
+                self.worker_id,
+                merge_iter.duplicated_entries.len(),
+                merge_iter.duplicated_entries_size
+            );
+            self.dup_entries = merge_iter.duplicated_entries;
+        }
+
+        let mut checkpoint_guard = self.checkpoint_store.lock().unwrap();
+        checkpoint_guard.update_sst_metas(
+            self.worker_id,
+            self.sst_metas.clone(),
+            self.dup_entries.clone(),
+        )?;
+        self.scheduler.add_created_files(self.sst_metas.len());
+
+        info!(
+            "{} worker-{} finish building, sst metas: {}, duplicated entries: {}, takes {:?}",
+            self.task_ctx.task_id,
+            self.worker_id,
+            self.sst_metas.len(),
+            self.dup_entries.len(),
+            start.saturating_elapsed(),
+        );
+        Ok(mem::take(&mut self.dup_entries))
+    }
+
+    fn read_batch(&mut self, merge_iter: &mut MergeIterator, batch_size: usize) -> Result<Vec<u8>> {
+        let mut buf = Vec::with_capacity(batch_size);
+        let mut pre_table_id = vec![];
+        while merge_iter.valid() {
+            let key = merge_iter.key();
+            let key_len = key.len();
+            let val = merge_iter.value();
+            let val_len = val.len();
+
+            if buf.len() + 2 + key_len + 4 + val_len > buf.capacity() {
+                return Ok(buf);
+            }
+            let table_id = merge_iter.table_id();
+            if !pre_table_id.is_empty() && pre_table_id.as_slice() != table_id {
+                return Ok(buf);
+            }
+            pre_table_id = table_id.to_vec();
+
+            buf.put_u16_le(key_len as u16);
+            buf.extend_from_slice(key);
+            buf.put_u32_le(val_len as u32);
+            buf.extend_from_slice(val);
+            merge_iter.next()?;
+        }
+        Ok(buf)
+    }
+
+    fn alloc_file_id(&mut self) -> Result<u64> {
+        if let Some(id) = self.cached_file_ids.pop() {
+            return Ok(id);
+        }
+        let start = Instant::now();
+        let count = 64;
+        loop {
+            match futures::executor::block_on(self.ctx.pd.batch_get_tso(count as u32)) {
+                Ok(ts) => {
+                    let last = ts.into_inner();
+                    let first = last - count as u64 + 1;
+                    self.cached_file_ids = (first..=last).rev().collect();
+                    return Ok(self.cached_file_ids.pop().unwrap());
+                }
+                Err(err) => {
+                    error!(
+                        "{} worker-{} failed to allocate file id from PD {:?}",
+                        self.task_ctx.task_id, self.worker_id, err
+                    );
+                    std::thread::sleep(Duration::from_secs(1));
+                    if start.saturating_elapsed() > ALLOCATE_ID_TIMEOUT {
+                        return Err(Error::PdError(err));
+                    }
+                }
+            }
+        }
+    }
+
+    fn spawn_build_file(
+        &self,
+        file_id: u64,
+        mut batch: Vec<u8>,
+        sender: Sender<Result<SstMeta>>,
+        compression_type: u8,
+    ) {
+        let ctx = self.ctx.clone();
+        let block_size = self.config.block_size;
+        let task_id = self.task_ctx.task_id.clone();
+        let worker_id = self.worker_id;
+        let checksum_type = self.config.checksum_type;
+        let encryption_key = self.task_ctx.encryption_key.clone();
+        let um = UserMeta::new(self.task_ctx.start_ts, self.task_ctx.commit_ts);
+        let mut val_buf = Value::encode_buf(0, &um.to_array(), self.task_ctx.commit_ts, &[]);
+        let base_val_len = val_buf.len();
+        let prepend_keyspace_id = self.task_ctx.prepend_keyspace_id;
+
+        self.ctx.runtime.spawn(async move {
+            info!(
+                "{} worker-{} start to build sst file {}",
+                task_id, worker_id, file_id
+            );
+            let mut builder = Builder::new(
+                file_id,
+                block_size,
+                compression_type,
+                ZSTD_COMPRESSION_LEVEL,
+                checksum_type,
+                encryption_key,
+                prepend_keyspace_id,
+            );
+            let mut entries = 0;
+            let mut offset = 0;
+            let mut uncompressed_size = 0;
+            while offset < batch.len() {
+                let key_len = (&batch[offset..]).get_u16_le() as usize;
+                offset += 2;
+                let key = &batch[offset..offset + key_len];
+                offset += key_len;
+                uncompressed_size += key_len;
+                let val_len = (&batch[offset..]).get_u32_le() as usize;
+                offset += 4;
+                let val = &batch[offset..offset + val_len];
+                offset += val_len;
+                uncompressed_size += base_val_len + val_len;
+                val_buf.resize(base_val_len, 0);
+                val_buf.extend_from_slice(val);
+
+                // The key is already trimmed prefix, so we can use `from_inner_buf` here.
+                let inner_key = InnerKey::from_inner_buf(key);
+                builder.add(inner_key, &Value::decode(&val_buf), None);
+                entries += 1;
+            }
+            batch.clear();
+            builder.finish(0, &mut batch);
+            let data: Bytes = batch.into();
+            let sst_meta = SstMeta {
+                id: file_id,
+                smallest: builder.get_smallest().to_vec(),
+                biggest: builder.get_biggest().to_vec(),
+                size: data.len(),
+                uncompressed_size,
+                keys: entries,
+            };
+            info!(
+                "{} worker-{} finish building sst file {:?}",
+                task_id, worker_id, sst_meta
+            );
+            let opts = Options::default();
+            let res = ctx
+                .dfs
+                .create(file_id, data, opts)
+                .await
+                .map(|_| sst_meta.clone())
+                .map_err(|e| Error::from(e));
+
+            sender.send(res).unwrap();
+        });
+    }
+
+    fn ingest_sst(&mut self, mut sst_metas: Vec<SstMeta>) -> Result<()> {
+        if sst_metas.is_empty() {
+            return Ok(());
+        }
+        info!(
+            "{} worker-{} start to ingest, sst metas: {}",
+            self.task_ctx.task_id,
+            self.worker_id,
+            sst_metas.len()
+        );
+        sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
+        let start = Instant::now();
+        let outer_key_prefix = self.task_ctx.outer_key_prefix.to_vec();
+        let coarse_split_keys = gen_split_keys(
+            &outer_key_prefix,
+            &sst_metas,
+            self.config.coarse_split_size,
+            true,
+        );
+        let new_regions_id = self.split_regions(&coarse_split_keys)?;
+        let result = self.ctx.pd.scatter_regions_by_id(new_regions_id);
+        if let Err(err) = result {
+            error!(
+                "{} worker-{} scatter regions failed {:?}",
+                self.task_ctx.task_id, self.worker_id, err
+            );
+        }
+        for i in 0..coarse_split_keys.len() - 1 {
+            let mut encoded_start_key = coarse_split_keys[i].as_slice();
+            let raw_start_key = decode_bytes(&mut encoded_start_key, false).unwrap();
+            let mut encoded_end_key = coarse_split_keys[i + 1].as_slice();
+            let raw_end_key = decode_bytes(&mut encoded_end_key, false).unwrap();
+            let inner_start_key = InnerKey::from_outer_key(&raw_start_key);
+            let inner_end_key = InnerKey::from_outer_end_key(&raw_end_key);
+            let group_ssts = get_ssts_in_range(&sst_metas, inner_start_key, inner_end_key);
+            assert!(
+                !group_ssts.is_empty(),
+                "raw start {:?}, raw end {:?}, inner start {:?}, inner end {:?}, ssts {:?}",
+                raw_start_key,
+                raw_end_key,
+                inner_start_key,
+                inner_end_key,
+                sst_metas
+            );
+            self.ingest_group(group_ssts)?;
+        }
+        info!(
+            "{} worker-{} finish ingesting, takes {:?}",
+            self.task_ctx.task_id,
+            self.worker_id,
+            start.saturating_elapsed()
+        );
+        Ok(())
+    }
+
+    fn split_regions(&self, split_keys: &[Vec<u8>]) -> Result<Vec<u64>> {
+        info!(
+            "{} worker-{} start split, keys {:?}",
+            self.task_ctx.task_id, self.worker_id, split_keys
+        );
+        let mut retry = 0;
+        let mut split_keys = split_keys.to_owned();
+        let mut new_regions_id = Vec::with_capacity(split_keys.len());
+        loop {
+            let mut unprocessed_keys = Vec::with_capacity(split_keys.len());
+            for split_key in &split_keys {
+                let region = self.ctx.pd.get_region(split_key)?;
+                let start_key = region.get_start_key();
+                if start_key == split_key {
+                    new_regions_id.push(region.get_id());
+                    continue;
+                }
+                unprocessed_keys.push(split_key.clone());
+            }
+            if unprocessed_keys.is_empty() {
+                break;
+            }
+
+            let result = self
+                .ctx
+                .runtime
+                .block_on(self.ctx.pd.split_regions(unprocessed_keys.clone()));
+            match result {
+                Err(err) => {
+                    error!(
+                        "{} worker-{} split failed {:?}",
+                        self.task_ctx.task_id, self.worker_id, err
+                    );
+                    if retry >= MAX_RETRY_TIMES {
+                        return Err(Error::PdError(err));
+                    }
+                    std::thread::sleep(std::cmp::min(
+                        MAX_SLEEP_DURATION,
+                        2_u32.pow(retry as u32) * RETRY_SLEEP_DURATION,
+                    ));
+                }
+                Ok(regions_id) => {
+                    new_regions_id.extend_from_slice(&regions_id);
+                    break;
+                }
+            }
+            split_keys = unprocessed_keys.clone();
+            retry += 1;
+        }
+        new_regions_id.sort();
+        new_regions_id.dedup();
+        info!(
+            "{} worker-{} finish split, new regions_id {:?}",
+            self.task_ctx.task_id, self.worker_id, new_regions_id
+        );
+        Ok(new_regions_id)
+    }
+
+    fn ingest_group(&self, sst_metas: Vec<SstMeta>) -> Result<()> {
+        let outer_key_prefix = self.task_ctx.outer_key_prefix.to_vec();
+        let split_keys = gen_split_keys(
+            &outer_key_prefix,
+            &sst_metas,
+            self.config.region_size,
+            false,
+        );
+        if !split_keys.is_empty() {
+            self.split_regions(&split_keys)?;
+        }
+        let outer_first_key = new_region_key(
+            &outer_key_prefix,
+            sst_metas.first().unwrap().smallest.as_slice(),
+        );
+        let outer_last_key = {
+            let mut last_key = sst_metas.last().unwrap().biggest.clone();
+            last_key.push(0);
+            new_region_key(&outer_key_prefix, &last_key)
+        };
+
+        let mut success_ranges = MergeRanges::default(); // keys of `success_ranges` are encoded.
+        let mut last_error: Option<Error> = None;
+        for retry in 0..MAX_RETRY_TIMES {
+            match self.ingest_group_to_range(
+                &outer_key_prefix,
+                &sst_metas,
+                outer_first_key.clone(),
+                outer_last_key.clone(),
+                &mut success_ranges,
+            ) {
+                Ok(_) => {
+                    debug_assert!(success_ranges.covered(&outer_first_key, &outer_last_key));
+                    return Ok(());
+                }
+                Err(err) if Self::is_ingest_error_retryable(&err) => {
+                    warn!(
+                        "{} worker-{} ingest_group_to_range failed {:?}, retry {}",
+                        self.task_ctx.task_id, self.worker_id, err, retry
+                    );
+                    last_error = Some(err);
+                    std::thread::sleep(std::cmp::min(
+                        MAX_SLEEP_DURATION,
+                        2_u32.pow(retry as u32) * RETRY_SLEEP_DURATION,
+                    ));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_error.unwrap())
+    }
+
+    fn is_ingest_error_retryable(err: &Error) -> bool {
+        match err {
+            Error::RegionNotFound(_)
+            | Error::LeaderNotFound(_)
+            | Error::RegionError(..)
+            | Error::PdError(_)
+            | Error::HyperError(_)
+            | Error::RegionsIntegrityError(_) => true,
+            Error::MultiErrors(errs) => errs.iter().all(Self::is_ingest_error_retryable),
+            _ => false,
+        }
+    }
+
+    fn ingest_group_to_range(
+        &self,
+        outer_key_prefix: &[u8],
+        sst_metas: &[SstMeta],
+        outer_first_key: Vec<u8>,
+        outer_last_key: Vec<u8>,
+        success_ranges: &mut MergeRanges,
+    ) -> Result<()> {
+        let mut regions = self.ctx.runtime.block_on(self.ctx.pd.scan_regions(
+            outer_first_key.clone(),
+            outer_last_key.clone(),
+            usize::MAX,
+        ))?;
+        verify_regions_boundary(&outer_first_key, &outer_last_key, &regions)?;
+        if !success_ranges.is_empty() {
+            regions.retain(|region| {
+                !success_ranges
+                    .covered(&region.get_region().start_key, &region.get_region().end_key)
+            });
+        }
+        info!(
+            "{} worker-{} scanned and filtered regions {:?}",
+            self.task_ctx.task_id, self.worker_id, regions
+        );
+
+        let mut errors = vec![];
+        let mut handle_ingest_res = |res: Result<metapb::Region>| match res {
+            Ok(region) => {
+                let success_start = max(region.get_start_key(), outer_first_key.as_slice());
+                let success_end = min(region.get_end_key(), outer_last_key.as_slice());
+                success_ranges.insert(success_start.to_vec(), success_end.to_vec());
+                self.scheduler.add_ingested_regions();
+            }
+            Err(err) => errors.push(err),
+        };
+
+        let (tx, rx) = tikv_util::mpsc::unbounded();
+        let mut msg_cnt = 0;
+        for mut pd_region in regions {
+            let region = pd_region.get_region();
+            let cs = build_ingest_files(
+                outer_key_prefix.len(),
+                region,
+                sst_metas,
+                self.task_ctx.commit_ts,
+            );
+            if cs.get_ingest_files().get_table_creates().is_empty() {
+                continue;
+            }
+            if self.scheduler.is_canceled() {
+                return Err(Error::Canceled);
+            }
+            let pd_cli = self.ctx.pd.clone();
+            let task_id = self.task_ctx.task_id.clone();
+            let worker_id = self.worker_id;
+            let tx = tx.clone();
+            self.ctx.runtime.spawn(async move {
+                let region = pd_region.take_region();
+                let leader = pd_region.take_leader();
+                info!(
+                    "{} worker-{} ingest_group_to_range: region: {:?}, leader: {:?}, cs: {:?}",
+                    task_id, worker_id, region, leader, cs
+                );
+                let res = ingest_files_to_leader(pd_cli, cs, &region, leader).await;
+                let _ = tx.send(res.map(|_| region));
+            });
+            if msg_cnt < INGEST_CONCURRENCY {
+                msg_cnt += 1;
+            } else {
+                handle_ingest_res(rx.recv().unwrap());
+            }
+        }
+        for _ in 0..msg_cnt {
+            handle_ingest_res(rx.recv().unwrap());
+        }
+
+        if !errors.is_empty() {
+            return Err(Error::MultiErrors(errors));
+        }
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+fn build_readers(
+    task_ctx: &TaskContext,
+    file_metas: Vec<FileMeta>,
+    key_comm_prefix: usize,
+    lower_bound: Vec<u8>,
+    upper_bound: Vec<u8>,
+) -> Vec<KvPairsReader> {
+    let table_prefix_offset = KEYSPACE_PREFIX_LEN - task_ctx.inner_key_off.unwrap();
     let mut readers = Vec::with_capacity(file_metas.len());
     for file_meta in file_metas {
         let file = File::open(file_meta.file_path).unwrap();
@@ -1018,7 +1770,25 @@ fn build_readers(task_ctx: TaskContext, file_metas: Vec<FileMeta>) -> Vec<KvPair
             Iv::Empty
         };
         let decrypter_reader = DecrypterReader::new(file, method, key, iv).unwrap();
-        let reader = KvPairsReader::new(file_meta.kv_count, decrypter_reader);
+
+        let lower_bound_suffix = if !lower_bound.is_empty() && lower_bound > file_meta.first_key {
+            lower_bound.as_slice()[key_comm_prefix..].to_vec()
+        } else {
+            vec![]
+        };
+        let upper_bound_suffix = if !upper_bound.is_empty() && upper_bound <= file_meta.last_key {
+            upper_bound.as_slice()[key_comm_prefix..].to_vec()
+        } else {
+            vec![]
+        };
+
+        let reader = KvPairsReader::new(
+            file_meta.kv_count,
+            decrypter_reader,
+            lower_bound_suffix,
+            upper_bound_suffix,
+            table_prefix_offset,
+        );
         readers.push(reader);
     }
     readers

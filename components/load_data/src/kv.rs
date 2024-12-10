@@ -10,6 +10,7 @@ use bytes::Bytes;
 use encryption::DecrypterReader;
 use rfengine::decompress_lz4;
 use serde_derive::{Deserialize, Serialize};
+use tidb_query_datatype::codec::table::{TABLE_PREFIX_KEY_LEN, TABLE_PREFIX_LEN};
 use tikv_util::mpsc::{bounded, Receiver};
 
 use crate::error::{Error, Result};
@@ -40,10 +41,19 @@ pub struct KvPairsReader {
     next_offset: usize,
     buf_rx: Receiver<Result<Vec<u8>>>,
     key_comm_prefix_len: usize,
+    lower_bound_suffix: Vec<u8>,
+    upper_bound_suffix: Vec<u8>,
+    table_prefix_offset: usize,
 }
 
 impl KvPairsReader {
-    pub fn new(count: usize, mut reader: DecrypterReader<File>) -> Self {
+    pub fn new(
+        count: usize,
+        mut reader: DecrypterReader<File>,
+        lower_bound_suffix: Vec<u8>,
+        upper_bound_suffix: Vec<u8>,
+        table_prefix_offset: usize,
+    ) -> Self {
         let (buf_tx, buf_rx) = bounded(1);
         thread::spawn(move || {
             let mut compressed_size_buf = [0u8; 4];
@@ -82,11 +92,22 @@ impl KvPairsReader {
             next_offset: 0,
             buf_rx,
             key_comm_prefix_len: 0,
+            lower_bound_suffix,
+            upper_bound_suffix,
+            table_prefix_offset,
         }
     }
 
-    fn init(&mut self, key_comm_prefix_len: usize) {
+    fn init(&mut self, key_comm_prefix_len: usize) -> Result<()> {
+        self.next()?;
+
         self.key_comm_prefix_len = key_comm_prefix_len;
+        if !self.lower_bound_suffix.is_empty() {
+            while self.valid() && self.key_suffix() < self.lower_bound_suffix.as_slice() {
+                self.next()?;
+            }
+        }
+        Ok(())
     }
 
     fn key(&self) -> &[u8] {
@@ -107,8 +128,15 @@ impl KvPairsReader {
         &self.buf[offset..offset + self.row_id_buf_len]
     }
 
+    fn table_id(&self) -> &[u8] {
+        &self.buf[self.offset + 2 + self.table_prefix_offset + TABLE_PREFIX_LEN
+            ..self.offset + 2 + self.table_prefix_offset + TABLE_PREFIX_KEY_LEN]
+    }
+
     fn valid(&self) -> bool {
         self.idx <= self.count
+            && (self.upper_bound_suffix.is_empty()
+                || self.key_suffix() < self.upper_bound_suffix.as_slice())
     }
 
     fn next(&mut self) -> Result<()> {
@@ -187,9 +215,10 @@ impl MergeIterator {
     ) -> Result<Self> {
         let mut heap = Vec::with_capacity(readers.len());
         for mut reader in readers {
-            reader.init(key_comm_prefix_len);
-            reader.next()?;
-            heap.push(Box::new(reader));
+            reader.init(key_comm_prefix_len)?;
+            if reader.valid() {
+                heap.push(Box::new(reader));
+            }
         }
 
         let mut it = Self {
@@ -257,6 +286,10 @@ impl MergeIterator {
 
     pub fn row_id(&self) -> &[u8] {
         self.heap[0].row_id()
+    }
+
+    pub fn table_id(&self) -> &[u8] {
+        self.heap[0].table_id()
     }
 
     pub fn prev_key(&self) -> &[u8] {
@@ -378,10 +411,9 @@ mod tests {
         let key_comm_prefix_len = key_comm_prefix.len();
         let mut key_buf = key_comm_prefix;
 
-        reader.init(key_comm_prefix_len);
+        reader.init(key_comm_prefix_len).unwrap();
         ids.sort();
         for id in ids.iter() {
-            reader.next().unwrap();
             key_buf.resize(key_comm_prefix_len, 0);
             key_buf.extend_from_slice(reader.key_suffix());
             let key = i_to_key(1, id);
@@ -389,6 +421,7 @@ mod tests {
             assert_eq!(key.as_slice(), key_buf.as_slice());
             assert_eq!(i_to_val(id).as_slice(), reader.value());
             assert_eq!(i_to_row_id(id).as_slice(), reader.row_id());
+            reader.next().unwrap();
         }
         reader.next().unwrap();
         assert!(!reader.valid());

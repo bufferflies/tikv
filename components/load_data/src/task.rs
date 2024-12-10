@@ -63,22 +63,22 @@ const DEFAULT_REGION_SIZE: usize = 750 * 1024 * 1024; // 750MB
 const DEFAULT_COARSE_SPLIT_SIZE: usize = 32 * 1024 * 1024 * 1024; // 32GB
 const DEFAULT_ENABLE_CHECKPOINT: bool = false;
 
-const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+pub const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 pub const FLUSH_FILE_CONCURRENCY: usize = 8;
-const CREATE_FILE_CONCURRENCY: usize = 32;
-const INGEST_CONCURRENCY: usize = 4;
+pub const CREATE_FILE_CONCURRENCY: usize = 32;
+pub const INGEST_CONCURRENCY: usize = 4;
 
-const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
-const MAX_RETRY_TIMES: usize = 10;
-const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
+pub const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
+pub const MAX_RETRY_TIMES: usize = 10;
+pub const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_METRICS_GATHER_INTERVAL: Duration = Duration::from_secs(30);
 
 // the following constants are used to calculate RU consumption
-const DEFAULT_AVG_BATCH_PROPORTION: f64 = 0.5;
-const REPLICA_NUMS: f64 = 3.0;
-const TXN_FILE_RU_DISCOUNT_RATIO: f64 = 0.125;
+pub const DEFAULT_AVG_BATCH_PROPORTION: f64 = 0.5;
+pub const REPLICA_NUMS: f64 = 3.0;
+pub const TXN_FILE_RU_DISCOUNT_RATIO: f64 = 0.125;
 
 pub struct LoadTaskWorker {
     config: LoadDataConfig,
@@ -324,6 +324,11 @@ impl LoadTaskScheduler {
         states.finished
     }
 
+    pub(crate) fn add_created_files(&self, n: usize) {
+        let mut states = self.states.write().unwrap();
+        states.created_files += n;
+    }
+
     pub(crate) fn add_flushed_files(&self, n: usize) {
         let mut states = self.states.write().unwrap();
         states.flushed_files += n;
@@ -337,6 +342,11 @@ impl LoadTaskScheduler {
     pub(crate) fn set_total_kvs(&self, total_kvs: usize) {
         let mut states = self.states.write().unwrap();
         states.total_kvs = total_kvs;
+    }
+
+    pub(crate) fn add_total_kvs(&self, total_kvs: usize) {
+        let mut states = self.states.write().unwrap();
+        states.total_kvs += total_kvs;
     }
 
     pub(crate) fn get_handled_chunks(&self) -> HashMap<u64, u64> {
@@ -1581,7 +1591,7 @@ impl LoadTaskWorker {
     }
 }
 
-async fn ingest_files_to_leader(
+pub async fn ingest_files_to_leader(
     pd: Arc<dyn PdClient>,
     cs: kvenginepb::ChangeSet,
     region: &metapb::Region,
@@ -1731,7 +1741,7 @@ async fn get_leader_store(
     Ok(pd.get_store_async(store_id).await?)
 }
 
-fn build_ingest_files(
+pub fn build_ingest_files(
     inner_key_off: usize,
     region: &metapb::Region,
     sst_metas: &[SstMeta],
@@ -1766,7 +1776,7 @@ fn build_ingest_files(
     cs
 }
 
-fn gen_split_keys(
+pub fn gen_split_keys(
     outer_key_prefix: &[u8],
     ssts: &[SstMeta],
     split_size: usize,
@@ -1797,13 +1807,13 @@ fn gen_split_keys(
     keys
 }
 
-fn new_region_key(outer_key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
+pub fn new_region_key(outer_key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
     let mut key = outer_key_prefix.to_vec();
     key.extend_from_slice(raw_key);
     encode_bytes(&key)
 }
 
-fn get_ssts_in_range(ssts: &[SstMeta], start: InnerKey<'_>, end: InnerKey<'_>) -> Vec<SstMeta> {
+pub fn get_ssts_in_range(ssts: &[SstMeta], start: InnerKey<'_>, end: InnerKey<'_>) -> Vec<SstMeta> {
     let position = ssts
         .binary_search_by(|sst| InnerKey::from_inner_buf(&sst.smallest).cmp(&start))
         .unwrap();
@@ -1894,7 +1904,11 @@ pub fn flush_to_local_file(
     writer.flush()?;
     let file = fs::File::open(path)?;
     let reader = DecrypterReader::new(file, method, key, iv).unwrap();
-    Ok((KvPairsReader::new(kv_pairs.len(), reader), key_comm_prefix))
+    let table_prefix_offset = KEYSPACE_PREFIX_LEN - task_ctx.inner_key_off.unwrap();
+    Ok((
+        KvPairsReader::new(kv_pairs.len(), reader, vec![], vec![], table_prefix_offset),
+        key_comm_prefix,
+    ))
 }
 
 fn reload_reader(local_file_info: &LocalFileInfo, task_ctx: TaskContext) -> KvPairsReader {
@@ -1916,10 +1930,17 @@ fn reload_reader(local_file_info: &LocalFileInfo, task_ctx: TaskContext) -> KvPa
     };
 
     let reader = DecrypterReader::new(file, method, key, iv).unwrap();
-    KvPairsReader::new(local_file_info.kv_count, reader)
+    let table_prefix_offset = KEYSPACE_PREFIX_LEN - task_ctx.inner_key_off.unwrap();
+    KvPairsReader::new(
+        local_file_info.kv_count,
+        reader,
+        vec![],
+        vec![],
+        table_prefix_offset,
+    )
 }
 
-fn verify_regions_boundary(
+pub fn verify_regions_boundary(
     start_key: &[u8],
     end_key: &[u8],
     regions: &[pdpb::Region],
