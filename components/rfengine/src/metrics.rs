@@ -70,6 +70,11 @@ lazy_static! {
         exponential_buckets(0.0005, 1.8, 26).unwrap()
     )
     .unwrap();
+    pub static ref ENGINE_PENDING_COMPACTION_WALS_GAUGE: IntGauge = register_int_gauge!(
+        "raft_engine_pending_compaction_wals",
+        "Total number of pending compaction wals"
+    )
+    .unwrap();
     pub static ref ENGINE_TAKE_SNAPSHOT_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_take_snapshot_duration_seconds",
         "Bucketed histogram of Raft Engine take snapshot duration",

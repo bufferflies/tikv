@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fs, os::unix::fs::FileExt, path::Path};
+use std::{fs, os::unix::fs::FileExt, path::Path, sync::atomic::Ordering};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
@@ -39,6 +39,7 @@ impl RfEngineCore {
         }
         let mut writer = self.writer.lock().unwrap();
         writer.open_file(epoch_id, wal_offset)?;
+        self.current_epoch_id.store(epoch_id, Ordering::SeqCst);
         Ok(async_offset)
     }
 

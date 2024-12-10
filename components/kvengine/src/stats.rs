@@ -7,7 +7,10 @@ use bytes::Bytes;
 use codec::{buffer::BufferWriter, number::NumberEncoder};
 
 use crate::{
-    metrics::ENGINE_OPEN_FILES,
+    metrics::{
+        ENGINE_OPEN_FILES, ENGINE_REGION_HUGE_L0_TABLE_BYTES_HISTOGRAM,
+        ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM,
+    },
     table::{BoundedDataSet, DataBound, InnerKey},
     IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
 };
@@ -184,6 +187,27 @@ impl super::Engine {
         shard_stats.truncate(10);
         engine_stats.top_10_write = shard_stats;
         engine_stats
+    }
+
+    pub fn update_region_huge_table_bytes_metrics(
+        shard_stats: &Vec<ShardStats>,
+        max_mem_table_size: u64,
+    ) {
+        if max_mem_table_size == 0 {
+            return;
+        }
+        let region_huge_mem_table_bytes = ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM.local();
+        let region_huge_l0_table_bytes = ENGINE_REGION_HUGE_L0_TABLE_BYTES_HISTOGRAM.local();
+        for shard in shard_stats {
+            if shard.mem_table_size > max_mem_table_size * 2 {
+                region_huge_mem_table_bytes.observe(shard.mem_table_size as f64);
+            }
+            if shard.l0_table_size > max_mem_table_size * 2 {
+                region_huge_l0_table_bytes.observe(shard.l0_table_size as f64);
+            }
+        }
+        region_huge_mem_table_bytes.flush();
+        region_huge_l0_table_bytes.flush();
     }
 
     fn append_table_record_prefix(prefix: &mut Vec<u8>, table_id: i64) {

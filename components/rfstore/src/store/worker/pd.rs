@@ -814,6 +814,10 @@ impl PdRunner {
             .set(used_size as i64);
 
         let kv_all_shard_stats = store_info.kv_engine.get_all_shard_stats();
+        kvengine::Engine::update_region_huge_table_bytes_metrics(
+            &kv_all_shard_stats,
+            store_info.kv_engine.opts.max_mem_table_size,
+        );
         let kv_engine_stats = kvengine::Engine::get_engine_stats(kv_all_shard_stats);
 
         store_info

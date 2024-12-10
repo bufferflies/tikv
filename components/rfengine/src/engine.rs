@@ -134,6 +134,12 @@ pub struct RfEngineCore {
 
     pub(crate) lightweight: bool,
 
+    // Initializes current epoch id during loading engine and update it after wal rotation of sync
+    // writer.
+    pub(crate) current_epoch_id: Arc<AtomicU32>,
+
+    pub(crate) compacted_epoch: Arc<AtomicU32>,
+
     _lock: fslock::LockFile, // hold lock to avoid release
 }
 
@@ -193,6 +199,8 @@ impl RfEngineCore {
             }),
             engine_id,
             lightweight: cfg.lightweight_backup,
+            current_epoch_id: Arc::new(AtomicU32::new(0)),
+            compacted_epoch: compacted_epoch.clone(),
             _lock: lock,
         };
         let async_offset = en.load(&manifest)?;
@@ -306,6 +314,8 @@ impl RfEngineCore {
         let epoch_id = writer.epoch_id;
         let (size, rotated) = writer.write_batch(&wb)?;
         if rotated {
+            self.current_epoch_id
+                .store(writer.epoch_id, Ordering::SeqCst);
             self.task_sender.send(Task::Rotate { epoch_id }).unwrap();
         }
         if self.is_async_wal_enabled() {
@@ -483,6 +493,12 @@ impl RfEngineCore {
             .map_or(false, |hs| !hs.read().unwrap().is_empty())
     }
 
+    pub fn pending_compaction_wals(&self) -> u8 {
+        (self.current_epoch_id.load(Ordering::SeqCst)
+            - 1
+            - self.compacted_epoch.load(Ordering::SeqCst)) as u8
+    }
+
     /// Dumps the state of the engine.
     pub fn get_engine_stats(&self) -> EngineStats {
         let mut total_mem_size = 0;
@@ -510,11 +526,14 @@ impl RfEngineCore {
                 }
             }
         }
+        let pending_compaction_wals = self.pending_compaction_wals();
+        ENGINE_PENDING_COMPACTION_WALS_GAUGE.set(pending_compaction_wals as i64);
         EngineStats {
             total_mem_size,
             total_mem_entries,
             disk_size,
             num_files,
+            pending_compaction_wals,
             top_10_size_peers: peers_stats,
         }
     }
@@ -1101,6 +1120,7 @@ pub struct EngineStats {
     pub total_mem_entries: usize,
     pub num_files: usize,
     pub disk_size: u64,
+    pub pending_compaction_wals: u8,
     pub top_10_size_peers: Vec<PeerStats>,
 }
 

@@ -58,6 +58,18 @@ lazy_static! {
         &["level", "type"]
     )
     .unwrap();
+    pub static ref ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM: Histogram = register_histogram!(
+        "kv_engine_region_huge_mem_table_bytes",
+        "Histogram of huge mem table bytes for regions",
+        exponential_buckets(1024.0 * 1024.0, 2.0, 20).unwrap()
+    )
+    .unwrap();
+    pub static ref ENGINE_REGION_HUGE_L0_TABLE_BYTES_HISTOGRAM: Histogram = register_histogram!(
+        "kv_engine_region_huge_l0_table_bytes",
+        "Histogram of huge l0 table bytes for regions",
+        exponential_buckets(1024.0 * 1024.0, 2.0, 20).unwrap()
+    )
+    .unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {
