@@ -7,7 +7,7 @@ use std::{
     io::Write,
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -19,21 +19,18 @@ use tikv_util::{debug, error, info};
 
 use crate::{
     kv::{DuplicateEntry, SstMeta},
-    metrics::{remove_metrics, LOAD_DATA_TASK_STATE},
-    task::TaskContext,
+    metrics::LOAD_DATA_TASK_STATE,
+    task::{LoadTaskMsg, LoadTaskScheduler, LoadTaskStates, TaskContext},
     Error,
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub const CHECKPOINT_WORKER_PREFIX: &str = "LOAD_DATA_CHECK_POINT_";
 
-// The expiration time of the canceled task file.
-pub const CANCELLED_CHECKPOINT_FILE_EXPIRE_SEC: u64 = 30 * 60;
+pub const CANCELLED_TASK_EXPIRE_SEC: i64 = 3 * 60 * 60; // 3h
+pub const IDLE_TASK_EXPIRE_SEC: i64 = 3 * 24 * 60 * 60; // 3d
+pub const CLEANUP_INTERVAL_SEC: u64 = 10 * 60; // 10m
 
-pub const CANCELLED_TASK_METRIC_EXPIRE_SEC: i64 = 2 * 60;
-
-// The interval between each attempt to clean the checkpoint file.
-pub const CLEAN_CHECKPOINT_FILE_INTERVAL_SEC: u64 = 2 * 60;
 lazy_static::lazy_static! {
     static ref FILE_LOCK: Mutex<()> = Mutex::new(());
 }
@@ -483,7 +480,7 @@ impl LocalFileCheckpointStorage {
         let file_data = LocalFileCheckpointStorage::read_file(self.get_file_path());
         let checkpoint = LocalFileCheckpointStorage::binary_to_checkpoint(file_data.as_str());
         debug!(
-            "{} [checkpoint store] loaded checkpoint:{:?},",
+            "{} [checkpoint store] loaded checkpoint: {:?},",
             self.checkpoint_ctx.task_id, checkpoint
         );
         checkpoint
@@ -571,90 +568,132 @@ impl LocalFileCheckpointStorage {
     }
 }
 
-// spawn_clean_checkpoint_files_worker scan the checkpoint files under the
-// directory and clean up the cancel status files which have exceeded the
-// waiting time.
-pub fn spawn_clean_checkpoint_files_worker(
-    checkpoint_dir: PathBuf,
-    cancelled_task_checkpoint_file_expire_sec: u64,
-    clean_checkpoint_file_interval_sec: u64,
-    ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (timestamp,
-                                                               * Option<keyspace_id>) */
-) {
-    std::thread::spawn(move || {
+struct TracingTaskState {
+    updated_at: i64,
+    canceled_at: i64,
+    canceled: bool,
+    flushed_files: usize,
+    created_files: usize,
+    ingested_regions: usize,
+}
+
+pub struct LoadDataCleanupWorker {
+    running_tasks: Arc<DashMap<String, LoadTaskScheduler>>,
+    tracing_task_states: HashMap<String, TracingTaskState>,
+    cleanup_interval_secs: u64,
+    cancelled_task_expire_secs: i64,
+    idle_task_expire_secs: i64,
+}
+
+impl LoadDataCleanupWorker {
+    pub fn new(
+        running_tasks: Arc<DashMap<String, LoadTaskScheduler>>,
+        cleanup_interval_secs: u64,
+        cancelled_task_expire_secs: i64,
+        idle_task_expire_secs: i64,
+    ) -> Self {
+        Self {
+            running_tasks,
+            tracing_task_states: HashMap::default(),
+            cleanup_interval_secs,
+            cancelled_task_expire_secs,
+            idle_task_expire_secs,
+        }
+    }
+
+    pub fn run(&mut self) {
+        let interval = Duration::from_secs(self.cleanup_interval_secs);
+        info!("start to run cleanup worker");
         loop {
-            remove_load_data_metrics(ended_tasks.clone());
-            try_clean_checkpoint_files(
-                checkpoint_dir.clone(),
-                cancelled_task_checkpoint_file_expire_sec,
-            );
-            std::thread::sleep(Duration::from_secs(clean_checkpoint_file_interval_sec));
-        }
-    });
-}
+            let task_states: Vec<LoadTaskStates> = self
+                .running_tasks
+                .iter()
+                .map(|x| {
+                    x.check_task_thread_finished();
+                    x.states.read().unwrap().clone()
+                })
+                .collect();
 
-pub fn remove_load_data_metrics(ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>) {
-    let now = Utc::now().timestamp();
-    let metric_safe_ts = now - CANCELLED_TASK_METRIC_EXPIRE_SEC;
-    let mut to_remove_task_ids = vec![];
-    for ended_task in ended_tasks.iter() {
-        let task_id = ended_task.key();
-        let (ts, keyspace_id) = ended_task.value();
-        if *ts < metric_safe_ts {
-            remove_metrics(task_id, keyspace_id.clone());
-            to_remove_task_ids.push(task_id.clone());
-        }
-    }
+            let now_timestamp = chrono::Utc::now().timestamp();
+            for task_state in task_states {
+                let task_id = task_state.task_id;
+                let tracing_task_state =
+                    self.tracing_task_states
+                        .entry(task_id.clone())
+                        .or_insert(TracingTaskState {
+                            updated_at: now_timestamp,
+                            canceled_at: 0,
+                            canceled: false,
+                            flushed_files: 0,
+                            created_files: 0,
+                            ingested_regions: 0,
+                        });
 
-    for remove_task_id in to_remove_task_ids {
-        ended_tasks.remove(&remove_task_id);
-    }
-}
+                if tracing_task_state.flushed_files != task_state.flushed_files
+                    || tracing_task_state.created_files != task_state.created_files
+                    || tracing_task_state.ingested_regions != task_state.ingested_regions
+                {
+                    tracing_task_state.flushed_files = task_state.flushed_files;
+                    tracing_task_state.created_files = task_state.created_files;
+                    tracing_task_state.ingested_regions = task_state.ingested_regions;
+                    tracing_task_state.updated_at = now_timestamp;
+                }
 
-fn try_clean_checkpoint_files(
-    checkpoint_dir: PathBuf,
-    cancelled_task_checkpoint_file_expire_sec: u64,
-) {
-    let files = fs::read_dir(checkpoint_dir).unwrap();
-    let dir_entries: Vec<fs::DirEntry> = files.filter_map(|r| r.ok()).collect();
-    for file in &dir_entries {
-        let file_name = file.file_name();
-        let str_file_name = file_name.to_string_lossy();
-        if str_file_name.starts_with(CHECKPOINT_WORKER_PREFIX) {
-            let path = file.path();
+                if tracing_task_state.canceled != task_state.canceled {
+                    tracing_task_state.canceled = task_state.canceled;
+                    tracing_task_state.canceled_at = now_timestamp;
+                }
 
-            let file_data = LocalFileCheckpointStorage::read_file(path.clone());
-            let checkpoint_ctx =
-                LocalFileCheckpointStorage::binary_to_checkpoint(file_data.as_str());
-
-            if checkpoint_ctx.canceled {
-                try_clean_checkpoint_file(path.clone(), cancelled_task_checkpoint_file_expire_sec);
+                if tracing_task_state.canceled_at > 0
+                    && now_timestamp - tracing_task_state.canceled_at
+                        > self.cancelled_task_expire_secs
+                {
+                    info!(
+                        "clean up canceled task {}, duration {}",
+                        task_id,
+                        now_timestamp - tracing_task_state.canceled_at
+                    );
+                    if let Some((_, scheduler)) = self.running_tasks.remove(&task_id) {
+                        scheduler.sender.send(LoadTaskMsg::Cleanup).unwrap();
+                    }
+                } else if now_timestamp - tracing_task_state.updated_at > self.idle_task_expire_secs
+                {
+                    info!(
+                        "clean up idle task {}, duration {}",
+                        task_id,
+                        now_timestamp - tracing_task_state.updated_at
+                    );
+                    if let Some((_, scheduler)) = self.running_tasks.remove(&task_id) {
+                        scheduler.cancel("gc by cleanup worker".to_string());
+                        scheduler.sender.send(LoadTaskMsg::Cleanup).unwrap();
+                    }
+                }
             }
-        }
-    }
-}
 
-// Clean up files that have exceeded the wait time.
-pub fn try_clean_checkpoint_file(path: PathBuf, cancelled_task_checkpoint_file_expire_sec: u64) {
-    let metadata = fs::metadata(path.clone()).unwrap();
-    let modified_time = metadata.modified().unwrap();
-    let time_since_modified = SystemTime::now().duration_since(modified_time).unwrap();
-    let time_since_modified = time_since_modified.as_secs();
-    if time_since_modified > cancelled_task_checkpoint_file_expire_sec {
-        fs::remove_file(path.clone()).unwrap();
-        info!(
-            "[checkpoint store] {:?} checkpoint file has been removed due to being modified over {} sec ago.",
-            path, cancelled_task_checkpoint_file_expire_sec
-        );
+            let task_ids: Vec<String> = self
+                .tracing_task_states
+                .iter()
+                .map(|x| x.0.clone())
+                .collect();
+            for task_id in &task_ids {
+                if !self.running_tasks.contains_key(task_id) {
+                    self.tracing_task_states.remove(task_id);
+                }
+            }
+            std::thread::sleep(interval);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
 
+    use std::sync::RwLock;
+
     use tempfile::TempDir;
 
     use super::*;
+    use crate::task::WritersStates;
 
     #[test]
     fn test_local_file_store() {
@@ -668,6 +707,7 @@ mod tests {
             outer_key_prefix: vec![],
             encryption_key: None,
             prepend_keyspace_id: None,
+            keyspace_id: None,
         };
         let checkpoint = LoadDataCheckpointCtx::new(task_ctx);
 
@@ -812,34 +852,95 @@ mod tests {
         assert_eq!(false, is_succ);
     }
 
-    // Test whether the file can be cleaned properly after the expire time is
-    // exceeded.
     #[test]
-    fn test_clean_file() {
+    fn test_checkpoint_default() {
+        let _ = LocalFileCheckpointStorage::binary_to_checkpoint("{}");
+    }
+
+    #[test]
+    fn test_cleanup_worker() {
+        let running_tasks: Arc<DashMap<String, LoadTaskScheduler>> = Arc::new(DashMap::new());
         let checkpoint_dir = TempDir::new().unwrap();
         let path = checkpoint_dir.path();
-        let cancelled_task_checkpoint_file_expire_sec = 1;
 
-        let task_id1 = "task_id_001".to_string();
-        let store1 = make_test_checkpoint_storage(path.to_owned(), task_id1);
+        // canceled task
+        let task_id = "task_id1";
+        let checkpoint_store = make_test_checkpoint_storage(path.to_owned(), task_id.to_string());
+        let (sender, receiver1) = tikv_util::mpsc::unbounded();
+        let thread_handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(60));
+        });
+        let scheduler = LoadTaskScheduler {
+            sender,
+            states: Arc::new(RwLock::new(LoadTaskStates::default())),
+            writers: Arc::new(Mutex::new(WritersStates::default())),
+            thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
+            check_point_store: Arc::new(Mutex::new(checkpoint_store)),
+        };
+        let mut states = scheduler.states.write().unwrap();
+        states.task_id = task_id.to_string();
+        drop(states);
+        scheduler.cancel("cancel for test".to_string());
+        running_tasks.insert(task_id.to_owned(), scheduler);
 
-        // Sleep a while, wait file update time exceeds the expected wait time.
-        std::thread::sleep(Duration::from_secs(
-            cancelled_task_checkpoint_file_expire_sec + 2,
-        ));
+        // idle task
+        let task_id = "task_id2";
+        let checkpoint_store = make_test_checkpoint_storage(path.to_owned(), task_id.to_string());
+        let (sender, receiver2) = tikv_util::mpsc::unbounded();
+        let thread_handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(60));
+        });
+        let scheduler2 = LoadTaskScheduler {
+            sender,
+            states: Arc::new(RwLock::new(LoadTaskStates::default())),
+            writers: Arc::new(Mutex::new(WritersStates::default())),
+            thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
+            check_point_store: Arc::new(Mutex::new(checkpoint_store)),
+        };
+        let mut states = scheduler2.states.write().unwrap();
+        states.task_id = task_id.to_string();
+        drop(states);
+        running_tasks.insert(task_id.to_owned(), scheduler2.clone());
 
-        // The file corresponding to path2 did not pass the wait time and was not
-        // cleaned
-        let task_id2 = "task_id_002".to_string();
-        let store2 = make_test_checkpoint_storage(path.to_owned(), task_id2);
+        // normal task
+        let task_id = "task_id3";
+        let checkpoint_store = make_test_checkpoint_storage(path.to_owned(), task_id.to_string());
+        let (sender, receiver3) = tikv_util::mpsc::unbounded();
+        let thread_handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(60));
+        });
+        let scheduler3 = LoadTaskScheduler {
+            sender,
+            states: Arc::new(RwLock::new(LoadTaskStates::default())),
+            writers: Arc::new(Mutex::new(WritersStates::default())),
+            thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
+            check_point_store: Arc::new(Mutex::new(checkpoint_store)),
+        };
+        let mut states = scheduler3.states.write().unwrap();
+        states.task_id = task_id.to_string();
+        drop(states);
+        running_tasks.insert(task_id.to_owned(), scheduler3.clone());
 
-        try_clean_checkpoint_files(path.to_owned(), cancelled_task_checkpoint_file_expire_sec);
+        let mut cleanup_worker = LoadDataCleanupWorker::new(running_tasks.clone(), 5, 10, 10);
+        std::thread::spawn(move || {
+            cleanup_worker.run();
+        });
 
-        // The file of task_id1 should be deleted.
-        assert_eq!(false, store1.get_file_path().exists());
-        // The file of task_id2 was not cleaned up because the wait time was not
-        // reached.
-        assert_eq!(true, store2.get_file_path().exists());
+        for i in 0..10 {
+            let mut states = scheduler3.states.write().unwrap();
+            states.flushed_files += i;
+            drop(states);
+            std::thread::sleep(Duration::from_secs(2));
+        } // takes 20s = 10 * 2s
+
+        receiver1.try_recv().unwrap();
+        receiver2.try_recv().unwrap();
+        let msg = receiver3.try_recv();
+        assert!(msg.is_err());
+
+        assert!(scheduler2.states.read().unwrap().canceled);
+        assert!(!scheduler3.states.read().unwrap().canceled);
+        assert!(running_tasks.len() == 1);
     }
 
     fn make_test_checkpoint_storage(
@@ -854,17 +955,12 @@ mod tests {
             outer_key_prefix: vec![],
             encryption_key: None,
             prepend_keyspace_id: None,
+            keyspace_id: None,
         };
 
-        let mut checkpoint = LoadDataCheckpointCtx::new(task_ctx);
-        checkpoint.canceled = true;
+        let checkpoint = LoadDataCheckpointCtx::new(task_ctx);
         let mut store = LocalFileCheckpointStorage::new(checkpoint, checkpoint_dir).unwrap();
         store.flush_checkpoint_ctx().unwrap();
         store
-    }
-
-    #[test]
-    fn test_checkpoint_default() {
-        let _ = LocalFileCheckpointStorage::binary_to_checkpoint("{}");
     }
 }

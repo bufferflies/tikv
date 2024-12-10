@@ -14,10 +14,10 @@ use kvengine::{
 use load_data::{
     checkpoint,
     checkpoint::{
-        spawn_clean_checkpoint_files_worker, LoadDataCheckpointCtx,
+        LoadDataCheckpointCtx, LoadDataCleanupWorker,
         LoadDataWorkerState::{BuildingSst, IngestedSst},
-        LocalFileCheckpointStorage, CANCELLED_CHECKPOINT_FILE_EXPIRE_SEC,
-        CLEAN_CHECKPOINT_FILE_INTERVAL_SEC,
+        LocalFileCheckpointStorage, CANCELLED_TASK_EXPIRE_SEC, CLEANUP_INTERVAL_SEC,
+        IDLE_TASK_EXPIRE_SEC,
     },
     task::{
         FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
@@ -211,6 +211,7 @@ pub(crate) async fn handle_load_data(
                     outer_key_prefix: vec![],
                     encryption_key: None,
                     prepend_keyspace_id: None,
+                    keyspace_id: None,
                 };
                 // step 1: on start, client call init task
                 manager.init_task(task_ctx);
@@ -266,8 +267,6 @@ pub(crate) struct LoadDataManager {
     ctx: LoadDataContext,
     worker_scaler: Option<WorkerScaler>,
     worker_scaler_conf: WorkerScalerConfig,
-    ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (timestamp,
-                                                               * Option<keyspace_id>) */
 }
 
 impl LoadDataManager {
@@ -294,7 +293,6 @@ impl LoadDataManager {
             ctx: context,
             worker_scaler,
             worker_scaler_conf,
-            ended_tasks: Arc::new(DashMap::default()),
         }
     }
 
@@ -330,13 +328,16 @@ impl LoadDataManager {
         if checkpoint_dir.as_os_str().is_empty() {
             checkpoint_dir = PathBuf::from(".");
         }
-        // spawn a worker to clean checkpoint files
-        spawn_clean_checkpoint_files_worker(
-            checkpoint_dir.clone(),
-            CANCELLED_CHECKPOINT_FILE_EXPIRE_SEC,
-            CLEAN_CHECKPOINT_FILE_INTERVAL_SEC,
-            self.ended_tasks.clone(),
+
+        let mut cleanup_worker = LoadDataCleanupWorker::new(
+            self.running_tasks.clone(),
+            CLEANUP_INTERVAL_SEC,
+            CANCELLED_TASK_EXPIRE_SEC,
+            IDLE_TASK_EXPIRE_SEC,
         );
+        std::thread::spawn(move || {
+            cleanup_worker.run();
+        });
 
         // recover tasks from checkpoint files
         let files = fs::read_dir(checkpoint_dir).unwrap();
@@ -382,13 +383,13 @@ impl LoadDataManager {
             outer_key_prefix: vec![],
             encryption_key: None,
             prepend_keyspace_id: None,
+            keyspace_id: None,
         };
         let mut worker = LoadTaskWorker::new(
             self.config.clone(),
             self.ctx.clone(),
             task_context.clone(),
             checkpoint_ctx,
-            self.ended_tasks.clone(),
         );
         let mut scheduler = worker.get_scheduler();
         let thread_handle = std::thread::spawn(move || {
@@ -412,7 +413,6 @@ impl LoadDataManager {
                     self.ctx.clone(),
                     task_ctx,
                     checkpint_ctx,
-                    self.ended_tasks.clone(),
                 );
                 let mut scheduler = worker.get_scheduler();
                 let thread_handle = std::thread::spawn(move || {

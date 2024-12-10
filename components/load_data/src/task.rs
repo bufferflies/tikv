@@ -15,7 +15,6 @@ use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, BufMut, Bytes};
 use chrono::Utc;
 use cloud_encryption::{EncryptionKey, MasterKey};
-use dashmap::DashMap;
 use encryption::{DecrypterReader, EncrypterWriter, Iv};
 use http::Request;
 use hyper::Body;
@@ -50,7 +49,7 @@ use crate::{
     error::{Error, Result},
     kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator, SstMeta},
     metrics::{
-        LOAD_DATA_BUILD_SST_COUNTER, LOAD_DATA_BUILD_SST_TIME_MILLIS,
+        remove_metrics, LOAD_DATA_BUILD_SST_COUNTER, LOAD_DATA_BUILD_SST_TIME_MILLIS,
         LOAD_DATA_HANDLE_ADD_CHUNK_COUNTER, LOAD_DATA_HANDLE_ADD_CHUNK_TIME_MILLIS,
         LOAD_DATA_TASK_STATE, LOAD_DATA_WRU_COST_COUNTER,
     },
@@ -74,6 +73,7 @@ const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
 const MAX_RETRY_TIMES: usize = 10;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_METRICS_GATHER_INTERVAL: Duration = Duration::from_secs(30);
 
 // the following constants are used to calculate RU consumption
 const DEFAULT_AVG_BATCH_PROPORTION: f64 = 0.5;
@@ -189,6 +189,7 @@ pub struct LoadDataConfig {
     pub enable_checkpoint: bool,
     pub rg_config: Option<ResourceGroupConfig>,
     pub checksum_type: ChecksumType,
+    pub metrics_gather_interval: Duration,
 }
 
 impl Default for LoadDataConfig {
@@ -203,6 +204,7 @@ impl Default for LoadDataConfig {
             enable_checkpoint: DEFAULT_ENABLE_CHECKPOINT,
             rg_config: None,
             checksum_type: ChecksumType::Crc32,
+            metrics_gather_interval: DEFAULT_METRICS_GATHER_INTERVAL,
         }
     }
 }
@@ -241,6 +243,7 @@ pub struct TaskContext {
     pub outer_key_prefix: Vec<u8>,
     pub encryption_key: Option<EncryptionKey>,
     pub prepend_keyspace_id: Option<u32>,
+    pub keyspace_id: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -250,9 +253,6 @@ pub struct LoadTaskScheduler {
     pub writers: Arc<Mutex<WritersStates>>,
     pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
     pub check_point_store: Arc<Mutex<LocalFileCheckpointStorage>>,
-    pub ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (end_time,
-                                                                   * Option<keyspace_id>) */
-    pub keyspace_id: Arc<Mutex<Option<String>>>,
 }
 
 impl LoadTaskScheduler {
@@ -269,18 +269,10 @@ impl LoadTaskScheduler {
         states.error = err;
 
         let ts = Utc::now().timestamp();
-        let task_id = check_point_store_guard.checkpoint_ctx.task_id.clone();
+        let task_id = &check_point_store_guard.checkpoint_ctx.task_id;
         LOAD_DATA_TASK_STATE
-            .with_label_values(&[&task_id, "cancel"])
+            .with_label_values(&[task_id, "cancel"])
             .set(ts as f64);
-
-        let keyspace_id = self.keyspace_id.lock().unwrap().clone();
-        self.ended_tasks.insert(task_id, (ts, keyspace_id));
-    }
-
-    pub fn set_keyspace_id(&self, keyspace_id: String) {
-        let mut keyspace_id_guard = self.keyspace_id.lock().unwrap();
-        *keyspace_id_guard = Some(keyspace_id);
     }
 
     pub fn check_task_thread_finished(&self) {
@@ -400,8 +392,6 @@ impl LoadTaskWorker {
         context: LoadDataContext,
         task_ctx: TaskContext,
         check_point_ctx: LoadDataCheckpointCtx,
-        ended_tasks: Arc<DashMap<String, (i64, Option<String>)>>, /* task_id -> (end_time,
-                                                                   * Option<keyspace_id>) */
     ) -> Self {
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let mut states = LoadTaskStates::default();
@@ -450,8 +440,6 @@ impl LoadTaskWorker {
             writers: Arc::new(Mutex::new(writers)),
             thread_handle: None,
             check_point_store: Arc::clone(&check_point_store_arc),
-            ended_tasks: Arc::clone(&ended_tasks),
-            keyspace_id: Arc::new(Mutex::new(None)),
         };
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
         let task_dir = context.dir.join(task_ctx.task_id.as_str());
@@ -541,6 +529,13 @@ impl LoadTaskWorker {
                 }
                 LoadTaskMsg::Cleanup => {
                     self.remove_local_files();
+
+                    let keyspace_id = self
+                        .task_ctx
+                        .keyspace_id
+                        .map(|keyspace_id| keyspace_id.to_string());
+                    std::thread::sleep(self.config.metrics_gather_interval);
+                    remove_metrics(&self.task_ctx.task_id, keyspace_id);
                     return;
                 }
                 LoadTaskMsg::QueryUnhandledChunks { mut chunk_ids, cb } => {
@@ -562,6 +557,7 @@ impl LoadTaskWorker {
 
     pub fn set_inner_key_off_and_encryption_key(&mut self, first_key: Bytes) -> Result<()> {
         if self.task_ctx.inner_key_off.is_none() {
+            self.task_ctx.keyspace_id = ApiV2::get_u32_keyspace_id_by_key(first_key.chunk());
             let shard_meta = self.ctx.runtime.block_on(get_shard_meta(
                 self.ctx.pd.clone(),
                 first_key.chunk(),
@@ -966,17 +962,6 @@ impl LoadTaskWorker {
             if check_point_store_guard.checkpoint_ctx.get_is_recover() {
                 sst_metas = check_point_store_guard.get_sst_meta();
             }
-            let keyspace_id = if !sst_metas.is_empty() {
-                let key = if self.task_ctx.outer_key_prefix.is_empty() {
-                    sst_metas.first().unwrap().smallest.as_slice()
-                } else {
-                    self.task_ctx.outer_key_prefix.as_slice()
-                };
-                ApiV2::get_keyspace_id_str(key)
-            } else {
-                "".to_string()
-            };
-
             let mut data_size = 0;
             let mut total_kvs = 0;
             for sst_meta in sst_metas.iter() {
@@ -993,8 +978,10 @@ impl LoadTaskWorker {
             )?;
 
             let mut wru = 0.0;
-            if self.config.rg_config.is_some() && !keyspace_id.is_empty() {
-                let ru_config = &self.config.rg_config.as_ref().unwrap().request_unit;
+            if let (Some(ru_config), Some(keyspace_id)) =
+                (&self.config.rg_config, self.task_ctx.keyspace_id)
+            {
+                let request_unit = &ru_config.request_unit;
                 // The calculation formula is a reference to the pd's ru consumption,
                 // ref https://github.com/tikv/pd/blob/master/client/resource_group/controller/model.go#L103.
                 //
@@ -1007,22 +994,20 @@ impl LoadTaskWorker {
                 //
                 // Set import billing same as txn file, though the underlying mechanisms are not
                 // the same.
-                wru = ru_config.write_base_cost
-                    + ru_config.write_per_batch_base_cost * DEFAULT_AVG_BATCH_PROPORTION
-                    + ru_config.write_cost_per_byte
+                wru = request_unit.write_base_cost
+                    + request_unit.write_per_batch_base_cost * DEFAULT_AVG_BATCH_PROPORTION
+                    + request_unit.write_cost_per_byte
                         * data_size as f64
                         * TXN_FILE_RU_DISCOUNT_RATIO
                         * REPLICA_NUMS;
 
                 LOAD_DATA_WRU_COST_COUNTER
-                    .with_label_values(&[&keyspace_id, &self.task_ctx.task_id])
+                    .with_label_values(&[&keyspace_id.to_string(), &self.task_ctx.task_id])
                     .inc_by(wru as u64);
-
-                self.scheduler.set_keyspace_id(keyspace_id.clone());
             }
             info!(
-                "{} ingest successfully, data size {}, ru ru_consumption {}, keyspace id {}",
-                self.task_ctx.task_id, data_size, wru, keyspace_id
+                "{} ingest successfully, data size {}, ru ru_consumption {}, keyspace id {:?}",
+                self.task_ctx.task_id, data_size, wru, self.task_ctx.keyspace_id,
             );
         }
         Ok(())

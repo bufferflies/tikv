@@ -459,6 +459,7 @@ mod tests {
             outer_key_prefix: vec![],
             encryption_key: None,
             prepend_keyspace_id: None,
+            keyspace_id: None,
         };
         flush_to_local_file(kv_pairs, mock_task_ctx, path, batch_size).unwrap()
     }

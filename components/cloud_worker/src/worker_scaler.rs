@@ -224,7 +224,7 @@ impl WorkerPod {
                     "pod {} no progress for {} seconds",
                     &self.name, updated_duration
                 );
-                if updated_duration > expire_seconds * 10 {
+                if updated_duration > expire_seconds * 30 {
                     warn!(
                         "pod {} canceled for no progress for {} seconds",
                         &self.name, updated_duration
@@ -862,7 +862,7 @@ mod tests {
         assert_eq!(worker_pod.created_files, 2);
         assert_eq!(worker_pod.updated_at, now_ts + 180);
         assert!(!worker_pod.canceled);
-        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 800, 60);
+        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 2000, 60);
         assert_eq!(worker_pod.created_files, 2);
         assert_eq!(worker_pod.updated_at, now_ts + 180);
         assert!(worker_pod.canceled);

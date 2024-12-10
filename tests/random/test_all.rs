@@ -124,6 +124,7 @@ fn test_random_all() {
             enable_checkpoint: false,
             rg_config: None,
             checksum_type: ChecksumType::Crc32,
+            metrics_gather_interval: Duration::from_secs(0),
         }
     };
 

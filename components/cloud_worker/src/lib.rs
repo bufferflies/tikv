@@ -197,6 +197,9 @@ fn start_server(
             worker_scaler.run().await;
         });
     }
+    if !config.push_metrics_interval.is_zero() {
+        load_data_config.metrics_gather_interval = config.push_metrics_interval.0;
+    }
 
     if !config.data_dir.is_empty() {
         fs::create_dir_all(&config.data_dir).unwrap();
