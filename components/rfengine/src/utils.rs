@@ -1,6 +1,9 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    result::Result as StdResult,
+};
 
 use api_version::{
     api_v2::{self, KEYSPACE_ID_LEN},
@@ -9,6 +12,7 @@ use api_version::{
 use bytes::{BufMut, Bytes, BytesMut};
 use kvproto::metapb;
 use regex::Regex;
+use tikv_util::info;
 
 pub(crate) const RAFT_STATE_KEY_BYTE: u8 = 1;
 pub const REGION_META_KEY_BYTE: u8 = 2;
@@ -146,56 +150,82 @@ pub fn parse_wal_chunk_key(key: Option<&str>) -> Option<(u32, u64, u64, bool /* 
     })
 }
 
-pub fn verify_wal_chunks_integrity(
+/// Try to get integral WAL chunks with maximum length, and ignore some
+/// overlapping separated chunks.
+///
+/// The algorithm is simple and greedy, and may not be optimal. It just picks
+/// the largest one from chunks with same start offset.
+///
+/// It's based on how abnormal chunks are generated, which would be lost, or
+/// re-written with larger size.
+///
+/// See https://github.com/tidbcloud/cloud-storage-engine/issues/2033 for details.
+pub fn get_integral_wal_chunks(
     chunks: &[String],
-    check_last: bool,
-) -> std::result::Result<u64 /* last_end_off */, String> {
+) -> StdResult<
+    (
+        Vec<String>, // integral_chunks
+        u64,         // last_end_off
+        bool,        // has_last_chunk
+    ),
+    String, // err_msg
+> {
     if chunks.is_empty() {
-        // `check_last` is true, it means the chunks belongs to a previous epoch, empty
-        // chunks is invalid. `check_last` is false, it means the chunks belongs
-        // to the current epoch, it is valid before the first chunk put to S3.
-        return if check_last {
-            Err("no chunk".to_string())
-        } else {
-            Ok(0)
-        };
+        return Ok((vec![], 0, false));
     }
-
-    let wal_epoch;
-    let mut last_end_off;
-    let mut has_last_chunk;
 
     let first_chunk = chunks.first().unwrap();
-    if let Some((epoch, start_off, end_off, last)) = parse_wal_chunk_key(Some(first_chunk)) {
-        if start_off != 0 {
-            return Err("miss first chunk".to_string());
-        }
-        wal_epoch = epoch;
-        last_end_off = end_off;
-        has_last_chunk = last;
-    } else {
+    let Some((epoch, start_off, end_off, last)) = parse_wal_chunk_key(Some(first_chunk)) else {
         return Err(format!("invalid pattern: {first_chunk}"));
+    };
+    if start_off != 0 {
+        // Return as no chunk.
+        return Ok((vec![], 0, false));
     }
 
-    for chunk in &chunks[1..] {
-        if let Some((epoch, start_off, end_off, last)) = parse_wal_chunk_key(Some(chunk)) {
-            if epoch != wal_epoch {
-                return Err(format!("epoch mismatch: {epoch} != {wal_epoch}"));
-            }
-            if start_off != last_end_off {
-                return Err(format!("miss chunk: offset {last_end_off}"));
-            }
+    let wal_epoch = epoch;
+    let mut last_start_off = start_off;
+    let mut last_end_off = end_off;
+    let mut has_last_chunk = last;
+
+    let mut integral_chunks = Vec::with_capacity(chunks.len());
+    integral_chunks.push(first_chunk.clone());
+
+    for chunk in chunks.iter().skip(1) {
+        let Some((epoch, start_off, end_off, last)) = parse_wal_chunk_key(Some(chunk)) else {
+            return Err(format!("invalid pattern: {chunk}"));
+        };
+        if epoch != wal_epoch {
+            return Err(format!("epoch mismatch: {epoch} != {wal_epoch}: {chunk}"));
+        }
+
+        if start_off == last_end_off {
+            integral_chunks.push(chunk.clone());
+            last_start_off = start_off;
             last_end_off = end_off;
             has_last_chunk = last;
+        } else if start_off == last_start_off {
+            debug_assert!(end_off > last_end_off, "disorder chunks: {:?}", chunks);
+            integral_chunks.pop();
+            integral_chunks.push(chunk.clone());
+            last_end_off = end_off;
+            has_last_chunk = last;
+        } else if start_off > last_end_off {
+            // Some chunks in the middle missed.
+            break;
         } else {
-            return Err(format!("invalid pattern: {chunk}"));
+            // last_start_off < start_off < last_end_off, ignore this chunk.
         }
     }
-    if check_last && !has_last_chunk {
-        Err("miss last chunk".to_string())
-    } else {
-        Ok(last_end_off)
+
+    if integral_chunks.len() < chunks.len() {
+        info!(
+            "get integral wal chunks: ignore some abnormal chunks";
+            "integral_chunks" => ?integral_chunks,
+            "all_chunks" => ?chunks,
+        );
     }
+    Ok((integral_chunks, last_end_off, has_last_chunk))
 }
 
 pub fn wal_chunk_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
@@ -343,12 +373,8 @@ mod tests {
     };
     use kvproto::metapb::Region;
 
-    use crate::{
-        get_region_keyspace_id, get_region_keyspace_id_str, last_wal_chunk_file_key,
-        parse_epoch_from_snapshot_key, parse_wal_chunk_key, snapshot_rlog_key,
-        test_util::{get_txn_endkey_prefix, get_txn_startkey_prefix},
-        verify_wal_chunks_integrity, wal_chunk_file_key,
-    };
+    use super::*;
+    use crate::test_util::{get_txn_endkey_prefix, get_txn_startkey_prefix};
 
     #[test]
     fn test_get_region_keyspace_id() {
@@ -428,91 +454,95 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_wal_chunks_integrity() {
+    fn test_get_max_integral_wal_chunks() {
         let cases: Vec<(
-            Vec<String>,                  // keys
-            bool,                         // check_last
-            std::result::Result<u64, ()>, // expected
+            Vec<(u64, u64, bool)>, // (start_off, end_off, is_last)
+            Vec<usize>,            // expected chunks (index of input)
+            u64,                   // last_end_off
+            bool,                  // has_last_chunk
         )> = vec![
-            (vec![], false, Ok(0)),                                   // empty
-            (vec![wal_chunk_file_key(1, 1, 0, 100)], false, Ok(100)), // only has one chunk
-            (vec![wal_chunk_file_key(1, 1, 1, 100)], false, Err(())), // start_off is not 0
+            (vec![], vec![], 0, false),
+            (vec![(1, 100, true)], vec![], 0, false),
+            (vec![(0, 100, false)], vec![0], 100, false),
+            (vec![(0, 100, true)], vec![0], 100, true),
             (
-                // start_off is not 0
-                vec![
-                    wal_chunk_file_key(1, 1, 1, 100),
-                    wal_chunk_file_key(1, 1, 100, 200),
-                ],
-                false,
-                Err(()),
-            ),
-            (
-                // offset is not continuous
-                vec![
-                    wal_chunk_file_key(1, 1, 0, 100),
-                    wal_chunk_file_key(1, 1, 150, 200),
-                    wal_chunk_file_key(1, 1, 200, 300),
-                ],
-                false,
-                Err(()),
-            ),
-            (
-                // epoch is not consistent
-                vec![
-                    wal_chunk_file_key(1, 1, 0, 100),
-                    wal_chunk_file_key(1, 1, 100, 200),
-                    wal_chunk_file_key(1, 2, 200, 300),
-                ],
-                false,
-                Err(()),
-            ),
-            (
-                // last chunk is not last, ignore the last check
-                vec![
-                    wal_chunk_file_key(1, 1, 0, 100),
-                    wal_chunk_file_key(1, 1, 100, 200),
-                    wal_chunk_file_key(1, 1, 200, 300),
-                ],
-                false,
-                Ok(300),
-            ),
-            (
-                // last chunk is not last, check the last
-                vec![
-                    wal_chunk_file_key(1, 1, 0, 100),
-                    wal_chunk_file_key(1, 1, 100, 200),
-                    wal_chunk_file_key(1, 1, 200, 300),
-                ],
+                vec![(0, 100, false), (100, 200, true)],
+                vec![0, 1],
+                200,
                 true,
-                Err(()),
             ),
+            (vec![(0, 100, false), (0, 200, true)], vec![1], 200, true),
+            (vec![(0, 100, false), (50, 200, true)], vec![0], 100, false),
+            (vec![(0, 100, false), (101, 200, true)], vec![0], 100, false),
             (
-                // last chunk is last, ignore the last check
-                vec![
-                    wal_chunk_file_key(1, 1, 0, 100),
-                    wal_chunk_file_key(1, 1, 100, 200),
-                    last_wal_chunk_file_key(1, 1, 200, 300),
-                ],
-                false,
-                Ok(300),
-            ),
-            (
-                // last chunk is last, check the last
-                vec![
-                    wal_chunk_file_key(1, 1, 0, 100),
-                    wal_chunk_file_key(1, 1, 100, 200),
-                    last_wal_chunk_file_key(1, 1, 200, 300),
-                ],
+                vec![(0, 100, false), (100, 200, false), (200, 300, true)],
+                vec![0, 1, 2],
+                300,
                 true,
-                Ok(300),
+            ),
+            (
+                vec![
+                    (0, 100, false),
+                    (100, 200, false),
+                    (200, 201, false),
+                    (200, 300, true),
+                ],
+                vec![0, 1, 3],
+                300,
+                true,
+            ),
+            (
+                vec![
+                    (0, 100, false),
+                    (100, 200, false),
+                    (200, 201, false),
+                    (200, 202, false),
+                    (200, 203, false),
+                    (200, 204, false),
+                    (204, 300, true),
+                ],
+                vec![0, 1, 5, 6],
+                300,
+                true,
             ),
         ];
 
-        for (keys, check_last, expected) in cases {
+        fn make_chunks(chunks: Vec<(u64, u64, bool)>) -> Vec<String> {
+            chunks
+                .into_iter()
+                .map(|(start_off, end_off, is_last)| {
+                    if is_last {
+                        last_wal_chunk_file_key(1, 1, start_off, end_off)
+                    } else {
+                        wal_chunk_file_key(1, 1, start_off, end_off)
+                    }
+                })
+                .collect::<Vec<_>>()
+        }
+
+        fn pick_chunks(chunks: &[String], idx: Vec<usize>) -> Vec<String> {
+            let mut res = Vec::with_capacity(idx.len());
+            for i in idx {
+                res.push(chunks[i].clone())
+            }
+            res
+        }
+
+        for (chunks, expected, last_end_off, has_last_chunk) in cases {
+            let chunks = make_chunks(chunks);
+            let expected_chunks = pick_chunks(&chunks, expected);
             assert_eq!(
-                verify_wal_chunks_integrity(&keys, check_last).map_err(|_| ()),
-                expected
+                get_integral_wal_chunks(&chunks).unwrap(),
+                (expected_chunks, last_end_off, has_last_chunk)
             );
+        }
+
+        let err_cases: Vec<Vec<String>> = vec![vec![
+            wal_chunk_file_key(1, 1, 0, 100),
+            wal_chunk_file_key(1, 10, 100, 200),
+        ]];
+        for chunks in err_cases {
+            get_integral_wal_chunks(&chunks).unwrap_err();
         }
     }
 }

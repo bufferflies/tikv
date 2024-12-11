@@ -17,7 +17,7 @@ use slog_global::*;
 use tikv_util::mpsc::{Receiver, Sender};
 
 use crate::{
-    compress_lz4, decompress_lz4, last_wal_chunk_file_key,
+    compress_lz4, decompress_lz4, get_integral_wal_chunks, last_wal_chunk_file_key,
     metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE, parse_wal_chunk_key, wal_chunk_file_key,
     wal_chunk_file_prefix, wal_file_name, Error, Result, Task,
 };
@@ -127,8 +127,15 @@ impl ObjectStorageWorker {
             let (chunks, has_more) = self.s3fs.list_objects("", Some(&scan_prefix), None)?;
             debug_assert_eq!(has_more, None);
             if !chunks.is_empty() {
-                last_chunk_key = Some(chunks.last().unwrap().key.clone());
-                break;
+                let chunk_keys = chunks.into_iter().map(|x| x.key).collect::<Vec<_>>();
+                if let Ok((mut integral_chunks, ..)) = get_integral_wal_chunks(&chunk_keys) {
+                    last_chunk_key = integral_chunks.pop();
+                    if last_chunk_key.is_some() {
+                        info!("found integral wal chunks";
+                            "integral_chunks" => ?integral_chunks, "last_chunk" => ?last_chunk_key);
+                        break;
+                    }
+                }
             }
 
             if rebuild_epoch <= 1 || self.epoch_id >= rebuild_epoch + 3 {

@@ -23,8 +23,8 @@ use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
 use rfengine::{
-    assemble_wal_chunks, find_latest_snapshot, parse_epoch_from_snapshot_key,
-    snapshot_store_meta_key, verify_wal_chunks_integrity, wal_chunk_file_prefix,
+    assemble_wal_chunks, find_latest_snapshot, get_integral_wal_chunks,
+    parse_epoch_from_snapshot_key, snapshot_store_meta_key, wal_chunk_file_prefix,
     wal_chunk_file_suffix, RfEngine, MAX_EPOCH_BACKWARD,
 };
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
@@ -553,15 +553,20 @@ fn collect_wal_chunk_keys(
         }
     };
 
-    // Verify the wal chunk files integrity.
+    // Get integral WAL chunk files.
     let check_last = end_off == u64::MAX;
-    match verify_wal_chunks_integrity(&chunk_keys, check_last) {
-        Ok(last_end_off) => {
-            if check_last || last_end_off >= end_off {
-                Ok((chunk_keys, last_end_off))
+    match get_integral_wal_chunks(&chunk_keys) {
+        Ok((integral_chunks, last_end_off, has_last_chunk)) => {
+            let ok = if check_last {
+                has_last_chunk
+            } else {
+                last_end_off >= end_off
+            };
+            if ok {
+                Ok((integral_chunks, last_end_off))
             } else {
                 error!("{} collect wal chunk keys: chunks not ready", tag;
-                    "epoch" => epoch_id, "end_off" => end_off, "last_end_off" => last_end_off, "chunk_keys" => ?chunk_keys);
+                    "epoch" => epoch_id, "end_off" => end_off, "last_end_off" => last_end_off, "integral_chunks" => ?integral_chunks);
                 Err(Error::WalChunkIntegrityError(format!(
                     "chunks not ready for offset {end_off}"
                 )))
