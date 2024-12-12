@@ -214,6 +214,7 @@ fn start_server(
         None
     };
     load_data_config.rg_config = rg_config;
+    load_data_config.enable_multi_threads = config.enable_load_data_multi_threads;
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
         config.data_dir.clone().into(),
@@ -619,6 +620,7 @@ pub struct Config {
     pub worker_scaler: WorkerScalerConfig,
     pub report_wru: bool,
     pub enable_load_data_check_point: bool,
+    pub enable_load_data_multi_threads: bool,
     pub checksum_type: ChecksumType,
     pub worker_limiter: WorkerLimiterConfig,
     pub schema_manager: SchemaManagerConfig,
@@ -662,6 +664,7 @@ impl Default for Config {
             cop_block_size: ReadableSize::kb(32),
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,
+            enable_load_data_multi_threads: false,
             enable_load_data_check_point: false,
             checksum_type: ChecksumType::Crc32,
             worker_limiter: WorkerLimiterConfig::default(),

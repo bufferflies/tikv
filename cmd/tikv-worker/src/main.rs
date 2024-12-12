@@ -146,6 +146,13 @@ fn main() {
                 .help("enable load data check point"),
         )
         .arg(
+            Arg::with_name("enable-load-data-multi-threads")
+                .long("enable-load-data-multi-threads")
+                .takes_value(true)
+                .value_name("Bool")
+                .help("enable load data multi threads"),
+        )
+        .arg(
             Arg::with_name("push-metrics-addr")
                 .long("push-metrics-addr")
                 .value_name("ADDR")
@@ -298,6 +305,10 @@ fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
 
     if let Some(enable_check_point) = matches.value_of("enable-load-data-check-point") {
         config.enable_load_data_check_point = enable_check_point == "true";
+    }
+
+    if let Some(enable_multi_threads) = matches.value_of("enable-load-data-multi-threads") {
+        config.enable_load_data_multi_threads = enable_multi_threads == "true";
     }
 
     if let Some(push_metrics_addr) = matches.value_of("push-metrics-addr") {

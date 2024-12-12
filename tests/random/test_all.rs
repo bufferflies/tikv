@@ -115,6 +115,9 @@ fn test_random_all() {
         let tikv_config = cluster.get_node_config(cluster.get_nodes()[0]);
         let region_size = tikv_config.coprocessor.region_split_size.0 as usize;
         LoadDataConfig {
+            enable_multi_threads: true,
+            kvpairs_worker_num: 2,
+            building_worker_num: 2,
             max_in_mem_size: MAX_IN_MEM_SIZE,
             flush_batch_size: FLUSH_BATCH_SIZE,
             block_size: tikv_config.rocksdb.writecf.block_size.0 as usize,
@@ -181,7 +184,9 @@ fn test_random_all() {
         ));
     }
     let load_data_task_timeout = Duration::from_secs(env_param("LOAD_DATA_TASK_TIMEOUT_SEC", 30));
-    for _ in 0..LOAD_DATA_CONCURRENCY {
+    for i in 0..LOAD_DATA_CONCURRENCY {
+        let mut load_data_config = load_data_config.clone();
+        load_data_config.enable_multi_threads = i % 2 == 0;
         handles.push(spawn_load_data(
             cluster.get_pd_client(),
             runtime.block_on(cluster.new_keyspace_client()),

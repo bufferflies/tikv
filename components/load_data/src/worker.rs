@@ -1,5 +1,5 @@
-// Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
-//
+// Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
+
 use std::{
     cmp::{max, min, Ordering},
     collections::HashMap,
@@ -46,7 +46,6 @@ use crate::{
     },
 };
 
-#[allow(dead_code)]
 pub enum KvPairsWorkerMsg {
     AddChunk {
         writer_id: u64,
@@ -73,7 +72,6 @@ pub struct UnhandledFlushFile {
     pub file_meta: FileMeta,
 }
 
-#[allow(dead_code)]
 pub struct KvPairsWorker {
     worker_id: u64,
     config: LoadDataConfig,
@@ -103,7 +101,6 @@ pub struct KvPairsWorker {
     flushed_chunk_ids: HashMap<u64, u64>,
 }
 
-#[allow(dead_code)]
 impl KvPairsWorker {
     pub fn new(
         worker_id: u64,
@@ -908,6 +905,8 @@ impl KvPairsWorker {
             buf.extend_from_slice(key);
             buf.put_u32_le(val_len as u32);
             buf.extend_from_slice(val);
+            buf.put_u16_le(row_id_len as u16);
+            buf.extend_from_slice(row_id);
             kv_count += 1;
             merge_iter.next()?;
         }
@@ -925,7 +924,6 @@ impl KvPairsWorker {
     }
 }
 
-#[allow(dead_code)]
 fn new_file_writer(task_ctx: TaskContext, path: PathBuf) -> Result<EncrypterWriter<File>> {
     let file = fs::OpenOptions::new()
         .create(true)
@@ -949,7 +947,6 @@ fn new_file_writer(task_ctx: TaskContext, path: PathBuf) -> Result<EncrypterWrit
     Ok(EncrypterWriter::new(file, method, key, iv).unwrap())
 }
 
-#[allow(dead_code)]
 fn flush_l1_file_to_local(
     batches: Vec<Vec<u8>>,
     task_ctx: TaskContext,
@@ -967,7 +964,6 @@ fn flush_l1_file_to_local(
     Ok(())
 }
 
-#[allow(dead_code)]
 fn flush_l0_file_to_local(
     mut kv_pairs: Vec<KvPair>,
     task_ctx: TaskContext,
@@ -1017,7 +1013,6 @@ fn flush_l0_file_to_local(
     Ok((first_key, last_key, key_comm_prefix, kv_size))
 }
 
-#[allow(dead_code)]
 pub enum BuildingWorkerMsg {
     Build {
         start_key: Vec<u8>,
@@ -1027,12 +1022,11 @@ pub enum BuildingWorkerMsg {
         cb: Box<dyn FnOnce(Vec<DuplicateEntry>) + Send>,
     },
     Ingest {
-        cb: Box<dyn FnOnce() + Send>,
+        cb: Box<dyn FnOnce(()) + Send>,
     },
     Cleanup,
 }
 
-#[allow(dead_code)]
 pub struct BuildingWorker {
     worker_id: u64,
     config: LoadDataConfig,
@@ -1051,7 +1045,6 @@ pub struct BuildingWorker {
     ingested: bool,
 }
 
-#[allow(dead_code)]
 impl BuildingWorker {
     pub fn new(
         worker_id: u64,
@@ -1133,7 +1126,7 @@ impl BuildingWorker {
                             self.task_ctx.task_id, self.worker_id, err
                         ));
                     }
-                    cb();
+                    cb(());
                 }
                 BuildingWorkerMsg::Cleanup => {
                     return;
@@ -1744,7 +1737,6 @@ impl BuildingWorker {
     }
 }
 
-#[allow(dead_code)]
 fn build_readers(
     task_ctx: &TaskContext,
     file_metas: Vec<FileMeta>,

@@ -57,6 +57,8 @@ use crate::{
 
 pub const DEFAULT_MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024; // 256MB
 const DEFAULT_FLUSH_BATCH_SIZE: usize = 2 * 1024 * 1024; // 2MB
+const DEFAULT_KVPAIRS_WORKER_NUM: usize = 1;
+const DEFAULT_BUILDING_WORKER_NUM: usize = 1;
 const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB
 const DEFAULT_SST_FILE_SIZE: usize = 48 * 1024 * 1024; // 48MB
 const DEFAULT_REGION_SIZE: usize = 750 * 1024 * 1024; // 750MB
@@ -72,7 +74,7 @@ pub const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
 pub const MAX_RETRY_TIMES: usize = 10;
 pub const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
-const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
+pub const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_METRICS_GATHER_INTERVAL: Duration = Duration::from_secs(30);
 
 // the following constants are used to calculate RU consumption
@@ -119,14 +121,11 @@ pub enum LoadTaskMsg {
         compression_type: u8,
     },
     Flush {
+        writer_id: u64,
         flush_file_count: Option<usize>,
         cb: Box<dyn FnOnce(FlushStates) + Send>,
     },
     Cleanup,
-    QueryUnhandledChunks {
-        chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
-        cb: Box<dyn FnOnce(HashMap<u64, u64>) + Send>,
-    },
 }
 
 pub enum FlushStates {
@@ -180,6 +179,9 @@ pub struct LoadTaskStates {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct LoadDataConfig {
+    pub enable_multi_threads: bool,
+    pub kvpairs_worker_num: usize,
+    pub building_worker_num: usize,
     pub max_in_mem_size: usize,
     pub flush_batch_size: usize,
     pub block_size: usize,
@@ -195,6 +197,9 @@ pub struct LoadDataConfig {
 impl Default for LoadDataConfig {
     fn default() -> Self {
         Self {
+            enable_multi_threads: false,
+            kvpairs_worker_num: DEFAULT_KVPAIRS_WORKER_NUM,
+            building_worker_num: DEFAULT_BUILDING_WORKER_NUM,
             max_in_mem_size: DEFAULT_MAX_IN_MEM_SIZE,
             flush_batch_size: DEFAULT_FLUSH_BATCH_SIZE,
             block_size: DEFAULT_BLOCK_SIZE,
@@ -252,7 +257,7 @@ pub struct LoadTaskScheduler {
     pub states: Arc<RwLock<LoadTaskStates>>,
     pub writers: Arc<Mutex<WritersStates>>,
     pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
-    pub check_point_store: Arc<Mutex<LocalFileCheckpointStorage>>,
+    pub checkpoint_store: Arc<Mutex<LocalFileCheckpointStorage>>,
 }
 
 impl LoadTaskScheduler {
@@ -260,7 +265,7 @@ impl LoadTaskScheduler {
         warn!("canceled {}", err);
 
         let mut states = self.states.write().unwrap();
-        let check_point_store_mutex = Arc::clone(&self.check_point_store);
+        let check_point_store_mutex = Arc::clone(&self.checkpoint_store);
         let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
         check_point_store_guard
             .update_cancel_and_errmsg(true, err.clone())
@@ -386,14 +391,6 @@ impl LoadTaskScheduler {
     pub fn set_thread_handle(&mut self, thread_handle: std::thread::JoinHandle<()>) {
         self.thread_handle = Some(Arc::new(Mutex::new(thread_handle)))
     }
-
-    pub async fn query_unhandled_chunks(&self, chunk_ids: HashMap<u64, u64>) -> HashMap<u64, u64> {
-        let (cb, fut) = tikv_util::future::paired_future_callback();
-        self.sender
-            .send(LoadTaskMsg::QueryUnhandledChunks { chunk_ids, cb })
-            .unwrap();
-        fut.await.unwrap()
-    }
 }
 
 impl LoadTaskWorker {
@@ -449,7 +446,7 @@ impl LoadTaskWorker {
             states: Arc::new(RwLock::new(states)),
             writers: Arc::new(Mutex::new(writers)),
             thread_handle: None,
-            check_point_store: Arc::clone(&check_point_store_arc),
+            checkpoint_store: Arc::clone(&check_point_store_arc),
         };
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
         let task_dir = context.dir.join(task_ctx.task_id.as_str());
@@ -532,6 +529,7 @@ impl LoadTaskWorker {
                     }
                 }
                 LoadTaskMsg::Flush {
+                    writer_id: _writer_id,
                     flush_file_count,
                     cb,
                 } => {
@@ -547,15 +545,6 @@ impl LoadTaskWorker {
                     std::thread::sleep(self.config.metrics_gather_interval);
                     remove_metrics(&self.task_ctx.task_id, keyspace_id);
                     return;
-                }
-                LoadTaskMsg::QueryUnhandledChunks { mut chunk_ids, cb } => {
-                    let mut res: HashMap<u64, u64> = HashMap::new();
-                    for (writer_id, chunk_id) in chunk_ids.drain() {
-                        if self.scheduler.get_flushed_chunk(&writer_id) < chunk_id {
-                            res.insert(writer_id, chunk_id);
-                        }
-                    }
-                    cb(res);
                 }
             }
         }

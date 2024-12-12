@@ -19,6 +19,7 @@ use load_data::{
         LocalFileCheckpointStorage, CANCELLED_TASK_EXPIRE_SEC, CLEANUP_INTERVAL_SEC,
         IDLE_TASK_EXPIRE_SEC,
     },
+    dispatcher::Dispatcher,
     task::{
         FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
         LoadTaskStates, LoadTaskWorker, PutChunkResult, TaskContext,
@@ -131,7 +132,14 @@ pub(crate) async fn handle_load_data(
                 if !manager.has_task(&task_id) {
                     Ok(make_response(StatusCode::NOT_FOUND, ""))
                 } else {
-                    let flush_res = manager.flush(&task_id).await;
+                    let writer_id = get_param::<u64>(&query_pairs, "writer_id");
+                    if writer_id.is_none() {
+                        return Ok(make_response(
+                            StatusCode::BAD_REQUEST,
+                            "writer id is missing",
+                        ));
+                    }
+                    let flush_res = manager.flush(&task_id, writer_id.unwrap()).await;
                     let json = serde_json::to_string(&flush_res).unwrap();
                     Ok(Response::builder()
                         .header(header::CONTENT_TYPE, "application/json")
@@ -375,8 +383,9 @@ impl LoadDataManager {
     }
 
     pub(crate) fn exec_task_by_checkpoint(&self, checkpoint_ctx: LoadDataCheckpointCtx) {
-        let task_context = TaskContext {
-            task_id: checkpoint_ctx.get_task_id(),
+        let task_id = checkpoint_ctx.get_task_id();
+        let task_ctx = TaskContext {
+            task_id: task_id.clone(),
             start_ts: checkpoint_ctx.get_start_ts(),
             commit_ts: checkpoint_ctx.get_commit_ts(),
             inner_key_off: None,
@@ -385,19 +394,35 @@ impl LoadDataManager {
             prepend_keyspace_id: None,
             keyspace_id: None,
         };
-        let mut worker = LoadTaskWorker::new(
-            self.config.clone(),
-            self.ctx.clone(),
-            task_context.clone(),
-            checkpoint_ctx,
-        );
-        let mut scheduler = worker.get_scheduler();
-        let thread_handle = std::thread::spawn(move || {
-            worker.run();
-        });
+
+        let (mut scheduler, thread_handle) = if !checkpoint_ctx.recover_from_old_model() {
+            let mut dispatcher = Dispatcher::new(
+                self.config.clone(),
+                self.ctx.clone(),
+                task_ctx,
+                checkpoint_ctx,
+            );
+            let scheduler = dispatcher.get_scheduler();
+            let thread_handle = std::thread::spawn(move || {
+                dispatcher.run();
+            });
+            (scheduler, thread_handle)
+        } else {
+            let mut worker = LoadTaskWorker::new(
+                self.config.clone(),
+                self.ctx.clone(),
+                task_ctx,
+                checkpoint_ctx,
+            );
+            let scheduler = worker.get_scheduler();
+            let thread_handle = std::thread::spawn(move || {
+                worker.run();
+            });
+            (scheduler, thread_handle)
+        };
 
         scheduler.set_thread_handle(thread_handle);
-        self.running_tasks.insert(task_context.task_id, scheduler);
+        self.running_tasks.insert(task_id, scheduler);
     }
 
     pub(crate) fn init_task(&self, task_ctx: TaskContext) {
@@ -407,17 +432,34 @@ impl LoadDataManager {
                 info!("task {} already exists", task_id);
             }
             Entry::Vacant(entry) => {
-                let checkpint_ctx = LoadDataCheckpointCtx::new(task_ctx.clone());
-                let mut worker = LoadTaskWorker::new(
-                    self.config.clone(),
-                    self.ctx.clone(),
-                    task_ctx,
-                    checkpint_ctx,
-                );
-                let mut scheduler = worker.get_scheduler();
-                let thread_handle = std::thread::spawn(move || {
-                    worker.run();
-                });
+                let checkpoint_ctx = LoadDataCheckpointCtx::new(task_ctx.clone());
+                let (mut scheduler, thread_handle) = if self.config.enable_multi_threads {
+                    let mut dispatcher = Dispatcher::new(
+                        self.config.clone(),
+                        self.ctx.clone(),
+                        task_ctx,
+                        checkpoint_ctx,
+                    );
+                    let scheduler = dispatcher.get_scheduler();
+                    let thread_handle = std::thread::spawn(move || {
+                        dispatcher.run();
+                    });
+                    (scheduler, thread_handle)
+                } else {
+                    let mut worker = LoadTaskWorker::new(
+                        self.config.clone(),
+                        self.ctx.clone(),
+                        task_ctx,
+                        checkpoint_ctx,
+                    );
+                    let scheduler = worker.get_scheduler();
+                    let thread_handle = std::thread::spawn(move || {
+                        worker.run();
+                    });
+
+                    (scheduler, thread_handle)
+                };
+
                 scheduler.set_thread_handle(thread_handle);
                 entry.insert(scheduler);
             }
@@ -446,7 +488,7 @@ impl LoadDataManager {
             .unwrap();
     }
 
-    pub(crate) async fn flush(&self, task_id: &str) -> FlushResult {
+    pub(crate) async fn flush(&self, task_id: &str, writer_id: u64) -> FlushResult {
         let scheduler = self.running_tasks.get(task_id).unwrap().clone();
 
         let interval = Duration::from_secs(3);
@@ -457,6 +499,7 @@ impl LoadDataManager {
             scheduler
                 .sender
                 .send(LoadTaskMsg::Flush {
+                    writer_id,
                     flush_file_count: file_count,
                     cb,
                 })

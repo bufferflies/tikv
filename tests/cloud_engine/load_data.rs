@@ -38,11 +38,13 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 fn test_load_data() {
     test_util::init_log_for_test();
 
-    impl_test_load_data(false);
-    impl_test_load_data(true);
+    impl_test_load_data(false, false);
+    impl_test_load_data(true, false);
+    impl_test_load_data(false, true);
+    impl_test_load_data(true, true);
 }
 
-fn impl_test_load_data(enable_inner_key_off: bool) {
+fn impl_test_load_data(enable_inner_key_off: bool, enable_multi_threads: bool) {
     let base_dir = tempfile::Builder::new()
         .prefix("test_load_data")
         .tempdir()
@@ -96,6 +98,9 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     // Init task.
     // Total data size is about 1.3MB = 10000 * (23 + 120)
     let load_data_config = LoadDataConfig {
+        enable_multi_threads,
+        kvpairs_worker_num: 2,
+        building_worker_num: 2,
         max_in_mem_size: 1024, // 1KB
         flush_batch_size: 512,
         block_size: 1024,
@@ -259,6 +264,9 @@ fn test_load_data_overlap() {
     client.split_keyspace(KEYSPACE_ID);
 
     let load_data_config = LoadDataConfig {
+        enable_multi_threads: true,
+        kvpairs_worker_num: 2,
+        building_worker_num: 2,
         max_in_mem_size: 1024, // 1KB
         flush_batch_size: 512,
         block_size: 1024,

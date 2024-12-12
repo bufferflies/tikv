@@ -6,11 +6,13 @@ use bytes::{BufMut, BytesMut};
 use futures::executor::block_on;
 use load_data::{
     checkpoint::LoadDataCheckpointCtx,
+    dispatcher::Dispatcher,
     task::{
         FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
         LoadTaskWorker, TaskContext,
     },
 };
+use rand::prelude::SliceRandom;
 use tikv_util::{error, time::Instant};
 
 use crate::{client::RefStore, try_wait};
@@ -22,6 +24,7 @@ pub fn init_task(
     commit_ts: u64,
 ) -> (LoadTaskScheduler, std::thread::JoinHandle<()>) {
     let task_id = format!("load_data_{}", start_ts);
+
     let task_ctx = TaskContext {
         task_id,
         start_ts,
@@ -33,12 +36,21 @@ pub fn init_task(
         keyspace_id: None,
     };
     let checkpoint_ctx = LoadDataCheckpointCtx::new(task_ctx.clone());
-
-    let mut worker = LoadTaskWorker::new(config, ctx, task_ctx, checkpoint_ctx);
-    let scheduler = worker.get_scheduler();
-    let worker_handle = std::thread::spawn(move || {
-        worker.run();
-    });
+    let (scheduler, worker_handle) = if config.enable_multi_threads {
+        let mut dispatcher = Dispatcher::new(config.clone(), ctx.clone(), task_ctx, checkpoint_ctx);
+        let scheduler = dispatcher.get_scheduler();
+        let worker_handle = std::thread::spawn(move || {
+            dispatcher.run();
+        });
+        (scheduler, worker_handle)
+    } else {
+        let mut worker = LoadTaskWorker::new(config.clone(), ctx.clone(), task_ctx, checkpoint_ctx);
+        let scheduler = worker.get_scheduler();
+        let worker_handle = std::thread::spawn(move || {
+            worker.run();
+        });
+        (scheduler, worker_handle)
+    };
 
     assert!(
         !scheduler.is_canceled(),
@@ -67,19 +79,22 @@ where
 {
     let mut chunk_ids: HashMap<u64, u64> = HashMap::with_capacity(5);
     let mut ref_store = RefStore::default();
+    let mut rng = rand::thread_rng();
+    let mut integers: Vec<usize> = (0..data_count).collect();
+    integers.shuffle(&mut rng);
 
     let capacity = (mem::size_of::<u16>() /* key length */ + i_to_key(0).len() + mem::size_of::<u32>() /* val length */ + i_to_val(0).len())
         * batch_size;
     for i in (0..data_count).step_by(batch_size) {
         let mut buf = BytesMut::with_capacity(capacity);
-        for j in 0..batch_size {
-            let idx = i + j;
-            if idx >= data_count {
+        for _ in 0..batch_size {
+            if integers.is_empty() {
                 break;
             }
-            let key = i_to_key(idx);
-            let val = i_to_val(idx);
-            let row_id = i_to_row_id(idx);
+            let n = integers.pop().unwrap();
+            let key = i_to_key(n);
+            let val = i_to_val(n);
+            let row_id = i_to_row_id(n);
 
             buf.put_u16_le(key.len() as u16);
             buf.put_slice(&key);
@@ -89,12 +104,12 @@ where
             buf.put_slice(&row_id);
 
             ref_store.put_kv(key, val);
-            for k in 1..=dup_count(idx) {
+            for k in 1..=dup_count(n) {
                 // Repeated key is the same as the original key with some row_id.
                 // Repeated key is caused by resending some data after the client restarts.
-                let repeated_key = i_to_key(idx);
-                let repeated_val = i_to_val(idx);
-                let repeated_row_id = i_to_row_id(idx);
+                let repeated_key = i_to_key(n);
+                let repeated_val = i_to_val(n);
+                let repeated_row_id = i_to_row_id(n);
                 buf.put_u16_le(repeated_key.len() as u16);
                 buf.put_slice(&repeated_key);
                 buf.put_u32_le(repeated_val.len() as u32);
@@ -103,9 +118,9 @@ where
                 buf.put_slice(&repeated_row_id);
 
                 // Duplicate key is the same as the original key with different row_id.
-                let dup_key = i_to_key(idx);
-                let dup_val = i_to_val(idx + k);
-                let dup_row_id = i_to_val(idx + k);
+                let dup_key = i_to_key(n);
+                let dup_val = i_to_val(n + k);
+                let dup_row_id = i_to_val(n + k);
                 buf.put_u16_le(dup_key.len() as u16);
                 buf.put_slice(&dup_key);
                 buf.put_u32_le(dup_val.len() as u32);
@@ -139,7 +154,7 @@ where
         );
     }
 
-    let mut file_count: Option<usize> = None;
+    let mut file_counts: HashMap<u64, Option<usize>> = HashMap::default();
     let ok = try_wait(
         || {
             assert!(
@@ -147,27 +162,36 @@ where
                 "task canceled: {}",
                 scheduler.error_msg()
             );
-            let (cb, fut) = tikv_util::future::paired_future_callback();
-            scheduler
-                .sender
-                .send(LoadTaskMsg::Flush {
-                    flush_file_count: file_count,
-                    cb,
-                })
-                .unwrap();
-            let flush_states = block_on(fut).unwrap();
-            match flush_states {
-                FlushStates::FlushFileCount { flush_file_count } => {
-                    file_count = Some(flush_file_count);
-                    false
-                }
-                FlushStates::FlushResult { flush_result } => {
-                    !flush_result.canceled
-                        && !flush_result.finished
-                        && flush_result.error.is_empty()
-                        && flush_result.flushed_chunk_ids.eq(&chunk_ids)
+            let mut flushed = true;
+            for writer_id in 0..writer_count as u64 {
+                let file_count = file_counts.entry(writer_id).or_default();
+                let (cb, fut) = tikv_util::future::paired_future_callback();
+                scheduler
+                    .sender
+                    .send(LoadTaskMsg::Flush {
+                        writer_id,
+                        flush_file_count: *file_count,
+                        cb,
+                    })
+                    .unwrap();
+                let flush_states = block_on(fut).unwrap();
+                match flush_states {
+                    FlushStates::FlushFileCount { flush_file_count } => {
+                        *file_count = Some(flush_file_count);
+                        flushed = false;
+                    }
+                    FlushStates::FlushResult { flush_result } => {
+                        if flush_result.canceled
+                            || flush_result.finished
+                            || *flush_result.flushed_chunk_ids.get(&writer_id).unwrap()
+                                != *chunk_ids.get(&writer_id).unwrap()
+                        {
+                            flushed = false;
+                        }
+                    }
                 }
             }
+            flushed
         },
         timeout.as_secs() as usize,
     );

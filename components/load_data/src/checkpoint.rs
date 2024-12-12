@@ -79,7 +79,9 @@ impl LoadDataWorkerState {
                 }
             }
             LoadDataWorkerState::BuildingSst => {
-                if new_state == LoadDataWorkerState::IngestingSst {
+                if new_state == LoadDataWorkerState::IngestingSst
+                    || new_state == LoadDataWorkerState::IngestedSst
+                {
                     return true;
                 }
             }
@@ -875,7 +877,7 @@ mod tests {
             states: Arc::new(RwLock::new(LoadTaskStates::default())),
             writers: Arc::new(Mutex::new(WritersStates::default())),
             thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
-            check_point_store: Arc::new(Mutex::new(checkpoint_store)),
+            checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
         };
         let mut states = scheduler.states.write().unwrap();
         states.task_id = task_id.to_string();
@@ -895,7 +897,7 @@ mod tests {
             states: Arc::new(RwLock::new(LoadTaskStates::default())),
             writers: Arc::new(Mutex::new(WritersStates::default())),
             thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
-            check_point_store: Arc::new(Mutex::new(checkpoint_store)),
+            checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
         };
         let mut states = scheduler2.states.write().unwrap();
         states.task_id = task_id.to_string();
@@ -914,7 +916,7 @@ mod tests {
             states: Arc::new(RwLock::new(LoadTaskStates::default())),
             writers: Arc::new(Mutex::new(WritersStates::default())),
             thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
-            check_point_store: Arc::new(Mutex::new(checkpoint_store)),
+            checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
         };
         let mut states = scheduler3.states.write().unwrap();
         states.task_id = task_id.to_string();
