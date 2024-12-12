@@ -14,6 +14,7 @@ mod recovery;
 mod restore;
 mod sst;
 mod stats;
+mod test;
 mod truncate_ts;
 mod txn_file;
 mod txn_log;
@@ -37,6 +38,7 @@ use crate::{
     restore::{execute_restore_command, RestoreCommand},
     sst::{execute_scan_bad_table, execute_show_sst, ScanBadTableFileArgs, ShowSstArgs},
     stats::{execute_stats, StatsArgs},
+    test::{execute_test, TestArgs},
     truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     txn_file::{execute_show_txn_chunk, ShowTxnChunkArgs},
     txn_log::{execute_show_txn_log, ShowTxnLogArgs},
@@ -82,6 +84,9 @@ fn main() {
         }
         Recovery(args) => {
             execute_recovery(args);
+        }
+        Test(args) => {
+            execute_test(args);
         }
     }
 }
@@ -151,6 +156,8 @@ pub enum Commands {
     Recovery(RecoveryArgs),
     /// Run HTTP requests to stores.
     Http(HttpArgs),
+    /// Run test tools.
+    Test(TestArgs),
 }
 
 #[derive(Args)]
