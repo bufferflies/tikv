@@ -41,10 +41,10 @@ prop_compose! {
 }
 
 #[rstest]
-#[case(IaCapacity::MemoryAndDiskCap(300, PathBuf::from("ia"), 3000))]
-#[case::memory(IaCapacity::MemoryCap(3000))]
-#[case::big_cap(IaCapacity::MemoryAndDiskCap(1000, PathBuf::from("ia"), 10000))]
-#[case::small_cap(IaCapacity::MemoryAndDiskCap(128, PathBuf::from("ia"), 1024))]
+#[case(IaCapacity::MemoryAndDiskCap(300.into(), PathBuf::from("ia"), 3000.into()))]
+#[case::memory(IaCapacity::MemoryCap(3000.into()))]
+#[case::big_cap(IaCapacity::MemoryAndDiskCap(1000.into(), PathBuf::from("ia"), 10000.into()))]
+#[case::small_cap(IaCapacity::MemoryAndDiskCap(128.into(), PathBuf::from("ia"), 1024.into()))]
 #[ignore]
 fn test_read(#[case] mut ia_cap: IaCapacity) {
     init_log_for_test();
@@ -149,7 +149,7 @@ fn test_init() {
     let rt = runtime.handle().clone();
     runtime.block_on(async move {
         let local_path = temp_dir.join("ia");
-        let ia_cap = IaCapacity::MemoryAndDiskCap(0, local_path.clone(), 1000);
+        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), local_path.clone(), 1000.into());
         let options = IaManagerOptionsBuilder::default()
             .capacity(ia_cap)
             .segment_size(SEGMENT_SIZE)
@@ -267,7 +267,7 @@ fn test_abnormal_local_file() {
         .await
         .unwrap();
 
-        let ia_cap = IaCapacity::MemoryAndDiskCap(0, local_path.clone(), 100000);
+        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), local_path.clone(), 100000.into());
         let options = IaManagerOptionsBuilder::default()
             .capacity(ia_cap)
             .segment_size(SEGMENT_SIZE)

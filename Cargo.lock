@@ -3920,7 +3920,6 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
- "sysinfo 0.26.9",
  "tempfile",
  "test_util",
  "thiserror",

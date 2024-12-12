@@ -55,7 +55,7 @@ use security::{SecurityConfig, SecurityManager};
 pub use server::get_cop_req_tag;
 use slog_global::{error, info, warn};
 use tikv_util::{
-    config::{ReadableDuration, ReadableSize},
+    config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     quota_limiter::QuotaLimiter,
     sys::{record_global_memory_usage, SysQuota},
     time::Instant,
@@ -368,19 +368,7 @@ fn create_ia_ctx(
         let segment_path = ia_path.join("segment");
         fs::create_dir_all(&segment_path)
             .map_err(|err| format!("create segment path failed: {err:?}"))?;
-        let cap = if config.ia_mem_cap.0 > 0 && config.ia_disk_cap.0 > 0 {
-            IaCapacity::MemoryAndDiskCap(
-                config.ia_mem_cap.0 as i64,
-                segment_path,
-                config.ia_disk_cap.0 as i64,
-            )
-        } else {
-            IaCapacity::MemoryAndDiskRatio(
-                config.ia_mem_cap_ratio,
-                segment_path,
-                config.ia_disk_cap_ratio,
-            )
-        };
+        let cap = IaCapacity::MemoryAndDiskCap(config.ia_mem_cap, segment_path, config.ia_disk_cap);
         let opts = IaManagerOptionsBuilder::default()
             .capacity(cap)
             .segment_size(config.ia_segment_size)
@@ -641,15 +629,12 @@ pub struct Config {
     /// The memory & disk capacity usage ratio for IA (Infrequent Access) of
     /// remote coprocessor.
     ///
-    /// Enable IA by setting `!data_dir.is_empty() && ia_mem_cap_ratio > 0 &&
-    /// ia_disk_cap_ratio > 0`.
-    pub ia_mem_cap_ratio: f64,
-    pub ia_disk_cap_ratio: f64,
+    /// Enable IA by setting `!data_dir.is_empty() && ia_mem_cap > 0 &&
+    /// ia_disk_cap > 0`.
+    pub ia_mem_cap: AbsoluteOrPercentSize,
+    pub ia_disk_cap: AbsoluteOrPercentSize,
     pub ia_segment_size: i64,
     pub ia_freq_update_interval: ReadableDuration,
-    /// The followings are mainly used for test purpose.
-    pub ia_mem_cap: ReadableSize,
-    pub ia_disk_cap: ReadableSize,
 
     pub push_metrics_addr: String,
     pub push_metrics_interval: ReadableDuration,
@@ -683,12 +668,10 @@ impl Default for Config {
             schema_manager: SchemaManagerConfig::default(),
             txn_chunk_manager: TxnChunkManagerConfig::default(),
             txn_chunk_target_block_entries: txn_chunk::TARGET_BLOCK_ENTRIES_DEF,
-            ia_mem_cap_ratio: 0.0,
-            ia_disk_cap_ratio: 0.0,
+            ia_mem_cap: Default::default(),
+            ia_disk_cap: Default::default(),
             ia_segment_size: IA_SEGMENT_SIZE_DEF,
             ia_freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
-            ia_mem_cap: ReadableSize::default(),
-            ia_disk_cap: ReadableSize::default(),
             push_metrics_addr: String::default(),
             push_metrics_interval: ReadableDuration::secs(30),
         }
@@ -735,7 +718,6 @@ impl Config {
     pub fn is_ia_enabled(&self) -> bool {
         self.is_remote_cop_enabled()
             && !self.data_dir.is_empty()
-            && (self.ia_mem_cap_ratio > 0.0 && self.ia_disk_cap_ratio > 0.0
-                || self.ia_mem_cap.0 > 0 && self.ia_disk_cap.0 > 0)
+            && (!self.ia_mem_cap.is_zero() && !self.ia_disk_cap.is_zero())
     }
 }

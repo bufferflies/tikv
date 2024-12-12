@@ -41,7 +41,6 @@ use kvproto::{
     brpb::create_backup, deadlock::create_deadlock, diagnosticspb_grpc::create_diagnostics,
     import_sstpb_grpc::create_import_sst, raft_serverpb::StoreIdent,
 };
-use nix::NixPath;
 use overload_protector::{OverloadProtector, OverloadProtectorWorker};
 use pd_client::{
     metrics::STORE_SIZE_GAUGE_VEC, pd_control::PdControl, PdClient, RpcClient, INVALID_ID,
@@ -65,7 +64,6 @@ use rfstore::{
 };
 use security::SecurityManager;
 use sst_importer::SstImporter;
-use sysinfo::{DiskExt, System as Sys, SystemExt};
 use tikv::{
     config::{ConfigController, TikvConfig},
     coprocessor, coprocessor_v2,
@@ -86,7 +84,10 @@ use tikv_util::{
     config::{ensure_dir_exist, ReadableDuration, ReadableSize, VersionTrack},
     get_panic_region_count, mpsc,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
-    sys::{register_memory_usage_high_water, thread::ThreadBuildWrapper, SysQuota},
+    sys::{
+        disk::get_disk_capacity, register_memory_usage_high_water, thread::ThreadBuildWrapper,
+        SysQuota,
+    },
     thread_group::GroupProperties,
     time::{Duration, Instant, Monitor},
     worker::{Builder as WorkerBuilder, LazyWorker, Worker},
@@ -1177,30 +1178,22 @@ impl TikvServer {
             return;
         }
         let data_path = PathBuf::from(data_dir);
-        let sys = Sys::new_all();
-        // find the mounted disk of the data dir.
-        let mut data_disk = None;
-        let mut mount_point_len = 0;
-        for disk in sys.disks() {
-            let mp = disk.mount_point();
-            if data_path.starts_with(mp) && mp.len() > mount_point_len {
-                data_disk = Some(disk);
-                mount_point_len = mp.len();
-            }
-        }
-        match data_disk {
-            Some(disk) => {
-                let total_space = disk.total_space();
-                if total_space < K8S_MIN_DISK_CAPACITY {
+        match get_disk_capacity(&data_path) {
+            Ok(cap) => {
+                if cap < K8S_MIN_DISK_CAPACITY {
                     fatal!(
                         "insufficient disk space for k8s deploy, at least {} bytes required, but got {} bytes",
                         K8S_MIN_DISK_CAPACITY,
-                        total_space
+                        cap
                     );
                 }
             }
-            None => {
-                fatal!("Unable to find the disk for data directory: {}", data_dir);
+            Err(err) => {
+                fatal!(
+                    "Unable to get disk capacity for data directory: {}: {:?}",
+                    data_dir,
+                    err
+                );
             }
         }
     }

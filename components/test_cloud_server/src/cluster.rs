@@ -70,8 +70,8 @@ const BLOCK_SIZE_DEF: u64 = 4096;
 
 const IA_SEGMENT_SIZE_DEF: i64 = BLOCK_SIZE_DEF as i64 * 8; // 32 KiB
 const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(3);
-const IA_MEM_CAP_DEF: i64 = 1 << 20; // 1 MiB
-const IA_DISK_CAP_DEF: i64 = 10 << 20; // 10 MiB
+const IA_MEM_CAP_DEF: u64 = 1 << 20; // 1 MiB
+const IA_DISK_CAP_DEF: u64 = 10 << 20; // 10 MiB
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -734,8 +734,8 @@ impl ServerCluster {
                 data_dir: data_dir.to_string_lossy().into_owned(),
                 ia_segment_size: opts.ia_segment_size,
                 ia_freq_update_interval: ReadableDuration(opts.ia_freq_update_interval),
-                ia_mem_cap: ReadableSize(opts.ia_mem_cap as u64),
-                ia_disk_cap: ReadableSize(opts.ia_disk_cap as u64),
+                ia_mem_cap: opts.ia_mem_cap.into(),
+                ia_disk_cap: opts.ia_disk_cap.into(),
                 ..Default::default()
             };
 
@@ -882,8 +882,8 @@ pub struct TikvWorkerOptions {
     pub register: bool,
     pub ia_segment_size: i64,
     pub ia_freq_update_interval: Duration,
-    pub ia_mem_cap: i64,
-    pub ia_disk_cap: i64,
+    pub ia_mem_cap: u64,
+    pub ia_disk_cap: u64,
 }
 
 impl Default for TikvWorkerOptions {

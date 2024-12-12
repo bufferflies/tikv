@@ -261,6 +261,12 @@ pub enum AbsoluteOrPercentSize {
     Percent(f64),
 }
 
+impl Default for AbsoluteOrPercentSize {
+    fn default() -> Self {
+        Self::Abs(ReadableSize(0))
+    }
+}
+
 impl Serialize for AbsoluteOrPercentSize {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -346,12 +352,26 @@ impl AbsoluteOrPercentSize {
         }
     }
 
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Self::Abs(size) => size.0 == 0,
+            Self::Percent(percent) => percent.is_zero(),
+        }
+    }
+
     /// Consider as config of memory size, i.e. absolute memory size, or percent
     /// of total memory.
     pub fn as_memory_size(&self) -> u64 {
         match self {
             Self::Abs(size) => size.0,
             Self::Percent(_) => self.absolute(SysQuota::memory_limit_in_bytes()),
+        }
+    }
+
+    pub fn as_disk_size(&self, path: &Path) -> std::io::Result<u64> {
+        match self {
+            Self::Abs(size) => Ok(size.0),
+            Self::Percent(_) => Ok(self.absolute(get_disk_capacity(path)?)),
         }
     }
 }
@@ -1292,6 +1312,10 @@ impl<T> Tracker<T> {
 }
 
 use std::collections::HashMap;
+
+use num_traits::Zero;
+
+use crate::sys::disk::get_disk_capacity;
 
 /// TomlLine use to parse one line content of a toml file
 #[derive(Debug)]

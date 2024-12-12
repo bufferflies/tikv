@@ -14,9 +14,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use dashmap::DashMap;
-use nix::NixPath;
-use sysinfo::{DiskExt, System as Sys, SystemExt};
-use tikv_util::sys::SysQuota;
+use tikv_util::config::AbsoluteOrPercentSize;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
@@ -246,16 +244,18 @@ pub enum IaCapacity {
         small_queue: QueueOptions,
         main_queue: QueueOptions,
     },
-    MemoryRatio(f64),
-    MemoryCap(i64),
+    MemoryCap(AbsoluteOrPercentSize),
     /// Small queue in memory & main queue in disk.
-    MemoryAndDiskRatio(f64 /* mem_ratio */, PathBuf, f64 /* disk_ratio */),
-    MemoryAndDiskCap(i64 /* mem_cap */, PathBuf, i64 /* disk_ratio */),
+    MemoryAndDiskCap(
+        AbsoluteOrPercentSize, // mem_cap
+        PathBuf,
+        AbsoluteOrPercentSize, // disk_cap
+    ),
 }
 
 impl Default for IaCapacity {
     fn default() -> Self {
-        IaCapacity::MemoryRatio(0.2)
+        IaCapacity::MemoryCap(AbsoluteOrPercentSize::Percent(20.0))
     }
 }
 
@@ -269,37 +269,26 @@ impl IaCapacity {
                 options.small_queue = small_queue;
                 options.main_queue = main_queue;
             }
-            IaCapacity::MemoryRatio(ratio) => {
-                let mem_cap = (SysQuota::memory_limit_in_bytes() as f64 * ratio) as i64;
-                Self::set_options_by_mem_cap(mem_cap, options);
-            }
             IaCapacity::MemoryCap(cap) => {
-                Self::set_options_by_mem_cap(cap, options);
-            }
-            IaCapacity::MemoryAndDiskRatio(mem_ratio, local_dir, disk_ratio) => {
-                let mem_cap = (SysQuota::memory_limit_in_bytes() as f64 * mem_ratio) as i64;
+                let mem_cap = cap.as_memory_size() as i64;
                 options.small_queue.path = None;
-                options.small_queue.cap = mem_cap;
-
-                let disk_cap = (get_disk_capacity(&local_dir)? as f64 * disk_ratio) as i64;
-                options.main_queue.path = Some(local_dir);
-                options.main_queue.cap = disk_cap;
+                options.small_queue.cap = mem_cap / MAIN_QUEUE_CAPACITY_FACTOR;
+                options.main_queue.path = None;
+                options.main_queue.cap = mem_cap - options.small_queue.cap;
             }
             IaCapacity::MemoryAndDiskCap(mem_cap, local_dir, disk_cap) => {
+                let mem_cap = mem_cap.as_memory_size();
                 options.small_queue.path = None;
-                options.small_queue.cap = mem_cap;
+                options.small_queue.cap = mem_cap as i64;
+
+                let disk_cap = disk_cap
+                    .as_disk_size(&local_dir)
+                    .map_err(|err| Error::Io(format!("get disk capacity failed: {err:?}")))?;
                 options.main_queue.path = Some(local_dir);
-                options.main_queue.cap = disk_cap;
+                options.main_queue.cap = disk_cap as i64;
             }
         }
         Ok(())
-    }
-
-    fn set_options_by_mem_cap(mem_cap: i64, options: &mut IaManagerOptions) {
-        options.small_queue.path = None;
-        options.small_queue.cap = mem_cap / MAIN_QUEUE_CAPACITY_FACTOR;
-        options.main_queue.path = None;
-        options.main_queue.cap = mem_cap - options.small_queue.cap;
     }
 
     #[cfg(any(test, feature = "testexport"))]
@@ -316,10 +305,10 @@ impl IaCapacity {
                     *path = parent.join(&path);
                 }
             }
-            IaCapacity::MemoryAndDiskRatio(_, dir, _) | IaCapacity::MemoryAndDiskCap(_, dir, _) => {
+            IaCapacity::MemoryAndDiskCap(_, dir, _) => {
                 *dir = parent.join(&dir);
             }
-            IaCapacity::MemoryCap(..) | IaCapacity::MemoryRatio(..) => {}
+            IaCapacity::MemoryCap(..) => {}
         }
     }
 }
@@ -360,23 +349,6 @@ impl IaManagerOptionsBuilder {
 
         Ok(options)
     }
-}
-
-fn get_disk_capacity(dir: &Path) -> Result<u64> {
-    let sys = Sys::new_all();
-    // find the mounted disk of the data dir.
-    let mut data_disk = None;
-    let mut mount_point_len = 0;
-    for disk in sys.disks() {
-        let mp = disk.mount_point();
-        if dir.starts_with(mp) && mp.len() > mount_point_len {
-            data_disk = Some(disk);
-            mount_point_len = mp.len();
-        }
-    }
-    data_disk
-        .map(|disk| disk.total_space())
-        .ok_or_else(|| Error::Io(format!("Unable to find disk for dir: {:?}", dir)))
 }
 
 #[cfg(any(test, feature = "testexport"))]
@@ -472,13 +444,17 @@ mod tests {
     fn test_ia_capacity() {
         let mut options = IaManagerOptions::default();
 
-        let ia_cap = IaCapacity::MemoryRatio(0.2);
+        let ia_cap = IaCapacity::MemoryCap(AbsoluteOrPercentSize::Percent(20.0));
         ia_cap.build_options(&mut options).unwrap();
-        println!("options for MemoryRatio(0.2): {:?}", options);
+        println!("options for MemoryCap(20%): {:?}", options);
 
         let temp_dir = TempDir::new().unwrap();
-        let ia_cap = IaCapacity::MemoryAndDiskRatio(0.1, temp_dir.path().to_path_buf(), 0.1);
+        let ia_cap = IaCapacity::MemoryAndDiskCap(
+            AbsoluteOrPercentSize::Percent(10.0),
+            temp_dir.path().to_path_buf(),
+            AbsoluteOrPercentSize::Percent(10.0),
+        );
         ia_cap.build_options(&mut options).unwrap();
-        println!("options for DiskRatio(0.1): {:?}", options);
+        println!("options for MemoryAndDiskCap(10%+10%): {:?}", options);
     }
 }

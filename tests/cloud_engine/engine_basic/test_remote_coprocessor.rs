@@ -2654,9 +2654,9 @@ impl<'a> DagTest<'a> {
         let ia_ctx = if enable {
             let path = self.ctx.temp_dir.path();
             let cap = IaCapacity::MemoryAndDiskCap(
-                100 * IA_SEGMENT_SIZE,
+                (100 * IA_SEGMENT_SIZE as u64).into(),
                 path.join("seg"),
-                1000 * IA_SEGMENT_SIZE,
+                (1000 * IA_SEGMENT_SIZE as u64).into(),
             );
             let opts = IaManagerOptionsBuilder::default()
                 .capacity(cap)

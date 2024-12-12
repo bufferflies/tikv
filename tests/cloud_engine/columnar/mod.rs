@@ -855,7 +855,7 @@ fn test_columnar_ia_file() {
         .unwrap();
     let schema_files = Arc::new(DashMap::new());
     let local_path = temp_dir.path().join("ia");
-    let ia_cap = IaCapacity::MemoryAndDiskCap(0, local_path.clone(), 1000);
+    let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), local_path.clone(), 1000.into());
     let options = IaManagerOptionsBuilder::default()
         .capacity(ia_cap)
         .segment_size(64)

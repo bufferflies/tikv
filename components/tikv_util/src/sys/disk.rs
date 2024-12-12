@@ -1,5 +1,9 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::{
+    io,
+    path::Path,
+    sync::atomic::{AtomicI32, AtomicU64, Ordering},
+};
 
 use fail::fail_point;
 pub use kvproto::disk_usage::DiskUsage;
@@ -77,4 +81,30 @@ pub fn get_disk_status(_store_id: u64) -> DiskUsage {
         2 => DiskUsage::AlreadyFull,
         _ => panic!("Disk Status Value not meet expectations"),
     }
+}
+
+pub fn get_disk_capacity(dir: &Path) -> io::Result<u64> {
+    use nix::NixPath;
+    use sysinfo::{DiskExt, RefreshKind, System, SystemExt};
+
+    lazy_static::lazy_static! {
+        static ref SYS_INFO: System = System::new_with_specifics(RefreshKind::new().with_disks_list());
+    }
+
+    // find the mounted disk of the data dir.
+    let mut data_disk = None;
+    let mut mount_point_len = 0;
+    for disk in SYS_INFO.disks() {
+        let mp = disk.mount_point();
+        if dir.starts_with(mp) && mp.len() > mount_point_len {
+            data_disk = Some(disk);
+            mount_point_len = mp.len();
+        }
+    }
+    data_disk.map(|disk| disk.total_space()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Unable to find disk for dir: {dir:?}"),
+        )
+    })
 }
