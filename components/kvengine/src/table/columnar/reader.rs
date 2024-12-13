@@ -1143,8 +1143,9 @@ impl ColumnarRowTableReader {
     }
 
     fn is_unsigned(col_info: &ColumnInfo) -> bool {
-        let flag = FieldTypeFlag::from_bits(col_info.get_flag() as u32).unwrap();
-        flag.contains(FieldTypeFlag::UNSIGNED)
+        FieldTypeFlag::from_bits(col_info.get_flag() as u32)
+            .map(|f| f.contains(FieldTypeFlag::UNSIGNED))
+            .unwrap_or(false)
     }
 
     fn decode_decimal_as_int(col_info: &ColumnInfo, decimal: &Decimal) -> Vec<u8> {
