@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, iter::FromIterator, sync::Arc};
 
-use api_version::{ApiV2, KeyMode, KvFormat};
+use api_version::ApiV2;
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use collections::HashSet;
@@ -55,8 +55,8 @@ impl BlackList {
         }
     }
 
-    pub(crate) fn check_blocked(&mut self, region_id: u64, start: &[u8], end: &[u8]) -> bool {
-        if let Some(keyspace_id) = get_keyspace_id(start, end) {
+    pub(crate) fn check_blocked(&mut self, region_id: u64, start: &[u8]) -> bool {
+        if let Some(keyspace_id) = ApiV2::get_u32_keyspace_id_by_key(start) {
             if self.keyspace_ids.contains(&keyspace_id) {
                 BLACKLIST_REGION_GAUGE.inc();
                 self.region_ids.insert(region_id);
@@ -77,15 +77,6 @@ impl BlackList {
         BLACKLIST_REGION_GAUGE.add(region_ids.len() as i64);
         self.region_ids.extend(region_ids);
     }
-}
-
-pub(crate) fn get_keyspace_id(start: &[u8], end: &[u8]) -> Option<u32> {
-    let start_mode = ApiV2::parse_key_mode(start);
-    let end_mode = ApiV2::parse_key_mode(end);
-    if start_mode != KeyMode::Txn || end_mode != KeyMode::Txn {
-        return None;
-    }
-    Some(ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(start)))
 }
 
 impl RecoverHandler {
@@ -382,11 +373,7 @@ impl kvengine::MetaIterator for RecoverHandler {
                 }
                 if let Some(black_list) = self.black_list.as_mut() {
                     let snap = cs.get_snapshot();
-                    if black_list.check_blocked(
-                        cs.shard_id,
-                        snap.get_outer_start(),
-                        snap.get_outer_end(),
-                    ) {
+                    if black_list.check_blocked(cs.shard_id, snap.get_outer_start()) {
                         warn!("region {} blocked by black list", cs.shard_id);
                         // Collect all file ids for blacklisted region.
                         snap.get_l0_creates().iter().for_each(|f| {

@@ -2607,9 +2607,7 @@ impl BoundedDataSet for ShardRange {
 
 impl ShardRange {
     pub fn new(outer_start: &[u8], outer_end: &[u8], inner_key_off: usize) -> Self {
-        let keyspace_id = ApiV2::get_keyspace_prefix(outer_start)
-            .map(|prefix| ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(prefix)))
-            .unwrap_or_default();
+        let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(outer_start).unwrap_or_default();
         Self {
             outer_start: Bytes::from(outer_start.to_vec()),
             outer_end: Bytes::from(outer_end.to_vec()),

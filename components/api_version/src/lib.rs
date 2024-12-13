@@ -11,8 +11,6 @@ use kvproto::kvrpcpb::ApiVersion;
 pub use match_template::match_template;
 use txn_types::{Key, TimeStamp};
 
-use crate::api_v2::KeyspaceId;
-
 pub trait KvFormat: Clone + Copy + 'static + Send + Sync {
     const TAG: ApiVersion;
     /// Corresponding TAG of client requests. For test only.
@@ -101,7 +99,7 @@ pub trait KvFormat: Clone + Copy + 'static + Send + Sync {
         })
     }
 
-    fn strip_keyspace(key: &[u8]) -> Result<(Option<KeyspaceId>, &[u8])> {
+    fn strip_keyspace(key: &[u8]) -> Result<(Option<u32>, &[u8])> {
         Ok((None, key))
     }
 }
@@ -276,7 +274,7 @@ mod tests {
         assert_eq!(ApiV1Ttl::parse_key_mode(&b"ot"[..]), KeyMode::Raw);
         assert_eq!(
             ApiV2::parse_key_mode(&[RAW_KEY_PREFIX, b'a', b'b', b'c']),
-            KeyMode::Raw
+            KeyMode::Unknown
         );
         assert_eq!(
             ApiV2::parse_key_mode(&[TXN_KEY_PREFIX, b'a', b'b', b'c']),
@@ -324,11 +322,11 @@ mod tests {
         );
         assert_eq!(
             ApiV2::parse_range_mode((Some(b"r\0\0a"), Some(b"r\0\0z"))),
-            KeyMode::Raw
+            KeyMode::Unknown
         );
         assert_eq!(
             ApiV2::parse_range_mode((Some(b"r\0\0\0"), Some(b"s"))),
-            KeyMode::Raw
+            KeyMode::Unknown
         );
         assert_eq!(
             ApiV2::parse_range_mode((Some(b"t_a"), Some(b"ua"))),

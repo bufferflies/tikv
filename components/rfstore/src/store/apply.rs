@@ -2043,7 +2043,7 @@ pub(crate) fn build_split_pb(
         } else if is_whole_keyspace_range(&raw_start, &raw_end)
             && !keyspace_encryption_keys.is_empty()
         {
-            let keyspace_id = ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(&raw_start));
+            let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&raw_start).unwrap_or_default();
             if let Some(encryption_key) = keyspace_encryption_keys.remove(&keyspace_id) {
                 props.mut_keys().push(ENCRYPTION_KEY.to_string());
                 props.mut_values().push(encryption_key);

@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use api_version::ApiV2;
 use concurrency_manager::ConcurrencyManager;
 use fail::fail_point;
 use kvproto::{
@@ -1048,7 +1049,7 @@ impl<'a> StoreMsgHandler<'a> {
                 debug!("region {} blocked by black list", region_id);
                 return;
             }
-            if let Some(keyspace_id) = get_keyspace_id(msg.get_start_key(), msg.get_end_key()) {
+            if let Some(keyspace_id) = ApiV2::get_u32_keyspace_id_by_key(msg.get_start_key()) {
                 if black_list.is_keyspace_blocked(keyspace_id) {
                     debug!("keyspace {} blocked by black list", keyspace_id);
                     return;

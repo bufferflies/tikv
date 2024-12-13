@@ -489,7 +489,7 @@ impl PdRunner {
                     .unwrap_or_default()
             };
             if is_whole_keyspace_range(&raw_start, &raw_end) {
-                let keyspace_id = ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(&raw_start));
+                let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&raw_start).unwrap_or_default();
                 match pd_client.get_keyspace_encryption(keyspace_id) {
                     Err(e) if pd_client::grpc_error_is_unimplemented(&e) => {
                         warn!(

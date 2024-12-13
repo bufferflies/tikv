@@ -169,8 +169,7 @@ fn test_snap_marshal_with_opt(enable_inner_key_offset: bool) {
         conf.enable_inner_key_offset = enable_inner_key_offset;
     });
     let mut client = cluster.new_client();
-    let keyspace_id_array = api_version::ApiV2::get_keyspace_id("x123".as_bytes());
-    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id(keyspace_id_array);
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key("x123".as_bytes()).unwrap_or_default();
     client.split_keyspace(keyspace_id);
     client.put_kv(0..100, i_to_key, i_to_val);
     client.put_kv(100..200, i_to_key, i_to_val);
@@ -218,8 +217,8 @@ fn test_cloud_store_reset_range_with_opt(enable_inner_key: bool) {
     });
     let mut client = cluster.new_client();
 
-    let keyspace_id_array = api_version::ApiV2::get_keyspace_id("x123".as_bytes());
-    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id(keyspace_id_array);
+    let keyspace_id =
+        api_version::ApiV2::get_u32_keyspace_id_by_key("x123".as_bytes()).unwrap_or_default();
     client.split_keyspace(keyspace_id);
 
     client.put_kv(3..10, i_to_key, i_to_val);

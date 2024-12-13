@@ -2,7 +2,7 @@
 
 use std::{fmt::Debug, marker::PhantomData, time::Duration};
 
-use api_version::{api_v2::KeyspaceId, KvFormat};
+use api_version::KvFormat;
 use paste::paste;
 use tikv_util::time::Instant;
 use yatp::task::future::reschedule;
@@ -78,7 +78,7 @@ pub struct RangesScannerOptions<T> {
 pub struct IndexedKvPair {
     key: Vec<u8>,
     value: Vec<u8>,
-    keyspace: Option<KeyspaceId>,
+    keyspace: Option<u32>,
     offset: usize,
 }
 
@@ -108,7 +108,7 @@ impl IndexedKvPair {
         (self.key(), self.value())
     }
 
-    pub fn keyspace(&self) -> Option<KeyspaceId> {
+    pub fn keyspace(&self) -> Option<u32> {
         self.keyspace
     }
 }

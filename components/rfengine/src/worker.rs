@@ -16,7 +16,7 @@ use std::{
     thread::JoinHandle,
 };
 
-use api_version::{api_v2, ApiV2};
+use api_version::ApiV2;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
 use kvproto::raft_serverpb::RegionLocalState;
@@ -519,7 +519,7 @@ impl Worker {
     }
 
     fn get_keyspace_id_from_peer(peer_meta: &rfenginepb::PeerMeta) -> u32 {
-        let keyspace_id = match peer_meta
+        match peer_meta
             .get_states()
             .iter()
             .rev() // the states are got from BTreeMap iter, so the last one is latest.
@@ -528,15 +528,15 @@ impl Worker {
             Some(state) => {
                 let mut local_state = RegionLocalState::default();
                 local_state.merge_from_bytes(state.get_value()).unwrap();
-                utils::get_region_keyspace_id(local_state.get_region())
+                ApiV2::get_u32_keyspace_id_by_key(local_state.get_region().get_start_key())
+                    .unwrap_or_default()
             }
             None => {
                 warn!("Get unknown keyspace id peer {:?}", peer_meta);
                 debug_assert!(peer_meta.peer_id == 0 && peer_meta.region_id == 0);
-                api_v2::UNKNOWN_KEYSPACE_ID
+                0
             }
-        };
-        ApiV2::get_u32_keyspace_id(keyspace_id)
+        }
     }
 
     // Aggregate all raft logs into one file by keyspace id.
@@ -1337,7 +1337,7 @@ mod tests {
     fn test_get_keyspace_id_from_peer() {
         init_logger();
         let mut peer_meta = rfenginepb::PeerMeta::default();
-        assert_eq!(Worker::get_keyspace_id_from_peer(&peer_meta), 16777215);
+        assert_eq!(Worker::get_keyspace_id_from_peer(&peer_meta), 0);
         write_keyspace_state(&mut peer_meta, 100);
         write_keyspace_state(&mut peer_meta, 200);
         assert_eq!(Worker::get_keyspace_id_from_peer(&peer_meta), 200);

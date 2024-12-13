@@ -40,8 +40,6 @@ bitflags::bitflags! {
     }
 }
 
-pub type KeyspaceId = [u8; KEYSPACE_ID_LEN];
-
 impl KvFormat for ApiV2 {
     const TAG: ApiVersion = ApiVersion::V2;
     #[cfg(any(test, feature = "testexport"))]
@@ -54,7 +52,6 @@ impl KvFormat for ApiV2 {
         }
 
         match key[0] {
-            RAW_KEY_PREFIX => KeyMode::Raw,
             TXN_KEY_PREFIX => KeyMode::Txn,
             TIDB_META_KEY_PREFIX | TIDB_TABLE_KEY_PREFIX => KeyMode::Tidb,
             _ => KeyMode::Unknown,
@@ -217,12 +214,12 @@ impl KvFormat for ApiV2 {
         }
     }
 
-    fn strip_keyspace(key: &[u8]) -> Result<(Option<KeyspaceId>, &[u8])> {
+    fn strip_keyspace(key: &[u8]) -> Result<(Option<u32>, &[u8])> {
         if key.len() < KEYSPACE_PREFIX_LEN {
             return Err(Error::KeyLength.into());
         }
-        let id = Self::get_keyspace_id(key);
-        Ok((Some(id), &key[KEYSPACE_PREFIX_LEN..]))
+        let id = Self::get_u32_keyspace_id_by_key(key);
+        Ok((id, &key[KEYSPACE_PREFIX_LEN..]))
     }
 }
 
@@ -259,22 +256,11 @@ impl ApiV2 {
         apiv2_key
     }
 
-    pub fn get_keyspace_id(key: &[u8]) -> [u8; KEYSPACE_ID_LEN] {
-        assert!(key.len() >= KEYSPACE_PREFIX_LEN);
-        [key[1], key[2], key[3]]
-    }
-
-    pub fn get_u32_keyspace_id(keyspace_id: [u8; KEYSPACE_ID_LEN]) -> u32 {
-        [0, keyspace_id[0], keyspace_id[1], keyspace_id[2]]
-            .as_slice()
-            .get_u32()
-    }
-
     /// Return `None` when the key is not an API V2 key.
     pub fn get_u32_keyspace_id_by_key(key: &[u8]) -> Option<u32> {
         let key_mode = Self::parse_key_mode(key);
-        if key_mode == KeyMode::Raw || key_mode == KeyMode::Txn {
-            Some(Self::get_u32_keyspace_id(Self::get_keyspace_id(key)))
+        if key_mode == KeyMode::Txn {
+            Some([0, key[1], key[2], key[3]].as_slice().get_u32())
         } else {
             None
         }
@@ -299,11 +285,7 @@ impl ApiV2 {
     }
 
     pub fn get_keyspace_prefix(key: &[u8]) -> Option<&[u8]> {
-        let key_mode = ApiV2::parse_key_mode(key);
-        if key_mode == KeyMode::Unknown || key_mode == KeyMode::Tidb {
-            return None;
-        }
-        Some(&key[0..KEYSPACE_PREFIX_LEN])
+        matches!(ApiV2::parse_key_mode(key), KeyMode::Txn).then(|| &key[0..KEYSPACE_PREFIX_LEN])
     }
 
     /// Check whether two keys are in the same keyspace.
@@ -614,10 +596,10 @@ mod tests {
             (b"x0011".to_vec(), b"x002".to_vec(), false),
             (b"r0011".to_vec(), b"r0012".to_vec(), true), // Raw
             (b"r001".to_vec(), b"r0011".to_vec(), true),
-            (b"r0011".to_vec(), b"r0021".to_vec(), false),
+            (b"r0011".to_vec(), b"r0021".to_vec(), true),
             (b"x0011".to_vec(), b"r0011".to_vec(), false), // Txn vs. Raw
             (b"x0011".to_vec(), b"00121".to_vec(), false), // Txn/Raw vs. Unknown/TiDB
-            (b"r0011".to_vec(), b"00121".to_vec(), false),
+            (b"r0011".to_vec(), b"00121".to_vec(), true),
             (b"01234".to_vec(), b"02345".to_vec(), true), // Unknown/TiDB
             (b"m1234".to_vec(), b"m2345".to_vec(), true),
             (b"m1234".to_vec(), b"t2345".to_vec(), true),

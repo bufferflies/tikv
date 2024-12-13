@@ -727,9 +727,9 @@ mod tests {
             (b"x0000", b"x0010", (true, true)),
             // Raw
             (b"r0000", b"r0001", (false, false)),
-            (b"r0000", b"r0010", (true, true)),
+            (b"r0000", b"r0010", (false, false)),
             // Txn & Raw
-            (b"x0000", b"r0000", (true, true)),
+            (b"x0000", b"r0000", (true, false)),
             // Txn & TiDB/Unknown
             (b"x0000", b"t", (true, false)),
             (b"t", b"x0000", (false, true)),

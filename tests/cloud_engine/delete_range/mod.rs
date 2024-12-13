@@ -2,6 +2,7 @@
 
 use std::{thread, time::Duration};
 
+use api_version::ApiV2;
 use pd_client::PdClient;
 use test_cloud_server::{must_wait, oss, ServerCluster};
 use tikv::config::TikvConfig;
@@ -24,7 +25,7 @@ fn test_delete_range_helper(enable_inner_key_off: bool) {
     let mut client = cluster.new_client();
 
     // split keyspace region for inner key offset to take effect.
-    client.split_keyspace(get_keyspace_id("x123".as_bytes()));
+    client.split_keyspace(ApiV2::get_u32_keyspace_id_by_key("x123".as_bytes()).unwrap_or_default());
 
     // insert "key_100".."key_500"
     client.put_kv(100..500, i_to_key_with_prefix, i_to_val);
@@ -100,7 +101,7 @@ fn test_delete_range_lost_table_delete() {
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
     });
     let mut client = cluster.new_client();
-    client.split_keyspace(get_keyspace_id("x123".as_bytes()));
+    client.split_keyspace(ApiV2::get_u32_keyspace_id_by_key("x123".as_bytes()).unwrap_or_default());
 
     client.put_kv(200..350, i_to_key_with_prefix, i_to_val);
     client.put_kv(350..450, i_to_key_with_prefix, i_to_val);
@@ -186,9 +187,4 @@ fn i_to_val(i: usize) -> Vec<u8> {
 
 fn i_to_key_with_prefix(i: usize) -> Vec<u8> {
     format!("x123key_{:03}", i).into_bytes()
-}
-
-fn get_keyspace_id(keyspace: &[u8]) -> u32 {
-    let keyspace_id_array = api_version::ApiV2::get_keyspace_id(keyspace);
-    api_version::ApiV2::get_u32_keyspace_id(keyspace_id_array)
 }

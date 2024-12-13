@@ -5,10 +5,7 @@ use std::{
     result::Result as StdResult,
 };
 
-use api_version::{
-    api_v2::{self, KEYSPACE_ID_LEN},
-    ApiV2, KeyMode, KvFormat,
-};
+use api_version::{ApiV2, KeyMode, KvFormat};
 use bytes::{BufMut, Bytes, BytesMut};
 use kvproto::metapb;
 use regex::Regex;
@@ -43,8 +40,7 @@ fn is_api_v2_region(region: &metapb::Region) -> bool {
     let start_key_mode = ApiV2::parse_key_mode(startkey);
     let end_key_mode = ApiV2::parse_key_mode(endkey);
 
-    (start_key_mode == KeyMode::Raw || start_key_mode == KeyMode::Txn)
-        && (end_key_mode == KeyMode::Raw || end_key_mode == KeyMode::Txn)
+    start_key_mode == KeyMode::Txn && end_key_mode == KeyMode::Txn
 }
 
 pub fn compress_lz4(uncompressed: &[u8], compressed_buf: &mut Vec<u8>) -> std::io::Result<usize> {
@@ -71,14 +67,6 @@ pub fn get_region_keyspace_id_str(region: &metapb::Region) -> Option<String> {
         return Some(keyspace_id_str);
     }
     None
-}
-
-pub(crate) fn get_region_keyspace_id(region: &metapb::Region) -> [u8; KEYSPACE_ID_LEN] {
-    if is_api_v2_region(region) {
-        ApiV2::get_keyspace_id(region.start_key.as_slice())
-    } else {
-        api_v2::UNKNOWN_KEYSPACE_ID
-    }
 }
 
 pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64) -> PathBuf {
@@ -367,40 +355,7 @@ pub mod test_util {
 
 #[cfg(test)]
 mod tests {
-    use api_version::{
-        api_v2::{self},
-        ApiV2,
-    };
-    use kvproto::metapb::Region;
-
     use super::*;
-    use crate::test_util::{get_txn_endkey_prefix, get_txn_startkey_prefix};
-
-    #[test]
-    fn test_get_region_keyspace_id() {
-        let keyspace_id = 1;
-        let startkey = get_txn_startkey_prefix(keyspace_id);
-        let endkey = get_txn_endkey_prefix(keyspace_id);
-
-        let mut region = Region {
-            id: keyspace_id as u64,
-            start_key: startkey.to_vec(),
-            end_key: endkey.to_vec(),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            get_region_keyspace_id_str(&region).unwrap(),
-            keyspace_id.to_string()
-        );
-        assert_eq!(
-            get_region_keyspace_id(&region),
-            ApiV2::get_keyspace_id(&keyspace_id.to_be_bytes())
-        );
-        region.start_key = vec![];
-        assert!(get_region_keyspace_id_str(&region).is_none());
-        assert_eq!(get_region_keyspace_id(&region), api_v2::UNKNOWN_KEYSPACE_ID);
-    }
 
     #[test]
     fn test_parse_snapshot_key() {

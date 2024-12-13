@@ -205,7 +205,8 @@ mod tests {
         let global_latches = GlobalLatches::new(1024);
 
         let key_1_str = "x001abc";
-        let keyspace_1 = ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(key_1_str.as_bytes()));
+        let keyspace_1 =
+            ApiV2::get_u32_keyspace_id_by_key(key_1_str.as_bytes()).unwrap_or_default();
         let mut lock_1 = Lock::new(keyspace_1, &[Key::from_raw(key_1_str.as_bytes())]);
         assert!(global_latches.acquire(&mut lock_1, 1));
 
@@ -218,7 +219,8 @@ mod tests {
         assert!(global_latches.acquire(&mut lock_1_conflict, 2));
 
         let key_2_str = "x002abc";
-        let keyspace_2 = ApiV2::get_u32_keyspace_id(ApiV2::get_keyspace_id(key_2_str.as_bytes()));
+        let keyspace_2 =
+            ApiV2::get_u32_keyspace_id_by_key(key_2_str.as_bytes()).unwrap_or_default();
         let mut lock_2 = Lock::new(keyspace_2, &[Key::from_raw(key_2_str.as_bytes())]);
 
         // The key hash is calculated with keyspace prefix trimmed, so the hashes should
