@@ -328,7 +328,7 @@ impl KvPairsWorker {
                 result.error,
             );
             cb(result);
-            return Ok(());
+            return Err(Error::Canceled);
         }
 
         if chunk_data.is_empty() {
@@ -481,6 +481,7 @@ impl KvPairsWorker {
 
             file_metas.push(unhandled_flush_file.file_meta);
         }
+        self.scheduler.add_flushed_files(need_handled);
 
         let mut checkpoint_guard = self.checkpoint.lock().unwrap();
         checkpoint_guard.update_l0_flushed_info(
@@ -489,7 +490,6 @@ impl KvPairsWorker {
             file_metas.clone(),
             last_key_comm_prefix.clone(),
         )?;
-        self.scheduler.add_flushed_files(need_handled);
 
         self.flushed_chunk_ids = handled_chunk_ids;
         self.key_comm_prefix = last_key_comm_prefix;
@@ -636,7 +636,7 @@ impl KvPairsWorker {
                 self.scheduler.is_finished(),
                 self.scheduler.error_msg(),
             );
-            return Ok((vec![], vec![]));
+            return Err(Error::Canceled);
         }
 
         if !self.kv_pairs.is_empty() || self.l0_file_metas.len() < self.l0_file_idx {
@@ -769,6 +769,7 @@ impl KvPairsWorker {
             );
             self.dup_entries = merge_iter.duplicated_entries;
         }
+        self.scheduler.add_flushed_files(self.l1_file_metas.len());
 
         let mut checkpoint_guard = self.checkpoint.lock().unwrap();
         checkpoint_guard.update_l1_flushed_info(
@@ -776,7 +777,6 @@ impl KvPairsWorker {
             self.l1_file_metas.clone(),
             self.dup_entries.clone(),
         )?;
-        self.scheduler.add_flushed_files(self.l1_file_metas.len());
         info!(
             "{} worker-{} finish sorting, takes {:?}",
             self.task_ctx.task_id,
@@ -1145,7 +1145,7 @@ impl BuildingWorker {
                 self.scheduler.is_finished(),
                 self.scheduler.error_msg(),
             );
-            return Ok(());
+            return Err(Error::Canceled);
         }
 
         if self.ingested {
@@ -1233,7 +1233,7 @@ impl BuildingWorker {
                 self.scheduler.is_finished(),
                 self.scheduler.error_msg(),
             );
-            return Ok(vec![]);
+            return Err(Error::Canceled);
         }
         if !self.sst_metas.is_empty() {
             return Ok(mem::take(&mut self.dup_entries));
@@ -1320,6 +1320,7 @@ impl BuildingWorker {
             );
             self.dup_entries = merge_iter.duplicated_entries;
         }
+        self.scheduler.add_created_files(self.sst_metas.len());
 
         let mut checkpoint_guard = self.checkpoint_store.lock().unwrap();
         checkpoint_guard.update_sst_metas(
@@ -1327,7 +1328,6 @@ impl BuildingWorker {
             self.sst_metas.clone(),
             self.dup_entries.clone(),
         )?;
-        self.scheduler.add_created_files(self.sst_metas.len());
 
         info!(
             "{} worker-{} finish building, sst metas: {}, duplicated entries: {}, takes {:?}",

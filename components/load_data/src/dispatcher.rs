@@ -447,6 +447,7 @@ impl Dispatcher {
                 self.task_ctx.task_id, err
             );
         }
+        drop(checkpoint_guard);
         info!(
             "{} dispatcher finish building, duplicated entries: {}, takes {:?}",
             self.task_ctx.task_id,

@@ -262,19 +262,22 @@ pub struct LoadTaskScheduler {
 
 impl LoadTaskScheduler {
     pub fn cancel(&self, err: String) {
-        warn!("canceled {}", err);
-
         let mut states = self.states.write().unwrap();
-        let check_point_store_mutex = Arc::clone(&self.checkpoint_store);
-        let mut check_point_store_guard = check_point_store_mutex.lock().unwrap();
-        check_point_store_guard
-            .update_cancel_and_errmsg(true, err.clone())
-            .unwrap();
+        if states.canceled {
+            return;
+        }
+        warn!("canceled {}", err);
         states.canceled = true;
-        states.error = err;
+        states.error = err.clone();
+        drop(states);
+
+        let mut checkpoint_guard = self.checkpoint_store.lock().unwrap();
+        checkpoint_guard
+            .update_cancel_and_errmsg(true, err)
+            .unwrap();
+        let task_id = &checkpoint_guard.checkpoint_ctx.task_id;
 
         let ts = Utc::now().timestamp();
-        let task_id = &check_point_store_guard.checkpoint_ctx.task_id;
         LOAD_DATA_TASK_STATE
             .with_label_values(&[task_id, "cancel"])
             .set(ts as f64);
