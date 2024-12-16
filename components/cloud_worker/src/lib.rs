@@ -32,11 +32,7 @@ use dashmap::DashMap;
 use kvengine::{
     context::IaCtx,
     dfs::{DFSConfig, Dfs, S3Fs},
-    ia::{
-        manager::IaManager,
-        util::{IaCapacity, IaManagerOptionsBuilder},
-        IA_FREQ_UPDATE_INTERVAL_DEF, IA_SEGMENT_SIZE_DEF,
-    },
+    ia::{manager::IaManager, util::IaConfig},
     table::{
         sstable::{BlockCache, BlockCacheType},
         ChecksumType,
@@ -55,7 +51,7 @@ use security::{SecurityConfig, SecurityManager};
 pub use server::get_cop_req_tag;
 use slog_global::{error, info, warn};
 use tikv_util::{
-    config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
+    config::{ReadableDuration, ReadableSize},
     quota_limiter::QuotaLimiter,
     sys::{record_global_memory_usage, SysQuota},
     time::Instant,
@@ -369,12 +365,9 @@ fn create_ia_ctx(
         let segment_path = ia_path.join("segment");
         fs::create_dir_all(&segment_path)
             .map_err(|err| format!("create segment path failed: {err:?}"))?;
-        let cap = IaCapacity::MemoryAndDiskCap(config.ia_mem_cap, segment_path, config.ia_disk_cap);
-        let opts = IaManagerOptionsBuilder::default()
-            .capacity(cap)
-            .segment_size(config.ia_segment_size)
-            .freq_update_interval(config.ia_freq_update_interval.0)
-            .build()
+        let opts = config
+            .ia
+            .to_manager_options(segment_path)
             .map_err(|err| format!("build IA options failed: {err:?}"))?;
 
         let rt = runtime.clone();
@@ -628,15 +621,9 @@ pub struct Config {
     pub txn_chunk_manager: TxnChunkManagerConfig,
     pub txn_chunk_target_block_entries: usize,
 
-    /// The memory & disk capacity usage ratio for IA (Infrequent Access) of
-    /// remote coprocessor.
-    ///
-    /// Enable IA by setting `!data_dir.is_empty() && ia_mem_cap > 0 &&
-    /// ia_disk_cap > 0`.
-    pub ia_mem_cap: AbsoluteOrPercentSize,
-    pub ia_disk_cap: AbsoluteOrPercentSize,
-    pub ia_segment_size: i64,
-    pub ia_freq_update_interval: ReadableDuration,
+    /// Enable IA by setting `!data_dir.is_empty() && ia.mem_cap > 0 &&
+    /// ia.disk_cap > 0`.
+    pub ia: IaConfig,
 
     pub push_metrics_addr: String,
     pub push_metrics_interval: ReadableDuration,
@@ -671,10 +658,7 @@ impl Default for Config {
             schema_manager: SchemaManagerConfig::default(),
             txn_chunk_manager: TxnChunkManagerConfig::default(),
             txn_chunk_target_block_entries: txn_chunk::TARGET_BLOCK_ENTRIES_DEF,
-            ia_mem_cap: Default::default(),
-            ia_disk_cap: Default::default(),
-            ia_segment_size: IA_SEGMENT_SIZE_DEF,
-            ia_freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
+            ia: IaConfig::default(),
             push_metrics_addr: String::default(),
             push_metrics_interval: ReadableDuration::secs(30),
         }
@@ -721,6 +705,6 @@ impl Config {
     pub fn is_ia_enabled(&self) -> bool {
         self.is_remote_cop_enabled()
             && !self.data_dir.is_empty()
-            && (!self.ia_mem_cap.is_zero() && !self.ia_disk_cap.is_zero())
+            && (!self.ia.mem_cap.is_zero() && !self.ia.disk_cap.is_zero())
     }
 }

@@ -14,7 +14,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use dashmap::DashMap;
-use tikv_util::config::AbsoluteOrPercentSize;
+use tikv_util::config::{AbsoluteOrPercentSize, ReadableDuration};
 use tokio::io::AsyncWriteExt;
 
 use crate::{
@@ -234,8 +234,9 @@ impl LocalStore for LocalMemoryStore {
     }
 }
 
-pub const IA_SEGMENT_SIZE_DEF: i64 = 1 << 20; // 1MiB
-pub const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(60);
+const IA_SEGMENT_SIZE_DEF: i64 = 1 << 20; // 1MiB
+const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(60);
+const IA_DFS_CONCURRENCY_DEF: usize = 32;
 
 const MAIN_QUEUE_CAPACITY_FACTOR: i64 = 10; // Main queue is 10x larger than small queue.
 
@@ -318,6 +319,7 @@ pub struct IaManagerOptionsBuilder {
     capacity: Option<IaCapacity>,
     segment_size: Option<i64>,
     freq_update_interval: Option<Duration>,
+    dfs_concurrency: Option<usize>,
 }
 
 impl IaManagerOptionsBuilder {
@@ -336,6 +338,11 @@ impl IaManagerOptionsBuilder {
         self
     }
 
+    pub fn dfs_concurrency(mut self, concurrency: usize) -> Self {
+        self.dfs_concurrency = Some(concurrency);
+        self
+    }
+
     pub fn build(mut self) -> Result<IaManagerOptions> {
         let mut options = IaManagerOptions::default();
 
@@ -346,8 +353,46 @@ impl IaManagerOptionsBuilder {
         options.freq_update_interval = self
             .freq_update_interval
             .unwrap_or(IA_FREQ_UPDATE_INTERVAL_DEF);
+        options.dfs_concurrency = self.dfs_concurrency.unwrap_or(IA_DFS_CONCURRENCY_DEF);
 
         Ok(options)
+    }
+}
+
+/// The config of IA (Infrequent Access) which use memory for small queue and
+/// disk for main queue.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct IaConfig {
+    pub mem_cap: AbsoluteOrPercentSize,
+    pub disk_cap: AbsoluteOrPercentSize,
+    pub segment_size: i64,
+    pub freq_update_interval: ReadableDuration,
+    pub dfs_concurrency: usize,
+}
+
+impl Default for IaConfig {
+    fn default() -> Self {
+        Self {
+            mem_cap: Default::default(),
+            disk_cap: Default::default(),
+            segment_size: IA_SEGMENT_SIZE_DEF,
+            freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
+            dfs_concurrency: IA_DFS_CONCURRENCY_DEF,
+        }
+    }
+}
+
+impl IaConfig {
+    pub fn to_manager_options(&self, data_path: PathBuf) -> Result<IaManagerOptions> {
+        let cap = IaCapacity::MemoryAndDiskCap(self.mem_cap, data_path, self.disk_cap);
+        IaManagerOptionsBuilder::default()
+            .capacity(cap)
+            .segment_size(self.segment_size)
+            .freq_update_interval(self.freq_update_interval.0)
+            .dfs_concurrency(self.dfs_concurrency)
+            .build()
     }
 }
 

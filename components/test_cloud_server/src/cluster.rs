@@ -21,7 +21,8 @@ use dashmap::DashMap;
 use futures::executor::block_on;
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
 use kvengine::{
-    dfs::Dfs, table::sstable::BlockCacheType, txn_chunk_manager::TxnChunkManagerConfig, ShardStats,
+    dfs::Dfs, ia::util::IaConfig, table::sstable::BlockCacheType,
+    txn_chunk_manager::TxnChunkManagerConfig, ShardStats,
 };
 use kvproto::{
     kvrpcpb::{Mutation, Op},
@@ -732,10 +733,13 @@ impl ServerCluster {
                 cop_block_cache_type: opts.cop_block_cache_type,
                 cop_block_size: tikv_config.rocksdb.writecf.block_size,
                 data_dir: data_dir.to_string_lossy().into_owned(),
-                ia_segment_size: opts.ia_segment_size,
-                ia_freq_update_interval: ReadableDuration(opts.ia_freq_update_interval),
-                ia_mem_cap: opts.ia_mem_cap.into(),
-                ia_disk_cap: opts.ia_disk_cap.into(),
+                ia: IaConfig {
+                    segment_size: opts.ia_segment_size,
+                    freq_update_interval: ReadableDuration(opts.ia_freq_update_interval),
+                    mem_cap: opts.ia_mem_cap.into(),
+                    disk_cap: opts.ia_disk_cap.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
 

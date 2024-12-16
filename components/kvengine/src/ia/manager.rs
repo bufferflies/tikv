@@ -14,6 +14,7 @@ use bytes::Bytes;
 use dashmap::mapref::entry::Entry;
 use engine_traits::GetObjectOptions;
 use tikv_util::time::Instant;
+use tokio::sync::Semaphore;
 
 use crate::{
     dfs::{Dfs, FileType, S3Fs},
@@ -78,6 +79,8 @@ pub struct IaManagerOptions {
     /// Used to handle the scene that a single request touch multiple slice of a
     /// segment and increase the freq unexpectedly.
     pub freq_update_interval: Duration,
+
+    pub dfs_concurrency: usize,
 }
 
 impl IaManagerOptions {
@@ -127,6 +130,8 @@ impl IaManager {
             segment_data_ctx,
         );
 
+        let dfs_concurrency = Arc::new(Semaphore::new(opts.dfs_concurrency));
+
         let core = Arc::new(IaManagerCore {
             segment_size: opts.segment_size,
             s3fs,
@@ -136,6 +141,7 @@ impl IaManager {
             fifo,
             cache_hit_counter: Default::default(),
             cache_miss_counter: Default::default(),
+            dfs_concurrency,
         });
 
         let mgr = Self { core };
@@ -155,6 +161,8 @@ pub struct IaManagerCore {
     fifo: S3FifoHandle,
     cache_hit_counter: AtomicU64,
     cache_miss_counter: AtomicU64,
+
+    dfs_concurrency: Arc<Semaphore>,
 }
 
 impl IaManagerCore {
@@ -251,7 +259,9 @@ impl IaManagerCore {
         ident: &FileSegmentIdent,
         ftype: FileType,
     ) -> Result<Bytes> {
-        // TODO: rate limit
+        let _permit = self.dfs_concurrency.acquire().await.map_err(|err| {
+            Error::IaMgr(format!("acquire DFS concurrency permit failed: {:?}", err))
+        })?;
 
         let opts = GetObjectOptions {
             start_off: Some(ident.start_off),
