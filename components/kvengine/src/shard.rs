@@ -1180,7 +1180,12 @@ impl Shard {
 
     pub fn get_writable_mem_table_size(&self) -> u64 {
         let guard = self.data.read().unwrap();
-        guard.mem_tbls[0].size()
+        let mem_tbl = &guard.mem_tbls[0];
+        let mut size = mem_tbl.size();
+        if guard.prepend_keyspace_id().is_some() {
+            size += (mem_tbl.skip_list_entries() * KEYSPACE_PREFIX_LEN) as u64;
+        }
+        size
     }
 
     pub fn has_over_bound_data(&self) -> bool {

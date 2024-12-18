@@ -2,6 +2,7 @@
 
 use std::{cmp, collections::HashMap, iter::Iterator};
 
+use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BytesMut};
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
@@ -252,7 +253,11 @@ impl Engine {
             self.refresh_shard_states(&shard);
         }
         store_u64(&shard.write_sequence, wb.sequence);
-        let size = mem_tbl.size();
+        let mut size = mem_tbl.size();
+        let skip_list_entries = mem_tbl.skip_list_entries();
+        if data.prepend_keyspace_id().is_some() {
+            size += (skip_list_entries * KEYSPACE_PREFIX_LEN) as u64;
+        }
         if wb.switch_mem_table || size > self.opts.max_mem_table_size {
             self.switch_mem_table(&shard, version, false);
             if let Err(err) = self.trigger_flush(&shard) {
