@@ -556,7 +556,7 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(1, TikvWorkerOptions::default());
+    cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
@@ -965,7 +965,7 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(1, TikvWorkerOptions::default());
+    cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client_opt(ClusterClientOptions {

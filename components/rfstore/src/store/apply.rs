@@ -59,7 +59,10 @@ use txn_types::LockType;
 use super::*;
 use crate::{
     errors::*,
-    store::cmd_resp::{bind_term, err_resp},
+    store::{
+        cmd_resp::{bind_term, err_resp},
+        metrics::STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER,
+    },
     RaftRouter, RaftStoreRouter,
 };
 
@@ -1514,6 +1517,8 @@ impl Applier {
                 .unwrap()
                 .send_command(req, Callback::None);
             self.mut_mem_table_state(&ctx.engine).proposed_time = Some(now);
+
+            STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER.inc();
         }
     }
 
@@ -1880,7 +1885,7 @@ impl MemTableState {
             // The proposal maybe failed for some reason, propose again.
             warn!("{} propose switch mem-table expired, propose again", tag);
         }
-        if self.max_mem_table_size < BYTES_MB {
+        if cfg!(debug_assertions) && self.max_mem_table_size < BYTES_MB {
             // running in test mode, use probability algorithm to switch for better
             // coverage.
             let size_ratio = self.mem_table_size as f64 / self.max_mem_table_size as f64;

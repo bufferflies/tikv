@@ -50,7 +50,7 @@ use tikv_util::{
 };
 use tipb::{Chunk, Executor, Expr, ExprType, ScalarFuncSig};
 
-use crate::{alloc_node_id, request_major_compaction, wait_for_keyspace_stats};
+use crate::{alloc_node_id, alloc_node_id_vec, request_major_compaction, wait_for_keyspace_stats};
 
 const FLAG_IGNORE_TRUNCATE: u64 = 1;
 const FLAG_TRUNCATE_AS_WARNING: u64 = 1 << 1;
@@ -2387,7 +2387,7 @@ impl<'a> DagTest<'a> {
             },
             pd,
         );
-        cluster.start_tikv_workers(1, TikvWorkerOptions::default());
+        cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
 
         let mut client = cluster.new_client_opt(ClusterClientOptions {
             txn_file_max_chunk_size: Some(1024),

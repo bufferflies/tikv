@@ -9,7 +9,11 @@ use kvproto::metapb;
 use security::{RestfulClient, SecurityManager};
 use serde::Deserialize;
 use slog_global::debug;
-use tikv_util::config::ReadableDuration;
+use tikv_util::{
+    config::{ReadableDuration, ReadableSize},
+    retry::sleep_async,
+    time::Instant,
+};
 
 use crate::Config;
 
@@ -24,6 +28,10 @@ const PD_STATS_REGION: &str = "pd/api/v1/stats/region";
 const PD_HEALTH_PATH: &str = "health";
 const PD_SCHEDULERS_PATH: &str = "pd/api/v1/schedulers";
 const PD_OPERATORS_PATH: &str = "pd/api/v1/operators";
+const PD_STORES_PATH: &str = "pd/api/v1/stores";
+const PD_STORE_PATH: &str = "pd/api/v1/store";
+
+const EVICT_LEADER_SCHEDULER: &str = "evict-leader-scheduler";
 
 const TIFLASH_GROUP: &str = "tiflash";
 
@@ -154,8 +162,7 @@ impl PdControl {
         }
     }
 
-    pub async fn create_scheduler(&self, name: String) -> Result<()> {
-        let param = CreateSchedulerParam { name };
+    pub async fn create_scheduler(&self, param: CreateSchedulerParam) -> Result<()> {
         let body_data = Bytes::from(serde_json::to_vec(&param)?);
         let resp = self
             .client
@@ -163,6 +170,12 @@ impl PdControl {
             .await?;
         debug!("pd_control::create_scheduler"; "resp" => resp.to_str_lossy().as_ref());
         Ok(())
+    }
+
+    pub async fn remove_scheduler(&self, name: &str) -> Result<String> {
+        let query = format!("{PD_SCHEDULERS_PATH}/{name}");
+        let resp = self.client.delete(query).await?;
+        Ok(resp.to_str_lossy().to_string())
     }
 
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/operator.go
@@ -175,6 +188,50 @@ impl PdControl {
         let query = format!("{PD_OPERATORS_PATH}/{region_id}");
         let _ = self.client.delete(query).await?;
         Ok(())
+    }
+
+    pub async fn get_stores(&self) -> Result<Vec<StoreInfo>> {
+        let resp: StoresInfoResponse = self.client.get(PD_STORES_PATH).await?;
+        Ok(resp.stores)
+    }
+
+    pub async fn get_store(&self, store_id: u64) -> Result<StoreInfo> {
+        self.client.get(format!("{PD_STORE_PATH}/{store_id}")).await
+    }
+
+    pub async fn find_store_by_status_address(
+        &self,
+        status_address: &str,
+    ) -> Result<Option<StoreInfo>> {
+        let resp: StoresInfoResponse = self.client.get(PD_STORES_PATH).await?;
+        Ok(resp
+            .stores
+            .into_iter()
+            .find(|store| store.store.status_address == status_address))
+    }
+
+    /// Evict all leaders from the specified store.
+    ///
+    /// Return OK when all leaders are evicted or the timeout is reached.
+    pub async fn evict_store_leaders(
+        &self,
+        store_id: u64,
+        timeout: Duration,
+    ) -> Result<(StoreInfo, String /* scheduler_name */)> {
+        self.create_scheduler(CreateSchedulerParam {
+            name: EVICT_LEADER_SCHEDULER.to_string(),
+            store_id: Some(store_id),
+        })
+        .await?;
+
+        let start_time = Instant::now_coarse();
+        loop {
+            let store = self.get_store(store_id).await?;
+            if store.status.leader_count == 0 || start_time.saturating_elapsed() > timeout {
+                return Ok((store, EVICT_LEADER_SCHEDULER.to_string()));
+            }
+            sleep_async(Duration::from_millis(500)).await;
+        }
     }
 }
 
@@ -299,6 +356,9 @@ pub struct Scheduler {
 #[serde(default)]
 pub struct CreateSchedulerParam {
     pub name: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<u64>,
 }
 
 #[derive(Default, Deserialize, Debug)]
@@ -408,6 +468,36 @@ pub enum OpKind {
     OpWitnessLeader = 1 << 8,
     // Include witness transfer.
     OpWitness = 1 << 9,
+}
+
+// Ref: https://github.com/tidbcloud/pd-cse/blob/release-8.1-keyspace/pkg/response/store.go
+#[derive(Default, Deserialize, Debug)]
+pub struct StoresInfoResponse {
+    pub count: u64,
+    pub stores: Vec<StoreInfo>,
+}
+
+#[derive(Default, Deserialize, Debug)]
+pub struct StoreInfo {
+    pub store: MetaStore,
+    pub status: StoreStatus,
+}
+
+#[derive(Default, Deserialize, Debug)]
+pub struct MetaStore {
+    pub id: u64,
+    pub address: String,
+    pub status_address: String,
+    pub git_hash: String,
+    pub state_name: String,
+}
+
+#[derive(Default, Deserialize, Debug)]
+pub struct StoreStatus {
+    pub capacity: ReadableSize,
+    pub available: ReadableSize,
+    pub leader_count: u64,
+    pub region_count: u64,
 }
 
 #[cfg(test)]

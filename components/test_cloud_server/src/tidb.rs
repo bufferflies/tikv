@@ -4,7 +4,7 @@ use std::{
     fs, ops,
     path::{Path, PathBuf},
     process::{
-        Command, {self},
+        Child, Command, {self},
     },
     sync::Arc,
     time::Duration,
@@ -15,6 +15,7 @@ use futures::executor::block_on;
 use grpcio::EnvBuilder;
 use kvengine::dfs::DFSConfig;
 use kvproto::metapb;
+use nix::sys::signal::Signal;
 use pd_client::{
     pd_control::{PdControl, PdScheduleConfig},
     PdClient,
@@ -541,7 +542,7 @@ impl TidbCluster {
         let tiflash = TiFlashServers::new(tiflash_bin, base_path.path().to_owned(), security_mgr);
 
         let inner = TidbClusterCore {
-            _data_path: base_path,
+            data_path: base_path,
             pd,
             tidb,
             tiflash,
@@ -570,7 +571,7 @@ pub struct StartTidbOptions {
 }
 
 pub struct TidbClusterCore {
-    _data_path: TempDir,
+    data_path: TempDir,
 
     pub pd: PdServers,
     pub tidb: TidbServers,
@@ -640,6 +641,10 @@ impl TidbClusterCore {
             timeout.as_secs() as usize,
         );
         assert!(ok, "stores: {:?}", pd_client.get_all_stores(true).unwrap());
+    }
+
+    pub fn data_path(&self) -> &Path {
+        self.data_path.path()
     }
 }
 
@@ -794,7 +799,7 @@ fn get_idx_from_keyspace_name(name: &str) -> u16 {
 }
 
 /// Check binaries by running with "-V".
-fn check_binary(name: &str, bin_path: &Path) {
+pub(crate) fn check_binary(name: &str, bin_path: &Path) {
     let mut cmd = Command::new(bin_path);
     if name == "tiflash" {
         cmd.arg("--version");
@@ -815,4 +820,11 @@ fn check_binary(name: &str, bin_path: &Path) {
         name,
         String::from_utf8_lossy(&output.stdout).as_ref()
     );
+}
+
+pub(crate) fn send_signal_to_child(child: &Child, signal: Signal) -> nix::Result<()> {
+    use nix::{libc::pid_t, sys::signal::kill, unistd::Pid};
+
+    let pid = Pid::from_raw(child.id() as pid_t);
+    kill(pid, signal)
 }

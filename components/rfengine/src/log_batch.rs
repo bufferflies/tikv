@@ -152,7 +152,7 @@ impl RaftLogBlock {
 /// `RaftLogs` contains continuous raft logs in memory for a single raft group.
 #[derive(Clone, Default)]
 pub(crate) struct RaftLogs {
-    // Actually one `VecDeque<RaftLogOp>` can satisfiy our requirements. However, when
+    // Actually one `VecDeque<RaftLogOp>` can satisfy our requirements. However, when
     // truncating, it may drop lots of raft logs in the main thread which hurts the performance,
     // so we allocate small chunks of raft logs and transfer them to the background worker to drop.
     blocks: VecDeque<RaftLogBlock>,

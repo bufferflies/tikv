@@ -13,7 +13,7 @@ use bytes::BytesMut;
 use futures::executor::block_on;
 use kvengine::dfs;
 use pd_client::{
-    pd_control::{CreateKeyspaceParams, SchedulerStatus},
+    pd_control::{CreateKeyspaceParams, CreateSchedulerParam, SchedulerStatus},
     PdClient,
 };
 use rand::prelude::*;
@@ -451,6 +451,31 @@ fn test_pd_control() {
         let health = pd_ctl.health().await.unwrap();
         info!("pd_control::get_health: {:?}", health);
 
+        let stores = pd_ctl.get_stores().await.unwrap();
+        info!("pd_control::get_stores: {:?}", stores);
+
+        {
+            let node_id = *cluster.get_nodes().first().unwrap();
+            let status_addr = &cluster.get_node_config(node_id).server.status_addr;
+            let store = pd_ctl
+                .find_store_by_status_address(status_addr)
+                .await
+                .unwrap()
+                .unwrap();
+            info!(
+                "pd_control::find_store_by_status_address: status_addr {}, store {:?}",
+                status_addr, store
+            );
+            assert_eq!(store.store.id, cluster.get_store_id(node_id));
+        }
+
+        {
+            let store_id = *cluster.get_stores().first().unwrap();
+            let store = pd_ctl.get_store(store_id).await.unwrap();
+            info!("pd_control::get_store: {:?}", store);
+            assert_eq!(store.store.id, store_id);
+        }
+
         let tiflash_rule_group = pd_ctl.get_tiflash_placement_rule_group().await.unwrap();
         info!(
             "pd_control::get_tiflash_placement_rule_group: {:?}",
@@ -462,10 +487,24 @@ fn test_pd_control() {
             "shuffle-region-scheduler",
             "random-merge-scheduler",
         ] {
-            pd_ctl
-                .create_scheduler(scheduler_name.to_string())
-                .await
-                .unwrap();
+            let param = CreateSchedulerParam {
+                name: scheduler_name.to_string(),
+                ..Default::default()
+            };
+            pd_ctl.create_scheduler(param).await.unwrap();
+        }
+
+        {
+            for store_id in cluster.get_stores() {
+                let (store, scheduler_name) = pd_ctl
+                    .evict_store_leaders(store_id, Duration::from_secs(5))
+                    .await
+                    .unwrap();
+                info!("pd_control::evict_store_leaders: {:?}", store);
+
+                let msg = pd_ctl.remove_scheduler(&scheduler_name).await.unwrap();
+                info!("pd_control::remove_scheduler: {}: {}", scheduler_name, msg);
+            }
         }
 
         let operators = pd_ctl.get_operators().await.unwrap();
@@ -533,7 +572,7 @@ fn test_tikv_worker() {
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(2, TikvWorkerOptions::default());
+    cluster.start_tikv_workers(alloc_node_id_vec(2), TikvWorkerOptions::default());
     let mut client = cluster.new_client();
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
     client.split_keyspace(keyspace_id);

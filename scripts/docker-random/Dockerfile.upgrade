@@ -1,9 +1,11 @@
 ARG TIDB_VERSION=v7.5.0
 ARG PD_VERSION=v8.1.0
+ARG TIKV_VERSION
 ARG TIFLASH_VERSION=v7.5.0
 
 FROM hub-new.pingcap.net/keyspace/tidb:${TIDB_VERSION} as tidb
 FROM hub-new.pingcap.net/keyspace/pd:${PD_VERSION} as pd
+FROM hub-new.pingcap.net/sunxiaoguang/serverless/tikv:${TIKV_VERSION} as tikv-server
 FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
 
@@ -17,10 +19,14 @@ RUN dnf update -y && dnf install -y \
 
 COPY --from=tidb /tidb-server /tidb-server
 COPY --from=pd /pd-server /pd-server
+COPY --from=tikv-server /tikv-server /tikv-server
+COPY --from=tikv-server /tikv-worker /tikv-worker
 COPY --from=tiflash /tiflash /tiflash
 COPY --from=go-tpc /go-tpc /go-tpc
 
 ENV TIDB_BIN=/tidb-server
 ENV PD_BIN=/pd-server
+ENV TIKV_SERVER_BIN=/tikv-server
+ENV TIKV_WORKER_BIN=/tikv-worker
 ENV TIFLASH_BIN=/tiflash/tiflash
 ENV TPC_BIN=/go-tpc

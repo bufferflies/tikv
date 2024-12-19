@@ -595,38 +595,41 @@ extern crate serde_derive;
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
     pub addr: String,
-    pub pd: pd_client::Config,
-    pub security: SecurityConfig,
     pub update_interval: ReadableDuration,
-    pub dfs: DFSConfig,
     pub log_file: String,
     pub log_level: String,
     pub data_dir: String,
     pub register: bool,
-    pub native_br: NativeBrConfig,
     pub cop_addr: String,
     pub cop_cache_size: ReadableSize,
     pub cop_block_cache_size: ReadableSize,
     pub cop_block_cache_type: BlockCacheType,
     // Used to calculate block cache capacity of items. Should be the same as tikv-server.
     pub cop_block_size: ReadableSize,
-    pub worker_scaler: WorkerScalerConfig,
     pub report_wru: bool,
     pub enable_load_data_check_point: bool,
     pub enable_load_data_multi_threads: bool,
     pub checksum_type: ChecksumType,
+
+    pub txn_chunk_target_block_entries: usize,
+
+    pub push_metrics_addr: String,
+    pub push_metrics_interval: ReadableDuration,
+
+    // Embedded configurations must be placed at the end of the struct.
+    // Otherwise, it will fail to serialize to toml.
+    pub pd: pd_client::Config,
+    pub security: SecurityConfig,
+    pub dfs: DFSConfig,
+    pub native_br: NativeBrConfig,
+    pub worker_scaler: WorkerScalerConfig,
     pub worker_limiter: WorkerLimiterConfig,
     pub schema_manager: SchemaManagerConfig,
-
     pub txn_chunk_manager: TxnChunkManagerConfig,
-    pub txn_chunk_target_block_entries: usize,
 
     /// Enable IA by setting `!data_dir.is_empty() && ia.mem_cap > 0 &&
     /// ia.disk_cap > 0`.
     pub ia: IaConfig,
-
-    pub push_metrics_addr: String,
-    pub push_metrics_interval: ReadableDuration,
 }
 
 impl Default for Config {

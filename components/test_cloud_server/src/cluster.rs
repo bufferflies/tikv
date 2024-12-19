@@ -3,13 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{
-            AtomicU16,
-            Ordering::{self, Relaxed},
-        },
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     thread::sleep,
     time::Duration,
 };
@@ -56,11 +50,11 @@ use crate::{
     client::{ApiV2NoPrefixCodec, ClusterClient, ClusterClientOptions, ClusterTxnClient, RefStore},
     keyspace::{ClusterKeyspaceClient, KeyspaceManager},
     scheduler::Scheduler,
+    tikv_bin::wait_tikv_worker_healthy,
     txn::{lock_resolver::LockResolver, txn_file::TxnFileHelper},
 };
 
 const REGION_MEM_LIMIT_RATIO: f64 = 0.2;
-static TIKV_WORKER_IDX_ALLOCATOR: AtomicU16 = AtomicU16::new(0);
 const TIKV_WORKER_UPDATE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 
 const TXN_CHUNK_MGR_GC_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
@@ -91,6 +85,7 @@ pub struct ServerCluster {
     confs: HashMap<u16 /* node_id */, TikvConfig>,
     keyspace_manager: KeyspaceManager,
     nodes_count: usize,
+    tikv_worker_configs: HashMap<u16 /* idx */, cloud_worker::Config>,
     tikv_workers: HashMap<u16 /* idx */, CloudWorker>,
     schema_manager: Option<CloudWorker>,
 }
@@ -120,6 +115,7 @@ impl ServerCluster {
             .tempdir()
             .unwrap();
         let pd_client = pd_wrapper.client();
+        let nodes_count = nodes.len();
         let mut cluster = Self {
             servers: HashMap::new(),
             tmp_dir,
@@ -133,15 +129,23 @@ impl ServerCluster {
             schedule_lock: Arc::new(DashMap::new()),
             confs: Default::default(),
             keyspace_manager: Default::default(),
-            nodes_count: nodes.len(),
+            nodes_count,
+            tikv_worker_configs: Default::default(),
             tikv_workers: Default::default(),
             schema_manager: None,
         };
         for node_id in nodes {
             cluster.start_node(node_id, &update_conf);
         }
-        cluster.wait_pd_region_min_count(1);
+        if nodes_count > 0 {
+            // When there is no node, PD will not bootstrap.
+            cluster.wait_pd_region_min_count(1);
+        }
         cluster
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        self.tmp_dir.path()
     }
 
     pub fn get_dfs(&self) -> Option<Arc<dyn Dfs>> {
@@ -243,6 +247,10 @@ impl ServerCluster {
 
     pub fn get_node_config(&self, node_id: u16) -> &TikvConfig {
         self.confs.get(&node_id).unwrap()
+    }
+
+    pub fn update_node_config(&mut self, node_id: u16, conf: TikvConfig) {
+        self.confs.insert(node_id, conf);
     }
 
     pub fn stop(&mut self) {
@@ -374,6 +382,7 @@ impl ServerCluster {
                     continue;
                 }
             };
+            info!("wait region replicated"; "region" => ?region_info);
             let region_id = region_info.id;
             let region_ver = region_info.get_region_epoch().version;
             let voter_count = region_info
@@ -383,9 +392,17 @@ impl ServerCluster {
                 .count();
             if voter_count >= replica_cnt {
                 let all_applied_snapshot = region_info.get_peers().iter().all(|peer| {
-                    let node_id = self.get_server_node_id(peer.store_id);
-                    let kv = self.get_kvengine(node_id);
-                    kv.get_shard_with_ver(region_id, region_ver).is_ok()
+                    match self.get_server_node_id(peer.store_id) {
+                        Some(node_id) => {
+                            let kv = self.get_kvengine(node_id);
+                            kv.get_shard_with_ver(region_id, region_ver).is_ok()
+                        }
+                        None => {
+                            // Skip to check shard version when the store is not existed.
+                            // It means that the store is stopped or start externally.
+                            true
+                        }
+                    }
                 });
                 if all_applied_snapshot {
                     return;
@@ -465,13 +482,13 @@ impl ServerCluster {
         panic!("kvengine is not empty");
     }
 
-    fn get_server_node_id(&self, store_id: u64) -> u16 {
+    fn get_server_node_id(&self, store_id: u64) -> Option<u16> {
         for (node_id, server) in &self.servers {
             if server.get_store_id() == store_id {
-                return *node_id;
+                return Some(*node_id);
             }
         }
-        panic!("server not found");
+        None
     }
 
     pub fn new_client(&self) -> ClusterClient {
@@ -703,15 +720,11 @@ impl ServerCluster {
             .collect()
     }
 
-    pub fn start_tikv_workers(&mut self, workers_cnt: usize, opts: TikvWorkerOptions) {
-        assert!(
-            self.tikv_workers.is_empty(),
-            "start tikv workers more than once is not supported"
-        );
-        let tikv_config = self.confs.iter().next().unwrap().1;
-        for _ in 0..workers_cnt {
-            let idx = TIKV_WORKER_IDX_ALLOCATOR.fetch_add(1, Relaxed);
-
+    pub fn generate_tikv_worker_configs(&mut self, worker_ids: Vec<u16>, opts: TikvWorkerOptions) {
+        let (_, tikv_config) = self.confs.iter().next().unwrap_or_else(|| {
+            panic!("no tikv config found");
+        });
+        for idx in worker_ids {
             let data_dir = self.tmp_dir.path().join(format!("worker-{idx}"));
             std::fs::create_dir_all(&data_dir)
                 .unwrap_or_else(|e| panic!("create dir {:?} failed: {:?}", data_dir, e));
@@ -743,22 +756,53 @@ impl ServerCluster {
                 ..Default::default()
             };
 
-            let mut worker = CloudWorker::new(
-                tikv_worker_conf,
-                None,
-                opts.threads_cnt,
-                self.get_pure_pd_client(),
-            );
-            worker.start();
-            self.tikv_workers.insert(idx, worker);
+            self.tikv_worker_configs.insert(idx, tikv_worker_conf);
         }
     }
 
-    pub fn start_schema_manager(&mut self) {
+    pub fn tikv_worker_configs(&self) -> &HashMap<u16 /* idx */, cloud_worker::Config> {
+        &self.tikv_worker_configs
+    }
+
+    pub fn start_tikv_workers(&mut self, worker_ids: Vec<u16>, opts: TikvWorkerOptions) {
+        let threads_cnt = opts.threads_cnt;
+        self.generate_tikv_worker_configs(worker_ids, opts);
+        self.start_tikv_workers_on_existed_configs(threads_cnt);
+    }
+
+    pub fn start_tikv_workers_on_existed_configs(&mut self, threads_cnt: usize) {
+        for (&idx, conf) in &self.tikv_worker_configs {
+            let mut worker =
+                CloudWorker::new(conf.clone(), None, threads_cnt, self.get_pure_pd_client());
+            worker.start();
+            let prev = self.tikv_workers.insert(idx, worker);
+            assert!(prev.is_none());
+        }
+    }
+
+    pub fn stop_tikv_workers(&mut self) {
+        for (_, child) in self.tikv_workers.drain() {
+            child.shutdown();
+        }
+    }
+
+    pub async fn tikv_workers_must_healthy(&self, timeout: Duration) {
+        for ep in self.tikv_worker_endpoints() {
+            wait_tikv_worker_healthy(ep.clone(), self.security_mgr.clone(), timeout)
+                .await
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "tikv-worker: wait healthy timeout: endpoint {}, err {:?}",
+                        ep, err
+                    );
+                })
+        }
+    }
+
+    pub fn start_schema_manager(&mut self, worker_idx: u16) {
         let tikv_config = self.confs.iter().next().unwrap().1;
-        let idx = TIKV_WORKER_IDX_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
         let worker_config = cloud_worker::Config {
-            addr: tikv_worker_addr(idx),
+            addr: tikv_worker_addr(worker_idx),
             cop_addr: "".to_string(),
             pd: pd_client::Config::new(self.pd_endpoints().to_vec()),
             security: tikv_config.security.clone(),

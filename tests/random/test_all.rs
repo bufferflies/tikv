@@ -394,7 +394,7 @@ fn prepare_cluster(
     let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
     let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
     cluster.start_tikv_workers(
-        TIKV_WORKERS_COUNT,
+        alloc_node_id_vec(TIKV_WORKERS_COUNT),
         TikvWorkerOptions {
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
             cop_block_cache_type: block_cache_type,

@@ -15,6 +15,7 @@ LOG_PATH=""
 PATH_SUFFIX=""
 TESTNAME="all"
 TIDB_VERSION="v7.5.0"
+TIKV_VERSION=""
 REBUILD_IMAGE=1
 declare -a RUN_ARGS
 RUN_ARGS=()
@@ -24,15 +25,16 @@ MEMORY_PROFILE=0
 show_help() {
 	echo "Usage: $0 [OPTIONS]"
 	echo "OPTIONS:"
-	echo "  --help                             Display this message"
-	echo "  --tmp-path     <temporary path>    Set the path for temporary data generated during testing"
-	echo "  --log-path     <log path>          Set the path for logs"
-	echo "  --path-with-suffix                 Add git commit and timestamp to the path as suffix"
-	echo "  --test         <all/with_tidb>     Set the name of test case to run"
-	echo "  --tidb-version <v6.6.0/v7.1.0/...> Set the version of TiDB for \"with_tidb\" test"
-	echo "  --no-rebuild-image                 Do NOT rebuild the testing Docker image"
-	echo "  --keep-tmp-on-error                Keep temporary data on error for debugging"
-	echo "  --memory-profile                   Enable memory profiling"
+	echo "  --help                                 Display this message"
+	echo "  --tmp-path     <temporary path>        Set the path for temporary data generated during testing"
+	echo "  --log-path     <log path>              Set the path for logs"
+	echo "  --path-with-suffix                     Add git commit and timestamp to the path as suffix"
+	echo "  --test         <all/with_tidb/upgrade> Set the name of test case to run"
+	echo "  --tidb-version <v6.6.0/v7.1.0/...>     Set the version of TiDB for \"with_tidb\" test"
+	echo "  --tikv-version <git_hash>              Set the version of old TiKV for \"upgrade\" test"
+	echo "  --no-rebuild-image                     Do NOT rebuild the testing Docker image"
+	echo "  --keep-tmp-on-error                    Keep temporary data on error for debugging"
+	echo "  --memory-profile                       Enable memory profiling"
 }
 
 PWD=$(pwd)
@@ -56,6 +58,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--tidb-version)
 		TIDB_VERSION="$2"
+		shift
+		;;
+	--tikv-version)
+		TIKV_VERSION="$2"
 		shift
 		;;
 	--no-rebuild-image)
@@ -121,14 +127,25 @@ if [ "$MEMORY_PROFILE" -eq 1 ] && [ "$KEEP_TMP_ON_ERROR" -ne 1 ]; then
 	echo "WARNING: --keep-tmp-on-error is not enabled. The profile dumps will be removed after each test."
 fi
 
+BUILD_IMAGE_ARGS=""
+if [ "$REBUILD_IMAGE" -eq 1 ]; then
+  BUILD_IMAGE_ARGS+=" --pull --no-cache"
+fi
+
 IMAGE="amazonlinux:2023.5.20241001.1"
 if [ "$TESTNAME" = "with_tidb" ]; then
-	BUILD_TIDB_IMAGE_ARGS=""
-	if [ "$REBUILD_IMAGE" -eq 1 ]; then
-		BUILD_TIDB_IMAGE_ARGS+=" --pull --no-cache"
-	fi
-	docker build $BUILD_TIDB_IMAGE_ARGS -t random-tidb --build-arg TIDB_VERSION="$TIDB_VERSION" - <Dockerfile.tidb
+	docker build $BUILD_IMAGE_ARGS -t random-tidb --build-arg TIDB_VERSION="$TIDB_VERSION" - <Dockerfile.tidb
 	IMAGE="random-tidb"
+elif [ "$TESTNAME" = "upgrade" ]; then
+  if [ -z "$TIKV_VERSION" ]; then
+    echo "ERROR: --tikv-version is required for upgrade test"
+    exit 1
+  fi
+	docker build $BUILD_IMAGE_ARGS -t random-upgrade \
+	  --build-arg TIDB_VERSION="$TIDB_VERSION" \
+	  --build-arg TIKV_VERSION="$TIKV_VERSION" \
+	  - <Dockerfile.upgrade
+	IMAGE="random-upgrade"
 elif [ "$MEMORY_PROFILE" -eq 1 ]; then
 	# Parse profile dumps in an environment different with container for random test would fail to translate the addresses to symbols.
 	# So provide an image with tools.

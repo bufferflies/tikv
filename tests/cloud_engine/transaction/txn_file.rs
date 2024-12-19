@@ -338,7 +338,7 @@ fn test_txn_file_basic_impl(
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(1, TikvWorkerOptions::default());
+    cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 
     let gen_key = generate_keyspace_key(KEYSPACE_ID);
@@ -482,7 +482,7 @@ fn test_txn_file_split_merge(#[case] enable_inner_key_off: bool) {
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(1, TikvWorkerOptions::default());
+    cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 
     let gen_key = generate_keyspace_key(KEYSPACE_ID);
@@ -706,7 +706,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(1, TikvWorkerOptions::default());
+    cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 
     let gen_key = generate_keyspace_key(KEYSPACE_ID);
@@ -1030,7 +1030,7 @@ fn test_txn_file_move_down(#[case] enable_inner_key_off: bool) {
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(1, TikvWorkerOptions::default());
+    cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 
     let gen_key = generate_keyspace_key(KEYSPACE_ID);
@@ -1197,7 +1197,7 @@ fn test_commit_primary_region() {
         },
         pd_wrapper,
     );
-    cluster.start_tikv_workers(1, TikvWorkerOptions::default());
+    cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 
     let gen_key = generate_keyspace_key(KEYSPACE_ID);

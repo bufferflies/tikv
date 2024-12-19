@@ -10,6 +10,7 @@ mod test_native_br;
 mod test_tidb;
 mod test_txn_file;
 mod test_unique;
+mod test_upgrade;
 
 use std::{
     collections::HashSet,

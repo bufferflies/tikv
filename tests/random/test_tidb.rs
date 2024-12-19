@@ -35,20 +35,20 @@ use crate::{
     *,
 };
 
-const REGION_SIZE: ReadableSize = ReadableSize::mb(1);
+pub(crate) const REGION_SIZE: ReadableSize = ReadableSize::mb(1);
 // TiDB has records with 200kb+ size (see "mysql.stats_history"), so set bucket
 // size to 256kb.
-const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(256);
+pub(crate) const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(256);
 // Ref: https://docs.pingcap.com/tidb/stable/pd-configuration-file#split-merge-interval
 const SPLIT_MERGE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 
 // Test on only one keyspace to simulate a heavy tenant. Scenes of multiple
 // keyspaces are covered by test_random_all.
-const INITIAL_KEYSPACE_COUNT: usize = 1;
-const NODES_COUNT: usize = 4;
+pub(crate) const INITIAL_KEYSPACE_COUNT: usize = 1;
+pub(crate) const NODES_COUNT: usize = 4;
 const TEST_DURATION: Duration = Duration::from_secs(120); // Test for longer as TiDB bootstrap may cost 30s+.
 
-const TIKV_WORKERS_COUNT: usize = 2;
+pub(crate) const TIKV_WORKERS_COUNT: usize = 2;
 
 const PD_COUNT: usize = 1;
 const PD_BIN_ENV_KEY: &str = "PD_BIN";
@@ -62,41 +62,44 @@ const TIDB_PORT_ENV_KEY: &str = "TIDB_PORT";
 const TIDB_PORT_DEFAULT: u16 = 4000;
 const TIDB_STATUS_PORT_ENV_KEY: &str = "TIDB_STATUS_PORT";
 const TIDB_STATUS_PORT_DEFAULT: u16 = 10080;
-const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
-const TIDB_LOG_LEVEL: &str = "info";
+pub(crate) const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const TIDB_LOG_LEVEL: &str = "info";
 
-const TIFLASH_SWITCH_ENV_KEY: &str = "USE_TIFLASH";
-const TIFLASH_BIN_ENV_KEY: &str = "TIFLASH_BIN";
-const TIFLASH_SERVER_COUNT: usize = 1;
-const TIFLASH_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const TIKV_SERVER_BIN_ENV_KEY: &str = "TIKV_SERVER_BIN";
+pub(crate) const TIKV_WORKER_BIN_ENV_KEY: &str = "TIKV_WORKER_BIN";
 
-const TPC_WORKLOAD_SWITCH_ENV_KEY: &str = "TPC_WORKLOAD";
-const TPC_BIN_ENV_KEY: &str = "TPC_BIN";
+pub(crate) const TIFLASH_SWITCH_ENV_KEY: &str = "USE_TIFLASH";
+pub(crate) const TIFLASH_BIN_ENV_KEY: &str = "TIFLASH_BIN";
+pub(crate) const TIFLASH_SERVER_COUNT: usize = 1;
+pub(crate) const TIFLASH_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
+
+pub(crate) const TPC_WORKLOAD_SWITCH_ENV_KEY: &str = "TPC_WORKLOAD";
+pub(crate) const TPC_BIN_ENV_KEY: &str = "TPC_BIN";
 const TPCC_WAREHOUSES: usize = 2;
 const TPCC_MAX_PROCS: usize = 1;
 const TPCC_THREADS: usize = 4; // Number of threads for each TPCC workload.
-const TPCC_RUN_DURATION: Duration = Duration::from_secs(10); // Duration of each TPCC run.
-const TPCC_WORKLOAD_CONCURRENCY: usize = 1;
+pub(crate) const TPCC_RUN_DURATION: Duration = Duration::from_secs(10); // Duration of each TPCC run.
+pub(crate) const TPCC_WORKLOAD_CONCURRENCY: usize = 1;
 
-const JEPSEN_WORKLOAD_SWITCH_ENV_KEY: &str = "JEPSEN_WORKLOAD";
-const JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY: &str = "JEPSEN_TXN_FILE";
-const JEPSEN_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
+pub(crate) const JEPSEN_WORKLOAD_SWITCH_ENV_KEY: &str = "JEPSEN_WORKLOAD";
+pub(crate) const JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY: &str = "JEPSEN_TXN_FILE";
+pub(crate) const JEPSEN_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
 
-const UNIQUE_WORKLOAD_SWITCH_ENV_KEY: &str = "UNIQUE_WORKLOAD";
-const UNIQUE_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
+pub(crate) const UNIQUE_WORKLOAD_SWITCH_ENV_KEY: &str = "UNIQUE_WORKLOAD";
+pub(crate) const UNIQUE_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
 
-const COLUMNAR_WORKLOAD_SWITCH_ENV_KEY: &str = "COLUMNAR_WORKLOAD";
-const COLUMNAR_WORKLOAD_KEYSPACE: u32 = 1;
+pub(crate) const COLUMNAR_WORKLOAD_SWITCH_ENV_KEY: &str = "COLUMNAR_WORKLOAD";
+pub(crate) const COLUMNAR_WORKLOAD_KEYSPACE: u32 = 1;
 
-const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
-const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset.
+pub(crate) const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset.
 
-const ENABLE_GLOBAL_TXN_FILE_RATIO: f64 = 0.8; // 80% chance enable txn file globally.
-const ENABLE_GLOBAL_TXN_FILE_ENV_KEY: &str = "GLOBAL_TXN_FILE";
+pub(crate) const ENABLE_GLOBAL_TXN_FILE_RATIO: f64 = 0.8; // 80% chance enable txn file globally.
+pub(crate) const ENABLE_GLOBAL_TXN_FILE_ENV_KEY: &str = "GLOBAL_TXN_FILE";
 
-const USE_REMOTE_COP_ENV_KEY: &str = "USE_REMOTE_COP";
-const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(16); // Small size to make eviction more frequent.
+pub(crate) const USE_REMOTE_COP_ENV_KEY: &str = "USE_REMOTE_COP";
+pub(crate) const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(16); // Small size to make eviction more frequent.
 
 #[test]
 fn test_random_with_tidb() {
@@ -143,9 +146,6 @@ fn test_random_with_tidb() {
     let pd_client = cluster.get_pd_client_ext();
     let pd_ctl = Arc::new(cluster.get_pd_control().unwrap());
     let keyspace_manager = cluster.keyspace_manager().clone();
-
-    let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
-    check_tpc_binary(&tpc_bin);
 
     let start_tidb = {
         let tc = tc.clone();
@@ -206,6 +206,9 @@ fn test_random_with_tidb() {
 
     let mut prepare_tasks = vec![];
     if tpc_switch_on {
+        let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
+        check_tpc_binary(&tpc_bin);
+
         let all_keyspaces = keyspace_manager.get_all_keyspaces();
         prepare_tasks.push(runtime.spawn(prepare_tpcc(
             tc.clone(),
@@ -242,6 +245,7 @@ fn test_random_with_tidb() {
 
     let mut async_handles = vec![];
     if tpc_switch_on {
+        let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).unwrap();
         for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
             async_handles.push(spawn_tpcc(
                 tc.clone(),
@@ -365,7 +369,7 @@ fn test_random_with_tidb() {
     tc.pd.stop_all();
 }
 
-fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
+pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
     let pd_bin = std::env::var(PD_BIN_ENV_KEY).expect("env PD_BIN is not set");
     let pd_port_base = std::env::var(PD_PORT_ENV_KEY)
         .map(|s| s.parse().unwrap())
@@ -428,9 +432,11 @@ fn prepare_cluster(
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
+    let tikv_worker_nodes = alloc_node_id_vec(TIKV_WORKERS_COUNT);
     let dfs_config = Arc::new(dfs_config.clone());
     let cpu_cores = SysQuota::cpu_cores_quota() as usize;
-    let update_conf_fn = move |node_id: u16, conf: &mut TikvConfig| {
+    let update_conf_fn = |_node_id: u16, conf: &mut TikvConfig| {
+        let mut rng = thread_rng();
         conf.dfs = (*dfs_config).clone();
         conf.enable_inner_key_offset = enable_inner_key_off;
         conf.security = security_conf.clone();
@@ -450,8 +456,7 @@ fn prepare_cluster(
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
 
         conf.rfengine.target_file_size = ReadableSize::mb(8);
-        conf.rfengine.batch_compression_threshold =
-            ReadableSize::kb(rand::thread_rng().gen_range(0..2));
+        conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
         conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
@@ -464,7 +469,8 @@ fn prepare_cluster(
         conf.storage.scheduler_worker_pool_size = cpu_cores;
 
         if use_remote_cop {
-            let cop_worker_url = tikv_worker_cop_url(node_id % TIKV_WORKERS_COUNT as u16);
+            let tikv_worker_idx = *tikv_worker_nodes.choose(&mut rng).unwrap();
+            let cop_worker_url = tikv_worker_cop_url(tikv_worker_idx);
             conf.kvengine.remote_worker_addr = cop_worker_url.clone();
             conf.kvengine.remote_coprocessor_addr = cop_worker_url;
             conf.kvengine.remote_coprocessor_min_blocks_size = 1024 * 1024;
@@ -477,7 +483,7 @@ fn prepare_cluster(
     };
     let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
     cluster.start_tikv_workers(
-        TIKV_WORKERS_COUNT,
+        tikv_worker_nodes,
         TikvWorkerOptions {
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
             cop_block_cache_type: block_cache_type,
@@ -485,7 +491,7 @@ fn prepare_cluster(
         },
     );
     if enable_schema_manager {
-        cluster.start_schema_manager();
+        cluster.start_schema_manager(alloc_node_id());
     }
     cluster.wait_region_replicated(&[], 3);
 
@@ -528,7 +534,7 @@ fn prepare_cluster(
     cluster
 }
 
-async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
+pub(crate) async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
     // Pause all schedulers to make stats stable.
     pd_ctl
         .pause_or_resume_scheduler("all", Duration::MAX)
@@ -594,7 +600,11 @@ async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
 }
 
 // TODO: merge to `verify_cluster` in `test_all.rs`.
-async fn verify_cluster(cluster: &mut ServerCluster, tpc_switch_on: bool, jepsen_switch_on: bool) {
+pub(crate) async fn verify_cluster(
+    cluster: &mut ServerCluster,
+    tpc_switch_on: bool,
+    jepsen_switch_on: bool,
+) {
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
@@ -608,7 +618,7 @@ async fn verify_cluster(cluster: &mut ServerCluster, tpc_switch_on: bool, jepsen
     }
 }
 
-async fn prepare_tpcc(
+pub(crate) async fn prepare_tpcc(
     tc: TidbCluster,
     keyspace_manager: KeyspaceManager,
     tpc_bin: String,
@@ -677,7 +687,7 @@ async fn prepare_tpcc(
     }
 }
 
-fn spawn_tpcc(
+pub(crate) fn spawn_tpcc(
     tc: TidbCluster,
     keyspace_manager: KeyspaceManager,
     tpc_bin: &str,
@@ -734,11 +744,11 @@ fn spawn_tpcc(
     })
 }
 
-fn db_name_by_tpc_idx(tpc_idx: usize) -> String {
+pub(crate) fn db_name_by_tpc_idx(tpc_idx: usize) -> String {
     format!("tpcc_{tpc_idx}")
 }
 
-fn check_tpc_binary(tpc_bin: &str) {
+pub(crate) fn check_tpc_binary(tpc_bin: &str) {
     let mut cmd = std::process::Command::new(tpc_bin);
     cmd.arg("version");
     let output = cmd.output().unwrap();
@@ -751,7 +761,7 @@ fn check_tpc_binary(tpc_bin: &str) {
     info!("tpc binary check passed"; "output" => ?output);
 }
 
-fn check_tpc() {
+pub(crate) fn check_tpc() {
     let tpc_txns = TPCC_COUNTER.load(Ordering::Relaxed);
     let threshold = env_param("TPCC_TXNS_THRESHOLD", 100);
     assert!(
@@ -773,7 +783,7 @@ fn check_jepsen() {
     );
 }
 
-fn spawn_restart_tso_svc(
+pub(crate) fn spawn_restart_tso_svc(
     tc: TidbCluster,
     restart_interval: Duration,
     timeout: Duration,
@@ -807,7 +817,7 @@ fn spawn_restart_tso_svc(
     tokio::spawn(task)
 }
 
-async fn connect_tidb(
+pub(crate) async fn connect_tidb(
     tc: &TidbCluster,
     keyspace_manager: &KeyspaceManager,
     keyspace_id: u32,

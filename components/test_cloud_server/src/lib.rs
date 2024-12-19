@@ -17,6 +17,7 @@ pub mod tpc;
 pub mod txn;
 pub mod util;
 pub use cluster::*;
+pub mod tikv_bin;
 
 #[cfg(test)]
 mod tests;
