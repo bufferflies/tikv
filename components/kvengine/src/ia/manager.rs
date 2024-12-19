@@ -81,6 +81,9 @@ pub struct IaManagerOptions {
     pub freq_update_interval: Duration,
 
     pub dfs_concurrency: usize,
+
+    // The capacity of the file descriptor cache.
+    pub fd_cache_capacity: usize,
 }
 
 impl IaManagerOptions {
@@ -114,7 +117,7 @@ impl IaManager {
         );
 
         info!("create IA manager"; "opts" => ?opts);
-        let main_store = new_local_store(opts.main_queue.path);
+        let main_store = new_local_store(opts.main_queue.path, opts.fd_cache_capacity);
         let segments = Arc::new(LocalSegmentMap::default());
         let segment_data_ctx = SegmentDataContext {
             segments: segments.clone(),

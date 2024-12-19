@@ -294,7 +294,7 @@ fn test_abnormal_local_file() {
                 .await
                 .unwrap();
 
-            let main_store = LocalFileStore::new(local_path.clone());
+            let main_store = LocalFileStore::new(local_path.clone(), 1_usize);
             main_store
                 .remove(
                     file_id,

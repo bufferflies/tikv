@@ -14,6 +14,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use dashmap::DashMap;
+use quick_cache::sync::Cache;
 use tikv_util::config::{AbsoluteOrPercentSize, ReadableDuration};
 use tokio::io::AsyncWriteExt;
 
@@ -44,9 +45,9 @@ pub trait LocalStore: Send + Sync {
     fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>>;
 }
 
-pub fn new_local_store(path: Option<PathBuf>) -> Arc<dyn LocalStore> {
+pub fn new_local_store(path: Option<PathBuf>, fd_cache_capacity: usize) -> Arc<dyn LocalStore> {
     if let Some(path) = path {
-        Arc::new(LocalFileStore::new(path)) as _
+        Arc::new(LocalFileStore::new(path, fd_cache_capacity)) as _
     } else {
         Arc::new(LocalMemoryStore::default()) as _
     }
@@ -80,11 +81,13 @@ macro_rules! try_some {
 
 pub struct LocalFileStore {
     dir: PathBuf,
+    fd_cache: Arc<Cache<String, Arc<std::fs::File>>>,
 }
 
 impl LocalFileStore {
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+    pub fn new(dir: PathBuf, fd_cache_capacity: usize) -> Self {
+        let fd_cache = Arc::new(Cache::new(fd_cache_capacity));
+        Self { dir, fd_cache }
     }
 }
 
@@ -141,9 +144,18 @@ impl LocalStore for LocalFileStore {
     }
 
     fn read_at(&self, file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<Option<()>> {
-        let path = self.dir.join(key);
-        debug!("FileDataStore.read_at"; "file_id" => file_id, "key" => key, "path" => ?path);
-        let mut f = try_open!(&path).table_ctx(file_id, format!("open.{key}"))?;
+        let mut f = if let Some(f) = self.fd_cache.get(key) {
+            debug!("FileDataStore.read_at cache hit"; "file_id" => file_id, "key" => key);
+            f.clone()
+        } else {
+            let path = self.dir.join(key);
+            debug!("FileDataStore.read_at cache miss"; "file_id" => file_id, "key" => key, "path" => ?path);
+            let f = try_open!(path).table_ctx(file_id, format!("open.{key}"))?;
+            let arc_f = Arc::new(f);
+            self.fd_cache.insert(key.to_owned(), arc_f.clone());
+            arc_f
+        };
+
         if offset > 0 {
             f.seek(SeekFrom::Start(offset))
                 .table_ctx(file_id, format!("seek.{key}"))?;
@@ -161,6 +173,7 @@ impl LocalStore for LocalFileStore {
 
     fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>> {
         let path = self.dir.join(key);
+        self.fd_cache.remove(key);
         try_fs!(std::fs::remove_file(path)).table_ctx(file_id, format!("remove.{key}"))?;
         Ok(Some(()))
     }
@@ -237,6 +250,7 @@ impl LocalStore for LocalMemoryStore {
 const IA_SEGMENT_SIZE_DEF: i64 = 1 << 20; // 1MiB
 const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(60);
 const IA_DFS_CONCURRENCY_DEF: usize = 32;
+const IA_FD_CACHE_CAPACITY_DEF: usize = 102400; // 100k
 
 const MAIN_QUEUE_CAPACITY_FACTOR: i64 = 10; // Main queue is 10x larger than small queue.
 
@@ -320,6 +334,7 @@ pub struct IaManagerOptionsBuilder {
     segment_size: Option<i64>,
     freq_update_interval: Option<Duration>,
     dfs_concurrency: Option<usize>,
+    fd_cache_capacity: Option<usize>,
 }
 
 impl IaManagerOptionsBuilder {
@@ -343,6 +358,11 @@ impl IaManagerOptionsBuilder {
         self
     }
 
+    pub fn fd_cache_capacity(mut self, capacity: usize) -> Self {
+        self.fd_cache_capacity = Some(capacity);
+        self
+    }
+
     pub fn build(mut self) -> Result<IaManagerOptions> {
         let mut options = IaManagerOptions::default();
 
@@ -354,6 +374,7 @@ impl IaManagerOptionsBuilder {
             .freq_update_interval
             .unwrap_or(IA_FREQ_UPDATE_INTERVAL_DEF);
         options.dfs_concurrency = self.dfs_concurrency.unwrap_or(IA_DFS_CONCURRENCY_DEF);
+        options.fd_cache_capacity = self.fd_cache_capacity.unwrap_or(IA_FD_CACHE_CAPACITY_DEF);
 
         Ok(options)
     }
@@ -370,6 +391,7 @@ pub struct IaConfig {
     pub segment_size: i64,
     pub freq_update_interval: ReadableDuration,
     pub dfs_concurrency: usize,
+    pub fd_cache_capacity: usize,
 }
 
 impl Default for IaConfig {
@@ -380,6 +402,7 @@ impl Default for IaConfig {
             segment_size: IA_SEGMENT_SIZE_DEF,
             freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
             dfs_concurrency: IA_DFS_CONCURRENCY_DEF,
+            fd_cache_capacity: IA_FD_CACHE_CAPACITY_DEF,
         }
     }
 }
@@ -392,6 +415,7 @@ impl IaConfig {
             .segment_size(self.segment_size)
             .freq_update_interval(self.freq_update_interval.0)
             .dfs_concurrency(self.dfs_concurrency)
+            .fd_cache_capacity(self.fd_cache_capacity)
             .build()
     }
 }
