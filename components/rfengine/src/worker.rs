@@ -518,7 +518,7 @@ impl Worker {
         });
     }
 
-    fn get_keyspace_id_from_peer(peer_meta: &rfenginepb::PeerMeta) -> u32 {
+    fn get_keyspace_id_from_peer(store_id: u64, peer_meta: &rfenginepb::PeerMeta) -> u32 {
         match peer_meta
             .get_states()
             .iter()
@@ -532,8 +532,17 @@ impl Worker {
                     .unwrap_or_default()
             }
             None => {
-                warn!("Get unknown keyspace id peer {:?}", peer_meta);
-                debug_assert!(peer_meta.peer_id == 0 && peer_meta.region_id == 0);
+                if peer_meta.peer_id != 0 || peer_meta.region_id != 0 {
+                    warn!(
+                        "{}: get unknown keyspace id peer: {:?}",
+                        store_id, peer_meta
+                    );
+                    debug_assert!(
+                        false,
+                        "{}: unknown keyspace id peer: {:?}",
+                        store_id, peer_meta
+                    );
+                }
                 0
             }
         }
@@ -552,7 +561,7 @@ impl Worker {
         let mut raft_log_size = 0;
         for peer in manifest.get_peers() {
             let peer_id = peer.get_peer_id();
-            let keyspace_id = Self::get_keyspace_id_from_peer(peer);
+            let keyspace_id = Self::get_keyspace_id_from_peer(store_id, peer);
             let peer_files = peer.get_files();
             let mut files = Vec::with_capacity(peer_files.len());
             for f in peer_files {
@@ -1337,9 +1346,9 @@ mod tests {
     fn test_get_keyspace_id_from_peer() {
         init_logger();
         let mut peer_meta = rfenginepb::PeerMeta::default();
-        assert_eq!(Worker::get_keyspace_id_from_peer(&peer_meta), 0);
+        assert_eq!(Worker::get_keyspace_id_from_peer(1, &peer_meta), 0);
         write_keyspace_state(&mut peer_meta, 100);
         write_keyspace_state(&mut peer_meta, 200);
-        assert_eq!(Worker::get_keyspace_id_from_peer(&peer_meta), 200);
+        assert_eq!(Worker::get_keyspace_id_from_peer(1, &peer_meta), 200);
     }
 }
