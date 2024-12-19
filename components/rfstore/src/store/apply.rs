@@ -46,6 +46,7 @@ use raftstore::store::{
     util,
     util::{ChangePeerI, ConfChangeKind},
 };
+use rand::Rng;
 use tikv_util::{
     box_err, debug, error, info,
     store::{find_peer, find_peer_mut, remove_peer},
@@ -1492,7 +1493,8 @@ impl Applier {
         let region_id = self.region_id();
         self.mem_table_state.get_or_insert_with(|| {
             let shard = engine.get_shard(region_id).unwrap();
-            MemTableState::new(shard.get_writable_mem_table_size())
+            let max_mem_table_size = engine.opts.max_mem_table_size;
+            MemTableState::new(shard.get_writable_mem_table_size(), max_mem_table_size)
         })
     }
 
@@ -1836,6 +1838,7 @@ pub(crate) fn is_property_change_set(cs: &kvenginepb::ChangeSet) -> bool {
 
 struct MemTableState {
     mem_table_size: u64,
+    max_mem_table_size: u64,
     init_time: Instant,
     last_switch_time: Option<Instant>,
     proposed_time: Option<Instant>,
@@ -1856,9 +1859,10 @@ const MAX_JITTER_SECONDS: u64 = 4096;
 const PROPOSE_SWITCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl MemTableState {
-    fn new(mem_table_size: u64) -> Self {
+    fn new(mem_table_size: u64, max_mem_table_size: u64) -> Self {
         Self {
             mem_table_size,
+            max_mem_table_size,
             init_time: Instant::now(),
             last_switch_time: None,
             proposed_time: None,
@@ -1875,6 +1879,12 @@ impl MemTableState {
             }
             // The proposal maybe failed for some reason, propose again.
             warn!("{} propose switch mem-table expired, propose again", tag);
+        }
+        if self.max_mem_table_size < BYTES_MB {
+            // running in test mode, use probability algorithm to switch for better
+            // coverage.
+            let size_ratio = self.mem_table_size as f64 / self.max_mem_table_size as f64;
+            return size_ratio > 0.75 && rand::thread_rng().gen_bool(0.1);
         }
         // Avoid too many mem-tables flush at the same time.
         let jitter_seconds = self.mem_table_size % MAX_JITTER_SECONDS;
@@ -2511,7 +2521,7 @@ mod tests {
             Case::new(1).check_at(25 * 60 * 60).result(true),
         ];
         for case in cases {
-            let mut states = MemTableState::new(case.size_kb * 1024);
+            let mut states = MemTableState::new(case.size_kb * 1024, BYTES_MB);
             states.proposed_time = case
                 .propose_time
                 .map(|secs| Instant::now() + Duration::from_secs(secs));
