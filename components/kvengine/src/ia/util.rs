@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    io::{Read, Seek, SeekFrom},
+    os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -144,7 +144,7 @@ impl LocalStore for LocalFileStore {
     }
 
     fn read_at(&self, file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<Option<()>> {
-        let mut f = if let Some(f) = self.fd_cache.get(key) {
+        let f = if let Some(f) = self.fd_cache.get(key) {
             debug!("FileDataStore.read_at cache hit"; "file_id" => file_id, "key" => key);
             f.clone()
         } else {
@@ -156,12 +156,9 @@ impl LocalStore for LocalFileStore {
             arc_f
         };
 
-        if offset > 0 {
-            f.seek(SeekFrom::Start(offset))
-                .table_ctx(file_id, format!("seek.{key}"))?;
-        }
-        f.read_exact(buf)
-            .table_ctx(file_id, format!("read_exact.{key}"))?;
+        // FIXME: remove extra ctx fields.
+        f.read_exact_at(buf, offset)
+            .table_ctx(file_id, format!("read_exact.{key}.{offset}.{}", buf.len()))?;
         Ok(Some(()))
     }
 
