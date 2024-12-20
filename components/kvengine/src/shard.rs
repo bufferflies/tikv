@@ -310,7 +310,9 @@ impl Shard {
         for columnar in snap.get_columnar_creates() {
             ids.insert(columnar.id, FileMeta::from_columnar_table(columnar));
         }
-        if snap.has_schema_meta() {
+        // `file_id` in shard meta will set to `0` when the columnar replica was
+        // removed. We also need to check if the schema file is valid.
+        if snap.has_schema_meta() && snap.get_schema_meta().get_file_id() > 0 {
             ids.insert(
                 snap.get_schema_meta().get_file_id(),
                 FileMeta::from_schema_meta(),
