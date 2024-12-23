@@ -17,9 +17,9 @@ use slog_global::*;
 use tikv_util::mpsc::{Receiver, Sender};
 
 use crate::{
-    compress_lz4, decompress_lz4, get_integral_wal_chunks, last_wal_chunk_file_key,
-    metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE, parse_wal_chunk_key, wal_chunk_file_key,
-    wal_chunk_file_prefix, wal_file_name, Error, Result, Task,
+    compact_worker::CompactTask, compress_lz4, decompress_lz4, get_integral_wal_chunks,
+    last_wal_chunk_file_key, metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE, parse_wal_chunk_key,
+    wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name, Error, Result,
 };
 
 #[derive(Debug)]
@@ -60,7 +60,7 @@ pub(crate) struct ObjectStorageWorker {
     config: LightweightBackupConfig,
     engine_id: Arc<AtomicU64>,
     task_rx: Receiver<ObjectStorageTask>,
-    callback: Sender<Task>, // Callback to worker.
+    compact_worker_tx: Sender<CompactTask>,
     buf: Vec<u8>,
     async_wal_file: Option<fs::File>,
     epoch_id: u32,
@@ -79,7 +79,7 @@ impl ObjectStorageWorker {
         engine_id: Arc<AtomicU64>,
         dfs_worker_healthy: Healthy,
         task_rx: Receiver<ObjectStorageTask>,
-        callback: Sender<Task>,
+        compact_worker_tx: Sender<CompactTask>,
     ) -> Self {
         info!("dfs worker config: {:?}", config);
         let dfs_config = config.dfs_config.clone();
@@ -91,7 +91,7 @@ impl ObjectStorageWorker {
             epoch_id,
             engine_id,
             task_rx,
-            callback,
+            compact_worker_tx,
             buf: Vec::with_capacity(wal_chunk_target_file_size),
             async_wal_file: None,
             chunk_id: 1,
@@ -106,7 +106,7 @@ impl ObjectStorageWorker {
     // `init` will rebuild the last wal chunk persistence states. If no wal chunk
     // found in the epoch range from `epoch_id - 3` to `epoch_id`, trigger an
     // instant rfengine snapshot.
-    fn init(&mut self) -> Result<bool> {
+    pub(crate) fn init(&mut self) -> Result<bool> {
         self.healthy.set_healthy();
         let mut need_snapshot = false;
         // Wait for node bootstrapped.
@@ -179,8 +179,8 @@ impl ObjectStorageWorker {
         match self.init() {
             Ok(need_snapshot) => {
                 if need_snapshot {
-                    // Callback worker to trigger a snapshot.
-                    self.callback.send(Task::Snapshot).unwrap();
+                    // Send task to compact worker to trigger a snapshot.
+                    self.compact_worker_tx.send(CompactTask::Snapshot).unwrap();
                 }
             }
             Err(err) => {
@@ -193,7 +193,7 @@ impl ObjectStorageWorker {
             // If dfs worker is unhealthy, skip handle some tasks and downgrade to disable
             // lightweight backup.
             // Try to recover when receive snapshot task.
-            if !self.healthy.is_healthy() && !task.can_be_handled_under_unhealthy() {
+            if !self.healthy.is_healthy() {
                 continue;
             }
             match task {
@@ -218,20 +218,6 @@ impl ObjectStorageWorker {
                     if let Err(err) = self.handle_rotate(epoch_id) {
                         error!("dfs worker handle_rotate failed, set unhealthy"; "err" => ?err);
                         self.healthy.set_unhealthy();
-                    }
-                }
-                ObjectStorageTask::Snapshot { snapshot_objects } => {
-                    match self.handle_snapshot(snapshot_objects) {
-                        Ok(()) => {
-                            if !self.healthy.is_healthy() {
-                                self.healthy.set_healthy();
-                                info!("dfs worker recover to healthy");
-                            }
-                        }
-                        Err(err) => {
-                            error!("dfs worker handle_snapshot failed, set unhealthy"; "err" => ?err);
-                            self.healthy.set_unhealthy();
-                        }
                     }
                 }
                 ObjectStorageTask::Flush => {
@@ -364,38 +350,6 @@ impl ObjectStorageWorker {
         Ok(())
     }
 
-    // This function should be called after compact done.
-    fn handle_snapshot(&mut self, snapshot_objects: Vec<(String, Bytes)>) -> Result<()> {
-        let store_id = self.get_engine_id();
-        debug!(
-            "{}: handle_snapshot epoch {} objects {}",
-            store_id,
-            self.epoch_id,
-            snapshot_objects.len()
-        );
-        if snapshot_objects.is_empty() {
-            return Ok(());
-        }
-        let fs = self.s3fs.clone();
-        let healthy = self.healthy.clone();
-        let acquired = self
-            .memory_limiter
-            .acquire(snapshot_objects.iter().map(|x| x.1.len()).sum::<usize>());
-        self.s3fs.get_runtime().spawn_blocking(move || {
-            // Snapshot objects should be put in order.
-            for obj in snapshot_objects {
-                if let Err(err) = fs.put_objects(vec![obj]) {
-                    error!("{} put snapshot object failed", store_id; "err" => ?err);
-                    healthy.set_unhealthy();
-                    return;
-                }
-            }
-            drop(acquired);
-        });
-
-        Ok(())
-    }
-
     pub(crate) fn should_chunk(&mut self, to_read: usize) -> bool {
         if !self.buf.is_empty()
             && self.buf.len() + ChunkHeader::len() + to_read
@@ -447,7 +401,7 @@ impl ObjectStorageWorker {
         );
         let fs = self.s3fs.clone();
         let healthy = self.healthy.clone();
-        let acquired = self.memory_limiter.acquire(chunk.len());
+        let acquired = self.memory_limiter.acquire(chunk.len())?;
         self.s3fs.get_runtime().spawn_blocking(move || {
             if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
                 error!("{} put wal chunk failed", store_id, ; "err" => ?err);
@@ -585,25 +539,10 @@ impl ChunkHeader {
 }
 
 pub(crate) enum ObjectStorageTask {
-    Sync {
-        epoch_id: u32,
-        file_off: u64,
-    }, // Sync the `epoch_id` wal file to `file_off`.
-    Rotate {
-        epoch_id: u32,
-        file_off: u64,
-    }, // Rotate to next epoch.
-    Snapshot {
-        snapshot_objects: Vec<(String, Bytes)>,
-    }, // Persist snapshot objects.
-    Flush, // Trigger flush the last chunk, mainly for test.
+    Sync { epoch_id: u32, file_off: u64 }, // Sync the `epoch_id` wal file to `file_off`.
+    Rotate { epoch_id: u32, file_off: u64 }, // Rotate to next epoch.
+    Flush,                                 // Trigger flush the last chunk, mainly for test.
     Close,
-}
-
-impl ObjectStorageTask {
-    fn can_be_handled_under_unhealthy(&self) -> bool {
-        matches!(self, Self::Snapshot { .. } | Self::Close)
-    }
 }
 
 #[derive(Clone)]
@@ -696,7 +635,7 @@ mod tests {
         let (tx, _) = tikv_util::mpsc::unbounded();
         let dfs_config = kvengine::dfs::DFSConfig::default();
         let mut worker = ObjectStorageWorker::new(
-            crate::LightweightBackupConfig::new(
+            LightweightBackupConfig::new(
                 std::env::temp_dir(),
                 1024 * 1024,
                 CompressionType::Lz4Compression,
@@ -706,7 +645,7 @@ mod tests {
                 1 << 20,
             ),
             1,
-            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            Arc::new(AtomicU64::new(1)),
             Healthy::default(),
             rx,
             tx,

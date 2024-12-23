@@ -274,7 +274,7 @@ pub(crate) fn check_wal_header(dir: &Path, epoch_id: u32) -> Result<WalHeader> {
 }
 
 pub(crate) struct WalWriter {
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
     pub(crate) version: Version,
     pub(crate) epoch_id: u32,
     pub(crate) wal_size: usize,

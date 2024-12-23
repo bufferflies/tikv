@@ -14,6 +14,7 @@ extern crate serde_derive;
 mod config;
 pub use config::Config as RfEngineConfig;
 
+pub mod compact_worker;
 pub mod dfs_worker;
 pub mod engine;
 pub mod iterator;
@@ -21,14 +22,15 @@ pub mod load;
 mod log_batch;
 pub mod manifest;
 mod metrics;
+pub mod service_worker;
 pub mod traits;
 pub mod utils;
-pub mod worker;
 mod write_batch;
 pub mod writer;
 
 use std::num::ParseIntError;
 
+pub use compact_worker::*;
 pub use dfs_worker::*;
 pub use engine::*;
 use iterator::*;
@@ -36,7 +38,6 @@ use metrics::*;
 use thiserror::Error as ThisError;
 pub use traits::*;
 pub use utils::*;
-pub use worker::*;
 pub use write_batch::WriteBatch;
 pub use writer::*;
 

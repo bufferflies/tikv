@@ -33,6 +33,7 @@ use crate::{
     log_batch::{RaftLogBlock, RaftLogs},
     manifest::{manifest_path, persist_change_set, Manifest},
     metrics::*,
+    service_worker::{ServiceTask, ServiceWorker},
     write_batch::{PeerBatch, WriteBatch},
     *,
 };
@@ -126,9 +127,9 @@ pub struct RfEngineCore {
 
     pub(crate) dependants: dashmap::DashMap<u64, RwLock<HashSet<u64>>>,
 
-    pub(crate) task_sender: Sender<Task>,
+    pub(crate) task_sender: Sender<ServiceTask>,
 
-    pub(crate) worker_handle: Mutex<WorkerHandle>,
+    pub(crate) service_worker_handle: Mutex<Option<JoinHandle<()>>>,
 
     pub(crate) engine_id: Arc<AtomicU64>,
 
@@ -141,11 +142,6 @@ pub struct RfEngineCore {
     pub(crate) compacted_epoch: Arc<AtomicU32>,
 
     _lock: fslock::LockFile, // hold lock to avoid release
-}
-
-pub(crate) struct WorkerHandle {
-    task_sender: Sender<Task>,
-    handle: Option<JoinHandle<()>>,
 }
 
 impl RfEngineCore {
@@ -169,7 +165,7 @@ impl RfEngineCore {
 
         let engine_id = Arc::new(AtomicU64::new(0));
         let manifest = Manifest::open(dir, engine_id.clone())?;
-        let (tx, rx) = tikv_util::mpsc::unbounded();
+        let (service_tx, service_rx) = tikv_util::mpsc::unbounded();
         let compacted_epoch = Arc::new(AtomicU32::new(manifest.epoch_id));
         let wal_dir = wal_sync_dir.as_deref().unwrap_or(dir);
         let writer_type = if cfg.cli_mode {
@@ -184,7 +180,6 @@ impl RfEngineCore {
             compacted_epoch.clone(),
             writer_type,
         );
-
         let dfs_worker_healthy = dfs_worker::Healthy::default();
         let mut en = Self {
             dir: dir.to_owned(),
@@ -192,11 +187,8 @@ impl RfEngineCore {
             peers: Default::default(),
             dependants: Default::default(),
             writer: Mutex::new(writer),
-            task_sender: tx.clone(),
-            worker_handle: Mutex::new(WorkerHandle {
-                task_sender: tx.clone(),
-                handle: None,
-            }),
+            task_sender: service_tx,
+            service_worker_handle: Mutex::new(None),
             engine_id,
             lightweight: cfg.lightweight_backup,
             current_epoch_id: Arc::new(AtomicU32::new(0)),
@@ -244,19 +236,20 @@ impl RfEngineCore {
             } else {
                 None
             };
-
-            let mut worker = Worker::new(
+            let epoch_id = en.current_epoch_id.load(Ordering::SeqCst);
+            let mut service_worker = ServiceWorker::new(
                 dir.to_owned(),
-                rx,
-                tx,
-                manifest,
-                compacted_epoch,
+                epoch_id,
                 async_wal_writer,
+                service_rx,
+                manifest,
+                compacted_epoch.clone(),
                 lightweight_backup_config,
                 dfs_worker_healthy,
             );
-            let join_handle = thread::spawn(move || worker.run());
-            en.worker_handle.lock().unwrap().handle = Some(join_handle);
+            let join_handle = thread::spawn(move || service_worker.run());
+            let mut guard = en.service_worker_handle.lock().unwrap();
+            *guard = Some(join_handle);
         }
 
         Ok(en)
@@ -299,7 +292,7 @@ impl RfEngineCore {
         }
         if !truncated_logs.is_empty() {
             self.task_sender
-                .send(Task::Truncates(truncated_logs))
+                .send(ServiceTask::Truncates(truncated_logs))
                 .unwrap();
         }
         ENGINE_APPLY_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
@@ -316,10 +309,12 @@ impl RfEngineCore {
         if rotated {
             self.current_epoch_id
                 .store(writer.epoch_id, Ordering::SeqCst);
-            self.task_sender.send(Task::Rotate { epoch_id }).unwrap();
+            self.task_sender
+                .send(ServiceTask::Rotate { epoch_id })
+                .unwrap();
         }
         if self.is_async_wal_enabled() {
-            self.task_sender.send(Task::Write { wb }).unwrap();
+            self.task_sender.send(ServiceTask::Write { wb }).unwrap();
         }
         ENGINE_PERSIST_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
         Ok(size)
@@ -432,9 +427,9 @@ impl RfEngineCore {
     }
 
     pub fn stop_worker(&self, force: bool) {
-        let mut handle_ref = self.worker_handle.lock().unwrap();
-        if let Some(h) = handle_ref.handle.take() {
-            handle_ref.task_sender.send(Task::Close { force }).unwrap();
+        let mut handle = self.service_worker_handle.lock().unwrap();
+        if let Some(h) = handle.take() {
+            self.task_sender.send(ServiceTask::Close { force }).unwrap();
             h.join().unwrap();
         }
     }
@@ -637,7 +632,7 @@ impl RfEngineCore {
 
     // Upload latest wal chunk to object storage
     pub fn upload_wal_chunk(&self) {
-        self.task_sender.send(Task::Upload).unwrap();
+        self.task_sender.send(ServiceTask::Upload).unwrap();
     }
 
     pub fn dump_wal_chunk(
@@ -645,10 +640,10 @@ impl RfEngineCore {
         epoch_id: u32,
         start_off: u64,
         end_off: u64,
-        callback: Box<dyn FnOnce(Result<Bytes>) + Send>,
+        callback: Box<dyn FnOnce(Result<(Bytes, bool /* partial content */)>) + Send>,
     ) {
         self.task_sender
-            .send(Task::Dump {
+            .send(ServiceTask::Dump {
                 epoch_id,
                 start_off,
                 end_off,
@@ -664,7 +659,7 @@ impl RfEngineCore {
             let writer = self.writer.lock().unwrap();
             task.file_off = writer.file_off;
         }
-        self.task_sender.send(Task::Backup(task)).unwrap();
+        self.task_sender.send(ServiceTask::Backup(task)).unwrap();
     }
 
     pub(crate) fn is_async_wal_enabled(&self) -> bool {

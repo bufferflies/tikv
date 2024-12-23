@@ -852,6 +852,8 @@ impl StatusServer {
     }
 
     // URI: /rfengine/wal_chunk?epoch_id=xxx&start_off=xxx&end_off=xxx
+    // If end_off is zero, it means to dump to the latest, then the response status
+    // code maybe PARTIAL_CONTENT if the request epoch_id is not the latest.
     async fn rfengine_wal_chunk(
         req: Request<Body>,
         engine: rfengine::RfEngine,
@@ -887,7 +889,17 @@ impl StatusServer {
 
         Ok(match future.await {
             Ok(resp) => match resp {
-                Ok(chunk) => Response::builder().body(Body::from(chunk)).unwrap(),
+                Ok((chunk, partial_content)) => {
+                    let status = if partial_content {
+                        StatusCode::PARTIAL_CONTENT
+                    } else {
+                        StatusCode::OK
+                    };
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from(chunk))
+                        .unwrap()
+                }
                 Err(Error::WalEpochOverwritten { epoch_id }) => make_response(
                     StatusCode::GONE,
                     format!("WAL epoch {epoch_id} is overwritten"),

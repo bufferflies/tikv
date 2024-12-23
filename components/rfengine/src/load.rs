@@ -6,7 +6,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
 use tikv_util::{info, warn};
 
-use crate::{log_batch::RaftLogOp, manifest::Manifest, *};
+use crate::{log_batch::RaftLogOp, manifest::Manifest, service_worker::ServiceTask, *};
 
 impl RfEngineCore {
     pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
@@ -32,7 +32,9 @@ impl RfEngineCore {
             (wal_offset, async_offset) = self.load_wal_file(epoch_id, true)?;
         }
         while wal_exists(self.wal_dir(), epoch_id + 1) {
-            self.task_sender.send(Task::Rotate { epoch_id }).unwrap();
+            self.task_sender
+                .send(ServiceTask::Rotate { epoch_id })
+                .unwrap();
             epoch_id += 1;
             let (offset, _) = self.load_wal_file(epoch_id, false)?;
             wal_offset = offset;
@@ -86,7 +88,7 @@ impl RfEngineCore {
                 }
             });
             if let Some(wb) = wb {
-                self.task_sender.send(Task::Write { wb }).unwrap();
+                self.task_sender.send(ServiceTask::Write { wb }).unwrap();
             }
         }) {
             Ok(_) => {}
@@ -419,7 +421,7 @@ mod tests {
                 let (cb, fut) = tikv_util::future::paired_future_callback();
                 engine.dump_wal_chunk(epoch, start_off, end_off, cb);
                 let chunks = match futures::executor::block_on(fut).unwrap() {
-                    Ok(chunks) => chunks,
+                    Ok((chunks, _)) => chunks,
                     Err(e) => {
                         info!("dump wal chunk failed: {:?}", e);
                         return false;
