@@ -17,7 +17,7 @@ use hyper::Method;
 use nix::sys::signal::Signal;
 use security::{RestfulClient, SecurityConfig, SecurityManager};
 use tikv::config::TikvConfig;
-use tikv_util::{box_err, info};
+use tikv_util::{box_err, info, warn};
 
 use crate::{
     new_test_config,
@@ -216,8 +216,12 @@ impl TikvWorkers {
         for idx in all {
             let (_, mut child) = self.children.remove(&idx).unwrap();
             send_signal_to_child(&child, Signal::SIGTERM).unwrap();
-            child.wait().unwrap();
-            info!("tikv-worker: stopped"; "idx" => idx);
+            let exit_status = child.wait().unwrap();
+            if exit_status.success() {
+                info!("tikv-worker: stopped"; "idx" => idx);
+            } else {
+                warn!("tikv-worker: exit with error"; "idx" => idx, "exit_status" => ?exit_status);
+            }
         }
     }
 

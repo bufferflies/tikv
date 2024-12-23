@@ -115,7 +115,11 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
         let res = server.await;
         tx.send(res).unwrap();
     });
-    rx.recv().unwrap().unwrap();
+    if cfg!(unix) {
+        cloud_server::signal_handler::wait_for_signal();
+    } else {
+        rx.recv().unwrap().unwrap();
+    }
 }
 
 // `config_file_path`: optional path to the config file which cloud_worker will

@@ -222,6 +222,7 @@ fn main() {
 
     info!("config is {:?}", &config);
     cloud_worker::run_cloud_worker(config, config_file_path, pd);
+    info!("tikv worker exit");
 }
 
 fn init_logger<W: 'static + io::Write + Send>(writer: W, level: Level) {

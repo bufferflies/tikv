@@ -133,6 +133,7 @@ for i in $(seq -w 1 100000); do
         pkill -9 tidb-server || true
         pkill -9 pd-server || true
         pkill -9 tikv-server || true
+        pkill -9 tikv-worker || true
         pkill -9 tiflash || true
         pkill -9 go-tpc || true
     fi
