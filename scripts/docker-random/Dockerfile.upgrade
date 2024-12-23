@@ -5,7 +5,7 @@ ARG TIFLASH_VERSION=v7.5.0
 
 FROM hub-new.pingcap.net/keyspace/tidb:${TIDB_VERSION} as tidb
 FROM hub-new.pingcap.net/keyspace/pd:${PD_VERSION} as pd
-FROM hub-new.pingcap.net/sunxiaoguang/serverless/tikv:${TIKV_VERSION} as tikv-server
+FROM hub-new.pingcap.net/keyspace/tikv-cse:${TIKV_VERSION} as tikv-server
 FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
 
