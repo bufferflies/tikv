@@ -133,6 +133,9 @@ impl LocalStore for LocalFileStore {
         f.write_all(&data)
             .await
             .table_ctx(file_id, format!("write_tmp.{key}"))?;
+        f.sync_data()
+            .await
+            .table_ctx(file_id, format!("sync_tmp.{key}"))?;
 
         let path = self.dir.join(key);
         tokio::fs::rename(&tmp_path, &path)
