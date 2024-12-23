@@ -539,9 +539,8 @@ impl LoadDataManager {
     }
 
     pub(crate) fn delete(&self, task_id: &str) {
-        if let Some((_, scheduler)) = self.running_tasks.remove(task_id) {
+        if let Some(scheduler) = self.running_tasks.get(task_id) {
             scheduler.cancel("deleted".to_string());
-            scheduler.sender.send(LoadTaskMsg::Cleanup).unwrap();
         }
     }
 }

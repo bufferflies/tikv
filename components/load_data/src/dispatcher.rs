@@ -237,7 +237,6 @@ impl Dispatcher {
                         .task_ctx
                         .keyspace_id
                         .map(|keyspace_id| keyspace_id.to_string());
-                    std::thread::sleep(self.config.metrics_gather_interval);
                     remove_metrics(&self.task_ctx.task_id, keyspace_id);
                     return;
                 }
