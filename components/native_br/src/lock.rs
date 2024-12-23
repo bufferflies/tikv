@@ -388,6 +388,8 @@ impl LockResolver {
     }
 
     // Ref: TxnFileCommand::build_commit_txn_file_ref
+    // Keyspace ID is not prepend here, as the generated `TxnFileRef` will not be
+    // used by old versions.
     fn build_txn_file_ref(
         &self,
         snap: &kvengine::SnapAccess,

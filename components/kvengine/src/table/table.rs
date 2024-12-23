@@ -582,6 +582,11 @@ pub async fn new_merge_iterator_async<'a>(
     Box::new(AsyncMergeIterator::new(iters, reverse, false))
 }
 
+/// Used with caution. The `end_key` must be the EXCLUSIVE end key of a range.
+fn is_keyspace_end_key(end_key: &[u8]) -> bool {
+    end_key.len() == KEYSPACE_PREFIX_LEN && ApiV2::is_txn_key(end_key)
+}
+
 #[derive(Clone, Copy, PartialOrd, PartialEq, Ord, Eq)]
 pub struct InnerKey<'a> {
     key: &'a [u8],
@@ -602,10 +607,9 @@ impl<'a> InnerKey<'a> {
         Self { key: outer_key }.trim_keyspace()
     }
 
+    /// NOTE: The `outer_end_key` must be the EXCLUSIVE end key of a range.
     pub fn from_outer_end_key<'b: 'a>(outer_end_key: &'b [u8]) -> Self {
-        let is_keyspace_end_key =
-            ApiV2::is_txn_key(outer_end_key) && outer_end_key.len() == KEYSPACE_PREFIX_LEN;
-        if outer_end_key.is_empty() || is_keyspace_end_key {
+        if outer_end_key.is_empty() || is_keyspace_end_key(outer_end_key) {
             Self {
                 key: GLOBAL_SHARD_END_KEY,
             }
@@ -656,6 +660,17 @@ impl OwnedInnerKey {
             inner = inner.slice(KEYSPACE_PREFIX_LEN..);
         }
         Self { inner }
+    }
+
+    /// NOTE: The `inner_end_key` must be the EXCLUSIVE end key of a range.
+    pub fn new_end_key(inner_end_key: bytes::Bytes) -> Self {
+        if inner_end_key.is_empty() || is_keyspace_end_key(&inner_end_key) {
+            Self {
+                inner: bytes::Bytes::copy_from_slice(GLOBAL_SHARD_END_KEY),
+            }
+        } else {
+            Self::new(inner_end_key)
+        }
     }
 
     pub fn as_ref(&self) -> InnerKey<'_> {
@@ -923,9 +938,16 @@ mod tests {
     }
 
     #[test]
-    fn test_inner_key_debug() {
+    fn test_inner_key() {
         let buf = vec![128, 0, 255];
         let inner_key = InnerKey::from_inner_buf(&buf);
         assert_eq!(format!("{:?}", inner_key), "8000FF".to_string());
+
+        let keyspace_end_key = vec![0x78, 0, 0, 2];
+        let inner_key = InnerKey::from_outer_end_key(&keyspace_end_key);
+        assert_eq!(GLOBAL_SHARD_END_KEY, inner_key.deref());
+
+        let owned_inner_key = OwnedInnerKey::new_end_key(bytes::Bytes::from(keyspace_end_key));
+        assert_eq!(GLOBAL_SHARD_END_KEY, owned_inner_key.as_ref().deref());
     }
 }

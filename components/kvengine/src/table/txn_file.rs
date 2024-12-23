@@ -110,7 +110,9 @@ impl TxnCtx {
             lock_val_prefix: txn_file_ref.lock_val_prefix.clone().into(),
             version,
             lower_bound: OwnedInnerKey::new(Bytes::from(txn_file_ref.inner_lower_bound.clone())),
-            upper_bound: OwnedInnerKey::new(Bytes::from(txn_file_ref.inner_upper_bound.clone())),
+            upper_bound: OwnedInnerKey::new_end_key(Bytes::from(
+                txn_file_ref.inner_upper_bound.clone(),
+            )),
         }
     }
 
