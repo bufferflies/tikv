@@ -285,6 +285,13 @@ fn divide_mapper(lhs_is_unsigned: bool, rhs_is_unsigned: bool) -> RpnFnMeta {
     }
 }
 
+fn divide_decimal_mapper(lhs_is_unsigned: bool, rhs_is_unsigned: bool) -> RpnFnMeta {
+    match (lhs_is_unsigned, rhs_is_unsigned) {
+        (false, false) => int_divide_decimal_fn_meta(),
+        _ => int_divide_decimal_unsigned_fn_meta(),
+    }
+}
+
 fn map_rhs_int_sig<F>(value: ScalarFuncSig, children: &[Expr], mapper: F) -> Result<RpnFnMeta>
 where
     F: Fn(bool) -> RpnFnMeta,
@@ -358,27 +365,7 @@ pub fn map_unary_minus_int_func(value: ScalarFuncSig, children: &[Expr]) -> Resu
     }
 }
 
-fn map_lower_sig(value: ScalarFuncSig, children: &[Expr]) -> Result<RpnFnMeta> {
-    if children.len() != 1 {
-        return Err(other_err!(
-            "ScalarFunction {:?} (params = {}) is not supported in batch mode",
-            value,
-            children.len()
-        ));
-    }
-    if children[0].get_field_type().is_binary_string_like() {
-        Ok(lower_fn_meta())
-    } else {
-        let ret_field_type = children[0].get_field_type();
-        Ok(match_template_charset! {
-            TT, match Charset::from_name(ret_field_type.get_charset()).map_err(tidb_query_datatype::codec::Error::from)? {
-                Charset::TT => lower_utf8_fn_meta::<TT>(),
-            }
-        })
-    }
-}
-
-fn map_upper_sig(value: ScalarFuncSig, children: &[Expr]) -> Result<RpnFnMeta> {
+fn map_upper_utf8_sig(value: ScalarFuncSig, children: &[Expr]) -> Result<RpnFnMeta> {
     if children.len() != 1 {
         return Err(other_err!(
             "ScalarFunction {:?} (params = {}) is not supported in batch mode",
@@ -442,7 +429,7 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::DivideDecimal => arithmetic_with_ctx_fn_meta::<DecimalDivide>(),
         ScalarFuncSig::DivideReal => arithmetic_with_ctx_fn_meta::<RealDivide>(),
         ScalarFuncSig::IntDivideInt => map_int_sig(value, children, divide_mapper)?,
-        ScalarFuncSig::IntDivideDecimal => int_divide_decimal_fn_meta(),
+        ScalarFuncSig::IntDivideDecimal => map_int_sig(value, children, divide_decimal_mapper)?,
         ScalarFuncSig::ModReal => arithmetic_fn_meta::<RealMod>(),
         ScalarFuncSig::ModDecimal => arithmetic_with_ctx_fn_meta::<DecimalMod>(),
         ScalarFuncSig::ModInt => map_int_sig(value, children, mod_mapper)?,
@@ -650,6 +637,8 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::JsonValidStringSig => json_valid_fn_meta(),
         ScalarFuncSig::JsonValidOthersSig => json_valid_fn_meta(),
         ScalarFuncSig::JsonMemberOfSig => member_of_fn_meta(),
+        ScalarFuncSig::JsonArrayAppendSig => json_array_append_fn_meta(),
+        ScalarFuncSig::JsonMergePatchSig => json_merge_patch_fn_meta(),
 
         // impl_vec
         ScalarFuncSig::VecAsTextSig => vec_as_text_fn_meta(),
@@ -809,10 +798,10 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::Insert => insert_fn_meta(),
         ScalarFuncSig::InsertUtf8 => insert_utf8_fn_meta(),
         ScalarFuncSig::RightUtf8 => right_utf8_fn_meta(),
-        ScalarFuncSig::UpperUtf8 => map_upper_sig(value, children)?,
+        ScalarFuncSig::UpperUtf8 => map_upper_utf8_sig(value, children)?,
         ScalarFuncSig::Upper => upper_fn_meta(),
-        ScalarFuncSig::Lower => map_lower_sig(value, children)?,
         ScalarFuncSig::LowerUtf8 => map_lower_utf8_sig(value, children)?,
+        ScalarFuncSig::Lower => lower_fn_meta(),
         ScalarFuncSig::Locate2Args => locate_2_args_fn_meta(),
         ScalarFuncSig::Locate3Args => locate_3_args_fn_meta(),
         ScalarFuncSig::FieldInt => field_fn_meta::<Int>(),
@@ -887,6 +876,62 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::StringStringTimeDiff => string_string_time_diff_fn_meta(),
         ScalarFuncSig::DurationStringTimeDiff => duration_string_time_diff_fn_meta(),
         ScalarFuncSig::Quarter => quarter_fn_meta(),
+        ScalarFuncSig::AddDateStringString => add_date_time_string_interval_string_as_string_fn_meta(),
+        ScalarFuncSig::SubDateStringString => sub_date_time_string_interval_string_as_string_fn_meta(),
+        ScalarFuncSig::AddDateStringInt => add_date_time_string_interval_any_as_string_fn_meta::<i64>(),
+        ScalarFuncSig::SubDateStringInt => sub_date_time_string_interval_any_as_string_fn_meta::<i64>(),
+        ScalarFuncSig::AddDateStringReal => add_date_time_string_interval_any_as_string_fn_meta::<Real>(),
+        ScalarFuncSig::SubDateStringReal => sub_date_time_string_interval_any_as_string_fn_meta::<Real>(),
+        ScalarFuncSig::AddDateStringDecimal => add_date_time_string_interval_any_as_string_fn_meta::<Decimal>(),
+        ScalarFuncSig::SubDateStringDecimal => sub_date_time_string_interval_any_as_string_fn_meta::<Decimal>(),
+        ScalarFuncSig::AddDateIntString => add_date_time_any_interval_string_as_string_fn_meta::<i64>(),
+        ScalarFuncSig::SubDateIntString => sub_date_time_any_interval_string_as_string_fn_meta::<i64>(),
+        ScalarFuncSig::AddDateRealString => add_date_time_any_interval_string_as_string_fn_meta::<Real>(),
+        ScalarFuncSig::SubDateRealString => sub_date_time_any_interval_string_as_string_fn_meta::<Real>(),
+        ScalarFuncSig::AddDateDecimalString => add_date_time_any_interval_string_as_string_fn_meta::<Decimal>(),
+        ScalarFuncSig::SubDateDecimalString => sub_date_time_any_interval_string_as_string_fn_meta::<Decimal>(),
+        ScalarFuncSig::AddDateIntInt => add_date_time_any_interval_any_as_string_fn_meta::<i64, i64>(),
+        ScalarFuncSig::SubDateIntInt => sub_date_time_any_interval_any_as_string_fn_meta::<i64, i64>(),
+        ScalarFuncSig::AddDateIntReal => add_date_time_any_interval_any_as_string_fn_meta::<i64, Real>(),
+        ScalarFuncSig::SubDateIntReal => sub_date_time_any_interval_any_as_string_fn_meta::<i64, Real>(),
+        ScalarFuncSig::AddDateIntDecimal => add_date_time_any_interval_any_as_string_fn_meta::<i64, Decimal>(),
+        ScalarFuncSig::SubDateIntDecimal => sub_date_time_any_interval_any_as_string_fn_meta::<i64, Decimal>(),
+        ScalarFuncSig::AddDateRealInt => add_date_time_any_interval_any_as_string_fn_meta::<Real, i64>(),
+        ScalarFuncSig::SubDateRealInt => sub_date_time_any_interval_any_as_string_fn_meta::<Real, i64>(),
+        ScalarFuncSig::AddDateRealReal => add_date_time_any_interval_any_as_string_fn_meta::<Real, Real>(),
+        ScalarFuncSig::SubDateRealReal => sub_date_time_any_interval_any_as_string_fn_meta::<Real, Real>(),
+        ScalarFuncSig::AddDateRealDecimal => add_date_time_any_interval_any_as_string_fn_meta::<Real, Decimal>(),
+        ScalarFuncSig::SubDateRealDecimal => sub_date_time_any_interval_any_as_string_fn_meta::<Real, Decimal>(),
+        ScalarFuncSig::AddDateDecimalInt => add_date_time_any_interval_any_as_string_fn_meta::<Decimal, i64>(),
+        ScalarFuncSig::SubDateDecimalInt => sub_date_time_any_interval_any_as_string_fn_meta::<Decimal, i64>(),
+        ScalarFuncSig::AddDateDecimalReal => add_date_time_any_interval_any_as_string_fn_meta::<Decimal, Real>(),
+        ScalarFuncSig::SubDateDecimalReal => sub_date_time_any_interval_any_as_string_fn_meta::<Decimal, Real>(),
+        ScalarFuncSig::AddDateDecimalDecimal => add_date_time_any_interval_any_as_string_fn_meta::<Decimal, Decimal>(),
+        ScalarFuncSig::SubDateDecimalDecimal => sub_date_time_any_interval_any_as_string_fn_meta::<Decimal, Decimal>(),
+        ScalarFuncSig::AddDateDatetimeString => add_date_time_datetime_interval_string_as_datetime_fn_meta(),
+        ScalarFuncSig::SubDateDatetimeString => sub_date_time_datetime_interval_string_as_datetime_fn_meta(),
+        ScalarFuncSig::AddDateDatetimeInt => add_date_time_datetime_interval_any_as_datetime_fn_meta::<i64>(),
+        ScalarFuncSig::SubDateDatetimeInt => sub_date_time_datetime_interval_any_as_datetime_fn_meta::<i64>(),
+        ScalarFuncSig::AddDateDatetimeReal => add_date_time_datetime_interval_any_as_datetime_fn_meta::<Real>(),
+        ScalarFuncSig::SubDateDatetimeReal => sub_date_time_datetime_interval_any_as_datetime_fn_meta::<Real>(),
+        ScalarFuncSig::AddDateDatetimeDecimal => add_date_time_datetime_interval_any_as_datetime_fn_meta::<Decimal>(),
+        ScalarFuncSig::SubDateDatetimeDecimal => sub_date_time_datetime_interval_any_as_datetime_fn_meta::<Decimal>(),
+        ScalarFuncSig::AddDateDurationString => add_date_time_duration_interval_string_as_duration_fn_meta(),
+        ScalarFuncSig::SubDateDurationString => sub_date_time_duration_interval_string_as_duration_fn_meta(),
+        ScalarFuncSig::AddDateDurationInt => add_date_time_duration_interval_any_as_duration_fn_meta::<i64>(),
+        ScalarFuncSig::SubDateDurationInt => sub_date_time_duration_interval_any_as_duration_fn_meta::<i64>(),
+        ScalarFuncSig::AddDateDurationReal => add_date_time_duration_interval_any_as_duration_fn_meta::<Real>(),
+        ScalarFuncSig::SubDateDurationReal => sub_date_time_duration_interval_any_as_duration_fn_meta::<Real>(),
+        ScalarFuncSig::AddDateDurationDecimal => add_date_time_duration_interval_any_as_duration_fn_meta::<Decimal>(),
+        ScalarFuncSig::SubDateDurationDecimal => sub_date_time_duration_interval_any_as_duration_fn_meta::<Decimal>(),
+        ScalarFuncSig::AddDateDurationStringDatetime => add_date_time_duration_interval_string_as_datetime_fn_meta(),
+        ScalarFuncSig::SubDateDurationStringDatetime => sub_date_time_duration_interval_string_as_datetime_fn_meta(),
+        ScalarFuncSig::AddDateDurationIntDatetime => add_date_time_duration_interval_any_as_datetime_fn_meta::<i64>(),
+        ScalarFuncSig::SubDateDurationIntDatetime => sub_date_time_duration_interval_any_as_datetime_fn_meta::<i64>(),
+        ScalarFuncSig::AddDateDurationRealDatetime => add_date_time_duration_interval_any_as_datetime_fn_meta::<Real>(),
+        ScalarFuncSig::SubDateDurationRealDatetime => sub_date_time_duration_interval_any_as_datetime_fn_meta::<Real>(),
+        ScalarFuncSig::AddDateDurationDecimalDatetime => add_date_time_duration_interval_any_as_datetime_fn_meta::<Decimal>(),
+        ScalarFuncSig::SubDateDurationDecimalDatetime => sub_date_time_duration_interval_any_as_datetime_fn_meta::<Decimal>(),
         _ => return Err(other_err!(
             "ScalarFunction {:?} is not supported in batch mode",
             value
