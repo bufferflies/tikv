@@ -989,14 +989,18 @@ impl RlogCache {
     fn add_rlog(&mut self, peer_id: u64, rlog: &RaftLogFile, rlog_data: &[u8]) -> bool /* is_cached */
     {
         if let Some(inner) = self.inner.as_mut() {
-            if rlog_data.len() > self.size_threshold {
-                return false;
-            }
-
             let k = RlogCacheKey {
                 peer_id,
                 first_index: rlog.first_index,
             };
+
+            if rlog_data.len() > self.size_threshold {
+                // The rlog cache must always be overwritten, as the content may be changed.
+                // See https://github.com/tidbcloud/cloud-storage-engine/issues/2154.
+                inner.remove(&k);
+                return false;
+            }
+
             let v = RlogCacheValue {
                 last_index: rlog.last_index,
                 data: Bytes::copy_from_slice(rlog_data),
