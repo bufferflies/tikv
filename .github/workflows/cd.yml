@@ -72,6 +72,8 @@ jobs:
     name: Create Multi-Architecture Image
     runs-on: amd64
     needs: ["build-arm64", "build-amd64"]
+    env:
+      IMAGE_TAG: ${{ inputs.daily_run_image_tag || 'v7.5.0' }}
     steps:
       - name: Login to Harbor
         uses: docker/login-action@v3
@@ -98,10 +100,10 @@ jobs:
         if: ${{ inputs.update_daily_run_image || github.ref == 'refs/heads/cloud-engine' }}
         run: |
           # Remove the local manifest entry if it exists
-          docker manifest rm hub.pingcap.net/keyspace/tikv-cse:${{ inputs.daily_run_image_tag }} || true
+          docker manifest rm hub.pingcap.net/keyspace/tikv-cse:${{ env.IMAGE_TAG }} || true
           
-          docker manifest create hub.pingcap.net/keyspace/tikv-cse:${{ inputs.daily_run_image_tag }} \
+          docker manifest create hub.pingcap.net/keyspace/tikv-cse:${{ env.IMAGE_TAG }} \
           --amend hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-amd64 \
           --amend hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-arm64
           
-          docker manifest push hub.pingcap.net/keyspace/tikv-cse:${{ inputs.daily_run_image_tag }}
+          docker manifest push hub.pingcap.net/keyspace/tikv-cse:${{ env.IMAGE_TAG }}
