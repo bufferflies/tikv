@@ -14,7 +14,7 @@ use std::{
 use bytes::Bytes;
 use memmap2::Mmap;
 
-use crate::{error::IoContext, table::table};
+use crate::{error::IoContext, ia::types::FileSegmentIdent, table::table};
 
 // 30 minutes idle file would be closed.
 const FILE_TTL: u64 = 30 * 60;
@@ -81,6 +81,16 @@ pub trait File: Sync + Send {
     }
 
     fn mmap(&self) -> table::Result<MmapData>;
+
+    /// `get_remote_segments` returns the remote segments of the file. Used for
+    /// prefetching. Available for IA files only.
+    fn get_remote_segments(
+        &self,
+        _start_off: u64,
+        _end_off: u64,
+    ) -> table::Result<(Vec<FileSegmentIdent>, usize /* total_segments */)> {
+        Ok((vec![], 0))
+    }
 }
 
 pub enum MmapData {

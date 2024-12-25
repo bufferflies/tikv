@@ -322,7 +322,7 @@ impl Shard {
     }
 
     pub async fn from_change_set(
-        tag: String,
+        tag: &str,
         ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         mut mem_tbls: Vec<CfTable>,
@@ -361,10 +361,11 @@ impl Shard {
                 }
             }
 
+            // TODO: Cache L0 tables in local disk when IA is enabled.
             let fs = ctx.dfs.clone();
             let tx = result_tx.clone();
             let fm = fm.clone();
-            let tag = tag.clone();
+            let tag = tag.to_string();
             let ia_ctx = if fm.can_use_ia() {
                 ctx.ia_ctx.clone()
             } else {
@@ -382,7 +383,7 @@ impl Shard {
                         fm.file_type,
                         fm.table_meta_off as u64,
                         data_dir.deref(),
-                        fs.as_ref(),
+                        ia_mgr.get_dfs(),
                     )
                     .await
                     .map(|data| (data, Some(ia_mgr)))

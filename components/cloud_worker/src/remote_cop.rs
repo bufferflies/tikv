@@ -15,7 +15,7 @@ use kvproto::{
     tikvpb::{create_tikv, Tikv, TikvClient},
 };
 use tikv::coprocessor::parse_request_and_handle_remote_cop;
-use tikv_util::{thd_name, warn};
+use tikv_util::{info, thd_name, time::Instant, warn};
 
 use crate::server::{get_cop_req_tag, Context};
 
@@ -92,6 +92,7 @@ impl Tikv for CopService {
         req: Request,
         sink: grpcio::UnarySink<Response>,
     ) {
+        let handle_start = Instant::now_coarse();
         let store_id = req.get_context().get_peer().get_store_id();
         let client_res = self.get_client(store_id);
         if let Err(err) = client_res {
@@ -119,13 +120,16 @@ impl Tikv for CopService {
         let quota_limiter = self.ctx.quota_limiter.clone();
         let peer = Some(ctx.peer());
         let future = async move {
+            let delegate_start = Instant::now_coarse();
             let mut resp = client
                 .delegate_coprocessor_async(&delegate_req)
                 .unwrap()
                 .await
                 .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
+
+            let snap_start = Instant::now_coarse();
             let snap_access = kvengine::SnapAccess::construct_snapshot(
-                tag,
+                &tag,
                 &snap_ctx,
                 &resp.take_mem_table_data(),
                 &resp.take_snapshot(),
@@ -133,14 +137,37 @@ impl Tikv for CopService {
             .await
             .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
             let snapshot = rfstore::store::RegionSnapshot::from_snapshot(snap_access);
-            parse_request_and_handle_remote_cop(
+
+            let process_start = Instant::now_coarse();
+            let result = parse_request_and_handle_remote_cop(
                 req,
                 peer,
                 max_handle_duration,
                 quota_limiter.clone(),
                 snapshot,
             )
-            .await
+            .await;
+
+            if let Ok(response) = &result {
+                let finish_time = Instant::now_coarse();
+                let wait_dur = delegate_start.saturating_duration_since(handle_start);
+                let delegate_req_dur = snap_start.saturating_duration_since(delegate_start);
+                let snap_dur = process_start.saturating_duration_since(snap_start);
+                let process_dur = finish_time.saturating_duration_since(process_start);
+                let handle_dur = finish_time.saturating_duration_since(handle_start);
+                info!(
+                    "finished remote cop service";
+                    "tag" => tag,
+                    "resp_size" => response.data.len(),
+                    "max_handle_duration" => ?max_handle_duration,
+                    "wait_dur" => ?wait_dur,
+                    "delegate_req_dur" => ?delegate_req_dur,
+                    "snap_dur" => ?snap_dur,
+                    "process_dur" => ?process_dur,
+                    "handle_dur" => ?handle_dur,
+                );
+            }
+            result
         };
         let task = async move {
             match future.await {

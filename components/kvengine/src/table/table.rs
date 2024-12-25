@@ -475,6 +475,8 @@ pub enum Error {
     NeedEncryptionKey { chunk_id: u64, encryption_ver: u32 },
     #[error("IA manager error: {0}")]
     IaMgr(String),
+    #[error("Deadline is exceeded: {0}")]
+    DeadlineExceeded(String),
     #[error("{0}")]
     Other(String),
 }

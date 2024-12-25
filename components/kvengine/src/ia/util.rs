@@ -249,7 +249,8 @@ impl LocalStore for LocalMemoryStore {
 
 const IA_SEGMENT_SIZE_DEF: i64 = 1 << 20; // 1MiB
 const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(60);
-const IA_DFS_CONCURRENCY_DEF: usize = 32;
+const IA_DFS_CONCURRENCY_DEF: usize = 64;
+const IA_DFS_KEYSPACE_CONCURRENCY_DEF: usize = 20;
 const IA_FD_CACHE_CAPACITY_DEF: usize = 102400; // 100k
 
 const MAIN_QUEUE_CAPACITY_FACTOR: i64 = 10; // Main queue is 10x larger than small queue.
@@ -334,6 +335,7 @@ pub struct IaManagerOptionsBuilder {
     segment_size: Option<i64>,
     freq_update_interval: Option<Duration>,
     dfs_concurrency: Option<usize>,
+    dfs_keyspace_concurrency: Option<usize>,
     fd_cache_capacity: Option<usize>,
 }
 
@@ -353,8 +355,9 @@ impl IaManagerOptionsBuilder {
         self
     }
 
-    pub fn dfs_concurrency(mut self, concurrency: usize) -> Self {
+    pub fn dfs_concurrency(mut self, concurrency: usize, keyspace_concurrency: usize) -> Self {
         self.dfs_concurrency = Some(concurrency);
+        self.dfs_keyspace_concurrency = Some(keyspace_concurrency);
         self
     }
 
@@ -374,6 +377,9 @@ impl IaManagerOptionsBuilder {
             .freq_update_interval
             .unwrap_or(IA_FREQ_UPDATE_INTERVAL_DEF);
         options.dfs_concurrency = self.dfs_concurrency.unwrap_or(IA_DFS_CONCURRENCY_DEF);
+        options.dfs_keyspace_concurrency = self
+            .dfs_keyspace_concurrency
+            .unwrap_or(IA_DFS_KEYSPACE_CONCURRENCY_DEF);
         options.fd_cache_capacity = self.fd_cache_capacity.unwrap_or(IA_FD_CACHE_CAPACITY_DEF);
 
         Ok(options)
@@ -391,6 +397,7 @@ pub struct IaConfig {
     pub segment_size: i64,
     pub freq_update_interval: ReadableDuration,
     pub dfs_concurrency: usize,
+    pub dfs_keyspace_concurrency: usize,
     pub fd_cache_capacity: usize,
 }
 
@@ -402,6 +409,7 @@ impl Default for IaConfig {
             segment_size: IA_SEGMENT_SIZE_DEF,
             freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
             dfs_concurrency: IA_DFS_CONCURRENCY_DEF,
+            dfs_keyspace_concurrency: IA_DFS_KEYSPACE_CONCURRENCY_DEF,
             fd_cache_capacity: IA_FD_CACHE_CAPACITY_DEF,
         }
     }
@@ -414,7 +422,7 @@ impl IaConfig {
             .capacity(cap)
             .segment_size(self.segment_size)
             .freq_update_interval(self.freq_update_interval.0)
-            .dfs_concurrency(self.dfs_concurrency)
+            .dfs_concurrency(self.dfs_concurrency, self.dfs_keyspace_concurrency)
             .fd_cache_capacity(self.fd_cache_capacity)
             .build()
     }

@@ -62,6 +62,19 @@ lazy_static! {
         exponential_buckets(0.0005, 2.0, 20).unwrap()
     ).unwrap();
 
+    pub static ref REMOTE_COPR_PREFETCH_HISTOGRAM: Histogram = register_histogram!(
+        "tikv_worker_remote_cop_prefetch_duration_seconds",
+        "Bucketed histogram of remote copr prefetch segments duration",
+        exponential_buckets(0.0005, 2.0, 20).unwrap()
+    ).unwrap();
+
+    pub static ref REMOTE_COPR_PREFETCH_CACHE_HIT_PERCENT_HISTOGRAM: Histogram = register_histogram!(
+        "tikv_worker_remote_cop_prefetch_cache_hit_percent",
+        "Bucketed histogram of cache hit percent for remote copr prefetch segments",
+        linear_buckets(50.0, 2.0, 25).unwrap()
+    )
+    .unwrap();
+
     pub static ref REMOTE_COPR_REQ_HANDLE_HISTOGRAM: Histogram = register_histogram!(
         "tikv_worker_remote_cop_request_duration_seconds",
         "Bucketed histogram of remote copr request duration",

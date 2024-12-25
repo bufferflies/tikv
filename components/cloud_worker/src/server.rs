@@ -1,11 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    error::Error as StdError,
-    future::Future,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{error::Error as StdError, future::Future, sync::Arc, time::Duration};
 
 use bytes::Buf;
 use cloud_encryption::MasterKey;
@@ -41,21 +36,17 @@ use tikv::{
     server::status_server::StatusServer,
 };
 use tikv_util::{
+    deadline::Deadline,
     error, info,
     metrics::{dump, dump_to},
     quota_limiter::QuotaLimiter,
-    time::InstantExt,
+    time::Instant,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
     load_data::{self, LoadDataManager},
-    metrics::{
-        REMOTE_ANALYZE_REQ_COUNTER, REMOTE_ANALYZE_RESP_SIZE, REMOTE_CHECKSUM_REQ_COUNTER,
-        REMOTE_CHECKSUM_RESP_SIZE, REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM,
-        REMOTE_COPR_DAG_REQ_COUNTER, REMOTE_COPR_DAG_RESP_SIZE, REMOTE_COPR_REQ_HANDLE_HISTOGRAM,
-        REMOTE_COPR_SNAPSHOT_HISTOGRAM,
-    },
+    metrics::*,
     native_br::{self, NativeBrManager},
     txn_chunk::{handle_txn_chunk, TxnChunkHandler},
     worker_limiter::WorkerLimiter,
@@ -135,7 +126,7 @@ where
                             .body(hyper::Body::from("ok"))
                             .unwrap()),
                         "/compact" => {
-                            let ob_start = Instant::now();
+                            let ob_start = Instant::now_coarse();
 
                             let allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
                             let resp = kvengine::handle_remote_compaction(
@@ -215,12 +206,14 @@ async fn handle_remote_coprocessor(
     }
     let cop_ctx = cop_req.get_context();
     let keyspace_id = cop_ctx.keyspace_id;
-    let handle_start = Instant::now();
+    let handle_start = Instant::now_coarse();
     let tag = get_cop_req_tag(&cop_req);
     let mut timeout = Duration::from_millis(cop_ctx.get_max_execution_duration_ms());
     if timeout.is_zero() {
         timeout = DEFAULT_COP_TIMEOUT;
     }
+    let deadline = Deadline::from_now(timeout);
+
     let res = tokio::time::timeout(timeout, ctx.worker_limiter.acquire_permit(keyspace_id)).await;
     if res.is_err() {
         info!(
@@ -231,27 +224,55 @@ async fn handle_remote_coprocessor(
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
     let _permit = res.unwrap();
+
     let req_type = cop_req.get_tp();
-    let snap_start = Instant::now();
-    let use_cache_fs = matches!(req_type, REQ_TYPE_DAG if !ctx.ia_ctx.is_enabled());
+    let snap_start = Instant::now_coarse();
+    let use_cache_fs = matches!(req_type, REQ_TYPE_DAG);
     let snap_ctx = ctx.get_snap_ctx(use_cache_fs);
     let snap_access_res =
-        SnapAccess::construct_snapshot(tag.clone(), &snap_ctx, mem_data, snap_data).await;
+        SnapAccess::construct_snapshot(&tag, &snap_ctx, mem_data, snap_data).await;
     if let Err(err) = snap_access_res.as_ref() {
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
     if handle_start.saturating_elapsed() > timeout {
-        info!(
-            "construct snapshot timeout";
-            "tag" => tag,
-        );
+        info!("construct snapshot timeout"; "tag" => tag);
         let body = hyper::Body::from("construct snapshot timeout");
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
     let snap_access = snap_access_res.unwrap();
+
+    let prefetch_start = Instant::now_coarse();
+    if matches!(req_type, REQ_TYPE_DAG if ctx.ia_ctx.is_enabled()) {
+        match tikv::coprocessor::prefetch_ia_remote_segments(
+            &tag,
+            &snap_ctx,
+            &snap_access,
+            cop_req.get_ranges(),
+            deadline,
+        )
+        .await
+        {
+            Ok(cache_hit) => {
+                if let Some(cache_hit) = cache_hit {
+                    REMOTE_COPR_PREFETCH_CACHE_HIT_PERCENT_HISTOGRAM.observe(cache_hit * 100.0);
+                }
+            }
+            Err(err) => {
+                error!("{} prefetch failed, error {:?}", tag, err);
+                let body = hyper::Body::from("prefetch segments failed");
+                return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+            }
+        }
+        if deadline.check().is_err() {
+            info!("prefetch timeout"; "tag" => tag);
+            let body = hyper::Body::from("prefetch segments timeout");
+            return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        }
+    }
+
     let snap = RegionSnapshot::from_snapshot(snap_access);
-    let process_start = Instant::now();
+    let process_start = Instant::now_coarse();
     let result = tikv::coprocessor::parse_request_and_handle_remote_cop(
         cop_req,
         None,
@@ -265,22 +286,26 @@ async fn handle_remote_coprocessor(
         let body = hyper::Body::from(format!("{:?}", err));
         return Ok(hyper::Response::builder().status(500).body(body).unwrap());
     }
-    let finish_time = Instant::now();
+
+    let finish_time = Instant::now_coarse();
     let permit_wait_duration = snap_start.saturating_duration_since(handle_start);
-    let snap_duration = process_start.saturating_duration_since(snap_start);
+    let snap_duration = prefetch_start.saturating_duration_since(snap_start);
+    let prefetch_duration = process_start.saturating_duration_since(prefetch_start);
     let process_duration = finish_time.saturating_duration_since(process_start);
     let handle_duration = finish_time.saturating_duration_since(handle_start);
     REMOTE_COPR_SNAPSHOT_HISTOGRAM.observe(snap_duration.as_secs_f64());
+    REMOTE_COPR_PREFETCH_HISTOGRAM.observe(prefetch_duration.as_secs_f64());
     REMOTE_COPR_REQ_HANDLE_HISTOGRAM.observe(handle_duration.as_secs_f64());
     let response = result.unwrap();
     info!(
         "finished remote coprocessor";
-        "tag" => tag.clone(),
+        "tag" => &tag,
         "req_size" => req_body.len(),
         "resp_size" => response.data.len(),
         "timeout" => ?timeout,
         "permit_wait_duration" => ?permit_wait_duration,
         "snap_duration" => ?snap_duration,
+        "prefetch_duration" => ?prefetch_duration,
         "process_duration" => ?process_duration,
         "handle_duration" => ?handle_duration,
     );

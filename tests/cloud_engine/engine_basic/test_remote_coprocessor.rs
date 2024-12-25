@@ -45,6 +45,7 @@ use tidb_query_datatype::{
 use tikv::coprocessor::{REQ_TYPE_ANALYZE, REQ_TYPE_CHECKSUM, REQ_TYPE_DAG};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
+    deadline::Deadline,
     info,
     quota_limiter::QuotaLimiter,
 };
@@ -2609,13 +2610,26 @@ impl<'a> DagTest<'a> {
         let tag = cloud_worker::get_cop_req_tag(&req);
         let f = tikv_util::init_task_local(async {
             let snap_access = SnapAccess::construct_snapshot(
-                tag,
+                &tag,
                 &self.snap_ctx,
                 &snapshot.memtable_rows,
                 &snapshot.cs,
             )
             .await
             .unwrap();
+
+            if self.snap_ctx.ia_ctx.is_enabled() {
+                tikv::coprocessor::prefetch_ia_remote_segments(
+                    &tag,
+                    &self.snap_ctx,
+                    &snap_access,
+                    req.get_ranges(),
+                    Deadline::from_now(Duration::from_secs(60)),
+                )
+                .await
+                .unwrap();
+            }
+
             let snap = RegionSnapshot::from_snapshot(snap_access);
 
             tikv::coprocessor::parse_request_and_handle_remote_cop::<RegionSnapshot>(
@@ -2639,7 +2653,7 @@ impl<'a> DagTest<'a> {
         let snapshot = self.fetch_snapshot(start_ts, key_ranges);
         let f = async {
             SnapAccess::construct_snapshot(
-                "snapshot".to_string(),
+                "snapshot",
                 &self.snap_ctx,
                 &snapshot.memtable_rows,
                 &snapshot.cs,

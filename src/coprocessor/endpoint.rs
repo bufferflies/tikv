@@ -12,6 +12,11 @@ use async_stream::try_stream;
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::PerfLevel;
 use futures::{channel::mpsc, prelude::*};
+use futures_util::future::try_join_all;
+use kvengine::{
+    context::{IaCtx, SnapCtx},
+    SnapAccess,
+};
 use kvproto::{
     coprocessor as coppb, errorpb, kvrpcpb,
     kvrpcpb::{ScanDetailV2, TimeDetail},
@@ -1153,6 +1158,76 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
     exec_details_v2.set_time_detail(time_detail);
     resp.set_exec_details_v2(exec_details_v2);
     Ok(resp)
+}
+
+pub async fn prefetch_ia_remote_segments(
+    tag: &str,
+    snap_ctx: &SnapCtx,
+    snap_access: &SnapAccess,
+    ranges: &[coppb::KeyRange],
+    deadline: Deadline,
+) -> Result<Option<f64> /* cache_hit */> {
+    if snap_access.is_sync() {
+        return Ok(None);
+    }
+    let IaCtx::Enabled(ia_mgr, _) = &snap_ctx.ia_ctx else {
+        debug_assert!(false, "IA must be enabled when snap is async");
+        return Ok(None);
+    };
+
+    let mut segments = vec![];
+    let mut total_segments = 0;
+    for ran in ranges {
+        let (segs, total) = snap_access
+            .get_ia_remote_segments((ran.get_start(), ran.get_end()))
+            .map_err(|err| -> Error {
+                error!("{} get remote segments failed", tag; "range" => ?ran, "err" => ?err);
+                box_err!("get remote segments failed: {:?}", err)
+            })?;
+        segments.extend(segs);
+        total_segments += total;
+    }
+
+    if segments.is_empty() {
+        return Ok(Some(1.0));
+    }
+    segments.sort();
+    segments.dedup();
+    info!("{} prefetch remote segments", tag; "segments" => ?segments);
+
+    let prefetch_segments = segments.len();
+    let _enter = ia_mgr.enter_runtime(); // To spawn tasks on runtime of `ia_mgr`.
+    let keyspace_id = snap_access.get_keyspace_id();
+    let mut tasks = vec![];
+    for (ident, ftype) in segments {
+        let tag = tag.to_string();
+        let mgr = ia_mgr.clone();
+        let task = async move {
+            mgr.prefetch_segment(ident.clone(), ftype, keyspace_id, deadline).map_err(|err| -> Error {
+                error!("{} prefetch segment failed", tag; "ident" => %ident, "ftype" => ?ftype, "err" => ?err);
+                if let kvengine::table::Error::DeadlineExceeded(_) = err {
+                    Error::DeadlineExceeded
+                } else {
+                    box_err!("prefetch segment failed: {}: {:?}", ident, err)
+                }
+            }).await
+        };
+        tasks.push(tokio::spawn(task));
+    }
+
+    match tokio::time::timeout_at(deadline.to_tokio_instant(), try_join_all(tasks)).await {
+        Ok(res) => {
+            let res = res.map_err(|err| -> Error {
+                box_err!("{} prefetch: join tasks failed: {:?}", tag, err)
+            })?;
+            res.into_iter().collect::<Result<()>>()?;
+            let cache_hit = (total_segments - prefetch_segments) as f64 / total_segments as f64;
+            info!("{} prefetch ia remote segments", tag;
+                "prefetch_segments" => prefetch_segments, "cache_hit" => cache_hit);
+            Ok(Some(cache_hit))
+        }
+        Err(_) => Err(Error::DeadlineExceeded),
+    }
 }
 
 macro_rules! make_error_response_common {

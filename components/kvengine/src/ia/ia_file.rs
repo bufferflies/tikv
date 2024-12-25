@@ -197,7 +197,9 @@ impl IaFile {
 
         let ident = self.align_to_segment(start_off, end_off)?;
         debug!("{} read range", self.id; "start" => start_off, "end" => end_off, "ident" => %ident);
-        self.mgr.read_segment(ident, self.ftype, read_at).await
+        self.mgr
+            .read_segment(ident, self.ftype, None, None, read_at)
+            .await
     }
 
     fn align_to_segment(&self, start_off: u64, end_off: u64) -> Result<FileSegmentIdent> {
@@ -302,6 +304,26 @@ impl File for IaFile {
 
     fn mmap(&self) -> Result<MmapData> {
         unimplemented!()
+    }
+
+    fn get_remote_segments(
+        &self,
+        start_off: u64,
+        end_off: u64,
+    ) -> Result<(Vec<FileSegmentIdent>, usize /* total_segments */)> {
+        let mut segments = vec![];
+        let mut total_segments = 0;
+        let mut off = start_off;
+        while off < end_off {
+            let ident = self.align_to_segment(off, off + 1)?;
+            off = ident.end_off;
+
+            if !self.mgr.is_segment_cached(&ident) {
+                segments.push(ident);
+            }
+            total_segments += 1;
+        }
+        Ok((segments, total_segments))
     }
 }
 

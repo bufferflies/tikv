@@ -638,7 +638,7 @@ impl BackupReader {
         let tag = format!("backup_reader_{}", meta.tag());
         let snap = runtime
             .block_on(SnapAccess::from_change_set(
-                tag,
+                &tag,
                 &self.snap_ctx,
                 meta.to_change_set(),
                 true,

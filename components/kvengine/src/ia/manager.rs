@@ -11,10 +11,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use dashmap::mapref::entry::Entry;
+use dashmap::{mapref::entry::Entry, DashMap};
 use engine_traits::GetObjectOptions;
-use tikv_util::time::Instant;
-use tokio::sync::Semaphore;
+use tikv_util::{deadline::Deadline, time::Instant};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
     dfs::{Dfs, FileType, S3Fs},
@@ -30,6 +30,8 @@ use crate::{
     try_some,
 };
 
+/// `buf` can be empty, which means to request the specified range of data but
+/// do not actually read it. Used to prefetch segments from remote.
 pub(crate) struct ReadAt<'a> {
     buf: &'a mut [u8],
     offset: u64,
@@ -51,11 +53,14 @@ impl<'a> ReadAt<'a> {
     fn read_from_segment_bytes(&mut self, ident: &FileSegmentIdent, seg_data: &Bytes) {
         let (start_off, end_off) = (self.start_off(), self.end_off());
         debug_assert!(
-            start_off < end_off && ident.start_off <= start_off && end_off <= ident.end_off
+            start_off <= end_off && ident.start_off <= start_off && end_off <= ident.end_off
         );
-        let seg_slice = seg_data
-            .slice((start_off - ident.start_off) as usize..(end_off - ident.start_off) as usize);
-        self.buf.copy_from_slice(&seg_slice);
+        if !self.buf.is_empty() {
+            let seg_slice = seg_data.slice(
+                (start_off - ident.start_off) as usize..(end_off - ident.start_off) as usize,
+            );
+            self.buf.copy_from_slice(&seg_slice);
+        }
     }
 }
 
@@ -81,6 +86,7 @@ pub struct IaManagerOptions {
     pub freq_update_interval: Duration,
 
     pub dfs_concurrency: usize,
+    pub dfs_keyspace_concurrency: usize,
 
     // The capacity of the file descriptor cache.
     pub fd_cache_capacity: usize,
@@ -129,7 +135,7 @@ impl IaManager {
             opts.main_queue.cap,
             opts.segment_size,
             opts.freq_update_interval,
-            runtime,
+            runtime.clone(),
             segment_data_ctx,
         );
 
@@ -138,6 +144,7 @@ impl IaManager {
         let core = Arc::new(IaManagerCore {
             segment_size: opts.segment_size,
             s3fs,
+            runtime,
             main_store,
             loading_segments: Default::default(),
             segments,
@@ -145,6 +152,8 @@ impl IaManager {
             cache_hit_counter: Default::default(),
             cache_miss_counter: Default::default(),
             dfs_concurrency,
+            dfs_keyspace_concurrency_limit: opts.dfs_keyspace_concurrency,
+            dfs_keyspace_concurrency: Default::default(),
         });
 
         let mgr = Self { core };
@@ -156,6 +165,7 @@ impl IaManager {
 pub struct IaManagerCore {
     segment_size: i64,
     s3fs: S3Fs,
+    runtime: tokio::runtime::Handle,
     main_store: Arc<dyn LocalStore>,
 
     loading_segments: GuardMap<FileSegmentIdent, ()>,
@@ -166,9 +176,19 @@ pub struct IaManagerCore {
     cache_miss_counter: AtomicU64,
 
     dfs_concurrency: Arc<Semaphore>,
+    dfs_keyspace_concurrency_limit: usize,
+    dfs_keyspace_concurrency: Arc<DashMap<u32 /* keyspace_id */, Arc<Semaphore>>>,
 }
 
 impl IaManagerCore {
+    pub fn enter_runtime(&self) -> tokio::runtime::EnterGuard<'_> {
+        self.runtime.enter()
+    }
+
+    pub fn get_dfs(&self) -> &dyn Dfs {
+        &self.s3fs
+    }
+
     pub(crate) fn segment_size(&self) -> i64 {
         self.segment_size
     }
@@ -200,10 +220,12 @@ impl IaManagerCore {
         &self,
         ident: FileSegmentIdent,
         ftype: FileType,
+        keyspace_id: Option<u32>,
+        deadline: Option<Deadline>,
         mut read_at: ReadAt<'_>,
     ) -> Result<()> {
         let (start_off, end_off) = (read_at.start_off(), read_at.end_off());
-        if start_off >= end_off || start_off < ident.start_off || ident.end_off < end_off {
+        if start_off > end_off || start_off < ident.start_off || ident.end_off < end_off {
             debug_assert!(
                 false,
                 "invalid range, segment {:?}, range: {}-{}",
@@ -238,7 +260,9 @@ impl IaManagerCore {
                 return Ok(());
             }
 
-            let data = self.read_segment_from_remote(&ident, ftype).await?;
+            let data = self
+                .read_segment_from_remote(&ident, ftype, keyspace_id, deadline)
+                .await?;
             self.segments
                 .set_segment_data(ident.clone(), FileSegmentData::InMem(data.clone()));
 
@@ -261,10 +285,15 @@ impl IaManagerCore {
         &self,
         ident: &FileSegmentIdent,
         ftype: FileType,
+        keyspace_id: Option<u32>,
+        deadline: Option<Deadline>,
     ) -> Result<Bytes> {
-        let _permit = self.dfs_concurrency.acquire().await.map_err(|err| {
-            Error::IaMgr(format!("acquire DFS concurrency permit failed: {:?}", err))
-        })?;
+        let _permit = self.acquire_concurrency_permit(keyspace_id).await;
+        if deadline.is_some_and(|d| d.check().is_err()) {
+            return Err(Error::DeadlineExceeded(format!(
+                "acquire concurrency permit timeout: {ident}"
+            )));
+        }
 
         let opts = GetObjectOptions {
             start_off: Some(ident.start_off),
@@ -297,18 +326,63 @@ impl IaManagerCore {
         Ok(res)
     }
 
+    // Note: when `read_at.buf` is empty, the existence of segment is not checked.
     fn read_segment_from_local_store(
         &self,
         ident: &FileSegmentIdent,
         read_at: &mut ReadAt<'_>,
     ) -> Result<Option<()>> {
         debug!("read segment from local"; "ident" => %ident);
+        if read_at.buf.is_empty() {
+            return Ok(Some(()));
+        }
         self.main_store.read_at(
             ident.file_id,
             &ident.local_filename(),
             read_at.buf,
             read_at.offset - ident.start_off,
         )
+    }
+
+    // Note: It's possible that the segment is of `SegmentData::InStore` but
+    // actually not existed. In such condition this method will still return
+    // true.
+    pub fn is_segment_cached(&self, ident: &FileSegmentIdent) -> bool {
+        self.segments.get_segment(ident).is_some()
+    }
+
+    pub async fn prefetch_segment(
+        &self,
+        ident: FileSegmentIdent,
+        ftype: FileType,
+        keyspace_id: u32,
+        deadline: Deadline,
+    ) -> Result<()> {
+        let mut buf: [u8; 0] = [];
+        let read_at = ReadAt::new(buf.as_mut_slice(), ident.start_off);
+        self.read_segment(ident, ftype, Some(keyspace_id), Some(deadline), read_at)
+            .await
+    }
+
+    pub async fn acquire_concurrency_permit(
+        &self,
+        keyspace_id: Option<u32>,
+    ) -> (Option<OwnedSemaphorePermit>, OwnedSemaphorePermit) {
+        let keyspace_permit = match keyspace_id {
+            Some(keyspace_id) => {
+                let sem = self
+                    .dfs_keyspace_concurrency
+                    .entry(keyspace_id)
+                    .or_insert_with(|| {
+                        Arc::new(Semaphore::new(self.dfs_keyspace_concurrency_limit))
+                    })
+                    .clone();
+                Some(sem.acquire_owned().await.unwrap())
+            }
+            None => None,
+        };
+        let global_permit = self.dfs_concurrency.clone().acquire_owned().await.unwrap();
+        (keyspace_permit, global_permit)
     }
 
     pub fn cache_hit_rate(&self) -> f64 {

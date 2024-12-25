@@ -26,6 +26,8 @@ use txn_types::Lock;
 
 use crate::{
     context::SnapCtx,
+    dfs::FileType,
+    ia::types::FileSegmentIdent,
     limiter::RegionLimiter,
     table::{
         blobtable::blobtable::BlobPrefetcher,
@@ -35,6 +37,7 @@ use crate::{
             HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
+        sstable::SsTable,
         table,
         vector_index::VectorItemsReader,
         AsyncMergeIterator, BoundedDataSet, DataBound, InnerKey, Iterator as TableIterator,
@@ -108,7 +111,7 @@ impl SnapAccess {
     }
 
     pub async fn from_change_set(
-        tag: String,
+        tag: &str,
         ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         ignore_lock: bool,
@@ -120,7 +123,7 @@ impl SnapAccess {
     }
 
     async fn from_change_set_and_memtable_data(
-        tag: String,
+        tag: &str,
         ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         mem_tbls: Vec<CfTable>,
@@ -131,7 +134,7 @@ impl SnapAccess {
     }
 
     pub async fn construct_snapshot<'a>(
-        tag: String,
+        tag: &str,
         ctx: &SnapCtx,
         mem_table_data: &[u8],
         snapshot: &[u8],
@@ -321,7 +324,7 @@ impl SnapAccessCore {
     }
 
     pub async fn from_change_set(
-        tag: String,
+        tag: &str,
         ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         mem_tbls: Vec<CfTable>,
@@ -1529,6 +1532,43 @@ impl SnapAccessCore {
     pub fn is_sync(&self) -> bool {
         self.is_sync
     }
+
+    /// Get IA segments which are in DFS. Used to prefetch in parallel.
+    // TODO: Support columnar tables
+    pub fn get_ia_remote_segments(
+        &self,
+        outer_range: (&[u8], &[u8]),
+    ) -> Result<(
+        Vec<(FileSegmentIdent, FileType)>,
+        usize, // total_segments
+    )> {
+        let start_key = InnerKey::from_outer_key(outer_range.0);
+        let end_key = InnerKey::from_outer_end_key(outer_range.1);
+        let data_bound = DataBound::new(start_key, end_key, false);
+
+        let mut segments = vec![];
+        let mut total_segments = 0;
+        let tables = self.get_overlap_async_tables(data_bound);
+        for t in tables {
+            let (segs, total) = t.get_remote_segments(data_bound)?;
+            segments.extend(segs.into_iter().map(|ident| (ident, FileType::Sst)));
+            total_segments += total;
+        }
+        Ok((segments, total_segments))
+    }
+
+    fn get_overlap_async_tables(&self, data_bound: DataBound<'_>) -> Vec<SsTable> {
+        let mut tables = vec![];
+        for lh in &self.data.cfs[WRITE_CF].levels {
+            let (left, right) = data_bound.get_overlap_data_sets(&lh.tables);
+            for t in &lh.tables[left..right] {
+                if !t.is_sync() {
+                    tables.push(t.clone());
+                }
+            }
+        }
+        tables
+    }
 }
 
 pub struct Iterator {
@@ -2003,7 +2043,7 @@ mod tests {
             cs.set_shard_ver(shard_ver);
             cs.set_snapshot(snap_pb);
             let snap_bin = cs.write_to_bytes().unwrap();
-            let remote_snap = block_on(SnapAccess::construct_snapshot("test".to_owned(), &snap_ctx, &mem_bin, &snap_bin)).unwrap();
+            let remote_snap = block_on(SnapAccess::construct_snapshot("test", &snap_ctx, &mem_bin, &snap_bin)).unwrap();
 
             let inner_ranges = inner_ranges.iter().map(|(start, end)| (start.as_ref(), end.as_ref())).collect::<Vec<_>>();
             let ref_store_in_ranges = ref_store.new_in_ranges(&inner_ranges);

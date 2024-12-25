@@ -18,6 +18,7 @@ use xorf::{BinaryFuse8, Filter};
 
 use super::{builder::*, iterator::TableIterator};
 use crate::{
+    ia::types::FileSegmentIdent,
     next_version, next_version_async,
     table::{
         file::{File, TtlCache},
@@ -189,6 +190,26 @@ impl SsTable {
 
     pub fn is_sync(&self) -> bool {
         self.file.is_sync()
+    }
+
+    pub fn get_remote_segments(
+        &self,
+        data_bound: DataBound<'_>,
+    ) -> Result<(Vec<FileSegmentIdent>, usize /* total_segments */)> {
+        if self.file.is_sync() {
+            return Ok((vec![], 0));
+        }
+
+        let idx = self.load_index();
+        let (first_block, exclusive_last_block) = idx.seek_overlap_blocks(data_bound);
+        let start_off = idx.get_block_addr(first_block).curr_off as u64;
+        let end_off = if exclusive_last_block < idx.num_blocks() {
+            idx.get_block_addr(exclusive_last_block).curr_off as u64
+        } else {
+            self.data_end_offset() as u64
+        };
+
+        self.file.get_remote_segments(start_off, end_off)
     }
 }
 
@@ -548,6 +569,10 @@ impl SsTableCore {
         (idx_in_mem + old_idx_in_mem) as u64
     }
 
+    fn data_end_offset(&self) -> u32 {
+        self.start_off as u32 + self.footer.data_len() as u32
+    }
+
     /// The offset of first table meta (index).
     #[inline]
     pub fn meta_offset(&self) -> u32 {
@@ -555,7 +580,7 @@ impl SsTableCore {
     }
 
     pub fn index_offset(&self) -> u32 {
-        self.footer.index_offset
+        self.start_off as u32 + self.footer.index_offset
     }
 
     fn filter_offset(&self) -> u32 {
@@ -686,6 +711,22 @@ impl Index {
             }
             Ordering::Greater => self.num_blocks(),
         }
+    }
+
+    pub fn seek_overlap_blocks(
+        &self,
+        data_bound: DataBound<'_>,
+    ) -> (
+        usize, // first_block_idx
+        usize, // exclusive_last_block_idx
+    ) {
+        let first_idx = self.seek_block(data_bound.lower_bound).saturating_sub(1);
+        let last_exclusive_idx = if data_bound.upper_inclusive {
+            self.seek_block(data_bound.upper_bound)
+        } else {
+            self.seek_block_bigger_or_equal(data_bound.upper_bound)
+        };
+        (first_idx, last_exclusive_idx)
     }
 
     fn block_diff_key(&self, i: usize) -> &[u8] {

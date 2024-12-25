@@ -562,7 +562,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
     let snap_access = dfs
         .get_runtime()
         .block_on(SnapAccess::construct_snapshot(
-            "test".to_owned(),
+            "test",
             &snap_ctx,
             delegate_resp.get_mem_table_data(),
             delegate_resp.get_snapshot(),
@@ -881,7 +881,7 @@ fn test_columnar_ia_file() {
     };
     let snap_access = runtime
         .block_on(SnapAccess::construct_snapshot(
-            "test".to_owned(),
+            "test",
             &snap_ctx,
             delegate_resp.get_mem_table_data(),
             delegate_resp.get_snapshot(),
