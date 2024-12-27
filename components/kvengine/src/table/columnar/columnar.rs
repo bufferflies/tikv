@@ -273,6 +273,65 @@ impl TableMeta {
     }
 }
 
+pub struct MinMaxIndex {
+    pub(crate) min_max: ColumnBuffer,
+    pub(crate) has_null_marks: Vec<u8>,
+    pub(crate) has_value_marks: Vec<u8>,
+}
+
+impl MinMaxIndex {
+    pub(crate) fn new(col_id: i32, fixed_size: usize, nullable: bool) -> Self {
+        let min_max = ColumnBuffer::new(col_id, fixed_size, nullable);
+        Self {
+            min_max,
+            has_null_marks: vec![],
+            has_value_marks: vec![],
+        }
+    }
+
+    pub(crate) fn push_value(&mut self, data: &[u8]) {
+        self.min_max.push_value(data);
+    }
+
+    pub(crate) fn push_null(&mut self) {
+        self.min_max.push_null();
+    }
+
+    pub(crate) fn push_has_null(&mut self, has_null: bool) {
+        self.has_null_marks.push(has_null as u8);
+    }
+
+    pub(crate) fn push_has_value(&mut self, has_value: bool) {
+        self.has_value_marks.push(has_value as u8);
+    }
+
+    pub(crate) fn length(&self) -> usize {
+        debug_assert_eq!(self.has_null_marks.len() * 2, self.min_max.length());
+        debug_assert_eq!(self.has_value_marks.len() * 2, self.min_max.length());
+        self.min_max.length() / 2
+    }
+
+    pub(crate) fn parse(&mut self, mut buf: &[u8]) {
+        let length = buf.get_u32_le() as usize;
+        self.has_null_marks.clear();
+        self.has_null_marks.extend_from_slice(&buf[..length]);
+        buf = &buf[length..];
+        self.has_value_marks.clear();
+        self.has_value_marks.extend_from_slice(&buf[..length]);
+        buf = &buf[length..];
+        self.min_max.reset();
+        self.min_max.parse(buf);
+    }
+
+    pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
+        buf.clear();
+        buf.put_u32_le(self.length() as u32);
+        buf.extend_from_slice(&self.has_null_marks);
+        buf.extend_from_slice(&self.has_value_marks);
+        self.min_max.append_to(buf);
+    }
+}
+
 pub struct ColumnMeta {
     pub(crate) col_info: ColumnInfo,
     pub(crate) fixed_size: usize,
@@ -280,7 +339,7 @@ pub struct ColumnMeta {
     // The length is number_of_packs + 1, the last element is the end offset of the last pack.
     pub(crate) pack_offsets: PackOffsets,
     // table level min-max, contains just two values, can be used to filter the whole file.
-    pub(crate) min_max: Option<ColumnBuffer>,
+    pub(crate) min_max: Option<MinMaxIndex>,
     pub(crate) compressed_min_max_pack: Vec<u8>,
 }
 
@@ -290,7 +349,7 @@ impl ColumnMeta {
         let fixed_size = get_fixed_size(&col_info);
         let nullable = col_info.get_flag() as u32 & FieldTypeFlag::NOT_NULL.bits() == 0;
         let min_max = (can_build_min_max(&col_info) && need_min_max)
-            .then(|| ColumnBuffer::new(col_id, fixed_size, nullable));
+            .then(|| MinMaxIndex::new(col_id, fixed_size, nullable));
         Self {
             col_info,
             fixed_size,
@@ -318,7 +377,7 @@ impl ColumnMeta {
             buf = &buf[min_max_idx_len..];
             let mut uncompressed_min_max_buf = vec![];
             decompress_pack(compressed_min_max_idx_buf, &mut uncompressed_min_max_buf);
-            let mut min_max = ColumnBuffer::new(col_id, fixed_size, nullable);
+            let mut min_max = MinMaxIndex::new(col_id, fixed_size, nullable);
             min_max.parse(&uncompressed_min_max_buf);
             Some(min_max)
         } else {
@@ -828,6 +887,10 @@ impl ColumnBuffer {
 
     pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
         buf.clear();
+        self.append_to(buf);
+    }
+
+    pub(crate) fn append_to(&self, buf: &mut Vec<u8>) {
         buf.put_u16_le(PACK_FORMAT);
         buf.put_u16_le(ENCODING_TYPE_NONE);
         buf.put_u32_le(self.length() as u32);

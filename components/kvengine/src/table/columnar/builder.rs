@@ -341,10 +341,15 @@ impl ColumnarTableBuilder {
             .handle_builder
             .append_handle(&block.handles, start_offset, end_offset);
         self.version_builder
-            .append(&block.versions, start_offset, end_offset);
+            .append(&block.versions, None, start_offset, end_offset);
         for (i, col_buf) in block.columns.iter().enumerate() {
             let col_builder = &mut self.column_builders[i];
-            col_builder.append(col_buf, start_offset, end_offset);
+            col_builder.append(
+                col_buf,
+                Some(self.version_builder.get_del_marks()),
+                start_offset,
+                end_offset,
+            );
         }
         for i in start_offset..end_offset {
             self.max_version = max(self.max_version, block.versions.get_version(i))
@@ -353,7 +358,7 @@ impl ColumnarTableBuilder {
     }
 
     fn finish_table(&mut self) {
-        self.handle_builder.finish_pack();
+        self.handle_builder.finish_pack(None);
         // handle index add the handle next to the max handle
         // to avoid out of range seek load the last pack.
         if self.handle_builder.col_meta.fixed_size > 0 {
@@ -370,9 +375,9 @@ impl ColumnarTableBuilder {
             self.handle_builder.handle_index.push(next_handle);
         };
         self.compressed_handle_index = self.handle_builder.build_handle_index();
-        self.version_builder.finish_pack();
+        self.version_builder.finish_pack(None);
         for col_builder in &mut self.column_builders {
-            col_builder.finish_pack();
+            col_builder.finish_pack(Some(self.version_builder.get_del_marks()));
         }
         for col_builder in &mut self.column_builders {
             col_builder.finish_min_max_pack();
@@ -481,6 +486,7 @@ pub struct ColumnarColumnBuilder {
     compressed_buf: Vec<u8>,
     compressed_packs: Vec<Vec<u8>>,
     estimated_size: usize,
+    del_marks: Vec<u8>, // Save the deleted marks if this is a version column.
 }
 
 #[derive(Default, Copy, Clone, Debug)]
@@ -520,10 +526,17 @@ impl ColumnarColumnBuilder {
             compressed_buf: vec![],
             compressed_packs: vec![],
             estimated_size: 0,
+            del_marks: vec![],
         }
     }
 
-    pub(crate) fn append(&mut self, input: &ColumnBuffer, row_offset: usize, row_end_off: usize) {
+    pub(crate) fn append(
+        &mut self,
+        input: &ColumnBuffer,
+        del_marks: Option<&[u8]>,
+        row_offset: usize,
+        row_end_off: usize,
+    ) {
         let mut current_offset = row_offset;
         while current_offset < row_end_off {
             let pack_remain = self.pack_max_row_count - self.pack_buffer.length();
@@ -535,11 +548,17 @@ impl ColumnarColumnBuilder {
             let current_end_offset = std::cmp::min(row_end_off, limited_end_offset);
             self.pack_buffer
                 .append(input, current_offset, current_end_offset);
+            // If this is a version column, push the del_marks to builder.
+            if self.is_version_builder() {
+                assert!(del_marks.is_none());
+                self.del_marks
+                    .extend_from_slice(&input.nulls[current_offset..current_end_offset]);
+            }
             self.row_count += (current_end_offset - current_offset) as u32;
             if self.pack_buffer.length() >= self.pack_max_row_count
                 || self.pack_buffer.data_size() >= self.pack_max_size
             {
-                self.finish_pack();
+                self.finish_pack(del_marks);
             }
             current_offset = current_end_offset;
         }
@@ -558,7 +577,7 @@ impl ColumnarColumnBuilder {
             if current_length >= self.pack_max_row_count {
                 let last_handle = self.pack_buffer.get_not_null_value(current_length - 1);
                 if last_handle != handle {
-                    self.finish_pack();
+                    self.finish_pack(None);
                     return i;
                 }
             }
@@ -568,7 +587,15 @@ impl ColumnarColumnBuilder {
         row_end_off
     }
 
-    fn finish_pack(&mut self) {
+    pub(crate) fn get_del_marks(&self) -> &[u8] {
+        &self.del_marks
+    }
+
+    fn is_version_builder(&self) -> bool {
+        self.col_meta.col_info.get_column_id() == VERSION_COL_ID as i64
+    }
+
+    fn finish_pack(&mut self, del_marks: Option<&[u8]>) {
         let current_length = self.pack_buffer.length();
         if current_length == 0 {
             return;
@@ -581,18 +608,31 @@ impl ColumnarColumnBuilder {
             self.max_handle.extend_from_slice(last_handle);
         }
         self.fill_uncompressed_buf();
+        let (total_len, offset) = self.col_meta.pack_offsets.end_offset();
         if let Some(mut min_max) = self.col_meta.min_max.take() {
-            if let Some((min, max)) = self.compute_min_max() {
+            let del_marks = &del_marks.unwrap()[offset as usize..self.row_count as usize];
+            // If there is any null value and not deleted, we should set has_null to true.
+            let has_null = self.pack_buffer.nullable
+                && self
+                    .pack_buffer
+                    .nulls
+                    .iter()
+                    .enumerate()
+                    .any(|(i, &x)| x == 1 && del_marks[i] == 0);
+            min_max.push_has_null(has_null);
+            if let Some((min, max)) = self.compute_min_max(del_marks) {
                 min_max.push_value(&min);
                 min_max.push_value(&max);
+                min_max.push_has_value(true);
             } else {
                 min_max.push_null();
                 min_max.push_null();
+                min_max.push_has_value(false);
             }
             self.col_meta.min_max = Some(min_max);
         }
         let pack = self.compress_pack();
-        let (total_len, _) = self.col_meta.pack_offsets.end_offset();
+
         self.col_meta
             .pack_offsets
             .push(total_len + pack.len() as u32, self.row_count);
@@ -619,55 +659,51 @@ impl ColumnarColumnBuilder {
     }
 
     fn finish_min_max_pack(&mut self) {
-        if let Some(min_max_buf) = self.col_meta.min_max.take() {
-            self.pack_buffer = min_max_buf;
-            self.fill_uncompressed_buf();
+        if let Some(min_max) = self.col_meta.min_max.take() {
+            min_max.write_to(&mut self.uncompressed_buf);
             let compressed_buf = self.compress_pack();
             self.col_meta.compressed_min_max_pack = compressed_buf;
         }
     }
 
-    fn compute_min_max(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+    fn compute_min_max(&self, del_marks: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
         let tp = FieldTypeTp::from_i32(self.col_meta.col_info.get_tp()).unwrap();
         let is_unsigned = get_unsigned(&self.col_meta.col_info);
-        if self.pack_buffer.nullable && self.pack_buffer.nulls.iter().all(|&x| x == 1) {
-            return None;
-        }
         debug_assert!(self.pack_buffer.length() > 0);
         match tp {
             FieldTypeTp::Unspecified => {}
             FieldTypeTp::Float => {
                 return self
-                    .compute_min_max_fixed::<f32>()
+                    .compute_min_max_fixed::<f32>(del_marks)
                     .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()));
             }
             FieldTypeTp::Double => {
                 return self
-                    .compute_min_max_fixed::<f64>()
+                    .compute_min_max_fixed::<f64>(del_marks)
                     .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()));
             }
             FieldTypeTp::Null => {}
             FieldTypeTp::Tiny | FieldTypeTp::Short | FieldTypeTp::Int24 | FieldTypeTp::Long => {
                 return if is_unsigned {
-                    self.compute_min_max_fixed::<u32>()
+                    self.compute_min_max_fixed::<u32>(del_marks)
                         .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()))
                 } else {
-                    self.compute_min_max_fixed::<i32>()
+                    self.compute_min_max_fixed::<i32>(del_marks)
                         .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()))
                 };
             }
             FieldTypeTp::LongLong => {
                 return if is_unsigned {
-                    self.compute_min_max_fixed::<u64>()
+                    self.compute_min_max_fixed::<u64>(del_marks)
                         .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()))
                 } else {
-                    self.compute_min_max_fixed::<i64>()
+                    self.compute_min_max_fixed::<i64>(del_marks)
                         .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()))
                 };
             }
             FieldTypeTp::Duration | FieldTypeTp::Year => {
                 return self
-                    .compute_min_max_fixed::<i64>()
+                    .compute_min_max_fixed::<i64>(del_marks)
                     .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()));
             }
             FieldTypeTp::Timestamp
@@ -677,7 +713,7 @@ impl ColumnarColumnBuilder {
             | FieldTypeTp::Bit
             | FieldTypeTp::Enum => {
                 return self
-                    .compute_min_max_fixed::<u64>()
+                    .compute_min_max_fixed::<u64>(del_marks)
                     .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()));
             }
             FieldTypeTp::VarChar => {}
@@ -696,12 +732,18 @@ impl ColumnarColumnBuilder {
         None
     }
 
-    fn compute_min_max_fixed<T: bytemuck::AnyBitPattern + PartialOrd>(&self) -> Option<(T, T)> {
+    fn compute_min_max_fixed<T: bytemuck::AnyBitPattern + PartialOrd>(
+        &self,
+        del_marks: &[u8],
+    ) -> Option<(T, T)> {
         let val_slice: &[T] = bytemuck::cast_slice(&self.pack_buffer.data_buf);
         let mut min_val = None;
         let mut max_val = None;
         for (i, val) in val_slice.iter().enumerate() {
-            if self.pack_buffer.nullable && self.pack_buffer.nulls[i] == 1 {
+            let is_deleted = del_marks[i] == 1;
+            let is_null = self.pack_buffer.nullable && self.pack_buffer.nulls[i] == 1;
+            // Skip the deleted or null value.
+            if is_deleted || is_null {
                 continue;
             }
             if min_val.is_none() {

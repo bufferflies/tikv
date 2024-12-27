@@ -74,6 +74,11 @@ impl TiFlashServers {
         } else {
             "".to_string()
         };
+        let use_columnar = if tiflash_compute_mode {
+            Some(true)
+        } else {
+            None
+        };
 
         let config = TiFlashConfig {
             http_port: TIFLASH_HTTP_PORT_BASE + idx,
@@ -81,6 +86,7 @@ impl TiFlashServers {
             flash: FlashConfig {
                 service_addr: service_addr.clone(),
                 disaggregated_mode: role,
+                use_columnar,
                 proxy: ProxyConfig {
                     addr: format!("127.0.0.1:{}", TIFLASH_PROXY_PORT_BASE + idx),
                     status_addr: self.status_addr(idx),
@@ -226,6 +232,7 @@ struct FlashConfig {
     service_addr: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     disaggregated_mode: String,
+    use_columnar: Option<bool>,
     proxy: ProxyConfig,
 }
 

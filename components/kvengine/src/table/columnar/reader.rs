@@ -1701,7 +1701,7 @@ pub mod tests {
     #[test]
     fn test_columnar_builder() {
         init_log_for_test();
-        for common_handle in [true, true] {
+        for common_handle in [true, false] {
             let schema = new_schema(1, common_handle);
             let (file, ref_rows) = build_table(1, &schema, 100, 150, 100);
             let columnar_file = ColumnarFile::open(file).unwrap();
