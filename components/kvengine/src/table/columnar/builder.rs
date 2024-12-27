@@ -290,6 +290,7 @@ pub struct ColumnarTableBuilder {
     max_version: u64,
     encryption_key: Option<EncryptionKey>,
     file_id: u64, // Used for encryption
+    del_marks: Vec<u8>,
 }
 
 #[allow(dead_code)]
@@ -297,7 +298,6 @@ impl ColumnarTableBuilder {
     pub fn new(
         schema: Schema,
         opts: ColumnarTableBuildOptions,
-        need_min_max: bool,
         encryption_key: Option<EncryptionKey>,
         file_id: u64,
     ) -> Self {
@@ -309,7 +309,7 @@ impl ColumnarTableBuilder {
                 col_info.clone(),
                 pack_max_row_count,
                 pack_max_size,
-                need_min_max,
+                true,
             );
             column_builders.push(col_builder);
         }
@@ -332,6 +332,7 @@ impl ColumnarTableBuilder {
             max_version: 0,
             encryption_key,
             file_id,
+            del_marks: vec![],
         }
     }
 
@@ -342,14 +343,11 @@ impl ColumnarTableBuilder {
             .append_handle(&block.handles, start_offset, end_offset);
         self.version_builder
             .append(&block.versions, None, start_offset, end_offset);
+        self.del_marks
+            .extend_from_slice(&block.versions.nulls[start_offset..end_offset]);
         for (i, col_buf) in block.columns.iter().enumerate() {
             let col_builder = &mut self.column_builders[i];
-            col_builder.append(
-                col_buf,
-                Some(self.version_builder.get_del_marks()),
-                start_offset,
-                end_offset,
-            );
+            col_builder.append(col_buf, Some(&self.del_marks), start_offset, end_offset);
         }
         for i in start_offset..end_offset {
             self.max_version = max(self.max_version, block.versions.get_version(i))
@@ -377,7 +375,7 @@ impl ColumnarTableBuilder {
         self.compressed_handle_index = self.handle_builder.build_handle_index();
         self.version_builder.finish_pack(None);
         for col_builder in &mut self.column_builders {
-            col_builder.finish_pack(Some(self.version_builder.get_del_marks()));
+            col_builder.finish_pack(Some(&self.del_marks));
         }
         for col_builder in &mut self.column_builders {
             col_builder.finish_min_max_pack();
@@ -486,7 +484,6 @@ pub struct ColumnarColumnBuilder {
     compressed_buf: Vec<u8>,
     compressed_packs: Vec<Vec<u8>>,
     estimated_size: usize,
-    del_marks: Vec<u8>, // Save the deleted marks if this is a version column.
 }
 
 #[derive(Default, Copy, Clone, Debug)]
@@ -526,7 +523,6 @@ impl ColumnarColumnBuilder {
             compressed_buf: vec![],
             compressed_packs: vec![],
             estimated_size: 0,
-            del_marks: vec![],
         }
     }
 
@@ -548,12 +544,6 @@ impl ColumnarColumnBuilder {
             let current_end_offset = std::cmp::min(row_end_off, limited_end_offset);
             self.pack_buffer
                 .append(input, current_offset, current_end_offset);
-            // If this is a version column, push the del_marks to builder.
-            if self.is_version_builder() {
-                assert!(del_marks.is_none());
-                self.del_marks
-                    .extend_from_slice(&input.nulls[current_offset..current_end_offset]);
-            }
             self.row_count += (current_end_offset - current_offset) as u32;
             if self.pack_buffer.length() >= self.pack_max_row_count
                 || self.pack_buffer.data_size() >= self.pack_max_size
@@ -585,14 +575,6 @@ impl ColumnarColumnBuilder {
             self.row_count += 1;
         }
         row_end_off
-    }
-
-    pub(crate) fn get_del_marks(&self) -> &[u8] {
-        &self.del_marks
-    }
-
-    fn is_version_builder(&self) -> bool {
-        self.col_meta.col_info.get_column_id() == VERSION_COL_ID as i64
     }
 
     fn finish_pack(&mut self, del_marks: Option<&[u8]>) {
@@ -672,27 +654,17 @@ impl ColumnarColumnBuilder {
         debug_assert!(self.pack_buffer.length() > 0);
         match tp {
             FieldTypeTp::Unspecified => {}
-            FieldTypeTp::Float => {
-                return self
-                    .compute_min_max_fixed::<f32>(del_marks)
-                    .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()));
-            }
-            FieldTypeTp::Double => {
+            FieldTypeTp::Float | FieldTypeTp::Double => {
                 return self
                     .compute_min_max_fixed::<f64>(del_marks)
                     .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()));
             }
             FieldTypeTp::Null => {}
-            FieldTypeTp::Tiny | FieldTypeTp::Short | FieldTypeTp::Int24 | FieldTypeTp::Long => {
-                return if is_unsigned {
-                    self.compute_min_max_fixed::<u32>(del_marks)
-                        .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()))
-                } else {
-                    self.compute_min_max_fixed::<i32>(del_marks)
-                        .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()))
-                };
-            }
-            FieldTypeTp::LongLong => {
+            FieldTypeTp::Tiny
+            | FieldTypeTp::Short
+            | FieldTypeTp::Int24
+            | FieldTypeTp::Long
+            | FieldTypeTp::LongLong => {
                 return if is_unsigned {
                     self.compute_min_max_fixed::<u64>(del_marks)
                         .map(|(min, max)| (min.to_le_bytes().to_vec(), max.to_le_bytes().to_vec()))

@@ -1632,13 +1632,8 @@ pub mod tests {
             let mut opts = ColumnarTableBuildOptions::default();
             opts.pack_max_row_count = 8;
             opts.pack_max_size = 256;
-            let mut table_builder = ColumnarTableBuilder::new(
-                schema.clone(),
-                opts,
-                true,
-                encryption_key.clone(),
-                file_id,
-            );
+            let mut table_builder =
+                ColumnarTableBuilder::new(schema.clone(), opts, encryption_key.clone(), file_id);
             block_on(row_tbl_reader.seek(&tables_ref_rows[i][0].handle)).unwrap();
             let mut append_rows = 0;
             let mut block_off = 0;

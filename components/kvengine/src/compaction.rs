@@ -3857,7 +3857,6 @@ async fn compact_table_for_columnar(
     let mut tbl_builder = ColumnarTableBuilder::new(
         schema.clone(),
         *columnar_config,
-        false,
         ctx.encryption_key.clone(),
         file_builder.file_id,
     );
@@ -3876,7 +3875,6 @@ async fn compact_table_for_columnar(
                 tbl_builder = ColumnarTableBuilder::new(
                     schema.clone(),
                     *columnar_config,
-                    false,
                     ctx.encryption_key.clone(),
                     file_builder.file_id,
                 );
