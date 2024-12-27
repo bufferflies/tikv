@@ -11,7 +11,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::DashMap;
 use engine_traits::GetObjectOptions;
 use tikv_util::{deadline::Deadline, time::Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -466,22 +466,8 @@ impl SegmentDataContext {
         expected: &FileSegmentData,
         segment_data: Option<FileSegmentData>,
     ) -> std::result::Result<(), Option<FileSegmentData>> {
-        match self.segments.entry(ident) {
-            Entry::Occupied(mut entry) => {
-                let prev = entry.get();
-                if Self::is_pos_match(prev, expected) {
-                    if let Some(segment_data) = segment_data {
-                        entry.insert(segment_data);
-                    } else {
-                        entry.remove();
-                    }
-                    Ok(())
-                } else {
-                    Err(Some(prev.clone()))
-                }
-            }
-            Entry::Vacant(_) => Err(None),
-        }
+        self.segments
+            .compare_and_set(ident, expected, segment_data, Self::is_pos_match)
     }
 
     #[inline]
@@ -491,7 +477,7 @@ impl SegmentDataContext {
 
     #[inline]
     pub(crate) fn remove_segment_data(&self, ident: &FileSegmentIdent) -> Option<FileSegmentData> {
-        self.segments.remove(ident).map(|x| x.1)
+        self.segments.remove(ident)
     }
 
     #[inline]

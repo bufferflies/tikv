@@ -253,15 +253,6 @@ impl S3Fifo {
         }
         let pos = if let Some((queue_item, pos)) = self.get_item_ref(ident) {
             queue_item.access(self.freq_update_interval);
-
-            // Try to fix the mismatch.
-            // Happens when a delay evict make segment data empty but segment in main queue.
-            // Then the next read will lead to segment data in mem but segment still in main
-            // queue.
-            if matches!(pos, QueueItemPos::Main) {
-                self.move_item_to_store(ident.clone());
-            }
-
             pos
         } else if insert_main || self.small_queue.capacity() == 0 || self.is_in_ghost(ident) {
             self.insert_main(ident.clone());
