@@ -813,6 +813,7 @@ impl ServerCluster {
                 enabled: true,
                 keyspace_refresh_interval: ReadableDuration::secs(3),
                 http_timeout: ReadableDuration::secs(3),
+                ..Default::default()
             },
             ..Default::default()
         };

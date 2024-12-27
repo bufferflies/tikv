@@ -1,7 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     ops::Deref,
     path::{Path, PathBuf},
@@ -249,6 +249,8 @@ pub struct SchemaManagerConfig {
     pub schema_refresh_threshold: u64,
     pub http_timeout: ReadableDuration,
     pub enabled: bool,
+    // `whiltelist_file` is a json file contains a list of keyspace_id.
+    pub whitelist_file: Option<PathBuf>,
 }
 
 impl Default for SchemaManagerConfig {
@@ -259,6 +261,7 @@ impl Default for SchemaManagerConfig {
             schema_refresh_threshold: SCHEMA_REFRESH_THRESHOLD,
             http_timeout: DEFAULT_TIMEOUT,
             enabled: false,
+            whitelist_file: None, // None means no whitelist filtering
         }
     }
 }
@@ -270,6 +273,7 @@ impl SchemaManagerConfig {
         schema_refresh_threshold: u64,
         http_timeout: ReadableDuration,
         enabled: bool,
+        whitelist_file: Option<PathBuf>,
     ) -> Self {
         Self {
             dir,
@@ -277,6 +281,7 @@ impl SchemaManagerConfig {
             schema_refresh_threshold,
             http_timeout,
             enabled,
+            whitelist_file,
         }
     }
 }
@@ -397,6 +402,9 @@ impl SchemaManager {
         for (&keyspace_id, keyspace_shard_stats) in keyspace_stats.iter().filter(|(_, v)| {
             v.iter().map(|s| s.total_size).sum::<u64>() > self.config.schema_refresh_threshold
         }) {
+            if !self.in_whitelist(keyspace_id) {
+                continue;
+            }
             // 1. Try to read schema file from local.
             let local_schema_file =
                 read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id);
@@ -762,6 +770,12 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
     schema_buf.into()
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct WhiteListKeyspace {
+    keyspace_ids: Vec<u32>,
+}
+
 pub struct SchemaManagerCore {
     ctx: Arc<Context>,
     security_mgr: Arc<SecurityManager>,
@@ -769,6 +783,7 @@ pub struct SchemaManagerCore {
     txn_client: TxnClient,
     meta_file: MetaFile,
     id_allocator: Arc<dyn IdAllocator>,
+    whitelist_keyspaces: Option<HashSet<u32>>,
 }
 
 impl SchemaManagerCore {
@@ -778,6 +793,20 @@ impl SchemaManagerCore {
         config: SchemaManagerConfig,
         txn_client: TxnClient,
     ) -> Self {
+        let whitelist_keyspaces: Option<HashSet<u32>> =
+            config.whitelist_file.as_ref().map(|path| {
+                let data = fs::read_to_string(path).unwrap();
+                let whitelist: WhiteListKeyspace = serde_json::from_str(&data).unwrap();
+                whitelist.keyspace_ids.iter().cloned().collect()
+            });
+        info!(
+            "read whitelist keyspaces count: {}, keyspaces: {:?}",
+            whitelist_keyspaces
+                .as_ref()
+                .map(|s| s.len())
+                .unwrap_or_default(),
+            whitelist_keyspaces
+        );
         let meta_file_path = config.dir.join(META_FILE_NAME);
         let meta_file = if meta_file_path.exists() {
             MetaFile::open(LocalFile::open(0, meta_file_path.as_path(), false).unwrap()).unwrap()
@@ -792,7 +821,16 @@ impl SchemaManagerCore {
             txn_client,
             meta_file,
             id_allocator,
+            whitelist_keyspaces,
         }
+    }
+
+    // Return whether the keyspace_id is in the whitelist, return true if whitelist
+    // not configured.
+    fn in_whitelist(&self, keyspace_id: u32) -> bool {
+        self.whitelist_keyspaces
+            .as_ref()
+            .map_or(true, |whitelist| whitelist.contains(&keyspace_id))
     }
 }
 
