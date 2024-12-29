@@ -19,7 +19,7 @@
 
 
 # The prepare image avoid ruining the cache of the builder
-FROM amazonlinux:2022.0.20220504.1 as prepare
+FROM amazonlinux:2023.5.20241001.1 as prepare
 WORKDIR /tikv
 
 RUN yum install -y findutils
@@ -35,7 +35,7 @@ RUN for component in $(find . -type f -name 'Cargo.toml' -exec dirname {} \; | s
   ; done
 
 
-FROM amazonlinux:2022.0.20220504.1 as builder
+FROM amazonlinux:2023.5.20241001.1 as builder
 
 RUN yum clean all && yum makecache
 
@@ -106,7 +106,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
   && cp /tikv/target/release/tikv-worker /tikv-worker
 
 # Export to a clean image
-FROM amazonlinux:2022.0.20220504.1
+FROM amazonlinux:2023.5.20241001.1
+
+RUN dnf update -y && dnf install -y procps-ng
+
 COPY --from=builder /tikv-server /tikv-server
 COPY --from=builder /cse-ctl /cse-ctl
 COPY --from=builder /tikv-worker /tikv-worker
