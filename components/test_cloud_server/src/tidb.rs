@@ -104,6 +104,7 @@ impl PdServers {
                 pre_alloc: (1..=self.pre_alloc_keyspaces)
                     .map(|i| keyspace_name_by_idx(i))
                     .collect(),
+                ..Default::default()
             },
             schedule: self.schedule_config.clone(),
             ..Default::default()
@@ -685,10 +686,20 @@ impl Default for PdReplicationConfig {
     }
 }
 
-#[derive(Default, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]
 struct PdKeyspaceConfig {
     pre_alloc: Vec<String>,
+    disable_raw_kv_region_split: bool,
+}
+
+impl Default for PdKeyspaceConfig {
+    fn default() -> Self {
+        Self {
+            pre_alloc: vec![],
+            disable_raw_kv_region_split: true,
+        }
+    }
 }
 
 const PD_TSO_SVC_STATUS_PATH: &str = "status";

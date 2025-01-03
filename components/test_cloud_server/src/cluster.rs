@@ -372,7 +372,7 @@ impl ServerCluster {
     }
 
     pub fn wait_region_replicated(&self, key: &[u8], replica_cnt: usize) {
-        for _ in 0..10 {
+        for _ in 0..30 {
             let region_info = match self.pd_client.get_region_info(key) {
                 Ok(region_info) => region_info,
                 Err(err) => {
