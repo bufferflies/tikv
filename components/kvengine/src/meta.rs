@@ -190,7 +190,7 @@ impl ShardMeta {
         }
     }
 
-    fn move_down_file(&mut self, id: u64, cf: i32, level: u32) {
+    fn move_down_file(&mut self, id: u64, cf: i32, level: u32, meta_offset: u32) {
         let fm = self.files.get_mut(&id).unwrap();
         assert_eq!(
             fm.get_level() + 1,
@@ -205,6 +205,7 @@ impl ShardMeta {
             assert_eq!(fm.cf, cf as i8);
         }
         fm.level = level as u8;
+        fm.table_meta_off = meta_offset;
     }
 
     pub fn add_file(&mut self, id: u64, file_meta: FileMeta) {
@@ -597,7 +598,7 @@ impl ShardMeta {
     fn apply_compaction(&mut self, comp: &pb::Compaction) {
         if is_move_down(comp) {
             for tbl in comp.get_table_creates() {
-                self.move_down_file(tbl.id, tbl.cf, tbl.level);
+                self.move_down_file(tbl.id, tbl.cf, tbl.level, tbl.meta_offset);
             }
             return;
         }
