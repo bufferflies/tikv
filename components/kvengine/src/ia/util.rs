@@ -430,10 +430,24 @@ impl IaConfig {
 
 #[cfg(any(test, feature = "testexport"))]
 pub mod test_util {
+    #[cfg(feature = "debug-trace-ia-segments")]
+    use crate::ia::debug::SegmentAction;
     use crate::ia::{
         queue::{QueueItem, QueueItemPos},
         types::{FileSegmentData, FileSegmentIdent},
     };
+
+    #[cfg(feature = "debug-trace-ia-segments")]
+    fn dump_segment_action_history(ident: &FileSegmentIdent) -> Vec<SegmentAction> {
+        crate::ia::debug::dump_segment_action_history(ident)
+    }
+
+    #[cfg(not(feature = "debug-trace-ia-segments"))]
+    fn dump_segment_action_history(_ident: &FileSegmentIdent) -> &'static str {
+        "(disabled)"
+    }
+
+    const SEGMENT_POS_MISMATCH_THRESHOLD: usize = 3;
 
     pub fn verify_local_segments(
         segments: &[(FileSegmentIdent, FileSegmentData, Option<QueueItem>)],
@@ -444,46 +458,62 @@ pub mod test_util {
         let mut total_size = 0;
         let mut small_cached_size = 0;
         let mut main_cached_size = 0;
-        let mut pos_mismatch_cnt = 0;
+        let mut mismatch_segments = vec![];
         for (ident, segment, queue_item) in segments {
-            debug!("verify_local_segments"; "ident" => ?ident, "segment" => ?segment, "queue_item" => ?queue_item);
+            let history = dump_segment_action_history(ident);
+            debug!("verify_local_segments"; "ident" => ?ident, "segment" => ?segment,
+                "queue_item" => ?queue_item, "history" => ?history);
+
             total_size += ident.size();
-            let expected_pos = match segment {
+            match &segment {
                 FileSegmentData::InMem(_) => {
                     small_cached_size += ident.size();
-                    QueueItemPos::Small
                 }
                 FileSegmentData::InStore => {
                     main_cached_size += ident.size();
-                    QueueItemPos::Main
                 }
-            };
+            }
 
             match queue_item {
                 None => {
-                    warn!("pos mismatch, queue: No, store: {:?}", segment;
-                            "ident" =>?ident, "segment" => ?segment);
-                    panic!("pos mismatch, not in queue: ident: {}", ident);
+                    panic!(
+                        "pos mismatch, not in queue: ident: {:?}, segment: {:?}, history: {:?}",
+                        ident, segment, history
+                    );
                 }
-                Some(queue_item) => {
-                    if queue_item.pos != expected_pos {
+                Some(queue_item) => match (&queue_item.pos, segment) {
+                    (QueueItemPos::Small, FileSegmentData::InMem(_))
+                    | (QueueItemPos::Main, FileSegmentData::InStore) => {}
+                    (QueueItemPos::Small, FileSegmentData::InStore) => {
+                        // Tolerate this case.
+                        // Happen when the movement to main store is delayed to execute after
+                        // another evict and insert to memory for the same segment.
+                        // See https://github.com/tidbcloud/cloud-storage-engine/issues/1993#issuecomment-2567583092.
                         warn!("pos mismatch, queue: {:?}, store: {:?}", queue_item.pos, segment;
-                            "ident" =>?ident, "segment" => ?segment, "queue_item" => ?queue_item);
-                        pos_mismatch_cnt += 1;
+                                "ident" =>?ident, "segment" => ?segment, "queue_item" => ?queue_item, "history" => ?history);
+                        mismatch_segments.push(ident.clone());
                     }
-                }
+                    (QueueItemPos::Main, FileSegmentData::InMem(_)) => {
+                        panic!(
+                            "pos mismatch, ident: {:?}, queue_item: {:?}, segment: {:?}, history: {:?}",
+                            ident, queue_item, segment, history
+                        );
+                    }
+                },
             }
         }
+
+        assert!(
+            mismatch_segments.len() <= SEGMENT_POS_MISMATCH_THRESHOLD,
+            "pos mismatch: {:?}, segments: {:?}, threshold: {}",
+            mismatch_segments,
+            segments,
+            SEGMENT_POS_MISMATCH_THRESHOLD
+        );
 
         if let Some(expected_total_size) = expected_total_size {
             assert!(total_size <= expected_total_size);
         }
-
-        assert_eq!(
-            pos_mismatch_cnt, 0,
-            "pos mismatch: {}, segments: {:?}",
-            pos_mismatch_cnt, segments
-        );
 
         info!("cached size";
             "small_cached_size" => small_cached_size,
@@ -500,8 +530,12 @@ pub mod test_util {
             small_cap,
             segments
         );
+        let mismatch_size = mismatch_segments
+            .iter()
+            .map(|ident| ident.size())
+            .sum::<u64>();
         assert!(
-            main_cached_size as i64 <= main_cap,
+            main_cached_size as i64 <= main_cap + mismatch_size as i64,
             "total_size: {}, main_cached_size: {}, main_cap: {}, segments: {:?}",
             total_size,
             main_cached_size,

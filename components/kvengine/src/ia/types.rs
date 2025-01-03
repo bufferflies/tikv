@@ -6,6 +6,8 @@ use bytes::Bytes;
 use dashmap::{mapref::entry::Entry, DashMap};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+#[cfg(feature = "debug-trace-ia-segments")]
+use crate::ia::debug::*;
 use crate::metrics::ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE;
 
 /// The identifier of a file segment.
@@ -108,11 +110,17 @@ impl LocalSegmentMap {
         ident: FileSegmentIdent,
         segment_data: FileSegmentData,
     ) -> Option<FileSegmentData> {
+        #[cfg(feature = "debug-trace-ia-segments")]
+        trace_insert_segment_data(&ident, Some(&segment_data));
+
         let mut memory_delta = segment_data.memory_size();
-        let prev = self.core.insert(ident, segment_data);
+        let prev = self.core.insert(ident.clone(), segment_data);
 
         memory_delta -= prev.as_ref().map_or(0, |x| x.memory_size());
         ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE.add(memory_delta);
+        #[cfg(feature = "debug-trace-ia-segments")]
+        trace_remove_segment_data(&ident, prev.as_ref());
+
         prev
     }
 
@@ -126,10 +134,16 @@ impl LocalSegmentMap {
     where
         F: FnOnce(&FileSegmentData, &FileSegmentData) -> bool,
     {
-        match self.core.entry(ident) {
+        match self.core.entry(ident.clone()) {
             Entry::Occupied(mut entry) => {
                 let prev = entry.get();
                 if is_match(prev, expected) {
+                    #[cfg(feature = "debug-trace-ia-segments")]
+                    {
+                        trace_remove_segment_data(&ident, Some(&prev));
+                        trace_insert_segment_data(&ident, segment_data.as_ref());
+                    }
+
                     let mut memory_delta = -prev.memory_size();
                     if let Some(segment_data) = segment_data {
                         memory_delta += segment_data.memory_size();
@@ -151,6 +165,10 @@ impl LocalSegmentMap {
     pub(crate) fn remove(&self, ident: &FileSegmentIdent) -> Option<FileSegmentData> {
         let prev = self.core.remove(ident)?.1;
         ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE.sub(prev.memory_size());
+
+        #[cfg(feature = "debug-trace-ia-segments")]
+        trace_remove_segment_data(&ident, Some(&prev));
+
         Some(prev)
     }
 

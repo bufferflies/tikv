@@ -13,6 +13,8 @@ testexport = []
 is_sync = ["maybe-async/is_sync"]
 is_async = ["maybe-async/is_async"]
 
+debug-trace-ia-segments = []
+
 [dependencies]
 api_version = { path = "../api_version" }
 arrow-buffer = "53.1.0"

@@ -9,7 +9,10 @@ use kvengine::{
         ia_file::{table_meta_file_local_path, IaFile},
         manager::IaManager,
         types::{FileSegmentData, FileSegmentIdent},
-        util::{IaCapacity, IaManagerOptionsBuilder, LocalFileStore, LocalStore},
+        util::{
+            test_util::verify_local_segments, IaCapacity, IaManagerOptionsBuilder, LocalFileStore,
+            LocalStore,
+        },
     },
     table::{file::InMemFile, sstable, ChecksumType, InnerKey, Value, NO_COMPRESSION},
 };
@@ -41,7 +44,7 @@ prop_compose! {
 #[case(IaCapacity::MemoryAndDiskCap(300.into(), PathBuf::from("ia"), 3000.into()))]
 #[case::memory(IaCapacity::MemoryCap(3000.into()))]
 #[case::big_cap(IaCapacity::MemoryAndDiskCap(1000.into(), PathBuf::from("ia"), 10000.into()))]
-#[case::small_cap(IaCapacity::MemoryAndDiskCap(128.into(), PathBuf::from("ia"), 1024.into()))]
+#[case::small_cap(IaCapacity::MemoryAndDiskCap(256.into(), PathBuf::from("ia"), 1024.into()))]
 fn test_read(#[case] mut ia_cap: IaCapacity) {
     init_log_for_test();
 
@@ -64,8 +67,7 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
         .freq_update_interval(Duration::ZERO)
         .build()
         .unwrap();
-    // let (small_cap, main_cap) = (options.small_queue.cap,
-    // options.main_queue.cap);
+    let (small_cap, main_cap) = (options.small_queue.cap, options.main_queue.cap);
 
     let rt = runtime.handle().clone();
     let (mgr, user_data, ia_file) = runtime.block_on(async move {
@@ -117,13 +119,12 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
         prop_assert_eq!(buf, expected.chunk());
     });
 
-    // FIXME: fix the stability and uncomment.
-    // runtime.block_on(async {
-    //     mgr.flush_tasks(Duration::from_secs(5)).await.unwrap();
-    //
-    //     let segments = mgr.get_local_segments().await;
-    //     verify_local_segments(&segments, small_cap, main_cap,
-    // Some(user_data.len() as u64)); });
+    runtime.block_on(async {
+        mgr.flush_tasks(Duration::from_secs(60)).await.unwrap();
+
+        let segments = mgr.get_local_segments().await;
+        verify_local_segments(&segments, small_cap, main_cap, Some(user_data.len() as u64));
+    });
 
     info!("cache hit rate: {}", mgr.cache_hit_rate());
     oss.shutdown();

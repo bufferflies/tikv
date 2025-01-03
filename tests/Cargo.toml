@@ -73,6 +73,10 @@ cloud-azure = ["external_storage_export/cloud-azure"]
 testexport = ["raftstore/testexport", "tikv/testexport", "pd_client/testexport", "kvengine/testexport"]
 profiling = ["profiler/profiling"]
 
+# Usage: set environment variable RUST_LOG (e.g, export RUST_LOG="info,raft=debug")
+# Ref: https://docs.rs/env_logger/latest/env_logger/#enabling-logging
+env-logger = ["tikv_util/env-logger"]
+
 test-engine-kv-rocksdb = [
     "raftstore/test-engine-kv-rocksdb"
 ]
@@ -91,6 +95,8 @@ snmalloc = ["tikv/snmalloc"]
 mem-profiling = ["tikv/mem-profiling"]
 sse = ["tikv/sse"]
 portable = ["tikv/portable"]
+
+debug-trace-ia-segments = ["kvengine/debug-trace-ia-segments"]
 
 [dependencies]
 api_version = { workspace = true }
