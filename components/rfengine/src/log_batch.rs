@@ -83,7 +83,7 @@ const RAFT_LOG_BLOCK_CAP: usize = 255;
 /// `RaftLogBlock` contains fixed count raft logs.
 /// It's the building block of `RaftLogs`. Caller should make sure index is in
 /// the range.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct RaftLogBlock {
     logs: VecDeque<RaftLogOp>,
     size: usize,
@@ -114,7 +114,12 @@ impl RaftLogBlock {
     /// Truncates and returns all logs whose index is less than or equal to the
     /// `truncated_idx`. It's used to truncate persisted logs.
     fn truncate_left(&mut self, truncated_idx: u64) -> RaftLogBlock {
-        debug_assert!(self.first_index() <= truncated_idx && truncated_idx < self.last_index());
+        debug_assert!(
+            self.first_index() <= truncated_idx && truncated_idx < self.last_index(),
+            "truncate_left: invalid truncated_idx: {}, block: {:?}",
+            truncated_idx,
+            self,
+        );
         let mut truncated_block = RaftLogBlock::new();
         while let Some(true) = self.logs.front().map(|f| f.index <= truncated_idx) {
             truncated_block.append(self.logs.pop_front().unwrap());
@@ -126,7 +131,12 @@ impl RaftLogBlock {
     /// Truncates all logs whose index is greater than or equal to the
     /// `truncated_idx`. It's used to truncate conflicted logs.
     fn truncate_right(&mut self, truncated_idx: u64) {
-        debug_assert!(self.first_index() < truncated_idx && truncated_idx <= self.last_index());
+        debug_assert!(
+            self.first_index() < truncated_idx && truncated_idx <= self.last_index(),
+            "truncate_right: invalid truncated_idx: {}, block: {:?}",
+            truncated_idx,
+            self,
+        );
         while let Some(back) = self.logs.pop_back() {
             if back.index < truncated_idx {
                 self.logs.push_back(back);
