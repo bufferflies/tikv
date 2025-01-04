@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use kvengine::{dfs::DFSConfig, table::sstable::BlockCacheType};
+use kvengine::dfs::DFSConfig;
 use pd_client::pd_control::PdControl;
 use rand::prelude::*;
 use security::SecurityConfig;
@@ -15,25 +15,12 @@ use test_cloud_server::{
     oss::prepare_dfs,
     tidb::*,
     tikv_bin::{TikvServers, TikvWorkers},
-    tikv_worker_cop_url, ServerCluster, TikvWorkerOptions,
+    ServerCluster, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
-use tikv::config::TikvConfig;
-use tikv_util::{
-    config::{ReadableDuration, ReadableSize},
-    info,
-    sys::SysQuota,
-    time::Instant,
-};
+use tikv_util::{config::ReadableDuration, info, time::Instant};
 
-use crate::{
-    test_columnar::{prepare_columnar, run_columnar_workload},
-    test_jepsen::*,
-    test_tidb::*,
-    test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE},
-    test_unique::*,
-    *,
-};
+use crate::{test_tidb::*, *};
 
 const TIKV_STORE_UPGRADE_DOWNGRADE_INTERVAL: Duration = Duration::from_secs(10); // Interval between upgrade/downgrade TiKV stores.
 const TEST_DURATION_BEFORE_UPGRADE: Duration = Duration::from_secs(60);
@@ -56,49 +43,10 @@ fn test_random_upgrade() {
         .build()
         .unwrap();
     let _guard = runtime.enter();
-    let mut rng = thread_rng();
 
-    // TODO: eliminate duplicated codes with `test_random_with_tidb`.
-    let enable_inner_key_off: bool = rng.gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
-    let use_remote_cop = env_switch(USE_REMOTE_COP_ENV_KEY);
-    let block_cache_type = if rng.gen_ratio(1, 5) {
-        BlockCacheType::Moka
-    } else {
-        BlockCacheType::Quick
-    };
-    let columnar_switch_on = env_switch_opt(COLUMNAR_WORKLOAD_SWITCH_ENV_KEY, 0);
-
-    let test_dur_before_upgrade = env_param(
-        "TEST_DUR_BEFORE_UPGRADE",
-        ReadableDuration(TEST_DURATION_BEFORE_UPGRADE),
-    );
-    let test_dur_after_upgrade = env_param(
-        "TEST_DUR_AFTER_UPGRADE",
-        ReadableDuration(TEST_DURATION_AFTER_UPGRADE),
-    );
-    let test_dur_after_downgrade = env_param(
-        "TEST_DUR_AFTER_DOWNGRADE",
-        ReadableDuration(TEST_DURATION_AFTER_DOWNGRADE),
-    );
-    // +2 for estimated extra time for upgrade and downgrade.
-    let dur_upgrade_downgrade =
-        TIKV_STORE_UPGRADE_DOWNGRADE_INTERVAL * (NODES_COUNT as u32 + 2) * 2;
-    let test_dur = test_dur_before_upgrade.0
-        + test_dur_after_upgrade.0
-        + test_dur_after_downgrade.0
-        + dur_upgrade_downgrade;
-
-    let evict_leader_switch = rng.gen_ratio(1, 5);
-
-    info!("switches";
-        "enable_inner_key_off" => enable_inner_key_off,
-        "use_remote_cop" => use_remote_cop,
-        "columnar_switch" => columnar_switch_on,
-        "block_cache_type" => ?block_cache_type,
-        "test_dur_before_upgrade" => ?test_dur_before_upgrade,
-        "test_dur_after_upgrade" => ?test_dur_after_upgrade,
-        "evict_leader" => evict_leader_switch,
-    );
+    let switches = Switches::from_env();
+    let upgrade_switches = UpgradeTestSwitches::from_env();
+    info!("switches: {:?}, {:?}", switches, upgrade_switches);
 
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
@@ -109,160 +57,21 @@ fn test_random_upgrade() {
         &security_conf,
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
-        enable_inner_key_off,
-        use_remote_cop,
-        columnar_switch_on,
-        block_cache_type,
+        &switches,
         &tc,
     );
     let pd_client = cluster.get_pd_client_ext();
     let pd_ctl = Arc::new(cluster.get_pd_control().unwrap());
     let keyspace_manager = cluster.keyspace_manager().clone();
 
-    let start_tidb = {
-        let tc = tc.clone();
-        let tikv_worker_addr = tikv_workers.endpoints().pop().unwrap();
-        runtime.spawn(async move {
-            tc.start_tidb(
-                INITIAL_KEYSPACE_COUNT as u16,
-                TIDB_HEALTHY_TIMEOUT,
-                TIDB_LOG_LEVEL,
-                StartTidbOptions {
-                    tikv_worker_addr,
-                    txn_chunk_max_size: TXN_CHUNK_MAX_SIZE as u64,
-                    txn_file_min_mutation_size: Some(TXN_FILE_MIN_SIZE as u64),
-                    tiflash_compute_mode: columnar_switch_on,
-                },
-            )
-            .await
-        })
-    };
-    let start_tiflash = {
-        let tc = tc.clone();
-        runtime.spawn_blocking(move || {
-            tc.start_tiflash(
-                TIFLASH_SERVER_COUNT as u16,
-                &dfs_config,
-                TIFLASH_HEALTHY_TIMEOUT,
-                columnar_switch_on,
-            );
-        })
-    };
-    let (start_tidb, start_tiflash) =
-        runtime.block_on(async move { futures::join!(start_tidb, start_tiflash) });
-    start_tidb.unwrap();
-    start_tiflash.unwrap();
-
-    let tiflash_switch_on = env_switch(TIFLASH_SWITCH_ENV_KEY);
-    let tpc_switch_on = env_switch(TPC_WORKLOAD_SWITCH_ENV_KEY);
-    let jepsen_switch_on = env_switch(JEPSEN_WORKLOAD_SWITCH_ENV_KEY);
-    let jepsen_use_txn_file = env_switch(JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY);
-    let unique_workload_switch_on = env_switch_opt(UNIQUE_WORKLOAD_SWITCH_ENV_KEY, 0);
-    let global_use_txn_file = env_switch(ENABLE_GLOBAL_TXN_FILE_ENV_KEY);
-
     let mut rng = thread_rng();
-    let global_use_txn_file = global_use_txn_file && rng.gen_bool(ENABLE_GLOBAL_TXN_FILE_RATIO);
 
-    info!("global_use_txn_file: {}", global_use_txn_file);
-    if !global_use_txn_file {
-        runtime.block_on(async {
-            for keyspace_id in keyspace_manager.get_all_keyspaces() {
-                let pool = connect_tidb(&tc, &keyspace_manager, keyspace_id).await;
-                sqlx::query("SET GLOBAL tidb_disable_txn_file = 'ON'")
-                    .execute(&pool)
-                    .await
-                    .unwrap();
-            }
-        });
-    }
-
-    let mut prepare_tasks = vec![];
-    if tpc_switch_on {
-        let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
-        check_tpc_binary(&tpc_bin);
-
-        let all_keyspaces = keyspace_manager.get_all_keyspaces();
-        prepare_tasks.push(runtime.spawn(prepare_tpcc(
-            tc.clone(),
-            keyspace_manager.clone(),
-            tpc_bin.clone(),
-            all_keyspaces,
-            global_use_txn_file,
-        )));
-    }
-    if jepsen_switch_on {
-        prepare_tasks.push(runtime.spawn(prepare_jepsen_bank(
-            tc.clone(),
-            keyspace_manager.clone(),
-            JEPSEN_WORKLOAD_KEYSPACE,
-            tiflash_switch_on.then_some(TIFLASH_SERVER_COUNT),
-        )));
-    }
-    if unique_workload_switch_on {
-        prepare_tasks.push(runtime.spawn(prepare_unique_workload(
-            tc.clone(),
-            keyspace_manager.clone(),
-            UNIQUE_WORKLOAD_KEYSPACE,
-        )));
-    }
-    if columnar_switch_on {
-        info!("prepare_columnar");
-        prepare_tasks.push(runtime.spawn(prepare_columnar(
-            tc.clone(),
-            keyspace_manager.clone(),
-            COLUMNAR_WORKLOAD_KEYSPACE,
-        )));
-    }
-    runtime.block_on(futures::future::join_all(prepare_tasks));
-
-    let mut async_handles = vec![];
-    if tpc_switch_on {
-        let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).unwrap();
-        for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
-            async_handles.push(spawn_tpcc(
-                tc.clone(),
-                keyspace_manager.clone(),
-                &tpc_bin,
-                tpc_idx,
-                TPCC_RUN_DURATION,
-                test_dur,
-            ));
-        }
-    }
-    if jepsen_switch_on {
-        async_handles.push(runtime.spawn(run_jepsen_bank(
-            tc.clone(),
-            keyspace_manager.clone(),
-            JEPSEN_WORKLOAD_KEYSPACE,
-            global_use_txn_file && jepsen_use_txn_file,
-            tiflash_switch_on,
-            test_dur,
-        )));
-    }
-    if unique_workload_switch_on {
-        async_handles.push(runtime.spawn(run_unique_workload(
-            tc.clone(),
-            keyspace_manager.clone(),
-            UNIQUE_WORKLOAD_KEYSPACE,
-            global_use_txn_file,
-            test_dur,
-        )));
-    }
-    if columnar_switch_on {
-        async_handles.push(runtime.spawn(run_columnar_workload(
-            tc.clone(),
-            keyspace_manager,
-            COLUMNAR_WORKLOAD_KEYSPACE,
-            test_dur,
-        )));
-    }
-
-    assert!(!async_handles.is_empty(), "no workload to run");
-    async_handles.push(spawn_restart_tso_svc(
-        tc.clone(),
-        Duration::from_secs(10),
-        test_dur,
-    ));
+    let tikv_worker_addr = tikv_workers.endpoints().pop().unwrap();
+    start_components(&tc, tikv_worker_addr, &switches, &dfs_config, &runtime);
+    prepare_workloads(&tc, &keyspace_manager, &switches, &runtime);
+    let running = Running::new_start();
+    let async_handles =
+        start_workloads(&tc, &keyspace_manager, &switches, &runtime, running.clone());
 
     let must_wait_store_down = |ctx: &str, store_id: u64| {
         must_wait_store_state(
@@ -285,9 +94,10 @@ fn test_random_upgrade() {
 
     // Before upgrade.
     let start_time = Instant::now();
-    while start_time.saturating_elapsed() < test_dur_before_upgrade.0 {
+    while start_time.saturating_elapsed() < upgrade_switches.test_dur_before_upgrade.0 {
         sleep(Duration::from_secs(1));
     }
+    info!("before upgrade: finished"; "stats" => ?WorkloadStats::collect());
 
     // Upgrade tikv-workers.
     // TODO: rolling upgrade.
@@ -314,7 +124,7 @@ fn test_random_upgrade() {
                 .unwrap();
             let store_id = store.store.id;
 
-            if evict_leader_switch {
+            if upgrade_switches.evict_leader_switch {
                 info!("upgrade: evict leader"; "node_id" => node_id, "store_id" => store_id, "store" => ?store);
                 let (store, scheduler_name) =
                     block_on(pd_ctl.evict_store_leaders(store_id, EVICT_LEADERS_TIMEOUT)).unwrap();
@@ -345,10 +155,11 @@ fn test_random_upgrade() {
 
     // After upgrade.
     let start_time = Instant::now();
-    while start_time.saturating_elapsed() < test_dur_after_upgrade.0 {
+    while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_upgrade.0 {
         // Restart nodes.
         random_node_restart(&mut cluster);
     }
+    info!("after upgrade: finished"; "stats" => ?WorkloadStats::collect());
 
     // Downgrade tikv-workers.
     // TODO: rolling downgrade.
@@ -368,7 +179,7 @@ fn test_random_upgrade() {
 
             let store_id = cluster.get_store_id(node_id);
 
-            if evict_leader_switch {
+            if upgrade_switches.evict_leader_switch {
                 let (store, scheduler_name) =
                     block_on(pd_ctl.evict_store_leaders(store_id, EVICT_LEADERS_TIMEOUT)).unwrap();
                 if store.status.leader_count > 0 {
@@ -392,12 +203,13 @@ fn test_random_upgrade() {
 
     // After downgrade.
     let start_time = Instant::now();
-    while start_time.saturating_elapsed() < test_dur_after_downgrade.0 {
+    while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_downgrade.0 {
         sleep(Duration::from_secs(1));
     }
 
     // Finish.
     info!("test finished, stopping all workers");
+    running.stop();
     block_on(futures::future::try_join_all(async_handles)).unwrap();
 
     // Start cluster again for `verify_cluster`.
@@ -425,49 +237,28 @@ fn test_random_upgrade() {
     runtime.block_on(async {
         // Make stats stable
         info!("stop TiDB and schedulers");
-        tc.pd.must_healthy(VERIFY_HEALTHY_TIMEOUT).await;
-        tc.tidb.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
-        tc.tiflash.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
-        tc.tidb.stop_all(); // To stop background tasks.
-        tc.tiflash.stop_all();
+        check_and_stop_components(&tc).await;
         stop_schedulers(pd_ctl).await;
 
         info!("verify cluster");
-        verify_cluster(&mut cluster, tpc_switch_on, jepsen_switch_on).await;
+        verify_cluster(&mut cluster, &switches).await;
     });
 
     // Stop cluster.
     info!("stopping cluster");
     cluster.stop();
 
-    // Statistics.
-    let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
-    let total_node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
-    let total_tpcc_txns = TPCC_COUNTER.load(Ordering::SeqCst);
-    let total_jepsen_bank = JEPSEN_BANK_TXN_COUNTER.load(Ordering::SeqCst);
-    let total_jepsen_bank_retry = JEPSEN_BANK_TXN_RETRY_COUNTER.load(Ordering::SeqCst);
-    let total_unique_workload = UNIQUE_WORKLOAD_TXN_COUNTER.load(Ordering::SeqCst);
-    let total_unique_conflict = UNIQUE_WORKLOAD_CONFLICT_COUNTER.load(Ordering::SeqCst);
-    let region_number = pd_client.get_regions_number();
-
     let rfstore_propose_switch_mem_table =
         rfstore::store::metrics::STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER.get();
     assert!(rfstore_propose_switch_mem_table > 0);
 
-    info!(
-        "TEST SUCCEED: keyspace {}, region {}, node restart {}, tpcc {}, jepsen_bank {} (retry {}), unique_workload {} (conflict {})",
-        total_keyspace_count,
-        region_number,
-        total_node_restart,
-        total_tpcc_txns,
-        total_jepsen_bank,
-        total_jepsen_bank_retry,
-        total_unique_workload,
-        total_unique_conflict;
-        "rfstore_propose_switch_mem_table" => rfstore_propose_switch_mem_table,
-    );
-
+    let region_number = pd_client.get_regions_number();
     tc.pd.stop_all();
+
+    // Statistics.
+    let stats = WorkloadStats::collect();
+
+    info!("TEST SUCCEED: region_number {}, {:?}", region_number, stats);
 }
 
 fn prepare_tikv_servers(
@@ -498,59 +289,14 @@ fn prepare_cluster(
     security_conf: &SecurityConfig,
     nodes_count: usize,
     initial_keyspace_count: usize,
-    enable_inner_key_off: bool,
-    use_remote_cop: bool,
-    enable_schema_manager: bool,
-    block_cache_type: BlockCacheType,
+    switches: &Switches,
     tc: &TidbCluster,
 ) -> (ServerCluster, TikvServers, TikvWorkers) {
     let mut rng = thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
     let tikv_worker_nodes = alloc_node_id_vec(TIKV_WORKERS_COUNT);
-    let dfs_config = Arc::new(dfs_config.clone());
-    let cpu_cores = SysQuota::cpu_cores_quota() as usize;
-    let update_conf_fn = |_node_id: u16, conf: &mut TikvConfig| {
-        let mut rng = thread_rng();
-        conf.dfs = (*dfs_config).clone();
-        conf.enable_inner_key_offset = enable_inner_key_off;
-        conf.security = security_conf.clone();
-
-        conf.coprocessor.region_split_size = REGION_SIZE;
-        conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
-
-        conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(5);
-        conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(15);
-        conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(25);
-        conf.raft_store.split_region_check_tick_interval = ReadableDuration::millis(500);
-        conf.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(500);
-        conf.raft_store.pd_heartbeat_tick_interval = ReadableDuration::secs(5);
-        conf.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(500);
-
-        conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
-        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
-
-        conf.rfengine.target_file_size = ReadableSize::mb(8);
-        conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
-        conf.rfengine.lightweight_backup = true;
-        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
-        conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
-
-        conf.kvengine.compaction_tombs_count = 100;
-        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
-        conf.kvengine.block_cache_type = block_cache_type;
-
-        conf.storage.flow_control.enable = true;
-        conf.storage.scheduler_worker_pool_size = cpu_cores;
-
-        if use_remote_cop {
-            let tikv_worker_idx = *tikv_worker_nodes.choose(&mut rng).unwrap();
-            let cop_worker_url = tikv_worker_cop_url(tikv_worker_idx);
-            conf.kvengine.remote_worker_addr = cop_worker_url.clone();
-            conf.kvengine.remote_coprocessor_addr = cop_worker_url;
-            conf.kvengine.remote_coprocessor_min_blocks_size = 1024 * 1024;
-        }
-    };
-
+    let update_conf_fn =
+        generate_update_conf_fn(dfs_config, security_conf, &tikv_worker_nodes, switches);
     let pd_wrapper = PdWrapper::new_real(tc.pd.endpoints(), security_conf);
     let mut cluster = ServerCluster::new_opt(vec![], |_, _| {}, pd_wrapper);
 
@@ -564,7 +310,7 @@ fn prepare_cluster(
     for node_id in nodes {
         // Start tikv-servers one by one to work around the conflict on bootstrap
         // cluster.
-        tikv_servers.start_node(node_id, update_conf_fn);
+        tikv_servers.start_node(node_id, &update_conf_fn);
         block_on(tikv_servers.must_healthy(node_id, WAIT_TIKV_SERVER_HEALTHY_TIMEOUT));
     }
     for (node_id, conf) in tikv_servers.configs() {
@@ -573,10 +319,10 @@ fn prepare_cluster(
 
     // Start tikv-workers.
     cluster.generate_tikv_worker_configs(
-        tikv_worker_nodes,
+        tikv_worker_nodes.clone(),
         TikvWorkerOptions {
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
-            cop_block_cache_type: block_cache_type,
+            cop_block_cache_type: switches.block_cache_type,
             ..Default::default()
         },
     );
@@ -584,7 +330,7 @@ fn prepare_cluster(
     tikv_workers.start_all(cluster.tikv_worker_configs());
     block_on(tikv_workers.must_all_healthy(WAIT_TIKV_WORKER_HEALTHY_TIMEOUT));
 
-    if enable_schema_manager {
+    if switches.columnar_switch_on {
         cluster.start_schema_manager(alloc_node_id());
     }
     cluster.wait_region_replicated(&[], 3);
@@ -641,4 +387,40 @@ fn must_wait_store_state<F>(
             format!("{ctx}: store state not match: {store:?}")
         },
     );
+}
+
+#[derive(Debug)]
+struct UpgradeTestSwitches {
+    test_dur_before_upgrade: ReadableDuration,
+    test_dur_after_upgrade: ReadableDuration,
+    test_dur_after_downgrade: ReadableDuration,
+    evict_leader_switch: bool,
+}
+
+impl UpgradeTestSwitches {
+    fn from_env() -> Self {
+        let mut rng = thread_rng();
+
+        let test_dur_before_upgrade = env_param(
+            "TEST_DUR_BEFORE_UPGRADE",
+            ReadableDuration(crate::test_upgrade::TEST_DURATION_BEFORE_UPGRADE),
+        );
+        let test_dur_after_upgrade = env_param(
+            "TEST_DUR_AFTER_UPGRADE",
+            ReadableDuration(crate::test_upgrade::TEST_DURATION_AFTER_UPGRADE),
+        );
+        let test_dur_after_downgrade = env_param(
+            "TEST_DUR_AFTER_DOWNGRADE",
+            ReadableDuration(crate::test_upgrade::TEST_DURATION_AFTER_DOWNGRADE),
+        );
+
+        let evict_leader_switch = rng.gen_ratio(1, 5);
+
+        Self {
+            test_dur_before_upgrade,
+            test_dur_after_upgrade,
+            test_dur_after_downgrade,
+            evict_leader_switch,
+        }
+    }
 }

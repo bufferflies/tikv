@@ -8,6 +8,7 @@ mod test_jepsen;
 mod test_load_data;
 mod test_native_br;
 mod test_tidb;
+mod test_tpc;
 mod test_txn_file;
 mod test_unique;
 mod test_upgrade;
@@ -16,7 +17,7 @@ use std::{
     collections::HashSet,
     str::FromStr,
     sync::{
-        atomic::{AtomicU16, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
         Arc, RwLock,
     },
     thread::{sleep, JoinHandle},
@@ -686,4 +687,21 @@ pub(crate) fn verify_cluster_stats(cluster: &ServerCluster, bucket_size: u64, ti
         stats.log_all();
         panic!("check_buckets failed: {:?}", err);
     });
+}
+
+#[derive(Clone)]
+pub(crate) struct Running(Arc<AtomicBool>);
+
+impl Running {
+    fn new_start() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+
+    pub fn stop(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }

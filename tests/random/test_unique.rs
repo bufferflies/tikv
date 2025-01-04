@@ -16,7 +16,7 @@ use crate::{
         gen_padding, is_duplicate_entry_err, is_error_retryable, retry_or_panic, Transaction,
         MAX_PADDING_SIZE,
     },
-    UNIQUE_WORKLOAD_CONFLICT_COUNTER, UNIQUE_WORKLOAD_TXN_COUNTER,
+    Running, UNIQUE_WORKLOAD_CONFLICT_COUNTER, UNIQUE_WORKLOAD_TXN_COUNTER,
 };
 
 const UNIQUE_WORKLOAD_CONCURRENCY: usize = 4;
@@ -102,7 +102,7 @@ pub(crate) async fn run_unique_workload(
     keyspace_manager: KeyspaceManager,
     keyspace_id: u32,
     use_txn_file: bool,
-    timeout: Duration,
+    running: Running,
 ) {
     info!("run_unique_workload"; "use_txn_file" => use_txn_file);
     let keyspace_name = keyspace_manager
@@ -116,12 +116,13 @@ pub(crate) async fn run_unique_workload(
     let mut handles = Vec::with_capacity(UNIQUE_WORKLOAD_CONCURRENCY);
     for tid in 0..UNIQUE_WORKLOAD_CONCURRENCY {
         let conn_string = conn_string.clone();
+        let running = running.clone();
         let handle = tokio::spawn(async move {
             let tag = format!("unique-{}-{}", keyspace_id, tid);
 
             let mut padding = [0u8; MAX_PADDING_SIZE];
             let start_time = Instant::now();
-            while start_time.saturating_elapsed() < timeout {
+            while running.get() {
                 let (insert_sql, delete_sql) = {
                     let mut rng = thread_rng();
 
@@ -215,6 +216,7 @@ pub(crate) async fn run_unique_workload(
                     }
                 }
             }
+            info!("unique workload exit"; "tag" => tag, "dur" => ?start_time.saturating_elapsed());
         });
         handles.push(handle);
     }
@@ -222,7 +224,7 @@ pub(crate) async fn run_unique_workload(
     let conn_string_copy = conn_string.clone();
     handles.push(tokio::spawn(async move {
         let start_time = Instant::now();
-        while start_time.saturating_elapsed() < timeout {
+        while running.get() {
             retry_or_panic!(
                 verify_unique(&conn_string_copy)
                     .await
@@ -230,6 +232,7 @@ pub(crate) async fn run_unique_workload(
             );
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        info!("verify unique thread exit"; "dur" => ?start_time.saturating_elapsed());
     }));
 
     join_all(handles).await;

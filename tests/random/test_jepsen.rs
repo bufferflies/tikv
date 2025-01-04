@@ -1,6 +1,10 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt, sync::atomic::Ordering::Relaxed, time::Duration};
+use std::{
+    fmt,
+    sync::atomic::{Ordering, Ordering::Relaxed},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use futures::future::join_all;
@@ -10,11 +14,12 @@ use test_cloud_server::{keyspace::KeyspaceManager, tidb::TidbCluster};
 use tikv_util::{error, info, time::Instant};
 
 use crate::{
+    env_param,
     sql_util::{
         gen_padding, get_engine_hint, is_error_retryable, retry_or_panic,
         wait_tiflash_or_columnar_replicas_available, DEADLOCK_ERR_MSG, MAX_PADDING_SIZE,
     },
-    JEPSEN_BANK_TXN_COUNTER, JEPSEN_BANK_TXN_RETRY_COUNTER,
+    Running, JEPSEN_BANK_TXN_COUNTER, JEPSEN_BANK_TXN_RETRY_COUNTER,
 };
 
 pub(crate) const JEPSEN_BANK_WORKLOAD_CONCURRENCY: usize = 4;
@@ -87,7 +92,7 @@ pub(crate) async fn run_jepsen_bank(
     keyspace_id: u32,
     jepsen_use_txn_file: bool,
     use_tiflash: bool,
-    timeout: Duration,
+    running: Running,
 ) {
     info!("run_jepsen_bank"; "use_txn_file" => jepsen_use_txn_file, "use_tiflash" => use_tiflash);
     let keyspace_name = keyspace_manager
@@ -102,12 +107,13 @@ pub(crate) async fn run_jepsen_bank(
     let mut handles = Vec::with_capacity(JEPSEN_BANK_WORKLOAD_CONCURRENCY);
     for tid in 0..JEPSEN_BANK_WORKLOAD_CONCURRENCY {
         let pool = pool.clone();
+        let running = running.clone();
         let handle = tokio::spawn(async move {
             let tag = format!("bank-{}-{}", keyspace_id, tid);
 
             let mut padding = [0u8; MAX_PADDING_SIZE];
             let start_time = Instant::now();
-            while start_time.saturating_elapsed() < timeout {
+            while running.get() {
                 let mut random = || {
                     let mut rng = thread_rng();
                     let from_to = (0..BANK_ACCOUNTS).choose_multiple(&mut rng, 2);
@@ -134,6 +140,7 @@ pub(crate) async fn run_jepsen_bank(
                     JEPSEN_BANK_TXN_RETRY_COUNTER.fetch_add(1, Relaxed);
                 }
             }
+            info!("jepsen bank workload exit"; "tag" => tag, "dur" => ?start_time.saturating_elapsed());
         });
         handles.push(handle);
     }
@@ -141,7 +148,7 @@ pub(crate) async fn run_jepsen_bank(
     let pool_copy = pool.clone();
     handles.push(tokio::spawn(async move {
         let start_time = Instant::now();
-        while start_time.saturating_elapsed() < timeout {
+        while running.get() {
             let check = async {
                 verify_bank_accounts(&pool_copy, false)
                     .await
@@ -156,6 +163,7 @@ pub(crate) async fn run_jepsen_bank(
             retry_or_panic!(check.await);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        info!("verify bank accounts thread exit"; "dur" => ?start_time.saturating_elapsed());
     }));
 
     join_all(handles).await;
@@ -302,4 +310,15 @@ where
         })
         .collect::<Vec<_>>();
     Ok(accounts)
+}
+
+pub(crate) fn check_jepsen() {
+    let jepsen_txns = JEPSEN_BANK_TXN_COUNTER.load(Ordering::Relaxed);
+    let threshold = env_param("JEPSEN_TXNS_THRESHOLD", 100);
+    assert!(
+        jepsen_txns >= threshold,
+        "Jepsen transactions are too few: {} (threshold: {})",
+        jepsen_txns,
+        threshold
+    );
 }

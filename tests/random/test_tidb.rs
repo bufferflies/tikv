@@ -15,7 +15,7 @@ use pd_client::{
 use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
-    oss::prepare_dfs, tidb::*, tikv_worker_cop_url, tpc::*, try_wait_async, ServerCluster,
+    oss::prepare_dfs, tidb::*, tikv_worker_cop_url, try_wait_async, ServerCluster,
     TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
@@ -26,10 +26,12 @@ use tikv_util::{
     sys::SysQuota,
     time::Instant,
 };
+use tokio::runtime::Runtime;
 
 use crate::{
     test_columnar::{prepare_columnar, run_columnar_workload},
     test_jepsen::*,
+    test_tpc::*,
     test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE},
     test_unique::*,
     *,
@@ -75,9 +77,6 @@ pub(crate) const TIFLASH_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) const TPC_WORKLOAD_SWITCH_ENV_KEY: &str = "TPC_WORKLOAD";
 pub(crate) const TPC_BIN_ENV_KEY: &str = "TPC_BIN";
-const TPCC_WAREHOUSES: usize = 2;
-const TPCC_MAX_PROCS: usize = 1;
-const TPCC_THREADS: usize = 4; // Number of threads for each TPCC workload.
 pub(crate) const TPCC_RUN_DURATION: Duration = Duration::from_secs(10); // Duration of each TPCC run.
 pub(crate) const TPCC_WORKLOAD_CONCURRENCY: usize = 1;
 
@@ -111,22 +110,9 @@ fn test_random_with_tidb() {
         .build()
         .unwrap();
     let _guard = runtime.enter();
-    let mut rng = thread_rng();
 
-    let enable_inner_key_off: bool = rng.gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
-    let use_remote_cop = env_switch(USE_REMOTE_COP_ENV_KEY);
-    let block_cache_type = if rng.gen_ratio(1, 5) {
-        BlockCacheType::Moka
-    } else {
-        BlockCacheType::Quick
-    };
-    let columnar_switch_on = env_switch_opt(COLUMNAR_WORKLOAD_SWITCH_ENV_KEY, 0);
-    info!("switches";
-        "enable_inner_key_off" => enable_inner_key_off,
-        "use_remote_cop" => use_remote_cop,
-        "columnar_switch" => columnar_switch_on,
-        "block_cache_type" => ?block_cache_type,
-    );
+    let switches = Switches::from_env();
+    info!("switches: {:?}", switches);
 
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
@@ -137,160 +123,19 @@ fn test_random_with_tidb() {
         &security_conf,
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
-        enable_inner_key_off,
-        use_remote_cop,
-        columnar_switch_on,
-        block_cache_type,
+        &switches,
         Some(&tc),
     );
     let pd_client = cluster.get_pd_client_ext();
     let pd_ctl = Arc::new(cluster.get_pd_control().unwrap());
     let keyspace_manager = cluster.keyspace_manager().clone();
 
-    let start_tidb = {
-        let tc = tc.clone();
-        let tikv_worker_addr = cluster.tikv_worker_endpoints().pop().unwrap();
-        runtime.spawn(async move {
-            tc.start_tidb(
-                INITIAL_KEYSPACE_COUNT as u16,
-                TIDB_HEALTHY_TIMEOUT,
-                TIDB_LOG_LEVEL,
-                StartTidbOptions {
-                    tikv_worker_addr,
-                    txn_chunk_max_size: TXN_CHUNK_MAX_SIZE as u64,
-                    txn_file_min_mutation_size: Some(TXN_FILE_MIN_SIZE as u64),
-                    tiflash_compute_mode: columnar_switch_on,
-                },
-            )
-            .await
-        })
-    };
-    let start_tiflash = {
-        let tc = tc.clone();
-        runtime.spawn_blocking(move || {
-            tc.start_tiflash(
-                TIFLASH_SERVER_COUNT as u16,
-                &dfs_config,
-                TIFLASH_HEALTHY_TIMEOUT,
-                columnar_switch_on,
-            );
-        })
-    };
-    let (start_tidb, start_tiflash) =
-        runtime.block_on(async move { futures::join!(start_tidb, start_tiflash) });
-    start_tidb.unwrap();
-    start_tiflash.unwrap();
-
-    let tiflash_switch_on = env_switch(TIFLASH_SWITCH_ENV_KEY);
-    let tpc_switch_on = env_switch(TPC_WORKLOAD_SWITCH_ENV_KEY);
-    let jepsen_switch_on = env_switch(JEPSEN_WORKLOAD_SWITCH_ENV_KEY);
-    let jepsen_use_txn_file = env_switch(JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY);
-    let unique_workload_switch_on = env_switch_opt(UNIQUE_WORKLOAD_SWITCH_ENV_KEY, 0);
-    let global_use_txn_file = env_switch(ENABLE_GLOBAL_TXN_FILE_ENV_KEY);
-
-    let mut rng = thread_rng();
-    let global_use_txn_file = global_use_txn_file && rng.gen_bool(ENABLE_GLOBAL_TXN_FILE_RATIO);
-
-    info!("global_use_txn_file: {}", global_use_txn_file);
-    if !global_use_txn_file {
-        runtime.block_on(async {
-            for keyspace_id in keyspace_manager.get_all_keyspaces() {
-                let pool = connect_tidb(&tc, &keyspace_manager, keyspace_id).await;
-                sqlx::query("SET GLOBAL tidb_disable_txn_file = 'ON'")
-                    .execute(&pool)
-                    .await
-                    .unwrap();
-            }
-        });
-    }
-
-    let mut prepare_tasks = vec![];
-    if tpc_switch_on {
-        let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
-        check_tpc_binary(&tpc_bin);
-
-        let all_keyspaces = keyspace_manager.get_all_keyspaces();
-        prepare_tasks.push(runtime.spawn(prepare_tpcc(
-            tc.clone(),
-            keyspace_manager.clone(),
-            tpc_bin.clone(),
-            all_keyspaces,
-            global_use_txn_file,
-        )));
-    }
-    if jepsen_switch_on {
-        prepare_tasks.push(runtime.spawn(prepare_jepsen_bank(
-            tc.clone(),
-            keyspace_manager.clone(),
-            JEPSEN_WORKLOAD_KEYSPACE,
-            tiflash_switch_on.then_some(TIFLASH_SERVER_COUNT),
-        )));
-    }
-    if unique_workload_switch_on {
-        prepare_tasks.push(runtime.spawn(prepare_unique_workload(
-            tc.clone(),
-            keyspace_manager.clone(),
-            UNIQUE_WORKLOAD_KEYSPACE,
-        )));
-    }
-    if columnar_switch_on {
-        info!("prepare_columnar");
-        prepare_tasks.push(runtime.spawn(prepare_columnar(
-            tc.clone(),
-            keyspace_manager.clone(),
-            COLUMNAR_WORKLOAD_KEYSPACE,
-        )));
-    }
-    runtime.block_on(futures::future::join_all(prepare_tasks));
-
-    let mut async_handles = vec![];
-    if tpc_switch_on {
-        let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).unwrap();
-        for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
-            async_handles.push(spawn_tpcc(
-                tc.clone(),
-                keyspace_manager.clone(),
-                &tpc_bin,
-                tpc_idx,
-                TPCC_RUN_DURATION,
-                TEST_DURATION,
-            ));
-        }
-    }
-    if jepsen_switch_on {
-        async_handles.push(runtime.spawn(run_jepsen_bank(
-            tc.clone(),
-            keyspace_manager.clone(),
-            JEPSEN_WORKLOAD_KEYSPACE,
-            global_use_txn_file && jepsen_use_txn_file,
-            tiflash_switch_on,
-            TEST_DURATION,
-        )));
-    }
-    if unique_workload_switch_on {
-        async_handles.push(runtime.spawn(run_unique_workload(
-            tc.clone(),
-            keyspace_manager.clone(),
-            UNIQUE_WORKLOAD_KEYSPACE,
-            global_use_txn_file,
-            TEST_DURATION,
-        )));
-    }
-    if columnar_switch_on {
-        async_handles.push(runtime.spawn(run_columnar_workload(
-            tc.clone(),
-            keyspace_manager,
-            COLUMNAR_WORKLOAD_KEYSPACE,
-            TEST_DURATION,
-        )));
-    }
-
-    assert!(!async_handles.is_empty(), "no workload to run");
-    async_handles.push(spawn_restart_tso_svc(
-        tc.clone(),
-        Duration::from_secs(10),
-        TEST_DURATION,
-    ));
+    let tikv_worker_addr = cluster.tikv_worker_endpoints().pop().unwrap();
+    start_components(&tc, tikv_worker_addr, &switches, &dfs_config, &runtime);
+    prepare_workloads(&tc, &keyspace_manager, &switches, &runtime);
+    let running = Running::new_start();
+    let async_handles =
+        start_workloads(&tc, &keyspace_manager, &switches, &runtime, running.clone());
 
     // Main loop.
     let start_time = Instant::now();
@@ -302,71 +147,31 @@ fn test_random_with_tidb() {
     // Finish.
     runtime.block_on(async {
         info!("test finished, stopping all workers");
+        running.stop();
         for handle in async_handles {
             handle.await.unwrap();
         }
 
         // Make stats stable
         info!("stop TiDB and schedulers");
-        tc.pd.must_healthy(VERIFY_HEALTHY_TIMEOUT).await;
-        tc.tidb.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
-        tc.tiflash.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
-        tc.tidb.stop_all(); // To stop background tasks.
-        tc.tiflash.stop_all();
+        check_and_stop_components(&tc).await;
         stop_schedulers(pd_ctl).await;
 
         info!("verify cluster");
-        verify_cluster(&mut cluster, tpc_switch_on, jepsen_switch_on).await;
+        verify_cluster(&mut cluster, &switches).await;
     });
 
     // Stop cluster.
     info!("stopping cluster");
     cluster.stop();
 
-    // Statistics.
-    let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
-    let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
-    let total_table_count = TABLE_COUNTER.load(Ordering::SeqCst);
-    let total_drop_table_count = DROP_TABLE_COUNTER.load(Ordering::SeqCst);
-    let total_merge_count = MERGE_COUNTER.load(Ordering::SeqCst);
-    let total_move_count = MOVE_COUNTER.load(Ordering::SeqCst);
-    let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
-    let total_node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
-    let total_backup_count = BACKUP_COUNTER.load(Ordering::SeqCst);
-    let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
-    let total_load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
-    let total_manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
-    let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
-    let total_tpcc_txns = TPCC_COUNTER.load(Ordering::SeqCst);
-    let total_jepsen_bank = JEPSEN_BANK_TXN_COUNTER.load(Ordering::SeqCst);
-    let total_jepsen_bank_retry = JEPSEN_BANK_TXN_RETRY_COUNTER.load(Ordering::SeqCst);
-    let total_unique_workload = UNIQUE_WORKLOAD_TXN_COUNTER.load(Ordering::SeqCst);
-    let total_unique_conflict = UNIQUE_WORKLOAD_CONFLICT_COUNTER.load(Ordering::SeqCst);
     let region_number = pd_client.get_regions_number();
-    info!(
-        "TEST SUCCEED: write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, restore {}, load_data {}, manual_major_compact {}, gc {}, tpcc {}, jepsen_bank {} (retry {}), unique_workload {} (conflict {})",
-        total_write_count,
-        total_keyspace_count,
-        total_table_count,
-        total_drop_table_count,
-        region_number,
-        total_merge_count,
-        total_move_count,
-        total_transfer_count,
-        total_node_restart,
-        total_backup_count,
-        total_restore_count,
-        total_load_data_count,
-        total_manual_major_compact,
-        total_gc_resolved_locks,
-        total_tpcc_txns,
-        total_jepsen_bank,
-        total_jepsen_bank_retry,
-        total_unique_workload,
-        total_unique_conflict,
-    );
-
     tc.pd.stop_all();
+
+    // Statistics.
+    let stats = WorkloadStats::collect();
+
+    info!("TEST SUCCEED: region_number {}, {:?}", region_number, stats);
 }
 
 pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
@@ -418,65 +223,19 @@ pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbClus
     tc
 }
 
-// TODO: merge to `prepare_cluster` in `test_all.rs`.
 fn prepare_cluster(
     dfs_config: &DFSConfig,
     security_conf: &SecurityConfig,
     nodes_count: usize,
     initial_keyspace_count: usize,
-    enable_inner_key_off: bool,
-    use_remote_cop: bool,
-    enable_schema_manager: bool,
-    block_cache_type: BlockCacheType,
+    switches: &Switches,
     tc: Option<&TidbCluster>,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
     let tikv_worker_nodes = alloc_node_id_vec(TIKV_WORKERS_COUNT);
-    let dfs_config = Arc::new(dfs_config.clone());
-    let cpu_cores = SysQuota::cpu_cores_quota() as usize;
-    let update_conf_fn = |_node_id: u16, conf: &mut TikvConfig| {
-        let mut rng = thread_rng();
-        conf.dfs = (*dfs_config).clone();
-        conf.enable_inner_key_offset = enable_inner_key_off;
-        conf.security = security_conf.clone();
-
-        conf.coprocessor.region_split_size = REGION_SIZE;
-        conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
-
-        conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(5);
-        conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(15);
-        conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(25);
-        conf.raft_store.split_region_check_tick_interval = ReadableDuration::millis(500);
-        conf.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(500);
-        conf.raft_store.pd_heartbeat_tick_interval = ReadableDuration::secs(5);
-        conf.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(500);
-
-        conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
-        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
-
-        conf.rfengine.target_file_size = ReadableSize::mb(8);
-        conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
-        conf.rfengine.lightweight_backup = true;
-        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
-        conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
-
-        conf.kvengine.compaction_tombs_count = 100;
-        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
-        conf.kvengine.block_cache_type = block_cache_type;
-
-        conf.storage.flow_control.enable = true;
-        conf.storage.scheduler_worker_pool_size = cpu_cores;
-
-        if use_remote_cop {
-            let tikv_worker_idx = *tikv_worker_nodes.choose(&mut rng).unwrap();
-            let cop_worker_url = tikv_worker_cop_url(tikv_worker_idx);
-            conf.kvengine.remote_worker_addr = cop_worker_url.clone();
-            conf.kvengine.remote_coprocessor_addr = cop_worker_url;
-            conf.kvengine.remote_coprocessor_min_blocks_size = 1024 * 1024;
-        }
-    };
-
+    let update_conf_fn =
+        generate_update_conf_fn(dfs_config, security_conf, &tikv_worker_nodes, switches);
     let pd_wrapper = match tc {
         Some(tc) => PdWrapper::new_real(tc.pd.endpoints(), security_conf),
         None => PdWrapper::new_test(1, security_conf, None),
@@ -486,11 +245,11 @@ fn prepare_cluster(
         tikv_worker_nodes,
         TikvWorkerOptions {
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
-            cop_block_cache_type: block_cache_type,
+            cop_block_cache_type: switches.block_cache_type,
             ..Default::default()
         },
     );
-    if enable_schema_manager {
+    if switches.columnar_switch_on {
         cluster.start_schema_manager(alloc_node_id());
     }
     cluster.wait_region_replicated(&[], 3);
@@ -532,6 +291,221 @@ fn prepare_cluster(
     // TODO: restart cluster with inner key offset enabled
 
     cluster
+}
+
+pub(crate) fn generate_update_conf_fn<'a>(
+    dfs_config: &'a DFSConfig,
+    security_conf: &'a SecurityConfig,
+    tikv_worker_nodes: &'a [u16],
+    switches: &'a Switches,
+) -> impl Fn(u16, &mut TikvConfig) + 'a {
+    let cpu_cores = SysQuota::cpu_cores_quota() as usize;
+
+    move |_node_id: u16, conf: &mut TikvConfig| {
+        let mut rng = thread_rng();
+        conf.dfs = dfs_config.clone();
+        conf.enable_inner_key_offset = switches.enable_inner_key_off;
+        conf.security = security_conf.clone();
+
+        conf.coprocessor.region_split_size = REGION_SIZE;
+        conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
+
+        conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(5);
+        conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(15);
+        conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(25);
+        conf.raft_store.split_region_check_tick_interval = ReadableDuration::millis(500);
+        conf.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(500);
+        conf.raft_store.pd_heartbeat_tick_interval = ReadableDuration::secs(5);
+        conf.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(500);
+
+        conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
+        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
+
+        conf.rfengine.target_file_size = ReadableSize::mb(8);
+        conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
+        conf.rfengine.lightweight_backup = true;
+        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
+        conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
+
+        conf.kvengine.compaction_tombs_count = 100;
+        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
+        conf.kvengine.block_cache_type = switches.block_cache_type;
+
+        conf.storage.flow_control.enable = true;
+        conf.storage.scheduler_worker_pool_size = cpu_cores;
+
+        if switches.use_remote_cop {
+            let tikv_worker_idx = *tikv_worker_nodes.choose(&mut rng).unwrap();
+            let cop_worker_url = tikv_worker_cop_url(tikv_worker_idx);
+            conf.kvengine.remote_worker_addr = cop_worker_url.clone();
+            conf.kvengine.remote_coprocessor_addr = cop_worker_url;
+            conf.kvengine.remote_coprocessor_min_blocks_size = 1024 * 1024;
+        }
+    }
+}
+
+pub(crate) fn start_components(
+    tc: &TidbCluster,
+    tikv_worker_addr: String,
+    switches: &Switches,
+    dfs_config: &DFSConfig,
+    runtime: &Runtime,
+) {
+    let start_tidb = {
+        let tc = tc.clone();
+        let columnar_switch_on = switches.columnar_switch_on;
+        runtime.spawn(async move {
+            tc.start_tidb(
+                INITIAL_KEYSPACE_COUNT as u16,
+                TIDB_HEALTHY_TIMEOUT,
+                TIDB_LOG_LEVEL,
+                StartTidbOptions {
+                    tikv_worker_addr,
+                    txn_chunk_max_size: TXN_CHUNK_MAX_SIZE as u64,
+                    txn_file_min_mutation_size: Some(TXN_FILE_MIN_SIZE as u64),
+                    tiflash_compute_mode: columnar_switch_on,
+                },
+            )
+            .await
+        })
+    };
+    let start_tiflash = {
+        let tc = tc.clone();
+        let columnar_switch_on = switches.columnar_switch_on;
+        let dfs_config = dfs_config.clone();
+        runtime.spawn_blocking(move || {
+            tc.start_tiflash(
+                TIFLASH_SERVER_COUNT as u16,
+                &dfs_config,
+                TIFLASH_HEALTHY_TIMEOUT,
+                columnar_switch_on,
+            );
+        })
+    };
+    let (start_tidb, start_tiflash) =
+        runtime.block_on(async move { futures::join!(start_tidb, start_tiflash) });
+    start_tidb.unwrap();
+    start_tiflash.unwrap();
+}
+
+pub(crate) fn prepare_workloads(
+    tc: &TidbCluster,
+    keyspace_manager: &KeyspaceManager,
+    switches: &Switches,
+    runtime: &Runtime,
+) {
+    if !switches.global_use_txn_file {
+        runtime.block_on(async {
+            for keyspace_id in keyspace_manager.get_all_keyspaces() {
+                let pool = connect_tidb(tc, keyspace_manager, keyspace_id).await;
+                sqlx::query("SET GLOBAL tidb_disable_txn_file = 'ON'")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        });
+    }
+
+    let mut prepare_tasks = vec![];
+    if switches.tpc_switch_on {
+        let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).expect("env TPC_BIN is not set");
+        check_tpc_binary(&tpc_bin);
+
+        let all_keyspaces = keyspace_manager.get_all_keyspaces();
+        prepare_tasks.push(runtime.spawn(prepare_tpcc(
+            tc.clone(),
+            keyspace_manager.clone(),
+            tpc_bin.clone(),
+            all_keyspaces,
+            switches.global_use_txn_file,
+            TPCC_WORKLOAD_CONCURRENCY,
+        )));
+    }
+    if switches.jepsen_switch_on {
+        prepare_tasks.push(runtime.spawn(prepare_jepsen_bank(
+            tc.clone(),
+            keyspace_manager.clone(),
+            JEPSEN_WORKLOAD_KEYSPACE,
+            switches.tiflash_switch_on.then_some(TIFLASH_SERVER_COUNT),
+        )));
+    }
+    if switches.unique_workload_switch_on {
+        prepare_tasks.push(runtime.spawn(prepare_unique_workload(
+            tc.clone(),
+            keyspace_manager.clone(),
+            UNIQUE_WORKLOAD_KEYSPACE,
+        )));
+    }
+    if switches.columnar_switch_on {
+        info!("prepare_columnar");
+        prepare_tasks.push(runtime.spawn(prepare_columnar(
+            tc.clone(),
+            keyspace_manager.clone(),
+            COLUMNAR_WORKLOAD_KEYSPACE,
+        )));
+    }
+    runtime
+        .block_on(futures::future::try_join_all(prepare_tasks))
+        .unwrap();
+}
+
+pub(crate) fn start_workloads(
+    tc: &TidbCluster,
+    keyspace_manager: &KeyspaceManager,
+    switches: &Switches,
+    runtime: &Runtime,
+    running: Running,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut async_handles = vec![];
+    if switches.tpc_switch_on {
+        let tpc_bin = std::env::var(TPC_BIN_ENV_KEY).unwrap();
+        for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
+            async_handles.push(spawn_tpcc(
+                tc.clone(),
+                keyspace_manager.clone(),
+                &tpc_bin,
+                tpc_idx,
+                TPCC_RUN_DURATION,
+                running.clone(),
+            ));
+        }
+    }
+    if switches.jepsen_switch_on {
+        async_handles.push(runtime.spawn(run_jepsen_bank(
+            tc.clone(),
+            keyspace_manager.clone(),
+            JEPSEN_WORKLOAD_KEYSPACE,
+            switches.global_use_txn_file && switches.jepsen_use_txn_file,
+            switches.tiflash_switch_on,
+            running.clone(),
+        )));
+    }
+    if switches.unique_workload_switch_on {
+        async_handles.push(runtime.spawn(run_unique_workload(
+            tc.clone(),
+            keyspace_manager.clone(),
+            UNIQUE_WORKLOAD_KEYSPACE,
+            switches.global_use_txn_file,
+            running.clone(),
+        )));
+    }
+    if switches.columnar_switch_on {
+        async_handles.push(runtime.spawn(run_columnar_workload(
+            tc.clone(),
+            keyspace_manager.clone(),
+            COLUMNAR_WORKLOAD_KEYSPACE,
+            running.clone(),
+        )));
+    }
+
+    assert!(!async_handles.is_empty(), "no workload to run");
+    async_handles.push(spawn_restart_tso_svc(
+        tc.clone(),
+        Duration::from_secs(10),
+        running,
+    ));
+
+    async_handles
 }
 
 pub(crate) async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
@@ -599,194 +573,33 @@ pub(crate) async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
     }
 }
 
+pub(crate) async fn check_and_stop_components(tc: &TidbCluster) {
+    tc.pd.must_healthy(VERIFY_HEALTHY_TIMEOUT).await;
+    tc.tidb.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
+    tc.tiflash.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
+    tc.tidb.stop_all(); // To stop background tasks.
+    tc.tiflash.stop_all();
+}
+
 // TODO: merge to `verify_cluster` in `test_all.rs`.
-pub(crate) async fn verify_cluster(
-    cluster: &mut ServerCluster,
-    tpc_switch_on: bool,
-    jepsen_switch_on: bool,
-) {
+pub(crate) async fn verify_cluster(cluster: &mut ServerCluster, switches: &Switches) {
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
     verify_cluster_stats(cluster, REGION_BUCKET_SIZE.0, Duration::from_secs(60));
 
-    if tpc_switch_on {
+    if switches.tpc_switch_on {
         check_tpc();
     }
-    if jepsen_switch_on {
+    if switches.jepsen_switch_on {
         check_jepsen();
     }
-}
-
-pub(crate) async fn prepare_tpcc(
-    tc: TidbCluster,
-    keyspace_manager: KeyspaceManager,
-    tpc_bin: String,
-    keyspace_ids: Vec<u32>,
-    use_txn_file: bool,
-) {
-    let mut handles = Vec::with_capacity(TPCC_WORKLOAD_CONCURRENCY);
-    for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
-        let tc = tc.clone();
-        let keyspace_manager = keyspace_manager.clone();
-        let tpc_bin = PathBuf::from_str(&tpc_bin).unwrap();
-        let keyspace_ids = keyspace_ids.to_vec();
-        let task = async move {
-            let db = db_name_by_tpc_idx(tpc_idx);
-
-            for keyspace_id in keyspace_ids {
-                let keyspace_name = keyspace_manager
-                    .get_keyspace_meta(keyspace_id)
-                    .unwrap()
-                    .name();
-                let tag = format!("tpcc-{}[{}]-{}", keyspace_id, keyspace_name, tpc_idx);
-                let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
-                let params = tc.tidb.conn_params(tidb_idx);
-
-                let mut tpc = Tpc::new(tag.clone(), tpc_bin.clone());
-                tpc.tpcc()
-                    .host(&params.host)
-                    .port(params.port)
-                    .user(&params.user)
-                    .password(&params.password)
-                    .db(&db)
-                    .warehouses(TPCC_WAREHOUSES)
-                    .max_procs(TPCC_MAX_PROCS);
-
-                let conn_string = params.conn_string("test");
-                let pool = sqlx::MySqlPool::connect(&conn_string).await.unwrap();
-
-                info!("{} prepare_tpcc", tag; "use_txn_file" => use_txn_file);
-
-                let mut sqls = vec![format!("CREATE DATABASE IF NOT EXISTS `{}`", db)];
-                if use_txn_file {
-                    sqls.push("SET GLOBAL tidb_txn_mode = 'optimistic'".to_string());
-                }
-                for sql in sqls {
-                    info!("{} executing sql", tag; "sql" => &sql);
-                    sqlx::query(&sql).execute(&pool).await.unwrap();
-                }
-
-                tpc.prepare(TPCC_THREADS).await.unwrap();
-                tpc.check().await.unwrap();
-
-                // Use txn file during preparation only. As using optimistic transaction for
-                // TPC-C will meet lots of write conflicts.
-                if use_txn_file {
-                    let sql = "SET GLOBAL tidb_txn_mode = 'pessimistic'";
-                    info!("{} executing sql", tag; "sql" => &sql);
-                    sqlx::query(sql).execute(&pool).await.unwrap();
-                }
-            }
-        };
-        handles.push(tokio::spawn(task));
-    }
-
-    for handle in handles {
-        handle.await.unwrap();
-    }
-}
-
-pub(crate) fn spawn_tpcc(
-    tc: TidbCluster,
-    keyspace_manager: KeyspaceManager,
-    tpc_bin: &str,
-    tpc_idx: usize,
-    run_duration: Duration,
-    timeout: Duration,
-) -> tokio::task::JoinHandle<()> {
-    let tpc_bin = PathBuf::from_str(tpc_bin).unwrap();
-    tokio::spawn(async move {
-        let db = db_name_by_tpc_idx(tpc_idx);
-
-        let start_time = Instant::now();
-        while start_time.saturating_elapsed() < timeout {
-            let random_keyspace = || {
-                let mut rng = rand::thread_rng();
-                keyspace_manager.get_zipf_random_keyspace(&mut rng)
-            };
-            let keyspace_id = random_keyspace();
-            let keyspace_name = keyspace_manager
-                .get_keyspace_meta(keyspace_id)
-                .unwrap()
-                .name();
-            {
-                let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
-                let guard = lock.try_shared_lock();
-                if guard.is_none() {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                let _guard = guard.unwrap();
-
-                let tag = format!("tpcc-{}[{}]-{}", keyspace_id, keyspace_name, tpc_idx);
-                let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
-                let params = tc.tidb.conn_params(tidb_idx);
-
-                let mut tpc = Tpc::new(tag, tpc_bin.clone());
-                tpc.tpcc()
-                    .host(&params.host)
-                    .port(params.port)
-                    .user(&params.user)
-                    .password(&params.password)
-                    .db(&db)
-                    .warehouses(TPCC_WAREHOUSES)
-                    .max_procs(TPCC_MAX_PROCS);
-
-                let txns = tpc
-                    .run(TPCC_THREADS, false, true, run_duration)
-                    .await
-                    .unwrap();
-                TPCC_COUNTER.fetch_add(txns, Ordering::Relaxed);
-                tpc.check().await.unwrap();
-            }
-        }
-    })
-}
-
-pub(crate) fn db_name_by_tpc_idx(tpc_idx: usize) -> String {
-    format!("tpcc_{tpc_idx}")
-}
-
-pub(crate) fn check_tpc_binary(tpc_bin: &str) {
-    let mut cmd = std::process::Command::new(tpc_bin);
-    cmd.arg("version");
-    let output = cmd.output().unwrap();
-    assert!(
-        output.status.success(),
-        "tpc binary check failed: {:?}",
-        output
-    );
-
-    info!("tpc binary check passed"; "output" => ?output);
-}
-
-pub(crate) fn check_tpc() {
-    let tpc_txns = TPCC_COUNTER.load(Ordering::Relaxed);
-    let threshold = env_param("TPCC_TXNS_THRESHOLD", 100);
-    assert!(
-        tpc_txns >= threshold,
-        "TPC-C transactions are too few: {} (threshold: {})",
-        tpc_txns,
-        threshold
-    );
-}
-
-fn check_jepsen() {
-    let jepsen_txns = JEPSEN_BANK_TXN_COUNTER.load(Ordering::Relaxed);
-    let threshold = env_param("JEPSEN_TXNS_THRESHOLD", 100);
-    assert!(
-        jepsen_txns >= threshold,
-        "Jepsen transactions are too few: {} (threshold: {})",
-        jepsen_txns,
-        threshold
-    );
 }
 
 pub(crate) fn spawn_restart_tso_svc(
     tc: TidbCluster,
     restart_interval: Duration,
-    timeout: Duration,
+    running: Running,
 ) -> tokio::task::JoinHandle<()> {
     let task = async move {
         let tso_svc_count = match tc.pd.mode() {
@@ -794,7 +607,7 @@ pub(crate) fn spawn_restart_tso_svc(
             PdServerMode::MicroServices { tso_count } => *tso_count,
         };
         let start_time = Instant::now_coarse();
-        while start_time.saturating_elapsed() < timeout {
+        while running.get() {
             let random = || {
                 let mut rng = rand::thread_rng();
                 let tso_svc_idx = rng.gen_range(0..tso_svc_count);
@@ -813,6 +626,7 @@ pub(crate) fn spawn_restart_tso_svc(
                 .await;
             tokio::time::sleep(loop_interval).await;
         }
+        info!("restart tso workload exit"; "dur" => ?start_time.saturating_elapsed());
     };
     tokio::spawn(task)
 }
@@ -830,4 +644,87 @@ pub(crate) async fn connect_tidb(
     let params = tc.tidb.conn_params(tidb_idx);
     let conn_string = params.conn_string("test");
     sqlx::MySqlPool::connect(&conn_string).await.unwrap()
+}
+
+#[derive(Debug)]
+pub(crate) struct Switches {
+    pub enable_inner_key_off: bool,
+    pub use_remote_cop: bool,
+    pub block_cache_type: BlockCacheType,
+    pub columnar_switch_on: bool,
+    pub tiflash_switch_on: bool,
+    pub tpc_switch_on: bool,
+    pub jepsen_switch_on: bool,
+    pub jepsen_use_txn_file: bool,
+    pub unique_workload_switch_on: bool,
+    pub global_use_txn_file: bool,
+}
+
+impl Switches {
+    pub fn from_env() -> Self {
+        let mut rng = thread_rng();
+
+        let enable_inner_key_off: bool = rng.gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
+        let use_remote_cop = env_switch(USE_REMOTE_COP_ENV_KEY);
+        let block_cache_type = if rng.gen_ratio(1, 5) {
+            BlockCacheType::Moka
+        } else {
+            BlockCacheType::Quick
+        };
+        let columnar_switch_on = env_switch_opt(COLUMNAR_WORKLOAD_SWITCH_ENV_KEY, 0);
+        let tiflash_switch_on = env_switch(TIFLASH_SWITCH_ENV_KEY);
+        let tpc_switch_on = env_switch(TPC_WORKLOAD_SWITCH_ENV_KEY);
+        let jepsen_switch_on = env_switch(JEPSEN_WORKLOAD_SWITCH_ENV_KEY);
+        let jepsen_use_txn_file = env_switch(JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY);
+        let unique_workload_switch_on = env_switch_opt(UNIQUE_WORKLOAD_SWITCH_ENV_KEY, 0);
+
+        let global_use_txn_file = env_switch(ENABLE_GLOBAL_TXN_FILE_ENV_KEY);
+        let global_use_txn_file = global_use_txn_file && rng.gen_bool(ENABLE_GLOBAL_TXN_FILE_RATIO);
+
+        Self {
+            enable_inner_key_off,
+            use_remote_cop,
+            block_cache_type,
+            columnar_switch_on,
+            tiflash_switch_on,
+            tpc_switch_on,
+            jepsen_switch_on,
+            jepsen_use_txn_file,
+            unique_workload_switch_on,
+            global_use_txn_file,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct WorkloadStats {
+    pub total_keyspace_count: usize,
+    pub total_node_restart: usize,
+    pub total_tpcc_txns: usize,
+    pub total_jepsen_bank: usize,
+    pub total_jepsen_bank_retry: usize,
+    pub total_unique_workload: usize,
+    pub total_unique_conflict: usize,
+}
+
+impl WorkloadStats {
+    pub fn collect() -> Self {
+        let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
+        let total_node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
+        let total_tpcc_txns = TPCC_COUNTER.load(Ordering::SeqCst);
+        let total_jepsen_bank = JEPSEN_BANK_TXN_COUNTER.load(Ordering::SeqCst);
+        let total_jepsen_bank_retry = JEPSEN_BANK_TXN_RETRY_COUNTER.load(Ordering::SeqCst);
+        let total_unique_workload = UNIQUE_WORKLOAD_TXN_COUNTER.load(Ordering::SeqCst);
+        let total_unique_conflict = UNIQUE_WORKLOAD_CONFLICT_COUNTER.load(Ordering::SeqCst);
+        Self {
+            total_keyspace_count,
+            total_node_restart,
+            total_tpcc_txns,
+            total_jepsen_bank,
+            total_jepsen_bank_retry,
+            total_unique_workload,
+            total_unique_conflict,
+        }
+    }
 }

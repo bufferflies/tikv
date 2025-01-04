@@ -26,7 +26,7 @@ use crate::{
         get_engine_hint, is_db_error_retryable, wait_tiflash_or_columnar_replicas_available,
         DEADLOCK_ERR_MSG,
     },
-    COLUMNAR_RETRY_COUNTER, COLUMNAR_WRITE_COUNTER,
+    Running, COLUMNAR_RETRY_COUNTER, COLUMNAR_WRITE_COUNTER,
 };
 
 const COLUMNAR_DB_NAME: &str = "columnar_db";
@@ -114,7 +114,7 @@ pub(crate) async fn run_columnar_workload(
     tc: TidbCluster,
     keyspace_manager: KeyspaceManager,
     keyspace_id: u32,
-    timeout: Duration,
+    running: Running,
 ) {
     info!("run workload with columnar");
     let keyspace_name = keyspace_manager
@@ -130,11 +130,12 @@ pub(crate) async fn run_columnar_workload(
     let max_id = Arc::new(AtomicU64::new(0));
     for tid in 0..WORKLOAD_CONCURRENCY {
         let pool = pool.clone();
+        let running = running.clone();
         let max_id = max_id.clone();
         let handle = tokio::spawn(async move {
             let tag = format!("columnar-{}-{}", keyspace_id, tid);
             let start_time = Instant::now();
-            while start_time.saturating_elapsed() < timeout {
+            while running.get() {
                 let mut sqls = generate_insert_sqls(10);
                 let del_sqls = generate_delete_sqls(10, max_id.load(Relaxed));
                 sqls.extend(del_sqls);
@@ -151,6 +152,7 @@ pub(crate) async fn run_columnar_workload(
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            info!("columnar workload exit"; "tag" => tag, "dur" => ?start_time.saturating_elapsed());
         });
         handles.push(handle);
     }
@@ -158,7 +160,7 @@ pub(crate) async fn run_columnar_workload(
     let pool_copy = pool.clone();
     handles.push(tokio::spawn(async move {
         let start_time = Instant::now();
-        while start_time.saturating_elapsed() < timeout {
+        while running.get() {
             info!("verify_data randomly");
             match verify_data(&pool_copy, false).await {
                 Ok(_) => {
@@ -170,6 +172,7 @@ pub(crate) async fn run_columnar_workload(
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
+        info!("columnar verify thread exit"; "dur" => ?start_time.saturating_elapsed());
     }));
 
     join_all(handles).await;
