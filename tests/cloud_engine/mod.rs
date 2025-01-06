@@ -30,6 +30,7 @@ mod ia_file;
 mod load_data;
 mod major_compaction;
 mod merge;
+mod merged_engine;
 mod native_backup;
 mod replica_read;
 mod transaction;

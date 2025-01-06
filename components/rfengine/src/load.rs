@@ -133,7 +133,7 @@ impl RfEngineCore {
         end_offset: u64, // u64::MAX means replay all the chunk
         full_restore: bool,
     ) -> Result<()> {
-        let mut it = WalIterator::new_from_chunks(file_data, epoch_id);
+        let mut it = WalIterator::new_from_chunks(file_data, epoch_id, 0);
         it.iterate_batch(|data, offset| {
             // `offset` is the data read position after `data` be read.
             if offset > end_offset {
@@ -427,7 +427,7 @@ mod tests {
                         return false;
                     }
                 };
-                let mut async_it = WalIterator::new_from_chunks(chunks, epoch);
+                let mut async_it = WalIterator::new_from_chunks(chunks, epoch, 0);
                 if let Err(e) = async_it.iterate_batch(|_, _| {
                     // Do nothing but verify checksum.
                 }) {

@@ -4365,6 +4365,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "merged_engine"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cloud_encryption",
+ "file_system",
+ "kvengine",
+ "kvenginepb",
+ "kvproto",
+ "log",
+ "native_br",
+ "pd_client",
+ "protobuf",
+ "resolved_ts",
+ "rfengine",
+ "rfenginepb",
+ "rfstore",
+ "security",
+ "slog",
+ "slog-global",
+ "slog-term",
+ "thiserror",
+ "tikv",
+ "tikv_util",
+]
+
+[[package]]
 name = "mimalloc"
 version = "0.1.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8374,6 +8401,7 @@ dependencies = [
  "libc 0.2.161",
  "load_data",
  "log_wrappers",
+ "merged_engine",
  "more-asserts",
  "native_br",
  "online_config",

@@ -662,6 +662,11 @@ impl RfEngineCore {
         self.task_sender.send(ServiceTask::Backup(task)).unwrap();
     }
 
+    pub fn get_epoch_offset(&self) -> (u32, u64) {
+        let writer = self.writer.lock().unwrap();
+        (writer.epoch_id, writer.file_off)
+    }
+
     pub(crate) fn is_async_wal_enabled(&self) -> bool {
         self.wal_sync_dir.is_some()
     }
@@ -976,6 +981,13 @@ pub fn load_store_ident(rf: &RfEngine) -> Option<StoreIdent> {
     let mut ident = StoreIdent::new();
     ident.merge_from_bytes(val.unwrap().chunk()).unwrap();
     Some(ident)
+}
+
+pub fn save_store_ident(rf: &RfEngine, store_ident: &StoreIdent) {
+    let val = store_ident.write_to_bytes().unwrap();
+    let mut wb = WriteBatch::new();
+    wb.set_state(0, 0, STORE_IDENT_KEY, &val);
+    rf.write(wb).unwrap();
 }
 
 #[derive(Debug, Clone, Default)]

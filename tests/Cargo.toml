@@ -128,6 +128,7 @@ kvproto = { workspace = true }
 libc = "0.2"
 load_data = { path = "../components/load_data" }
 log_wrappers = { workspace = true }
+merged_engine = { workspace = true }
 more-asserts = "0.2"
 native_br = { workspace = true }
 online_config = { workspace = true }

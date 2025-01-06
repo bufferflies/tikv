@@ -13,10 +13,10 @@ use crate::{
     compact_worker::wal_file_name,
     write_batch::PeerBatch,
     writer::{DmaBuffer, WalHeader, BATCH_HEADER_SIZE},
-    Error, Result,
+    Error, Result, WriteBatch,
 };
 
-pub(crate) struct WalIterator {
+pub struct WalIterator {
     dir: PathBuf,
     epoch_id: u32,
     buf: BytesMut,
@@ -37,12 +37,12 @@ impl WalIterator {
         }
     }
 
-    pub(crate) fn new_from_chunks(file_data: Bytes, epoch_id: u32) -> Self {
+    pub fn new_from_chunks(file_data: Bytes, epoch_id: u32, offset: u64) -> Self {
         Self {
             dir: PathBuf::new(),
             epoch_id,
             buf: BytesMut::new(),
-            offset: 0,
+            offset,
             in_mem_reader: Some(Box::new(file_data.reader())),
         }
     }
@@ -71,13 +71,15 @@ impl WalIterator {
             let fd = fs::File::open(filename)?;
             Box::new(BufReader::new(fd))
         };
-        match self.check_wal_header(&mut buf_reader) {
-            Ok(()) => {}
-            Err(Error::Eof) => {
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
+        if self.offset == 0 {
+            match self.check_wal_header(&mut buf_reader) {
+                Ok(()) => {}
+                Err(Error::Eof) => {
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
+        }
         loop {
             match self.read_batch(&mut buf_reader) {
                 Err(err) => {
@@ -94,6 +96,19 @@ impl WalIterator {
                 }
             }
         }
+    }
+
+    pub fn iterate_write_batch<F>(&mut self, mut f: F) -> Result<()>
+    where
+        F: FnMut(WriteBatch),
+    {
+        self.iterate_batch(|data, _| {
+            let mut wb = WriteBatch::new();
+            WalIterator::iterate_peer_batch(data, |peer_batch| {
+                wb.peers.insert(peer_batch.peer_id, peer_batch);
+            });
+            f(wb);
+        })
     }
 
     pub(crate) fn check_wal_header(&mut self, reader: &mut Box<dyn std::io::Read>) -> Result<()> {

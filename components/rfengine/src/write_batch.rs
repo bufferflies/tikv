@@ -74,6 +74,18 @@ impl WriteBatch {
             self.merge_peer(peer_batch);
         }
     }
+
+    pub fn iterate_peer_states(&self, peer_id: u64, mut f: impl FnMut(&[u8], &[u8])) {
+        if let Some(peer_batch) = self.peers.get(&peer_id) {
+            for (k, v) in &peer_batch.states {
+                f(k.chunk(), v.chunk());
+            }
+        }
+    }
+
+    pub fn get_region_peer_map(&self) -> HashMap<u64, u64> {
+        self.peers.iter().map(|(k, v)| (v.region_id, *k)).collect()
+    }
 }
 
 /// `RegionBatch` is a batch of modifications in one region.

@@ -266,6 +266,7 @@ members = [
   "components/kvenginepb",
   "components/load_data",
   "components/log_wrappers",
+  "components/merged_engine",
   "components/native_br",
   "components/online_config",
   "components/overload_protector",
@@ -353,6 +354,7 @@ kvenginepb = { path = "components/kvenginepb" }
 log_wrappers = { path = "components/log_wrappers" }
 maybe-async = { git = "https://github.com/pingyu/maybe-async-rs", branch = "cse" }
 memory_trace_macros = { path = "components/memory_trace_macros" }
+merged_engine = { path = "components/merged_engine" }
 native_br = { path = "components/native_br" }
 online_config = { path = "components/online_config" }
 overload_protector = { path = "components/overload_protector" }
