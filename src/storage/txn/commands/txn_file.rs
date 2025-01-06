@@ -674,6 +674,29 @@ impl TxnFileCommand {
             }
         }
         let txn_status = self.process_check_txn_status_missing_lock(&mut reader, primary_key)?;
+
+        // Resolve txn file locks merged from other regions.
+        // See https://github.com/tidbcloud/cloud-storage-engine/issues/2182.
+        if let Some(lock_txn_file) = snap_access.get_lock_txn_file(self.txn_file_ref.start_ts) {
+            match &txn_status {
+                TxnStatus::Committed { commit_ts } => {
+                    info!("process_check_txn_status: commit txn file lock";
+                        "start_ts" => self.ts(), "commit_ts" => commit_ts, "lock" => ?lock_txn_file);
+                    self.set_committed_or_rolled_back(commit_ts.into_inner());
+                }
+                TxnStatus::RolledBack => {
+                    info!("process_check_txn_status: rollback txn file lock"; "start_ts" => self.ts(), "lock" => ?lock_txn_file);
+                    self.set_committed_or_rolled_back(0);
+                }
+                TxnStatus::LockNotExist => {
+                    warn!("process_check_txn_status: lock may be lost"; "start_ts" => self.ts(), "lock" => ?lock_txn_file);
+                    debug_assert!(false, "lock may be lost");
+                    self.set_committed_or_rolled_back(0);
+                }
+                _ => unreachable!("unexpected txn status {:?}", txn_status),
+            }
+        }
+
         Ok(ProcessResult::TxnStatus { txn_status })
     }
 
@@ -685,11 +708,7 @@ impl TxnFileCommand {
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         let txn_status = if lock.ts.physical() + lock.ttl < current_ts.physical() {
             // rollback.
-            let user_meta = UserMeta::new(self.txn_file_ref.start_ts, 0);
-            self.txn_file_ref
-                .set_user_meta(user_meta.to_array().to_vec());
-            self.txn_file_ref.set_lock_val_prefix(vec![]);
-            self.modified = true;
+            self.set_committed_or_rolled_back(0);
             TxnStatus::TtlExpire
         } else {
             // If lock.min_commit_ts is 0, it's not a large transaction and we can't push
@@ -831,6 +850,15 @@ impl TxnFileCommand {
         Ok(ProcessResult::NextCommand {
             cmd: Command::ResolveLock(resolve_lock),
         })
+    }
+
+    // `commit_ts > 0`: committed, `commit_ts == 0`: rollbacked.
+    fn set_committed_or_rolled_back(&mut self, commit_ts: u64) {
+        let user_meta = UserMeta::new(self.txn_file_ref.start_ts, commit_ts);
+        self.txn_file_ref
+            .set_user_meta(user_meta.to_array().to_vec());
+        self.txn_file_ref.set_lock_val_prefix(vec![]);
+        self.modified = true;
     }
 }
 
