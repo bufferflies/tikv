@@ -3,12 +3,16 @@
 use std::{
     fmt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use log_wrappers::Value as LogValue;
+use tokio::io::AsyncWriteExt;
 
 use crate::{
     dfs,
@@ -25,9 +29,10 @@ use crate::{
         sstable::SsTable,
         Error, Result,
     },
+    IoContext,
 };
 
-const TABLE_META_LOCAL_FILE_SUFFIX: &str = ".meta";
+const TABLE_META_LOCAL_FILE_SUFFIX: &str = "meta";
 
 #[derive(Clone)]
 pub struct IaFile {
@@ -218,6 +223,7 @@ impl IaFile {
         let table_meta_data = match tokio::fs::read(&local_path).await {
             Ok(bytes) => {
                 if let Err(err) = filetime::set_file_mtime(&local_path, filetime::FileTime::now()) {
+                    debug_assert!(false, "{} set file mtime failed: {:?}", file_id, err);
                     warn!("{} prepare meta: set file mtime failed", file_id; "err" => ?err);
                 }
                 Bytes::from(bytes)
@@ -229,7 +235,8 @@ impl IaFile {
                 let bytes = dfs.read_file(file_id, opts).await.map_err(|err| {
                     Error::IaMgr(format!("{} prepare meta: failed: {:?}", file_id, err))
                 })?;
-                if let Err(err) = tokio::fs::write(local_path, &bytes).await {
+                if let Err(err) = Self::save_table_meta(file_id, &local_path, &bytes).await {
+                    debug_assert!(false, "{} save table meta failed: {:?}", file_id, err);
                     warn!("{} prepare meta: write failed", file_id; "err" => ?err);
                 }
                 bytes
@@ -242,6 +249,26 @@ impl IaFile {
             }
         };
         Ok(table_meta_data)
+    }
+
+    async fn save_table_meta(file_id: u64, local_path: &Path, data: &[u8]) -> Result<()> {
+        lazy_static::lazy_static! {
+            static ref TMP_ID: AtomicU64 = AtomicU64::new(0);
+        }
+        let tmp_path = local_path.with_extension(format!(
+            "{}.{}.tmp",
+            TABLE_META_LOCAL_FILE_SUFFIX,
+            TMP_ID.fetch_add(1, Relaxed)
+        ));
+        let mut f = tokio::fs::File::create(&tmp_path)
+            .await
+            .table_ctx(file_id, "create_tmp")?;
+        f.write_all(data).await.table_ctx(file_id, "write_tmp")?;
+        f.sync_data().await.table_ctx(file_id, "sync_tmp")?;
+        tokio::fs::rename(&tmp_path, local_path)
+            .await
+            .table_ctx(file_id, "rename")?;
+        Ok(())
     }
 }
 
@@ -425,12 +452,12 @@ fn align_to_segment(
 pub fn table_meta_file_local_path(file_id: u64, file_type: FileType, data_dir: &Path) -> PathBuf {
     match file_type {
         FileType::Sst => data_dir.join(format!(
-            "{}{}",
+            "{}.{}",
             new_sst_filename(file_id).display(),
             TABLE_META_LOCAL_FILE_SUFFIX
         )),
         FileType::Columnar => data_dir.join(format!(
-            "{}{}",
+            "{}.{}",
             new_columnar_filename(file_id).display(),
             TABLE_META_LOCAL_FILE_SUFFIX
         )),

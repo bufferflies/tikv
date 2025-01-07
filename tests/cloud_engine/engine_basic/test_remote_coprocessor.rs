@@ -2687,7 +2687,9 @@ impl<'a> DagTest<'a> {
                     self.ctx.rt.handle().clone(),
                 ))
                 .unwrap();
-            IaCtx::Enabled(ia_mgr, Arc::new(path.join("meta")))
+            let meta_path = path.join("meta");
+            std::fs::create_dir_all(&meta_path).unwrap();
+            IaCtx::Enabled(ia_mgr, Arc::new(meta_path))
         } else {
             IaCtx::Disabled
         };

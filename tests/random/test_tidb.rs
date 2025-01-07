@@ -98,6 +98,8 @@ pub(crate) const ENABLE_GLOBAL_TXN_FILE_RATIO: f64 = 0.8; // 80% chance enable t
 pub(crate) const ENABLE_GLOBAL_TXN_FILE_ENV_KEY: &str = "GLOBAL_TXN_FILE";
 
 pub(crate) const USE_REMOTE_COP_ENV_KEY: &str = "USE_REMOTE_COP";
+pub(crate) const REMOTE_COP_MIN_BLOCK_SIZE_OPTIONS: [usize; 3] =
+    [64 * 1024, 512 * 1024, 1024 * 1024];
 pub(crate) const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(16); // Small size to make eviction more frequent.
 
 #[test]
@@ -334,12 +336,12 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
 
-        if switches.use_remote_cop {
+        if switches.remote_cop_min_block_size > 0 {
             let tikv_worker_idx = *tikv_worker_nodes.choose(&mut rng).unwrap();
             let cop_worker_url = tikv_worker_cop_url(tikv_worker_idx);
             conf.kvengine.remote_worker_addr = cop_worker_url.clone();
             conf.kvengine.remote_coprocessor_addr = cop_worker_url;
-            conf.kvengine.remote_coprocessor_min_blocks_size = 1024 * 1024;
+            conf.kvengine.remote_coprocessor_min_blocks_size = switches.remote_cop_min_block_size;
         }
     }
 }
@@ -649,7 +651,7 @@ pub(crate) async fn connect_tidb(
 #[derive(Debug)]
 pub(crate) struct Switches {
     pub enable_inner_key_off: bool,
-    pub use_remote_cop: bool,
+    pub remote_cop_min_block_size: usize,
     pub block_cache_type: BlockCacheType,
     pub columnar_switch_on: bool,
     pub tiflash_switch_on: bool,
@@ -665,7 +667,9 @@ impl Switches {
         let mut rng = thread_rng();
 
         let enable_inner_key_off: bool = rng.gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
-        let use_remote_cop = env_switch(USE_REMOTE_COP_ENV_KEY);
+        // Random min block size to generate more or less workloads for cop workers.
+        let remote_cop_min_block_size = env_switch(USE_REMOTE_COP_ENV_KEY) as usize
+            * (*REMOTE_COP_MIN_BLOCK_SIZE_OPTIONS.choose(&mut rng).unwrap());
         let block_cache_type = if rng.gen_ratio(1, 5) {
             BlockCacheType::Moka
         } else {
@@ -683,7 +687,7 @@ impl Switches {
 
         Self {
             enable_inner_key_off,
-            use_remote_cop,
+            remote_cop_min_block_size,
             block_cache_type,
             columnar_switch_on,
             tiflash_switch_on,
