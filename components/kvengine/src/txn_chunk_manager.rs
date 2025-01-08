@@ -460,12 +460,13 @@ impl TxnChunkManagerCore {
     ) -> Result<TxnFile> {
         let mut chunks = Vec::with_capacity(txn_file_ref.chunk_ids.len());
         for &chunk_id in &txn_file_ref.chunk_ids {
-            if !is_prepared {
-                self.prepare(chunk_id, encryption_key.clone())?;
-            }
-            let txn_chunk = self.get(chunk_id).ok_or_else(|| -> Error {
-                box_err!("txn chunk is not prepared, chunk_id {}", chunk_id)
-            })?;
+            let txn_chunk = if !is_prepared {
+                self.prepare(chunk_id, encryption_key.clone())?
+            } else {
+                self.get(chunk_id).ok_or_else(|| -> Error {
+                    box_err!("txn chunk is not prepared, chunk_id {}", chunk_id)
+                })?
+            };
             chunks.push(txn_chunk);
         }
         let txn_ctx = TxnCtx::from_txn_file_ref(txn_file_ref);
