@@ -337,17 +337,22 @@ impl ColumnarTableBuilder {
     }
 
     pub(crate) fn append_block(&mut self, block: &Block, start_offset: usize) -> usize {
-        let mut end_offset = block.length();
-        end_offset = self
-            .handle_builder
-            .append_handle(&block.handles, start_offset, end_offset);
+        let (end_offset, finish_pack) =
+            self.handle_builder
+                .append_handle(&block.handles, start_offset, block.length());
         self.version_builder
-            .append(&block.versions, None, start_offset, end_offset);
+            .append(&block.versions, None, finish_pack, start_offset, end_offset);
         self.del_marks
             .extend_from_slice(&block.versions.nulls[start_offset..end_offset]);
         for (i, col_buf) in block.columns.iter().enumerate() {
             let col_builder = &mut self.column_builders[i];
-            col_builder.append(col_buf, Some(&self.del_marks), start_offset, end_offset);
+            col_builder.append(
+                col_buf,
+                Some(&self.del_marks),
+                finish_pack,
+                start_offset,
+                end_offset,
+            );
         }
         for i in start_offset..end_offset {
             self.max_version = max(self.max_version, block.versions.get_version(i))
@@ -530,6 +535,38 @@ impl ColumnarColumnBuilder {
         &mut self,
         input: &ColumnBuffer,
         del_marks: Option<&[u8]>,
+        finish_pack: bool,
+        row_offset: usize,
+        row_end_off: usize,
+    ) {
+        // Ensure the fixed-size column has same pack index with handle column to use
+        // filter
+        if self.is_fixed() {
+            self.append_fixed(input, del_marks, finish_pack, row_offset, row_end_off);
+        } else {
+            self.append_var(input, del_marks, row_offset, row_end_off);
+        }
+    }
+
+    fn append_fixed(
+        &mut self,
+        input: &ColumnBuffer,
+        del_marks: Option<&[u8]>,
+        finish_pack: bool,
+        row_offset: usize,
+        row_end_off: usize,
+    ) {
+        self.pack_buffer.append(input, row_offset, row_end_off);
+        self.row_count += (row_end_off - row_offset) as u32;
+        if finish_pack {
+            self.finish_pack(del_marks);
+        }
+    }
+
+    fn append_var(
+        &mut self,
+        input: &ColumnBuffer,
+        del_marks: Option<&[u8]>,
         row_offset: usize,
         row_end_off: usize,
     ) {
@@ -559,7 +596,7 @@ impl ColumnarColumnBuilder {
         input: &ColumnBuffer,
         row_offset: usize,
         row_end_off: usize,
-    ) -> usize {
+    ) -> (usize, bool /* finish pack */) {
         debug_assert!(self.is_handle);
         for i in row_offset..row_end_off {
             let handle = input.get_not_null_value(i);
@@ -568,13 +605,13 @@ impl ColumnarColumnBuilder {
                 let last_handle = self.pack_buffer.get_not_null_value(current_length - 1);
                 if last_handle != handle {
                     self.finish_pack(None);
-                    return i;
+                    return (i, true);
                 }
             }
             self.pack_buffer.push_value(handle);
             self.row_count += 1;
         }
-        row_end_off
+        (row_end_off, false)
     }
 
     fn finish_pack(&mut self, del_marks: Option<&[u8]>) {
@@ -746,5 +783,10 @@ impl ColumnarColumnBuilder {
             packs_data_size,
             index_size,
         }
+    }
+
+    #[inline]
+    fn is_fixed(&self) -> bool {
+        self.col_meta.fixed_size > 0
     }
 }
