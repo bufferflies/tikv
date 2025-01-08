@@ -2,6 +2,7 @@
 
 use std::{
     ops,
+    ops::Deref,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -12,12 +13,12 @@ use std::{
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use engine_traits::GetObjectOptions;
 use tikv_util::{deadline::Deadline, time::Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
-    dfs::{Dfs, FileType, S3Fs},
+    dfs,
+    dfs::{Dfs, FileType},
     ia::{
         queue::S3FifoHandle,
         types::{
@@ -114,7 +115,7 @@ impl ops::Deref for IaManager {
 impl IaManager {
     pub async fn new(
         opts: IaManagerOptions,
-        s3fs: S3Fs,
+        fs: Arc<dyn dfs::Dfs>,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self> {
         assert!(
@@ -143,7 +144,7 @@ impl IaManager {
 
         let core = Arc::new(IaManagerCore {
             segment_size: opts.segment_size,
-            s3fs,
+            fs,
             runtime,
             main_store,
             loading_segments: Default::default(),
@@ -164,7 +165,7 @@ impl IaManager {
 
 pub struct IaManagerCore {
     segment_size: i64,
-    s3fs: S3Fs,
+    fs: Arc<dyn dfs::Dfs>,
     runtime: tokio::runtime::Handle,
     main_store: Arc<dyn LocalStore>,
 
@@ -186,7 +187,7 @@ impl IaManagerCore {
     }
 
     pub fn get_dfs(&self) -> &dyn Dfs {
-        &self.s3fs
+        self.fs.deref()
     }
 
     pub(crate) fn segment_size(&self) -> i64 {
@@ -295,14 +296,12 @@ impl IaManagerCore {
             )));
         }
 
-        let opts = GetObjectOptions {
-            start_off: Some(ident.start_off),
-            end_off: Some(ident.end_off),
-        };
-        let file_key = self.s3fs.file_key(ident.file_id, ftype);
-        let filename = format!("{ident}.seg");
-        let _enter = self.s3fs.get_runtime().enter();
-        Ok(self.s3fs.get_object(file_key, filename, opts).await?)
+        let opts = dfs::Options::default()
+            .with_type(ftype)
+            .with_start_off(ident.start_off)
+            .with_end_off(ident.end_off);
+        let _enter = self.fs.get_runtime().enter();
+        Ok(self.fs.read_file(ident.file_id, opts).await?)
     }
 
     fn read_segment_from_cache(

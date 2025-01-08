@@ -865,7 +865,7 @@ fn test_columnar_ia_file() {
     let ia_mgr = runtime
         .block_on(IaManager::new(
             options,
-            s3fs.clone(),
+            Arc::new(s3fs.clone()),
             runtime.handle().clone(),
         ))
         .unwrap();

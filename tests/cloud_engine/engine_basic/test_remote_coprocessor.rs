@@ -2683,7 +2683,7 @@ impl<'a> DagTest<'a> {
                 .rt
                 .block_on(IaManager::new(
                     opts,
-                    self.ctx.s3fs.clone(),
+                    Arc::new(self.ctx.s3fs.clone()),
                     self.ctx.rt.handle().clone(),
                 ))
                 .unwrap();

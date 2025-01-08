@@ -966,12 +966,17 @@ impl ObjectStorage for S3Fs {
 #[async_trait]
 impl Dfs for S3Fs {
     async fn read_file(&self, file_id: u64, opts: Options) -> crate::dfs::Result<Bytes> {
+        let filename = if let Some(end_off) = opts.end_off {
+            format!("{}-{}-{}.seg", file_id, opts.start_off, end_off)
+        } else {
+            format!("{}.{}", file_id, opts.file_type.suffix())
+        };
         self.get_object(
             self.file_key(file_id, opts.file_type),
-            format!("{}.{}", file_id, opts.file_type.suffix()),
+            filename,
             GetObjectOptions {
                 start_off: Some(opts.start_off),
-                end_off: None,
+                end_off: opts.end_off,
             },
         )
         .await

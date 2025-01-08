@@ -162,9 +162,13 @@ impl BuiltinDfs {
         store_id: u64,
     ) -> dfs::Result<Bytes> {
         let store_addr = self.get_store_addr(store_id).await?;
+        let end_off = opts
+            .end_off
+            .map(|end| format!("&end_off={}", end))
+            .unwrap_or_default();
         let uri = Uri::try_from(format!(
-            "http://{}/dfs/{}?file_type={}&start_off={}",
-            store_addr, file_id, opts.file_type, opts.start_off
+            "http://{}/dfs/{}?file_type={}&start_off={}{}",
+            store_addr, file_id, opts.file_type, opts.start_off, end_off
         ))
         .unwrap();
         let resp = self.http_client.get(uri).await?;

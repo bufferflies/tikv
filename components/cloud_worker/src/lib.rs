@@ -376,7 +376,7 @@ fn create_ia_ctx(
 
         let rt = runtime.clone();
         let ia_mgr = runtime
-            .block_on(IaManager::new(opts, s3fs.clone(), rt))
+            .block_on(IaManager::new(opts, Arc::new(s3fs.clone()), rt))
             .map_err(|err| format!("create IA manager failed: {err:?}"))?;
 
         let meta_path = ia_path.join("meta");

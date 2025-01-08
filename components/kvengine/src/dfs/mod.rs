@@ -10,6 +10,7 @@ use std::{
     fmt::{Debug, Display, Formatter},
     io::{self, BufReader, Read, Seek, SeekFrom, Write},
     ops::Deref,
+    os::unix::fs::FileExt,
     path::{Path, PathBuf},
     result,
     sync::{
@@ -98,7 +99,11 @@ impl InMemFs {
 impl Dfs for InMemFs {
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         if let Some(file) = self.files.get(&file_id).as_deref() {
-            return Ok(file.slice(opts.start_off as usize..));
+            if let Some(end_off) = opts.end_off {
+                return Ok(file.slice(opts.start_off as usize..end_off as usize));
+            } else {
+                return Ok(file.slice(opts.start_off as usize..));
+            }
         }
         Err(Error::NotExists(file_id))
     }
@@ -233,6 +238,7 @@ impl CacheFs {
                     shard_id: opts.shard_id,
                     shard_ver: opts.shard_ver,
                     start_off: 0,
+                    end_off: None,
                 };
                 s3_fs.read_file(file_id, full_range_opts).await
             })
@@ -250,7 +256,11 @@ impl CacheFs {
                 .with_label_values(&["hit"])
                 .inc();
         }
-        Ok(file.slice(opts.start_off as usize..))
+        if let Some(end_off) = opts.end_off {
+            Ok(file.slice(opts.start_off as usize..end_off as usize))
+        } else {
+            Ok(file.slice(opts.start_off as usize..))
+        }
     }
 }
 
@@ -379,13 +389,21 @@ impl Dfs for LocalFs {
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         let local_file_name = self.local_file_path(file_id, opts.file_type);
         let mut fd = std::fs::File::open(local_file_name).dfs_ctx(file_id, "open")?;
-        if opts.start_off > 0 {
-            fd.seek(SeekFrom::Start(opts.start_off))
-                .dfs_ctx(file_id, "seek")?;
-        }
-        let mut reader = BufReader::new(fd);
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).dfs_ctx(file_id, "read")?;
+        let buf = if let Some(end_off) = opts.end_off {
+            let mut buf = vec![0; (end_off - opts.start_off) as usize];
+            fd.read_at(&mut buf, opts.start_off)
+                .dfs_ctx(file_id, "read")?;
+            buf
+        } else {
+            if opts.start_off > 0 {
+                fd.seek(SeekFrom::Start(opts.start_off))
+                    .dfs_ctx(file_id, "seek")?;
+            }
+            let mut reader = BufReader::new(fd);
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).dfs_ctx(file_id, "read")?;
+            buf
+        };
         KVENGINE_DFS_THROUGHPUT_VEC
             .with_label_values(&["read"])
             .inc_by(buf.len() as u64);
@@ -435,6 +453,7 @@ pub struct Options {
     pub shard_id: u64,
     pub shard_ver: u64,
     pub start_off: u64,
+    pub end_off: Option<u64>,
 }
 
 impl Default for Options {
@@ -444,6 +463,7 @@ impl Default for Options {
             shard_id: 0,
             shard_ver: 0,
             start_off: 0,
+            end_off: None,
         }
     }
 }
@@ -462,6 +482,11 @@ impl Options {
 
     pub fn with_start_off(mut self, start_off: u64) -> Self {
         self.start_off = start_off;
+        self
+    }
+
+    pub fn with_end_off(mut self, end_off: u64) -> Self {
+        self.end_off = Some(end_off);
         self
     }
 }

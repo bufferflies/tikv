@@ -5,7 +5,7 @@ use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
     iter::Iterator,
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{FileExt, MetadataExt},
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -464,17 +464,29 @@ impl EngineCore {
         Ok(())
     }
 
-    pub fn read_local_file(&self, id: u64, file_type: FileType, start_off: u64) -> Result<Bytes> {
+    pub fn read_local_file(
+        &self,
+        id: u64,
+        file_type: FileType,
+        start_off: u64,
+        end_off: Option<u64>,
+    ) -> Result<Bytes> {
         let _guard = self.lock_file(id);
         let path = self.local_file_path(id, file_type);
         let mut f = fs::File::open(path).table_ctx(id, "read_local_file.open")?;
-        if start_off > 0 {
-            f.seek(SeekFrom::Start(start_off))
-                .table_ctx(id, "read_local_file.seek")?;
+        if let Some(end_off) = end_off {
+            let mut buf = vec![0; (end_off - start_off) as usize];
+            f.read_at(&mut buf, start_off).dfs_ctx(id, "read")?;
+            Ok(buf.into())
+        } else {
+            if start_off > 0 {
+                f.seek(SeekFrom::Start(start_off))
+                    .table_ctx(id, "read_local_file.seek")?;
+            }
+            let mut data = vec![];
+            f.read_to_end(&mut data).table_ctx(id, "read_local_file")?;
+            Ok(data.into())
         }
-        let mut data = vec![];
-        f.read_to_end(&mut data).table_ctx(id, "read_local_file")?;
-        Ok(data.into())
     }
 
     fn open_local_file(&self, id: u64, file_type: FileType) -> Result<LocalFile> {
