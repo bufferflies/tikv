@@ -105,8 +105,8 @@ impl KvPairsWorker {
     pub fn new(
         worker_id: u64,
         config: LoadDataConfig,
-        ctx: LoadDataContext,
         task_ctx: TaskContext,
+        task_dir: PathBuf,
         receiver: Receiver<KvPairsWorkerMsg>,
         scheduler: LoadTaskScheduler,
         checkpoint: Arc<Mutex<LocalFileCheckpointStorage>>,
@@ -131,14 +131,10 @@ impl KvPairsWorker {
         drop(checkpoint_guard);
 
         let (file_tx, file_rx) = tikv_util::mpsc::unbounded();
-        let l0_data_dir = ctx
-            .dir
-            .join(task_ctx.task_id.as_str())
+        let l0_data_dir = task_dir
             .join(format!("worker-{}", worker_id))
             .join("l0-files");
-        let l1_data_dir = ctx
-            .dir
-            .join(task_ctx.task_id.as_str())
+        let l1_data_dir = task_dir
             .join(format!("worker-{}", worker_id))
             .join("l1-files");
 
@@ -239,18 +235,6 @@ impl KvPairsWorker {
                     }
                 }
                 KvPairsWorkerMsg::Cleanup => {
-                    if let Err(err) = fs::remove_dir_all(&self.l0_data_dir) {
-                        error!(
-                            "{} worker-{} failed to remove data dir {:?}, error {:?}",
-                            self.task_ctx.task_id, self.worker_id, self.l0_data_dir, err
-                        );
-                    }
-                    if let Err(err) = fs::remove_dir_all(&self.l1_data_dir) {
-                        error!(
-                            "{} worker-{} failed to remove data dir {:?}, error {:?}",
-                            self.task_ctx.task_id, self.worker_id, self.l1_data_dir, err
-                        );
-                    }
                     return;
                 }
             }

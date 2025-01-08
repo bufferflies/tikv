@@ -1,6 +1,8 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 use std::{
     collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -32,6 +34,7 @@ pub struct Dispatcher {
     config: LoadDataConfig,
     ctx: LoadDataContext,
     task_ctx: TaskContext,
+    task_dir: PathBuf,
     kvpairs_worker_num: u64,
     building_worker_num: u64,
     scheduler: LoadTaskScheduler,
@@ -108,10 +111,12 @@ impl Dispatcher {
             thread_handle: None,
         };
 
+        let task_dir = ctx.dir.join(task_ctx.task_id.as_str());
         Self {
             config,
             ctx,
             task_ctx,
+            task_dir,
             kvpairs_worker_num: kvpairs_worker_nums,
             building_worker_num: building_worker_nums,
             scheduler,
@@ -228,6 +233,8 @@ impl Dispatcher {
                     for sender in self.building_worker_senders.values() {
                         sender.send(BuildingWorkerMsg::Cleanup).unwrap();
                     }
+
+                    let _ = fs::remove_dir_all(&self.task_dir);
                     self.checkpoint_store
                         .lock()
                         .unwrap()
@@ -280,8 +287,8 @@ impl Dispatcher {
                 let mut worker = KvPairsWorker::new(
                     worker_id,
                     self.config.clone(),
-                    self.ctx.clone(),
                     self.task_ctx.clone(),
+                    self.task_dir.clone(),
                     receiver,
                     self.scheduler.clone(),
                     self.checkpoint_store.clone(),
