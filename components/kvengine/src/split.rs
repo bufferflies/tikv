@@ -347,6 +347,22 @@ impl Engine {
             ));
         }
 
+        if !old_data.col_levels.unconverted_l0s.is_empty() {
+            warn!(
+                "{} prepare_merge denied, unconverted l0s : {:?}",
+                old_shard.tag(),
+                old_data
+                    .col_levels
+                    .unconverted_l0s
+                    .iter()
+                    .map(|l0| l0.id())
+                    .collect::<Vec<_>>()
+            );
+            return Err(Error::Other(
+                MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG.into(),
+            ));
+        }
+
         self.prepare_update_shard_version(&old_shard, sequence, true);
         let mut new_shard = self.new_shard_version(&old_shard, sequence);
         // source shard may have non-empty mem-table, we need to flush them before

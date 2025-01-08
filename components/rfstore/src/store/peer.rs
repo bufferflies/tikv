@@ -2215,6 +2215,7 @@ impl<'a> PreprocessRef<'a> {
             return;
         }
         if !shard_meta.unconverted_l0s.is_empty() {
+            // Error response is returned by `exec_admin_cmd`, so do not return error here.
             warn!(
                 "{} preprocess_prepare_merge denied, unconverted l0s : {:?}",
                 tag, shard_meta.unconverted_l0s
