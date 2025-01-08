@@ -130,11 +130,11 @@ for i in $(seq -w 1 100000); do
     fi
 
     if [ "$TESTNAME" = "with_tidb" ] || [ "$TESTNAME" = "upgrade" ]; then
-        pkill -9 tidb-server || true
-        pkill -9 pd-server || true
-        pkill -9 tikv-server || true
-        pkill -9 tikv-worker || true
-        pkill -9 tiflash || true
-        pkill -9 go-tpc || true
+        pkill -9 -f "/tidb-server" || true
+        pkill -9 -f "/pd-server" || true
+        pkill -9 -f "/tikv-server" || true
+        pkill -9 -f "/tikv-worker" || true
+        pkill -9 -f "/tiflash/tiflash" || true
+        pkill -9 -f "/go-tpc" || true
     fi
 done
