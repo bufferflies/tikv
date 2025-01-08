@@ -113,6 +113,7 @@ message L0Create {
   uint64 ID = 1;
   bytes smallest = 2;
   bytes biggest = 3;
+  uint32 size = 4;
 }
 
 message BlobCreate {

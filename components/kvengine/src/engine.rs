@@ -646,6 +646,7 @@ impl EngineCore {
                         l0_create.set_id(id);
                         l0_create.set_smallest(res.smallest);
                         l0_create.set_biggest(res.biggest);
+                        l0_create.set_size(buf.len() as u32);
                         ingest_files.mut_l0_creates().push(l0_create);
                     } else {
                         let mut tbl_create = kvenginepb::TableCreate::new();

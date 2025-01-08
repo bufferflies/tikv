@@ -848,6 +848,7 @@ impl SnapAccessCore {
             l0.set_id(v.id());
             l0.set_smallest(v.smallest().to_vec());
             l0.set_biggest(v.biggest().to_vec());
+            l0.set_size(v.size() as u32);
             snap.mut_l0_creates().push(l0);
             l0_ids.insert(v.id());
         }
@@ -1845,6 +1846,7 @@ mod tests {
                         tbl_create.level = level;
                         tbl_create.smallest = tbl.smallest().to_vec();
                         tbl_create.biggest = tbl.biggest().to_vec();
+                        tbl_create.meta_offset = tbl.meta_offset();
                         kvs.truncate(0);
                         cs.ln_tables.insert(tbl.id(), tbl.clone());
                         snap.mut_table_creates().push(tbl_create);

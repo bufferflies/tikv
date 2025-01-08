@@ -205,6 +205,7 @@ impl ShardMeta {
             assert_eq!(fm.cf, cf as i8);
         }
         fm.level = level as u8;
+        fm.l0_size = 0;
         fm.table_meta_off = meta_offset;
     }
 
@@ -958,6 +959,7 @@ impl ShardMeta {
                         l0.set_id(*k);
                         l0.set_smallest(v.smallest.to_vec());
                         l0.set_biggest(v.biggest.to_vec());
+                        l0.set_size(v.l0_size);
                         snap.mut_l0_creates().push(l0);
                     } else {
                         let mut tbl = pb::TableCreate::new();
@@ -1267,6 +1269,9 @@ pub struct FileMeta {
     pub smallest: Bytes,
     pub biggest: Bytes,
 
+    // Available ONLY for SST level 0.
+    pub l0_size: u32,
+
     // Available ONLY for SST (level 1+) & Columnar.
     pub table_meta_off: u32,
 }
@@ -1278,6 +1283,7 @@ impl FileMeta {
         file_type: FileType,
         smallest: &[u8],
         biggest: &[u8],
+        l0_size: u32,
         table_meta_off: u32,
     ) -> Self {
         Self {
@@ -1286,6 +1292,7 @@ impl FileMeta {
             file_type,
             smallest: Bytes::copy_from_slice(smallest),
             biggest: Bytes::copy_from_slice(biggest),
+            l0_size,
             table_meta_off,
         }
     }
@@ -1325,6 +1332,7 @@ impl FileMeta {
             FileType::Sst,
             table.get_smallest(),
             table.get_biggest(),
+            table.size,
             0,
         )
     }
@@ -1336,6 +1344,7 @@ impl FileMeta {
             FileType::Sst,
             table.get_smallest(),
             table.get_biggest(),
+            0,
             table.meta_offset,
         )
     }
@@ -1347,6 +1356,7 @@ impl FileMeta {
             FileType::Columnar,
             table.get_smallest(),
             table.get_biggest(),
+            0,
             table.meta_offset,
         )
     }
@@ -1359,6 +1369,7 @@ impl FileMeta {
             table.get_smallest(),
             table.get_biggest(),
             0,
+            0,
         )
     }
 
@@ -1370,11 +1381,12 @@ impl FileMeta {
             vec_idx_file.get_smallest(),
             vec_idx_file.get_biggest(),
             0,
+            0,
         )
     }
 
     pub fn from_schema_meta() -> Self {
-        Self::new(0, 0, FileType::Schema, &[], &[], 0)
+        Self::new(0, 0, FileType::Schema, &[], &[], 0, 0)
     }
 }
 
@@ -1390,7 +1402,7 @@ impl BoundedDataSet for FileMeta {
 
 impl Default for FileMeta {
     fn default() -> Self {
-        Self::new(0, 0, FileType::Sst, b"", b"", 0)
+        Self::new(0, 0, FileType::Sst, b"", b"", 0, 0)
     }
 }
 
@@ -1468,13 +1480,13 @@ mod tests {
     fn test_delete_file_with_level() {
         let files = vec![
             // L0:
-            (1, FileMeta::new(0, 0, FileType::Sst, b"", b"", 0)),
+            (1, FileMeta::new(0, 0, FileType::Sst, b"", b"", 0, 0)),
             // L1:
-            (101, FileMeta::new(0, 1, FileType::Sst, b"", b"", 0)),
-            (102, FileMeta::new(0, 1, FileType::Sst, b"", b"", 0)),
+            (101, FileMeta::new(0, 1, FileType::Sst, b"", b"", 0, 0)),
+            (102, FileMeta::new(0, 1, FileType::Sst, b"", b"", 0, 0)),
             // L2:
-            (201, FileMeta::new(0, 2, FileType::Sst, b"", b"", 0)),
-            (202, FileMeta::new(0, 2, FileType::Sst, b"", b"", 0)),
+            (201, FileMeta::new(0, 2, FileType::Sst, b"", b"", 0, 0)),
+            (202, FileMeta::new(0, 2, FileType::Sst, b"", b"", 0, 0)),
         ];
 
         // comp_level, top_deletes, bottom_deletes, is_duplicated, result_files
@@ -1759,7 +1771,7 @@ mod tests {
                 let (smallest, biggest) = make_smallest_biggest(t);
                 meta.files.insert(
                     id as u64,
-                    FileMeta::new(WRITE_CF as i32, 3, FileType::Sst, &smallest, &biggest, 0),
+                    FileMeta::new(WRITE_CF as i32, 3, FileType::Sst, &smallest, &biggest, 0, 0),
                 );
             }
             meta

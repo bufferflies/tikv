@@ -232,6 +232,7 @@ impl Engine {
             l0_ids.insert(l0.id());
             l0_create.set_smallest(l0.smallest().to_vec());
             l0_create.set_biggest(l0.biggest().to_vec());
+            l0_create.set_size(l0.size() as u32);
             initial_flush.mut_l0_creates().push(l0_create);
         }
         flush.shard_data.for_each_level(|cf, lvl| {
@@ -462,6 +463,7 @@ impl Engine {
         l0_create.set_id(res.id);
         l0_create.set_smallest(mem::take(&mut res.smallest));
         l0_create.set_biggest(mem::take(&mut res.biggest));
+        l0_create.set_size(data_buf.len() as u32);
         (l0_create, data_buf.into())
     }
 

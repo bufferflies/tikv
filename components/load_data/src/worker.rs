@@ -1434,13 +1434,14 @@ impl BuildingWorker {
                 entries += 1;
             }
             batch.clear();
-            builder.finish(0, &mut batch);
+            let res = builder.finish(0, &mut batch);
             let data: Bytes = batch.into();
             let sst_meta = SstMeta {
                 id: file_id,
                 smallest: builder.get_smallest().to_vec(),
                 biggest: builder.get_biggest().to_vec(),
                 size: data.len(),
+                meta_offset: res.meta_offset,
                 uncompressed_size,
                 keys: entries,
             };

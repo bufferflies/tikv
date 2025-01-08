@@ -1221,13 +1221,14 @@ impl LoadTaskWorker {
                 entries += 1;
             }
             batch.clear();
-            builder.finish(0, &mut batch);
+            let res = builder.finish(0, &mut batch);
             let data: Bytes = batch.into();
             let sst_meta = SstMeta {
                 id: file_id,
                 smallest: builder.get_smallest().to_vec(),
                 biggest: builder.get_biggest().to_vec(),
                 size: data.len(),
+                meta_offset: res.meta_offset,
                 uncompressed_size,
                 keys: entries,
             };
@@ -1762,6 +1763,7 @@ pub fn build_ingest_files(
         table_create.set_level(WRITE_CF_BOTTOM_LEVEL);
         table_create.set_smallest(sst_meta.smallest.clone());
         table_create.set_biggest(sst_meta.biggest.clone());
+        table_create.set_meta_offset(sst_meta.meta_offset);
         table_creates.push(table_create);
     }
     cs

@@ -361,6 +361,7 @@ impl L0Builder {
         l0_create.set_id(self.fid);
         l0_create.set_smallest(smallest);
         l0_create.set_biggest(biggest);
+        l0_create.set_size(buf.len() as u32);
         (l0_create, buf.into())
     }
 

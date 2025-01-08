@@ -811,6 +811,7 @@ mod tests {
             smallest,
             biggest,
             size: 3,
+            meta_offset: 0,
             uncompressed_size: 3,
             keys: 3,
         };
