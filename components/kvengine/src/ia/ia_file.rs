@@ -187,7 +187,7 @@ impl IaFile {
         Ok(f)
     }
 
-    async fn read_range(&self, read_at: ReadAt<'_>) -> Result<()> {
+    async fn read_range(&self, mut read_at: ReadAt<'_>) -> Result<()> {
         let (start_off, end_off) = (read_at.start_off(), read_at.end_off());
 
         // Read across meta should not happen.
@@ -203,7 +203,7 @@ impl IaFile {
         let ident = self.align_to_segment(start_off, end_off)?;
         debug!("{} read range", self.id; "start" => start_off, "end" => end_off, "ident" => %ident);
         self.mgr
-            .read_segment(ident, self.ftype, None, None, read_at)
+            .read_segment(ident, self.ftype, None, None, &mut read_at)
             .await
     }
 
@@ -313,7 +313,7 @@ impl File for IaFile {
 
         let mut buf = BytesMut::new();
         buf.resize(length, 0);
-        let read_at = ReadAt::new(buf.as_mut(), off);
+        let read_at = ReadAt::new(buf.as_mut(), off, false);
         self.read_range(read_at).await?;
         Ok(buf.freeze())
     }
@@ -325,7 +325,7 @@ impl File for IaFile {
             return Ok(());
         }
 
-        let read_at = ReadAt::new(buf, offset);
+        let read_at = ReadAt::new(buf, offset, false);
         self.read_range(read_at).await
     }
 

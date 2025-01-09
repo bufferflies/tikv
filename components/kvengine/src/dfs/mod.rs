@@ -469,22 +469,26 @@ impl Default for Options {
 }
 
 impl Options {
+    #[must_use]
     pub fn with_shard(mut self, shard_id: u64, shard_ver: u64) -> Self {
         self.shard_id = shard_id;
         self.shard_ver = shard_ver;
         self
     }
 
+    #[must_use]
     pub fn with_type(mut self, file_type: FileType) -> Self {
         self.file_type = file_type;
         self
     }
 
+    #[must_use]
     pub fn with_start_off(mut self, start_off: u64) -> Self {
         self.start_off = start_off;
         self
     }
 
+    #[must_use]
     pub fn with_end_off(mut self, end_off: u64) -> Self {
         self.end_off = Some(end_off);
         self

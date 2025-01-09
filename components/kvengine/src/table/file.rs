@@ -134,6 +134,18 @@ impl LocalFile {
         Ok(local_file)
     }
 
+    pub fn from_file(id: u64, path: PathBuf, file: Arc<std::fs::File>) -> table::Result<LocalFile> {
+        let meta = std::fs::metadata(&path).table_ctx(id, "local.from_file.metadata")?;
+        let local_file = LocalFile {
+            id,
+            size: meta.size(),
+            path,
+            fd: TtlCache::new(file),
+            mmap: Mutex::new(None),
+        };
+        Ok(local_file)
+    }
+
     fn get_file(&self) -> table::Result<Arc<std::fs::File>> {
         self.fd
             .get(|| std::fs::File::open(self.path.as_path()).table_ctx(self.id, "local.get_file"))
@@ -305,6 +317,14 @@ impl<T> Default for TtlCache<T> {
 }
 
 impl<T> TtlCache<T> {
+    pub fn new(t: Arc<T>) -> Self {
+        let now_ns = time::precise_time_ns();
+        Self {
+            access_ns: AtomicU64::new(now_ns),
+            data: Mutex::new(Some(t)),
+        }
+    }
+
     pub fn get(&self, init: impl FnOnce() -> table::Result<T>) -> table::Result<Arc<T>> {
         let now_ns = time::precise_time_ns();
         self.access_ns.store(now_ns, Relaxed);

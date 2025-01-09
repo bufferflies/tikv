@@ -19,8 +19,11 @@ use tikv_util::config::{AbsoluteOrPercentSize, ReadableDuration};
 use tokio::io::AsyncWriteExt;
 
 use crate::{
-    ia::manager::{IaManagerOptions, QueueOptions},
-    table::{Error, Result},
+    ia::{
+        manager::{IaManagerOptions, QueueOptions},
+        types::SegmentHandle,
+    },
+    table::{file::LocalFile, Error, Result},
     IoContext,
 };
 
@@ -43,6 +46,9 @@ pub trait LocalStore: Send + Sync {
     fn read(&self, file_id: u64, key: &str, start_off: u64, end_off: u64) -> Result<Option<Bytes>>;
 
     fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>>;
+
+    /// Get a handle to hold the underlying data from being removed.
+    fn handle(&self, file_id: u64, key: &str) -> Result<Option<SegmentHandle>>;
 }
 
 pub fn new_local_store(path: Option<PathBuf>, fd_cache_capacity: usize) -> Arc<dyn LocalStore> {
@@ -88,6 +94,21 @@ impl LocalFileStore {
     pub fn new(dir: PathBuf, fd_cache_capacity: usize) -> Self {
         let fd_cache = Arc::new(Cache::new(fd_cache_capacity));
         Self { dir, fd_cache }
+    }
+
+    fn open_file(&self, file_id: u64, key: &str) -> Result<Option<Arc<std::fs::File>>> {
+        let f = if let Some(f) = self.fd_cache.get(key) {
+            debug!("FileDataStore.open_file cache hit"; "file_id" => file_id, "key" => key);
+            f.clone()
+        } else {
+            let path = self.dir.join(key);
+            debug!("FileDataStore.open_file cache miss"; "file_id" => file_id, "key" => key, "path" => ?path);
+            let f = try_open!(path).table_ctx(file_id, format!("open.{key}"))?;
+            let arc_f = Arc::new(f);
+            self.fd_cache.insert(key.to_owned(), arc_f.clone());
+            arc_f
+        };
+        Ok(Some(f))
     }
 }
 
@@ -147,21 +168,9 @@ impl LocalStore for LocalFileStore {
     }
 
     fn read_at(&self, file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<Option<()>> {
-        let f = if let Some(f) = self.fd_cache.get(key) {
-            debug!("FileDataStore.read_at cache hit"; "file_id" => file_id, "key" => key);
-            f.clone()
-        } else {
-            let path = self.dir.join(key);
-            debug!("FileDataStore.read_at cache miss"; "file_id" => file_id, "key" => key, "path" => ?path);
-            let f = try_open!(path).table_ctx(file_id, format!("open.{key}"))?;
-            let arc_f = Arc::new(f);
-            self.fd_cache.insert(key.to_owned(), arc_f.clone());
-            arc_f
-        };
-
-        // FIXME: remove extra ctx fields.
+        let f = try_some!(self.open_file(file_id, key)?);
         f.read_exact_at(buf, offset)
-            .table_ctx(file_id, format!("read_exact.{key}.{offset}.{}", buf.len()))?;
+            .table_ctx(file_id, format!("read_exact.{key}"))?;
         Ok(Some(()))
     }
 
@@ -176,6 +185,13 @@ impl LocalStore for LocalFileStore {
         self.fd_cache.remove(key);
         try_fs!(std::fs::remove_file(path)).table_ctx(file_id, format!("remove.{key}"))?;
         Ok(Some(()))
+    }
+
+    fn handle(&self, file_id: u64, key: &str) -> Result<Option<SegmentHandle>> {
+        let f = try_some!(self.open_file(file_id, key)?);
+        let path = self.dir.join(key);
+        let local_file = LocalFile::from_file(file_id, path, f)?;
+        Ok(Some(local_file.into()))
     }
 }
 
@@ -244,6 +260,11 @@ impl LocalStore for LocalMemoryStore {
 
     fn remove(&self, _file_id: u64, key: &str) -> Result<Option<()>> {
         Ok(self.m.remove(key).map(|_| ()))
+    }
+
+    fn handle(&self, file_id: u64, key: &str) -> Result<Option<SegmentHandle>> {
+        let data = try_some!(self.get(key));
+        Ok(Some(SegmentHandle::from_bytes(file_id, data)))
     }
 }
 

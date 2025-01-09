@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 #[cfg(feature = "debug-trace-ia-segments")]
 use crate::ia::debug::*;
-use crate::metrics::ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE;
+use crate::{metrics::ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE, table, table::file::InMemFile};
 
 /// The identifier of a file segment.
 #[repr(C)]
@@ -20,6 +20,14 @@ pub struct FileSegmentIdent {
 }
 
 impl FileSegmentIdent {
+    pub fn new(file_id: u64, start_off: u64, end_off: u64) -> Self {
+        Self {
+            file_id,
+            start_off,
+            end_off,
+        }
+    }
+
     pub(crate) fn fingerprint(&self) -> u32 {
         let ptr = unsafe {
             std::slice::from_raw_parts(self as *const _ as *const u8, std::mem::size_of::<Self>())
@@ -172,6 +180,7 @@ impl LocalSegmentMap {
         Some(prev)
     }
 
+    #[cfg(any(test, feature = "testexport"))]
     #[inline]
     pub(crate) fn iter(&self) -> dashmap::iter::Iter<'_, FileSegmentIdent, FileSegmentData> {
         self.core.iter()
@@ -223,6 +232,34 @@ where
                 guard
             }
         }
+    }
+}
+
+pub struct SegmentHandle(Arc<dyn table::file::File>);
+
+impl fmt::Debug for SegmentHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SegmentHandle")
+            .field("file_id", &self.0.id())
+            .field("size", &self.0.size())
+            .finish()
+    }
+}
+
+impl SegmentHandle {
+    pub fn from_bytes(file_id: u64, bytes: Bytes) -> Self {
+        let f = InMemFile::new(file_id, bytes);
+        Self(Arc::new(f))
+    }
+
+    pub fn into_inner(self) -> Arc<dyn table::file::File> {
+        self.0
+    }
+}
+
+impl From<table::file::LocalFile> for SegmentHandle {
+    fn from(f: table::file::LocalFile) -> Self {
+        Self(Arc::new(f))
     }
 }
 

@@ -23,7 +23,7 @@ use tikv_util::{box_err, box_try, codec::number::U64_SIZE};
 
 use crate::{
     context::{IaCtx, SnapCtx},
-    ia::ia_file::IaFile,
+    ia::{ia_file::IaFile, types::FileSegmentIdent},
     limiter::RegionLimiter,
     table::{
         self,
@@ -363,35 +363,18 @@ impl Shard {
                 }
             }
 
-            // TODO: Cache L0 tables in local disk when IA is enabled.
             let fs = ctx.dfs.clone();
             let tx = result_tx.clone();
             let fm = fm.clone();
             let tag = tag.to_string();
-            let ia_ctx = if fm.can_use_ia() {
+            let ia_ctx = if fm.can_use_ia() || fm.is_l0_sst_with_size() {
                 ctx.ia_ctx.clone()
             } else {
                 IaCtx::Disabled
             };
             runtime.spawn(async move {
-                let res = match ia_ctx {
-                    IaCtx::Disabled => fs
-                        .read_file(id, opts.with_type(fm.file_type))
-                        .await
-                        .map(|data| (data, None))
-                        .map_err(|err| err.into()),
-                    IaCtx::Enabled(ia_mgr, data_dir) => IaFile::prepare_table_meta(
-                        id,
-                        fm.file_type,
-                        fm.table_meta_off as u64,
-                        data_dir.deref(),
-                        ia_mgr.get_dfs(),
-                    )
-                    .await
-                    .map(|data| (data, Some(ia_mgr)))
-                    .map_err(|err| err.into()),
-                };
-                if let Err(err) = tx.send(res.map(|(data, ia_mgr)| (id, fm, data, ia_mgr))) {
+                let res = Self::prepare_file(id, &fm, fs.as_ref(), &opts, &ia_ctx).await;
+                if let Err(err) = tx.send(res.map(|file| (id, fm, file))) {
                     error!("failed to send result"; "tag" => tag, "file_id" => id, "err" => %err);
                 }
             });
@@ -400,14 +383,10 @@ impl Shard {
         let mut errors: Vec<Error> = vec![];
         for _ in 0..msg_count {
             match result_rx.recv().await.unwrap() {
-                Ok((id, fm, data, ia_mgr)) => {
-                    let file = if let Some(ia_mgr) = ia_mgr {
+                Ok((id, fm, file)) => {
+                    if !file.is_sync() {
                         is_sync = false;
-                        let table_meta_file = Arc::new(InMemFile::new(id, data));
-                        Arc::new(IaFile::open(id, fm.file_type, table_meta_file, ia_mgr)?) as _
-                    } else {
-                        Arc::new(InMemFile::new(id, data)) as _
-                    };
+                    }
                     cs.add_file(
                         id,
                         file,
@@ -462,6 +441,47 @@ impl Shard {
         shard.is_sync = is_sync;
         shard.set_data(builder.build());
         Ok(shard)
+    }
+
+    async fn prepare_file(
+        id: u64,
+        fm: &FileMeta,
+        fs: &dyn dfs::Dfs,
+        opts: &dfs::Options,
+        ia_ctx: &IaCtx,
+    ) -> Result<Arc<dyn table::file::File>> {
+        match ia_ctx {
+            IaCtx::Disabled => fs
+                .read_file(id, opts.with_type(fm.file_type))
+                .await
+                .map(|data| Arc::new(InMemFile::new(id, data)) as _)
+                .map_err(|err| err.into()),
+            IaCtx::Enabled(ia_mgr, data_dir) => {
+                if fm.can_use_ia() {
+                    let data = IaFile::prepare_table_meta(
+                        id,
+                        fm.file_type,
+                        fm.table_meta_off as u64,
+                        data_dir.deref(),
+                        ia_mgr.get_dfs(),
+                    )
+                    .await?;
+                    let table_meta_file = Arc::new(InMemFile::new(id, data));
+                    let file = IaFile::open(id, fm.file_type, table_meta_file, ia_mgr.clone())?;
+                    Ok(Arc::new(file) as _)
+                } else if fm.is_l0_sst_with_size() {
+                    // Cache the whole file as a segment.
+                    let ident = FileSegmentIdent::new(id, 0, fm.l0_size as u64);
+                    ia_mgr
+                        .get_segment_handle(ident, fm.file_type)
+                        .await
+                        .map(|handle| handle.into_inner())
+                        .map_err(|err| err.into())
+                } else {
+                    unreachable!()
+                }
+            }
+        }
     }
 
     pub fn get_cf_total_size(&self, cf: usize) -> u64 {

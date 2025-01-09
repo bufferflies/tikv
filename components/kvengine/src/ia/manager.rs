@@ -22,7 +22,7 @@ use crate::{
     ia::{
         queue::S3FifoHandle,
         types::{
-            FileSegmentData, FileSegmentIdent, GuardMap, LocalSegmentMap,
+            FileSegmentData, FileSegmentIdent, GuardMap, LocalSegmentMap, SegmentHandle,
             FILE_SEGMENT_DATA_IN_MEMORY,
         },
         util::{new_local_store, LocalStore},
@@ -36,11 +36,21 @@ use crate::{
 pub(crate) struct ReadAt<'a> {
     buf: &'a mut [u8],
     offset: u64,
+
+    /// Get handle to keep underlying data available, even the segment is
+    /// evicted.
+    need_segment_handle: bool,
+    segment_handle: Option<SegmentHandle>,
 }
 
 impl<'a> ReadAt<'a> {
-    pub(crate) fn new(buf: &'a mut [u8], offset: u64) -> Self {
-        Self { buf, offset }
+    pub(crate) fn new(buf: &'a mut [u8], offset: u64, need_segment_handle: bool) -> Self {
+        Self {
+            buf,
+            offset,
+            need_segment_handle,
+            segment_handle: None,
+        }
     }
 
     pub(crate) fn start_off(&self) -> u64 {
@@ -56,12 +66,21 @@ impl<'a> ReadAt<'a> {
         debug_assert!(
             start_off <= end_off && ident.start_off <= start_off && end_off <= ident.end_off
         );
+        if self.need_segment_handle {
+            let handle = SegmentHandle::from_bytes(ident.file_id, seg_data.clone());
+            self.set_handle(handle);
+        }
         if !self.buf.is_empty() {
             let seg_slice = seg_data.slice(
                 (start_off - ident.start_off) as usize..(end_off - ident.start_off) as usize,
             );
             self.buf.copy_from_slice(&seg_slice);
         }
+    }
+
+    fn set_handle(&mut self, handle: SegmentHandle) {
+        let prev = self.segment_handle.replace(handle);
+        debug_assert!(prev.is_none());
     }
 }
 
@@ -223,7 +242,7 @@ impl IaManagerCore {
         ftype: FileType,
         keyspace_id: Option<u32>,
         deadline: Option<Deadline>,
-        mut read_at: ReadAt<'_>,
+        read_at: &mut ReadAt<'_>,
     ) -> Result<()> {
         let (start_off, end_off) = (read_at.start_off(), read_at.end_off());
         if start_off > end_off || start_off < ident.start_off || ident.end_off < end_off {
@@ -240,7 +259,7 @@ impl IaManagerCore {
 
         let start_time = Instant::now_coarse();
         debug!("read segment"; "ident" => %ident, "start_off" => start_off, "end_off" => end_off);
-        if let Some(()) = self.read_segment_from_cache(&ident, &mut read_at)? {
+        if let Some(()) = self.read_segment_from_cache(&ident, read_at)? {
             debug!("read segment finished (cache hit)";
                 "ident" => %ident,
                 "elapsed" => ?start_time.saturating_elapsed());
@@ -251,7 +270,7 @@ impl IaManagerCore {
             let _loading_guard = self.loading_segments.get_locked(ident.clone()).await;
 
             // Check cache again. Another thread may have filled the cache.
-            if let Some(()) = self.read_segment_from_cache(&ident, &mut read_at)? {
+            if let Some(()) = self.read_segment_from_cache(&ident, read_at)? {
                 debug!("read segment finished (cache hit)";
                     "ident" => %ident,
                     "elapsed" => ?start_time.saturating_elapsed());
@@ -332,12 +351,19 @@ impl IaManagerCore {
         read_at: &mut ReadAt<'_>,
     ) -> Result<Option<()>> {
         debug!("read segment from local"; "ident" => %ident);
+        let local_filename = ident.local_filename();
+        if read_at.need_segment_handle {
+            match self.main_store.handle(ident.file_id, &local_filename)? {
+                Some(handle) => read_at.set_handle(handle),
+                None => return Ok(None),
+            }
+        }
         if read_at.buf.is_empty() {
             return Ok(Some(()));
         }
         self.main_store.read_at(
             ident.file_id,
-            &ident.local_filename(),
+            &local_filename,
             read_at.buf,
             read_at.offset - ident.start_off,
         )
@@ -358,9 +384,29 @@ impl IaManagerCore {
         deadline: Deadline,
     ) -> Result<()> {
         let mut buf: [u8; 0] = [];
-        let read_at = ReadAt::new(buf.as_mut_slice(), ident.start_off);
-        self.read_segment(ident, ftype, Some(keyspace_id), Some(deadline), read_at)
-            .await
+        let mut read_at = ReadAt::new(buf.as_mut_slice(), ident.start_off, false);
+        self.read_segment(
+            ident,
+            ftype,
+            Some(keyspace_id),
+            Some(deadline),
+            &mut read_at,
+        )
+        .await
+    }
+
+    pub async fn get_segment_handle(
+        &self,
+        ident: FileSegmentIdent,
+        ftype: FileType,
+    ) -> Result<SegmentHandle> {
+        let mut buf: [u8; 0] = [];
+        let mut read_at = ReadAt::new(buf.as_mut_slice(), ident.start_off, true);
+        self.read_segment(ident.clone(), ftype, None, None, &mut read_at)
+            .await?;
+        let handle = read_at.segment_handle.unwrap();
+        info!("get segment handle"; "ident" => ?ident, "ftype" => ?ftype, "handle" => ?handle);
+        Ok(handle)
     }
 
     pub async fn acquire_concurrency_permit(

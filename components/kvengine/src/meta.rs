@@ -1332,6 +1332,10 @@ impl FileMeta {
         }
     }
 
+    pub fn is_l0_sst_with_size(&self) -> bool {
+        self.file_type == FileType::Sst && self.level == 0 && self.l0_size > 0
+    }
+
     pub fn from_l0_table(table: &kvenginepb::L0Create) -> Self {
         Self::new(
             -1,
