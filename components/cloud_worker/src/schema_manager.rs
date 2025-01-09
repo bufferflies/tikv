@@ -36,7 +36,7 @@ use rfstore::store::PdIdAllocator;
 use schema::schema::{
     convert_column_infos_to_tipb, ColumnInfo, IndexInfo, TableInfo, VectorIndexInfo,
 };
-use security::SecurityManager;
+use security::{SecurityConfig, SecurityManager};
 use tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC;
 use tikv_client::{BoundRange, Key, TransactionOptions, Value};
 use tikv_util::{box_err, config::ReadableDuration, debug, error, info};
@@ -303,14 +303,28 @@ impl SchemaManager {
     pub(crate) fn new(
         ctx: Arc<Context>,
         security_mgr: Arc<SecurityManager>,
+        security_config: SecurityConfig,
         config: SchemaManagerConfig,
         endpoints: &[String],
     ) -> Self {
         let runtime = ctx.s3fs.get_runtime();
+        let mut client_config = tikv_client::Config::default();
+        if !security_config.ca_path.is_empty()
+            || !security_config.cert_path.is_empty()
+            || !security_config.key_path.is_empty()
+        {
+            let SecurityConfig {
+                ca_path,
+                cert_path,
+                key_path,
+                ..
+            } = security_config;
+            client_config = client_config.with_security(ca_path, cert_path, key_path);
+        }
         let txn_client = runtime
             .block_on(tikv_client::TransactionClient::new_with_codec(
                 endpoints.to_vec(),
-                tikv_client::Config::default(),
+                client_config,
                 ApiV2NoPrefixCodec::default(),
             ))
             .unwrap();

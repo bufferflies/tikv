@@ -275,6 +275,7 @@ fn start_server(
         let schema_manager = SchemaManager::new(
             ctx.clone(),
             security_mgr.clone(),
+            config.security.clone(),
             config.schema_manager.clone(),
             config.pd.endpoints.as_ref(),
         );
