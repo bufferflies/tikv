@@ -689,6 +689,11 @@ impl Applier {
                 if is_property_change_set(&cs) {
                     wb.set_property(cs.get_property_key(), cs.get_property_value());
                 }
+                if cs.has_major_compaction()
+                    && cs.get_major_compaction().get_update_inner_key_offset()
+                {
+                    wb.set_update_inner_key_offset();
+                }
             }
             TYPE_RESOLVE_LOCK => cl.iterate_resolve_lock(|tp, k, ts, del_lock| match tp {
                 TYPE_COMMIT => self.commit_lock(engine, wb, k, ts, log_index),

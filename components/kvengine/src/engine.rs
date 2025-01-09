@@ -601,7 +601,6 @@ impl EngineCore {
             zstd_compression_lvl,
             checksum_type,
             shard.encryption_key.clone(),
-            shard.range.prepend_keyspace_id(),
         );
         let mut fids = vec![];
 

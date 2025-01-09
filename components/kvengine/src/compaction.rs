@@ -11,10 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use api_version::{
-    api_v2::{KEYSPACE_PREFIX_LEN, TXN_KEY_PREFIX},
-    ApiV2,
-};
+use api_version::ApiV2;
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
@@ -632,11 +629,13 @@ impl Engine {
             .get(ENCRYPTION_KEY)
             .unwrap_or_default()
             .to_vec();
+        let inner_key_off = shard.get_data().inner_key_off;
         self.new_compact_request(
             shard.engine_id,
             shard.id,
             shard.ver,
             shard.range.clone(),
+            inner_key_off,
             exported_encryption_key,
         )
     }
@@ -652,6 +651,7 @@ impl Engine {
             meta.id,
             meta.ver,
             meta.range.clone(),
+            meta.inner_key_off,
             exported_encryption_key,
         )
     }
@@ -662,6 +662,7 @@ impl Engine {
         shard_id: u64,
         shard_ver: u64,
         range: ShardRange,
+        inner_key_off: usize,
         exported_encryption_key: Vec<u8>,
     ) -> CompactionRequest {
         CompactionRequest {
@@ -670,7 +671,7 @@ impl Engine {
             shard_ver,
             outer_start: range.outer_start.to_vec(),
             outer_end: range.outer_end.to_vec(),
-            inner_key_off: range.inner_key_off,
+            inner_key_off,
             file_ids: vec![],
             compaction_tp: CompactionType::Unknown,
             compactor_version: self.opts.compaction_request_version,
@@ -735,23 +736,16 @@ impl Engine {
                     delete.set_level(cl.level as u32);
                     columnar_deletes.push(delete);
                 } else if del_prefixes.inner_delete_bounds().any(|bound| {
-                    let start = bound.lower_bound;
-                    let trim_keyspace_start =
-                        if shard.inner_key_off == 0 && start[0] == TXN_KEY_PREFIX {
-                            &start[KEYSPACE_PREFIX_LEN..]
-                        } else {
-                            start.as_ref()
-                        };
-                    match decode_table_id(trim_keyspace_start) {
+                    let start = bound.lower_bound.deref();
+                    match decode_table_id(start) {
                         Ok(table_id) => {
-                            trim_keyspace_start.len() == TABLE_PREFIX_LEN + ID_LEN
-                                && t.has_table(table_id)
+                            start.len() == TABLE_PREFIX_LEN + ID_LEN && t.has_table(table_id)
                         }
                         Err(_) => {
                             error!(
                                 "{}, can not decode table_id from start key: {:?}",
                                 shard.tag(),
-                                trim_keyspace_start
+                                start
                             );
                             false
                         }
@@ -1511,7 +1505,12 @@ impl Engine {
             req.file_ids.len(),
             total_size,
         );
-        Some(self.comp_client.compact(req))
+        let update_inner_key_offset = self.opts.update_inner_key_offset;
+        Some(self.comp_client.compact(req).map(|mut cs| {
+            let major_compaction = cs.mut_major_compaction();
+            major_compaction.set_update_inner_key_offset(update_inner_key_offset);
+            cs
+        }))
     }
 
     pub(crate) fn trigger_remove_columnar_compaction(
@@ -2510,7 +2509,6 @@ fn compact_destroy_range(
                 t.version(),
                 checksum_type,
                 ctx.encryption_key.clone(),
-                ctx.req.prepend_keyspace_id(),
             );
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
@@ -2543,7 +2541,6 @@ fn compact_destroy_range(
                 compression_lvl,
                 ctx.checksum_type,
                 ctx.encryption_key.clone(),
-                ctx.req.prepend_keyspace_id(),
             );
             let mut iter = t.new_iterator(false, false);
             iter.seek(req.inner_start());
@@ -2769,7 +2766,6 @@ fn compact_truncate_ts(
                 t.version(),
                 checksum_type,
                 ctx.encryption_key.clone(),
-                ctx.req.prepend_keyspace_id(),
             );
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
@@ -2802,7 +2798,6 @@ fn compact_truncate_ts(
                 compression_lvl,
                 checksum_type,
                 ctx.encryption_key.clone(),
-                ctx.req.prepend_keyspace_id(),
             );
             let mut iter = t.new_iterator(false, false);
             iter.rewind();
@@ -3025,7 +3020,6 @@ fn compact_trim_over_bound(
                 t.version(),
                 checksum_tp,
                 ctx.encryption_key.clone(),
-                ctx.req.prepend_keyspace_id(),
             );
             for cf in 0..NUM_CFS {
                 if let Some(cf_t) = t.get_cf(cf) {
@@ -3056,7 +3050,6 @@ fn compact_trim_over_bound(
                 compression_lvl,
                 checksum_tp,
                 ctx.encryption_key.clone(),
-                ctx.req.prepend_keyspace_id(),
             );
             let mut iter = t.new_iterator(false, false);
             iter.seek(req.inner_start());
@@ -3396,7 +3389,6 @@ fn compact_for_cf(
         compression_lvl,
         checksum_tp,
         ctx.encryption_key.clone(),
-        ctx.req.prepend_keyspace_id(),
     );
     let mut cur_blob_table_id = 0;
     // Owns the decompressed blob value while reading from the orginal blob

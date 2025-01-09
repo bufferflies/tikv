@@ -1395,7 +1395,6 @@ impl BuildingWorker {
         let um = UserMeta::new(self.task_ctx.start_ts, self.task_ctx.commit_ts);
         let mut val_buf = Value::encode_buf(0, &um.to_array(), self.task_ctx.commit_ts, &[]);
         let base_val_len = val_buf.len();
-        let prepend_keyspace_id = self.task_ctx.prepend_keyspace_id;
 
         self.ctx.runtime.spawn(async move {
             info!(
@@ -1409,7 +1408,6 @@ impl BuildingWorker {
                 ZSTD_COMPRESSION_LEVEL,
                 checksum_type,
                 encryption_key,
-                prepend_keyspace_id,
             );
             let mut entries = 0;
             let mut offset = 0;

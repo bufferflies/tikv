@@ -218,7 +218,6 @@ pub(crate) async fn handle_load_data(
                     inner_key_off: None,
                     outer_key_prefix: vec![],
                     encryption_key: None,
-                    prepend_keyspace_id: None,
                     keyspace_id: None,
                 };
                 // step 1: on start, client call init task
@@ -391,7 +390,6 @@ impl LoadDataManager {
             inner_key_off: None,
             outer_key_prefix: vec![],
             encryption_key: None,
-            prepend_keyspace_id: None,
             keyspace_id: None,
         };
 

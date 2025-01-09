@@ -1770,6 +1770,7 @@ pub struct MajorCompaction {
     pub new_blob_tables: ::protobuf::RepeatedField<BlobCreate>,
     pub old_blob_tables: ::std::vec::Vec<u64>,
     pub conflicted: bool,
+    pub update_inner_key_offset: bool,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1883,6 +1884,21 @@ impl MajorCompaction {
     pub fn set_conflicted(&mut self, v: bool) {
         self.conflicted = v;
     }
+
+    // bool update_inner_key_offset = 5;
+
+
+    pub fn get_update_inner_key_offset(&self) -> bool {
+        self.update_inner_key_offset
+    }
+    pub fn clear_update_inner_key_offset(&mut self) {
+        self.update_inner_key_offset = false;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_update_inner_key_offset(&mut self, v: bool) {
+        self.update_inner_key_offset = v;
+    }
 }
 
 impl ::protobuf::Message for MajorCompaction {
@@ -1920,6 +1936,13 @@ impl ::protobuf::Message for MajorCompaction {
                     let tmp = is.read_bool()?;
                     self.conflicted = tmp;
                 },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_bool()?;
+                    self.update_inner_key_offset = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1946,6 +1969,9 @@ impl ::protobuf::Message for MajorCompaction {
         if self.conflicted != false {
             my_size += 2;
         }
+        if self.update_inner_key_offset != false {
+            my_size += 2;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1967,6 +1993,9 @@ impl ::protobuf::Message for MajorCompaction {
         };
         if self.conflicted != false {
             os.write_bool(4, self.conflicted)?;
+        }
+        if self.update_inner_key_offset != false {
+            os.write_bool(5, self.update_inner_key_offset)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -2030,6 +2059,11 @@ impl ::protobuf::Message for MajorCompaction {
                     |m: &MajorCompaction| { &m.conflicted },
                     |m: &mut MajorCompaction| { &mut m.conflicted },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
+                    "update_inner_key_offset",
+                    |m: &MajorCompaction| { &m.update_inner_key_offset },
+                    |m: &mut MajorCompaction| { &mut m.update_inner_key_offset },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<MajorCompaction>(
                     "MajorCompaction",
                     fields,
@@ -2056,6 +2090,7 @@ impl ::protobuf::Clear for MajorCompaction {
         self.new_blob_tables.clear();
         self.old_blob_tables.clear();
         self.conflicted = false;
+        self.update_inner_key_offset = false;
         self.unknown_fields.clear();
     }
 }
@@ -2069,6 +2104,7 @@ impl ::protobuf::PbPrint for MajorCompaction {
         ::protobuf::PbPrint::fmt(&self.new_blob_tables, "new_blob_tables", buf);
         ::protobuf::PbPrint::fmt(&self.old_blob_tables, "old_blob_tables", buf);
         ::protobuf::PbPrint::fmt(&self.conflicted, "conflicted", buf);
+        ::protobuf::PbPrint::fmt(&self.update_inner_key_offset, "update_inner_key_offset", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -2083,6 +2119,7 @@ impl ::std::fmt::Debug for MajorCompaction {
         ::protobuf::PbPrint::fmt(&self.new_blob_tables, "new_blob_tables", &mut s);
         ::protobuf::PbPrint::fmt(&self.old_blob_tables, "old_blob_tables", &mut s);
         ::protobuf::PbPrint::fmt(&self.conflicted, "conflicted", &mut s);
+        ::protobuf::PbPrint::fmt(&self.update_inner_key_offset, "update_inner_key_offset", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -9310,90 +9347,91 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     .enginepb.TableCreateB\0\x12\x14\n\ntopDeletes\x18\x04\x20\x03(\x04B\0\
     \x12\x17\n\rbottomDeletes\x18\x05\x20\x03(\x04B\0\x12\x14\n\nconflicted\
     \x18\x06\x20\x01(\x08B\0\x12*\n\nblobTables\x18\x07\x20\x03(\x0b2\x14.en\
-    ginepb.BlobCreateB\0:\0\"\xa1\x01\n\x0fMajorCompaction\x12.\n\rsstableCh\
+    ginepb.BlobCreateB\0:\0\"\xc4\x01\n\x0fMajorCompaction\x12.\n\rsstableCh\
     ange\x18\x01\x20\x01(\x0b2\x15.enginepb.TableChangeB\0\x12-\n\rnewBlobTa\
     bles\x18\x02\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x17\n\roldBlob\
     Tables\x18\x03\x20\x03(\x04B\0\x12\x14\n\nconflicted\x18\x04\x20\x01(\
-    \x08B\0:\0\"f\n\nSchemaMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\rB\
-    \0\x12\x11\n\x07file_id\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07version\x18\
-    \x03\x20\x01(\x03B\0\x12\x19\n\x0frestore_version\x18\x04\x20\x01(\x04B\
-    \0:\0\"\x8b\x01\n\x12ColumnarCompaction\x120\n\x0fcolumnar_change\x18\
-    \x01\x20\x01(\x0b2\x15.enginepb.TableChangeB\0\x12\x16\n\x0csnap_version\
-    \x18\x02\x20\x01(\x04B\0\x12\x11\n\x07row_l0s\x18\x03\x20\x03(\x04B\0\
-    \x12\x16\n\x0ctarget_level\x18\x04\x20\x01(\rB\0:\0\"\x8e\x01\n\x11Updat\
-    eVectorIndex\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08\
-    index_id\x18\x02\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\
-    \x03B\0\x12*\n\x05added\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFi\
-    leB\0\x12\x11\n\x07removed\x18\x05\x20\x03(\x04B\0:\0\"\xab\x01\n\x05Flu\
-    sh\x12&\n\x08l0Create\x18\x01\x20\x01(\x0b2\x12.enginepb.L0CreateB\0\x12\
-    *\n\nproperties\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\x11\
-    \n\x07version\x18\x03\x20\x01(\x04B\0\x12\x10\n\x06max_ts\x18\x05\x20\
-    \x01(\x04B\0\x12'\n\tl0Creates\x18\x06\x20\x03(\x0b2\x12.enginepb.L0Crea\
-    teB\0:\0\"\x93\x04\n\x08Snapshot\x12\x15\n\x0bouter_start\x18\x01\x20\
-    \x01(\x0cB\0\x12\x13\n\touter_end\x18\x02\x20\x01(\x0cB\0\x12*\n\nproper\
-    ties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0Creates\
-    \x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\
-    \x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbaseVers\
-    ion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\x01(\
-    \x04B\0\x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.BlobCreat\
-    eB\0\x12\x10\n\x06max_ts\x18\n\x20\x01(\x04B\0\x12\x17\n\rinner_key_off\
-    \x18\x0b\x20\x01(\rB\0\x123\n\x0fcolumnarCreates\x18\x0c\x20\x03(\x0b2\
-    \x18.enginepb.ColumnarCreateB\0\x12+\n\x0bschema_meta\x18\r\x20\x01(\x0b\
-    2\x14.enginepb.SchemaMetaB\0\x12\x1f\n\x15columnar_snap_version\x18\x0e\
-    \x20\x01(\x04B\0\x12\x19\n\x0funconverted_l0s\x18\x0f\x20\x03(\x04B\0\
-    \x12/\n\x0evector_indexes\x18\x10\x20\x03(\x0b2\x15.enginepb.VectorIndex\
-    B\0:\0\"Q\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\
-    \n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\
-    \x01(\x0cB\0\x12\x0e\n\x04size\x18\x04\x20\x01(\rB\0:\0\"C\n\nBlobCreate\
-    \x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\
-    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"z\n\
-    \x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05lev\
-    el\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\
-    \n\x08smallest\x18\x04\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\
-    \x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x07\x20\x01(\rB\0:\0\"<\n\x0bT\
-    ableDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\
-    \x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"o\n\
-    \x0eColumnarCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05\
-    level\x18\x02\x20\x01(\rB\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\
-    \0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\
-    \x18\x05\x20\x01(\rB\0:\0\"1\n\x0eColumnarDelete\x12\x0c\n\x02ID\x18\x01\
-    \x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0:\0\"D\n\x05Spl\
-    it\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\
-    \x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\xd2\x01\n\x0bIngestFiles\
-    \x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\
-    \x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\
-    \n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12+\n\
-    \x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\
-    \n\x06max_ts\x18\x05\x20\x01(\x04B\0:\0\"C\n\nProperties\x12\x11\n\x07sh\
-    ardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\
-    \x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"\xef\x01\n\x0bTableChan\
-    ge\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDelete\
-    B\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreat\
-    eB\0\x12\x16\n\x0cfile_ids_map\x18\x03\x20\x03(\x04B\0\x123\n\x0fcolumna\
-    rDeletes\x18\x04\x20\x03(\x0b2\x18.enginepb.ColumnarDeleteB\0\x123\n\x0f\
-    columnarCreates\x18\x05\x20\x03(\x0b2\x18.enginepb.ColumnarCreateB\0:\0\
-    \">\n\x0bTxnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\x14.eng\
-    inepb.TxnFileRefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08start_ts\x18\
-    \x01\x20\x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\0\x12\
-    \x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\x04\
-    \x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\0\
-    \x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_b\
-    ound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\x20\
-    \x01(\x0cB\0:\0\"\x9d\x01\n\x06Schema\x12\x12\n\x08table_id\x18\x01\x20\
-    \x01(\x03B\0\x12\x11\n\x07columns\x18\x02\x20\x03(\x0cB\0\x12\x14\n\npk_\
-    col_ids\x18\x03\x20\x03(\x03B\0\x122\n\x0evector_indexes\x18\x04\x20\x03\
-    (\x0b2\x18.enginepb.VectorIndexDefB\0\x12\x0e\n\x04keys\x18\x05\x20\x03(\
-    \tB\0\x12\x10\n\x06values\x18\x06\x20\x03(\x0cB\0:\0\"u\n\x0bVectorIndex\
+    \x08B\0\x12!\n\x17update_inner_key_offset\x18\x05\x20\x01(\x08B\0:\0\"f\
+    \n\nSchemaMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\rB\0\x12\x11\n\
+    \x07file_id\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07version\x18\x03\x20\x01\
+    (\x03B\0\x12\x19\n\x0frestore_version\x18\x04\x20\x01(\x04B\0:\0\"\x8b\
+    \x01\n\x12ColumnarCompaction\x120\n\x0fcolumnar_change\x18\x01\x20\x01(\
+    \x0b2\x15.enginepb.TableChangeB\0\x12\x16\n\x0csnap_version\x18\x02\x20\
+    \x01(\x04B\0\x12\x11\n\x07row_l0s\x18\x03\x20\x03(\x04B\0\x12\x16\n\x0ct\
+    arget_level\x18\x04\x20\x01(\rB\0:\0\"\x8e\x01\n\x11UpdateVectorIndex\
     \x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\
     \x02\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\
-    \x05files\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"`\n\
-    \x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\
-    \x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\
-    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\0\"z\n\
-    \x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\
-    \n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\
-    \x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_\
-    values\x18\x05\x20\x03(\x0cB\0:\0B\0b\x06proto3\
+    \x05added\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0\x12\x11\
+    \n\x07removed\x18\x05\x20\x03(\x04B\0:\0\"\xab\x01\n\x05Flush\x12&\n\x08\
+    l0Create\x18\x01\x20\x01(\x0b2\x12.enginepb.L0CreateB\0\x12*\n\nproperti\
+    es\x18\x02\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12\x11\n\x07version\
+    \x18\x03\x20\x01(\x04B\0\x12\x10\n\x06max_ts\x18\x05\x20\x01(\x04B\0\x12\
+    '\n\tl0Creates\x18\x06\x20\x03(\x0b2\x12.enginepb.L0CreateB\0:\0\"\x93\
+    \x04\n\x08Snapshot\x12\x15\n\x0bouter_start\x18\x01\x20\x01(\x0cB\0\x12\
+    \x13\n\touter_end\x18\x02\x20\x01(\x0cB\0\x12*\n\nproperties\x18\x03\x20\
+    \x01(\x0b2\x14.enginepb.PropertiesB\0\x12'\n\tl0Creates\x18\x05\x20\x03(\
+    \x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\x06\x20\x03(\
+    \x0b2\x15.enginepb.TableCreateB\0\x12\x15\n\x0bbaseVersion\x18\x07\x20\
+    \x01(\x04B\0\x12\x17\n\rdata_sequence\x18\x08\x20\x01(\x04B\0\x12+\n\x0b\
+    BlobCreates\x18\t\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\n\x06\
+    max_ts\x18\n\x20\x01(\x04B\0\x12\x17\n\rinner_key_off\x18\x0b\x20\x01(\r\
+    B\0\x123\n\x0fcolumnarCreates\x18\x0c\x20\x03(\x0b2\x18.enginepb.Columna\
+    rCreateB\0\x12+\n\x0bschema_meta\x18\r\x20\x01(\x0b2\x14.enginepb.Schema\
+    MetaB\0\x12\x1f\n\x15columnar_snap_version\x18\x0e\x20\x01(\x04B\0\x12\
+    \x19\n\x0funconverted_l0s\x18\x0f\x20\x03(\x04B\0\x12/\n\x0evector_index\
+    es\x18\x10\x20\x03(\x0b2\x15.enginepb.VectorIndexB\0:\0\"Q\n\x08L0Create\
+    \x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\
+    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0\x12\x0e\n\
+    \x04size\x18\x04\x20\x01(\rB\0:\0\"C\n\nBlobCreate\x12\x0c\n\x02ID\x18\
+    \x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\
+    \x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"z\n\x0bTableCreate\x12\x0c\
+    \n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\
+    \0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\
+    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0\x12\x15\n\
+    \x0bmeta_offset\x18\x07\x20\x01(\rB\0:\0\"<\n\x0bTableDelete\x12\x0c\n\
+    \x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\
+    \x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"o\n\x0eColumnarCreate\x12\
+    \x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\
+    \rB\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\
+    \x18\x04\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x05\x20\x01(\rB\0:\
+    \0\"1\n\x0eColumnarDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\
+    \x0f\n\x05level\x18\x02\x20\x01(\rB\0:\0\"D\n\x05Split\x12)\n\tnewShards\
+    \x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\x12\x0e\n\x04Keys\x18\
+    \x03\x20\x03(\x0cB\0:\0\"\xd2\x01\n\x0bIngestFiles\x12'\n\tl0Creates\x18\
+    \x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\x18\
+    \x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\n\nproperties\x18\
+    \x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12+\n\x0bBlobCreates\x18\
+    \x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\n\x06max_ts\x18\
+    \x05\x20\x01(\x04B\0:\0\"C\n\nProperties\x12\x11\n\x07shardID\x18\x01\
+    \x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06va\
+    lues\x18\x03\x20\x03(\x0cB\0:\0\"\xef\x01\n\x0bTableChange\x12-\n\x0ctab\
+    leDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDeleteB\0\x12-\n\x0cta\
+    bleCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x16\n\
+    \x0cfile_ids_map\x18\x03\x20\x03(\x04B\0\x123\n\x0fcolumnarDeletes\x18\
+    \x04\x20\x03(\x0b2\x18.enginepb.ColumnarDeleteB\0\x123\n\x0fcolumnarCrea\
+    tes\x18\x05\x20\x03(\x0b2\x18.enginepb.ColumnarCreateB\0:\0\">\n\x0bTxnF\
+    ileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\x14.enginepb.TxnFile\
+    RefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08start_ts\x18\x01\x20\x01(\
+    \x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\0\x12\x11\n\x07versio\
+    n\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\x04\x20\x01(\x0cB\0\
+    \x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\0\x12\x13\n\tshard_v\
+    er\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_bound\x18\x07\x20\
+    \x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\x20\x01(\x0cB\0:\0\"\
+    \x9d\x01\n\x06Schema\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\
+    \x11\n\x07columns\x18\x02\x20\x03(\x0cB\0\x12\x14\n\npk_col_ids\x18\x03\
+    \x20\x03(\x03B\0\x122\n\x0evector_indexes\x18\x04\x20\x03(\x0b2\x18.engi\
+    nepb.VectorIndexDefB\0\x12\x0e\n\x04keys\x18\x05\x20\x03(\tB\0\x12\x10\n\
+    \x06values\x18\x06\x20\x03(\x0cB\0:\0\"u\n\x0bVectorIndex\x12\x12\n\x08t\
+    able_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\
+    \x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05files\x18\
+    \x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"`\n\x0fVectorInde\
+    xFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\x0csnap_version\
+    \x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\
+    \x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\0\"z\n\x0eVectorIndexDef\
+    \x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\
+    \x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\x13\
+    \n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\x20\
+    \x03(\x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

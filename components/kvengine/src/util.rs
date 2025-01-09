@@ -327,7 +327,7 @@ impl TxnFileLocks {
 pub mod test_util {
     use std::sync::Mutex;
 
-    use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
+    use api_version::ApiV2;
     use bytes::Bytes;
     use tidb_query_datatype::{
         codec::{
@@ -342,15 +342,13 @@ pub mod test_util {
     #[derive(Debug, Clone)]
     pub struct KeyBuilder {
         keyspace_id: u32,
-        enable_inner_key_off: bool,
         prefix: String,
     }
 
     impl KeyBuilder {
-        pub fn new(keyspace_id: u32, enable_inner_key_off: bool, prefix: &str) -> Self {
+        pub fn new(keyspace_id: u32, prefix: &str) -> Self {
             Self {
                 keyspace_id,
-                enable_inner_key_off,
                 prefix: prefix.to_string(),
             }
         }
@@ -376,14 +374,6 @@ pub mod test_util {
         #[inline]
         pub fn i_to_val(&self, i: usize) -> String {
             format!("val{:06}", i)
-        }
-
-        pub fn get_enable_inner_key_off(&self) -> bool {
-            self.enable_inner_key_off
-        }
-
-        pub fn inner_key_off(&self) -> usize {
-            KEYSPACE_PREFIX_LEN * self.enable_inner_key_off as usize
         }
 
         pub fn gen_row_inner_key(&self, table_id: i64, i: usize) -> OwnedInnerKey {

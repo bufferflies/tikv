@@ -205,7 +205,6 @@ mod tests {
     use std::{ops::Deref, sync::Arc};
 
     use bytes::Bytes;
-    use rstest::rstest;
 
     use crate::{
         table::{
@@ -247,14 +246,8 @@ mod tests {
         skl.put_batch(&mut wb, None, WRITE_CF);
     }
 
-    fn build_txn_file_chunk_data(
-        chunk_id: u64,
-        keys: Vec<usize>,
-        enable_inner_key_off: bool,
-        kb: &KeyBuilder,
-    ) -> Bytes {
-        let mut batch_builder =
-            TxnChunkBuilder::new(chunk_id, 10, None, KEYSPACE_ID, enable_inner_key_off);
+    fn build_txn_file_chunk_data(chunk_id: u64, keys: Vec<usize>, kb: &KeyBuilder) -> Bytes {
+        let mut batch_builder = TxnChunkBuilder::new(chunk_id, 10, None);
         for i in keys {
             let key = kb.i_to_key(i);
             let val = new_val(i);
@@ -265,17 +258,14 @@ mod tests {
         data_buf.into()
     }
 
-    #[rstest]
-    #[case::enable_key_off(true)]
-    #[case::disable_key_off(false)]
-    fn test_skl_ext_write_cf(#[case] enable_inner_key_off: bool) {
+    #[test]
+    fn test_skl_ext_write_cf() {
         let skl = SkipList::new(None);
-        let kb = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_");
+        let kb = KeyBuilder::new(KEYSPACE_ID, "t_");
         write_skl_write_cf(&skl, vec![5, 10, 15, 20], 100, 101, &kb);
 
         let chunk_id = 1;
-        let txn_file_chunk_data =
-            build_txn_file_chunk_data(chunk_id, vec![10, 12, 18, 20], enable_inner_key_off, &kb);
+        let txn_file_chunk_data = build_txn_file_chunk_data(chunk_id, vec![10, 12, 18, 20], &kb);
         let txn_file_chunk_file = Arc::new(InMemFile::new(chunk_id, txn_file_chunk_data));
         let txn_file_chunk = TxnChunk::new(txn_file_chunk_file, BlockCache::None, None).unwrap();
         let user_meta = UserMeta::new(102, 103).to_array().to_vec();

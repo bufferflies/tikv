@@ -247,7 +247,6 @@ pub struct TaskContext {
     pub inner_key_off: Option<usize>,
     pub outer_key_prefix: Vec<u8>,
     pub encryption_key: Option<EncryptionKey>,
-    pub prepend_keyspace_id: Option<u32>,
     pub keyspace_id: Option<u32>,
 }
 
@@ -565,13 +564,9 @@ impl LoadTaskWorker {
                 GET_SHARD_META_TIMEOUT,
             ))?;
             let snapshot = shard_meta.get_snapshot();
-            let mut prepend_keyspace_id = None;
-            if snapshot.inner_key_off == 0 {
-                prepend_keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&snapshot.outer_start)
-            }
-            self.task_ctx.inner_key_off = Some(snapshot.inner_key_off as usize);
-            self.task_ctx.outer_key_prefix =
-                first_key.slice(..snapshot.inner_key_off as usize).to_vec();
+            let keyspace_id = self.task_ctx.keyspace_id.unwrap_or_default();
+            self.task_ctx.outer_key_prefix = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
+            self.task_ctx.inner_key_off = Some(self.task_ctx.outer_key_prefix.len());
             self.task_ctx.encryption_key =
                 get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
                     self.ctx
@@ -579,7 +574,6 @@ impl LoadTaskWorker {
                         .decrypt_encryption_key(&exported_key)
                         .unwrap()
                 });
-            self.task_ctx.prepend_keyspace_id = prepend_keyspace_id;
         }
         Ok(())
     }
@@ -1185,7 +1179,6 @@ impl LoadTaskWorker {
         let um = UserMeta::new(self.task_ctx.start_ts, self.task_ctx.commit_ts);
         let mut val_buf = Value::encode_buf(0, &um.to_array(), self.task_ctx.commit_ts, &[]);
         let base_val_len = val_buf.len();
-        let prepend_keyspace_id = self.task_ctx.prepend_keyspace_id;
 
         self.ctx.runtime.spawn(async move {
             info!("{} start build sst file {}", task_id, file_id);
@@ -1196,7 +1189,6 @@ impl LoadTaskWorker {
                 ZSTD_COMPRESSION_LEVEL,
                 checksum_type,
                 encryption_key,
-                prepend_keyspace_id,
             );
             let mut entries = 0;
             let mut offset = 0;

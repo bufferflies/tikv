@@ -787,7 +787,6 @@ fn new_sst_table_for_columnar(
         comp_lvl,
         ChecksumType::Crc32,
         None,
-        None,
     );
     let ctx = Mutex::new(EvalContext::default());
     for i in begin..end {

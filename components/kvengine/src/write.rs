@@ -20,6 +20,7 @@ pub struct WriteBatch {
     properties: HashMap<String, BytesMut>,
     sequence: u64,
     switch_mem_table: bool,
+    update_inner_key_offset: bool,
 }
 
 impl Default for WriteBatch {
@@ -35,6 +36,7 @@ impl Default for WriteBatch {
             properties: HashMap::new(),
             sequence: 0,
             switch_mem_table: false,
+            update_inner_key_offset: false,
         }
     }
 }
@@ -93,6 +95,10 @@ impl WriteBatch {
 
     pub fn set_switch_mem_table(&mut self) {
         self.switch_mem_table = true;
+    }
+
+    pub fn set_update_inner_key_offset(&mut self) {
+        self.update_inner_key_offset = true;
     }
 
     pub fn num_entries(&self) -> usize {
@@ -164,6 +170,12 @@ impl Engine {
         let version = shard.get_base_version() + wb.sequence;
         self.update_write_batch_version(wb, version);
         let mut data = shard.get_data();
+        if wb.update_inner_key_offset && data.prepend_keyspace_id().is_some() {
+            let mut data_builder = ShardDataBuilder::new(data.clone());
+            data_builder.set_inner_key_off(KEYSPACE_PREFIX_LEN);
+            shard.set_data(data_builder.build());
+            data = shard.get_data();
+        }
         let snap = shard.new_snap_access();
         let mut mem_tbl = data.get_writable_mem_table();
         for cf in 0..NUM_CFS {

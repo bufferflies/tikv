@@ -75,7 +75,7 @@ fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
 
     // test rollback lock.
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300);
 
     let mut req = PrewriteRequest::new();
     req.set_context(ctx.clone());
@@ -150,7 +150,7 @@ fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
 
     // test rollback lock.
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300);
     let primary_lock = gen_key(0);
 
     let mut req = PrewriteRequest::new();
@@ -180,7 +180,7 @@ fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
 
     // test resolve lock.
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300);
     let primary_lock = gen_key(0);
 
     let mut req = PrewriteRequest::new();
@@ -210,7 +210,7 @@ fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
 
     // test resolve lock (batch).
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300);
     let primary_lock = gen_key(0);
 
     let mut req = PrewriteRequest::new();
@@ -244,7 +244,7 @@ fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
 
     // test success 2pc.
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300, enable_inner_key_off);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 300);
     let primary_lock = gen_key(0);
 
     let mut req = PrewriteRequest::new();
@@ -1115,7 +1115,7 @@ fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>, enable_inner_key_off: boo
     client.split_keyspace(KEYSPACE_ID);
 
     let start_ts = client.get_ts().into_inner();
-    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 500, enable_inner_key_off);
+    let chunk_ids = build_txn_files(&dfs, start_ts, 0, 500);
     assert_eq!(chunk_ids.len(), 5);
 
     let gen_key = generate_keyspace_key(KEYSPACE_ID);
@@ -1286,17 +1286,10 @@ where
     (mutations, txn_muts)
 }
 
-fn build_txn_files(
-    dfs: &Arc<dyn Dfs>,
-    start_ts: u64,
-    start: usize,
-    end: usize,
-    enable_inner_key_off: bool,
-) -> Vec<u64> {
+fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) -> Vec<u64> {
     let mut chunk_ids = vec![];
     let mut chunk_id = start_ts + 1;
-    let mut txn_chunk_builder =
-        TxnChunkBuilder::new(chunk_id, 10, None, KEYSPACE_ID, enable_inner_key_off);
+    let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
     for i in start..end {
         let key = i_to_tidb_key(i);
         let val = i_to_val(i);
@@ -1304,8 +1297,7 @@ fn build_txn_files(
         if (i + 1) % 100 == 0 {
             let mut data_buf = vec![];
             txn_chunk_builder.finish(&mut data_buf);
-            txn_chunk_builder =
-                TxnChunkBuilder::new(chunk_id, 10, None, KEYSPACE_ID, enable_inner_key_off);
+            txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
             let opts = dfs::Options::default().with_type(FileType::TxnChunk);
             dfs.get_runtime()
                 .block_on(dfs.create(chunk_id, Bytes::from(data_buf), opts))

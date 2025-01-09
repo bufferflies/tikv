@@ -30,6 +30,7 @@ pub struct ShardMeta {
     pub id: u64,
     pub ver: u64,
     pub range: ShardRange,
+    pub inner_key_off: usize,
 
     /// `seq` is the raft log index of the applied change set.
     ///
@@ -95,6 +96,7 @@ impl ShardMeta {
             id: cs.shard_id,
             ver: cs.shard_ver,
             range: ShardRange::from_snap(snap),
+            inner_key_off: snap.inner_key_off as usize,
             seq: cs.sequence,
             properties,
             base_version: snap.base_version,
@@ -168,22 +170,24 @@ impl ShardMeta {
         parent: Box<ShardMeta>,
         enable_inner_key_offset: bool,
     ) -> Self {
-        let range = if enable_inner_key_offset && is_whole_keyspace_range(start, end) {
-            ShardRange::new(start, end, KEYSPACE_PREFIX_LEN)
-        } else {
-            debug!(
-                "engine new_split";
-                "shard_id" => id,
-                "start_key" => format!("{:?}", start),
-                "end_key" => format!("{:?}", end),
-                "inner_key_off" => parent.range.inner_key_off
-            );
-            ShardRange::new(start, end, parent.range.inner_key_off)
-        };
+        let (range, inner_key_off) =
+            if enable_inner_key_offset && is_whole_keyspace_range(start, end) {
+                (ShardRange::new(start, end), KEYSPACE_PREFIX_LEN)
+            } else {
+                debug!(
+                    "engine new_split";
+                    "shard_id" => id,
+                    "start_key" => format!("{:?}", start),
+                    "end_key" => format!("{:?}", end),
+                    "inner_key_off" => parent.inner_key_off
+                );
+                (ShardRange::new(start, end), parent.inner_key_off)
+            };
         Self {
             id,
             ver,
             range,
+            inner_key_off,
             parent: Some(parent),
             properties: Properties::new().apply_pb(props),
             ..Default::default()
@@ -630,6 +634,9 @@ impl ShardMeta {
         for create in comp.get_new_blob_tables() {
             self.add_file(create.get_id(), FileMeta::from_blob_table(create));
         }
+        if comp.update_inner_key_offset && self.range.keyspace_id > 0 && self.inner_key_off == 0 {
+            self.inner_key_off = KEYSPACE_PREFIX_LEN;
+        }
     }
 
     fn is_duplicated_table_change(&self, tc: &pb::TableChange) -> bool {
@@ -945,7 +952,7 @@ impl ShardMeta {
         let mut snap = pb::Snapshot::new();
         snap.set_outer_start(self.range.outer_start.to_vec());
         snap.set_outer_end(self.range.outer_end.to_vec());
-        snap.set_inner_key_off(self.range.inner_key_off as u32);
+        snap.set_inner_key_off(self.inner_key_off as u32);
         snap.set_properties(self.properties.to_pb(self.id));
         snap.set_base_version(self.base_version);
         snap.set_data_sequence(self.data_sequence);
@@ -1143,8 +1150,8 @@ impl ShardMeta {
 
             // `inner_key_off` will be different when merge regions of different keyspaces.
             if clear_target {
-                parent.range.inner_key_off = source.range.inner_key_off;
-                self.range.inner_key_off = source.range.inner_key_off;
+                parent.inner_key_off = source.inner_key_off;
+                self.inner_key_off = source.inner_key_off;
             }
 
             // merge DEL_PREFIXES_KEY from source if needed
@@ -1627,13 +1634,20 @@ mod tests {
     }
 
     fn test_table_overlap_helper(enable_inner_key_off: bool) {
-        let range = if enable_inner_key_off {
-            ShardRange::new(&[b'x', 2, 3, 4, 10], &[b'x', 2, 3, 4, 20], 4)
+        let (range, inner_key_off) = if enable_inner_key_off {
+            (
+                ShardRange::new(&[b'x', 2, 3, 4, 10], &[b'x', 2, 3, 4, 20]),
+                4,
+            )
         } else {
-            ShardRange::new(&[b'x', 2, 3, 4, 10], &[b'x', 2, 3, 4, 20], 0)
+            (
+                ShardRange::new(&[b'x', 2, 3, 4, 10], &[b'x', 2, 3, 4, 20]),
+                0,
+            )
         };
         let meta = ShardMeta {
             range,
+            inner_key_off,
             ..Default::default()
         };
 

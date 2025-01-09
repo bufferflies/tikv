@@ -740,7 +740,7 @@ impl SnapAccessCore {
     }
 
     pub fn get_inner_key_offset(&self) -> usize {
-        self.data.range.inner_key_off
+        self.data.inner_key_off
     }
 
     pub fn prepend_keyspace_id(&self) -> Option<u32> {
@@ -814,7 +814,7 @@ impl SnapAccessCore {
 
         snap.set_outer_start(self.get_start_key().to_vec());
         snap.set_outer_end(self.get_end_key().to_vec());
-        snap.set_inner_key_off(self.data.range.inner_key_off as u32);
+        snap.set_inner_key_off(self.data.inner_key_off as u32);
         snap.set_properties(properties);
         let mut count = 0;
         let mut overlapped_count = 0;
@@ -1857,7 +1857,7 @@ mod tests {
         build_table_fn(0, 10000, 2, 500, 5);
         build_table_fn(0, 10000, 1, 200, 20);
         cs.change_set = cs_pb;
-        let range = ShardRange::new(&[], GLOBAL_SHARD_END_KEY, 0);
+        let range = ShardRange::new(&[], GLOBAL_SHARD_END_KEY);
         let opt = Arc::new(crate::options::Options::default());
         let master_key = MasterKey::new(&[1u8; 32]);
         let shard = Shard::new(
@@ -1865,6 +1865,7 @@ mod tests {
             &kvenginepb::Properties::new(),
             1,
             range,
+            0,
             opt,
             &master_key,
         );
@@ -1971,7 +1972,7 @@ mod tests {
             let shard_id = 1;
             let shard_ver = 10;
 
-            let kb = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_");
+            let kb = KeyBuilder::new(KEYSPACE_ID, "t_");
             let dfs: Arc<dyn crate::dfs::Dfs> = Arc::new(InMemFs::new());
             let txn_chunk_manager = TxnChunkManager::new(None, dfs.clone(), BlockCache::None, with_pool_size(2), TxnChunkManagerConfig::default());
 
@@ -1983,7 +1984,8 @@ mod tests {
             verify_mem_tables(&mem_tbls, &ref_store, &[(kb.i_to_inner_key(0).as_ref(), kb.i_to_inner_key(MAX_I).as_ref())])?;
 
             let (outer_start, outer_end) = ApiV2::get_txn_keyspace_range(KEYSPACE_ID);
-            let range = ShardRange::new(&outer_start, &outer_end, KEYSPACE_PREFIX_LEN * enable_inner_key_off as usize);
+            let range = ShardRange::new(&outer_start, &outer_end);
+            let inner_key_off = KEYSPACE_PREFIX_LEN * enable_inner_key_off as usize;
             let opt = Arc::new(crate::options::Options::default());
 
             let inner_ranges = ranges.iter().map(|&(start, end)| {
@@ -2008,6 +2010,7 @@ mod tests {
                     &props,
                     shard_ver,
                     range,
+                    inner_key_off,
                     opt,
                     &master_key,
                 );
@@ -2141,13 +2144,8 @@ mod tests {
                     let mut txn_chunks = vec![];
                     for chunk in is.chunks(3) {
                         next_txn_chunk_id += 1;
-                        let mut builder = TxnChunkBuilder::new(
-                            next_txn_chunk_id,
-                            10,
-                            enc_key.cloned(),
-                            KEYSPACE_ID,
-                            kb.get_enable_inner_key_off(),
-                        );
+                        let mut builder =
+                            TxnChunkBuilder::new(next_txn_chunk_id, 10, enc_key.cloned());
                         for &i in chunk {
                             let key = kb.i_to_inner_key(i);
                             let val = kb.i_to_val(start_ts as usize + i);

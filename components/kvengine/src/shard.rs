@@ -184,6 +184,7 @@ impl Shard {
         props: &pb::Properties,
         ver: u64,
         range: ShardRange,
+        inner_key_off: usize,
         opt: Arc<Options>,
         master_key: &MasterKey,
     ) -> Self {
@@ -197,7 +198,7 @@ impl Shard {
             range: range.clone(),
             parent_id: 0,
             pending_ops: RwLock::new(ShardPendingOperations::new(range.keyspace_id)),
-            data: RwLock::new(ShardData::new_empty(range, limiter)),
+            data: RwLock::new(ShardData::new_empty(range, inner_key_off, limiter)),
             opt,
             active: Default::default(),
             properties: Properties::new().apply_pb(props),
@@ -267,6 +268,7 @@ impl Shard {
             snap.get_properties(),
             cs.shard_ver,
             range,
+            snap.inner_key_off as usize,
             opt,
             master_key,
         );
@@ -1315,6 +1317,7 @@ impl BoundedDataSet for Shard {
 pub(crate) struct ShardDataBuilder {
     old: ShardData,
     range: Option<ShardRange>,
+    inner_key_off: Option<usize>,
     mem_tbls: Option<Vec<CfTable>>,
     l0_tbls: Option<Vec<L0Table>>,
     cfs: Option<[ShardCf; 3]>,
@@ -1331,6 +1334,7 @@ impl ShardDataBuilder {
         Self {
             old,
             range: None,
+            inner_key_off: None,
             mem_tbls: None,
             l0_tbls: None,
             cfs: None,
@@ -1345,6 +1349,10 @@ impl ShardDataBuilder {
 
     pub(crate) fn set_range(&mut self, range: ShardRange) {
         self.range = Some(range);
+    }
+
+    pub(crate) fn set_inner_key_off(&mut self, inner_key_off: usize) {
+        self.inner_key_off = Some(inner_key_off);
     }
 
     pub(crate) fn set_mem_tbls(&mut self, mem_tbls: Vec<CfTable>) {
@@ -1386,6 +1394,9 @@ impl ShardDataBuilder {
     pub(crate) fn build(mut self) -> ShardData {
         ShardData::new(
             self.range.take().unwrap_or_else(|| self.old.range.clone()),
+            self.inner_key_off
+                .take()
+                .unwrap_or_else(|| self.old.inner_key_off),
             self.mem_tbls
                 .take()
                 .unwrap_or_else(|| self.old.mem_tbls.clone()),
@@ -1453,9 +1464,14 @@ impl BoundedDataSet for ShardData {
 }
 
 impl ShardData {
-    pub(crate) fn new_empty(shard_range: ShardRange, limiter: RegionLimiter) -> Self {
+    pub(crate) fn new_empty(
+        shard_range: ShardRange,
+        inner_key_offset: usize,
+        limiter: RegionLimiter,
+    ) -> Self {
         Self::new(
             shard_range,
+            inner_key_offset,
             vec![CfTable::new()],
             vec![],
             Arc::new(HashMap::new()),
@@ -1472,6 +1488,7 @@ impl ShardData {
 
     pub(crate) fn new(
         range: ShardRange,
+        inner_key_off: usize,
         mem_tbls: Vec<memtable::CfTable>,
         l0_tbls: Vec<L0Table>,
         blob_tbl_map: Arc<HashMap<u64, BlobTable>>,
@@ -1489,6 +1506,7 @@ impl ShardData {
         Self {
             core: Arc::new(ShardDataCore {
                 range,
+                inner_key_off,
                 mem_tbls,
                 lock_txn_files,
                 l0_tbls,
@@ -1507,6 +1525,7 @@ impl ShardData {
 
 pub(crate) struct ShardDataCore {
     pub(crate) range: ShardRange,
+    pub(crate) inner_key_off: usize,
     pub(crate) mem_tbls: Vec<memtable::CfTable>,
     pub(crate) lock_txn_files: Vec<TxnFile>,
     pub(crate) l0_tbls: Vec<L0Table>,
@@ -1805,6 +1824,10 @@ impl ShardDataCore {
 
     pub fn has_unconverted_l0s(&self) -> bool {
         !self.col_levels.unconverted_l0s.is_empty()
+    }
+
+    pub fn prepend_keyspace_id(&self) -> Option<u32> {
+        (self.range.keyspace_id > 0 && self.inner_key_off == 0).then_some(self.range.keyspace_id)
     }
 }
 
@@ -2603,7 +2626,6 @@ pub(crate) fn need_update_truncate_ts(cur: Option<TruncateTs>, new: TruncateTs) 
 pub struct ShardRange {
     pub outer_start: Bytes,
     pub outer_end: Bytes,
-    pub inner_key_off: usize,
     pub keyspace_id: u32,
 }
 
@@ -2614,22 +2636,17 @@ impl BoundedDataSet for ShardRange {
 }
 
 impl ShardRange {
-    pub fn new(outer_start: &[u8], outer_end: &[u8], inner_key_off: usize) -> Self {
+    pub fn new(outer_start: &[u8], outer_end: &[u8]) -> Self {
         let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(outer_start).unwrap_or_default();
         Self {
             outer_start: Bytes::from(outer_start.to_vec()),
             outer_end: Bytes::from(outer_end.to_vec()),
-            inner_key_off,
             keyspace_id,
         }
     }
 
     pub(crate) fn from_snap(snap: &kvenginepb::Snapshot) -> Self {
-        Self::new(
-            snap.get_outer_start(),
-            snap.get_outer_end(),
-            snap.inner_key_off as usize,
-        )
+        Self::new(snap.get_outer_start(), snap.get_outer_end())
     }
 
     pub fn inner_start(&self) -> InnerKey<'_> {
@@ -2655,10 +2672,6 @@ impl ShardRange {
     pub fn to_outer_key(&self, inner_key: InnerKey<'_>) -> Vec<u8> {
         [self.keyspace_prefix(), inner_key.deref()].concat()
     }
-
-    pub(crate) fn prepend_keyspace_id(&self) -> Option<u32> {
-        (self.keyspace_id > 0 && self.inner_key_off == 0).then_some(self.keyspace_id)
-    }
 }
 
 impl fmt::Debug for ShardRange {
@@ -2672,7 +2685,6 @@ impl fmt::Debug for ShardRange {
                 "outer_end",
                 &log_wrappers::hex_encode_upper(&self.outer_end),
             )
-            .field("inner_key_off", &self.inner_key_off)
             .field("keyspace_id", &self.keyspace_id)
             .finish()
     }
@@ -2963,11 +2975,11 @@ mod tests {
 
     #[test]
     fn test_range_keyspace_id() {
-        let mut range = ShardRange::new(&[b'x', 0, 0, 1], &[b'x', 0, 0, 2], 4);
+        let mut range = ShardRange::new(&[b'x', 0, 0, 1], &[b'x', 0, 0, 2]);
         assert_eq!(range.keyspace_id, 1);
-        range = ShardRange::new(&[], GLOBAL_SHARD_END_KEY, 0);
+        range = ShardRange::new(&[], GLOBAL_SHARD_END_KEY);
         assert_eq!(range.keyspace_id, 0);
-        range = ShardRange::new(&[b't', 0, 0, 0], &[], 0);
+        range = ShardRange::new(&[b't', 0, 0, 0], &[]);
         assert_eq!(range.keyspace_id, 0);
     }
 

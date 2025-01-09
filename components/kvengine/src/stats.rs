@@ -276,6 +276,7 @@ pub struct ShardStats {
     pub tombs: usize,
     pub kv_size: u64,
     pub open_files: i64,
+    pub keyspace_prefix_tables: u32,
     pub base_version: u64,
     pub meta_sequence: u64,
     pub write_sequence: u64,
@@ -450,6 +451,7 @@ impl super::Shard {
         let mut l0_cf_table_size = [0; NUM_CFS];
         let mut total_blob_size = 0;
         let mut in_use_blob_size = 0;
+        let mut keyspace_prefix_tables = 0;
         let blob_table_count = data.blob_tbl_map.len();
         // FIXME: Calculate the total size of blob files.
         let mut blob_table_size = 0;
@@ -471,6 +473,7 @@ impl super::Shard {
                 l0_table_size += l0_tbl.size() / 2;
                 partial_l0s += 1;
             }
+            let mut l0_keyspace_prefix_tables_counted = false;
             for cf in 0..NUM_CFS {
                 if let Some(cf_tbl) = l0_tbl.get_cf(cf) {
                     tbl_index_size += cf_tbl.index_size();
@@ -486,6 +489,10 @@ impl super::Shard {
                         if cf_tbl.has_open_file() {
                             open_files += 1;
                         }
+                    }
+                    if cf_tbl.keyspace_id.is_some() && !l0_keyspace_prefix_tables_counted {
+                        keyspace_prefix_tables += 1;
+                        l0_keyspace_prefix_tables_counted = true;
                     }
                     in_use_blob_size += cf_tbl.total_blob_size();
 
@@ -511,6 +518,9 @@ impl super::Shard {
                     t.expire_cache(l.level);
                     if t.has_open_file() {
                         open_files += 1;
+                    }
+                    if t.keyspace_id.is_some() {
+                        keyspace_prefix_tables += 1;
                     }
                     if shard_bound.contains_bound(t.data_bound()) {
                         level_stats.data_size += t.size();
@@ -598,7 +608,7 @@ impl super::Shard {
             ver: self.ver,
             start: self.outer_start.clone(),
             end: self.outer_end.clone(),
-            inner_key_off: self.inner_key_off,
+            inner_key_off: data.inner_key_off,
             active: self.is_active(),
             compacting: self.is_compacting(),
             flushed: self.get_initial_flushed(),
@@ -626,6 +636,7 @@ impl super::Shard {
             tombs,
             kv_size,
             open_files,
+            keyspace_prefix_tables,
             partial_l0s,
             shared_blob_tables,
             partial_tbls,

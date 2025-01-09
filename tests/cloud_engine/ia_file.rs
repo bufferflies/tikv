@@ -353,7 +353,6 @@ fn make_sstable(
         0,
         ChecksumType::default(),
         None,
-        None,
     );
     let mut val = vec![0; val_len];
     let mut ver = n as u64;

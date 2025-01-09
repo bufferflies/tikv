@@ -74,6 +74,8 @@ pub struct Config {
 
     /// if enabled, flush large L0 file will split into multiple files.
     pub flush_split_l0: bool,
+    /// if enabled, major compaction will update inner key offset from 0 to 4.
+    pub update_inner_key_offset: bool,
 
     pub txn_file_worker_pool_size: Option<usize>,
 
@@ -104,6 +106,7 @@ impl Default for Config {
             remote_coprocessor_addr: "".to_string(),
             remote_coprocessor_min_blocks_size: 32 * 1024 * 1024,
             flush_split_l0: true,
+            update_inner_key_offset: false,
             txn_file_worker_pool_size: None,
             checksum_type: ChecksumType::Crc32,
             block_cache_type: BlockCacheType::Moka,

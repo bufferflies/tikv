@@ -284,6 +284,15 @@ impl ApiV2 {
         start_key.to_vec()
     }
 
+    pub fn get_keyspace_prefix_by_id(keyspace_id: u32) -> Vec<u8> {
+        if keyspace_id == 0 {
+            return vec![];
+        }
+        let mut start_key = keyspace_id.to_be_bytes();
+        start_key[0] = TXN_KEY_PREFIX;
+        start_key.to_vec()
+    }
+
     pub fn get_keyspace_prefix(key: &[u8]) -> Option<&[u8]> {
         matches!(ApiV2::parse_key_mode(key), KeyMode::Txn).then(|| &key[0..KEYSPACE_PREFIX_LEN])
     }

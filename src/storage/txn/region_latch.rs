@@ -193,7 +193,6 @@ mod tests {
         util::test_util::KeyBuilder,
         UserMeta, GLOBAL_SHARD_END_KEY,
     };
-    use rstest::rstest;
     use txn_types::Key;
 
     use super::*;
@@ -233,11 +232,9 @@ mod tests {
         assert!(global_latches.acquire(&mut lock_2, 3));
     }
 
-    #[rstest]
-    #[case::enable_key_off(true)]
-    #[case::disable_key_off(false)]
-    fn test_region_latch_txn_file(#[case] enable_inner_key_off: bool) {
-        let kb = KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_");
+    #[test]
+    fn test_region_latch_txn_file() {
+        let kb = KeyBuilder::new(KEYSPACE_ID, "t_");
         let global_latches = GlobalLatches::new(1024);
 
         let mut normal_lock = make_normal_lock(&kb.i_to_key(20), 999);
@@ -247,15 +244,7 @@ mod tests {
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
 
-        let txn_file = make_txn_file(
-            100,
-            200,
-            1000,
-            lower_bound,
-            upper_bound,
-            enable_inner_key_off,
-            &kb,
-        );
+        let txn_file = make_txn_file(100, 200, 1000, lower_bound, upper_bound, &kb);
         let mut txn_lock = make_txn_lock(txn_file);
         let txn_lock_cid = 2;
         // The lock before the txn file blocks txn file lock.
@@ -276,15 +265,7 @@ mod tests {
         assert!(!global_latches.acquire(&mut normal_lock_conflict, normal_conflict_cid));
 
         // another txn file will be blocked by txn lock.
-        let txn_file_2 = make_txn_file(
-            300,
-            400,
-            1010,
-            lower_bound,
-            upper_bound,
-            enable_inner_key_off,
-            &kb,
-        );
+        let txn_file_2 = make_txn_file(300, 400, 1010, lower_bound, upper_bound, &kb);
         let mut txn_lock_2 = make_txn_lock(txn_file_2);
         let txn_lock_2_cid = 5;
         assert!(!global_latches.acquire(&mut txn_lock_2, txn_lock_2_cid));
@@ -313,11 +294,10 @@ mod tests {
         start_ts: u64,
         lower_bound: InnerKey<'_>,
         upper_bound: InnerKey<'_>,
-        enable_inner_key_off: bool,
         kb: &KeyBuilder,
     ) -> TxnFile {
         let txn_file_id = TxnFileId::new(1, 1, start_ts);
-        let txn_chunk = make_txn_chunk(start, end, start_ts, enable_inner_key_off, kb);
+        let txn_chunk = make_txn_chunk(start, end, start_ts, kb);
         let user_meta = UserMeta::new(start_ts, start_ts + 1).to_array().to_vec();
         let txn_ctx = TxnCtx::new(
             user_meta.into(),
@@ -329,15 +309,8 @@ mod tests {
         TxnFile::new(txn_file_id, vec![txn_chunk], txn_ctx).unwrap()
     }
 
-    fn make_txn_chunk(
-        start: usize,
-        end: usize,
-        chunk_id: u64,
-        enable_inner_key_off: bool,
-        kb: &KeyBuilder,
-    ) -> TxnChunk {
-        let mut txn_chunk_builder =
-            TxnChunkBuilder::new(chunk_id, 10, None, KEYSPACE_ID, enable_inner_key_off);
+    fn make_txn_chunk(start: usize, end: usize, chunk_id: u64, kb: &KeyBuilder) -> TxnChunk {
+        let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
         for i in start..end {
             let key = kb.i_to_key(i);
             txn_chunk_builder.add_entry(InnerKey::from_outer_key(&key), OP_PUT, &key);

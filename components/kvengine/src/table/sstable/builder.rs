@@ -2,7 +2,6 @@
 
 use std::{convert::TryFrom, mem, ops::Deref};
 
-use api_version::ApiV2;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut};
 use cloud_encryption::EncryptionKey;
@@ -130,10 +129,6 @@ pub struct Builder {
     total_blob_size: u64,
     encryption_key: Option<EncryptionKey>,
     l0_version: u64,
-    // If the shard's keyspace > 0 && inner_key_offset == 0, prepend_keyspace_id is set for the
-    // builder to build table with keyspace_id prefix for old version tikv to read during
-    // upgrading.
-    prepend_keyspace_id: Option<u32>,
 }
 
 impl Builder {
@@ -145,7 +140,6 @@ impl Builder {
         compression_lvl: i32,
         checksum_type: ChecksumType,
         encryption_key: Option<EncryptionKey>,
-        prepend_keyspace_id: Option<u32>,
     ) -> Self {
         let mut x = Self::default();
         x.sst_fid = sst_fid;
@@ -156,7 +150,6 @@ impl Builder {
         x.old_builder.compression_tp = compression_tp;
         x.old_builder.compression_lvl = compression_lvl;
         x.encryption_key = encryption_key;
-        x.prepend_keyspace_id = prepend_keyspace_id;
         x
     }
 
@@ -186,14 +179,7 @@ impl Builder {
     }
 
     pub fn add(&mut self, inner_key: InnerKey<'_>, val: &Value, blob_ref: Option<BlobRef>) {
-        let mut prepend_key_buf;
-        let key = if let Some(keyspace_id) = self.prepend_keyspace_id {
-            prepend_key_buf = ApiV2::get_txn_keyspace_prefix(keyspace_id);
-            prepend_key_buf.extend_from_slice(inner_key.deref());
-            &prepend_key_buf
-        } else {
-            inner_key.deref()
-        };
+        let key = inner_key.deref();
         if self.block_builder.same_last_key(key) {
             self.block_builder
                 .set_last_entry_old_ver_if_zero(val.version);

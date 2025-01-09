@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use api_version::{api_v2, ApiV2};
+use api_version::ApiV2;
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use dashmap::DashMap;
@@ -92,7 +92,6 @@ pub(crate) async fn handle_txn_chunk(
         chunk_id,
         ctx.s3fs.clone(),
         req,
-        keyspace_id,
         &keyspace_info,
         ctx.txn_chunk_handler.target_block_entries,
     )
@@ -115,7 +114,6 @@ pub(crate) async fn create_txn_chunk(
     chunk_id: u64,
     dfs: Arc<dyn Dfs>,
     req: Request<Body>,
-    keyspace_id: u32,
     keyspace_info: &KeyspaceInfo,
     target_block_entries: usize,
 ) -> hyper::Result<Response<Body>> {
@@ -136,8 +134,6 @@ pub(crate) async fn create_txn_chunk(
         chunk_id,
         target_block_entries,
         keyspace_info.encryption_key.clone(),
-        keyspace_id,
-        keyspace_info.enable_inner_key_off,
     );
     while !body_buf.is_empty() {
         let key_len = body_buf.get_u16_le() as usize;
@@ -169,7 +165,6 @@ pub(crate) async fn create_txn_chunk(
 
 #[derive(Clone)]
 pub(crate) struct KeyspaceInfo {
-    enable_inner_key_off: bool,
     encryption_key: Option<EncryptionKey>,
 }
 
@@ -213,10 +208,6 @@ impl TxnChunkHandler {
             return Err(box_err!("keyspace range mismatch"));
         }
 
-        let enable_inner_key_off = snapshot.inner_key_off > 0;
-        if enable_inner_key_off {
-            assert_eq!(snapshot.inner_key_off, api_v2::KEYSPACE_PREFIX_LEN as u32);
-        }
         let encryption_key =
             get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
                 ctx.master_key
@@ -224,10 +215,7 @@ impl TxnChunkHandler {
                     .unwrap()
             });
 
-        let keyspace_info = KeyspaceInfo {
-            enable_inner_key_off,
-            encryption_key,
-        };
+        let keyspace_info = KeyspaceInfo { encryption_key };
         self.keyspaces.insert(keyspace_id, keyspace_info.clone());
         Ok(keyspace_info)
     }
@@ -276,7 +264,6 @@ mod tests {
             .body(hyper::Body::from(req_body))
             .unwrap();
         let keyspace_info = KeyspaceInfo {
-            enable_inner_key_off: true,
             encryption_key: None,
         };
         let mut res = dfs
@@ -285,7 +272,6 @@ mod tests {
                 chunk_id,
                 dfs.clone(),
                 req,
-                0,
                 &keyspace_info,
                 TARGET_BLOCK_ENTRIES_DEF,
             ))

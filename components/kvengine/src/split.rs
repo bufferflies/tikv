@@ -76,19 +76,19 @@ impl Engine {
                 split.get_keys(),
                 i,
             );
-            let range = if self.core.opts.enable_inner_key_offset
+            let (range, inner_key_off) = if self.core.opts.enable_inner_key_offset
                 && is_whole_keyspace_range(start_key, end_key)
             {
-                ShardRange::new(start_key, end_key, KEYSPACE_PREFIX_LEN)
+                (ShardRange::new(start_key, end_key), KEYSPACE_PREFIX_LEN)
             } else {
                 debug!(
                     "engine split";
                     "shard_id" => old_shard.id,
                     "start_key" => format!("{:?}", start_key),
                     "end_key" => format!("{:?}", end_key),
-                    "inner_key_off" => old_shard.inner_key_off
+                    "inner_key_off" => old_data.inner_key_off
                 );
-                ShardRange::new(start_key, end_key, old_shard.inner_key_off)
+                (ShardRange::new(start_key, end_key), old_data.inner_key_off)
             };
             // Note: properties of new shards are processed in `build_split_pb`.
             let mut new_shard = Shard::new(
@@ -96,6 +96,7 @@ impl Engine {
                 &new_shard_props[i],
                 new_ver,
                 range,
+                inner_key_off,
                 self.opts.clone(),
                 &self.master_key,
             );
@@ -393,6 +394,7 @@ impl Engine {
         sequence: u64,
     ) -> Result<()> {
         let old_shard = self.get_shard_with_ver(shard_id, shard_ver)?;
+        let inner_key_off = old_shard.get_data().inner_key_off;
         self.prepare_update_shard_version(&old_shard, sequence, true);
         let source_snap = source.get_snapshot();
 
@@ -427,6 +429,7 @@ impl Engine {
             old_shard.set_data_opt(
                 ShardData::new_empty(
                     old_shard.range.clone(),
+                    inner_key_off,
                     old_shard.get_data().limiter.clone(),
                 ),
                 false,
@@ -470,11 +473,6 @@ impl Engine {
         }
 
         let data = if !clear_source {
-            if clear_target {
-                // `inner_key_off` will be different when merge regions of different keyspaces.
-                new_shard.range.inner_key_off = source_snap.inner_key_off as usize;
-            }
-
             // merge source DEL_PREFIXES_KEY to new shard
             let source_del_prefixes =
                 get_shard_property(DEL_PREFIXES_KEY, source_snap.get_properties())
@@ -561,6 +559,10 @@ impl Engine {
             }
             let mut builder = ShardDataBuilder::new(old_data);
             builder.set_range(new_shard.range.clone());
+            if clear_target {
+                // `inner_key_off` will be different when merge regions of different keyspaces.
+                builder.set_inner_key_off(source_snap.inner_key_off as usize);
+            }
             builder.set_mem_tbls(mem_tbls);
             builder.set_l0_tbls(l0_tbls);
             builder.set_blob_tbls(blob_tbl_map);
@@ -605,11 +607,13 @@ impl Engine {
 
     pub(crate) fn new_shard_version(&self, old_shard: &Shard, sequence: u64) -> Shard {
         let engine_id = self.get_engine_id();
+        let inner_key_off = old_shard.get_data().inner_key_off;
         let new_shard = Shard::new(
             engine_id,
             &old_shard.properties.to_pb(old_shard.id),
             old_shard.ver + 1,
             old_shard.range.clone(),
+            inner_key_off,
             old_shard.opt.clone(),
             &self.master_key,
         );

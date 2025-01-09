@@ -17,7 +17,7 @@ use crate::{
     },
     tests::{
         generate_encryption_key, new_test_engine_opt, write_data, TestEngine, DEF_BLOCK_SIZE,
-        KEYSPACE_ID, TABLE_KEY_PREFIX,
+        TABLE_KEY_PREFIX,
     },
     util::test_util::KeyBuilder,
     UserMeta, WriteBatch, GLOBAL_SHARD_END_KEY, LOCK_CF, TXN_FILE_REF, WRITE_CF,
@@ -34,17 +34,8 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
     let (engine, tx) = new_test_engine_opt(enable_inner_key_off, DEF_BLOCK_SIZE, TABLE_KEY_PREFIX);
     let kb = engine.key_builder();
 
-    let build_chunk = |start, end, chunk_id| {
-        build_txn_chunk(
-            &engine,
-            start,
-            end,
-            chunk_id,
-            |_| OP_PUT,
-            enc_key,
-            enable_inner_key_off,
-        )
-    };
+    let build_chunk =
+        |start, end, chunk_id| build_txn_chunk(&engine, start, end, chunk_id, |_| OP_PUT, enc_key);
     let check_constraint = |start, end, start_ts, expected: Option<usize>| -> anyhow::Result<()> {
         let op_fn = |i| {
             if i % 4 == 0 {
@@ -53,15 +44,8 @@ fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_ke
                 OP_CHECK_NOT_EXIST
             }
         };
-        let already_exist_key = check_txn_file_constraint(
-            &engine,
-            start,
-            end,
-            start_ts,
-            op_fn,
-            enc_key,
-            enable_inner_key_off,
-        );
+        let already_exist_key =
+            check_txn_file_constraint(&engine, start, end, start_ts, op_fn, enc_key);
         let expected = expected.map(|i| kb.i_to_outer_key(i));
         if already_exist_key != expected {
             bail!(
@@ -297,15 +281,7 @@ fn test_txn_file_multiple(
     let start_ts = 2000;
     for &chunk_id in &chunks_id {
         let start = chunk_id as usize;
-        build_txn_chunk(
-            &engine,
-            start,
-            start + 10,
-            chunk_id,
-            |_| OP_PUT,
-            enc_key,
-            enable_inner_key_off,
-        );
+        build_txn_chunk(&engine, start, start + 10, chunk_id, |_| OP_PUT, enc_key);
     }
     let mut wb = WriteBatch::new(1);
     let txn_file_refs = make_txn_file_refs(
@@ -341,11 +317,9 @@ pub(crate) fn build_txn_chunk<OpF: Fn(usize) -> u8>(
     id: u64,
     op_fn: OpF,
     enc_key: Option<&EncryptionKey>,
-    enable_inner_key_off: bool,
 ) {
     let kb = engine.key_builder();
-    let mut chunk_builder =
-        TxnChunkBuilder::new(id, 10, enc_key.cloned(), KEYSPACE_ID, enable_inner_key_off);
+    let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned());
     for i in start..end {
         let key = kb.i_to_key(i);
         chunk_builder.add_entry(InnerKey::from_outer_key(&key), op_fn(i), &key);
@@ -366,20 +340,11 @@ fn build_txn_file<OpF: Fn(usize) -> u8>(
     commit_ts: Option<u64>, // None for prewrite, Some(commit_ts) for commit, Some(0) for rollback
     op_fn: OpF,
     enc_key: Option<&EncryptionKey>,
-    enable_inner_key_off: bool,
 ) -> TxnFile {
     static CHUNK_ID: AtomicU64 = AtomicU64::new(1_000_000);
 
     let chunk_id = CHUNK_ID.fetch_add(1, Ordering::Relaxed);
-    build_txn_chunk(
-        engine,
-        start,
-        end,
-        chunk_id,
-        op_fn,
-        enc_key,
-        enable_inner_key_off,
-    );
+    build_txn_chunk(engine, start, end, chunk_id, op_fn, enc_key);
     engine
         .txn_chunk_mgr
         .prepare(chunk_id, enc_key.cloned())
@@ -449,18 +414,8 @@ fn check_txn_file_constraint<F: Fn(usize) -> u8>(
     start_ts: u64,
     op_fn: F,
     enc_key: Option<&EncryptionKey>,
-    enable_inner_key_off: bool,
 ) -> Option<Vec<u8> /* already_exist_key */> {
-    let txn_file = build_txn_file(
-        engine,
-        start,
-        end,
-        start_ts,
-        None,
-        op_fn,
-        enc_key,
-        enable_inner_key_off,
-    );
+    let txn_file = build_txn_file(engine, start, end, start_ts, None, op_fn, enc_key);
     let snap = engine.get_snap_access(1).unwrap();
     snap.check_txn_file_constraint(&txn_file, start_ts)
 }

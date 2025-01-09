@@ -132,7 +132,7 @@ fn new_test_engine_opt(
         applier.run();
     });
     let keyspace_id = if enable_inner_key_off { 1 } else { 0 };
-    let key_builder = KeyBuilder::new(keyspace_id, enable_inner_key_off, key_prefix);
+    let key_builder = KeyBuilder::new(keyspace_id, key_prefix);
     (
         TestEngine {
             engine,
@@ -814,15 +814,7 @@ fn test_lock_cf_repeatable_read() {
     // Write txn file lock.
     let txn_file_ver6 = {
         let chunk_id = 6000;
-        build_txn_chunk(
-            &engine,
-            150,
-            300,
-            chunk_id,
-            |_| OP_PUT,
-            None,
-            enable_inner_key_off,
-        );
+        build_txn_chunk(&engine, 150, 300, chunk_id, |_| OP_PUT, None);
         let primary = kb.i_to_outer_key(150);
         let mut wb = WriteBatch::new(1);
         let txn_file_refs = make_txn_file_refs(
@@ -955,13 +947,14 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
     let range = ShardRange::new(
         &engine.key_builder.i_to_outer_key(30),
         &engine.key_builder.i_to_outer_key(600),
-        shard.inner_key_off,
     );
+    let inner_key_off = shard.get_data().inner_key_off;
     let shard = Shard::new(
         shard.engine_id,
         &shard.properties.to_pb(shard.id),
         shard.ver,
         range.clone(),
+        inner_key_off,
         engine.opts.clone(),
         &engine.master_key,
     );
@@ -1070,13 +1063,14 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
     let range = ShardRange::new(
         &engine.key_builder.i_to_outer_key(30),
         &engine.key_builder.i_to_outer_key(600),
-        shard.inner_key_off,
     );
+    let inner_key_off = shard.get_data().inner_key_off;
     let shard = Shard::new(
         shard.engine_id,
         &shard.properties.to_pb(shard.id),
         shard.ver,
         range.clone(),
+        inner_key_off,
         engine.opts.clone(),
         &engine.master_key,
     );
@@ -1720,7 +1714,6 @@ async fn new_table(
         comp_lvl,
         ChecksumType::Crc32,
         None,
-        None,
     );
     for i in begin..end {
         let key = engine.key_builder.i_to_inner_key(i);
@@ -1776,7 +1769,7 @@ fn new_l0table_file(
     let block_size = engine.opts.table_builder_options.block_size;
     let fs = engine.fs.clone();
 
-    let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32, None, None);
+    let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32, None);
     for cf in 0..NUM_CFS {
         for i in begin[cf]..end[cf] {
             let key = engine.key_builder.i_to_inner_key(i);

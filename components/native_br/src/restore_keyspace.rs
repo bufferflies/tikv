@@ -585,7 +585,7 @@ impl BackupShard {
     }
 
     pub fn inner_key_off(&self) -> usize {
-        self.meta.range.inner_key_off
+        self.meta.inner_key_off
     }
 
     pub fn table_version(&self) -> u64 {
@@ -1676,7 +1676,7 @@ impl BackupCluster {
     }
 
     pub fn is_inner_key_off_enabled(&self) -> bool {
-        self.get_sorted_shard(0).meta.range.inner_key_off != 0
+        self.get_sorted_shard(0).meta.inner_key_off != 0
     }
 
     pub fn get_shard_metas_before_flush(&self) -> Vec<ShardMeta> {
@@ -1913,8 +1913,8 @@ impl BackupCluster {
             meta.range = ShardRange::new(
                 region.target_region.get_start_key(),
                 region.target_region.get_end_key(),
-                inner_key_off,
             );
+            meta.inner_key_off = inner_key_off;
             if let Some(encryption_key) = self.get_keyspace_exported_encryption_key() {
                 meta.set_property(ENCRYPTION_KEY, encryption_key.as_slice());
             }
@@ -2068,7 +2068,6 @@ impl BackupCluster {
         self.get_shard(*self.sorted_shards.first().unwrap())
             .unwrap()
             .meta
-            .range
             .inner_key_off
     }
 
@@ -2650,7 +2649,8 @@ mod tests {
             let mut shard = BackupShard::default();
             shard.region_id = tuple.0;
             shard.meta.ver = tuple.1;
-            shard.meta.range = ShardRange::new(tuple.2.as_bytes(), tuple.3.as_bytes(), 0);
+            shard.meta.range = ShardRange::new(tuple.2.as_bytes(), tuple.3.as_bytes());
+            shard.meta.inner_key_off = 0;
             shard
         };
 
@@ -2823,8 +2823,8 @@ mod tests {
             for r in regions {
                 let mut shard = BackupShard::default();
                 shard.region_id = r.id;
-                shard.meta.range =
-                    ShardRange::new(r.get_start_key(), r.get_end_key(), inner_key_off);
+                shard.meta.range = ShardRange::new(r.get_start_key(), r.get_end_key());
+                shard.meta.inner_key_off = inner_key_off;
 
                 shards_id.push(shard.region_id);
                 shards.insert(shard.region_id, shard);

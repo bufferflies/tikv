@@ -200,7 +200,7 @@ impl Engine {
         let initial_flush = cs.mut_initial_flush();
         initial_flush.set_outer_start(task.range.outer_start.to_vec());
         initial_flush.set_outer_end(task.range.outer_end.to_vec());
-        initial_flush.set_inner_key_off(task.range.inner_key_off as u32);
+        initial_flush.set_inner_key_off(flush.shard_data.inner_key_off as u32);
         initial_flush.set_base_version(flush.base_version);
         initial_flush.set_data_sequence(flush.data_sequence);
         initial_flush.set_max_ts(flush.max_ts);
@@ -375,7 +375,6 @@ impl Engine {
                 0,
                 checksum_type,
                 task.encryption_key.clone(),
-                task.range.prepend_keyspace_id(),
             );
             write_cf_builder.set_l0_version(m.get_version());
             let mut it = m.get_cf(WRITE_CF).new_iterator(false);
@@ -415,7 +414,6 @@ impl Engine {
             m.get_version(),
             checksum_type,
             task.encryption_key.clone(),
-            task.range.prepend_keyspace_id(),
         );
         for cf in l0_builder_start_cf..NUM_CFS {
             let skl = m.get_cf(cf);

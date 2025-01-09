@@ -597,7 +597,7 @@ mod tests {
         let runtime = dfs.get_runtime();
         let opts = dfs::Options::default().with_type(FileType::TxnChunk);
         for chunk_id in 1u64..=6 {
-            let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None, 0, true);
+            let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
             for i in 0..100 {
                 let key = format!("{:02}/{:02}", chunk_id, i);
                 chunk_builder.add_entry(

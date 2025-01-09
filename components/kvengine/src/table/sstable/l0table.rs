@@ -302,7 +302,6 @@ impl L0Builder {
         version: u64,
         checksum_type: ChecksumType,
         encryption_key: Option<EncryptionKey>,
-        prepend_keyspace_id: Option<u32>,
     ) -> Self {
         let mut builders = Vec::with_capacity(4);
         for _ in 0..NUM_CFS {
@@ -313,7 +312,6 @@ impl L0Builder {
                 0,
                 checksum_type,
                 encryption_key.clone(),
-                prepend_keyspace_id,
             );
             builders.push(builder);
         }

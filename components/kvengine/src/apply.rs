@@ -853,6 +853,7 @@ impl EngineCore {
             snap.get_properties(),
             cs.shard_ver + 1,
             range,
+            snap.inner_key_off as usize,
             old_shard.opt.clone(),
             &self.master_key,
         );

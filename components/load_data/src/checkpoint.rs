@@ -708,7 +708,6 @@ mod tests {
             inner_key_off: None,
             outer_key_prefix: vec![],
             encryption_key: None,
-            prepend_keyspace_id: None,
             keyspace_id: None,
         };
         let checkpoint = LoadDataCheckpointCtx::new(task_ctx);
@@ -957,7 +956,6 @@ mod tests {
             inner_key_off: None,
             outer_key_prefix: vec![],
             encryption_key: None,
-            prepend_keyspace_id: None,
             keyspace_id: None,
         };
 

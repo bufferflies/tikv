@@ -58,6 +58,7 @@ message MajorCompaction {
   repeated BlobCreate newBlobTables = 2;
   repeated uint64 oldBlobTables = 3;
   bool conflicted = 4;
+  bool update_inner_key_offset = 5;
 }
 
 message SchemaMeta {

@@ -1071,7 +1071,6 @@ pub(crate) mod test_util {
             0,
             ChecksumType::default(),
             None,
-            None,
         )
     }
 

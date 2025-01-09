@@ -2,7 +2,6 @@
 
 use std::{cmp, fmt, iter::Iterator as StdIterator, ops::Deref, sync::Arc};
 
-use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::EncryptionKey;
 use itertools::Itertools;
@@ -1384,10 +1383,6 @@ pub struct TxnChunkBuilder {
     check_constraint_blocks: BlockBitmap, // Bitmap of block_pos which has constraint op.
     checksum_type: ChecksumType,
     encryption_key: Option<EncryptionKey>,
-
-    // `entry_key_buf` is used to build txn chunks for keyspaces with inner key offset disabled.
-    // Note that hash index is ALWAYS without prefix.
-    entry_key_buf: Option<Vec<u8>>,
 }
 
 impl TxnChunkBuilder {
@@ -1395,17 +1390,12 @@ impl TxnChunkBuilder {
         chunk_id: u64,
         target_block_entries: usize,
         encryption_key: Option<EncryptionKey>,
-        keyspace_id: u32,
-        enable_inner_key_off: bool,
     ) -> Self {
-        let entry_key_buf =
-            (!enable_inner_key_off).then(|| ApiV2::get_txn_keyspace_prefix(keyspace_id));
         Self {
             chunk_id,
             target_block_entries,
             checksum_type: ChecksumType::Crc32,
             encryption_key,
-            entry_key_buf,
             ..Default::default()
         }
     }
@@ -1413,13 +1403,7 @@ impl TxnChunkBuilder {
     pub fn add_entry(&mut self, inner_key: InnerKey<'_>, op: u8, val: &[u8]) {
         let key_hash = farmhash::fingerprint64(inner_key.deref());
 
-        let key = if let Some(entry_key_buf) = self.entry_key_buf.as_mut() {
-            entry_key_buf.truncate(KEYSPACE_PREFIX_LEN);
-            entry_key_buf.extend_from_slice(inner_key.deref());
-            entry_key_buf.as_slice()
-        } else {
-            inner_key.deref()
-        };
+        let key = inner_key.deref();
 
         let block_idx = self.block_offsets.len() as u16;
         let key_idx = self.block.tmp_keys.length() as u16;
@@ -1855,23 +1839,21 @@ mod tests {
 
     const KEYSPACE_ID: u32 = 42;
 
-    fn new_key_builder(enable_inner_key_off: bool) -> KeyBuilder {
-        KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, "t_batch")
+    fn new_key_builder() -> KeyBuilder {
+        KeyBuilder::new(KEYSPACE_ID, "t_batch")
     }
 
-    fn new_key_builder_prefix(enable_inner_key_off: bool, prefix: &str) -> KeyBuilder {
-        KeyBuilder::new(KEYSPACE_ID, enable_inner_key_off, &format!("t_{prefix}"))
+    fn new_key_builder_prefix(prefix: &str) -> KeyBuilder {
+        KeyBuilder::new(KEYSPACE_ID, &format!("t_{prefix}"))
     }
 
     #[rstest]
-    #[case::basic(None, true)]
-    #[case::enc(Some(generate_encryption_key()), true)]
-    #[case::disable_key_off(None, false)]
-    #[case::enc_disable_key_off(Some(generate_encryption_key()), false)]
-    fn test_txn_chunk(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_key_off: bool) {
-        let kb = new_key_builder(enable_inner_key_off);
+    #[case::basic(None)]
+    #[case::enc(Some(generate_encryption_key()))]
+    fn test_txn_chunk(#[case] enc_key: Option<EncryptionKey>) {
+        let kb = new_key_builder();
         let get_inner_key = |prefix: &str, i: usize| -> OwnedInnerKey {
-            let kb = new_key_builder_prefix(enable_inner_key_off, prefix);
+            let kb = new_key_builder_prefix(prefix);
             kb.i_to_inner_key(i)
         };
         let get_op = |i| {
@@ -1884,7 +1866,7 @@ mod tests {
             }
         };
 
-        let chunk = build_txn_chunk(0, 100, 1, get_op, enc_key.as_ref(), enable_inner_key_off);
+        let chunk = build_txn_chunk(0, 100, 1, get_op, enc_key.as_ref());
         assert_eq!(chunk.id(), 1);
         assert_eq!(chunk.get_inserts(), 25);
         assert_eq!(chunk.get_check_non_exists(), 5);
@@ -1978,7 +1960,7 @@ mod tests {
     #[test]
     fn test_txn_chunk_merge_chunks() {
         let chunks = (0..5)
-            .map(|i| build_txn_chunk(i * 10, (i + 1) * 10, i as u64, |_| OP_PUT, None, true))
+            .map(|i| build_txn_chunk(i * 10, (i + 1) * 10, i as u64, |_| OP_PUT, None))
             .collect::<Vec<_>>();
 
         let id = TxnFileId::new(10, 1, 3);
@@ -2019,12 +2001,10 @@ mod tests {
         }
     }
 
-    #[rstest]
-    #[case::enable_key_off(true)]
-    #[case::disable_key_off(false)]
-    fn test_txn_chunk_in_range(#[case] enable_inner_key_off: bool) {
-        let kb = new_key_builder(enable_inner_key_off);
-        let chunk = build_txn_chunk(10, 100, 1, |_| OP_PUT, None, enable_inner_key_off);
+    #[test]
+    fn test_txn_chunk_in_range() {
+        let kb = new_key_builder();
+        let chunk = build_txn_chunk(10, 100, 1, |_| OP_PUT, None);
 
         let cases: Vec<(
             usize, // range start
@@ -2059,14 +2039,12 @@ mod tests {
         id: u64,
         op_fn: F,
         enc_key: Option<&EncryptionKey>,
-        enable_inner_key_off: bool,
     ) -> TxnChunk
     where
         F: Fn(usize) -> u8,
     {
-        let mut chunk_builder =
-            TxnChunkBuilder::new(id, 10, enc_key.cloned(), KEYSPACE_ID, enable_inner_key_off);
-        let kb = new_key_builder(enable_inner_key_off);
+        let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned());
+        let kb = new_key_builder();
         for i in (start..end).step_by(2) {
             let key = kb.i_to_key(i);
             let val = get_test_value(i);
@@ -2080,13 +2058,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::base(None, true)]
-    #[case::enc(Some(generate_encryption_key()), true)]
-    #[case::disable_key_off(None, false)]
-    #[case::enc_disable_key_off(Some(generate_encryption_key()), false)]
-    fn test_txn_file(#[case] enc_key: Option<EncryptionKey>, #[case] enable_inner_key_off: bool) {
+    #[case::base(None)]
+    #[case::enc(Some(generate_encryption_key()))]
+    fn test_txn_file(#[case] enc_key: Option<EncryptionKey>) {
         let enc_key = enc_key.as_ref();
-        let kb = new_key_builder(enable_inner_key_off);
+        let kb = new_key_builder();
         let op_fn = |i: usize| {
             if i < 100 {
                 OP_LOCK
@@ -2100,11 +2076,11 @@ mod tests {
                 OP_PUT
             }
         };
-        let chunk_1 = build_txn_chunk(50, 100, 1, op_fn, enc_key, enable_inner_key_off);
-        let chunk_2 = build_txn_chunk(100, 150, 2, op_fn, enc_key, enable_inner_key_off);
-        let chunk_3 = build_txn_chunk(150, 200, 3, op_fn, enc_key, enable_inner_key_off);
-        let chunk_4 = build_txn_chunk(200, 250, 4, op_fn, enc_key, enable_inner_key_off);
-        let chunk_5 = build_txn_chunk(250, 300, 5, op_fn, enc_key, enable_inner_key_off);
+        let chunk_1 = build_txn_chunk(50, 100, 1, op_fn, enc_key);
+        let chunk_2 = build_txn_chunk(100, 150, 2, op_fn, enc_key);
+        let chunk_3 = build_txn_chunk(150, 200, 3, op_fn, enc_key);
+        let chunk_4 = build_txn_chunk(200, 250, 4, op_fn, enc_key);
+        let chunk_5 = build_txn_chunk(250, 300, 5, op_fn, enc_key);
         let id = TxnFileId::new(10, 1, 3);
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
@@ -2308,14 +2284,12 @@ mod tests {
         }
     }
 
-    #[rstest]
-    #[case::enable_key_off(true)]
-    #[case::disable_key_off(false)]
-    fn test_txn_file_in_ranges(#[case] enable_inner_key_off: bool) {
-        let kb = new_key_builder(enable_inner_key_off);
-        let chunk_1 = build_txn_chunk(50, 100, 1, |_| OP_PUT, None, enable_inner_key_off);
-        let chunk_2 = build_txn_chunk(100, 150, 2, |_| OP_PUT, None, enable_inner_key_off);
-        let chunk_5 = build_txn_chunk(250, 300, 5, |_| OP_PUT, None, enable_inner_key_off);
+    #[test]
+    fn test_txn_file_in_ranges() {
+        let kb = new_key_builder();
+        let chunk_1 = build_txn_chunk(50, 100, 1, |_| OP_PUT, None);
+        let chunk_2 = build_txn_chunk(100, 150, 2, |_| OP_PUT, None);
+        let chunk_5 = build_txn_chunk(250, 300, 5, |_| OP_PUT, None);
         let id = TxnFileId::new(10, 1, 3);
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
@@ -2354,31 +2328,29 @@ mod tests {
         }
     }
 
-    #[rstest]
-    #[case::enable_key_off(true)]
-    #[case::disable_key_off(false)]
-    fn test_txn_file_size(#[case] enable_inner_key_off: bool) {
-        let kb = new_key_builder(enable_inner_key_off);
-        let chunk_1 = build_txn_chunk(50, 100, 1, |_| OP_PUT, None, enable_inner_key_off);
-        let chunk_2 = build_txn_chunk(100, 150, 2, |_| OP_PUT, None, enable_inner_key_off);
-        let chunk_5 = build_txn_chunk(250, 300, 5, |_| OP_PUT, None, enable_inner_key_off);
+    #[test]
+    fn test_txn_file_size() {
+        let kb = new_key_builder();
+        let chunk_1 = build_txn_chunk(50, 100, 1, |_| OP_PUT, None);
+        let chunk_2 = build_txn_chunk(100, 150, 2, |_| OP_PUT, None);
+        let chunk_5 = build_txn_chunk(250, 300, 5, |_| OP_PUT, None);
         let id = TxnFileId::new(10, 1, 3);
         let cases: Vec<(
             (usize /* start */, usize /* end */), // range
-            (usize, usize),                       // txn file size inner_key_off on/off.
+            usize,                                // txn file size
         )> = vec![
-            ((50, 301), (2457, 2502)),
-            ((75, 301), (2184, 2224)),
-            ((75, 281), (1911, 1946)),
-            ((100, 281), (1380, 1405)),
-            ((100, 170), (828, 843)),
-            ((100, 149), (828, 843)),
-            ((119, 121), (552, 562)),
-            ((120, 121), (276, 281)),
-            ((160, 170), (0, 0)),
+            ((50, 301), 2457),
+            ((75, 301), 2184),
+            ((75, 281), 1911),
+            ((100, 281), 1380),
+            ((100, 170), 828),
+            ((100, 149), 828),
+            ((119, 121), 552),
+            ((120, 121), 276),
+            ((160, 170), 0),
         ];
         let chunks = vec![chunk_1, chunk_2, chunk_5];
-        for ((start, end), (txn_file_size_enable, txn_file_size_disable)) in cases {
+        for ((start, end), txn_file_size) in cases {
             let lower_bound = kb.i_to_inner_key(start);
             let upper_bound = kb.i_to_inner_key(end);
             let txn_ctx = TxnCtx::new(
@@ -2389,11 +2361,7 @@ mod tests {
                 upper_bound.as_ref(),
             );
             let txn_file = TxnFile::new(id, chunks.clone(), txn_ctx).unwrap();
-            if enable_inner_key_off {
-                assert_eq!(txn_file.size(), txn_file_size_enable);
-            } else {
-                assert_eq!(txn_file.size(), txn_file_size_disable);
-            }
+            assert_eq!(txn_file.size(), txn_file_size);
         }
     }
 
@@ -2403,7 +2371,6 @@ mod tests {
         chunks_end: usize,
         chunks: Vec<TxnChunk>,
         chunk_ref: TxnFileRefStore,
-        enable_inner_key_off: bool,
     }
 
     prop_compose! {
@@ -2412,14 +2379,13 @@ mod tests {
             (
                 chunks_size in prop::collection::vec(1..max_chunk_size, 1..max_chunks_num),
                 enable_enc in any::<bool>(),
-                enable_inner_key_off in any::<bool>(),
             )
             -> ArbitraryChunks
         {
             const CHUNKS_START: usize = 100;
             let mut next_chunk: usize = CHUNKS_START;
             let mut chunks = Vec::with_capacity(chunks_size.len());
-            let mut chunk_ref = TxnFileRefStore::new(enable_inner_key_off);
+            let mut chunk_ref = TxnFileRefStore::new();
             let enc_key = enable_enc.then(generate_encryption_key);
             let mut rng = thread_rng();
             for chunk_size in chunks_size {
@@ -2431,7 +2397,7 @@ mod tests {
                 };
                 let get_op = |i| ops[i - next_chunk];
 
-                let chunk = build_txn_chunk(next_chunk, next_chunk + chunk_size, next_chunk as u64, get_op, enc_key.as_ref(), enable_inner_key_off);
+                let chunk = build_txn_chunk(next_chunk, next_chunk + chunk_size, next_chunk as u64, get_op, enc_key.as_ref());
                 chunks.push(chunk);
                 chunk_ref.put_batch(next_chunk, next_chunk + chunk_size, get_op);
                 next_chunk += chunk_size;
@@ -2441,7 +2407,6 @@ mod tests {
                 chunks_end: next_chunk,
                 chunks,
                 chunk_ref,
-                enable_inner_key_off,
             }
         }
     }
@@ -2473,13 +2438,13 @@ mod tests {
     }
     proptest! {
         #[test]
-        fn test_txn_file_bounded( ArbitraryChunks { chunks_start, chunks_end, chunks, chunk_ref, enable_inner_key_off } in arb_chunks(50, 5)) {
+        fn test_txn_file_bounded( ArbitraryChunks { chunks_start, chunks_end, chunks, chunk_ref } in arb_chunks(50, 5)) {
             let chunk_ref_check_constraint = chunk_ref.filter_check_constraint();
 
             proptest!(|(
                 (lower_bound, upper_bound, reverse, keys) in arb_bounded_args(chunks_start, chunks_end)
             )| {
-                let kb = new_key_builder(enable_inner_key_off);
+                let kb = new_key_builder();
                 let lower_bound_key = kb.i_to_inner_key(lower_bound);
                 let upper_bound_key = kb.i_to_inner_key(upper_bound);
                 let bound = DataBound::new(lower_bound_key.as_ref(), upper_bound_key.as_ref(), false);
@@ -2557,11 +2522,11 @@ mod tests {
         }
 
         #[test]
-        fn test_txn_file_has_data_in_range( ArbitraryChunks { chunks_start, chunks_end, chunks, chunk_ref, enable_inner_key_off } in arb_chunks(50, 5)) {
+        fn test_txn_file_has_data_in_range( ArbitraryChunks { chunks_start, chunks_end, chunks, chunk_ref } in arb_chunks(50, 5)) {
             proptest!(|(
                 (lower_bound, upper_bound) in arb_range_args(chunks_start, chunks_end)
             )| {
-                let kb = new_key_builder(enable_inner_key_off);
+                let kb = new_key_builder();
                 let lower_bound_key = kb.i_to_inner_key(lower_bound);
                 let upper_bound_key = kb.i_to_inner_key(upper_bound);
                 let data_bound = DataBound::new(lower_bound_key.as_ref(), upper_bound_key.as_ref(), false);
@@ -2582,12 +2547,10 @@ mod tests {
         }
     }
 
-    #[rstest]
-    #[case::enable_key_off(true)]
-    #[case::disable_key_off(false)]
-    fn test_txn_file_has_over_bound_data(#[case] enable_inner_key_off: bool) {
-        let kb = new_key_builder(enable_inner_key_off);
-        let chunk = build_txn_chunk(0, 50, 1, |_| OP_PUT, None, enable_inner_key_off);
+    #[test]
+    fn test_txn_file_has_over_bound_data() {
+        let kb = new_key_builder();
+        let chunk = build_txn_chunk(0, 50, 1, |_| OP_PUT, None);
         let id = TxnFileId::new(10, 1, 3);
         let txn_ctx = TxnCtx::new(
             UserMeta::new(3, 5).to_array().to_vec().into(),
@@ -2634,10 +2597,10 @@ mod tests {
     }
 
     impl TxnFileRefStore {
-        pub fn new(enable_inner_key_off: bool) -> Self {
+        pub fn new() -> Self {
             Self {
                 vec: vec![],
-                key_builder: new_key_builder(enable_inner_key_off),
+                key_builder: new_key_builder(),
             }
         }
 
