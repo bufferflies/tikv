@@ -201,8 +201,12 @@ impl CompactionClient {
 
     pub fn get_remote_compactor(&self) -> RemoteCompactor {
         let mut remote_compactors = self.remote_compactors.lock().unwrap();
+        // `last_failure` is updated when there has only 1 compactor. We ignore the
+        // compactor when the compactor is not permanent and the last failure is
+        // less than the retry interval.
         if remote_compactors.remote_urls.is_empty()
-            || remote_compactors.last_failure.elapsed().le(&RETRY_INTERVAL)
+            || (remote_compactors.last_failure.elapsed().le(&RETRY_INTERVAL)
+                && !remote_compactors.remote_urls[0].permanent)
         {
             RemoteCompactor::default()
         } else {
