@@ -599,6 +599,16 @@ impl<'a> PeerMsgHandler<'a> {
             self.on_transfer_leader_msg(msg.get_message());
             Ok(())
         } else {
+            // This can be a message that sent when it's still a follower. Nevertheleast,
+            // it's meaningless to continue to handle the request as callbacks are cleared.
+            if msg.get_message().get_msg_type() == MessageType::MsgReadIndex
+                && self.fsm.peer.is_leader()
+                && (msg.get_message().get_from() == raft::INVALID_ID
+                    || msg.get_message().get_from() == self.fsm.peer_id())
+            {
+                self.ctx.raft_metrics.message_dropped.stale_msg.inc();
+                return Ok(());
+            }
             self.fsm.peer.step(self.ctx, msg.take_message())
         };
 
