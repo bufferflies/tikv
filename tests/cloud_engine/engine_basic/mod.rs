@@ -5,16 +5,22 @@ mod test_remote_coprocessor;
 mod test_stats;
 mod test_store;
 
-use std::{thread, time::Duration};
+use std::{
+    mem,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
 use api_version::ApiV2;
 use bytes::Bytes;
 use futures::executor::block_on;
-use kvengine::SnapAccess;
+use kvengine::{SnapAccess, WriteBatch, WRITE_CF};
 use kvenginepb::ChangeSet;
 use kvproto::kvrpcpb::Op;
 use pd_client::PdClient;
 use protobuf::Message;
+use rfstore::store::ApplyContext;
 use test_cloud_server::{client::TxnMutations, must_wait, try_wait, util::Mutation, ServerCluster};
 use test_util::init_log_for_test;
 use tikv::storage::{txn::CloudStoreScanner, Scanner};
@@ -201,6 +207,74 @@ fn test_snap_marshal_with_opt(enable_inner_key_offset: bool) {
         || "snapshot table count is zero".to_string(),
     );
     cluster.stop();
+}
+
+#[test]
+fn test_apply_observer() {
+    init_log_for_test();
+    let node_id = alloc_node_id();
+    let cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.rocksdb.writecf.write_buffer_size = ReadableSize::mb(1);
+    });
+    let mut client = cluster.new_client();
+    for i in 0..10 {
+        let start = i * 10;
+        client.put_kv(start..start + 10, i_to_key, i_to_val);
+    }
+    let rfengine = cluster.get_rfengine(node_id);
+    let kvengine = cluster.get_kvengine(node_id);
+    let recoverer = rfstore::store::RecoverHandler::new(rfengine.clone());
+    let mut apply_ctx = ApplyContext::new(kvengine.clone(), None);
+
+    let result: Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>> = Arc::new(Mutex::new(vec![]));
+    let observer = TestApplyObserver {
+        entries: vec![],
+        log_index: 0,
+        result: result.clone(),
+    };
+    apply_ctx.set_apply_observer(Box::new(observer));
+    let region_id = client.get_region_id(&i_to_key(0));
+    let shard = kvengine.get_shard(region_id).unwrap();
+    let region_peer_map = rfengine.get_region_peer_map();
+    let &peer_id = region_peer_map.get(&region_id).unwrap();
+    let store_id = rfengine.get_engine_id();
+    let shard_meta = rfstore::store::load_engine_meta(&rfengine, store_id, peer_id).unwrap();
+    recoverer
+        .recover_with_apply_ctx(&mut apply_ctx, &shard, &shard_meta)
+        .unwrap();
+    let mut observer = apply_ctx.take_apply_observer().unwrap();
+    observer.flush();
+    let guard = result.lock().unwrap();
+    for i in 0..guard.iter().len() {
+        let (key, val) = &guard[i];
+        assert_eq!(key, &i_to_key(i));
+        assert_eq!(val, &i_to_val(i));
+    }
+}
+
+struct TestApplyObserver {
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+    log_index: u64,
+    result: Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>>,
+}
+
+impl rfstore::store::ApplyObserver for TestApplyObserver {
+    fn on_apply(&mut self, _region_id: u64, log_index: u64, wb: &WriteBatch) {
+        let wb_write = wb.get_cf(WRITE_CF);
+        wb_write.iterate(|entry, buf| {
+            let key = entry.key(buf);
+            let val = entry.value(buf);
+            self.entries.push((key.to_vec(), val.to_vec()));
+        });
+        assert!(log_index >= self.log_index);
+        self.log_index = log_index;
+    }
+
+    fn flush(&mut self) {
+        let entries = mem::take(&mut self.entries);
+        let mut guard = self.result.lock().unwrap();
+        *guard = entries;
+    }
 }
 
 #[test]

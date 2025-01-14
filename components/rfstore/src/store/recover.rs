@@ -162,18 +162,15 @@ impl RecoverHandler {
         }
         Ok(())
     }
-}
 
-impl kvengine::RecoverHandler for RecoverHandler {
-    fn recover(
+    pub fn recover_with_apply_ctx(
         &self,
-        engine: &Engine,
+        ctx: &mut ApplyContext,
         shard: &Arc<Shard>,
         meta: &ShardMeta,
     ) -> kvengine::Result<()> {
         let tag = shard.tag();
         let applied_index = shard.get_write_sequence();
-        let mut ctx = ApplyContext::new(engine.clone(), None);
         let applied_index_term = shard.get_property(TERM_KEY).unwrap().get_u64_le();
         let apply_state = RaftApplyState::new(applied_index, applied_index_term);
         let (region_meta, preprocessed_index) = self.load_region_meta(shard.id, shard.ver);
@@ -224,26 +221,34 @@ impl kvengine::RecoverHandler for RecoverHandler {
                 } else if is_split_or_prepare_merge || admin.has_commit_merge() {
                     // We are recovering an parent shard, we need to switch the mem-table for
                     // children to copy.
-                    engine.switch_mem_table(shard, meta.base_version + ctx.exec_log_index, true);
+                    ctx.engine.switch_mem_table(
+                        shard,
+                        meta.base_version + ctx.exec_log_index,
+                        true,
+                    );
                     // It is the last command for a parent shard, we should return here.
                     return Ok(());
                 } else {
-                    Self::execute_admin_request(&mut applier, &mut ctx, req)?;
+                    Self::execute_admin_request(&mut applier, ctx, req)?;
                 }
             } else if let Some(custom) = rlog::get_custom_log(&req) {
                 if rlog::is_txn_file_ref(custom.data.chunk()) {
                     let txn_file_ref = custom.get_txn_file_ref().unwrap();
-                    prepare_txn_file_ref(engine, &txn_file_ref, encryption_key.clone())?;
+                    prepare_txn_file_ref(&ctx.engine, &txn_file_ref, encryption_key.clone())?;
                 }
                 if let Some(mut cs) = get_async_change_set(&custom) {
                     cs.sequence = e.get_index();
                     if meta.ver == cs.get_shard_ver() && !meta.is_duplicated_change_set(&mut cs) {
                         // We don't have a background region worker now, should do it synchronously.
-                        let cs =
-                            engine.prepare_change_set(cs, false, None, encryption_key.clone())?;
-                        engine.apply_change_set(cs)?;
+                        let cs = ctx.engine.prepare_change_set(
+                            cs,
+                            false,
+                            None,
+                            encryption_key.clone(),
+                        )?;
+                        ctx.engine.apply_change_set(cs)?;
                     }
-                } else if let Err(err) = applier.exec_custom_log(&mut ctx, &custom) {
+                } else if let Err(err) = applier.exec_custom_log(ctx, &custom) {
                     // Only duplicated pre-split may fail, we can ignore this error.
                     warn!("{} failed to execute custom log {:?}", tag, err);
                 }
@@ -252,6 +257,18 @@ impl kvengine::RecoverHandler for RecoverHandler {
             applier.apply_state.applied_index_term = ctx.exec_log_term;
         }
         Ok(())
+    }
+}
+
+impl kvengine::RecoverHandler for RecoverHandler {
+    fn recover(
+        &self,
+        engine: &Engine,
+        shard: &Arc<Shard>,
+        meta: &ShardMeta,
+    ) -> kvengine::Result<()> {
+        let mut ctx = ApplyContext::new(engine.clone(), None);
+        self.recover_with_apply_ctx(&mut ctx, shard, meta)
     }
 }
 

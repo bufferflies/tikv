@@ -79,11 +79,20 @@ impl WriteBatch {
         self.buf.clear();
     }
 
-    pub fn iterate<F>(&mut self, f: F)
+    pub fn iterate_mut<F>(&mut self, f: F)
     where
         F: Fn(&mut WriteBatchEntry, &[u8]),
     {
         for e in &mut self.entries {
+            f(e, self.buf.chunk())
+        }
+    }
+
+    pub fn iterate<F>(&self, mut f: F)
+    where
+        F: FnMut(&WriteBatchEntry, &[u8]),
+    {
+        for e in &self.entries {
             f(e, self.buf.chunk())
         }
     }

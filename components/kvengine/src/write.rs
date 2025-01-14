@@ -123,6 +123,10 @@ impl WriteBatch {
         &mut self.cf_batches[cf]
     }
 
+    pub fn get_cf(&self, cf: usize) -> &memtable::WriteBatch {
+        &self.cf_batches[cf]
+    }
+
     pub fn cf_len(&self, cf: usize) -> usize {
         self.cf_batches[cf].len()
     }
@@ -348,7 +352,7 @@ impl Engine {
     fn update_write_batch_version(&self, wb: &mut WriteBatch, version: u64) {
         for cf in 0..NUM_CFS {
             if !CF_MANAGED[cf] {
-                wb.get_cf_mut(cf).iterate(|e, _| {
+                wb.get_cf_mut(cf).iterate_mut(|e, _| {
                     e.version = version;
                 });
             };

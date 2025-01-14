@@ -641,6 +641,7 @@ impl Applier {
         ctx: &mut ApplyContext,
         cl: &CustomRaftLog<'_>,
     ) -> Result<(RaftCmdResponse, ApplyResult)> {
+        let mut observer = ctx.observer.take();
         let mut wb_ref = ctx.get_engine_wb(self.region.get_id());
         let wb = &mut wb_ref;
         let engine = &ctx.engine;
@@ -723,7 +724,11 @@ impl Applier {
             _ => panic!("unknown custom log type"),
         }
         let mem_table_size = ctx.engine.write(wb);
+        if let Some(observer) = &mut observer {
+            observer.on_apply(self.region_id(), log_index, wb);
+        }
         drop(wb_ref);
+        ctx.observer = observer;
         let mem_states = self.mut_mem_table_state(engine);
         if mem_states.mem_table_size > 0 && mem_table_size == 0 {
             mem_states.set_switch_time(timer);
@@ -2257,7 +2262,13 @@ pub(crate) struct ApplyRouter {}
 
 pub use kvengine::shard::TERM_KEY;
 
-pub(crate) struct ApplyContext {
+pub trait ApplyObserver: Send {
+    fn on_apply(&mut self, region_id: u64, log_index: u64, wb: &WriteBatch);
+
+    fn flush(&mut self);
+}
+
+pub struct ApplyContext {
     pub(crate) engine: kvengine::Engine,
     pub(crate) router: Option<RaftRouter>, // None in recover mode.
     pub(crate) exec_log_index: u64,
@@ -2267,6 +2278,7 @@ pub(crate) struct ApplyContext {
     wb: RefCell<WriteBatch>,
     pub(crate) apply_wait: LocalHistogram,
     pub(crate) apply_time: LocalHistogram,
+    pub(crate) observer: Option<Box<dyn ApplyObserver>>,
 }
 
 impl ApplyContext {
@@ -2279,7 +2291,16 @@ impl ApplyContext {
             wb: RefCell::new(WriteBatch::default()),
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
             apply_time: APPLY_TIME_HISTOGRAM.local(),
+            observer: None,
         }
+    }
+
+    pub fn set_apply_observer(&mut self, observer: Box<dyn ApplyObserver>) {
+        self.observer = Some(observer);
+    }
+
+    pub fn take_apply_observer(&mut self) -> Option<Box<dyn ApplyObserver>> {
+        self.observer.take()
     }
 
     pub(crate) fn get_engine_wb(&self, region_id: u64) -> RefMut<'_, WriteBatch> {
@@ -2288,7 +2309,7 @@ impl ApplyContext {
         wb
     }
 
-    pub fn finish_for(&self, applier: &mut Applier, results: VecDeque<ExecResult>) {
+    pub(crate) fn finish_for(&self, applier: &mut Applier, results: VecDeque<ExecResult>) {
         if let Some(router) = &self.router {
             let apply_res = MsgApplyResult {
                 peer_id: applier.id(),
