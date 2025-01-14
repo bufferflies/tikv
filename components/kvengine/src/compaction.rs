@@ -275,14 +275,14 @@ impl CompactionClient {
                             tag, req, e, retry_cnt, remote_compactor.remote_url
                         );
 
-                        if remote_compactor.permanent && retry_cnt >= 5
-                            || !remote_compactor.permanent && retry_cnt >= 3
-                        {
+                        if !remote_compactor.permanent && retry_cnt >= 3 {
                             retry_cnt = 0;
                             self.delete_remote_compactor(&remote_compactor);
                             remote_compactor = self.get_remote_compactor();
                         }
-                        if remote_compactor.remote_url.is_empty() {
+                        if remote_compactor.remote_url.is_empty()
+                            || (remote_compactor.permanent && retry_cnt >= 5)
+                        {
                             if self.allow_fallback_local {
                                 break local_compact(&ctx);
                             } else {
