@@ -332,6 +332,7 @@ impl<'a> PeerMsgHandler<'a> {
                 shard_ver,
                 callback,
             } => self.on_check_leader(shard_ver, callback),
+            CasualMessage::ClearColumnar => self.on_clear_columnar(),
         }
     }
 
@@ -1672,6 +1673,20 @@ impl<'a> PeerMsgHandler<'a> {
                 .push(self.region().clone());
         }
         callback.invoke_with_response(resp);
+    }
+
+    fn on_clear_columnar(&mut self) {
+        if !self.peer.is_leader() {
+            return;
+        }
+        let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
+        if shard_meta.schema_file_id == 0 {
+            return;
+        }
+        let mut change_set = kvengine::new_change_set(shard_meta.id, shard_meta.ver);
+        change_set.set_clear_columnar(true);
+        info!("{} propose clear_columnar", self.peer.tag());
+        self.propose_change_set(change_set);
     }
 
     fn on_ingest_files(&mut self, cs: kvenginepb::ChangeSet, callback: Callback) {

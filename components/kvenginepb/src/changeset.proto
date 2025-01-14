@@ -25,8 +25,9 @@ message ChangeSet {
   Snapshot initial_flush = 7;
   Split split = 10;
   bool shardDelete = 11;
-  // The sequence value is not set by the DB when generating the change set, user have to assign the value.
-  // If specified, we check sequence is monotonically increasing.
+  // The sequence value is not set by the DB when generating the change set,
+  // user have to assign the value. If specified, we check sequence is
+  // monotonically increasing.
   uint64 sequence = 12;
   ChangeSet parent = 13;
   IngestFiles ingest_files = 14;
@@ -41,6 +42,7 @@ message ChangeSet {
   SchemaMeta update_schema_meta = 23;
   ColumnarCompaction columnar_compaction = 24;
   UpdateVectorIndex update_vector_index = 25;
+  bool clear_columnar = 26;
 }
 
 message Compaction {
@@ -88,7 +90,8 @@ message Flush {
   Properties properties = 2;
   uint64 version = 3;
   uint64 max_ts = 5;
-  // used for txn file transaction which may be too large to flush a single L0 file.
+  // used for txn file transaction which may be too large to flush a single L0
+  // file.
   repeated L0Create l0Creates = 6;
 }
 
@@ -176,17 +179,18 @@ message TableChange {
   repeated TableDelete tableDeletes = 1;
   // Tables that created by destroy range / truncate ts.
   repeated TableCreate tableCreates = 2;
-  // For in-place compaction that each deleted file id followed by a created file id.
+  // For in-place compaction that each deleted file id followed by a created
+  // file id.
   repeated uint64 file_ids_map = 3;
-  // Columnar Tables that deleted by destroy range / truncate ts / compaction / trim over bound.
+  // Columnar Tables that deleted by destroy range / truncate ts / compaction /
+  // trim over bound.
   repeated ColumnarDelete columnarDeletes = 4;
-  // Columnar Tables that created by destroy range / truncate ts / compaction / trim over bound.
+  // Columnar Tables that created by destroy range / truncate ts / compaction /
+  // trim over bound.
   repeated ColumnarCreate columnarCreates = 5;
 }
 
-message TxnFileRefs {
-  repeated TxnFileRef txn_file_refs = 1;
-}
+message TxnFileRefs { repeated TxnFileRef txn_file_refs = 1; }
 
 message TxnFileRef {
   uint64 start_ts = 1;

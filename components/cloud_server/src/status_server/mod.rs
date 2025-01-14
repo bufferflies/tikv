@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use api_version::ApiV2;
+use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
 use async_stream::stream;
 use bytes::{Buf, BufMut, BytesMut};
 use collections::HashMap;
@@ -38,7 +38,7 @@ use hyper::{
 };
 use kvengine::{
     dfs::{DFSConfig, FileType},
-    Shard, ShardStats,
+    Shard, ShardStats, GLOBAL_SHARD_END_KEY,
 };
 use kvproto::{coprocessor::DelegateResponse, raft_serverpb::StoreIdent};
 use online_config::OnlineConfig;
@@ -1655,6 +1655,69 @@ impl StatusServer {
         Ok(Response::new(Body::empty()))
     }
 
+    /// Clear columnar data of the specified keyspace or shard.
+    ///
+    /// If keyspace_id is 0, clear all columnar data of all shards.
+    /// POST /clear_columnar?[keyspace_id=xxx][shard_id=1]
+    async fn handle_clear_columnar(
+        req: Request<Body>,
+        router: RaftRouter,
+    ) -> hyper::Result<Response<Body>> {
+        let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        if !query_pairs.contains_key("keyspace_id") && !query_pairs.contains_key("shard_id") {
+            return Ok(bad_request_resp("keyspace_id or shard_id not found"));
+        }
+        let mut shard_ids = vec![];
+        if query_pairs.contains_key("keyspace_id") {
+            let keyspace_id = match get_uint_param(&query_pairs, "keyspace_id") {
+                Some(keyspace_id) => keyspace_id,
+                None => {
+                    return Ok(bad_request_resp("keyspace_id not found"));
+                }
+            };
+            // If keyspace_id is 0, clear all columnar data of all shards.
+            let (start, end) = if keyspace_id == 0 {
+                (vec![TXN_KEY_PREFIX], GLOBAL_SHARD_END_KEY.to_vec())
+            } else {
+                ApiV2::get_txn_keyspace_range(keyspace_id as u32)
+            };
+            let (callback, future) = paired_future_callback();
+            router.send_store_msg(StoreMsg::GetRegionsInRange {
+                start,
+                end,
+                callback,
+            });
+            let res = future.await;
+            if res.is_err() {
+                return Ok(make_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to get regions in range",
+                ));
+            }
+            let region_id_vers = res.unwrap();
+            for region_id_ver in region_id_vers {
+                shard_ids.push(region_id_ver.id());
+                router.send_casual_msg(region_id_ver.id(), CasualMessage::ClearColumnar);
+            }
+        } else {
+            let shard_id = match get_uint_param(&query_pairs, "shard_id") {
+                Some(shard_id) => shard_id,
+                None => {
+                    return Ok(bad_request_resp("shard_id not found"));
+                }
+            };
+            shard_ids.push(shard_id);
+            router.send_casual_msg(shard_id, CasualMessage::ClearColumnar);
+        }
+
+        Ok(Response::new(Body::from(format!(
+            "clear columnar success, shard_ids: {:?}\n",
+            shard_ids
+        ))))
+    }
+
     pub fn stop(self) {
         let _ = self.tx.send(());
         self.thread_pool.shutdown_timeout(Duration::from_secs(3));
@@ -1998,6 +2061,9 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/schema_file") => {
                                 Self::handle_schema_file(req, router, engine).await
+                            }
+                            (Method::POST, path) if path.starts_with("/clear_columnar") => {
+                                Self::handle_clear_columnar(req, router).await
                             }
                             (Method::GET, path) if path.starts_with("/dfs/") => {
                                 Self::handle_dfs_file_read(req, engine).await

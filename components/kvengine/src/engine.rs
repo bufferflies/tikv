@@ -394,7 +394,13 @@ impl EngineCore {
             &cs,
         );
         let mut builder = ShardDataBuilder::new(shard.get_data());
-        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, self.opts.for_restore);
+        create_snapshot_tables(
+            &mut builder,
+            cs.get_snapshot(),
+            &cs,
+            self.opts.for_restore,
+            self.opts.ignore_columnar_table_load,
+        );
         // schema_file_id may be 0 after the columnar removed.
         let schema_file = (cs.get_snapshot().has_schema_meta()
             && cs.get_snapshot().get_schema_meta().get_file_id() != 0)

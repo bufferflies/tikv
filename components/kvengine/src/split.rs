@@ -257,6 +257,11 @@ impl Engine {
         target_id: u64,
         target_ver: u64,
     ) -> Result<CheckMergeResult> {
+        if self.opts.ignore_columnar_table_load {
+            return Err(Error::CheckMerge(
+                "ignore_columnar_table_load is enabled, disable region merge".to_string(),
+            ));
+        }
         let source_shard = self.get_shard_with_ver(source_id, source_ver)?;
         if !source_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("source not initial flushed".to_string()));

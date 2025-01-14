@@ -45,6 +45,7 @@ impl EngineCore {
         encryption_key: Option<EncryptionKey>, /* encryption_key will be ignored if cs is
                                                 * snapshot or restore_shard */
     ) -> Result<ChangeSet> {
+        let ignore_columnar = self.opts.ignore_columnar_table_load;
         let mut ids: HashMap<u64, FileMeta> = HashMap::new();
         let mut lock_txn_file_refs: Vec<TxnFileRef> = vec![];
         let mut schema_file = None;
@@ -166,7 +167,7 @@ impl EngineCore {
             if schema_file_id == 0 {
                 // Set schema_file to None if schema file id is 0, no need to mark tombstone.
                 schema_file = None;
-            } else {
+            } else if !ignore_columnar {
                 schema_file = Some(
                     self.fs
                         .get_runtime()
@@ -184,6 +185,13 @@ impl EngineCore {
             cs.unloaded_tables = ids
                 .extract_if(|_, tb| !table_filter(cs.shard_id, tb)) // !table_filter: table will not load
                 .collect();
+        }
+
+        if ignore_columnar {
+            ids.retain(|_, meta| {
+                meta.file_type != FileType::Columnar && meta.file_type != FileType::VectorIndex
+            });
+            schema_file = None;
         }
 
         info!(

@@ -462,6 +462,7 @@ pub enum CasualMessage {
         shard_ver: u64,
         callback: Callback,
     },
+    ClearColumnar,
 }
 
 impl fmt::Debug for CasualMessage {
@@ -508,6 +509,9 @@ impl fmt::Debug for CasualMessage {
             }
             CasualMessage::CheckLeader { shard_ver, .. } => {
                 write!(fmt, "check leader with version {}", shard_ver)
+            }
+            CasualMessage::ClearColumnar => {
+                write!(fmt, "clear columnar",)
             }
         }
     }

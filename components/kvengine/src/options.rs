@@ -80,6 +80,9 @@ pub struct Options {
     pub flow_control: FlowControlOptions,
 
     pub txn_file_worker_pool_size: usize,
+    /// Ignore columnar table load and ingest when start kvengine. This is used
+    /// for clear columnar replica in all shards when encounter critical issue.
+    pub ignore_columnar_table_load: bool,
 }
 
 impl Default for Options {
@@ -111,6 +114,7 @@ impl Default for Options {
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
             flow_control: Default::default(),
             txn_file_worker_pool_size: 16,
+            ignore_columnar_table_load: false,
         }
     }
 }

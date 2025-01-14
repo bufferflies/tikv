@@ -76,6 +76,8 @@ pub struct Config {
     pub flush_split_l0: bool,
     /// if enabled, major compaction will update inner key offset from 0 to 4.
     pub update_inner_key_offset: bool,
+    /// if enabled, columnar table will not be loaded.
+    pub ignore_columnar_table_load: bool,
 
     pub txn_file_worker_pool_size: Option<usize>,
 
@@ -114,6 +116,7 @@ impl Default for Config {
             per_keyspace_configs: vec![],
             columnar_table_build_options: Default::default(),
             vector_index_build_options: Default::default(),
+            ignore_columnar_table_load: false,
         }
     }
 }

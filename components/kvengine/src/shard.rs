@@ -435,7 +435,7 @@ impl Shard {
             Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), &ctx.master_key);
         let mut builder = ShardDataBuilder::new(shard.get_data());
         builder.set_mem_tbls(mem_tbls);
-        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, ignore_lock);
+        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, ignore_lock, false);
         builder.set_schema_file(cs.schema_file.clone());
         shard.id = cs.shard_id;
         shard.is_sync = is_sync;

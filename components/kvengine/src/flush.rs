@@ -262,7 +262,9 @@ impl Engine {
             blob_create.set_biggest(blob.biggest_key().to_vec());
             initial_flush.mut_blob_creates().push(blob_create);
         }
-        if let Some(schema_file) = &flush.shard_data.schema_file {
+        if !self.opts.ignore_columnar_table_load
+            && let Some(schema_file) = &flush.shard_data.schema_file
+        {
             // After split, the schema file may not overlap the schema file anymore.
             if schema_file.overlap(
                 &task.range.outer_start,

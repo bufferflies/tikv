@@ -1870,7 +1870,7 @@ mod tests {
             &master_key,
         );
         let mut builder = ShardDataBuilder::new(shard.get_data());
-        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, false);
+        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, false, false);
         builder.set_schema_file(cs.schema_file.clone());
         shard.set_data(builder.build());
         let snap = shard.new_snap_access();

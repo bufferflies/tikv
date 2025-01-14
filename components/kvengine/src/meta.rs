@@ -306,6 +306,10 @@ impl ShardMeta {
             self.apply_update_vector_index(cs.get_update_vector_index());
             return;
         }
+        if cs.get_clear_columnar() {
+            self.clear_columnar();
+            return;
+        }
         if !cs.get_property_key().is_empty() {
             if cs.get_property_merge() {
                 // Now only DEL_PREFIXES_KEY is mergeable.
@@ -944,6 +948,21 @@ impl ShardMeta {
             vec_idx.mut_files().push(file.clone());
         }
         self.vector_indexes.push(vec_idx)
+    }
+
+    pub fn clear_columnar(&mut self) {
+        info!("{} shard_meta apply clear_columnar", self.tag());
+        self.schema_file_id = 0;
+        self.schema_restore_ver = 0;
+        self.schema_file_ver = 0;
+        self.columnar_snap_version = 0;
+        self.unconverted_l0s.clear();
+        self.vector_indexes.clear();
+        self.files.retain(|_, fm| {
+            fm.file_type != FileType::Columnar
+                && fm.file_type != FileType::Schema
+                && fm.file_type != FileType::VectorIndex
+        });
     }
 
     pub fn to_change_set(&self) -> pb::ChangeSet {

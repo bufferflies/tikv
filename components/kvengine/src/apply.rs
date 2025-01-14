@@ -121,6 +121,7 @@ pub(crate) fn create_snapshot_tables(
     snap: &kvenginepb::Snapshot,
     tables: &ChangeSet,
     not_all_tables_loaded: bool,
+    ignore_columnar: bool,
 ) {
     // Note: Some tables in `snap` will not exist in `tables` if it's not necessary
     // to load from DFS.
@@ -178,41 +179,43 @@ pub(crate) fn create_snapshot_tables(
         scfs[cf] = scf.build();
     }
     let mut col_levels = ColumnarLevels::new();
-    for col_create in snap.get_columnar_creates() {
-        if let Some(col_file) = tables.col_files.get(&col_create.id) {
-            col_levels.add_file(col_create.level as usize, col_file.clone());
-        } else {
-            assert!(
-                not_all_tables_loaded,
-                "columnar_create: {:?}, tables: {:?}",
-                col_create, tables,
-            );
-        }
-    }
-    for &l0_id in snap.get_unconverted_l0s() {
-        if let Some(unconverted_l0) = l0_tbls.iter().find(|l0| l0.id() == l0_id) {
-            col_levels.unconverted_l0s.push(unconverted_l0.clone());
-        } else {
-            assert!(
-                not_all_tables_loaded,
-                "unconverted_l0: {:?}, tables: {:?}",
-                l0_id, tables
-            );
-        }
-    }
-    col_levels.sort();
     let mut vector_indexes = VectorIndexes::default();
-    for vec_idx_pb in snap.get_vector_indexes() {
-        for vec_idx_file_pb in vec_idx_pb.get_files() {
-            let vec_idx_file = tables
-                .vec_index_files
-                .get(&vec_idx_file_pb.get_id())
-                .unwrap()
-                .clone();
-            vector_indexes.add_index_file(vec_idx_file);
+    if !ignore_columnar {
+        for col_create in snap.get_columnar_creates() {
+            if let Some(col_file) = tables.col_files.get(&col_create.id) {
+                col_levels.add_file(col_create.level as usize, col_file.clone());
+            } else {
+                assert!(
+                    not_all_tables_loaded,
+                    "columnar_create: {:?}, tables: {:?}",
+                    col_create, tables,
+                );
+            }
         }
+        for &l0_id in snap.get_unconverted_l0s() {
+            if let Some(unconverted_l0) = l0_tbls.iter().find(|l0| l0.id() == l0_id) {
+                col_levels.unconverted_l0s.push(unconverted_l0.clone());
+            } else {
+                assert!(
+                    not_all_tables_loaded,
+                    "unconverted_l0: {:?}, tables: {:?}",
+                    l0_id, tables
+                );
+            }
+        }
+        col_levels.sort();
+        for vec_idx_pb in snap.get_vector_indexes() {
+            for vec_idx_file_pb in vec_idx_pb.get_files() {
+                let vec_idx_file = tables
+                    .vec_index_files
+                    .get(&vec_idx_file_pb.get_id())
+                    .unwrap()
+                    .clone();
+                vector_indexes.add_index_file(vec_idx_file);
+            }
+        }
+        vector_indexes.sort();
     }
-    vector_indexes.sort();
     builder.set_l0_tbls(l0_tbls);
     builder.set_blob_tbls(blob_tbl_map);
     builder.set_cfs(scfs);
@@ -288,6 +291,8 @@ impl EngineCore {
             self.apply_restore_shard(&shard, &cs)?;
         } else if cs.has_update_schema_meta() {
             self.apply_update_schema_meta(&shard, &cs);
+        } else if cs.get_clear_columnar() {
+            self.apply_clear_columnar(&shard);
         }
         debug!("{} finished applying change set: {:?}", shard.tag(), cs);
 
@@ -337,7 +342,10 @@ impl EngineCore {
             new_l0_tbls.extend_from_slice(l0s.as_slice());
             new_l0_tbls.extend_from_slice(old_data.l0_tbls.as_slice());
             let mut col_levels = old_data.col_levels.clone();
-            if old_data.schema_file.is_some() && shard.get_columnar_snap_version() > 0 {
+            if old_data.schema_file.is_some()
+                && shard.get_columnar_snap_version() > 0
+                && !self.opts.ignore_columnar_table_load
+            {
                 col_levels.unconverted_l0s.extend_from_slice(l0s.as_slice());
             }
             let mut builder = ShardDataBuilder::new(old_data);
@@ -369,7 +377,13 @@ impl EngineCore {
         let mut mem_tbls = data.mem_tbls.clone();
 
         let mut builder = ShardDataBuilder::new(data.clone());
-        create_snapshot_tables(&mut builder, initial_flush, cs, self.opts.for_restore);
+        create_snapshot_tables(
+            &mut builder,
+            initial_flush,
+            cs,
+            self.opts.for_restore,
+            self.opts.ignore_columnar_table_load,
+        );
         // `lock_txn_files` is ignored because it does not depend on initial flush to
         // keep consistency between peers, as only target region has txn file locks.
         builder.set_lock_txn_files(data.lock_txn_files.clone());
@@ -864,6 +878,7 @@ impl EngineCore {
             cs.get_restore_shard(),
             cs,
             self.opts.for_restore,
+            self.opts.ignore_columnar_table_load,
         );
         builder.set_schema_file(cs.schema_file.clone());
         new_shard.set_data(builder.build());
@@ -903,6 +918,17 @@ impl EngineCore {
             assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
             shard.set_property(STORAGE_CLASS_KEY, cs.get_property_value());
         }
+    }
+
+    fn apply_clear_columnar(&self, shard: &Shard) {
+        info!("{} shard apply clear_columnar", shard.tag());
+        let old_data = shard.get_data();
+        let mut builder = ShardDataBuilder::new(old_data);
+        builder.set_schema_file(None);
+        builder.set_columnar_levels(ColumnarLevels::new());
+        builder.set_vector_indexes(VectorIndexes::default());
+        shard.set_data(builder.build());
+        store_u64(&shard.col_snap_version, 0);
     }
 
     fn apply_columnar_compaction(&self, shard: &Shard, cs: &ChangeSet) {

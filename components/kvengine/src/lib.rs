@@ -6,10 +6,10 @@
 #![feature(extract_if)]
 #![feature(assert_matches)]
 #![feature(cell_update)]
+#![feature(let_chains)]
 #![allow(clippy::diverging_sub_expression)]
 #![allow(internal_features)]
 #![cfg_attr(test, feature(test))]
-
 #[cfg(test)]
 extern crate test;
 
