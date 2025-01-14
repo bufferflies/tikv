@@ -14,7 +14,7 @@ use pd_client::PdClient;
 use rand::{rngs::ThreadRng, Rng};
 use security::SecurityConfig;
 use test_cloud_server::{
-    keyspace::{make_key, ClusterKeyspaceClient, KeyspaceManager},
+    keyspace::{make_row_key, ClusterKeyspaceClient, KeyspaceManager},
     load_data::{build, cleanup, init_task, put_chunks},
 };
 use tikv_util::{info, time::Instant};
@@ -158,7 +158,8 @@ fn do_load_data(
     let data_count = rng.gen_range(1..=10) * 1000_usize; // generate at most about 2.5MB (10000 x 256) data, 160 (2.5MB / 16KB) SST files.
     let data_batch_size = rng.gen_range(1..=10) * 10_usize;
     let writer_count = rng.gen_range(1..=5);
-    let generate_key = move |i: usize| -> Vec<u8> { make_key(keyspace_id, table_id, &i_to_key(i)) };
+    let generate_key =
+        move |i: usize| -> Vec<u8> { make_row_key(keyspace_id, table_id, &i_to_key(i)) };
     let generate_row_id = move |i: usize| -> Vec<u8> { i.to_be_bytes().to_vec() };
     let ref_store = put_chunks(
         &scheduler,
@@ -188,8 +189,8 @@ fn do_load_data(
     // Verify the data consistency, to find problems earlier.
     // Must be in lock context to block restore.
     // TODO: remove when it's stable.
-    let start_key = make_key(keyspace_id, table_id, &[]);
-    let end_key = make_key(keyspace_id, table_id + 1, &[]);
+    let start_key = make_row_key(keyspace_id, table_id, &[]);
+    let end_key = make_row_key(keyspace_id, table_id + 1, &[]);
     let verified_count = runtime
         .block_on(client.verify_data_by_scan(&ref_store, Some((&start_key, &end_key))))
         .expect("verify data of load_data failed");

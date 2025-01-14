@@ -10,7 +10,7 @@ use std::{
 use kvengine::{dfs::DFSConfig, table::sstable::BlockCacheType};
 use pd_client::{
     pd_control,
-    pd_control::{OpKind, PdScheduleConfig},
+    pd_control::{OpKind, PdControl, PdScheduleConfig},
 };
 use rand::prelude::*;
 use security::SecurityConfig;
@@ -64,7 +64,7 @@ const TIDB_PORT_ENV_KEY: &str = "TIDB_PORT";
 const TIDB_PORT_DEFAULT: u16 = 4000;
 const TIDB_STATUS_PORT_ENV_KEY: &str = "TIDB_STATUS_PORT";
 const TIDB_STATUS_PORT_DEFAULT: u16 = 10080;
-pub(crate) const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(600); // TODO: improve the efficiency of TiDB start up.
 pub(crate) const TIDB_LOG_LEVEL: &str = "info";
 
 pub(crate) const TIKV_SERVER_BIN_ENV_KEY: &str = "TIKV_SERVER_BIN";
@@ -92,6 +92,7 @@ pub(crate) const COLUMNAR_WORKLOAD_KEYSPACE: u32 = 1;
 
 pub(crate) const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
+// FIXME: Remove after all regions of prod env switched to inner_key_off = 4.
 pub(crate) const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset.
 
 pub(crate) const ENABLE_GLOBAL_TXN_FILE_RATIO: f64 = 0.8; // 80% chance enable txn file globally.
@@ -126,7 +127,7 @@ fn test_random_with_tidb() {
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
         &switches,
-        Some(&tc),
+        &tc,
     );
     let pd_client = cluster.get_pd_client_ext();
     let pd_ctl = Arc::new(cluster.get_pd_control().unwrap());
@@ -231,18 +232,15 @@ fn prepare_cluster(
     nodes_count: usize,
     initial_keyspace_count: usize,
     switches: &Switches,
-    tc: Option<&TidbCluster>,
+    tc: &TidbCluster,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
     let tikv_worker_nodes = alloc_node_id_vec(TIKV_WORKERS_COUNT);
     let update_conf_fn =
         generate_update_conf_fn(dfs_config, security_conf, &tikv_worker_nodes, switches);
-    let pd_wrapper = match tc {
-        Some(tc) => PdWrapper::new_real(tc.pd.endpoints(), security_conf),
-        None => PdWrapper::new_test(1, security_conf, None),
-    };
-    let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
+    let pd = PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
+    let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd);
     cluster.start_tikv_workers(
         tikv_worker_nodes,
         TikvWorkerOptions {
@@ -256,31 +254,15 @@ fn prepare_cluster(
     }
     cluster.wait_region_replicated(&[], 3);
 
-    let mut keyspaces: Vec<u32> = vec![];
-    let mut keyspace_names: Vec<String> = vec![];
-    match tc {
-        Some(tc) => {
-            let pd_control = tc.pd.get_pd_control();
-
-            // Initial keyspaces have been created by `pre_alloc_keyspaces` of PD.
-            // Note: keyspaces allocation starts from 1.
-            for idx in 1..=initial_keyspace_count {
-                let keyspace_name = TidbCluster::keyspace_name(idx as u16);
-                let keyspace = block_on(pd_control.get_keyspace_by_name(&keyspace_name)).unwrap();
-                keyspaces.push(keyspace.id);
-                keyspace_names.push(keyspace_name);
-            }
-        }
-        None => {
-            // TODO
-            unimplemented!();
-        }
-    }
+    let pd_control = tc.pd.get_pd_control();
+    // Initial keyspaces have been created by `pre_alloc_keyspaces` of PD.
+    let (keyspace_ids, keyspace_names) =
+        get_pre_alloc_keyspaces(initial_keyspace_count, &pd_control);
 
     // TODO: create by API to be uniform with test PD.
     // TODO: enable encryption.
     cluster.keyspace_manager().create_keyspaces(
-        &keyspaces,
+        &keyspace_ids,
         keyspace_names,
         DEFAULT_INNER_KEY_OFFSET,
         0,
@@ -344,6 +326,25 @@ pub(crate) fn generate_update_conf_fn<'a>(
             conf.kvengine.remote_coprocessor_min_blocks_size = switches.remote_cop_min_block_size;
         }
     }
+}
+
+pub(crate) fn get_pre_alloc_keyspaces(
+    initial_keyspace_count: usize,
+    pd_control: &PdControl,
+) -> (
+    Vec<u32>,    // keyspace_ids
+    Vec<String>, // keyspace_names
+) {
+    let mut ids = vec![];
+    let mut names = vec![];
+    // Note: keyspaces allocation starts from 1.
+    for idx in 1..=initial_keyspace_count {
+        let keyspace_name = TidbCluster::keyspace_name(idx as u16);
+        let keyspace = block_on(pd_control.get_keyspace_by_name(&keyspace_name)).unwrap();
+        ids.push(keyspace.id);
+        names.push(keyspace_name);
+    }
+    (ids, names)
 }
 
 pub(crate) fn start_components(

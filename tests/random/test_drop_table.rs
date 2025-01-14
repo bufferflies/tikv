@@ -4,7 +4,7 @@ use std::{sync::atomic::Ordering, time::Duration};
 
 use test_cloud_server::{
     client::ClusterTxnClient,
-    keyspace::{make_key, ClusterKeyspaceClient, KeyspaceManager},
+    keyspace::{make_row_key, ClusterKeyspaceClient, KeyspaceManager},
 };
 use tikv_util::{info, time::Instant};
 
@@ -81,8 +81,8 @@ pub(crate) async fn pick_and_run_pending_destroy_range(
             );
         }
 
-        let start_key = make_key(keyspace_id, task.table_id, &[]);
-        let end_key = make_key(keyspace_id, task.table_id + 1, &[]);
+        let start_key = make_row_key(keyspace_id, task.table_id, &[]);
+        let end_key = make_row_key(keyspace_id, task.table_id + 1, &[]);
 
         info!("pick_and_run_pending_destroy_range: kv_unsafe_destroy_range";
             "start_key" => log_wrappers::hex_encode_upper(&start_key),

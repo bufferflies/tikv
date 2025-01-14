@@ -222,8 +222,8 @@ impl KeyspaceManagerCore {
     }
 
     pub fn drop_table(&self, keyspace_id: u32, table_id: i64, ts: u64) {
-        let start = make_key(keyspace_id, table_id, &[]);
-        let end = make_key(keyspace_id, table_id + 1, &[]);
+        let start = make_row_key(keyspace_id, table_id, &[]);
+        let end = make_row_key(keyspace_id, table_id + 1, &[]);
         debug_assert!(tidb_query_common::util::is_prefix_next(&start, &end));
 
         self.keyspaces
@@ -577,7 +577,7 @@ impl ClusterKeyspaceClient {
         for i in rng {
             let mut m = Mutation::default();
             m.set_op(Op::Put);
-            m.set_key(make_key(keyspace_id, table_id, &gen_user_key(i)));
+            m.set_key(make_row_key(keyspace_id, table_id, &gen_user_key(i)));
             m.set_value(gen_val(i));
             mutations.push(m)
         }
@@ -604,7 +604,7 @@ impl ClusterKeyspaceClient {
         for i in rng {
             let mut m = Mutation::default();
             m.set_op(Op::Del);
-            m.set_key(make_key(keyspace_id, table_id, &gen_user_key(i)));
+            m.set_key(make_row_key(keyspace_id, table_id, &gen_user_key(i)));
             mutations.push(m)
         }
         self.kv_mutate(mutations.clone(), Duration::from_secs(30))
@@ -697,7 +697,7 @@ const TABLE_PREFIX: &[u8] = b"t";
 const RECORD_PREFIX_SEP: &[u8] = b"_r";
 const INDEX_PREFIX_SEP: &[u8] = b"_i";
 
-pub fn make_key_ext(keyspace_id: u32, table_id: i64, sep: &[u8], user_key: &[u8]) -> Vec<u8> {
+pub fn make_table_key(keyspace_id: u32, table_id: i64, sep: &[u8], user_key: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(
         4 + TABLE_PREFIX.len() + mem::size_of_val(&table_id) + sep.len() + user_key.len(),
     );
@@ -712,13 +712,13 @@ pub fn make_key_ext(keyspace_id: u32, table_id: i64, sep: &[u8], user_key: &[u8]
 }
 
 #[inline]
-pub fn make_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
-    make_key_ext(keyspace_id, table_id, RECORD_PREFIX_SEP, user_key)
+pub fn make_row_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
+    make_table_key(keyspace_id, table_id, RECORD_PREFIX_SEP, user_key)
 }
 
 #[inline]
 pub fn make_index_key(keyspace_id: u32, table_id: i64, user_key: &[u8]) -> Vec<u8> {
-    make_key_ext(keyspace_id, table_id, INDEX_PREFIX_SEP, user_key)
+    make_table_key(keyspace_id, table_id, INDEX_PREFIX_SEP, user_key)
 }
 
 #[derive(Clone)]

@@ -335,7 +335,11 @@ fn test_on_real_pd() {
     let _guard = runtime.enter();
 
     let node_ids = alloc_node_id_vec(3);
-    let pd_wrapper = PdWrapper::new_real(pd_addrs, &SecurityConfig::default());
+    let pd_wrapper = PdWrapper::new_real(
+        pd_addrs,
+        &SecurityConfig::default(),
+        ReadableDuration::secs(30),
+    );
     let mut cluster = ServerCluster::new_opt(node_ids, |_, _| {}, pd_wrapper);
 
     runtime.block_on(async {
@@ -390,7 +394,11 @@ fn test_pd_control() {
     let _guard = runtime.enter();
 
     let node_ids = alloc_node_id_vec(3);
-    let pd_wrapper = PdWrapper::new_real(pd_addrs, &SecurityConfig::default());
+    let pd_wrapper = PdWrapper::new_real(
+        pd_addrs,
+        &SecurityConfig::default(),
+        ReadableDuration::secs(30),
+    );
     let pd_ctl = Arc::new(pd_wrapper.get_pd_control().unwrap());
     let mut cluster = ServerCluster::new_opt(node_ids, |_, _| {}, pd_wrapper);
 

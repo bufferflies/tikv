@@ -102,23 +102,29 @@ pub struct RealPd {
     client: Arc<pd_client::RpcClient>,
     endpoints: Vec<String>,
     security_mgr: Arc<SecurityManager>,
+    client_update_interval: ReadableDuration,
 }
 
 impl RealPd {
     fn new_client_impl(
         endpoints: Vec<String>,
         security_mgr: Arc<SecurityManager>,
+        client_update_interval: ReadableDuration,
     ) -> pd_client::RpcClient {
         let env = Arc::new(EnvBuilder::new().cq_count(1).build());
         let mut cfg = pd_client::Config::new(endpoints);
-        cfg.update_interval = ReadableDuration::secs(1);
+        cfg.update_interval = client_update_interval;
         cfg.validate().unwrap();
         pd_client::RpcClient::new(&cfg, Some(env), security_mgr)
             .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
     }
 
     pub fn new_client(&self) -> pd_client::RpcClient {
-        Self::new_client_impl(self.endpoints.clone(), self.security_mgr.clone())
+        Self::new_client_impl(
+            self.endpoints.clone(),
+            self.security_mgr.clone(),
+            self.client_update_interval,
+        )
     }
 
     pub fn get_pd_control(&self) -> pd_client::pd_control::Result<PdControl> {
@@ -161,13 +167,22 @@ impl PdWrapper {
         })
     }
 
-    pub fn new_real(endpoints: Vec<String>, security_conf: &SecurityConfig) -> Self {
+    pub fn new_real(
+        endpoints: Vec<String>,
+        security_conf: &SecurityConfig,
+        client_update_interval: ReadableDuration,
+    ) -> Self {
         let security_mgr = Arc::new(SecurityManager::new(security_conf).unwrap());
-        let client = RealPd::new_client_impl(endpoints.clone(), security_mgr.clone());
+        let client = RealPd::new_client_impl(
+            endpoints.clone(),
+            security_mgr.clone(),
+            client_update_interval,
+        );
         Self::Real(RealPd {
             client: Arc::new(client),
             endpoints,
             security_mgr,
+            client_update_interval,
         })
     }
 

@@ -23,9 +23,12 @@ use pd_client::{
 use security::{RestfulClient, SecurityConfig, SecurityManager};
 use serde_derive::{Deserialize, Serialize};
 use tempfile::TempDir;
-use tikv_util::{box_err, config::ReadableDuration, info, warn};
+use tikv_util::{box_err, config::ReadableDuration, info, time::Instant, warn};
 
 use crate::{tiflash::TiFlashServers, try_wait, try_wait_result_async};
+
+// Set small update_interval to speed up recover new tso from legacy tso.
+pub const PD_CLIENT_UPDATE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 
 const TXN_CHUNK_WRITER_CONCURRENCY: u64 = 4;
 
@@ -258,8 +261,7 @@ impl PdServers {
         let env = Arc::new(EnvBuilder::new().cq_count(1).build());
         let mgr = self.security_mgr.clone();
         let mut cfg = pd_client::Config::new(endpoints);
-        // Set update_interval to 1 to speed up recover new tso from legacy tso
-        cfg.update_interval = ReadableDuration::secs(1);
+        cfg.update_interval = PD_CLIENT_UPDATE_INTERVAL;
         cfg.validate().unwrap();
         pd_client::RpcClient::new_async(&cfg, Some(env), mgr)
             .await
@@ -593,6 +595,7 @@ impl TidbClusterCore {
         log_level: &str,
         options: StartTidbOptions,
     ) {
+        let start_time = Instant::now_coarse();
         let pd_endpoints = self.pd.endpoints();
         // Start from 1 as keyspace 0 is reserved.
         for idx in 1..=count {
@@ -600,6 +603,7 @@ impl TidbClusterCore {
                 .start(idx, &pd_endpoints, log_level, options.clone());
         }
         self.tidb.must_all_healthy(timeout).await;
+        info!("start TiDB success"; "takes" => ?start_time.saturating_elapsed());
     }
 
     pub fn start_tiflash(
@@ -609,6 +613,7 @@ impl TidbClusterCore {
         timeout: Duration,
         tiflash_compute_mode: bool,
     ) {
+        let start_time = Instant::now_coarse();
         let pd_endpoints = self.pd.endpoints();
         for idx in 0..count {
             self.tiflash
@@ -619,6 +624,7 @@ impl TidbClusterCore {
         if !tiflash_compute_mode {
             self.wait_tiflash_up(count, timeout);
         }
+        info!("start TiFlash success"; "takes" => ?start_time.saturating_elapsed());
     }
 
     pub fn wait_tiflash_up(&self, count: u16, timeout: Duration) {
@@ -726,6 +732,7 @@ struct TsoSvcStatus {
 #[serde(rename_all = "kebab-case")]
 struct TidbConfig {
     keyspace_name: String,
+    split_table: bool, // Set to false.
     disaggregated_tiflash: bool,
     use_autoscaler: bool,
     tikv_client: TikvClientConfig,

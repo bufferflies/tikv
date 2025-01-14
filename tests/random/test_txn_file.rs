@@ -69,7 +69,7 @@ pub(crate) fn spawn_txn_file_write(
                 let gen_key = |i| {
                     let mut user_key = i_to_key(i);
                     user_key.extend_from_slice(format!("{:02}", thread_idx).as_bytes());
-                    keyspace::make_key(keyspace_id, table_id, &user_key)
+                    keyspace::make_row_key(keyspace_id, table_id, &user_key)
                 };
                 // Generate index: start_ts -> first_key
                 let gen_index = move |start_ts: u64, muts: &[Mutation]| -> Vec<(Bytes, Bytes)> {

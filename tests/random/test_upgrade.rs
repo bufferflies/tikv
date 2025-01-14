@@ -36,6 +36,10 @@ const WAIT_TIKV_WORKER_HEALTHY_TIMEOUT: Duration = Duration::from_secs(15);
 #[test]
 fn test_random_upgrade() {
     let _logger_guard = test_util::init_log_for_test_async();
+
+    let temp_dir = std::env::temp_dir();
+    tikv_util::set_panic_hook(false, temp_dir.to_str().unwrap()); // To prevent temp dirs from being dropped on error.
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(4)
@@ -297,7 +301,8 @@ fn prepare_cluster(
     let tikv_worker_nodes = alloc_node_id_vec(TIKV_WORKERS_COUNT);
     let update_conf_fn =
         generate_update_conf_fn(dfs_config, security_conf, &tikv_worker_nodes, switches);
-    let pd_wrapper = PdWrapper::new_real(tc.pd.endpoints(), security_conf);
+    let pd_wrapper =
+        PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
     let mut cluster = ServerCluster::new_opt(vec![], |_, _| {}, pd_wrapper);
 
     // Start tikv-servers.
@@ -335,24 +340,15 @@ fn prepare_cluster(
     }
     cluster.wait_region_replicated(&[], 3);
 
-    let mut keyspaces: Vec<u32> = vec![];
-    let mut keyspace_names: Vec<String> = vec![];
-
     let pd_control = tc.pd.get_pd_control();
-
     // Initial keyspaces have been created by `pre_alloc_keyspaces` of PD.
-    // Note: keyspaces allocation starts from 1.
-    for idx in 1..=initial_keyspace_count {
-        let keyspace_name = TidbCluster::keyspace_name(idx as u16);
-        let keyspace = block_on(pd_control.get_keyspace_by_name(&keyspace_name)).unwrap();
-        keyspaces.push(keyspace.id);
-        keyspace_names.push(keyspace_name);
-    }
+    let (keyspace_ids, keyspace_names) =
+        get_pre_alloc_keyspaces(initial_keyspace_count, &pd_control);
 
     // TODO: create by API to be uniform with test PD.
     // TODO: enable encryption.
     cluster.keyspace_manager().create_keyspaces(
-        &keyspaces,
+        &keyspace_ids,
         keyspace_names,
         DEFAULT_INNER_KEY_OFFSET,
         0,
