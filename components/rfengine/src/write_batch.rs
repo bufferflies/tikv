@@ -46,6 +46,17 @@ impl WriteBatch {
         self.get_peer(peer_id, region_id).get_state(key)
     }
 
+    pub fn reset_truncated_idx(&mut self, peer_id: u64) -> Option<u64> {
+        let peer_batch = self.peers.get_mut(&peer_id)?;
+        let truncated_idx = peer_batch.truncated_idx;
+        if peer_batch.truncated_idx > 0 {
+            peer_batch.truncated_idx = 0;
+            Some(truncated_idx)
+        } else {
+            None
+        }
+    }
+
     pub fn clear_peer(&mut self, peer_id: u64) {
         self.peers.remove(&peer_id);
     }

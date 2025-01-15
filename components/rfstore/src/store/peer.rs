@@ -3861,7 +3861,7 @@ fn make_transfer_leader_response() -> RaftCmdResponse {
     resp
 }
 
-pub(crate) fn get_preprocess_cmd(entry: &eraftpb::Entry) -> Option<RaftCmdRequest> {
+pub fn get_preprocess_cmd(entry: &eraftpb::Entry) -> Option<RaftCmdRequest> {
     if entry.entry_type != eraftpb::EntryType::EntryNormal {
         return None;
     }
@@ -4027,7 +4027,7 @@ impl<'a> PreprocessRef<'a> {
     }
 
     pub fn write_raft_state(&mut self, ctx: &mut PreprocessContext<'_>) {
-        debug!("{} write raft state {:?}", self.tag(), self.raft_state);
+        info!("{} write raft state {:?}", self.tag(), self.raft_state);
         write_raft_state(
             ctx.raft_wb,
             self.peer_id(),

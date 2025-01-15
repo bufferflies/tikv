@@ -36,6 +36,7 @@ pub struct RecoverHandler {
     black_list: Option<BlackList>,
     contained_region_ids: Option<HashSet<u64>>,
     files_in_blacklist: Vec<u64>,
+    merged_engine: bool,
 }
 
 pub const BLACK_LIST_FILE: &str = "black_list_file";
@@ -93,11 +94,16 @@ impl RecoverHandler {
             black_list: None,
             contained_region_ids: None,
             files_in_blacklist: vec![],
+            merged_engine: false,
         }
     }
 
     pub fn set_contained_region_ids(&mut self, mut region_ids: Vec<u64>) {
         self.contained_region_ids = Some(HashSet::from_iter(region_ids.drain(..)))
+    }
+
+    pub fn set_merged_engine(&mut self, merged_engine: bool) {
+        self.merged_engine = merged_engine;
     }
 
     pub fn set_black_list(&mut self, black_list: BlackList) {
@@ -109,7 +115,7 @@ impl RecoverHandler {
     }
 
     fn load_region_meta(&self, shard_id: u64, shard_ver: u64) -> (metapb::Region, u64) {
-        let &peer_id = self.region_peer_map.get(&shard_id).unwrap();
+        let peer_id = self.get_peer_id(shard_id);
         let tag = PeerTag::new(self.store_id, RegionIdVer::new(shard_id, shard_ver));
 
         let mut region_state = self
@@ -163,6 +169,14 @@ impl RecoverHandler {
         Ok(())
     }
 
+    fn get_peer_id(&self, shard_id: u64) -> u64 {
+        if self.merged_engine {
+            shard_id
+        } else {
+            *self.region_peer_map.get(&shard_id).unwrap()
+        }
+    }
+
     pub fn recover_with_apply_ctx(
         &self,
         ctx: &mut ApplyContext,
@@ -181,7 +195,7 @@ impl RecoverHandler {
             tag, applied_index, preprocessed_index,
         );
         let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
-        let &peer_id = self.region_peer_map.get(&shard.id).unwrap();
+        let peer_id = self.get_peer_id(shard.id);
         self.rf_engine
             .fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entries)
             .map_err(|e| {

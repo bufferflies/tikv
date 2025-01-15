@@ -20,8 +20,8 @@ use raft_proto::{
 use raft_serverpb::RegionLocalState;
 use raftstore::store::{util, util::conf_state_from_region};
 use rfengine::{
-    self, raft_state_key, region_state_key, KV_ENGINE_META_KEY, RAFT_TRUNCATED_STATE_KEY,
-    REGION_META_KEY_PREFIX,
+    self, raft_state_key, region_state_key, KV_ENGINE_META_KEY, RAFT_STATE_KEY_BYTE,
+    RAFT_TRUNCATED_STATE_KEY, REGION_META_KEY_PREFIX,
 };
 use tikv_util::{box_err, debug, info};
 
@@ -792,6 +792,15 @@ pub fn load_peer_raft_state(
     let mut raft_state = RaftState::default();
     raft_state.unmarshal(raft_state_val.as_ref());
     Some(raft_state)
+}
+
+pub fn load_last_raft_state(raft: &rfengine::RfEngine, peer_id: u64) -> Option<RaftState> {
+    raft.get_last_state_with_prefix(peer_id, &[RAFT_STATE_KEY_BYTE])
+        .map(|v| {
+            let mut raft_state = RaftState::default();
+            raft_state.unmarshal(&v);
+            raft_state
+        })
 }
 
 pub fn collect_prefix_regions(

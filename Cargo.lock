@@ -4381,6 +4381,7 @@ dependencies = [
  "native_br",
  "pd_client",
  "protobuf",
+ "raft-proto",
  "resolved_ts",
  "rfengine",
  "rfenginepb",

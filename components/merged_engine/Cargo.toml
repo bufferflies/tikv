@@ -15,6 +15,7 @@ log = "0.4.19"
 native_br = { workspace = true }
 pd_client = { workspace = true }
 protobuf = { version = "2.8", features = ["bytes"] }
+raft-proto = { version = "0.7.0", default-features = false }
 resolved_ts = { workspace = true }
 rfengine = { workspace = true }
 rfenginepb = { workspace = true }

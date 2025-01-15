@@ -1257,11 +1257,15 @@ impl Shard {
         !self.get_data().vector_indexes.is_empty()
     }
 
+    pub fn get_encryption_key(&self) -> Option<EncryptionKey> {
+        self.encryption_key.clone()
+    }
+
     pub(crate) fn ready_to_compact(&self) -> bool {
         self.is_active() && self.get_initial_flushed()
     }
 
-    pub(crate) fn add_parent_data(&self, parent: Arc<Shard>) {
+    pub fn add_parent_data(&self, parent: Arc<Shard>) {
         let shard_data = self.get_data();
         let parent_data = parent.get_data();
 

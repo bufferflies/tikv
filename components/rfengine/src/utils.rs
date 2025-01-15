@@ -11,7 +11,7 @@ use kvproto::metapb;
 use regex::Regex;
 use tikv_util::info;
 
-pub(crate) const RAFT_STATE_KEY_BYTE: u8 = 1;
+pub const RAFT_STATE_KEY_BYTE: u8 = 1;
 pub const REGION_META_KEY_BYTE: u8 = 2;
 pub const REGION_META_KEY_PREFIX: &[u8] = &[REGION_META_KEY_BYTE];
 pub const STORE_IDENT_KEY: &[u8] = &[3];

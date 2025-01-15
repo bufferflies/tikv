@@ -199,6 +199,18 @@ pub struct ApplyMsgs {
     pub(crate) msgs: Vec<ApplyMsg>,
 }
 
+impl ApplyMsgs {
+    pub fn get_last_change_set(&self) -> Option<kvenginepb::ChangeSet> {
+        let last = self.msgs.last()?;
+        match last {
+            ApplyMsg::PendingSplit(cs) => Some(cs.clone()),
+            ApplyMsg::PrepareCommitMerge { source, .. } => Some(source.clone()),
+            ApplyMsg::PrepareChangeSet { cs, .. } => Some(cs.clone()),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) struct ApplyBatch {
     pub(crate) applier: Arc<Mutex<Applier>>,
     pub(crate) msgs: Vec<ApplyMsg>,
