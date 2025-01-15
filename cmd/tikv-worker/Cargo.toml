@@ -15,5 +15,10 @@ security = { path = "../../components/security", default-features = false }
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 slog-term = "2.4"
+tikv = { workspace = true }
 tikv_util = { path = "../../components/tikv_util" }
 toml = "0.5"
+
+[build-dependencies]
+cc = "1.0"
+time = "0.1"

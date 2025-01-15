@@ -1862,6 +1862,7 @@ dependencies = [
  "api_version",
  "async-trait",
  "bytes",
+ "cc",
  "chrono",
  "clap 3.2.22",
  "cloud_encryption",
@@ -1893,7 +1894,9 @@ dependencies = [
  "slog-term",
  "test_util",
  "tidb_query_datatype",
+ "tikv",
  "tikv_util",
+ "time",
  "tokio",
  "toml",
  "txn_types",
@@ -8669,7 +8672,7 @@ dependencies = [
 
 [[package]]
 name = "tikv"
-version = "6.5.0-alpha"
+version = "7.5.0"
 dependencies = [
  "anyhow",
  "api_version",
@@ -8935,6 +8938,7 @@ dependencies = [
 name = "tikv-worker"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "chrono",
  "clap 2.34.0",
  "cloud_worker",
@@ -8946,7 +8950,9 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
+ "tikv",
  "tikv_util",
+ "time",
  "toml",
 ]
 

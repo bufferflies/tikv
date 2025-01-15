@@ -64,7 +64,7 @@ pub fn tikv_version_info(build_time: Option<&str>) -> String {
          \nEnable Features:   {}\
          \nProfile:           {}",
         tikv_build_version(),
-        option_env!("TIKV_EDITION").unwrap_or("Community"),
+        option_env!("TIKV_EDITION").unwrap_or("Cloud Storage Engine"),
         option_env!("TIKV_BUILD_GIT_HASH").unwrap_or(fallback),
         option_env!("TIKV_BUILD_GIT_BRANCH").unwrap_or(fallback),
         build_time.unwrap_or(fallback),
@@ -82,8 +82,8 @@ pub fn tikv_build_version() -> &'static str {
 }
 
 /// Prints the tikv version information to the standard output.
-pub fn log_tikv_info(build_time: Option<&str>) {
-    info!("Welcome to TiKV");
+pub fn log_tikv_info(component: &str, build_time: Option<&str>) {
+    info!("Welcome to {}", component);
     for line in tikv_version_info(build_time)
         .lines()
         .filter(|s| !s.is_empty())

@@ -1,11 +1,12 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
+#![feature(lazy_cell)]
 
 mod metrics;
 
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use clap::{App, Arg, ArgMatches};
@@ -22,6 +23,11 @@ use crate::metrics::CPU_CORES_QUOTA_GAUGE;
 const ZSTD_COMPRESSION_LEVEL_FOR_REMOTE: &str = "5";
 const DEFAULT_LOG_LEVEL: Level = Level::Info;
 
+static VERSION_INFO: LazyLock<String> = LazyLock::new(|| {
+    let build_timestamp = option_env!("TIKV_BUILD_TIME");
+    tikv::tikv_version_info(build_timestamp)
+});
+
 fn main() {
     init_logger(io::stdout(), DEFAULT_LOG_LEVEL);
     tikv_util::metrics::monitor_process()
@@ -30,6 +36,7 @@ fn main() {
     CPU_CORES_QUOTA_GAUGE.set(SysQuota::cpu_cores_quota());
     let matches = App::new("tikv-worker")
         .about("tikv remote worker")
+        .version(&**VERSION_INFO)
         .arg(
             Arg::with_name("config")
                 .short("C")
@@ -220,9 +227,12 @@ fn main() {
             .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e)),
     );
 
+    let build_timestamp = option_env!("TIKV_BUILD_TIME");
+    tikv::log_tikv_info("TiKV worker", build_timestamp);
+
     info!("config is {:?}", &config);
     cloud_worker::run_cloud_worker(config, config_file_path, pd);
-    info!("tikv worker exit");
+    info!("TiKV worker exit");
 }
 
 fn init_logger<W: 'static + io::Write + Send>(writer: W, level: Level) {

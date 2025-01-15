@@ -1,4 +1,5 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
+#![feature(lazy_cell)]
 
 #[macro_use]
 extern crate serde_derive;
@@ -20,7 +21,7 @@ mod txn_file;
 mod txn_log;
 mod unsafe_recover;
 
-use std::{env, fs::OpenOptions, io};
+use std::{env, fs::OpenOptions, io, sync::LazyLock};
 
 use backup::{execute_show_backup_list, ShowBackupListArgs};
 use clap::{Args, Parser, Subcommand};
@@ -122,8 +123,13 @@ fn init_logger_impl<W: 'static + io::Write + Send>(writer: W, level: slog::Level
     slog_global::set_global(logger);
 }
 
+static VERSION_INFO: LazyLock<String> = LazyLock::new(|| {
+    let build_timestamp = option_env!("TIKV_BUILD_TIME");
+    tikv::tikv_version_info(build_timestamp)
+});
+
 #[derive(Parser)]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, version = &**VERSION_INFO, about, long_about = None)]
 pub struct Cli {
     #[clap(subcommand)]
     command: Commands,
