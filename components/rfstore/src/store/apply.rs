@@ -694,6 +694,9 @@ impl Applier {
                     && cs.get_major_compaction().get_update_inner_key_offset()
                 {
                     wb.set_update_inner_key_offset();
+                    // When inner key offset is updated, the size of mem table will be changed.
+                    // So we need to clear the cached mem table state.
+                    self.clear_mem_table_state();
                 }
             }
             TYPE_RESOLVE_LOCK => cl.iterate_resolve_lock(|tp, k, ts, del_lock| match tp {
@@ -1509,6 +1512,10 @@ impl Applier {
             let max_mem_table_size = engine.opts.max_mem_table_size;
             MemTableState::new(shard.get_writable_mem_table_size(), max_mem_table_size)
         })
+    }
+
+    fn clear_mem_table_state(&mut self) {
+        self.mem_table_state.take();
     }
 
     fn maybe_propose_switch_mem_table(&mut self, ctx: &mut ApplyContext, now: Instant) {

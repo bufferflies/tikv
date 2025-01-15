@@ -14,6 +14,7 @@ use crate::{
     *,
 };
 
+// IMPORTANT: All fields MUST be reset.
 pub struct WriteBatch {
     shard_id: u64,
     cf_batches: [memtable::WriteBatch; NUM_CFS],
@@ -42,6 +43,17 @@ impl Default for WriteBatch {
 }
 
 impl WriteBatch {
+    pub fn reset(&mut self, shard_id: u64) {
+        for wb in &mut self.cf_batches {
+            wb.reset();
+        }
+        self.shard_id = shard_id;
+        self.properties.clear();
+        self.sequence = 0;
+        self.switch_mem_table = false;
+        self.update_inner_key_offset = false;
+    }
+
     #[cfg(test)]
     pub(crate) fn new(shard_id: u64) -> Self {
         let mut wb = Self::default();
@@ -107,16 +119,6 @@ impl WriteBatch {
             num += wb.len();
         }
         num
-    }
-
-    pub fn reset(&mut self, shard_id: u64) {
-        for wb in &mut self.cf_batches {
-            wb.reset();
-        }
-        self.shard_id = shard_id;
-        self.sequence = 0;
-        self.properties.clear();
-        self.switch_mem_table = false;
     }
 
     pub fn get_cf_mut(&mut self, cf: usize) -> &mut memtable::WriteBatch {
