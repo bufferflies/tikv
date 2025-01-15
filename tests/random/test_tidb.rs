@@ -66,6 +66,8 @@ const TIDB_STATUS_PORT_ENV_KEY: &str = "TIDB_STATUS_PORT";
 const TIDB_STATUS_PORT_DEFAULT: u16 = 10080;
 pub(crate) const TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(600); // TODO: improve the efficiency of TiDB start up.
 pub(crate) const TIDB_LOG_LEVEL: &str = "info";
+pub(crate) const TIDB_GC_INTERVAL: &str = "60s";
+pub(crate) const TIDB_GC_LIFETIME: &str = "90s";
 
 pub(crate) const TIKV_SERVER_BIN_ENV_KEY: &str = "TIKV_SERVER_BIN";
 pub(crate) const TIKV_WORKER_BIN_ENV_KEY: &str = "TIKV_WORKER_BIN";
@@ -317,6 +319,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
+        conf.gc.enable_safe_point_v2 = true;
 
         if switches.remote_cop_min_block_size > 0 {
             let tikv_worker_idx = *tikv_worker_nodes.choose(&mut rng).unwrap();
@@ -366,6 +369,8 @@ pub(crate) fn start_components(
                     tikv_worker_addr,
                     txn_chunk_max_size: TXN_CHUNK_MAX_SIZE as u64,
                     txn_file_min_mutation_size: Some(TXN_FILE_MIN_SIZE as u64),
+                    gc_interval: TIDB_GC_INTERVAL.to_owned(),
+                    gc_lifetime: TIDB_GC_LIFETIME.to_owned(),
                     tiflash_compute_mode: columnar_switch_on,
                 },
             )

@@ -107,6 +107,7 @@ impl PdServers {
                 pre_alloc: (1..=self.pre_alloc_keyspaces)
                     .map(|i| keyspace_name_by_idx(i))
                     .collect(),
+                enable_global_safe_point_v2: true,
                 ..Default::default()
             },
             schedule: self.schedule_config.clone(),
@@ -395,6 +396,7 @@ impl TidbServers {
         let config_file = self.data_path.join(format!("tidb-{idx}.toml"));
         let mut config = TidbConfig {
             keyspace_name: keyspace_name_by_idx(idx),
+            enable_safe_point_v2: true,
             ..Default::default()
         };
         if let Some(txn_file_min_mutation_size) = options.txn_file_min_mutation_size {
@@ -432,6 +434,12 @@ impl TidbServers {
             .arg(format!("--log-file={}", log_file.display()))
             .arg(format!("--log-slow-query={}", slow_log_file.display()))
             .arg(format!("--config={}", config_file.display()));
+        if !options.gc_interval.is_empty() {
+            cmd.env("HACK_GC_RUN_INTERVAL", &options.gc_interval);
+        }
+        if !options.gc_lifetime.is_empty() {
+            cmd.env("HACK_GC_LIFE_TIME", &options.gc_lifetime);
+        }
         info!("start tidb-server"; "cmd" => ?cmd);
         let child = cmd.spawn().unwrap();
         let old = self.children.insert(idx, child);
@@ -570,6 +578,8 @@ pub struct StartTidbOptions {
     pub tikv_worker_addr: String,
     pub txn_chunk_max_size: u64,
     pub txn_file_min_mutation_size: Option<u64>,
+    pub gc_interval: String,
+    pub gc_lifetime: String,
     pub tiflash_compute_mode: bool,
 }
 
@@ -696,6 +706,7 @@ impl Default for PdReplicationConfig {
 #[serde(rename_all = "kebab-case")]
 struct PdKeyspaceConfig {
     pre_alloc: Vec<String>,
+    enable_global_safe_point_v2: bool,
     disable_raw_kv_region_split: bool,
 }
 
@@ -703,6 +714,7 @@ impl Default for PdKeyspaceConfig {
     fn default() -> Self {
         Self {
             pre_alloc: vec![],
+            enable_global_safe_point_v2: true,
             disable_raw_kv_region_split: true,
         }
     }
@@ -732,7 +744,8 @@ struct TsoSvcStatus {
 #[serde(rename_all = "kebab-case")]
 struct TidbConfig {
     keyspace_name: String,
-    split_table: bool, // Set to false.
+    split_table: bool,          // Set to false.
+    enable_safe_point_v2: bool, // Deprecated since v7.5
     disaggregated_tiflash: bool,
     use_autoscaler: bool,
     tikv_client: TikvClientConfig,
