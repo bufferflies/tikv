@@ -932,6 +932,9 @@ impl EngineCore {
     }
 
     fn apply_columnar_compaction(&self, shard: &Shard, cs: &ChangeSet) {
+        if self.opts.ignore_columnar_table_load {
+            return;
+        }
         let col_comp = cs.get_columnar_compaction();
         let col_change = col_comp.get_columnar_change();
         let old_data = shard.get_data();
@@ -980,6 +983,9 @@ impl EngineCore {
     }
 
     fn apply_update_vector_index(&self, shard: &Shard, cs: &ChangeSet) {
+        if self.opts.ignore_columnar_table_load {
+            return;
+        }
         let update_vector_index = cs.get_update_vector_index();
         let mut vector_indexes = shard.get_data().vector_indexes.clone();
         for added in &update_vector_index.added {

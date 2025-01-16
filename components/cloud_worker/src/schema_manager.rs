@@ -483,6 +483,10 @@ impl SchemaManager {
                 schema::sync_schema(kv_getter, kv_scanner, keyspace_id, cur_schema_version)
                     .await
                     .map_err(|e| crate::error::Error::SchemaError(e))?;
+            debug!(
+                "schema_version: {}, table_infos: {:?}",
+                schema_version, table_infos
+            );
             let cur_schema_version = cur_schema_version.unwrap_or(0);
             if let Some(checked_schema_version) = self.meta_file.get_checked_version(keyspace_id) {
                 if cur_schema_version < checked_schema_version

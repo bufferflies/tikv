@@ -1680,7 +1680,7 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
-        if shard_meta.schema_file_id == 0 {
+        if shard_meta.schema_file_id == 0 && shard_meta.schema_file_ver == 0 {
             return;
         }
         let mut change_set = kvengine::new_change_set(shard_meta.id, shard_meta.ver);

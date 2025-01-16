@@ -18,21 +18,24 @@ use tidb_query_datatype::{
     codec::{
         datum,
         datum::{
-            BYTES_FLAG, COMPACT_BYTES_FLAG, DECIMAL_FLAG, DURATION_FLAG, FLOAT_FLAG, INT_FLAG,
-            JSON_FLAG, NIL_FLAG, UINT_FLAG, VAR_INT_FLAG, VAR_UINT_FLAG, VECTOR_FLOAT32_FLAG,
+            decode, BYTES_FLAG, COMPACT_BYTES_FLAG, DECIMAL_FLAG, DURATION_FLAG, FLOAT_FLAG,
+            INT_FLAG, JSON_FLAG, NIL_FLAG, UINT_FLAG, VAR_INT_FLAG, VAR_UINT_FLAG,
+            VECTOR_FLOAT32_FLAG,
         },
-        mysql::{Decimal, DecimalDecoder},
-        row::v2::{decode_v2_i64, decode_v2_u64, RowSlice},
+        mysql::{Decimal, DecimalDecoder, JsonEncoder, VectorFloat32Encoder},
+        row::v2::{decode_v2_i64, decode_v2_u64, RowSlice, CODEC_VERSION},
         table::{
             decode_common_handle, decode_int_handle, encode_common_handle_row_key, encode_row_key,
             PREFIX_LEN,
         },
+        Datum,
     },
     FieldTypeFlag, FieldTypeTp,
 };
 use tikv_util::codec::{
     bytes::{decode_bytes, decode_compact_bytes},
     number::{decode_f64, decode_i64, decode_u64, decode_var_i64, decode_var_u64},
+    BytesSlice,
 };
 use tipb::ColumnInfo;
 
@@ -1103,6 +1106,45 @@ impl ColumnarRowTableReader {
     }
 
     fn decode_row_columns(&self, block: &mut Block, row_value: &[u8]) -> table::Result<()> {
+        if row_value[0] == CODEC_VERSION {
+            self.decode_row_columns_v2(block, row_value)
+        } else {
+            self.decode_row_columns_v1(block, row_value)
+        }
+    }
+
+    fn decode_row_columns_v1(&self, block: &mut Block, row_value: &[u8]) -> table::Result<()> {
+        let mut data: BytesSlice<'_> = row_value;
+        let datums = decode(&mut data).map_err(|e| table::Error::Other(e.to_string()))?;
+        let mut datums_map = HashMap::with_capacity(datums.len() / 2);
+        let mut datums_iter = datums.into_iter();
+        while let (Some(col_id), Some(data)) = (datums_iter.next(), datums_iter.next()) {
+            if let Ok(Some(col_id)) = col_id.as_int() {
+                datums_map.insert(col_id, data);
+            } else {
+                return Err(table::Error::Other("invalid col id".to_string()));
+            }
+        }
+        for (offset, col_info) in self.schema.columns.iter().enumerate() {
+            let col_id = col_info.get_column_id();
+            let col_buf = &mut block.columns[offset];
+            if datums_map.contains_key(&col_id) {
+                Self::push_col_buf_with_row_v1_datum(
+                    col_buf,
+                    col_info,
+                    datums_map.get(&col_id).unwrap(),
+                );
+            } else if let Some(default_val) = &self.default_vals[offset] {
+                col_buf.push_value(default_val);
+            } else {
+                col_buf.push_null();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn decode_row_columns_v2(&self, block: &mut Block, row_value: &[u8]) -> table::Result<()> {
         let row_slice = RowSlice::from_bytes(row_value).unwrap();
         if self.check_schema {
             let row_max_col_id = row_slice.max_col_id();
@@ -1115,13 +1157,26 @@ impl ColumnarRowTableReader {
         for (offset, col_info) in self.schema.columns.iter().enumerate() {
             let col_id = col_info.get_column_id();
             let col_buf = &mut block.columns[offset];
+            assert_eq!(col_buf.col_id as i64, col_id);
             if row_slice.search_in_null_ids(col_id) {
                 col_buf.push_null();
                 continue;
             }
             if let Some((start, end)) = row_slice.search_in_non_null_ids(col_id).unwrap() {
                 let col_val = &values[start..end];
-                Self::push_col_buf_with_field_type(col_buf, col_info, col_val);
+                if let Err(e) = Self::push_col_buf_with_field_type(col_buf, col_info, col_val) {
+                    error!(
+                        "decode_row_columns_v2: {:?}, col_info col_id: {}, col_buf col_id: {}, tp: {}, offset: {}, val_len: {}, schema: {:?}",
+                        e,
+                        col_id,
+                        col_buf.col_id,
+                        col_info.get_tp(),
+                        offset,
+                        col_val.len(),
+                        self.schema
+                    );
+                    return Err(table::Error::Other(e.to_string()));
+                }
             } else if !self.is_int_handle && get_primary_key(col_info) {
                 // get value from common handle
                 let mut common_handle =
@@ -1129,7 +1184,21 @@ impl ColumnarRowTableReader {
                 for &pk_col_id in &self.schema.pk_col_ids {
                     let (datum, remain) = datum::split_datum(common_handle, false).unwrap();
                     if pk_col_id == col_id {
-                        Self::push_col_buf_with_datum(col_buf, col_info, datum);
+                        if let Err(e) =
+                            Self::push_col_buf_with_common_handle_datum(col_buf, col_info, datum)
+                        {
+                            error!(
+                                "decode_row_columns_v2 pk: {:?}, col_info col_id: {}, col_buf col_id: {}, tp: {}, offset: {}, val_len: {}, schema: {:?}",
+                                e,
+                                col_id,
+                                col_buf.col_id,
+                                col_info.get_tp(),
+                                offset,
+                                datum.len(),
+                                self.schema
+                            );
+                            return Err(table::Error::Other(e.to_string()));
+                        }
                         break;
                     }
                     common_handle = remain;
@@ -1176,8 +1245,10 @@ impl ColumnarRowTableReader {
         col_buf: &mut ColumnBuffer,
         col_info: &ColumnInfo,
         col_val: &[u8],
-    ) {
-        let ft = FieldTypeTp::from_i32(col_info.get_tp()).unwrap();
+    ) -> tidb_query_datatype::codec::Result<()> {
+        let ft = FieldTypeTp::from_i32(col_info.get_tp()).ok_or(
+            tidb_query_datatype::codec::Error::InvalidDataType("invalid field type".to_string()),
+        )?;
         match ft {
             FieldTypeTp::Tiny
             | FieldTypeTp::Short
@@ -1185,10 +1256,10 @@ impl ColumnarRowTableReader {
             | FieldTypeTp::Long
             | FieldTypeTp::LongLong => {
                 if Self::is_unsigned(col_info) {
-                    let v = decode_v2_u64(col_val).unwrap();
+                    let v = decode_v2_u64(col_val)?;
                     col_buf.push_value(&v.to_le_bytes());
                 } else {
-                    let v = decode_v2_i64(col_val).unwrap();
+                    let v = decode_v2_i64(col_val)?;
                     col_buf.push_value(&v.to_le_bytes());
                 }
             }
@@ -1198,16 +1269,16 @@ impl ColumnarRowTableReader {
             | FieldTypeTp::Enum
             | FieldTypeTp::Bit
             | FieldTypeTp::Set => {
-                let v = decode_v2_u64(col_val).unwrap();
+                let v = decode_v2_u64(col_val)?;
                 col_buf.push_value(&v.to_le_bytes());
             }
             FieldTypeTp::Year | FieldTypeTp::Duration => {
-                let v = decode_v2_i64(col_val).unwrap();
+                let v = decode_v2_i64(col_val)?;
                 col_buf.push_value(&v.to_le_bytes());
             }
             FieldTypeTp::Float | FieldTypeTp::Double => {
                 let mut val = col_val;
-                let v = decode_f64(&mut val).unwrap();
+                let v = decode_f64(&mut val)?;
                 col_buf.push_value(&v.to_le_bytes());
             }
             FieldTypeTp::Null => {
@@ -1216,7 +1287,7 @@ impl ColumnarRowTableReader {
             FieldTypeTp::NewDecimal => {
                 // Marshal decimal in TiFlash compatible format.
                 let mut val = col_val;
-                let decimal = val.read_decimal().unwrap();
+                let decimal = val.read_decimal()?;
                 col_buf.push_value(&Self::decode_decimal_as_int(col_info, &decimal));
             }
             FieldTypeTp::Unspecified
@@ -1234,32 +1305,76 @@ impl ColumnarRowTableReader {
                 col_buf.push_value(col_val);
             }
         }
+        Ok(())
     }
 
-    fn push_col_buf_with_datum(
+    fn push_col_buf_with_row_v1_datum(
+        col_buf: &mut ColumnBuffer,
+        col_info: &ColumnInfo,
+        datum: &Datum,
+    ) {
+        match datum {
+            Datum::I64(v) => {
+                col_buf.push_value(&v.to_le_bytes());
+            }
+            Datum::Dur(ref d) => {
+                col_buf.push_value(&d.to_nanos().to_le_bytes());
+            }
+            Datum::U64(v) => {
+                col_buf.push_value(&v.to_le_bytes());
+            }
+            Datum::Bytes(ref bs) => {
+                col_buf.push_value(bs);
+            }
+            Datum::Null => {
+                col_buf.push_null();
+            }
+            Datum::F64(v) => {
+                col_buf.push_value(&v.to_le_bytes());
+            }
+            Datum::Dec(ref d) => {
+                col_buf.push_value(&Self::decode_decimal_as_int(col_info, d));
+            }
+            Datum::VectorFloat32(ref v) => {
+                let mut buf = vec![];
+                buf.write_vector_float32(v.as_ref()).unwrap();
+                col_buf.push_value(&buf);
+            }
+            Datum::Json(ref j) => {
+                let mut buf = vec![];
+                buf.write_json(j.as_ref()).unwrap();
+                col_buf.push_value(&buf);
+            }
+            _ => {
+                panic!("unsupported datum type: {:?}", datum);
+            }
+        }
+    }
+
+    fn push_col_buf_with_common_handle_datum(
         col_buf: &mut ColumnBuffer,
         col_info: &ColumnInfo,
         mut datum: &[u8],
-    ) {
+    ) -> tidb_query_datatype::codec::Result<()> {
         let flag = datum.get_u8();
         match flag {
             INT_FLAG | DURATION_FLAG => {
-                let v = decode_i64(&mut datum).unwrap();
+                let v = decode_i64(&mut datum)?;
                 col_buf.push_value(&v.to_le_bytes());
             }
             UINT_FLAG => {
-                let v = decode_u64(&mut datum).unwrap();
+                let v = decode_u64(&mut datum)?;
                 col_buf.push_value(&v.to_le_bytes());
             }
             BYTES_FLAG => {
-                let v = decode_bytes(&mut datum, false).unwrap();
+                let v = decode_bytes(&mut datum, false)?;
                 col_buf.push_value(&v);
             }
             NIL_FLAG => {
                 col_buf.push_null();
             }
             FLOAT_FLAG => {
-                let v = decode_f64(&mut datum).unwrap();
+                let v = decode_f64(&mut datum)?;
                 col_buf.push_value(&v.to_le_bytes());
             }
             DECIMAL_FLAG => {
@@ -1271,16 +1386,23 @@ impl ColumnarRowTableReader {
                 // col_buf.push_value(&buf);
                 //
                 // Marshal decimal to TiFlash compatible format.
-                let decimal = datum.read_decimal().unwrap();
+                let decimal = datum.read_decimal()?;
                 col_buf.push_value(&Self::decode_decimal_as_int(col_info, &decimal));
             }
             JSON_FLAG | VECTOR_FLOAT32_FLAG | VAR_UINT_FLAG | VAR_INT_FLAG | COMPACT_BYTES_FLAG => {
-                unreachable!("invalid flag {} in common handle", flag)
+                return Err(tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                    "invalid flag {} in common handle",
+                    flag
+                )));
             }
             _ => {
-                unreachable!("unknown flag {} in common handle", flag)
+                return Err(tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                    "unknown flag {} in common handle",
+                    flag
+                )));
             }
         }
+        Ok(())
     }
 }
 
