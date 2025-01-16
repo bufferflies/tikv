@@ -2,6 +2,7 @@
 
 use std::{convert::TryInto, ops::Deref, sync::Arc};
 
+use aligned_vec::{avec, AVec};
 use bytes::{Buf, BufMut};
 use collections::HashMap;
 use protobuf::Message;
@@ -248,7 +249,7 @@ impl TableMeta {
             }
             columns.insert(col.col_info.get_column_id() as i32, Arc::new(col));
         }
-        let mut uncompressed_buf = vec![];
+        let mut uncompressed_buf = avec![];
         let compressed_handle_len = buf.get_u32_le() as usize;
         let compressed_handle_idx_buf = &buf[..compressed_handle_len];
         buf = &buf[compressed_handle_len..];
@@ -305,30 +306,22 @@ impl MinMaxIndex {
         self.has_value_marks.push(has_value as u8);
     }
 
-    pub(crate) fn length(&self) -> usize {
-        debug_assert_eq!(self.has_null_marks.len() * 2, self.min_max.length());
-        debug_assert_eq!(self.has_value_marks.len() * 2, self.min_max.length());
-        self.min_max.length() / 2
-    }
-
     pub(crate) fn parse(&mut self, mut buf: &[u8]) {
-        let length = buf.get_u32_le() as usize;
+        self.min_max.reset();
+        buf = self.min_max.parse(buf);
+        let length = self.min_max.length() / 2;
         self.has_null_marks.clear();
         self.has_null_marks.extend_from_slice(&buf[..length]);
         buf = &buf[length..];
         self.has_value_marks.clear();
         self.has_value_marks.extend_from_slice(&buf[..length]);
-        buf = &buf[length..];
-        self.min_max.reset();
-        self.min_max.parse(buf);
     }
 
     pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
         buf.clear();
-        buf.put_u32_le(self.length() as u32);
+        self.min_max.append_to(buf);
         buf.extend_from_slice(&self.has_null_marks);
         buf.extend_from_slice(&self.has_value_marks);
-        self.min_max.append_to(buf);
     }
 }
 
@@ -375,7 +368,7 @@ impl ColumnMeta {
         let min_max_opt = if min_max_idx_len > 0 {
             let compressed_min_max_idx_buf = &buf[..min_max_idx_len];
             buf = &buf[min_max_idx_len..];
-            let mut uncompressed_min_max_buf = vec![];
+            let mut uncompressed_min_max_buf = avec![];
             decompress_pack(compressed_min_max_idx_buf, &mut uncompressed_min_max_buf);
             let mut min_max = MinMaxIndex::new(col_id, fixed_size, nullable);
             min_max.parse(&uncompressed_min_max_buf);
@@ -861,7 +854,7 @@ impl ColumnBuffer {
         }
     }
 
-    pub(crate) fn parse(&mut self, mut uncompressed_pack: &[u8]) {
+    pub(crate) fn parse<'a>(&mut self, mut uncompressed_pack: &'a [u8]) -> &'a [u8] {
         let _pack_format = uncompressed_pack.get_u16();
         let _encoding_type = uncompressed_pack.get_u16();
         let length = uncompressed_pack.get_u32_le() as usize;
@@ -881,8 +874,10 @@ impl ColumnBuffer {
         uncompressed_pack = &uncompressed_pack[data_end_offset..];
         if self.nullable {
             self.nulls.truncate(0);
-            self.nulls.extend_from_slice(uncompressed_pack);
+            self.nulls.extend_from_slice(&uncompressed_pack[..length]);
+            uncompressed_pack = &uncompressed_pack[length..]
         }
+        uncompressed_pack
     }
 
     pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
@@ -1262,7 +1257,7 @@ pub(crate) fn get_primary_key(col_info: &ColumnInfo) -> bool {
     col_info.flag().contains(FieldTypeFlag::PRIMARY_KEY)
 }
 
-pub(crate) fn decompress_pack(mut compressed_pack: &[u8], out_buf: &mut Vec<u8>) {
+pub(crate) fn decompress_pack(mut compressed_pack: &[u8], out_buf: &mut AVec<u8>) {
     let check_sum_offset = compressed_pack.len() - 4;
     let checksum = (&compressed_pack[check_sum_offset..]).get_u32_le();
     compressed_pack = &compressed_pack[..check_sum_offset];

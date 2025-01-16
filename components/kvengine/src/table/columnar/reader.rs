@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+use aligned_vec::{avec, AVec};
 use api_version::ApiV2;
 use arrow_buffer::i256;
 use async_trait::async_trait;
@@ -312,7 +313,7 @@ impl ColumnarColumnReader {
 struct PackLoader {
     file: Arc<dyn File>,
     compressed_buf: Vec<u8>,
-    uncompressed_buf: Vec<u8>,
+    uncompressed_buf: AVec<u8>,
     encryption_key: Option<EncryptionKey>,
     encryption_ver: u32,
 }
@@ -328,7 +329,7 @@ impl PackLoader {
             encryption_key,
             encryption_ver,
             compressed_buf: vec![],
-            uncompressed_buf: vec![],
+            uncompressed_buf: avec![],
         }
     }
 
