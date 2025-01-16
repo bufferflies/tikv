@@ -178,3 +178,17 @@ impl CfTableCore {
         )
     }
 }
+
+#[cfg(feature = "debug-trace-mem-table")]
+impl CfTableCore {
+    pub fn skl_and_txn_files_size(&self) -> (u64 /* skl_size */, u64 /* txn_files_size */) {
+        self.tbls
+            .iter()
+            .fold((0, 0), |(skl_size, txn_files_size), t| {
+                (
+                    skl_size + t.skl_size() as u64,
+                    txn_files_size + t.txn_files_size() as u64,
+                )
+            })
+    }
+}

@@ -45,6 +45,11 @@ pub struct CustomRaftLog<'a> {
 }
 
 impl<'a> CustomRaftLog<'a> {
+    // For debug trace.
+    pub fn get_raw(&self) -> &[u8] {
+        self.data
+    }
+
     pub fn new_from_data(data: &'a [u8]) -> Self {
         Self { data }
     }

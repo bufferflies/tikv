@@ -54,6 +54,9 @@ extern crate tikv_alloc;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "debug-trace-mem-table")]
+pub mod debug;
+
 pub use apply::*;
 pub use compaction::*;
 use concat_iterator::ConcatIterator;

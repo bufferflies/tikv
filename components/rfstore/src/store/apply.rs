@@ -738,7 +738,7 @@ impl Applier {
             }
             _ => panic!("unknown custom log type"),
         }
-        let mem_table_size = ctx.engine.write(wb);
+        let mem_table_size = ctx.engine.write(wb, cl.get_raw());
         if let Some(observer) = &mut observer {
             observer.on_apply(self.region_id(), log_index, wb);
         }

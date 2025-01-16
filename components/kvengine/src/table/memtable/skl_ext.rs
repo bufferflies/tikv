@@ -47,8 +47,19 @@ impl SkipListExt {
         }
     }
 
+    #[inline]
     pub fn size(&self) -> usize {
-        self.skl.size() as usize + self.txn_files.iter().map(|t| t.size()).sum::<usize>()
+        self.skl_size() + self.txn_files_size()
+    }
+
+    #[inline]
+    pub fn skl_size(&self) -> usize {
+        self.skl.size() as usize
+    }
+
+    #[inline]
+    pub fn txn_files_size(&self) -> usize {
+        self.txn_files.iter().map(|t| t.size()).sum()
     }
 
     pub fn skip_list_entries(&self) -> usize {

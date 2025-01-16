@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -euo pipefail
+set -xeuo pipefail
 
 # Run from the Makefile environment
 SELF=$(realpath -s "$0")
@@ -12,23 +12,25 @@ fi
 show_help() {
 	echo "Usage: $0 [OPTIONS]"
 	echo "OPTIONS:"
-	echo "  --help        Display this message"
-	echo "  --debug       Make test binary as debug target"
-	echo "  --env-logger  Enable env-logger"
+	echo "  --help             Display this message"
+	echo "  --debug            Make test binary as debug target"
+	echo "  --env-logger       Enable env-logger"
+	echo "  --debug-trace-xxx  Enable debug trace"
 }
 
 RELEASE=1
-ENV_LOGGER=0
+EXTRA_FEATURES=()
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--debug)
 		RELEASE=0
-		shift
 		;;
 	--env-logger)
-		ENV_LOGGER=1
-		shift
+		EXTRA_FEATURES+=("env-logger")
+		;;
+	--debug-trace-mem-table)
+		EXTRA_FEATURES+=("debug-trace-mem-table")
 		;;
 	--help)
 		show_help
@@ -39,11 +41,12 @@ while [[ $# -gt 0 ]]; do
 		exit 1
 		;;
 	esac
+	shift
 done
 
-if [ "$ENV_LOGGER" -eq 1 ]; then
-	TIKV_ENABLE_FEATURES="$TIKV_ENABLE_FEATURES env-logger"
-fi
+# Concat by space
+EXTRA_FEATURES_STR=$(IFS=$' '; echo "${EXTRA_FEATURES[*]}")
+TIKV_ENABLE_FEATURES="$TIKV_ENABLE_FEATURES $EXTRA_FEATURES_STR"
 
 declare -a BUILD_FLAG
 BUILD_FLAG=(

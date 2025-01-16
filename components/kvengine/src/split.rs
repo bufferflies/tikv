@@ -245,7 +245,7 @@ impl Engine {
         let version = shard.load_mem_table_version();
         // Switch the old shard mem-table, so the first mem-table is always empty.
         // ignore the read-only mem-table to be flushed. let the new shard handle it.
-        self.switch_mem_table(shard, version, force_switch_mem_table);
+        self.switch_mem_table(shard, version, force_switch_mem_table, sequence);
         self.send_flush_msg(FlushMsg::Clear(shard.id));
         self.send_compact_msg(CompactMsg::Clear(IdVer::new(shard.id, shard.ver)));
     }

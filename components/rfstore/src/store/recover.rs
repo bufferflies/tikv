@@ -239,6 +239,7 @@ impl RecoverHandler {
                         shard,
                         meta.base_version + ctx.exec_log_index,
                         true,
+                        ctx.exec_log_index,
                     );
                     // It is the last command for a parent shard, we should return here.
                     return Ok(());

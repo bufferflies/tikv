@@ -138,7 +138,7 @@ impl Engine {
     // `force`: Should be set to `true` during split/merge, to help initial flush
     // get the properties need to be flush.
     // See https://github.com/tidbcloud/cloud-storage-engine/issues/1553.
-    pub fn switch_mem_table(&self, shard: &Shard, version: u64, force: bool) {
+    pub fn switch_mem_table(&self, shard: &Shard, version: u64, force: bool, write_sequence: u64) {
         let data = shard.get_data();
         let mem_table = data.get_writable_mem_table();
         if !force && mem_table.size() == 0 {
@@ -148,6 +148,12 @@ impl Engine {
         if force {
             mem_table.set_force_switch();
         }
+
+        #[cfg(feature = "debug-trace-mem-table")]
+        if !self.opts.for_restore {
+            debug::trace_switch_mem_table(&shard, &mem_table, write_sequence);
+        }
+
         let new_tbl = memtable::CfTable::new();
         let mut new_mem_tbls = Vec::with_capacity(data.mem_tbls.len() + 1);
         new_mem_tbls.push(new_tbl);
@@ -158,17 +164,19 @@ impl Engine {
         new_data.refresh_for_limiter(&shard.tag());
         shard.set_data(new_data);
         info!(
-            "shard {} switch mem-table version {}, size {}, force {}",
+            "shard {} switch mem-table version {}, size {}, force {}, write_seq {}",
             shard.tag(),
             version,
             mem_table.size(),
             force,
+            write_sequence,
         );
         let props = shard.properties.to_pb(shard.id);
         mem_table.set_properties(props);
     }
 
-    pub fn write(&self, wb: &mut WriteBatch) -> u64 {
+    // `_custom_log` is for debug trace only.
+    pub fn write(&self, wb: &mut WriteBatch, _custom_log: &[u8]) -> u64 {
         let shard = self.get_shard(wb.shard_id).unwrap_or_else(|| {
             let tag = ShardTag::new(self.get_engine_id(), IdVer::new(wb.shard_id, 0));
             panic!("{} unable to get shard", tag);
@@ -276,8 +284,14 @@ impl Engine {
         if data.prepend_keyspace_id().is_some() {
             size += (skip_list_entries * KEYSPACE_PREFIX_LEN) as u64;
         }
+
+        #[cfg(feature = "debug-trace-mem-table")]
+        if !self.opts.for_restore {
+            debug::trace_write_mem_table(&shard, &mem_tbl, size, wb.sequence, _custom_log);
+        }
+
         if wb.switch_mem_table || size > self.opts.max_mem_table_size {
-            self.switch_mem_table(&shard, version, false);
+            self.switch_mem_table(&shard, version, false, wb.sequence);
             if let Err(err) = self.trigger_flush(&shard) {
                 warn!("{} trigger_flush error: {:?}", shard.tag(), err);
             }
@@ -370,22 +384,22 @@ impl Engine {
     }
 
     pub fn flush_shard_for_restore(&self, shard: &Shard) -> Result<()> {
-        let ver = shard.get_base_version()
-            + cmp::max(shard.get_write_sequence(), shard.get_meta_sequence())
-            + 1;
+        let write_seq = shard.get_write_sequence();
+        let meta_seq = shard.get_meta_sequence();
+        let ver = shard.get_base_version() + cmp::max(write_seq, meta_seq) + 1;
         debug!(
             "{} flush_shard_for_restore, ver: {}, base_ver: {}, write_seq: {}, meta_seq: {}",
             shard.tag(),
             ver,
             shard.get_base_version(),
-            shard.get_write_sequence(),
-            shard.get_meta_sequence(),
+            write_seq,
+            meta_seq,
         );
 
         if !shard.get_initial_flushed() {
             self.load_unloaded_tables(shard.id, shard.ver, false)?;
         }
-        self.switch_mem_table(shard, ver, false);
+        self.switch_mem_table(shard, ver, false, write_seq);
         self.set_shard_active(shard.id, true);
         self.trigger_flush(shard)
     }

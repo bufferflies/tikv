@@ -1510,7 +1510,7 @@ impl Applier {
             seq += 1;
             if let Some(wb) = task.wb.as_mut() {
                 wb.set_sequence(seq);
-                self.engine.write(wb);
+                self.engine.write(wb, &[]);
             }
             if let Some(mut cs) = task.cs.take() {
                 cs.set_sequence(seq);

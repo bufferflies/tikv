@@ -328,6 +328,12 @@ impl EngineCore {
             let last = new_mem_tbls.pop().unwrap();
             let last_version = last.get_version();
             if last_version != l0_version {
+                #[cfg(feature = "debug-trace-mem-table")]
+                {
+                    debug::dump_mem_table_actions(shard.id);
+                    debug::dump_raft_logs(shard.id);
+                }
+
                 panic!(
                     "{} mem table last version {}, size {} not match L0 version {}, shard meta seq {}, flush seq {}",
                     shard.tag(),

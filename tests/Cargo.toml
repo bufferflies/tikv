@@ -97,6 +97,7 @@ sse = ["tikv/sse"]
 portable = ["tikv/portable"]
 
 debug-trace-ia-segments = ["kvengine/debug-trace-ia-segments"]
+debug-trace-mem-table = ["kvengine/debug-trace-mem-table"]
 
 [dependencies]
 api_version = { workspace = true }

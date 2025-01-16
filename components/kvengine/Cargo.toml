@@ -14,6 +14,7 @@ is_sync = ["maybe-async/is_sync"]
 is_async = ["maybe-async/is_async"]
 
 debug-trace-ia-segments = []
+debug-trace-mem-table = []
 
 [dependencies]
 aligned-vec = "0.6.1"
