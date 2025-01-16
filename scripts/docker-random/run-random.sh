@@ -28,6 +28,8 @@ LOAD_DATA_TASK_TIMEOUT_SEC=60
 UNIQUE_WORKLOAD=0
 COLUMNAR_WORKLOAD=0
 
+UPGRADE_TEST_DURATION="60s"
+
 while [ $# -gt 0 ]; do
     case "$1" in
     --keep-tmp-on-error)
@@ -76,6 +78,10 @@ while [ $# -gt 0 ]; do
     --columnar-workload)
         COLUMNAR_WORKLOAD=1
         ;;
+    --upgrade-test-duration)
+        UPGRADE_TEST_DURATION="$2"
+        shift
+        ;;
     *)
         echo "Usage: $0 DOCKER_ID TESTNAME [--keep-tmp-on-error] [--log-path LOG_PATH] [--memory-profile]"
         exit 1
@@ -106,6 +112,11 @@ export LOAD_DATA_TASK_TIMEOUT_SEC
 
 export UNIQUE_WORKLOAD
 export COLUMNAR_WORKLOAD
+
+export TEST_DUR_BEFORE_UPGRADE="$UPGRADE_TEST_DURATION"
+export TEST_DUR_AFTER_UPGRADE="$UPGRADE_TEST_DURATION"
+export TEST_DUR_AFTER_DOWNGRADE="$UPGRADE_TEST_DURATION"
+export TEST_DUR_AFTER_UPDATE_CONFIGS="$UPGRADE_TEST_DURATION"
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs
 for i in $(seq -w 1 100000); do

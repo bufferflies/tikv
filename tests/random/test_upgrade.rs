@@ -1,13 +1,15 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
-use kvengine::dfs::DFSConfig;
-use pd_client::pd_control::PdControl;
+use kvengine::{dfs::DFSConfig, ShardStats};
+use pd_client::pd_control::{PdControl, StoreInfo};
 use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
@@ -15,23 +17,30 @@ use test_cloud_server::{
     oss::prepare_dfs,
     tidb::*,
     tikv_bin::{TikvServers, TikvWorkers},
-    ServerCluster, TikvWorkerOptions,
+    MajorCompactionTarget, ServerCluster, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
 use tikv_util::{config::ReadableDuration, info, time::Instant};
 
 use crate::{test_tidb::*, *};
 
-const TIKV_STORE_UPGRADE_DOWNGRADE_INTERVAL: Duration = Duration::from_secs(10); // Interval between upgrade/downgrade TiKV stores.
+const TIKV_STORE_RESTART_INTERVAL: Duration = Duration::from_secs(10); // Interval between restarting TiKV stores.
 const TEST_DURATION_BEFORE_UPGRADE: Duration = Duration::from_secs(60);
 const TEST_DURATION_AFTER_UPGRADE: Duration = Duration::from_secs(60);
 const TEST_DURATION_AFTER_DOWNGRADE: Duration = Duration::from_secs(60);
+const TEST_DURATION_AFTER_UPDATE_CONFIGS: Duration = Duration::from_secs(60);
 
 const EVICT_LEADERS_TIMEOUT: Duration = Duration::from_secs(30);
 
+const REQUEST_MAJOR_COMPACTION_TIMEOUT: Duration = Duration::from_secs(60);
+const WAIT_PREFIX_KEYSPACE_TABLES_COMPACTED_TIMEOUT: Duration = Duration::from_secs(300);
+
 const WAIT_STORE_STATE_TIMEOUT: Duration = Duration::from_secs(60);
-const WAIT_TIKV_SERVER_HEALTHY_TIMEOUT: Duration = Duration::from_secs(30);
+const WAIT_TIKV_SERVER_HEALTHY_TIMEOUT: Duration = Duration::from_secs(150); // Recover will take a long time.
 const WAIT_TIKV_WORKER_HEALTHY_TIMEOUT: Duration = Duration::from_secs(15);
+const CHECK_HEALTHY_TIMEOUT: Duration = Duration::from_secs(15);
+
+const TIKV_WORKER_THREADS_COUNT: usize = 2;
 
 #[test]
 fn test_random_upgrade() {
@@ -56,7 +65,7 @@ fn test_random_upgrade() {
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
     let security_conf = new_security_config();
     let tc = prepare_tidb_cluster(&security_conf);
-    let (mut cluster, mut tikv_servers, mut tikv_workers) = prepare_cluster(
+    let (cluster, tikv_servers, tikv_workers) = prepare_cluster(
         &dfs_config,
         &security_conf,
         NODES_COUNT,
@@ -68,8 +77,6 @@ fn test_random_upgrade() {
     let pd_ctl = Arc::new(cluster.get_pd_control().unwrap());
     let keyspace_manager = cluster.keyspace_manager().clone();
 
-    let mut rng = thread_rng();
-
     let tikv_worker_addr = tikv_workers.endpoints().pop().unwrap();
     start_components(&tc, tikv_worker_addr, &switches, &dfs_config, &runtime);
     prepare_workloads(&tc, &keyspace_manager, &switches, &runtime);
@@ -77,138 +84,130 @@ fn test_random_upgrade() {
     let async_handles =
         start_workloads(&tc, &keyspace_manager, &switches, &runtime, running.clone());
 
-    let must_wait_store_down = |ctx: &str, store_id: u64| {
-        must_wait_store_state(
-            ctx,
-            &pd_ctl,
-            store_id,
-            |store| store.store.state_name != "Up",
-            WAIT_STORE_STATE_TIMEOUT,
-        );
-    };
-    let must_wait_store_up = |ctx: &str, store_id: u64| {
-        must_wait_store_state(
-            ctx,
-            &pd_ctl,
-            store_id,
-            |store| store.store.state_name == "Up",
-            WAIT_STORE_STATE_TIMEOUT,
-        );
-    };
+    let worker_configs = cluster.tikv_worker_configs().clone();
+    let server_configs = cluster.get_node_configs().clone();
+
+    let cluster = RefCell::new(cluster);
 
     // Before upgrade.
-    let start_time = Instant::now();
+    let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < upgrade_switches.test_dur_before_upgrade.0 {
-        sleep(Duration::from_secs(1));
+        random_tikv_servers_restart(&tikv_servers);
     }
     info!("before upgrade: finished"; "stats" => ?WorkloadStats::collect());
 
-    // Upgrade tikv-workers.
-    // TODO: rolling upgrade.
-    {
-        block_on(tikv_workers.must_all_healthy(Duration::from_secs(1)));
-        tikv_workers.stop_all();
-        cluster.start_tikv_workers_on_existed_configs(2);
-        block_on(cluster.tikv_workers_must_healthy(WAIT_TIKV_WORKER_HEALTHY_TIMEOUT));
-        info!("tikv-worker: upgrade finished");
-    }
-
-    // Rolling upgrade tikv-servers.
-    {
-        block_on(tikv_servers.must_all_healthy(Duration::from_secs(1)));
-        let nodes = tikv_servers.get_all_nodes();
-        for node_id in nodes {
-            // Sleep first to have longer test duration for different version between
-            // tikv-server & tikv-worker.
-            std::thread::sleep(TIKV_STORE_UPGRADE_DOWNGRADE_INTERVAL);
-
-            let conf = cluster.get_node_config(node_id);
-            let store = block_on(pd_ctl.find_store_by_status_address(&conf.server.status_addr))
-                .unwrap()
-                .unwrap();
-            let store_id = store.store.id;
-
-            if upgrade_switches.evict_leader_switch {
-                info!("upgrade: evict leader"; "node_id" => node_id, "store_id" => store_id, "store" => ?store);
-                let (store, scheduler_name) =
-                    block_on(pd_ctl.evict_store_leaders(store_id, EVICT_LEADERS_TIMEOUT)).unwrap();
-                if store.status.leader_count > 0 {
-                    warn!("upgrade: store still has leaders after evicting"; "node_id" => node_id, "store" => ?store);
-                }
-                block_on(pd_ctl.remove_scheduler(&scheduler_name)).unwrap();
-            }
-
-            info!("upgrade: stop old version"; "node_id" => node_id);
-            let exit_status = tikv_servers.stop_node(node_id);
-            if !exit_status.success() {
-                panic!(
-                    "tikv-server exit with error, node_id {}, exit_status {:?}",
-                    node_id, exit_status
-                );
-            }
-            must_wait_store_down("upgrade: wait for store is down", store_id);
-
-            info!("upgrade: start new version"; "node_id" => ?node_id);
-            cluster.start_node(node_id, |_, _| {});
-            let new_store_id = cluster.get_store_id(node_id);
-            assert_eq!(new_store_id, store_id);
-            must_wait_store_up("upgrade: wait for store is up", store_id);
-        }
-        info!("tikv-server: upgrade finished");
-    }
+    // Upgrade.
+    switch_workers_version(
+        Workers::TikvWorkers(&tikv_workers),
+        Workers::ServerCluster(&cluster),
+        &worker_configs,
+    );
+    switch_servers_version(
+        Servers::TikvServers(&tikv_servers),
+        Servers::ServerCluster(&cluster),
+        |_, _| {},
+        &server_configs,
+        pd_ctl.as_ref(),
+        &upgrade_switches,
+    );
 
     // After upgrade.
-    let start_time = Instant::now();
+    let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_upgrade.0 {
-        // Restart nodes.
-        random_node_restart(&mut cluster);
+        random_node_restart(&mut cluster.borrow_mut());
     }
     info!("after upgrade: finished"; "stats" => ?WorkloadStats::collect());
 
-    // Downgrade tikv-workers.
-    // TODO: rolling downgrade.
-    {
-        block_on(cluster.tikv_workers_must_healthy(Duration::from_secs(1)));
-        cluster.stop_tikv_workers();
-        tikv_workers.start_all(cluster.tikv_worker_configs());
-        block_on(tikv_workers.must_all_healthy(WAIT_TIKV_WORKER_HEALTHY_TIMEOUT));
-        info!("tikv-worker: downgrade finished");
-    }
-
-    // Rolling downgrade tikv-servers.
-    {
-        let nodes = cluster.get_nodes();
-        for node_id in nodes {
-            std::thread::sleep(TIKV_STORE_UPGRADE_DOWNGRADE_INTERVAL);
-
-            let store_id = cluster.get_store_id(node_id);
-
-            if upgrade_switches.evict_leader_switch {
-                let (store, scheduler_name) =
-                    block_on(pd_ctl.evict_store_leaders(store_id, EVICT_LEADERS_TIMEOUT)).unwrap();
-                if store.status.leader_count > 0 {
-                    warn!("downgrade: store still has leaders after evicting"; "node_id" => node_id, "store" => ?store);
-                }
-                block_on(pd_ctl.remove_scheduler(&scheduler_name)).unwrap();
-            }
-
-            let force = rng.gen_bool(0.2);
-            info!("downgrade: stop new version"; "node_id" => node_id, "force" => force);
-            cluster.stop_node_force(node_id, force);
-            must_wait_store_down("downgrade: wait for store is down", store_id);
-
-            info!("downgrade: start new version"; "node_id" => ?node_id);
-            tikv_servers.start_node(node_id, |_, _| {});
-            block_on(tikv_servers.must_healthy(node_id, WAIT_TIKV_SERVER_HEALTHY_TIMEOUT));
-            must_wait_store_up("downgrade: wait for store is up", store_id);
-        }
-        info!("tikv-server: downgrade finished");
-    }
+    // Downgrade.
+    switch_workers_version(
+        Workers::ServerCluster(&cluster),
+        Workers::TikvWorkers(&tikv_workers),
+        &worker_configs,
+    );
+    switch_servers_version(
+        Servers::ServerCluster(&cluster),
+        Servers::TikvServers(&tikv_servers),
+        |_, _| {},
+        &server_configs,
+        pd_ctl.as_ref(),
+        &upgrade_switches,
+    );
 
     // After downgrade.
-    let start_time = Instant::now();
+    let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_downgrade.0 {
-        sleep(Duration::from_secs(1));
+        random_tikv_servers_restart(&tikv_servers);
+    }
+    info!("after downgrade: finished"; "stats" => ?WorkloadStats::collect());
+
+    // Upgrade again.
+    switch_workers_version(
+        Workers::TikvWorkers(&tikv_workers),
+        Workers::ServerCluster(&cluster),
+        &worker_configs,
+    );
+    switch_servers_version(
+        Servers::TikvServers(&tikv_servers),
+        Servers::ServerCluster(&cluster),
+        |_, _| {},
+        &server_configs,
+        pd_ctl.as_ref(),
+        &upgrade_switches,
+    );
+
+    // Enable `update_inner_key_offset`.
+    update_servers_configs(
+        Servers::ServerCluster(&cluster),
+        |_, conf| {
+            conf.enable_inner_key_offset = true;
+            conf.kvengine.update_inner_key_offset = upgrade_switches.update_inner_key_offset;
+        },
+        &server_configs,
+        pd_ctl.as_ref(),
+        &upgrade_switches,
+    );
+
+    let mut cluster = cluster.into_inner();
+
+    if !switches.enable_inner_key_off {
+        let stats = cluster.find_shard_with_stats(|_, stats| stats.keyspace_prefix_tables > 0);
+        assert!(
+            stats.is_some(),
+            "no keyspace prefix tables found, stats: {:?}",
+            cluster.get_data_stats()
+        );
+    }
+
+    // After update configs.
+    let start_time = Instant::now_coarse();
+    while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_update_configs.0 / 2 {
+        random_node_restart(&mut cluster);
+    }
+    info!("after update configs: finished"; "stats" => ?WorkloadStats::collect());
+
+    if upgrade_switches.update_inner_key_offset {
+        // Trigger major compaction and wait for keyspace prefix tables compacted.
+        {
+            let start_time = Instant::now_coarse();
+            for keyspace_id in keyspace_manager.get_all_keyspaces() {
+                cluster.request_major_compaction(
+                    MajorCompactionTarget::Keyspace(keyspace_id),
+                    true,
+                    REQUEST_MAJOR_COMPACTION_TIMEOUT,
+                );
+            }
+
+            wait_for_keyspace_prefix_tables_compacted_and_retry(&cluster);
+            info!("major compaction: finished"; "takes" => ?start_time.saturating_elapsed());
+        }
+
+        // After major compaction.
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_update_configs.0 / 2
+        {
+            random_node_restart(&mut cluster);
+        }
+        info!("after major compaction: finished"; "stats" => ?WorkloadStats::collect());
     }
 
     // Finish.
@@ -216,28 +215,7 @@ fn test_random_upgrade() {
     running.stop();
     block_on(futures::future::try_join_all(async_handles)).unwrap();
 
-    // Start cluster again for `verify_cluster`.
-    {
-        block_on(tikv_servers.must_all_healthy(Duration::from_secs(1)));
-        let nodes = tikv_servers.get_all_nodes();
-        for node_id in nodes {
-            info!("final: stop old version"; "node_id" => node_id);
-            let exit_status = tikv_servers.stop_node(node_id);
-            if !exit_status.success() {
-                panic!(
-                    "tikv-server exit with error, node_id {}, exit_status {:?}",
-                    node_id, exit_status
-                );
-            }
-
-            info!("final: start new version"; "node_id" => ?node_id);
-            cluster.start_node(node_id, |_, _| {});
-            let store_id = cluster.get_store_id(node_id);
-            must_wait_store_up("final: wait for store is up", store_id);
-        }
-        info!("tikv-server: final startup finished");
-    }
-
+    // NOTE: Start cluster for verify it's NOT up.
     runtime.block_on(async {
         // Make stats stable
         info!("stop TiDB and schedulers");
@@ -266,14 +244,17 @@ fn test_random_upgrade() {
 }
 
 fn prepare_tikv_servers(
+    tag: String,
+    env_key: &str,
     data_path: PathBuf,
     working_path: PathBuf,
     nodes_count: usize,
     security_conf: &SecurityConfig,
 ) -> TikvServers {
     let tikv_server_bin =
-        std::env::var(TIKV_SERVER_BIN_ENV_KEY).expect("env TIKV_SERVER_BIN is not set");
+        std::env::var(env_key).unwrap_or_else(|_| panic!("env {} is not set", env_key));
     TikvServers::new(
+        tag,
         PathBuf::from(tikv_server_bin),
         data_path,
         working_path,
@@ -282,10 +263,20 @@ fn prepare_tikv_servers(
     )
 }
 
-fn prepare_tikv_workers(working_path: PathBuf, security_conf: &SecurityConfig) -> TikvWorkers {
+fn prepare_tikv_workers(
+    tag: String,
+    env_key: &str,
+    working_path: PathBuf,
+    security_conf: &SecurityConfig,
+) -> TikvWorkers {
     let tikv_worker_bin =
-        std::env::var(TIKV_WORKER_BIN_ENV_KEY).expect("env TIKV_WORKER_BIN is not set");
-    TikvWorkers::new(PathBuf::from(tikv_worker_bin), working_path, security_conf)
+        std::env::var(env_key).unwrap_or_else(|_| panic!("env {} is not set", env_key));
+    TikvWorkers::new(
+        tag,
+        PathBuf::from(tikv_worker_bin),
+        working_path,
+        security_conf,
+    )
 }
 
 fn prepare_cluster(
@@ -306,10 +297,12 @@ fn prepare_cluster(
     let mut cluster = ServerCluster::new_opt(vec![], |_, _| {}, pd_wrapper);
 
     // Start tikv-servers.
-    let mut tikv_servers = prepare_tikv_servers(
+    let tikv_servers = prepare_tikv_servers(
+        "tikv_servers".to_string(),
+        TIKV_SERVER_BIN_ENV_KEY,
         cluster.data_dir().to_path_buf(),
         tc.data_path().to_path_buf(),
-        NODES_COUNT,
+        nodes_count,
         security_conf,
     );
     for node_id in nodes {
@@ -319,7 +312,7 @@ fn prepare_cluster(
         block_on(tikv_servers.must_healthy(node_id, WAIT_TIKV_SERVER_HEALTHY_TIMEOUT));
     }
     for (node_id, conf) in tikv_servers.configs() {
-        cluster.update_node_config(*node_id, conf.clone());
+        cluster.update_node_config(node_id, conf);
     }
 
     // Start tikv-workers.
@@ -331,7 +324,12 @@ fn prepare_cluster(
             ..Default::default()
         },
     );
-    let mut tikv_workers = prepare_tikv_workers(tc.data_path().to_path_buf(), security_conf);
+    let tikv_workers = prepare_tikv_workers(
+        "tikv_workers".to_string(),
+        TIKV_WORKER_BIN_ENV_KEY,
+        tc.data_path().to_path_buf(),
+        security_conf,
+    );
     tikv_workers.start_all(cluster.tikv_worker_configs());
     block_on(tikv_workers.must_all_healthy(WAIT_TIKV_WORKER_HEALTHY_TIMEOUT));
 
@@ -363,13 +361,16 @@ fn prepare_cluster(
     (cluster, tikv_servers, tikv_workers)
 }
 
-fn must_wait_store_state<F>(
-    ctx: &str,
-    pd_ctl: &PdControl,
-    store_id: u64,
-    expect: F,
-    timeout: Duration,
-) where
+fn store_is_down(store: &StoreInfo) -> bool {
+    store.store.state_name != "Up"
+}
+
+fn store_is_up(store: &StoreInfo) -> bool {
+    store.store.state_name == "Up"
+}
+
+fn must_wait_store_state<F>(ctx: &str, pd_ctl: &PdControl, store_id: u64, expect: F)
+where
     F: Fn(&pd_client::pd_control::StoreInfo) -> bool,
 {
     must_wait(
@@ -377,7 +378,7 @@ fn must_wait_store_state<F>(
             let store = block_on(pd_ctl.get_store(store_id)).unwrap();
             expect(&store)
         },
-        timeout.as_secs() as usize,
+        WAIT_STORE_STATE_TIMEOUT.as_secs() as usize,
         || {
             let store = block_on(pd_ctl.get_store(store_id)).unwrap();
             format!("{ctx}: store state not match: {store:?}")
@@ -385,12 +386,263 @@ fn must_wait_store_state<F>(
     );
 }
 
+// TODO: rolling switch.
+fn switch_workers_version(
+    from: Workers<'_>,
+    to: Workers<'_>,
+    confs: &HashMap<u16 /* idx */, cloud_worker::Config>,
+) {
+    from.stop_all();
+    to.start_all(confs);
+    info!("tikv-worker: switch version finished"; "from" => from.tag(), "to" => to.tag());
+}
+
+fn switch_servers_version<F>(
+    from: Servers<'_>,
+    to: Servers<'_>,
+    update_conf: F,
+    configs: &HashMap<u16, TikvConfig>,
+    pd_ctl: &PdControl,
+    upgrade_switches: &UpgradeTestSwitches,
+) where
+    F: Fn(u16, &mut TikvConfig),
+{
+    block_on(from.must_all_healthy(CHECK_HEALTHY_TIMEOUT));
+    let nodes = from.get_all_nodes();
+    assert_eq!(nodes.len(), NODES_COUNT);
+    for node_id in nodes {
+        // Sleep first to have longer test duration for different version between
+        // servers & workers.
+        std::thread::sleep(TIKV_STORE_RESTART_INTERVAL);
+
+        let conf = configs.get(&node_id).unwrap();
+        let store = block_on(pd_ctl.find_store_by_status_address(&conf.server.status_addr))
+            .unwrap()
+            .unwrap();
+        let store_id = store.store.id;
+
+        if upgrade_switches.graceful_restart {
+            info!("switch version: evict leader"; "node_id" => node_id, "store_id" => store_id, "store" => ?store);
+            let (store, scheduler_name) =
+                block_on(pd_ctl.evict_store_leaders(store_id, EVICT_LEADERS_TIMEOUT)).unwrap();
+            if store.status.leader_count > 0 {
+                warn!("switch version: store still has leaders after evicting"; "node_id" => node_id, "store" => ?store);
+            }
+            block_on(pd_ctl.remove_scheduler(&scheduler_name)).unwrap();
+        }
+
+        info!("switch version: stop server"; "node_id" => node_id, "from" => from.tag());
+        from.stop_node(node_id, false);
+        must_wait_store_state(
+            "switch version: wait for store is down",
+            pd_ctl,
+            store_id,
+            store_is_down,
+        );
+
+        info!("switch version: start server"; "node_id" => ?node_id, "to" => to.tag());
+        to.start_node(node_id, store_id, &update_conf);
+        must_wait_store_state(
+            "switch version: wait for store is up",
+            pd_ctl,
+            store_id,
+            store_is_up,
+        );
+    }
+    info!("tikv-server: switch version finished"; "from" => from.tag(), "to" => to.tag());
+}
+
+fn update_servers_configs<F>(
+    servers: Servers<'_>,
+    update_conf: F,
+    configs: &HashMap<u16, TikvConfig>,
+    pd_ctl: &PdControl,
+    upgrade_switches: &UpgradeTestSwitches,
+) where
+    F: Fn(u16, &mut TikvConfig),
+{
+    switch_servers_version(
+        servers.clone(),
+        servers,
+        update_conf,
+        configs,
+        pd_ctl,
+        upgrade_switches,
+    );
+}
+
+enum Workers<'a> {
+    TikvWorkers(&'a TikvWorkers),
+    ServerCluster(&'a RefCell<ServerCluster>),
+}
+
+impl<'a> Workers<'a> {
+    fn tag(&self) -> &str {
+        match self {
+            Self::TikvWorkers(workers) => workers.tag(),
+            Self::ServerCluster(_) => "server_cluster",
+        }
+    }
+
+    fn stop_all(&self) {
+        match self {
+            Self::TikvWorkers(workers) => {
+                block_on(workers.must_all_healthy(CHECK_HEALTHY_TIMEOUT));
+                workers.stop_all();
+            }
+            Self::ServerCluster(cluster) => {
+                let mut cluster = cluster.borrow_mut();
+                block_on(cluster.tikv_workers_must_healthy(CHECK_HEALTHY_TIMEOUT));
+                cluster.stop_tikv_workers();
+            }
+        }
+    }
+
+    fn start_all(&self, confs: &HashMap<u16 /* idx */, cloud_worker::Config>) {
+        match self {
+            Self::TikvWorkers(workers) => {
+                workers.start_all(confs);
+                block_on(workers.must_all_healthy(WAIT_TIKV_WORKER_HEALTHY_TIMEOUT));
+            }
+            Self::ServerCluster(cluster) => {
+                let mut cluster = cluster.borrow_mut();
+                cluster.start_tikv_workers_on_existed_configs(TIKV_WORKER_THREADS_COUNT);
+                block_on(cluster.tikv_workers_must_healthy(WAIT_TIKV_WORKER_HEALTHY_TIMEOUT));
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum Servers<'a> {
+    TikvServers(&'a TikvServers),
+    ServerCluster(&'a RefCell<ServerCluster>),
+}
+
+impl<'a> Servers<'a> {
+    fn tag(&self) -> &str {
+        match self {
+            Self::TikvServers(servers) => servers.tag(),
+            Self::ServerCluster(_) => "server_cluster",
+        }
+    }
+
+    fn stop_node(&self, node_id: u16, force: bool) {
+        match self {
+            Self::TikvServers(servers) => {
+                let exit_status = servers.stop_node(node_id, force);
+                if !force && !exit_status.success() {
+                    panic!(
+                        "tikv-server exit with error, node_id {}, exit_status {:?}",
+                        node_id, exit_status
+                    );
+                }
+            }
+            Self::ServerCluster(cluster) => {
+                cluster.borrow_mut().stop_node_force(node_id, force);
+            }
+        }
+    }
+
+    fn start_node<F>(&self, node_id: u16, store_id: u64, update_conf: F)
+    where
+        F: Fn(u16, &mut TikvConfig),
+    {
+        match self {
+            Self::TikvServers(servers) => {
+                servers.start_node(node_id, update_conf);
+                block_on(servers.must_healthy(node_id, WAIT_TIKV_SERVER_HEALTHY_TIMEOUT));
+            }
+            Self::ServerCluster(cluster) => {
+                let mut cluster = cluster.borrow_mut();
+                cluster.start_node(node_id, update_conf);
+                let new_store_id = cluster.get_store_id(node_id);
+                assert_eq!(new_store_id, store_id);
+            }
+        }
+    }
+
+    async fn must_all_healthy(&self, timeout: Duration) {
+        match self {
+            Self::TikvServers(servers) => {
+                servers.must_all_healthy(timeout).await;
+            }
+            Self::ServerCluster(_) => {}
+        }
+    }
+
+    fn get_all_nodes(&self) -> Vec<u16> {
+        match self {
+            Self::TikvServers(servers) => servers.get_all_nodes(),
+            Self::ServerCluster(cluster) => cluster.borrow().get_nodes(),
+        }
+    }
+}
+
+fn random_tikv_servers_restart(tikv_servers: &TikvServers) {
+    let mut rng = thread_rng();
+
+    // Ref: random::random_node_start
+    sleep(Duration::from_secs(rng.gen_range(3..17)));
+
+    let node_id = tikv_servers.random_restart_node(&mut rng).unwrap();
+    block_on(tikv_servers.must_healthy(node_id, WAIT_TIKV_SERVER_HEALTHY_TIMEOUT));
+    NODE_RESTART_COUNTER.fetch_add(1, Ordering::Relaxed);
+}
+
+fn wait_for_keyspace_prefix_tables_compacted_and_retry(cluster: &ServerCluster) {
+    let mut last_retry_time = Instant::now_coarse();
+    let mut keyspace_prefix_regions = vec![];
+    try_wait_result(
+        || {
+            if last_retry_time.saturating_elapsed() > Duration::from_secs(10) {
+                let mut get_keyspace_prefix_regions = |_, stats: &ShardStats| -> bool {
+                    if stats.keyspace_prefix_tables > 0 {
+                        keyspace_prefix_regions.push(stats.id);
+                    }
+                    false
+                };
+                cluster.find_shard_with_stats(&mut get_keyspace_prefix_regions);
+                if keyspace_prefix_regions.is_empty() {
+                    return Ok(());
+                }
+                keyspace_prefix_regions.sort_unstable();
+                keyspace_prefix_regions.dedup();
+
+                info!("wait for keyspace prefix tables compacted: retry"; "regions" => ?keyspace_prefix_regions);
+                for region_id in keyspace_prefix_regions.drain(..) {
+                    cluster.request_major_compaction(
+                        MajorCompactionTarget::Region(region_id),
+                        true,
+                        REQUEST_MAJOR_COMPACTION_TIMEOUT,
+                    );
+                }
+                last_retry_time = Instant::now_coarse();
+            }
+
+            match cluster.find_shard_with_stats(|_, stats| stats.keyspace_prefix_tables > 0) {
+                None => Ok(()),
+                Some(stats) => Err(stats),
+            }
+        },
+        WAIT_PREFIX_KEYSPACE_TABLES_COMPACTED_TIMEOUT.as_secs() as usize,
+    )
+    .unwrap_or_else(|stats| {
+        panic!(
+            "wait for keyspace prefix tables compacted timeout: {:?}",
+            stats
+        )
+    });
+}
+
 #[derive(Debug)]
 struct UpgradeTestSwitches {
     test_dur_before_upgrade: ReadableDuration,
     test_dur_after_upgrade: ReadableDuration,
     test_dur_after_downgrade: ReadableDuration,
-    evict_leader_switch: bool,
+    test_dur_after_update_configs: ReadableDuration,
+    graceful_restart: bool,
+    update_inner_key_offset: bool,
 }
 
 impl UpgradeTestSwitches {
@@ -399,24 +651,31 @@ impl UpgradeTestSwitches {
 
         let test_dur_before_upgrade = env_param(
             "TEST_DUR_BEFORE_UPGRADE",
-            ReadableDuration(crate::test_upgrade::TEST_DURATION_BEFORE_UPGRADE),
+            ReadableDuration(TEST_DURATION_BEFORE_UPGRADE),
         );
         let test_dur_after_upgrade = env_param(
             "TEST_DUR_AFTER_UPGRADE",
-            ReadableDuration(crate::test_upgrade::TEST_DURATION_AFTER_UPGRADE),
+            ReadableDuration(TEST_DURATION_AFTER_UPGRADE),
         );
         let test_dur_after_downgrade = env_param(
             "TEST_DUR_AFTER_DOWNGRADE",
-            ReadableDuration(crate::test_upgrade::TEST_DURATION_AFTER_DOWNGRADE),
+            ReadableDuration(TEST_DURATION_AFTER_DOWNGRADE),
+        );
+        let test_dur_after_update_configs = env_param(
+            "TEST_DUR_AFTER_UPDATE_CONFIGS",
+            ReadableDuration(TEST_DURATION_AFTER_UPDATE_CONFIGS),
         );
 
-        let evict_leader_switch = rng.gen_ratio(1, 5);
+        let graceful_restart = rng.gen_ratio(1, 5);
+        let update_inner_key_offset = env_switch("UPDATE_INNER_KEY_OFFSET");
 
         Self {
             test_dur_before_upgrade,
             test_dur_after_upgrade,
             test_dur_after_downgrade,
-            evict_leader_switch,
+            test_dur_after_update_configs,
+            graceful_restart,
+            update_inner_key_offset,
         }
     }
 }

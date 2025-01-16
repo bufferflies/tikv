@@ -15,9 +15,10 @@ use std::{
 use dashmap::DashMap;
 use hyper::Method;
 use nix::sys::signal::Signal;
+use rand::prelude::*;
 use security::{RestfulClient, SecurityConfig, SecurityManager};
 use tikv::config::TikvConfig;
-use tikv_util::{box_err, info, warn};
+use tikv_util::{box_err, info, time::Instant, warn};
 
 use crate::{
     new_test_config,
@@ -26,17 +27,19 @@ use crate::{
 };
 
 pub struct TikvServers {
+    tag: String,
     bin_path: PathBuf,
     data_path: PathBuf,
     working_path: PathBuf,
     nodes_count: usize,
     security_mgr: Arc<SecurityManager>,
-    confs: HashMap<u16 /* node_id */, TikvConfig>,
+    confs: DashMap<u16 /* node_id */, TikvConfig>,
     children: DashMap<u16 /* node_id */, process::Child>,
 }
 
 impl TikvServers {
     pub fn new(
+        tag: String,
         bin_path: PathBuf,
         data_path: PathBuf,
         working_path: PathBuf,
@@ -46,6 +49,7 @@ impl TikvServers {
         check_binary("tikv_server", &bin_path);
         let security_mgr = Arc::new(SecurityManager::new(security_conf).unwrap());
         Self {
+            tag,
             bin_path,
             data_path,
             working_path,
@@ -56,15 +60,22 @@ impl TikvServers {
         }
     }
 
-    pub fn configs(&self) -> &HashMap<u16 /* node_id */, TikvConfig> {
-        &self.confs
+    pub fn tag(&self) -> &str {
+        &self.tag
     }
 
-    pub fn start_node<F>(&mut self, node_id: u16, update_conf: F)
+    pub fn configs(&self) -> HashMap<u16 /* node_id */, TikvConfig> {
+        self.confs
+            .iter()
+            .map(|r| (*r.key(), r.value().clone()))
+            .collect()
+    }
+
+    pub fn start_node<F>(&self, node_id: u16, update_conf: F)
     where
         F: Fn(u16, &mut TikvConfig),
     {
-        let mut config = if let Some(config) = self.confs.remove(&node_id) {
+        let mut config = if let Some((_, config)) = self.confs.remove(&node_id) {
             config
         } else {
             new_test_config(&self.data_path, node_id, self.nodes_count)
@@ -90,12 +101,36 @@ impl TikvServers {
         assert!(old.is_none(), "tikv-server {} already started", node_id);
     }
 
-    pub fn stop_node(&self, node_id: u16) -> ExitStatus {
+    pub fn stop_node(&self, node_id: u16, force: bool) -> ExitStatus {
         let (_, mut child) = self.children.remove(&node_id).unwrap();
-        send_signal_to_child(&child, Signal::SIGTERM).unwrap();
+        let signal = if force {
+            Signal::SIGKILL
+        } else {
+            Signal::SIGTERM
+        };
+        info!("tikv-server: stopping"; "node_id" => node_id, "force" => force);
+        let start_time = Instant::now_coarse();
+        send_signal_to_child(&child, signal).unwrap();
         let exit_status = child.wait().unwrap();
-        info!("tikv-server: stopped"; "node_id" => node_id, "exit_status" => ?exit_status);
+        info!("tikv-server: stopped"; "node_id" => node_id, "exit_status" => ?exit_status, "takes" => ?start_time.saturating_elapsed());
         exit_status
+    }
+
+    pub fn random_restart_node(&self, rng: &mut ThreadRng) -> std::result::Result<u16, ExitStatus> {
+        let node_id = *self.get_all_nodes().choose(rng).unwrap();
+        let stop_sec = rng.gen_range(0..3);
+        let force = rng.gen();
+
+        let exit_status = self.stop_node(node_id, force);
+        // The exit status of force kill must be 9.
+        if !force && !exit_status.success() {
+            return Err(exit_status);
+        }
+
+        std::thread::sleep(Duration::from_secs(stop_sec));
+
+        self.start_node(node_id, |_, _| {});
+        Ok(node_id)
     }
 
     pub fn get_all_nodes(&self) -> Vec<u16> {
@@ -171,18 +206,25 @@ impl StatusClient {
 }
 
 pub struct TikvWorkers {
+    tag: String,
     bin_path: PathBuf,
     working_path: PathBuf,
     security_mgr: Arc<SecurityManager>,
-    endpoints: HashMap<u16, String>,
+    endpoints: DashMap<u16, String>,
     children: DashMap<u16 /* idx */, process::Child>,
 }
 
 impl TikvWorkers {
-    pub fn new(bin_path: PathBuf, working_path: PathBuf, security_conf: &SecurityConfig) -> Self {
+    pub fn new(
+        tag: String,
+        bin_path: PathBuf,
+        working_path: PathBuf,
+        security_conf: &SecurityConfig,
+    ) -> Self {
         check_binary("tikv_worker", &bin_path);
         let security_mgr = Arc::new(SecurityManager::new(security_conf).unwrap());
         Self {
+            tag,
             bin_path,
             working_path,
             security_mgr,
@@ -191,7 +233,11 @@ impl TikvWorkers {
         }
     }
 
-    pub fn start_all(&mut self, confs: &HashMap<u16 /* idx */, cloud_worker::Config>) {
+    pub fn tag(&self) -> &str {
+        &self.tag
+    }
+
+    pub fn start_all(&self, confs: &HashMap<u16 /* idx */, cloud_worker::Config>) {
         for (idx, conf) in confs {
             let log_file = self.working_path.join(format!("tikv-worker-{idx}.log"));
             let config_file = self.working_path.join(format!("tikv-worker-{idx}.toml"));
@@ -233,7 +279,7 @@ impl TikvWorkers {
     }
 
     async fn must_healthy(&self, idx: u16, timeout: Duration) {
-        let ep = self.endpoints.get(&idx).cloned().unwrap();
+        let ep = self.endpoints.get(&idx).map(|r| r.value().clone()).unwrap();
         wait_tikv_worker_healthy(ep, self.security_mgr.clone(), timeout)
             .await
             .unwrap_or_else(|err| {
@@ -243,7 +289,7 @@ impl TikvWorkers {
     }
 
     pub fn endpoints(&self) -> Vec<String> {
-        self.endpoints.values().cloned().collect()
+        self.endpoints.iter().map(|r| r.value().clone()).collect()
     }
 
     fn get_all_indexes(&self) -> Vec<u16> {

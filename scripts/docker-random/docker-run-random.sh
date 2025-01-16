@@ -111,6 +111,10 @@ while [[ $# -gt 0 ]]; do
 	--columnar-workload)
 		RUN_ARGS+=("--columnar-workload")
 		;;
+	--upgrade-test-duration)
+		RUN_ARGS+=("--upgrade-test-duration" "$2")
+		shift
+		;;
 	--help)
 		show_help
 		exit 0

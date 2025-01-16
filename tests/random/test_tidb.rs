@@ -95,7 +95,7 @@ pub(crate) const COLUMNAR_WORKLOAD_KEYSPACE: u32 = 1;
 pub(crate) const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
 // FIXME: Remove after all regions of prod env switched to inner_key_off = 4.
-pub(crate) const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset.
+pub(crate) const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.5; // 50% chance to enable inner key offset.
 
 pub(crate) const ENABLE_GLOBAL_TXN_FILE_RATIO: f64 = 0.8; // 80% chance enable txn file globally.
 pub(crate) const ENABLE_GLOBAL_TXN_FILE_ENV_KEY: &str = "GLOBAL_TXN_FILE";

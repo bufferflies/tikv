@@ -9,11 +9,13 @@ use std::{
 };
 
 use anyhow::bail;
+use bstr::ByteSlice;
 use cloud_server::TikvServer;
 use cloud_worker::CloudWorker;
 use dashmap::DashMap;
-use futures::executor::block_on;
+use futures::{executor::block_on, future::try_join_all};
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
+use hyper::{http, Body, Request};
 use kvengine::{
     dfs::Dfs, ia::util::IaConfig, table::sstable::BlockCacheType,
     txn_chunk_manager::TxnChunkManagerConfig, ShardStats,
@@ -21,7 +23,7 @@ use kvengine::{
 use kvproto::{
     kvrpcpb::{Mutation, Op},
     metapb,
-    metapb::PeerRole,
+    metapb::{PeerRole, Store},
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
 };
 use log_wrappers::Value;
@@ -184,11 +186,11 @@ impl ServerCluster {
             new_test_config(self.tmp_dir.path(), node_id, self.nodes_count)
         };
         update_conf(node_id, &mut config);
+        let pd_client = self.pd.new_client(); // Different nodes must not share PD client.
+        config.server.cluster_id = pd_client.get_cluster_id().unwrap();
         self.confs.insert(node_id, config.clone());
 
         std::fs::create_dir_all(&config.storage.data_dir).unwrap();
-        let pd_client = self.pd.new_client(); // Different nodes must not share PD client.
-        config.server.cluster_id = pd_client.get_cluster_id().unwrap();
         let dfs = self
             .dfs
             .get_or_insert_with(|| Self::prepare_dfs(&config, pd_client.clone()));
@@ -249,6 +251,10 @@ impl ServerCluster {
         self.confs.get(&node_id).unwrap()
     }
 
+    pub fn get_node_configs(&self) -> &HashMap<u16, TikvConfig> {
+        &self.confs
+    }
+
     pub fn update_node_config(&mut self, node_id: u16, conf: TikvConfig) {
         self.confs.insert(node_id, conf);
     }
@@ -265,30 +271,28 @@ impl ServerCluster {
 
     // Stop node gracefully.
     pub fn stop_node(&mut self, node_id: u16) {
-        if let Some(node) = self.servers.remove(&node_id) {
-            // Force stop node to cover the case wal chunk recovery.
-            node.force_stop(false);
-        }
+        self.stop_node_force(node_id, false);
     }
 
-    // Stop node without flush rfengine dfs worker if force is true.
+    // Stop node without flush rfengine dfs worker if force is true. Used to cover
+    // the case wal chunk recovery.
     pub fn stop_node_force(&mut self, node_id: u16, force: bool) {
         if let Some(node) = self.servers.remove(&node_id) {
-            // Force stop node to cover the case wal chunk recovery.
+            let store_id = node.get_store_id();
+            info!("node stopping"; "node" => node_id, "store" => store_id, "force" => force);
+
+            let start_time = Instant::now_coarse();
             node.force_stop(force);
+            info!("node stopped"; "node" => node_id, "takes" => ?start_time.saturating_elapsed());
         }
     }
 
     pub fn restart_node(&mut self, node_id: u16, stop_dur: Duration, force: bool) {
-        let store_id = self.get_store_id(node_id);
         self.stop_node_force(node_id, force);
-        info!(
-            "node stopped"; "node" => node_id, "store" => store_id, "force" => force,
-        );
 
         std::thread::sleep(stop_dur);
         self.start_node(node_id, |_, _| {});
-        info!("node restarted"; "node" => node_id, "store" => store_id);
+        info!("node restarted"; "node" => node_id);
     }
 
     pub fn get_kvengine(&self, node_id: u16) -> kvengine::Engine {
@@ -555,6 +559,24 @@ impl ServerCluster {
             stats.add(store_id, kv_engine.get_all_shard_stats_ext(skip_shards));
         }
         stats
+    }
+
+    pub fn find_shard_with_stats<F>(&self, mut f: F) -> Option<(u64 /* store_id */, ShardStats)>
+    where
+        F: FnMut(u64 /* store_id */, &ShardStats) -> bool, // found
+    {
+        for server in self.servers.values() {
+            let store_id = server.get_store_id();
+            let kv_engine = server.get_kv_engine();
+            for shard in kv_engine.get_all_shard_id_vers() {
+                if let Some(stats) = kv_engine.get_shard_stat_opt(shard.id) {
+                    if f(store_id, &stats) {
+                        return Some((store_id, stats));
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn get_shard_stats(&self, shard_id: u64) -> RegionShardStats {
@@ -833,6 +855,89 @@ impl ServerCluster {
                 TxnFileHelper::new(max_chunk_size, endpoints, self.security_mgr.clone()).unwrap();
             Some(Arc::new(helper))
         }
+    }
+
+    pub fn request_major_compaction(
+        &self,
+        target: MajorCompactionTarget,
+        allow_not_found: bool,
+        timeout: Duration,
+    ) {
+        let prefix = "major_compact=true";
+        let query = match &target {
+            MajorCompactionTarget::Keyspace(keyspace_id) => {
+                format!("{prefix}&keyspace_id={}", *keyspace_id)
+            }
+            MajorCompactionTarget::Region(region_id) => {
+                format!("{prefix}&region_id={}", *region_id)
+            }
+            MajorCompactionTarget::Table {
+                keyspace_id,
+                table_id,
+            } => format!(
+                "{prefix}&keyspace_id={}&table_id={}",
+                *keyspace_id, *table_id
+            ),
+        };
+
+        let pd_client = self.get_pure_pd_client();
+        let stores = pd_client.get_all_stores(true).unwrap();
+        let mut handles = vec![];
+        for store in stores {
+            let security_mgr = self.security_mgr.clone();
+            handles.push(tokio::spawn(Self::request_major_compaction_on_store(
+                security_mgr,
+                store,
+                query.clone(),
+                allow_not_found,
+                timeout,
+            )));
+        }
+        block_on(try_join_all(handles)).unwrap();
+    }
+
+    async fn request_major_compaction_on_store(
+        security_mgr: Arc<SecurityManager>,
+        store: Store,
+        query: String,
+        allow_not_found: bool,
+        timeout: Duration,
+    ) {
+        let store_id = store.id;
+        let uri = security_mgr
+            .build_uri(format!("{}/major-compact?{}", &store.status_address, query))
+            .unwrap();
+        try_wait_result_async(
+            || {
+                let query = query.to_string();
+                let uri = uri.clone();
+                let client = security_mgr.http_client(hyper::Client::builder()).unwrap();
+                Box::pin(async move {
+                    let req = Request::post(uri).body(Body::empty()).unwrap();
+                    let resp = client.request(req).await.map_err(|err| {
+                        warn!("request major compaction failed"; "query" => query, "store" => store_id, "err" => ?err);
+                        err
+                    })?;
+                    let status = resp.status();
+                    let is_success = status.is_success()
+                        || (allow_not_found && resp.status() == http::StatusCode::NOT_FOUND);
+                    let resp_data = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+                    assert!(
+                        is_success,
+                        "request major compaction failed: store {}, {:?}: {}",
+                        store_id,
+                        status,
+                        resp_data.to_str_lossy().as_ref()
+                    );
+                    Ok(())
+                })
+            },
+            timeout.as_secs() as usize,
+        )
+        .await
+        .unwrap_or_else(|err: hyper::Error| {
+            panic!("request major compaction failed: {:?}: {:?}", query, err);
+        });
     }
 }
 
@@ -1309,4 +1414,10 @@ impl RegionShardStats {
         }
         Ok(stats)
     }
+}
+
+pub enum MajorCompactionTarget {
+    Keyspace(u32),
+    Region(u64),
+    Table { keyspace_id: u32, table_id: i64 },
 }

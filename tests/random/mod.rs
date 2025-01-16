@@ -577,7 +577,7 @@ async fn must_split_region_for_keyspace(
 pub(crate) fn random_node_restart(cluster: &mut ServerCluster) {
     let mut rng = rand::thread_rng();
 
-    // Some regions would loss majority for a wile when the sleep duration is small.
+    // Some regions would lose majority for a wile when the sleep duration is small.
     // Data corruption should not happen, and workloads should tolerate this.
     sleep(Duration::from_secs(rng.gen_range(3..17)));
 
