@@ -294,6 +294,9 @@ impl EngineCore {
         } else if cs.get_clear_columnar() {
             self.apply_clear_columnar(&shard);
         }
+        if !cs.get_property_key().is_empty() && cs.get_property_key() == STORAGE_CLASS_KEY {
+            self.apply_update_storage_class(&shard, &cs)
+        }
         debug!("{} finished applying change set: {:?}", shard.tag(), cs);
 
         // Get shard again as version may be changed after change set applied.
@@ -757,12 +760,17 @@ impl EngineCore {
                 if new_tbl_create.cf as usize == cf {
                     let new_tbl = if is_move_down(comp) {
                         if comp.level == 0 {
-                            let old_l0 = data
-                                .l0_tbls
-                                .iter()
-                                .find(|l0| l0.id() == new_tbl_create.id)
-                                .unwrap();
-                            old_l0.get_cf(WRITE_CF).clone().unwrap()
+                            if let Some(tbl) = cs.ln_tables.get(&new_tbl_create.get_id()) {
+                                // reload sst for ia
+                                tbl.clone()
+                            } else {
+                                let old_l0 = data
+                                    .l0_tbls
+                                    .iter()
+                                    .find(|l0| l0.id() == new_tbl_create.id)
+                                    .unwrap();
+                                old_l0.get_cf(WRITE_CF).clone().unwrap()
+                            }
                         } else {
                             let old_top_level = old_scf.get_level(level - 1);
                             old_top_level.get_table_by_id(new_tbl_create.id).unwrap()
@@ -920,9 +928,26 @@ impl EngineCore {
         let mut builder = ShardDataBuilder::new(old_data);
         builder.set_schema_file(cs.schema_file.clone());
         shard.set_data(builder.build());
-        if !cs.get_property_key().is_empty() {
-            assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
-            shard.set_property(STORAGE_CLASS_KEY, cs.get_property_value());
+    }
+
+    fn apply_update_storage_class(&self, shard: &Shard, cs: &ChangeSet) {
+        assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
+        shard.set_property(STORAGE_CLASS_KEY, cs.get_property_value());
+        if !cs.ln_tables.is_empty() {
+            let old_data = shard.get_data();
+            let mut scf_builder = ShardCfBuilder::new(WRITE_CF);
+            for level in &old_data.cfs[WRITE_CF].levels {
+                for old_tbl in level.tables.as_ref() {
+                    let new_tbl = cs.ln_tables.get(&old_tbl.id()).unwrap().clone();
+                    scf_builder.add_table(new_tbl, level.level);
+                }
+            }
+            let new_cf = scf_builder.build();
+            let mut new_cfs = old_data.cfs.clone();
+            new_cfs[WRITE_CF] = new_cf;
+            let mut builder = ShardDataBuilder::new(old_data);
+            builder.set_cfs(new_cfs);
+            shard.set_data(builder.build());
         }
     }
 

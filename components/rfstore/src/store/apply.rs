@@ -1496,6 +1496,9 @@ impl Applier {
         ctx: &mut ApplyContext,
         cs: kvenginepb::ChangeSet,
         encryption_key: Option<EncryptionKey>,
+        reload_snap: Option<kvenginepb::Snapshot>, /* The snap contains the current files that
+                                                    * need to be reloaded. */
+        shard_use_ia: bool, // The shard_use_ia means shard's storage class is IA.
     ) {
         if cs.has_ingest_files() {
             self.paused_apply_queue
@@ -1512,7 +1515,14 @@ impl Applier {
         std::thread::spawn(move || {
             let id = cs.shard_id;
             tikv_util::set_current_region(id);
-            let res = engine.prepare_change_set(cs, !is_leader, None, encryption_key);
+            let res = engine.prepare_change_set(
+                cs,
+                !is_leader,
+                shard_use_ia,
+                reload_snap,
+                None,
+                encryption_key,
+            );
             router.send(id, PeerMsg::PrepareChangeSetResult(res, peer_id));
         });
     }
@@ -1585,7 +1595,8 @@ impl Applier {
         let encryption_key = self.encryption_key.clone();
         std::thread::spawn(move || {
             tikv_util::set_current_region(source.shard_id);
-            let res = engine.prepare_change_set(source, !is_leader, None, encryption_key);
+            let res =
+                engine.prepare_change_set(source, !is_leader, false, None, None, encryption_key);
             router.send(
                 region_id,
                 PeerMsg::PrepareCommitMergeResult(res, commit_index),
@@ -1758,8 +1769,13 @@ impl Applier {
                     .insert(pending_split.sequence, pending_split);
                 self.maybe_pause_for_split();
             }
-            ApplyMsg::PrepareChangeSet { cs, encryption_key } => {
-                self.handle_prepare_change_set(ctx, cs, encryption_key);
+            ApplyMsg::PrepareChangeSet {
+                cs,
+                encryption_key,
+                reload_snap,
+                shard_use_ia,
+            } => {
+                self.handle_prepare_change_set(ctx, cs, encryption_key, reload_snap, shard_use_ia);
             }
             ApplyMsg::ApplyChangeSet(cs) => {
                 self.handle_apply_change_set(ctx, cs);

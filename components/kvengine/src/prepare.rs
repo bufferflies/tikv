@@ -5,6 +5,7 @@ use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
     iter::Iterator,
+    ops::Deref,
     os::unix::fs::{FileExt, MetadataExt},
     path::PathBuf,
     sync::{
@@ -23,11 +24,16 @@ use tikv_util::{mpsc::Receiver, time::Instant};
 
 use crate::{
     apply::ChangeSet,
+    context::IaCtx,
     dfs::FileType,
     error::IoContext,
+    ia::{
+        ia_file::{table_meta_file_local_path, IaFile},
+        manager::IaManager,
+    },
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
-        columnar::SchemaFile,
+        columnar::{SchemaFile, IA_STORAGE_CLASS},
         file::{InMemFile, LocalFile},
         BoundedDataSet,
     },
@@ -41,6 +47,9 @@ impl EngineCore {
         &self,
         cs: kvenginepb::ChangeSet,
         use_direct_io: bool,
+        shard_use_ia: bool, // The shard_use_ia means shard's storage class is IA.
+        reload_snap: Option<kvenginepb::Snapshot>, /* The snap contains the current files that
+                             * need to be reloaded. */
         table_filter: Option<LoadTableFilterFn>,
         encryption_key: Option<EncryptionKey>, /* encryption_key will be ignored if cs is
                                                 * snapshot or restore_shard */
@@ -72,6 +81,10 @@ impl EngineCore {
                 }
                 for bt in comp.get_blob_tables() {
                     ids.insert(bt.get_id(), FileMeta::from_blob_table(bt));
+                }
+            } else if comp.level == 0 && shard_use_ia {
+                for tbl in &comp.table_creates {
+                    ids.insert(tbl.id, FileMeta::from_table(tbl));
                 }
             }
         }
@@ -137,6 +150,9 @@ impl EngineCore {
         if cs.has_update_schema_meta() {
             schema_meta = Some(cs.get_update_schema_meta());
         }
+        if let Some(reload_snap) = &reload_snap {
+            self.collect_snap_ids(reload_snap, &mut ids);
+        }
         if cs.has_columnar_compaction() {
             let columnar_comp = cs.get_columnar_compaction();
             for tbl in columnar_comp.get_columnar_change().get_columnar_creates() {
@@ -153,11 +169,21 @@ impl EngineCore {
             }
         }
         let mut encryption_key = encryption_key;
+        let mut shard_use_ia = shard_use_ia;
         if let Some(snap) = snap {
             self.collect_snap_ids(snap, &mut ids);
             lock_txn_file_refs.extend(collect_snap_lock_txn_file_refs(snap));
             encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
                 .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap());
+            shard_use_ia = get_shard_property(STORAGE_CLASS_KEY, snap.get_properties())
+                .map(|v| {
+                    if !v.is_empty() {
+                        v[0] == IA_STORAGE_CLASS
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
             if snap.has_schema_meta() {
                 schema_meta = Some(snap.get_schema_meta());
             }
@@ -205,6 +231,7 @@ impl EngineCore {
             &ids,
             &mut cs,
             use_direct_io,
+            shard_use_ia,
             encryption_key.clone(),
         )?;
 
@@ -255,6 +282,7 @@ impl EngineCore {
         ids: &HashMap<u64, FileMeta>,
         cs: &mut ChangeSet,
         use_direct_io: bool,
+        shard_use_ia: bool,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(ids.len());
@@ -262,22 +290,66 @@ impl EngineCore {
         let opts = dfs::Options::default().with_shard(shard_id, shard_ver);
         let mut msg_count = 0;
         for (&id, fm) in ids {
-            if let Ok(local_file) = self.open_local_file(id, fm.file_type) {
-                cs.add_file(
-                    id,
-                    Arc::new(local_file),
-                    fm,
-                    self.cache.clone(),
-                    encryption_key.clone(),
-                )?;
-                continue;
-            }
             let fs = self.fs.clone();
+            let use_ia_file = self.ia_ctx.is_enabled() && fm.use_ia(shard_use_ia);
+            let ia_ctx = if use_ia_file {
+                match self.ia_ctx.clone() {
+                    IaCtx::Disabled => {
+                        unreachable!() // Checked before. It won't happen.
+                    }
+                    IaCtx::Enabled(ia_mgr, data_dir) => {
+                        let meta_file_path =
+                            table_meta_file_local_path(id, fm.file_type, data_dir.deref());
+                        if let Ok(table_meta_file) =
+                            self.open_local_file_with_file_path(id, meta_file_path)
+                        {
+                            if let Ok(ia_file) =
+                                IaFile::open(id, fm.file_type, Arc::new(table_meta_file), ia_mgr)
+                            {
+                                cs.add_file(
+                                    id,
+                                    Arc::new(ia_file),
+                                    fm,
+                                    self.cache.clone(),
+                                    encryption_key.clone(),
+                                )?;
+                                continue;
+                            }
+                        };
+                    }
+                };
+                self.ia_ctx.clone()
+            } else {
+                if let Ok(local_file) = self.open_local_file(id, fm.file_type) {
+                    cs.add_file(
+                        id,
+                        Arc::new(local_file),
+                        fm,
+                        self.cache.clone(),
+                        encryption_key.clone(),
+                    )?;
+                    continue;
+                }
+                IaCtx::Disabled
+            };
             let tx = result_tx.clone();
             let fm = fm.clone();
             runtime.spawn(async move {
-                let res = fs.read_file(id, opts.with_type(fm.file_type)).await;
-                let _ = tx.send(res.map(|data| (id, fm, data)));
+                let res = match ia_ctx {
+                    IaCtx::Disabled => fs
+                        .read_file(id, opts.with_type(fm.file_type))
+                        .await
+                        .map(|data| (data, None)),
+                    IaCtx::Enabled(ia_mgr, data_dir) => {
+                        let opts = dfs::Options::default()
+                            .with_type(fm.file_type)
+                            .with_start_off(fm.table_meta_off as u64);
+                        fs.read_file(id, opts)
+                            .await
+                            .map(|data| (data, Some((ia_mgr, data_dir))))
+                    }
+                };
+                let _ = tx.send(res.map(|(data, ia_mgr)| (id, fm, data, ia_mgr)));
             });
             if msg_count < LOAD_FILE_CONCURRENCY {
                 msg_count += 1;
@@ -295,20 +367,25 @@ impl EngineCore {
         &self,
         cs: &mut ChangeSet,
         use_direct_io: bool,
-        result_tx: &Receiver<dfs::Result<(u64, FileMeta, Bytes)>>,
+        result_tx: &Receiver<
+            dfs::Result<(u64, FileMeta, Bytes, Option<(IaManager, Arc<PathBuf>)>)>,
+        >,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
-        let (id, meta, data) = result_tx.recv().unwrap()?;
+        let (id, meta, data, ia_ctx) = result_tx.recv().unwrap()?;
         let data_len = data.len();
-        self.write_local_file(id, data, use_direct_io, meta.file_type)?;
-        let file = self.open_local_file(id, meta.file_type)?;
-        cs.add_file(
-            id,
-            Arc::new(file),
-            &meta,
-            self.cache.clone(),
-            encryption_key,
-        )?;
+        let file = if let Some((ia_mgr, data_dir)) = ia_ctx {
+            let meta_file_path = table_meta_file_local_path(id, meta.file_type, data_dir.deref());
+            self.write_local_file_with_file_path(id, data, use_direct_io, meta_file_path.clone())?;
+            let meta_file = self.open_local_file_with_file_path(id, meta_file_path)?;
+            let table_meta_file = Arc::new(meta_file);
+            Arc::new(IaFile::open(id, meta.file_type, table_meta_file, ia_mgr)?) as _
+        } else {
+            self.write_local_file(id, data, use_direct_io, meta.file_type)?;
+            let file = self.open_local_file(id, meta.file_type)?;
+            Arc::new(file) as _
+        };
+        cs.add_file(id, file, &meta, self.cache.clone(), encryption_key)?;
         ENGINE_LEVEL_WRITE_VEC
             .with_label_values(&[&meta.get_level().to_string()])
             .inc_by(data_len as u64);
@@ -340,6 +417,7 @@ impl EngineCore {
             &load_tables,
             &mut cs,
             use_direct_io,
+            false,
             shard.encryption_key.clone(),
         )?;
 
@@ -418,8 +496,18 @@ impl EngineCore {
         use_direct_io: bool,
         file_type: FileType,
     ) -> Result<()> {
-        let start = Instant::now();
         let local_file_name = self.local_file_path(id, file_type);
+        self.write_local_file_with_file_path(id, data, use_direct_io, local_file_name)
+    }
+
+    fn write_local_file_with_file_path(
+        &self,
+        id: u64,
+        data: Bytes,
+        use_direct_io: bool,
+        file_path: PathBuf,
+    ) -> Result<()> {
+        let start = Instant::now();
         let tmp_file_name = self.tmp_file_path(id);
         if use_direct_io {
             let mut writer =
@@ -443,7 +531,7 @@ impl EngineCore {
             file.sync_data()
                 .table_ctx(id, "write_local_file.sync_tmp")?;
         }
-        std::fs::rename(tmp_file_name, local_file_name).table_ctx(id, "write_local_file.rename")?;
+        std::fs::rename(tmp_file_name, file_path).table_ctx(id, "write_local_file.rename")?;
         info!(
             "write local file {} size: {} takes {:?}",
             id,
@@ -498,11 +586,15 @@ impl EngineCore {
     }
 
     fn open_local_file(&self, id: u64, file_type: FileType) -> Result<LocalFile> {
-        let _guard = self.lock_file(id);
         let path = self.local_file_path(id, file_type);
+        self.open_local_file_with_file_path(id, path)
+    }
+
+    fn open_local_file_with_file_path(&self, id: u64, file_path: PathBuf) -> Result<LocalFile> {
+        let _guard = self.lock_file(id);
         Ok(LocalFile::open(
             id,
-            path.as_path(),
+            file_path.as_path(),
             self.loaded.load(Relaxed),
         )?)
     }

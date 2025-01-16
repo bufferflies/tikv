@@ -20,7 +20,10 @@ use util::TxnFileRefExt as _;
 use super::*;
 use crate::{
     dfs::FileType,
-    table::{BoundedDataSet, DataBound, InnerKey},
+    table::{
+        columnar::{IA_STORAGE_CLASS, UNSPECIFIED_STORAGE_CLASS},
+        BoundedDataSet, DataBound, InnerKey,
+    },
     util::{TxnFileLocks, TxnFileRefPropertyHelper},
 };
 
@@ -292,10 +295,6 @@ impl ShardMeta {
             self.schema_file_id = sm.get_file_id();
             self.schema_file_ver = sm.get_version();
             assert_eq!(self.schema_restore_ver, sm.get_restore_version());
-            if !cs.get_property_key().is_empty() {
-                assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
-                self.set_property(STORAGE_CLASS_KEY, cs.get_property_value());
-            }
             return;
         }
         if cs.has_columnar_compaction() {
@@ -479,6 +478,9 @@ impl ShardMeta {
                 );
                 return true;
             }
+        }
+        if !cs.get_property_key().is_empty() && cs.get_property_key() == STORAGE_CLASS_KEY {
+            return self.get_storage_class() == *cs.property_value.first().unwrap();
         }
         false
     }
@@ -1279,6 +1281,47 @@ impl ShardMeta {
         );
         debug!("{} recover txn file locks from shard", self.tag(); "locks" => ?self.txn_file_locks);
     }
+
+    pub fn collect_files_for_storage_class(
+        &mut self,
+        cs: &kvenginepb::ChangeSet,
+    ) -> Option<pb::Snapshot> {
+        debug_assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
+        let mut snap = pb::Snapshot::new();
+        for (k, v) in self.files.iter() {
+            if v.file_type == FileType::Sst && v.get_level() > 0 && v.get_cf() as usize == WRITE_CF
+            {
+                let mut tbl = pb::TableCreate::new();
+                tbl.set_id(*k);
+                tbl.set_cf(v.cf as i32);
+                tbl.set_level(v.get_level());
+                tbl.set_smallest(v.smallest.to_vec());
+                tbl.set_biggest(v.biggest.to_vec());
+                tbl.set_meta_offset(v.table_meta_off);
+                snap.mut_table_creates().push(tbl);
+            }
+        }
+        if snap.table_creates.is_empty() {
+            return None;
+        }
+        Some(snap)
+    }
+
+    pub fn use_ia(&self) -> bool {
+        self.get_storage_class() == IA_STORAGE_CLASS
+    }
+
+    pub fn get_storage_class(&self) -> u8 {
+        if let Some(val) = self.get_property(STORAGE_CLASS_KEY) {
+            if !val.is_empty() {
+                val[0]
+            } else {
+                UNSPECIFIED_STORAGE_CLASS
+            }
+        } else {
+            UNSPECIFIED_STORAGE_CLASS
+        }
+    }
 }
 
 impl BoundedDataSet for ShardMeta {
@@ -1346,6 +1389,14 @@ impl FileMeta {
     pub fn can_use_ia(&self) -> bool {
         match self.file_type {
             FileType::Sst if (self.cf as usize == WRITE_CF && self.level > 0) => true,
+            FileType::Columnar => true,
+            _ => false,
+        }
+    }
+
+    pub fn use_ia(&self, shard_use_ia: bool) -> bool {
+        match self.file_type {
+            FileType::Sst => shard_use_ia && (self.cf as usize == WRITE_CF && self.level > 0),
             FileType::Columnar => true,
             _ => false,
         }

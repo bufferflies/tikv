@@ -7,9 +7,12 @@ use std::{
 
 use tikv_util::config::ReadableDuration;
 
-use crate::table::{
-    blobtable::builder::BlobTableBuildOptions, columnar::ColumnarTableBuildOptions,
-    sstable::BlockCacheType, vector_index::VectorIndexBuildOptions, ChecksumType,
+use crate::{
+    ia::util::IaConfig,
+    table::{
+        blobtable::builder::BlobTableBuildOptions, columnar::ColumnarTableBuildOptions,
+        sstable::BlockCacheType, vector_index::VectorIndexBuildOptions, ChecksumType,
+    },
 };
 
 pub(crate) const DEFAULT_COMPACTION_REQUEST_VERSION: u32 = 3;
@@ -87,6 +90,9 @@ pub struct Config {
 
     pub per_keyspace_configs: Vec<PerKeyspaceConfig>,
 
+    /// Enable IA by setting `ia.mem_cap > 0 && ia.disk_cap > 0`.
+    pub ia: IaConfig,
+
     pub blob_table_build_options: BlobTableBuildOptions,
 
     pub columnar_table_build_options: ColumnarTableBuildOptions,
@@ -114,6 +120,7 @@ impl Default for Config {
             block_cache_type: BlockCacheType::Moka,
             blob_table_build_options: Default::default(),
             per_keyspace_configs: vec![],
+            ia: Default::default(),
             columnar_table_build_options: Default::default(),
             vector_index_build_options: Default::default(),
             ignore_columnar_table_load: false,

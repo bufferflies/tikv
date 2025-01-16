@@ -2307,7 +2307,14 @@ impl MetaApplier {
                     self.engine.meta_committed(&cs, false);
                     match self
                         .engine
-                        .prepare_change_set(cs, false, None, self.encryption_key.clone())
+                        .prepare_change_set(
+                            cs,
+                            false,
+                            false,
+                            None,
+                            None,
+                            self.encryption_key.clone(),
+                        )
                         .and_then(|cs| self.engine.apply_change_set(cs))
                     {
                         Ok(()) => debug!(

@@ -14,7 +14,9 @@ use cloud_encryption::EncryptionKey;
 use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
-use kvengine::{get_shard_property, util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY};
+use kvengine::{
+    get_shard_property, util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY, STORAGE_CLASS_KEY,
+};
 use kvproto::{
     disk_usage::DiskUsage,
     kvrpcpb::ExtraOp as TxnExtraOp,
@@ -1944,6 +1946,18 @@ impl<'a> PreprocessRef<'a> {
             "region" => tag,
             "max_ts" => shard_meta.max_ts,
         );
+        // During the cs process of updating the storage class property, we instantly
+        // reload all the existing files `reload_snap`.
+        // After cs of updating the storage class property, the new files of other cs
+        // will be directly loaded according to the target storage class
+        // `shard_use_ia` and applied normally.
+        let reload_snap =
+            if !cs.get_property_key().is_empty() && cs.get_property_key() == STORAGE_CLASS_KEY {
+                shard_meta.collect_files_for_storage_class(&cs)
+            } else {
+                None
+            };
+        let shard_use_ia = shard_meta.use_ia();
         ctx.raft_wb.set_state(
             peer_id,
             region_id,
@@ -1958,6 +1972,8 @@ impl<'a> PreprocessRef<'a> {
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet {
             cs,
             encryption_key: self.encryption_key.clone(),
+            reload_snap,
+            shard_use_ia,
         });
         Ok(())
     }

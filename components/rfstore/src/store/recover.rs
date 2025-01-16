@@ -258,6 +258,8 @@ impl RecoverHandler {
                         let cs = ctx.engine.prepare_change_set(
                             cs,
                             false,
+                            meta.use_ia(),
+                            None,
                             None,
                             encryption_key.clone(),
                         )?;

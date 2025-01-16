@@ -409,7 +409,7 @@ impl IaManagerOptionsBuilder {
 
 /// The config of IA (Infrequent Access) which use memory for small queue and
 /// disk for main queue.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct IaConfig {

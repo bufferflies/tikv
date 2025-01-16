@@ -29,7 +29,8 @@ use crate::{
         self,
         blobtable::blobtable::BlobTable,
         columnar::{
-            ColumnarLevel, ColumnarLevels, SchemaFile, VectorIndexDef, UNSPECIFIED_STORAGE_CLASS,
+            ColumnarLevel, ColumnarLevels, SchemaFile, VectorIndexDef, IA_STORAGE_CLASS,
+            UNSPECIFIED_STORAGE_CLASS,
         },
         file::InMemFile,
         memtable::{self, CfTable},
@@ -114,7 +115,7 @@ pub struct Shard {
     // columnar if the schema is not updated, we skip retrying the convert.
     pub(crate) outdated_schema_ver: AtomicI64,
 
-    is_sync: bool,
+    pub(crate) checked_schema_ver: AtomicI64,
 }
 
 // Note: when add new property, consider whether to add it to following process:
@@ -219,7 +220,7 @@ impl Shard {
             compaction_priority: RwLock::new(None),
             encryption_key,
             outdated_schema_ver: Default::default(),
-            is_sync: true,
+            checked_schema_ver: Default::default(),
         };
         {
             let mut pending_ops = shard.pending_ops.write().unwrap();
@@ -333,7 +334,6 @@ impl Shard {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
         let mut lock_txn_file_refs: Vec<TxnFileRef> = vec![];
-        let mut is_sync = true;
         if mem_tbls.is_empty() {
             mem_tbls.push(CfTable::new());
         }
@@ -384,9 +384,6 @@ impl Shard {
         for _ in 0..msg_count {
             match result_rx.recv().await.unwrap() {
                 Ok((id, fm, file)) => {
-                    if !file.is_sync() {
-                        is_sync = false;
-                    }
                     cs.add_file(
                         id,
                         file,
@@ -438,7 +435,6 @@ impl Shard {
         create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, ignore_lock, false);
         builder.set_schema_file(cs.schema_file.clone());
         shard.id = cs.shard_id;
-        shard.is_sync = is_sync;
         shard.set_data(builder.build());
         Ok(shard)
     }
@@ -1233,6 +1229,10 @@ impl Shard {
         self.pending_ops.read().unwrap().manual_major_compaction
     }
 
+    pub fn use_ia(&self) -> bool {
+        self.get_storage_class() == IA_STORAGE_CLASS
+    }
+
     pub fn get_storage_class(&self) -> u8 {
         self.pending_ops.read().unwrap().storage_class
     }
@@ -1243,6 +1243,14 @@ impl Shard {
 
     pub fn tag(&self) -> ShardTag {
         ShardTag::new(self.engine_id, IdVer::new(self.id, self.ver))
+    }
+
+    pub fn get_checked_schema_ver(&self) -> i64 {
+        self.checked_schema_ver.load(Acquire)
+    }
+
+    pub fn set_checked_schema_ver(&self, schema_ver: i64) {
+        self.checked_schema_ver.store(schema_ver, Ordering::Release);
     }
 
     pub fn get_schema_file(&self) -> Option<SchemaFile> {
@@ -1325,10 +1333,6 @@ impl Shard {
 
     pub(crate) fn set_outdated_schema_ver(&self, ver: i64) {
         self.outdated_schema_ver.store(ver, Ordering::Release);
-    }
-
-    pub(crate) fn is_sync(&self) -> bool {
-        self.is_sync
     }
 }
 
@@ -1850,6 +1854,10 @@ impl ShardDataCore {
         !self.col_levels.unconverted_l0s.is_empty()
     }
 
+    pub(crate) fn is_sync(&self) -> bool {
+        self.cfs[WRITE_CF].is_sync()
+    }
+
     pub fn prepend_keyspace_id(&self) -> Option<u32> {
         (self.range.keyspace_id > 0 && self.inner_key_off == 0).then_some(self.range.keyspace_id)
     }
@@ -1949,6 +1957,15 @@ impl ShardCf {
             .iter()
             .map(|lh| lh.tables.iter().map(|tbl| tbl.size()).sum::<u64>())
             .sum()
+    }
+
+    pub(crate) fn is_sync(&self) -> bool {
+        for l in &self.levels {
+            if !l.tables.is_empty() {
+                return l.tables[0].is_sync();
+            }
+        }
+        true
     }
 }
 

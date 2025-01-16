@@ -30,6 +30,8 @@ use txn_chunk_manager::with_pool_size;
 use crate::{
     apply::ChangeSet,
     config::PerKeyspaceConfig,
+    context::IaCtx,
+    ia::manager::IaManager,
     limiter::StoreLimiter,
     meta::ShardMeta,
     table::{
@@ -121,6 +123,7 @@ impl Engine {
             with_pool_size(opts.txn_file_worker_pool_size),
             TxnChunkManagerConfig::default(),
         );
+        let ia_ctx = create_ia_ctx(opts.clone(), fs.clone());
         let (metas, files_in_blacklist) =
             tikv_util::init_task_local_sync(|| EngineCore::read_meta(meta_iter))?;
         let core = EngineCore {
@@ -156,6 +159,7 @@ impl Engine {
             ks_safepoint_v2: ks_gc_sp_map,
             master_key,
             txn_chunk_mgr,
+            ia_ctx,
             schema_files: Arc::new(DashMap::new()),
         };
         let en = Engine {
@@ -308,6 +312,7 @@ pub struct EngineCore {
     pub(crate) ks_safepoint_v2: Option<Arc<DashMap<u32, u64>>>,
     pub(crate) master_key: MasterKey,
     pub(crate) txn_chunk_mgr: TxnChunkManager,
+    pub(crate) ia_ctx: IaCtx,
     pub(crate) files_in_blacklist: Arc<HashSet<u64>>,
     pub(crate) schema_files: Arc<DashMap<u64, SchemaFile>>,
 }
@@ -361,8 +366,14 @@ impl EngineCore {
         }
         info!("load and ingest shard {}", meta.tag());
         // Encryption key is not necessary for change set of snapshot.
-        let change_set =
-            self.prepare_change_set(meta.to_change_set(), false, table_filter, None)?;
+        let change_set = self.prepare_change_set(
+            meta.to_change_set(),
+            false,
+            meta.use_ia(),
+            None,
+            table_filter,
+            None,
+        )?;
         self.ingest(change_set, false)?;
         let shard = self.get_shard(meta.id);
         Ok(shard.unwrap())
@@ -377,8 +388,14 @@ impl EngineCore {
     ) -> Result<Shard> {
         info!("load parent shard {}", meta.tag());
         // Encryption key is not necessary for change set of snapshot.
-        let change_set =
-            self.prepare_change_set(meta.to_change_set(), false, table_filter, None)?;
+        let change_set = self.prepare_change_set(
+            meta.to_change_set(),
+            false,
+            meta.use_ia(),
+            None,
+            table_filter,
+            None,
+        )?;
         let shard = self.new_shard_from_change_set(change_set);
         shard.refresh_states();
         Ok(shard)
@@ -858,6 +875,10 @@ impl EngineCore {
         self.master_key.clone()
     }
 
+    pub fn is_ia_enabled(&self) -> bool {
+        self.ia_ctx.is_enabled()
+    }
+
     pub fn get_txn_chunk_manager(&self) -> TxnChunkManager {
         self.txn_chunk_mgr.clone()
     }
@@ -974,5 +995,27 @@ fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
         for txn_file in txn_files {
             txn_file.expire_ttl_cache();
         }
+    }
+}
+
+fn create_ia_ctx(opts: Arc<Options>, fs: Arc<dyn dfs::Dfs>) -> IaCtx {
+    if !opts.ia.mem_cap.is_zero() && !opts.ia.disk_cap.is_zero() {
+        let ia_path = opts.local_dir.join("ia");
+        let segment_path = ia_path.join("segment");
+        std::fs::create_dir_all(&segment_path).unwrap();
+        let opts = opts.ia.to_manager_options(segment_path).unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("ia")
+            .build()
+            .unwrap();
+        let rt = runtime.handle().clone();
+        let ia_mgr = runtime.block_on(IaManager::new(opts, fs, rt)).unwrap();
+        let meta_path = ia_path.join("meta");
+        std::fs::create_dir_all(&meta_path).unwrap();
+        IaCtx::Enabled(ia_mgr, Arc::new(meta_path))
+    } else {
+        IaCtx::Disabled
     }
 }

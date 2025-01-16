@@ -1530,7 +1530,7 @@ impl Applier {
                     unwrap_or_return!(
                         self.engine.apply_change_set(
                             self.engine
-                                .prepare_change_set(cs, false, None, None)
+                                .prepare_change_set(cs, false, false, None, None, None)
                                 .unwrap()
                         ),
                         "applier apply changeset"

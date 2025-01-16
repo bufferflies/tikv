@@ -83,6 +83,9 @@ pub(crate) enum ApplyMsg {
     PrepareChangeSet {
         cs: kvenginepb::ChangeSet,
         encryption_key: Option<EncryptionKey>,
+        reload_snap: Option<kvenginepb::Snapshot>, /* The snap contains the current files that
+                                                    * need to be reloaded. */
+        shard_use_ia: bool, // The shard_use_ia means shard's storage class is IA.
     },
     PrepareMerge,
     PrepareCommitMerge {

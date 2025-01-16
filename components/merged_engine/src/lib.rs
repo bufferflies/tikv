@@ -462,6 +462,8 @@ impl MergedEngine {
                         let source_cs = self.kv.prepare_change_set(
                             source,
                             false,
+                            false,
+                            None,
                             None,
                             shard.get_encryption_key(),
                         )?;

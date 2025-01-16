@@ -49,7 +49,7 @@ use tikv_util::{
     store::{find_peer, is_learner},
     sys::thread::StdThreadBuildWrapper,
     warn,
-    worker::{LazyWorker, Scheduler},
+    worker::{Builder, LazyWorker, Scheduler},
     RingQueue,
 };
 use time::Timespec;
@@ -63,6 +63,7 @@ const UNREACHABLE_BACKOFF: Duration = Duration::from_secs(10);
 struct Workers {
     pd_worker: LazyWorker<PdTask>,
     gc_worker: LazyWorker<GcTask>,
+    schema_worker: LazyWorker<SchemaTask>,
     coprocessor_host: CoprocessorHost<kvengine::Engine>,
 }
 
@@ -128,9 +129,21 @@ impl RaftBatchSystem {
         gc_worker.start(gc_runner);
         let gc_scheduler = gc_worker.scheduler();
 
+        let schema_worker_name = "schema-worker";
+        let mut schema_worker = Builder::new(schema_worker_name)
+            .thread_count(1)
+            .pending_capacity(1)
+            .create()
+            .lazy_build(schema_worker_name);
+        let schema_runner =
+            SchemaRunner::new(meta.get_id(), engines.kv.clone(), self.router.clone());
+        schema_worker.start(schema_runner);
+        let schema_scheduler = schema_worker.scheduler();
+
         let mut workers = Workers {
             pd_worker,
             gc_worker,
+            schema_worker,
             coprocessor_host: coprocessor_host.clone(),
         };
         let pd_scheduler = workers.pd_worker.scheduler();
@@ -143,6 +156,7 @@ impl RaftBatchSystem {
             trans,
             pd_scheduler,
             gc_scheduler,
+            schema_scheduler,
             coprocessor_host,
             importer,
             destroying: HashSet::default(),
@@ -254,6 +268,7 @@ impl RaftBatchSystem {
         // Wait all workers finish.
         workers.gc_worker.stop();
         workers.pd_worker.stop();
+        workers.schema_worker.stop();
         fail_point!("after_shutdown_apply");
         workers.coprocessor_host.shutdown();
     }
@@ -528,6 +543,7 @@ pub(crate) struct GlobalContext {
     pub(crate) trans: Box<dyn Transport>,
     pub(crate) pd_scheduler: Scheduler<PdTask>,
     pub(crate) gc_scheduler: Scheduler<GcTask>,
+    pub(crate) schema_scheduler: Scheduler<SchemaTask>,
     pub(crate) coprocessor_host: CoprocessorHost<kvengine::Engine>,
     pub(crate) importer: Arc<SstImporter>,
     /// Saves destroying regions in one loop. It's used to solve the race

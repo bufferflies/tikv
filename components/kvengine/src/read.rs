@@ -307,6 +307,7 @@ impl SnapAccessCore {
         let meta_seq = shard.get_meta_sequence();
         let write_sequence = shard.get_write_sequence();
         let columnar_snap_version = shard.get_columnar_snap_version();
+        let is_sync = data.is_sync();
         Self {
             tag: shard.tag(),
             write_sequence,
@@ -319,7 +320,7 @@ impl SnapAccessCore {
             blob_table_prefetch_size: shard.opt.blob_prefetch_size,
             deleting_prefixes: shard.get_del_prefixes(),
             encryption_key: shard.encryption_key.clone(),
-            is_sync: shard.is_sync(),
+            is_sync,
         }
     }
 
@@ -1384,6 +1385,9 @@ impl SnapAccessCore {
     pub fn new_schema_from_columns(&self, table_id: i64, columns: &[ColumnInfo]) -> Option<Schema> {
         let schema_file = self.data.schema_file.as_ref()?;
         let table_schema = schema_file.get_table(table_id)?;
+        if !table_schema.with_columnar() {
+            return None;
+        }
         let mut schema_buf = SchemaBuf {
             table_id,
             handle_column: table_schema.handle_column.clone(),

@@ -14,6 +14,7 @@ use crate::{
         DEFAULT_COMPACTION_REQUEST_VERSION, DEFAULT_COMPACTION_TOMBS_COUNT,
         DEFAULT_COMPACTION_TOMBS_RATIO,
     },
+    ia::util::IaConfig,
     table::{blobtable, columnar, sstable, vector_index::VectorIndexBuildOptions},
     *,
 };
@@ -80,6 +81,9 @@ pub struct Options {
     pub flow_control: FlowControlOptions,
 
     pub txn_file_worker_pool_size: usize,
+
+    /// Enable IA by setting `ia.mem_cap > 0 && ia.disk_cap > 0`.
+    pub ia: IaConfig,
     /// Ignore columnar table load and ingest when start kvengine. This is used
     /// for clear columnar replica in all shards when encounter critical issue.
     pub ignore_columnar_table_load: bool,
@@ -114,6 +118,7 @@ impl Default for Options {
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
             flow_control: Default::default(),
             txn_file_worker_pool_size: 16,
+            ia: Default::default(),
             ignore_columnar_table_load: false,
         }
     }

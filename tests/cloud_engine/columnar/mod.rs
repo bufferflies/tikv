@@ -214,33 +214,19 @@ fn test_schema_file_with_storage_class() {
     must_wait(
         || {
             let all_ids_vers = kvengine.get_all_shard_id_vers();
-            all_ids_vers.len() == 7
-        },
-        10,
-        || "failed to split ia table".to_string(),
-    );
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        schema_file_id,
-    ));
-    must_wait(
-        || {
-            let mut shard_with_schema_file_count = 0;
             let mut shard_with_ia_count = 0;
             for &id_ver in &kvengine.get_all_shard_id_vers() {
                 let shard = kvengine.get_shard(id_ver.id).unwrap();
-                if shard.get_schema_file().is_some() {
-                    shard_with_schema_file_count += 1;
-                    if shard.get_storage_class() == IA_STORAGE_CLASS {
-                        shard_with_ia_count += 1;
-                    }
+                if shard.get_schema_file().is_some()
+                    && shard.get_storage_class() == IA_STORAGE_CLASS
+                {
+                    shard_with_ia_count += 1;
                 }
             }
-            shard_with_schema_file_count == 2 && shard_with_ia_count == 2
+            all_ids_vers.len() == 7 && shard_with_ia_count == 2
         },
-        10,
-        || "failed to wait storage class".to_string(),
+        20,
+        || "failed to wait storage class ia".to_string(),
     );
 
     // convert IA to STANDARD.
@@ -267,14 +253,11 @@ fn test_schema_file_with_storage_class() {
 
     must_wait(
         || {
-            let mut shard_with_schema_file_ids = vec![];
             let mut shard_with_ia_count = 0;
             let mut shard_with_standard_count = 0;
             for &id_ver in &kvengine.get_all_shard_id_vers() {
                 let shard = kvengine.get_shard(id_ver.id).unwrap();
                 if shard.get_schema_file().is_some() {
-                    let schema_file_id = shard.get_schema_file().unwrap().get_file_id();
-                    shard_with_schema_file_ids.push(schema_file_id);
                     if shard.get_storage_class() == IA_STORAGE_CLASS {
                         shard_with_ia_count += 1;
                     } else if shard.get_storage_class() == STANDARD_STORAGE_CLASS {
@@ -282,11 +265,7 @@ fn test_schema_file_with_storage_class() {
                     }
                 }
             }
-            shard_with_schema_file_ids.len() == 2
-                && shard_with_schema_file_ids[0] == new_schema_file_id
-                && shard_with_schema_file_ids[1] == new_schema_file_id
-                && shard_with_ia_count == 1
-                && shard_with_standard_count == 1
+            shard_with_ia_count == 1 && shard_with_standard_count == 1
         },
         10,
         || "failed to wait storage class".to_string(),

@@ -499,8 +499,10 @@ impl SchemaManager {
                     continue;
                 }
             }
-            let need_build_columnar = table_infos.iter().any(|ti| ti.build_columnar());
-            if cur_schema_version == 0 && !need_build_columnar {
+            let need_update_schema = table_infos
+                .iter()
+                .any(|ti| ti.build_columnar() || ti.with_storage_class());
+            if cur_schema_version == 0 && !need_update_schema {
                 continue;
             }
             if cur_schema_version < schema_version {
