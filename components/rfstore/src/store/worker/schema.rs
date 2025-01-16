@@ -14,7 +14,7 @@ use kvengine::{
 };
 use kvproto::{metapb, metapb::Region};
 use tidb_query_datatype::codec::table::decode_table_id;
-use tikv_util::{info, time::Instant, worker::Runnable};
+use tikv_util::{info, time::Instant, warn, worker::Runnable};
 
 use crate::{
     store::{Callback, CasualMessage, PeerMsg, PeerTag, RegionIdVer, StoreMsg},
@@ -174,14 +174,18 @@ impl SchemaRunner {
                                     return;
                                 }
                             }
-                            if shard.get_storage_class() == storage_class {
+                            let current = shard.get_storage_class();
+                            if current == storage_class {
                                 shard.set_checked_schema_ver(schema_version);
                                 return;
                             }
-                            if begin.saturating_elapsed() > timeout {
+                            if begin.saturating_elapsed() < timeout {
                                 std::thread::sleep(std::time::Duration::from_millis(100));
                                 continue;
                             }
+
+                            warn!("{} wait for updating storage class property timeout", tag; "current" => current, "expect" => storage_class);
+                            break;
                         }
                     }
                 } else {

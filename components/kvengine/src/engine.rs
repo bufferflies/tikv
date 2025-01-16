@@ -1010,8 +1010,11 @@ fn create_ia_ctx(opts: Arc<Options>, fs: Arc<dyn dfs::Dfs>) -> IaCtx {
             .thread_name("ia")
             .build()
             .unwrap();
-        let rt = runtime.handle().clone();
-        let ia_mgr = runtime.block_on(IaManager::new(opts, fs, rt)).unwrap();
+        let ia_mgr = fs
+            .clone()
+            .get_runtime()
+            .block_on(IaManager::new(opts, fs, runtime.into()))
+            .unwrap();
         let meta_path = ia_path.join("meta");
         std::fs::create_dir_all(&meta_path).unwrap();
         IaCtx::Enabled(ia_mgr, Arc::new(meta_path))

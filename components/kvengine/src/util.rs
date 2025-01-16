@@ -1,11 +1,14 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::future::Future;
+
 use bytes::{Buf, Bytes};
 use collections::HashMap;
 use kvproto::kvrpcpb;
 use log_wrappers::Value;
 use protobuf::Message;
 use tikv_util::box_err;
+use tokio::task::JoinHandle;
 
 use crate::{table::TxnFile, DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY};
 
@@ -320,6 +323,80 @@ impl TxnFileLocks {
             key_errors.push(key_err);
         }
         Ok(key_errors)
+    }
+}
+
+#[derive(Debug)]
+pub enum WorkerPool {
+    Pool(tokio::runtime::Runtime),
+    Handle(tokio::runtime::Handle),
+}
+
+impl WorkerPool {
+    pub fn handle(&self) -> WorkerPoolHandle {
+        match self {
+            Self::Pool(pool) => WorkerPoolHandle::new(pool.handle().clone()),
+            Self::Handle(handle) => WorkerPoolHandle::new(handle.clone()),
+        }
+    }
+
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let future = tikv_util::init_task_local(future);
+        match self {
+            Self::Pool(pool) => pool.spawn(future),
+            Self::Handle(handle) => handle.spawn(future),
+        }
+    }
+
+    pub fn enter(&self) -> tokio::runtime::EnterGuard<'_> {
+        match self {
+            Self::Pool(pool) => pool.enter(),
+            Self::Handle(handle) => handle.enter(),
+        }
+    }
+}
+
+impl From<tokio::runtime::Handle> for WorkerPool {
+    fn from(handle: tokio::runtime::Handle) -> Self {
+        Self::Handle(handle)
+    }
+}
+
+impl From<tokio::runtime::Runtime> for WorkerPool {
+    fn from(runtime: tokio::runtime::Runtime) -> Self {
+        Self::Pool(runtime)
+    }
+}
+
+#[derive(Clone)]
+pub struct WorkerPoolHandle {
+    handle: tokio::runtime::Handle,
+}
+
+impl WorkerPoolHandle {
+    fn new(handle: tokio::runtime::Handle) -> Self {
+        Self { handle }
+    }
+
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.handle.spawn(tikv_util::init_task_local(future))
+    }
+
+    pub fn spawn_blocking<F, R>(&self, func: F) -> JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        self.handle
+            .spawn_blocking(move || tikv_util::init_task_local_sync(func))
     }
 }
 

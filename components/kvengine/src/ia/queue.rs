@@ -23,6 +23,7 @@ use crate::{
         types::{FileSegmentData, FileSegmentIdent},
     },
     table::{Error, Result},
+    util::WorkerPoolHandle,
 };
 
 /// A simple wrapper for `S3Fifo`.
@@ -38,7 +39,7 @@ impl S3FifoHandle {
         main_cap: i64,
         item_size: i64,
         freq_update_interval: Duration,
-        runtime: tokio::runtime::Handle,
+        runtime: WorkerPoolHandle,
         segment_data_ctx: SegmentDataContext,
     ) -> Self {
         let (task_tx, task_rx) = crossbeam::channel::unbounded();
@@ -170,7 +171,7 @@ struct S3Fifo {
     task_tx: crossbeam::channel::Sender<FifoTask>,
     task_rx: crossbeam::channel::Receiver<FifoTask>,
 
-    runtime: tokio::runtime::Handle,
+    runtime: WorkerPoolHandle,
     segment_data_ctx: SegmentDataContext,
     task_counter: Arc<()>,
 }
@@ -184,7 +185,7 @@ impl S3Fifo {
         freq_update_interval: Duration,
         task_tx: crossbeam::channel::Sender<FifoTask>,
         task_rx: crossbeam::channel::Receiver<FifoTask>,
-        runtime: tokio::runtime::Handle,
+        runtime: WorkerPoolHandle,
         segment_data_ctx: SegmentDataContext,
     ) -> Self {
         #[cfg(not(any(test, feature = "testexport")))]
@@ -611,6 +612,7 @@ mod benches {
     use test::black_box;
 
     use super::*;
+    use crate::util::WorkerPool;
 
     #[bench]
     fn bench_s3fifo_1(b: &mut test::Bencher) {
@@ -631,13 +633,14 @@ mod benches {
         concurrency: usize,
     ) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
+        let worker_pool = WorkerPool::from(runtime.handle().clone());
         let segment_data_ctx = SegmentDataContext::new_for_test();
         let fifo = Arc::new(S3FifoHandle::new(
             small_cap,
             main_cap,
             1,
             Duration::ZERO,
-            runtime.handle().clone(),
+            worker_pool.handle(),
             segment_data_ctx,
         ));
 

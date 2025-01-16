@@ -2684,7 +2684,7 @@ impl<'a> DagTest<'a> {
                 .block_on(IaManager::new(
                     opts,
                     Arc::new(self.ctx.s3fs.clone()),
-                    self.ctx.rt.handle().clone(),
+                    self.ctx.rt.handle().clone().into(),
                 ))
                 .unwrap();
             let meta_path = path.join("meta");

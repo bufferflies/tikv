@@ -3,7 +3,6 @@
 use std::{
     default::Default,
     fs,
-    future::Future,
     ops::Deref,
     path::PathBuf,
     sync::{
@@ -19,10 +18,7 @@ use dashmap::DashMap;
 use futures::executor::block_on;
 use regex::Regex;
 use tikv_util::{box_err, config::ReadableDuration, time::Instant};
-use tokio::{
-    sync::{OwnedRwLockWriteGuard, RwLock},
-    task::JoinHandle,
-};
+use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 use crate::{
     dfs,
@@ -35,6 +31,7 @@ use crate::{
         txn_file::TxnChunk,
         TxnCtx, TxnFile, TxnFileId,
     },
+    util::{WorkerPool, WorkerPoolHandle},
     Error, Result,
 };
 
@@ -100,24 +97,6 @@ impl Default for TxnChunkManagerConfig {
     }
 }
 
-// If `TxnChunkManager` will be hold in an async context, create worker pool
-// outside and pass the handle to create it. Otherwise, it will panic when the
-// runtime is dropped in the async context.
-#[derive(Debug)]
-pub enum WorkerPool {
-    Pool(tokio::runtime::Runtime),
-    Handle(tokio::runtime::Handle),
-}
-
-impl WorkerPool {
-    pub fn handle(&self) -> WorkerPoolHandle {
-        match self {
-            WorkerPool::Pool(pool) => WorkerPoolHandle::new(pool.handle().clone()),
-            WorkerPool::Handle(handle) => WorkerPoolHandle::new(handle.clone()),
-        }
-    }
-}
-
 pub fn with_pool_size(pool_size: usize) -> WorkerPool {
     WorkerPool::Pool(
         tokio::runtime::Builder::new_multi_thread()
@@ -128,38 +107,6 @@ pub fn with_pool_size(pool_size: usize) -> WorkerPool {
             .build()
             .unwrap(),
     )
-}
-
-pub fn with_pool_handle(handle: tokio::runtime::Handle) -> WorkerPool {
-    WorkerPool::Handle(handle)
-}
-
-#[derive(Clone)]
-pub struct WorkerPoolHandle {
-    handle: tokio::runtime::Handle,
-}
-
-impl WorkerPoolHandle {
-    fn new(handle: tokio::runtime::Handle) -> Self {
-        Self { handle }
-    }
-
-    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.handle.spawn(tikv_util::init_task_local(future))
-    }
-
-    pub fn spawn_blocking<F, R>(&self, func: F) -> JoinHandle<R>
-    where
-        F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        self.handle
-            .spawn_blocking(move || tikv_util::init_task_local_sync(func))
-    }
 }
 
 // Memory based if `local_path` is None.

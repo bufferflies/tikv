@@ -29,6 +29,7 @@ use crate::{
     },
     table::{Error, Result},
     try_some,
+    util::WorkerPool,
 };
 
 /// `buf` can be empty, which means to request the specified range of data but
@@ -135,7 +136,7 @@ impl IaManager {
     pub async fn new(
         opts: IaManagerOptions,
         fs: Arc<dyn dfs::Dfs>,
-        runtime: tokio::runtime::Handle,
+        runtime: WorkerPool,
     ) -> Result<Self> {
         assert!(
             opts.small_queue.path.is_none(),
@@ -155,7 +156,7 @@ impl IaManager {
             opts.main_queue.cap,
             opts.segment_size,
             opts.freq_update_interval,
-            runtime.clone(),
+            runtime.handle(),
             segment_data_ctx,
         );
 
@@ -185,7 +186,7 @@ impl IaManager {
 pub struct IaManagerCore {
     segment_size: i64,
     fs: Arc<dyn dfs::Dfs>,
-    runtime: tokio::runtime::Handle,
+    runtime: WorkerPool,
     main_store: Arc<dyn LocalStore>,
 
     loading_segments: GuardMap<FileSegmentIdent, ()>,

@@ -37,7 +37,7 @@ use kvengine::{
         sstable::{BlockCache, BlockCacheType},
         ChecksumType,
     },
-    txn_chunk_manager::{with_pool_handle, TxnChunkManager, TxnChunkManagerConfig},
+    txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
 };
 use kvproto::metapb::Store;
 #[cfg(feature = "testexport")]
@@ -247,7 +247,7 @@ fn start_server(
         None,
         s3fs.clone(),
         block_cache.clone(),
-        with_pool_handle(thread_pool.handle().clone()),
+        thread_pool.handle().clone().into(),
         config.txn_chunk_manager,
     );
 
@@ -377,7 +377,7 @@ fn create_ia_ctx(
 
         let rt = runtime.clone();
         let ia_mgr = runtime
-            .block_on(IaManager::new(opts, Arc::new(s3fs.clone()), rt))
+            .block_on(IaManager::new(opts, Arc::new(s3fs.clone()), rt.into()))
             .map_err(|err| format!("create IA manager failed: {err:?}"))?;
 
         let meta_path = ia_path.join("meta");

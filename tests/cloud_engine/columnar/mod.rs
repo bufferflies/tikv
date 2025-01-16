@@ -845,7 +845,7 @@ fn test_columnar_ia_file() {
         .block_on(IaManager::new(
             options,
             Arc::new(s3fs.clone()),
-            runtime.handle().clone(),
+            runtime.handle().clone().into(),
         ))
         .unwrap();
     let ia_ctx = IaCtx::Enabled(ia_mgr, Arc::new(local_path));

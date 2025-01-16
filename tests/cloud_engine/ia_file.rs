@@ -86,7 +86,7 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
         .await
         .unwrap();
 
-        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt)
+        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.into())
             .await
             .unwrap();
         let table_meta_data =
@@ -161,7 +161,7 @@ fn test_init() {
         let file_type = FileType::Sst;
 
         {
-            let mgr = IaManager::new(options.clone(), Arc::new(s3fs.clone()), rt.clone())
+            let mgr = IaManager::new(options.clone(), Arc::new(s3fs.clone()), rt.clone().into())
                 .await
                 .unwrap();
 
@@ -201,7 +201,7 @@ fn test_init() {
         }
 
         {
-            let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt)
+            let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.into())
                 .await
                 .unwrap();
 
@@ -277,7 +277,7 @@ fn test_abnormal_local_file() {
             .freq_update_interval(FREQ_UPDATE_INTERVAL)
             .build()
             .unwrap();
-        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt)
+        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.into())
             .await
             .unwrap();
 
