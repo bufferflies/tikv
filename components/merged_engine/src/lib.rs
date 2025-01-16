@@ -134,7 +134,8 @@ impl MergedEngine {
                     origin
                         .get_truncated_index(peer_id)
                         .unwrap_or(RAFT_INIT_LOG_INDEX),
-                );
+                )
+                .max(RAFT_INIT_LOG_INDEX);
                 region_progress.truncated_index = truncated_index;
                 // merge states
                 let mut batch = rfengine::WriteBatch::new();
@@ -145,9 +146,14 @@ impl MergedEngine {
                 let mut entry_buf = Vec::new();
                 let low_idx = merged_commit_index.max(truncated_index) + 1;
                 let high_idx = commit + 1;
-                origin
-                    .fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entry_buf)
-                    .unwrap();
+                if let Err(err) =
+                    origin.fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entry_buf)
+                {
+                    panic!(
+                        "fetch raft entries failed for region {}, low: {}, high: {}, err: {}",
+                        region_id, low_idx, high_idx, err
+                    );
+                }
                 for entry in entry_buf.iter() {
                     batch.append_raft_log(region_id, region_id, entry);
                 }
@@ -392,15 +398,21 @@ impl MergedEngine {
             let last_index = self
                 .raft
                 .get_last_index(updated_region)
-                .unwrap_or(RAFT_INIT_LOG_INDEX);
+                .unwrap_or(RAFT_INIT_LOG_INDEX)
+                .max(RAFT_INIT_LOG_INDEX);
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
             let origin = self.origins.get(&progress.leader_store).unwrap();
             let low = last_index + 1;
             let high = progress.commit_index + 1;
             let mut entries = vec![];
-            origin
-                .fetch_raft_entries_to(progress.leader_peer, low, high, None, &mut entries)
-                .unwrap();
+            if let Err(err) =
+                origin.fetch_raft_entries_to(progress.leader_peer, low, high, None, &mut entries)
+            {
+                panic!(
+                    "fetch raft entries failed for region {}, low: {}, high: {}, err: {}",
+                    updated_region, low, high, err
+                );
+            }
             let preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
                 Preprocessor::new(
                     &self.raft,
