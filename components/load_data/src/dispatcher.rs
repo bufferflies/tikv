@@ -25,7 +25,7 @@ use crate::{
     task::{
         get_common_prefix, get_shard_meta, FlushResult, FlushStates, LoadDataConfig,
         LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskStates, PutChunkResult,
-        TaskContext, WritersStates, GET_SHARD_META_TIMEOUT,
+        TaskContext, GET_SHARD_META_TIMEOUT,
     },
     worker::{BuildingWorker, BuildingWorkerMsg, KvPairsWorker, KvPairsWorkerMsg},
 };
@@ -106,7 +106,6 @@ impl Dispatcher {
         let scheduler = LoadTaskScheduler {
             sender,
             states: Arc::new(RwLock::new(states)),
-            writers: Arc::new(Mutex::new(WritersStates::default())),
             checkpoint_store: checkpoint_store.clone(),
             thread_handle: None,
         };

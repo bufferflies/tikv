@@ -318,10 +318,6 @@ fn override_from_args(config: &mut Config, matches: &ArgMatches<'_>) {
         config.enable_load_data_check_point = enable_check_point == "true";
     }
 
-    if let Some(enable_multi_threads) = matches.value_of("enable-load-data-multi-threads") {
-        config.enable_load_data_multi_threads = enable_multi_threads == "true";
-    }
-
     if let Some(push_metrics_addr) = matches.value_of("push-metrics-addr") {
         config.push_metrics_addr = push_metrics_addr.to_string();
     }

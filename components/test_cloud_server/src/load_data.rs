@@ -8,8 +8,7 @@ use load_data::{
     checkpoint::LoadDataCheckpointCtx,
     dispatcher::Dispatcher,
     task::{
-        FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
-        LoadTaskWorker, TaskContext,
+        FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler, TaskContext,
     },
 };
 use rand::prelude::SliceRandom;
@@ -35,21 +34,11 @@ pub fn init_task(
         keyspace_id: None,
     };
     let checkpoint_ctx = LoadDataCheckpointCtx::new(task_ctx.clone());
-    let (scheduler, worker_handle) = if config.enable_multi_threads {
-        let mut dispatcher = Dispatcher::new(config.clone(), ctx.clone(), task_ctx, checkpoint_ctx);
-        let scheduler = dispatcher.get_scheduler();
-        let worker_handle = std::thread::spawn(move || {
-            dispatcher.run();
-        });
-        (scheduler, worker_handle)
-    } else {
-        let mut worker = LoadTaskWorker::new(config.clone(), ctx.clone(), task_ctx, checkpoint_ctx);
-        let scheduler = worker.get_scheduler();
-        let worker_handle = std::thread::spawn(move || {
-            worker.run();
-        });
-        (scheduler, worker_handle)
-    };
+    let mut dispatcher = Dispatcher::new(config.clone(), ctx.clone(), task_ctx, checkpoint_ctx);
+    let scheduler = dispatcher.get_scheduler();
+    let worker_handle = std::thread::spawn(move || {
+        dispatcher.run();
+    });
 
     assert!(
         !scheduler.is_canceled(),

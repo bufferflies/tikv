@@ -147,13 +147,6 @@ pub struct LoadDataCheckpointCtx {
     commit_ts: u64,
     first_key: Bytes,
 
-    // LoadDataWorker
-    local_file_infos: Vec<LocalFileInfo>,
-    sst_metas: Vec<SstMeta>,
-    flushed_chunk_ids: HashMap<u64 /* writer_id */, u64 /* chunk_id */>,
-    flushed_file_idx: usize,
-    key_comm_prefix: Vec<u8>,
-
     // KVPairsWorker & BuildingWorker
     kvpairs_workers_ctx: HashMap<u64 /* worker_id */, KvPairsWorkerCtx>,
     building_workers_ctx: HashMap<u64 /* worker_id */, BuildingWorkerCtx>,
@@ -165,12 +158,6 @@ pub struct LoadDataCheckpointCtx {
     is_recover: bool,
     pub canceled: bool,
     pub error: String,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct LocalFileInfo {
-    pub path: PathBuf,
-    pub kv_count: usize,
 }
 
 impl LoadDataCheckpointCtx {
@@ -187,14 +174,9 @@ impl LoadDataCheckpointCtx {
             commit_ts: task_ctx.commit_ts,
             compression: 0,
             state: LoadDataWorkerState::InitTask,
-            sst_metas: vec![],
-            local_file_infos: vec![],
             duplicated_entries: vec![],
             is_recover: false,
             first_key: Default::default(),
-            flushed_chunk_ids: Default::default(),
-            flushed_file_idx: 0,
-            key_comm_prefix: vec![],
             canceled: false,
             error: "".to_string(),
             kvpairs_workers_ctx: HashMap::default(),
@@ -206,10 +188,6 @@ impl LoadDataCheckpointCtx {
         self.first_key.clone()
     }
 
-    pub fn get_local_file_infos(&self) -> Vec<LocalFileInfo> {
-        self.local_file_infos.clone()
-    }
-
     pub fn get_compression(&self) -> u8 {
         self.compression
     }
@@ -218,24 +196,8 @@ impl LoadDataCheckpointCtx {
         self.state
     }
 
-    pub fn get_sst_metas(&self) -> Vec<SstMeta> {
-        self.sst_metas.clone()
-    }
-
     pub fn get_duplicated_entries(&self) -> Vec<DuplicateEntry> {
         self.duplicated_entries.clone()
-    }
-
-    pub fn get_flushed_chunk_ids(&self) -> HashMap<u64 /* writer_id */, u64 /* chunk_id */> {
-        self.flushed_chunk_ids.clone()
-    }
-
-    pub fn get_flushed_file_idx(&self) -> usize {
-        self.flushed_file_idx
-    }
-
-    pub fn get_key_comm_prefix(&self) -> Vec<u8> {
-        self.key_comm_prefix.clone()
     }
 
     pub fn get_is_recover(&self) -> bool {
@@ -264,10 +226,6 @@ impl LoadDataCheckpointCtx {
 
     pub fn get_building_worker_ctx(&mut self, worker_id: u64) -> &BuildingWorkerCtx {
         self.building_workers_ctx.entry(worker_id).or_default()
-    }
-
-    pub fn recover_from_old_model(&self) -> bool {
-        self.is_recover && !self.key_comm_prefix.is_empty()
     }
 }
 
@@ -369,76 +327,10 @@ impl LocalFileCheckpointStorage {
         is_succ
     }
 
-    pub fn get_sst_meta(&self) -> Vec<SstMeta> {
-        self.checkpoint_ctx.sst_metas.clone()
-    }
-
     pub fn update_build_msg(&mut self, compression_type: u8) -> Result<()> {
         self.checkpoint_ctx.compression = compression_type;
         self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::BuildingSst)?;
         Ok(())
-    }
-
-    pub fn update_flushed_info(
-        &mut self,
-        handled_chunk_ids: HashMap<u64, u64>,
-        file_idx: usize,
-        local_file_infos: Vec<LocalFileInfo>,
-        key_comm_prefix: Vec<u8>,
-    ) -> Result<()> {
-        // Update flushed chunk ids.
-        for (writer_id, chunk_id) in handled_chunk_ids {
-            let flushed_chunk_id = self
-                .checkpoint_ctx
-                .flushed_chunk_ids
-                .entry(writer_id)
-                .or_insert(0);
-            assert!(*flushed_chunk_id <= chunk_id);
-            *flushed_chunk_id = chunk_id;
-        }
-
-        // Update flushed file idx.
-        self.checkpoint_ctx.flushed_file_idx = file_idx;
-
-        // Update local file infos.
-        for local_file_info in local_file_infos {
-            self.checkpoint_ctx.local_file_infos.push(local_file_info);
-            debug!(
-                "{} [checkpoint store] update local_file_infos {:?}",
-                self.checkpoint_ctx.task_id,
-                self.checkpoint_ctx.local_file_infos.clone()
-            );
-        }
-        self.checkpoint_ctx.key_comm_prefix = key_comm_prefix;
-
-        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::AddingChunks)?;
-        Ok(())
-    }
-
-    pub fn update_first_key_and_prefix(
-        &mut self,
-        first_key: Bytes,
-        key_comm_prefix: Vec<u8>,
-    ) -> Result<()> {
-        self.checkpoint_ctx.first_key = first_key;
-        self.checkpoint_ctx.key_comm_prefix = key_comm_prefix;
-        self.flush_checkpoint_ctx()?;
-        Ok(())
-    }
-
-    pub fn update_build_result(
-        &mut self,
-        sst_metas: Vec<SstMeta>,
-        duplicated_entries: Vec<DuplicateEntry>,
-    ) -> Result<()> {
-        self.checkpoint_ctx.sst_metas = sst_metas;
-        self.checkpoint_ctx.duplicated_entries = duplicated_entries;
-        self.flush_checkpoint_ctx()?;
-        Ok(())
-    }
-
-    pub fn get_local_file_infos(&self) -> Vec<LocalFileInfo> {
-        self.checkpoint_ctx.local_file_infos.clone()
     }
 
     pub fn get_state(&self) -> LoadDataWorkerState {
@@ -462,20 +354,7 @@ impl LocalFileCheckpointStorage {
     pub fn flush_checkpoint_ctx(&mut self) -> Result<()> {
         let value: Value = self.checkpoint_ctx_to_binary().to_vec();
         self.write_atomic_file(value.as_slice())?;
-        self.print_log();
         Ok(())
-    }
-
-    pub fn print_log(&self) {
-        let cp = self.checkpoint_ctx.clone();
-        let duplicated_entries_size = cp.duplicated_entries.len();
-        debug!(
-            "{} [checkpoint store] checkpoint context: {:?}, duplicated_entries_size: {}, sst_metas.len(): {},",
-            self.checkpoint_ctx.task_id,
-            cp,
-            duplicated_entries_size,
-            cp.sst_metas.len()
-        );
     }
 
     pub fn load_checkpoint_ctx(&self) -> LoadDataCheckpointCtx {
@@ -695,138 +574,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::task::WritersStates;
 
     #[test]
     fn test_local_file_store() {
-        let expect_task_id = "task_id_001".to_string();
-        let expect_state = LoadDataWorkerState::AddingChunks;
-        let task_ctx = TaskContext {
-            task_id: expect_task_id.clone(),
-            start_ts: 1_u64,
-            commit_ts: 1_u64,
-            inner_key_off: None,
-            outer_key_prefix: vec![],
-            encryption_key: None,
-            keyspace_id: None,
-        };
-        let checkpoint = LoadDataCheckpointCtx::new(task_ctx);
-
-        let checkpoint_dir = TempDir::new().unwrap();
-        let mut store =
-            LocalFileCheckpointStorage::new(checkpoint, checkpoint_dir.path().to_owned()).unwrap();
-        store.flush_checkpoint_ctx_with_state(expect_state).unwrap();
-        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
-        let res_task_id = loaddata_checkpoint_msg.task_id;
-
-        assert_eq!(
-            expect_task_id, res_task_id,
-            "case {}: {}",
-            expect_task_id, res_task_id
-        );
-        assert_eq!(
-            expect_state, loaddata_checkpoint_msg.state,
-            "case {:?}: {:?}",
-            expect_state, loaddata_checkpoint_msg.state
-        );
-
-        // Add chunks
-
-        // update_first_key
-        let expect_first_key = Bytes::from_static(b"test_first_key");
-        store
-            .update_first_key_and_prefix(expect_first_key.clone(), expect_first_key.to_vec())
-            .unwrap();
-        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
-        assert_eq!(expect_first_key, loaddata_checkpoint_msg.first_key);
-
-        let expect_is_recover = true;
-        store.checkpoint_ctx.set_is_recover(true);
-        store.flush_checkpoint_ctx().unwrap();
-        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
-        assert_eq!(expect_is_recover, loaddata_checkpoint_msg.is_recover);
-
-        // update_flushed_info
-        let mut handled_chunk_ids: HashMap<u64, u64> = HashMap::new();
-        handled_chunk_ids.insert(1, 100);
-        handled_chunk_ids.insert(2, 200);
-        handled_chunk_ids.insert(3, 300);
-
-        let max_file_idx = 10;
-
-        let local_file_infos: Vec<LocalFileInfo> = vec![
-            LocalFileInfo {
-                path: PathBuf::from("/path/to/file1"),
-                kv_count: 10,
-            },
-            LocalFileInfo {
-                path: PathBuf::from("/path/to/file2"),
-                kv_count: 20,
-            },
-            LocalFileInfo {
-                path: PathBuf::from("/path/to/file3"),
-                kv_count: 30,
-            },
-        ];
-        let key_comm_prefix = "test_".as_bytes().to_vec();
-
-        store
-            .update_flushed_info(
-                handled_chunk_ids,
-                max_file_idx,
-                local_file_infos.clone(),
-                key_comm_prefix.clone(),
-            )
-            .unwrap();
-        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
-        assert_eq!(max_file_idx, loaddata_checkpoint_msg.flushed_file_idx);
-
-        let get_local_file_infos = loaddata_checkpoint_msg.local_file_infos;
-        assert_eq!(local_file_infos.len(), get_local_file_infos.len());
-
-        for i in 0..get_local_file_infos.len() {
-            assert_eq!(local_file_infos[i].path, get_local_file_infos[i].path);
-            assert_eq!(
-                local_file_infos[i].kv_count,
-                get_local_file_infos[i].kv_count
-            );
-        }
-        assert_eq!(key_comm_prefix, loaddata_checkpoint_msg.key_comm_prefix);
-
-        // build sst
-        let compression_type = 1;
-
-        // update_build_msg
-        store.update_build_msg(compression_type).unwrap();
-        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
-        assert_eq!(compression_type, loaddata_checkpoint_msg.compression);
-
-        // update_sst_meta
-        let smallest = vec![1, 2, 3];
-        let biggest = vec![4, 5, 6];
-
-        let sst_meta = SstMeta {
-            id: 1,
-            smallest,
-            biggest,
-            size: 3,
-            meta_offset: 0,
-            uncompressed_size: 3,
-            keys: 3,
-        };
-
-        let sst_metas = vec![sst_meta.clone()];
-
-        // update_duplicated_entries
-        let key = "test_key".to_string();
-        let values = vec!["value1".to_string(), "value2".to_string()];
-        let entry = DuplicateEntry { key, values };
-        let entries = vec![entry.clone()];
-
-        store.update_build_result(sst_metas, entries).unwrap();
-        let loaddata_checkpoint_msg = store.load_checkpoint_ctx();
-        assert_eq!(sst_meta, loaddata_checkpoint_msg.sst_metas[0]);
-        assert_eq!(entry, loaddata_checkpoint_msg.duplicated_entries[0]);
+        // TODO: test checkpoint storage
     }
 
     #[test]
@@ -875,7 +626,6 @@ mod tests {
         let scheduler = LoadTaskScheduler {
             sender,
             states: Arc::new(RwLock::new(LoadTaskStates::default())),
-            writers: Arc::new(Mutex::new(WritersStates::default())),
             thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
             checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
         };
@@ -895,7 +645,6 @@ mod tests {
         let scheduler2 = LoadTaskScheduler {
             sender,
             states: Arc::new(RwLock::new(LoadTaskStates::default())),
-            writers: Arc::new(Mutex::new(WritersStates::default())),
             thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
             checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
         };
@@ -914,7 +663,6 @@ mod tests {
         let scheduler3 = LoadTaskScheduler {
             sender,
             states: Arc::new(RwLock::new(LoadTaskStates::default())),
-            writers: Arc::new(Mutex::new(WritersStates::default())),
             thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
             checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
         };

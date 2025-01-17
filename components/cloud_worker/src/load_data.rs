@@ -22,7 +22,7 @@ use load_data::{
     dispatcher::Dispatcher,
     task::{
         FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
-        LoadTaskStates, LoadTaskWorker, PutChunkResult, TaskContext,
+        LoadTaskStates, PutChunkResult, TaskContext,
     },
 };
 use pd_client::PdClient;
@@ -393,31 +393,16 @@ impl LoadDataManager {
             keyspace_id: None,
         };
 
-        let (mut scheduler, thread_handle) = if !checkpoint_ctx.recover_from_old_model() {
-            let mut dispatcher = Dispatcher::new(
-                self.config.clone(),
-                self.ctx.clone(),
-                task_ctx,
-                checkpoint_ctx,
-            );
-            let scheduler = dispatcher.get_scheduler();
-            let thread_handle = std::thread::spawn(move || {
-                dispatcher.run();
-            });
-            (scheduler, thread_handle)
-        } else {
-            let mut worker = LoadTaskWorker::new(
-                self.config.clone(),
-                self.ctx.clone(),
-                task_ctx,
-                checkpoint_ctx,
-            );
-            let scheduler = worker.get_scheduler();
-            let thread_handle = std::thread::spawn(move || {
-                worker.run();
-            });
-            (scheduler, thread_handle)
-        };
+        let mut dispatcher = Dispatcher::new(
+            self.config.clone(),
+            self.ctx.clone(),
+            task_ctx,
+            checkpoint_ctx,
+        );
+        let mut scheduler = dispatcher.get_scheduler();
+        let thread_handle = std::thread::spawn(move || {
+            dispatcher.run();
+        });
 
         scheduler.set_thread_handle(thread_handle);
         self.running_tasks.insert(task_id, scheduler);
@@ -431,32 +416,16 @@ impl LoadDataManager {
             }
             Entry::Vacant(entry) => {
                 let checkpoint_ctx = LoadDataCheckpointCtx::new(task_ctx.clone());
-                let (mut scheduler, thread_handle) = if self.config.enable_multi_threads {
-                    let mut dispatcher = Dispatcher::new(
-                        self.config.clone(),
-                        self.ctx.clone(),
-                        task_ctx,
-                        checkpoint_ctx,
-                    );
-                    let scheduler = dispatcher.get_scheduler();
-                    let thread_handle = std::thread::spawn(move || {
-                        dispatcher.run();
-                    });
-                    (scheduler, thread_handle)
-                } else {
-                    let mut worker = LoadTaskWorker::new(
-                        self.config.clone(),
-                        self.ctx.clone(),
-                        task_ctx,
-                        checkpoint_ctx,
-                    );
-                    let scheduler = worker.get_scheduler();
-                    let thread_handle = std::thread::spawn(move || {
-                        worker.run();
-                    });
-
-                    (scheduler, thread_handle)
-                };
+                let mut dispatcher = Dispatcher::new(
+                    self.config.clone(),
+                    self.ctx.clone(),
+                    task_ctx,
+                    checkpoint_ctx,
+                );
+                let mut scheduler = dispatcher.get_scheduler();
+                let thread_handle = std::thread::spawn(move || {
+                    dispatcher.run();
+                });
 
                 scheduler.set_thread_handle(thread_handle);
                 entry.insert(scheduler);

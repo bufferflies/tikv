@@ -197,9 +197,6 @@ fn start_server(
             worker_scaler.run().await;
         });
     }
-    if !config.push_metrics_interval.is_zero() {
-        load_data_config.metrics_gather_interval = config.push_metrics_interval.0;
-    }
 
     if !config.data_dir.is_empty() {
         fs::create_dir_all(&config.data_dir).unwrap();
@@ -214,7 +211,6 @@ fn start_server(
         None
     };
     load_data_config.rg_config = rg_config;
-    load_data_config.enable_multi_threads = config.enable_load_data_multi_threads;
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
         config.data_dir.clone().into(),

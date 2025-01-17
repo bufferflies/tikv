@@ -38,13 +38,11 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 fn test_load_data() {
     test_util::init_log_for_test();
 
-    impl_test_load_data(false, false);
-    impl_test_load_data(true, false);
-    impl_test_load_data(false, true);
-    impl_test_load_data(true, true);
+    impl_test_load_data(false);
+    impl_test_load_data(true);
 }
 
-fn impl_test_load_data(enable_inner_key_off: bool, enable_multi_threads: bool) {
+fn impl_test_load_data(enable_inner_key_off: bool) {
     let base_dir = tempfile::Builder::new()
         .prefix("test_load_data")
         .tempdir()
@@ -98,7 +96,6 @@ fn impl_test_load_data(enable_inner_key_off: bool, enable_multi_threads: bool) {
     // Init task.
     // Total data size is about 1.3MB = 10000 * (23 + 120)
     let load_data_config = LoadDataConfig {
-        enable_multi_threads,
         kvpairs_worker_num: 2,
         building_worker_num: 2,
         max_in_mem_size: 1024, // 1KB
@@ -110,7 +107,6 @@ fn impl_test_load_data(enable_inner_key_off: bool, enable_multi_threads: bool) {
         enable_checkpoint: false,
         rg_config: None,
         checksum_type: ChecksumType::Crc32,
-        metrics_gather_interval: Duration::from_secs(0),
     };
 
     let dfs = Arc::new(kvengine::dfs::S3Fs::new(
@@ -264,7 +260,6 @@ fn test_load_data_overlap() {
     client.split_keyspace(KEYSPACE_ID);
 
     let load_data_config = LoadDataConfig {
-        enable_multi_threads: true,
         kvpairs_worker_num: 2,
         building_worker_num: 2,
         max_in_mem_size: 1024, // 1KB
@@ -276,7 +271,6 @@ fn test_load_data_overlap() {
         enable_checkpoint: false,
         rg_config: None,
         checksum_type: ChecksumType::Crc32,
-        metrics_gather_interval: Duration::from_secs(0),
     };
     let dfs = Arc::new(kvengine::dfs::S3Fs::new(
         dfs_conf.prefix,
