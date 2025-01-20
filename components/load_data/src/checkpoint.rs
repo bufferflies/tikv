@@ -110,7 +110,7 @@ impl LoadDataWorkerState {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct FileMeta {
     pub file_path: PathBuf,
@@ -568,16 +568,145 @@ impl LoadDataCleanupWorker {
 
 #[cfg(test)]
 mod tests {
-
     use std::sync::RwLock;
 
     use tempfile::TempDir;
+    use tikv_util::mpsc::Receiver;
 
     use super::*;
 
     #[test]
     fn test_local_file_store() {
-        // TODO: test checkpoint storage
+        let task_id = "task_id_001".to_string();
+        let state = LoadDataWorkerState::AddingChunks;
+        let task_ctx = TaskContext {
+            task_id: task_id.clone(),
+            start_ts: 1_u64,
+            commit_ts: 1_u64,
+            inner_key_off: None,
+            outer_key_prefix: vec![],
+            encryption_key: None,
+            keyspace_id: None,
+        };
+        let checkpoint_ctx = LoadDataCheckpointCtx::new(task_ctx);
+        let checkpoint_dir = TempDir::new().unwrap();
+
+        let mut store =
+            LocalFileCheckpointStorage::new(checkpoint_ctx, checkpoint_dir.path().to_owned())
+                .unwrap();
+        store.flush_checkpoint_ctx_with_state(state).unwrap();
+        let checkpoint_ctx = store.load_checkpoint_ctx();
+        assert_eq!(task_id, checkpoint_ctx.task_id);
+        assert_eq!(state, checkpoint_ctx.state);
+
+        // add chunks
+        // update_first_key
+        let expect_first_key = Bytes::from_static(b"test_first_key");
+        store.update_first_key(expect_first_key.clone()).unwrap();
+        let checkpoint_ctx = store.load_checkpoint_ctx();
+        assert_eq!(expect_first_key, checkpoint_ctx.first_key);
+
+        let expect_is_recover = true;
+        store.checkpoint_ctx.set_is_recover(true);
+        store.flush_checkpoint_ctx().unwrap();
+        let checkpoint_ctx = store.load_checkpoint_ctx();
+        assert_eq!(expect_is_recover, checkpoint_ctx.is_recover);
+
+        // update_l0_flushed_info
+        let _ = store.checkpoint_ctx.get_kvpairs_worker_ctx(0);
+        let mut handled_chunk_ids: HashMap<u64, u64> = HashMap::new();
+        handled_chunk_ids.insert(1, 100);
+        handled_chunk_ids.insert(2, 200);
+        handled_chunk_ids.insert(3, 300);
+        let l0_file_metas: Vec<FileMeta> = vec![
+            FileMeta {
+                file_path: PathBuf::from("/path/to/file1"),
+                kv_count: 10,
+                kv_size: 100,
+                first_key: "test_first_key1".as_bytes().to_vec(),
+                last_key: "test_last_key1".as_bytes().to_vec(),
+            },
+            FileMeta {
+                file_path: PathBuf::from("/path/to/file2"),
+                kv_count: 20,
+                kv_size: 200,
+                first_key: "test_first_key2".as_bytes().to_vec(),
+                last_key: "test_last_key2".as_bytes().to_vec(),
+            },
+            FileMeta {
+                file_path: PathBuf::from("/path/to/file3"),
+                kv_count: 30,
+                kv_size: 300,
+                first_key: "test_first_key3".as_bytes().to_vec(),
+                last_key: "test_last_key3".as_bytes().to_vec(),
+            },
+        ];
+        let key_comm_prefix = "test_".as_bytes().to_vec();
+        store
+            .update_l0_flushed_info(
+                0,
+                handled_chunk_ids,
+                l0_file_metas.clone(),
+                key_comm_prefix.clone(),
+            )
+            .unwrap();
+        let mut checkpoint_ctx = store.load_checkpoint_ctx();
+        let worker_ctx = checkpoint_ctx.get_kvpairs_worker_ctx(0);
+        assert_eq!(l0_file_metas, worker_ctx.l0_file_metas);
+        assert_eq!(key_comm_prefix, worker_ctx.key_comm_prefix);
+
+        // build sst
+        // update_build_msg
+        let compression_type = 1;
+        store.update_build_msg(compression_type).unwrap();
+        let checkpoint_ctx = store.load_checkpoint_ctx();
+        assert_eq!(compression_type, checkpoint_ctx.compression);
+        assert_eq!(LoadDataWorkerState::BuildingSst, checkpoint_ctx.get_state());
+
+        // update_l1_flushed_info
+        let l1_file_metas = l0_file_metas;
+        let dup_entries = vec![DuplicateEntry {
+            key: "test_duplicated_key".to_string(),
+            values: vec![],
+        }];
+        store
+            .update_l1_flushed_info(0, l1_file_metas.clone(), dup_entries.clone())
+            .unwrap();
+        let mut checkpoint_ctx = store.load_checkpoint_ctx();
+        let worker_ctx = checkpoint_ctx.get_kvpairs_worker_ctx(0);
+        assert_eq!(l1_file_metas, worker_ctx.l1_file_metas);
+        assert_eq!(dup_entries, worker_ctx.duplicated_entries);
+
+        // update_sst_meta
+        let _ = store.checkpoint_ctx.get_building_worker_ctx(0);
+        let sst_metas = vec![SstMeta {
+            id: 1,
+            smallest: vec![1, 2, 3],
+            biggest: vec![4, 5, 6],
+            size: 3,
+            meta_offset: 0,
+            uncompressed_size: 3,
+            keys: 3,
+        }];
+        store
+            .update_sst_metas(0, sst_metas.clone(), dup_entries.clone())
+            .unwrap();
+        let mut checkpoint_ctx = store.load_checkpoint_ctx();
+        let worker_ctx = checkpoint_ctx.get_building_worker_ctx(0);
+        assert_eq!(sst_metas, worker_ctx.sst_metas);
+        assert_eq!(dup_entries, worker_ctx.duplicated_entries);
+
+        // set_worker_ingested
+        store.set_worker_ingested(0).unwrap();
+        let mut checkpoint_ctx = store.load_checkpoint_ctx();
+        let worker_ctx = checkpoint_ctx.get_building_worker_ctx(0);
+        assert!(worker_ctx.ingested);
+
+        // set_ingested
+        store.set_ingested(dup_entries.clone()).unwrap();
+        let checkpoint_ctx = store.load_checkpoint_ctx();
+        assert_eq!(LoadDataWorkerState::IngestedSst, checkpoint_ctx.get_state());
+        assert_eq!(dup_entries, checkpoint_ctx.get_duplicated_entries());
     }
 
     #[test]
@@ -614,62 +743,23 @@ mod tests {
     fn test_cleanup_worker() {
         let running_tasks: Arc<DashMap<String, LoadTaskScheduler>> = Arc::new(DashMap::new());
         let checkpoint_dir = TempDir::new().unwrap();
-        let path = checkpoint_dir.path();
+        let path = checkpoint_dir.path().to_owned();
 
         // canceled task
-        let task_id = "task_id1";
-        let checkpoint_store = make_test_checkpoint_storage(path.to_owned(), task_id.to_string());
-        let (sender, receiver1) = tikv_util::mpsc::unbounded();
-        let thread_handle = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(60));
-        });
-        let scheduler = LoadTaskScheduler {
-            sender,
-            states: Arc::new(RwLock::new(LoadTaskStates::default())),
-            thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
-            checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
-        };
-        let mut states = scheduler.states.write().unwrap();
-        states.task_id = task_id.to_string();
-        drop(states);
-        scheduler.cancel("cancel for test".to_string());
-        running_tasks.insert(task_id.to_owned(), scheduler);
+        let task_id = "task_id1".to_string();
+        let (scheduler1, receiver1) = make_test_scheduler(task_id.clone(), path.clone());
+        scheduler1.cancel("cancel for test".to_string());
+        running_tasks.insert(task_id, scheduler1);
 
         // idle task
-        let task_id = "task_id2";
-        let checkpoint_store = make_test_checkpoint_storage(path.to_owned(), task_id.to_string());
-        let (sender, receiver2) = tikv_util::mpsc::unbounded();
-        let thread_handle = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(60));
-        });
-        let scheduler2 = LoadTaskScheduler {
-            sender,
-            states: Arc::new(RwLock::new(LoadTaskStates::default())),
-            thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
-            checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
-        };
-        let mut states = scheduler2.states.write().unwrap();
-        states.task_id = task_id.to_string();
-        drop(states);
-        running_tasks.insert(task_id.to_owned(), scheduler2.clone());
+        let task_id = "task_id2".to_string();
+        let (scheduler2, receiver2) = make_test_scheduler(task_id.clone(), path.clone());
+        running_tasks.insert(task_id, scheduler2.clone());
 
         // normal task
-        let task_id = "task_id3";
-        let checkpoint_store = make_test_checkpoint_storage(path.to_owned(), task_id.to_string());
-        let (sender, receiver3) = tikv_util::mpsc::unbounded();
-        let thread_handle = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(60));
-        });
-        let scheduler3 = LoadTaskScheduler {
-            sender,
-            states: Arc::new(RwLock::new(LoadTaskStates::default())),
-            thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
-            checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
-        };
-        let mut states = scheduler3.states.write().unwrap();
-        states.task_id = task_id.to_string();
-        drop(states);
-        running_tasks.insert(task_id.to_owned(), scheduler3.clone());
+        let task_id = "task_id3".to_string();
+        let (scheduler3, receiver3) = make_test_scheduler(task_id.clone(), path);
+        running_tasks.insert(task_id, scheduler3.clone());
 
         let mut cleanup_worker = LoadDataCleanupWorker::new(running_tasks.clone(), 5, 10, 10);
         std::thread::spawn(move || {
@@ -682,7 +772,6 @@ mod tests {
             drop(states);
             std::thread::sleep(Duration::from_secs(2));
         } // takes 20s = 10 * 2s
-
         receiver1.try_recv().unwrap();
         receiver2.try_recv().unwrap();
         let msg = receiver3.try_recv();
@@ -691,6 +780,27 @@ mod tests {
         assert!(scheduler2.states.read().unwrap().canceled);
         assert!(!scheduler3.states.read().unwrap().canceled);
         assert!(running_tasks.len() == 1);
+    }
+
+    fn make_test_scheduler(
+        task_id: String,
+        path: PathBuf,
+    ) -> (LoadTaskScheduler, Receiver<LoadTaskMsg>) {
+        let checkpoint_store = make_test_checkpoint_storage(path.to_owned(), task_id.clone());
+        let (sender, receiver) = tikv_util::mpsc::unbounded();
+        let thread_handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(60));
+        });
+        let scheduler = LoadTaskScheduler {
+            sender,
+            states: Arc::new(RwLock::new(LoadTaskStates::default())),
+            thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
+            checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
+        };
+        let mut states = scheduler.states.write().unwrap();
+        states.task_id = task_id;
+        drop(states);
+        (scheduler, receiver)
     }
 
     fn make_test_checkpoint_storage(

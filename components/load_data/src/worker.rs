@@ -674,11 +674,7 @@ impl KvPairsWorker {
             vec![],
             vec![],
         );
-        let mut merge_iter = MergeIterator::new(
-            readers,
-            &self.task_ctx.outer_key_prefix,
-            self.key_comm_prefix.len(),
-        )?;
+        let mut merge_iter = MergeIterator::new(readers, &self.task_ctx.outer_key_prefix)?;
 
         let mut errs = vec![];
         let mut batches = vec![];
@@ -948,7 +944,7 @@ fn flush_l1_file_to_local(
     Ok(())
 }
 
-fn flush_l0_file_to_local(
+pub fn flush_l0_file_to_local(
     mut kv_pairs: Vec<KvPair>,
     task_ctx: TaskContext,
     path: PathBuf,
@@ -1245,11 +1241,7 @@ impl BuildingWorker {
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut sent_count = 0;
         let mut recv_count = 0;
-        let mut merge_iter = MergeIterator::new(
-            readers,
-            &self.task_ctx.outer_key_prefix,
-            self.key_comm_prefix.len(),
-        )?;
+        let mut merge_iter = MergeIterator::new(readers, &self.task_ctx.outer_key_prefix)?;
 
         let mut errs = vec![];
         while merge_iter.valid() {
@@ -1720,10 +1712,10 @@ impl BuildingWorker {
     }
 }
 
-fn build_readers(
+pub fn build_readers(
     task_ctx: &TaskContext,
     file_metas: Vec<FileMeta>,
-    key_comm_prefix: usize,
+    key_comm_prefix_len: usize,
     lower_bound: Vec<u8>,
     upper_bound: Vec<u8>,
 ) -> Vec<KvPairsReader> {
@@ -1747,12 +1739,12 @@ fn build_readers(
         let decrypter_reader = DecrypterReader::new(file, method, key, iv).unwrap();
 
         let lower_bound_suffix = if !lower_bound.is_empty() && lower_bound > file_meta.first_key {
-            lower_bound.as_slice()[key_comm_prefix..].to_vec()
+            lower_bound.as_slice()[key_comm_prefix_len..].to_vec()
         } else {
             vec![]
         };
         let upper_bound_suffix = if !upper_bound.is_empty() && upper_bound <= file_meta.last_key {
-            upper_bound.as_slice()[key_comm_prefix..].to_vec()
+            upper_bound.as_slice()[key_comm_prefix_len..].to_vec()
         } else {
             vec![]
         };
@@ -1760,6 +1752,7 @@ fn build_readers(
         let reader = KvPairsReader::new(
             file_meta.kv_count,
             decrypter_reader,
+            key_comm_prefix_len,
             lower_bound_suffix,
             upper_bound_suffix,
             table_prefix_offset,

@@ -1,20 +1,15 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    cmp::Ordering,
     collections::HashMap,
-    fs,
-    io::Write,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
-use api_version::api_v2::KEYSPACE_PREFIX_LEN;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::Bytes;
 use chrono::Utc;
 use cloud_encryption::{EncryptionKey, MasterKey};
-use encryption::{DecrypterReader, EncrypterWriter, Iv};
 use http::Request;
 use hyper::Body;
 use kvengine::{
@@ -22,10 +17,9 @@ use kvengine::{
     table::{ChecksumType, InnerKey},
     IdVer, ShardTag, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
-use kvproto::{encryptionpb::EncryptionMethod, metapb, pdpb};
+use kvproto::{metapb, pdpb};
 use pd_client::PdClient;
 use protobuf::Message;
-use rfengine::compress_lz4;
 use rfstore::store::{raw_end_key, raw_start_key};
 use serde_derive::{Deserialize, Serialize};
 use tikv_util::{box_err, codec::bytes::encode_bytes, error, mpsc::Sender, time::Instant, warn};
@@ -33,7 +27,7 @@ use tikv_util::{box_err, codec::bytes::encode_bytes, error, mpsc::Sender, time::
 use crate::{
     checkpoint::LocalFileCheckpointStorage,
     error::{Error, Result},
-    kv::{DuplicateEntry, KvPair, KvPairsReader, SstMeta},
+    kv::{DuplicateEntry, SstMeta},
     metrics::LOAD_DATA_TASK_STATE,
 };
 
@@ -534,77 +528,6 @@ pub fn get_common_prefix(k1: &[u8], k2: &[u8]) -> Vec<u8> {
         }
     }
     k1[..offset].to_vec()
-}
-
-pub fn flush_to_local_file(
-    mut kv_pairs: Vec<KvPair>,
-    task_ctx: TaskContext,
-    path: PathBuf,
-    batch_size: usize,
-) -> Result<(KvPairsReader, Vec<u8>)> {
-    kv_pairs.sort_by(|a, b| {
-        let order = a.key.cmp(&b.key);
-        if order == Ordering::Equal {
-            return a.row_id.cmp(&b.row_id);
-        }
-        order
-    });
-
-    let first = &kv_pairs.first().unwrap().key;
-    let last = &kv_pairs.last().unwrap().key;
-    let key_comm_prefix = get_common_prefix(first.chunk(), last.chunk());
-
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .read(true)
-        .open(path.as_path())?;
-    let mut buf: Vec<u8> = Vec::with_capacity(batch_size + batch_size / 8);
-    let mut compressed_buf: Vec<u8> = Vec::with_capacity(batch_size + batch_size / 8);
-    let iv = if task_ctx.encryption_key.is_some() {
-        let mut iv_buf = Vec::with_capacity(16);
-        iv_buf.put_u64(task_ctx.start_ts);
-        iv_buf.put_u64(task_ctx.commit_ts);
-        Iv::from_slice(&iv_buf).unwrap()
-    } else {
-        Iv::Empty
-    };
-    let (method, key) = if let Some(key) = &task_ctx.encryption_key {
-        (EncryptionMethod::Aes256Ctr, key.current_key.as_slice())
-    } else {
-        (EncryptionMethod::Plaintext, "".as_bytes())
-    };
-    let mut writer = EncrypterWriter::new(file, method, key, iv).unwrap();
-    for pair in &kv_pairs {
-        buf.put_u16_le(pair.key.len() as u16);
-        buf.extend_from_slice(pair.key.chunk());
-        buf.put_u32_le(pair.val.len() as u32);
-        buf.extend_from_slice(pair.val.chunk());
-        buf.put_u16_le(pair.row_id.len() as u16);
-        buf.extend_from_slice(pair.row_id.chunk());
-
-        if buf.len() >= batch_size {
-            let compressed_size = compress_lz4(&buf, &mut compressed_buf)? as u32;
-            writer.write_all(&compressed_size.to_le_bytes())?;
-            writer.write_all(&compressed_buf)?;
-            buf.clear();
-            compressed_buf.clear();
-        }
-    }
-    if !buf.is_empty() {
-        let compressed_size = compress_lz4(&buf, &mut compressed_buf)? as u32;
-        writer.write_all(&compressed_size.to_le_bytes())?;
-        writer.write_all(&compressed_buf)?;
-    }
-    writer.flush()?;
-    let file = fs::File::open(path)?;
-    let reader = DecrypterReader::new(file, method, key, iv).unwrap();
-    let table_prefix_offset = KEYSPACE_PREFIX_LEN - task_ctx.inner_key_off.unwrap();
-    Ok((
-        KvPairsReader::new(kv_pairs.len(), reader, vec![], vec![], table_prefix_offset),
-        key_comm_prefix,
-    ))
 }
 
 pub fn verify_regions_boundary(

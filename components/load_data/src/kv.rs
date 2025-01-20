@@ -50,6 +50,7 @@ impl KvPairsReader {
     pub fn new(
         count: usize,
         mut reader: DecrypterReader<File>,
+        key_comm_prefix_len: usize,
         lower_bound_suffix: Vec<u8>,
         upper_bound_suffix: Vec<u8>,
         table_prefix_offset: usize,
@@ -91,17 +92,16 @@ impl KvPairsReader {
             offset: 0,
             next_offset: 0,
             buf_rx,
-            key_comm_prefix_len: 0,
+            key_comm_prefix_len,
             lower_bound_suffix,
             upper_bound_suffix,
             table_prefix_offset,
         }
     }
 
-    fn init(&mut self, key_comm_prefix_len: usize) -> Result<()> {
+    fn init(&mut self) -> Result<()> {
         self.next()?;
 
-        self.key_comm_prefix_len = key_comm_prefix_len;
         if !self.lower_bound_suffix.is_empty() {
             while self.valid() && self.key_suffix() < self.lower_bound_suffix.as_slice() {
                 self.next()?;
@@ -209,14 +209,10 @@ pub struct DuplicateEntry {
 }
 
 impl MergeIterator {
-    pub fn new(
-        readers: Vec<KvPairsReader>,
-        outer_key_prefix: &[u8],
-        key_comm_prefix_len: usize,
-    ) -> Result<Self> {
+    pub fn new(readers: Vec<KvPairsReader>, outer_key_prefix: &[u8]) -> Result<Self> {
         let mut heap = Vec::with_capacity(readers.len());
         for mut reader in readers {
-            reader.init(key_comm_prefix_len)?;
+            reader.init()?;
             if reader.valid() {
                 heap.push(Box::new(reader));
             }
@@ -385,7 +381,11 @@ mod tests {
     use tidb_query_datatype::codec::table;
 
     use super::*;
-    use crate::task::{flush_to_local_file, get_common_prefix, TaskContext};
+    use crate::{
+        checkpoint::FileMeta,
+        task::{get_common_prefix, TaskContext},
+        worker::{build_readers, flush_l0_file_to_local},
+    };
 
     #[test]
     fn test_kv_pairs_reader() {
@@ -408,11 +408,22 @@ mod tests {
             Utc::now().timestamp_millis()
         ));
 
-        let (mut reader, key_comm_prefix) = generate_reader(kv_pairs, path.clone(), kv_pair_size);
+        let mock_task_ctx = generate_mock_task_ctx();
+        let (file_meta, key_comm_prefix) =
+            generate_file_meta(&mock_task_ctx, kv_pairs, path.clone(), kv_pair_size);
+        let mut reader = build_readers(
+            &mock_task_ctx,
+            vec![file_meta],
+            key_comm_prefix.len(),
+            vec![],
+            vec![],
+        )
+        .pop()
+        .unwrap();
         let key_comm_prefix_len = key_comm_prefix.len();
         let mut key_buf = key_comm_prefix;
 
-        reader.init(key_comm_prefix_len).unwrap();
+        reader.init().unwrap();
         ids.sort();
         for id in ids.iter() {
             key_buf.resize(key_comm_prefix_len, 0);
@@ -435,7 +446,6 @@ mod tests {
         let kv_pair_size = get_kv_pair_size();
         let mut key_ids: Vec<usize> = (0..reader_count * kv_count_per_reader).collect();
         key_ids.shuffle(&mut thread_rng());
-
         let mut kv_pairs = Vec::with_capacity(key_ids.len());
         for id in key_ids.iter() {
             kv_pairs.push(KvPair::new(
@@ -445,8 +455,9 @@ mod tests {
             ));
         }
 
+        let mock_task_ctx = generate_mock_task_ctx();
         let tmp_dir = TempDir::new().unwrap();
-        let mut readers = vec![];
+        let mut file_metas = vec![];
         let mut last_key_comm_prefix = i_to_key(1, &key_ids[0]);
         for i in 0..reader_count {
             let kv_pairs_part =
@@ -455,20 +466,25 @@ mod tests {
                 "test_merge_iterator_{}",
                 Utc::now().timestamp_millis()
             ));
-            let (reader, key_comm_prefix) = generate_reader(
+            let (file_meta, key_comm_prefix) = generate_file_meta(
+                &mock_task_ctx,
                 kv_pairs_part,
                 path.clone(),
                 kv_pair_size * (kv_count_per_reader / 2),
             );
-            readers.push(reader);
+            file_metas.push(file_meta);
             last_key_comm_prefix = get_common_prefix(&last_key_comm_prefix, &key_comm_prefix);
 
             sleep(Duration::from_millis(3));
         }
-
-        let key_comm_prefix_len = last_key_comm_prefix.len();
-        let mut merge_iter =
-            MergeIterator::new(readers, "".as_bytes(), key_comm_prefix_len).unwrap();
+        let readers = build_readers(
+            &mock_task_ctx,
+            file_metas,
+            last_key_comm_prefix.len(),
+            vec![],
+            vec![],
+        );
+        let mut merge_iter = MergeIterator::new(readers, "".as_bytes()).unwrap();
 
         key_ids.sort();
         for id in key_ids.iter() {
@@ -480,21 +496,36 @@ mod tests {
         assert!(!merge_iter.valid());
     }
 
-    fn generate_reader(
+    fn generate_file_meta(
+        task_ctx: &TaskContext,
         kv_pairs: Vec<KvPair>,
-        path: PathBuf,
+        file_path: PathBuf,
         batch_size: usize,
-    ) -> (KvPairsReader, Vec<u8>) {
-        let mock_task_ctx = TaskContext {
-            task_id: "mock_load_data_id".to_string(),
+    ) -> (FileMeta, Vec<u8>) {
+        let kv_count = kv_pairs.len();
+        let (first_key, last_key, key_comm_prefix, kv_size) =
+            flush_l0_file_to_local(kv_pairs, task_ctx.clone(), file_path.clone(), batch_size)
+                .unwrap();
+        let file_meta = FileMeta {
+            file_path,
+            kv_count,
+            kv_size,
+            first_key,
+            last_key,
+        };
+        (file_meta, key_comm_prefix)
+    }
+
+    fn generate_mock_task_ctx() -> TaskContext {
+        TaskContext {
+            task_id: "mock_load_data_task_id".to_string(),
             start_ts: 0,
             commit_ts: 0,
             inner_key_off: Some(KEYSPACE_PREFIX_LEN),
             outer_key_prefix: vec![],
             encryption_key: None,
             keyspace_id: None,
-        };
-        flush_to_local_file(kv_pairs, mock_task_ctx, path, batch_size).unwrap()
+        }
     }
 
     fn i_to_key(table_id: i64, i: &usize) -> Vec<u8> {
