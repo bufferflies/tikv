@@ -14,7 +14,7 @@ use dashmap::DashMap;
 use futures::{executor::block_on, future::ok, TryStreamExt};
 use hyper::Body;
 use kvengine::{
-    context::{IaCtx, SnapCtx},
+    context::{IaCtx, PrepareType, SnapCtx},
     dfs,
     dfs::{FileType, S3Fs},
     ia::{
@@ -536,7 +536,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         schema_files: Some(schema_files.clone()),
         txn_chunk_manager: kvengine.get_txn_chunk_manager(),
         ia_ctx: IaCtx::Disabled,
-        for_columnar: false,
+        prepare_type: PrepareType::All,
     };
     let snap_access = dfs
         .get_runtime()
@@ -856,7 +856,7 @@ fn test_columnar_ia_file() {
         schema_files: Some(schema_files.clone()),
         txn_chunk_manager: kvengine.get_txn_chunk_manager(),
         ia_ctx,
-        for_columnar: false,
+        prepare_type: PrepareType::All,
     };
     let snap_access = runtime
         .block_on(SnapAccess::construct_snapshot(

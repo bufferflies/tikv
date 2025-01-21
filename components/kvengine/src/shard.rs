@@ -22,7 +22,7 @@ use slog_global::*;
 use tikv_util::{box_err, box_try, codec::number::U64_SIZE};
 
 use crate::{
-    context::{IaCtx, SnapCtx},
+    context::{IaCtx, PrepareType, SnapCtx},
     ia::{ia_file::IaFile, types::FileSegmentIdent},
     limiter::RegionLimiter,
     table::{
@@ -292,17 +292,21 @@ impl Shard {
 
     fn collect_ids_from_snapshot(
         snap: &pb::Snapshot,
-        for_columnar: bool,
+        prepare_type: PrepareType,
     ) -> HashMap<u64, FileMeta> {
+        let prepare_sst = matches!(prepare_type, PrepareType::SstOnly | PrepareType::All);
+        let prepare_columnar = matches!(prepare_type, PrepareType::ColumnarOnly | PrepareType::All);
+
         let mut ids = HashMap::new();
         let unconverted_l0s: HashSet<u64> = snap.get_unconverted_l0s().iter().copied().collect();
         for l0 in snap.get_l0_creates() {
-            if for_columnar && !unconverted_l0s.contains(&l0.id) {
+            // If type is prepare columnar only, unconverted l0s should also be prepared.
+            if prepare_columnar && !prepare_sst && !unconverted_l0s.contains(&l0.id) {
                 continue;
             }
             ids.insert(l0.id, FileMeta::from_l0_table(l0));
         }
-        if !for_columnar {
+        if prepare_sst {
             for ln in snap.get_table_creates() {
                 ids.insert(ln.id, FileMeta::from_table(ln));
             }
@@ -310,16 +314,23 @@ impl Shard {
                 ids.insert(blob.id, FileMeta::from_blob_table(blob));
             }
         }
-        for columnar in snap.get_columnar_creates() {
-            ids.insert(columnar.id, FileMeta::from_columnar_table(columnar));
-        }
-        // `file_id` in shard meta will set to `0` when the columnar replica was
-        // removed. We also need to check if the schema file is valid.
-        if snap.has_schema_meta() && snap.get_schema_meta().get_file_id() > 0 {
-            ids.insert(
-                snap.get_schema_meta().get_file_id(),
-                FileMeta::from_schema_meta(),
-            );
+        if prepare_columnar {
+            for columnar in snap.get_columnar_creates() {
+                ids.insert(columnar.id, FileMeta::from_columnar_table(columnar));
+            }
+            // `file_id` in shard meta will set to `0` when the columnar replica was
+            // removed. We also need to check if the schema file is valid.
+            if snap.has_schema_meta() && snap.get_schema_meta().get_file_id() > 0 {
+                ids.insert(
+                    snap.get_schema_meta().get_file_id(),
+                    FileMeta::from_schema_meta(),
+                );
+            }
+            for vec_index in snap.get_vector_indexes() {
+                for f in vec_index.files.iter() {
+                    ids.insert(f.id, FileMeta::from_vector_index_file(f));
+                }
+            }
         }
         ids
     }
@@ -339,7 +350,7 @@ impl Shard {
         }
         let encryption_key = if cs.has_snapshot() {
             let snap = cs.get_snapshot();
-            ids = Self::collect_ids_from_snapshot(snap, ctx.for_columnar);
+            ids = Self::collect_ids_from_snapshot(snap, ctx.prepare_type);
             if !ignore_lock {
                 lock_txn_file_refs = collect_snap_lock_txn_file_refs(snap);
             }
@@ -432,7 +443,13 @@ impl Shard {
             Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), &ctx.master_key);
         let mut builder = ShardDataBuilder::new(shard.get_data());
         builder.set_mem_tbls(mem_tbls);
-        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, ignore_lock, false);
+        create_snapshot_tables(
+            &mut builder,
+            cs.get_snapshot(),
+            &cs,
+            ignore_lock,
+            ctx.prepare_type,
+        );
         builder.set_schema_file(cs.schema_file.clone());
         shard.id = cs.shard_id;
         shard.set_data(builder.build());

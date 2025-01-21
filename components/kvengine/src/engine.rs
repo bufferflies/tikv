@@ -30,7 +30,7 @@ use txn_chunk_manager::with_pool_size;
 use crate::{
     apply::ChangeSet,
     config::PerKeyspaceConfig,
-    context::IaCtx,
+    context::{IaCtx, PrepareType},
     ia::manager::IaManager,
     limiter::StoreLimiter,
     meta::ShardMeta,
@@ -411,12 +411,17 @@ impl EngineCore {
             &cs,
         );
         let mut builder = ShardDataBuilder::new(shard.get_data());
+        let prepare_type = if self.opts.ignore_columnar_table_load {
+            PrepareType::SstOnly
+        } else {
+            PrepareType::All
+        };
         create_snapshot_tables(
             &mut builder,
             cs.get_snapshot(),
             &cs,
             self.opts.for_restore,
-            self.opts.ignore_columnar_table_load,
+            prepare_type,
         );
         // schema_file_id may be 0 after the columnar removed.
         let schema_file = (cs.get_snapshot().has_schema_meta()

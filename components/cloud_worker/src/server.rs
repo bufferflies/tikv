@@ -17,7 +17,7 @@ use hyper::{
     Body,
 };
 use kvengine::{
-    context::{IaCtx, SnapCtx},
+    context::{IaCtx, PrepareType, SnapCtx},
     dfs,
     dfs::{CacheFs, S3Fs},
     table::{columnar::SchemaFile, sstable::BlockCache, ChecksumType},
@@ -85,7 +85,7 @@ impl Context {
             schema_files: self.schema_files.clone(),
             txn_chunk_manager: self.txn_chunk_manager.clone(),
             ia_ctx: self.ia_ctx.clone(),
-            for_columnar: false,
+            prepare_type: PrepareType::All,
         }
     }
 }

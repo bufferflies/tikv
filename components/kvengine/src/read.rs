@@ -1812,7 +1812,7 @@ mod tests {
 
     use crate::{
         apply::create_snapshot_tables,
-        context::{IaCtx, SnapCtx},
+        context::{IaCtx, PrepareType, SnapCtx},
         dfs::{self, Dfs, InMemFs},
         read::MEM_DATA_FORMAT_V1,
         shard::ShardDataBuilder,
@@ -1874,7 +1874,13 @@ mod tests {
             &master_key,
         );
         let mut builder = ShardDataBuilder::new(shard.get_data());
-        create_snapshot_tables(&mut builder, cs.get_snapshot(), &cs, false, false);
+        create_snapshot_tables(
+            &mut builder,
+            cs.get_snapshot(),
+            &cs,
+            false,
+            PrepareType::All,
+        );
         builder.set_schema_file(cs.schema_file.clone());
         shard.set_data(builder.build());
         let snap = shard.new_snap_access();
@@ -2038,7 +2044,7 @@ mod tests {
                 schema_files: None,
                 txn_chunk_manager,
                 ia_ctx: IaCtx::Disabled,
-                for_columnar: false,
+                prepare_type: PrepareType::All,
             };
             let mut snap_pb = kvenginepb::Snapshot::default();
             snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32 * enable_inner_key_off as u32);

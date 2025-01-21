@@ -13,6 +13,7 @@ use cloud_encryption::EncryptionKey;
 use kvenginepb as pb;
 
 use crate::{
+    context::PrepareType,
     dfs::FileType,
     meta::is_move_down,
     table::{
@@ -121,29 +122,25 @@ pub(crate) fn create_snapshot_tables(
     snap: &kvenginepb::Snapshot,
     tables: &ChangeSet,
     not_all_tables_loaded: bool,
-    ignore_columnar: bool,
+    prepare_type: PrepareType,
 ) {
+    let prepare_sst = matches!(prepare_type, PrepareType::SstOnly | PrepareType::All);
+    let prepare_columnar = matches!(prepare_type, PrepareType::ColumnarOnly | PrepareType::All);
     // Note: Some tables in `snap` will not exist in `tables` if it's not necessary
     // to load from DFS.
     // Should only happen in restoration.
     let blob_creates = snap.get_blob_creates();
     let mut blob_tbl_map = HashMap::new();
-
-    if !blob_creates.is_empty() {
-        for blob_create in blob_creates {
-            if let Some(blob_tbl) = tables.blob_tables.get(&blob_create.id) {
-                blob_tbl_map.insert(blob_create.id, blob_tbl.clone());
-            } else {
-                assert!(
-                    not_all_tables_loaded,
-                    "blob_create: {:?}, tables: {:?}",
-                    blob_create, tables,
-                );
-            }
-        }
-    };
+    let mut scf_builders = vec![];
     let mut l0_tbls = vec![];
+    let mut scfs = [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)];
+
+    let unconverted_l0s: HashSet<u64> = snap.get_unconverted_l0s().iter().copied().collect();
     for l0_create in snap.get_l0_creates() {
+        // If type is prepare columnar only, unconverted l0s should also be prepared.
+        if prepare_columnar && !prepare_sst && !unconverted_l0s.contains(&l0_create.id) {
+            continue;
+        }
         if let Some(l0_tbl) = tables.l0_tables.get(&l0_create.id) {
             l0_tbls.push(l0_tbl.clone());
         } else {
@@ -156,31 +153,43 @@ pub(crate) fn create_snapshot_tables(
     }
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
 
-    let mut scf_builders = vec![];
-    for cf in 0..NUM_CFS {
-        let scf = ShardCfBuilder::new(cf);
-        scf_builders.push(scf);
-    }
-    for table_create in snap.get_table_creates() {
-        if let Some(tbl) = tables.ln_tables.get(&table_create.id) {
-            let scf = &mut scf_builders.as_mut_slice()[table_create.cf as usize];
-            scf.add_table(tbl.clone(), table_create.level as usize);
-        } else {
-            assert!(
-                not_all_tables_loaded,
-                "table_create: {:?}, tables: {:?}",
-                table_create, tables,
-            );
+    if prepare_sst {
+        for blob_create in blob_creates {
+            if let Some(blob_tbl) = tables.blob_tables.get(&blob_create.id) {
+                blob_tbl_map.insert(blob_create.id, blob_tbl.clone());
+            } else {
+                assert!(
+                    not_all_tables_loaded,
+                    "blob_create: {:?}, tables: {:?}",
+                    blob_create, tables,
+                );
+            }
         }
-    }
-    let mut scfs = [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)];
-    for cf in 0..NUM_CFS {
-        let scf = &mut scf_builders.as_mut_slice()[cf];
-        scfs[cf] = scf.build();
+
+        for cf in 0..NUM_CFS {
+            let scf = ShardCfBuilder::new(cf);
+            scf_builders.push(scf);
+        }
+        for table_create in snap.get_table_creates() {
+            if let Some(tbl) = tables.ln_tables.get(&table_create.id) {
+                let scf = &mut scf_builders.as_mut_slice()[table_create.cf as usize];
+                scf.add_table(tbl.clone(), table_create.level as usize);
+            } else {
+                assert!(
+                    not_all_tables_loaded,
+                    "table_create: {:?}, tables: {:?}",
+                    table_create, tables,
+                );
+            }
+        }
+        for cf in 0..NUM_CFS {
+            let scf = &mut scf_builders.as_mut_slice()[cf];
+            scfs[cf] = scf.build();
+        }
     }
     let mut col_levels = ColumnarLevels::new();
     let mut vector_indexes = VectorIndexes::default();
-    if !ignore_columnar {
+    if prepare_columnar {
         for col_create in snap.get_columnar_creates() {
             if let Some(col_file) = tables.col_files.get(&col_create.id) {
                 col_levels.add_file(col_create.level as usize, col_file.clone());
@@ -386,12 +395,17 @@ impl EngineCore {
         let mut mem_tbls = data.mem_tbls.clone();
 
         let mut builder = ShardDataBuilder::new(data.clone());
+        let prepare_type = if self.opts.ignore_columnar_table_load {
+            PrepareType::SstOnly
+        } else {
+            PrepareType::All
+        };
         create_snapshot_tables(
             &mut builder,
             initial_flush,
             cs,
             self.opts.for_restore,
-            self.opts.ignore_columnar_table_load,
+            prepare_type,
         );
         // `lock_txn_files` is ignored because it does not depend on initial flush to
         // keep consistency between peers, as only target region has txn file locks.
@@ -887,12 +901,17 @@ impl EngineCore {
         );
         let snap_data = new_shard.get_data();
         let mut builder = ShardDataBuilder::new(snap_data);
+        let prepare_type = if self.opts.ignore_columnar_table_load {
+            PrepareType::SstOnly
+        } else {
+            PrepareType::All
+        };
         create_snapshot_tables(
             &mut builder,
             cs.get_restore_shard(),
             cs,
             self.opts.for_restore,
-            self.opts.ignore_columnar_table_load,
+            prepare_type,
         );
         builder.set_schema_file(cs.schema_file.clone());
         new_shard.set_data(builder.build());

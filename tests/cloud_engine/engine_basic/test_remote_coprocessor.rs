@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use codec::prelude::NumberEncoder;
 use futures::executor::block_on;
 use kvengine::{
-    context::{IaCtx, SnapCtx},
+    context::{IaCtx, PrepareType, SnapCtx},
     dfs::S3Fs,
     ia::{
         manager::IaManager,
@@ -2413,7 +2413,7 @@ impl<'a> DagTest<'a> {
             schema_files: None,
             txn_chunk_manager,
             ia_ctx: IaCtx::Disabled,
-            for_columnar: false,
+            prepare_type: PrepareType::All,
         };
 
         Self {
