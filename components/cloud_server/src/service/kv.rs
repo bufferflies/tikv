@@ -27,7 +27,7 @@ use kvproto::{
 use log_wrappers::hex_encode;
 use rfstore::{
     router::RaftStoreRouter,
-    store::{Callback, CasualMessage},
+    store::{Callback, CasualMessage, PeerTag},
     Error as RaftStoreError,
 };
 use tikv::{
@@ -327,12 +327,13 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         });
         let ch = self.ch.clone();
         let kv = self.storage.get_engine().kv_engine().unwrap();
+        let store_id = kv.get_engine_id();
         let task = async move {
             let mut resp = UnsafeDestroyRangeResponse::default();
             let regions = future.await?;
             info!(
-                "unsafe_destroy_range: range prefix {:?} for regions {:?}",
-                prefix, regions
+                "{} unsafe_destroy_range: range prefix {:?} for regions {:?}",
+                store_id, prefix, regions
             );
             let mut region_futures = vec![];
             for region in &regions {
@@ -347,11 +348,10 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                 let ch = ch.clone();
                 let prefix = prefix.clone();
                 let region_task = async move {
+                    let tag = PeerTag::new(store_id, region);
                     info!(
-                        "{} unsafe_destroy_range: request delete prefix {:?} for region {:?}",
-                        region.id(),
-                        prefix,
-                        region
+                        "{} unsafe_destroy_range: request delete prefix {:?}",
+                        tag, prefix
                     );
                     let (cb, fu) = paired_future_callback();
                     let callback = Callback::write(Box::new(move |res| {
@@ -366,22 +366,21 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                         },
                     );
                     match fu.await {
-                        Ok(res) => {
+                        Ok(mut res) => {
                             if res.response.get_header().has_error() {
-                                return Err(format!(
-                                    "{} unsafe_destroy_range: request delete prefix failed: {:?}",
-                                    region.id(),
-                                    res.response.get_header().get_error()
-                                ));
+                                return Err(res.response.mut_header().take_error());
                             }
-                            Ok(())
                         }
-                        Err(e) => Err(format!(
-                            "{} unsafe_destroy_range: request delete prefix canceled: {:?}",
-                            region.id(),
-                            e
-                        )),
+                        Err(e) => {
+                            // Should happen only when TiKV is stopping.
+                            // Can be ignored as the request is sent to all stores.
+                            info!(
+                                "{} unsafe_destroy_range: request delete prefix canceled: {:?}",
+                                tag, e
+                            );
+                        }
                     }
+                    Ok(())
                 };
                 region_futures.push(region_task);
             }
@@ -392,7 +391,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                 .into_iter()
                 .collect::<Result<Vec<_>, _>>()
             {
-                resp.set_error(e);
+                resp.set_region_error(e);
             } else {
                 // Wait and check if all regions have applied delete prefix.
                 let mut regions_applied = false;
