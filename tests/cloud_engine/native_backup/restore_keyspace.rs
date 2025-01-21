@@ -39,7 +39,7 @@ use test_cloud_server::{
     },
     must_wait,
     oss::prepare_dfs,
-    try_wait, ServerCluster, TikvWorkerOptions,
+    try_wait, ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
@@ -539,7 +539,7 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
     let security_config = new_security_config();
     let pd_wrapper = PdWrapper::new_test(1, &security_config, None);
-    let mut cluster = ServerCluster::new_opt(
+    let mut cluster = ServerClusterBuilder::new(
         alloc_node_id_vec(NODES_COUNT),
         |_, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
@@ -554,8 +554,9 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
             conf.enable_inner_key_offset = options.enable_inner_key_off;
             conf.security = security_config.clone();
         },
-        pd_wrapper,
-    );
+    )
+    .pd(pd_wrapper)
+    .build();
     cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
@@ -950,7 +951,7 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
     let _enter = runtime.enter();
 
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
-    let mut cluster = ServerCluster::new_opt(
+    let mut cluster = ServerClusterBuilder::new(
         alloc_node_id_vec(NODES_COUNT),
         |_, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
@@ -963,8 +964,9 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
             conf.enable_inner_key_offset = true;
         },
-        pd_wrapper,
-    );
+    )
+    .pd(pd_wrapper)
+    .build();
     cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();

@@ -20,7 +20,7 @@ use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
     client::ClusterClientOptions, oss::prepare_dfs, tidb::TidbCluster, ServerCluster,
-    TikvWorkerOptions,
+    ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_pd_client::{PdClientExt, PdWrapper};
 use tikv_util::{
@@ -389,7 +389,9 @@ fn prepare_cluster(
         conf.storage.scheduler_worker_pool_size = cpu_cores;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
-    let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd_wrapper);
+    let mut cluster = ServerClusterBuilder::new(nodes, update_conf_fn)
+        .pd(pd_wrapper)
+        .build();
     cluster.start_tikv_workers(
         alloc_node_id_vec(TIKV_WORKERS_COUNT),
         TikvWorkerOptions {

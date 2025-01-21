@@ -17,7 +17,7 @@ use test_cloud_server::{
     oss::prepare_dfs,
     tidb::*,
     tikv_bin::{TikvServers, TikvWorkers},
-    MajorCompactionTarget, ServerCluster, TikvWorkerOptions,
+    MajorCompactionTarget, ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
 use tikv_util::{config::ReadableDuration, info, time::Instant};
@@ -259,6 +259,7 @@ fn prepare_tikv_servers(
         data_path,
         working_path,
         nodes_count,
+        MEMORY_CAPACITY_RATIO,
         security_conf,
     )
 }
@@ -294,7 +295,10 @@ fn prepare_cluster(
         generate_update_conf_fn(dfs_config, security_conf, &tikv_worker_nodes, switches);
     let pd_wrapper =
         PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
-    let mut cluster = ServerCluster::new_opt(vec![], |_, _| {}, pd_wrapper);
+    let mut cluster = ServerClusterBuilder::new(vec![], |_, _| {})
+        .pd(pd_wrapper)
+        .memory_capacity_ratio(MEMORY_CAPACITY_RATIO)
+        .build();
 
     // Start tikv-servers.
     let tikv_servers = prepare_tikv_servers(

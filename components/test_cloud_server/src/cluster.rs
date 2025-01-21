@@ -72,7 +72,6 @@ const IA_DISK_CAP_DEF: u64 = 10 << 20; // 10 MiB
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
-#[allow(dead_code)]
 pub struct ServerCluster {
     servers: HashMap<u16 /* node_id */, TikvServer>,
     tmp_dir: TempDir,
@@ -90,6 +89,10 @@ pub struct ServerCluster {
     tikv_worker_configs: HashMap<u16 /* idx */, cloud_worker::Config>,
     tikv_workers: HashMap<u16 /* idx */, CloudWorker>,
     schema_manager: Option<CloudWorker>,
+
+    /// The ratio of memory capacity to use from the total memory.
+    /// Used for reserve memory for other components (PD, TiDB, and TiFlash).
+    memory_capacity_ratio: f64,
 }
 
 impl ServerCluster {
@@ -97,16 +100,17 @@ impl ServerCluster {
     where
         F: Fn(u16, &mut TikvConfig),
     {
-        Self::new_opt(
-            nodes,
-            update_conf,
-            PdWrapper::new_test(0, &SecurityConfig::default(), None),
-        )
+        ServerClusterBuilder::new(nodes, update_conf).build()
     }
 
     // The node id is statically assigned, the temp dir and server address are
     // calculated by the node id.
-    pub fn new_opt<F>(nodes: Vec<u16>, update_conf: F, pd_wrapper: PdWrapper) -> ServerCluster
+    pub fn new_opt<F>(
+        nodes: Vec<u16>,
+        update_conf: F,
+        pd_wrapper: PdWrapper,
+        memory_capacity_ratio: f64,
+    ) -> ServerCluster
     where
         F: Fn(u16, &mut TikvConfig),
     {
@@ -135,6 +139,7 @@ impl ServerCluster {
             tikv_worker_configs: Default::default(),
             tikv_workers: Default::default(),
             schema_manager: None,
+            memory_capacity_ratio,
         };
         for node_id in nodes {
             cluster.start_node(node_id, &update_conf);
@@ -183,7 +188,12 @@ impl ServerCluster {
         let mut config = if let Some(config) = self.confs.remove(&node_id) {
             config
         } else {
-            new_test_config(self.tmp_dir.path(), node_id, self.nodes_count)
+            new_test_config(
+                self.tmp_dir.path(),
+                node_id,
+                self.nodes_count,
+                self.memory_capacity_ratio,
+            )
         };
         update_conf(node_id, &mut config);
         let pd_client = self.pd.new_client(); // Different nodes must not share PD client.
@@ -947,7 +957,48 @@ impl Drop for ServerCluster {
     }
 }
 
-pub fn new_test_config(base_dir: &Path, node_id: u16, nodes_count: usize) -> TikvConfig {
+pub struct ServerClusterBuilder<F> {
+    nodes: Vec<u16>,
+    update_conf: F,
+    pd: Option<PdWrapper>,
+    memory_capacity_ratio: f64,
+}
+
+impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
+    pub fn new(nodes: Vec<u16>, update_conf: F) -> Self {
+        Self {
+            nodes,
+            update_conf,
+            pd: None,
+            memory_capacity_ratio: 1.0,
+        }
+    }
+
+    pub fn pd(mut self, pd: PdWrapper) -> Self {
+        self.pd = Some(pd);
+        self
+    }
+
+    pub fn memory_capacity_ratio(mut self, ratio: f64) -> Self {
+        assert!(0.0 < ratio && ratio <= 1.0);
+        self.memory_capacity_ratio = ratio;
+        self
+    }
+
+    pub fn build(self) -> ServerCluster {
+        let pd = self
+            .pd
+            .unwrap_or_else(|| PdWrapper::new_test(0, &SecurityConfig::default(), None));
+        ServerCluster::new_opt(self.nodes, self.update_conf, pd, self.memory_capacity_ratio)
+    }
+}
+
+pub fn new_test_config(
+    base_dir: &Path,
+    node_id: u16,
+    nodes_count: usize,
+    memory_capacity_ratio: f64,
+) -> TikvConfig {
     let mut config = TikvConfig::default();
     config.storage.data_dir = format!("{}/{}", base_dir.to_str().unwrap(), node_id);
     config.storage.api_version = 2;
@@ -981,7 +1032,7 @@ pub fn new_test_config(base_dir: &Path, node_id: u16, nodes_count: usize) -> Tik
     config.server.raft_client_initial_reconnect_backoff = ReadableDuration::millis(100);
     config.server.raft_client_max_backoff = ReadableDuration::millis(250);
 
-    update_config_by_total_mem(&mut config, nodes_count);
+    update_config_by_total_mem(&mut config, nodes_count, memory_capacity_ratio);
     config
         .storage
         .flow_control
@@ -990,8 +1041,13 @@ pub fn new_test_config(base_dir: &Path, node_id: u16, nodes_count: usize) -> Tik
     config
 }
 
-fn update_config_by_total_mem(config: &mut TikvConfig, nodes_count: usize) {
-    let total_mem = (SysQuota::memory_limit_in_bytes() / nodes_count as u64) as f64;
+fn update_config_by_total_mem(
+    config: &mut TikvConfig,
+    nodes_count: usize,
+    memory_capacity_ratio: f64,
+) {
+    let total_mem =
+        (SysQuota::memory_limit_in_bytes() / nodes_count as u64) as f64 * memory_capacity_ratio;
 
     config.storage.block_cache.capacity = Some(ReadableSize(
         (total_mem * tikv::config::BLOCK_CACHE_RATE) as u64,

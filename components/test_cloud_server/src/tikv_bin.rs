@@ -32,6 +32,7 @@ pub struct TikvServers {
     data_path: PathBuf,
     working_path: PathBuf,
     nodes_count: usize,
+    memory_capacity_ratio: f64,
     security_mgr: Arc<SecurityManager>,
     confs: DashMap<u16 /* node_id */, TikvConfig>,
     children: DashMap<u16 /* node_id */, process::Child>,
@@ -44,6 +45,7 @@ impl TikvServers {
         data_path: PathBuf,
         working_path: PathBuf,
         nodes_count: usize,
+        memory_capacity_ratio: f64,
         security_conf: &SecurityConfig,
     ) -> Self {
         check_binary("tikv_server", &bin_path);
@@ -54,6 +56,7 @@ impl TikvServers {
             data_path,
             working_path,
             nodes_count,
+            memory_capacity_ratio,
             security_mgr,
             confs: Default::default(),
             children: Default::default(),
@@ -78,7 +81,12 @@ impl TikvServers {
         let mut config = if let Some((_, config)) = self.confs.remove(&node_id) {
             config
         } else {
-            new_test_config(&self.data_path, node_id, self.nodes_count)
+            new_test_config(
+                &self.data_path,
+                node_id,
+                self.nodes_count,
+                self.memory_capacity_ratio,
+            )
         };
         update_conf(node_id, &mut config);
         self.confs.insert(node_id, config.clone());

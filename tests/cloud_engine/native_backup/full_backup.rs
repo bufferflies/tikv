@@ -9,7 +9,7 @@ use kvengine::dfs::DFSConfig;
 use native_br::{backup, restore};
 use rand::Rng;
 use security::SecurityConfig;
-use test_cloud_server::{client, oss::ObjectStorageService, ServerCluster};
+use test_cloud_server::{client, oss::ObjectStorageService, ServerClusterBuilder};
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::{config::ReadableSize, info};
@@ -31,16 +31,14 @@ fn start_cluster_and_backup(
 ) -> (rfenginepb::ClusterBackupMeta, client::RefStore) {
     let nodes = Vec::from_iter((0..NODES_SIZE).map(|_| alloc_node_id()));
     let pd = PdWrapper::new_test(0, &SecurityConfig::default(), Some(CLUSTER_ID));
-    let mut cluster = ServerCluster::new_opt(
-        nodes,
-        |_, conf: &mut TikvConfig| {
-            conf.dfs = dfs_config.clone();
-            conf.rfengine.lightweight_backup = lightweight;
-            conf.rfengine.target_file_size = WAL_TARGET_SIZE;
-            conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
-        },
-        pd,
-    );
+    let mut cluster = ServerClusterBuilder::new(nodes, |_, conf: &mut TikvConfig| {
+        conf.dfs = dfs_config.clone();
+        conf.rfengine.lightweight_backup = lightweight;
+        conf.rfengine.target_file_size = WAL_TARGET_SIZE;
+        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
+    })
+    .pd(pd)
+    .build();
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
 
@@ -117,14 +115,12 @@ fn restore_cluster(
     }
 
     let pd = PdWrapper::new_test(0, &SecurityConfig::default(), Some(CLUSTER_ID));
-    let mut cluster = ServerCluster::new_opt(
-        nodes,
-        |node_id, conf: &mut TikvConfig| {
-            conf.storage.data_dir = get_storage_path(node_id).to_str().unwrap().to_string();
-            conf.dfs = dfs_config.clone();
-        },
-        pd,
-    );
+    let mut cluster = ServerClusterBuilder::new(nodes, |node_id, conf: &mut TikvConfig| {
+        conf.storage.data_dir = get_storage_path(node_id).to_str().unwrap().to_string();
+        conf.dfs = dfs_config.clone();
+    })
+    .pd(pd)
+    .build();
     cluster.wait_region_replicated(&[], 3);
 
     let mut client = cluster.new_client();

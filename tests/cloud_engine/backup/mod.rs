@@ -21,7 +21,7 @@ use kvproto::{
 use rand::Rng;
 use security::SecurityConfig;
 use tempfile::Builder;
-use test_cloud_server::{client::ClusterClient, ServerCluster};
+use test_cloud_server::{client::ClusterClient, ServerClusterBuilder};
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::config::{ReadableDuration, ReadableSize};
@@ -93,7 +93,9 @@ fn test_backup_and_import() {
         conf.raft_store.local_file_gc_tick_interval = ReadableDuration::millis(200);
     };
     let pd1 = PdWrapper::new_test(0, &SecurityConfig::default(), Some(CLUSTER_ID));
-    let mut cluster1 = ServerCluster::new_opt(vec![node_id], update_conf, pd1);
+    let mut cluster1 = ServerClusterBuilder::new(vec![node_id], update_conf)
+        .pd(pd1)
+        .build();
     // Backup file should be empty.
     let tmp = Builder::new().tempdir().unwrap();
     let mut client1 = cluster1.new_client();
@@ -131,7 +133,9 @@ fn test_backup_and_import() {
     // Use importer to restore backup files.
     let node2_id = alloc_node_id();
     let pd2 = PdWrapper::new_test(0, &SecurityConfig::default(), Some(CLUSTER_ID));
-    let mut cluster2 = ServerCluster::new_opt(vec![node2_id], update_conf, pd2);
+    let mut cluster2 = ServerClusterBuilder::new(vec![node2_id], update_conf)
+        .pd(pd2)
+        .build();
     let mut client2 = cluster2.new_client();
     let store_id = client2.get_stores().pop().unwrap();
     let region_id = client2.get_region_id(b"");

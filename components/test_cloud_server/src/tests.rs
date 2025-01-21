@@ -26,7 +26,7 @@ use tokio::runtime::Runtime;
 use crate::{
     client::{CommitAction, MutateOptions},
     oss::prepare_dfs,
-    try_wait, try_wait_result_async, ServerCluster, TikvWorkerOptions,
+    try_wait, try_wait_result_async, ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
 };
 
 #[test]
@@ -210,13 +210,11 @@ fn test_txn_client() {
     test_util::init_log_for_test();
     let node_ids = alloc_node_id_vec(3);
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
-    let mut cluster = ServerCluster::new_opt(
-        node_ids,
-        |_, conf| {
-            conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
-        },
-        pd_wrapper,
-    );
+    let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
+        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
+    })
+    .pd(pd_wrapper)
+    .build();
     let mut client = cluster.new_client();
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
     client.split_keyspace(keyspace_id);
@@ -340,7 +338,9 @@ fn test_on_real_pd() {
         &SecurityConfig::default(),
         ReadableDuration::secs(30),
     );
-    let mut cluster = ServerCluster::new_opt(node_ids, |_, _| {}, pd_wrapper);
+    let mut cluster = ServerClusterBuilder::new(node_ids, |_, _| {})
+        .pd(pd_wrapper)
+        .build();
 
     runtime.block_on(async {
         let pd_client = cluster.get_pd_client_ext();
@@ -400,7 +400,9 @@ fn test_pd_control() {
         ReadableDuration::secs(30),
     );
     let pd_ctl = Arc::new(pd_wrapper.get_pd_control().unwrap());
-    let mut cluster = ServerCluster::new_opt(node_ids, |_, _| {}, pd_wrapper);
+    let mut cluster = ServerClusterBuilder::new(node_ids, |_, _| {})
+        .pd(pd_wrapper)
+        .build();
 
     runtime.block_on(async {
         let ks_name = "ks_for_test";
@@ -572,14 +574,12 @@ fn test_tikv_worker() {
 
     let node_ids = alloc_node_id_vec(3);
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
-    let mut cluster = ServerCluster::new_opt(
-        node_ids.clone(),
-        |_, conf| {
-            conf.dfs = dfs_config.clone();
-            conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
-        },
-        pd_wrapper,
-    );
+    let mut cluster = ServerClusterBuilder::new(node_ids.clone(), |_, conf| {
+        conf.dfs = dfs_config.clone();
+        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
+    })
+    .pd(pd_wrapper)
+    .build();
     cluster.start_tikv_workers(alloc_node_id_vec(2), TikvWorkerOptions::default());
     let mut client = cluster.new_client();
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();

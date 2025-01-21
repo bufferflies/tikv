@@ -35,7 +35,7 @@ use test_cloud_server::{
     try_wait,
     txn::txn_file::TxnFileHelper,
     util::Mutation,
-    ServerCluster, TikvWorkerOptions,
+    ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
@@ -330,14 +330,12 @@ fn test_txn_file_basic_impl(
         "enable_inner_key_off" => enable_inner_key_off,
         "write_method" => ?write_method,
         "cluster_id" => cluster_id);
-    let mut cluster = ServerCluster::new_opt(
-        node_ids,
-        |_, conf| {
-            conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = enable_inner_key_off;
-        },
-        pd_wrapper,
-    );
+    let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
+        conf.dfs = dfs_config.clone();
+        conf.enable_inner_key_offset = enable_inner_key_off;
+    })
+    .pd(pd_wrapper)
+    .build();
     cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 
@@ -474,14 +472,12 @@ fn test_txn_file_split_merge(#[case] enable_inner_key_off: bool) {
 
     let node_ids = alloc_node_id_vec(NODES_COUNT);
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
-    let mut cluster = ServerCluster::new_opt(
-        node_ids,
-        |_, conf| {
-            conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = enable_inner_key_off;
-        },
-        pd_wrapper,
-    );
+    let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
+        conf.dfs = dfs_config.clone();
+        conf.enable_inner_key_offset = enable_inner_key_off;
+    })
+    .pd(pd_wrapper)
+    .build();
     cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 
@@ -698,14 +694,12 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
     let cluster_id = pd_wrapper.client().get_cluster_id().unwrap();
     info!("test_txn_file_abnormal_process"; "data_count" => data_count, "write_method" => ?write_method, "cluster_id" => cluster_id);
-    let mut cluster = ServerCluster::new_opt(
-        node_ids,
-        |_, conf| {
-            conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = enable_inner_key_off;
-        },
-        pd_wrapper,
-    );
+    let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
+        conf.dfs = dfs_config.clone();
+        conf.enable_inner_key_offset = enable_inner_key_off;
+    })
+    .pd(pd_wrapper)
+    .build();
     cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 
@@ -1021,15 +1015,13 @@ fn test_txn_file_move_down(#[case] enable_inner_key_off: bool) {
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
     let cluster_id = pd_wrapper.client().get_cluster_id().unwrap();
     info!("test_txn_file_move_down"; "cluster_id" => cluster_id);
-    let mut cluster = ServerCluster::new_opt(
-        node_ids,
-        |_, conf| {
-            conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = enable_inner_key_off;
-            conf.kvengine.flush_split_l0 = true;
-        },
-        pd_wrapper,
-    );
+    let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
+        conf.dfs = dfs_config.clone();
+        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.kvengine.flush_split_l0 = true;
+    })
+    .pd(pd_wrapper)
+    .build();
     cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 
@@ -1189,14 +1181,12 @@ fn test_commit_primary_region() {
 
     let node_ids = alloc_node_id_vec(NODES_COUNT);
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
-    let mut cluster = ServerCluster::new_opt(
-        node_ids,
-        |_, conf| {
-            conf.dfs = dfs_config.clone();
-            conf.enable_inner_key_offset = true;
-        },
-        pd_wrapper,
-    );
+    let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
+        conf.dfs = dfs_config.clone();
+        conf.enable_inner_key_offset = true;
+    })
+    .pd(pd_wrapper)
+    .build();
     cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
 

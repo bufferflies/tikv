@@ -16,7 +16,7 @@ use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
     oss::prepare_dfs, tidb::*, tikv_worker_cop_url, try_wait_async, ServerCluster,
-    TikvWorkerOptions,
+    ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
@@ -104,6 +104,8 @@ pub(crate) const USE_REMOTE_COP_ENV_KEY: &str = "USE_REMOTE_COP";
 pub(crate) const REMOTE_COP_MIN_BLOCK_SIZE_OPTIONS: [usize; 3] =
     [64 * 1024, 512 * 1024, 1024 * 1024];
 pub(crate) const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(16); // Small size to make eviction more frequent.
+
+pub(crate) const MEMORY_CAPACITY_RATIO: f64 = 0.8; // Reserve 20% memory for PD, TiDB, and TiFlash.
 
 #[test]
 fn test_random_with_tidb() {
@@ -242,7 +244,10 @@ fn prepare_cluster(
     let update_conf_fn =
         generate_update_conf_fn(dfs_config, security_conf, &tikv_worker_nodes, switches);
     let pd = PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
-    let mut cluster = ServerCluster::new_opt(nodes, update_conf_fn, pd);
+    let mut cluster = ServerClusterBuilder::new(nodes, update_conf_fn)
+        .pd(pd)
+        .memory_capacity_ratio(MEMORY_CAPACITY_RATIO)
+        .build();
     cluster.start_tikv_workers(
         tikv_worker_nodes,
         TikvWorkerOptions {
