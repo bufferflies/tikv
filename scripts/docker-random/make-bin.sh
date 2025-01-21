@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -xeuo pipefail
+set -eu
 
 # Run from the Makefile environment
 SELF=$(realpath -s "$0")
@@ -47,6 +47,7 @@ done
 # Concat by space
 EXTRA_FEATURES_STR=$(IFS=$' '; echo "${EXTRA_FEATURES[*]}")
 TIKV_ENABLE_FEATURES="$TIKV_ENABLE_FEATURES $EXTRA_FEATURES_STR"
+echo "features: $TIKV_ENABLE_FEATURES"
 
 declare -a BUILD_FLAG
 BUILD_FLAG=(
@@ -56,6 +57,7 @@ BUILD_FLAG=(
 
 PWD=$(pwd)
 TARGET_BIN="$PWD"/random-bin
+BUILD_LOG="$PWD"/build.log
 
 TARGET_PATH="target/debug/deps"
 if [ "$RELEASE" -eq 1 ]; then
@@ -66,9 +68,13 @@ fi
 cd ../..
 
 # "-p tikv" must be added, otherwise building will fail as some features are not contained in any package.
-EXECUTABLE=$(cargo test "${BUILD_FLAG[@]}" -p tests -p tikv --test random --no-run --message-format=json | grep -E -o "$TARGET_PATH"'/random-[a-z0-9]+' | tail -1)
+EXECUTABLE=$(cargo test "${BUILD_FLAG[@]}" -p tests -p tikv --test random --no-run --message-format=json | tee "$BUILD_LOG" | grep -E -o "$TARGET_PATH"'/random-[a-z0-9]+' | tail -1)
 if [ -z "$EXECUTABLE" ]; then
-	echo "Failed to find executable"
+	echo "Failed to find executable, errors:"
+	echo
+	jq -r 'select(.reason == "compiler-message" and .message.level == "error") | .message.message' < "$BUILD_LOG"
+	echo
+	echo "See build.log for details."
 	exit 1
 fi
 
