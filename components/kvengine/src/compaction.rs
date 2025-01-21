@@ -3855,6 +3855,7 @@ async fn compact_table_for_columnar(
         *columnar_config,
         ctx.encryption_key.clone(),
         file_builder.file_id,
+        target_lvl,
     );
     let mut block_offset = 0;
     while res > 0 {
@@ -3873,6 +3874,7 @@ async fn compact_table_for_columnar(
                     *columnar_config,
                     ctx.encryption_key.clone(),
                     file_builder.file_id,
+                    target_lvl,
                 );
             }
         } else {

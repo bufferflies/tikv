@@ -290,6 +290,7 @@ pub struct ColumnarTableBuilder {
     max_version: u64,
     encryption_key: Option<EncryptionKey>,
     file_id: u64, // Used for encryption
+    need_min_max: bool,
     del_marks: Vec<u8>,
 }
 
@@ -300,16 +301,19 @@ impl ColumnarTableBuilder {
         opts: ColumnarTableBuildOptions,
         encryption_key: Option<EncryptionKey>,
         file_id: u64,
+        level: u32,
     ) -> Self {
         let pack_max_row_count = opts.pack_max_row_count;
         let pack_max_size = opts.pack_max_size;
+        // Build min_max for the bottom level only.
+        let need_min_max = level == MAX_COLUMNAR_LEVEL as u32;
         let mut column_builders = vec![];
         for col_info in &schema.columns {
             let col_builder = ColumnarColumnBuilder::new(
                 col_info.clone(),
                 pack_max_row_count,
                 pack_max_size,
-                true,
+                need_min_max,
             );
             column_builders.push(col_builder);
         }
@@ -332,6 +336,7 @@ impl ColumnarTableBuilder {
             max_version: 0,
             encryption_key,
             file_id,
+            need_min_max,
             del_marks: vec![],
         }
     }
@@ -342,8 +347,10 @@ impl ColumnarTableBuilder {
                 .append_handle(&block.handles, start_offset, block.length());
         self.version_builder
             .append(&block.versions, None, finish_pack, start_offset, end_offset);
-        self.del_marks
-            .extend_from_slice(&block.versions.nulls[start_offset..end_offset]);
+        if self.need_min_max {
+            self.del_marks
+                .extend_from_slice(&block.versions.nulls[start_offset..end_offset]);
+        }
         for (i, col_buf) in block.columns.iter().enumerate() {
             let col_builder = &mut self.column_builders[i];
             col_builder.append(
