@@ -959,7 +959,7 @@ pub fn new_test_config(base_dir: &Path, node_id: u16, nodes_count: usize) -> Tik
     config.server.grpc_keepalive_time = ReadableDuration::secs(1);
     config.server.grpc_keepalive_timeout = ReadableDuration::secs(1);
     config.dfs.zstd_compression_level = "3".to_string();
-    config.raft_store.raft_base_tick_interval = ReadableDuration::millis(50);
+    config.raft_store.raft_base_tick_interval = ReadableDuration::millis(50); // Note: affect rfstore::Config::from_old.
     config.raft_store.raft_election_timeout_ticks = 10;
     config.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(450);
     config.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);

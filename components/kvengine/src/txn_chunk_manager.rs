@@ -381,6 +381,15 @@ impl TxnChunkManagerCore {
         guard.as_ref().map(|x| x.chunk.clone())
     }
 
+    pub fn get_prepare_time(&self, txn_chunk_id: u64) -> Option<Instant> {
+        let entry = self.txn_chunks.get(&txn_chunk_id)?.clone();
+        let x = match entry.chunk_data.try_read() {
+            Ok(guard) => guard.as_ref().map(|x| x.prepare_time),
+            Err(_) => Some(Instant::now_coarse()), // Return current time if the chunk is reading.
+        };
+        x
+    }
+
     pub fn remove(&self, txn_chunk_id: u64) -> bool {
         if let Some(local_file_path) = self.local_file_path(txn_chunk_id) {
             let _ = fs::remove_file(local_file_path);
@@ -568,6 +577,16 @@ mod tests {
             .prepare_txn_chunks(vec![4, 5, 6], None)
             .unwrap();
         assert!(txn_chunk_manager.all_chunks_exists(&[4, 5, 6]));
+
+        {
+            // `100ms` for tolerate precise of clock time.
+            let prepare_time = txn_chunk_manager.get_prepare_time(4).unwrap();
+            assert!(prepare_time.saturating_elapsed() < Duration::from_millis(100));
+
+            std::thread::sleep(Duration::from_millis(1100));
+            let prepare_time = txn_chunk_manager.get_prepare_time(5).unwrap();
+            assert!(prepare_time.saturating_elapsed() >= Duration::from_secs(1));
+        }
 
         txn_chunk_manager.remove(1);
         assert!(txn_chunk_manager.get(1).is_none());

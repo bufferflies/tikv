@@ -227,9 +227,9 @@ impl Config {
             // It is a test config, adjust the fields not included in the old.
             cfg.update_safe_ts_interval.0 = cfg.raft_base_tick_interval.0 * 60;
             cfg.switch_mem_table_check_tick_interval.0 = cfg.raft_base_tick_interval.0 * 60;
-            if cfg.local_file_gc_timeout.0 > cfg.raft_base_tick_interval.0 * 60 * 30 {
-                cfg.local_file_gc_timeout.0 = cfg.raft_base_tick_interval.0 * 60 * 30;
-                cfg.local_file_gc_tick_interval.0 = cfg.raft_base_tick_interval.0 * 60 * 10;
+            if cfg.local_file_gc_timeout.0 > cfg.raft_base_tick_interval.0 * 20 * 30 {
+                cfg.local_file_gc_timeout.0 = cfg.raft_base_tick_interval.0 * 20 * 30; // 30s, see `new_test_config`.
+                cfg.local_file_gc_tick_interval.0 = cfg.raft_base_tick_interval.0 * 20 * 10; // 10s, see `new_test_config`.
             }
             // cover aux worker in test
             if cfg.aux_worker_count == 0 {
