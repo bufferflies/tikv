@@ -60,6 +60,9 @@ pub trait ColumnarReader: Send {
     fn schema(&self) -> &Schema;
     async fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()>;
     async fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
+    fn reset(&mut self) -> crate::table::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) struct ColumnarTableReader {
@@ -810,6 +813,9 @@ pub(crate) struct ColumnarMergeReader {
     schema: Schema,
     #[allow(clippy::vec_box)]
     heap: Vec<Box<ColumnarReaderBuffer>>,
+    // Save the invalid reader buffer to recover them when reset.
+    #[allow(clippy::vec_box)]
+    origin_heap: Vec<Box<ColumnarReaderBuffer>>,
     is_int_handle: bool,
     first_batch_end_row_idx: usize,
 }
@@ -834,6 +840,12 @@ impl ColumnarReaderBuffer {
 
     pub fn int_handle(&self) -> i64 {
         self.block.handles.get_int_handle_value(self.row_idx)
+    }
+
+    pub fn reset(&mut self) {
+        self.row_idx = 0;
+        self.block.reset();
+        self.reader.reset().unwrap();
     }
 
     pub fn version(&self) -> u64 {
@@ -869,6 +881,7 @@ impl ColumnarMergeReader {
         ColumnarMergeReader {
             schema,
             heap,
+            origin_heap: vec![],
             is_int_handle,
             first_batch_end_row_idx: 0,
         }
@@ -972,11 +985,23 @@ impl ColumnarReader for ColumnarMergeReader {
         &self.schema
     }
 
+    fn reset(&mut self) -> crate::table::Result<()> {
+        // Recover all readers from origin_heap and push them into heap.
+        while let Some(reader) = self.origin_heap.pop() {
+            self.heap.push(reader);
+        }
+        self.heap.iter_mut().for_each(|r| r.reset());
+        Ok(())
+    }
+
     async fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
         for reader in &mut self.heap {
             reader.seek(handle).await?;
         }
-        self.heap.retain(|r| r.valid());
+        // Move invalid readers to origin_heap, keep valid readers in heap.
+        let (invalid, valid) = self.heap.drain(..).partition(|r| !r.valid());
+        self.origin_heap = invalid;
+        self.heap = valid;
         if !self.heap.is_empty() {
             self.init_heap();
         }
@@ -1000,7 +1025,8 @@ impl ColumnarReader for ColumnarMergeReader {
             if first.row_idx == first.block.handles.length() {
                 first.read_block().await?;
                 if !first.valid() {
-                    self.heap.swap_remove(0);
+                    let removed = self.heap.swap_remove(0);
+                    self.origin_heap.push(removed);
                     if self.heap.is_empty() {
                         return Ok(read_row);
                     }
