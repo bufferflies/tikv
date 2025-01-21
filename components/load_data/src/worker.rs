@@ -1,5 +1,4 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
-
 use std::{
     cmp::{max, min, Ordering},
     collections::HashMap,
@@ -15,15 +14,21 @@ use std::{
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut, Bytes};
 use encryption::{DecrypterReader, EncrypterWriter, Iv};
+use http::Request;
+use hyper::Body;
 use kvengine::{
     dfs::Options,
     table::{sstable::Builder, InnerKey, Value},
-    UserMeta,
+    IdVer, ShardTag, UserMeta, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
-use kvproto::{encryptionpb::EncryptionMethod, metapb};
+use kvproto::{encryptionpb::EncryptionMethod, metapb, pdpb};
+use pd_client::PdClient;
+use protobuf::Message;
 use rfengine::compress_lz4;
+use rfstore::store::{raw_end_key, raw_start_key};
 use tikv_util::{
-    codec::bytes::decode_bytes,
+    box_err,
+    codec::bytes::{decode_bytes, encode_bytes},
     error, info,
     merge_range::MergeRanges,
     mpsc::{Receiver, Sender},
@@ -37,14 +42,25 @@ use crate::{
     kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator, SstMeta},
     metrics::LOAD_DATA_WRU_COST_COUNTER,
     task::{
-        build_ingest_files, gen_split_keys, get_common_prefix, get_ssts_in_range,
-        ingest_files_to_leader, new_region_key, verify_regions_boundary, FlushResult, FlushStates,
-        LoadDataConfig, LoadDataContext, LoadTaskScheduler, PutChunkResult, TaskContext,
-        ALLOCATE_ID_TIMEOUT, CREATE_FILE_CONCURRENCY, DEFAULT_AVG_BATCH_PROPORTION,
-        FLUSH_FILE_CONCURRENCY, INGEST_CONCURRENCY, MAX_RETRY_TIMES, MAX_SLEEP_DURATION,
-        REPLICA_NUMS, RETRY_SLEEP_DURATION, TXN_FILE_RU_DISCOUNT_RATIO, ZSTD_COMPRESSION_LEVEL,
+        FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskScheduler,
+        PutChunkResult, TaskContext,
     },
 };
+
+pub const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+pub const FLUSH_FILE_CONCURRENCY: usize = 8;
+pub const CREATE_FILE_CONCURRENCY: usize = 32;
+pub const INGEST_CONCURRENCY: usize = 4;
+
+pub const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
+pub const MAX_RETRY_TIMES: usize = 10;
+pub const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
+
+// the following constants are used to calculate RU consumption
+pub const DEFAULT_AVG_BATCH_PROPORTION: f64 = 0.5;
+pub const REPLICA_NUMS: f64 = 3.0;
+pub const TXN_FILE_RU_DISCOUNT_RATIO: f64 = 0.125;
 
 pub enum KvPairsWorkerMsg {
     AddChunk {
@@ -1760,4 +1776,270 @@ pub fn build_readers(
         readers.push(reader);
     }
     readers
+}
+
+pub async fn ingest_files_to_leader(
+    pd: Arc<dyn PdClient>,
+    cs: kvenginepb::ChangeSet,
+    region: &metapb::Region,
+    mut leader: metapb::Peer,
+) -> Result<()> {
+    let security_mgr = pd.get_security_mgr();
+    let http_client = security_mgr.http_client(hyper::Client::builder())?;
+    // Loop for retry on "not leader".
+    loop {
+        let store = get_leader_store(
+            pd.clone() as Arc<dyn PdClient>,
+            region.get_id(),
+            Some(&leader),
+        )
+        .await?;
+        let uri = security_mgr.build_uri(format!(
+            "{}/ingest_files?cluster_id={}",
+            &store.status_address,
+            pd.get_cluster_id().unwrap()
+        ))?;
+        let body = cs.write_to_bytes().unwrap();
+        let req = Request::post(uri).body(Body::from(body))?;
+        let resp = http_client.request(req).await?;
+        if !resp.status().is_success() {
+            let body = hyper::body::to_bytes(resp.into_body()).await?;
+            let mut errpb = kvproto::errorpb::Error::new();
+            errpb.merge_from_bytes(&body).unwrap();
+            let tag = ShardTag::new(
+                store.get_id(),
+                IdVer::new(region.get_id(), region.get_region_epoch().get_version()),
+            );
+            warn!("{} ingest_files_to_leader failed {:?}", tag, errpb);
+            if errpb.has_not_leader() {
+                leader = errpb.mut_not_leader().take_leader();
+                if leader.store_id == 0 {
+                    return Err(Error::LeaderNotFound(region.get_id()));
+                }
+                continue;
+            } else if errpb
+                .get_message()
+                .starts_with(rfstore::errors::INGEST_OVERLAP_ERROR_TAG)
+            {
+                return Err(Error::IngestOverlap(errpb.take_message()));
+            } else {
+                return Err(Error::RegionError(region.get_id(), errpb));
+            }
+        }
+        return Ok(());
+    }
+}
+
+#[allow(clippy::unnecessary_unwrap)]
+pub async fn get_leader_store(
+    pd: Arc<dyn PdClient>,
+    region_id: u64,
+    leader: Option<&metapb::Peer>,
+) -> Result<metapb::Store> {
+    let store_id = if leader.is_none() || leader.unwrap().store_id == 0 {
+        let res = pd.get_region_leader_by_id(region_id).await?;
+        if res.is_none() {
+            return Err(Error::RegionNotFound(region_id));
+        }
+        let (_, leader) = res.unwrap();
+        if leader.store_id == 0 {
+            return Err(Error::LeaderNotFound(region_id));
+        }
+        leader.store_id
+    } else {
+        leader.unwrap().store_id
+    };
+    Ok(pd.get_store_async(store_id).await?)
+}
+
+pub fn build_ingest_files(
+    inner_key_off: usize,
+    region: &metapb::Region,
+    sst_metas: &[SstMeta],
+    commit_ts: u64,
+) -> kvenginepb::ChangeSet {
+    let raw_start_key = raw_start_key(region);
+    let inner_start_key = &raw_start_key[inner_key_off..];
+    let raw_end_key = raw_end_key(region);
+    let inner_end_key = &raw_end_key[inner_key_off..];
+    let mut cs = kvenginepb::ChangeSet::default();
+    cs.set_shard_id(region.get_id());
+    cs.set_shard_ver(region.get_region_epoch().get_version());
+    let ingest_files = cs.mut_ingest_files();
+    ingest_files.set_max_ts(commit_ts);
+    // Don't set INGEST_ID_KEY property to indicate that it's from load data.
+    let table_creates = ingest_files.mut_table_creates();
+    for sst_meta in sst_metas {
+        if sst_meta.biggest.as_slice() < inner_start_key {
+            continue;
+        }
+        if !inner_end_key.is_empty() && sst_meta.smallest.as_slice() >= inner_end_key {
+            break;
+        }
+        let mut table_create = kvenginepb::TableCreate::new();
+        table_create.set_id(sst_meta.id);
+        table_create.set_cf(WRITE_CF as i32);
+        table_create.set_level(WRITE_CF_BOTTOM_LEVEL);
+        table_create.set_smallest(sst_meta.smallest.clone());
+        table_create.set_biggest(sst_meta.biggest.clone());
+        table_create.set_meta_offset(sst_meta.meta_offset);
+        table_creates.push(table_create);
+    }
+    cs
+}
+
+pub fn gen_split_keys(
+    outer_key_prefix: &[u8],
+    ssts: &[SstMeta],
+    split_size: usize,
+    include_bound: bool,
+) -> Vec<Vec<u8>> {
+    let mut keys = vec![];
+    if include_bound {
+        keys.push(new_region_key(
+            outer_key_prefix,
+            ssts.first().unwrap().smallest.as_slice(),
+        ));
+    }
+    let mut size = 0;
+    for sst in ssts {
+        if size > split_size {
+            keys.push(new_region_key(outer_key_prefix, sst.smallest.as_slice()));
+            size = 0;
+        }
+        size += sst.size;
+    }
+    if include_bound {
+        // split at last key so the last region will not be split by other concurrent
+        // load_data and get epoch not match error.
+        let mut last_key = ssts.last().unwrap().biggest.to_vec();
+        last_key.push(0);
+        keys.push(new_region_key(outer_key_prefix, last_key.as_slice()));
+    }
+    keys
+}
+
+pub fn new_region_key(outer_key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
+    let mut key = outer_key_prefix.to_vec();
+    key.extend_from_slice(raw_key);
+    encode_bytes(&key)
+}
+
+pub fn get_ssts_in_range(ssts: &[SstMeta], start: InnerKey<'_>, end: InnerKey<'_>) -> Vec<SstMeta> {
+    let position = ssts
+        .binary_search_by(|sst| InnerKey::from_inner_buf(&sst.smallest).cmp(&start))
+        .unwrap();
+    let mut matched = vec![];
+    for i in position..ssts.len() {
+        let sst = &ssts[i];
+        if !end.is_empty() && InnerKey::from_inner_buf(&sst.smallest) >= end {
+            break;
+        }
+        matched.push(sst.clone())
+    }
+    matched
+}
+
+pub fn get_common_prefix(k1: &[u8], k2: &[u8]) -> Vec<u8> {
+    let len = std::cmp::min(k1.len(), k2.len());
+    let mut offset = len;
+    for i in 0..len {
+        if k1[i] != k2[i] {
+            offset = i;
+            break;
+        }
+    }
+    k1[..offset].to_vec()
+}
+
+pub fn verify_regions_boundary(
+    start_key: &[u8],
+    end_key: &[u8],
+    regions: &[pdpb::Region],
+) -> Result<()> {
+    if regions.is_empty() {
+        return Err(box_err!("no region"));
+    }
+
+    let first_region = regions.first().unwrap();
+    let last_region = regions.last().unwrap();
+    if first_region.get_region().get_start_key() > start_key {
+        return Err(Error::RegionsIntegrityError(format!(
+            "unexpected start key of first region: {:?}, start_key: {:?}",
+            first_region, start_key
+        )));
+    } else if last_region.get_region().get_end_key() < end_key {
+        return Err(Error::RegionsIntegrityError(format!(
+            "unexpected end key of last region: {:?}, end_key: {:?}",
+            last_region, end_key
+        )));
+    }
+
+    for region in regions.windows(2) {
+        if region[0].get_region().get_end_key() != region[1].get_region().get_start_key() {
+            return Err(Error::RegionsIntegrityError(format!(
+                "region boundary not match: {:?}, {:?}",
+                region[0], region[1]
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_regions_boundary() {
+        let make_key = |key: u64| -> Vec<u8> { format!("k{:02}", key).into_bytes() };
+        let make_region = |start: u64, end: u64| -> pdpb::Region {
+            let mut region = metapb::Region::default();
+            region.set_start_key(make_key(start));
+            region.set_end_key(make_key(end));
+
+            let mut pd_region = pdpb::Region::default();
+            pd_region.set_region(region);
+            pd_region
+        };
+
+        let regions1 = vec![
+            make_region(1, 2),
+            make_region(2, 4),
+            make_region(4, 6),
+            make_region(6, 10),
+            make_region(10, 14),
+        ];
+        let regions2 = vec![make_region(1, 2), make_region(4, 6)];
+
+        let cases = vec![
+            (&regions1, 1, 14, true), // start, end, expect_is_ok
+            (&regions1, 1, 2, true),
+            (&regions1, 0, 2, false),
+            (&regions1, 2, 15, false),
+            (&regions2, 1, 6, false),
+        ];
+        for (idx, (regions, start, end, expect_is_ok)) in cases.into_iter().enumerate() {
+            let res = verify_regions_boundary(&make_key(start), &make_key(end), regions);
+            assert_eq!(res.is_ok(), expect_is_ok, "case {}: {:?}", idx, res);
+        }
+    }
+
+    #[test]
+    fn test_get_common_prefix() {
+        let keys = vec![
+            vec![b't', 128, 0, 0, 0, 0, 0, 0, 1, b'_', 1],
+            vec![b't', 128, 0, 0, 0, 0, 0, 0, 1, b'_', 2],
+            vec![b't', 128, 0, 0, 0, 0, 0, 0, 1, b'_', 3],
+        ];
+        let mut key_comm_prefix = keys[0].clone();
+
+        for key in keys.iter() {
+            key_comm_prefix = get_common_prefix(&key_comm_prefix, key);
+        }
+
+        let target_key_comm_prefix = vec![b't', 128, 0, 0, 0, 0, 0, 0, 1, b'_'];
+        assert_eq!(key_comm_prefix, target_key_comm_prefix);
+    }
 }

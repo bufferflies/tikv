@@ -14,7 +14,7 @@ use kvengine::{
     table::{txn_file::TxnChunkBuilder, ChecksumType, InnerKey},
     ENCRYPTION_KEY,
 };
-use load_data::task::get_shard_meta;
+use load_data::dispatcher::get_shard_meta;
 use tikv_util::{box_err, warn};
 
 use crate::{

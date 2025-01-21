@@ -4,12 +4,19 @@ use std::{
     fs,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use api_version::ApiV2;
 use bytes::{Buf, Bytes};
+use http::Request;
+use hyper::Body;
 use kvengine::{get_shard_property, ENCRYPTION_KEY};
+use pd_client::PdClient;
+use protobuf::Message;
 use tikv_util::{
+    box_err,
+    codec::bytes::encode_bytes,
     error, info,
     mpsc::{Receiver, Sender},
     time::Instant,
@@ -19,16 +26,20 @@ use crate::{
     checkpoint::{
         FileMeta, LoadDataCheckpointCtx, LoadDataWorkerState, LocalFileCheckpointStorage,
     },
-    error::Result,
+    error::{Error, Result},
     kv::DuplicateEntry,
     metrics::remove_metrics,
     task::{
-        get_common_prefix, get_shard_meta, FlushResult, FlushStates, LoadDataConfig,
-        LoadDataContext, LoadTaskMsg, LoadTaskScheduler, LoadTaskStates, PutChunkResult,
-        TaskContext, GET_SHARD_META_TIMEOUT,
+        FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
+        LoadTaskStates, PutChunkResult, TaskContext,
     },
-    worker::{BuildingWorker, BuildingWorkerMsg, KvPairsWorker, KvPairsWorkerMsg},
+    worker::{
+        get_common_prefix, get_leader_store, BuildingWorker, BuildingWorkerMsg, KvPairsWorker,
+        KvPairsWorkerMsg,
+    },
 };
+
+pub const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct Dispatcher {
     config: LoadDataConfig,
@@ -595,6 +606,82 @@ impl RangesSplitter {
         }
 
         ranges_groups
+    }
+}
+
+// Note: also used by `TxnChunkHandler`.
+// TODO: find a better place for this method.
+pub async fn get_shard_meta(
+    pd: Arc<dyn PdClient>,
+    shard_raw_key: &[u8],
+    timeout: Duration,
+) -> Result<kvenginepb::ChangeSet> {
+    let security_mgr = pd.get_security_mgr();
+    let http_client = security_mgr.http_client(hyper::Client::builder())?;
+    let encoded_key = encode_bytes(shard_raw_key);
+    let start_time = Instant::now_coarse();
+    let mut retry = 0;
+    loop {
+        if start_time.saturating_elapsed() >= timeout {
+            return Err(Error::Other(box_err!(
+                "get_shard_meta failed, key: {:?}",
+                shard_raw_key
+            )));
+        }
+        if retry > 0 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        retry += 1;
+
+        let region_res = pd.get_region_async(&encoded_key).await;
+        if region_res.is_err() {
+            error!(
+                "get_shard_meta: get region error: {:?}, key: {:?}",
+                region_res.unwrap_err(),
+                encoded_key
+            );
+            continue;
+        }
+        let shard_id = region_res.unwrap().get_id();
+
+        let store_res = get_leader_store(pd.clone() as Arc<dyn PdClient>, shard_id, None).await;
+        if store_res.is_err() {
+            error!(
+                "get_shard_meta: get leader error: {:?}, key: {:?}, shard_id: {}",
+                store_res.unwrap_err(),
+                shard_raw_key,
+                shard_id
+            );
+            continue;
+        }
+        let store = store_res.unwrap();
+        let uri = security_mgr.build_uri(format!(
+            "{}/kvengine/meta/{}",
+            &store.status_address, shard_id
+        ))?;
+        let req = Request::get(uri).body(Body::from(""))?;
+        match http_client.request(req).await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    let body = hyper::body::to_bytes(resp.into_body()).await?;
+                    let mut cs = kvenginepb::ChangeSet::default();
+                    cs.merge_from_bytes(&body)?;
+                    if cs.shard_id == 0 {
+                        continue;
+                    }
+                    return Ok(cs);
+                } else {
+                    continue;
+                }
+            }
+            Err(e) => {
+                error!(
+                    "get_shard_meta failed, shard_id: {}, error: {:?}",
+                    shard_id, e
+                );
+                continue;
+            }
+        }
     }
 }
 

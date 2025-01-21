@@ -383,8 +383,8 @@ mod tests {
     use super::*;
     use crate::{
         checkpoint::FileMeta,
-        task::{get_common_prefix, TaskContext},
-        worker::{build_readers, flush_l0_file_to_local},
+        task::TaskContext,
+        worker::{build_readers, flush_l0_file_to_local, get_common_prefix},
     };
 
     #[test]
