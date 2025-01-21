@@ -753,14 +753,14 @@ impl EngineCore {
 
     // meta_committed should be called when a change set is committed in the raft
     // group.
-    pub fn meta_committed(&self, cs: &kvenginepb::ChangeSet, rejected: bool) {
+    // Return `None` when the shard is not found.
+    pub fn meta_committed(&self, cs: &kvenginepb::ChangeSet, rejected: bool) -> Option<()> {
         if cs.has_flush() || cs.has_initial_flush() {
             if rejected {
                 self.send_flush_msg(FlushMsg::Clear(cs.shard_id));
-                if let Some(shard) = self.get_shard(cs.shard_id) {
-                    if let Err(err) = self.trigger_flush(&shard) {
-                        warn!("{} trigger_flush error: {:?}", shard.tag(), err);
-                    }
+                let shard = self.get_shard(cs.shard_id)?;
+                if let Err(err) = self.trigger_flush(&shard) {
+                    warn!("{} trigger_flush error: {:?}", shard.tag(), err);
                 }
             } else {
                 let table_version = change_set_table_version(cs);
@@ -778,12 +778,13 @@ impl EngineCore {
         {
             // This compaction may be conflicted with initial flush, so we have to trigger
             // next compaction if needed.
-            let shard = self.get_shard(cs.shard_id).unwrap();
+            let shard = self.get_shard(cs.shard_id)?;
             store_bool(&shard.compacting, false);
             // Notify the compaction runner otherwise the shard can't be compacted any more.
             self.send_compact_msg(CompactMsg::Applied(IdVer::new(cs.shard_id, cs.shard_ver)));
             self.refresh_shard_states(&shard);
         }
+        Some(())
     }
 
     pub fn set_shard_active(&self, shard_id: u64, active: bool) {
