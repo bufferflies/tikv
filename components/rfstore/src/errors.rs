@@ -14,6 +14,8 @@ use crate::store::PeerMsg;
 pub const RAFTSTORE_IS_BUSY: &str = "raftstore is busy";
 pub const MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG: &str =
     "fail to merge source region with txn file locks";
+pub const MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG: &str =
+    "fail to merge source region with unconverted l0s";
 
 // Used in `kvproto::Error::message` to indicate that the ingest is overlapped
 // with existed data. Clients will check error type by this string.

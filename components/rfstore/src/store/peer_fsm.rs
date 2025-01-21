@@ -62,6 +62,7 @@ use crate::{
         PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
+    MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG,
 };
 
 /// Limits the maximum number of regions returned by error.
@@ -2269,7 +2270,11 @@ impl<'a> PeerMsgHandler<'a> {
                         "target" => ?expect_region,
                         "unconverted_l0s" => ?source_meta.unconverted_l0s,
                     );
-                    return Ok(());
+                    return Err(box_err!(
+                        "{}: {}",
+                        tag,
+                        MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG
+                    ));
                 }
             }
 
