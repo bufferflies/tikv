@@ -34,6 +34,7 @@ pub use compact_worker::*;
 pub use dfs_worker::*;
 pub use engine::*;
 use iterator::*;
+pub use log_batch::RaftLogOp;
 use metrics::*;
 use thiserror::Error as ThisError;
 pub use traits::*;

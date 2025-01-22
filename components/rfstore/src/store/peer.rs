@@ -4043,7 +4043,7 @@ impl<'a> PreprocessRef<'a> {
     }
 
     pub fn write_raft_state(&mut self, ctx: &mut PreprocessContext<'_>) {
-        info!("{} write raft state {:?}", self.tag(), self.raft_state);
+        debug!("{} write raft state {:?}", self.tag(), self.raft_state);
         write_raft_state(
             ctx.raft_wb,
             self.peer_id(),

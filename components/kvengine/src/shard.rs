@@ -1286,6 +1286,16 @@ impl Shard {
         self.encryption_key.clone()
     }
 
+    // When recover is called multiple times, the write_sequence may be smaller than
+    // the meta.data_sequence, so we need to update it before recover to avoid
+    // entries unavailable error.
+    pub fn sync_data_sequence(&self, meta: &ShardMeta) {
+        if self.get_meta_sequence() == meta.seq && self.get_write_sequence() < meta.data_sequence {
+            self.write_sequence
+                .store(meta.data_sequence, Ordering::Release);
+        }
+    }
+
     pub(crate) fn ready_to_compact(&self) -> bool {
         self.is_active() && self.get_initial_flushed()
     }

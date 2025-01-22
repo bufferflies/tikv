@@ -16,23 +16,20 @@ use cloud_encryption::MasterKey;
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use kvengine::{dfs::S3Fs, limiter::StoreLimiter, RecoverHandler as RecoverHandlerTrait};
-use kvproto::{
-    metapb,
-    metapb::Peer,
-    raft_cmdpb::AdminRequest,
-    raft_serverpb::{PeerState, StoreIdent},
-};
+use kvproto::{metapb, metapb::Peer, raft_cmdpb::AdminRequest, raft_serverpb::StoreIdent};
 use native_br::common::{
     collect_snapshot_meta_rlog_files, replay_wal_logs_from_backup, ReplayWalLogsContext,
 };
 use pd_client::PdClient;
 use protobuf::Message;
-use raft_proto::eraftpb::Entry;
-use rfengine::{iterator::WalIterator, RfEngine, TRUNCATE_ALL_INDEX};
+use raft_proto::{eraftpb, eraftpb::Entry};
+use rfengine::{
+    iterator::WalIterator, RaftLogOp, RfEngine, RAFT_STATE_KEY_BYTE, TRUNCATE_ALL_INDEX,
+};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::store::{
-    get_preprocess_cmd, ApplyMsgs, MetaChangeListener, PdIdAllocator, PreprocessContext,
-    RecoverHandler, RAFT_INIT_LOG_INDEX,
+    get_preprocess_cmd, state::RaftState, ApplyMsgs, MetaChangeListener, PdIdAllocator,
+    PreprocessContext, RecoverHandler, RAFT_INIT_LOG_INDEX,
 };
 use security::SecurityConfig;
 use tikv::config::TikvConfig;
@@ -61,18 +58,25 @@ pub struct MergedEngineConfig {
     pub mem_table_size: ReadableSize,
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct RegionProgress {
-    pub leader_store: u64,
-    pub leader_peer: u64,
+    pub entries: HashMap<u64, RaftLogOp>,
+    pub synced_index: u64,
     pub commit_index: u64,
     pub truncated_index: u64,
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct StoreProgress {
+    pub epoch: u32,
+    pub offset: u64,
 }
 
 pub struct MergedEngine {
     ctx: MergedEngineContext,
     origins: HashMap<u64, RfEngine>,
     region_progresses: HashMap<u64, RegionProgress>,
+    store_progresses: HashMap<u64, StoreProgress>,
     updated_regions: HashSet<u64>,
     raft: RfEngine,
     kv: kvengine::Engine,
@@ -101,9 +105,15 @@ impl MergedEngine {
         }
         raft.set_engine_id(merged_store_id);
         let mut region_progresses = HashMap::new();
+        let mut store_progresses = HashMap::new();
         let mut preprocessors = HashMap::new();
         let mut origins = HashMap::new();
         for store in backup_meta.get_stores() {
+            let store_progress = StoreProgress {
+                epoch: store.get_epoch(),
+                offset: store.get_offset(),
+            };
+            store_progresses.insert(store.get_store_id(), store_progress);
             let mut store_config = TikvConfig::default();
             let store_path = ctx.local_dir.join(store.store_id.to_string());
             store_config.storage.data_dir = store_path.to_str().unwrap().to_string();
@@ -129,6 +139,7 @@ impl MergedEngine {
                 }
                 let merged_commit_index = region_progress.commit_index;
                 region_progress.commit_index = commit;
+                region_progress.synced_index = commit;
                 let truncated_index = max(
                     region_progress.truncated_index,
                     origin
@@ -186,6 +197,7 @@ impl MergedEngine {
             ctx,
             origins,
             region_progresses,
+            store_progresses,
             updated_regions: HashSet::new(),
             raft,
             kv,
@@ -288,6 +300,10 @@ impl MergedEngine {
         self.region_progresses.get(&region_id).cloned()
     }
 
+    pub fn get_store_progress(&self, store_id: u64) -> Option<StoreProgress> {
+        self.store_progresses.get(&store_id).cloned()
+    }
+
     pub fn update_wal(
         &mut self,
         store_id: u64,
@@ -309,6 +325,7 @@ impl MergedEngine {
             ))
             .into());
         }
+        let new_offset = cur_offset + data.len() as u64;
         let mut wal_iterator = WalIterator::new_from_chunks(data, epoch_id, offset);
         let mut origin_batches = Vec::new();
         wal_iterator.iterate_write_batch(|origin_wb| {
@@ -318,29 +335,41 @@ impl MergedEngine {
             let region_peer_map = origin_wb.get_region_peer_map();
             for (&region_id, &peer_id) in &region_peer_map {
                 let progress = self.region_progresses.entry(region_id).or_default();
-                if let Some(truncated_idx) = origin_wb.reset_truncated_idx(peer_id) {
-                    if progress.truncated_index < truncated_idx {
+                if let Some(truncated_idx) = origin_wb.get_truncated_idx(peer_id) {
+                    if progress.truncated_index < truncated_idx
+                        && truncated_idx != TRUNCATE_ALL_INDEX
+                    {
                         progress.truncated_index = truncated_idx;
                     }
                 }
+                if let Some(v) =
+                    origin_wb.get_latest_state(peer_id, region_id, &[RAFT_STATE_KEY_BYTE])
+                {
+                    if !v.is_empty() {
+                        let mut raft_state = RaftState::default();
+                        raft_state.unmarshal(v);
+                        if raft_state.get_commit() > progress.commit_index {
+                            progress.commit_index = raft_state.get_commit();
+                        }
+                    }
+                }
+                origin_wb.read_peer_logs(peer_id, |logs| {
+                    for log_op in logs {
+                        if let Some(existing_op) = progress.entries.get(&log_op.index) {
+                            if existing_op.term >= log_op.term {
+                                continue;
+                            }
+                        }
+                        progress.entries.insert(log_op.index, log_op.clone());
+                    }
+                });
+                self.updated_regions.insert(region_id);
             }
             origin.write(origin_wb)?;
-            for (region_id, peer_id) in region_peer_map {
-                let progress = self.region_progresses.get_mut(&region_id).unwrap();
-                if let Some(raft_state) = rfstore::store::load_last_raft_state(origin, peer_id) {
-                    if progress.commit_index < raft_state.get_commit() {
-                        progress.commit_index = raft_state.get_commit();
-                        progress.leader_store = store_id;
-                        progress.leader_peer = peer_id;
-                    }
-                    self.updated_regions.insert(region_id);
-                } else {
-                    let peer_state = rfstore::store::load_last_peer_state(origin, peer_id).unwrap();
-                    assert_eq!(peer_state.get_state(), PeerState::Tombstone);
-                    progress.truncated_index = TRUNCATE_ALL_INDEX;
-                }
-            }
         }
+        let store_progress = self.store_progresses.entry(store_id).or_default();
+        store_progress.epoch = epoch_id;
+        store_progress.offset = new_offset;
         Ok(())
     }
 
@@ -367,7 +396,7 @@ impl MergedEngine {
         self.sync_merged_for_regions(&mut ctx, &updated_regions)?;
         let mut raft_wb = rfengine::WriteBatch::new();
         for updated_region in updated_regions {
-            let progress = self.region_progresses.get(&updated_region).unwrap();
+            let progress = self.region_progresses.get_mut(&updated_region).unwrap();
             if let Some(truncated) = self.raft.get_truncated_index(updated_region) {
                 if progress.truncated_index > truncated {
                     raft_wb.truncate_raft_log(
@@ -377,6 +406,8 @@ impl MergedEngine {
                     );
                 }
             }
+            progress.entries.clear();
+            progress.synced_index = progress.commit_index;
         }
         self.raft.write(raft_wb)?;
         Ok(())
@@ -395,24 +426,9 @@ impl MergedEngine {
                 new_regions.push(updated_region);
                 continue;
             }
-            let last_index = self
-                .raft
-                .get_last_index(updated_region)
-                .unwrap_or(RAFT_INIT_LOG_INDEX)
-                .max(RAFT_INIT_LOG_INDEX);
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
-            let origin = self.origins.get(&progress.leader_store).unwrap();
-            let low = last_index + 1;
+            let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
             let high = progress.commit_index + 1;
-            let mut entries = vec![];
-            if let Err(err) =
-                origin.fetch_raft_entries_to(progress.leader_peer, low, high, None, &mut entries)
-            {
-                panic!(
-                    "fetch raft entries failed for region {}, low: {}, high: {}, err: {}",
-                    updated_region, low, high, err
-                );
-            }
             let preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
                 Preprocessor::new(
                     &self.raft,
@@ -422,17 +438,24 @@ impl MergedEngine {
                 )
             });
             let mut preprocessor_ref = preprocessor.as_ref();
-            for entry in &mut entries {
-                let admin_req = update_entry(entry, merged_store_id);
-                let err = preprocessor_ref.preprocess_committed_entry(ctx, entry);
+            let mut hs = eraftpb::HardState::default();
+            for log_index in low..high {
+                let mut entry = progress.entries.get(&log_index).unwrap().to_entry();
+                let admin_req = update_entry(&mut entry, merged_store_id);
+                let err = preprocessor_ref.preprocess_committed_entry(ctx, &entry);
                 if let Some(err) = err {
                     warn!("preprocess committed entry failed"; "region_id" => updated_region, "err" => ?err);
                 }
                 preprocessor_ref
                     .raft_state
                     .set_last_preprocessed_index(*preprocessor_ref.preprocessed_index);
+                hs.set_term(1);
+                hs.set_vote(updated_region);
+                hs.set_commit(progress.commit_index);
+                preprocessor_ref.raft_state.set_hard_state(&hs);
+                preprocessor_ref.raft_state.set_last_index(log_index);
                 ctx.raft_wb
-                    .append_raft_log(updated_region, updated_region, entry);
+                    .append_raft_log(updated_region, updated_region, &entry);
                 let last_change_set = ctx.apply_msgs.get_last_change_set();
                 if last_change_set.is_some() || admin_req.is_some() {
                     let shard_meta = rfstore::store::load_engine_meta(
@@ -445,6 +468,7 @@ impl MergedEngine {
                     let wb = mem::take(ctx.raft_wb);
                     ctx.raft.write(wb)?;
                     let shard = self.kv.get_shard(updated_region).unwrap();
+                    shard.sync_data_sequence(&shard_meta);
                     self.recover_handler
                         .recover(&self.kv, &shard, &shard_meta)?;
                 }
@@ -488,6 +512,7 @@ impl MergedEngine {
                 let preprocessor = self.preprocessors.get_mut(&updated_region).unwrap();
                 let preprocessor_ref = preprocessor.as_ref();
                 let shard_meta = preprocessor_ref.shard_meta.as_ref().unwrap();
+                shard.sync_data_sequence(shard_meta);
                 self.recover_handler
                     .recover(&self.kv, &shard, shard_meta)
                     .unwrap();

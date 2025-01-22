@@ -2,27 +2,33 @@
 
 use std::sync::Arc;
 
+use api_version::ApiV2;
 use futures::executor::block_on;
-use kvengine::{dfs::S3Fs, WRITE_CF};
+use kvengine::{dfs::S3Fs, table::BIT_DELETE, WRITE_CF};
 use merged_engine::{MergedEngine, MergedEngineConfig, MergedEngineContext};
 use native_br::{backup, backup::BackupType, common::send_request_to_store};
 use pd_client::PdClient;
+use rand::Rng;
 use security::GetSecurityManager;
-use test_cloud_server::{must_wait, oss::prepare_dfs, ServerCluster};
-use test_pd_client::PdClientExt;
+use test_cloud_server::{
+    client::{RefStore, RequestOptions},
+    oss::prepare_dfs,
+    ServerCluster,
+};
+use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
 use tikv_util::{
     codec::bytes::encode_bytes,
     config::{ReadableDuration, ReadableSize},
 };
 
-use crate::alloc_node_id_vec;
+use crate::{alloc_node_id_vec, i_to_key};
 
 #[test]
 fn test_merged_engine() {
     test_util::init_log_for_test();
     let (base_dir, _oss, dfs_conf) = prepare_dfs("test_merged_engine");
-    let node_ids = alloc_node_id_vec(3);
+    let node_ids = alloc_node_id_vec(4);
     let cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_conf.clone();
         conf.rfengine.lightweight_backup = true;
@@ -31,9 +37,12 @@ fn test_merged_engine() {
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
+    pd_client.disable_default_operator();
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    let mut client = cluster.new_client();
+    client.split_keyspace(keyspace_id);
     let split_key = encode_bytes(&crate::i_to_key(700));
     block_on(pd_client.split_regions(vec![split_key])).unwrap();
-    let mut client = cluster.new_client();
     for i in 0..10 {
         client.put_kv(i * 100..i * 100 + 50, crate::i_to_key, crate::i_to_val);
     }
@@ -72,46 +81,60 @@ fn test_merged_engine() {
     let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone());
     let merged_kv = merged_engine.get_kv();
     let all_shards = merged_kv.get_all_shard_id_vers();
-    assert_eq!(all_shards.len(), 2);
-    for i in 0..10 {
-        let region_id = client.get_region_id(&crate::i_to_key(i * 100));
-        let shard = merged_kv.get_shard(region_id).unwrap();
-        let snap_access = shard.new_snap_access();
-        for j in 0..50 {
-            let key = crate::i_to_key(i * 100 + j);
-            let val = crate::i_to_val(i * 100 + j);
-            let item = snap_access.get(WRITE_CF, &key, u64::MAX);
-            assert_eq!(item.get_value(), val.as_slice());
-        }
-    }
+    assert_eq!(all_shards.len(), 4);
+    let ref_store = kv_engine_to_ref_store(&merged_kv);
+    client
+        .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
+        .unwrap();
+    let scheduler = cluster.new_scheduler();
+    let mut rng = rand::thread_rng();
     for i in 0..10 {
         client.put_kv(i * 100 + 50..i * 100 + 60, crate::i_to_key, crate::i_to_val);
-        if i == 5 {
-            let encoded_key_500 = encode_bytes(&crate::i_to_key(500));
-            block_on(pd_client.split_regions(vec![encoded_key_500])).unwrap();
+        if i < 8 {
+            if rng.gen_bool(0.5) {
+                let encoded_key_500 = encode_bytes(&crate::i_to_key(i * 100));
+                block_on(pd_client.split_regions(vec![encoded_key_500])).unwrap();
+            } else {
+                scheduler.move_random_region();
+            }
+        } else {
+            scheduler.merge_random_region(true);
         }
-        if i == 8 {
-            let encoded_key_600 = encode_bytes(&crate::i_to_key(600));
-            let encoded_key_700 = encode_bytes(&crate::i_to_key(700));
-            let merge_source = pd_client.get_region(&encoded_key_600).unwrap();
-            let merge_target = pd_client.get_region(&encoded_key_700).unwrap();
-            pd_client.merge_region(merge_source.get_id(), merge_target.get_id());
-            must_wait(
-                || {
-                    let region = pd_client.get_region(&encoded_key_600).unwrap();
-                    region.get_id() == merge_target.get_id()
-                },
-                10,
-                || "merge region".to_string(),
-            );
+        if rng.gen_bool(0.2) {
+            update_merged_engine(&pd_client, &cluster, &mut merged_engine);
+            let ref_store = kv_engine_to_ref_store(&merged_kv);
+            client
+                .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
+                .unwrap();
         }
     }
+    update_merged_engine(&pd_client, &cluster, &mut merged_engine);
+    let ref_store = kv_engine_to_ref_store(&merged_kv);
+    client
+        .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
+        .unwrap();
+    let merged_raft = merged_engine.get_raft();
+    let region_peers = merged_raft.get_region_peer_map();
+    for (region_id, _) in region_peers {
+        if let Some(progress) = merged_engine.get_region_progress(region_id) {
+            let truncated_index = merged_raft.get_truncated_index(region_id).unwrap();
+            assert_eq!(progress.truncated_index, truncated_index);
+        }
+    }
+}
+
+fn update_merged_engine(
+    pd_client: &TestPdClient,
+    cluster: &ServerCluster,
+    merged_engine: &mut MergedEngine,
+) {
     let security_mgr = pd_client.get_security_mgr();
     let dfs = cluster.get_dfs().unwrap();
-    for store_meta in backup_meta.get_stores() {
-        let store_id = store_meta.get_store_id();
-        let epoch = store_meta.get_epoch();
-        let start_off = store_meta.get_offset();
+    let stores = cluster.get_stores();
+    for store_id in stores {
+        let store_progress = merged_engine.get_store_progress(store_id).unwrap();
+        let epoch = store_progress.epoch;
+        let start_off = store_progress.offset;
         let store = pd_client.get_store(store_id).unwrap();
         let uri = security_mgr
             .build_uri(format!(
@@ -131,23 +154,23 @@ fn test_merged_engine() {
             .unwrap();
     }
     merged_engine.sync_merged().unwrap();
-    for i in 0..10 {
-        let region_id = client.get_region_id(&crate::i_to_key(i * 100));
-        let shard = merged_kv.get_shard(region_id).unwrap();
+}
+
+fn kv_engine_to_ref_store(kv: &kvengine::Engine) -> RefStore {
+    let mut ref_store = RefStore::default();
+    for id_ver in kv.get_all_shard_id_vers() {
+        let shard = kv.get_shard(id_ver.id).unwrap();
         let snap_access = shard.new_snap_access();
-        for j in 50..60 {
-            let key = crate::i_to_key(i * 100 + j);
-            let val = crate::i_to_val(i * 100 + j);
-            let item = snap_access.get(WRITE_CF, &key, u64::MAX);
-            assert_eq!(item.get_value(), val.as_slice());
+        let mut iter = snap_access.new_iterator(WRITE_CF, false, false, None, false);
+        iter.rewind();
+        while iter.valid() {
+            if iter.meta() == BIT_DELETE {
+                ref_store.insert(iter.key().to_vec(), None);
+            } else {
+                ref_store.insert(iter.key().to_vec(), Some(iter.val().to_vec()));
+            }
+            iter.next()
         }
     }
-    let merged_raft = merged_engine.get_raft();
-    let region_peers = merged_raft.get_region_peer_map();
-    for (region_id, _) in region_peers {
-        if let Some(progress) = merged_engine.get_region_progress(region_id) {
-            let truncated_index = merged_raft.get_truncated_index(region_id).unwrap();
-            assert_eq!(progress.truncated_index, truncated_index);
-        }
-    }
+    ref_store
 }

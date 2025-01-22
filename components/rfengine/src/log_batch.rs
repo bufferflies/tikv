@@ -11,13 +11,13 @@ use slog_global::info;
 /// `RaftLogOp` is identical to `eraftpb::Entry`. It implements custom
 /// serialization/deserialization for better performance than protobuf.
 #[derive(Default, Clone, PartialEq, Debug)]
-pub(crate) struct RaftLogOp {
-    pub(crate) index: u64,
-    pub(crate) term: u32,
-    pub(crate) e_type: u8,
+pub struct RaftLogOp {
+    pub index: u64,
+    pub term: u32,
+    pub e_type: u8,
     // `ProposalContext` in components/rfstore/src/store/peer.rs.
-    pub(crate) context: u8,
-    pub(crate) data: Bytes,
+    pub context: u8,
+    pub data: Bytes,
 }
 
 impl RaftLogOp {
@@ -32,7 +32,7 @@ impl RaftLogOp {
         }
     }
 
-    pub(crate) fn to_entry(&self) -> eraftpb::Entry {
+    pub fn to_entry(&self) -> eraftpb::Entry {
         let mut entry = eraftpb::Entry::new();
         entry.set_entry_type(eraftpb::EntryType::from_i32(self.e_type as i32).unwrap());
         entry.set_term(self.term as u64);

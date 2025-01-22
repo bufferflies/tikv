@@ -46,12 +46,20 @@ impl WriteBatch {
         self.get_peer(peer_id, region_id).get_state(key)
     }
 
-    pub fn reset_truncated_idx(&mut self, peer_id: u64) -> Option<u64> {
-        let peer_batch = self.peers.get_mut(&peer_id)?;
-        let truncated_idx = peer_batch.truncated_idx;
+    pub fn get_latest_state(
+        &mut self,
+        peer_id: u64,
+        region_id: u64,
+        key_prefix: &[u8],
+    ) -> Option<&[u8]> {
+        self.get_peer(peer_id, region_id)
+            .get_latest_state(key_prefix)
+    }
+
+    pub fn get_truncated_idx(&self, peer_id: u64) -> Option<u64> {
+        let peer_batch = self.peers.get(&peer_id)?;
         if peer_batch.truncated_idx > 0 {
-            peer_batch.truncated_idx = 0;
-            Some(truncated_idx)
+            Some(peer_batch.truncated_idx)
         } else {
             None
         }
@@ -91,6 +99,12 @@ impl WriteBatch {
             for (k, v) in &peer_batch.states {
                 f(k.chunk(), v.chunk());
             }
+        }
+    }
+
+    pub fn read_peer_logs(&self, peer_id: u64, mut f: impl FnMut(&VecDeque<RaftLogOp>)) {
+        if let Some(peer_batch) = self.peers.get(&peer_id) {
+            f(&peer_batch.raft_logs);
         }
     }
 
@@ -145,6 +159,14 @@ impl PeerBatch {
 
     pub fn get_state(&self, key: &[u8]) -> Option<&[u8]> {
         self.states.get(key).map(|v| v.chunk())
+    }
+
+    pub fn get_latest_state(&self, key_prefix: &[u8]) -> Option<&[u8]> {
+        self.states
+            .iter()
+            .rev()
+            .find(|(k, _)| k.starts_with(key_prefix))
+            .map(|(_, v)| v.chunk())
     }
 
     pub fn append_raft_log(&mut self, op: RaftLogOp) {

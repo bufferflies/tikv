@@ -92,6 +92,10 @@ impl RaftState {
         self.last_index
     }
 
+    pub fn set_last_index(&mut self, last_index: u64) {
+        self.last_index = last_index;
+    }
+
     pub fn get_last_preprocessed_index(&self) -> u64 {
         self.last_preprocessed_index
     }
