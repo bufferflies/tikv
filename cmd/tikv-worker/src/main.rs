@@ -16,7 +16,7 @@ use pd_client::RpcClient;
 use security::SecurityManager;
 use slog::Level;
 use slog_global::{error, info};
-use tikv_util::{config::ReadableDuration, sys::SysQuota};
+use tikv_util::{config, config::ReadableDuration, sys::SysQuota};
 
 use crate::metrics::CPU_CORES_QUOTA_GAUGE;
 
@@ -200,6 +200,9 @@ fn main() {
     };
 
     override_from_args(&mut config, &matches);
+    // Convert to absolute path. Get disk capacity depends on this.
+    config.data_dir = config::canonicalize_path(&config.data_dir)
+        .unwrap_or_else(|e| panic!("failed to canonicalize data dir: {:?}", e));
     let log_level =
         tikv_util::logger::get_level_by_string(&config.log_level).unwrap_or(DEFAULT_LOG_LEVEL);
     if !config.log_file.is_empty() {

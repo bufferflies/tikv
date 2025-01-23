@@ -1,6 +1,14 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{borrow::Cow, collections::HashMap, str::FromStr};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use futures::{future::ok, TryStreamExt};
 use http::{header, Response, StatusCode};
@@ -49,4 +57,37 @@ where
         .header(header::CONTENT_TYPE, "application/json")
         .body(json.into())
         .unwrap()
+}
+
+pub struct RunningController(Arc<AtomicBool>);
+
+impl Default for RunningController {
+    fn default() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+}
+
+impl RunningController {
+    pub fn stop(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    pub fn handle(&self) -> Running {
+        Running(self.0.clone())
+    }
+}
+
+impl Drop for RunningController {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[derive(Clone)]
+pub struct Running(Arc<AtomicBool>);
+
+impl Running {
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }

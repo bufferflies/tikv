@@ -3,6 +3,7 @@
 mod common;
 mod error;
 mod load_data;
+pub mod local_gc;
 mod metrics;
 mod native_br;
 mod remote_cop;
@@ -60,7 +61,9 @@ use tokio::{runtime::Runtime, task::JoinHandle};
 pub use txn_chunk::CreateTxnChunkResp;
 
 use crate::{
+    common::{Running, RunningController},
     load_data::LoadDataManager,
+    local_gc::{LocalGcConfig, LocalGcRunner},
     native_br::{NativeBrConfig, NativeBrManager},
     remote_cop::RemoteCopServer,
     txn_chunk::TxnChunkHandler,
@@ -99,6 +102,7 @@ impl Future for ServerFuture {
     }
 }
 
+// Entry for `tikv_worker` binary.
 pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: Arc<dyn PdClient>) {
     let thread_pool = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -109,7 +113,14 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
             .unwrap(),
     );
 
-    let server = start_server(config, config_file_path, thread_pool.clone(), pd);
+    let running_ctl = RunningController::default();
+    let server = start_server(
+        config,
+        config_file_path,
+        thread_pool.clone(),
+        pd,
+        &running_ctl,
+    );
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     thread_pool.spawn(async move {
         let res = server.await;
@@ -129,6 +140,7 @@ fn start_server(
     config_file_path: Option<PathBuf>,
     thread_pool: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
+    running_ctl: &RunningController,
 ) -> ServerFuture {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(kvengine::dfs::S3Fs::new(
@@ -235,6 +247,8 @@ fn start_server(
 
     let ia_ctx =
         create_ia_ctx(&config, &s3fs, thread_pool.handle()).expect("create IA context failed");
+
+    run_local_gc(&config, &ia_ctx, running_ctl.handle());
 
     // Create `TxnChunkManager` using `thread_pool`. Otherwise, as `TxnChunkManager`
     // is hold in async context, we will meet the panic of dropping tokio
@@ -385,6 +399,17 @@ fn create_ia_ctx(
     }
 }
 
+fn run_local_gc(config: &Config, ia_ctx: &IaCtx, running: Running) {
+    if let IaCtx::Enabled(ia_mgr, meta_path) = ia_ctx {
+        let mut local_gc_runner = LocalGcRunner::new(
+            config.local_gc.clone(),
+            ia_mgr.clone(),
+            meta_path.as_ref().clone(),
+        );
+        thread::spawn(move || local_gc_runner.run(running));
+    }
+}
+
 pub struct CloudWorker {
     config: Config,
     config_file_path: Option<PathBuf>,
@@ -393,6 +418,7 @@ pub struct CloudWorker {
 
     svc_handle: Option<JoinHandle<()>>,
     notify: Arc<tokio::sync::Notify>,
+    running_ctl: RunningController,
 }
 
 impl CloudWorker {
@@ -417,6 +443,7 @@ impl CloudWorker {
             pd,
             svc_handle: None,
             notify: Arc::new(tokio::sync::Notify::new()),
+            running_ctl: RunningController::default(),
         }
     }
 
@@ -430,6 +457,7 @@ impl CloudWorker {
             self.config_file_path.clone(),
             self.thread_pool.clone(),
             self.pd.clone(),
+            &self.running_ctl,
         );
         let addr = self.addr().to_string();
         info!("{} cloud_worker server start", addr; "config" => ?self.config);
@@ -631,6 +659,8 @@ pub struct Config {
     /// Enable IA by setting `!data_dir.is_empty() && ia.mem_cap > 0 &&
     /// ia.disk_cap > 0`.
     pub ia: IaConfig,
+
+    pub local_gc: LocalGcConfig,
 }
 
 impl Default for Config {
@@ -665,6 +695,7 @@ impl Default for Config {
             ia: IaConfig::default(),
             push_metrics_addr: String::default(),
             push_metrics_interval: ReadableDuration::secs(30),
+            local_gc: LocalGcConfig::default(),
         }
     }
 }

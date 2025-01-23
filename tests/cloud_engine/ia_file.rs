@@ -1,8 +1,9 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{assert_matches::assert_matches, path::PathBuf, sync::Arc, time::Duration};
+use std::{assert_matches::assert_matches, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::{Buf, Bytes};
+use cloud_worker::local_gc::{LocalGcConfig, LocalGcRunner};
 use kvengine::{
     dfs::{FileType, S3Fs},
     ia::{
@@ -21,7 +22,7 @@ use rand::prelude::*;
 use rstest::rstest;
 use test_cloud_server::oss::prepare_dfs;
 use test_util::init_log_for_test;
-use tikv_util::{debug, info};
+use tikv_util::{config::ReadableDuration, debug, info};
 
 const BLOCK_SIZE: usize = 32;
 const SEGMENT_SIZE: i64 = 64;
@@ -90,7 +91,7 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
             .await
             .unwrap();
         let table_meta_data =
-            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, temp_dir, &s3fs)
+            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, temp_dir, &mgr)
                 .await
                 .unwrap();
         let table_meta_file = InMemFile::new(file_id, table_meta_data);
@@ -183,7 +184,7 @@ fn test_init() {
             }
 
             for (file_id, file_type, table_meta_off) in files {
-                IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &s3fs)
+                IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &mgr)
                     .await
                     .unwrap();
             }
@@ -283,7 +284,7 @@ fn test_abnormal_local_file() {
 
         {
             let table_meta_data =
-                IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &s3fs)
+                IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &mgr)
                     .await
                     .unwrap();
             let table_meta_file = InMemFile::new(file_id, table_meta_data);
@@ -317,7 +318,7 @@ fn test_abnormal_local_file() {
             // First open file failed due to local meta not found.
             IaFile::open_in_path(file_id, file_type, &local_path, mgr.clone()).unwrap_err();
             // Prepare again.
-            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &s3fs)
+            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &mgr)
                 .await
                 .unwrap();
             let ia_file =
@@ -326,6 +327,142 @@ fn test_abnormal_local_file() {
             // Read can handle local segment not found by retry to get from remote.
             let seg = ia_file.multi_read_async(0, user_data.len()).await.unwrap();
             assert_eq!(seg, user_data);
+        }
+    });
+
+    oss.shutdown();
+}
+
+#[test]
+fn test_local_gc() {
+    init_log_for_test();
+
+    let (temp_dir, mut oss, dfs_conf) = prepare_dfs("test");
+    let temp_dir = temp_dir.path();
+
+    let s3fs = S3Fs::new_from_config(dfs_conf);
+    let _s3fs = s3fs.clone();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    let rt = runtime.handle().clone();
+    runtime.block_on(async move {
+        let local_path = temp_dir.join("ia");
+        let segment_path = local_path.join("seg");
+        let meta_path = local_path.join("meta");
+        fs::create_dir_all(&segment_path).unwrap();
+        fs::create_dir_all(&meta_path).unwrap();
+
+        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), segment_path.clone(), 1000.into());
+        let options = IaManagerOptionsBuilder::default()
+            .capacity(ia_cap)
+            .segment_size(SEGMENT_SIZE)
+            .freq_update_interval(FREQ_UPDATE_INTERVAL)
+            .build()
+            .unwrap();
+
+        let file_type = FileType::Sst;
+        let file_count = 10;
+
+        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.clone().into())
+            .await
+            .unwrap();
+
+        let mut files = Vec::with_capacity(file_count);
+        for i in 1..=file_count {
+            let file_id = i as u64;
+            let (file_data, _, table_meta_off) = make_sstable(file_id, BLOCK_SIZE, 10, 7, 5, false);
+
+            s3fs.put_object(
+                s3fs.file_key(file_id, file_type),
+                file_data,
+                format!("{}.{}", file_id, file_type.suffix()),
+            )
+            .await
+            .unwrap();
+
+            files.push((file_id, file_type, table_meta_off));
+        }
+
+        for (file_id, file_type, table_meta_off) in files {
+            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &meta_path, &mgr)
+                .await
+                .unwrap();
+        }
+
+        let ia1 = IaFile::open_in_path(1, file_type, &meta_path, mgr.clone()).unwrap();
+        let data1_5_10 = ia1.multi_read_async(5, 10).await.unwrap();
+        assert_eq!(ia1.multi_read_async(5, 10).await.unwrap(), data1_5_10);
+
+        let ia2 = IaFile::open_in_path(2, file_type, &meta_path, mgr.clone()).unwrap();
+        let data2_100_64 = ia2.multi_read_async(100, 64).await.unwrap();
+        assert_eq!(ia2.multi_read_async(100, 64).await.unwrap(), data2_100_64);
+
+        // To make sure that segments are written to local store.
+        mgr.flush_tasks(Duration::from_secs(5)).await.unwrap();
+
+        // No meta is GCed.
+        {
+            let config = LocalGcConfig::default();
+            let mut local_gc_runner = LocalGcRunner::new(config, mgr.clone(), meta_path.clone());
+            assert_eq!(local_gc_runner.meta_file_gc().unwrap(), 0);
+        }
+
+        // All metas are GCed.
+        {
+            let config = LocalGcConfig {
+                meta_lifetime: ReadableDuration::ZERO,
+                ..Default::default()
+            };
+            let mut local_gc_runner = LocalGcRunner::new(config, mgr.clone(), meta_path.clone());
+            assert_eq!(local_gc_runner.meta_file_gc().unwrap(), file_count);
+
+            // Opened IA files are not affected.
+            assert_eq!(ia1.multi_read_async(5, 10).await.unwrap(), data1_5_10);
+            assert_eq!(ia2.multi_read_async(100, 64).await.unwrap(), data2_100_64);
+        }
+
+        // No segment is GCed.
+        {
+            let config = LocalGcConfig {
+                segment_interval: ReadableDuration::ZERO,
+                ..Default::default()
+            };
+            let mut local_gc_runner = LocalGcRunner::new(config, mgr.clone(), meta_path.clone());
+            assert_eq!(local_gc_runner.segment_gc().unwrap(), 0);
+
+            assert_eq!(ia1.multi_read_async(5, 10).await.unwrap(), data1_5_10);
+            assert_eq!(ia2.multi_read_async(100, 64).await.unwrap(), data2_100_64);
+        }
+
+        // All segments are GCed.
+        {
+            assert!(fs::read_dir(&segment_path).unwrap().next().is_some());
+
+            // Open IA manager on another path.
+            let another_segment_path = local_path.join("seg1");
+            fs::create_dir_all(&another_segment_path).unwrap();
+            let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), another_segment_path, 1000.into());
+            let options = IaManagerOptionsBuilder::default()
+                .capacity(ia_cap)
+                .build()
+                .unwrap();
+            let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.clone().into())
+                .await
+                .unwrap();
+
+            let config = LocalGcConfig {
+                segment_interval: ReadableDuration::ZERO,
+                ..Default::default()
+            };
+            let mut local_gc_runner = LocalGcRunner::new(config, mgr, meta_path.clone());
+            local_gc_runner.set_segment_path(segment_path.clone()); // Change to original path which has segments.
+            assert!(local_gc_runner.segment_gc().unwrap() > 0); // The number of segments is not determined.
+
+            assert!(fs::read_dir(&segment_path).unwrap().next().is_none());
         }
     });
 

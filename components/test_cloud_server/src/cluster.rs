@@ -11,7 +11,7 @@ use std::{
 use anyhow::bail;
 use bstr::ByteSlice;
 use cloud_server::TikvServer;
-use cloud_worker::CloudWorker;
+use cloud_worker::{local_gc::LocalGcConfig, CloudWorker};
 use dashmap::DashMap;
 use futures::{executor::block_on, future::try_join_all};
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
@@ -783,7 +783,13 @@ impl ServerCluster {
                     freq_update_interval: ReadableDuration(opts.ia_freq_update_interval),
                     mem_cap: opts.ia_mem_cap.into(),
                     disk_cap: opts.ia_disk_cap.into(),
+                    table_meta_mtime_interval: ReadableDuration::secs(10),
                     ..Default::default()
+                },
+                local_gc: LocalGcConfig {
+                    interval: ReadableDuration::secs(10),
+                    meta_lifetime: ReadableDuration::secs(30),
+                    segment_interval: ReadableDuration::secs(0), // Run on every `interval`.
                 },
                 ..Default::default()
             };

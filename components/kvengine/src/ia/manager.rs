@@ -3,7 +3,7 @@
 use std::{
     ops,
     ops::Deref,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
         Arc,
@@ -23,7 +23,7 @@ use crate::{
         queue::S3FifoHandle,
         types::{
             FileSegmentData, FileSegmentIdent, GuardMap, LocalSegmentMap, SegmentHandle,
-            FILE_SEGMENT_DATA_IN_MEMORY,
+            TableMetaInfo, FILE_SEGMENT_DATA_IN_MEMORY,
         },
         util::{new_local_store, LocalStore},
     },
@@ -111,6 +111,8 @@ pub struct IaManagerOptions {
 
     // The capacity of the file descriptor cache.
     pub fd_cache_capacity: usize,
+
+    pub table_meta_mtime_interval: Duration,
 }
 
 impl IaManagerOptions {
@@ -169,6 +171,8 @@ impl IaManager {
             main_store,
             loading_segments: Default::default(),
             segments,
+            table_metas: Default::default(),
+            table_meta_mtime_interval: opts.table_meta_mtime_interval,
             fifo,
             cache_hit_counter: Default::default(),
             cache_miss_counter: Default::default(),
@@ -191,6 +195,9 @@ pub struct IaManagerCore {
 
     loading_segments: GuardMap<FileSegmentIdent, ()>,
     segments: Arc<LocalSegmentMap>,
+
+    table_metas: Arc<DashMap<u64 /* file_id */, TableMetaInfo>>,
+    table_meta_mtime_interval: Duration,
 
     fifo: S3FifoHandle,
     cache_hit_counter: AtomicU64,
@@ -439,6 +446,45 @@ impl IaManagerCore {
         } else {
             0.0
         }
+    }
+
+    pub fn contains_segment(&self, ident: &FileSegmentIdent) -> bool {
+        self.segments.contains(ident)
+    }
+
+    pub fn main_store_path(&self) -> Option<&Path> {
+        self.main_store.path()
+    }
+
+    pub fn access_table_meta(&self, file_id: u64) -> bool /* should_set_mtime */ {
+        match self.table_metas.entry(file_id) {
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                e.insert(TableMetaInfo::default());
+                // Return false because:
+                // The cop worker on spot instances will restart frequently for a short while.
+                // If return true here, we will set mtime more than expected.
+                // On the other hand, as the lifetime of table meta are much longer than
+                // interval (24h vs. 1h by default), miss one or two times of
+                // set mtime will not impact too much.
+                false
+            }
+            dashmap::mapref::entry::Entry::Occupied(mut e) => {
+                let meta = e.get_mut();
+                let now = Instant::now_coarse();
+                let last_set_mtime =
+                    Instant::from_timespec_second_coarse(meta.last_set_mtime_instant_sec);
+                if now.saturating_duration_since(last_set_mtime) >= self.table_meta_mtime_interval {
+                    meta.last_set_mtime_instant_sec = now.second();
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    pub fn remove_table_meta(&self, file_id: u64) {
+        self.table_metas.remove(&file_id);
     }
 }
 

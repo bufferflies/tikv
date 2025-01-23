@@ -1,7 +1,9 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    convert::TryFrom,
     fmt,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -19,7 +21,7 @@ use crate::{
     dfs::FileType,
     ia::{
         manager::{IaManager, ReadAt},
-        types::FileSegmentIdent,
+        types::{FileSegmentIdent, TABLE_META_LOCAL_FILE_SUFFIX},
     },
     new_columnar_filename, new_sst_filename,
     table::{
@@ -31,8 +33,6 @@ use crate::{
     },
     IoContext,
 };
-
-const TABLE_META_LOCAL_FILE_SUFFIX: &str = "meta";
 
 #[derive(Clone)]
 pub struct IaFile {
@@ -217,28 +217,43 @@ impl IaFile {
         ftype: FileType,
         table_meta_off: u64,
         data_dir: &Path,
-        dfs: &dyn dfs::Dfs,
+        ia_mgr: &IaManager,
     ) -> Result<Bytes> {
         let local_path = table_meta_file_local_path(file_id, ftype, data_dir);
         let table_meta_data = match tokio::fs::read(&local_path).await {
             Ok(bytes) => {
-                if let Err(err) = filetime::set_file_mtime(&local_path, filetime::FileTime::now()) {
-                    debug_assert!(false, "{} set file mtime failed: {:?}", file_id, err);
-                    warn!("{} prepare meta: set file mtime failed", file_id; "err" => ?err);
+                let should_set_mtime = ia_mgr.access_table_meta(file_id);
+                if should_set_mtime {
+                    if let Err(err) =
+                        filetime::set_file_mtime(&local_path, filetime::FileTime::now())
+                    {
+                        debug_assert!(
+                            err.kind() == ErrorKind::NotFound,
+                            "{} set mtime failed: {:?}",
+                            file_id,
+                            err
+                        );
+                        warn!("{} prepare meta: set file mtime failed", file_id; "err" => ?err);
+                    }
                 }
                 Bytes::from(bytes)
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(err) if err.kind() == ErrorKind::NotFound => {
                 let opts = dfs::Options::default()
                     .with_type(ftype)
                     .with_start_off(table_meta_off);
-                let bytes = dfs.read_file(file_id, opts).await.map_err(|err| {
-                    Error::IaMgr(format!("{} prepare meta: failed: {:?}", file_id, err))
-                })?;
+                let bytes = ia_mgr
+                    .get_dfs()
+                    .read_file(file_id, opts)
+                    .await
+                    .map_err(|err| {
+                        Error::IaMgr(format!("{} prepare meta: failed: {:?}", file_id, err))
+                    })?;
                 if let Err(err) = Self::save_table_meta(file_id, &local_path, &bytes).await {
                     debug_assert!(false, "{} save table meta failed: {:?}", file_id, err);
                     warn!("{} prepare meta: write failed", file_id; "err" => ?err);
                 }
+                ia_mgr.access_table_meta(file_id);
                 bytes
             }
             Err(err) => {
@@ -465,6 +480,17 @@ pub fn table_meta_file_local_path(file_id: u64, file_type: FileType, data_dir: &
     }
 }
 
+// Format: {:016x}.{:file_type}.meta
+pub fn parse_table_meta_filename(filename: &str) -> Option<(u64 /* file_id */, FileType)> {
+    let parts: Vec<&str> = filename.split('.').collect();
+    if parts.len() != 3 || parts[2] != TABLE_META_LOCAL_FILE_SUFFIX {
+        return None;
+    }
+    let file_id = u64::from_str_radix(parts[0], 16).ok()?;
+    let file_type = FileType::try_from(parts[1]).ok()?;
+    Some((file_id, file_type))
+}
+
 #[cfg(any(test, feature = "testexport"))]
 impl IaFile {
     pub fn open_in_path(id: u64, ftype: FileType, data_dir: &Path, mgr: IaManager) -> Result<Self> {
@@ -593,6 +619,35 @@ mod tests {
                 align_to_segment(1, &segment_offsets, start, end).ok(),
                 expected,
             );
+        }
+    }
+
+    #[test]
+    fn test_table_meta_filename() {
+        let data_dir = PathBuf::from("/data");
+        let cases = vec![
+            (42, FileType::Sst, "/data/000000000000002a.sst.meta"),
+            (43, FileType::Columnar, "/data/000000000000002b.col.meta"),
+        ];
+        for (file_id, file_type, expected) in cases {
+            let path = table_meta_file_local_path(file_id, file_type, &data_dir);
+            assert_eq!(path.display().to_string(), expected);
+
+            let filename = path.as_path().file_name().unwrap().to_str().unwrap();
+            assert_eq!(
+                parse_table_meta_filename(filename).unwrap(),
+                (file_id, file_type)
+            );
+        }
+
+        let invalid_cases = vec![
+            "000000000000002a.sst",
+            "000000000000002a.sst.meta1",
+            "000000000000002a.s.meta",
+            "x00000000000002a.sst.meta",
+        ];
+        for filename in invalid_cases {
+            assert!(parse_table_meta_filename(filename).is_none());
         }
     }
 }

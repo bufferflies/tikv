@@ -4,11 +4,17 @@ use std::{fmt, hash::Hash, ops, sync::Arc};
 
 use bytes::Bytes;
 use dashmap::{mapref::entry::Entry, DashMap};
+use tikv_util::time::Instant;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 #[cfg(feature = "debug-trace-ia-segments")]
 use crate::ia::debug::*;
 use crate::{metrics::ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE, table, table::file::InMemFile};
+
+pub const TABLE_META_LOCAL_FILE_SUFFIX: &str = "meta";
+
+pub const SEGMENT_LOCAL_FILE_SUFFIX: &str = "seg";
+pub const SEGMENT_LOCAL_FILE_DOT_SUFFIX: &str = ".seg";
 
 /// The identifier of a file segment.
 #[repr(C)]
@@ -40,12 +46,15 @@ impl FileSegmentIdent {
     }
 
     pub fn local_filename(&self) -> String {
-        format!("{}-{}-{}.seg", self.file_id, self.start_off, self.end_off)
+        format!(
+            "{}-{}-{}.{}",
+            self.file_id, self.start_off, self.end_off, SEGMENT_LOCAL_FILE_SUFFIX
+        )
     }
 
-    pub(crate) fn parse_local_filename(filename: &str) -> Option<Self> {
+    pub fn parse_local_filename(filename: &str) -> Option<Self> {
         let parts: Option<Vec<u64>> = filename
-            .strip_suffix(".seg")?
+            .strip_suffix(SEGMENT_LOCAL_FILE_DOT_SUFFIX)?
             .split('-')
             .map(|x| x.parse::<u64>().ok())
             .collect();
@@ -180,6 +189,10 @@ impl LocalSegmentMap {
         Some(prev)
     }
 
+    pub(crate) fn contains(&self, ident: &FileSegmentIdent) -> bool {
+        self.core.contains_key(ident)
+    }
+
     #[cfg(any(test, feature = "testexport"))]
     #[inline]
     pub(crate) fn iter(&self) -> dashmap::iter::Iter<'_, FileSegmentIdent, FileSegmentData> {
@@ -260,6 +273,22 @@ impl SegmentHandle {
 impl From<table::file::LocalFile> for SegmentHandle {
     fn from(f: table::file::LocalFile) -> Self {
         Self(Arc::new(f))
+    }
+}
+
+pub(crate) struct TableMetaInfo {
+    /// The second part of instant when setting the modified time of table meta
+    /// file.
+    ///
+    /// Used to limit the frequency of fs operations.
+    pub(crate) last_set_mtime_instant_sec: i64,
+}
+
+impl Default for TableMetaInfo {
+    fn default() -> Self {
+        Self {
+            last_set_mtime_instant_sec: Instant::now_coarse().second(),
+        }
     }
 }
 

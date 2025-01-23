@@ -299,6 +299,18 @@ impl Instant {
         Instant::MonotonicCoarse(monotonic_coarse_now())
     }
 
+    pub fn from_timespec_second_coarse(sec: i64) -> Instant {
+        let t = Timespec { sec, nsec: 0 };
+        Instant::MonotonicCoarse(t)
+    }
+
+    pub fn second(&self) -> i64 {
+        match self {
+            Self::Monotonic(t) => t.sec,
+            Self::MonotonicCoarse(t) => t.sec,
+        }
+    }
+
     pub fn saturating_elapsed(&self) -> Duration {
         match *self {
             Instant::Monotonic(t) => {

@@ -273,6 +273,7 @@ const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(60);
 const IA_DFS_CONCURRENCY_DEF: usize = 64;
 const IA_DFS_KEYSPACE_CONCURRENCY_DEF: usize = 20;
 const IA_FD_CACHE_CAPACITY_DEF: usize = 102400; // 100k
+const IA_TABLE_META_MTIME_INTERVAL_DEF: Duration = Duration::from_secs(3600); // 1 hour
 
 const MAIN_QUEUE_CAPACITY_FACTOR: i64 = 10; // Main queue is 10x larger than small queue.
 
@@ -358,6 +359,7 @@ pub struct IaManagerOptionsBuilder {
     dfs_concurrency: Option<usize>,
     dfs_keyspace_concurrency: Option<usize>,
     fd_cache_capacity: Option<usize>,
+    table_meta_mtime_interval: Option<Duration>,
 }
 
 impl IaManagerOptionsBuilder {
@@ -387,6 +389,11 @@ impl IaManagerOptionsBuilder {
         self
     }
 
+    pub fn table_meta_mtime_interval(mut self, interval: Duration) -> Self {
+        self.table_meta_mtime_interval = Some(interval);
+        self
+    }
+
     pub fn build(mut self) -> Result<IaManagerOptions> {
         let mut options = IaManagerOptions::default();
 
@@ -402,6 +409,9 @@ impl IaManagerOptionsBuilder {
             .dfs_keyspace_concurrency
             .unwrap_or(IA_DFS_KEYSPACE_CONCURRENCY_DEF);
         options.fd_cache_capacity = self.fd_cache_capacity.unwrap_or(IA_FD_CACHE_CAPACITY_DEF);
+        options.table_meta_mtime_interval = self
+            .table_meta_mtime_interval
+            .unwrap_or(IA_TABLE_META_MTIME_INTERVAL_DEF);
 
         Ok(options)
     }
@@ -409,7 +419,7 @@ impl IaManagerOptionsBuilder {
 
 /// The config of IA (Infrequent Access) which use memory for small queue and
 /// disk for main queue.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct IaConfig {
@@ -420,6 +430,7 @@ pub struct IaConfig {
     pub dfs_concurrency: usize,
     pub dfs_keyspace_concurrency: usize,
     pub fd_cache_capacity: usize,
+    pub table_meta_mtime_interval: ReadableDuration,
 }
 
 impl Default for IaConfig {
@@ -432,6 +443,7 @@ impl Default for IaConfig {
             dfs_concurrency: IA_DFS_CONCURRENCY_DEF,
             dfs_keyspace_concurrency: IA_DFS_KEYSPACE_CONCURRENCY_DEF,
             fd_cache_capacity: IA_FD_CACHE_CAPACITY_DEF,
+            table_meta_mtime_interval: ReadableDuration(IA_TABLE_META_MTIME_INTERVAL_DEF),
         }
     }
 }
@@ -445,6 +457,7 @@ impl IaConfig {
             .freq_update_interval(self.freq_update_interval.0)
             .dfs_concurrency(self.dfs_concurrency, self.dfs_keyspace_concurrency)
             .fd_cache_capacity(self.fd_cache_capacity)
+            .table_meta_mtime_interval(self.table_meta_mtime_interval.0)
             .build()
     }
 }
