@@ -3423,7 +3423,7 @@ impl Peer {
                     return Err(Error::ProposalInMergingMode(self.region_id));
                 }
                 let cs = custom_log.get_change_set().unwrap();
-                if !cs.has_initial_flush() && !cs.has_columnar_compaction() {
+                if !cs.has_initial_flush() {
                     return Err(Error::ProposalInMergingMode(self.region_id));
                 }
             }
