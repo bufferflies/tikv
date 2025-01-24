@@ -40,6 +40,12 @@ use crate::{
 };
 
 pub const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
+const TOTAL_FLUSH_FILE_CONCURRENCY: usize = 32;
+const TOTAL_CREATE_FILE_CONCURRENCY: usize = 128;
+const TOTAL_INGEST_CONCURRENCY: usize = 16;
+const MAX_FLUSH_FILE_CONCURRENCY_PER_WORKER: usize = 8;
+const MAX_CREATE_FILE_CONCURRENCY_PER_WORKER: usize = 32;
+const MAX_INGEST_CONCURRENCY_PER_WORKER: usize = 4;
 
 pub struct Dispatcher {
     config: LoadDataConfig,
@@ -55,6 +61,9 @@ pub struct Dispatcher {
     writer2worker: HashMap<u64, u64>,
     next_worker: u64,
     checkpoint_store: Arc<Mutex<LocalFileCheckpointStorage>>,
+    flush_file_concurrency: usize,
+    create_file_concurrency: usize,
+    ingest_concurrency: usize,
 }
 
 impl Dispatcher {
@@ -122,6 +131,13 @@ impl Dispatcher {
         };
 
         let task_dir = ctx.dir.join(task_ctx.task_id.as_str());
+        let flush_file_concurrency = (TOTAL_FLUSH_FILE_CONCURRENCY / kvpairs_worker_nums as usize)
+            .min(MAX_FLUSH_FILE_CONCURRENCY_PER_WORKER);
+        let create_file_concurrency = (TOTAL_CREATE_FILE_CONCURRENCY
+            / building_worker_nums as usize)
+            .min(MAX_CREATE_FILE_CONCURRENCY_PER_WORKER);
+        let ingest_concurrency = (TOTAL_INGEST_CONCURRENCY / building_worker_nums as usize)
+            .min(MAX_INGEST_CONCURRENCY_PER_WORKER);
         Self {
             config,
             ctx,
@@ -136,6 +152,9 @@ impl Dispatcher {
             kvpairs_worker_senders: HashMap::default(),
             building_worker_senders: HashMap::default(),
             checkpoint_store,
+            flush_file_concurrency,
+            create_file_concurrency,
+            ingest_concurrency,
         }
     }
 
@@ -299,6 +318,7 @@ impl Dispatcher {
                     self.config.clone(),
                     self.task_ctx.clone(),
                     self.task_dir.clone(),
+                    self.flush_file_concurrency,
                     receiver,
                     self.scheduler.clone(),
                     self.checkpoint_store.clone(),
@@ -508,6 +528,8 @@ impl Dispatcher {
                         self.config.clone(),
                         self.ctx.clone(),
                         self.task_ctx.clone(),
+                        self.create_file_concurrency,
+                        self.ingest_concurrency,
                         key_comm_prefix.clone(),
                         receiver,
                         self.scheduler.clone(),

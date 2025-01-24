@@ -69,8 +69,7 @@ use crate::{
     txn_chunk::TxnChunkHandler,
     worker_limiter::{WorkerLimiter, WorkerLimiterConfig},
     worker_scaler::{
-        WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV,
-        LOAD_DATA_WORKER_MAX_IN_MEM_SIZE_ENV,
+        WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV, LOAD_DATA_WORKER_WORKER_NUM_ENV,
     },
 };
 
@@ -186,15 +185,7 @@ fn start_server(
         .block_on(config.security.new_master_key());
     let is_load_data_worker = std::env::var(LOAD_DATA_WORKER_ENV).is_ok();
     let mut worker_scaler_opt: Option<WorkerScaler> = None;
-    let mut load_data_config = LoadDataConfig::default();
-    load_data_config.enable_checkpoint = config.enable_load_data_check_point;
-    load_data_config.checksum_type = checksum_type;
-    if is_load_data_worker {
-        load_data_config.max_in_mem_size = std::env::var(LOAD_DATA_WORKER_MAX_IN_MEM_SIZE_ENV)
-            .unwrap()
-            .parse()
-            .unwrap();
-    } else if config.worker_scaler.run {
+    if !is_load_data_worker && config.worker_scaler.run {
         let scaler_cfg = config.worker_scaler.clone();
         let cluster_id = pd.get_cluster_id().unwrap();
         let worker_scaler = thread_pool
@@ -214,15 +205,7 @@ fn start_server(
         fs::create_dir_all(&config.data_dir).unwrap();
     }
 
-    let rg_config = if config.report_wru {
-        let rg_config = get_rg_config_from_pd(&pd, &thread_pool)
-            .unwrap_or_else(|e| panic!("failed to ru config: {:?}", e));
-        info!("get rg config from pd: {:?}", rg_config);
-        Some(rg_config)
-    } else {
-        None
-    };
-    load_data_config.rg_config = rg_config;
+    let load_data_config = init_load_data_config(&config, &pd, &thread_pool);
     let load_manager = Arc::new(LoadDataManager::new(
         pd.clone(),
         config.data_dir.clone().into(),
@@ -529,6 +512,38 @@ fn get_rg_config_from_pd(
     }
 }
 
+fn init_load_data_config(
+    config: &Config,
+    pd_client: &Arc<dyn PdClient>,
+    runtime: &Arc<tokio::runtime::Runtime>,
+) -> LoadDataConfig {
+    let mut load_data_config = LoadDataConfig::default();
+    load_data_config.enable_checkpoint = config.enable_load_data_check_point;
+    load_data_config.checksum_type = config.checksum_type;
+
+    let is_load_data_worker = std::env::var(LOAD_DATA_WORKER_ENV).is_ok();
+    if is_load_data_worker {
+        let worker_num = std::env::var(LOAD_DATA_WORKER_WORKER_NUM_ENV)
+            .unwrap()
+            .parse()
+            .unwrap();
+        load_data_config.kvpairs_worker_num = worker_num;
+        load_data_config.building_worker_num = worker_num;
+    }
+
+    let rg_config = if config.report_wru {
+        let rg_config = get_rg_config_from_pd(pd_client, runtime)
+            .unwrap_or_else(|e| panic!("failed to ru config: {:?}", e));
+        info!("get rg config from pd: {:?}", rg_config);
+        Some(rg_config)
+    } else {
+        None
+    };
+
+    load_data_config.rg_config = rg_config;
+    load_data_config
+}
+
 pub(crate) fn get_all_stores_except_tiflash(
     pd_client: &Arc<dyn PdClient>,
 ) -> Result<Vec<Store>, pd_client::Error> {
@@ -637,7 +652,6 @@ pub struct Config {
     pub cop_block_size: ReadableSize,
     pub report_wru: bool,
     pub enable_load_data_check_point: bool,
-    pub enable_load_data_multi_threads: bool,
     pub checksum_type: ChecksumType,
 
     pub txn_chunk_target_block_entries: usize,
@@ -685,7 +699,6 @@ impl Default for Config {
             cop_block_size: ReadableSize::kb(32),
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,
-            enable_load_data_multi_threads: false,
             enable_load_data_check_point: false,
             checksum_type: ChecksumType::Crc32,
             worker_limiter: WorkerLimiterConfig::default(),

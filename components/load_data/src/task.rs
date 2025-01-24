@@ -18,8 +18,8 @@ use crate::{
     checkpoint::LocalFileCheckpointStorage, kv::DuplicateEntry, metrics::LOAD_DATA_TASK_STATE,
 };
 
-pub const DEFAULT_MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024; // 256MB
-const DEFAULT_FLUSH_BATCH_SIZE: usize = 2 * 1024 * 1024; // 2MB
+const DEFAULT_MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024; // 256MB
+const DEFAULT_FLUSH_BATCH_SIZE: usize = 1024 * 1024; // 1MB
 const DEFAULT_KVPAIRS_WORKER_NUM: usize = 1;
 const DEFAULT_BUILDING_WORKER_NUM: usize = 1;
 const DEFAULT_BLOCK_SIZE: usize = 64 * 1024; // 64KB

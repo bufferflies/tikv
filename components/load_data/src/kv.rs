@@ -55,7 +55,8 @@ impl KvPairsReader {
         upper_bound_suffix: Vec<u8>,
         table_prefix_offset: usize,
     ) -> Self {
-        let (buf_tx, buf_rx) = bounded(1);
+        let (buf_tx, buf_rx) = bounded(0);
+
         thread::spawn(move || {
             let mut compressed_size_buf = [0u8; 4];
             let mut compressed_buf: Vec<u8> = vec![];

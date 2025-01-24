@@ -8,7 +8,9 @@ use http::Uri;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
-        core::v1::{EnvVar, PersistentVolumeClaim, Pod, Service, ServicePort, ServiceSpec},
+        core::v1::{
+            EnvVar, PersistentVolumeClaim, Pod, Service, ServicePort, ServiceSpec, VolumeMount,
+        },
     },
     apimachinery::pkg::{apis::meta::v1::ObjectMeta, util::intstr::IntOrString},
     serde_json,
@@ -17,14 +19,14 @@ use kube::{
     api::{Api, AttachParams, AttachedProcess, ListParams, PostParams, ResourceExt},
     Client as KubeClient,
 };
-use load_data::task::{LoadTaskStates, DEFAULT_MAX_IN_MEM_SIZE};
+use load_data::task::LoadTaskStates;
 use security::SecurityManager;
 use serde_json::json;
 use tikv_util::{box_err, config::ReadableSize, error, info, time::Instant, warn};
 use tokio::sync::RwLock;
 
 const CLEAN_UP_WORKER_TICK_INTERVAL: u64 = 60;
-const WORKER_MIN_STORAGE_GB: usize = 64;
+const WORKER_MIN_STORAGE_GB: usize = 16;
 const DEFAULT_LOAD_DATA_WORKER_NAME: &str = "load-data-worker";
 const DEFAULT_LOAD_DATA_WORKER_PORT: u16 = 19500;
 const DEFAULT_MAX_SIZE: ReadableSize = ReadableSize::gb(1024);
@@ -43,10 +45,13 @@ const K8S_LABEL_SERVICE: &str = "app.kubernetes.io/service";
 const K8S_LABEL_COMPONENT: &str = "app.kubernetes.io/component";
 const K8S_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
 
+const LOAD_DATA_WORKER_NODE_GROUP_NAME: &str = "load-data-worker";
+const LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM: f64 = 46.0;
+
 const NETWORK_PROTOCOL: &str = "TCP";
 
 pub const LOAD_DATA_WORKER_ENV: &str = "TIKV_LOAD_DATA_WORKER";
-pub const LOAD_DATA_WORKER_MAX_IN_MEM_SIZE_ENV: &str = "TIKV_LOAD_DATA_WORKER_MAX_IN_MEM_SIZE";
+pub const LOAD_DATA_WORKER_WORKER_NUM_ENV: &str = "TIKV_LOAD_DATA_WORKER_WORKER_NUM_ENV";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -109,12 +114,21 @@ pub(crate) struct WorkerScalerCore {
     pvc_api: Api<PersistentVolumeClaim>,
     pod_api: Api<Pod>,
     config: WorkerScalerConfig,
-    pvc_template_name: String,
     cluster_id: u64,
     in_k8s: bool,
     http_client: security::HttpClient,
     pods_map: DashMap<String, Arc<RwLock<WorkerPod>>>,
     security_mgr: Arc<SecurityManager>,
+}
+
+struct StsConfig {
+    // The following fields are used to generate sts.
+    core_num: f64,
+    storage_size_gb: usize,
+    enable_node_group: bool,
+
+    // The following fields are used to configure the load-data-worker.
+    worker_num: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -249,20 +263,6 @@ impl WorkerScaler {
         let svc_api: Api<Service> = Api::namespaced(kube_client.clone(), &cfg.namespace);
         let pod_api: Api<Pod> = Api::namespaced(kube_client.clone(), &cfg.namespace);
         let sts_template = sts_api.get(&cfg.template_sts_name).await?;
-        let pvc_template_name = sts_template
-            .spec
-            .as_ref()
-            .unwrap()
-            .volume_claim_templates
-            .as_ref()
-            .unwrap()
-            .first()
-            .unwrap()
-            .metadata
-            .name
-            .as_ref()
-            .unwrap()
-            .clone();
         let in_k8s = fs::read(K8S_NAMESPACE_PATH).is_ok();
         let worker_scaler = Self {
             core: Arc::new(WorkerScalerCore {
@@ -273,7 +273,6 @@ impl WorkerScaler {
                 pod_api,
                 pods_map: dashmap::DashMap::default(),
                 config: cfg.clone(),
-                pvc_template_name,
                 cluster_id,
                 in_k8s,
                 http_client: security_mgr.http_client(hyper::Client::builder()).unwrap(),
@@ -335,19 +334,16 @@ impl WorkerScaler {
             return;
         }
         let mut pvcs = res.unwrap();
-        let mut orphan_pvc_tasks = vec![];
+        let mut orphan_pvcs = vec![];
         for pvc in pvcs.items.iter_mut() {
             let name = pvc.name_any();
-            let task_id = parse_task_id_by_pvc_name(&name, &self.pvc_template_name);
+            let task_id = parse_task_id_by_pvc_name(&name);
             assert!(!task_id.is_empty());
             if !self.pods_map.contains_key(&task_id) {
-                orphan_pvc_tasks.push(task_id);
+                orphan_pvcs.push(name);
             }
         }
-        for task_id in orphan_pvc_tasks {
-            info!("delete orphan pvc {}", task_id);
-            self.delete_pvc(&task_id).await;
-        }
+        self.delete_pvc_by_names(orphan_pvcs).await;
     }
 
     pub(crate) async fn create_worker(
@@ -376,11 +372,10 @@ impl WorkerScaler {
         }
 
         if create_worker {
-            let num_cores = calculate_num_cores(data_size_gb, self.config.worker_max_cores);
-            let storage_size_gb = max(data_size_gb * 2, WORKER_MIN_STORAGE_GB);
+            let sts_config = gen_sts_config(data_size_gb, self.config.worker_max_cores);
             let sts_name = new_worker_sts_name(task_id);
             let svc_name = new_worker_svc_name(task_id);
-            self.create_sts(sts_name.clone(), num_cores, storage_size_gb)
+            self.create_sts(task_id, sts_name.clone(), sts_config)
                 .await?;
             self.create_svc(
                 svc_name.clone(),
@@ -404,9 +399,9 @@ impl WorkerScaler {
 
     async fn create_sts(
         &self,
+        task_id: &str,
         sts_name: String,
-        num_cores: f64,
-        storage_size_gb: usize,
+        sts_config: StsConfig,
     ) -> kube::Result<()> {
         let mut sts = self.sts_template.clone();
         sts.metadata = serde_json::from_value(json!({
@@ -434,11 +429,23 @@ impl WorkerScaler {
         labels.insert(K8S_LABEL_SERVICE.to_string(), sts_name.clone());
         pod_metadata.labels = Some(labels);
         let pod_template_spec = pod_template.spec.as_mut().unwrap();
+        if sts_config.enable_node_group {
+            pod_template_spec.node_selector = Some(
+                serde_json::from_value(json!({
+                    "serverless.tidbcloud.com/node": LOAD_DATA_WORKER_NODE_GROUP_NAME,
+                }))
+                .unwrap(),
+            );
+            let tolerations = pod_template_spec.tolerations.as_mut().unwrap();
+            tolerations.first_mut().unwrap().value =
+                Some(LOAD_DATA_WORKER_NODE_GROUP_NAME.to_string());
+        }
         let pod_container = pod_template_spec.containers.first_mut().unwrap();
-        let request_cpu = format!("{}", num_cores);
-        let request_memory = format!("{}Gi", num_cores * 2.0);
-        let limit_cpu = format!("{}", num_cores * 2.0);
-        let limit_memory = format!("{}Gi", num_cores * 4.0);
+        let core_num = sts_config.core_num;
+        let request_cpu = format!("{}", core_num);
+        let request_memory = format!("{}Gi", core_num * 2.0);
+        let limit_cpu = format!("{}", core_num * 2.0);
+        let limit_memory = format!("{}Gi", core_num * 4.0);
         pod_container.resources = Some(
             serde_json::from_value(json!({
                 "requests": {
@@ -462,33 +469,47 @@ impl WorkerScaler {
             value: Some("true".to_string()),
             value_from: None,
         });
-        let max_in_mem_size = calculate_max_in_mem_size(num_cores * 2.0);
         env.push(EnvVar {
-            name: LOAD_DATA_WORKER_MAX_IN_MEM_SIZE_ENV.to_string(),
-            value: Some(max_in_mem_size.to_string()),
+            name: LOAD_DATA_WORKER_WORKER_NUM_ENV.to_string(),
+            value: Some(sts_config.worker_num.to_string()),
             value_from: None,
         });
-        let pvc_template = spec
-            .volume_claim_templates
-            .as_mut()
-            .unwrap()
-            .first_mut()
-            .unwrap();
-        pvc_template.metadata.labels = Some(
+
+        let pvcs = spec.volume_claim_templates.as_mut().unwrap();
+        let first_pvc = pvcs.first_mut().unwrap();
+        first_pvc.metadata.labels = Some(
             serde_json::from_value(json!({
                 K8S_LABEL_NAME: self.config.name.clone()
             }))
             .unwrap(),
         );
-        let pvc_template_spec = pvc_template.spec.as_mut().unwrap();
-        pvc_template_spec.resources = Some(
-            serde_json::from_value(json!({
-                "requests": {
-                    "storage": format!("{}Gi", storage_size_gb)
-                }
-            }))
-            .unwrap(),
-        );
+
+        let mut pvc_template = first_pvc.clone();
+        let volume_mounts = pod_container.volume_mounts.as_mut().unwrap();
+        let root_path = volume_mounts.first().unwrap().mount_path.clone();
+        for worker_id in 0..sts_config.worker_num {
+            let name = format!("worker{}", worker_id);
+            pvc_template.metadata.name = Some(name.clone());
+            let pvc_template_spec = pvc_template.spec.as_mut().unwrap();
+            pvc_template_spec.resources = Some(
+                serde_json::from_value(json!({
+                    "requests": {
+                        "storage": format!("{}Gi", sts_config.storage_size_gb)
+                    }
+                }))
+                .unwrap(),
+            );
+            pvcs.push(pvc_template.clone());
+            volume_mounts.push(VolumeMount {
+                mount_path: format!("{}/{}/worker-{}", root_path, task_id, worker_id),
+                mount_propagation: None,
+                name,
+                read_only: None,
+                sub_path: None,
+                sub_path_expr: None,
+            })
+        }
+
         info!("create sts {:?}", sts_name);
         self.sts_api.create(&PostParams::default(), &sts).await?;
         Ok(())
@@ -531,10 +552,39 @@ impl WorkerScaler {
         }
     }
 
+    async fn list_pvcs_by_task_id(&self, task_id: String) -> kube::Result<Vec<String>> {
+        let list_params = ListParams::default()
+            .labels(&self.config.label_selector())
+            .timeout(15);
+        let pvcs = self.pvc_api.list(&list_params).await?;
+        let mut pvc_names = vec![];
+        for pvc in pvcs.items.iter() {
+            let name = pvc.name_any();
+            let cur_task_id = parse_task_id_by_pvc_name(&name);
+            assert!(!task_id.is_empty());
+            if cur_task_id == task_id {
+                pvc_names.push(name);
+            }
+        }
+        Ok(pvc_names)
+    }
+
     async fn delete_pvc(&self, task_id: &str) {
-        let pvc_name = new_worker_pvc_name(&self.pvc_template_name, task_id);
-        if let Err(err) = self.pvc_api.delete(&pvc_name, &Default::default()).await {
-            warn!("delete pvc {} err {:?}", pvc_name, err);
+        match self.list_pvcs_by_task_id(task_id.to_string()).await {
+            Ok(pvc_names) => {
+                self.delete_pvc_by_names(pvc_names).await;
+            }
+            Err(err) => {
+                warn!("list {} pvc err {:?}", task_id, err);
+            }
+        }
+    }
+
+    async fn delete_pvc_by_names(&self, pvc_names: Vec<String>) {
+        for pvc_name in &pvc_names {
+            if let Err(err) = self.pvc_api.delete(pvc_name, &Default::default()).await {
+                warn!("delete pvc {} err {:?}", pvc_name, err);
+            }
         }
     }
 
@@ -724,11 +774,11 @@ fn parse_task_id_by_pod_name(pod_name: &str) -> String {
     "".to_string()
 }
 
-fn parse_task_id_by_pvc_name(pvc_name: &str, pvc_template_name: &str) -> String {
+fn parse_task_id_by_pvc_name(pvc_name: &str) -> String {
     // pvc name format: {pvc-template-name}-load-data-worker-{task-id}-0
     // task-id:         {keyspace-id}-{lightning-task-id}-{table-id}-{engine-id}
     //
-    let fields: Vec<&str> = pvc_name[pvc_template_name.len()..].split('-').collect();
+    let fields: Vec<&str> = pvc_name.split('-').collect();
     if fields.len() == 9 {
         return format!("{}-{}-{}-{}", fields[4], fields[5], fields[6], fields[7]);
     } else if fields.len() == 10 {
@@ -749,10 +799,6 @@ fn new_worker_pod_name(task_id: &str) -> String {
     format!("load-data-worker-{}-0", task_id)
 }
 
-fn new_worker_pvc_name(pvc_template_name: &str, task_id: &str) -> String {
-    format!("{}-load-data-worker-{}-0", pvc_template_name, task_id)
-}
-
 async fn get_proc_output(mut attached: AttachedProcess) -> String {
     let stdout = tokio_util::io::ReaderStream::new(attached.stdout().unwrap());
     let out = stdout
@@ -764,8 +810,37 @@ async fn get_proc_output(mut attached: AttachedProcess) -> String {
     out
 }
 
+fn gen_sts_config(data_size_gb: usize, max_cores: f64) -> StsConfig {
+    let core_num = calculate_num_cores(data_size_gb, max_cores);
+    let worker_num = calculate_num_workers(core_num);
+    let storage_size_gb = max(data_size_gb / worker_num * 3, WORKER_MIN_STORAGE_GB);
+
+    // align with `calculate_num_cores`
+    let enable_node_group = core_num == LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM;
+    StsConfig {
+        core_num,
+        storage_size_gb,
+        enable_node_group,
+        worker_num,
+    }
+}
+
+fn calculate_num_workers(core_num: f64) -> usize {
+    // align with `calculate_num_cores`
+    if core_num == LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM {
+        16
+    } else if core_num == 14.0 {
+        8
+    } else {
+        1
+    }
+}
+
 fn calculate_num_cores(data_size_gb: usize, max_cores: f64) -> f64 {
-    let cores: f64 = if data_size_gb > 100 {
+    let cores: f64 = if data_size_gb > 500 {
+        // in order to exclusively use the node by worker
+        LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM
+    } else if data_size_gb > 100 {
         14.0
     } else if data_size_gb > 50 {
         8.0
@@ -781,24 +856,19 @@ fn calculate_num_cores(data_size_gb: usize, max_cores: f64) -> f64 {
     cores.min(max_cores)
 }
 
-fn calculate_max_in_mem_size(pod_mem: f64) -> usize {
-    if pod_mem >= 28.0 {
-        // align with calculate_num_cores
-        DEFAULT_MAX_IN_MEM_SIZE * 2
-    } else {
-        DEFAULT_MAX_IN_MEM_SIZE
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::Time};
     use load_data::task::LoadTaskStates;
 
     use crate::worker_scaler::{
-        new_worker_pod_name, new_worker_pvc_name, new_worker_svc_name, parse_task_id_by_pod_name,
+        new_worker_pod_name, new_worker_svc_name, parse_task_id_by_pod_name,
         parse_task_id_by_pvc_name, WorkerPod,
     };
+
+    fn new_worker_pvc_name(pvc_template_name: &str, task_id: &str) -> String {
+        format!("{}-load-data-worker-{}-0", pvc_template_name, task_id)
+    }
 
     #[test]
     fn test_worker_pod_update() {
@@ -876,10 +946,7 @@ mod tests {
             let pod_name = new_worker_pod_name(task_id);
             let pvc_name = new_worker_pvc_name(pvc_template_name, task_id);
             assert_eq!(task_id, parse_task_id_by_pod_name(pod_name.as_str()));
-            assert_eq!(
-                task_id,
-                parse_task_id_by_pvc_name(pvc_name.as_str(), pvc_template_name)
-            );
+            assert_eq!(task_id, parse_task_id_by_pvc_name(pvc_name.as_str()));
         }
     }
 }

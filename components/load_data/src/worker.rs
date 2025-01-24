@@ -48,9 +48,6 @@ use crate::{
 };
 
 pub const ZSTD_COMPRESSION_LEVEL: i32 = 3;
-pub const FLUSH_FILE_CONCURRENCY: usize = 8;
-pub const CREATE_FILE_CONCURRENCY: usize = 32;
-pub const INGEST_CONCURRENCY: usize = 4;
 
 pub const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
@@ -94,6 +91,7 @@ pub struct KvPairsWorker {
     task_ctx: TaskContext,
     l0_data_dir: PathBuf,
     l1_data_dir: PathBuf,
+    flush_file_concurrency: usize,
 
     kv_pairs: Vec<KvPair>,
     in_mem_size: usize,
@@ -123,6 +121,7 @@ impl KvPairsWorker {
         config: LoadDataConfig,
         task_ctx: TaskContext,
         task_dir: PathBuf,
+        flush_file_concurrency: usize,
         receiver: Receiver<KvPairsWorkerMsg>,
         scheduler: LoadTaskScheduler,
         checkpoint: Arc<Mutex<LocalFileCheckpointStorage>>,
@@ -167,6 +166,7 @@ impl KvPairsWorker {
             l0_file_metas,
             l1_file_metas,
             flush_file_errs: vec![],
+            flush_file_concurrency,
             scheduler,
             receiver,
             unhandled_flush_files: vec![],
@@ -414,7 +414,7 @@ impl KvPairsWorker {
                 > self.l0_file_metas.len()
                     + self.flush_file_errs.len()
                     + self.unhandled_flush_files.len()
-                    + FLUSH_FILE_CONCURRENCY
+                    + self.flush_file_concurrency
             {
                 self.recv_flush_file(1)?;
             }
@@ -717,7 +717,7 @@ impl KvPairsWorker {
                 kv_size = 0;
                 kv_count = 0;
                 sent_count += 1;
-                if sent_count > FLUSH_FILE_CONCURRENCY {
+                if sent_count > self.flush_file_concurrency {
                     recv_count += 1;
                     match rx.recv().unwrap() {
                         Ok(l1_file) => {
@@ -1031,6 +1031,8 @@ pub struct BuildingWorker {
     scheduler: LoadTaskScheduler,
     receiver: Receiver<BuildingWorkerMsg>,
     cached_file_ids: Vec<u64>,
+    create_file_concurrency: usize,
+    ingest_concurrency: usize,
 
     key_comm_prefix: Vec<u8>,
     checkpoint_store: Arc<Mutex<LocalFileCheckpointStorage>>,
@@ -1047,6 +1049,8 @@ impl BuildingWorker {
         config: LoadDataConfig,
         ctx: LoadDataContext,
         task_ctx: TaskContext,
+        create_file_concurrency: usize,
+        ingest_concurrency: usize,
         key_comm_prefix: Vec<u8>,
         receiver: Receiver<BuildingWorkerMsg>,
         scheduler: LoadTaskScheduler,
@@ -1070,6 +1074,8 @@ impl BuildingWorker {
             receiver,
             scheduler,
             cached_file_ids: vec![],
+            create_file_concurrency,
+            ingest_concurrency,
             key_comm_prefix,
             checkpoint_store,
             sst_metas,
@@ -1272,7 +1278,7 @@ impl BuildingWorker {
             }
             self.spawn_build_file(file_id.unwrap(), batch, tx.clone(), compression_type);
             sent_count += 1;
-            if sent_count > CREATE_FILE_CONCURRENCY {
+            if sent_count > self.create_file_concurrency {
                 recv_count += 1;
                 match rx.recv().unwrap() {
                     Err(err) => {
@@ -1711,7 +1717,7 @@ impl BuildingWorker {
                 let res = ingest_files_to_leader(pd_cli, cs, &region, leader).await;
                 let _ = tx.send(res.map(|_| region));
             });
-            if msg_cnt < INGEST_CONCURRENCY {
+            if msg_cnt < self.ingest_concurrency {
                 msg_cnt += 1;
             } else {
                 handle_ingest_res(rx.recv().unwrap());
