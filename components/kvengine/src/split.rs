@@ -18,6 +18,7 @@ use bytes::{Buf, Bytes};
 use collections::HashSet;
 use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
+use schema::schema::StorageClass;
 use slog_global::info;
 use tidb_query_datatype::codec::table::{
     decode_table_id, INDEX_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
@@ -25,11 +26,7 @@ use tidb_query_datatype::codec::table::{
 use tikv_util::codec::{bytes::encode_bytes, number::NumberEncoder};
 
 use crate::{
-    table::{
-        columnar::{ColumnarLevels, IA_STORAGE_CLASS},
-        vector_index::VectorIndexes,
-        BoundedDataSet,
-    },
+    table::{columnar::ColumnarLevels, vector_index::VectorIndexes, BoundedDataSet},
     *,
 };
 
@@ -269,13 +266,15 @@ impl Engine {
         if source_shard.has_txn_file_locks() {
             return Err(Error::CheckMerge("source has txn file locks".to_string()));
         }
-        let source_storage_class = source_shard.get_property(STORAGE_CLASS_KEY);
+        let source_storage_class =
+            StorageClass::unmarshal(source_shard.get_property(STORAGE_CLASS_KEY).as_deref());
 
         let target_shard = self.get_shard_with_ver(target_id, target_ver)?;
         if !target_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("target not initial flushed".to_string()));
         }
-        let target_storage_class = target_shard.get_property(STORAGE_CLASS_KEY);
+        let target_storage_class =
+            StorageClass::unmarshal(target_shard.get_property(STORAGE_CLASS_KEY).as_deref());
 
         let belongs_to_same_keyspace = ApiV2::is_belongs_to_same_keyspace(
             &source_shard.outer_start,
@@ -297,15 +296,11 @@ impl Engine {
                     .map(|k| k.cipher_text.clone());
 
         let inconsistent_storage_class = if belongs_to_same_keyspace {
-            if source_storage_class.is_none() && target_storage_class.is_none() {
+            if !source_storage_class.is_specified() && !target_storage_class.is_specified() {
                 false
             } else {
-                let source_ia = source_storage_class
-                    .map(|val| val.eq(&[IA_STORAGE_CLASS].to_vec()))
-                    .unwrap_or_default();
-                let target_ia = target_storage_class
-                    .map(|val| val.eq(&[IA_STORAGE_CLASS].to_vec()))
-                    .unwrap_or_default();
+                let source_ia = source_storage_class == StorageClass::Ia;
+                let target_ia = target_storage_class == StorageClass::Ia;
                 if source_ia && target_ia {
                     let source_table_prefix =
                         &source_shard.outer_start[0..KEYSPACE_PREFIX_LEN + 1 + 8];
@@ -317,7 +312,7 @@ impl Engine {
                 }
             }
         } else {
-            source_storage_class.is_some() || target_storage_class.is_some()
+            source_storage_class.is_specified() || target_storage_class.is_specified()
         };
 
         let (clear_source, clear_target) =

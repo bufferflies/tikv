@@ -6,6 +6,7 @@ use aligned_vec::{avec, AVec};
 use bytes::{Buf, BufMut};
 use collections::HashMap;
 use protobuf::Message;
+use schema::schema::StorageClass;
 use tidb_query_datatype::{FieldTypeAccessor, FieldTypeFlag, FieldTypeTp};
 use tipb::ColumnInfo;
 
@@ -25,10 +26,6 @@ use crate::{
 
 pub const HANDLE_COL_ID: i32 = -1;
 pub(crate) const VERSION_COL_ID: i32 = -1024;
-
-pub const UNSPECIFIED_STORAGE_CLASS: u8 = 0;
-pub const STANDARD_STORAGE_CLASS: u8 = 1;
-pub const IA_STORAGE_CLASS: u8 = 2;
 
 pub const COLUMNAR_MAGIC: u32 = 0xc01e32ae;
 
@@ -88,9 +85,10 @@ impl SchemaBuf {
         self.columns.retain(|c| c.get_column_id() != handle_col_id);
     }
 
-    pub fn set_storage_class(&mut self, storage_class: u8) {
-        if storage_class > UNSPECIFIED_STORAGE_CLASS {
-            self.properties.set(STORAGE_CLASS_KEY, &[storage_class]);
+    pub fn set_storage_class(&mut self, storage_class: StorageClass) {
+        if storage_class.is_specified() {
+            self.properties
+                .set(STORAGE_CLASS_KEY, &storage_class.marshal());
         } else {
             self.properties.remove(STORAGE_CLASS_KEY)
         }
@@ -134,11 +132,8 @@ impl Schema {
             || !self.vector_indexes.is_empty()
     }
 
-    pub fn get_storage_class(&self) -> u8 {
-        self.properties
-            .get(STORAGE_CLASS_KEY)
-            .map(|v| v.first().copied().unwrap())
-            .unwrap_or_default()
+    pub fn get_storage_class(&self) -> StorageClass {
+        StorageClass::unmarshal(self.properties.get(STORAGE_CLASS_KEY).as_deref())
     }
 
     pub fn find_column_by_id(&self, id: i64) -> Option<&ColumnInfo> {

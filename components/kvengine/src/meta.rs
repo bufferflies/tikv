@@ -14,16 +14,14 @@ use bytes::{Buf, Bytes};
 use kvenginepb as pb;
 use kvenginepb::{SchemaMeta, TxnFileRef, VectorIndex};
 use protobuf::Message;
+use schema::schema::StorageClass;
 use slog_global::*;
 use util::TxnFileRefExt as _;
 
 use super::*;
 use crate::{
     dfs::FileType,
-    table::{
-        columnar::{IA_STORAGE_CLASS, UNSPECIFIED_STORAGE_CLASS},
-        BoundedDataSet, DataBound, InnerKey,
-    },
+    table::{BoundedDataSet, DataBound, InnerKey},
     util::{TxnFileLocks, TxnFileRefPropertyHelper},
 };
 
@@ -479,8 +477,9 @@ impl ShardMeta {
                 return true;
             }
         }
-        if !cs.get_property_key().is_empty() && cs.get_property_key() == STORAGE_CLASS_KEY {
-            return self.get_storage_class() == *cs.property_value.first().unwrap();
+        if cs.get_property_key() == STORAGE_CLASS_KEY {
+            let sc = StorageClass::unmarshal(Some(&cs.property_value));
+            return self.get_storage_class() == sc;
         }
         false
     }
@@ -1308,19 +1307,11 @@ impl ShardMeta {
     }
 
     pub fn use_ia(&self) -> bool {
-        self.get_storage_class() == IA_STORAGE_CLASS
+        self.get_storage_class() == StorageClass::Ia
     }
 
-    pub fn get_storage_class(&self) -> u8 {
-        if let Some(val) = self.get_property(STORAGE_CLASS_KEY) {
-            if !val.is_empty() {
-                val[0]
-            } else {
-                UNSPECIFIED_STORAGE_CLASS
-            }
-        } else {
-            UNSPECIFIED_STORAGE_CLASS
-        }
+    pub fn get_storage_class(&self) -> StorageClass {
+        StorageClass::unmarshal(self.get_property(STORAGE_CLASS_KEY).as_deref())
     }
 }
 

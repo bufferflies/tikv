@@ -7,12 +7,9 @@ use std::{
 
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::Buf;
-use kvengine::{
-    get_split_keys_for_exclusive_tables,
-    table::columnar::{IA_STORAGE_CLASS, STANDARD_STORAGE_CLASS},
-    STORAGE_CLASS_KEY,
-};
+use kvengine::{get_split_keys_for_exclusive_tables, STORAGE_CLASS_KEY};
 use kvproto::{metapb, metapb::Region};
+use schema::schema::StorageClass;
 use tidb_query_datatype::codec::table::decode_table_id;
 use tikv_util::{info, time::Instant, warn, worker::Runnable};
 
@@ -100,9 +97,9 @@ impl SchemaRunner {
                 let ia_storage_class_tables = schema_file.overlap_storage_class_tables(
                     &shard.range.outer_start,
                     &shard.range.outer_end,
-                    IA_STORAGE_CLASS,
+                    StorageClass::Ia,
                 );
-                let mut storage_class_property: Option<u8> = None;
+                let mut storage_class_property: Option<StorageClass> = None;
                 if !ia_storage_class_tables.is_empty() {
                     let ia_tables_len = ia_storage_class_tables.len();
                     let split_keys = get_split_keys_for_exclusive_tables(
@@ -126,14 +123,14 @@ impl SchemaRunner {
                         };
                         self.router.send(region_id, PeerMsg::CasualMessage(msg));
                         return;
-                    } else if ia_tables_len == 1 && shard.get_storage_class() != IA_STORAGE_CLASS {
-                        storage_class_property = Some(IA_STORAGE_CLASS)
+                    } else if ia_tables_len == 1 && shard.get_storage_class() != StorageClass::Ia {
+                        storage_class_property = Some(StorageClass::Ia)
                     }
                 } else {
                     let standard_storage_class_tables = schema_file.overlap_storage_class_tables(
                         &shard.range.outer_start,
                         &shard.range.outer_end,
-                        STANDARD_STORAGE_CLASS,
+                        StorageClass::Standard,
                     );
                     if standard_storage_class_tables.len() == 1 {
                         let mut start_key: &[u8] = &shard.range.outer_start;
@@ -143,18 +140,18 @@ impl SchemaRunner {
                         let start_table_id = decode_table_id(start_key).unwrap_or(0);
                         let end_table_id = decode_table_id(end_key).unwrap_or(i64::MAX);
                         if end_table_id - start_table_id < 2
-                            && shard.get_storage_class() != STANDARD_STORAGE_CLASS
+                            && shard.get_storage_class() != StorageClass::Standard
                         {
-                            storage_class_property = Some(STANDARD_STORAGE_CLASS)
+                            storage_class_property = Some(StorageClass::Standard)
                         }
                     }
                 }
                 if let Some(storage_class) = storage_class_property {
                     let mut cs = kvengine::new_change_set(shard.id, shard.ver);
                     cs.set_property_key(STORAGE_CLASS_KEY.to_string());
-                    cs.set_property_value([storage_class].to_vec());
+                    cs.set_property_value(storage_class.marshal());
                     info!(
-                        "{} propose update storage_class property {}",
+                        "{} propose update storage_class property {:?}",
                         tag, storage_class
                     );
                     let msg = StoreMsg::GenerateEngineChangeSet(cs);
@@ -184,7 +181,7 @@ impl SchemaRunner {
                                 continue;
                             }
 
-                            warn!("{} wait for updating storage class property timeout", tag; "current" => current, "expect" => storage_class);
+                            warn!("{} wait for updating storage class property timeout", tag; "current" => ?current, "expect" => ?storage_class);
                             break;
                         }
                     }

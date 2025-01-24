@@ -18,6 +18,7 @@ use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
 use kvenginepb::{self as pb, TxnFileRef};
 use rand::Rng;
+use schema::schema::StorageClass;
 use slog_global::*;
 use tikv_util::{box_err, box_try, codec::number::U64_SIZE};
 
@@ -28,10 +29,7 @@ use crate::{
     table::{
         self,
         blobtable::blobtable::BlobTable,
-        columnar::{
-            ColumnarLevel, ColumnarLevels, SchemaFile, VectorIndexDef, IA_STORAGE_CLASS,
-            UNSPECIFIED_STORAGE_CLASS,
-        },
+        columnar::{ColumnarLevel, ColumnarLevels, SchemaFile, VectorIndexDef},
         file::InMemFile,
         memtable::{self, CfTable},
         search,
@@ -49,7 +47,7 @@ pub(crate) struct ShardPendingOperations {
     pub(crate) truncate_ts: Option<TruncateTs>,
     pub(crate) trim_over_bound: bool,
     pub(crate) manual_major_compaction: bool,
-    pub(crate) storage_class: u8,
+    pub(crate) storage_class: StorageClass,
 }
 
 impl ShardPendingOperations {
@@ -59,7 +57,7 @@ impl ShardPendingOperations {
             truncate_ts: None,
             trim_over_bound: false,
             manual_major_compaction: false,
-            storage_class: UNSPECIFIED_STORAGE_CLASS,
+            storage_class: StorageClass::Unspecified,
         }
     }
 }
@@ -246,11 +244,7 @@ impl Shard {
                 }
             }
             if let Some(val) = get_shard_property(STORAGE_CLASS_KEY, props) {
-                if !val.is_empty() {
-                    pending_ops.storage_class = val[0];
-                } else {
-                    pending_ops.storage_class = UNSPECIFIED_STORAGE_CLASS
-                }
+                pending_ops.storage_class = StorageClass::unmarshal(Some(&val));
             }
         }
         shard
@@ -737,11 +731,7 @@ impl Shard {
             }
             STORAGE_CLASS_KEY => {
                 let mut pending_ops = self.pending_ops.write().unwrap();
-                if !val.is_empty() {
-                    pending_ops.storage_class = val[0];
-                } else {
-                    pending_ops.storage_class = UNSPECIFIED_STORAGE_CLASS;
-                }
+                pending_ops.storage_class = StorageClass::unmarshal(Some(val));
             }
             _ => {}
         }
@@ -1247,10 +1237,10 @@ impl Shard {
     }
 
     pub fn use_ia(&self) -> bool {
-        self.get_storage_class() == IA_STORAGE_CLASS
+        self.get_storage_class() == StorageClass::Ia
     }
 
-    pub fn get_storage_class(&self) -> u8 {
+    pub fn get_storage_class(&self) -> StorageClass {
         self.pending_ops.read().unwrap().storage_class
     }
 

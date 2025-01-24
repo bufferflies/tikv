@@ -5,6 +5,7 @@ use std::{cmp, collections::HashSet};
 use api_version;
 use bytes::Bytes;
 use codec::{buffer::BufferWriter, number::NumberEncoder};
+use schema::schema::StorageClass;
 
 use crate::{
     metrics::{
@@ -293,7 +294,7 @@ pub struct ShardStats {
     pub ready_to_destroy_range: bool,
     pub truncate_ts: Option<u64>,
     pub trim_over_bound: bool,
-    pub storage_class: u8,
+    pub storage_class: StorageClass,
     // Txn File Stats
     pub txn_file_locks: usize,
     // Columnar Stats

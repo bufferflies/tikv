@@ -22,8 +22,7 @@ use kvengine::{
         columnar,
         columnar::{
             new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
-            Schema, SchemaBuf, SchemaFile, VectorIndexDef, IA_STORAGE_CLASS,
-            STANDARD_STORAGE_CLASS, UNSPECIFIED_STORAGE_CLASS,
+            Schema, SchemaBuf, SchemaFile, VectorIndexDef,
         },
         file::{File, LocalFile},
         ChecksumType, NO_COMPRESSION,
@@ -733,15 +732,7 @@ impl SchemaManager {
 }
 
 fn table_info_to_schema(ti: &TableInfo) -> Schema {
-    let storage_class = if let Some(storage_class) = ti.storage_class() {
-        if storage_class.eq("IA") {
-            IA_STORAGE_CLASS
-        } else {
-            STANDARD_STORAGE_CLASS
-        }
-    } else {
-        UNSPECIFIED_STORAGE_CLASS
-    };
+    let storage_class = ti.storage_class();
     if !ti.with_columnar() {
         let mut schema_buf = SchemaBuf::default();
         schema_buf.table_id = ti.id;

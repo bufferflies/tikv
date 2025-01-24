@@ -26,8 +26,7 @@ use kvengine::{
         columnar,
         columnar::{
             build_schema_file, filter::TableScanCtx, new_int_handle_column_info,
-            new_version_column_info, ColumnarFilterReader, Schema, SchemaBuf, IA_STORAGE_CLASS,
-            STANDARD_STORAGE_CLASS,
+            new_version_column_info, ColumnarFilterReader, Schema, SchemaBuf,
         },
         sstable::BlockCache,
     },
@@ -37,6 +36,7 @@ use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
 use protobuf::Message;
 use rand::Rng;
+use schema::schema::StorageClass;
 use test_cloud_server::{
     client::{CommitAction, MutateOptions},
     must_wait,
@@ -192,7 +192,7 @@ fn test_schema_file_with_storage_class() {
     for table_id in [table_ids[1], table_ids[3]] {
         let mut schema_buf = SchemaBuf::default();
         schema_buf.table_id = table_id;
-        schema_buf.set_storage_class(IA_STORAGE_CLASS);
+        schema_buf.set_storage_class(StorageClass::Ia);
         schemas.push(schema_buf.into());
     }
     let schema_version = 10;
@@ -217,7 +217,7 @@ fn test_schema_file_with_storage_class() {
             for &id_ver in &kvengine.get_all_shard_id_vers() {
                 let shard = kvengine.get_shard(id_ver.id).unwrap();
                 if shard.get_schema_file().is_some()
-                    && shard.get_storage_class() == IA_STORAGE_CLASS
+                    && shard.get_storage_class() == StorageClass::Ia
                 {
                     shard_with_ia_count += 1;
                 }
@@ -232,11 +232,11 @@ fn test_schema_file_with_storage_class() {
     let mut new_schemas = vec![];
     let mut schema_buf_0 = SchemaBuf::default();
     schema_buf_0.table_id = table_ids[1];
-    schema_buf_0.set_storage_class(IA_STORAGE_CLASS);
+    schema_buf_0.set_storage_class(StorageClass::Ia);
     new_schemas.push(schema_buf_0.into());
     let mut schema_buf_1 = SchemaBuf::default();
     schema_buf_1.table_id = table_ids[3];
-    schema_buf_1.set_storage_class(STANDARD_STORAGE_CLASS);
+    schema_buf_1.set_storage_class(StorageClass::Standard);
     new_schemas.push(schema_buf_1.into());
     let new_schema_version = 11;
     let new_schema_file_data = build_schema_file(keyspace_id, new_schema_version, new_schemas, 0);
@@ -257,9 +257,9 @@ fn test_schema_file_with_storage_class() {
             for &id_ver in &kvengine.get_all_shard_id_vers() {
                 let shard = kvengine.get_shard(id_ver.id).unwrap();
                 if shard.get_schema_file().is_some() {
-                    if shard.get_storage_class() == IA_STORAGE_CLASS {
+                    if shard.get_storage_class() == StorageClass::Ia {
                         shard_with_ia_count += 1;
-                    } else if shard.get_storage_class() == STANDARD_STORAGE_CLASS {
+                    } else if shard.get_storage_class() == StorageClass::Standard {
                         shard_with_standard_count += 1;
                     }
                 }

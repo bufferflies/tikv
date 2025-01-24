@@ -50,6 +50,8 @@ pub struct TableInfo {
     pub version: u16,
     pub is_columnar: bool,
     pub tiflash_replica: Option<TiFlashReplica>,
+    // `None`: the storage class is never set.
+    pub storage_class_tier: Option<String>,
 }
 
 impl TableInfo {
@@ -70,17 +72,14 @@ impl TableInfo {
     }
 
     pub fn with_storage_class(&self) -> bool {
-        self.comment.contains("storage_class")
+        self.storage_class_tier.as_ref().is_some()
     }
 
-    pub fn storage_class(&self) -> Option<String> {
-        if self.comment.contains("storage_class=IA") {
-            Some("IA".to_string())
-        } else if self.comment.contains("storage_class") {
-            Some("Standard".to_string())
-        } else {
-            None
-        }
+    pub fn storage_class(&self) -> StorageClass {
+        self.storage_class_tier
+            .as_deref()
+            .and_then(|x| x.try_into().ok())
+            .unwrap_or(StorageClass::Unspecified)
     }
 }
 
@@ -214,6 +213,8 @@ pub struct PartitionDefinition {
     pub less_than: Option<Vec<String>>,
     pub in_values: Option<Vec<Vec<String>>>,
     pub comment: Option<String>,
+    // `None`: the storage class is never set.
+    pub storage_class_tier: Option<String>,
 }
 
 // SchemaDiff contains the schema modification at a particular schema version.
@@ -248,6 +249,84 @@ pub struct AffectedOption {
 pub struct SchemaVersionResponse {
     pub version: i64,
     pub schemas: Vec<TableInfo>,
+}
+
+const STORAGE_CLASS_TIER_STANDARD: &str = "STANDARD";
+const STORAGE_CLASS_TIER_IA: &str = "IA";
+
+#[repr(u8)]
+#[derive(PartialEq, Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StorageClass {
+    /// User doesn't specify the storage class.
+    ///
+    /// Most tables and partitions should be of this. Used to bypass storage
+    /// class relevant logic for performance.
+    #[default]
+    Unspecified = 0,
+
+    /// Standard Tier for general purpose.
+    Standard = 1,
+
+    /// Infrequent Access Tier for warm / cold data.
+    Ia = 2,
+}
+
+impl StorageClass {
+    pub fn marshal(&self) -> Vec<u8> {
+        match self {
+            Self::Unspecified => vec![],
+            _ => vec![*self as u8],
+        }
+    }
+
+    pub fn unmarshal(val: Option<&[u8]>) -> Self {
+        match val {
+            Some(val) if !val.is_empty() => {
+                debug_assert_eq!(val.len(), 1, "invalid val: {:?}", val);
+                StorageClass::try_from(val[0]).unwrap_or(StorageClass::Unspecified)
+            }
+            _ => StorageClass::Unspecified,
+        }
+    }
+
+    /// User has specified the storage class.
+    #[inline]
+    pub fn is_specified(&self) -> bool {
+        *self != Self::Unspecified
+    }
+}
+
+impl TryFrom<&str> for StorageClass {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "" => Ok(StorageClass::Unspecified),
+            STORAGE_CLASS_TIER_STANDARD => Ok(StorageClass::Standard),
+            STORAGE_CLASS_TIER_IA => Ok(StorageClass::Ia),
+            _ => {
+                debug_assert!(false, "Unknown storage class: {}", value);
+                Err(format!("Unknown storage class: {}", value))
+            }
+        }
+    }
+}
+
+impl TryFrom<u8> for StorageClass {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        // `0` is not expected to be passed in.
+        match value {
+            1 => Ok(StorageClass::Standard),
+            2 => Ok(StorageClass::Ia),
+            _ => {
+                debug_assert!(false, "Unknown storage class: {}", value);
+                Err(format!("Unknown storage class: {}", value))
+            }
+        }
+    }
 }
 
 pub fn convert_column_infos_to_tipb(
@@ -468,5 +547,19 @@ mod tests {
         assert_eq!(replica.location_labels, None);
         assert_eq!(replica.available, true);
         assert_eq!(replica.available_partition_ids, None);
+    }
+
+    #[test]
+    fn test_storage_class() {
+        let cases = vec![
+            (StorageClass::Unspecified, None, vec![]),
+            (StorageClass::Unspecified, Some(vec![]), vec![]),
+            (StorageClass::Standard, Some(vec![1]), vec![1]),
+            (StorageClass::Ia, Some(vec![2]), vec![2]),
+        ];
+        for (sc, input, output) in cases {
+            assert_eq!(StorageClass::unmarshal(input.as_deref()), sc);
+            assert_eq!(sc.marshal(), output);
+        }
     }
 }

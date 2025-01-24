@@ -16,9 +16,9 @@ use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    table::columnar::{SchemaFile, IA_STORAGE_CLASS},
-    CheckMergeResult, IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION,
-    MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE, TRUNCATE_TS_KEY,
+    table::columnar::SchemaFile, CheckMergeResult, IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY,
+    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE,
+    TRUNCATE_TS_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -35,6 +35,7 @@ use raft::{self, eraftpb::MessageType, GetEntriesContext, Storage};
 use raft_proto::eraftpb;
 use raftstore::store::util;
 use rand::{thread_rng, Rng};
+use schema::schema::StorageClass;
 use tikv_util::{
     box_err,
     codec::bytes::decode_bytes,
@@ -1202,7 +1203,7 @@ impl<'a> PeerMsgHandler<'a> {
             let mut estimated_size = shard.get_estimated_size();
             let estimated_entries = shard.get_estimated_entries();
             let estimated_kv_size = shard.get_estimated_kv_size();
-            if shard.get_storage_class() == IA_STORAGE_CLASS {
+            if shard.get_storage_class() == StorageClass::Ia {
                 estimated_size = cmp::max(estimated_size, self.ctx.cfg.region_split_size.0);
             }
             // use 1 for empty size as 0 is for unknown size in PD.

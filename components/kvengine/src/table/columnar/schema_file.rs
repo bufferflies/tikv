@@ -5,6 +5,7 @@ use std::{collections::HashMap, ops::Deref, sync::Arc};
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut};
 use protobuf::Message;
+use schema::schema::StorageClass;
 use tidb_query_datatype::codec::table::{
     decode_table_id, INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
 };
@@ -12,10 +13,7 @@ use tidb_query_datatype::codec::table::{
 use crate::{
     table::{
         self,
-        columnar::{
-            builder::new_version_column_info, columnar::Schema, SchemaBuf, VectorIndexDef,
-            UNSPECIFIED_STORAGE_CLASS,
-        },
+        columnar::{builder::new_version_column_info, columnar::Schema, SchemaBuf, VectorIndexDef},
         file::File,
         ChecksumType, InnerKey, NO_COMPRESSION,
     },
@@ -223,7 +221,7 @@ impl SchemaFile {
             && &end_key[TABLE_PREFIX_KEY_LEN..] < INDEX_PREFIX_SEP;
         for schema in self.core.tables.values() {
             let table_id = schema.table_id;
-            if schema.get_storage_class() > UNSPECIFIED_STORAGE_CLASS {
+            if schema.get_storage_class().is_specified() {
                 if start_table_id == end_table_id && table_id == start_table_id {
                     return true;
                 }
@@ -286,7 +284,7 @@ impl SchemaFile {
         &self,
         mut start_key: &[u8],
         mut end_key: &[u8],
-        storage_class: u8,
+        storage_class: StorageClass,
     ) -> Vec<i64> {
         start_key.advance(KEYSPACE_PREFIX_LEN);
         end_key.advance(KEYSPACE_PREFIX_LEN);
@@ -392,6 +390,7 @@ pub fn build_schema_file(
 #[cfg(test)]
 mod tests {
     use api_version::{api_v2::TIDB_META_KEY_PREFIX, ApiV2};
+    use schema::schema::StorageClass;
     use tidb_query_datatype::{
         codec::table::RECORD_PREFIX_SEP, Collation::Utf8Mb4GeneralCi, FieldTypeTp,
     };
@@ -400,10 +399,7 @@ mod tests {
     use super::*;
     use crate::{
         table::{
-            columnar::{
-                builder::{new_common_handle_column_info, new_int_handle_column_info},
-                IA_STORAGE_CLASS, STANDARD_STORAGE_CLASS,
-            },
+            columnar::builder::{new_common_handle_column_info, new_int_handle_column_info},
             file::InMemFile,
         },
         Properties,
@@ -523,11 +519,11 @@ mod tests {
         let schema_version = 1234i64;
         let mut schema_buf_1 = SchemaBuf::default();
         schema_buf_1.table_id = 10;
-        schema_buf_1.set_storage_class(IA_STORAGE_CLASS);
+        schema_buf_1.set_storage_class(StorageClass::Ia);
         let schema_1 = Schema::new(schema_buf_1);
         let mut schema_buf_2 = SchemaBuf::default();
         schema_buf_2.table_id = 20;
-        schema_buf_2.set_storage_class(STANDARD_STORAGE_CLASS);
+        schema_buf_2.set_storage_class(StorageClass::Standard);
         let schema_2 = Schema::new(schema_buf_2);
         let schemas = vec![schema_1, schema_2];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
@@ -630,11 +626,11 @@ mod tests {
             vector_indexes: vec![],
             properties: Properties::default(),
         };
-        schema_buf_2.set_storage_class(STANDARD_STORAGE_CLASS);
+        schema_buf_2.set_storage_class(StorageClass::Standard);
         let schema_2 = Schema::new(schema_buf_2);
         let mut schema_buf_3 = SchemaBuf::default();
         schema_buf_3.table_id = 30;
-        schema_buf_3.set_storage_class(IA_STORAGE_CLASS);
+        schema_buf_3.set_storage_class(StorageClass::Ia);
         let schema_3 = Schema::new(schema_buf_3);
         let schemas = vec![schema_1, schema_2, schema_3];
         let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
