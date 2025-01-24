@@ -36,6 +36,9 @@ pub enum ErrorInner {
     #[error("{0}")]
     Engine(#[from] engine_traits::Error),
 
+    #[error{"{0}"}]
+    CloudKvEngine(#[from] kvengine::Error),
+
     #[error("storage is closed.")]
     Closed,
 
@@ -148,6 +151,7 @@ impl ErrorCodeExt for Error {
             ErrorInner::Kv(e) => e.error_code(),
             ErrorInner::Txn(e) => e.error_code(),
             ErrorInner::Engine(e) => e.error_code(),
+            ErrorInner::CloudKvEngine(_) => error_code::engine::ENGINE,
             ErrorInner::Closed => error_code::storage::CLOSED,
             ErrorInner::Other(_) => error_code::storage::UNKNOWN,
             ErrorInner::Io(_) => error_code::storage::IO,

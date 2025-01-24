@@ -42,6 +42,9 @@ env-logger = ["tikv_util/env-logger"]
 # https://stackoverflow.com/questions/41700543/can-we-share-test-utilites-between-crates
 testing = []
 
+# For debug trace
+debug-trace-txn-tasks = []
+
 [lib]
 name = "tikv"
 

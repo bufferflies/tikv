@@ -251,9 +251,6 @@ struct SchedulerInner<L: LockManager> {
     // slot_id -> { cid -> `TaskContext` } in the slot.
     task_slots: Vec<CachePadded<Mutex<HashMap<u64, TaskContext>>>>,
 
-    // cmd id generator
-    id_alloc: CachePadded<AtomicU64>,
-
     // write concurrency control
     latches: GlobalLatches,
 
@@ -297,11 +294,15 @@ fn id_index(cid: u64) -> usize {
     cid as usize % TASKS_SLOTS_NUM
 }
 
+lazy_static::lazy_static! {
+    static ref CMD_ID_ALLOC: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+}
+
 impl<L: LockManager> SchedulerInner<L> {
     /// Generates the next command ID.
     #[inline]
     fn gen_id(&self) -> u64 {
-        let id = self.id_alloc.fetch_add(1, Ordering::Relaxed);
+        let id = CMD_ID_ALLOC.fetch_add(1, Ordering::Relaxed);
         id + 1
     }
 
@@ -445,7 +446,6 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
         let inner = Arc::new(SchedulerInner {
             task_slots,
-            id_alloc: AtomicU64::new(0).into(),
             latches: GlobalLatches::new(config.scheduler_concurrency),
             engine: engine.get_kvengine(),
             running_write_bytes: AtomicUsize::new(0).into(),
@@ -522,6 +522,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let cid = specified_cid.unwrap_or_else(|| self.inner.gen_id());
         let tracker = get_tls_tracker_token();
         debug!("received new command"; "cid" => cid, "cmd" => ?cmd, "tracker" => ?tracker);
+        #[cfg(feature = "debug-trace-txn-tasks")]
+        crate::storage::txn::debug::trace_txn_task(cid, &cmd);
 
         let tag = cmd.tag();
         let priority_tag = get_priority_tag(cmd.priority());
@@ -777,6 +779,9 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     {
         let err = StorageError::from(err);
         debug!("write command finished with error"; "cid" => cid, "err" => ?err);
+        #[cfg(feature = "debug-trace-txn-tasks")]
+        crate::storage::txn::debug::trace_txn_task_error(cid, &err);
+
         let tctx = self.inner.dequeue_task_context(cid);
 
         SCHED_STAGE_COUNTER_VEC.get(tctx.tag).error.inc();
@@ -1817,7 +1822,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                                     "start_ts" => start_ts,
                                     "cid" => cid,
                                     "err" => ?err);
-                                callback.execute(ProcessResult::Failed { err: box_err!(err) });
+                                Self::finish_txn_file_cmd_with_err(cid, tag, callback, err);
                                 return;
                             }
                         }
@@ -1829,7 +1834,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                                     "start_ts" => start_ts,
                                     "cid" => cid,
                                     "err" => ?err);
-                                callback.execute(ProcessResult::Failed { err: err.into() });
+                                Self::finish_txn_file_cmd_with_err(cid, tag, callback, err);
                                 return;
                             }
                         };
@@ -1838,15 +1843,30 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     }
                     Err(err) => {
                         SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_err.inc();
-                        info!("get snapshot failed"; "cid" => cid, "cmd" => ?cmd, "err" => ?err);
-                        callback.execute(ProcessResult::Failed {
-                            err: StorageError::from(err),
-                        });
+                        debug!("txn file: get snapshot failed"; "cid" => cid, "cmd" => ?cmd, "err" => ?err);
+                        Self::finish_txn_file_cmd_with_err(cid, tag, callback, err);
                     }
                 }
             },
             cid,
         );
+    }
+
+    fn finish_txn_file_cmd_with_err<ER>(
+        _cid: u64,
+        tag: CommandKind,
+        callback: SchedulerTaskCallback,
+        err: ER,
+    ) where
+        StorageError: From<ER>,
+    {
+        let err = StorageError::from(err);
+
+        #[cfg(feature = "debug-trace-txn-tasks")]
+        crate::storage::txn::debug::trace_txn_task_error(_cid, &err);
+
+        SCHED_STAGE_COUNTER_VEC.get(tag).error.inc();
+        callback.execute(ProcessResult::Failed { err });
     }
 }
 

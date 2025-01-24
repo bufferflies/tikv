@@ -32,6 +32,9 @@ while [[ $# -gt 0 ]]; do
 	--debug-trace-mem-table)
 		EXTRA_FEATURES+=("debug-trace-mem-table")
 		;;
+	--debug-trace-txn-tasks)
+		EXTRA_FEATURES+=("debug-trace-txn-tasks")
+		;;
 	--help)
 		show_help
 		exit 0

@@ -13,6 +13,9 @@ mod latch;
 mod region_latch;
 mod store;
 
+#[cfg(feature = "debug-trace-txn-tasks")]
+pub mod debug;
+
 use std::{error::Error as StdError, io::Error as IoError};
 
 use error_code::{self, ErrorCode, ErrorCodeExt};
