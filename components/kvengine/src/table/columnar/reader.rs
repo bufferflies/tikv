@@ -39,6 +39,7 @@ use tikv_util::codec::{
 };
 use tipb::ColumnInfo;
 
+use super::filter::{FilterOpResult, FilterOpResults, FilterOperator};
 use crate::table::{
     self,
     blobtable::blobtable::BlobTable,
@@ -78,10 +79,14 @@ impl ColumnarTableReader {
     pub fn new(
         columnar_file: &ColumnarFile,
         schema: Schema,
+        filter_op: Option<FilterOperator>,
         encryption_key: Option<EncryptionKey>,
     ) -> ColumnarTableReader {
         let table_meta = columnar_file.get_table(schema.table_id);
         debug_assert_eq!(table_meta.table_id, schema.table_id);
+        let packs_filter = filter_op
+            .as_ref()
+            .map(|op| Arc::new(op.rough_check(&table_meta)));
         let file = columnar_file.get_file();
         let encryption_ver = columnar_file.get_encryption_ver();
         let handle_reader = ColumnarColumnReader::new(
@@ -90,6 +95,7 @@ impl ColumnarTableReader {
             false,
             encryption_key.clone(),
             encryption_ver,
+            packs_filter.clone(),
         );
         let version_reader = ColumnarColumnReader::new(
             file.clone(),
@@ -97,12 +103,18 @@ impl ColumnarTableReader {
             false,
             encryption_key.clone(),
             encryption_ver,
+            packs_filter.clone(),
         );
         let columns_readers = schema
             .columns
             .iter()
             .map(|col| {
                 let col_id = col.get_column_id() as i32;
+                let packs_filter = if get_fixed_size(col) == 0 {
+                    None
+                } else {
+                    packs_filter.clone()
+                };
                 if let Some(col_meta) = table_meta.columns.get(&col_id) {
                     ColumnarColumnReader::new(
                         file.clone(),
@@ -110,6 +122,7 @@ impl ColumnarTableReader {
                         false,
                         encryption_key.clone(),
                         encryption_ver,
+                        packs_filter,
                     )
                 } else {
                     let col_meta = ColumnMeta::new(col.clone(), false);
@@ -119,6 +132,7 @@ impl ColumnarTableReader {
                         true,
                         encryption_key.clone(),
                         encryption_ver,
+                        packs_filter,
                     )
                 }
             })
@@ -140,8 +154,15 @@ impl ColumnarReader for ColumnarTableReader {
     }
 
     async fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
-        let pack_idx = self.table_meta.handle_index.search_pack_idx(handle);
-        self.handle_reader.load_pack(pack_idx).await?;
+        let mut pack_idx = self.table_meta.handle_index.search_pack_idx(handle);
+        while self.handle_reader.load_pack(pack_idx).await? {
+            if pack_idx >= self.handle_reader.num_packs() {
+                break;
+            }
+            // If the pack is skipped, try load next pack. Keep the row position align with
+            // other column readers.
+            pack_idx += 1;
+        }
         let handle_buffer = &self.handle_reader.pack_buffer;
         let row_idx_in_pack = if handle.is_empty() {
             0
@@ -165,12 +186,92 @@ impl ColumnarReader for ColumnarTableReader {
     }
 
     async fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
-        let read_row = self.handle_reader.read(&mut block.handles, limit).await?;
-        self.version_reader.read(&mut block.versions, limit).await?;
-        for (i, col) in self.columns_readers.iter_mut().enumerate() {
-            col.read(&mut block.columns[i], limit).await?;
+        // Read version column first to check if the pack is marked as skipped. If this
+        // pack is marked as skipped, we should set_row_idx to other column readers,
+        // including handle column if it is common handle.
+        let mut total_read_row = 0;
+        while total_read_row < limit {
+            if !self.version_reader.valid() {
+                break;
+            }
+            // If the pack is skipped, the read will return ASAP, in this case we should
+            // continue to read if total_read_row is less than limit.
+            let (read_row, is_skipped, row_idx) =
+                self.version_reader.read(&mut block.versions, limit).await?;
+            if is_skipped {
+                let (handle_read_row, handle_is_skipped, ..) = self
+                    .handle_reader
+                    .read(&mut block.handles, read_row)
+                    .await?;
+                assert_eq!(
+                    read_row,
+                    handle_read_row,
+                    "read_row: {}, handle_read_row: {}, version_pack_idx: {}, pack_idx: {}, version_num_packs: {}, num_packs: {}, handle_is_skipped: {}",
+                    read_row,
+                    handle_read_row,
+                    self.version_reader.pack_idx(),
+                    self.handle_reader.pack_idx(),
+                    self.version_reader.num_packs(),
+                    self.handle_reader.num_packs(),
+                    handle_is_skipped
+                );
+                self.handle_reader.set_row_idx(row_idx).await?;
+                for (i, col) in self.columns_readers.iter_mut().enumerate() {
+                    let (col_read_row, col_is_skipped, ..) =
+                        col.read(&mut block.columns[i], read_row).await?;
+                    assert_eq!(
+                        read_row,
+                        col_read_row,
+                        "read_row: {}, col_read_row: {}, col_pack_idx: {}, pack_idx: {}, col_num_packs: {}, num_packs: {}, col_is_skipped: {}",
+                        read_row,
+                        col_read_row,
+                        col.pack_idx(),
+                        self.version_reader.pack_idx(),
+                        col.num_packs(),
+                        self.version_reader.num_packs(),
+                        col_is_skipped
+                    );
+                    col.set_row_idx(row_idx).await?;
+                }
+                total_read_row += read_row;
+            } else {
+                let (handle_read_row, handle_is_skipped, _) =
+                    self.handle_reader.read(&mut block.handles, limit).await?;
+                assert_eq!(
+                    read_row,
+                    handle_read_row,
+                    "read_row: {}, handle_read_row: {}, version_pack_idx: {}, pack_idx: {}, version_num_packs: {}, num_packs: {}, handle_is_skipped: {}",
+                    read_row,
+                    handle_read_row,
+                    self.version_reader.pack_idx(),
+                    self.handle_reader.pack_idx(),
+                    self.version_reader.num_packs(),
+                    self.handle_reader.num_packs(),
+                    handle_is_skipped
+                );
+                assert!(!handle_is_skipped);
+                for (i, col) in self.columns_readers.iter_mut().enumerate() {
+                    let (col_read_row, col_is_skipped, _) =
+                        col.read(&mut block.columns[i], limit).await?;
+                    assert_eq!(
+                        read_row,
+                        col_read_row,
+                        "read_row: {}, col_read_row: {}, col_pack_idx: {}, pack_idx: {}, col_num_packs: {}, num_packs: {}, col_is_skipped: {}",
+                        read_row,
+                        col_read_row,
+                        col.pack_idx(),
+                        self.version_reader.pack_idx(),
+                        col.num_packs(),
+                        self.version_reader.num_packs(),
+                        col_is_skipped
+                    );
+                    assert!(!col_is_skipped);
+                }
+                total_read_row += read_row;
+                return Ok(total_read_row);
+            }
         }
-        Ok(read_row)
+        Ok(total_read_row)
     }
 }
 
@@ -185,6 +286,8 @@ pub(crate) struct ColumnarColumnReader {
     is_default_val: bool,
     default_val: Option<Vec<u8>>,
     decryption_buf: Vec<u8>,
+    packs_filter: Option<Arc<FilterOpResults>>,
+    tag: String,
 }
 
 impl ColumnarColumnReader {
@@ -194,6 +297,7 @@ impl ColumnarColumnReader {
         is_default_val: bool,
         encryption_key: Option<EncryptionKey>,
         encryption_ver: u32,
+        packs_filter: Option<Arc<FilterOpResults>>,
     ) -> ColumnarColumnReader {
         let pack_loader = PackLoader::new(file, encryption_key, encryption_ver);
         let pack_buffer = ColumnBuffer::new_from_col_info(&col_meta.col_info);
@@ -202,6 +306,11 @@ impl ColumnarColumnReader {
         } else {
             None
         };
+        let tag = format!(
+            "{}_{}",
+            pack_loader.file.id(),
+            col_meta.col_info.get_column_id(),
+        );
         ColumnarColumnReader {
             pack_loader,
             col_meta,
@@ -213,6 +322,8 @@ impl ColumnarColumnReader {
             is_default_val,
             default_val,
             decryption_buf: vec![],
+            packs_filter,
+            tag,
         }
     }
 
@@ -221,7 +332,7 @@ impl ColumnarColumnReader {
             self.row_idx_in_pack = row_idx;
             return Ok(());
         }
-        if self.pack_row_start < row_idx && row_idx < self.pack_row_end {
+        if self.pack_row_start <= row_idx && row_idx < self.pack_row_end {
             self.row_idx_in_pack = row_idx - self.pack_row_start;
             return Ok(());
         }
@@ -235,17 +346,40 @@ impl ColumnarColumnReader {
             .pack_offsets
             .search_pack_idx(from_pack_idx, row_idx as u32);
         self.load_pack(pack_idx).await?;
-        self.row_idx_in_pack = row_idx - self.pack_row_start;
+        if row_idx >= self.pack_row_start {
+            self.row_idx_in_pack = row_idx - self.pack_row_start;
+        }
         Ok(())
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        self.pack_idx < self.col_meta.pack_offsets.num_packs()
+    }
+
+    pub(crate) fn pack_idx(&self) -> usize {
+        self.pack_idx
+    }
+
+    pub(crate) fn num_packs(&self) -> usize {
+        self.col_meta.pack_offsets.num_packs()
+    }
+
+    pub(crate) fn tag(&self) -> &str {
+        &self.tag
     }
 
     pub(crate) async fn read(
         &mut self,
         to: &mut ColumnBuffer,
         limit: usize,
-    ) -> crate::table::Result<usize> {
+    ) -> crate::table::Result<(
+        usize, // read_row
+        bool,  // is_skipped
+        usize, // row_idx
+    )> {
         if self.is_default_val {
-            return self.read_default(to, limit);
+            let read_row = self.read_default(to, limit)?;
+            return Ok((read_row, false, 0));
         }
         let mut read_row = 0;
         let num_packs = self.col_meta.pack_offsets.num_packs();
@@ -256,8 +390,11 @@ impl ColumnarColumnReader {
                 if next_pack_idx >= num_packs {
                     break;
                 }
-                self.load_pack(next_pack_idx).await?;
+                let is_skipped = self.load_pack(next_pack_idx).await?;
                 self.row_idx_in_pack = 0;
+                if is_skipped {
+                    return Ok((read_row, true, self.pack_row_end));
+                }
                 continue;
             }
             let batch_size = min(remain, limit - read_row);
@@ -269,7 +406,7 @@ impl ColumnarColumnReader {
             self.row_idx_in_pack += batch_size;
             read_row += batch_size;
         }
-        Ok(read_row)
+        Ok((read_row, false, 0))
     }
 
     fn read_default(&mut self, to: &mut ColumnBuffer, limit: usize) -> crate::table::Result<usize> {
@@ -285,9 +422,9 @@ impl ColumnarColumnReader {
         Ok(limit)
     }
 
-    async fn load_pack(&mut self, pack_idx: usize) -> crate::table::Result<()> {
+    async fn load_pack(&mut self, pack_idx: usize) -> crate::table::Result<bool /* is_skipped */> {
         if pack_idx == self.pack_idx && self.pack_buffer.length() > 0 {
-            return Ok(());
+            return Ok(false);
         }
         let num_packs = self.col_meta.pack_offsets.num_packs();
         if pack_idx >= num_packs {
@@ -297,10 +434,22 @@ impl ColumnarColumnReader {
             self.pack_row_start = row_end_off as usize;
             self.pack_row_end = row_end_off as usize;
             self.row_idx_in_pack = 0;
-            return Ok(());
+            return Ok(false);
         }
         let ((pack_start, pack_row_start), (pack_end, pack_row_end)) =
             self.col_meta.get_pack_offset(pack_idx);
+        if let Some(packs_filter) = &self.packs_filter {
+            // If the pack is not support filter, result is Unknown, treat it as Some.
+            if packs_filter[pack_idx] == FilterOpResult::None {
+                debug!("{}: skip load_pack: {}", self.tag(), pack_idx);
+                self.pack_idx = pack_idx;
+                self.pack_buffer.reset();
+                self.pack_row_start = pack_row_end as usize;
+                self.pack_row_end = pack_row_end as usize;
+                self.row_idx_in_pack = 0;
+                return Ok(true);
+            }
+        }
         self.pack_loader
             .load_pack(
                 &mut self.pack_buffer,
@@ -309,10 +458,11 @@ impl ColumnarColumnReader {
                 &mut self.decryption_buf,
             )
             .await?;
+        debug!("{}: load_pack: {}", self.tag(), pack_idx);
         self.pack_idx = pack_idx;
         self.pack_row_start = pack_row_start as usize;
         self.pack_row_end = pack_row_end as usize;
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -1238,35 +1388,6 @@ impl ColumnarRowTableReader {
         Ok(())
     }
 
-    fn is_unsigned(col_info: &ColumnInfo) -> bool {
-        FieldTypeFlag::from_bits(col_info.get_flag() as u32)
-            .map(|f| f.contains(FieldTypeFlag::UNSIGNED))
-            .unwrap_or(false)
-    }
-
-    fn decode_decimal_as_int(col_info: &ColumnInfo, decimal: &Decimal) -> Vec<u8> {
-        let mut buf = vec![];
-        let mut decimal_str = decimal.to_string();
-        decimal_str.retain(|c| c != '.');
-        let prec = col_info.get_column_len();
-        if prec <= 9 {
-            let val = decimal_str.parse::<i32>().unwrap_or_default();
-            buf.extend_from_slice(&val.to_le_bytes());
-        } else if prec <= 18 {
-            let val = decimal_str.parse::<i64>().unwrap_or_default();
-            buf.extend_from_slice(&val.to_le_bytes());
-        } else if prec <= 38 {
-            let val = decimal_str.parse::<i128>().unwrap_or_default();
-            buf.extend_from_slice(&val.to_le_bytes());
-        } else if prec <= 65 {
-            let val = decimal_str.parse::<i256>().unwrap_or_default();
-            buf.extend_from_slice(&val.to_le_bytes());
-        } else {
-            panic!("unsupported precision: {}", prec);
-        }
-        buf
-    }
-
     fn push_col_buf_with_field_type(
         col_buf: &mut ColumnBuffer,
         col_info: &ColumnInfo,
@@ -1281,8 +1402,8 @@ impl ColumnarRowTableReader {
             | FieldTypeTp::Int24
             | FieldTypeTp::Long
             | FieldTypeTp::LongLong => {
-                if Self::is_unsigned(col_info) {
-                    let v = decode_v2_u64(col_val)?;
+                if is_unsigned(col_info) {
+                    let v = decode_v2_u64(col_val).unwrap();
                     col_buf.push_value(&v.to_le_bytes());
                 } else {
                     let v = decode_v2_i64(col_val)?;
@@ -1313,8 +1434,8 @@ impl ColumnarRowTableReader {
             FieldTypeTp::NewDecimal => {
                 // Marshal decimal in TiFlash compatible format.
                 let mut val = col_val;
-                let decimal = val.read_decimal()?;
-                col_buf.push_value(&Self::decode_decimal_as_int(col_info, &decimal));
+                let decimal = val.read_decimal().unwrap();
+                col_buf.push_value(&decode_decimal_as_int(col_info, &decimal));
             }
             FieldTypeTp::Unspecified
             | FieldTypeTp::NewDate
@@ -1359,7 +1480,7 @@ impl ColumnarRowTableReader {
                 col_buf.push_value(&v.to_le_bytes());
             }
             Datum::Dec(ref d) => {
-                col_buf.push_value(&Self::decode_decimal_as_int(col_info, d));
+                col_buf.push_value(&decode_decimal_as_int(col_info, d));
             }
             Datum::VectorFloat32(ref v) => {
                 let mut buf = vec![];
@@ -1412,8 +1533,8 @@ impl ColumnarRowTableReader {
                 // col_buf.push_value(&buf);
                 //
                 // Marshal decimal to TiFlash compatible format.
-                let decimal = datum.read_decimal()?;
-                col_buf.push_value(&Self::decode_decimal_as_int(col_info, &decimal));
+                let decimal = datum.read_decimal().unwrap();
+                col_buf.push_value(&decode_decimal_as_int(col_info, &decimal));
             }
             JSON_FLAG | VECTOR_FLOAT32_FLAG | VAR_UINT_FLAG | VAR_INT_FLAG | COMPACT_BYTES_FLAG => {
                 return Err(tidb_query_datatype::codec::Error::InvalidDataType(format!(
@@ -1430,6 +1551,12 @@ impl ColumnarRowTableReader {
         }
         Ok(())
     }
+}
+
+pub fn is_unsigned(col_info: &ColumnInfo) -> bool {
+    FieldTypeFlag::from_bits(col_info.get_flag() as u32)
+        .map(|f| f.contains(FieldTypeFlag::UNSIGNED))
+        .unwrap_or(false)
 }
 
 #[async_trait]
@@ -1504,6 +1631,7 @@ impl ColumnarReader for ColumnarRowTableReader {
 
 pub struct ColumnarConcatReader {
     schema: Schema,
+    filter_op: Option<FilterOperator>,
     files: Vec<ColumnarFile>,
     reader: Option<ColumnarTableReader>,
     idx: usize,
@@ -1514,6 +1642,7 @@ impl ColumnarConcatReader {
     pub fn new(
         files: &[ColumnarFile],
         schema: Schema,
+        filter_op: Option<FilterOperator>,
         encryption_key: Option<EncryptionKey>,
     ) -> ColumnarConcatReader {
         let mut reader_files = vec![];
@@ -1524,6 +1653,7 @@ impl ColumnarConcatReader {
         }
         ColumnarConcatReader {
             schema,
+            filter_op,
             files: reader_files,
             reader: None,
             idx: 0,
@@ -1557,8 +1687,12 @@ impl ColumnarReader for ColumnarConcatReader {
             if file.get_biggest().deref() < row_key.as_slice() {
                 continue;
             }
-            let mut reader =
-                ColumnarTableReader::new(file, self.schema.clone(), self.encryption_key.clone());
+            let mut reader = ColumnarTableReader::new(
+                file,
+                self.schema.clone(),
+                self.filter_op.clone(),
+                self.encryption_key.clone(),
+            );
             reader.seek(handle).await?;
             self.reader = Some(reader);
             self.idx = i;
@@ -1580,6 +1714,7 @@ impl ColumnarReader for ColumnarConcatReader {
                     let mut reader = ColumnarTableReader::new(
                         file,
                         self.schema.clone(),
+                        self.filter_op.clone(),
                         self.encryption_key.clone(),
                     );
                     reader.seek(&[]).await?;
@@ -1591,6 +1726,29 @@ impl ColumnarReader for ColumnarConcatReader {
         }
         Ok(read_rows)
     }
+}
+
+pub fn decode_decimal_as_int(col_info: &ColumnInfo, decimal: &Decimal) -> Vec<u8> {
+    let mut buf = vec![];
+    let mut decimal_str = decimal.to_string();
+    decimal_str.retain(|c| c != '.');
+    let prec = col_info.get_column_len();
+    if prec <= 9 {
+        let val = decimal_str.parse::<i32>().unwrap_or_default();
+        buf.extend_from_slice(&val.to_le_bytes());
+    } else if prec <= 18 {
+        let val = decimal_str.parse::<i64>().unwrap_or_default();
+        buf.extend_from_slice(&val.to_le_bytes());
+    } else if prec <= 38 {
+        let val = decimal_str.parse::<i128>().unwrap_or_default();
+        buf.extend_from_slice(&val.to_le_bytes());
+    } else if prec <= 65 {
+        let val = decimal_str.parse::<i256>().unwrap_or_default();
+        buf.extend_from_slice(&val.to_le_bytes());
+    } else {
+        panic!("unsupported precision: {}", prec);
+    }
+    buf
 }
 
 #[cfg(test)]
@@ -1849,7 +2007,7 @@ pub mod tests {
             let schema = new_schema(1, common_handle);
             let (file, ref_rows) = build_table(1, &schema, 100, 150, 100);
             let columnar_file = ColumnarFile::open(file).unwrap();
-            let mut reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None);
+            let mut reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None, None);
             block_on(reader.seek(&0u64.to_le_bytes())).unwrap();
             let mut block = Block::new(&schema);
             block_on(reader.read(&mut block, 100)).unwrap();
@@ -1866,8 +2024,12 @@ pub mod tests {
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for file in files {
             let columnar_file = ColumnarFile::open(file.clone()).unwrap();
-            let reader =
-                ColumnarTableReader::new(&columnar_file, schema.clone(), encryption_key.clone());
+            let reader = ColumnarTableReader::new(
+                &columnar_file,
+                schema.clone(),
+                None,
+                encryption_key.clone(),
+            );
             readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
@@ -1886,7 +2048,7 @@ pub mod tests {
             if !columnar_file.has_table(schema.table_id) {
                 continue;
             }
-            let reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None);
+            let reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None, None);
             readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
@@ -2055,7 +2217,7 @@ pub mod tests {
                 let start_handle = rng.gen_range(90i64..170i64);
                 let end_handle = start_handle + rng.gen_range(1i64..200i64);
                 let mut block = Block::new(&schema);
-                let concat_reader = ColumnarConcatReader::new(&col_files, schema.clone(), None);
+                let concat_reader = ColumnarConcatReader::new(&col_files, schema.clone(), None, None);
                 let mut mvcc_reader = ColumnarMvccReader::new(Box::new(concat_reader), &schema, 100);
                 if common_handle {
                     let common_start_handle = i_to_common_handle(start_handle as i32);

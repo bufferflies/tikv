@@ -2,6 +2,7 @@
 
 mod builder;
 mod columnar;
+pub mod filter;
 mod reader;
 mod schema_file;
 

@@ -10,7 +10,9 @@ use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2, KeyMode, KvFormat};
 use bytes::{buf::Buf, Bytes};
 use kvengine::{
     read::Iterator,
-    table::columnar::{Block, ColumnarFilterReader, ColumnarMvccReader, HANDLE_COL_ID},
+    table::columnar::{
+        filter::TableScanCtx, Block, ColumnarFilterReader, ColumnarMvccReader, HANDLE_COL_ID,
+    },
     LOCK_CF,
 };
 use kvproto::{coprocessor::KeyRange, kvrpcpb::IsolationLevel};
@@ -357,9 +359,19 @@ pub fn build_columnar_scanner(
             &start_handle,
             end_handle.as_deref(),
         )
-        .or_else(|| snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), start_ts))
+        .or_else(|| {
+            snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), None, start_ts)
+        })
     } else {
-        snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), start_ts)
+        let mut executor = tipb::Executor::default();
+        executor.set_tbl_scan(table_scan.clone());
+        let scan_ctx = TableScanCtx::new(executor, vec![]);
+        snap.new_columnar_mvcc_reader(
+            table_id,
+            table_scan.get_columns(),
+            Some(&scan_ctx),
+            start_ts,
+        )
     }?;
     Some(Ok(ColumnarScanner::new(
         reader,

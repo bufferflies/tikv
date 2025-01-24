@@ -10,6 +10,7 @@ use std::{
 
 use api_version::ApiV2;
 use bytes::Buf;
+use codec::number::NumberEncoder;
 use dashmap::DashMap;
 use futures::{executor::block_on, future::ok, TryStreamExt};
 use hyper::Body;
@@ -24,8 +25,9 @@ use kvengine::{
     table::{
         columnar,
         columnar::{
-            build_schema_file, new_int_handle_column_info, new_version_column_info,
-            ColumnarFilterReader, Schema, SchemaBuf, IA_STORAGE_CLASS, STANDARD_STORAGE_CLASS,
+            build_schema_file, filter::TableScanCtx, new_int_handle_column_info,
+            new_version_column_info, ColumnarFilterReader, Schema, SchemaBuf, IA_STORAGE_CLASS,
+            STANDARD_STORAGE_CLASS,
         },
         sstable::BlockCache,
     },
@@ -48,12 +50,9 @@ use tidb_query_datatype::{
         table::{encode_row_key, TABLE_PREFIX},
     },
     expr::EvalContext,
-    Collation, FieldTypeTp,
+    Collation, FieldTypeAccessor, FieldTypeTp,
 };
-use tikv_util::{
-    codec::{bytes::encode_bytes, number::NumberEncoder},
-    info,
-};
+use tikv_util::{codec::bytes::encode_bytes, info};
 use tipb::ColumnInfo;
 use txn_types::Key;
 
@@ -394,7 +393,7 @@ fn test_covert_row_to_columnar() {
     let snap_access = shard.new_snap_access();
     let ts = client.get_ts().into_inner();
     let mut columnar_reader = snap_access
-        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, ts)
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts)
         .unwrap();
     block_on(columnar_reader.set_int_handle_range(0, Some(190))).unwrap();
     let mut block = columnar::Block::new(&schema);
@@ -716,7 +715,7 @@ fn test_region_merge_with_columnar() {
     let snap_access = shard.new_snap_access();
     let ts = client.get_ts().into_inner();
     let mut columnar_reader = snap_access
-        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, ts)
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts)
         .unwrap();
     block_on(columnar_reader.set_int_handle_range(0, Some(190))).unwrap();
     let mut block = columnar::Block::new(&schema);
@@ -870,7 +869,7 @@ fn test_columnar_ia_file() {
     assert!(schema_files.contains_key(&schema_file_id));
     let ts = client.get_ts().into_inner();
     let mut columnar_reader = snap_access
-        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, ts)
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts)
         .unwrap();
     block_on(columnar_reader.set_unbounded_handle_range()).unwrap();
     let mut block = columnar::Block::new(&schema);
@@ -887,6 +886,140 @@ fn test_columnar_ia_file() {
 
     cluster.stop();
     oss.shutdown();
+}
+
+#[test]
+fn test_columnar_scan_with_filter() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.enable_inner_key_offset = true;
+        conf.kvengine
+            .columnar_table_build_options
+            .max_columnar_table_size = 1024;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 9;
+    });
+    let dfs = cluster.get_dfs().unwrap();
+    let keyspace_id = 7;
+    let table_ids = dfs
+        .get_runtime()
+        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+    let table_id = table_ids[1];
+    let schemas = build_schemas(vec![table_id]);
+    let schema = schemas[0].clone();
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
+    let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    dfs.get_runtime()
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    let status_addr = cluster.status_addr(node_id);
+
+    let kvengine = cluster.get_kvengine(node_id);
+    must_wait(
+        || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if shard.get_schema_file().is_some() {
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build schema file".to_string(),
+    );
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    client.put_kv(
+        0..1000,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    let mut shard_id = None;
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    let snap_version = shard.get_snap_version();
+                    let columnar_snap_version = shard.get_columnar_snap_version();
+                    if snap_version == columnar_snap_version {
+                        shard_id = Some(id_ver.id);
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build columnar file".to_string(),
+    );
+    let shard_id = shard_id.unwrap();
+    let shard = kvengine.get_shard(shard_id).unwrap();
+    let snap_access = shard.new_snap_access();
+    let ts = client.get_ts().into_inner();
+    let expr = build_where_expr(&schema.columns, 1, 100);
+    let mut table_scan = tipb::Executor::default();
+    table_scan
+        .mut_tbl_scan()
+        .set_columns(schema.columns.clone().into());
+    let scan_ctx = TableScanCtx::new(table_scan, vec![expr]);
+    let mut columnar_reader = snap_access
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, Some(&scan_ctx), ts)
+        .unwrap();
+    block_on(columnar_reader.set_unbounded_handle_range()).unwrap();
+    let mut block = columnar::Block::new(&schema);
+    let read_rows = block_on(columnar_reader.read_block(&mut block, usize::MAX)).unwrap();
+    (100..110).contains(&read_rows);
+    for i in 0..read_rows {
+        let handle = block.get_handle_buf().get_int_handle_value(i);
+        assert_eq!(handle, i as i64);
+        let columns = block.get_columns();
+        assert_eq!(columns[0].get_not_null_value(i).get_i64_le(), i as i64);
+        let str_val = gen_str_val(i);
+        assert_eq!(columns[1].get_not_null_value(i), &str_val);
+    }
+}
+
+fn build_where_expr(cols: &[ColumnInfo], col_id: i64, val: i64) -> tipb::Expr {
+    let mut col = tipb::Expr::default();
+    col.set_tp(tipb::ExprType::ColumnRef);
+    let count_offset = test_coprocessor::offset_for_column(cols, col_id);
+    col.mut_val().write_i64(count_offset).unwrap();
+    col.mut_field_type()
+        .as_mut_accessor()
+        .set_tp(FieldTypeTp::LongLong);
+
+    let mut value = tipb::Expr::default();
+    value.set_tp(tipb::ExprType::Int64);
+    let mut buf = Vec::with_capacity(8);
+    buf.write_i64(val).unwrap();
+    value.set_val(buf);
+    value
+        .mut_field_type()
+        .as_mut_accessor()
+        .set_tp(FieldTypeTp::LongLong);
+
+    let mut cond = tipb::Expr::default();
+    cond.set_tp(tipb::ExprType::ScalarFunc);
+    cond.set_sig(tipb::ScalarFuncSig::LtInt);
+    cond.mut_field_type()
+        .as_mut_accessor()
+        .set_tp(FieldTypeTp::LongLong);
+    cond.mut_children().push(col);
+    cond.mut_children().push(value);
+    cond
 }
 
 fn gen_row_key(keyspace_id: u32, table_id: i64, i: usize) -> Vec<u8> {
@@ -1022,7 +1155,7 @@ fn get_table_split_keys(keyspace_id: u32, table_ids: &[i64]) -> Vec<Vec<u8>> {
             let mut buf = vec![];
             buf.extend_from_slice(&keyspace_prefix);
             buf.extend_from_slice(TABLE_PREFIX);
-            buf.encode_i64(tbl_id).unwrap();
+            buf.write_i64(tbl_id).unwrap();
             encode_bytes(&buf)
         })
         .collect()

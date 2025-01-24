@@ -557,6 +557,7 @@ impl VectorItemsReader {
                 let concat_reader = ColumnarConcatReader::new(
                     &columnar_level.files,
                     inner_schema.clone(),
+                    None,
                     encryption_key.clone(),
                 );
                 readers.push(Box::new(concat_reader));
@@ -571,6 +572,7 @@ impl VectorItemsReader {
                     let col_reader = ColumnarTableReader::new(
                         file,
                         inner_schema.clone(),
+                        None,
                         encryption_key.clone(),
                     );
                     readers.push(Box::new(col_reader));

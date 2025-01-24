@@ -2,7 +2,7 @@
 
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         Arc,
     },
     time::Duration,
@@ -110,6 +110,37 @@ pub(crate) async fn prepare_columnar(
     .await;
 }
 
+async fn trigger_columnar_major_compaction(pool: &Pool<MySql>) {
+    // remove columnar replica.
+    let sql =
+        format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` set tiflash replica 0");
+    sqlx::query(&sql).execute(pool).await.unwrap();
+    // remove table comment
+    let sql = format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` comment ''");
+    sqlx::query(&sql).execute(pool).await.unwrap();
+    // wait columnar replica cleared
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    // add table comment
+    let sql = format!(
+        "alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` comment 'columnar_engine'"
+    );
+    sqlx::query(&sql).execute(pool).await.unwrap();
+    // add columnar replica.
+    let sql =
+        format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` set tiflash replica 1");
+    sqlx::query(&sql).execute(pool).await.unwrap();
+    // wait columnar replica ready
+    wait_tiflash_or_columnar_replicas_available(
+        "trigger_columnar_major_compaction",
+        pool,
+        COLUMNAR_DB_NAME,
+        COLUMNAR_TABLE_NAME,
+        COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT * 2,
+    )
+    .await;
+}
+
 pub(crate) async fn run_columnar_workload(
     tc: TidbCluster,
     keyspace_manager: KeyspaceManager,
@@ -128,14 +159,20 @@ pub(crate) async fn run_columnar_workload(
 
     let mut handles = Vec::with_capacity(WORKLOAD_CONCURRENCY);
     let max_id = Arc::new(AtomicU64::new(0));
+    let pause_signal = Arc::new(AtomicBool::new(false));
     for tid in 0..WORKLOAD_CONCURRENCY {
         let pool = pool.clone();
         let running = running.clone();
         let max_id = max_id.clone();
+        let pause_signal = pause_signal.clone();
         let handle = tokio::spawn(async move {
             let tag = format!("columnar-{}-{}", keyspace_id, tid);
             let start_time = Instant::now();
             while running.get() {
+                if pause_signal.load(Relaxed) {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
                 let mut sqls = generate_insert_sqls(10);
                 let del_sqls = generate_delete_sqls(10, max_id.load(Relaxed));
                 sqls.extend(del_sqls);
@@ -158,9 +195,14 @@ pub(crate) async fn run_columnar_workload(
     }
 
     let pool_copy = pool.clone();
+    let pause_signal_copy = pause_signal.clone();
     handles.push(tokio::spawn(async move {
         let start_time = Instant::now();
         while running.get() {
+            if pause_signal_copy.load(Relaxed) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
             info!("verify_data randomly");
             match verify_data(&pool_copy, false).await {
                 Ok(_) => {
@@ -173,6 +215,15 @@ pub(crate) async fn run_columnar_workload(
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
         info!("columnar verify thread exit"; "dur" => ?start_time.saturating_elapsed());
+    }));
+
+    let pool_copy = pool.clone();
+    handles.push(tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        info!("pause columnar workload trigger columnar major compaction");
+        pause_signal.store(true, Relaxed);
+        trigger_columnar_major_compaction(&pool_copy).await;
+        pause_signal.store(false, Relaxed);
     }));
 
     join_all(handles).await;
@@ -433,7 +484,107 @@ async fn verify_data(pool: &Pool<MySql>, full_scan: bool) -> Result<()> {
     for (row1, row2) in row_result.iter().zip(col_result.iter()) {
         compare_rows(row1, row2).unwrap();
     }
-    info!("verify_data success, row_count: {}", row_result.len());
+
+    let scan_engine_with_primary_condition =
+        |use_tiflash: bool, lower_bound: u32, upper_bound: u32| {
+            format!(
+            "select {} id, int_col, tinyint_col, smallint_col, mediumint_col, bigint_col,
+                float_col, double_col, decimal_col,
+                date_col, datetime_col, timestamp_col, time_col, year_col,
+                char_col, varchar_col, text_col, mediumtext_col, longtext_col,
+                binary_col, varbinary_col, blob_col, mediumblob_col, longblob_col,
+                enum_col, set_col,
+                bool_col,
+                json_col from `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` where id >= {lower_bound} and id <= {upper_bound} order by id",
+            get_engine_hint(use_tiflash, COLUMNAR_TABLE_NAME)
+        )
+        };
+
+    let scan_engine_with_condition = |use_tiflash: bool, lower_bound: u32, upper_bound: u32| {
+        format!(
+            "select {} id, int_col, tinyint_col, smallint_col, mediumint_col, bigint_col,
+                float_col, double_col, decimal_col,
+                date_col, datetime_col, timestamp_col, time_col, year_col,
+                char_col, varchar_col, text_col, mediumtext_col, longtext_col,
+                binary_col, varbinary_col, blob_col, mediumblob_col, longblob_col,
+                enum_col, set_col,
+                bool_col,
+                json_col from `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` where int_col >= {lower_bound} and int_col <= {upper_bound} order by id",
+            get_engine_hint(use_tiflash, COLUMNAR_TABLE_NAME)
+        )
+    };
+
+    // Generate random number between 0 and row_count.
+    let lower_bound = rand::random::<u32>() % row_count as u32;
+    // Generate random number between row_count and u32::MAX.
+    let upper_bound = rand::random::<u32>() % (u32::MAX - row_count as u32) + row_count as u32;
+
+    // Verify the data with condition on primary id.
+    let row_result = sqlx::query(&scan_engine_with_primary_condition(
+        false,
+        lower_bound,
+        upper_bound,
+    ))
+    .fetch_all(&mut tx)
+    .await
+    .context("select * row engine with primary condition")?;
+    let col_result = sqlx::query(&scan_engine_with_primary_condition(
+        true,
+        lower_bound,
+        upper_bound,
+    ))
+    .fetch_all(&mut tx)
+    .await
+    .context("select * columnar engine with primary condition")?;
+    if row_result.len() != col_result.len() {
+        for row in &row_result {
+            let id: i64 = row.get("id");
+            info!("verify_data: row_result id: {}", id);
+        }
+        for row in &col_result {
+            let id: i64 = row.get("id");
+            info!("verify_data: col_result id: {}", id);
+        }
+        panic!(
+            "scan_with_primary_condition row count {} != col count {}",
+            row_result.len(),
+            col_result.len()
+        );
+    }
+    for (row1, row2) in row_result.iter().zip(col_result.iter()) {
+        compare_rows(row1, row2).unwrap();
+    }
+
+    // Verify the data with condition on int_col.
+    let row_result = sqlx::query(&scan_engine_with_condition(false, lower_bound, upper_bound))
+        .fetch_all(&mut tx)
+        .await
+        .context("select * row engine with primary condition")?;
+    let col_result = sqlx::query(&scan_engine_with_condition(true, lower_bound, upper_bound))
+        .fetch_all(&mut tx)
+        .await
+        .context("select * columnar engine with primary condition")?;
+    if row_result.len() != col_result.len() {
+        for row in &row_result {
+            let id: i64 = row.get("id");
+            let int_col: i64 = row.get("int_col");
+            info!("verify_data: row_result id: {}, int_col: {}", id, int_col);
+        }
+        for row in &col_result {
+            let id: i64 = row.get("id");
+            let int_col: i64 = row.get("int_col");
+            info!("verify_data: col_result id: {}, int_col: {}", id, int_col);
+        }
+        panic!(
+            "scan_with_condition row count {} != col count {}",
+            row_result.len(),
+            col_result.len()
+        );
+    }
+    for (row1, row2) in row_result.iter().zip(col_result.iter()) {
+        compare_rows(row1, row2).unwrap();
+    }
+
     Ok(())
 }
 

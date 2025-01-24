@@ -32,9 +32,9 @@ use crate::{
     table::{
         blobtable::blobtable::BlobPrefetcher,
         columnar::{
-            ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader, ColumnarReader,
-            ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf, SchemaFile,
-            HANDLE_COL_ID,
+            filter::TableScanCtx, ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader,
+            ColumnarReader, ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf,
+            SchemaFile, HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
         sstable::SsTable,
@@ -1407,18 +1407,21 @@ impl SnapAccessCore {
         &self,
         table_id: i64,
         columns: &[ColumnInfo],
+        scan_ctx: Option<&TableScanCtx>,
         read_ts: u64,
     ) -> Option<ColumnarMvccReader> {
         if self.columnar_snap_version == 0 {
             return None;
         }
         let schema = self.new_schema_from_columns(table_id, columns)?;
+        let filter_op = scan_ctx.map(|ctx| ctx.to_filter_operator());
         let mut readers = self.collect_column_row_readers(&schema);
         for columnar_level in &self.data.col_levels.levels {
             if columnar_level.level == 2 {
                 let concat_reader = ColumnarConcatReader::new(
                     &columnar_level.files,
                     schema.clone(),
+                    filter_op.clone(),
                     self.encryption_key.clone(),
                 );
                 readers.push(Box::new(concat_reader));
@@ -1430,6 +1433,7 @@ impl SnapAccessCore {
                     let col_reader = ColumnarTableReader::new(
                         col_file,
                         schema.clone(),
+                        filter_op.clone(),
                         self.encryption_key.clone(),
                     );
                     readers.push(Box::new(col_reader));
@@ -1523,8 +1527,12 @@ impl SnapAccessCore {
                 if !file.has_table(schema.table_id) {
                     continue;
                 }
-                let col_reader =
-                    ColumnarTableReader::new(file, schema.clone(), self.encryption_key.clone());
+                let col_reader = ColumnarTableReader::new(
+                    file,
+                    schema.clone(),
+                    None,
+                    self.encryption_key.clone(),
+                );
                 readers.push(Box::new(col_reader));
             }
         }

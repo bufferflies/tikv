@@ -321,6 +321,10 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.block_cache_type = switches.block_cache_type;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 32;
+        conf.kvengine.columnar_table_build_options.pack_max_size = 32 * 128;
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;

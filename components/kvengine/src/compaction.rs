@@ -2682,6 +2682,7 @@ async fn compact_destroy_range_for_columnar(
             let reader = ColumnarTableReader::new(
                 &columnar_file,
                 schema.clone(),
+                None,
                 ctx.encryption_key.clone(),
             );
             let mut compact_reader =
@@ -2930,6 +2931,7 @@ async fn compact_truncate_ts_for_columnar(
             let reader = ColumnarTableReader::new(
                 &columnar_file,
                 schema.clone(),
+                None,
                 ctx.encryption_key.clone(),
             );
             let mut truncate_ts_reader =
@@ -3202,6 +3204,7 @@ async fn compact_trim_over_bound_for_columnar(
             let reader = ColumnarTableReader::new(
                 &columnar_file,
                 schema.clone(),
+                None,
                 ctx.encryption_key.clone(),
             );
             let mut compact_reader =
@@ -4293,8 +4296,12 @@ async fn compact_columnar_l0_files(
             if !columnar_file.has_table(table_id) {
                 continue;
             }
-            let reader =
-                ColumnarTableReader::new(columnar_file, schema.clone(), ctx.encryption_key.clone());
+            let reader = ColumnarTableReader::new(
+                columnar_file,
+                schema.clone(),
+                None,
+                ctx.encryption_key.clone(),
+            );
             readers.push(Box::new(reader));
         }
         if readers.is_empty() {
@@ -4433,15 +4440,19 @@ async fn compact_columnar_l1_files(
             if !columnar_file.has_table(table_id) {
                 continue;
             }
-            let reader =
-                ColumnarTableReader::new(columnar_file, schema.clone(), ctx.encryption_key.clone());
+            let reader = ColumnarTableReader::new(
+                columnar_file,
+                schema.clone(),
+                None,
+                ctx.encryption_key.clone(),
+            );
             readers.push(Box::new(reader));
         }
         if readers.is_empty() {
             continue;
         }
         let concat_reader =
-            ColumnarConcatReader::new(&l2_tbls, schema.clone(), ctx.encryption_key.clone());
+            ColumnarConcatReader::new(&l2_tbls, schema.clone(), None, ctx.encryption_key.clone());
         readers.push(Box::new(concat_reader));
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mut compact_reader =
@@ -4542,6 +4553,7 @@ async fn update_vector_index(
         let reader = ColumnarTableReader::new(
             columnar_file,
             vector_col_schema.clone(),
+            None,
             ctx.encryption_key.clone(),
         );
         readers.push(Box::new(reader));

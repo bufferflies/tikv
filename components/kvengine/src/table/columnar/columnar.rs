@@ -323,6 +323,176 @@ impl MinMaxIndex {
         buf.extend_from_slice(&self.has_null_marks);
         buf.extend_from_slice(&self.has_value_marks);
     }
+
+    pub(crate) fn check_equal(
+        &self,
+        pack_idx: usize,
+        value: &[u8],
+        field_type: FieldTypeTp,
+        is_unsigned: bool,
+    ) -> bool {
+        if self.has_value_marks[pack_idx] == 0 {
+            return false;
+        }
+        let min = self.min_max.get_not_null_value(pack_idx * 2);
+        let max = self.min_max.get_not_null_value(pack_idx * 2 + 1);
+        // value >= min && value <= max
+        field_cmp(value, min, field_type, is_unsigned) >= std::cmp::Ordering::Equal
+            && field_cmp(value, max, field_type, is_unsigned) <= std::cmp::Ordering::Equal
+    }
+
+    pub(crate) fn check_less(
+        &self,
+        pack_idx: usize,
+        value: &[u8],
+        field_type: FieldTypeTp,
+        is_unsigned: bool,
+    ) -> bool {
+        if self.has_value_marks[pack_idx] == 0 {
+            return false;
+        }
+        let min = self.min_max.get_not_null_value(pack_idx * 2);
+        // value > min
+        field_cmp(value, min, field_type, is_unsigned) == std::cmp::Ordering::Greater
+    }
+
+    pub(crate) fn check_less_equal(
+        &self,
+        pack_idx: usize,
+        value: &[u8],
+        field_type: FieldTypeTp,
+        is_unsigned: bool,
+    ) -> bool {
+        if self.has_value_marks[pack_idx] == 0 {
+            return false;
+        }
+        let min = self.min_max.get_not_null_value(pack_idx * 2);
+        // value >= min
+        field_cmp(value, min, field_type, is_unsigned) >= std::cmp::Ordering::Equal
+    }
+
+    pub(crate) fn check_greater(
+        &self,
+        pack_idx: usize,
+        value: &[u8],
+        field_type: FieldTypeTp,
+        is_unsigned: bool,
+    ) -> bool {
+        if self.has_value_marks[pack_idx] == 0 {
+            return false;
+        }
+        let max = self.min_max.get_not_null_value(pack_idx * 2 + 1);
+        // value < max
+        field_cmp(value, max, field_type, is_unsigned) == std::cmp::Ordering::Less
+    }
+
+    pub(crate) fn check_greater_equal(
+        &self,
+        pack_idx: usize,
+        value: &[u8],
+        field_type: FieldTypeTp,
+        is_unsigned: bool,
+    ) -> bool {
+        if self.has_value_marks[pack_idx] == 0 {
+            return false;
+        }
+        let max = self.min_max.get_not_null_value(pack_idx * 2 + 1);
+        // value <= max
+        field_cmp(value, max, field_type, is_unsigned) <= std::cmp::Ordering::Equal
+    }
+
+    pub(crate) fn check_in(
+        &self,
+        pack_idx: usize,
+        values: &Vec<Vec<u8>>,
+        field_type: FieldTypeTp,
+        is_unsigned: bool,
+    ) -> bool {
+        if self.has_value_marks[pack_idx] == 0 {
+            return false;
+        }
+        for value in values {
+            if self.check_equal(pack_idx, value, field_type, is_unsigned) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn check_not_in(
+        &self,
+        pack_idx: usize,
+        values: &Vec<Vec<u8>>,
+        field_type: FieldTypeTp,
+        is_unsigned: bool,
+    ) -> bool {
+        if self.has_value_marks[pack_idx] == 0 {
+            return false;
+        }
+        !self.check_in(pack_idx, values, field_type, is_unsigned)
+    }
+
+    pub(crate) fn check_is_null(&self, pack_idx: usize) -> bool {
+        if self.has_value_marks[pack_idx] == 0 {
+            return false;
+        }
+        if self.has_null_marks[pack_idx] == 0 {
+            return false;
+        }
+        true
+    }
+}
+
+fn field_cmp(
+    mut a: &[u8],
+    mut b: &[u8],
+    field_type: FieldTypeTp,
+    is_unsigned: bool,
+) -> std::cmp::Ordering {
+    match field_type {
+        FieldTypeTp::Unspecified => {
+            panic!("field type is unspecified");
+        }
+        FieldTypeTp::Float | FieldTypeTp::Double => {
+            let a = a.get_f64_le();
+            let b = b.get_f64_le();
+            a.partial_cmp(&b).unwrap()
+        }
+        FieldTypeTp::Null => std::cmp::Ordering::Equal,
+        FieldTypeTp::Tiny
+        | FieldTypeTp::Short
+        | FieldTypeTp::Int24
+        | FieldTypeTp::Long
+        | FieldTypeTp::LongLong => {
+            if is_unsigned {
+                let a = a.get_u64_le();
+                let b = b.get_u64_le();
+                a.cmp(&b)
+            } else {
+                let a = a.get_i64_le();
+                let b = b.get_i64_le();
+                a.cmp(&b)
+            }
+        }
+        FieldTypeTp::Duration | FieldTypeTp::Year => {
+            let a = a.get_i64_le();
+            let b = b.get_i64_le();
+            a.cmp(&b)
+        }
+        FieldTypeTp::Timestamp
+        | FieldTypeTp::DateTime
+        | FieldTypeTp::Date
+        | FieldTypeTp::NewDate
+        | FieldTypeTp::Bit
+        | FieldTypeTp::Enum => {
+            let a = a.get_u64_le();
+            let b = b.get_u64_le();
+            a.cmp(&b)
+        }
+        _ => {
+            unimplemented!("field type is not supported");
+        }
+    }
 }
 
 pub struct ColumnMeta {

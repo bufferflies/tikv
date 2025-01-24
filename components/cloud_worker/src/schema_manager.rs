@@ -249,7 +249,7 @@ pub struct SchemaManagerConfig {
     pub schema_refresh_threshold: u64,
     pub http_timeout: ReadableDuration,
     pub enabled: bool,
-    // `whiltelist_file` is a json file contains a list of keyspace_id.
+    // `whitelist_file` is a json file contains a list of keyspace_id.
     pub whitelist_file: Option<PathBuf>,
 }
 
@@ -656,7 +656,6 @@ impl SchemaManager {
             let start_key = shard_stats.start.to_vec();
             let end_key = shard_stats.end.to_vec();
             if schema_file.overlap(&start_key, &end_key, keyspace_id)
-                && shard_stats.schema_version > 0
                 && cur_schema_version > shard_stats.schema_version
             {
                 info!(
