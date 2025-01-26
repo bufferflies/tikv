@@ -129,6 +129,7 @@ kvenginepb = { workspace = true }
 kvproto = { workspace = true }
 libc = "0.2"
 load_data = { path = "../components/load_data" }
+log = "0.4"
 log_wrappers = { workspace = true }
 merged_engine = { workspace = true }
 more-asserts = "0.2"

@@ -9,7 +9,7 @@ use rand::{
     prelude::{SliceRandom, ThreadRng},
     Rng,
 };
-use sqlx::{Connection, MySql, Row};
+use sqlx::{pool::PoolConnection, Executor, MySql, MySqlPool, Row};
 use tikv_util::{error, info, time::Instant};
 
 use crate::test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE};
@@ -47,17 +47,24 @@ pub(crate) fn is_error_retryable(err: &anyhow::Error) -> bool {
 }
 
 macro_rules! retry_or_panic {
-    ($expr:expr) => {{
+    ($expr:expr, $on_retry:expr) => {{
         match $expr {
             Ok(r) => r,
             Err(e) if is_error_retryable(&e) => {
                 info!("meet error, retry: {:?}", e);
+
+                // To fix clippy error: "try not to call a closure in the expression where it is
+                // declared".
+                let on_retry = $on_retry;
+                on_retry(&e);
+
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
             Err(e) => panic!("meet error: {:?}", e),
         }
     }};
+    ($expr:expr) => {{ retry_or_panic!($expr, |_| {}) }};
 }
 
 pub(crate) use retry_or_panic;
@@ -146,30 +153,28 @@ pub fn get_engine_hint(use_tiflash: bool, tb: &str) -> String {
 }
 
 pub struct Transaction {
-    conn: Option<sqlx::MySqlConnection>,
+    conn: Option<PoolConnection<MySql>>,
     tag: String,
     start_ts: u64,
     committed: bool,
+    read_only: bool,
 }
 
 impl Transaction {
-    pub async fn begin(tag: &str, conn_string: &str, optimistic_txn: bool) -> anyhow::Result<Self> {
-        let mut conn = sqlx::MySqlConnection::connect(conn_string)
-            .await
-            .context("connect")?;
+    pub async fn begin(tag: &str, pool: &MySqlPool, optimistic_txn: bool) -> anyhow::Result<Self> {
+        let mut conn = pool.acquire().await.context("acquire")?;
 
         let txn_mode = if optimistic_txn {
             "optimistic"
         } else {
             "pessimistic"
         };
-        sqlx::query(&format!("begin {txn_mode}"))
-            .execute(&mut conn)
+        conn.execute(format!("begin {txn_mode}").as_ref())
             .await
             .context("begin")?;
 
-        let tso: i64 = sqlx::query("select TIDB_CURRENT_TSO() as tso")
-            .fetch_one(&mut conn)
+        let tso: i64 = conn
+            .fetch_one("select TIDB_CURRENT_TSO() as tso")
             .await
             .context("select_current_tso")?
             .get("tso");
@@ -180,11 +185,19 @@ impl Transaction {
             conn: Some(conn),
             start_ts: tso as u64,
             committed: false,
+            read_only: false,
         })
     }
 
+    pub async fn begin_read(tag: &str, pool: &MySqlPool) -> anyhow::Result<Self> {
+        let mut txn = Self::begin(tag, pool, false).await?;
+        txn.read_only = true;
+        Ok(txn)
+    }
+
     pub async fn commit(&mut self) -> anyhow::Result<()> {
-        match sqlx::query("commit").execute(self.conn()).await {
+        assert!(!self.committed & !self.read_only);
+        match self.conn().execute("commit").await {
             Ok(_) => {
                 self.committed = true;
                 Ok(())
@@ -196,7 +209,7 @@ impl Transaction {
         }
     }
 
-    pub fn conn(&mut self) -> &mut sqlx::MySqlConnection {
+    pub fn conn(&mut self) -> &mut PoolConnection<MySql> {
         self.conn.as_mut().unwrap()
     }
 
@@ -207,15 +220,15 @@ impl Transaction {
 
 impl Drop for Transaction {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.committed && !self.read_only {
             let tag = self.tag.clone();
             let mut conn = self.conn.take().unwrap();
             let task = async move {
-                let res = sqlx::query("rollback").execute(&mut conn).await;
+                let res = conn.execute("rollback").await;
                 if let Err(err) = res {
                     error!("{} rollback failed", tag; "err" => ?err);
                 }
-                let _ = conn.close().await;
+                drop(conn);
             };
             let _ = tokio::spawn(task);
         }

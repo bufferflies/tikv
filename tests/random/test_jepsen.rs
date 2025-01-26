@@ -6,19 +6,21 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use crossbeam::queue::ArrayQueue;
 use futures::future::join_all;
 use rand::prelude::*;
-use sqlx::{MySql, Pool, Row};
+use sqlx::{MySql, MySqlPool, Row};
 use test_cloud_server::{keyspace::KeyspaceManager, tidb::TidbCluster};
-use tikv_util::{error, info, time::Instant};
+use tikv_util::{debug, error, info, time::Instant};
 
 use crate::{
     env_param,
     sql_util::{
         gen_padding, get_engine_hint, is_error_retryable, retry_or_panic,
-        wait_tiflash_or_columnar_replicas_available, DEADLOCK_ERR_MSG, MAX_PADDING_SIZE,
+        wait_tiflash_or_columnar_replicas_available, Transaction, MAX_PADDING_SIZE,
     },
+    test_tidb::connect_tidb,
     Running, JEPSEN_BANK_TXN_COUNTER, JEPSEN_BANK_TXN_RETRY_COUNTER,
 };
 
@@ -36,17 +38,8 @@ pub(crate) async fn prepare_jepsen_bank(
     keyspace_id: u32,
     tiflash_replicas: Option<usize>,
 ) {
-    let keyspace_name = keyspace_manager
-        .get_keyspace_meta(keyspace_id)
-        .unwrap()
-        .name();
-    let tag = format!("bank-{}[{}]", keyspace_id, keyspace_name);
-    let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
-    let params = tc.tidb.conn_params(tidb_idx);
-
-    let conn_string = params.conn_string("test");
-    let pool = sqlx::MySqlPool::connect(&conn_string).await.unwrap();
-
+    let tag = format!("bank-ks{}", keyspace_id);
+    let pool = connect_tidb(&tc, &keyspace_manager, keyspace_id).await;
     info!("{} prepare_jepsen_bank", tag);
 
     let mut sqls = vec![
@@ -55,7 +48,8 @@ pub(crate) async fn prepare_jepsen_bank(
         format!(
             "create table `{BANK_DB_NAME}`.`{ACCOUNTS_TABLE_NAME}` \
             (id int not null primary key, \
-            balance int not null default 0, \
+            balance bigint not null default 0, \
+            ts bigint unsigned not null default 0, \
             padding varbinary({MAX_PADDING_SIZE}) not null default 0x0)"
         ),
     ];
@@ -95,14 +89,7 @@ pub(crate) async fn run_jepsen_bank(
     running: Running,
 ) {
     info!("run_jepsen_bank"; "use_txn_file" => jepsen_use_txn_file, "use_tiflash" => use_tiflash);
-    let keyspace_name = keyspace_manager
-        .get_keyspace_meta(keyspace_id)
-        .unwrap()
-        .name();
-    let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
-    let params = tc.tidb.conn_params(tidb_idx);
-    let conn_string = params.conn_string(BANK_DB_NAME);
-    let pool = sqlx::MySqlPool::connect(&conn_string).await.unwrap();
+    let pool = connect_tidb(&tc, &keyspace_manager, keyspace_id).await;
 
     let mut handles = Vec::with_capacity(JEPSEN_BANK_WORKLOAD_CONCURRENCY);
     for tid in 0..JEPSEN_BANK_WORKLOAD_CONCURRENCY {
@@ -117,7 +104,7 @@ pub(crate) async fn run_jepsen_bank(
                 let mut random = || {
                     let mut rng = thread_rng();
                     let from_to = (0..BANK_ACCOUNTS).choose_multiple(&mut rng, 2);
-                    let amount = rng.gen_range(0..100);
+                    let amount = rng.gen_range(0..100000);
                     let padding_len = gen_padding(2, &mut rng, &mut padding);
                     let use_txn_file = if jepsen_use_txn_file {
                         rng.gen_bool(BANK_TXN_FILE_RATIO)
@@ -129,16 +116,13 @@ pub(crate) async fn run_jepsen_bank(
                 let (from, to, amount, padding_len, use_txn_file) = random();
                 let padding = &padding[..padding_len];
 
-                let ok = retry_or_panic!(
+                retry_or_panic!(
                     bank_transfer(&tag, &pool, from, to, amount, use_txn_file, padding)
                         .await
-                        .context("bank_transfer")
+                        .context("bank_transfer"),
+                    |_| JEPSEN_BANK_TXN_RETRY_COUNTER.fetch_add(1, Relaxed)
                 );
-                if ok {
-                    JEPSEN_BANK_TXN_COUNTER.fetch_add(1, Relaxed);
-                } else {
-                    JEPSEN_BANK_TXN_RETRY_COUNTER.fetch_add(1, Relaxed);
-                }
+                JEPSEN_BANK_TXN_COUNTER.fetch_add(1, Relaxed);
             }
             info!("jepsen bank workload exit"; "tag" => tag, "dur" => ?start_time.saturating_elapsed());
         });
@@ -147,20 +131,10 @@ pub(crate) async fn run_jepsen_bank(
 
     let pool_copy = pool.clone();
     handles.push(tokio::spawn(async move {
+        let tag = format!("bank-verify-{}", keyspace_id);
         let start_time = Instant::now();
         while running.get() {
-            let check = async {
-                verify_bank_accounts(&pool_copy, false)
-                    .await
-                    .context("verify")?;
-                if use_tiflash {
-                    verify_bank_accounts(&pool_copy, true)
-                        .await
-                        .context("verify_tiflash")?;
-                }
-                Ok(())
-            };
-            retry_or_panic!(check.await);
+            retry_or_panic!(verify_bank(&tag, &pool_copy, use_tiflash).await);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         info!("verify bank accounts thread exit"; "dur" => ?start_time.saturating_elapsed());
@@ -168,26 +142,13 @@ pub(crate) async fn run_jepsen_bank(
 
     join_all(handles).await;
 
+    let tag = format!("bank-final-{}", keyspace_id);
     let mut retry = 0;
     while retry <= 30 {
         retry += 1;
-        let check = async {
-            verify_bank_accounts(&pool, false).await.context("verify")?;
-            let accounts = list_bank_accounts(&pool, false).await.context("list")?;
-            info!("accounts: {:?}", accounts);
-            if use_tiflash {
-                verify_bank_accounts(&pool, true)
-                    .await
-                    .context("verify_tiflash")?;
-                let tiflash_accounts = list_bank_accounts(&pool, true)
-                    .await
-                    .context("list_tiflash")?;
-                info!("accounts from TiFlash: {:?}", accounts);
-                assert_eq!(accounts, tiflash_accounts);
-            }
-            Ok(())
-        };
-        retry_or_panic!(check.await);
+        retry_or_panic!(verify_bank(&tag, &pool, use_tiflash).await);
+
+        dump_accounts_history();
         return;
     }
     panic!("jepsen_bank: final check retry limit exceeded");
@@ -195,80 +156,120 @@ pub(crate) async fn run_jepsen_bank(
 
 async fn bank_transfer(
     tag: &str,
-    pool: &Pool<MySql>,
+    pool: &MySqlPool,
     from: usize,
     to: usize,
     amount: i32,
     use_txn_file: bool,
     padding: &[u8],
-) -> Result<bool> {
-    let txn_mode = if use_txn_file {
-        "optimistic"
-    } else {
-        "pessimistic"
-    };
-    let hex_padding = hex::encode(padding);
-    let sqls = vec![
-        format!("begin {txn_mode}"),
-        format!(
-            "update `{BANK_DB_NAME}`.`{ACCOUNTS_TABLE_NAME}` \
-                        set balance = balance - {amount}, padding = 0x{hex_padding} \
-                        where id = {from}",
-        ),
-        format!(
-            "update `{BANK_DB_NAME}`.`{ACCOUNTS_TABLE_NAME}` \
-                        set balance = balance + {amount}, padding = 0x{hex_padding} \
-                        where id = {to}",
-        ),
-    ];
+) -> Result<()> {
+    lazy_static::lazy_static! {
+        static ref TRANSFER_QUERY: String = format!(
+            "update `{}`.`{}` set balance = balance + ?, ts = ?, padding = ? where id = ?",
+            BANK_DB_NAME, ACCOUNTS_TABLE_NAME
+        );
+    }
+    let mut txn = Transaction::begin(tag, pool, use_txn_file)
+        .await
+        .context("begin")?;
 
-    let mut conn = pool.acquire().await.context("acquire")?;
-    for sql in &sqls {
-        info!("{} bank_transfer: executing sql", tag; "sql" => sql);
-        match sqlx::query(sql).execute(&mut conn).await {
-            Ok(_) => {}
-            Err(sqlx::Error::Database(err)) if err.message().contains(DEADLOCK_ERR_MSG) => {
-                info!("{} bank_transfer: ignore deadlock, retry", tag; "sql" => sql, "err" => ?err);
-                return Ok(false);
-            }
-            Err(err) => {
-                error!("{} bank_transfer: execute failed", tag; "sql" => sql, "err" => ?err);
-                return Err(err).with_context(|| format!("bank_transfer: sql: {}", sql));
-            }
-        }
-    }
-    match sqlx::query("commit").execute(&mut conn).await {
-        Ok(_) => Ok(true),
-        Err(err) => {
-            error!("{} bank_transfer: commit failed", tag; "err" => ?err);
-            Err(err).context("bank_transfer commit")
-        }
-    }
+    let start_ts = txn.start_ts();
+    info!("{} bank_transfer: {}->{}", tag, from, to; "amount" => amount, "start_ts" => start_ts, "padding.len" => padding.len());
+    sqlx::query(&TRANSFER_QUERY)
+        .bind(-amount)
+        .bind(start_ts)
+        .bind(padding)
+        .bind(from as i32)
+        .execute(txn.conn())
+        .await
+        .with_context(|| format!("bank_transfer:{start_ts}:[{from}]->{amount}"))?;
+    sqlx::query(&TRANSFER_QUERY)
+        .bind(amount)
+        .bind(start_ts)
+        .bind(padding)
+        .bind(to as i32)
+        .execute(txn.conn())
+        .await
+        .with_context(|| format!("bank_transfer:{start_ts}:{amount}->[{to}]"))?;
+    txn.commit().await.context("bank_transfer_commit")
 }
 
-async fn verify_bank_accounts(pool: &Pool<MySql>, use_tiflash: bool) -> Result<()> {
-    let mut tx = pool.begin().await.context("begin")?;
+async fn verify_bank_accounts(
+    txn: &mut Transaction,
+    pool: &MySqlPool,
+    use_tiflash: bool,
+) -> Result<()> {
     let engine_hint = get_engine_hint(use_tiflash, ACCOUNTS_TABLE_NAME);
     // Cast sum to "signed", as sum() return Decimal which is not easy to handle.
     let sql = format!(
         "select {engine_hint} cast(sum(balance) as signed) as sum from `{BANK_DB_NAME}`.`{ACCOUNTS_TABLE_NAME}`"
     );
     let row = sqlx::query(&sql)
-        .fetch_one(&mut tx)
+        .fetch_one(txn.conn())
         .await
         .context("select sum")?;
-    let sum: i32 = row.get("sum");
+    let sum: i64 = row.get("sum");
     if sum != 0 {
-        let accounts = list_bank_accounts(&mut tx, use_tiflash).await?;
-        panic!("sum is not zero: {}, accounts {:?}", sum, accounts);
+        let accounts = list_bank_accounts(txn.conn(), use_tiflash).await;
+
+        // Try again.
+        {
+            let mut txn = Transaction::begin_read("verify_again", pool)
+                .await
+                .context("begin")?;
+            let row = sqlx::query(&sql)
+                .fetch_one(txn.conn())
+                .await
+                .context("select sum")?;
+            let sum: i32 = row.get("sum");
+            let accounts = list_bank_accounts(txn.conn(), use_tiflash).await;
+            info!("verify_bank_accounts: try again"; "sum" => sum, "accounts" => ?accounts, "read_ts" => txn.start_ts());
+        }
+
+        dump_accounts_history();
+
+        panic!(
+            "sum is not zero: {}, read_ts {}, accounts {:?}",
+            sum,
+            txn.start_ts(),
+            accounts
+        );
     }
+    Ok(())
+}
+
+async fn verify_bank(tag: &str, pool: &MySqlPool, use_tiflash: bool) -> Result<()> {
+    let mut txn = Transaction::begin_read(tag, pool).await.context("begin")?;
+    let read_ts = txn.start_ts();
+
+    verify_bank_accounts(&mut txn, pool, false)
+        .await
+        .context("verify")?;
+    let accounts = list_bank_accounts(txn.conn(), false)
+        .await
+        .context("list")?;
+    debug!("accounts: {:?}", accounts; "read_ts" => read_ts);
+
+    if use_tiflash {
+        verify_bank_accounts(&mut txn, pool, true)
+            .await
+            .context("verify_tiflash")?;
+        let tiflash_accounts = list_bank_accounts(txn.conn(), true)
+            .await
+            .context("list_tiflash")?;
+        debug!("accounts from TiFlash: {:?}", accounts; "read_ts" => read_ts);
+        assert_eq!(accounts, tiflash_accounts);
+    }
+
+    trace_accounts(read_ts, &accounts);
     Ok(())
 }
 
 #[derive(PartialEq)]
 struct Account {
     id: i32,
-    balance: i32,
+    balance: i64,
+    ts: u64,
     padding: Vec<u8>,
 }
 
@@ -277,6 +278,7 @@ impl fmt::Debug for Account {
         f.debug_struct("Account")
             .field("id", &self.id)
             .field("balance", &self.balance)
+            .field("ts", &self.ts)
             .field("padding", &hex::encode(&self.padding))
             .finish()
     }
@@ -288,27 +290,41 @@ where
 {
     let engine_hint = get_engine_hint(use_tiflash, ACCOUNTS_TABLE_NAME);
     let sql = format!(
-        "select {engine_hint} id, balance, padding from `{BANK_DB_NAME}`.`{ACCOUNTS_TABLE_NAME}` order by id"
+        "select {engine_hint} id, balance, ts, padding from `{BANK_DB_NAME}`.`{ACCOUNTS_TABLE_NAME}` order by id"
     );
     let rows = sqlx::query(&sql)
         .fetch_all(executor)
         .await
         .context("select all")?;
-    assert_eq!(rows.len(), BANK_ACCOUNTS);
+    let rows_len = rows.len();
     let accounts = rows
         .into_iter()
         .map(|row| {
             let id: i32 = row.get("id");
-            let balance: i32 = row.get("balance");
+            let balance: i64 = row.get("balance");
+            let ts: u64 = row.get("ts");
             let mut padding: Vec<u8> = row.get("padding");
             padding.truncate(16);
             Account {
                 id,
                 balance,
+                ts,
                 padding,
             }
         })
         .collect::<Vec<_>>();
+
+    if rows_len != BANK_ACCOUNTS {
+        error!("list bank accounts: rows len not match";
+            "rows_len" => rows_len, "accounts" => ?accounts, "use_tiflash" => use_tiflash);
+        bail!(
+            "rows len not match: {}, detail {:?}, use_tiflash {}",
+            rows_len,
+            accounts,
+            use_tiflash
+        );
+    }
+
     Ok(accounts)
 }
 
@@ -321,4 +337,29 @@ pub(crate) fn check_jepsen() {
         jepsen_txns,
         threshold
     );
+}
+
+lazy_static::lazy_static! {
+    static ref ACCOUNTS_HISTORY: ArrayQueue<(u64 /* read_ts */, Vec<Account>)> = ArrayQueue::new(16);
+}
+
+fn trace_accounts(read_ts: u64, accounts: &[Account]) {
+    let accounts = accounts
+        .iter()
+        .map(|acc| Account {
+            id: acc.id,
+            balance: acc.balance,
+            ts: acc.ts,
+            padding: acc.padding[..acc.padding.len().min(16)].to_vec(),
+        })
+        .collect::<Vec<_>>();
+    ACCOUNTS_HISTORY.force_push((read_ts, accounts));
+}
+
+fn dump_accounts_history() {
+    let mut history = Vec::with_capacity(ACCOUNTS_HISTORY.len());
+    while let Some((read_ts, accounts)) = ACCOUNTS_HISTORY.pop() {
+        history.push((read_ts, accounts));
+    }
+    info!("accounts history: {:?}", history);
 }

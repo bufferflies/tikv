@@ -8407,6 +8407,7 @@ dependencies = [
  "lazy_static",
  "libc 0.2.161",
  "load_data",
+ "log",
  "log_wrappers",
  "merged_engine",
  "more-asserts",

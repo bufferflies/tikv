@@ -14,6 +14,7 @@ use pd_client::{
 };
 use rand::prelude::*;
 use security::SecurityConfig;
+use sqlx::ConnectOptions;
 use test_cloud_server::{
     oss::prepare_dfs, tidb::*, tikv_worker_cop_url, try_wait_async, ServerCluster,
     ServerClusterBuilder, TikvWorkerOptions,
@@ -652,15 +653,24 @@ pub(crate) async fn connect_tidb(
     tc: &TidbCluster,
     keyspace_manager: &KeyspaceManager,
     keyspace_id: u32,
-) -> sqlx::Pool<sqlx::MySql> {
+) -> sqlx::MySqlPool {
     let keyspace_name = keyspace_manager
         .get_keyspace_meta(keyspace_id)
         .unwrap()
         .name();
     let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
     let params = tc.tidb.conn_params(tidb_idx);
-    let conn_string = params.conn_string("test");
-    sqlx::MySqlPool::connect(&conn_string).await.unwrap()
+    let mut opts = sqlx::mysql::MySqlConnectOptions::new()
+        .host(&params.host)
+        .port(params.port)
+        .username(&params.user)
+        .database("test");
+    opts.log_statements(log::LevelFilter::Debug)
+        .log_slow_statements(log::LevelFilter::Warn, Duration::from_secs(30));
+    sqlx::mysql::MySqlPoolOptions::new()
+        .connect_with(opts)
+        .await
+        .unwrap()
 }
 
 #[derive(Debug)]

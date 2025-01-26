@@ -7,7 +7,7 @@ use std::{fmt, sync::atomic::Ordering::Relaxed, time::Duration};
 use anyhow::{Context, Result};
 use futures::future::join_all;
 use rand::prelude::*;
-use sqlx::{Connection, MySql, Row};
+use sqlx::{MySql, MySqlPool, Row};
 use test_cloud_server::{keyspace::KeyspaceManager, tidb::TidbCluster};
 use tikv_util::{debug, error, info, time::Instant, warn};
 
@@ -16,6 +16,7 @@ use crate::{
         gen_padding, is_duplicate_entry_err, is_error_retryable, retry_or_panic, Transaction,
         MAX_PADDING_SIZE,
     },
+    test_tidb::connect_tidb,
     Running, UNIQUE_WORKLOAD_CONFLICT_COUNTER, UNIQUE_WORKLOAD_TXN_COUNTER,
 };
 
@@ -43,16 +44,8 @@ pub(crate) async fn prepare_unique_workload(
     keyspace_manager: KeyspaceManager,
     keyspace_id: u32,
 ) {
-    let keyspace_name = keyspace_manager
-        .get_keyspace_meta(keyspace_id)
-        .unwrap()
-        .name();
-    let tag = format!("unique-{}[{}]", keyspace_id, keyspace_name);
-    let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
-    let params = tc.tidb.conn_params(tidb_idx);
-
-    let conn_string = params.conn_string("test");
-    let pool = sqlx::MySqlPool::connect(&conn_string).await.unwrap();
+    let tag = format!("unique-ks{}", keyspace_id);
+    let pool = connect_tidb(&tc, &keyspace_manager, keyspace_id).await;
 
     info!("{} prepare_unique_workload", tag);
 
@@ -105,17 +98,11 @@ pub(crate) async fn run_unique_workload(
     running: Running,
 ) {
     info!("run_unique_workload"; "use_txn_file" => use_txn_file);
-    let keyspace_name = keyspace_manager
-        .get_keyspace_meta(keyspace_id)
-        .unwrap()
-        .name();
-    let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
-    let params = tc.tidb.conn_params(tidb_idx);
-    let conn_string = params.conn_string(UNIQUE_DB_NAME);
+    let pool = connect_tidb(&tc, &keyspace_manager, keyspace_id).await;
 
     let mut handles = Vec::with_capacity(UNIQUE_WORKLOAD_CONCURRENCY);
     for tid in 0..UNIQUE_WORKLOAD_CONCURRENCY {
-        let conn_string = conn_string.clone();
+        let pool = pool.clone();
         let running = running.clone();
         let handle = tokio::spawn(async move {
             let tag = format!("unique-{}-{}", keyspace_id, tid);
@@ -171,11 +158,10 @@ pub(crate) async fn run_unique_workload(
                 };
 
                 let expect_conflict = delete_sql.is_none();
-                match do_sql(&tag, &conn_string, &insert_sql, use_txn_file).await {
+                match do_sql(&tag, &pool, &insert_sql, use_txn_file).await {
                     Ok(()) => {
                         if expect_conflict {
-                            let mut conn =
-                                sqlx::MySqlConnection::connect(&conn_string).await.unwrap();
+                            let mut conn = pool.acquire().await.unwrap();
                             match list_rows(&mut conn).await {
                                 Ok((rows, _)) => {
                                     info!("{} unique workload list rows", tag; "rows" => ?rows);
@@ -205,7 +191,7 @@ pub(crate) async fn run_unique_workload(
                 }
 
                 if let Some(delete_sql) = delete_sql {
-                    match do_sql(&tag, &conn_string, &delete_sql, use_txn_file).await {
+                    match do_sql(&tag, &pool, &delete_sql, use_txn_file).await {
                         Ok(()) => {}
                         Err(err) if is_error_retryable(&err) => {
                             warn!("{} unique workload perform delete failed, retry", tag; "err" => ?err);
@@ -221,15 +207,11 @@ pub(crate) async fn run_unique_workload(
         handles.push(handle);
     }
 
-    let conn_string_copy = conn_string.clone();
+    let pool_copy = pool.clone();
     handles.push(tokio::spawn(async move {
         let start_time = Instant::now();
         while running.get() {
-            retry_or_panic!(
-                verify_unique(&conn_string_copy)
-                    .await
-                    .context("verify_unique")
-            );
+            retry_or_panic!(verify_unique(&pool_copy).await.context("verify_unique"));
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         info!("verify unique thread exit"; "dur" => ?start_time.saturating_elapsed());
@@ -241,8 +223,8 @@ pub(crate) async fn run_unique_workload(
     while retry <= 30 {
         retry += 1;
         let check = async {
-            verify_unique(&conn_string).await.context("verify")?;
-            let mut conn = sqlx::MySqlConnection::connect(&conn_string).await.unwrap();
+            verify_unique(&pool).await.context("verify")?;
+            let mut conn = pool.acquire().await.unwrap();
             let (rows, _) = list_rows(&mut conn).await.context("list")?;
             info!("unique rows: {:?}", rows);
             Ok(())
@@ -253,8 +235,8 @@ pub(crate) async fn run_unique_workload(
     panic!("unique: final check retry limit exceeded");
 }
 
-async fn do_sql(tag: &str, conn_string: &str, sql: &str, optimistic_txn: bool) -> Result<()> {
-    let mut txn = Transaction::begin(tag, conn_string, optimistic_txn)
+async fn do_sql(tag: &str, pool: &MySqlPool, sql: &str, optimistic_txn: bool) -> Result<()> {
+    let mut txn = Transaction::begin(tag, pool, optimistic_txn)
         .await
         .context("begin")?;
     debug!("{} unique_workload: do sql", tag; "sql" => sql, "start_ts" => txn.start_ts());
@@ -265,10 +247,8 @@ async fn do_sql(tag: &str, conn_string: &str, sql: &str, optimistic_txn: bool) -
     txn.commit().await.context("do_sql_commit")
 }
 
-async fn verify_unique(conn_string: &str) -> Result<()> {
-    let mut conn = sqlx::MySqlConnection::connect(conn_string)
-        .await
-        .context("connect")?;
+async fn verify_unique(pool: &MySqlPool) -> Result<()> {
+    let mut conn = pool.acquire().await.context("acquire")?;
     sqlx::query("begin")
         .execute(&mut conn)
         .await
