@@ -170,7 +170,7 @@ impl LoadTaskScheduler {
         if states.canceled {
             return;
         }
-        warn!("canceled {}", err);
+        warn!("{} canceled {}", states.task_id, err);
         states.canceled = true;
         states.error = err.clone();
         drop(states);

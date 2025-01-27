@@ -17,7 +17,7 @@ use load_data::{
         LoadDataCheckpointCtx, LoadDataCleanupWorker,
         LoadDataWorkerState::{BuildingSst, IngestedSst},
         LocalFileCheckpointStorage, CANCELLED_TASK_EXPIRE_SEC, CLEANUP_INTERVAL_SEC,
-        IDLE_TASK_EXPIRE_SEC,
+        FINISHED_TASK_EXPIRE_SEC, IDLE_TASK_EXPIRE_SEC,
     },
     dispatcher::Dispatcher,
     task::{
@@ -340,6 +340,7 @@ impl LoadDataManager {
             self.running_tasks.clone(),
             CLEANUP_INTERVAL_SEC,
             CANCELLED_TASK_EXPIRE_SEC,
+            FINISHED_TASK_EXPIRE_SEC,
             IDLE_TASK_EXPIRE_SEC,
         );
         std::thread::spawn(move || {

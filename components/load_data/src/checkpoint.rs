@@ -28,8 +28,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub const CHECKPOINT_WORKER_PREFIX: &str = "LOAD_DATA_CHECK_POINT_";
 
 pub const CANCELLED_TASK_EXPIRE_SEC: i64 = 3 * 60 * 60; // 3h
+pub const FINISHED_TASK_EXPIRE_SEC: i64 = 3 * 60; // 3m
 pub const IDLE_TASK_EXPIRE_SEC: i64 = 3 * 24 * 60 * 60; // 3d
-pub const CLEANUP_INTERVAL_SEC: u64 = 10 * 60; // 10m
+pub const CLEANUP_INTERVAL_SEC: u64 = 60; // 1m
 
 lazy_static::lazy_static! {
     static ref FILE_LOCK: Mutex<()> = Mutex::new(());
@@ -463,6 +464,7 @@ pub struct LoadDataCleanupWorker {
     tracing_task_states: HashMap<String, TracingTaskState>,
     cleanup_interval_secs: u64,
     cancelled_task_expire_secs: i64,
+    finished_task_expire_secs: i64,
     idle_task_expire_secs: i64,
 }
 
@@ -471,6 +473,7 @@ impl LoadDataCleanupWorker {
         running_tasks: Arc<DashMap<String, LoadTaskScheduler>>,
         cleanup_interval_secs: u64,
         cancelled_task_expire_secs: i64,
+        finished_task_expire_secs: i64,
         idle_task_expire_secs: i64,
     ) -> Self {
         Self {
@@ -478,6 +481,7 @@ impl LoadDataCleanupWorker {
             tracing_task_states: HashMap::default(),
             cleanup_interval_secs,
             cancelled_task_expire_secs,
+            finished_task_expire_secs,
             idle_task_expire_secs,
         }
     }
@@ -525,25 +529,25 @@ impl LoadDataCleanupWorker {
                     tracing_task_state.canceled_at = now_timestamp;
                 }
 
-                if tracing_task_state.canceled_at > 0
-                    && now_timestamp - tracing_task_state.canceled_at
-                        > self.cancelled_task_expire_secs
-                {
-                    info!(
-                        "clean up canceled task {}, duration {}",
-                        task_id,
-                        now_timestamp - tracing_task_state.canceled_at
-                    );
-                    if let Some((_, scheduler)) = self.running_tasks.remove(&task_id) {
-                        scheduler.sender.send(LoadTaskMsg::Cleanup).unwrap();
+                if tracing_task_state.canceled_at > 0 {
+                    let duration = now_timestamp - tracing_task_state.canceled_at;
+                    if (task_state.finished && duration > self.finished_task_expire_secs)
+                        || duration > self.cancelled_task_expire_secs
+                    {
+                        let log_msg = if task_state.finished {
+                            "finished"
+                        } else {
+                            "canceled"
+                        };
+                        info!("clean up {} task {}", log_msg, task_id);
+                        if let Some((_, scheduler)) = self.running_tasks.remove(&task_id) {
+                            scheduler.sender.send(LoadTaskMsg::Cleanup).unwrap();
+                        }
                     }
-                } else if now_timestamp - tracing_task_state.updated_at > self.idle_task_expire_secs
-                {
-                    info!(
-                        "clean up idle task {}, duration {}",
-                        task_id,
-                        now_timestamp - tracing_task_state.updated_at
-                    );
+                }
+
+                if now_timestamp - tracing_task_state.updated_at > self.idle_task_expire_secs {
+                    info!("clean up idle task {}", task_id,);
                     if let Some((_, scheduler)) = self.running_tasks.remove(&task_id) {
                         scheduler.cancel("gc by cleanup worker".to_string());
                         scheduler.sender.send(LoadTaskMsg::Cleanup).unwrap();
@@ -758,10 +762,17 @@ mod tests {
 
         // normal task
         let task_id = "task_id3".to_string();
-        let (scheduler3, receiver3) = make_test_scheduler(task_id.clone(), path);
+        let (scheduler3, receiver3) = make_test_scheduler(task_id.clone(), path.clone());
         running_tasks.insert(task_id, scheduler3.clone());
 
-        let mut cleanup_worker = LoadDataCleanupWorker::new(running_tasks.clone(), 5, 10, 10);
+        // normal finished task
+        let task_id = "task_id4".to_string();
+        let (scheduler4, receiver4) = make_test_scheduler(task_id.clone(), path);
+        scheduler4.states.write().unwrap().finished = true;
+        scheduler4.cancel("finished".to_string());
+        running_tasks.insert(task_id.to_owned(), scheduler4.clone());
+
+        let mut cleanup_worker = LoadDataCleanupWorker::new(running_tasks.clone(), 1, 10, 5, 10);
         std::thread::spawn(move || {
             cleanup_worker.run();
         });
@@ -776,6 +787,7 @@ mod tests {
         receiver2.try_recv().unwrap();
         let msg = receiver3.try_recv();
         assert!(msg.is_err());
+        receiver4.try_recv().unwrap();
 
         assert!(scheduler2.states.read().unwrap().canceled);
         assert!(!scheduler3.states.read().unwrap().canceled);
