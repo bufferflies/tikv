@@ -248,18 +248,10 @@ impl GcRunner {
                     .with_ctx(|| format!("gc.txn.tmp.remove_file: {path:?}"))?;
             } else if filename.ends_with(".txn") {
                 if let Some(id) = kvengine::txn_chunk_manager::parse_txn_chunk_id(filename) {
-                    if !kv_txn_chunk_ids.contains(&id) {
-                        let is_old_chunk = match txn_chunk_manager.get_prepare_time(id) {
-                            Some(prepare_time) => prepare_time.saturating_elapsed() > self.timeout,
-                            None => {
-                                warn!("{} local file GC: txn chunk not in manager", store_id; "filename" => filename, "id" => id);
-                                true
-                            }
-                        };
-                        if is_old_chunk {
-                            txn_chunk_manager.remove(id);
-                            info!("{} local file GC remove txn chunk", store_id; "filename" => filename, "id" => id);
-                        }
+                    if !kv_txn_chunk_ids.contains(&id)
+                        && txn_chunk_manager.gc_chunk_file(id, self.timeout, store_id)
+                    {
+                        info!("{} local file GC remove txn chunk", store_id; "filename" => filename, "id" => id);
                     }
                 } else {
                     warn!("failed to parse txn chunk id {:?}", path);

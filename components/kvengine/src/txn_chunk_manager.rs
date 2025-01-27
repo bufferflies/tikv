@@ -14,7 +14,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use futures::executor::block_on;
 use regex::Regex;
 use tikv_util::{box_err, config::ReadableDuration, time::Instant};
@@ -381,20 +381,65 @@ impl TxnChunkManagerCore {
         guard.as_ref().map(|x| x.chunk.clone())
     }
 
-    pub fn get_prepare_time(&self, txn_chunk_id: u64) -> Option<Instant> {
-        let entry = self.txn_chunks.get(&txn_chunk_id)?.clone();
-        let x = match entry.chunk_data.try_read() {
-            Ok(guard) => guard.as_ref().map(|x| x.prepare_time),
-            Err(_) => Some(Instant::now_coarse()), // Return current time if the chunk is reading.
-        };
-        x
+    fn remove_chunk_file(&self, txn_chunk_id: u64) -> Result<()> {
+        if let Some(path) = self.local_file_path(txn_chunk_id) {
+            let res = fs::remove_file(&path);
+            match &res {
+                Ok(()) => info!("remove chunk file"; "id" => txn_chunk_id, "path" => ?path),
+                Err(err) => {
+                    warn!("remove chunk file failed"; "id" => txn_chunk_id, "path" => ?path, "err" => ?err)
+                }
+            }
+            res.table_ctx(txn_chunk_id, "txn_chunk.remove")?;
+        }
+        Ok(())
     }
 
-    pub fn remove(&self, txn_chunk_id: u64) -> bool {
-        if let Some(local_file_path) = self.local_file_path(txn_chunk_id) {
-            let _ = fs::remove_file(local_file_path);
-        }
+    #[cfg(test)]
+    fn unsafe_remove(&self, txn_chunk_id: u64) -> bool {
+        let _ = self.remove_chunk_file(txn_chunk_id);
         self.txn_chunks.remove(&txn_chunk_id).is_some()
+    }
+
+    pub fn gc_chunk_file(&self, txn_chunk_id: u64, timeout: Duration, store_id: u64) -> bool {
+        match self.txn_chunks.entry(txn_chunk_id) {
+            Entry::Vacant(_entry) => {
+                warn!("{} gc: chunk file is leak", store_id; "id" => txn_chunk_id);
+                let _ = self.remove_chunk_file(txn_chunk_id);
+                true
+            }
+            Entry::Occupied(entry) => {
+                let chunk_data = entry.get().chunk_data.clone();
+                let Ok(mut guard) = chunk_data.try_write() else {
+                    return false;
+                };
+                if Arc::strong_count(&chunk_data) > 2 {
+                    // 2: entry + guard.
+                    // Another thread has cloned the `chunk_data` and is waiting for the lock.
+                    return false;
+                }
+                let to_remove = match guard.as_ref() {
+                    Some(x) => x.prepare_time.saturating_elapsed() >= timeout,
+                    None => {
+                        warn!("{} gc: chunk file is leak", store_id; "id" => txn_chunk_id);
+                        true
+                    }
+                };
+                if to_remove {
+                    let _ = self.remove_chunk_file(txn_chunk_id);
+                    *guard = None;
+
+                    // The safety to remove the entry:
+                    // 1. No other thread is holding the entry of `txn_chunks`, as `entry` has the
+                    //    write lock.
+                    // 2. Threads has cloned the `chunk_data` but waiting for lock of `chunk_data`
+                    //    must result in `Arc::strong_count(&chunk_data) > 2`.
+                    entry.remove();
+                    debug_assert_eq!(Arc::strong_count(&chunk_data), 1);
+                }
+                to_remove
+            }
+        }
     }
 
     fn local_file_path(&self, txn_chunk_id: u64) -> Option<PathBuf> {
@@ -540,6 +585,7 @@ mod tests {
     #[case(Some(TempDir::new().unwrap()))]
     #[case::in_mem(None)]
     fn test_txn_chunk_manager(#[case] tmp_dir: Option<TempDir>) {
+        ::test_util::init_log_for_test();
         let local_path = tmp_dir.as_ref().map(|dir| dir.path().to_path_buf());
         let dfs: Arc<dyn Dfs> = Arc::new(InMemFs::new());
         let cache = BlockCache::new(BlockCacheType::Quick, 1024 * 1024, 4 * 1024);
@@ -553,17 +599,7 @@ mod tests {
         let runtime = dfs.get_runtime();
         let opts = dfs::Options::default().with_type(FileType::TxnChunk);
         for chunk_id in 1u64..=6 {
-            let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
-            for i in 0..100 {
-                let key = format!("{:02}/{:02}", chunk_id, i);
-                chunk_builder.add_entry(
-                    InnerKey::from_outer_key(key.as_bytes()),
-                    OP_PUT,
-                    key.as_bytes(),
-                );
-            }
-            let mut buf = vec![];
-            chunk_builder.finish(&mut buf);
+            let buf = make_txn_chunk(chunk_id);
             runtime
                 .block_on(dfs.create(chunk_id, buf.into(), opts))
                 .unwrap();
@@ -578,17 +614,7 @@ mod tests {
             .unwrap();
         assert!(txn_chunk_manager.all_chunks_exists(&[4, 5, 6]));
 
-        {
-            // `100ms` for tolerate precise of clock time.
-            let prepare_time = txn_chunk_manager.get_prepare_time(4).unwrap();
-            assert!(prepare_time.saturating_elapsed() < Duration::from_millis(100));
-
-            std::thread::sleep(Duration::from_millis(1100));
-            let prepare_time = txn_chunk_manager.get_prepare_time(5).unwrap();
-            assert!(prepare_time.saturating_elapsed() >= Duration::from_secs(1));
-        }
-
-        txn_chunk_manager.remove(1);
+        txn_chunk_manager.unsafe_remove(1);
         assert!(txn_chunk_manager.get(1).is_none());
         drop(txn_chunk_manager);
 
@@ -606,5 +632,58 @@ mod tests {
         } else {
             assert!(!txn_chunk_manager.all_chunks_exists(&[2, 3]));
         }
+    }
+
+    #[test]
+    fn test_gc() {
+        ::test_util::init_log_for_test();
+        let temp_dir = TempDir::new().unwrap();
+        let local_path = temp_dir.path();
+
+        let dfs: Arc<dyn Dfs> = Arc::new(InMemFs::new());
+        let cache = BlockCache::new(BlockCacheType::None, 0, 0);
+        let mgr = TxnChunkManager::new(
+            Some(local_path.to_path_buf()),
+            dfs,
+            cache,
+            with_pool_size(2),
+            TxnChunkManagerConfig::default(),
+        );
+
+        let chunk1 = make_txn_chunk(1);
+        let chunk1_path = mgr.local_file_path(1).unwrap();
+        fs::write(&chunk1_path, &chunk1).unwrap();
+        mgr.init().unwrap();
+        mgr.get(1).unwrap();
+
+        // Not timeout yet:
+        assert!(!mgr.gc_chunk_file(1, Duration::from_secs(60), 1));
+        mgr.get(1).unwrap();
+
+        // Timeout:
+        assert!(mgr.gc_chunk_file(1, Duration::from_secs(0), 1));
+        assert!(mgr.get(1).is_none());
+
+        // Leak:
+        fs::write(&chunk1_path, &chunk1).unwrap();
+        assert!(chunk1_path.try_exists().unwrap());
+        assert!(mgr.get(1).is_none());
+        assert!(mgr.gc_chunk_file(1, Duration::from_secs(60), 1));
+        assert!(!chunk1_path.try_exists().unwrap());
+    }
+
+    fn make_txn_chunk(chunk_id: u64) -> Vec<u8> {
+        let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+        for i in 0..100 {
+            let key = format!("{:02}/{:02}", chunk_id, i);
+            chunk_builder.add_entry(
+                InnerKey::from_outer_key(key.as_bytes()),
+                OP_PUT,
+                key.as_bytes(),
+            );
+        }
+        let mut buf = vec![];
+        chunk_builder.finish(&mut buf);
+        buf
     }
 }
