@@ -2,8 +2,8 @@
 
 use std::{
     convert::TryFrom,
-    fmt,
-    io::ErrorKind,
+    fmt, fs,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
@@ -14,7 +14,6 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use log_wrappers::Value as LogValue;
-use tokio::io::AsyncWriteExt;
 
 use crate::{
     dfs,
@@ -220,7 +219,7 @@ impl IaFile {
         ia_mgr: &IaManager,
     ) -> Result<Bytes> {
         let local_path = table_meta_file_local_path(file_id, ftype, data_dir);
-        let table_meta_data = match tokio::fs::read(&local_path).await {
+        let table_meta_data = match fs::read(&local_path) {
             Ok(bytes) => {
                 let should_set_mtime = ia_mgr.access_table_meta(file_id);
                 if should_set_mtime {
@@ -249,7 +248,7 @@ impl IaFile {
                     .map_err(|err| {
                         Error::IaMgr(format!("{} prepare meta: failed: {:?}", file_id, err))
                     })?;
-                if let Err(err) = Self::save_table_meta(file_id, &local_path, &bytes).await {
+                if let Err(err) = Self::save_table_meta(file_id, &local_path, &bytes) {
                     debug_assert!(false, "{} save table meta failed: {:?}", file_id, err);
                     warn!("{} prepare meta: write failed", file_id; "err" => ?err);
                 }
@@ -266,7 +265,7 @@ impl IaFile {
         Ok(table_meta_data)
     }
 
-    async fn save_table_meta(file_id: u64, local_path: &Path, data: &[u8]) -> Result<()> {
+    fn save_table_meta(file_id: u64, local_path: &Path, data: &[u8]) -> Result<()> {
         lazy_static::lazy_static! {
             static ref TMP_ID: AtomicU64 = AtomicU64::new(0);
         }
@@ -275,14 +274,10 @@ impl IaFile {
             TABLE_META_LOCAL_FILE_SUFFIX,
             TMP_ID.fetch_add(1, Relaxed)
         ));
-        let mut f = tokio::fs::File::create(&tmp_path)
-            .await
-            .table_ctx(file_id, "create_tmp")?;
-        f.write_all(data).await.table_ctx(file_id, "write_tmp")?;
-        f.sync_data().await.table_ctx(file_id, "sync_tmp")?;
-        tokio::fs::rename(&tmp_path, local_path)
-            .await
-            .table_ctx(file_id, "rename")?;
+        let mut f = fs::File::create(&tmp_path).table_ctx(file_id, "create_tmp")?;
+        f.write_all(data).table_ctx(file_id, "write_tmp")?;
+        f.sync_data().table_ctx(file_id, "sync_tmp")?;
+        fs::rename(&tmp_path, local_path).table_ctx(file_id, "rename")?;
         Ok(())
     }
 }

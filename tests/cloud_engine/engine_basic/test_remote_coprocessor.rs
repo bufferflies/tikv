@@ -2676,15 +2676,12 @@ impl<'a> DagTest<'a> {
                 .freq_update_interval(Duration::from_secs(1))
                 .build()
                 .unwrap();
-            let ia_mgr = self
-                .ctx
-                .rt
-                .block_on(IaManager::new(
-                    opts,
-                    Arc::new(self.ctx.s3fs.clone()),
-                    self.ctx.rt.handle().clone().into(),
-                ))
-                .unwrap();
+            let ia_mgr = IaManager::new(
+                opts,
+                Arc::new(self.ctx.s3fs.clone()),
+                self.ctx.rt.handle().clone().into(),
+            )
+            .unwrap();
             let meta_path = path.join("meta");
             std::fs::create_dir_all(&meta_path).unwrap();
             IaCtx::Enabled(ia_mgr, Arc::new(meta_path))

@@ -368,9 +368,7 @@ fn create_ia_ctx(
             .to_manager_options(segment_path)
             .map_err(|err| format!("build IA options failed: {err:?}"))?;
 
-        let rt = runtime.clone();
-        let ia_mgr = runtime
-            .block_on(IaManager::new(opts, Arc::new(s3fs.clone()), rt.into()))
+        let ia_mgr = IaManager::new(opts, Arc::new(s3fs.clone()), runtime.clone().into())
             .map_err(|err| format!("create IA manager failed: {err:?}"))?;
 
         let meta_path = ia_path.join("meta");

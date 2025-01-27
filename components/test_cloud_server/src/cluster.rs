@@ -790,6 +790,7 @@ impl ServerCluster {
                     interval: ReadableDuration::secs(10),
                     meta_lifetime: ReadableDuration::secs(30),
                     segment_interval: ReadableDuration::secs(0), // Run on every `interval`.
+                    segment_tmp_lifetime: ReadableDuration::secs(10),
                 },
                 ..Default::default()
             };

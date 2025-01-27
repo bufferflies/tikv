@@ -412,8 +412,8 @@ impl S3Fifo {
         let task_counter = self.task_counter.clone();
         let ctx = self.segment_data_ctx.clone();
         let task_tx = self.task_tx.clone();
-        self.runtime.spawn(async move {
-            let res = ctx.save_to_main_store(&ident, bytes).await;
+        self.runtime.spawn_blocking(move || {
+            let res = ctx.save_to_main_store(&ident, bytes);
             match &res {
                 Ok(()) => {
                     debug!("save to main store: done"; "ident" => %ident);

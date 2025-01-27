@@ -1,8 +1,10 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    ffi::OsStr,
     fs,
     fs::DirEntry,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -11,6 +13,7 @@ use kvengine::{
         ia_file::parse_table_meta_filename,
         manager::IaManager,
         types::{FileSegmentIdent, SEGMENT_LOCAL_FILE_SUFFIX, TABLE_META_LOCAL_FILE_SUFFIX},
+        util::TEMPORARY_FILE_SUFFIX,
     },
     IoContext,
 };
@@ -28,6 +31,7 @@ pub struct LocalGcConfig {
     pub interval: ReadableDuration,
     pub meta_lifetime: ReadableDuration,
     pub segment_interval: ReadableDuration,
+    pub segment_tmp_lifetime: ReadableDuration,
 }
 
 impl Default for LocalGcConfig {
@@ -36,6 +40,7 @@ impl Default for LocalGcConfig {
             interval: ReadableDuration::hours(1),
             meta_lifetime: ReadableDuration::days(1),
             segment_interval: ReadableDuration::days(1),
+            segment_tmp_lifetime: ReadableDuration::minutes(1),
         }
     }
 }
@@ -83,8 +88,8 @@ impl LocalGcRunner {
     pub fn meta_file_gc(&mut self) -> Result<usize> {
         Self::walk_dir(
             &self.meta_path,
-            |path, entry| self.handle_meta_file(path, &entry),
-            TABLE_META_LOCAL_FILE_SUFFIX,
+            &[TABLE_META_LOCAL_FILE_SUFFIX],
+            |_extension, path, entry| self.handle_meta_file(path, &entry),
         )
     }
 
@@ -106,8 +111,11 @@ impl LocalGcRunner {
             .unwrap_or_default();
         if modified_dur > self.config.meta_lifetime.0 {
             self.ia_mgr.remove_table_meta(file_id);
-            self.remove_file(path)?;
-            return Ok(true);
+            let is_removed = self
+                .remove_file(path)
+                .with_ctx(|| format!("remove_meta.{}", path.display()))?;
+            debug_assert!(is_removed, "meta file not removed: {}:{:?}", file_id, path);
+            return Ok(is_removed);
         }
         Ok(false)
     }
@@ -123,8 +131,16 @@ impl LocalGcRunner {
         self.segment_last_gc_time = Instant::now_coarse();
         Self::walk_dir(
             segment_path,
-            |path, _| self.handle_segment(path),
-            SEGMENT_LOCAL_FILE_SUFFIX,
+            &[SEGMENT_LOCAL_FILE_SUFFIX, TEMPORARY_FILE_SUFFIX],
+            |extension, path, entry| {
+                if extension == SEGMENT_LOCAL_FILE_SUFFIX {
+                    self.handle_segment(path)
+                } else if extension == TEMPORARY_FILE_SUFFIX {
+                    self.handle_segment_temp(path, &entry)
+                } else {
+                    unreachable!()
+                }
+            },
         )
     }
 
@@ -139,29 +155,57 @@ impl LocalGcRunner {
         };
         if !self.ia_mgr.contains_segment(&segment_ident) {
             warn!("worker gc: segment file is leaked"; "path" => ?path, "segment" => %segment_ident);
-            self.remove_file(path)?;
-            return Ok(true);
+            let is_removed = self
+                .remove_file(path)
+                .with_ctx(|| format!("remove_segment.{}", path.display()))?;
+            return Ok(is_removed);
         }
         Ok(false)
     }
 
-    fn remove_file(&self, path: &Path) -> Result<()> {
-        info!("worker gc: remove file {:?}", path);
-        fs::remove_file(path).with_ctx(|| format!("remove_file.{path:?}"))?;
-        Ok(())
+    fn handle_segment_temp(&self, path: &Path, entry: &DirEntry) -> Result<bool /* is_removed */> {
+        let metadata = entry.metadata().ctx("gc.metadata")?;
+        let modified_dur = metadata
+            .modified()
+            .ctx("gc.modified")?
+            .elapsed()
+            .unwrap_or_default();
+        if modified_dur >= self.config.segment_tmp_lifetime.0 {
+            let is_removed = self
+                .remove_file(path)
+                .with_ctx(|| format!("remove_seg_tmp.{}", path.display()))?;
+            return Ok(is_removed);
+        }
+        Ok(false)
     }
 
-    fn walk_dir<F>(dir: &Path, mut f: F, extension: &str) -> Result<usize>
+    fn remove_file(&self, path: &Path) -> io::Result<bool /* is_removed */> {
+        info!("worker gc: remove file {:?}", path);
+        match fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // Removed by segment eviction of IA manager.
+                info!("worker gc: remove file not found: {:?}", path);
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn walk_dir<F>(dir: &Path, extensions: &[&str], mut f: F) -> Result<usize>
     where
-        F: FnMut(&Path, DirEntry) -> Result<bool>,
+        F: FnMut(&OsStr /* extension */, &Path, DirEntry) -> Result<bool>,
     {
         let mut removed_count = 0;
         let entries = fs::read_dir(dir).with_ctx(|| format!("gc.read_dir.{dir:?}"))?;
         for e in entries {
             let entry = e.ctx("gc.entry")?;
             let path = entry.path();
-            if path.extension().is_some_and(|x| x == extension) {
-                match f(&path, entry) {
+            let Some(ext) = path.extension() else {
+                continue;
+            };
+            if extensions.iter().any(|&x| x == ext) {
+                match f(ext, &path, entry) {
                     Ok(is_removed) => removed_count += is_removed as usize,
                     Err(err) => {
                         error!("worker gc: handle file failed"; "err" => ?err, "path" => ?path);

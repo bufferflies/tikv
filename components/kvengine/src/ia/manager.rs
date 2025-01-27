@@ -135,11 +135,7 @@ impl ops::Deref for IaManager {
 }
 
 impl IaManager {
-    pub async fn new(
-        opts: IaManagerOptions,
-        fs: Arc<dyn dfs::Dfs>,
-        runtime: WorkerPool,
-    ) -> Result<Self> {
+    pub fn new(opts: IaManagerOptions, fs: Arc<dyn dfs::Dfs>, runtime: WorkerPool) -> Result<Self> {
         assert!(
             opts.small_queue.path.is_none(),
             "small queue must be in memory"
@@ -182,7 +178,7 @@ impl IaManager {
         });
 
         let mgr = Self { core };
-        mgr.init().await?;
+        mgr.init()?;
         Ok(mgr)
     }
 }
@@ -221,18 +217,18 @@ impl IaManagerCore {
         self.segment_size
     }
 
-    async fn init(&self) -> Result<()> {
-        self.main_store.init().await?;
-        let mut entries = self.main_store.scan().await?;
+    fn init(&self) -> Result<()> {
+        self.main_store.init()?;
+        let mut entries = self.main_store.scan()?;
         if let Some(segments) = entries.remove("seg") {
-            self.init_segments(segments).await?;
+            self.init_segments(segments)?;
         }
 
         Ok(())
     }
 
     // TODO: take snapshot for queue & restore from it.
-    async fn init_segments(&self, keys: Vec<String>) -> Result<()> {
+    fn init_segments(&self, keys: Vec<String>) -> Result<()> {
         for k in keys {
             if let Some(ident) = FileSegmentIdent::parse_local_filename(&k) {
                 self.segments
@@ -579,14 +575,9 @@ impl SegmentDataContext {
     }
 
     #[inline]
-    pub(crate) async fn save_to_main_store(
-        &self,
-        ident: &FileSegmentIdent,
-        bytes: Bytes,
-    ) -> Result<()> {
+    pub(crate) fn save_to_main_store(&self, ident: &FileSegmentIdent, bytes: Bytes) -> Result<()> {
         self.main_store
             .save(ident.file_id, &ident.local_filename(), bytes)
-            .await
     }
 
     #[cfg(test)]

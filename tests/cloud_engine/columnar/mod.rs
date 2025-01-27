@@ -840,13 +840,12 @@ fn test_columnar_ia_file() {
         .build()
         .unwrap();
     let s3fs = S3Fs::new_from_config(dfs_config);
-    let ia_mgr = runtime
-        .block_on(IaManager::new(
-            options,
-            Arc::new(s3fs.clone()),
-            runtime.handle().clone().into(),
-        ))
-        .unwrap();
+    let ia_mgr = IaManager::new(
+        options,
+        Arc::new(s3fs.clone()),
+        runtime.handle().clone().into(),
+    )
+    .unwrap();
     let ia_ctx = IaCtx::Enabled(ia_mgr, Arc::new(local_path));
     let snap_ctx = SnapCtx {
         dfs: dfs.clone(),

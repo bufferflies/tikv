@@ -2,6 +2,8 @@
 
 use std::{
     collections::HashMap,
+    fs,
+    io::Write,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{
@@ -16,7 +18,6 @@ use bytes::{Buf, Bytes};
 use dashmap::DashMap;
 use quick_cache::sync::Cache;
 use tikv_util::config::{AbsoluteOrPercentSize, ReadableDuration};
-use tokio::io::AsyncWriteExt;
 
 use crate::{
     ia::{
@@ -27,18 +28,20 @@ use crate::{
     IoContext,
 };
 
+pub const TEMPORARY_FILE_SUFFIX: &str = "tmp";
+
 /// LocalStore is used to provide uniform access to both local disk and memory.
 #[async_trait]
 pub trait LocalStore: Send + Sync {
     /// Return the path of store. Will be `None` when it's in memory.
     fn path(&self) -> Option<&Path>;
 
-    async fn init(&self) -> Result<()>;
+    fn init(&self) -> Result<()>;
 
     /// Return the existed keys & suffixes in the store from last startup.
-    async fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>>;
+    fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>>;
 
-    async fn save(&self, file_id: u64, key: &str, data: Bytes) -> Result<()>;
+    fn save(&self, file_id: u64, key: &str, data: Bytes) -> Result<()>;
 
     /// Read exactly `buf.len()` bytes into `buf` starting at `offset`.
     fn read_at(&self, file_id: u64, key: &str, buf: &mut [u8], offset: u64) -> Result<Option<()>>;
@@ -118,50 +121,50 @@ impl LocalStore for LocalFileStore {
         Some(&self.dir)
     }
 
-    async fn init(&self) -> Result<()> {
-        tokio::fs::create_dir_all(&self.dir)
-            .await
-            .table_ctx(0, format!("create_dir.{:?}", self.dir))
+    fn init(&self) -> Result<()> {
+        fs::create_dir_all(&self.dir).table_ctx(0, format!("create_dir.{:?}", self.dir))
     }
 
-    async fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
-        let mut entries = tokio::fs::read_dir(&self.dir)
-            .await
-            .table_ctx(0, format!("read_dir.{:?}", self.dir))?;
+    fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
+        let entries = fs::read_dir(&self.dir).table_ctx(0, format!("read_dir.{:?}", self.dir))?;
         let mut map = HashMap::new();
-        while let Some(entry) = entries.next_entry().await.table_ctx(0, "next_entry")? {
+        for entry in entries {
+            let entry = entry.table_ctx(0, "entry")?;
             let path = entry.path();
             if path.is_file() {
-                let key = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let suffix = path.extension().unwrap().to_str().unwrap().to_owned();
+                let key = path.file_name().unwrap().to_string_lossy().into_owned();
+                let suffix = path
+                    .extension()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 map.entry(suffix).or_insert_with(Vec::new).push(key);
             }
         }
         Ok(map)
     }
 
-    async fn save(&self, file_id: u64, key: &str, data: Bytes) -> Result<()> {
+    fn save(&self, file_id: u64, key: &str, data: Bytes) -> Result<()> {
         lazy_static::lazy_static! {
             static ref TMP_ID: AtomicU64 = AtomicU64::new(0);
         }
 
-        let tmp_filename = format!("{}.{}.tmp", key, TMP_ID.fetch_add(1, Relaxed));
+        let tmp_filename = format!(
+            "{}.{}.{}",
+            key,
+            TMP_ID.fetch_add(1, Relaxed),
+            TEMPORARY_FILE_SUFFIX
+        );
         let tmp_path = self.dir.join(tmp_filename);
-        let mut f = tokio::fs::File::create(&tmp_path)
-            .await
-            .table_ctx(file_id, format!("create_tmp.{key}"))?;
+        let mut f = fs::File::create(&tmp_path).table_ctx(file_id, format!("create_tmp.{key}"))?;
 
         f.write_all(&data)
-            .await
             .table_ctx(file_id, format!("write_tmp.{key}"))?;
         f.sync_data()
-            .await
             .table_ctx(file_id, format!("sync_tmp.{key}"))?;
 
         let path = self.dir.join(key);
-        tokio::fs::rename(&tmp_path, &path)
-            .await
-            .table_ctx(file_id, format!("rename.{key}"))?;
+        fs::rename(&tmp_path, &path).table_ctx(file_id, format!("rename.{key}"))?;
 
         debug!("FileDataStore.save"; "file_id" => file_id, "key" => key, "path" => ?path);
         Ok(())
@@ -225,15 +228,15 @@ impl LocalStore for LocalMemoryStore {
         None
     }
 
-    async fn init(&self) -> Result<()> {
+    fn init(&self) -> Result<()> {
         Ok(())
     }
 
-    async fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
+    fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
         Ok(HashMap::new())
     }
 
-    async fn save(&self, _file_id: u64, key: &str, data: Bytes) -> Result<()> {
+    fn save(&self, _file_id: u64, key: &str, data: Bytes) -> Result<()> {
         self.m.insert(key.to_owned(), data);
         Ok(())
     }
