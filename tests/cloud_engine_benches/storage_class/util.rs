@@ -1,20 +1,9 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::atomic::AtomicU16;
-
 use kvengine::SnapAccess;
 use rand::{thread_rng, Rng as _};
 use tikv::storage::txn::CloudStoreScanner;
-use tikv_util::info;
 use txn_types::{Key, TsSet};
-
-static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
-
-pub(crate) fn alloc_node_id() -> u16 {
-    let node_id = NODE_ALLOCATOR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    info!("allocated node_id {}", node_id);
-    node_id
-}
 
 pub(crate) const KEY_PREFIX: &str = "x123";
 

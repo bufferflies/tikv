@@ -2,10 +2,7 @@
 
 //! Test for test_cloud_server & test_pd_client themselves.
 
-use std::{
-    sync::{atomic::AtomicU16, Arc},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use api_version::ApiV2;
 use bstr::ByteSlice;
@@ -24,6 +21,7 @@ use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info};
 use tokio::runtime::Runtime;
 
 use crate::{
+    alloc_node_id_vec,
     client::{CommitAction, MutateOptions},
     oss::prepare_dfs,
     try_wait, try_wait_result_async, ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
@@ -683,20 +681,6 @@ fn test_builtin_dfs() {
             .unwrap();
         assert_eq!(partial_read_data, write_data.slice(start_off..));
     })
-}
-
-static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
-
-pub(crate) fn alloc_node_id() -> u16 {
-    let node_id = NODE_ALLOCATOR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    info!("allocated node_id {}", node_id);
-    node_id
-}
-
-pub(crate) fn alloc_node_id_vec(count: usize) -> Vec<u16> {
-    let mut nodes = vec![];
-    nodes.resize_with(count, || alloc_node_id());
-    nodes
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {

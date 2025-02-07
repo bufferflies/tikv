@@ -1085,7 +1085,7 @@ fn node_status_addr(node_id: u16) -> String {
 }
 
 fn tikv_worker_addr(idx: u16) -> String {
-    format!("127.0.0.1:{}", 19000 + idx)
+    format!("127.0.0.1:{}", 17000 + idx)
 }
 
 pub fn tikv_worker_cop_url(idx: u16) -> String {

@@ -47,14 +47,6 @@ jobs:
       - name: Run integrations tests
         env:
           CARGO_INCREMENTAL: "0"
-          LOG_FILE: ${{ runner.temp }}/run.log
-          LOG_APPEND: "1"
         working-directory: ./
         run: |
           make test-cloud-engine-integration
-      - name: Upload log on error
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: run.log
-          path: ${{ runner.temp }}/run.log

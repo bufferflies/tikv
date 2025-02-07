@@ -4094,7 +4094,7 @@ dependencies = [
 [[package]]
 name = "librocksdb_sys"
 version = "0.1.0"
-source = "git+https://github.com/tikv/rust-rocksdb.git#2096b9a161f93e437f7adee49e68cd1570aea42f"
+source = "git+https://github.com/tikv/rust-rocksdb.git?branch=tikv-6.5#ecbd6840f81372c30bab4a980e7ae9c91994a421"
 dependencies = [
  "bindgen 0.65.1",
  "bzip2-sys",
@@ -4113,7 +4113,7 @@ dependencies = [
 [[package]]
 name = "libtitan_sys"
 version = "0.0.1"
-source = "git+https://github.com/tikv/rust-rocksdb.git#bd07e9e598db63574cf06edaeea3c4687eadff59"
+source = "git+https://github.com/tikv/rust-rocksdb.git?branch=tikv-6.5#ecbd6840f81372c30bab4a980e7ae9c91994a421"
 dependencies = [
  "bzip2-sys",
  "cc",
@@ -6570,7 +6570,7 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.3.0"
-source = "git+https://github.com/tikv/rust-rocksdb.git#bd07e9e598db63574cf06edaeea3c4687eadff59"
+source = "git+https://github.com/tikv/rust-rocksdb.git?branch=tikv-6.5#ecbd6840f81372c30bab4a980e7ae9c91994a421"
 dependencies = [
  "libc 0.2.161",
  "librocksdb_sys",
@@ -8163,6 +8163,7 @@ dependencies = [
  "kvengine",
  "kvproto",
  "lazy_static",
+ "libc 0.2.161",
  "load_data",
  "log_wrappers",
  "nix 0.24.3",

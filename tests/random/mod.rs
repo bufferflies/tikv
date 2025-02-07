@@ -17,7 +17,7 @@ use std::{
     collections::HashSet,
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, RwLock,
     },
     thread::{sleep, JoinHandle},
@@ -98,19 +98,7 @@ const GC_INTERVAL: Duration = Duration::from_secs(10);
 
 const DROP_TABLE_CONCURRENCY: usize = 2; // More than 1 thread to reduce the chance of blocked by other mutual-exclusive workloads for a long time.
 
-static NODE_ALLOCATOR: AtomicU16 = AtomicU16::new(1);
-
-pub(crate) fn alloc_node_id() -> u16 {
-    let node_id = NODE_ALLOCATOR.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    info!("allocated node_id {}", node_id);
-    node_id
-}
-
-pub(crate) fn alloc_node_id_vec(count: usize) -> Vec<u16> {
-    let mut nodes = vec![];
-    nodes.resize_with(count, || alloc_node_id());
-    nodes
-}
+pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 
 pub(crate) fn spawn_move(scheduler: Scheduler, two_node_down: Arc<RwLock<()>>) -> JoinHandle<()> {
     std::thread::spawn(move || {

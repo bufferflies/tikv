@@ -159,7 +159,7 @@ endif
 # Almost all the rules in this Makefile are PHONY
 # Declaring a rule as PHONY could improve correctness
 # But probably instead just improves performance by a little bit
-.PHONY: audit clippy format pre-format pre-clippy pre-audit unset-override
+.PHONY: audit clippy format pre-format pre-clippy pre-audit unset-override pre-test
 .PHONY: all build clean dev check-udeps doc error-code fuzz run test
 .PHONY: docker docker-tag docker-tag-with-git-hash docker-tag-with-git-tag
 .PHONY: ctl dist_artifacts dist_tarballs x-build-dist
@@ -456,8 +456,11 @@ x-build-dist-debug: export X_PACKAGE=tikv-server tikv-ctl cse-ctl tikv-worker
 x-build-dist-debug:
 	bash scripts/run-cargo.sh
 
-test-cloud-engine:
-	cargo test \
+pre-test:
+	@which cargo-nextest &> /dev/null || cargo install -q cargo-nextest@0.9.85 --locked
+
+test-cloud-engine: pre-test
+	cargo nextest run -P ci \
 		-p kvengine -p rfstore -p rfengine \
 		-p cse-ctl -p tikv-worker -p cloud_worker \
 		-p test_cloud_server -p test_pd_client \
@@ -465,6 +468,7 @@ test-cloud-engine:
 		-p cloud_server -p pd_client \
 		--tests
 
-test-cloud-engine-integration:
-	# --test-threads=2 to limit work loads for stability.
-	cargo test -p tests --test cloud_engine --test cloud_engine_failpoints -- --test-threads=2 --nocapture
+test-cloud-engine-integration: pre-test
+	cargo nextest run -P ci -p tests \
+		--test cloud_engine --test cloud_engine_failpoints \
+		--test-threads=4
