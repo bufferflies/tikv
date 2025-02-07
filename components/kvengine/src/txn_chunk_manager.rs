@@ -6,7 +6,7 @@ use std::{
     ops::Deref,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -122,23 +122,35 @@ pub struct TxnChunkManagerCore {
 
 struct TxnChunkEntryData {
     chunk: TxnChunk,
-    prepare_time: Instant,
+    prepare_time_secs: AtomicI64,
 }
 
 impl TxnChunkEntryData {
     fn new(chunk: TxnChunk) -> Self {
+        Self::new_with(chunk, Instant::now_coarse())
+    }
+
+    fn new_with(chunk: TxnChunk, time: Instant) -> Self {
         Self {
             chunk,
-            prepare_time: Instant::now_coarse(),
+            prepare_time_secs: AtomicI64::new(time.second()),
         }
     }
 
-    fn touch(&mut self) {
-        self.prepare_time = Instant::now_coarse();
+    #[inline]
+    fn touch(&self) {
+        self.touch_with(Instant::now_coarse());
     }
 
-    fn touch_with(&mut self, time: Instant) {
-        self.prepare_time = time;
+    #[inline]
+    fn touch_with(&self, time: Instant) {
+        self.prepare_time_secs
+            .fetch_max(time.second(), Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn prepare_time(&self) -> Instant {
+        Instant::from_timespec_second_coarse(self.prepare_time_secs.load(Ordering::Relaxed))
     }
 }
 
@@ -180,10 +192,7 @@ impl TxnChunkManagerCore {
                         };
                         let files_entry = self.txn_chunks.entry(txn_file_id).or_default().clone();
                         let mut guard = block_on(files_entry.chunk_data.write());
-                        *guard = Some(TxnChunkEntryData {
-                            chunk: txn_chunk,
-                            prepare_time: now,
-                        })
+                        *guard = Some(TxnChunkEntryData::new_with(txn_chunk, now))
                     }
                 }
             }
@@ -357,12 +366,16 @@ impl TxnChunkManagerCore {
     }
 
     pub fn all_chunks_exists(&self, chunk_ids: &[u64]) -> bool {
+        let now = Instant::now_coarse();
         for chunk_id in chunk_ids {
             if let Some(entry) = self.txn_chunks.get(chunk_id) {
                 if let Ok(guard) = entry.value().chunk_data.try_read() {
-                    if guard.is_none() {
-                        // load chunk failed.
-                        return false;
+                    match guard.as_ref() {
+                        Some(chunk_data) => chunk_data.touch_with(now),
+                        None => {
+                            // load chunk failed.
+                            return false;
+                        }
                     }
                 } else {
                     // The chunk is loading by another thread.
@@ -419,7 +432,7 @@ impl TxnChunkManagerCore {
                     return false;
                 }
                 let to_remove = match guard.as_ref() {
-                    Some(x) => x.prepare_time.saturating_elapsed() >= timeout,
+                    Some(x) => x.prepare_time().saturating_elapsed() >= timeout,
                     None => {
                         warn!("{} gc: chunk file is leak", store_id; "id" => txn_chunk_id);
                         true
@@ -560,7 +573,7 @@ async fn gc_single_txn_chunk(
     let txn_chunk = entry.chunk_data.read().await;
     let (is_expired, size) = txn_chunk.as_ref().map_or((true, 0), |x| {
         (
-            now.saturating_duration_since(x.prepare_time) >= ttl,
+            now.saturating_duration_since(x.prepare_time()) >= ttl,
             x.chunk.size() as u64,
         )
     });
@@ -670,6 +683,14 @@ mod tests {
         assert!(mgr.get(1).is_none());
         assert!(mgr.gc_chunk_file(1, Duration::from_secs(60), 1));
         assert!(!chunk1_path.try_exists().unwrap());
+
+        // Test for `all_chunks_exists`:
+        fs::write(&chunk1_path, &chunk1).unwrap();
+        mgr.init().unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(mgr.all_chunks_exists(&[1]));
+        assert!(!mgr.gc_chunk_file(1, Duration::from_secs(1), 1));
+        mgr.get(1).unwrap();
     }
 
     fn make_txn_chunk(chunk_id: u64) -> Vec<u8> {
