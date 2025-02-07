@@ -1,14 +1,16 @@
 #!/bin/bash
 
 set -euo pipefail
+
+WORKDIR="/data/nvme1n1/$LOGNAME/random"
 CONCURRENCY=4
 CPU=4
 MEMORY=8g
+MEMORY_PROFILE=0
 MAKE_BIN_ARGS=""
 GIT_UPDATE=1
 UPGRADE_FROM=""
 
-WORKDIR="/data/nvme1n1/$LOGNAME/random"
 
 show_help() {
     echo "Usage: $0 [OPTIONS]"
@@ -17,6 +19,7 @@ show_help() {
     echo "  --concurrency NUM               Set the concurrency"
     echo "  --cpu NUM                       Set the CPU"
     echo "  --memory NUM                    Set the memory"
+    echo "  --memory-profile                Enable memory profile"
     echo "  --make-bin [MAKE OPTIONS]       make-bin.sh arguments"
     echo "  --upgrade-from                  Upgrade from the specific version"
     echo "  --git-no-update                 Do not update git"
@@ -40,6 +43,9 @@ while [ $# -gt 0 ]; do
     --memory)
         MEMORY="$2"
         shift
+        ;;
+    --memory-profile)
+        MEMORY_PROFILE=1
         ;;
     --upgrade-from)
         UPGRADE_FROM="$2"
@@ -89,12 +95,21 @@ export CONCURRENCY
 export CPU
 export MEMORY
 
+declare -a RUN_ARGS
+RUN_ARGS=(
+    "--test" "upgrade"
+    "--tikv-version" "$UPGRADE_FROM"
+    "--path-with-suffix"
+    "--log-path" "$WORKDIR/upgrade-logs"
+    "--tmp-path" "$WORKDIR/upgrade-tmp"
+)
+
+if [ "$MEMORY_PROFILE" -eq 1 ]; then
+    RUN_ARGS+=(
+        "--memory-profile"
+        "--keep-tmp-on-error"
+    )
+fi
+
 ./docker-stop-random.sh --test upgrade
-./docker-run-random.sh \
-    --path-with-suffix \
-    --keep-tmp-on-error \
-    --test upgrade \
-    --tikv-version "$UPGRADE_FROM" \
-    --log-path "$WORKDIR/upgrade-logs" \
-    --tmp-path "$WORKDIR/upgrade-tmp" \
-    "$@"
+./docker-run-random.sh "${RUN_ARGS[@]}" "$@"

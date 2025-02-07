@@ -128,12 +128,20 @@ for i in $(seq -w 1 100000); do
     fi
 
     LOG="$LOG_PATH"/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID".log
+    CLUSTER_LOGS="$LOG_PATH"/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID"_tc
     /random/random-bin test_random_"$TESTNAME" >"$LOG" 2>&1 || true
     if grep -q 'TEST SUCCEED' "$LOG"; then
         grep 'TEST SUCCEED' "$LOG"
         rm "$LOG"
         rm -rf "$TMPDIR" || true
     else
+        # For logs of TiDB cluster components
+        if compgen -G "$TMPDIR/tc*" >/dev/null; then
+            chmod +r "$TMPDIR"/tc*/*.log
+            mkdir -p "$CLUSTER_LOGS"
+            cp "$TMPDIR"/tc*/*.log "$TMPDIR"/tc*/*.toml "$CLUSTER_LOGS" || true
+        fi
+
         mv "$LOG" "$LOG_PATH"/error-logs/
         if [ "$KEEP_TMP_ON_ERROR" -ne 1 ]; then
             rm -rf "$TMPDIR" || true
