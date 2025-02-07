@@ -269,12 +269,15 @@ impl PdServers {
             .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
     }
 
+    // TODO: Randomly force stop.
     pub fn stop(&self, idx: u16, children: &DashMap<u16, process::Child>) {
         let (_, mut child) = children.remove(&idx).unwrap();
-        // TODO: gracefully stop by SIGINT
-        child.kill().unwrap_or_else(|err| {
-            panic!("pd-{} has exited unexpectedly: {}", idx, err);
-        });
+        // Ref: https://github.com/tidbcloud/pd-cse/blob/release-8.1-keyspace/pkg/mcs/tso/server/server.go#L498
+        send_signal_to_child(&child, Signal::SIGTERM).unwrap();
+        let exit_status = child.wait().unwrap();
+        if !exit_status.success() {
+            warn!("pd-{} exit with error", idx; "exit_status" => ?exit_status);
+        }
     }
 
     pub async fn restart_tso_svc(&self, idx: u16, stop_dur: Duration, healthy_timeout: Duration) {

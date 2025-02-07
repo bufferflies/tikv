@@ -106,6 +106,8 @@ pub(crate) const REMOTE_COP_MIN_BLOCK_SIZE_OPTIONS: [usize; 3] =
     [64 * 1024, 512 * 1024, 1024 * 1024];
 pub(crate) const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(16); // Small size to make eviction more frequent.
 
+pub(crate) const RESTART_TSO_SVC_ENV_KEY: &str = "RESTART_TSO_SVC";
+
 pub(crate) const MEMORY_CAPACITY_RATIO: f64 = 0.8; // Reserve 20% memory for PD, TiDB, and TiFlash.
 
 #[test]
@@ -517,11 +519,13 @@ pub(crate) fn start_workloads(
     }
 
     assert!(!async_handles.is_empty(), "no workload to run");
-    async_handles.push(spawn_restart_tso_svc(
-        tc.clone(),
-        Duration::from_secs(10),
-        running,
-    ));
+    if switches.restart_tso_svc {
+        async_handles.push(spawn_restart_tso_svc(
+            tc.clone(),
+            Duration::from_secs(10),
+            running,
+        ));
+    }
 
     async_handles
 }
@@ -685,6 +689,7 @@ pub(crate) struct Switches {
     pub jepsen_use_txn_file: bool,
     pub unique_workload_switch_on: bool,
     pub global_use_txn_file: bool,
+    pub restart_tso_svc: bool,
 }
 
 impl Switches {
@@ -710,6 +715,8 @@ impl Switches {
         let global_use_txn_file = env_switch(ENABLE_GLOBAL_TXN_FILE_ENV_KEY);
         let global_use_txn_file = global_use_txn_file && rng.gen_bool(ENABLE_GLOBAL_TXN_FILE_RATIO);
 
+        let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
+
         Self {
             enable_inner_key_off,
             remote_cop_min_block_size,
@@ -721,6 +728,7 @@ impl Switches {
             jepsen_use_txn_file,
             unique_workload_switch_on,
             global_use_txn_file,
+            restart_tso_svc,
         }
     }
 }

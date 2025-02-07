@@ -111,6 +111,9 @@ while [[ $# -gt 0 ]]; do
 	--columnar-workload)
 		RUN_ARGS+=("--columnar-workload")
 		;;
+	--no-restart-tso-svc)
+		RUN_ARGS+=("--no-restart-tso-svc")
+		;;
 	--upgrade-test-duration)
 		RUN_ARGS+=("--upgrade-test-duration" "$2")
 		shift

@@ -31,10 +31,16 @@ const RETRYABLE_DB_ERR_MSGS: &[&str] = &[
     "Resolve lock timeout",
 ];
 
+const RETRYABLE_TSO_ERR_MSGS: &[&str] = &[
+    "server not started", // TSO service is stopping.
+    "requested pd is not leader of cluster",
+];
+
 pub(crate) fn is_db_error_retryable(err: &sqlx::Error) -> bool {
     match err {
         sqlx::Error::Database(db_err) => RETRYABLE_DB_ERR_MSGS
             .iter()
+            .chain(RETRYABLE_TSO_ERR_MSGS.iter())
             .any(|msg| db_err.message().contains(msg)),
         sqlx::Error::Io(_) => true,
         _ => false,
