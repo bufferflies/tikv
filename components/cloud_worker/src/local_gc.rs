@@ -45,6 +45,18 @@ impl Default for LocalGcConfig {
     }
 }
 
+macro_rules! try_exists {
+    ($e:expr) => {{
+        match $e {
+            Ok(t) => Ok(t),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(err) => Err(err),
+        }
+    }};
+}
+
 pub struct LocalGcRunner {
     config: LocalGcConfig,
     ia_mgr: IaManager,
@@ -103,7 +115,7 @@ impl LocalGcRunner {
             warn!("worker gc: invalid filename of table meta"; "path" => ?path);
             return Ok(false);
         };
-        let metadata = entry.metadata().ctx("gc.metadata")?;
+        let metadata = try_exists!(entry.metadata()).ctx("gc.metadata")?;
         let modified_dur = metadata
             .modified()
             .ctx("gc.modified")?
@@ -164,7 +176,7 @@ impl LocalGcRunner {
     }
 
     fn handle_segment_temp(&self, path: &Path, entry: &DirEntry) -> Result<bool /* is_removed */> {
-        let metadata = entry.metadata().ctx("gc.metadata")?;
+        let metadata = try_exists!(entry.metadata()).ctx("gc.metadata")?;
         let modified_dur = metadata
             .modified()
             .ctx("gc.modified")?
