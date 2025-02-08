@@ -248,7 +248,8 @@ fn random_str(rng: &mut ThreadRng, len: usize, is_var: bool) -> String {
 fn generate_insert_sqls(max_count: usize) -> Vec<String> {
     let mut rng = rand::thread_rng();
     let count = rng.gen_range(1..=max_count);
-    let int_col: i32 = rng.gen();
+    // Use a small range for easy match in where condition.
+    let int_col: i32 = rng.gen_range(-100..300);
     let smallint_col: i16 = rng.gen();
     let tinyint_col: i8 = rng.gen();
     let mediumint_col: i16 = rng.gen();
@@ -257,7 +258,7 @@ fn generate_insert_sqls(max_count: usize) -> Vec<String> {
     let double_col: f64 = rng.gen();
     let decimal_col: f32 = rng.gen();
     let naive_date: NaiveDate = NaiveDate::from_ymd_opt(
-        rng.gen_range(2000..2100),
+        rng.gen_range(2000..2030),
         rng.gen_range(1..=12),
         rng.gen_range(1..=28),
     )
@@ -274,7 +275,7 @@ fn generate_insert_sqls(max_count: usize) -> Vec<String> {
     let time_col = naive_time.to_string();
     let year_col = rng.gen_range(2000..2100).to_string();
     let char_col = random_str(&mut rng, 10, false);
-    let varchar_col = random_str(&mut rng, 255, true);
+    let varchar_col = random_str(&mut rng, 2, true);
     let text_col = random_str(&mut rng, 255, true);
     let mediumtext_col = random_str(&mut rng, 512, true);
     let longtext_col = random_str(&mut rng, 1024, true);
@@ -500,7 +501,7 @@ async fn verify_data(pool: &Pool<MySql>, full_scan: bool) -> Result<()> {
         )
         };
 
-    let scan_engine_with_condition = |use_tiflash: bool, lower_bound: u32, upper_bound: u32| {
+    let scan_engine_with_condition = |use_tiflash: bool, condition: &str| {
         format!(
             "select {} id, int_col, tinyint_col, smallint_col, mediumint_col, bigint_col,
                 float_col, double_col, decimal_col,
@@ -509,7 +510,8 @@ async fn verify_data(pool: &Pool<MySql>, full_scan: bool) -> Result<()> {
                 binary_col, varbinary_col, blob_col, mediumblob_col, longblob_col,
                 enum_col, set_col,
                 bool_col,
-                json_col from `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` where int_col >= {lower_bound} and int_col <= {upper_bound} order by id",
+                json_col from `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}`
+                where {condition} order by id",
             get_engine_hint(use_tiflash, COLUMNAR_TABLE_NAME)
         )
     };
@@ -555,12 +557,13 @@ async fn verify_data(pool: &Pool<MySql>, full_scan: bool) -> Result<()> {
         compare_rows(row1, row2).unwrap();
     }
 
+    let condition = generate_complex_where_condition();
     // Verify the data with condition on int_col.
-    let row_result = sqlx::query(&scan_engine_with_condition(false, lower_bound, upper_bound))
+    let row_result = sqlx::query(&scan_engine_with_condition(false, &condition))
         .fetch_all(&mut tx)
         .await
         .context("select * row engine with primary condition")?;
-    let col_result = sqlx::query(&scan_engine_with_condition(true, lower_bound, upper_bound))
+    let col_result = sqlx::query(&scan_engine_with_condition(true, &condition))
         .fetch_all(&mut tx)
         .await
         .context("select * columnar engine with primary condition")?;
@@ -665,4 +668,179 @@ fn compare_rows(row1: &sqlx::mysql::MySqlRow, row2: &sqlx::mysql::MySqlRow) -> R
         }
     }
     Ok(())
+}
+
+/// Represents different comparison operators
+#[derive(Copy, Clone)]
+enum ComparisonOp {
+    Eq,
+    Ne,
+    Gt,
+    Lt,
+    Gte,
+    Lte,
+    Like,
+    Between,
+    In,
+}
+
+impl ComparisonOp {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ComparisonOp::Eq => "=",
+            ComparisonOp::Ne => "!=",
+            ComparisonOp::Gt => ">",
+            ComparisonOp::Lt => "<",
+            ComparisonOp::Gte => ">=",
+            ComparisonOp::Lte => "<=",
+            ComparisonOp::Like => "LIKE",
+            ComparisonOp::Between => "BETWEEN",
+            ComparisonOp::In => "IN",
+        }
+    }
+
+    fn random() -> Self {
+        let ops = [
+            ComparisonOp::Eq,
+            ComparisonOp::Ne,
+            ComparisonOp::Gt,
+            ComparisonOp::Lt,
+            ComparisonOp::Gte,
+            ComparisonOp::Lte,
+            ComparisonOp::Like,
+            ComparisonOp::Between,
+            ComparisonOp::In,
+        ];
+        ops[rand::thread_rng().gen_range(0..ops.len())]
+    }
+}
+
+/// Generates a random condition for a specific column
+fn generate_column_condition(column: &str, column_type: &str) -> String {
+    let mut rng = rand::thread_rng();
+    let op = ComparisonOp::random();
+
+    match column_type {
+        "int" | "bigint" => match op {
+            ComparisonOp::Between => {
+                let v1 = rng.gen_range(-100..100);
+                let v2 = rng.gen_range(v1..v1 + 200);
+                format!("{} BETWEEN {} AND {}", column, v1, v2)
+            }
+            ComparisonOp::In => {
+                let values: Vec<i32> = (0..3).map(|_| rng.gen_range(-100..100)).collect();
+                format!(
+                    "{} IN ({})",
+                    column,
+                    values
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            _ => format!("{} {} {}", column, op.as_str(), rng.gen_range(-1000..1000)),
+        },
+        "varchar" | "text" => match op {
+            ComparisonOp::Like => format!("{} LIKE '%{}%'", column, random_str(&mut rng, 2, true)),
+            ComparisonOp::In => {
+                let values: Vec<String> = (0..3)
+                    .map(|_| format!("'{}'", random_str(&mut rng, 2, true)))
+                    .collect();
+                format!("{} IN ({})", column, values.join(","))
+            }
+            ComparisonOp::Between => {
+                let v1 = random_str(&mut rng, 2, true);
+                let v2 = random_str(&mut rng, 2, true);
+                format!("{} BETWEEN '{}' AND '{}'", column, v1, v2)
+            }
+            _ => format!(
+                "{} {} '{}'",
+                column,
+                op.as_str(),
+                random_str(&mut rng, 2, true)
+            ),
+        },
+        "datetime" => match op {
+            ComparisonOp::In => {
+                let date = NaiveDateTime::from_timestamp_opt(
+                    rng.gen_range(946684800..1893456000), // 2000-01-01 to 2030-01-01
+                    0,
+                )
+                .unwrap();
+                format!("{} IN ('{}')", column, date.format("%Y-%m-%d %H:%M:%S"),)
+            }
+            ComparisonOp::Between => {
+                let v1 = NaiveDateTime::from_timestamp_opt(
+                    rng.gen_range(946684800..1893456000), // 2000-01-01 to 2030-01-01
+                    0,
+                )
+                .unwrap();
+                let v2 = NaiveDateTime::from_timestamp_opt(
+                    rng.gen_range(946684800..1893456000), // 2000-01-01 to 2030-01-01
+                    0,
+                )
+                .unwrap();
+                format!("{} BETWEEN '{}' AND '{}'", column, v1, v2)
+            }
+            _ => {
+                let date = NaiveDateTime::from_timestamp_opt(
+                    rng.gen_range(946684800..1893456000), // 2000-01-01 to 2030-01-01
+                    0,
+                )
+                .unwrap();
+                format!(
+                    "{} {} '{}'",
+                    column,
+                    op.as_str(),
+                    date.format("%Y-%m-%d %H:%M:%S")
+                )
+            }
+        },
+        _ => "".to_string(),
+    }
+}
+
+fn generate_complex_where_condition() -> String {
+    let mut rng = rand::thread_rng();
+
+    // Define available columns and their types
+    let columns = [
+        ("int_col", "int"),
+        ("varchar_col", "varchar"),
+        ("datetime_col", "datetime"),
+        ("text_col", "text"),
+        ("bigint_col", "bigint"),
+    ];
+
+    // Generate 1-3 conditions
+    let condition_count = rng.gen_range(1..=3);
+    let mut conditions = Vec::with_capacity(condition_count);
+
+    for _ in 0..condition_count {
+        let (col, col_type) = columns.choose(&mut rng).unwrap();
+        conditions.push(generate_column_condition(col, col_type));
+    }
+
+    // Randomly combine conditions with AND/OR/NOT
+    let mut combined = String::new();
+    for (i, condition) in conditions.iter().enumerate() {
+        if i > 0 {
+            combined.push_str(if rng.gen_bool(0.7) { " AND " } else { " OR " });
+        }
+        // Randomly group conditions with parentheses
+        if rng.gen_bool(0.3) && i < conditions.len() - 1 {
+            let not_prefix = if rng.gen_bool(0.2) { "NOT " } else { "" };
+            combined.push_str(not_prefix);
+            combined.push('(');
+            combined.push_str(condition);
+            combined.push_str(if rng.gen_bool(0.7) { " AND " } else { " OR " });
+            combined.push_str(&conditions[i + 1]);
+            combined.push(')');
+        } else {
+            combined.push_str(condition);
+        }
+    }
+
+    combined
 }

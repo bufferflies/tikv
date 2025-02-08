@@ -336,6 +336,23 @@ impl MinMaxIndex {
             && field_cmp(value, max, field_type, is_unsigned) <= std::cmp::Ordering::Equal
     }
 
+    pub(crate) fn check_not_equal(
+        &self,
+        pack_idx: usize,
+        value: &[u8],
+        field_type: FieldTypeTp,
+        is_unsigned: bool,
+    ) -> bool {
+        if self.has_value_marks[pack_idx] == 0 {
+            return false;
+        }
+        let min = self.min_max.get_not_null_value(pack_idx * 2);
+        let max = self.min_max.get_not_null_value(pack_idx * 2 + 1);
+        // value != min || value != max
+        field_cmp(value, min, field_type, is_unsigned) != std::cmp::Ordering::Equal
+            || field_cmp(value, max, field_type, is_unsigned) != std::cmp::Ordering::Equal
+    }
+
     pub(crate) fn check_less(
         &self,
         pack_idx: usize,

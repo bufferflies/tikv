@@ -645,6 +645,10 @@ impl ColumnarMvccReader {
             prev_common_handle: vec![],
         }
     }
+
+    pub fn reset(&mut self) {
+        self.src.reset().unwrap();
+    }
 }
 
 #[async_trait]

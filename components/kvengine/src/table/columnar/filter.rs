@@ -554,8 +554,75 @@ impl FilterOperator {
 
     #[inline]
     fn handle_logical_not(&self, pack_idx: usize, table_meta: &TableMeta) -> FilterOpResult {
-        let child = &self.children[0];
-        !child.rough_check_pack(pack_idx, table_meta)
+        let new_op = self.children[0].transform_not_op();
+        new_op.rough_check_pack(pack_idx, table_meta)
+    }
+
+    fn transform_not_op(&self) -> FilterOperator {
+        match self.op {
+            FilterType::And => FilterOperator::new(
+                FilterType::Or,
+                self.children
+                    .iter()
+                    .map(|child| child.transform_not_op())
+                    .collect(),
+            ),
+            FilterType::Or => FilterOperator::new(
+                FilterType::And,
+                self.children
+                    .iter()
+                    .map(|child| child.transform_not_op())
+                    .collect(),
+            ),
+            FilterType::Not => FilterOperator::new(
+                self.children[0].op,
+                self.children[0]
+                    .children
+                    .iter()
+                    .map(|child| child.transform_not_op())
+                    .collect(),
+            ),
+            FilterType::Equal => FilterOperator::new_compare(
+                FilterType::NotEqual,
+                self.compare.as_ref().unwrap().clone(),
+            ),
+            FilterType::NotEqual => FilterOperator::new_compare(
+                FilterType::Equal,
+                self.compare.as_ref().unwrap().clone(),
+            ),
+            FilterType::Less => FilterOperator::new_compare(
+                FilterType::GreaterEqual,
+                self.compare.as_ref().unwrap().clone(),
+            ),
+            FilterType::LessEqual => FilterOperator::new_compare(
+                FilterType::Greater,
+                self.compare.as_ref().unwrap().clone(),
+            ),
+            FilterType::Greater => FilterOperator::new_compare(
+                FilterType::LessEqual,
+                self.compare.as_ref().unwrap().clone(),
+            ),
+            FilterType::GreaterEqual => FilterOperator::new_compare(
+                FilterType::Less,
+                self.compare.as_ref().unwrap().clone(),
+            ),
+            FilterType::In => FilterOperator::new_compare(
+                FilterType::NotIn,
+                self.compare.as_ref().unwrap().clone(),
+            ),
+            FilterType::NotIn => {
+                FilterOperator::new_compare(FilterType::In, self.compare.as_ref().unwrap().clone())
+            }
+            FilterType::Like => FilterOperator::new_compare(
+                FilterType::NotLike,
+                self.compare.as_ref().unwrap().clone(),
+            ),
+            FilterType::NotLike => FilterOperator::new_compare(
+                FilterType::Like,
+                self.compare.as_ref().unwrap().clone(),
+            ),
+            _ => FilterOperator::default(),
+        }
     }
 
     fn handle_comparison(&self, pack_idx: usize, table_meta: &TableMeta) -> FilterOpResult {
@@ -576,7 +643,7 @@ impl FilterOperator {
                     col_meta.col_info.tp(),
                     is_unsigned(&col_meta.col_info),
                 ),
-                FilterType::NotEqual => !min_max.check_equal(
+                FilterType::NotEqual => min_max.check_not_equal(
                     pack_idx,
                     &compare.values[0],
                     col_meta.col_info.tp(),
