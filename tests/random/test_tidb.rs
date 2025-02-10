@@ -95,9 +95,6 @@ pub(crate) const COLUMNAR_WORKLOAD_KEYSPACE: u32 = 1;
 
 pub(crate) const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
-// FIXME: Remove after all regions of prod env switched to inner_key_off = 4.
-pub(crate) const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.5; // 50% chance to enable inner key offset.
-
 pub(crate) const ENABLE_GLOBAL_TXN_FILE_RATIO: f64 = 0.8; // 80% chance enable txn file globally.
 pub(crate) const ENABLE_GLOBAL_TXN_FILE_ENV_KEY: &str = "GLOBAL_TXN_FILE";
 
@@ -151,7 +148,7 @@ fn test_random_with_tidb() {
     let start_time = Instant::now();
     while start_time.saturating_elapsed() < TEST_DURATION {
         // Restart nodes.
-        random_node_restart(&mut cluster);
+        random_node_restart(&mut cluster, |_, _| {});
     }
 
     // Finish.
@@ -696,7 +693,7 @@ impl Switches {
     pub fn from_env() -> Self {
         let mut rng = thread_rng();
 
-        let enable_inner_key_off: bool = rng.gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
+        let enable_inner_key_off: bool = rng.gen_bool(env_param("ENABLE_INNER_KEY_OFF_RATIO", 0.5));
         // Random min block size to generate more or less workloads for cop workers.
         let remote_cop_min_block_size = env_switch(USE_REMOTE_COP_ENV_KEY) as usize
             * (*REMOTE_COP_MIN_BLOCK_SIZE_OPTIONS.choose(&mut rng).unwrap());

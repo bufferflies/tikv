@@ -114,6 +114,10 @@ while [[ $# -gt 0 ]]; do
 	--no-restart-tso-svc)
 		RUN_ARGS+=("--no-restart-tso-svc")
 		;;
+	--enable-inner-key-off-ratio)
+		RUN_ARGS+=("--enable-inner-key-off-ratio" "$2")
+		shift
+		;;
 	--upgrade-test-duration)
 		RUN_ARGS+=("--upgrade-test-duration" "$2")
 		shift

@@ -380,6 +380,12 @@ impl Applier {
         }
     }
 
+    fn clear_caches(&mut self) {
+        self.snap.take();
+        self.lock_cache.clear();
+        self.mem_table_state.take();
+    }
+
     pub(crate) fn get_peer(&self) -> &metapb::Peer {
         &self.peer
     }
@@ -1881,10 +1887,8 @@ impl Applier {
     /// Without the pause, `apply_restore_shard` would clear the mem-table on
     /// different apply index with other peer, and lead to data inconsistency.
     fn handle_prepare_restore_shard(&mut self, cs: &kvenginepb::ChangeSet) {
-        // Invalidate snapshot & lock_cache, otherwise they would be inconsistent with
-        // restored data.
-        self.snap.take();
-        self.lock_cache.clear();
+        // Invalidate caches, otherwise they would be inconsistent with restored data.
+        self.clear_caches();
 
         // Will resume after `apply_restore_shard`. See `apply_prepared_change_set`.
         self.paused_apply_queue

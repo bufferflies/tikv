@@ -10,7 +10,7 @@ use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use kvengine::{
     dfs::{self, DFSConfig, FileType, S3Fs},
-    table::{columnar::build_schema_file, sstable::BlockCacheType, ChecksumType},
+    table::{columnar::build_schema_file, ChecksumType},
 };
 use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;
@@ -55,7 +55,6 @@ const LOAD_DATA_CONCURRENCY: usize = 2;
 const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
 
 const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
-const ENABLE_INNER_KEY_OFF_RATIO: f64 = 0.8; // 80% chance to enable inner key offset
 
 const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(4); // Small size to make eviction more frequent.
 
@@ -70,18 +69,9 @@ fn test_random_all() {
         .build()
         .unwrap();
     let _guard = runtime.enter();
-    let mut rng = thread_rng();
 
-    let enable_inner_key_off: bool = rng.gen_bool(ENABLE_INNER_KEY_OFF_RATIO);
-    let block_cache_type: BlockCacheType = if rng.gen_ratio(1, 5) {
-        BlockCacheType::Moka
-    } else {
-        BlockCacheType::Quick
-    };
-    info!(
-        "enable_inner_key_off: {}, block_cache_type: {:?}",
-        enable_inner_key_off, block_cache_type
-    );
+    let switches = Switches::from_env();
+    info!("switches: {:?}", switches);
 
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
@@ -91,8 +81,7 @@ fn test_random_all() {
         &security_conf,
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
-        enable_inner_key_off,
-        block_cache_type,
+        &switches,
     );
     let pd_client = cluster.get_pd_client();
     let keyspace_manager = cluster.keyspace_manager().clone();
@@ -156,7 +145,12 @@ fn test_random_all() {
             TABLE_SCHEMA_ENABLE_RATIO,
             TIMEOUT,
         ),
-        spawn_major_compact(cluster.get_pd_client(), keyspace_manager.clone(), TIMEOUT),
+        spawn_major_compact(
+            cluster.get_pd_client(),
+            keyspace_manager.clone(),
+            switches.update_inner_key_off,
+            TIMEOUT,
+        ),
     ];
 
     let restore_config = RestoreConfig {
@@ -177,7 +171,7 @@ fn test_random_all() {
             restore_config.clone(),
             keyspace_manager.clone(),
             &s3fs,
-            enable_inner_key_off,
+            switches.enable_inner_key_off,
             TIMEOUT,
         ));
     }
@@ -247,7 +241,12 @@ fn test_random_all() {
     let start_time = Instant::now();
     while start_time.saturating_elapsed() < TIMEOUT {
         // Restart nodes.
-        random_node_restart(&mut cluster);
+        let update_conf = |_, conf: &mut TikvConfig| {
+            // Only update config of one node.
+            // It's similar to rolling restart.
+            conf.kvengine.update_inner_key_offset = switches.update_inner_key_off;
+        };
+        random_node_restart(&mut cluster, update_conf);
     }
 
     // Finish.
@@ -333,8 +332,7 @@ fn prepare_cluster(
     security_conf: &SecurityConfig,
     nodes_count: usize,
     initial_keyspace_count: usize,
-    enable_inner_key_off: bool,
-    block_cache_type: BlockCacheType,
+    switches: &Switches,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
@@ -358,7 +356,7 @@ fn prepare_cluster(
 
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
-        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.enable_inner_key_offset = switches.enable_inner_key_off;
         conf.security = security_conf.clone();
 
         conf.coprocessor.region_split_size = ReadableSize::kb(256);
@@ -383,7 +381,6 @@ fn prepare_cluster(
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.flush_split_l0 = true;
         conf.kvengine.per_keyspace_configs = per_keyspace_configs.clone();
-        conf.kvengine.block_cache_type = block_cache_type;
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
@@ -396,7 +393,6 @@ fn prepare_cluster(
         alloc_node_id_vec(TIKV_WORKERS_COUNT),
         TikvWorkerOptions {
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
-            cop_block_cache_type: block_cache_type,
             ..Default::default()
         },
     );
@@ -406,14 +402,15 @@ fn prepare_cluster(
     let region0 = pd_client.get_all_regions().first().unwrap().clone();
 
     // Split keyspaces.
-    let mut keys = vec![];
+    let mut keyspace_keys = vec![];
     let mut keyspaces: Vec<u32> = vec![];
     let mut data_keys = vec![];
     for _ in 0..initial_keyspace_count {
         // New keyspace must allocated by keyspace manager to avoid conflicts.
         let keyspace_id = cluster.keyspace_manager().new_keyspace_id(1);
         keyspaces.push(keyspace_id);
-        keys.push(ApiV2::get_txn_keyspace_prefix(keyspace_id));
+        keyspace_keys.push(ApiV2::get_txn_keyspace_prefix(keyspace_id));
+        keyspace_keys.push(ApiV2::get_txn_keyspace_prefix(keyspace_id + 1));
         let i_to_key = generate_keyspace_key(keyspace_id);
         for i in 0..rng.gen_range(0..10) {
             data_keys.push(Key::from_raw(&i_to_key(i * 100)).into_encoded());
@@ -426,15 +423,13 @@ fn prepare_cluster(
             }
         }
     }
-    keys.push(ApiV2::get_txn_keyspace_prefix(
-        initial_keyspace_count as u32 + 1,
-    ));
-    let encoded_keys = keys
+    keyspace_keys.dedup();
+    let encoded_keys = keyspace_keys
         .iter()
         .map(|k| Key::from_raw(k).into_encoded())
         .collect();
     pd_client.must_split_region(region0, CheckPolicy::Usekey, encoded_keys);
-    cluster.wait_pd_region_min_count(keys.len() + 1);
+    cluster.wait_pd_region_min_count(keyspace_keys.len() + 1);
     let keyspace_names = keyspaces
         .iter()
         .map(|&keyspace_id| TidbCluster::keyspace_name(keyspace_id as u16))
@@ -452,6 +447,7 @@ fn prepare_cluster(
         initial_keyspace_count * INITIAL_TABLE_COUNT,
         Ordering::Relaxed,
     );
+    let data_keys_len = data_keys.len();
     let res = block_on(pd_client.split_regions_with_retry(data_keys, Duration::from_secs(60)));
     if let Err(err) = res {
         warn!("split regions failed: {:?}", err);
@@ -489,11 +485,29 @@ fn prepare_cluster(
 
     // Scatter regions.
     let move_scheduler = cluster.new_scheduler();
-    for _ in 0..(keys.len() + 1) {
+    for _ in 0..(keyspace_keys.len() + data_keys_len + 1) {
         move_scheduler.move_random_region();
     }
 
-    // TODO: restart cluster with inner key offset enabled
+    // Restart cluster with inner key offset enabled
+    if !switches.enable_inner_key_off {
+        // The `inner_key_off` of new region is determined by config. So wait for all
+        // shards to be split before change config.
+        // Otherwise, `inner_key_off` of peers would be different.
+        for key in keyspace_keys {
+            cluster.wait_region_replicated(&key, 3);
+        }
+
+        let nodes = cluster.get_nodes();
+        for &node_id in &nodes {
+            cluster.stop_node(node_id);
+        }
+        for node_id in nodes {
+            cluster.start_node(node_id, |_, conf| {
+                conf.enable_inner_key_offset = true;
+            });
+        }
+    }
 
     cluster
 }
@@ -530,4 +544,24 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     check_drop_table();
 
     records_cnt
+}
+
+#[derive(Debug)]
+pub(crate) struct Switches {
+    pub enable_inner_key_off: bool,
+    pub update_inner_key_off: bool,
+}
+
+impl Switches {
+    pub fn from_env() -> Self {
+        let mut rng = thread_rng();
+
+        let enable_inner_key_off: bool = rng.gen_bool(env_param("ENABLE_INNER_KEY_OFF_RATIO", 0.5));
+        let update_inner_key_off = !enable_inner_key_off && env_switch("UPDATE_INNER_KEY_OFF");
+
+        Self {
+            enable_inner_key_off,
+            update_inner_key_off,
+        }
+    }
 }

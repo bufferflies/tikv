@@ -297,11 +297,14 @@ impl ServerCluster {
         }
     }
 
-    pub fn restart_node(&mut self, node_id: u16, stop_dur: Duration, force: bool) {
+    pub fn restart_node<F>(&mut self, node_id: u16, stop_dur: Duration, force: bool, update_conf: F)
+    where
+        F: Fn(u16, &mut TikvConfig),
+    {
         self.stop_node_force(node_id, force);
 
         std::thread::sleep(stop_dur);
-        self.start_node(node_id, |_, _| {});
+        self.start_node(node_id, update_conf);
         info!("node restarted"; "node" => node_id);
     }
 
@@ -386,12 +389,13 @@ impl ServerCluster {
     }
 
     pub fn wait_region_replicated(&self, key: &[u8], replica_cnt: usize) {
+        let encoded_key = encode_bytes(key);
         for _ in 0..30 {
-            let region_info = match self.pd_client.get_region_info(key) {
+            let region_info = match self.pd_client.get_region_info(&encoded_key) {
                 Ok(region_info) => region_info,
                 Err(err) => {
                     // The region may not exist during split. Retry.
-                    warn!("get_region_info failed"; "key" => Value::key(key), "err" => ?err);
+                    warn!("get_region_info failed"; "encoded_key" => Value::key(&encoded_key), "err" => ?err);
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }

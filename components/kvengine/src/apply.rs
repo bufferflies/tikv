@@ -918,7 +918,9 @@ impl EngineCore {
             prepare_type,
         );
         builder.set_schema_file(cs.schema_file.clone());
-        new_shard.set_data(builder.build());
+        let new_data = builder.build();
+        let new_inner_key_off = new_data.inner_key_off;
+        new_shard.set_data(new_data);
         new_shard.set_active(old_shard.is_active());
 
         store_u64(&new_shard.base_version, snap.base_version);
@@ -929,18 +931,28 @@ impl EngineCore {
         store_u64(&new_shard.snap_version, snap.base_version + cs.sequence);
         store_u64(&new_shard.col_snap_version, snap.columnar_snap_version);
 
-        let mut old_mem_tbls = old_shard.get_data().mem_tbls.clone();
+        let old_data = old_shard.get_data();
+        let old_inner_key_off = old_data.inner_key_off;
+        let mut old_mem_tbls = old_data.mem_tbls.clone();
         for mem_tbl in old_mem_tbls.drain(..) {
             self.send_free_mem_msg(FreeMemMsg::FreeMem(mem_tbl));
         }
 
         self.refresh_shard_states(&new_shard);
         info!(
-            "restore shard {} mem_table_version {}, change {:?}",
+            "{} restore shard: mem_table_version {}, change {:?}",
             new_shard.tag(),
             new_shard.load_mem_table_version(),
             &cs,
         );
+        if old_inner_key_off != new_inner_key_off {
+            info!(
+                "{} restore shard: inner key off {} -> {}",
+                new_shard.tag(),
+                old_inner_key_off,
+                new_inner_key_off
+            );
+        }
         self.shards.insert(new_shard.id, Arc::new(new_shard));
 
         Ok(())

@@ -653,8 +653,9 @@ pub struct BackupCluster {
     // `false` for restoration.
     // `true` for "check_table" to read data from backup directly.
     load_all_tables: bool,
-    // NOTE: New members need to check if need to clear in reset_keyspace.
+
     id_allocator: Arc<dyn IdAllocator>,
+    // NOTE: New members need to check if need to clear in reset_keyspace.
 }
 
 impl Drop for BackupCluster {
@@ -664,6 +665,42 @@ impl Drop for BackupCluster {
 }
 
 impl BackupCluster {
+    pub fn reset_keyspace(&mut self, keyspace_id: u32, target_keyspace_id: u32) -> Result<()> {
+        let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        self.tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
+        self.keyspace_id = keyspace_id;
+        self.target_keyspace_id = target_keyspace_id;
+        self.keyspace_start = keyspace_start;
+        self.keyspace_end = keyspace_end;
+
+        let kv_engine = self.kv_engine.take().unwrap();
+        kv_engine.close();
+        drop(kv_engine);
+
+        if let Some(sender) = self.meta_sender.take() {
+            sender.send(StoreMsg::Stop).unwrap();
+        }
+        self.meta_applier.take();
+        self.sorted_shards.clear();
+        self.raw_metas.clear();
+        self.store_shards.clear();
+        self.shards_store_map = None;
+        self.shards.clear();
+        self.shards_need_flush.clear();
+        self.shards_need_truncate.clear();
+        self.tolerated_err = 0;
+        self.txn_chunk_ids_in_wal = None;
+        self.load_shards()?;
+        self.collect_txn_chunks_in_wal()?;
+
+        self.check_all_shard_files()?;
+
+        for store_id in self.get_all_stores_id() {
+            self.setup_kv_engine(store_id)?;
+        }
+        Ok(())
+    }
+
     pub fn new(
         cluster_meta: &ClusterBackupMeta,
         path: PathBuf,
@@ -1083,7 +1120,6 @@ impl BackupCluster {
     ) -> Result<Vec<BackupShard>> {
         let region_peers = rf.get_region_peer_map();
         let mut prefix_shards = vec![];
-        let mut first_inner_key_off = None;
         for (region_id, peer_id) in region_peers {
             if region_id == 0 {
                 continue;
@@ -1102,13 +1138,8 @@ impl BackupCluster {
 
             let snap = meta.get_snapshot();
             if keyspace_start <= snap.get_outer_start() && snap.get_outer_end() <= keyspace_end {
-                if let Some(x) = first_inner_key_off {
-                    assert_eq!(x, snap.inner_key_off)
-                } else {
-                    first_inner_key_off = Some(snap.inner_key_off);
-                }
-
                 let shard = Self::create_backup_shard(rf, store_id, region_id, peer_id, meta)?;
+                debug!("{} collect_keyspace_shards", shard.tag(); "inner_key_off" => shard.inner_key_off());
                 prefix_shards.push(shard);
             }
         }
@@ -1675,8 +1706,8 @@ impl BackupCluster {
         self.sorted_shards.len()
     }
 
-    pub fn is_inner_key_off_enabled(&self) -> bool {
-        self.get_sorted_shard(0).meta.inner_key_off != 0
+    fn is_inner_key_off_enabled(&self) -> bool {
+        self.inner_key_off() != 0
     }
 
     pub fn get_shard_metas_before_flush(&self) -> Vec<ShardMeta> {
@@ -1904,9 +1935,14 @@ impl BackupCluster {
     ) -> Result<(Vec<ShardMeta>, usize /* number of sstables */)> {
         let mut sstables_cnt = 0;
         let mut target_shards = Vec::with_capacity(aligned_regions.len());
-        let inner_key_off = self.inner_key_off();
         let mut new_schema_file_id = None;
         for region in aligned_regions {
+            let shards = region
+                .backup_shards_id
+                .iter()
+                .map(|&shard_id| self.get_shard(shard_id).unwrap())
+                .collect::<Vec<_>>();
+
             let mut meta = ShardMeta::default();
             meta.id = region.target_region.id;
             meta.ver = region.target_region.epoch.version;
@@ -1914,15 +1950,20 @@ impl BackupCluster {
                 region.target_region.get_start_key(),
                 region.target_region.get_end_key(),
             );
-            meta.inner_key_off = inner_key_off;
+            // When `inner_key_off` of a backup shard is `0`, it has tables with keyspace
+            // prefix. So set the target shard as `inner_key_off == 0`.
+            meta.inner_key_off = shards
+                .iter()
+                .map(|shard| shard.inner_key_off())
+                .min()
+                .unwrap();
             if let Some(encryption_key) = self.get_keyspace_exported_encryption_key() {
                 meta.set_property(ENCRYPTION_KEY, encryption_key.as_slice());
             }
             let mut properties_helper =
                 kvengine::util::PropertiesHelper::new_from_shard_meta(&meta);
             properties_helper.set_rewrite_range_prefix(!self.is_inplace_restore());
-            for shard_id in region.backup_shards_id {
-                let shard = self.get_shard(shard_id).unwrap();
+            for shard in shards {
                 let mut all_l0_ssts: HashSet<u64> = HashSet::default();
                 for (&file_id, file_meta) in shard.meta.all_files() {
                     if meta.overlap_bound(file_meta.data_bound()) {
@@ -2064,51 +2105,18 @@ impl BackupCluster {
             .collect()
     }
 
+    // When `inner_key_off` of a backup shard is `0`, it has tables with keyspace
+    // prefix. So consider the whole keyspace as `inner_key_off == 0`.
     fn inner_key_off(&self) -> usize {
-        self.get_shard(*self.sorted_shards.first().unwrap())
+        self.shards
+            .values()
+            .map(|shard| shard.inner_key_off())
+            .min()
             .unwrap()
-            .meta
-            .inner_key_off
     }
 
     fn is_inplace_restore(&self) -> bool {
         self.keyspace_id == self.target_keyspace_id
-    }
-
-    pub fn reset_keyspace(&mut self, keyspace_id: u32, target_keyspace_id: u32) -> Result<()> {
-        let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
-        self.tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
-        self.keyspace_id = keyspace_id;
-        self.target_keyspace_id = target_keyspace_id;
-        self.keyspace_start = keyspace_start;
-        self.keyspace_end = keyspace_end;
-
-        let kv_engine = self.kv_engine.take().unwrap();
-        kv_engine.close();
-        drop(kv_engine);
-
-        if let Some(sender) = self.meta_sender.take() {
-            sender.send(StoreMsg::Stop).unwrap();
-        }
-        self.meta_applier.take();
-        self.sorted_shards.clear();
-        self.raw_metas.clear();
-        self.store_shards.clear();
-        self.shards_store_map = None;
-        self.shards.clear();
-        self.shards_need_flush.clear();
-        self.shards_need_truncate.clear();
-        self.tolerated_err = 0;
-        self.txn_chunk_ids_in_wal = None;
-        self.load_shards()?;
-        self.collect_txn_chunks_in_wal()?;
-
-        self.check_all_shard_files()?;
-
-        for store_id in self.get_all_stores_id() {
-            self.setup_kv_engine(store_id)?;
-        }
-        Ok(())
     }
 
     fn get_keyspace_exported_encryption_key(&self) -> Option<Vec<u8>> {

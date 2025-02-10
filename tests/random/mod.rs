@@ -244,6 +244,7 @@ pub(crate) fn check_gc() {
 pub(crate) fn spawn_major_compact(
     pd_client: Arc<TestPdClient>,
     keyspace_manager: KeyspaceManager,
+    update_inner_key_off: bool,
     timeout: Duration,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -257,8 +258,13 @@ pub(crate) fn spawn_major_compact(
 
         let start_time = Instant::now();
         while start_time.saturating_elapsed() < timeout {
-            // Manual major compact should not conform the zipf distribution.
-            let keyspace_id = keyspace_manager.get_uniform_random_keyspace(&mut rng);
+            let keyspace_id = if update_inner_key_off {
+                // Trigger update inner key offset.
+                keyspace_manager.get_zipf_random_keyspace(&mut rng)
+            } else {
+                // Manual major compact should not conform the zipf distribution.
+                keyspace_manager.get_uniform_random_keyspace(&mut rng)
+            };
 
             let stores = pd_client.get_all_stores(true).unwrap();
             {
@@ -278,7 +284,13 @@ pub(crate) fn spawn_major_compact(
             }
 
             MANUAL_MAJOR_COMPACT_COUNTER.fetch_add(1, Ordering::SeqCst);
-            sleep(Duration::from_secs(10));
+
+            let sleep_secs = if update_inner_key_off {
+                rng.gen_range(1..10)
+            } else {
+                10
+            };
+            sleep(Duration::from_secs(sleep_secs));
         }
         info!("major compact worker thread exit");
     })
@@ -562,7 +574,10 @@ async fn must_split_region_for_keyspace(
     );
 }
 
-pub(crate) fn random_node_restart(cluster: &mut ServerCluster) {
+pub(crate) fn random_node_restart<F>(cluster: &mut ServerCluster, update_conf: F)
+where
+    F: Fn(u16, &mut TikvConfig),
+{
     let mut rng = rand::thread_rng();
 
     // Some regions would lose majority for a wile when the sleep duration is small.
@@ -573,7 +588,12 @@ pub(crate) fn random_node_restart(cluster: &mut ServerCluster) {
     let node_id = *nodes.choose(&mut rng).unwrap();
     let sleep_sec = rng.gen_range(0..3);
     let force_stop = rng.gen();
-    cluster.restart_node(node_id, Duration::from_secs(sleep_sec), force_stop);
+    cluster.restart_node(
+        node_id,
+        Duration::from_secs(sleep_sec),
+        force_stop,
+        update_conf,
+    );
     NODE_RESTART_COUNTER.fetch_add(1, Ordering::Relaxed);
 }
 

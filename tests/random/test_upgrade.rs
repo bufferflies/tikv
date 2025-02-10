@@ -114,7 +114,7 @@ fn test_random_upgrade() {
     // After upgrade.
     let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_upgrade.0 {
-        random_node_restart(&mut cluster.borrow_mut());
+        random_node_restart(&mut cluster.borrow_mut(), |_, _| {});
     }
     info!("after upgrade: finished"; "stats" => ?WorkloadStats::collect());
 
@@ -181,7 +181,7 @@ fn test_random_upgrade() {
     // After update configs.
     let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_update_configs.0 / 2 {
-        random_node_restart(&mut cluster);
+        random_node_restart(&mut cluster, |_, _| {});
     }
     info!("after update configs: finished"; "stats" => ?WorkloadStats::collect());
 
@@ -205,7 +205,7 @@ fn test_random_upgrade() {
         let start_time = Instant::now_coarse();
         while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_update_configs.0 / 2
         {
-            random_node_restart(&mut cluster);
+            random_node_restart(&mut cluster, |_, _| {});
         }
         info!("after major compaction: finished"; "stats" => ?WorkloadStats::collect());
     }

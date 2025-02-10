@@ -13,7 +13,7 @@ use log_wrappers::hex_encode;
 use crate::{table::memtable, Shard};
 
 const RAFT_LOG_QUEUE_CAP: usize = 1024;
-const MEM_TABLE_ACTION_QUEUE_CAP_PER_REGION: usize = 64;
+const MEM_TABLE_ACTION_QUEUE_CAP_PER_REGION: usize = 512;
 
 enum MemTableActionType {
     Write,

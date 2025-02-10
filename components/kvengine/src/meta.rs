@@ -823,12 +823,12 @@ impl ShardMeta {
         assert_eq!(self.range.outer_start, cs.get_restore_shard().outer_start);
         assert_eq!(self.range.outer_end, cs.get_restore_shard().outer_end);
         info!(
-            "{} apply_restore_shard in meta: current ver:{}, seq:{}, base_ver:{}, data_seq:{}",
-            self.tag(),
-            self.ver,
-            self.seq,
-            self.base_version,
-            self.data_sequence
+            "{} apply_restore_shard in meta", self.tag();
+            "current ver" => self.ver,
+            "seq" => self.seq,
+            "base_ver" => self.base_version,
+            "data_seq" => self.data_sequence,
+            "inner_key_off" => self.inner_key_off,
         );
 
         // Increase shard version to make change sets generated before restore shard
@@ -838,13 +838,13 @@ impl ShardMeta {
         new_meta.ver = cs.shard_ver + 1;
         *self = new_meta;
         info!(
-            "{} apply_restore_shard in meta: new ver:{}, seq:{}, base_ver:{}, data_seq:{}, properties:{:?}",
-            self.tag(),
-            self.ver,
-            self.seq,
-            self.base_version,
-            self.data_sequence,
-            self.properties.to_pb(self.id),
+            "{} apply_restore_shard in meta", self.tag();
+            "new ver" => self.ver,
+            "seq" => self.seq,
+            "base_ver" => self.base_version,
+            "data_seq" => self.data_sequence,
+            "properties" => ?self.properties.to_pb(self.id),
+            "inner_key_off" => self.inner_key_off,
         );
     }
 
