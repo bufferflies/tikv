@@ -113,6 +113,10 @@ impl ChangeSet {
     pub fn get_schema_file(&self) -> Option<SchemaFile> {
         self.schema_file.clone()
     }
+
+    pub fn into_inner(self) -> kvenginepb::ChangeSet {
+        self.change_set
+    }
 }
 
 // `not_all_tables_loaded` means that some tables in `snap` are not loaded to
@@ -234,7 +238,7 @@ pub(crate) fn create_snapshot_tables(
 }
 
 impl EngineCore {
-    pub fn apply_change_set(&self, cs: ChangeSet) -> Result<()> {
+    pub fn apply_change_set(&self, cs: &ChangeSet) -> Result<()> {
         let shard = self.get_shard(cs.shard_id);
         if shard.is_none() {
             return Err(Error::ShardNotFound);
@@ -266,7 +270,7 @@ impl EngineCore {
             return Ok(());
         }
         if cs.has_flush() {
-            self.apply_flush(&shard, &cs);
+            self.apply_flush(&shard, cs);
         } else if cs.has_compaction()
             || cs.has_destroy_range()
             || cs.has_truncate_ts()
@@ -276,35 +280,35 @@ impl EngineCore {
             || cs.has_update_vector_index()
         {
             if cs.has_compaction() {
-                self.apply_compaction(&shard, &cs);
+                self.apply_compaction(&shard, cs);
             } else if cs.has_destroy_range() {
-                self.apply_destroy_range(&shard, &cs);
+                self.apply_destroy_range(&shard, cs);
             } else if cs.has_truncate_ts() {
-                self.apply_truncate_ts(&shard, &cs);
+                self.apply_truncate_ts(&shard, cs);
             } else if cs.has_trim_over_bound() {
-                self.apply_trim_over_bound(&shard, &cs);
+                self.apply_trim_over_bound(&shard, cs);
             } else if cs.has_major_compaction() {
-                self.apply_major_compaction(&shard, &cs);
+                self.apply_major_compaction(&shard, cs);
             } else if cs.has_columnar_compaction() {
-                self.apply_columnar_compaction(&shard, &cs);
+                self.apply_columnar_compaction(&shard, cs);
             } else if cs.has_update_vector_index() {
-                self.apply_update_vector_index(&shard, &cs);
+                self.apply_update_vector_index(&shard, cs);
             }
             store_bool(&shard.compacting, false);
             self.send_compact_msg(CompactMsg::Applied(IdVer::new(shard.id, shard.ver)));
         } else if cs.has_initial_flush() {
-            self.apply_initial_flush(&shard, &cs);
+            self.apply_initial_flush(&shard, cs);
         } else if cs.has_ingest_files() {
-            self.apply_ingest_files(&shard, &cs)?;
+            self.apply_ingest_files(&shard, cs)?;
         } else if cs.has_restore_shard() {
-            self.apply_restore_shard(&shard, &cs)?;
+            self.apply_restore_shard(&shard, cs)?;
         } else if cs.has_update_schema_meta() {
-            self.apply_update_schema_meta(&shard, &cs);
+            self.apply_update_schema_meta(&shard, cs);
         } else if cs.get_clear_columnar() {
             self.apply_clear_columnar(&shard);
         }
         if !cs.get_property_key().is_empty() && cs.get_property_key() == STORAGE_CLASS_KEY {
-            self.apply_update_storage_class(&shard, &cs)
+            self.apply_update_storage_class(&shard, cs)
         }
         debug!("{} finished applying change set: {:?}", shard.tag(), cs);
 

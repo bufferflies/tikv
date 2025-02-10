@@ -2315,7 +2315,7 @@ impl MetaApplier {
                             None,
                             self.encryption_key.clone(),
                         )
-                        .and_then(|cs| self.engine.apply_change_set(cs))
+                        .and_then(|cs| self.engine.apply_change_set(&cs))
                     {
                         Ok(()) => debug!(
                             "Keyspace {} shard {} MetaApplier apply change set successfully",

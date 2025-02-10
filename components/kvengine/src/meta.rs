@@ -25,7 +25,7 @@ use crate::{
     util::{TxnFileLocks, TxnFileRefPropertyHelper},
 };
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct ShardMeta {
     pub engine_id: u64,
     pub id: u64,
@@ -244,8 +244,8 @@ impl ShardMeta {
         self.properties.set_bytes(key, value);
     }
 
-    pub fn del_property(&mut self, key: &str) {
-        self.properties.remove(key);
+    pub fn del_property(&mut self, key: &str) -> Option<Bytes> {
+        self.properties.remove(key)
     }
 
     pub fn apply_change_set(&mut self, cs: &pb::ChangeSet) {
@@ -285,7 +285,7 @@ impl ShardMeta {
             return;
         }
         if cs.has_major_compaction() {
-            self.apply_major_compaction(cs.get_major_compaction());
+            self.apply_major_compaction(cs);
             return;
         }
         if cs.has_update_schema_meta() {
@@ -586,6 +586,14 @@ impl ShardMeta {
             self.data_sequence = new_data_seq;
         }
         self.max_ts = std::cmp::max(self.max_ts, flush.max_ts);
+
+        if self
+            .properties
+            .get_inner_key_off_update_seq()
+            .is_some_and(|update_seq| update_seq <= self.data_sequence)
+        {
+            self.remove_inner_key_off_update_seq_property();
+        }
     }
 
     pub fn apply_initial_flush(&mut self, cs: &pb::ChangeSet) {
@@ -597,12 +605,34 @@ impl ShardMeta {
         // self.data_sequence may be advanced on raft log gc tick.
         new_meta.data_sequence = std::cmp::max(new_meta.data_sequence, self.data_sequence);
         new_meta.max_ts = std::cmp::max(new_meta.max_ts, self.max_ts);
+
+        if let Some(update_seq) = new_meta.properties.get_inner_key_off_update_seq() {
+            debug_assert!(
+                update_seq <= new_meta.data_sequence,
+                "{} meta {:?} cs {:?}",
+                self.tag(),
+                self,
+                cs
+            );
+            self.remove_inner_key_off_update_seq_property();
+        }
+
         info!("{} apply_initial_flush", self.tag();
             "prop" => ?new_meta.properties,
             "data_seq" => new_meta.data_sequence,
             "columnar_snap_version" => new_meta.columnar_snap_version,
             "max_ts" => new_meta.max_ts);
         *self = new_meta;
+    }
+
+    fn remove_inner_key_off_update_seq_property(&mut self) {
+        let prev = self.del_property(INNER_KEY_OFFSET_UPDATE_SEQ_KEY);
+        let update_seq = prev.map(|mut x| x.get_u64_le()).unwrap_or_default();
+        info!(
+            "{} remove inner key offset update seq property: {}",
+            self.tag(),
+            update_seq
+        );
     }
 
     fn apply_compaction(&mut self, comp: &pb::Compaction) {
@@ -626,7 +656,8 @@ impl ShardMeta {
         }
     }
 
-    fn apply_major_compaction(&mut self, comp: &pb::MajorCompaction) {
+    fn apply_major_compaction(&mut self, cs: &pb::ChangeSet) {
+        let comp = cs.get_major_compaction();
         for delete in comp.get_sstable_change().get_table_deletes() {
             self.delete_file(delete.get_id(), delete.get_level());
         }
@@ -641,6 +672,15 @@ impl ShardMeta {
         }
         if comp.update_inner_key_offset && self.range.keyspace_id > 0 && self.inner_key_off == 0 {
             self.inner_key_off = KEYSPACE_PREFIX_LEN;
+            debug_assert!(
+                self.properties.get_inner_key_off_update_seq().is_none(),
+                "{} meta {:?} cs {:?}",
+                self.tag(),
+                self,
+                cs
+            );
+            self.properties.set_inner_key_off_update_seq(cs.sequence);
+            info!("{} update inner key offset", self.tag(); "seq" => cs.sequence);
         }
     }
 

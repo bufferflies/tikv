@@ -370,7 +370,7 @@ fn test_truncate_ts_request() {
     // truncated_ts is larger than current truncate ts, don't change it.
     let truncated_ts = TruncateTs::from(version + 20);
     cs.set_property_value(truncated_ts.marshal().to_vec());
-    let ret = engine.apply_change_set(apply::ChangeSet::new(cs.clone()));
+    let ret = engine.apply_change_set(&apply::ChangeSet::new(cs.clone()));
     ret.unwrap();
     assert_eq!(
         Some(truncate_ts),
@@ -381,7 +381,7 @@ fn test_truncate_ts_request() {
     let truncated_ts = TruncateTs::from(version + 10);
     cs.set_sequence(3);
     cs.set_property_value(truncated_ts.marshal().to_vec());
-    let ret = engine.apply_change_set(apply::ChangeSet::new(cs));
+    let ret = engine.apply_change_set(&apply::ChangeSet::new(cs));
     ret.unwrap();
     assert_eq!(None, engine.get_shard(1).unwrap().get_truncate_ts());
 }
@@ -1529,7 +1529,8 @@ impl Applier {
                     self.engine.meta_committed(&cs, false);
                     unwrap_or_return!(
                         self.engine.apply_change_set(
-                            self.engine
+                            &self
+                                .engine
                                 .prepare_change_set(cs, false, false, None, None, None)
                                 .unwrap()
                         ),

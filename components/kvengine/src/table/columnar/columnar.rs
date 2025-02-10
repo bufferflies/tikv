@@ -90,7 +90,7 @@ impl SchemaBuf {
             self.properties
                 .set(STORAGE_CLASS_KEY, &storage_class.marshal());
         } else {
-            self.properties.remove(STORAGE_CLASS_KEY)
+            self.properties.remove(STORAGE_CLASS_KEY);
         }
     }
 }

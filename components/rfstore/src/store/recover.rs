@@ -24,8 +24,9 @@ use slog_global::info;
 use tikv_util::{debug, warn};
 
 use crate::store::{
-    is_property_change_set, load_raft_truncated_state, load_region_state, rlog, Applier,
-    ApplyContext, CustomRaftLog, PeerTag, RaftApplyState, RaftState, RegionIdVer, TERM_KEY,
+    is_change_set_affect_mem_table, is_property_change_set, load_raft_truncated_state,
+    load_region_state, rlog, Applier, ApplyContext, CustomRaftLog, PeerTag, RaftApplyState,
+    RaftState, RegionIdVer, TERM_KEY,
 };
 
 #[derive(Clone)]
@@ -247,27 +248,26 @@ impl RecoverHandler {
                     Self::execute_admin_request(&mut applier, ctx, req)?;
                 }
             } else if let Some(custom) = rlog::get_custom_log(&req) {
-                if rlog::is_txn_file_ref(custom.data.chunk()) {
+                if rlog::is_txn_file_ref(custom.data) {
                     let txn_file_ref = custom.get_txn_file_ref().unwrap();
                     prepare_txn_file_ref(&ctx.engine, &txn_file_ref, encryption_key.clone())?;
                 }
-                if let Some(mut cs) = get_async_change_set(&custom) {
-                    cs.sequence = e.get_index();
-                    if meta.ver == cs.get_shard_ver() && !meta.is_duplicated_change_set(&mut cs) {
-                        // We don't have a background region worker now, should do it synchronously.
-                        let cs = ctx.engine.prepare_change_set(
-                            cs,
-                            false,
-                            meta.use_ia(),
-                            None,
-                            None,
-                            encryption_key.clone(),
-                        )?;
-                        ctx.engine.apply_change_set(cs)?;
+                let cs = if rlog::is_engine_meta_log(custom.data) {
+                    Some(recover_change_set(
+                        ctx,
+                        e,
+                        meta,
+                        encryption_key.as_ref(),
+                        &custom,
+                    )?)
+                } else {
+                    None
+                };
+                if cs.as_ref().map_or(true, is_change_set_affect_mem_table) {
+                    if let Err(err) = applier.exec_custom_log(ctx, &custom, cs) {
+                        // Only duplicated pre-split may fail, we can ignore this error.
+                        warn!("{} failed to execute custom log {:?}", tag, err);
                     }
-                } else if let Err(err) = applier.exec_custom_log(ctx, &custom) {
-                    // Only duplicated pre-split may fail, we can ignore this error.
-                    warn!("{} failed to execute custom log {:?}", tag, err);
                 }
             }
             applier.apply_state.applied_index = ctx.exec_log_index;
@@ -289,21 +289,6 @@ impl kvengine::RecoverHandler for RecoverHandler {
     }
 }
 
-// change set that only set property are applied synchronously by
-// exec_custom_log, other change set are applied asynchronously. During recover,
-// we don't have background worker, so we need to apply the async change sets
-// directly. And we must exclude property change set, because it has side effect
-// of switch mem-table, if we skip it, later apply flush mem-table would panic.
-fn get_async_change_set(custom: &CustomRaftLog<'_>) -> Option<ChangeSet> {
-    if rlog::is_engine_meta_log(custom.data.chunk()) {
-        let cs = custom.get_change_set().unwrap();
-        if !is_property_change_set(&cs) {
-            return Some(cs);
-        }
-    }
-    None
-}
-
 fn prepare_txn_file_ref(
     kv: &Engine,
     txn_file_ref: &kvenginepb::TxnFileRef,
@@ -311,6 +296,36 @@ fn prepare_txn_file_ref(
 ) -> kvengine::Result<()> {
     let manager = kv.get_txn_chunk_manager();
     manager.prepare_txn_chunks(txn_file_ref.chunk_ids.clone(), encryption_key)
+}
+
+fn recover_change_set(
+    ctx: &mut ApplyContext,
+    e: &eraftpb::Entry,
+    meta: &ShardMeta,
+    encryption_key: Option<&EncryptionKey>,
+    custom: &CustomRaftLog<'_>,
+) -> kvengine::Result<ChangeSet> {
+    let mut cs = custom.get_change_set().unwrap();
+    // Change sets that only set property are applied synchronously by
+    // exec_custom_log, other change sets are applied asynchronously.
+    if !is_property_change_set(&cs) {
+        cs.sequence = e.get_index();
+        if meta.ver == cs.get_shard_ver() && !meta.is_duplicated_change_set(&mut cs) {
+            // We don't have a background region worker now, should do it
+            // synchronously.
+            let cs1 = ctx.engine.prepare_change_set(
+                std::mem::take(&mut cs),
+                false,
+                meta.use_ia(),
+                None,
+                None,
+                encryption_key.cloned(),
+            )?;
+            ctx.engine.apply_change_set(&cs1)?;
+            cs = cs1.into_inner();
+        }
+    }
+    Ok(cs)
 }
 
 struct PeerToDestroy {
@@ -499,6 +514,6 @@ pub fn apply_custom_log_in_recover(
     ctx.exec_log_index = applied_index + 1;
     ctx.exec_log_term = applied_index_term;
     debug!("{} apply_custom_log_in_recover", shard.tag(); "log_index" => ctx.exec_log_index);
-    let _ = applier.exec_custom_log(&mut ctx, &custom)?;
+    let _ = applier.exec_custom_log(&mut ctx, &custom, None)?;
     Ok(())
 }

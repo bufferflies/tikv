@@ -652,6 +652,7 @@ impl Applier {
         &mut self,
         ctx: &mut ApplyContext,
         cl: &CustomRaftLog<'_>,
+        cs: Option<kvenginepb::ChangeSet>,
     ) -> Result<(RaftCmdResponse, ApplyResult)> {
         let mut observer = ctx.observer.take();
         let mut wb_ref = ctx.get_engine_wb(self.region.get_id());
@@ -698,17 +699,30 @@ impl Applier {
                 });
             }
             TYPE_ENGINE_META => {
-                let cs = cl.get_change_set().unwrap();
-                if is_property_change_set(&cs) {
-                    wb.set_property(cs.get_property_key(), cs.get_property_value());
-                }
-                if cs.has_major_compaction()
-                    && cs.get_major_compaction().get_update_inner_key_offset()
-                {
-                    wb.set_update_inner_key_offset();
-                    // When inner key offset is updated, the size of mem table will be changed.
-                    // So we need to clear the cached mem table state.
-                    self.clear_mem_table_state();
+                let cs = cs.unwrap_or_else(|| cl.get_change_set().unwrap());
+                // Checking kind of change set is duplicated, but it ensures the consistency of
+                // online and recovery process.
+                // Besides, some change sets (e.g. restore shard) do not have the same version
+                // with `self.region`.
+                if is_change_set_affect_mem_table(&cs) {
+                    let current_ver = self.region.get_region_epoch().version;
+                    if cs.shard_ver == current_ver {
+                        if is_property_change_set(&cs) {
+                            wb.set_property(cs.get_property_key(), cs.get_property_value());
+                        }
+                        if cs.has_major_compaction()
+                            && cs.get_major_compaction().get_update_inner_key_offset()
+                        {
+                            info!("{} exec custom log: update inner key offset", self.tag(); "log_index" => log_index);
+                            wb.set_update_inner_key_offset();
+                            // When inner key offset is updated, the size of mem table will be
+                            // changed. So we need to clear the cached mem table state.
+                            self.clear_mem_table_state();
+                        }
+                    } else {
+                        warn!("{} exec custom log: shard version not match", self.tag();
+                            "cs.ver" => cs.shard_ver, "log_index" => log_index);
+                    }
                 }
             }
             TYPE_RESOLVE_LOCK => cl.iterate_resolve_lock(|tp, k, ts, del_lock| match tp {
@@ -791,7 +805,7 @@ impl Applier {
             };
         }
         let custom = rlog::get_custom_log(req).unwrap();
-        match self.exec_custom_log(ctx, &custom) {
+        match self.exec_custom_log(ctx, &custom, None) {
             Ok((resp, result)) => (resp, result),
             Err(e) => (err_resp(e, ctx.exec_log_term), ApplyResult::None),
         }
@@ -1350,7 +1364,7 @@ impl Applier {
                 self.apply_state = RaftApplyState::from_snapshot(cs.get_snapshot());
                 ctx.engine.ingest(cs, false)
             } else {
-                ctx.engine.apply_change_set(cs)
+                ctx.engine.apply_change_set(&cs)
             };
 
             match result {
@@ -1884,6 +1898,12 @@ pub(crate) fn is_property_change_set(cs: &kvenginepb::ChangeSet) -> bool {
         && !cs.has_truncate_ts()
         && !cs.has_trim_over_bound()
         && !cs.has_update_schema_meta()
+}
+
+// Used in recover. These change sets have side effect of switch mem-table.
+pub(crate) fn is_change_set_affect_mem_table(cs: &kvenginepb::ChangeSet) -> bool {
+    is_property_change_set(cs)
+        || (cs.has_major_compaction() && cs.get_major_compaction().get_update_inner_key_offset())
 }
 
 struct MemTableState {

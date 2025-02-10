@@ -137,6 +137,7 @@ pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
 pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
 pub const ENCRYPTION_KEY: &str = "_encryption";
 pub const STORAGE_CLASS_KEY: &str = "_storage_class";
+pub const INNER_KEY_OFFSET_UPDATE_SEQ_KEY: &str = "_iko_upd_seq";
 
 // Note: TERM_KEY should not be flushed during initial flush, to keep
 // `ShardMeta.data_sequence` consistent with `TERM_KEY`.
@@ -258,12 +259,13 @@ impl Shard {
     ) -> Self {
         let snap = cs.get_snapshot();
         let range = ShardRange::from_snap(snap);
+        let inner_key_off = Self::inner_key_off_from_snapshot(snap);
         let mut shard = Self::new(
             engine_id,
             snap.get_properties(),
             cs.shard_ver,
             range,
-            snap.inner_key_off as usize,
+            inner_key_off,
             opt,
             master_key,
         );
@@ -282,6 +284,18 @@ impl Shard {
             .col_snap_version
             .store(cs.get_snapshot().get_columnar_snap_version(), Release);
         shard
+    }
+
+    fn inner_key_off_from_snapshot(snap: &pb::Snapshot) -> usize {
+        if let Some(val) =
+            get_shard_property(INNER_KEY_OFFSET_UPDATE_SEQ_KEY, snap.get_properties())
+        {
+            let update_seq = val.as_slice().get_u64_le();
+            if snap.data_sequence < update_seq {
+                return 0;
+            }
+        }
+        snap.inner_key_off as usize
     }
 
     fn collect_ids_from_snapshot(
@@ -1482,6 +1496,7 @@ impl fmt::Debug for ShardData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ShardData")
             .field("range", &self.range)
+            .field("inner_key_off", &self.inner_key_off)
             .field("sst_files", &self.get_all_sst_files())
             .field("txn_chunks", &self.get_txn_chunks())
             .field("columnar_files", &self.get_all_columnar_files())
@@ -2195,8 +2210,8 @@ impl Properties {
             .collect()
     }
 
-    pub fn remove(&self, key: &str) {
-        self.m.remove(key);
+    pub fn remove(&self, key: &str) -> Option<Bytes> {
+        self.m.remove(key).map(|r| r.1)
     }
 
     pub fn to_pb(&self, shard_id: u64) -> kvenginepb::Properties {
@@ -2247,6 +2262,20 @@ impl Properties {
                 e.insert(v);
             }
         }
+    }
+
+    pub fn get_inner_key_off_update_seq(&self) -> Option<u64> {
+        Some(
+            self.m
+                .get(INNER_KEY_OFFSET_UPDATE_SEQ_KEY)?
+                .value()
+                .as_ref()
+                .get_u64_le(),
+        )
+    }
+
+    pub fn set_inner_key_off_update_seq(&self, seq: u64) {
+        self.set(INNER_KEY_OFFSET_UPDATE_SEQ_KEY, &seq.to_le_bytes());
     }
 }
 

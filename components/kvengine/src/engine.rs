@@ -404,13 +404,15 @@ impl EngineCore {
     fn new_shard_from_change_set(&self, cs: ChangeSet) -> Shard {
         let engine_id = self.engine_id.load(Ordering::Acquire);
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone(), &self.master_key);
+        let data = shard.get_data();
         info!(
-            "ingest shard {} mem_table_version {}, change {:?}",
+            "ingest shard {} mem_table_version {}, inner_key_off {}, change {:?}",
             shard.tag(),
             shard.load_mem_table_version(),
+            data.inner_key_off,
             &cs,
         );
-        let mut builder = ShardDataBuilder::new(shard.get_data());
+        let mut builder = ShardDataBuilder::new(data);
         let prepare_type = if self.opts.ignore_columnar_table_load {
             PrepareType::SstOnly
         } else {
