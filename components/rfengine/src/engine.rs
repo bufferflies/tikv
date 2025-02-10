@@ -282,6 +282,7 @@ impl RfEngineCore {
         let mut truncated_logs = vec![];
         for (&peer_id, batch_data) in &wb.peers {
             let region_id = batch_data.meta.region_id;
+            tikv_util::set_current_region_thread_local(region_id);
             let peer_data = self.get_or_init_peer_data(peer_id, region_id);
             let mut peer_data = peer_data.write().unwrap();
             let truncated = peer_data.apply(batch_data);

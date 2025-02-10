@@ -205,7 +205,9 @@ impl RaftLogs {
                     if op_idx <= block.first_index() {
                         truncated_blocks.push(block);
                     } else {
-                        block.truncate_right(op_idx);
+                        if op_idx <= block.last_index() {
+                            block.truncate_right(op_idx);
+                        }
                         self.blocks.push_back(block);
                         break;
                     }
@@ -443,8 +445,19 @@ mod tests {
         }
         assert!(raft_logs.get(257).is_none());
 
+        // Append conflicted logs (at first index of last block, see issue #2153).
+        let log = RaftLogOp::new(&new_raft_entry(EntryType::EntryNormal, 1, 256, b"data1", 0));
+        logs[(log.index - 1) as usize] = log.clone();
+        let conflicted = raft_logs.append(log.clone());
+        assert_eq!(conflicted.len(), 1);
+        assert_eq!(raft_logs.last_index(), log.index);
+        assert_eq!(raft_logs.blocks.len(), 2);
+        for log in &logs[..log.index as usize] {
+            assert_eq!(raft_logs.get(log.index).unwrap(), log.to_entry());
+        }
+
         // Append conflicted logs.
-        let log = RaftLogOp::new(&new_raft_entry(EntryType::EntryNormal, 1, 255, b"data1", 0));
+        let log = RaftLogOp::new(&new_raft_entry(EntryType::EntryNormal, 1, 255, b"data2", 0));
         logs[(log.index - 1) as usize] = log.clone();
         let conflicted = raft_logs.append(log.clone());
         assert_eq!(conflicted.len(), 1);
