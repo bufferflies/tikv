@@ -233,8 +233,11 @@ impl Drop for Transaction {
                 let res = conn.execute("rollback").await;
                 if let Err(err) = res {
                     error!("{} rollback failed", tag; "err" => ?err);
+                    // Detach to abort the connection. Otherwise, the current progress would be
+                    // committed by another transaction.
+                    // See https://github.com/tidbcloud/cloud-storage-engine/issues/2300.
+                    let _ = conn.detach();
                 }
-                drop(conn);
             };
             let _ = tokio::spawn(task);
         }
