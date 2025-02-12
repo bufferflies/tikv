@@ -4591,6 +4591,7 @@ async fn update_vector_index(
     let mut ret = pb::UpdateVectorIndex::new();
     ret.set_table_id(update_vec_idx.table_id);
     ret.set_index_id(update_vec_idx.index_id);
+    ret.set_col_id(update_vec_idx.col_id);
     ret.set_removed(update_vec_idx.remove_file_ids.clone());
     ret.set_added(vec![vec_idx_file].into());
     info!("update vector index result {:?}", ret);
