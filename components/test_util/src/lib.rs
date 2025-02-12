@@ -15,6 +15,7 @@ mod security;
 
 use std::{
     env,
+    net::TcpListener,
     sync::atomic::{AtomicU16, Ordering},
     thread,
 };
@@ -92,7 +93,11 @@ pub fn alloc_port() -> u16 {
     loop {
         let next = if p >= MIN_LOCAL_PORT { 10240 } else { p + 1 };
         match INITIAL_PORT.compare_exchange_weak(p, next, Ordering::SeqCst, Ordering::SeqCst) {
-            Ok(_) => return next,
+            Ok(_) => {
+                if TcpListener::bind(("127.0.0.1", next)).is_ok() {
+                    return next;
+                }
+            }
             Err(e) => p = e,
         }
     }

@@ -10,7 +10,6 @@ use grpcio::WriteFlags;
 use kvproto::{cdcpb::*, kvrpcpb::*};
 use pd_client::PdClient;
 use raft::eraftpb::MessageType;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv::server::DEFAULT_CLUSTER_ID;
 use tikv_util::{config::ReadableDuration, HandyRwLock};

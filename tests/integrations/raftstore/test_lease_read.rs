@@ -15,7 +15,6 @@ use more_asserts::assert_le;
 use pd_client::PdClient;
 use raft::eraftpb::{ConfChangeType, MessageType};
 use raftstore::store::{Callback, RegionSnapshot};
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::*, time::Instant, HandyRwLock};
 

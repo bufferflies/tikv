@@ -55,7 +55,11 @@ pub trait KvEngine:
     /// Flush metrics to prometheus
     ///
     /// `instance` is the label of the metric to flush.
-    fn flush_metrics(&self, _instance: &str) {}
+    fn flush_metrics(&self, instance: &str) {
+        let mut reporter = Self::StatisticsReporter::new(instance);
+        reporter.collect(self);
+        reporter.flush();
+    }
 
     /// Reset internal statistics
     fn reset_statistics(&self) {}

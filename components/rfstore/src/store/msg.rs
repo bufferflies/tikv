@@ -149,6 +149,7 @@ pub enum StoreMsg {
     PrepareMerge {
         region_id: u64,
         req: RaftCmdRequest,
+        callback: Callback,
     },
     CheckMerge(u64),
     Stop,

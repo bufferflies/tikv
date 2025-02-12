@@ -2301,6 +2301,7 @@ impl<'a> PeerMsgHandler<'a> {
     }
 
     fn schedule_merge(&mut self, store_meta: &mut StoreMeta) -> Result<()> {
+        fail_point!("on_schedule_merge", |_| Ok(()));
         fail_point!("on_schedule_merge_error", |_| {
             // Return error to trigger rollback merge.
             Err(box_err!("on_schedule_merge_error failpoint"))

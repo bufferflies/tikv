@@ -831,9 +831,13 @@ impl<'a> StoreMsgHandler<'a> {
                 tikv_util::set_current_region_thread_local(region_id);
                 self.on_dependents_empty(region_id);
             }
-            StoreMsg::PrepareMerge { region_id, req } => {
+            StoreMsg::PrepareMerge {
+                region_id,
+                req,
+                callback,
+            } => {
                 tikv_util::set_current_region_thread_local(region_id);
-                self.on_prepare_merge_request(region_id, req);
+                self.on_prepare_merge_request(region_id, req, callback);
             }
             StoreMsg::CheckMerge(region_id) => {
                 tikv_util::set_current_region_thread_local(region_id);
@@ -1833,7 +1837,7 @@ impl<'a> StoreMsgHandler<'a> {
         self.on_destroy_peer(region_id, merged_target);
     }
 
-    fn on_prepare_merge_request(&mut self, region_id: u64, req: RaftCmdRequest) {
+    fn on_prepare_merge_request(&mut self, region_id: u64, req: RaftCmdRequest, cb: Callback) {
         let peer = match self.ctx.try_get_peer(region_id) {
             Some(peer) => peer,
             None => return,
@@ -1842,7 +1846,7 @@ impl<'a> StoreMsgHandler<'a> {
         let raft_ctx = &mut self.ctx.raft_ctx;
         let store_meta = &mut self.ctx.store_meta;
         let mut handler = PeerMsgHandler::new(&mut peer_fsm, raft_ctx);
-        handler.propose_raft_command(req, Callback::None, Some(store_meta));
+        handler.propose_raft_command(req, cb, Some(store_meta));
     }
 
     fn on_prepare_merge_result(&mut self, region: Region) {
@@ -1850,6 +1854,7 @@ impl<'a> StoreMsgHandler<'a> {
             Some(peer) => peer,
             None => return,
         };
+        fail::fail_point!("on_prepare_merge_result");
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
         let is_leader = peer_fsm.peer.is_leader();
         self.ctx

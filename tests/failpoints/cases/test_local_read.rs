@@ -7,7 +7,6 @@ use kvproto::{
     kvrpcpb::{Context, RawGetRequest},
     tikvpb_grpc::TikvClient,
 };
-use test_pd_client::PdClientExt;
 use test_raftstore::{
     must_get_equal, must_get_none, must_raw_get, must_raw_put, new_peer, new_server_cluster,
 };

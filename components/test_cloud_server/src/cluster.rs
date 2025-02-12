@@ -793,6 +793,7 @@ impl ServerCluster {
             .keys()
             .map(|&idx| tikv_worker_addr(idx))
             .collect()
+        // self.tikv_worker_configs.values().map(|c| c.addr.clone()).collect()
     }
 
     pub fn generate_tikv_worker_configs(&mut self, worker_ids: Vec<u16>, opts: TikvWorkerOptions) {
@@ -1266,21 +1267,28 @@ fn update_config_by_total_mem(
 // Keep away from 20xxx ports to work around https://github.com/tidbcloud/cloud-storage-engine/issues/658.
 // TODO: Remove this work around.
 fn node_addr(node_id: u16) -> String {
-    format!("127.0.0.1:{}", node_id + 21000)
+    let process_shift = (tikv_util::sys::thread::process_id() as u32 * 50 % 1023) as u16;
+    format!("127.0.0.1:{}", process_shift + node_id + 20000)
 }
 
 // Keep away from 3xxxx ports to work around https://github.com/tidbcloud/cloud-storage-engine/issues/658.
 // TODO: Remove this work around.
 fn node_status_addr(node_id: u16) -> String {
-    format!("127.0.0.1:{}", node_id + 25000)
+    format!("127.0.0.1:{}", process_offset() + node_id + 25000)
 }
 
 fn tikv_worker_addr(idx: u16) -> String {
-    format!("127.0.0.1:{}", 17000 + idx)
+    format!("127.0.0.1:{}", process_offset() + 15000 + idx)
 }
 
 pub fn tikv_worker_cop_url(idx: u16) -> String {
     format!("http://{}/coprocessor", tikv_worker_addr(idx))
+}
+
+// Generate an offset based on process_id to avoid port conflict
+// when nextest(case-per-process) is used.
+fn process_offset() -> u16 {
+    (tikv_util::sys::thread::process_id() as u32 * 50 % 1023) as u16
 }
 
 pub struct TikvWorkerOptions {

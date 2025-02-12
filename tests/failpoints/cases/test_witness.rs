@@ -5,7 +5,6 @@ use std::{iter::FromIterator, sync::Arc, time::Duration};
 use futures::executor::block_on;
 use kvproto::metapb;
 use pd_client::PdClient;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::store::find_peer;
 

@@ -20,7 +20,6 @@ use raft::eraftpb::{Message, MessageType, Snapshot};
 use raftstore::{store::*, Result};
 use rand::Rng;
 use security::SecurityManager;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv::server::snap::send_snap;
 use tikv_util::{config::*, time::Instant, HandyRwLock};

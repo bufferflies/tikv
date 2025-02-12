@@ -1048,7 +1048,7 @@ impl PdRunner {
                     info!("try to merge"; "region" => tag, "merge" => ?merge);
                     let request = new_merge_request(merge);
                     let req = new_admin_command(region_id, epoch, peer, request);
-                    router.send_store(StoreMsg::PrepareMerge {region_id, req});
+                    router.send_store(StoreMsg::PrepareMerge {region_id, req, callback: Callback::None });
                 } else {
                     PD_HEARTBEAT_COUNTER_VEC.with_label_values(&["noop"]).inc();
                 }

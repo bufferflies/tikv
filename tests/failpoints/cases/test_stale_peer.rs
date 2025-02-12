@@ -11,7 +11,6 @@ use futures::executor::block_on;
 use kvproto::raft_serverpb::{PeerState, RaftLocalState, RaftMessage};
 use pd_client::PdClient;
 use raft::eraftpb::MessageType;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::ReadableDuration, time::Instant, HandyRwLock};
 

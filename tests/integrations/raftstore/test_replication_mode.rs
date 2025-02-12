@@ -9,7 +9,6 @@ use std::{
 use kvproto::replication_modepb::*;
 use pd_client::PdClient;
 use raft::eraftpb::ConfChangeType;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::*, HandyRwLock};
 

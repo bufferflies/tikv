@@ -18,7 +18,7 @@ extern crate tikv_alloc;
 
 #[macro_use]
 pub mod setup;
-mod node;
+pub mod node;
 mod raftkv;
 pub mod server;
 pub mod service;

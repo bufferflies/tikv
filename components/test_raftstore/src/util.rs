@@ -635,15 +635,20 @@ pub fn configure_for_snapshot<T: Simulator>(cluster: &mut Cluster<T>) {
 }
 
 pub fn configure_for_merge<T: Simulator>(cluster: &mut Cluster<T>) {
+    adjust_config_for_merge(&mut cluster.cfg)
+}
+
+pub fn adjust_config_for_merge(cfg: &mut TikvConfig) {
     // Avoid log compaction which will prevent merge.
-    cluster.cfg.raft_store.raft_log_gc_threshold = 1000;
-    cluster.cfg.raft_store.raft_log_gc_count_limit = Some(1000);
-    cluster.cfg.raft_store.raft_log_gc_size_limit = Some(ReadableSize::mb(20));
+    cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(10);
+    cfg.raft_store.raft_log_gc_threshold = 1000;
+    cfg.raft_store.raft_log_gc_count_limit = Some(1000);
+    cfg.raft_store.raft_log_gc_size_limit = Some(ReadableSize::mb(20));
     // Make merge check resume quickly.
-    cluster.cfg.raft_store.merge_check_tick_interval = ReadableDuration::millis(100);
+    cfg.raft_store.merge_check_tick_interval = ReadableDuration::millis(100);
     // When isolated, follower relies on stale check tick to detect failure leader,
     // choose a smaller number to make it recover faster.
-    cluster.cfg.raft_store.peer_stale_state_check_interval = ReadableDuration::millis(500);
+    cfg.raft_store.peer_stale_state_check_interval = ReadableDuration::millis(500);
 }
 
 pub fn ignore_merge_target_integrity<T: Simulator>(cluster: &mut Cluster<T>) {

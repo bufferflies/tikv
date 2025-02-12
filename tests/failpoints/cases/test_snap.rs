@@ -14,7 +14,6 @@ use std::{
 use engine_traits::RaftEngineReadOnly;
 use kvproto::raft_serverpb::RaftMessage;
 use raft::eraftpb::MessageType;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::*, time::Instant, HandyRwLock};
 

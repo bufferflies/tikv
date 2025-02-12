@@ -7,7 +7,6 @@ use std::{sync::Arc, thread, time::*};
 use engine_traits::{Peekable, CF_RAFT};
 use kvproto::raft_serverpb::{PeerState, RegionLocalState};
 use raft::eraftpb::MessageType;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::ReadableDuration, HandyRwLock};
 

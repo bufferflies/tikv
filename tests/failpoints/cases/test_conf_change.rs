@@ -10,7 +10,6 @@ use futures::executor::block_on;
 use kvproto::raft_serverpb::RaftMessage;
 use pd_client::PdClient;
 use raft::eraftpb::{ConfChangeType, MessageType};
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::ReadableDuration, HandyRwLock};
 

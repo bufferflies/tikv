@@ -1232,7 +1232,7 @@ impl TikvServer {
         panic_regions
     }
 
-    fn init_flow_control(config: &TikvConfig) -> (FlowController, Arc<StoreLimiter>) {
+    pub fn init_flow_control(config: &TikvConfig) -> (FlowController, Arc<StoreLimiter>) {
         let soft_limit = config
             .storage
             .flow_control

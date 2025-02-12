@@ -12,8 +12,12 @@ use raftstore::{
     store::{initial_region, FlowStatsReporter},
 };
 use resource_metering::ResourceTagFactory;
-use rfstore::store::{
-    self, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask, RaftBatchSystem, Transport,
+use rfstore::{
+    store::{
+        self, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask, RaftBatchSystem,
+        Transport,
+    },
+    RaftRouter,
 };
 use tikv::{
     import::SstImporter,
@@ -201,6 +205,10 @@ impl Node {
     /// Gets the store id.
     pub fn id(&self) -> u64 {
         self.store.get_id()
+    }
+
+    pub fn get_router(&self) -> RaftRouter {
+        self.system.router()
     }
 
     // check store, return store id for the engine.

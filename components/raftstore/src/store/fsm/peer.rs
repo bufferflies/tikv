@@ -4405,6 +4405,8 @@ where
             );
         }
 
+        fail::fail_point!("on_ready_prepare_merge");
+
         self.fsm.peer.pending_merge_state = Some(state);
         let state = self.fsm.peer.pending_merge_state.as_ref().unwrap();
 

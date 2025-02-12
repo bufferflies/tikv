@@ -23,6 +23,10 @@ jobs:
       CARGO_UNSTABLE_SPARSE_REGISTRY: true
     steps:
       - uses: actions/checkout@v3
+      - uses: taiki-e/install-action@v2
+        with:
+          # cannot use the latest version due to the old rust-toolchain.
+          tool: nextest@0.9.79
       - name: Check cmake & protoc # use local to work around github rate limit
         run: |
           cmake --version
@@ -49,4 +53,10 @@ jobs:
           CARGO_INCREMENTAL: "0"
         working-directory: ./
         run: |
-          make test-cloud-engine-integration
+          make test-cloud-engine-integration-with-nextest
+      - name: Upload log on error
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run.log
+          path: ${{ runner.temp }}/run.log

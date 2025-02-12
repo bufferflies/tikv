@@ -9,7 +9,6 @@ use collections::HashMap;
 use engine_traits::{Peekable, CF_RAFT};
 use kvproto::raft_serverpb::RaftApplyState;
 use raftstore::store::*;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::config::*;
 

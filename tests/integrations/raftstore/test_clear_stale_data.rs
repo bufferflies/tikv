@@ -2,7 +2,6 @@
 
 use engine_rocks::{raw::CompactOptions, RocksEngine};
 use engine_traits::{MiscExt, Peekable, SyncMutable, CF_DEFAULT, CF_LOCK};
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 
 fn init_db_with_sst_files(db: &RocksEngine, level: i32, n: u8) {

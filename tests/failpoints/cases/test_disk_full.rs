@@ -10,7 +10,6 @@ use kvproto::{
 };
 use raft::eraftpb::MessageType;
 use raftstore::store::msg::*;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::ReadableDuration, time::Instant};
 

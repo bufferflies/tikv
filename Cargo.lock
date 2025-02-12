@@ -4150,7 +4150,7 @@ dependencies = [
 [[package]]
 name = "libtitan_sys"
 version = "0.0.1"
-source = "git+https://github.com/tikv/rust-rocksdb.git?branch=tikv-6.5#ecbd6840f81372c30bab4a980e7ae9c91994a421"
+source = "git+https://github.com/tikv/rust-rocksdb.git#2096b9a161f93e437f7adee49e68cd1570aea42f"
 dependencies = [
  "bzip2-sys",
  "cc",
@@ -8437,6 +8437,83 @@ dependencies = [
 ]
 
 [[package]]
+name = "test_rfstore"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "api_version",
+ "async-stream 0.2.0",
+ "async-trait",
+ "backtrace",
+ "bstr",
+ "builtin_dfs",
+ "bytes",
+ "chrono",
+ "cloud_encryption",
+ "cloud_server",
+ "cloud_worker",
+ "codec",
+ "collections",
+ "concurrency_manager",
+ "crc32c",
+ "crc32fast",
+ "crossbeam",
+ "dashmap 4.0.2",
+ "dyn-clone",
+ "encryption",
+ "engine_traits",
+ "file_system",
+ "futures 0.3.28",
+ "glob",
+ "grpcio",
+ "hex 0.4.3",
+ "hyper",
+ "keys",
+ "kvengine",
+ "kvproto",
+ "lazy_static",
+ "load_data",
+ "log_wrappers",
+ "nix 0.24.3",
+ "pd_client",
+ "protobuf",
+ "raft",
+ "raftstore",
+ "rand 0.8.5",
+ "regex",
+ "reqwest",
+ "rfengine",
+ "rfstore",
+ "rstest",
+ "security",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "slog",
+ "slog-global",
+ "sst_importer",
+ "tempfile",
+ "test_cloud_server",
+ "test_pd",
+ "test_pd_client",
+ "test_raftstore",
+ "test_util",
+ "thiserror",
+ "tidb_query_common",
+ "tidb_query_datatype",
+ "tikv",
+ "tikv-client",
+ "tikv_util",
+ "tipb",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "txn_types",
+ "url",
+ "zipf 7.0.0",
+]
+
+[[package]]
 name = "test_sst_importer"
 version = "0.1.0"
 dependencies = [
@@ -8576,6 +8653,7 @@ dependencies = [
  "test_pd",
  "test_pd_client",
  "test_raftstore",
+ "test_rfstore",
  "test_sst_importer",
  "test_storage",
  "test_util",

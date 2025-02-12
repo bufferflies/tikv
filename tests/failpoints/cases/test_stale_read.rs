@@ -10,7 +10,6 @@ use kvproto::metapb::{Peer, Region};
 use pd_client::PdClient;
 use raft::eraftpb::MessageType;
 use raftstore::store::Callback;
-use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv_util::{config::*, HandyRwLock};
 

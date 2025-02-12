@@ -1268,6 +1268,11 @@ impl TestPdClient {
         self.must_have_peer(region_id, peer);
     }
 
+    pub fn must_remove_peer(&self, region_id: u64, peer: metapb::Peer) {
+        self.remove_peer(region_id, peer.clone());
+        self.must_none_peer(region_id, peer);
+    }
+
     pub fn must_joint_confchange(
         &self,
         region_id: u64,
