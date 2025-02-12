@@ -3,7 +3,10 @@
 use std::{collections::HashMap, fs, time::Duration};
 
 use collections::HashSet;
-use kvengine::{new_tmp_filename, table::sstable::new_filename, ShardStats};
+use kvengine::{
+    new_columnar_filename, new_schema_filename, new_tmp_filename, new_vector_index_filename,
+    table::sstable::new_filename, ShardStats,
+};
 use kvproto::raft_cmdpb::{RaftCmdRequest, RaftRequestHeader};
 use rfstore::store::rlog::*;
 use test_cloud_server::{must_wait, ServerCluster};
@@ -29,6 +32,18 @@ fn test_local_file_gc() {
     fs::write(&new_file_path, "abc").unwrap();
     let new_tmp_file_path = kv.opts.local_dir.join(new_tmp_filename(new_file_id, 1));
     fs::write(&new_tmp_file_path, "def").unwrap();
+    let new_file_id = client.get_ts().into_inner();
+    let new_columnar_file_path = kv.opts.local_dir.join(new_columnar_filename(new_file_id));
+    fs::write(&new_columnar_file_path, "ghi").unwrap();
+    let new_file_id = client.get_ts().into_inner();
+    let new_schema_file_path = kv.opts.local_dir.join(new_schema_filename(new_file_id));
+    fs::write(&new_schema_file_path, "jkl").unwrap();
+    let new_file_id = client.get_ts().into_inner();
+    let new_vector_index_file_path = kv
+        .opts
+        .local_dir
+        .join(new_vector_index_filename(new_file_id));
+    fs::write(&new_vector_index_file_path, "mno").unwrap();
     cluster.wait_pd_region_count(1);
     client.put_kv(0..1000, gen_key, gen_val);
     client.split(&gen_key(500));
@@ -58,6 +73,9 @@ fn test_local_file_gc() {
     }
     assert!(!new_file_path.exists());
     assert!(!new_tmp_file_path.exists());
+    assert!(!new_columnar_file_path.exists());
+    assert!(!new_schema_file_path.exists());
+    assert!(!new_vector_index_file_path.exists());
     cluster.stop();
 }
 

@@ -18,6 +18,7 @@ use tikv_util::{error, info, warn, worker::Runnable};
 
 const COLUMNAR_FILE_SUFFIX: &str = ".col";
 const SCHEMA_FILE_SUFFIX: &str = ".schema";
+const VECTOR_INDEX_FILE_SUFFIX: &str = ".vec";
 
 pub struct GcTask {}
 
@@ -100,6 +101,9 @@ impl GcRunner {
             shard
                 .get_schema_file()
                 .map(|f| collect_file_ids.schema_file_ids.insert(f.get_file_id()));
+            collect_file_ids
+                .vec_idx_file_ids
+                .extend(shard.get_all_vec_idx_files());
         }
         Some(collect_file_ids)
     }
@@ -129,7 +133,7 @@ impl GcRunner {
             txn_chunk_ids,
             col_file_ids,
             schema_file_ids,
-            ..
+            vec_idx_file_ids,
         } = collect_file_ids;
         let store_id = self.kv.get_engine_id();
         let entries = fs::read_dir(&self.kv.opts.local_dir).ctx("gc.read_dir")?;
@@ -179,10 +183,25 @@ impl GcRunner {
                 let id = Self::parse_file_id(&path, SCHEMA_FILE_SUFFIX.len())?;
                 if !schema_file_ids.contains(&id) {
                     let _guard = self.kv.lock_file(id);
+                    if blacklist_file_ids.contains(&id) {
+                        continue;
+                    }
                     let meta = fs::metadata(&path).table_ctx(id, "gc.schema.metadata")?;
                     if self.is_old_file(meta) {
                         Self::remove_file(store_id, &path)
                             .table_ctx(id, "gc.schema.remove_file")?;
+                    }
+                }
+            } else if path_str.ends_with(VECTOR_INDEX_FILE_SUFFIX) {
+                let id = Self::parse_file_id(&path, VECTOR_INDEX_FILE_SUFFIX.len())?;
+                if !vec_idx_file_ids.contains(&id) {
+                    let _guard = self.kv.lock_file(id);
+                    if blacklist_file_ids.contains(&id) {
+                        continue;
+                    }
+                    let meta = fs::metadata(&path).table_ctx(id, "gc.vec.metadata")?;
+                    if self.is_old_file(meta) {
+                        Self::remove_file(store_id, &path).table_ctx(id, "gc.vec.remove_file")?;
                     }
                 }
             } else if !path_str.ends_with("LOCK") {
