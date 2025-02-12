@@ -4375,6 +4375,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "cloud_encryption",
+ "crc32c",
  "file_system",
  "kvengine",
  "kvenginepb",

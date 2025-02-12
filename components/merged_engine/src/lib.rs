@@ -1,6 +1,7 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod error;
+mod manifest;
 mod preprocessor;
 
 use std::{
@@ -11,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::MasterKey;
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
@@ -38,7 +39,7 @@ use tikv_util::{
     mpsc, warn,
 };
 
-use crate::preprocessor::Preprocessor;
+use crate::{manifest::Manifest, preprocessor::Preprocessor};
 
 #[derive(Clone)]
 pub struct MergedEngineContext {
@@ -68,13 +69,42 @@ pub struct RegionProgress {
 
 #[derive(Clone, Default, Debug)]
 pub struct StoreProgress {
+    pub store_id: u64,
     pub epoch: u32,
     pub offset: u64,
 }
 
+impl StoreProgress {
+    const SIZE: usize = 20;
+
+    pub(crate) fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u64_le(self.store_id);
+        buf.put_u32_le(self.epoch);
+        buf.put_u64_le(self.offset);
+    }
+
+    pub(crate) fn decode(buf: &mut impl Buf) -> Result<Self> {
+        if (buf.remaining()) < 20 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "store progress buffer is too short",
+            )
+            .into());
+        }
+        let store_id = buf.get_u64_le();
+        let epoch = buf.get_u32_le();
+        let offset = buf.get_u64_le();
+        Ok(Self {
+            store_id,
+            epoch,
+            offset,
+        })
+    }
+}
+
 pub struct MergedEngine {
     ctx: MergedEngineContext,
-    origins: HashMap<u64, RfEngine>,
+    manifest: Manifest,
     region_progresses: HashMap<u64, RegionProgress>,
     store_progresses: HashMap<u64, StoreProgress>,
     updated_regions: HashSet<u64>,
@@ -104,12 +134,71 @@ impl MergedEngine {
             rfengine::save_store_ident(&raft, &store_ident);
         }
         raft.set_engine_id(merged_store_id);
+        let mut manifest = Manifest::open(&merged_dir).unwrap();
+        let (region_progresses, store_progresses) = if manifest.store_progresses.is_empty() {
+            let (region_progresses, store_progresses) =
+                Self::recover_from_backup(&ctx, &backup_meta, &raft).unwrap();
+            manifest
+                .update_store_progresses(store_progresses.values(), store_progresses.len())
+                .unwrap();
+            (region_progresses, store_progresses)
+        } else {
+            // TODO: load region progresses from RfEngine.
+            (
+                Self::recover_from_merged_raft_engine(&raft).unwrap(),
+                manifest.store_progresses.clone(),
+            )
+        };
+        let mut preprocessors = HashMap::new();
+        for (region_id, _) in raft.get_region_peer_map() {
+            if region_id == 0 {
+                continue;
+            }
+            let processor = Preprocessor::new(&raft, merged_store_id, region_id, &ctx.master_key);
+            preprocessors.insert(region_id, processor);
+        }
+        let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
+        let store_limiter = Arc::new(StoreLimiter::dummy());
+        let mut recover_handler = RecoverHandler::new(raft.clone());
+        recover_handler.set_merged_engine(true);
+        let mut meta_iter = recover_handler.clone();
+        let kv = Self::init_kv_engine(
+            &ctx,
+            io_rate_limiter,
+            store_limiter,
+            &mut meta_iter,
+            recover_handler.clone(),
+        )
+        .unwrap();
+        Self {
+            ctx,
+            manifest,
+            region_progresses,
+            store_progresses,
+            updated_regions: HashSet::new(),
+            raft,
+            kv,
+            recover_handler,
+            preprocessors,
+        }
+    }
+
+    pub fn close(&self) {
+        self.raft.stop_worker(false);
+        self.kv.close();
+    }
+
+    fn recover_from_backup(
+        ctx: &MergedEngineContext,
+        backup_meta: &ClusterBackupMeta,
+        merged_raft: &RfEngine,
+    ) -> Result<(HashMap<u64, RegionProgress>, HashMap<u64, StoreProgress>)> {
         let mut region_progresses = HashMap::new();
         let mut store_progresses = HashMap::new();
-        let mut preprocessors = HashMap::new();
-        let mut origins = HashMap::new();
+        let mut raftdb_pathes = Vec::new();
         for store in backup_meta.get_stores() {
             let store_progress = StoreProgress {
+                store_id: store.get_store_id(),
                 epoch: store.get_epoch(),
                 offset: store.get_offset(),
             };
@@ -120,7 +209,8 @@ impl MergedEngine {
             store_config.raft_store.raftdb_path =
                 store_path.join("raft").to_str().unwrap().to_string();
             store_config.rfengine.lightweight_backup = false;
-            let origin = Self::setup_raft_engine(&ctx, &backup_meta, store).unwrap();
+            let origin = Self::setup_raft_engine(ctx, backup_meta, store).unwrap();
+            raftdb_pathes.push(store_config.raft_store.raftdb_path);
             let region_peers_map = origin.get_region_peer_map();
             for (region_id, peer_id) in region_peers_map {
                 if region_id == 0 {
@@ -151,7 +241,7 @@ impl MergedEngine {
                 // merge states
                 let mut batch = rfengine::WriteBatch::new();
                 origin.iterate_peer_states(peer_id, false, |k, v| {
-                    update_peer_state(&mut batch, k, v, merged_store_id, region_id);
+                    update_peer_state(&mut batch, k, v, merged_raft.get_engine_id(), region_id);
                 });
                 // merge raft logs
                 let mut entry_buf = Vec::new();
@@ -169,41 +259,45 @@ impl MergedEngine {
                     batch.append_raft_log(region_id, region_id, entry);
                 }
                 batch.truncate_raft_log(region_id, region_id, truncated_index);
-                raft.write(batch).unwrap();
+                merged_raft.write(batch).unwrap();
             }
-            origins.insert(store.store_id, origin);
         }
-        for (region_id, _) in raft.get_region_peer_map() {
+        // destroy original raft engines
+        for raftdb_path in raftdb_pathes {
+            let raft_path = Path::new(&raftdb_path);
+            // clean up dir
+            std::fs::remove_dir_all(raft_path).unwrap();
+        }
+        Ok((region_progresses, store_progresses))
+    }
+
+    fn recover_from_merged_raft_engine(
+        merged_raft: &RfEngine,
+    ) -> Result<HashMap<u64, RegionProgress>> {
+        let mut region_progersses = HashMap::new();
+
+        // Get region progresses from RfEngine.
+        let region_peers_map = merged_raft.get_region_peer_map();
+        for (region_id, peer_id) in region_peers_map {
             if region_id == 0 {
                 continue;
             }
-            let processor = Preprocessor::new(&raft, merged_store_id, region_id, &ctx.master_key);
-            preprocessors.insert(region_id, processor);
+            let region_state = rfstore::store::load_last_peer_state(merged_raft, peer_id).unwrap();
+            let region_version = region_state.get_region().get_region_epoch().get_version();
+            let raft_state =
+                rfstore::store::load_peer_raft_state(merged_raft, peer_id, region_version).unwrap();
+            let commit = raft_state.get_commit();
+            let region_progress = region_progersses
+                .entry(region_id)
+                .or_insert(RegionProgress::default());
+            region_progress.commit_index = commit;
+            region_progress.synced_index = commit;
+            region_progress.truncated_index = merged_raft
+                .get_truncated_index(region_id)
+                .unwrap_or(RAFT_INIT_LOG_INDEX);
         }
-        let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
-        let store_limiter = Arc::new(StoreLimiter::dummy());
-        let mut recover_handler = RecoverHandler::new(raft.clone());
-        recover_handler.set_merged_engine(true);
-        let mut meta_iter = recover_handler.clone();
-        let kv = Self::init_kv_engine(
-            &ctx,
-            io_rate_limiter,
-            store_limiter,
-            &mut meta_iter,
-            recover_handler.clone(),
-        )
-        .unwrap();
-        Self {
-            ctx,
-            origins,
-            region_progresses,
-            store_progresses,
-            updated_regions: HashSet::new(),
-            raft,
-            kv,
-            recover_handler,
-            preprocessors,
-        }
+
+        Ok(region_progersses)
     }
 
     fn setup_raft_engine(
@@ -311,20 +405,27 @@ impl MergedEngine {
         offset: u64,
         data: Bytes,
     ) -> Result<()> {
-        let origin = self.origins.get(&store_id).unwrap();
-        let (cur_epoch, cur_offset) = origin.get_epoch_offset();
-        if cur_epoch != epoch_id || cur_offset != offset {
+        let cur_offset = if let Some(store_progress) = self.store_progresses.get(&store_id) {
+            if store_progress.epoch != epoch_id || store_progress.offset != offset {
+                return Err(rfengine::Error::Other(format!(
+                    "{} epoch or offset mismatch, expect ({}, {}), got ({}, {}), wal_len: {}",
+                    store_id,
+                    epoch_id,
+                    offset,
+                    store_progress.epoch,
+                    store_progress.offset,
+                    data.len(),
+                ))
+                .into());
+            }
+            store_progress.offset
+        } else {
             return Err(rfengine::Error::Other(format!(
-                "{} epoch or offset mismatch, expect ({}, {}), got ({}, {}), wal_len: {}",
-                store_id,
-                epoch_id,
-                offset,
-                cur_epoch,
-                cur_offset,
-                data.len(),
+                "store {} not found in store progresses",
+                store_id
             ))
             .into());
-        }
+        };
         let new_offset = cur_offset + data.len() as u64;
         let mut wal_iterator = WalIterator::new_from_chunks(data, epoch_id, offset);
         let mut origin_batches = Vec::new();
@@ -365,11 +466,12 @@ impl MergedEngine {
                 });
                 self.updated_regions.insert(region_id);
             }
-            origin.write(origin_wb)?;
         }
         let store_progress = self.store_progresses.entry(store_id).or_default();
         store_progress.epoch = epoch_id;
         store_progress.offset = new_offset;
+        self.manifest
+            .update_store_progresses(std::iter::once(&*store_progress), 1)?;
         Ok(())
     }
 
@@ -428,7 +530,7 @@ impl MergedEngine {
             }
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
             let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
-            let high = progress.commit_index + 1;
+            let high: u64 = progress.commit_index + 1;
             let preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
                 Preprocessor::new(
                     &self.raft,
