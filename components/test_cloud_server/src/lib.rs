@@ -75,6 +75,7 @@ fn random_alloc_node_id() -> u16 {
             continue;
         }
 
+        #[allow(clippy::unnecessary_cast)]
         let lock = flock {
             l_type: F_WRLCK as i16,
             l_whence: SEEK_SET as i16,

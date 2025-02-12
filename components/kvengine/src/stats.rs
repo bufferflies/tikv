@@ -178,6 +178,8 @@ impl super::Engine {
                 engine_col_level.num_files += col_level.num_files;
                 engine_col_level.data_size += col_level.data_size;
             }
+            engine_stats.vector_indexes.data_size += shard.vector_indexes.data_size;
+            engine_stats.vector_indexes.num_files += shard.vector_indexes.num_files;
         }
         ENGINE_OPEN_FILES.set(engine_stats.open_files);
         shard_stats.sort_by(|a, b| {
