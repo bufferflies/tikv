@@ -4558,6 +4558,16 @@ async fn update_vector_index(
         );
         readers.push(Box::new(reader));
     }
+    let mut ret = pb::UpdateVectorIndex::new();
+    ret.set_table_id(update_vec_idx.table_id);
+    ret.set_index_id(update_vec_idx.index_id);
+    ret.set_col_id(update_vec_idx.col_id);
+    ret.set_removed(update_vec_idx.remove_file_ids.clone());
+    if readers.is_empty() {
+        info!("update vector index result {:?}", ret);
+        return Ok(ret);
+    }
+
     let mut vec_builder = VectorIndexBuilder::new(
         dimension,
         metric.as_ref(),
@@ -4588,11 +4598,6 @@ async fn update_vector_index(
     vec_idx_file.snap_version = update_vec_idx.snap_version;
     vec_idx_file.smallest = vec_builder.smallest.clone();
     vec_idx_file.biggest = vec_builder.biggest.clone();
-    let mut ret = pb::UpdateVectorIndex::new();
-    ret.set_table_id(update_vec_idx.table_id);
-    ret.set_index_id(update_vec_idx.index_id);
-    ret.set_col_id(update_vec_idx.col_id);
-    ret.set_removed(update_vec_idx.remove_file_ids.clone());
     ret.set_added(vec![vec_idx_file].into());
     info!("update vector index result {:?}", ret);
     Ok(ret)
