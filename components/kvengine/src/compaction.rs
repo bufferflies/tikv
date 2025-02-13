@@ -4592,7 +4592,6 @@ async fn update_vector_index(
     let _enter = fs.get_runtime().enter();
     fs.create(file_id, buf.into(), opts.with_type(FileType::VectorIndex))
         .await?;
-
     let mut vec_idx_file = pb::VectorIndexFile::new();
     vec_idx_file.id = file_id;
     vec_idx_file.snap_version = update_vec_idx.snap_version;

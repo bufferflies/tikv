@@ -325,6 +325,8 @@ pub(crate) fn generate_update_conf_fn<'a>(
             .columnar_table_build_options
             .pack_max_row_count = 32;
         conf.kvengine.columnar_table_build_options.pack_max_size = 32 * 128;
+        conf.kvengine.vector_index_build_options.delta_size = 128;
+        conf.kvengine.vector_index_build_options.rebuild_file_count = 2;
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;

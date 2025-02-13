@@ -939,6 +939,23 @@ impl SnapAccessCore {
             snap.set_schema_meta(schema_meta);
         }
         snap.set_columnar_snap_version(self.columnar_snap_version);
+        let vector_indexes = snap.mut_vector_indexes();
+        for index in self.data.vector_indexes.get_all() {
+            let mut vec_idx = pb::VectorIndex::new();
+            vec_idx.set_table_id(index.table_id);
+            vec_idx.set_index_id(index.index_id);
+            vec_idx.set_col_id(index.col_id);
+            let files = vec_idx.mut_files();
+            for file in index.files.iter() {
+                let mut file_meta = pb::VectorIndexFile::new();
+                file_meta.set_id(file.file_id());
+                file_meta.set_snap_version(file.snap_version());
+                file_meta.set_smallest(file.smallest().to_vec());
+                file_meta.set_biggest(file.biggest().to_vec());
+                files.push(file_meta);
+            }
+            vector_indexes.push(vec_idx);
+        }
 
         info!(
             "convert snap access to change set for {}, total files {}, overlapped files {}, unconverted_l0s {}",
@@ -1491,7 +1508,7 @@ impl SnapAccessCore {
         top_k: usize,
         schema: Schema,
         read_ts: u64,
-        start_handle: &[u8],
+        start_handle: Option<&[u8]>,
         end_handle: Option<&[u8]>,
     ) -> Option<ColumnarMvccReader> {
         let vector_index = self.data.vector_indexes.get(table_id, index_id, col_id)?;

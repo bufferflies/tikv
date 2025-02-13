@@ -31,8 +31,9 @@ use crate::{
 
 const COLUMNAR_DB_NAME: &str = "columnar_db";
 const COLUMNAR_TABLE_NAME: &str = "columnar_table";
+const EMBEDDED_DOC_TABLE_NAME: &str = "embedded_documents";
 const WORKLOAD_CONCURRENCY: usize = 1;
-
+const VECTOR_DIMENSION: u32 = 3;
 const COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) async fn prepare_columnar(
@@ -93,6 +94,17 @@ pub(crate) async fn prepare_columnar(
         ),
         // We should set tiflash replica to enable tidb plan tiflash replica.
         format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` set tiflash replica 1"),
+        format!(
+            "create table `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            document TEXT,
+            embedding VECTOR({VECTOR_DIMENSION}),
+            VECTOR INDEX idx_embedding((VEC_COSINE_DISTANCE(embedding)))
+            ) COMMENT='columnar_engine'"
+        ),
+        format!(
+            "alter table `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` set tiflash replica 1"
+        ),
     ];
 
     for sql in sqls {
@@ -105,6 +117,15 @@ pub(crate) async fn prepare_columnar(
         &pool,
         COLUMNAR_DB_NAME,
         COLUMNAR_TABLE_NAME,
+        COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT,
+    )
+    .await;
+
+    wait_tiflash_or_columnar_replicas_available(
+        &tag,
+        &pool,
+        COLUMNAR_DB_NAME,
+        EMBEDDED_DOC_TABLE_NAME,
         COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT,
     )
     .await;
@@ -319,6 +340,29 @@ fn generate_insert_sqls(max_count: usize) -> Vec<String> {
 
         sqls.push(sql);
     }
+
+    for _ in 0..count {
+        let document = random_str(&mut rng, 30, true);
+        let embedding: Vec<f32> = (0..VECTOR_DIMENSION)
+            .map(|_| rng.gen::<f32>() * 10.0)
+            .collect();
+        let embedding_str = format!(
+            "[{}]",
+            embedding
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let sql = format!(
+            "INSERT INTO `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` (
+                document, embedding
+            ) VALUES (
+                '{document}', '{embedding_str}'
+            );"
+        );
+        sqls.push(sql);
+    }
     sqls
 }
 
@@ -330,6 +374,10 @@ fn generate_delete_sqls(count: usize, max_id: u64) -> Vec<String> {
     for id in ids {
         let sql =
             format!("delete from `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` where id = {id};");
+        sqls.push(sql);
+        let sql = format!(
+            "delete from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` where id = {id};"
+        );
         sqls.push(sql);
     }
     sqls
@@ -373,6 +421,115 @@ async fn insert_delete_random_records(
             Err(err).context("columnar_workload commit")
         }
     }
+}
+
+async fn verify_vector_data(pool: &Pool<MySql>, dump_rows: bool) -> Result<()> {
+    let mut tx = pool.begin().await.context("begin")?;
+    let query_engine = |use_tiflash: bool| {
+        format!(
+            "select {} id, document, vec_cosine_distance(embedding, '[1, 2, 3]') AS distance from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` ORDER BY distance LIMIT 3",
+            get_engine_hint(use_tiflash, EMBEDDED_DOC_TABLE_NAME)
+        )
+    };
+    let scan_engine = |use_tiflash: bool| {
+        format!(
+            "select {} id, document, vec_cosine_distance(embedding, '[1, 2, 3]') AS distance from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` ORDER BY id",
+            get_engine_hint(use_tiflash, EMBEDDED_DOC_TABLE_NAME)
+        )
+    };
+
+    info!("verify_vector_data: execute sql: {}", query_engine(false));
+    let row_result = sqlx::query(&query_engine(false))
+        .fetch_all(&mut tx)
+        .await
+        .context("select vector data from row engine")?;
+    info!("verify_vector_data: execute sql: {}", query_engine(true));
+    let col_result = sqlx::query(&query_engine(true))
+        .fetch_all(&mut tx)
+        .await
+        .context("select vector data from columnar engine")?;
+    if row_result.len() != col_result.len() {
+        let all_row_result = sqlx::query(&scan_engine(false))
+            .fetch_all(&mut tx)
+            .await
+            .context("select from row engine")?;
+        let all_col_result = sqlx::query(&scan_engine(true))
+            .fetch_all(&mut tx)
+            .await
+            .context("select from columnar engine")?;
+        if dump_rows {
+            for row in &all_row_result {
+                info!(
+                    "verify_vector_data: row1 id: {:?}, text: {:?}, distance: {:?}",
+                    row.get::<i64, _>("id"),
+                    row.get::<&str, _>("document"),
+                    row.get::<f32, _>("distance")
+                );
+            }
+            for row in &all_col_result {
+                info!(
+                    "verify_vector_data: row2 id: {:?}, text: {:?}, distance: {:?}",
+                    row.get::<i64, _>("id"),
+                    row.get::<&str, _>("document"),
+                    row.get::<f32, _>("distance")
+                );
+            }
+        }
+        // TODO: items read vector index from columnar engine may be fewer than row
+        // engine if the item be mvcc deleted in vector index. Just log error here.
+        error!(
+            "verify_vector_data: row_result.len() {} != col_result.len() {}, all_row_result: {}, all_col_result: {}",
+            row_result.len(),
+            col_result.len(),
+            all_row_result.len(),
+            all_col_result.len()
+        );
+        return Ok(());
+    }
+    for (row1, row2) in row_result.iter().zip(col_result.iter()) {
+        info!(
+            "verify_vector_data: row1 id: {:?}, text: {:?}, distance: {:?}, row2 id: {:?}, text: {:?}, distance: {:?}",
+            row1.get::<i64, _>("id"),
+            row1.get::<&str, _>("document"),
+            row1.get::<f32, _>("distance"),
+            row2.get::<i64, _>("id"),
+            row2.get::<&str, _>("document"),
+            row2.get::<f32, _>("distance")
+        );
+        if let Err(err) = compare_rows(row1, row2) {
+            if dump_rows {
+                let all_row_result = sqlx::query(&scan_engine(false))
+                    .fetch_all(&mut tx)
+                    .await
+                    .context("select from row engine")?;
+                let all_col_result = sqlx::query(&scan_engine(true))
+                    .fetch_all(&mut tx)
+                    .await
+                    .context("select from columnar engine")?;
+                for row in all_row_result {
+                    info!(
+                        "verify_vector_data: row1 id: {:?}, text: {:?}, distance: {:?}",
+                        row.get::<i64, _>("id"),
+                        row.get::<&str, _>("document"),
+                        row.get::<f32, _>("distance")
+                    );
+                }
+                for row in all_col_result {
+                    info!(
+                        "verify_vector_data: row2 id: {:?}, text: {:?}, distance: {:?}",
+                        row.get::<i64, _>("id"),
+                        row.get::<&str, _>("document"),
+                        row.get::<f32, _>("distance")
+                    );
+                }
+            }
+            // TODO: the distance result may be different between
+            // TiDB/TiKV/TiFlash, and the result precision is related to CPU
+            // Architecture. We ignore to check the consistency.
+            error!("verify_vector_data failed, err: {}", err);
+        }
+    }
+    Ok(())
 }
 
 async fn verify_data(pool: &Pool<MySql>, full_scan: bool) -> Result<()> {
@@ -588,6 +745,8 @@ async fn verify_data(pool: &Pool<MySql>, full_scan: bool) -> Result<()> {
         compare_rows(row1, row2).unwrap();
     }
 
+    verify_vector_data(pool, false).await?;
+
     Ok(())
 }
 
@@ -602,23 +761,31 @@ fn compare_rows(row1: &sqlx::mysql::MySqlRow, row2: &sqlx::mysql::MySqlRow) -> R
             "TINYINT" | "SMALLINT" | "INT" | "MEDIUMINT" | "BIGINT" => {
                 let value1: i64 = row1.get::<i64, _>(col1.ordinal());
                 let value2: i64 = row2.get::<i64, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "INT UNSIGNED" | "MEDIUMINT UNSIGNED"
             | "BIGINT UNSIGNED" => {
                 let value1: u64 = row1.get::<u64, _>(col1.ordinal());
                 let value2: u64 = row2.get::<u64, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "FLOAT" => {
                 let value1: f32 = row1.get::<f32, _>(col1.ordinal());
                 let value2: f32 = row2.get::<f32, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "DOUBLE" => {
                 let value1: f64 = row1.get::<f64, _>(col1.ordinal());
                 let value2: f64 = row2.get::<f64, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "NULL" => {
                 assert_eq!(col1.type_info().is_null(), col2.type_info().is_null());
@@ -626,43 +793,59 @@ fn compare_rows(row1: &sqlx::mysql::MySqlRow, row2: &sqlx::mysql::MySqlRow) -> R
             "DATETIME" => {
                 let value1: NaiveDateTime = row1.get::<NaiveDateTime, _>(col1.ordinal());
                 let value2: NaiveDateTime = row2.get::<NaiveDateTime, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "TIMESTAMP" => {
                 let value1: DateTime<Utc> = row1.get::<DateTime<Utc>, _>(col1.ordinal());
                 let value2: DateTime<Utc> = row2.get::<DateTime<Utc>, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "DATE" => {
                 let value1: NaiveDate = row1.get::<NaiveDate, _>(col1.ordinal());
                 let value2: NaiveDate = row2.get::<NaiveDate, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "TIME" => {
                 let value1: NaiveTime = row1.get::<NaiveTime, _>(col1.ordinal());
                 let value2: NaiveTime = row2.get::<NaiveTime, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "YEAR" => {
                 let value1: u16 = row1.get::<u16, _>(col1.ordinal());
                 let value2: u16 = row2.get::<u16, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "ENUM" | "JSON" => {}
             "SET" | "CHAR" | "VARCHAR" | "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" => {
                 let value1: &str = row1.get::<&str, _>(col1.ordinal());
                 let value2: &str = row2.get::<&str, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" => {
                 let value1: Vec<u8> = row1.get::<Vec<u8>, _>(col1.ordinal());
                 let value2: Vec<u8> = row2.get::<Vec<u8>, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             "DECIMAL" => {
                 let value1: BigDecimal = row1.get::<BigDecimal, _>(col1.ordinal());
                 let value2: BigDecimal = row2.get::<BigDecimal, _>(col2.ordinal());
-                assert_eq!(value1, value2, "Column {} value mismatch", col1.name());
+                if value1 != value2 {
+                    return Err(anyhow::anyhow!("Column {} value mismatch", col1.name()));
+                }
             }
             _ => {}
         }

@@ -189,7 +189,7 @@ fn test_build_vector_index() {
             5,
             schema.clone(),
             u64::MAX,
-            &decode_int_handle(&start_table_key).unwrap().to_le_bytes(),
+            Some(&decode_int_handle(&start_table_key).unwrap().to_le_bytes()),
             Some(&decode_int_handle(&end_table_key).unwrap().to_le_bytes()),
         )
         .unwrap();

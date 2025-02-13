@@ -983,7 +983,8 @@ pub(crate) struct ColumnarReaderBuffer {
 impl ColumnarReaderBuffer {
     pub async fn seek(&mut self, handle: &[u8]) -> crate::table::Result<()> {
         self.reader.seek(handle).await?;
-        self.reader.read(&mut self.block, 1024).await?;
+        self.block.reset();
+        self.reader.read(&mut self.block, 1).await?;
         self.row_idx = 0;
         Ok(())
     }

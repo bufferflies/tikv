@@ -356,7 +356,7 @@ pub fn build_columnar_scanner(
             ann_query.get_top_k() as usize,
             schema.clone(),
             start_ts,
-            &start_handle,
+            Some(&start_handle),
             end_handle.as_deref(),
         )
         .or_else(|| {

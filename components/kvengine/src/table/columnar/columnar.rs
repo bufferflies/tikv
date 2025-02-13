@@ -1090,15 +1090,15 @@ impl ColumnBuffer {
         }
     }
 
-    fn compute_size_for_tiflash(&self, tp: FieldTypeTp, prec: u8) -> usize {
+    fn compute_size_for_tiflash(&self, tp: FieldTypeTp, column_len: usize) -> usize {
         let data_size = match tp {
             FieldTypeTp::NewDecimal => {
-                let item_size = match prec {
+                let item_size = match column_len {
                     0..=9 => 4,
                     10..=18 => 8,
                     19..=38 => 16,
                     39..=65 => 32,
-                    _ => panic!("unsupported precision: {}", prec),
+                    _ => panic!("unsupported precision: {}", column_len),
                 };
                 item_size * self.length()
             }
@@ -1125,6 +1125,7 @@ impl ColumnBuffer {
             FieldTypeTp::Float => self.length() * 4,
             FieldTypeTp::Year => self.length() * 2,
             FieldTypeTp::Null => self.length(),
+            FieldTypeTp::TiDbVectorFloat32 => self.length() * 8 + self.length() * column_len * 4,
             FieldTypeTp::NewDate => {
                 unimplemented!();
             }
@@ -1144,23 +1145,23 @@ impl ColumnBuffer {
         buf: &mut Vec<u8>,
         tp: i32,           // column type
         is_unsigned: bool, // used by integer number types
-        prec: u8,
+        column_len: usize,
     ) {
         buf.clear();
-        let tp = FieldTypeTp::from_u8(tp as u8).unwrap();
-        let target_size = self.compute_size_for_tiflash(tp, prec);
+        let tp = FieldTypeTp::from_i32(tp).unwrap();
+        let target_size = self.compute_size_for_tiflash(tp, column_len);
         buf.reserve(target_size);
         if self.is_nullable() {
             buf.extend_from_slice(&self.nulls);
         }
         match tp {
             FieldTypeTp::NewDecimal => {
-                let null_bytes: &'static [u8] = match prec {
+                let null_bytes: &'static [u8] = match column_len {
                     0..=9 => &[0; 4],
                     10..=18 => &[0; 8],
                     19..=38 => &[0; 16],
                     39..=65 => &[0; 32],
-                    _ => panic!("unsupported precision: {}", prec),
+                    _ => panic!("unsupported precision: {}", column_len),
                 };
                 for idx in 0..self.length() {
                     match self.get_value(idx) {
@@ -1288,6 +1289,24 @@ impl ColumnBuffer {
             }
             FieldTypeTp::Null => {
                 buf.resize(buf.len() + self.length(), 0);
+            }
+            FieldTypeTp::TiDbVectorFloat32 => {
+                let dimension = column_len;
+                let arr_len = (dimension as u64).to_le_bytes();
+                for _ in 0..self.length() {
+                    buf.extend_from_slice(&arr_len);
+                }
+                for idx in 0..self.length() {
+                    match self.get_value(idx) {
+                        Some(v) => {
+                            // skip the first 4 bytes which is the length of the array
+                            buf.extend_from_slice(&v[4..]);
+                        }
+                        None => {
+                            buf.resize(buf.len() + dimension * 4, 0);
+                        }
+                    }
+                }
             }
             FieldTypeTp::NewDate => {
                 // TODO

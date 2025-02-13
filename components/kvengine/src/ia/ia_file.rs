@@ -177,7 +177,7 @@ impl IaFile {
                 let table_meta =
                     TableMeta::parse(table_offsets.table_ids[i as usize], &table_index_data);
                 builder.push_from_columnar_table_meta(&table_meta);
-                builder.push_boundary(table_meta_off);
+                builder.push_boundary(table_meta_off + idx_start as u64);
             }
             f.segment_offsets = builder.finish();
         }

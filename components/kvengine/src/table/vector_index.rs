@@ -471,7 +471,7 @@ impl VectorItemsReader {
         target: &[f32],
         top_k: usize,
         read_ts: u64,
-        start_handle: &[u8],
+        start_handle: Option<&[u8]>,
         end_handle: Option<&[u8]>,
         col_levels: &ColumnarLevels,
         encryption_key: Option<EncryptionKey>,
@@ -507,25 +507,30 @@ impl VectorItemsReader {
         target: &[f32],
         top_k: usize,
         read_ts: u64,
-        start_handle: &[u8],
+        start_handle: Option<&[u8]>,
         end_handle: Option<&[u8]>,
     ) -> Result<Vec<VectorItem>> {
+        // TODO: The items read from vector index may be mvcc deleted. Valid items may
+        // be less than top_k.
         let mut items = vector_index.search(target, top_k, read_ts)?;
         if schema.is_common_handle() {
-            let end_handle = end_handle.unwrap();
-            items.retain(|item| {
-                item.handle.as_slice() >= start_handle && item.handle.as_slice() < end_handle
-            });
+            if let Some(start_handle) = start_handle {
+                let end_handle = end_handle.unwrap();
+                items.retain(|item| {
+                    item.handle.as_slice() >= start_handle && item.handle.as_slice() < end_handle
+                });
+            }
             items.sort_by(|a, b| a.handle.cmp(&b.handle));
         } else {
-            let mut start_handle = start_handle;
-            let start_int_handle = start_handle.get_i64_le();
-            let end_int_handle = end_handle.map(|mut h| h.get_i64_le());
-            items.retain(|item| {
-                let item_handle = item.handle.as_slice().get_i64_le();
-                item_handle >= start_int_handle
-                    && end_int_handle.map_or(true, |end| item_handle < end)
-            });
+            if let Some(mut start_handle) = start_handle {
+                let start_int_handle = start_handle.get_i64_le();
+                let end_int_handle = end_handle.map(|mut h| h.get_i64_le());
+                items.retain(|item| {
+                    let item_handle = item.handle.as_slice().get_i64_le();
+                    item_handle >= start_int_handle
+                        && end_int_handle.map_or(true, |end| item_handle < end)
+                });
+            }
             items.sort_by(|a, b| {
                 a.handle
                     .as_slice()
