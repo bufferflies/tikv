@@ -74,6 +74,8 @@ pub enum Error {
     Pd(#[from] pd_client::Error),
     #[error("Write conflict {0:?}")]
     WriteConflict(kvrpcpb::WriteConflict),
+    #[error("Already exist {0:?}")]
+    AlreadyExist(kvrpcpb::AlreadyExist),
     #[error("Transaction not found {0:?}")]
     TxnNotFound(kvrpcpb::TxnNotFound),
     #[error(transparent)]
@@ -371,8 +373,9 @@ impl ClusterClient {
         Ok(commit_ts)
     }
 
-    pub fn put_kv<F, G>(&mut self, rng: Range<usize>, gen_key: F, gen_val: G)
+    pub fn put_kv<R, F, G>(&mut self, rng: R, gen_key: F, gen_val: G)
     where
+        R: IntoIterator<Item = usize>,
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
     {
@@ -380,14 +383,15 @@ impl ClusterClient {
             .unwrap();
     }
 
-    pub fn try_put_kv<F, G>(
+    pub fn try_put_kv<R, F, G>(
         &mut self,
-        rng: Range<usize>,
+        rng: R,
         gen_key: F,
         gen_val: G,
         options: MutateOptions,
     ) -> Result<u64 /* commit_ts */>
     where
+        R: IntoIterator<Item = usize>,
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
     {
@@ -567,12 +571,9 @@ impl ClusterClient {
             let key_errors = resp.take_errors();
             if !key_errors.is_empty() {
                 info!("{} prewrite: encounters key_errors: {:?}", tag, key_errors);
-                self.handle_key_errors(
-                    &tag,
-                    prewrite_req.start_version,
-                    false,
-                    key_errors.into_vec(),
-                )?;
+                let key_errors = key_errors.into_vec();
+                errors.push((tag, Error::KeyErrors(key_errors.clone())));
+                self.handle_key_errors(&tag, prewrite_req.start_version, false, key_errors)?;
                 continue;
             }
             return Ok(());
@@ -1289,8 +1290,13 @@ impl ClusterClient {
             return Ok(lock);
         }
 
-        // TODO: handle already_exist error
-        Err(Error::KeyError(key_err))
+        if key_err.has_conflict() {
+            Err(Error::WriteConflict(key_err.take_conflict()))
+        } else if key_err.has_already_exist() {
+            Err(Error::AlreadyExist(key_err.take_already_exist()))
+        } else {
+            Err(Error::KeyError(key_err))
+        }
     }
 
     pub fn get_kv_client(&self, store_id: u64) -> TikvClient {
@@ -1654,6 +1660,12 @@ impl ClusterClient {
         );
     }
 
+    pub fn get_key_version(&mut self, key: &[u8], version: u64) -> Result<Option<Vec<u8>>> {
+        let (value, _) =
+            self.get_key_version_opt(key, version, Instant::now(), &RequestOptions::default())?;
+        Ok(value)
+    }
+
     pub fn get_key_version_opt(
         &mut self,
         key: &[u8],
@@ -1729,10 +1741,10 @@ impl ClusterClient {
         ))
     }
 
-    pub fn verify_data_with_ref_store(&mut self) {
+    pub fn verify_data_with_ref_store(&mut self) -> (usize /* existed */, usize /* deleted */) {
         let ref_store = self.ref_store.lock().unwrap().clone();
         self.verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
-            .expect("verify_data_with_ref_store");
+            .expect("verify_data_with_ref_store")
     }
 
     // Note: return verified number of existed entries only, to be uniform with

@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use api_version::ApiV2;
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::BufMut;
 use codec::number::NumberEncoder;
 use dashmap::{
@@ -21,6 +21,7 @@ use rand::{
     prelude::{IteratorRandom, SliceRandom, ThreadRng},
     Rng,
 };
+use schema::schema::StorageClass;
 use tikv_client::TimestampExt;
 use tikv_util::info;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
@@ -28,7 +29,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use crate::{
     client::{ClusterTxnClient, RefStore, Result},
     table::TableMeta,
-    util::{build_schemas, Mutation},
+    util::{build_schemas, Mutation, TableSchemaOptions},
 };
 
 #[derive(Clone, Default)]
@@ -58,9 +59,7 @@ impl KeyspaceManagerCore {
         &self,
         keyspace_ids: &[u32], // keyspace_ids must be allocated by new_keyspace_id().
         keyspace_names: Vec<String>,
-        inner_key_off: usize,
-        table_count: usize,
-        enable_schema_ratio: f64,
+        options: &CreateKeyspaceOptions,
         need_shuffle: Option<&mut ThreadRng>,
     ) {
         assert_eq!(keyspace_ids.len(), keyspace_names.len());
@@ -68,13 +67,7 @@ impl KeyspaceManagerCore {
             match self.keyspaces.entry(keyspace_id) {
                 Entry::Occupied(_) => panic!("duplicated keyspace {}", keyspace_id),
                 Entry::Vacant(entry) => {
-                    entry.insert(KeyspaceMeta::new(
-                        keyspace_name,
-                        inner_key_off,
-                        keyspace_id,
-                        table_count,
-                        enable_schema_ratio,
-                    ));
+                    entry.insert(KeyspaceMeta::new(keyspace_id, keyspace_name, options));
                 }
             }
         }
@@ -89,18 +82,10 @@ impl KeyspaceManagerCore {
         &self,
         keyspace_id: u32,
         keyspace_name: String,
-        inner_key_off: usize,
-        table_count: usize,
-        enable_schema_ratio: f64,
+        options: &CreateKeyspaceOptions,
         locked: bool,
     ) -> Option<OwnedRwLockWriteGuard<()>> {
-        let ks_meta = KeyspaceMeta::new(
-            keyspace_name,
-            inner_key_off,
-            keyspace_id,
-            table_count,
-            enable_schema_ratio,
-        );
+        let ks_meta = KeyspaceMeta::new(keyspace_id, keyspace_name, options);
         let lock_opt = if locked {
             let lock = ks_meta.get_locks();
             Some(lock.mutex_lock().await)
@@ -281,6 +266,24 @@ impl KeyspaceManagerCore {
     }
 }
 
+pub struct CreateKeyspaceOptions {
+    pub enable_inner_key_off: bool,
+    pub table_count: usize,
+    pub schema_enable_ratio: f64,
+    pub storage_class_fn: Box<dyn Fn(i64) -> StorageClass>,
+}
+
+impl Default for CreateKeyspaceOptions {
+    fn default() -> Self {
+        Self {
+            enable_inner_key_off: true,
+            table_count: 0,
+            schema_enable_ratio: 0.0,
+            storage_class_fn: Box::new(|_| StorageClass::default()),
+        }
+    }
+}
+
 pub struct KeyspaceMeta {
     core: KeyspaceMetaCore,
     inner_lock: Arc<RwLock<()>>,
@@ -345,29 +348,29 @@ impl fmt::Debug for KeyspaceMetaCore {
 }
 
 impl KeyspaceMeta {
-    pub fn new(
-        name: String,
-        inner_key_off: usize,
-        keyspace_id: u32,
-        table_count: usize,
-        schema_enable_ratio: f64,
-    ) -> Self {
+    pub fn new(keyspace_id: u32, name: String, options: &CreateKeyspaceOptions) -> Self {
         let tables = DashMap::default();
-        let mut schema_table_ids = vec![];
-        for _ in 0..table_count {
-            let is_schema_enabled = rand::thread_rng().gen_bool(schema_enable_ratio);
+        let mut tables_schema_opts = vec![];
+        for _ in 0..options.table_count {
+            let is_schema_enabled = rand::thread_rng().gen_bool(options.schema_enable_ratio);
             let table = TableMeta::new(true, is_schema_enabled);
             let table_id = table.id();
             tables.insert(table_id, table);
-            if is_schema_enabled {
-                schema_table_ids.push(table_id);
+
+            let storage_class = (options.storage_class_fn)(table_id);
+            if is_schema_enabled || storage_class.is_specified() {
+                tables_schema_opts.push(TableSchemaOptions {
+                    table_id,
+                    with_columns: is_schema_enabled,
+                    storage_class,
+                });
             }
         }
-        let schemas = build_schemas(schema_table_ids);
+        let schemas = build_schemas(&tables_schema_opts);
         Self {
             core: KeyspaceMetaCore {
                 name,
-                inner_key_off,
+                inner_key_off: KEYSPACE_PREFIX_LEN * options.enable_inner_key_off as usize,
                 tables,
                 del_prefixes: kvengine::DeletePrefixes::new_with_keyspace_id(keyspace_id),
                 pending_destroy_range: Default::default(),

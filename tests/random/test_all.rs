@@ -437,9 +437,12 @@ fn prepare_cluster(
     cluster.keyspace_manager().create_keyspaces(
         &keyspaces,
         keyspace_names,
-        DEFAULT_INNER_KEY_OFFSET,
-        INITIAL_TABLE_COUNT,
-        TABLE_SCHEMA_ENABLE_RATIO,
+        &CreateKeyspaceOptions {
+            enable_inner_key_off: switches.enable_inner_key_off,
+            table_count: INITIAL_TABLE_COUNT,
+            schema_enable_ratio: TABLE_SCHEMA_ENABLE_RATIO,
+            ..Default::default()
+        },
         Some(&mut rng),
     );
     KEYSPACE_COUNTER.store(initial_keyspace_count, Ordering::Relaxed);
@@ -479,6 +482,7 @@ fn prepare_cluster(
                 &stores,
                 keyspace_id,
                 schema_file_id,
+                Duration::from_secs(30),
             ));
         }
     }

@@ -49,10 +49,9 @@ fn test_build_vector_index() {
         conf.kvengine.vector_index_build_options.delta_size = 1024;
     });
     let dfs = cluster.get_dfs().unwrap();
-    let keyspace_id = 3;
-    let table_ids = dfs
+    let (keyspace_id, table_ids) = dfs
         .get_runtime()
-        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
     let t1 = table_ids[0];
     let schema = build_vector_schema(t1);
     let schema_file_data = build_schema_file(keyspace_id, 10, vec![schema.clone()], 0);
@@ -64,7 +63,7 @@ fn test_build_vector_index() {
     let status_addr = cluster.status_addr(node_id);
     let kvengine = cluster.get_kvengine(node_id);
     let all_ids_vers = kvengine.get_all_shard_id_vers();
-    assert_eq!(all_ids_vers.len(), 7);
+    assert_eq!(all_ids_vers.len(), 8);
     must_wait(
         || {
             dfs.get_runtime().block_on(send_schema_file_request(

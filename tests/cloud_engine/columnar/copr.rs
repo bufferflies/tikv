@@ -40,10 +40,9 @@ fn test_coprocessor() {
             .pack_max_row_count = 9;
     });
     let dfs = cluster.get_dfs().unwrap();
-    let keyspace_id = 3;
-    let table_ids = dfs
+    let (keyspace_id, table_ids) = dfs
         .get_runtime()
-        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
     let t1 = table_ids[0];
     let ddl_t1 = format!(
         "create table t{} (c1 int, c2 varchar, c3 int, c4 varchar, pk(c1))",
@@ -67,7 +66,7 @@ fn test_coprocessor() {
 
     let kvengine = cluster.get_kvengine(node_id);
     let all_ids_vers = kvengine.get_all_shard_id_vers();
-    assert_eq!(all_ids_vers.len(), 7);
+    assert_eq!(all_ids_vers.len(), 8);
     must_wait(
         || {
             dfs.get_runtime().block_on(send_schema_file_request(

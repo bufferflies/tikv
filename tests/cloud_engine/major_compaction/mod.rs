@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use api_version::ApiV2;
-use kvengine::{CF_LEVELS, WRITE_CF};
+use kvengine::{ShardStats, CF_LEVELS, WRITE_CF};
 use kvproto::{
     pdpb::CheckPolicy,
     raft_cmdpb::{RaftCmdRequest, RaftRequestHeader},
@@ -193,14 +193,7 @@ fn major_compacted(cluster: &ServerCluster, node_ids: &[u16], region_id: u64) ->
         .iter()
         .map(|id| cluster.get_kvengine(*id).get_shard_stat(region_id))
         .collect::<Vec<_>>();
-    curr_shard_stats.iter().any(|curr| {
-        let bottom_most_level = curr.cfs[WRITE_CF].levels.last().unwrap();
-        curr.mem_table_size == 0
-            && curr.mem_table_count == 1
-            && curr.l0_table_count == 0
-            && bottom_most_level.level == CF_LEVELS[WRITE_CF]
-            && bottom_most_level.num_tables != 0
-    })
+    curr_shard_stats.iter().any(ShardStats::is_major_compacted)
 }
 
 fn new_tokio_runtime() -> tokio::runtime::Runtime {

@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    ops,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread::sleep,
@@ -17,8 +18,12 @@ use futures::{executor::block_on, future::try_join_all};
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
 use hyper::{http, Body, Request};
 use kvengine::{
-    dfs::Dfs, ia::util::IaConfig, table::sstable::BlockCacheType,
-    txn_chunk_manager::TxnChunkManagerConfig, ShardStats,
+    dfs,
+    dfs::{Dfs, FileType},
+    ia::util::IaConfig,
+    table::{columnar::build_schema_file, sstable::BlockCacheType},
+    txn_chunk_manager::TxnChunkManagerConfig,
+    ShardStats,
 };
 use kvproto::{
     kvrpcpb::{Mutation, Op},
@@ -49,11 +54,14 @@ use tikv_util::{
 };
 
 use crate::{
+    alloc_node_id_vec,
     client::{ApiV2NoPrefixCodec, ClusterClient, ClusterClientOptions, ClusterTxnClient, RefStore},
-    keyspace::{ClusterKeyspaceClient, KeyspaceManager},
+    keyspace::{ClusterKeyspaceClient, CreateKeyspaceOptions, KeyspaceManager},
+    oss::{prepare_dfs, ObjectStorageService},
     scheduler::Scheduler,
     tikv_bin::wait_tikv_worker_healthy,
     txn::{lock_resolver::LockResolver, txn_file::TxnFileHelper},
+    util::{broadcast_schema_file_request, get_keyspace_split_keys, get_table_split_keys},
 };
 
 const REGION_MEM_LIMIT_RATIO: f64 = 0.2;
@@ -89,6 +97,7 @@ pub struct ServerCluster {
     tikv_worker_configs: HashMap<u16 /* idx */, cloud_worker::Config>,
     tikv_workers: HashMap<u16 /* idx */, CloudWorker>,
     schema_manager: Option<CloudWorker>,
+    stopped: bool,
 
     /// The ratio of memory capacity to use from the total memory.
     /// Used for reserve memory for other components (PD, TiDB, and TiFlash).
@@ -139,6 +148,7 @@ impl ServerCluster {
             tikv_worker_configs: Default::default(),
             tikv_workers: Default::default(),
             schema_manager: None,
+            stopped: false,
             memory_capacity_ratio,
         };
         for node_id in nodes {
@@ -270,6 +280,11 @@ impl ServerCluster {
     }
 
     pub fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+
         let nodes = self.get_nodes();
         for node_id in nodes {
             self.stop_node(node_id);
@@ -332,6 +347,11 @@ impl ServerCluster {
                 .get_shard(shard_id)
                 .and_then(|shard| shard.is_active().then_some(shard))
         })
+    }
+
+    pub fn get_active_shard_by_key(&self, key: &[u8]) -> Option<Arc<kvengine::Shard>> {
+        let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
+        self.get_active_shard(region.id)
     }
 
     /// Get snap of active shard.
@@ -901,6 +921,8 @@ impl ServerCluster {
             ),
         };
 
+        let _enter = self.get_dfs().unwrap().get_runtime().enter();
+
         let pd_client = self.get_pure_pd_client();
         let stores = pd_client.get_all_stores(true).unwrap();
         let mut handles = vec![];
@@ -960,6 +982,75 @@ impl ServerCluster {
             panic!("request major compaction failed: {:?}: {:?}", query, err);
         });
     }
+
+    // Note: Do not use with real PD
+    fn keyspace_name(keyspace_id: u32) -> String {
+        format!("ks{keyspace_id}")
+    }
+
+    // Note: Do not use with real PD. In that scene, keyspaces are allocated by PD.
+    pub async fn create_keyspace(&self, options: &CreateKeyspaceOptions, timeout: Duration) -> u32 /* keyspace_id */
+    {
+        let km = self.keyspace_manager();
+
+        let keyspace_id = km.new_keyspace_id(1);
+        km.create_single_keyspace(
+            keyspace_id,
+            Self::keyspace_name(keyspace_id),
+            options,
+            false,
+        )
+        .await;
+
+        let keyspace_split_keys = get_keyspace_split_keys(keyspace_id);
+        let pd_client = self.get_pd_client();
+        pd_client
+            .split_regions_with_retry(keyspace_split_keys, timeout)
+            .await
+            .unwrap();
+
+        let (table_ids, schemas) = {
+            let ks_meta = km.get_keyspace_meta(keyspace_id).unwrap();
+            let table_ids = ks_meta.get_all_available_tables();
+            let schemas = ks_meta.schemas();
+            (table_ids, schemas)
+        };
+
+        let table_split_keys = get_table_split_keys(keyspace_id, &table_ids);
+        if !table_split_keys.is_empty() {
+            pd_client
+                .split_regions_with_retry(table_split_keys, timeout)
+                .await
+                .unwrap();
+        }
+
+        if !schemas.is_empty() {
+            let schema_version = 10;
+            let schema_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
+            let schema_file_id = pd_client.alloc_id().unwrap();
+
+            let fs = self.get_dfs().unwrap();
+            let _enter = fs.get_runtime().enter();
+            fs.create(
+                schema_file_id,
+                schema_data.into(),
+                dfs::Options::default().with_type(FileType::Schema),
+            )
+            .await
+            .unwrap();
+
+            let stores = pd_client.get_all_stores(true).unwrap();
+            broadcast_schema_file_request(
+                &stores,
+                keyspace_id,
+                schema_file_id,
+                Duration::from_secs(10),
+            )
+            .await;
+        }
+
+        keyspace_id
+    }
 }
 
 impl Drop for ServerCluster {
@@ -968,11 +1059,46 @@ impl Drop for ServerCluster {
     }
 }
 
+pub struct ServerClusterExt {
+    pub cluster: ServerCluster,
+    pub oss: ObjectStorageService,
+    temp_dir: TempDir,
+}
+
+impl ops::Deref for ServerClusterExt {
+    type Target = ServerCluster;
+
+    fn deref(&self) -> &Self::Target {
+        &self.cluster
+    }
+}
+
+impl ops::DerefMut for ServerClusterExt {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cluster
+    }
+}
+
+impl Drop for ServerClusterExt {
+    fn drop(&mut self) {
+        self.cluster.stop();
+        self.oss.shutdown();
+    }
+}
+
+impl ServerClusterExt {
+    pub fn path(&self) -> &Path {
+        self.temp_dir.path()
+    }
+}
+
 pub struct ServerClusterBuilder<F> {
     nodes: Vec<u16>,
     update_conf: F,
     pd: Option<PdWrapper>,
     memory_capacity_ratio: f64,
+    pd_server_cnt: usize,
+    tikv_worker_cnt: usize,
 }
 
 impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
@@ -982,6 +1108,8 @@ impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
             update_conf,
             pd: None,
             memory_capacity_ratio: 1.0,
+            pd_server_cnt: 0,
+            tikv_worker_cnt: 0,
         }
     }
 
@@ -996,11 +1124,47 @@ impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
         self
     }
 
-    pub fn build(self) -> ServerCluster {
-        let pd = self
-            .pd
-            .unwrap_or_else(|| PdWrapper::new_test(0, &SecurityConfig::default(), None));
+    pub fn pd_server_cnt(mut self, cnt: usize) -> Self {
+        self.pd_server_cnt = cnt;
+        self
+    }
+
+    pub fn tikv_worker_cnt(mut self, cnt: usize) -> Self {
+        self.tikv_worker_cnt = cnt;
+        self
+    }
+
+    pub fn build(mut self) -> ServerCluster {
+        let pd = self.build_pd();
         ServerCluster::new_opt(self.nodes, self.update_conf, pd, self.memory_capacity_ratio)
+    }
+
+    pub fn build_ext(mut self) -> ServerClusterExt {
+        let (temp_dir, oss, dfs_config) = prepare_dfs("t");
+        let pd = self.build_pd();
+        let update_conf = |node_id, conf: &mut TikvConfig| {
+            (self.update_conf)(node_id, conf);
+            conf.dfs = dfs_config.clone();
+        };
+        let mut cluster =
+            ServerCluster::new_opt(self.nodes, update_conf, pd, self.memory_capacity_ratio);
+        if self.tikv_worker_cnt > 0 {
+            cluster.start_tikv_workers(
+                alloc_node_id_vec(self.tikv_worker_cnt),
+                TikvWorkerOptions::default(),
+            );
+        }
+        ServerClusterExt {
+            cluster,
+            oss,
+            temp_dir,
+        }
+    }
+
+    fn build_pd(&mut self) -> PdWrapper {
+        self.pd.take().unwrap_or_else(|| {
+            PdWrapper::new_test(self.pd_server_cnt, &SecurityConfig::default(), None)
+        })
     }
 }
 

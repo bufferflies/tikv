@@ -38,12 +38,15 @@ use kvproto::metapb::Store;
 use pd_client::PdClient;
 use rand::prelude::*;
 use security::SecurityConfig;
+pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 use test_cloud_server::{
     client::ClusterTxnClient,
-    keyspace::{ClusterKeyspaceClient, KeyspaceManager},
+    keyspace::{ClusterKeyspaceClient, CreateKeyspaceOptions, KeyspaceManager},
     scheduler::Scheduler,
     tidb::TidbCluster,
-    try_wait_result, ServerCluster,
+    try_wait_result,
+    util::broadcast_schema_file_request,
+    ServerCluster,
 };
 use test_pd_client::TestPdClient;
 use tidb_query_datatype::{
@@ -89,7 +92,6 @@ pub const TIMEOUT: Duration = Duration::from_secs(90);
 pub const WRITE_CONCURRENCY: usize = 4;
 pub const TXN_FILE_WRITE_CONCURRENCY: usize = 2;
 
-const DEFAULT_INNER_KEY_OFFSET: usize = 4;
 const REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT: Duration = Duration::from_secs(20);
 
 const KEYSPACE_CLEANUP_LOCKS_CONCURRENCY: usize = 4;
@@ -97,8 +99,6 @@ const KEYSPACE_CLEANUP_LOCKS_TIMEOUT: Duration = Duration::from_secs(30);
 const GC_INTERVAL: Duration = Duration::from_secs(10);
 
 const DROP_TABLE_CONCURRENCY: usize = 2; // More than 1 thread to reduce the chance of blocked by other mutual-exclusive workloads for a long time.
-
-pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 
 pub(crate) fn spawn_move(scheduler: Scheduler, two_node_down: Arc<RwLock<()>>) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -470,9 +470,12 @@ async fn create_new_keyspace(
         .create_single_keyspace(
             new_keyspace,
             TidbCluster::keyspace_name(new_keyspace as u16),
-            DEFAULT_INNER_KEY_OFFSET,
-            initial_table_count,
-            schema_enable_ratio,
+            &CreateKeyspaceOptions {
+                enable_inner_key_off: true,
+                table_count: initial_table_count,
+                schema_enable_ratio,
+                ..Default::default()
+            },
             locked,
         )
         .await;
@@ -493,40 +496,18 @@ async fn create_new_keyspace(
         .await
         .unwrap();
         // Setup schema file to stores.
-        broadcast_schema_file_request(&stores, new_keyspace, schema_file_id).await;
+        broadcast_schema_file_request(
+            &stores,
+            new_keyspace,
+            schema_file_id,
+            Duration::from_secs(30),
+        )
+        .await;
     }
     KEYSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
     TABLE_COUNTER.fetch_add(initial_table_count, Ordering::Relaxed);
 
     (new_keyspace, lock)
-}
-
-pub async fn broadcast_schema_file_request(
-    stores: &[Store],
-    keyspace_id: u32,
-    schema_file_id: u64,
-) {
-    for store in stores {
-        let status_addr = store.get_status_address();
-        let http_client = hyper::client::Client::new();
-        let start_time = Instant::now_coarse();
-        while start_time.saturating_elapsed() < TIMEOUT {
-            let request = hyper::http::Request::builder()
-                .method(http::method::Method::POST)
-                .uri(format!(
-                    "http://{}/schema_file?keyspace_id={}&file_id={}",
-                    status_addr, keyspace_id, schema_file_id
-                ))
-                .body(Body::empty())
-                .unwrap();
-            if let Ok(resp) = http_client.request(request).await {
-                if resp.status().is_success() {
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
 }
 
 pub fn gen_row_key_suffix(i: usize) -> Vec<u8> {

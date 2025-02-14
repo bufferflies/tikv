@@ -40,6 +40,7 @@ reqwest = { version = "0.11", default-features = false, features = ["blocking", 
 rfengine = { path = "../rfengine" }
 rfstore = { path = "../rfstore" }
 rstest = "0.18"
+schema = { workspace = true }
 security = { path = "../security", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"

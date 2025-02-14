@@ -13,7 +13,7 @@ use crate::{
         ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM,
     },
     table::{BoundedDataSet, DataBound, InnerKey},
-    IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
+    IdVer, CF_LEVELS, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
 };
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -310,6 +310,16 @@ impl ShardStats {
     #[inline]
     pub fn mem_table_is_empty(&self) -> bool {
         self.mem_table_size == 0 && self.mem_table_count == 1
+    }
+
+    #[cfg(any(test, feature = "testexport"))]
+    pub fn is_major_compacted(&self) -> bool {
+        let bottom_most_level = self.cfs[WRITE_CF].levels.last().unwrap();
+        self.mem_table_size == 0
+            && self.mem_table_count == 1
+            && self.l0_table_count == 0
+            && bottom_most_level.level == CF_LEVELS[WRITE_CF]
+            && bottom_most_level.num_tables != 0
     }
 }
 

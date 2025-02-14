@@ -39,22 +39,23 @@ use rand::Rng;
 use schema::schema::StorageClass;
 use test_cloud_server::{
     client::{CommitAction, MutateOptions},
+    keyspace::CreateKeyspaceOptions,
     must_wait,
     oss::prepare_dfs,
+    util::get_keyspace_split_keys,
     ServerCluster,
 };
 use test_pd_client::PdClientExt;
 use tidb_query_datatype::{
     codec::{
         row::v2::encoder_for_test::{Column, RowEncoder},
-        table::{encode_row_key, TABLE_PREFIX},
+        table::encode_row_key,
     },
     expr::EvalContext,
     Collation, FieldTypeAccessor, FieldTypeTp,
 };
 use tikv_util::{codec::bytes::encode_bytes, info};
 use tipb::ColumnInfo;
-use txn_types::Key;
 
 use crate::{alloc_node_id, request_dump_snapshot_on_store};
 
@@ -64,10 +65,9 @@ fn test_schema_file() {
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, _| {});
     let dfs = cluster.get_dfs().unwrap();
-    let keyspace_id = 9;
-    let table_ids = dfs
+    let (keyspace_id, table_ids) = dfs
         .get_runtime()
-        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
     let schemas = build_schemas(vec![table_ids[1], table_ids[3]]);
     let schema_version = 10;
     let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
@@ -80,7 +80,7 @@ fn test_schema_file() {
 
     let kvengine = cluster.get_kvengine(node_id);
     let all_ids_vers = kvengine.get_all_shard_id_vers();
-    assert_eq!(all_ids_vers.len(), 7);
+    assert_eq!(all_ids_vers.len(), 8);
     must_wait(
         || {
             dfs.get_runtime().block_on(send_schema_file_request(
@@ -178,8 +178,16 @@ fn test_schema_file_with_storage_class() {
     let km = cluster.keyspace_manager();
     let pd_client = cluster.get_pd_client();
     dfs.get_runtime().block_on(async move {
-        km.create_single_keyspace(keyspace_id, format!("ks{}", keyspace_id), 4, 4, 0.0, false)
-            .await;
+        km.create_single_keyspace(
+            keyspace_id,
+            format!("ks{}", keyspace_id),
+            &CreateKeyspaceOptions {
+                table_count: 4,
+                ..Default::default()
+            },
+            false,
+        )
+        .await;
         let keyspace_split_keys = get_keyspace_split_keys(keyspace_id);
         pd_client
             .split_regions_with_retry(keyspace_split_keys, Duration::from_secs(10))
@@ -306,10 +314,9 @@ fn test_covert_row_to_columnar() {
             .pack_max_row_count = 9;
     });
     let dfs = cluster.get_dfs().unwrap();
-    let keyspace_id = 7;
-    let table_ids = dfs
+    let (keyspace_id, table_ids) = dfs
         .get_runtime()
-        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
     let table_id = table_ids[1];
     let schemas = build_schemas(vec![table_id]);
     let schema = schemas[0].clone();
@@ -427,10 +434,9 @@ fn test_get_snapshot_from_leader_by_status_api() {
         conf.dfs = dfs_config.clone();
     });
     let dfs = cluster.get_dfs().unwrap();
-    let keyspace_id = 7;
-    let table_ids = dfs
+    let (keyspace_id, table_ids) = dfs
         .get_runtime()
-        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
     let table_id = table_ids[1];
     let schemas = build_schemas(vec![table_id]);
     let schema_version = 10;
@@ -614,10 +620,9 @@ fn test_region_merge_with_columnar() {
             .pack_max_row_count = 9;
     });
     let dfs = cluster.get_dfs().unwrap();
-    let keyspace_id = 7;
-    let table_ids = dfs
+    let (keyspace_id, table_ids) = dfs
         .get_runtime()
-        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
     let table_id = table_ids[1];
     let schemas = build_schemas(vec![table_id]);
     let schema = schemas[0].clone();
@@ -749,10 +754,9 @@ fn test_columnar_ia_file() {
     });
     let dfs = cluster.get_dfs().unwrap();
     let runtime = dfs.get_runtime();
-    let keyspace_id = 7;
-    let table_ids = dfs
+    let (keyspace_id, table_ids) = dfs
         .get_runtime()
-        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
     let table_id = table_ids[1];
     let schemas = build_schemas(vec![table_id]);
     let schema = schemas[0].clone();
@@ -901,10 +905,9 @@ fn test_columnar_scan_with_filter() {
             .pack_max_row_count = 9;
     });
     let dfs = cluster.get_dfs().unwrap();
-    let keyspace_id = 7;
-    let table_ids = dfs
+    let (keyspace_id, table_ids) = dfs
         .get_runtime()
-        .block_on(create_keyspace_and_split_tables(&mut cluster, keyspace_id));
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
     let table_id = table_ids[1];
     let schemas = build_schemas(vec![table_id]);
     let schema = schemas[0].clone();
@@ -1115,47 +1118,20 @@ async fn send_collect_columnar_status_request(
 
 async fn create_keyspace_and_split_tables(
     cluster: &mut ServerCluster,
-    keyspace_id: u32,
-) -> Vec<i64> {
-    let km = cluster.keyspace_manager();
-    km.create_single_keyspace(keyspace_id, format!("ks{}", keyspace_id), 4, 4, 0.0, false)
+) -> (u32 /* keyspace_id */, Vec<i64> /* table_ids */) {
+    let keyspace_id = cluster
+        .create_keyspace(
+            &CreateKeyspaceOptions {
+                table_count: 4,
+                ..Default::default()
+            },
+            Duration::from_secs(10),
+        )
         .await;
-    let keyspace_split_keys = get_keyspace_split_keys(keyspace_id);
-    let pd_client = cluster.get_pd_client();
-    pd_client
-        .split_regions_with_retry(keyspace_split_keys, Duration::from_secs(10))
-        .await
-        .unwrap();
-    let ks_meta = km.get_keyspace_meta(keyspace_id).unwrap();
-    let table_ids = ks_meta.get_all_available_tables();
-    let table_split_keys = get_table_split_keys(keyspace_id, &table_ids);
-    pd_client
-        .split_regions_with_retry(table_split_keys, Duration::from_secs(10))
-        .await
-        .unwrap();
-    table_ids
-}
-
-fn get_keyspace_split_keys(keyspace_id: u32) -> Vec<Vec<u8>> {
-    vec![
-        ApiV2::get_txn_keyspace_prefix(keyspace_id),
-        ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
-    ]
-    .into_iter()
-    .map(|k| Key::from_raw(&k).into_encoded())
-    .collect()
-}
-
-fn get_table_split_keys(keyspace_id: u32, table_ids: &[i64]) -> Vec<Vec<u8>> {
-    let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
-    table_ids
-        .iter()
-        .map(|&tbl_id| {
-            let mut buf = vec![];
-            buf.extend_from_slice(&keyspace_prefix);
-            buf.extend_from_slice(TABLE_PREFIX);
-            buf.write_i64(tbl_id).unwrap();
-            encode_bytes(&buf)
-        })
-        .collect()
+    let table_ids = cluster
+        .keyspace_manager()
+        .get_keyspace_meta(keyspace_id)
+        .unwrap()
+        .get_all_available_tables();
+    (keyspace_id, table_ids)
 }

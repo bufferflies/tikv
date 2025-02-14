@@ -1,21 +1,29 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt, mem};
+use std::{fmt, mem, time::Duration};
 
+use api_version::ApiV2;
 use bytes::Bytes;
-use kvengine::{
-    table::columnar::{new_int_handle_column_info, new_version_column_info, Schema, SchemaBuf},
-    Properties,
+use codec::number::NumberEncoder;
+use hyper::{http, Body};
+use kvengine::table::columnar::{
+    new_int_handle_column_info, new_version_column_info, Schema, SchemaBuf,
 };
 use kvproto::{
     kvrpcpb, metapb,
-    metapb::{Peer, RegionEpoch},
+    metapb::{Peer, RegionEpoch, Store},
 };
 use log_wrappers::Value;
 use rfstore::store::RegionIdVer;
-use tidb_query_datatype::{Collation, FieldTypeTp};
-use tikv_util::codec::bytes::decode_bytes;
+use schema::schema::StorageClass;
+use tidb_query_datatype::{codec::table::TABLE_PREFIX, Collation, FieldTypeTp};
+use tikv::storage::mvcc::Key;
+use tikv_util::{
+    codec::bytes::{decode_bytes, encode_bytes},
+    time::Instant,
+};
 use tipb::ColumnInfo;
+
 pub(crate) const DEFAULT_INNER_KEY_OFFSET: usize = 4;
 
 /// A cheaply cloneable version of `kvrpcpb::Mutation`.
@@ -182,28 +190,99 @@ impl pd_client::util::RegionLike for RawRegion {
     }
 }
 
-pub fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {
+#[derive(Default)]
+pub struct TableSchemaOptions {
+    pub table_id: i64,
+    pub with_columns: bool,
+    pub storage_class: StorageClass,
+}
+
+pub fn build_schemas(tables: &[TableSchemaOptions]) -> Vec<Schema> {
     let mut schemas = vec![];
-    for &columnar_table_id in &table_ids {
-        let mut c1 = ColumnInfo::new();
-        c1.set_column_id(1);
-        c1.set_tp(FieldTypeTp::LongLong.to_u8().unwrap() as i32);
-        let mut c2 = ColumnInfo::new();
-        c2.set_column_id(2);
-        c2.set_tp(FieldTypeTp::VarChar.to_u8().unwrap() as i32);
-        c2.set_column_len(255);
-        c2.set_collation(Collation::Utf8Mb4Bin as i32);
-        let schema = SchemaBuf {
-            table_id: columnar_table_id,
-            handle_column: new_int_handle_column_info(),
-            version_column: new_version_column_info(),
-            columns: vec![c1, c2],
-            pk_col_ids: vec![],
-            vector_indexes: vec![],
-            properties: Properties::default(),
+    for opts in tables {
+        let mut schema = SchemaBuf {
+            table_id: opts.table_id,
+            ..Default::default()
+        };
+        if opts.with_columns {
+            let mut c1 = ColumnInfo::new();
+            c1.set_column_id(1);
+            c1.set_tp(FieldTypeTp::LongLong.to_u8().unwrap() as i32);
+            let mut c2 = ColumnInfo::new();
+            c2.set_column_id(2);
+            c2.set_tp(FieldTypeTp::VarChar.to_u8().unwrap() as i32);
+            c2.set_column_len(255);
+            c2.set_collation(Collation::Utf8Mb4Bin as i32);
+
+            schema.handle_column = new_int_handle_column_info();
+            schema.version_column = new_version_column_info();
+            schema.columns = vec![c1, c2];
         }
-        .into();
-        schemas.push(schema);
+
+        if opts.storage_class.is_specified() {
+            schema.set_storage_class(opts.storage_class);
+        }
+
+        schemas.push(schema.into());
     }
     schemas
+}
+
+pub fn get_keyspace_split_keys(keyspace_id: u32) -> Vec<Vec<u8>> {
+    vec![
+        ApiV2::get_txn_keyspace_prefix(keyspace_id),
+        ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+    ]
+    .into_iter()
+    .map(|k| Key::from_raw(&k).into_encoded())
+    .collect()
+}
+
+pub fn get_table_split_keys(keyspace_id: u32, table_ids: &[i64]) -> Vec<Vec<u8>> {
+    let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+    let mut dup_table_ids = table_ids
+        .iter()
+        .flat_map(|&id| [id, id + 1])
+        .collect::<Vec<_>>();
+    dup_table_ids.sort();
+    dup_table_ids.dedup();
+    dup_table_ids
+        .into_iter()
+        .map(|tbl_id| {
+            let mut buf = vec![];
+            buf.extend_from_slice(&keyspace_prefix);
+            buf.extend_from_slice(TABLE_PREFIX);
+            buf.write_i64(tbl_id).unwrap();
+            encode_bytes(&buf)
+        })
+        .collect()
+}
+
+pub async fn broadcast_schema_file_request(
+    stores: &[Store],
+    keyspace_id: u32,
+    schema_file_id: u64,
+    timeout: Duration,
+) {
+    for store in stores {
+        let status_addr = store.get_status_address();
+        let http_client = hyper::client::Client::new();
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < timeout {
+            let request = hyper::http::Request::builder()
+                .method(http::method::Method::POST)
+                .uri(format!(
+                    "http://{}/schema_file?keyspace_id={}&file_id={}",
+                    status_addr, keyspace_id, schema_file_id
+                ))
+                .body(Body::empty())
+                .unwrap();
+            if let Ok(resp) = http_client.request(request).await {
+                if resp.status().is_success() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
 }

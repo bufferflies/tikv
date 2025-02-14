@@ -4,7 +4,7 @@ mod resolve_lock;
 mod txn_file;
 
 use bytes::Bytes;
-use kvproto::kvrpcpb;
+use kvproto::{kvrpcpb, kvrpcpb::WriteConflictReason};
 use test_cloud_server::{
     client::{Error, RequestOptions, TxnMutations},
     util::Mutation,
@@ -65,8 +65,8 @@ fn test_rollback_before_prewrite() {
         )
         .unwrap_err();
     match err {
-        Error::KeyError(key_error)
-            if key_error.get_retryable().contains("reason: SelfRolledBack") => {}
+        Error::WriteConflict(write_conflict)
+            if write_conflict.get_reason() == WriteConflictReason::SelfRolledBack => {}
         _ => panic!("unexpected error: {:?}", err),
     }
     client.verify_data_with_ref_store();

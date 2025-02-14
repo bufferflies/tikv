@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{ops::Range, sync::Arc, thread, time::Duration};
+use std::{assert_matches::assert_matches, ops::Range, sync::Arc, thread, time::Duration};
 
 use anyhow::{self, bail};
 use bytes::Bytes;
@@ -27,8 +27,8 @@ use security::SecurityConfig;
 use test_cloud_server::{
     client,
     client::{
-        ClusterClient, ClusterClientOptions, CommitAction, MutateOptions, RequestOptions,
-        TxnMutations, TxnWriteMethod,
+        ClusterClient, ClusterClientOptions, CommitAction, Error as ClientError, MutateOptions,
+        RequestOptions, TxnMutations, TxnWriteMethod,
     },
     must_wait,
     oss::prepare_dfs,
@@ -767,7 +767,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
         let err = client
             .kv_prewrite(txn_muts1.primary(), None, txn_muts1, start_ts1)
             .unwrap_err();
-        expect_err_msg(&err, "already_exist");
+        assert_matches!(err, ClientError::AlreadyExist(_));
         client.verify_data_with_ref_store();
     }
 
@@ -838,7 +838,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
         let err = client
             .kv_prewrite(txn_muts1.primary(), None, txn_muts1, start_ts1)
             .unwrap_err();
-        expect_err_msg(&err, "WriteConflict");
+        assert_matches!(err, ClientError::WriteConflict(_));
 
         let _new_commit_ts0 = rt.block_on(txn0).unwrap();
         client.put_kv_in_ref_store(muts0);
@@ -874,7 +874,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
             let err = client
                 .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
                 .unwrap_err();
-            expect_err_msg(&err, "WriteConflict");
+            assert_matches!(err, ClientError::WriteConflict(_));
             start_ts = client.get_ts();
         }
         client
@@ -889,7 +889,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
         let err = client
             .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap_err();
-        expect_err_msg(&err, "WriteConflict");
+        assert_matches!(err, ClientError::WriteConflict(_));
 
         // Commit after rollback.
         let commit_ts = client.get_ts();
@@ -932,7 +932,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
             let err = client
                 .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
                 .unwrap_err();
-            expect_err_msg(&err, "WriteConflict");
+            assert_matches!(err, ClientError::WriteConflict(_));
             start_ts = client.get_ts();
         }
         client
@@ -952,7 +952,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
         let err = client
             .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap_err();
-        expect_err_msg(&err, "WriteConflict");
+        assert_matches!(err, ClientError::WriteConflict(_));
 
         // Commit after rollback.
         let commit_ts = client.get_ts();
@@ -1313,5 +1313,12 @@ fn verify_range(client: &mut ClusterClient, start: usize, end: usize, version: u
 }
 
 fn expect_err_msg(err: &client::Error, msg: &str) {
-    assert!(err.to_string().contains(msg), "err: {:?}", err);
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains(msg),
+        "err: {:?}({}), expect: {}",
+        err,
+        err_str,
+        msg
+    );
 }

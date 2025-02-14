@@ -8177,6 +8177,7 @@ dependencies = [
  "rfengine",
  "rfstore",
  "rstest",
+ "schema",
  "security",
  "serde",
  "serde_derive",
