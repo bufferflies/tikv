@@ -21,6 +21,7 @@ pub struct SnapCtx {
     pub txn_chunk_manager: TxnChunkManager,
     pub ia_ctx: IaCtx,
     pub prepare_type: PrepareType,
+    pub read_columnar: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]

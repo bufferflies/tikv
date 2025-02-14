@@ -447,8 +447,11 @@ impl Shard {
             );
         }
 
-        let mut shard =
-            Shard::new_for_ingest(0, &cs, Arc::new(Options::default()), &ctx.master_key);
+        let opts = Options {
+            read_columnar: ctx.read_columnar,
+            ..Default::default()
+        };
+        let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(opts), &ctx.master_key);
         let mut builder = ShardDataBuilder::new(shard.get_data());
         builder.set_mem_tbls(mem_tbls);
         create_snapshot_tables(

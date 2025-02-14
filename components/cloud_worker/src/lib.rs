@@ -260,6 +260,7 @@ fn start_server(
         worker_limiter,
         txn_chunk_manager,
         ia_ctx,
+        read_columnar: config.read_columnar,
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
@@ -673,6 +674,9 @@ pub struct Config {
     pub ia: IaConfig,
 
     pub local_gc: LocalGcConfig,
+
+    /// Enable columnar reader. Default is false.
+    pub read_columnar: bool,
 }
 
 impl Default for Config {
@@ -707,6 +711,7 @@ impl Default for Config {
             push_metrics_addr: String::default(),
             push_metrics_interval: ReadableDuration::secs(30),
             local_gc: LocalGcConfig::default(),
+            read_columnar: false,
         }
     }
 }

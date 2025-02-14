@@ -1682,6 +1682,7 @@ fn new_test_options(
     opts.blob_table_build_options.min_blob_size = min_blob_size;
     opts.max_del_range_delay = Duration::from_secs(1);
     opts.enable_inner_key_offset = enable_inner_key_off;
+    opts.read_columnar = true;
     opts
 }
 

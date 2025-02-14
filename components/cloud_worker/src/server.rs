@@ -68,6 +68,7 @@ pub(crate) struct Context {
     pub worker_limiter: WorkerLimiter,
     pub txn_chunk_manager: TxnChunkManager,
     pub ia_ctx: IaCtx,
+    pub read_columnar: bool,
 }
 
 impl Context {
@@ -86,6 +87,7 @@ impl Context {
             txn_chunk_manager: self.txn_chunk_manager.clone(),
             ia_ctx: self.ia_ctx.clone(),
             prepare_type: PrepareType::All,
+            read_columnar: self.read_columnar,
         }
     }
 }

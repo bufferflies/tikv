@@ -295,6 +295,7 @@ pub struct SnapAccessCore {
     deleting_prefixes: Arc<DeletePrefixes>,
     encryption_key: Option<EncryptionKey>,
     is_sync: bool,
+    read_columnar: bool,
 }
 
 impl SnapAccessCore {
@@ -321,6 +322,7 @@ impl SnapAccessCore {
             deleting_prefixes: shard.get_del_prefixes(),
             encryption_key: shard.encryption_key.clone(),
             is_sync,
+            read_columnar: shard.opt.read_columnar,
         }
     }
 
@@ -1427,7 +1429,7 @@ impl SnapAccessCore {
         scan_ctx: Option<&TableScanCtx>,
         read_ts: u64,
     ) -> Option<ColumnarMvccReader> {
-        if self.columnar_snap_version == 0 {
+        if self.columnar_snap_version == 0 || !self.read_columnar {
             return None;
         }
         let schema = self.new_schema_from_columns(table_id, columns)?;
@@ -1511,6 +1513,9 @@ impl SnapAccessCore {
         start_handle: Option<&[u8]>,
         end_handle: Option<&[u8]>,
     ) -> Option<ColumnarMvccReader> {
+        if !self.read_columnar {
+            return None;
+        }
         let vector_index = self.data.vector_indexes.get(table_id, index_id, col_id)?;
         let vector_items_reader = VectorItemsReader::new(
             schema.clone(),
@@ -2070,6 +2075,7 @@ mod tests {
                 txn_chunk_manager,
                 ia_ctx: IaCtx::Disabled,
                 prepare_type: PrepareType::All,
+                read_columnar: true,
             };
             let mut snap_pb = kvenginepb::Snapshot::default();
             snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32 * enable_inner_key_off as u32);

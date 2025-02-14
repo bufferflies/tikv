@@ -566,6 +566,7 @@ impl BackupReader {
             txn_chunk_manager,
             ia_ctx: IaCtx::Disabled,
             prepare_type: PrepareType::All,
+            read_columnar: true,
         };
         Self {
             ts,

@@ -87,6 +87,9 @@ pub struct Options {
     /// Ignore columnar table load and ingest when start kvengine. This is used
     /// for clear columnar replica in all shards when encounter critical issue.
     pub ignore_columnar_table_load: bool,
+
+    /// Enable columnar table read.
+    pub read_columnar: bool,
 }
 
 impl Default for Options {
@@ -120,6 +123,7 @@ impl Default for Options {
             txn_file_worker_pool_size: 16,
             ia: Default::default(),
             ignore_columnar_table_load: false,
+            read_columnar: false,
         }
     }
 }

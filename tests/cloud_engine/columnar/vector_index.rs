@@ -47,6 +47,7 @@ fn test_build_vector_index() {
             .columnar_table_build_options
             .pack_max_row_count = 9;
         conf.kvengine.vector_index_build_options.delta_size = 1024;
+        conf.kvengine.read_columnar = true;
     });
     let dfs = cluster.get_dfs().unwrap();
     let (keyspace_id, table_ids) = dfs
@@ -195,7 +196,7 @@ fn test_build_vector_index() {
     block_on(vector_reader.set_int_handle_range(0, Some(1000))).unwrap();
     let mut block = Block::new(&schema);
     let cnt = block_on(vector_reader.read_block(&mut block, 5)).unwrap();
-    assert!(cnt >= 3);
+    assert!(cnt >= 3, "cnt: {}", cnt);
     let handle_buf = block.get_handle_buf();
     let vec_col_buf = &block.get_columns()[0];
     assert_eq!(handle_buf.get_int_handle_value(0), 99);

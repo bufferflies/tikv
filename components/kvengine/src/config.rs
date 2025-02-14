@@ -81,6 +81,8 @@ pub struct Config {
     pub update_inner_key_offset: bool,
     /// if enabled, columnar table will not be loaded.
     pub ignore_columnar_table_load: bool,
+    /// Enable columnar table read. Default is false.
+    pub read_columnar: bool,
 
     pub txn_file_worker_pool_size: Option<usize>,
 
@@ -124,6 +126,7 @@ impl Default for Config {
             columnar_table_build_options: Default::default(),
             vector_index_build_options: Default::default(),
             ignore_columnar_table_load: false,
+            read_columnar: false,
         }
     }
 }

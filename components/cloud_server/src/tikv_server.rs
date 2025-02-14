@@ -1070,6 +1070,7 @@ impl TikvServer {
         kv_opts.compaction_tombs_ratio = conf.kvengine.compaction_tombs_ratio;
         kv_opts.compaction_tombs_count = conf.kvengine.compaction_tombs_count;
         kv_opts.for_restore = for_restore;
+        kv_opts.read_columnar = conf.kvengine.read_columnar;
 
         kv_opts.flow_control.enable = conf.storage.flow_control.enable;
         kv_opts.flow_control.soft_region_mem_limit =

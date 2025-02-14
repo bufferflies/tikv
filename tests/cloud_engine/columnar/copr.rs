@@ -38,6 +38,7 @@ fn test_coprocessor() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.read_columnar = true;
     });
     let dfs = cluster.get_dfs().unwrap();
     let (keyspace_id, table_ids) = dfs

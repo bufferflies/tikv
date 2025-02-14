@@ -312,6 +312,7 @@ fn test_covert_row_to_columnar() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.read_columnar = true;
     });
     let dfs = cluster.get_dfs().unwrap();
     let (keyspace_id, table_ids) = dfs
@@ -542,6 +543,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         txn_chunk_manager: kvengine.get_txn_chunk_manager(),
         ia_ctx: IaCtx::Disabled,
         prepare_type: PrepareType::All,
+        read_columnar: true,
     };
     let snap_access = dfs
         .get_runtime()
@@ -618,6 +620,7 @@ fn test_region_merge_with_columnar() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.read_columnar = true;
     });
     let dfs = cluster.get_dfs().unwrap();
     let (keyspace_id, table_ids) = dfs
@@ -859,6 +862,7 @@ fn test_columnar_ia_file() {
         txn_chunk_manager: kvengine.get_txn_chunk_manager(),
         ia_ctx,
         prepare_type: PrepareType::All,
+        read_columnar: true,
     };
     let snap_access = runtime
         .block_on(SnapAccess::construct_snapshot(
@@ -903,6 +907,7 @@ fn test_columnar_scan_with_filter() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.read_columnar = true;
     });
     let dfs = cluster.get_dfs().unwrap();
     let (keyspace_id, table_ids) = dfs
