@@ -8,7 +8,7 @@ use tikv_util::{
         bytes::{decode_bytes, encode_bytes},
         number::NumberEncoder,
     },
-    debug, warn,
+    debug, error, warn,
 };
 
 use crate::schema::{DbInfo, TableInfo, STATE_PUBLIC};
@@ -34,8 +34,16 @@ pub async fn load_schema(
         end
     );
     let mut dbs = vec![];
-    for (_key, value) in pairs {
-        let db: DbInfo = serde_json::from_slice(value.as_slice()).unwrap();
+    for (key, value) in pairs {
+        let db: DbInfo = serde_json::from_slice(value.as_slice()).map_err(|err| {
+            let key = log_wrappers::hex_encode_upper(&key);
+            let val = String::from_utf8_lossy(&value);
+            error!(
+                "load schema: parse db info failed";
+                "err" => ?err, "key" => &key, "val" => val.as_ref(),
+            );
+            format!("parse db info failed for {}", key)
+        })?;
         if db.state == STATE_PUBLIC {
             dbs.push(db);
         }

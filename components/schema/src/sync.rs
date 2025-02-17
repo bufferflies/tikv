@@ -109,7 +109,7 @@ async fn sync_all_schemas(
     keyspace_id: u32,
     schema_version: i64,
 ) -> Result<(i64, Vec<TableInfo>), String> {
-    let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+    let keyspace_prefix = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
     let db_infos = load_schema(kv_scanner, &keyspace_prefix).await?;
     Ok((
         schema_version,

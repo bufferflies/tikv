@@ -6939,6 +6939,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "log_wrappers",
  "serde",
  "serde_derive",
  "serde_ignored",

@@ -232,7 +232,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
             master_key.clone(),
             txn_chunk_manager.clone(),
         ));
-        let keyspace_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+        let keyspace_prefix = api_version::ApiV2::get_keyspace_prefix_by_id(keyspace_id);
         let dbs = block_on(schema::load_schema(backup_reader.clone(), &keyspace_prefix)).unwrap();
         let starts_from_table_id = if idx == 0 {
             args.starts_from_table_id
