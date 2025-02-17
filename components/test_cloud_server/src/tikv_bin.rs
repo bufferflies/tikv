@@ -324,3 +324,17 @@ pub async fn wait_tikv_worker_healthy(
     )
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_toml() {
+        let tikv_configs = TikvConfig::default();
+        toml::to_string(&tikv_configs).unwrap();
+
+        let worker_configs = cloud_worker::Config::default();
+        toml::to_string(&worker_configs).unwrap();
+    }
+}

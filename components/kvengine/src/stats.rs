@@ -13,7 +13,7 @@ use crate::{
         ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM,
     },
     table::{BoundedDataSet, DataBound, InnerKey},
-    IdVer, CF_LEVELS, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
+    IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
 };
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -318,7 +318,7 @@ impl ShardStats {
         self.mem_table_size == 0
             && self.mem_table_count == 1
             && self.l0_table_count == 0
-            && bottom_most_level.level == CF_LEVELS[WRITE_CF]
+            && bottom_most_level.level == crate::CF_LEVELS[WRITE_CF]
             && bottom_most_level.num_tables != 0
     }
 }

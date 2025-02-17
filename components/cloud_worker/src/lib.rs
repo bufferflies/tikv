@@ -658,6 +658,9 @@ pub struct Config {
     pub push_metrics_addr: String,
     pub push_metrics_interval: ReadableDuration,
 
+    /// Enable columnar reader. Default is false.
+    pub read_columnar: bool,
+
     // Embedded configurations must be placed at the end of the struct.
     // Otherwise, it will fail to serialize to toml.
     pub pd: pd_client::Config,
@@ -674,9 +677,9 @@ pub struct Config {
     pub ia: IaConfig,
 
     pub local_gc: LocalGcConfig,
-
-    /// Enable columnar reader. Default is false.
-    pub read_columnar: bool,
+    // Note: Fields of simple (not structure) type can not be the last. Otherwise serializing the
+    // config will meet the "ValueAfterTable" error.
+    // See https://docs.rs/toml/0.5.11/toml/ser/enum.Error.html#variant.ValueAfterTable.
 }
 
 impl Default for Config {
@@ -710,8 +713,8 @@ impl Default for Config {
             ia: IaConfig::default(),
             push_metrics_addr: String::default(),
             push_metrics_interval: ReadableDuration::secs(30),
-            local_gc: LocalGcConfig::default(),
             read_columnar: false,
+            local_gc: LocalGcConfig::default(),
         }
     }
 }
