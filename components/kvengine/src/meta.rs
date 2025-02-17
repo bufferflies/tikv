@@ -1044,6 +1044,8 @@ impl ShardMeta {
                     let mut col_file = pb::ColumnarCreate::new();
                     col_file.set_id(*k);
                     col_file.set_level(v.get_level());
+                    col_file.set_smallest(v.smallest.to_vec());
+                    col_file.set_biggest(v.biggest.to_vec());
                     col_file.set_meta_offset(v.table_meta_off);
                     snap.mut_columnar_creates().push(col_file);
                 }
