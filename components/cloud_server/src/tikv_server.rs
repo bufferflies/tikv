@@ -77,6 +77,7 @@ use tikv::{
         txn::flow_controller::{FlowController, CLOUD_MIN_THROTTLE_SPEED},
         SCHED_WRITE_FLOW_GAUGE,
     },
+    tikv_build_version,
 };
 use tikv_kv::Engine;
 use tikv_util::{
@@ -702,6 +703,7 @@ impl TikvServer {
             raft_store,
             self.pd_client.clone(),
             self.background_worker.clone(),
+            tikv_build_version(),
         );
         info!("bootstrap store");
         node.try_bootstrap_store(self.raw_engines.clone())

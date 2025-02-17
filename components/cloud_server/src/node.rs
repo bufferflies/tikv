@@ -88,6 +88,7 @@ impl Node {
         store_cfg: Arc<VersionTrack<StoreConfig>>,
         pd_client: Arc<dyn PdClient>,
         bg_worker: Worker,
+        version: &str,
     ) -> Node {
         let mut store = metapb::Store::default();
         store.set_id(INVALID_ID);
@@ -101,7 +102,7 @@ impl Node {
         } else {
             store.set_status_address(cfg.advertise_status_addr.clone())
         }
-        store.set_version(env!("CARGO_PKG_VERSION").to_string());
+        store.set_version(version.to_string());
 
         if let Ok(path) = std::env::current_exe() {
             if let Some(path) = path.parent() {

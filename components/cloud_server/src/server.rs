@@ -40,6 +40,7 @@ use tikv::{
     storage::{
         kv::Error as EngineError, lock_manager::LockManager, Error as StorageError, Storage,
     },
+    tikv_build_version,
 };
 use tikv_util::{
     codec::Error as CodecError,
@@ -332,7 +333,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
 
         SERVER_INFO_GAUGE_VEC
             .with_label_values(&[
-                &("v".to_owned() + env!("CARGO_PKG_VERSION")),
+                &("v".to_owned() + tikv_build_version()),
                 option_env!("TIKV_BUILD_GIT_HASH").unwrap_or("None"),
             ])
             .set(startup_ts as i64);
