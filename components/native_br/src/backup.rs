@@ -179,16 +179,22 @@ pub fn execute_lightweight_backup(
         .checked_add(Duration::from_secs(gap))
         .unwrap();
     let mut interval = GLOBAL_TIMER_HANDLE.interval(start_time, interval).compat();
-
+    let mut cluster_backup_meta = None;
     while let Some(Ok(_)) = block_on(interval.next()) {
-        if let Err(e) = backup_cluster(
+        match backup_cluster(
             config.clone(),
             BackupType::Lightweight,
             name.clone(),
             &pd_client,
-            None,
+            cluster_backup_meta.clone(),
         ) {
-            error!("lightweight backup fail, {:?}", e)
+            Ok((path, meta)) => {
+                info!("lightweight backup succeed"; "path" => path, "meta" => %meta);
+                cluster_backup_meta = Some(meta);
+            }
+            Err(e) => {
+                error!("lightweight backup fail, {:?}", e);
+            }
         }
     }
     Ok(())
@@ -271,22 +277,43 @@ pub fn backup_cluster_with_ts(
         dfs_conf.s3_region,
         dfs_conf.s3_bucket,
     );
-    let mut cluster_backup_meta = if let Some(meta) = last_backup_meta {
-        // Cluster topology may be changed between two loop, so it's necessary to check
-        // consistency.
-        check_backup_meta_consistency(&meta, &stores)?;
-        meta
-    } else if backup_type != BackupType::Incremental {
-        ClusterBackupMeta::new()
-    } else {
-        // If no input backup meta, load latest one from s3.
-        let meta = runtime.block_on(get_latest_backup_meta(&s3fs, cluster_id))?;
-        if meta.is_lightweight {
-            info!("latest cluster backup meta is lightweight, fallback to full backup");
-            return Err(Error::MetaNotFound(cluster_id));
+    let mut cluster_backup_meta = match backup_type {
+        BackupType::Full => ClusterBackupMeta::new(),
+        BackupType::Incremental => {
+            if let Some(meta) = last_backup_meta {
+                // Cluster topology may be changed between two loop, so it's necessary to check
+                // consistency.
+                check_backup_meta_consistency(&meta, &stores)?;
+                meta
+            } else {
+                // If no input backup meta, load latest one from s3.
+                let meta = runtime.block_on(get_latest_backup_meta(&s3fs, cluster_id))?;
+                if meta.is_lightweight {
+                    info!("latest cluster backup meta is lightweight, fallback to full backup");
+                    return Err(Error::MetaNotFound(cluster_id));
+                }
+                check_backup_meta_consistency(&meta, &stores)?;
+                meta
+            }
         }
-        check_backup_meta_consistency(&meta, &stores)?;
-        meta
+        BackupType::Lightweight => {
+            let mut meta = ClusterBackupMeta::new();
+            let last_backup_meta = last_backup_meta.or_else(|| {
+                match runtime.block_on(get_latest_backup_meta(&s3fs, cluster_id)) {
+                    Ok(latest) => Some(latest),
+                    Err(err) => {
+                        warn!("get latest backup meta failed"; "err" => ?err);
+                        None
+                    }
+                }
+            });
+            if let Some(mut last_backup_meta) = last_backup_meta {
+                // Incremental backup of keyspace meta.
+                meta.set_meta_revision(last_backup_meta.meta_revision);
+                meta.set_keyspace_meta(last_backup_meta.take_keyspace_meta());
+            }
+            meta
+        }
     };
     cluster_backup_meta.set_backup_ts(backup_ts);
     cluster_backup_meta.set_cluster_id(cluster_id);
@@ -294,6 +321,8 @@ pub fn backup_cluster_with_ts(
 
     if !config.skip_keyspace_meta {
         runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
+    } else {
+        info!("skip backup keyspace meta");
     }
 
     let num_stores = stores.len();
@@ -518,6 +547,7 @@ async fn backup_pd_keyspace_meta(
     config: &BackupConfig,
     cluster_backup_meta: &mut ClusterBackupMeta,
 ) -> Result<()> {
+    info!("start backup PD keyspace meta"; "backup_meta" => %cluster_backup_meta);
     let cluster_id = cluster_backup_meta.cluster_id;
 
     let mut etcd_client = {

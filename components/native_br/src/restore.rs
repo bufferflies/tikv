@@ -317,6 +317,9 @@ pub fn restore_pd(config: RestoreConfig, name: String) {
         .get_runtime()
         .block_on(get_latest_backup_meta(&s3fs, cluster_backup.cluster_id))
         .unwrap_or_else(|_| cluster_backup.clone());
+    if latest_cluster_backup.keyspace_meta.is_empty() {
+        panic!("No keyspace meta in backup");
+    }
     let new_alloc_id = latest_cluster_backup.alloc_id
         + cluster_backup.get_stores().len() as u64
         + config.new_store_id_delta

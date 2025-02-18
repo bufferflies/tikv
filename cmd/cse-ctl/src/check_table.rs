@@ -147,6 +147,9 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
     );
     let cluster_backup = get_cluster_backup_meta(&s3fs, config.backup_name.clone());
     let mut keyspace_ids = if config.all {
+        if cluster_backup.keyspace_meta.is_empty() {
+            panic!("check table: No keyspace meta in backup");
+        }
         let mut all_keyspace_ids = vec![];
         let skip_keyspace_ids: HashSet<u32> =
             HashSet::from_iter(config.skip_keyspace_ids.iter().copied());
