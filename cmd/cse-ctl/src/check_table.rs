@@ -285,9 +285,10 @@ fn create_check_table_tasks(
                 if (tbl.is_common_handle || tbl.pk_is_handle) && idx_info.is_primary {
                     continue;
                 }
-                if idx_info.mv_index == Some(true) {
+                if idx_info.mv_index == Some(true) || idx_info.vector_index.is_some() {
                     // Multi value index may have multiple or no entries points to a single
                     // handle, we should ignore it.
+                    // Vector index is persisted in other forms and not supported yet.
                     continue;
                 }
                 if idx_info.state == STATE_PUBLIC {
