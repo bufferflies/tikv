@@ -1,5 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::fmt;
+
 use tidb_query_datatype::{
     codec::{
         datum,
@@ -255,7 +257,7 @@ const STORAGE_CLASS_TIER_STANDARD: &str = "STANDARD";
 const STORAGE_CLASS_TIER_IA: &str = "IA";
 
 #[repr(u8)]
-#[derive(PartialEq, Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(PartialEq, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClass {
     /// User doesn't specify the storage class.
@@ -273,6 +275,14 @@ pub enum StorageClass {
 }
 
 impl StorageClass {
+    pub fn display(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "UNSPECIFIED",
+            Self::Standard => "STANDARD",
+            Self::Ia => "IA",
+        }
+    }
+
     pub fn marshal(&self) -> Vec<u8> {
         match self {
             Self::Unspecified => vec![],
@@ -294,6 +304,12 @@ impl StorageClass {
     #[inline]
     pub fn is_specified(&self) -> bool {
         *self != Self::Unspecified
+    }
+
+    /// The storage class requires to occupy a region exclusively.
+    #[inline]
+    pub fn require_exclusive_region(&self) -> bool {
+        matches!(self, Self::Ia)
     }
 }
 
@@ -326,6 +342,18 @@ impl TryFrom<u8> for StorageClass {
                 Err(format!("Unknown storage class: {}", value))
             }
         }
+    }
+}
+
+impl fmt::Debug for StorageClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}({})", self.display(), *self as u8)
+    }
+}
+
+impl fmt::Display for StorageClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.display())
     }
 }
 

@@ -1602,7 +1602,6 @@ impl<'a> PeerMsgHandler<'a> {
             if !self.ctx.global.schema_scheduler.is_busy() {
                 let task = SchemaTask::StorageClass {
                     region: self.region().clone(),
-                    peer: self.peer.peer.clone(),
                     schema_version: schema_file.get_version(),
                 };
                 if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {

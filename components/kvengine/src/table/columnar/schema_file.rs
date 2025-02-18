@@ -5,17 +5,17 @@ use std::{collections::HashMap, ops::Deref, sync::Arc};
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut};
 use protobuf::Message;
-use schema::schema::StorageClass;
 use tidb_query_datatype::codec::table::{
     decode_table_id, INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
 };
+use tikv_util::{codec::number::NumberEncoder, Either};
 
 use crate::{
     table::{
         self,
         columnar::{builder::new_version_column_info, columnar::Schema, SchemaBuf, VectorIndexDef},
         file::File,
-        ChecksumType, InnerKey, NO_COMPRESSION,
+        ChecksumType, DataBound, InnerKey, OwnedInnerKey, NO_COMPRESSION,
     },
     Properties,
 };
@@ -280,37 +280,43 @@ impl SchemaFile {
             .collect()
     }
 
+    /// Return:
+    /// - Left: The id of the table with specified storage class and fully
+    ///   covers the range.
+    /// - Right: Overlapped prefix keys of tables which requires exclusive
+    ///   region.
     pub fn overlap_storage_class_tables(
         &self,
-        mut start_key: &[u8],
-        mut end_key: &[u8],
-        storage_class: StorageClass,
-    ) -> Vec<i64> {
-        start_key.advance(KEYSPACE_PREFIX_LEN);
-        end_key.advance(KEYSPACE_PREFIX_LEN);
-        let start_table_id = decode_table_id(start_key).unwrap_or(0);
-        let end_table_id = decode_table_id(end_key).unwrap_or(i64::MAX);
-        let end_lt_index = end_key.len() >= TABLE_PREFIX_KEY_LEN
-            && &end_key[TABLE_PREFIX_KEY_LEN..] < INDEX_PREFIX_SEP;
-        self.core
-            .tables
-            .values()
-            .filter_map(|schema| {
-                if schema.get_storage_class() == storage_class {
-                    if start_table_id == end_table_id && schema.table_id == start_table_id {
-                        return Some(schema.table_id);
-                    }
-                    if start_table_id < end_table_id
-                        && start_table_id <= schema.table_id
-                        && (end_lt_index && schema.table_id < end_table_id
-                            || !end_lt_index && schema.table_id <= end_table_id)
-                    {
-                        return Some(schema.table_id);
-                    }
+        range: DataBound<'_>,
+    ) -> Either<i64 /* table_id */, Vec<OwnedInnerKey> /* overlapped_keys */> {
+        let mut overlapped_keys = Vec::new();
+        for (&table_id, schema) in &self.core.tables {
+            let sc = schema.get_storage_class();
+            if !sc.is_specified() {
+                continue;
+            }
+
+            let table_start_key = encode_table_prefix_key(table_id);
+            let table_end_key = encode_table_prefix_key(table_id + 1);
+            let table_bound =
+                DataBound::new(table_start_key.as_ref(), table_end_key.as_ref(), false);
+            if table_bound.contains_bound(range) {
+                return Either::Left(table_id);
+            }
+
+            if sc.require_exclusive_region() {
+                if range.exclusive_overlap_key(table_start_key.as_ref()) {
+                    overlapped_keys.push(table_start_key);
                 }
-                None
-            })
-            .collect()
+                if range.exclusive_overlap_key(table_end_key.as_ref()) {
+                    overlapped_keys.push(table_end_key);
+                }
+            }
+        }
+
+        overlapped_keys.sort();
+        overlapped_keys.dedup();
+        Either::Right(overlapped_keys)
     }
 
     pub fn contains(&self, others: &[Schema]) -> bool {
@@ -385,6 +391,13 @@ pub fn build_schema_file(
     footer.checksum = checksum_type.checksum(&data);
     footer.write_to(&mut data);
     data
+}
+
+fn encode_table_prefix_key(table_id: i64) -> OwnedInnerKey {
+    let mut key = Vec::with_capacity(TABLE_PREFIX_KEY_LEN);
+    key.put(TABLE_PREFIX);
+    key.encode_i64(table_id).unwrap();
+    OwnedInnerKey::new(key.into())
 }
 
 #[cfg(test)]

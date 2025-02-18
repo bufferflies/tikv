@@ -5,13 +5,13 @@ use std::{
     fmt::{Display, Formatter},
 };
 
-use api_version::api_v2::KEYSPACE_PREFIX_LEN;
-use bytes::Buf;
-use kvengine::{get_split_keys_for_exclusive_tables, STORAGE_CLASS_KEY};
+use kvengine::{
+    table::{BoundedDataSet, OwnedInnerKey},
+    Shard, STORAGE_CLASS_KEY,
+};
 use kvproto::{metapb, metapb::Region};
 use schema::schema::StorageClass;
-use tidb_query_datatype::codec::table::decode_table_id;
-use tikv_util::{info, time::Instant, warn, worker::Runnable};
+use tikv_util::{codec::bytes::encode_bytes, info, time::Instant, warn, worker::Runnable, Either};
 
 use crate::{
     store::{Callback, CasualMessage, PeerMsg, PeerTag, RegionIdVer, StoreMsg},
@@ -21,7 +21,6 @@ use crate::{
 pub enum SchemaTask {
     StorageClass {
         region: metapb::Region,
-        peer: metapb::Peer,
         schema_version: i64,
     },
 }
@@ -31,13 +30,12 @@ impl Display for SchemaTask {
         match self {
             SchemaTask::StorageClass {
                 ref region,
-                ref peer,
                 ref schema_version,
             } => {
                 write!(
                     f,
-                    "check schema of region {} peer {} schema_version {}",
-                    region.id, peer.id, schema_version
+                    "check schema of region {} schema_version {}",
+                    region.id, schema_version
                 )
             }
         }
@@ -56,9 +54,8 @@ impl Runnable for SchemaRunner {
         match task {
             SchemaTask::StorageClass {
                 region,
-                peer,
                 schema_version,
-            } => self.handle_storage_class(region, peer, schema_version),
+            } => self.handle_storage_class(region, schema_version),
         }
     }
 }
@@ -77,16 +74,12 @@ impl SchemaRunner {
         PeerTag::new(self.store_id, id_ver)
     }
 
-    fn handle_storage_class(
-        &self,
-        region: metapb::Region,
-        peer: metapb::Peer,
-        schema_version: i64,
-    ) {
+    fn handle_storage_class(&self, region: metapb::Region, schema_version: i64) {
         let tag = self.peer_tag(&region);
-        let region_id = region.get_id();
-        let peer_id = peer.get_id();
-        if let Some(shard) = self.kv.get_shard(region.get_id()) {
+        if let Ok(shard) = self
+            .kv
+            .get_shard_with_ver(region.get_id(), region.get_region_epoch().version)
+        {
             if let Some(schema_file) = shard.get_schema_file() {
                 if schema_version != schema_file.get_version() {
                     return;
@@ -94,100 +87,98 @@ impl SchemaRunner {
                 if shard.get_checked_schema_ver() >= schema_version {
                     return;
                 }
-                let ia_storage_class_tables = schema_file.overlap_storage_class_tables(
-                    &shard.range.outer_start,
-                    &shard.range.outer_end,
-                    StorageClass::Ia,
-                );
-                let mut storage_class_property: Option<StorageClass> = None;
-                if !ia_storage_class_tables.is_empty() {
-                    let ia_tables_len = ia_storage_class_tables.len();
-                    let split_keys = get_split_keys_for_exclusive_tables(
-                        &shard.range.outer_start,
-                        &shard.range.outer_end,
-                        shard.range.keyspace_id,
-                        ia_storage_class_tables,
-                    );
-                    if !split_keys.is_empty() {
-                        info!(
-                            "schedule ask split";
-                            "tag" => tag,
-                            "peer_id" => peer_id,
-                            "ia_tables" => ia_tables_len,
-                        );
-                        let msg = CasualMessage::SplitRegion {
-                            region_epoch: region.get_region_epoch().clone(),
-                            split_keys,
-                            callback: Callback::None,
-                            source: "schema".into(),
-                        };
-                        self.router.send(region_id, PeerMsg::CasualMessage(msg));
-                        return;
-                    } else if ia_tables_len == 1 && shard.get_storage_class() != StorageClass::Ia {
-                        storage_class_property = Some(StorageClass::Ia)
-                    }
-                } else {
-                    let standard_storage_class_tables = schema_file.overlap_storage_class_tables(
-                        &shard.range.outer_start,
-                        &shard.range.outer_end,
-                        StorageClass::Standard,
-                    );
-                    if standard_storage_class_tables.len() == 1 {
-                        let mut start_key: &[u8] = &shard.range.outer_start;
-                        let mut end_key: &[u8] = &shard.range.outer_end;
-                        start_key.advance(KEYSPACE_PREFIX_LEN);
-                        end_key.advance(KEYSPACE_PREFIX_LEN);
-                        let start_table_id = decode_table_id(start_key).unwrap_or(0);
-                        let end_table_id = decode_table_id(end_key).unwrap_or(i64::MAX);
-                        if end_table_id - start_table_id < 2
-                            && shard.get_storage_class() != StorageClass::Standard
-                        {
-                            storage_class_property = Some(StorageClass::Standard)
-                        }
-                    }
-                }
-                if let Some(storage_class) = storage_class_property {
-                    let mut cs = kvengine::new_change_set(shard.id, shard.ver);
-                    cs.set_property_key(STORAGE_CLASS_KEY.to_string());
-                    cs.set_property_value(storage_class.marshal());
-                    info!(
-                        "{} propose update storage_class property {:?}",
-                        tag, storage_class
-                    );
-                    let msg = StoreMsg::GenerateEngineChangeSet(cs);
-                    if let Err(e) = self.router.store_sender.send(msg) {
-                        info!(
-                            "failed to to send meta change message";
-                            "err" => ?e,
-                        )
-                    } else {
-                        // Wait to finish updating the storage class property.
-                        let begin = Instant::now_coarse();
-                        let timeout = std::time::Duration::from_secs(10);
-                        loop {
-                            if let Some(schema_file) = shard.get_schema_file() {
-                                if schema_version != schema_file.get_version() {
-                                    // If the schema version changes, recheck.
-                                    return;
-                                }
-                            }
-                            let current = shard.get_storage_class();
-                            if current == storage_class {
-                                shard.set_checked_schema_ver(schema_version);
-                                return;
-                            }
-                            if begin.saturating_elapsed() < timeout {
-                                std::thread::sleep(std::time::Duration::from_millis(100));
-                                continue;
-                            }
 
-                            warn!("{} wait for updating storage class property timeout", tag; "current" => ?current, "expect" => ?storage_class);
-                            break;
+                info!("{} handle storage class", tag; "schema_version" => schema_version);
+                match schema_file.overlap_storage_class_tables(shard.range.data_bound()) {
+                    Either::Left(table_id) => {
+                        // The table fully covers the region.
+                        let schema = schema_file.get_table(table_id).unwrap();
+                        let sc = schema.get_storage_class();
+                        debug_assert!(sc.is_specified());
+                        if self.update_storage_class(&tag, &shard, sc, schema_version) {
+                            shard.set_checked_schema_ver(schema_version);
+                            info!("{} update storage class", tag; "sc" => ?sc, "schema_version" => schema_version);
                         }
                     }
-                } else {
-                    shard.set_checked_schema_ver(schema_version);
+                    Either::Right(table_inner_keys) => {
+                        if !table_inner_keys.is_empty() {
+                            // The overlapped keys of tables require exclusive region.
+                            self.split_regions_for_tables(&tag, &shard, &region, &table_inner_keys);
+                        } else {
+                            // No table requires exclusive region, nothing to do.
+                            shard.set_checked_schema_ver(schema_version);
+                        }
+                    }
                 }
+            }
+        } else {
+            info!("{} handle storage class: skip, shard not found/match", tag;
+                "region" => ?region, "schema_version" => schema_version);
+        }
+    }
+
+    fn split_regions_for_tables(
+        &self,
+        tag: &PeerTag,
+        shard: &Shard,
+        region: &metapb::Region,
+        table_inner_keys: &[OwnedInnerKey],
+    ) {
+        info!(
+            "{} handle storage class: schedule ask split", tag;
+            "table_keys" => ?table_inner_keys,
+        );
+        let split_keys = table_inner_keys
+            .iter()
+            .map(|inner_key| encode_bytes(&shard.to_outer_key(inner_key.as_ref())))
+            .collect::<Vec<_>>();
+        let msg = CasualMessage::SplitRegion {
+            region_epoch: region.get_region_epoch().clone(),
+            split_keys,
+            callback: Callback::None,
+            source: "schema".into(),
+        };
+        self.router.send(shard.id, PeerMsg::CasualMessage(msg));
+    }
+
+    fn update_storage_class(
+        &self,
+        tag: &PeerTag,
+        shard: &Shard,
+        storage_class: StorageClass,
+        schema_version: i64,
+    ) -> bool {
+        let mut cs = kvengine::new_change_set(shard.id, shard.ver);
+        cs.set_property_key(STORAGE_CLASS_KEY.to_string());
+        cs.set_property_value(storage_class.marshal());
+        info!("{} propose update storage_class property", tag; "sc" => ?storage_class);
+        let msg = StoreMsg::GenerateEngineChangeSet(cs);
+        if let Err(e) = self.router.store_sender.send(msg) {
+            warn!("{} failed to to send meta change message", tag; "err" => ?e, "sc" => ?storage_class);
+            false
+        } else {
+            // Wait to finish updating the storage class property.
+            let begin = Instant::now_coarse();
+            let timeout = std::time::Duration::from_secs(10);
+            loop {
+                if let Some(schema_file) = shard.get_schema_file() {
+                    if schema_version != schema_file.get_version() {
+                        // If the schema version changes, recheck.
+                        return false;
+                    }
+                }
+                let current = shard.get_storage_class();
+                if current == storage_class {
+                    return true;
+                }
+                if begin.saturating_elapsed() < timeout {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+
+                warn!("{} wait for updating storage class property timeout", tag;
+                    "current" => ?current, "expect" => ?storage_class);
+                break false;
             }
         }
     }

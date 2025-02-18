@@ -12,6 +12,7 @@ use std::{
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut};
+use log_wrappers::Value as LogValue;
 use thiserror::Error;
 
 use super::blobtable::BlobRef;
@@ -645,14 +646,14 @@ impl Deref for InnerKey<'_> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OwnedInnerKey {
     inner: bytes::Bytes,
 }
 
 impl Debug for OwnedInnerKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", &self.inner)
+        write!(f, "{}", &LogValue::key(&self.inner))
     }
 }
 
@@ -686,6 +687,14 @@ impl OwnedInnerKey {
     pub fn to_vec(&self) -> Vec<u8> {
         self.inner.to_vec()
     }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
 }
 
 impl From<InnerKey<'_>> for OwnedInnerKey {
@@ -716,8 +725,52 @@ impl<'a> DataBound<'a> {
         }
     }
 
+    /// Whether the key overlaps the range of data bound.
+    ///
+    /// ```rust
+    /// use kvengine::table::{DataBound, InnerKey};
+    /// let k00 = b"k00";
+    /// let k10 = b"k10";
+    /// let k15 = b"k15";
+    /// let k20 = b"k20";
+    /// let k30 = b"k30";
+    /// let data_bound = DataBound::new(
+    ///     InnerKey::from_inner_buf(k10.as_slice()),
+    ///     InnerKey::from_inner_buf(k20.as_slice()),
+    ///     false,
+    /// );
+    /// for k in &[k10, k15] {
+    ///     assert!(data_bound.overlap_key(InnerKey::from_inner_buf(k.as_slice())));
+    /// }
+    /// for k in &[k00, k20, k30] {
+    ///     assert!(!data_bound.overlap_key(InnerKey::from_inner_buf(k.as_slice())));
+    /// }
+    /// ```
     pub fn overlap_key(&self, key: InnerKey<'_>) -> bool {
         self.lower_bound <= key && !self.less_than_key(key)
+    }
+
+    /// Whether the key overlaps, but not equal to the lower and upper bound.
+    ///
+    /// ```rust
+    /// use kvengine::table::{DataBound, InnerKey};
+    /// let k00 = b"k00";
+    /// let k10 = b"k10";
+    /// let k15 = b"k15";
+    /// let k20 = b"k20";
+    /// let k30 = b"k30";
+    /// let data_bound = DataBound::new(
+    ///     InnerKey::from_inner_buf(k10.as_slice()),
+    ///     InnerKey::from_inner_buf(k20.as_slice()),
+    ///     false,
+    /// );
+    /// assert!(data_bound.exclusive_overlap_key(InnerKey::from_inner_buf(k15.as_slice())));
+    /// for k in &[k00, k10, k20, k30] {
+    ///     assert!(!data_bound.exclusive_overlap_key(InnerKey::from_inner_buf(k.as_slice())));
+    /// }
+    /// ```
+    pub fn exclusive_overlap_key(&self, key: InnerKey<'_>) -> bool {
+        self.lower_bound < key && !self.less_or_equal_key(key)
     }
 
     pub fn overlap_bound(&self, bound: DataBound<'_>) -> bool {
@@ -733,10 +786,67 @@ impl<'a> DataBound<'a> {
             }
     }
 
+    /// Whether the range is less than the key.
+    ///
+    /// ```rust
+    /// use kvengine::table::{DataBound, InnerKey};
+    /// let k00 = b"k00";
+    /// let k10 = b"k10";
+    /// let k15 = b"k15";
+    /// let k20 = b"k20";
+    /// let k30 = b"k30";
+    /// let data_bound = DataBound::new(
+    ///     InnerKey::from_inner_buf(k10.as_slice()),
+    ///     InnerKey::from_inner_buf(k20.as_slice()),
+    ///     false,
+    /// );
+    /// for k in &[k20, k30] {
+    ///     assert!(data_bound.less_than_key(InnerKey::from_inner_buf(k.as_slice())));
+    /// }
+    /// for k in &[k00, k10, k15] {
+    ///     assert!(!data_bound.less_than_key(InnerKey::from_inner_buf(k.as_slice())));
+    /// }
+    ///
+    /// let data_bound = DataBound::new(
+    ///     InnerKey::from_inner_buf(k10.as_slice()),
+    ///     InnerKey::from_inner_buf(k20.as_slice()),
+    ///     true,
+    /// );
+    /// assert!(!data_bound.less_than_key(InnerKey::from_inner_buf(k20.as_slice())));
+    /// ```
     pub fn less_than_key(&self, key: InnerKey<'_>) -> bool {
         match self.upper_bound.cmp(&key) {
             Ordering::Less => true,
             Ordering::Equal => !self.upper_inclusive,
+            Ordering::Greater => false,
+        }
+    }
+
+    /// Whether the range is less than the key, or (upper bound) equal to the
+    /// key.
+    ///
+    /// ```rust
+    /// use kvengine::table::{DataBound, InnerKey};
+    /// let k00 = b"k00";
+    /// let k10 = b"k10";
+    /// let k15 = b"k15";
+    /// let k20 = b"k20";
+    /// let k30 = b"k30";
+    /// let data_bound = DataBound::new(
+    ///     InnerKey::from_inner_buf(k10.as_slice()),
+    ///     InnerKey::from_inner_buf(k20.as_slice()),
+    ///     true,
+    /// );
+    /// for k in &[k20, k30] {
+    ///     assert!(data_bound.less_or_equal_key(InnerKey::from_inner_buf(k.as_slice())));
+    /// }
+    /// for k in &[k00, k10, k15] {
+    ///     assert!(!data_bound.less_or_equal_key(InnerKey::from_inner_buf(k.as_slice())));
+    /// }
+    /// ```
+    pub fn less_or_equal_key(&self, key: InnerKey<'_>) -> bool {
+        match self.upper_bound.cmp(&key) {
+            Ordering::Less | Ordering::Equal => true,
             Ordering::Greater => false,
         }
     }
@@ -932,11 +1042,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_data_bound_exclusive_overlap_key() {
+        let start = make_key(10);
+        let end = make_key(20);
+        let range_inc = DataBound::new(start.as_ref(), end.as_ref(), true);
+        let range_exc = DataBound::new(start.as_ref(), end.as_ref(), false);
+
+        let cases = vec![
+            (0, false), // (key, expected)
+            (10, false),
+            (11, true),
+            (19, true),
+            (20, false),
+            (21, false),
+        ];
+
+        for (idx, (key, expected)) in cases.into_iter().enumerate() {
+            let key = make_key(key);
+            for range in &[range_inc, range_exc] {
+                assert_eq!(
+                    range.exclusive_overlap_key(key.as_ref()),
+                    expected,
+                    "case {}",
+                    idx
+                );
+            }
+        }
+    }
+
     fn make_table(t: (usize, usize)) -> kvenginepb::TableCreate {
         let mut table = kvenginepb::TableCreate::default();
         table.set_smallest(format!("{:04}", t.0).into_bytes());
         table.set_biggest(format!("{:04}", t.1).into_bytes());
         table
+    }
+
+    fn make_key(i: usize) -> OwnedInnerKey {
+        OwnedInnerKey::new(format!("{:04}", i).into_bytes().into())
     }
 
     #[test]
