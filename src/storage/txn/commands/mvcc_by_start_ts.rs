@@ -36,8 +36,11 @@ impl CommandExt for MvccByStartTs {
     gen_lock!(empty);
 }
 
-impl<S: Snapshot> ReadCommand<S> for MvccByStartTs {
-    fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult> {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static> ReadCommand<S> for MvccByStartTs {
+    #[maybe_async]
+    async fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult> {
         let mut reader = SnapshotReader::new(TimeStamp::max(), snapshot, true);
         match reader.seek_ts(self.start_ts)? {
             Some(key) => {

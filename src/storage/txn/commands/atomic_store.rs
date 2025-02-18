@@ -38,8 +38,10 @@ impl CommandExt for RawAtomicStore {
     }
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for RawAtomicStore {
-    fn process_write(self, _: S, wctx: WriteContext<'_, L>) -> Result<WriteResult> {
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for RawAtomicStore {
+    #[maybe_async]
+    async fn process_write(self, _: S, wctx: WriteContext<'_, L>) -> Result<WriteResult> {
         let rows = self.mutations.len();
         let (mut mutations, ctx, raw_ext) = (self.mutations, self.ctx, wctx.raw_ext);
 

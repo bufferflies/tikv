@@ -70,8 +70,11 @@ impl CommandExt for AcquirePessimisticLock {
     gen_lock!(keys: multiple(|x| &x.0));
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLock {
-    fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLock {
+    #[maybe_async]
+    async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
         if self.allow_lock_with_conflict && self.keys.len() > 1 {
             // Currently multiple keys with `allow_lock_with_conflict` set is not supported.
             return Err(Error::from(ErrorInner::Other(box_err!(

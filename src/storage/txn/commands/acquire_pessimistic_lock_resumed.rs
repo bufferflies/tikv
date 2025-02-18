@@ -78,8 +78,11 @@ impl CommandExt for AcquirePessimisticLockResumed {
     gen_lock!(items: multiple(|x| &x.key));
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLockResumed {
-    fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLockResumed {
+    #[maybe_async]
+    async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
         fail_point!("acquire_pessimistic_lock_resumed_before_process_write");
         let mut modifies = vec![];
         let mut txn = None;

@@ -61,6 +61,7 @@ use tracker::{get_tls_tracker_token, set_tls_tracker_token, TrackerToken};
 use txn_types::TimeStamp;
 
 use crate::{
+    command_process_read, command_process_write,
     read_pool::ReadPoolHandle,
     server::lock_manager::waiter_manager,
     storage::{
@@ -1110,7 +1111,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
             fail_point!("scheduler_process");
             if task.cmd.readonly() {
-                self.process_read(snapshot, task, &mut statistics);
+                self.process_read(snapshot, task, &mut statistics).await;
             } else {
                 self.process_write(snapshot, task, &mut statistics).await;
             };
@@ -1130,7 +1131,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
     /// Processes a read command within a worker thread, then posts
     /// `ReadFinished` message back to the `Scheduler`.
-    fn process_read(self, snapshot: E::Snap, task: Task, statistics: &mut Statistics) {
+    async fn process_read(self, snapshot: E::Snap, task: Task, statistics: &mut Statistics) {
         fail_point!("txn_before_process_read");
         debug!("process read cmd in worker pool"; "cid" => task.cid);
 
@@ -1141,12 +1142,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
         let begin_instant = Instant::now();
         let cmd = task.cmd;
-        let pr = unsafe {
-            with_perf_context::<E, _, _>(tag, || {
-                cmd.process_read(snapshot, statistics)
-                    .unwrap_or_else(|e| ProcessResult::Failed { err: e.into() })
-            })
-        };
+        let pr = command_process_read!(cmd, snapshot, statistics)
+            .unwrap_or_else(|e| ProcessResult::Failed { err: e.into() });
         SCHED_PROCESSING_READ_HISTOGRAM_STATIC
             .get(tag)
             .observe(begin_instant.saturating_elapsed_secs());
@@ -1160,6 +1157,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         fail_point!("txn_before_process_write");
         let snap = snapshot.get_kvengine_snap();
         let region_id = snap.as_ref().map(|snap| snap.get_id()).unwrap_or_default();
+        tikv_util::set_current_region(region_id);
         let write_bytes = task.cmd.write_bytes();
         let tag = task.cmd.tag();
         let cid = task.cid;
@@ -1192,7 +1190,6 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
         let deadline = task.cmd.deadline();
         let write_result = {
-            let _guard = sample.observe_cpu();
             let context = WriteContext {
                 lock_mgr: &self.inner.lock_mgr,
                 concurrency_manager,
@@ -1202,14 +1199,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 raw_ext,
             };
             let begin_instant = Instant::now();
-            let res = unsafe {
-                with_perf_context::<E, _, _>(tag, || {
-                    tikv_util::set_current_region(region_id);
-                    task.cmd
-                        .process_write(snapshot, context)
-                        .map_err(StorageError::from)
-                })
-            };
+            let res = command_process_write!(task.cmd, snapshot, context, sample)
+                .map_err(StorageError::from);
             SCHED_PROCESSING_READ_HISTOGRAM_STATIC
                 .get(tag)
                 .observe(begin_instant.saturating_elapsed_secs());

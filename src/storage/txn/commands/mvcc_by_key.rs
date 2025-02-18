@@ -35,8 +35,11 @@ impl CommandExt for MvccByKey {
     gen_lock!(empty);
 }
 
-impl<S: Snapshot> ReadCommand<S> for MvccByKey {
-    fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult> {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static> ReadCommand<S> for MvccByKey {
+    #[maybe_async]
+    async fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult> {
         let mut reader = SnapshotReader::new(TimeStamp::max(), snapshot, true);
         let result = find_mvcc_infos_by_key(&mut reader, &self.key, TimeStamp::max());
         statistics.add(&reader.take_statistics());

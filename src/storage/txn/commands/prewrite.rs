@@ -256,8 +256,11 @@ impl CommandExt for Prewrite {
     }
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Prewrite {
-    fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Prewrite {
+    #[maybe_async]
+    async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
         self.into_prewriter().process_write(snapshot, context)
     }
 }
@@ -421,8 +424,11 @@ impl CommandExt for PrewritePessimistic {
     gen_lock!(mutations: multiple(|(x, _)| x.key()));
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for PrewritePessimistic {
-    fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for PrewritePessimistic {
+    #[maybe_async]
+    async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
         self.into_prewriter().process_write(snapshot, context)
     }
 }

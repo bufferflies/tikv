@@ -119,8 +119,11 @@ impl CommandExt for FlashbackToVersionReadPhase {
 ///   4. [FinishFlashback] Commit phase:
 ///     - Commit the `self.start_key` we write at the second phase to finish the
 ///       flashback.
-impl<S: Snapshot> ReadCommand<S> for FlashbackToVersionReadPhase {
-    fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult> {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static> ReadCommand<S> for FlashbackToVersionReadPhase {
+    #[maybe_async]
+    async fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult> {
         let tag = self.tag().get_str();
         let mut reader = MvccReader::new_with_ctx(snapshot, Some(ScanMode::Forward), &self.ctx);
         let mut start_key = self.start_key.clone();

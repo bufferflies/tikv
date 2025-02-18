@@ -44,8 +44,10 @@ impl CommandExt for Rollback {
     can_build_txn_file!();
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Rollback {
-    fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Rollback {
+    #[maybe_async]
+    async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
         let mut txn = MvccTxn::new(self.start_ts, context.concurrency_manager);
         let mut reader = ReaderWithStats::new(
             SnapshotReader::new_with_ctx(self.start_ts, snapshot, &self.ctx),

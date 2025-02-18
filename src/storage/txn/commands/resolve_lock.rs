@@ -76,8 +76,15 @@ impl CommandExt for ResolveLock {
     }
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for ResolveLock {
-    fn process_write(mut self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLock {
+    #[maybe_async]
+    async fn process_write(
+        mut self,
+        snapshot: S,
+        context: WriteContext<'_, L>,
+    ) -> Result<WriteResult> {
         let (ctx, txn_status, key_locks) = (self.ctx, self.txn_status, self.key_locks);
 
         let mut txn = MvccTxn::new(TimeStamp::zero(), context.concurrency_manager);

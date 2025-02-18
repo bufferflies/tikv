@@ -40,8 +40,14 @@ impl CommandExt for Pause {
     gen_lock!(keys: multiple);
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Pause {
-    fn process_write(self, _snapshot: S, _context: WriteContext<'_, L>) -> Result<WriteResult> {
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Pause {
+    #[maybe_async]
+    async fn process_write(
+        self,
+        _snapshot: S,
+        _context: WriteContext<'_, L>,
+    ) -> Result<WriteResult> {
         thread::sleep(Duration::from_millis(self.duration));
         Ok(WriteResult {
             ctx: self.ctx,

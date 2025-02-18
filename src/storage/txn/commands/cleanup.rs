@@ -44,8 +44,10 @@ impl CommandExt for Cleanup {
     gen_lock!(key);
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for Cleanup {
-    fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Cleanup {
+    #[maybe_async]
+    async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
         // It is not allowed for commit to overwrite a protected rollback. So we update
         // max_ts to prevent this case from happening.
         context.concurrency_manager.update_max_ts(self.start_ts);

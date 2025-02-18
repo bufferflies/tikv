@@ -50,8 +50,11 @@ impl CommandExt for RawCompareAndSwap {
     }
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for RawCompareAndSwap {
-    fn process_write(self, snapshot: S, wctx: WriteContext<'_, L>) -> Result<WriteResult> {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for RawCompareAndSwap {
+    #[maybe_async]
+    async fn process_write(self, snapshot: S, wctx: WriteContext<'_, L>) -> Result<WriteResult> {
         let (cf, mut key, value, previous_value, ctx, raw_ext) = (
             self.cf,
             self.key,

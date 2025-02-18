@@ -66,7 +66,9 @@ impl CommandExt for CheckTxnStatus {
     can_build_txn_file!();
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for CheckTxnStatus {
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatus {
     /// checks whether a transaction has expired its primary lock's TTL,
     /// rollback the transaction if expired, or update the transaction's
     /// min_commit_ts according to the metadata in the primary lock.
@@ -75,7 +77,8 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for CheckTxnStatus {
     /// `caller_start_ts` is T1's `start_ts`, and the `current_ts` is
     /// literally the timestamp when this function is invoked; it may not be
     /// accurate.
-    fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
+    #[maybe_async]
+    async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
         let mut new_max_ts = self.lock_ts;
         if !self.current_ts.is_max() && self.current_ts > new_max_ts {
             new_max_ts = self.current_ts;

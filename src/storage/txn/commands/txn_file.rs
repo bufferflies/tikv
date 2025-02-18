@@ -900,8 +900,11 @@ impl CommandExt for TxnFileCommand {
     }
 }
 
-impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for TxnFileCommand {
-    fn process_write(
+// TODO: implement async process.
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileCommand {
+    #[maybe_async]
+    async fn process_write(
         mut self,
         snapshot: S,
         _context: WriteContext<'_, L>,

@@ -699,44 +699,46 @@ impl Command {
         }
     }
 
-    pub(super) fn process_read<S: Snapshot>(
+    #[maybe_async::both]
+    pub(super) async fn process_read<S: Snapshot + 'static>(
         self,
         snapshot: S,
         statistics: &mut Statistics,
     ) -> Result<ProcessResult> {
         match self {
-            Command::ResolveLockReadPhase(t) => t.process_read(snapshot, statistics),
-            Command::MvccByKey(t) => t.process_read(snapshot, statistics),
-            Command::MvccByStartTs(t) => t.process_read(snapshot, statistics),
-            Command::FlashbackToVersionReadPhase(t) => t.process_read(snapshot, statistics),
+            Command::ResolveLockReadPhase(t) => t.process_read(snapshot, statistics).await,
+            Command::MvccByKey(t) => t.process_read(snapshot, statistics).await,
+            Command::MvccByStartTs(t) => t.process_read(snapshot, statistics).await,
+            Command::FlashbackToVersionReadPhase(t) => t.process_read(snapshot, statistics).await,
             _ => panic!("unsupported read command"),
         }
     }
 
-    pub(crate) fn process_write<S: Snapshot, L: LockManager>(
+    #[maybe_async::both]
+    pub(crate) async fn process_write<S: Snapshot + 'static, L: LockManager>(
         self,
         snapshot: S,
         context: WriteContext<'_, L>,
     ) -> Result<WriteResult> {
         match self {
-            Command::Prewrite(t) => t.process_write(snapshot, context),
-            Command::PrewritePessimistic(t) => t.process_write(snapshot, context),
-            Command::AcquirePessimisticLock(t) => t.process_write(snapshot, context),
-            Command::AcquirePessimisticLockResumed(t) => t.process_write(snapshot, context),
-            Command::Commit(t) => t.process_write(snapshot, context),
-            Command::Cleanup(t) => t.process_write(snapshot, context),
-            Command::Rollback(t) => t.process_write(snapshot, context),
-            Command::PessimisticRollback(t) => t.process_write(snapshot, context),
-            Command::ResolveLock(t) => t.process_write(snapshot, context),
-            Command::ResolveLockLite(t) => t.process_write(snapshot, context),
-            Command::TxnHeartBeat(t) => t.process_write(snapshot, context),
-            Command::CheckTxnStatus(t) => t.process_write(snapshot, context),
-            Command::CheckSecondaryLocks(t) => t.process_write(snapshot, context),
-            Command::Pause(t) => t.process_write(snapshot, context),
-            Command::RawCompareAndSwap(t) => t.process_write(snapshot, context),
-            Command::RawAtomicStore(t) => t.process_write(snapshot, context),
-            Command::FlashbackToVersion(t) => t.process_write(snapshot, context),
-            Command::TxnFile(t) => t.process_write(snapshot, context),
+            Command::Prewrite(t) => t.process_write(snapshot, context).await,
+            Command::PrewritePessimistic(t) => t.process_write(snapshot, context).await,
+            Command::AcquirePessimisticLock(t) => t.process_write(snapshot, context).await,
+            Command::AcquirePessimisticLockResumed(t) => t.process_write(snapshot, context).await,
+            Command::Commit(t) => t.process_write(snapshot, context).await,
+            Command::Cleanup(t) => t.process_write(snapshot, context).await,
+            Command::Rollback(t) => t.process_write(snapshot, context).await,
+            Command::PessimisticRollback(t) => t.process_write(snapshot, context).await,
+            Command::ResolveLock(t) => t.process_write(snapshot, context).await,
+            Command::ResolveLockLite(t) => t.process_write(snapshot, context).await,
+            Command::TxnHeartBeat(t) => t.process_write(snapshot, context).await,
+            Command::CheckTxnStatus(t) => t.process_write(snapshot, context).await,
+            Command::CheckSecondaryLocks(t) => t.process_write(snapshot, context).await,
+            Command::Pause(t) => t.process_write(snapshot, context).await,
+            Command::RawCompareAndSwap(t) => t.process_write(snapshot, context).await,
+            Command::RawAtomicStore(t) => t.process_write(snapshot, context).await,
+            Command::FlashbackToVersion(t) => t.process_write(snapshot, context).await,
+            Command::TxnFile(t) => t.process_write(snapshot, context).await,
             _ => panic!("unsupported write command"),
         }
     }
@@ -818,14 +820,44 @@ impl Debug for Command {
 
 /// Commands that do not need to modify the database during execution will
 /// implement this trait.
+#[maybe_async::async_trait]
 pub trait ReadCommand<S: Snapshot>: CommandExt {
-    fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult>;
+    #[maybe_async]
+    async fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult>;
+}
+
+#[macro_export]
+macro_rules! command_process_read {
+    ($cmd:expr, $snapshot:expr, $statistics:expr) => {{
+        if $snapshot.is_sync() {
+            $cmd.process_read($snapshot, $statistics)
+        } else {
+            $cmd.process_read_async($snapshot, $statistics).await
+        }
+    }};
 }
 
 /// Commands that need to modify the database during execution will implement
 /// this trait.
+#[maybe_async::async_trait]
 pub trait WriteCommand<S: Snapshot, L: LockManager>: CommandExt {
-    fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult>;
+    #[maybe_async]
+    async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult>;
+}
+
+#[macro_export]
+macro_rules! command_process_write {
+    ($cmd:expr, $snapshot:expr, $context:expr, $sample:expr) => {{
+        if $snapshot.is_sync() {
+            let _guard = $sample.observe_cpu();
+            $cmd.process_write($snapshot, $context)
+        } else {
+            let task = async { $cmd.process_write_async($snapshot, $context).await };
+            let (cpu_time, res) = $sample.observe_cpu_async(task).await;
+            $sample.add_cpu_time(cpu_time);
+            res
+        }
+    }};
 }
 
 #[cfg(test)]
