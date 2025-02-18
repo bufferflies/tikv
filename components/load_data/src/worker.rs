@@ -1817,7 +1817,10 @@ pub async fn ingest_files_to_leader(
                 IdVer::new(region.get_id(), region.get_region_epoch().get_version()),
             );
             warn!("{} ingest_files_to_leader failed {:?}", tag, errpb);
-            if errpb.has_not_leader() {
+            if errpb.has_region_not_initialized() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            } else if errpb.has_not_leader() {
                 leader = errpb.mut_not_leader().take_leader();
                 if leader.store_id == 0 {
                     return Err(Error::LeaderNotFound(region.get_id()));
