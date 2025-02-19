@@ -762,10 +762,11 @@ impl Engine {
         });
 
         info!(
-            "start destroying range for {}, {:?}, destroyed: {}, overlaps: {}, columnar overlaps: {}",
+            "start destroying range for {}, {:?}, destroyed: {}, columnar destroyed: {}, overlaps: {}, columnar overlaps: {}",
             shard.tag(),
             del_prefixes,
-            deletes.len() + columnar_deletes.len(),
+            deletes.len(),
+            columnar_deletes.len(),
             overlaps.len(),
             col_overlaps.len(),
         );
@@ -773,6 +774,8 @@ impl Engine {
         let mut cs = if overlaps.is_empty() && col_overlaps.is_empty() {
             let mut cs = pb::ChangeSet::default();
             cs.mut_destroy_range().set_table_deletes(deletes.into());
+            cs.mut_destroy_range()
+                .set_columnar_deletes(columnar_deletes.into());
             cs
         } else {
             let mut req = self.new_compact_request_with_shard(shard);
@@ -793,7 +796,9 @@ impl Engine {
             let mut cs = self.comp_client.compact(req)?;
             let dr = cs.mut_destroy_range();
             deletes.extend(dr.take_table_deletes().into_iter());
+            columnar_deletes.extend(dr.take_columnar_deletes().into_iter());
             dr.set_table_deletes(deletes.into());
+            dr.set_columnar_deletes(columnar_deletes.into());
             cs
         };
         cs.set_shard_id(shard.id);
@@ -950,9 +955,10 @@ impl Engine {
         });
 
         info!(
-            "start trim_over_bound for {}, destroyed: {}, overlaps: {}, columnar overlaps: {}",
+            "start trim_over_bound for {}, destroyed: {}, columnar destroyed: {}, overlaps: {}, columnar overlaps: {}",
             shard.tag(),
             deletes.len(),
+            columnar_deletes.len(),
             overlaps.len(),
             col_overlaps.len(),
         );
@@ -960,6 +966,8 @@ impl Engine {
         let mut cs = if overlaps.is_empty() && col_overlaps.is_empty() {
             let mut cs = pb::ChangeSet::default();
             cs.mut_trim_over_bound().set_table_deletes(deletes.into());
+            cs.mut_trim_over_bound()
+                .set_columnar_deletes(columnar_deletes.into());
             cs
         } else {
             let mut req = self.new_compact_request_with_shard(shard);
@@ -979,7 +987,9 @@ impl Engine {
             let mut cs = self.comp_client.compact(req)?;
             let tc = cs.mut_trim_over_bound();
             deletes.extend(tc.take_table_deletes().into_iter());
+            columnar_deletes.extend(tc.take_columnar_deletes().into_iter());
             tc.set_table_deletes(deletes.into());
+            tc.set_columnar_deletes(columnar_deletes.into());
             cs
         };
         cs.set_shard_id(shard.id);
@@ -992,34 +1002,53 @@ impl Engine {
     pub fn trim_over_bound_by_meta(&self, meta: &ShardMeta) -> Result<pb::ChangeSet> {
         // Tables that are entirely over bound.
         let mut deletes = vec![];
+        let mut columnar_deletes = vec![];
         // Tables that are partially over bound.
         let mut over_bounds = vec![];
+        let mut col_over_bounds = vec![];
         for (&id, f) in &meta.files {
             let shard_bound = meta.range.data_bound();
             let file_bound = f.data_bound();
             if !shard_bound.overlap_bound(file_bound) {
-                let mut delete = pb::TableDelete::default();
-                delete.set_id(id);
-                delete.set_level(f.level as u32);
-                delete.set_cf(f.cf as i32);
-                deletes.push(delete);
+                if f.is_columnar_file() {
+                    let mut columnar_delete = pb::ColumnarDelete::default();
+                    columnar_delete.set_id(id);
+                    columnar_delete.set_level(f.level as u32);
+                    columnar_deletes.push(columnar_delete);
+                } else {
+                    let mut delete = pb::TableDelete::default();
+                    delete.set_id(id);
+                    delete.set_level(f.level as u32);
+                    delete.set_cf(f.cf as i32);
+                    deletes.push(delete);
+                }
             } else if !shard_bound.contains_bound(file_bound) {
-                over_bounds.push((id, f.level as u32, f.cf as i32));
+                if f.is_columnar_file() {
+                    col_over_bounds.push((id, f.level as u32));
+                } else {
+                    over_bounds.push((id, f.level as u32, f.cf as i32));
+                }
             }
         }
 
         debug!(
-            "start trim_over_bound_by_meta for {}:{}, destroyed: {}, overlapping: {}",
+            "start trim_over_bound_by_meta for {}:{}, destroyed: {}, columnar destroyed: {}, overlaps: {}, columnar overlaps: {}",
             meta.id,
             meta.ver,
             deletes.len(),
-            over_bounds.len()
+            columnar_deletes.len(),
+            over_bounds.len(),
+            col_over_bounds.len()
         );
 
-        let mut res_cs = if over_bounds.is_empty() {
+        let mut res_cs = if over_bounds.is_empty() && col_over_bounds.is_empty() {
             let mut cs = pb::ChangeSet::default();
             if !deletes.is_empty() {
                 cs.mut_trim_over_bound().set_table_deletes(deletes.into());
+            }
+            if !columnar_deletes.is_empty() {
+                cs.mut_trim_over_bound()
+                    .set_columnar_deletes(columnar_deletes.into());
             }
             cs
         } else {
@@ -1027,7 +1056,7 @@ impl Engine {
             req.file_ids = self.id_allocator.alloc_id(over_bounds.len()).unwrap();
             let in_place_compaction_ctx = InPlaceCompactionCtx {
                 file_ids: over_bounds,
-                col_file_ids: vec![],
+                col_file_ids: col_over_bounds,
                 block_size: self.opts.table_builder_options.block_size,
                 columnar_build_opts: self.opts.columnar_build_options,
                 schema_file_id: Some(meta.schema_file_id),
@@ -1037,7 +1066,9 @@ impl Engine {
             let mut cs = self.comp_client.compact(req)?;
             let tc = cs.mut_trim_over_bound();
             deletes.extend(tc.take_table_deletes().into_iter());
+            columnar_deletes.extend(tc.take_columnar_deletes().into_iter());
             tc.set_table_deletes(deletes.into());
+            tc.set_columnar_deletes(columnar_deletes.into());
             cs
         };
         res_cs.set_shard_id(meta.id);

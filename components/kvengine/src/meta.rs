@@ -1419,6 +1419,10 @@ impl FileMeta {
         self.file_type == FileType::Sst
     }
 
+    pub fn is_columnar_file(&self) -> bool {
+        self.file_type == FileType::Columnar
+    }
+
     pub fn can_use_ia(&self) -> bool {
         match self.file_type {
             FileType::Sst if (self.cf as usize == WRITE_CF && self.level > 0) => true,
