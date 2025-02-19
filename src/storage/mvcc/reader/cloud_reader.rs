@@ -43,27 +43,30 @@ impl CloudReader {
 
     /// Note: This method is also used by resolving locks during restoring
     /// keyspace.
-    // TODO: support async (for write process).
-    pub fn get_txn_commit_record(
+    #[maybe_async::both]
+    pub async fn get_txn_commit_record(
         &mut self,
         key: &Key,
         start_ts: TimeStamp,
     ) -> Result<TxnCommitRecord> {
         let raw_key = key.to_raw()?;
-        let item = self.snapshot.get(WRITE_CF, &raw_key, 0);
+        let item = self.snapshot.get(WRITE_CF, &raw_key, 0).await;
         if item.user_meta_len() > 0 {
             let user_meta = UserMeta::from_slice(item.user_meta());
             if let Some(record) = Self::get_commit_by_item(&user_meta, item.get_value(), start_ts) {
                 return Ok(record);
             }
         }
-        let mut data_iter =
-            self.snapshot
-                .new_iterator(WRITE_CF, false, true, None, self.fill_cache);
+        let mut data_iter = self
+            .snapshot
+            .new_iterator(WRITE_CF, false, true, None, self.fill_cache)
+            .await;
         let mut next_key = Vec::with_capacity(raw_key.len() + 1);
         next_key.extend_from_slice(&raw_key);
         next_key.push(0);
-        data_iter.set_range(Bytes::from(raw_key), Bytes::from(next_key));
+        data_iter
+            .set_range(Bytes::from(raw_key), Bytes::from(next_key))
+            .await;
         while data_iter.valid() {
             debug_assert!(!kvengine::table::is_deleted(data_iter.meta()));
             // TODO: remove this check, iterator should not return deleted records.

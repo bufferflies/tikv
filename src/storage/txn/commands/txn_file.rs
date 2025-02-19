@@ -240,17 +240,23 @@ impl TxnFileCommand {
         None
     }
 
-    fn get_conflict_write(&self, snap_access: &SnapAccess) -> Option<(Vec<u8>, UserMeta)> {
-        if let Some((key, um)) = snap_access.get_txn_file_conflict_write(&self.txn_file) {
+    #[maybe_async::both]
+    async fn get_conflict_write(&self, snap_access: &SnapAccess) -> Option<(Vec<u8>, UserMeta)> {
+        if let Some((key, um)) = snap_access
+            .get_txn_file_conflict_write(&self.txn_file)
+            .await
+        {
             return Some((key, um));
         }
         None
     }
 
     // TODO: choose best match algorithm based on stats.
-    fn check_constraint(&self, snap_access: &SnapAccess) -> crate::storage::mvcc::Result<()> {
-        if let Some(already_exist_key) =
-            snap_access.check_txn_file_constraint(&self.txn_file, self.ts().into_inner())
+    #[maybe_async::both]
+    async fn check_constraint(&self, snap_access: &SnapAccess) -> crate::storage::mvcc::Result<()> {
+        if let Some(already_exist_key) = snap_access
+            .check_txn_file_constraint(&self.txn_file, self.ts().into_inner())
+            .await
         {
             return Err(ErrorInner::AlreadyExist {
                 key: already_exist_key,
@@ -260,9 +266,9 @@ impl TxnFileCommand {
         Ok(())
     }
 
+    #[maybe_async::both]
     #[allow(dead_code)]
-    // TODO: support async (for write process).
-    fn check_constraint_by_linear_match(
+    async fn check_constraint_by_linear_match(
         &self,
         snap_access: &SnapAccess,
     ) -> crate::storage::mvcc::Result<()> {
@@ -278,9 +284,10 @@ impl TxnFileCommand {
         let mut end_key = prefix.to_vec();
         end_key.extend_from_slice(self.txn_file.biggest().deref());
         end_key.push(0);
-        let mut snap_iter =
-            snap_access.new_iterator(WRITE_CF, false, false, Some(self.ts().into_inner()), true);
-        snap_iter.set_range(start_key.into(), end_key.into());
+        let mut snap_iter = snap_access
+            .new_iterator(WRITE_CF, false, false, Some(self.ts().into_inner()), true)
+            .await;
+        snap_iter.set_range(start_key.into(), end_key.into()).await;
         txn_file_iter.rewind();
         while txn_file_iter.valid() && snap_iter.valid() {
             let txn_key = txn_file_iter.key();
@@ -288,7 +295,7 @@ impl TxnFileCommand {
             let txn_op = txn_file_iter.get_op();
             match &snap_key[prefix_len..].cmp(txn_key.deref()) {
                 Ordering::Less => {
-                    snap_iter.next();
+                    snap_iter.next().await;
                 }
                 Ordering::Equal => {
                     if !snap_iter.val().is_empty()
@@ -299,7 +306,7 @@ impl TxnFileCommand {
                         }
                         .into());
                     }
-                    snap_iter.next();
+                    snap_iter.next().await;
                     txn_file_iter.next();
                 }
                 Ordering::Greater => {
@@ -354,7 +361,8 @@ impl TxnFileCommand {
         Ok(false)
     }
 
-    fn process_prewrite(
+    #[maybe_async::both]
+    async fn process_prewrite(
         &mut self,
         snap_access: &SnapAccess,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
@@ -378,7 +386,7 @@ impl TxnFileCommand {
                 self.ts()
             ));
         } else {
-            if let Some(commit_ts) = self.check_txn_commit_record(snap_access)? {
+            if let Some(commit_ts) = self.check_txn_commit_record(snap_access).await? {
                 // already committed
                 let lock = self.lock_prefix.as_ref().unwrap();
                 let start_ts = lock.ts;
@@ -390,7 +398,7 @@ impl TxnFileCommand {
                 }
                 .into());
             }
-            if let Some((key, conflict_um)) = self.get_conflict_write(snap_access) {
+            if let Some((key, conflict_um)) = self.get_conflict_write(snap_access).await {
                 let lock_prefix = self.lock_prefix.as_ref().unwrap();
                 return Err(ErrorInner::WriteConflict {
                     start_ts: self.ts(),
@@ -403,7 +411,7 @@ impl TxnFileCommand {
                 .into());
             }
             if self.txn_file.get_inserts() + self.txn_file.get_check_not_exists() > 0 {
-                self.check_constraint(snap_access)?;
+                self.check_constraint(snap_access).await?;
             }
             self.modified = true;
         }
@@ -416,7 +424,8 @@ impl TxnFileCommand {
         })
     }
 
-    fn check_txn_commit_record(
+    #[maybe_async::both]
+    async fn check_txn_commit_record(
         &mut self,
         snap_access: &SnapAccess,
     ) -> crate::storage::mvcc::Result<Option<TimeStamp>> {
@@ -425,8 +434,9 @@ impl TxnFileCommand {
         if snap_access.get_start_key() <= primary && primary < snap_access.get_end_key() {
             let mut cloud_reader = CloudReader::new(snap_access.clone(), true);
             let primary = Key::from_raw(&lock_prefix.primary);
-            if let TxnCommitRecord::SingleRecord { commit_ts, write } =
-                cloud_reader.get_txn_commit_record(&primary, lock_prefix.ts)?
+            if let TxnCommitRecord::SingleRecord { commit_ts, write } = cloud_reader
+                .get_txn_commit_record(&primary, lock_prefix.ts)
+                .await?
             {
                 if write.write_type == WriteType::Rollback {
                     return Err(ErrorInner::WriteConflict {
@@ -449,7 +459,8 @@ impl TxnFileCommand {
 
     // Return Ok(None) when all keys are out of region, and the status of txn is
     // unknown.
-    fn check_txn_commit_record_by_keys(
+    #[maybe_async::both]
+    async fn check_txn_commit_record_by_keys(
         &self,
         keys: &[Key],
         start_ts: TimeStamp,
@@ -462,7 +473,7 @@ impl TxnFileCommand {
             if snap_access.get_start_key() <= raw_key.as_slice()
                 && raw_key.as_slice() < snap_access.get_end_key()
             {
-                return match reader.get_txn_commit_record(key, start_ts)?.info() {
+                return match reader.get_txn_commit_record(key, start_ts).await?.info() {
                     Some((_, WriteType::Rollback)) | None => {
                         // None: related Rollback has been collapsed.
                         // Rollback: rollback by concurrent transaction.
@@ -496,7 +507,8 @@ impl TxnFileCommand {
     /// or rollback, and then the primary region is merged.
     ///
     /// See https://github.com/tidbcloud/cloud-storage-engine/issues/1800.
-    fn check_commit_primary_region(
+    #[maybe_async::both]
+    async fn check_commit_primary_region(
         &self,
         lock: &txn_types::Lock,
         lock_txn_file: &TxnFile,
@@ -522,7 +534,8 @@ impl TxnFileCommand {
 
             let mut cloud_reader = CloudReader::new(snap_access.clone(), true);
             let record = cloud_reader
-                .get_txn_commit_record(&Key::from_raw(&lock.primary), start_ts)?
+                .get_txn_commit_record(&Key::from_raw(&lock.primary), start_ts)
+                .await?
                 .info();
             return match record {
                 Some((_, WriteType::Rollback)) | None => Err(txn_lock_not_found()),
@@ -539,7 +552,8 @@ impl TxnFileCommand {
         Ok(())
     }
 
-    fn process_commit(
+    #[maybe_async::both]
+    async fn process_commit(
         &mut self,
         snap_access: &SnapAccess,
         commit_ts: TimeStamp,
@@ -559,7 +573,8 @@ impl TxnFileCommand {
                 start_ts,
                 commit_ts,
                 snap_access,
-            )?;
+            )
+            .await?;
 
             debug_assert_eq!(lock.ts, self.ts());
             if commit_ts < lock.min_commit_ts {
@@ -592,12 +607,10 @@ impl TxnFileCommand {
                 });
             }
 
-            if let Some(_new_commit_ts) = self.check_txn_commit_record_by_keys(
-                keys.as_slice(),
-                start_ts,
-                commit_ts,
-                snap_access,
-            )? {
+            if let Some(_new_commit_ts) = self
+                .check_txn_commit_record_by_keys(keys.as_slice(), start_ts, commit_ts, snap_access)
+                .await?
+            {
                 // Normal txn return the commit_ts in request other than the committed record.
                 // We keep the same here.
                 return Ok(ProcessResult::TxnStatus {
@@ -613,7 +626,8 @@ impl TxnFileCommand {
         .into())
     }
 
-    fn process_rollback(
+    #[maybe_async::both]
+    async fn process_rollback(
         &mut self,
         snap_access: &SnapAccess,
         keys: Option<Vec<Key>>,
@@ -629,7 +643,10 @@ impl TxnFileCommand {
         } else if let Some(keys) = keys {
             let mut cloud_reader = CloudReader::new(snap_access.clone(), true);
             for key in keys {
-                match self.process_check_txn_status_missing_lock(&mut cloud_reader, key.clone())? {
+                match self
+                    .process_check_txn_status_missing_lock(&mut cloud_reader, key.clone())
+                    .await?
+                {
                     TxnStatus::RolledBack | TxnStatus::LockNotExist => {}
                     TxnStatus::Committed { commit_ts } => {
                         return Err(ErrorInner::Committed {
@@ -656,7 +673,8 @@ impl TxnFileCommand {
         }
     }
 
-    fn process_check_txn_status(
+    #[maybe_async::both]
+    async fn process_check_txn_status(
         &mut self,
         snap_access: &SnapAccess,
         primary_key: Key,
@@ -673,7 +691,9 @@ impl TxnFileCommand {
                 );
             }
         }
-        let txn_status = self.process_check_txn_status_missing_lock(&mut reader, primary_key)?;
+        let txn_status = self
+            .process_check_txn_status_missing_lock(&mut reader, primary_key)
+            .await?;
 
         // Resolve txn file locks merged from other regions.
         // See https://github.com/tidbcloud/cloud-storage-engine/issues/2182.
@@ -744,23 +764,26 @@ impl TxnFileCommand {
         Ok(ProcessResult::TxnStatus { txn_status })
     }
 
-    fn process_check_txn_status_missing_lock(
+    #[maybe_async::both]
+    async fn process_check_txn_status_missing_lock(
         &mut self,
         reader: &mut CloudReader,
         primary_key: Key,
     ) -> crate::storage::mvcc::Result<TxnStatus> {
-        let txn_status =
-            match reader.get_txn_commit_record(&primary_key, self.txn_file_ref.start_ts.into())? {
-                TxnCommitRecord::SingleRecord { commit_ts, write } => {
-                    if write.write_type == WriteType::Rollback {
-                        TxnStatus::RolledBack
-                    } else {
-                        TxnStatus::committed(commit_ts)
-                    }
+        let txn_status = match reader
+            .get_txn_commit_record(&primary_key, self.txn_file_ref.start_ts.into())
+            .await?
+        {
+            TxnCommitRecord::SingleRecord { commit_ts, write } => {
+                if write.write_type == WriteType::Rollback {
+                    TxnStatus::RolledBack
+                } else {
+                    TxnStatus::committed(commit_ts)
                 }
-                TxnCommitRecord::None { .. } => TxnStatus::LockNotExist,
-                _ => unreachable!(),
-            };
+            }
+            TxnCommitRecord::None { .. } => TxnStatus::LockNotExist,
+            _ => unreachable!(),
+        };
         Ok(txn_status)
     }
 
@@ -798,16 +821,18 @@ impl TxnFileCommand {
         })
     }
 
-    fn process_resolve_txn_lock(
+    #[maybe_async::both]
+    async fn process_resolve_txn_lock(
         &mut self,
         snap_access: &SnapAccess,
         commit_ts: TimeStamp,
         resolve_keys: Option<Vec<Key>>,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         let res = if commit_ts.is_zero() {
-            self.process_rollback(snap_access, resolve_keys)
+            self.process_rollback(snap_access, resolve_keys).await
         } else {
             self.process_commit(snap_access, commit_ts, resolve_keys)
+                .await
         };
         match res {
             Ok(_) => Ok(ProcessResult::Res),
@@ -821,13 +846,15 @@ impl TxnFileCommand {
         }
     }
 
-    fn process_resolve_lock(
+    #[maybe_async::both]
+    async fn process_resolve_lock(
         &mut self,
         snap_access: &SnapAccess,
         mut resolve_lock: ResolveLock,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         let um = UserMeta::from_slice(self.txn_file_ref.get_user_meta());
-        self.process_resolve_txn_lock(snap_access, um.commit_ts.into(), None)?;
+        self.process_resolve_txn_lock(snap_access, um.commit_ts.into(), None)
+            .await?;
         let resolved_txn = resolve_lock.txn_file_status.remove(&self.ts());
         debug_assert!(resolved_txn.is_some());
         if resolve_lock.txn_file_status.is_empty() && resolve_lock.txn_status.is_empty() {
@@ -900,7 +927,6 @@ impl CommandExt for TxnFileCommand {
     }
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileCommand {
     #[maybe_async]
@@ -915,24 +941,29 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileComman
         debug!("txn file process write"; "cmd" => ?cmd, "txn_file_ref" => ?self.txn_file_ref, "ctx" => ?ctx, "snap" => ?snap);
 
         let pr = match *cmd {
-            Command::Prewrite(_) => self.process_prewrite(snap)?,
+            Command::Prewrite(_) => self.process_prewrite(snap).await?,
             Command::Commit(commit) => {
-                self.process_commit(snap, commit.commit_ts, Some(commit.keys))?
+                self.process_commit(snap, commit.commit_ts, Some(commit.keys))
+                    .await?
             }
-            Command::Rollback(rollback) => self.process_rollback(snap, Some(rollback.keys))?,
+            Command::Rollback(rollback) => self.process_rollback(snap, Some(rollback.keys)).await?,
             Command::TxnHeartBeat(txn_heartbeat) => {
                 let primary_key = txn_heartbeat.primary_key.to_raw().unwrap();
                 self.process_txn_heartbeat(snap, primary_key, txn_heartbeat.advise_ttl)?
             }
-            Command::CheckTxnStatus(check_txn_status) => self.process_check_txn_status(
-                snap,
-                check_txn_status.primary_key,
-                check_txn_status.current_ts,
-                check_txn_status.caller_start_ts,
-            )?,
-            Command::ResolveLock(resolve) => self.process_resolve_lock(snap, resolve)?,
+            Command::CheckTxnStatus(check_txn_status) => {
+                self.process_check_txn_status(
+                    snap,
+                    check_txn_status.primary_key,
+                    check_txn_status.current_ts,
+                    check_txn_status.caller_start_ts,
+                )
+                .await?
+            }
+            Command::ResolveLock(resolve) => self.process_resolve_lock(snap, resolve).await?,
             Command::ResolveLockLite(resolve) => {
-                self.process_resolve_txn_lock(snap, resolve.commit_ts, Some(resolve.resolve_keys))?
+                self.process_resolve_txn_lock(snap, resolve.commit_ts, Some(resolve.resolve_keys))
+                    .await?
             }
             _ => {
                 return Err(box_err!("unsupported txn file command"));

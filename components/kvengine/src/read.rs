@@ -40,8 +40,8 @@ use crate::{
         sstable::SsTable,
         table,
         vector_index::VectorItemsReader,
-        AsyncMergeIterator, BoundedDataSet, DataBound, InnerKey, Iterator as TableIterator,
-        SkipOpTxnFileIterator, TxnFile, TxnFileIterator,
+        AsyncMergeIterator, BoundedDataSet, ConstraintChecker, DataBound, InnerKey,
+        Iterator as TableIterator, SkipOpTxnFileIterator, TxnFile, TxnFileIterator,
     },
     txn_chunk_manager::TxnChunkManager,
     *,
@@ -681,21 +681,28 @@ impl SnapAccessCore {
         table::new_merge_iterator(iters, reversed)
     }
 
-    // TODO: support async (for write process).
-    pub fn new_delta_write_iterator(&self, since_ts: u64) -> Box<dyn table::Iterator> {
-        let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
-        for mem_tbl in &self.data.mem_tbls {
-            if mem_tbl.data_max_ts() > since_ts {
-                iters.push(mem_tbl.get_cf(WRITE_CF).new_delta_write_iterator(since_ts));
-            }
-        }
-        for l0 in &self.data.l0_tbls {
-            if let Some(tbl) = &l0.get_cf(WRITE_CF) {
-                if tbl.max_ts > since_ts {
-                    iters.push(tbl.new_iterator(false, true));
+    #[maybe_async::both]
+    pub async fn new_delta_write_iterator(&self, since_ts: u64) -> Box<dyn table::Iterator> {
+        self.check_sync(WRITE_CF).await;
+        let sync_merge_iter: Box<dyn table::Iterator> = {
+            let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
+            for mem_tbl in &self.data.mem_tbls {
+                if mem_tbl.data_max_ts() > since_ts {
+                    iters.push(mem_tbl.get_cf(WRITE_CF).new_delta_write_iterator(since_ts));
                 }
             }
-        }
+            for l0 in &self.data.l0_tbls {
+                if let Some(tbl) = &l0.get_cf(WRITE_CF) {
+                    if tbl.max_ts > since_ts {
+                        iters.push(tbl.new_iterator(false, true));
+                    }
+                }
+            }
+            Box::new(AsyncMergeIterator::new(iters, false, true)) as _
+        };
+
+        let mut iters = vec![sync_merge_iter];
+
         let scf = self.data.get_cf(WRITE_CF);
         for lh in scf.levels.as_slice() {
             if lh.tables.len() == 0 || lh.max_ts < since_ts {
@@ -707,7 +714,7 @@ impl SnapAccessCore {
             }
             iters.push(Box::new(ConcatIterator::new(lh.clone(), false, true)));
         }
-        table::new_merge_iterator(iters, false)
+        Box::new(AsyncMergeIterator::new(iters, false, false))
     }
 
     pub fn get_write_sequence(&self) -> u64 {
@@ -1228,11 +1235,12 @@ impl SnapAccessCore {
         self.data.keyspace_id
     }
 
-    fn seek_txn_file(&self, iter: &mut Box<dyn table::Iterator>, txn_file: &TxnFile) {
+    #[maybe_async::both]
+    async fn seek_txn_file(&self, iter: &mut Box<dyn table::Iterator>, txn_file: &TxnFile) {
         if txn_file.smallest() < self.data.inner_start() {
-            iter.seek(self.data.inner_start());
+            iter.seek(self.data.inner_start()).await;
         } else {
-            iter.seek(txn_file.smallest());
+            iter.seek(txn_file.smallest()).await;
         }
     }
 
@@ -1246,7 +1254,6 @@ impl SnapAccessCore {
         }
     }
 
-    // TODO: support async (for write process).
     pub fn get_txn_file_conflict_lock(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, Lock)> {
         if txn_file.is_empty() {
             return None;
@@ -1311,13 +1318,17 @@ impl SnapAccessCore {
     // Get writes with `commit_ts` LARGER than `txn_file.start_ts()`.
     // These writes are not seen by clients and should be considered as conflicts.
     // Ref: `SnapAccessCore::get_newer`.
-    // TODO: support async (for write process).
-    pub fn get_txn_file_conflict_write(&self, txn_file: &TxnFile) -> Option<(Vec<u8>, UserMeta)> {
+    #[maybe_async::both]
+    pub async fn get_txn_file_conflict_write(
+        &self,
+        txn_file: &TxnFile,
+    ) -> Option<(Vec<u8>, UserMeta)> {
+        self.check_sync(WRITE_CF).await;
         if txn_file.is_empty() {
             return None;
         }
-        let mut write_iter = self.new_delta_write_iterator(txn_file.start_ts());
-        self.seek_txn_file(&mut write_iter, txn_file);
+        let mut write_iter = self.new_delta_write_iterator(txn_file.start_ts()).await;
+        self.seek_txn_file(&mut write_iter, txn_file).await;
         let mut upper_bound_buf = vec![];
         let upper_bound = self.get_upper_bound(&mut upper_bound_buf, txn_file);
         let mut outer_val_buf = vec![];
@@ -1345,43 +1356,23 @@ impl SnapAccessCore {
                     return Some((key, um));
                 }
             }
-            write_iter.next();
+            next!(write_iter).await;
         }
         None
     }
 
-    // TODO: support async (for write process).
-    pub fn check_txn_file_constraint(
+    #[maybe_async::both]
+    pub async fn check_txn_file_constraint(
         &self,
         txn_file: &TxnFile,
         read_ts: u64,
     ) -> Option<Vec<u8> /* already_exist_key */> {
-        let mut already_exist_key: Option<Vec<u8>> = None;
-
-        let mut item = Item::new();
-        item.owned_val = Some(vec![]);
-        let cb = |key: InnerKey<'_>| -> bool {
-            item.path = AccessPath::default();
-            item.val = self.get_value(
-                WRITE_CF,
-                key,
-                read_ts,
-                &mut item.path,
-                item.owned_val.as_mut().unwrap(),
-                &[],
-            );
-            // Blob value is not needed here.
-
-            if item.value_len() > 0 {
-                let outer_key = self.data.to_outer_key(key);
-                already_exist_key = Some(outer_key);
-                return false; // Return false to stop iteration.
-            }
-            true
-        };
-
-        txn_file.iter_check_constraint_keys(self.data.data_bound(), cb);
-        already_exist_key
+        self.check_sync(WRITE_CF).await;
+        let mut checker = TxnFileConstraintChecker::new(self, read_ts);
+        txn_file
+            .iter_check_constraint_keys(self.data.data_bound(), &mut checker)
+            .await;
+        checker.already_exist_key
     }
 
     pub fn get_lock_txn_file(&self, start_ts: u64) -> Option<TxnFile> {
@@ -1604,6 +1595,19 @@ impl SnapAccessCore {
         }
         tables
     }
+
+    // To ensure that async `SnapAccess` must be called by async methods.
+    // The checking in `IaFile` may be not reached when the block has been
+    // loaded.
+    #[inline]
+    fn check_sync(&self, cf: usize) {
+        if cf == WRITE_CF {
+            debug_assert!(self.is_sync());
+        }
+    }
+
+    #[inline]
+    async fn check_sync_async(&self, _: usize) {}
 }
 
 pub struct Iterator {
@@ -1825,6 +1829,54 @@ impl Iterator {
         } else {
             self.inner.key() >= self.data.inner_end()
         }
+    }
+}
+
+/// To check that the key already exists or not.
+struct TxnFileConstraintChecker<'a> {
+    already_exist_key: Option<Vec<u8>>,
+    item: Item<'a>,
+    snap: &'a SnapAccessCore,
+    read_ts: u64,
+}
+
+impl<'a> TxnFileConstraintChecker<'a> {
+    fn new(snap: &'a SnapAccessCore, read_ts: u64) -> Self {
+        let mut item = Item::new();
+        item.owned_val = Some(vec![]);
+        Self {
+            already_exist_key: None,
+            item,
+            snap,
+            read_ts,
+        }
+    }
+}
+
+#[maybe_async::async_trait]
+impl ConstraintChecker for TxnFileConstraintChecker<'_> {
+    #[maybe_async]
+    async fn check(&mut self, key: InnerKey<'_>) -> bool {
+        self.item.path = AccessPath::default();
+        self.item.val = self
+            .snap
+            .get_value(
+                WRITE_CF,
+                key,
+                self.read_ts,
+                &mut self.item.path,
+                self.item.owned_val.as_mut().unwrap(),
+                &[],
+            )
+            .await;
+        // Blob value is not needed here.
+
+        if self.item.value_len() > 0 {
+            let outer_key = self.snap.data.to_outer_key(key);
+            self.already_exist_key = Some(outer_key);
+            return false; // Return false to stop iteration.
+        }
+        true
     }
 }
 

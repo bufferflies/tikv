@@ -309,11 +309,13 @@ impl TxnFile {
         self.lower_bound() < start || self.upper_bound() > end
     }
 
-    /// `f`: Return false to stop iteration.
-    pub fn iter_check_constraint_keys<F>(&self, bound: DataBound<'_>, mut f: F)
-    where
-        F: FnMut(InnerKey<'_>) -> bool,
-    {
+    /// `checker.check()`: Return false to stop iteration.
+    #[maybe_async::both]
+    pub async fn iter_check_constraint_keys<C: ConstraintChecker>(
+        &self,
+        bound: DataBound<'_>,
+        checker: &mut C,
+    ) {
         if self.is_empty() {
             return;
         }
@@ -325,7 +327,10 @@ impl TxnFile {
             if !chunk.has_constraint() || chunk.data_bound().less_than_key(bound.lower_bound) {
                 continue;
             }
-            if !chunk.iter_check_constraint_keys(seek_key.take(), bound, &mut f) {
+            if !chunk
+                .iter_check_constraint_keys(seek_key.take(), bound, checker)
+                .await
+            {
                 return;
             }
         }
@@ -349,6 +354,13 @@ impl Deref for TxnFile {
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
+}
+
+#[maybe_async::async_trait]
+pub trait ConstraintChecker {
+    /// Return false to indicate that constraint is violated and stop iteration.
+    #[maybe_async]
+    async fn check(&mut self, key: InnerKey<'_>) -> bool;
 }
 
 pub struct TxnFileInner {
@@ -484,16 +496,14 @@ impl TxnChunk {
 
     /// Return false to stop outer iteration.
     ///
-    /// `f`: Return false to stop iteration.
-    pub fn iter_check_constraint_keys<F>(
+    /// `checker.check()`: Return false to stop iteration.
+    #[maybe_async::both]
+    pub async fn iter_check_constraint_keys<C: ConstraintChecker>(
         &self,
         mut seek_key: Option<InnerKey<'_>>,
         bound: DataBound<'_>,
-        mut f: F,
-    ) -> bool
-    where
-        F: FnMut(InnerKey<'_>) -> bool,
-    {
+        checker: &mut C,
+    ) -> bool {
         let mut iter = TxnChunkIterator::new(self.clone(), false);
         let start_block = if let Some(key) = seek_key {
             self.index.seek_block(key).saturating_sub(1)
@@ -518,7 +528,7 @@ impl TxnChunk {
                 }
 
                 if (iter.block_iter.op == OP_INSERT || iter.block_iter.op == OP_CHECK_NOT_EXIST)
-                    && !f(iter.key())
+                    && !checker.check(iter.key()).await
                 {
                     return false;
                 }
@@ -1829,8 +1839,8 @@ mod tests {
             txn_file::{
                 TxnChunk, TxnChunkBuilder, TxnChunkIterator, OP_CHECK_NOT_EXIST, OP_INSERT, OP_PUT,
             },
-            BlockBitmap, DataBound, InnerKey, Iterator, OwnedInnerKey, SkipOpTxnFileIterator,
-            TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_DELETE, OP_LOCK,
+            BlockBitmap, ConstraintChecker, DataBound, InnerKey, Iterator, OwnedInnerKey,
+            SkipOpTxnFileIterator, TxnCtx, TxnFile, TxnFileId, TxnFileIterator, OP_DELETE, OP_LOCK,
         },
         tests::generate_encryption_key,
         util::test_util::KeyBuilder,
@@ -2506,17 +2516,12 @@ mod tests {
 
                 // Test check_constraint
                 {
-                    let mut entries = vec![];
-                    let cb = |key: InnerKey<'_>| -> bool {
-                        entries.push(key.to_vec());
-                        true
-                    };
-
-                    txn_file.iter_check_constraint_keys(bound, cb);
+                    let mut checker = DummyConstraintChecker::default();
+                    txn_file.iter_check_constraint_keys(bound, &mut checker);
 
                     let chunk_ref = chunk_ref_check_constraint.slice(lower_bound_key.as_ref(), upper_bound_key.as_ref());
                     let expected: Vec<_> = chunk_ref.iter(false).map(|r| r.key.to_vec()).collect();
-                    prop_assert_eq!(entries, expected);
+                    prop_assert_eq!(checker.entries, expected);
                 }
             });
         }
@@ -2697,6 +2702,20 @@ mod tests {
 
         pub fn is_empty(&self) -> bool {
             self.slice.is_empty()
+        }
+    }
+
+    #[derive(Default)]
+    struct DummyConstraintChecker {
+        entries: Vec<Vec<u8>>,
+    }
+
+    #[maybe_async::async_trait]
+    impl ConstraintChecker for DummyConstraintChecker {
+        #[maybe_async]
+        async fn check(&mut self, key: InnerKey<'_>) -> bool {
+            self.entries.push(key.to_vec());
+            true
         }
     }
 
