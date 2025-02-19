@@ -403,8 +403,8 @@ where
     Ok(default_cursor.value(&mut statistics.data).to_vec())
 }
 
-// TODO: support async (for write process).
-pub fn has_data_in_range<S: Snapshot>(
+#[maybe_async::both]
+pub async fn has_data_in_range<S: Snapshot>(
     snapshot: S,
     cf: CfName,
     left: &Key,
@@ -414,8 +414,10 @@ pub fn has_data_in_range<S: Snapshot>(
     if let Some(snap) = snapshot.get_kvengine_snap() {
         let raw_left = left.to_raw().unwrap();
         let mut raw_right = right.to_raw().unwrap();
-        let mut iter = snap.new_iterator(WRITE_CF, false, false, Some(u64::MAX), true);
-        iter.seek(&raw_left);
+        let mut iter = snap
+            .new_iterator(WRITE_CF, false, false, Some(u64::MAX), true)
+            .await;
+        iter.seek(&raw_left).await;
         if iter.valid() && iter.key() < raw_right.as_slice() {
             return Ok(true);
         }

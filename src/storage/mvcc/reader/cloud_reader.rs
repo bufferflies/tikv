@@ -84,7 +84,7 @@ impl CloudReader {
             if let Some(record) = Self::get_commit_by_item(&user_meta, data_iter.val(), start_ts) {
                 return Ok(record);
             }
-            data_iter.next();
+            data_iter.next().await;
         }
         match self.get_extra(key, start_ts) {
             Some((commit_ts, write)) => Ok(TxnCommitRecord::SingleRecord { commit_ts, write }),
@@ -126,14 +126,15 @@ impl CloudReader {
         Ok(Some(lock))
     }
 
-    pub fn get(
+    #[maybe_async::both]
+    pub async fn get(
         &mut self,
         key: &Key,
         ts: TimeStamp,
         _gc_fence_limit: Option<TimeStamp>,
     ) -> Result<Option<Value>> {
         let raw_key = key.to_raw()?;
-        let item = self.snapshot.get(WRITE_CF, &raw_key, ts.into_inner());
+        let item = self.snapshot.get(WRITE_CF, &raw_key, ts.into_inner()).await;
         self.statistics.write.get += 1;
         self.statistics.write.flow_stats.read_bytes += raw_key.len() + item.value_len();
         self.statistics.write.flow_stats.read_keys += 1;
@@ -145,19 +146,26 @@ impl CloudReader {
         Ok(None)
     }
 
-    pub fn get_write(
+    #[maybe_async::both]
+    pub async fn get_write(
         &mut self,
         key: &Key,
         ts: TimeStamp,
         _gc_fence_limit: Option<TimeStamp>,
     ) -> Result<Option<Write>> {
         self.seek_write(key, ts)
+            .await
             .map(|opt| opt.map(|(_, write)| write))
     }
 
-    pub fn seek_write(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<(TimeStamp, Write)>> {
+    #[maybe_async::both]
+    pub async fn seek_write(
+        &mut self,
+        key: &Key,
+        ts: TimeStamp,
+    ) -> Result<Option<(TimeStamp, Write)>> {
         let raw_key = key.to_raw()?;
-        let item = self.snapshot.get(WRITE_CF, &raw_key, ts.into_inner());
+        let item = self.snapshot.get(WRITE_CF, &raw_key, ts.into_inner()).await;
         self.statistics.write.seek += 1;
         self.statistics.write.flow_stats.read_keys += 1;
         self.statistics.write.flow_stats.read_bytes += raw_key.len() + item.value_len();
@@ -171,8 +179,9 @@ impl CloudReader {
         Ok(None)
     }
 
+    #[maybe_async::both]
     #[inline(always)]
-    pub fn get_old_value(
+    pub async fn get_old_value(
         &mut self,
         key: &Key,
         start_ts: TimeStamp,
@@ -187,7 +196,10 @@ impl CloudReader {
             return Ok(OldValue::value(write.short_value.unwrap()));
         }
         let raw_key = key.to_raw()?;
-        let item = self.snapshot.get(WRITE_CF, &raw_key, start_ts.into_inner());
+        let item = self
+            .snapshot
+            .get(WRITE_CF, &raw_key, start_ts.into_inner())
+            .await;
         if item.value_len() > 0 {
             return Ok(OldValue::value(item.get_value().to_vec()));
         }
@@ -251,9 +263,17 @@ impl CloudReader {
         Ok((locks, false))
     }
 
-    pub fn get_newer(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<(TimeStamp, Write)>> {
+    #[maybe_async::both]
+    pub async fn get_newer(
+        &mut self,
+        key: &Key,
+        ts: TimeStamp,
+    ) -> Result<Option<(TimeStamp, Write)>> {
         let raw_key = key.to_raw()?;
-        let item = self.snapshot.get_newer(WRITE_CF, &raw_key, ts.into_inner());
+        let item = self
+            .snapshot
+            .get_newer(WRITE_CF, &raw_key, ts.into_inner())
+            .await;
         if item.user_meta_len() > 0 {
             let user_meta = UserMeta::from_slice(item.user_meta());
             return Ok(Some(parse_write(&user_meta, item.get_value())));

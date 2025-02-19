@@ -14,8 +14,8 @@ pub use self::{
     point_getter::{PointGetter, PointGetterBuilder},
     reader::{MvccReader, SnapshotReader},
     scanner::{
-        has_data_in_range, near_load_data_by_write, seek_for_valid_write, test_util, DeltaScanner,
-        EntryScanner, Scanner, ScannerBuilder,
+        has_data_in_range, has_data_in_range_async, near_load_data_by_write, seek_for_valid_write,
+        test_util, DeltaScanner, EntryScanner, Scanner, ScannerBuilder,
     },
 };
 

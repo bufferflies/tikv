@@ -61,14 +61,16 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
         }
     }
 
+    #[maybe_async::both]
     #[inline(always)]
-    pub fn get_txn_commit_record(&mut self, key: &Key) -> Result<TxnCommitRecord> {
+    pub async fn get_txn_commit_record(&mut self, key: &Key) -> Result<TxnCommitRecord> {
         if self.cloud_reader.is_some() {
             return self
                 .cloud_reader
                 .as_mut()
                 .unwrap()
-                .get_txn_commit_record(key, self.start_ts);
+                .get_txn_commit_record(key, self.start_ts)
+                .await;
         }
         self.reader.get_txn_commit_record(key, self.start_ts)
     }
@@ -81,14 +83,16 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
         self.reader.load_lock(key)
     }
 
+    #[maybe_async::both]
     #[inline(always)]
-    pub fn key_exist(&mut self, key: &Key, ts: TimeStamp) -> Result<bool> {
+    pub async fn key_exist(&mut self, key: &Key, ts: TimeStamp) -> Result<bool> {
         if self.cloud_reader.is_some() {
             return Ok(self
                 .cloud_reader
                 .as_mut()
                 .unwrap()
-                .get_write(key, ts, Some(self.start_ts))?
+                .get_write(key, ts, Some(self.start_ts))
+                .await?
                 .is_some());
         }
         Ok(self
@@ -97,38 +101,49 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
             .is_some())
     }
 
+    #[maybe_async::both]
     #[inline(always)]
-    pub fn get(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<Value>> {
+    pub async fn get(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<Value>> {
         if self.cloud_reader.is_some() {
             return self
                 .cloud_reader
                 .as_mut()
                 .unwrap()
-                .get(key, ts, Some(self.start_ts));
+                .get(key, ts, Some(self.start_ts))
+                .await;
         }
         self.reader.get(key, ts, Some(self.start_ts))
     }
 
+    #[maybe_async::both]
     #[inline(always)]
-    pub fn get_write(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<Write>> {
+    pub async fn get_write(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<Write>> {
         if self.cloud_reader.is_some() {
             return self
                 .cloud_reader
                 .as_mut()
                 .unwrap()
-                .get_write(key, ts, Some(self.start_ts));
+                .get_write(key, ts, Some(self.start_ts))
+                .await;
         }
         self.reader.get_write(key, ts, Some(self.start_ts))
     }
 
+    #[maybe_async::both]
     #[inline(always)]
-    pub fn get_write_with_commit_ts(
+    pub async fn get_write_with_commit_ts(
         &mut self,
         key: &Key,
         ts: TimeStamp,
     ) -> Result<Option<(Write, TimeStamp)>> {
         if self.cloud_reader.is_some() {
-            return match self.cloud_reader.as_mut().unwrap().seek_write(key, ts)? {
+            return match self
+                .cloud_reader
+                .as_mut()
+                .unwrap()
+                .seek_write(key, ts)
+                .await?
+            {
                 Some((commit_ts, write)) => Ok(match write.write_type {
                     WriteType::Put => Some((write, commit_ts)),
                     WriteType::Delete => None,
@@ -149,10 +164,20 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
             .get_write_with_commit_ts(key, ts, Some(self.start_ts))
     }
 
+    #[maybe_async::both]
     #[inline(always)]
-    pub fn seek_write(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<(TimeStamp, Write)>> {
+    pub async fn seek_write(
+        &mut self,
+        key: &Key,
+        ts: TimeStamp,
+    ) -> Result<Option<(TimeStamp, Write)>> {
         if self.cloud_reader.is_some() {
-            return self.cloud_reader.as_mut().unwrap().seek_write(key, ts);
+            return self
+                .cloud_reader
+                .as_mut()
+                .unwrap()
+                .seek_write(key, ts)
+                .await;
         }
         self.reader.seek_write(key, ts)
     }
@@ -165,8 +190,9 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
         self.reader.load_data(key, write)
     }
 
+    #[maybe_async::both]
     #[inline(always)]
-    pub fn get_old_value(
+    pub async fn get_old_value(
         &mut self,
         key: &Key,
         ts: TimeStamp,
@@ -178,7 +204,8 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
                 .cloud_reader
                 .as_mut()
                 .unwrap()
-                .get_old_value(key, ts, prev_write);
+                .get_old_value(key, ts, prev_write)
+                .await;
         }
         self.reader
             .get_old_value(key, ts, prev_write_loaded, prev_write)

@@ -300,8 +300,13 @@ impl SkipListCore {
             let entry = &batch.entries[i];
             if is_deleted(entry.meta) {
                 let key = entry.key(&batch.buf);
+                // Do not call `contains_in_older_table` for async table as it is expensive and
+                // requires async execution.
                 if snap
-                    .map(|snap| snap.contains_in_older_table(InnerKey::from_inner_buf(key), cf))
+                    .map(|snap| {
+                        !snap.is_cf_sync(cf)
+                            || snap.contains_in_older_table(InnerKey::from_inner_buf(key), cf)
+                    })
                     .unwrap_or_default()
                 {
                     self.put_with_hint(&batch.buf, entry, &mut hint);

@@ -513,6 +513,7 @@ impl SnapAccessCore {
         out_val_owner: &mut Vec<u8>,
         with_lock_txn_files: &[TxnFile],
     ) -> table::Value {
+        self.check_sync(cf).await;
         if cf == LOCK_CF {
             for txn_file in with_lock_txn_files {
                 if txn_file.version() > version {
@@ -567,10 +568,11 @@ impl SnapAccessCore {
         table::Value::new()
     }
 
-    pub fn multi_get(&self, cf: usize, keys: &[Vec<u8>], version: u64) -> Vec<Item<'_>> {
+    #[maybe_async::both]
+    pub async fn multi_get(&self, cf: usize, keys: &[Vec<u8>], version: u64) -> Vec<Item<'_>> {
         let mut items = Vec::with_capacity(keys.len());
         for key in keys {
-            let item = self.get(cf, key, version);
+            let item = self.get(cf, key, version).await;
             items.push(item);
         }
         items
@@ -587,6 +589,7 @@ impl SnapAccessCore {
         fill_cache: bool,
         skip_txn_file_with_start_ts: Option<u64>,
     ) -> Box<dyn table::Iterator> {
+        self.check_sync(cf);
         let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
         if cf == LOCK_CF && !self.data.lock_txn_files.is_empty() {
             for txn_file in &self.data.lock_txn_files {
@@ -773,9 +776,9 @@ impl SnapAccessCore {
         self.meta_seq
     }
 
-    // TODO: support async (for write process).
-    // Or skip when it's an IA shard.
+    // Sync only.
     pub(crate) fn contains_in_older_table(&self, key: InnerKey<'_>, cf: usize) -> bool {
+        self.check_sync(cf);
         let key_hash = farmhash::fingerprint64(key.deref());
         let mut outer_val_owner = vec![];
         for tbl in &self.data.mem_tbls[1..] {
@@ -881,13 +884,20 @@ impl SnapAccessCore {
                 if ignore_locks && cf == WRITE_CF && v.size() == 0 {
                     continue;
                 }
-                // TODO: skip check overlap when `!v.is_sync()`.
+                let is_sync = v.is_cf_sync(cf);
                 let mut overlap = false;
                 for (outer_start, outer_end) in outer_ranges {
                     let inner_start = InnerKey::from_outer_key(outer_start);
                     let inner_end = InnerKey::from_outer_end_key(outer_end);
                     let data_bound = DataBound::new(inner_start, inner_end, false);
-                    if v.has_overlap(data_bound) {
+                    let range_overlap = if is_sync {
+                        v.has_overlap(data_bound)
+                    } else {
+                        // Check the bound only as `has_overlap` for async tables is expensive and
+                        // requires async execution.
+                        v.data_bound().overlap_bound(data_bound)
+                    };
+                    if range_overlap {
                         overlap = true;
                         break;
                     }
@@ -1155,6 +1165,7 @@ impl SnapAccessCore {
         version: u64,
         out_val_owner: &mut Vec<u8>,
     ) -> table::Value {
+        self.check_sync(cf).await;
         let key_hash = farmhash::fingerprint64(inner_key.deref());
         for i in 0..self.data.mem_tbls.len() {
             let tbl = self.data.mem_tbls.as_slice()[i].get_cf(cf);
@@ -1185,6 +1196,7 @@ impl SnapAccessCore {
 
     #[maybe_async::both]
     pub async fn has_data_in_prefix<'a>(&'a self, mut prefix: &'a [u8]) -> bool {
+        self.check_sync(WRITE_CF).await;
         let keyspace_prefix = self.data.keyspace_prefix();
 
         let min_off = std::cmp::min(prefix.len(), keyspace_prefix.len());
@@ -1204,7 +1216,7 @@ impl SnapAccessCore {
             return false;
         }
         let mut it = self
-            .new_iterator(0, false, false, Some(u64::MAX), true)
+            .new_iterator(WRITE_CF, false, false, Some(u64::MAX), true)
             .await;
         it.seek(prefix).await;
         if !it.valid() {
@@ -1555,8 +1567,14 @@ impl SnapAccessCore {
         Some(mvcc_reader)
     }
 
+    #[inline]
     pub fn is_sync(&self) -> bool {
         self.is_sync
+    }
+
+    #[inline]
+    pub fn is_cf_sync(&self, cf: usize) -> bool {
+        cf != WRITE_CF || self.is_sync()
     }
 
     /// Get IA segments which are in DFS. Used to prefetch in parallel.
@@ -1601,9 +1619,7 @@ impl SnapAccessCore {
     // loaded.
     #[inline]
     fn check_sync(&self, cf: usize) {
-        if cf == WRITE_CF {
-            debug_assert!(self.is_sync());
-        }
+        debug_assert!(self.is_cf_sync(cf));
     }
 
     #[inline]

@@ -25,7 +25,7 @@ use crate::{
         table::{Iterator, Result},
         *,
     },
-    IoContext,
+    IoContext, WRITE_CF,
 };
 
 // higher level ttl is longer than lower level.
@@ -188,8 +188,14 @@ impl SsTable {
         FOOTER_SIZE
     }
 
+    #[inline]
     pub fn is_sync(&self) -> bool {
         self.file.is_sync()
+    }
+
+    #[inline]
+    pub fn is_cf_sync(&self, cf: usize) -> bool {
+        cf != WRITE_CF || self.is_sync()
     }
 
     pub fn get_remote_segments(
