@@ -10,7 +10,7 @@ use crate::storage::{
     lock_manager::{LockManager, WaitTimeout},
     mvcc::{Error as MvccError, ErrorInner as MvccErrorInner, MvccTxn, SnapshotReader},
     txn::{
-        acquire_pessimistic_lock,
+        acquire_pessimistic_lock, acquire_pessimistic_lock_async,
         commands::{
             Command, CommandExt, ReaderWithStats, ReleasedLocks, ResponsePolicy, TypedCommand,
             WriteCommand, WriteContext, WriteResult, WriteResultLockInfo,
@@ -70,7 +70,6 @@ impl CommandExt for AcquirePessimisticLock {
     gen_lock!(keys: multiple(|x| &x.0));
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLock {
     #[maybe_async]
@@ -109,7 +108,9 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for AcquirePessim
                 need_old_value,
                 self.lock_only_if_exists,
                 self.allow_lock_with_conflict,
-            ) {
+            )
+            .await
+            {
                 Ok((key_res, old_value)) => {
                     res.push(key_res);
                     // MutationType is unknown in AcquirePessimisticLock stage.

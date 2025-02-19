@@ -12,12 +12,12 @@ use crate::storage::{
         MAX_TXN_WRITE_SIZE,
     },
     txn::{
-        cleanup,
+        cleanup, cleanup_async,
         commands::{
             Command, CommandExt, ReaderWithStats, ReleasedLocks, ResolveLockReadPhase,
             ResponsePolicy, TypedCommand, WriteCommand, WriteContext, WriteResult,
         },
-        commit, Error, ErrorInner, Result,
+        commit, commit_async, Error, ErrorInner, Result,
     },
     ProcessResult, Snapshot,
 };
@@ -76,7 +76,6 @@ impl CommandExt for ResolveLock {
     }
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLock {
     #[maybe_async]
@@ -110,12 +109,13 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLock {
                     current_key.clone(),
                     TimeStamp::zero(),
                     false,
-                )?
+                )
+                .await?
             } else if commit_ts > current_lock.ts {
                 // Continue to resolve locks if the not found committed locks are pessimistic
                 // type. They could be left if the transaction is finally committed and
                 // pessimistic conflict retry happens during execution.
-                match commit(&mut txn, &mut reader, current_key.clone(), commit_ts) {
+                match commit(&mut txn, &mut reader, current_key.clone(), commit_ts).await {
                     Ok(res) => res,
                     Err(MvccError(box MvccErrorInner::TxnLockNotFound { .. }))
                         if current_lock.is_pessimistic_lock() =>

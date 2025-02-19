@@ -25,15 +25,15 @@ use txn_types::{Key, TimeStamp, Value};
 
 pub use self::{
     actions::{
-        acquire_pessimistic_lock::acquire_pessimistic_lock,
-        cleanup::cleanup,
-        commit::commit,
+        acquire_pessimistic_lock::{acquire_pessimistic_lock, acquire_pessimistic_lock_async},
+        cleanup::{cleanup, cleanup_async},
+        commit::{commit, commit_async},
         flashback_to_version::{
             flashback_to_version_read_lock, flashback_to_version_read_write,
             flashback_to_version_write, rollback_locks, FLASHBACK_BATCH_SIZE,
         },
         gc::gc,
-        prewrite::{prewrite, CommitKind, TransactionKind, TransactionProperties},
+        prewrite::{prewrite, prewrite_async, CommitKind, TransactionKind, TransactionProperties},
     },
     cloud_store::{check_locks, CloudStore, CloudStoreScanner},
     commands::{Command, RESOLVE_LOCK_BATCH_SIZE},

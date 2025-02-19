@@ -12,7 +12,7 @@ use crate::storage::{
             Command, CommandExt, ReaderWithStats, ReleasedLocks, ResponsePolicy, TypedCommand,
             WriteCommand, WriteContext, WriteResult,
         },
-        commit, Error, ErrorInner, Result,
+        commit, commit_async, Error, ErrorInner, Result,
     },
     ProcessResult, Snapshot, TxnStatus,
 };
@@ -46,7 +46,6 @@ impl CommandExt for Commit {
     can_build_txn_file!();
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Commit {
     #[maybe_async]
@@ -67,7 +66,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Commit {
         // Pessimistic txn needs key_hashes to wake up waiters
         let mut released_locks = ReleasedLocks::new();
         for k in self.keys {
-            released_locks.push(commit(&mut txn, &mut reader, k, self.commit_ts)?);
+            released_locks.push(commit(&mut txn, &mut reader, k, self.commit_ts).await?);
         }
 
         let pr = ProcessResult::TxnStatus {

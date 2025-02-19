@@ -54,7 +54,6 @@ enum SecondaryLockStatus {
     RolledBack,
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckSecondaryLocks {
     #[maybe_async]
@@ -80,7 +79,8 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckSecondar
                 Some(lock) if lock.ts == self.start_ts => {
                     if lock.lock_type == LockType::Pessimistic {
                         released_lock = txn.unlock_key(key.clone(), true, TimeStamp::zero());
-                        let overlapped_write = reader.get_txn_commit_record(&key)?.unwrap_none();
+                        let overlapped_write =
+                            reader.get_txn_commit_record(&key).await?.unwrap_none();
                         (SecondaryLockStatus::RolledBack, true, overlapped_write)
                     } else {
                         (SecondaryLockStatus::Locked(lock), false, None)
@@ -90,7 +90,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckSecondar
                 // timestamp (0 if the lock is not committed).
                 l => {
                     mismatch_lock = l;
-                    match reader.get_txn_commit_record(&key)? {
+                    match reader.get_txn_commit_record(&key).await? {
                         TxnCommitRecord::SingleRecord { commit_ts, write } => {
                             let status = if write.write_type != WriteType::Rollback {
                                 SecondaryLockStatus::Committed(commit_ts)

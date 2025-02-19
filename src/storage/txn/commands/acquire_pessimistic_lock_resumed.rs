@@ -16,7 +16,7 @@ use crate::storage::{
     },
     mvcc::{Error as MvccError, ErrorInner as MvccErrorInner, MvccTxn, SnapshotReader},
     txn::{
-        acquire_pessimistic_lock,
+        acquire_pessimistic_lock, acquire_pessimistic_lock_async,
         commands::{
             acquire_pessimistic_lock::make_write_data, Command, CommandExt, ReleasedLocks,
             ResponsePolicy, TypedCommand, WriteCommand, WriteContext, WriteResult,
@@ -78,7 +78,6 @@ impl CommandExt for AcquirePessimisticLockResumed {
     gen_lock!(items: multiple(|x| &x.key));
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for AcquirePessimisticLockResumed {
     #[maybe_async]
@@ -143,7 +142,9 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for AcquirePessim
                 need_old_value,
                 params.lock_only_if_exists,
                 true,
-            ) {
+            )
+            .await
+            {
                 Ok((key_res, old_value)) => {
                     res.push(key_res);
                     new_locked_keys.push((params.start_ts, key.clone()));

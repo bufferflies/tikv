@@ -7,7 +7,8 @@ use crate::storage::{
         ErrorInner, Key, MvccTxn, ReleasedLock, Result as MvccResult, SnapshotReader, TimeStamp,
     },
     txn::actions::check_txn_status::{
-        check_txn_status_missing_lock, rollback_lock, MissingLockAction,
+        check_txn_status_missing_lock, check_txn_status_missing_lock_async, rollback_lock,
+        rollback_lock_async, MissingLockAction,
     },
     Snapshot, TxnStatus,
 };
@@ -19,7 +20,8 @@ use crate::storage::{
 ///
 /// Returns the released lock. Returns error if the key is locked or has already
 /// been committed.
-pub fn cleanup<S: Snapshot>(
+#[maybe_async::both]
+pub async fn cleanup<S: Snapshot>(
     txn: &mut MvccTxn,
     reader: &mut SnapshotReader<S>,
     key: Key,
@@ -47,6 +49,7 @@ pub fn cleanup<S: Snapshot>(
                 lock.is_pessimistic_txn(),
                 !protect_rollback,
             )
+            .await
         }
         l => match check_txn_status_missing_lock(
             txn,
@@ -55,7 +58,9 @@ pub fn cleanup<S: Snapshot>(
             l,
             MissingLockAction::rollback_protect(protect_rollback),
             false,
-        )? {
+        )
+        .await?
+        {
             TxnStatus::Committed { commit_ts } => {
                 MVCC_CONFLICT_COUNTER.rollback_committed.inc();
                 Err(ErrorInner::Committed {

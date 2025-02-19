@@ -66,7 +66,6 @@ impl CommandExt for CheckTxnStatus {
     can_build_txn_file!();
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatus {
     /// checks whether a transaction has expired its primary lock's TTL,
@@ -104,16 +103,19 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
         ));
 
         let (txn_status, released) = match reader.load_lock(&self.primary_key)? {
-            Some(lock) if lock.ts == self.lock_ts => check_txn_status_lock_exists(
-                &mut txn,
-                &mut reader,
-                self.primary_key,
-                lock,
-                self.current_ts,
-                self.caller_start_ts,
-                self.force_sync_commit,
-                self.resolving_pessimistic_lock,
-            )?,
+            Some(lock) if lock.ts == self.lock_ts => {
+                check_txn_status_lock_exists(
+                    &mut txn,
+                    &mut reader,
+                    self.primary_key,
+                    lock,
+                    self.current_ts,
+                    self.caller_start_ts,
+                    self.force_sync_commit,
+                    self.resolving_pessimistic_lock,
+                )
+                .await?
+            }
             l => (
                 check_txn_status_missing_lock(
                     &mut txn,
@@ -122,7 +124,8 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
                     l,
                     MissingLockAction::rollback(self.rollback_if_not_exist),
                     self.resolving_pessimistic_lock,
-                )?,
+                )
+                .await?,
                 None,
             ),
         };

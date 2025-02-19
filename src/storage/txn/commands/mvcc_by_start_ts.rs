@@ -6,7 +6,10 @@ use txn_types::{Key, TimeStamp};
 use crate::storage::{
     mvcc::SnapshotReader,
     txn::{
-        commands::{find_mvcc_infos_by_key, Command, CommandExt, ReadCommand, TypedCommand},
+        commands::{
+            find_mvcc_infos_by_key, find_mvcc_infos_by_key_async, Command, CommandExt, ReadCommand,
+            TypedCommand,
+        },
         ProcessResult, Result,
     },
     types::MvccInfo,
@@ -36,7 +39,6 @@ impl CommandExt for MvccByStartTs {
     gen_lock!(empty);
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static> ReadCommand<S> for MvccByStartTs {
     #[maybe_async]
@@ -44,7 +46,7 @@ impl<S: Snapshot + 'static> ReadCommand<S> for MvccByStartTs {
         let mut reader = SnapshotReader::new(TimeStamp::max(), snapshot, true);
         match reader.seek_ts(self.start_ts)? {
             Some(key) => {
-                let result = find_mvcc_infos_by_key(&mut reader, &key, TimeStamp::max());
+                let result = find_mvcc_infos_by_key(&mut reader, &key, TimeStamp::max()).await;
                 statistics.add(&reader.take_statistics());
                 let (lock, writes, values) = result?;
                 Ok(ProcessResult::MvccStartTs {

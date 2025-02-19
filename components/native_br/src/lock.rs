@@ -489,6 +489,7 @@ impl TxnStatus {
         Ok(reader_cache.get_mut(&shard_id).unwrap())
     }
 
+    // TODO: Use IA.
     fn get_txn_status_from_cloud_reader(
         cloud_reader: &mut CloudReader,
         key: &Key,

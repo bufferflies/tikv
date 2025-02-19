@@ -8,14 +8,15 @@ use crate::storage::{
         metrics::MVCC_CHECK_TXN_STATUS_COUNTER_VEC, reader::OverlappedWrite, ErrorInner, LockType,
         MvccTxn, ReleasedLock, Result, SnapshotReader, TxnCommitRecord,
     },
-    txn::commands::find_mvcc_infos_by_key,
+    txn::commands::{find_mvcc_infos_by_key, find_mvcc_infos_by_key_async},
     Snapshot, TxnStatus,
 };
 
 // Check whether there's an overlapped write record, and then perform rollback.
 // The actual behavior to do the rollback differs according to whether there's
 // an overlapped write record.
-pub fn check_txn_status_lock_exists(
+#[maybe_async::both]
+pub async fn check_txn_status_lock_exists(
     txn: &mut MvccTxn,
     reader: &mut SnapshotReader<impl Snapshot>,
     primary_key: Key,
@@ -51,7 +52,7 @@ pub fn check_txn_status_lock_exists(
             Ok((TxnStatus::PessimisticRollBack, released))
         } else {
             let released =
-                rollback_lock(txn, reader, primary_key, &lock, is_pessimistic_txn, true)?;
+                rollback_lock(txn, reader, primary_key, &lock, is_pessimistic_txn, true).await?;
             MVCC_CHECK_TXN_STATUS_COUNTER_VEC.rollback.inc();
             Ok((TxnStatus::TtlExpire, released))
         };
@@ -87,7 +88,8 @@ pub fn check_txn_status_lock_exists(
     Ok((TxnStatus::uncommitted(lock, min_commit_ts_pushed), None))
 }
 
-pub fn check_txn_status_missing_lock(
+#[maybe_async::both]
+pub async fn check_txn_status_missing_lock(
     txn: &mut MvccTxn,
     reader: &mut SnapshotReader<impl Snapshot>,
     primary_key: Key,
@@ -97,7 +99,7 @@ pub fn check_txn_status_missing_lock(
 ) -> Result<TxnStatus> {
     MVCC_CHECK_TXN_STATUS_COUNTER_VEC.get_commit_info.inc();
 
-    match reader.get_txn_commit_record(&primary_key)? {
+    match reader.get_txn_commit_record(&primary_key).await? {
         TxnCommitRecord::SingleRecord { commit_ts, write } => {
             if write.write_type == WriteType::Rollback {
                 Ok(TxnStatus::RolledBack)
@@ -145,7 +147,8 @@ pub fn check_txn_status_missing_lock(
     }
 }
 
-pub fn rollback_lock(
+#[maybe_async::both]
+pub async fn rollback_lock(
     txn: &mut MvccTxn,
     reader: &mut SnapshotReader<impl Snapshot>,
     key: Key,
@@ -153,10 +156,12 @@ pub fn rollback_lock(
     is_pessimistic_txn: bool,
     collapse_rollback: bool,
 ) -> Result<Option<ReleasedLock>> {
-    let overlapped_write = match reader.get_txn_commit_record(&key)? {
+    let overlapped_write = match reader.get_txn_commit_record(&key).await? {
         TxnCommitRecord::None { overlapped_write } => overlapped_write,
         TxnCommitRecord::SingleRecord { write, .. } if write.write_type != WriteType::Rollback => {
-            let (_, writes, _) = find_mvcc_infos_by_key(reader, &key, TimeStamp::max()).unwrap();
+            let (_, writes, _) = find_mvcc_infos_by_key(reader, &key, TimeStamp::max())
+                .await
+                .unwrap();
             panic!(
                 "txn record found but not expected: {:?}, key: {:?}, record: {:?}, lock: {:?}, writes: {:?}",
                 txn, key, write, lock, writes

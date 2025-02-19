@@ -12,7 +12,8 @@ use crate::storage::{
 /// If not, returns an `AlreadyExist` error.
 /// The caller must guarantee that the given `write` is the latest version of
 /// the key.
-pub(crate) fn check_data_constraint<S: Snapshot>(
+#[maybe_async::both]
+pub(crate) async fn check_data_constraint<S: Snapshot>(
     reader: &mut SnapshotReader<S>,
     should_not_exist: bool,
     write: &Write,
@@ -31,7 +32,7 @@ pub(crate) fn check_data_constraint<S: Snapshot>(
     // 1.The current write type is `PUT`
     // 2.The current write type is `Rollback` or `Lock`, and the key have an older
     // version.
-    if write.write_type == WriteType::Put || reader.key_exist(key, write_commit_ts.prev())? {
+    if write.write_type == WriteType::Put || reader.key_exist(key, write_commit_ts.prev()).await? {
         return Err(ErrorInner::AlreadyExist { key: key.to_raw()? }.into());
     }
     Ok(())

@@ -4295,7 +4295,7 @@ checksum = "b87248edafb776e59e6ee64a79086f65890d3510f2c656c000bf2a7e8a0aea40"
 [[package]]
 name = "maybe-async"
 version = "0.2.6"
-source = "git+https://github.com/pingyu/maybe-async-rs?branch=cse#a48a423009593f443046724aa88d6b5408ec5d1b"
+source = "git+https://github.com/pingyu/maybe-async-rs?branch=cse#38a743983ac75f925260f2449e360f5a37b803fa"
 dependencies = [
  "proc-macro2",
  "quote",

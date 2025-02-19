@@ -8,12 +8,12 @@ use crate::storage::{
     lock_manager::LockManager,
     mvcc::{MvccTxn, SnapshotReader},
     txn::{
-        cleanup,
+        cleanup, cleanup_async,
         commands::{
             Command, CommandExt, ReaderWithStats, ReleasedLocks, ResponsePolicy, TypedCommand,
             WriteCommand, WriteContext, WriteResult,
         },
-        commit, Result,
+        commit, commit_async, Result,
     },
     ProcessResult, Snapshot,
 };
@@ -46,7 +46,6 @@ impl CommandExt for ResolveLockLite {
     can_build_txn_file!();
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLockLite {
     #[maybe_async]
@@ -63,9 +62,9 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLockLi
         let mut released_locks = ReleasedLocks::new();
         for key in self.resolve_keys {
             released_locks.push(if !self.commit_ts.is_zero() {
-                commit(&mut txn, &mut reader, key, self.commit_ts)?
+                commit(&mut txn, &mut reader, key, self.commit_ts).await?
             } else {
-                cleanup(&mut txn, &mut reader, key, TimeStamp::zero(), false)?
+                cleanup(&mut txn, &mut reader, key, TimeStamp::zero(), false).await?
             });
         }
 

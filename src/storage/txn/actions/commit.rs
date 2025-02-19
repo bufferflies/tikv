@@ -8,11 +8,12 @@ use crate::storage::{
         metrics::{MVCC_CONFLICT_COUNTER, MVCC_DUPLICATE_CMD_COUNTER_VEC},
         ErrorInner, LockType, MvccTxn, ReleasedLock, Result as MvccResult, SnapshotReader,
     },
-    txn::commands::find_mvcc_infos_by_key,
+    txn::commands::{find_mvcc_infos_by_key, find_mvcc_infos_by_key_async},
     Snapshot,
 };
 
-pub fn commit<S: Snapshot>(
+#[maybe_async::both]
+pub async fn commit<S: Snapshot>(
     txn: &mut MvccTxn,
     reader: &mut SnapshotReader<S>,
     key: Key,
@@ -48,8 +49,9 @@ pub fn commit<S: Snapshot>(
             // lock again(due to WriteConflict). If the transaction is committed, we should
             // commit this pessimistic lock too.
             if lock.lock_type == LockType::Pessimistic {
-                let (_, writes, _) =
-                    find_mvcc_infos_by_key(reader, &key, TimeStamp::max()).unwrap();
+                let (_, writes, _) = find_mvcc_infos_by_key(reader, &key, TimeStamp::max())
+                    .await
+                    .unwrap();
                 warn!(
                     "commit a pessimistic lock with Lock type";
                     "key" => %key,
@@ -64,7 +66,7 @@ pub fn commit<S: Snapshot>(
             lock
         }
         _ => {
-            return match reader.get_txn_commit_record(&key)?.info() {
+            return match reader.get_txn_commit_record(&key).await?.info() {
                 Some((_, WriteType::Rollback)) | None => {
                     MVCC_CONFLICT_COUNTER.commit_lock_not_found.inc();
                     // None: related Rollback has been collapsed.

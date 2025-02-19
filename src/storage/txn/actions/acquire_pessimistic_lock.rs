@@ -10,7 +10,8 @@ use crate::storage::{
         ErrorInner, MvccTxn, Result as MvccResult, SnapshotReader,
     },
     txn::{
-        actions::check_data_constraint::check_data_constraint, sched_pool::tls_can_enable,
+        actions::check_data_constraint::{check_data_constraint, check_data_constraint_async},
+        sched_pool::tls_can_enable,
         scheduler::LAST_CHANGE_TS,
     },
     types::PessimisticLockKeyResult,
@@ -36,7 +37,8 @@ use crate::storage::{
 ///
 /// The second return value will also contains the previous value of the key if
 /// `need_old_value` is set, or `OldValue::Unspecified` otherwise.
-pub fn acquire_pessimistic_lock<S: Snapshot>(
+#[maybe_async::both]
+pub async fn acquire_pessimistic_lock<S: Snapshot>(
     txn: &mut MvccTxn,
     reader: &mut SnapshotReader<S>,
     key: Key,
@@ -79,7 +81,8 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
     // `load_old_value` doing repeated work.
     let mut need_load_value = need_value || (need_check_existence && need_old_value);
 
-    fn load_old_value<S: Snapshot>(
+    #[maybe_async]
+    async fn load_old_value<S: Snapshot>(
         need_old_value: bool,
         value_loaded: bool,
         val: Option<&Value>,
@@ -99,7 +102,9 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
                 None => OldValue::None,
             })
         } else {
-            reader.get_old_value(key, for_update_ts, prev_write_loaded, prev_write)
+            reader
+                .get_old_value(key, for_update_ts, prev_write_loaded, prev_write)
+                .await
         }
     }
 
@@ -143,14 +148,15 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
             };
 
         if need_load_value || need_check_existence || should_not_exist {
-            let write = reader.get_write_with_commit_ts(&key, for_update_ts)?;
+            let write = reader.get_write_with_commit_ts(&key, for_update_ts).await?;
             if let Some((write, commit_ts)) = write {
                 // Here `get_write_with_commit_ts` returns only the latest PUT if it exists and
                 // is not deleted. It's still ok to pass it into `check_data_constraint`.
                 // In case we are going to lock it with write conflict, we do not check it since
                 // the statement will then retry.
                 if locked_with_conflict_ts.is_none() {
-                    check_data_constraint(reader, should_not_exist, &write, commit_ts, &key)?;
+                    check_data_constraint(reader, should_not_exist, &write, commit_ts, &key)
+                        .await?;
                 }
                 if need_load_value {
                     val = Some(reader.load_data(&key, write)?);
@@ -159,7 +165,7 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
                 }
             }
         }
-        // Pervious write is not loaded.
+        // Previous write is not loaded.
         let (prev_write_loaded, prev_write) = (false, None);
         let old_value = load_old_value(
             need_old_value,
@@ -170,7 +176,8 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
             for_update_ts,
             prev_write_loaded,
             prev_write,
-        )?;
+        )
+        .await?;
 
         // Overwrite the lock with small for_update_ts
         if for_update_ts > lock.for_update_ts {
@@ -229,7 +236,7 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
         }
     }
 
-    if let Some((commit_ts, write)) = reader.seek_write(&key, TimeStamp::max())? {
+    if let Some((commit_ts, write)) = reader.seek_write(&key, TimeStamp::max()).await? {
         // Find a previous write.
         if need_old_value {
             prev_write = Some(write.clone());
@@ -298,7 +305,7 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
         // going to lock it with write conflict, we do not check it since the
         // statement will then retry.
         if locked_with_conflict_ts.is_none() {
-            check_data_constraint(reader, should_not_exist, &write, commit_ts, &key)?;
+            check_data_constraint(reader, should_not_exist, &write, commit_ts, &key).await?;
         }
 
         (last_change_ts, versions_to_last_change) = write.next_last_change_info(commit_ts);
@@ -323,9 +330,9 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
                 WriteType::Delete | WriteType::Put => None,
                 WriteType::Lock | WriteType::Rollback => {
                     if need_load_value {
-                        reader.get(&key, commit_ts.prev())?
+                        reader.get(&key, commit_ts.prev()).await?
                     } else {
-                        reader.get_write(&key, commit_ts.prev())?.map(|_| vec![])
+                        reader.get_write(&key, commit_ts.prev()).await?.map(|_| vec![])
                     }
                 }
             };
@@ -348,7 +355,8 @@ pub fn acquire_pessimistic_lock<S: Snapshot>(
         for_update_ts,
         prev_write_loaded,
         prev_write,
-    )?;
+    )
+    .await?;
     let lock = PessimisticLock {
         primary: primary.into(),
         start_ts: reader.start_ts,

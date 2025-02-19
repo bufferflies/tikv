@@ -22,14 +22,17 @@ use crate::storage::{
         Error, ErrorInner, Lock, LockType, MvccTxn, Result, SnapshotReader,
     },
     txn::{
-        actions::check_data_constraint::check_data_constraint, sched_pool::tls_can_enable,
-        scheduler::LAST_CHANGE_TS, LockInfo,
+        actions::check_data_constraint::{check_data_constraint, check_data_constraint_async},
+        sched_pool::tls_can_enable,
+        scheduler::LAST_CHANGE_TS,
+        LockInfo,
     },
     Snapshot,
 };
 
 /// Prewrite a single mutation by creating and storing a lock and value.
-pub fn prewrite<S: Snapshot>(
+#[maybe_async::both]
+pub async fn prewrite<S: Snapshot>(
     txn: &mut MvccTxn,
     reader: &mut SnapshotReader<S>,
     txn_props: &TransactionProperties<'_>,
@@ -65,7 +68,7 @@ pub fn prewrite<S: Snapshot>(
     let lock_status = match reader.load_lock(&mutation.key)? {
         Some(lock) => mutation.check_lock(lock, pessimistic_action)?,
         None if matches!(pessimistic_action, DoPessimisticCheck) => {
-            amend_pessimistic_lock(&mut mutation, reader)?;
+            amend_pessimistic_lock(&mut mutation, reader).await?;
             lock_amended = true;
             LockStatus::None
         }
@@ -79,7 +82,7 @@ pub fn prewrite<S: Snapshot>(
     // Note that the `prev_write` may have invalid GC fence.
     let (mut prev_write, mut prev_write_loaded) = if !mutation.skip_constraint_check() {
         (
-            mutation.check_for_newer_version(reader)?,
+            mutation.check_for_newer_version(reader).await?,
             mutation.should_not_exist || txn_props.need_old_value,
         )
     } else {
@@ -96,8 +99,9 @@ pub fn prewrite<S: Snapshot>(
     //   `assertion_level` is set to `Strict` level.
     // Assertion level will be checked within the `check_assertion` function.
     if !lock_amended {
-        let (reloaded_prev_write, reloaded) =
-            mutation.check_assertion(reader, &prev_write, prev_write_loaded)?;
+        let (reloaded_prev_write, reloaded) = mutation
+            .check_assertion(reader, &prev_write, prev_write_loaded)
+            .await?;
         if reloaded {
             prev_write = reloaded_prev_write;
             prev_write_loaded = true;
@@ -150,7 +154,9 @@ pub fn prewrite<S: Snapshot>(
                 TransactionKind::Optimistic(_) => txn_props.start_ts,
                 TransactionKind::Pessimistic(for_update_ts) => for_update_ts,
             };
-            reader.get_old_value(&mutation.key, ts, prev_write_loaded, prev_write)?
+            reader
+                .get_old_value(&mutation.key, ts, prev_write_loaded, prev_write)
+                .await?
         }
     } else {
         OldValue::Unspecified
@@ -363,7 +369,8 @@ impl<'a> PrewriteMutation<'a> {
         Ok(LockStatus::Locked(min_commit_ts))
     }
 
-    fn check_for_newer_version<S: Snapshot>(
+    #[maybe_async::both]
+    async fn check_for_newer_version<S: Snapshot>(
         &mut self,
         reader: &mut SnapshotReader<S>,
     ) -> Result<Option<(Write, TimeStamp)>> {
@@ -392,7 +399,9 @@ impl<'a> PrewriteMutation<'a> {
                         }
                     }
                 };
-                if let Some((commit_ts, write)) = cloud_reader.get_newer(&self.key, check_ts)? {
+                if let Some((commit_ts, write)) =
+                    cloud_reader.get_newer(&self.key, check_ts).await?
+                {
                     match conflict_reason {
                         Some(reason) => {
                             MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
@@ -418,7 +427,7 @@ impl<'a> PrewriteMutation<'a> {
         }
 
         let mut seek_ts = TimeStamp::max();
-        while let Some((commit_ts, write)) = reader.seek_write(&self.key, seek_ts)? {
+        while let Some((commit_ts, write)) = reader.seek_write(&self.key, seek_ts).await? {
             // If there's a write record whose commit_ts equals to our start ts, the current
             // transaction is ok to continue, unless the record means that the current
             // transaction has been rolled back.
@@ -488,7 +497,8 @@ impl<'a> PrewriteMutation<'a> {
             }
             // Should check it when no lock exists, otherwise it can report error when there
             // is a lock belonging to a committed transaction which deletes the key.
-            check_data_constraint(reader, self.should_not_exist, &write, commit_ts, &self.key)?;
+            check_data_constraint(reader, self.should_not_exist, &write, commit_ts, &self.key)
+                .await?;
 
             return Ok(Some((write, commit_ts)));
         }
@@ -582,7 +592,8 @@ impl<'a> PrewriteMutation<'a> {
         .into())
     }
 
-    fn check_assertion<S: Snapshot>(
+    #[maybe_async::both]
+    async fn check_assertion<S: Snapshot>(
         &mut self,
         reader: &mut SnapshotReader<S>,
         write: &Option<(Write, TimeStamp)>,
@@ -637,7 +648,9 @@ impl<'a> PrewriteMutation<'a> {
             }
 
             let reload_ts = write.as_ref().map_or(TimeStamp::max(), |(_, ts)| *ts);
-            reloaded_write = reader.get_write_with_commit_ts(&self.key, reload_ts)?;
+            reloaded_write = reader
+                .get_write_with_commit_ts(&self.key, reload_ts)
+                .await?;
             write = &reloaded_write;
             reloaded = true;
         } else {
@@ -661,7 +674,7 @@ impl<'a> PrewriteMutation<'a> {
         // the check was skipped before.
         if assertion_err.is_err() {
             if self.skip_constraint_check() {
-                self.check_for_newer_version(reader)?;
+                self.check_for_newer_version(reader).await?;
             }
             assertion_err?;
         }
@@ -789,7 +802,8 @@ fn async_commit_timestamps(
 // TiKV may fails to write pessimistic locks due to pipelined process.
 // If the data is not changed after acquiring the lock, we can still prewrite
 // the key.
-fn amend_pessimistic_lock<S: Snapshot>(
+#[maybe_async::both]
+async fn amend_pessimistic_lock<S: Snapshot>(
     mutation: &mut PrewriteMutation<'_>,
     reader: &mut SnapshotReader<S>,
 ) -> Result<()> {
@@ -814,7 +828,7 @@ fn amend_pessimistic_lock<S: Snapshot>(
         }
     }
 
-    let write = reader.seek_write(&mutation.key, TimeStamp::max())?;
+    let write = reader.seek_write(&mutation.key, TimeStamp::max()).await?;
     if let Some((commit_ts, write)) = write.as_ref() {
         // The invariants of pessimistic locks are:
         //   1. lock's for_update_ts >= key's latest commit_ts
@@ -859,7 +873,9 @@ fn amend_pessimistic_lock<S: Snapshot>(
         .inc();
 
     // Check assertion after amending.
-    mutation.check_assertion(reader, &write.map(|(w, ts)| (ts, w)), true)?;
+    mutation
+        .check_assertion(reader, &write.map(|(w, ts)| (ts, w)), true)
+        .await?;
 
     Ok(())
 }

@@ -527,7 +527,8 @@ type LockWritesVals = (
     Vec<(TimeStamp, Value)>,
 );
 
-pub(crate) fn find_mvcc_infos_by_key<S: Snapshot>(
+#[maybe_async::both]
+pub(crate) async fn find_mvcc_infos_by_key<S: Snapshot>(
     reader: &mut SnapshotReader<S>,
     key: &Key,
     mut ts: TimeStamp,
@@ -536,7 +537,7 @@ pub(crate) fn find_mvcc_infos_by_key<S: Snapshot>(
     let mut values = vec![];
     let lock = reader.load_lock(key)?;
     loop {
-        let opt = reader.seek_write(key, ts)?;
+        let opt = reader.seek_write(key, ts).await?;
         match opt {
             Some((commit_ts, write)) => {
                 writes.push((commit_ts, write));

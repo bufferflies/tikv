@@ -24,11 +24,14 @@ use crate::storage::{
     kv::WriteData,
     lock_manager::LockManager,
     mvcc::{
-        has_data_in_range, Error as MvccError, ErrorInner as MvccErrorInner, MvccTxn,
-        Result as MvccResult, SnapshotReader, TxnCommitRecord,
+        has_data_in_range, has_data_in_range_async, Error as MvccError,
+        ErrorInner as MvccErrorInner, MvccTxn, Result as MvccResult, SnapshotReader,
+        TxnCommitRecord,
     },
     txn::{
-        actions::prewrite::{prewrite, CommitKind, TransactionKind, TransactionProperties},
+        actions::prewrite::{
+            prewrite, prewrite_async, CommitKind, TransactionKind, TransactionProperties,
+        },
         commands::{
             Command, CommandExt, ReleasedLocks, ResponsePolicy, TypedCommand, WriteCommand,
             WriteContext, WriteResult,
@@ -256,12 +259,11 @@ impl CommandExt for Prewrite {
     }
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Prewrite {
     #[maybe_async]
     async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
-        self.into_prewriter().process_write(snapshot, context)
+        self.into_prewriter().process_write(snapshot, context).await
     }
 }
 
@@ -424,12 +426,11 @@ impl CommandExt for PrewritePessimistic {
     gen_lock!(mutations: multiple(|(x, _)| x.key()));
 }
 
-// TODO: implement async process.
 #[maybe_async::async_trait]
 impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for PrewritePessimistic {
     #[maybe_async]
     async fn process_write(self, snapshot: S, context: WriteContext<'_, L>) -> Result<WriteResult> {
-        self.into_prewriter().process_write(snapshot, context)
+        self.into_prewriter().process_write(snapshot, context).await
     }
 }
 
@@ -454,13 +455,15 @@ struct Prewriter<K: PrewriteKind> {
 
 impl<K: PrewriteKind> Prewriter<K> {
     /// Entry point for handling a prewrite by Prewriter.
-    fn process_write(
+    #[maybe_async::both]
+    async fn process_write(
         mut self,
         snapshot: impl Snapshot,
         mut context: WriteContext<'_, impl LockManager>,
     ) -> Result<WriteResult> {
         self.kind
-            .can_skip_constraint_check(&mut self.mutations, &snapshot, &mut context)?;
+            .can_skip_constraint_check(&mut self.mutations, &snapshot, &mut context)
+            .await?;
         self.check_max_ts_synced(&snapshot)?;
 
         let mut txn = MvccTxn::new(self.start_ts, context.concurrency_manager);
@@ -472,7 +475,7 @@ impl<K: PrewriteKind> Prewriter<K> {
         // prewrite.
 
         let rows = self.mutations.len();
-        let res = self.prewrite(&mut txn, &mut reader, context.extra_op);
+        let res = self.prewrite(&mut txn, &mut reader, context.extra_op).await;
         let (locks, final_min_commit_ts) = res?;
 
         Ok(self.write_result(
@@ -505,7 +508,8 @@ impl<K: PrewriteKind> Prewriter<K> {
     /// iterates over the mutations in the prewrite and prewrites each one.
     /// It keeps track of any locks encountered and (if it's an async commit
     /// transaction) the min_commit_ts, these are returned by the method.
-    fn prewrite(
+    #[maybe_async::both]
+    async fn prewrite(
         &mut self,
         txn: &mut MvccTxn,
         reader: &mut SnapshotReader<impl Snapshot>,
@@ -548,13 +552,14 @@ impl<K: PrewriteKind> Prewriter<K> {
         // Note that this check cannot fully guarantee idempotence because an MVCC
         // GC can remove the old committed records, then we cannot determine
         // whether the transaction has been committed, so the error is still returned.
-        fn check_committed_record_on_err(
+        #[maybe_async]
+        async fn check_committed_record_on_err(
             prewrite_result: MvccResult<(TimeStamp, OldValue)>,
             txn: &mut MvccTxn,
             reader: &mut SnapshotReader<impl Snapshot>,
             key: &Key,
         ) -> Result<(Vec<std::result::Result<(), StorageError>>, TimeStamp)> {
-            match reader.get_txn_commit_record(key)? {
+            match reader.get_txn_commit_record(key).await? {
                 TxnCommitRecord::SingleRecord { commit_ts, write }
                     if write.write_type != WriteType::Rollback =>
                 {
@@ -583,7 +588,8 @@ impl<K: PrewriteKind> Prewriter<K> {
             }
 
             let need_min_commit_ts = secondaries.is_some() || self.try_one_pc;
-            let prewrite_result = prewrite(txn, reader, &props, m, secondaries, pessimistic_action);
+            let prewrite_result =
+                prewrite(txn, reader, &props, m, secondaries, pessimistic_action).await;
             match prewrite_result {
                 Ok((ts, old_value)) if !(need_min_commit_ts && ts.is_zero()) => {
                     if need_min_commit_ts && final_min_commit_ts < ts {
@@ -615,16 +621,16 @@ impl<K: PrewriteKind> Prewriter<K> {
                     conflict_commit_ts,
                     ..
                 })) if conflict_commit_ts > start_ts => {
-                    return check_committed_record_on_err(prewrite_result, txn, reader, &key);
+                    return check_committed_record_on_err(prewrite_result, txn, reader, &key).await;
                 }
                 Err(MvccError(box MvccErrorInner::PessimisticLockNotFound { .. })) => {
-                    return check_committed_record_on_err(prewrite_result, txn, reader, &key);
+                    return check_committed_record_on_err(prewrite_result, txn, reader, &key).await;
                 }
                 Err(MvccError(box MvccErrorInner::CommitTsTooLarge { .. })) => {
                     // The prewrite might be a retry and the record may have been committed.
                     // So, we need to prevent the fallback to avoid duplicate commits.
                     if let Ok(res) =
-                        check_committed_record_on_err(prewrite_result, txn, reader, &key)
+                        check_committed_record_on_err(prewrite_result, txn, reader, &key).await
                     {
                         return Ok(res);
                     }
@@ -639,7 +645,7 @@ impl<K: PrewriteKind> Prewriter<K> {
                     final_min_commit_ts = TimeStamp::zero();
                 }
                 Err(MvccError(box MvccErrorInner::KeyIsLocked { .. })) => {
-                    match check_committed_record_on_err(prewrite_result, txn, reader, &key) {
+                    match check_committed_record_on_err(prewrite_result, txn, reader, &key).await {
                         Ok(res) => return Ok(res),
                         Err(e) => locks.push(Err(e.into())),
                     }
@@ -741,14 +747,16 @@ impl<K: PrewriteKind> Prewriter<K> {
 
 /// Encapsulates things which must be done differently for optimistic or
 /// pessimistic transactions.
-trait PrewriteKind {
+#[maybe_async::async_trait]
+trait PrewriteKind: Send {
     /// The type of mutation and, optionally, its extra information, differing
     /// for the optimistic and pessimistic transaction.
     type Mutation: MutationLock;
 
     fn txn_kind(&self) -> TransactionKind;
 
-    fn can_skip_constraint_check(
+    #[maybe_async]
+    async fn can_skip_constraint_check(
         &mut self,
         _mutations: &mut [Self::Mutation],
         _snapshot: &impl Snapshot,
@@ -763,6 +771,7 @@ struct Optimistic {
     skip_constraint_check: bool,
 }
 
+#[maybe_async::async_trait]
 impl PrewriteKind for Optimistic {
     type Mutation = Mutation;
 
@@ -771,7 +780,8 @@ impl PrewriteKind for Optimistic {
     }
 
     // If there is no data in range, we could skip constraint check.
-    fn can_skip_constraint_check(
+    #[maybe_async]
+    async fn can_skip_constraint_check(
         &mut self,
         mutations: &mut [Self::Mutation],
         snapshot: &impl Snapshot,
@@ -792,7 +802,9 @@ impl PrewriteKind for Optimistic {
                 left_key,
                 &right_key,
                 &mut context.statistics.write,
-            )? {
+            )
+            .await?
+            {
                 self.skip_constraint_check = true;
             }
         }
