@@ -6,6 +6,8 @@ FROM hub-new.pingcap.net/keyspace/tidb:${TIDB_VERSION} as tidb
 FROM hub-new.pingcap.net/keyspace/pd:${PD_VERSION} as pd
 FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
+FROM minio/minio:latest as minio
+FROM minio/mc:latest as mc
 
 FROM amazonlinux:2023.5.20241001.1
 RUN dnf update -y && dnf install -y \
@@ -19,6 +21,8 @@ COPY --from=tidb /tidb-server /tidb-server
 COPY --from=pd /pd-server /pd-server
 COPY --from=tiflash /tiflash /tiflash
 COPY --from=go-tpc /go-tpc /go-tpc
+COPY --from=minio /usr/bin/minio /usr/bin/minio
+COPY --from=mc /usr/bin/mc /usr/bin/mc
 
 ENV TIDB_BIN=/tidb-server
 ENV PD_BIN=/pd-server

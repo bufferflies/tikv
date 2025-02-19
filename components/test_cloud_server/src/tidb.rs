@@ -25,7 +25,10 @@ use serde_derive::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tikv_util::{box_err, config::ReadableDuration, info, time::Instant, warn};
 
-use crate::{tiflash::TiFlashServers, try_wait, try_wait_result_async};
+use crate::{
+    tiflash::{TiFlashRole, TiFlashServers},
+    try_wait, try_wait_result_async,
+};
 
 // Set small update_interval to speed up recover new tso from legacy tso.
 pub const PD_CLIENT_UPDATE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
@@ -412,14 +415,21 @@ impl TidbServers {
             config.disaggregated_tiflash = true;
             config.use_autoscaler = false;
             let tiflash_replicas_config = TiFlashReplicas {
-                group_id: "tiflash_group".to_string(),
+                group_id: "enable_s3_wn_region".to_string(),
                 extra_s3_rule: false,
                 min_count: 1,
-                constraints: vec![TiFlashReplicasConstraints {
-                    key: "engine".to_string(),
-                    op: "in".to_string(),
-                    values: vec!["tiflash".to_string()],
-                }],
+                constraints: vec![
+                    TiFlashReplicasConstraints {
+                        key: "engine".to_string(),
+                        op: "in".to_string(),
+                        values: vec!["tiflash".to_string()],
+                    },
+                    TiFlashReplicasConstraints {
+                        key: "engine_role".to_string(),
+                        op: "in".to_string(),
+                        values: vec!["write".to_string()],
+                    },
+                ],
             };
             config.tiflash_replicas = Some(tiflash_replicas_config);
         }
@@ -627,16 +637,28 @@ impl TidbClusterCore {
         tiflash_compute_mode: bool,
     ) {
         let start_time = Instant::now_coarse();
+        if tiflash_compute_mode {
+            self.tiflash.start_minio();
+        }
         let pd_endpoints = self.pd.endpoints();
         for idx in 0..count {
+            if !tiflash_compute_mode {
+                self.tiflash
+                    .start(idx, dfs.clone(), &pd_endpoints, TiFlashRole::Legacy);
+            } else {
+                self.tiflash
+                    .start(idx, dfs.clone(), &pd_endpoints, TiFlashRole::Write);
+            }
+        }
+        // Start 1 compute node for compute mode.
+        if tiflash_compute_mode {
             self.tiflash
-                .start(idx, dfs.clone(), &pd_endpoints, tiflash_compute_mode);
+                .start(count, dfs.clone(), &pd_endpoints, TiFlashRole::Compute);
         }
+
         block_on(self.tiflash.must_all_healthy(timeout));
-        // TiFlash compute node may not register self to pd.
-        if !tiflash_compute_mode {
-            self.wait_tiflash_up(count, timeout);
-        }
+        // Note: TiFlash compute node may not register self to pd.
+        self.wait_tiflash_up(count, timeout);
         info!("start TiFlash success"; "takes" => ?start_time.saturating_elapsed());
     }
 

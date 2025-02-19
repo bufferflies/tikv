@@ -4,7 +4,7 @@ use std::{
     fs,
     path::PathBuf,
     process::{self, Command, Stdio},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -23,12 +23,20 @@ const TIFLASH_SERVICE_PORT_BASE: u16 = 3930;
 const TIFLASH_METRICS_PORT_BASE: u16 = 8234;
 const TIFLASH_PROXY_PORT_BASE: u16 = 20170;
 const TIFLASH_PROXY_STATUS_PORT_BASE: u16 = 20292;
+const MINIO_PORT: u16 = 29000;
+
+pub enum TiFlashRole {
+    Legacy,
+    Compute,
+    Write,
+}
 
 pub struct TiFlashServers {
     bin_path: PathBuf,
     data_path: PathBuf,
     security_mgr: Arc<SecurityManager>,
     servers: DashMap<u16 /* idx */, process::Child>,
+    minio: Arc<Mutex<Option<process::Child>>>,
 }
 
 impl Drop for TiFlashServers {
@@ -44,6 +52,7 @@ impl TiFlashServers {
             data_path,
             security_mgr,
             servers: DashMap::new(),
+            minio: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -52,13 +61,7 @@ impl TiFlashServers {
         format!("127.0.0.1:{}", TIFLASH_PROXY_STATUS_PORT_BASE + idx)
     }
 
-    pub fn start(
-        &self,
-        idx: u16,
-        dfs: DFSConfig,
-        pd_endpoints: &[String],
-        tiflash_compute_mode: bool,
-    ) {
+    pub fn start(&self, idx: u16, dfs: DFSConfig, pd_endpoints: &[String], role: TiFlashRole) {
         let data_dir = self.data_path.join(format!("tiflash-{idx}"));
         let log_file = self.data_path.join(format!("tiflash-{idx}.log"));
         let error_log_file = self.data_path.join(format!("tiflash-error-{idx}.log"));
@@ -69,15 +72,19 @@ impl TiFlashServers {
         let proxy_config_file = self.data_path.join(format!("tiflash-proxy-{idx}.toml"));
 
         let service_addr = format!("127.0.0.1:{}", TIFLASH_SERVICE_PORT_BASE + idx);
-        let role = if tiflash_compute_mode {
-            "tiflash_compute".to_string()
-        } else {
-            "".to_string()
+        let role_str = match role {
+            TiFlashRole::Legacy => "".to_string(),
+            TiFlashRole::Compute => "tiflash_compute".to_string(),
+            TiFlashRole::Write => "tiflash_write".to_string(),
         };
-        let use_columnar = if tiflash_compute_mode {
-            Some(true)
-        } else {
-            None
+        let use_columnar = match role {
+            TiFlashRole::Legacy => None,
+            TiFlashRole::Compute => Some(true),
+            TiFlashRole::Write => Some(false),
+        };
+        let s3 = match role {
+            TiFlashRole::Legacy => None,
+            TiFlashRole::Compute | TiFlashRole::Write => Some(StorageS3Config::default()),
         };
 
         let config = TiFlashConfig {
@@ -85,7 +92,7 @@ impl TiFlashServers {
             tcp_port: TIFLASH_TCP_PORT_BASE + idx,
             flash: FlashConfig {
                 service_addr: service_addr.clone(),
-                disaggregated_mode: role,
+                disaggregated_mode: role_str,
                 use_columnar,
                 proxy: ProxyConfig {
                     addr: format!("127.0.0.1:{}", TIFLASH_PROXY_PORT_BASE + idx),
@@ -110,6 +117,7 @@ impl TiFlashServers {
                 main: StorageMainConfig {
                     dir: vec![data_dir.to_str().unwrap().to_owned()],
                 },
+                s3,
                 ..Default::default()
             },
             ..Default::default()
@@ -187,10 +195,77 @@ impl TiFlashServers {
         for idx in all {
             self.stop(idx);
         }
+        let mut minio = self.minio.lock().unwrap();
+        if let Some(mut child) = minio.take() {
+            child.kill().unwrap_or_else(|err| {
+                panic!("MinIO has exited unexpectedly: {}", err);
+            });
+        }
     }
 
     fn get_all_indexes(&self) -> Vec<u16> {
         self.servers.iter().map(|kv| *kv.key()).collect::<Vec<_>>()
+    }
+
+    // TiFlash use XML API to access S3.
+    pub fn start_minio(&self) {
+        let minio_data_dir = self.data_path.join("minio");
+        fs::create_dir_all(&minio_data_dir).unwrap();
+
+        let mut cmd = Command::new("minio");
+        cmd.arg("server")
+            .arg("--address")
+            .arg(format!(":{}", MINIO_PORT))
+            .arg(minio_data_dir.display().to_string())
+            .env("MINIO_BROWSER", "off"); // Disable web UI for testing
+
+        info!("starting minio server"; "cmd" => ?cmd);
+
+        let mut child = cmd.spawn().unwrap_or_else(|e| {
+            panic!("failed to start minio server: {}", e);
+        });
+
+        // Wait a moment for MinIO to start
+        std::thread::sleep(Duration::from_secs(1));
+
+        // Verify MinIO is running
+        if let Ok(None) = child.try_wait() {
+            info!("minio server started successfully");
+        } else {
+            panic!("minio server failed to start");
+        }
+
+        let mut minio = self.minio.lock().unwrap();
+        *minio = Some(child);
+
+        // Configure mc client
+        let status = Command::new("mc")
+            .arg("alias")
+            .arg("set")
+            .arg("local") // alias name
+            .arg(format!("http://127.0.0.1:{}", MINIO_PORT))
+            .arg("minioadmin")
+            .arg("minioadmin")
+            .status()
+            .unwrap_or_else(|e| panic!("failed to configure mc: {}", e));
+
+        if !status.success() {
+            panic!("failed to configure mc client");
+        }
+
+        // Create bucket if it doesn't exist
+        let status = Command::new("mc")
+            .arg("mb")
+            .arg("--ignore-existing")
+            .arg(format!("local/{}", "tiflash"))
+            .status()
+            .unwrap_or_else(|e| panic!("failed to create bucket: {}", e));
+
+        if !status.success() {
+            panic!("failed to create bucket {}", "tiflash");
+        }
+
+        info!("created minio bucket successfully");
     }
 }
 
@@ -293,6 +368,7 @@ impl Default for StatusConfig {
 struct StorageConfig {
     api_version: u16,
     main: StorageMainConfig,
+    s3: Option<StorageS3Config>,
 }
 
 impl Default for StorageConfig {
@@ -300,6 +376,7 @@ impl Default for StorageConfig {
         Self {
             api_version: 2,
             main: StorageMainConfig::default(),
+            s3: None,
         }
     }
 }
@@ -308,6 +385,28 @@ impl Default for StorageConfig {
 #[serde(rename_all = "snake_case")]
 struct StorageMainConfig {
     dir: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct StorageS3Config {
+    endpoint: String,
+    access_key_id: String,
+    secret_access_key: String,
+    bucket: String,
+    root: String,
+}
+
+impl Default for StorageS3Config {
+    fn default() -> Self {
+        Self {
+            endpoint: format!("http://127.0.0.1:{}", MINIO_PORT),
+            access_key_id: "minioadmin".to_owned(),
+            secret_access_key: "minioadmin".to_owned(),
+            bucket: "tiflash".to_owned(),
+            root: "/".to_owned(),
+        }
+    }
 }
 
 #[derive(Default, Serialize)]

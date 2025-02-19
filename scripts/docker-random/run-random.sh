@@ -167,5 +167,6 @@ for i in $(seq -w 1 100000); do
         pkill -9 -f "/tikv-worker" || true
         pkill -9 -f "/tiflash/tiflash" || true
         pkill -9 -f "/go-tpc" || true
+        pkill -9 -f "minio" || true
     fi
 done
