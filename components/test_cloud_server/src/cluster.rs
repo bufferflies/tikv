@@ -74,9 +74,9 @@ const TXN_CHUNK_TARGET_BLOCK_ENTRIES: usize = 64;
 const BLOCK_SIZE_DEF: u64 = 4096;
 
 const IA_SEGMENT_SIZE_DEF: i64 = BLOCK_SIZE_DEF as i64 * 8; // 32 KiB
-const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(3);
-const IA_MEM_CAP_DEF: u64 = 1 << 20; // 1 MiB
-const IA_DISK_CAP_DEF: u64 = 10 << 20; // 10 MiB
+pub const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(3);
+pub const IA_MEM_CAP_DEF: u64 = 1 << 20; // 1 MiB
+pub const IA_DISK_CAP_DEF: u64 = 10 << 20; // 10 MiB
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 

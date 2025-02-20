@@ -582,14 +582,6 @@ pub(crate) fn i_to_key(i: usize) -> Vec<u8> {
     format!("tkey{:08}", i).into_bytes()
 }
 
-pub(crate) fn generate_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
-    move |i: usize| -> Vec<u8> {
-        let mut key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
-        key.extend(i_to_key(i));
-        key
-    }
-}
-
 pub(crate) fn generate_random_string(prefix: String) -> impl Fn(usize) -> Vec<u8> {
     move |i: usize| -> Vec<u8> {
         let mut val = prefix.as_bytes().to_vec();

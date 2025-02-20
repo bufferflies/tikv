@@ -118,6 +118,10 @@ while [[ $# -gt 0 ]]; do
 		RUN_ARGS+=("--enable-inner-key-off-ratio" "$2")
 		shift
 		;;
+	--ia-table-ratio)
+		RUN_ARGS+=("--ia-table-ratio" "$2")
+		shift
+		;;
 	--upgrade-test-duration)
 		RUN_ARGS+=("--upgrade-test-duration" "$2")
 		shift

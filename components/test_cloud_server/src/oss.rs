@@ -727,7 +727,6 @@ mod tests {
         dfs::{Dfs, FileType, Options, S3Fs},
     };
     use rand::prelude::*;
-    use tikv_util::codec::number::U64_SIZE;
 
     use super::*;
 
@@ -1116,10 +1115,8 @@ mod tests {
             "cse_test".to_string(),
         );
 
-        let mut rng = thread_rng();
-        let data: Vec<u8> = (0..OBJECT_SIZE / U64_SIZE)
-            .flat_map(|_| rng.gen::<u64>().to_be_bytes())
-            .collect();
+        let mut data = vec![0u8; OBJECT_SIZE];
+        thread_rng().fill_bytes(data.as_mut_slice());
         let data = Bytes::from(data);
         let data_len = data.len();
         assert_eq!(data_len, OBJECT_SIZE);

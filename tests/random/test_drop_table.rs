@@ -2,6 +2,7 @@
 
 use std::{sync::atomic::Ordering, time::Duration};
 
+use schema::schema::StorageClass;
 use test_cloud_server::{
     client::ClusterTxnClient,
     keyspace::{make_row_key, ClusterKeyspaceClient, KeyspaceManager},
@@ -30,19 +31,24 @@ pub fn spawn_drop_table(
                 (keyspace_id, table_meta)
             };
             let (keyspace_id, table_meta) = random();
-            let table_id = match table_meta.as_ref() {
-                Some(table_meta) => table_meta.id(),
-                None => continue,
+            let Some(table_meta) = table_meta else {
+                continue;
             };
+            let table_id = table_meta.id();
             client.drop_table(keyspace_id, table_id).await.unwrap();
             DROP_TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
             // Add a new table to keep number of tables.
+            // FIXME: copy the storage class & build schema.
             client
                 .keyspace_manager()
                 .get_keyspace_meta(keyspace_id)
                 .unwrap()
-                .new_table(true, table_meta.unwrap().is_schema_enabled());
+                .new_table(
+                    true,
+                    table_meta.is_schema_enabled(),
+                    StorageClass::default(),
+                );
             TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
             let sleep_time = interval.saturating_sub(loop_start_time.saturating_elapsed());

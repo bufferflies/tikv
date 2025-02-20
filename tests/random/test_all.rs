@@ -10,6 +10,7 @@ use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use kvengine::{
     dfs::{self, DFSConfig, FileType, S3Fs},
+    ia::util::IaConfig,
     table::{columnar::build_schema_file, ChecksumType},
 };
 use kvproto::pdpb::CheckPolicy;
@@ -17,10 +18,12 @@ use load_data::task::LoadDataConfig;
 use native_br::{backup, backup_worker, restore::RestoreConfig};
 use pd_client::PdClient;
 use rand::prelude::*;
+use schema::schema::StorageClass;
 use security::SecurityConfig;
 use test_cloud_server::{
-    client::ClusterClientOptions, oss::prepare_dfs, tidb::TidbCluster, ServerCluster,
-    ServerClusterBuilder, TikvWorkerOptions,
+    client::ClusterClientOptions, keyspace::make_row_key, oss::prepare_dfs, tidb::TidbCluster,
+    ServerCluster, ServerClusterBuilder, TikvWorkerOptions, IA_DISK_CAP_DEF,
+    IA_FREQ_UPDATE_INTERVAL_DEF, IA_MEM_CAP_DEF,
 };
 use test_pd_client::{PdClientExt, PdWrapper};
 use tikv_util::{
@@ -354,6 +357,8 @@ fn prepare_cluster(
         .collect::<Vec<_>>();
     info!("prepare_cluster"; "per_keyspace_configs" => ?per_keyspace_configs);
 
+    let enable_ia = switches.ia_table_ratio > 0.0;
+
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
         conf.enable_inner_key_offset = switches.enable_inner_key_off;
@@ -381,6 +386,15 @@ fn prepare_cluster(
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.flush_split_l0 = true;
         conf.kvengine.per_keyspace_configs = per_keyspace_configs.clone();
+        if enable_ia {
+            conf.kvengine.ia = IaConfig {
+                mem_cap: IA_MEM_CAP_DEF.into(),
+                disk_cap: IA_DISK_CAP_DEF.into(),
+                segment_size: conf.rocksdb.writecf.block_size.0 as i64 * 8,
+                freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
+                ..Default::default()
+            }
+        }
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
@@ -405,16 +419,23 @@ fn prepare_cluster(
     let mut keyspace_keys = vec![];
     let mut keyspaces: Vec<u32> = vec![];
     let mut data_keys = vec![];
+    let mut next_table_id = 1; // Table id is global unique. See `TableMeta::new`.
     for _ in 0..initial_keyspace_count {
         // New keyspace must allocated by keyspace manager to avoid conflicts.
         let keyspace_id = cluster.keyspace_manager().new_keyspace_id(1);
         keyspaces.push(keyspace_id);
         keyspace_keys.push(ApiV2::get_txn_keyspace_prefix(keyspace_id));
         keyspace_keys.push(ApiV2::get_txn_keyspace_prefix(keyspace_id + 1));
-        let i_to_key = generate_keyspace_key(keyspace_id);
-        for i in 0..rng.gen_range(0..10) {
-            data_keys.push(Key::from_raw(&i_to_key(i * 100)).into_encoded());
+
+        for _ in 0..INITIAL_TABLE_COUNT {
+            let table_id = next_table_id;
+            next_table_id += 1;
+            for i in 0..rng.gen_range(0..10) {
+                let key = make_row_key(keyspace_id, table_id, &gen_row_key_suffix(i * 100));
+                data_keys.push(Key::from_raw(&key).into_encoded());
+            }
         }
+
         let cfg = KeyspaceEncryptionConfig { enabled: rng.gen() };
         match pd_client.set_keyspace_encryption(keyspace_id, cfg) {
             Ok(_) => {}
@@ -434,6 +455,14 @@ fn prepare_cluster(
         .iter()
         .map(|&keyspace_id| TidbCluster::keyspace_name(keyspace_id as u16))
         .collect();
+    let ia_table_ratio = switches.ia_table_ratio;
+    let storage_class_fn = Box::new(move |_| {
+        if thread_rng().gen_bool(ia_table_ratio) {
+            StorageClass::Ia
+        } else {
+            StorageClass::default()
+        }
+    });
     cluster.keyspace_manager().create_keyspaces(
         &keyspaces,
         keyspace_names,
@@ -441,7 +470,7 @@ fn prepare_cluster(
             enable_inner_key_off: switches.enable_inner_key_off,
             table_count: INITIAL_TABLE_COUNT,
             schema_enable_ratio: TABLE_SCHEMA_ENABLE_RATIO,
-            ..Default::default()
+            storage_class_fn,
         },
         Some(&mut rng),
     );
@@ -547,6 +576,8 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     check_gc();
     check_drop_table();
 
+    // TODO: check storage class property.
+
     records_cnt
 }
 
@@ -554,6 +585,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
 pub(crate) struct Switches {
     pub enable_inner_key_off: bool,
     pub update_inner_key_off: bool,
+    pub ia_table_ratio: f64,
 }
 
 impl Switches {
@@ -562,10 +594,12 @@ impl Switches {
 
         let enable_inner_key_off: bool = rng.gen_bool(env_param("ENABLE_INNER_KEY_OFF_RATIO", 0.5));
         let update_inner_key_off = !enable_inner_key_off && env_switch("UPDATE_INNER_KEY_OFF");
+        let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.2);
 
         Self {
             enable_inner_key_off,
             update_inner_key_off,
+            ia_table_ratio,
         }
     }
 }

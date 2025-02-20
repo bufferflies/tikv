@@ -1,7 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use kvengine::SnapAccess;
-use rand::{thread_rng, Rng as _};
+use rand::{thread_rng, RngCore as _};
 use tikv::storage::txn::CloudStoreScanner;
 use txn_types::{Key, TsSet};
 
@@ -18,11 +18,9 @@ pub(crate) fn i_to_val(i: usize) -> Vec<u8> {
 
 /// `value_size` should be factor of 8.
 pub(crate) fn random_value(value_size: usize) -> Vec<u8> {
-    let mut rng = thread_rng();
-    let batch = value_size >> 3;
-    (0..batch)
-        .flat_map(|_| rng.gen::<u64>().to_le_bytes())
-        .collect()
+    let mut value = vec![0u8; value_size];
+    thread_rng().fill_bytes(value.as_mut_slice());
+    value
 }
 
 pub(crate) fn new_scanner(

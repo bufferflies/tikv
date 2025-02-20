@@ -335,6 +335,7 @@ impl TryFrom<u8> for StorageClass {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         // `0` is not expected to be passed in.
         match value {
+            0 => Ok(StorageClass::Unspecified),
             1 => Ok(StorageClass::Standard),
             2 => Ok(StorageClass::Ia),
             _ => {

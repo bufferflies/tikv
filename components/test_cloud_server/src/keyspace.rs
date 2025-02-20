@@ -353,11 +353,13 @@ impl KeyspaceMeta {
         let mut tables_schema_opts = vec![];
         for _ in 0..options.table_count {
             let is_schema_enabled = rand::thread_rng().gen_bool(options.schema_enable_ratio);
-            let table = TableMeta::new(true, is_schema_enabled);
+            let table = TableMeta::new(true, is_schema_enabled, StorageClass::default());
             let table_id = table.id();
+            let storage_class = (options.storage_class_fn)(table_id);
+            table.set_storage_class(storage_class);
+            info!("keyspace manager: create table"; "keyspace" => keyspace_id, "meta" => ?table);
             tables.insert(table_id, table);
 
-            let storage_class = (options.storage_class_fn)(table_id);
             if is_schema_enabled || storage_class.is_specified() {
                 tables_schema_opts.push(TableSchemaOptions {
                     table_id,
@@ -404,8 +406,13 @@ impl KeyspaceMeta {
             .choose(rng)
     }
 
-    pub fn new_table(&self, is_available: bool, is_schema_enabled: bool) -> i64 {
-        let table = TableMeta::new(is_available, is_schema_enabled);
+    pub fn new_table(
+        &self,
+        is_available: bool,
+        is_schema_enabled: bool,
+        storage_class: StorageClass,
+    ) -> i64 {
+        let table = TableMeta::new(is_available, is_schema_enabled, storage_class);
         let table_id = table.id();
         self.tables.insert(table.id(), table);
         table_id

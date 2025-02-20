@@ -88,6 +88,13 @@ pub(crate) fn i_to_key_v1(i: usize) -> Vec<u8> {
     format!("m_{:08}", i).into_bytes()
 }
 
+pub(crate) fn random_value(value_len: usize) -> Vec<u8> {
+    use rand::RngCore as _;
+    let mut value = vec![0u8; value_len];
+    rand::thread_rng().fill_bytes(value.as_mut_slice());
+    value
+}
+
 pub(crate) async fn request_major_compact_on_store(
     store: &Store,
     query: &str,
