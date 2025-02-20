@@ -281,7 +281,7 @@ impl Node {
         );
 
         let region = initial_region(store_id, region_id, peer_id);
-        store::prepare_bootstrap_cluster(engines, &region)?;
+        store::prepare_bootstrap_cluster(engines, &region, peer_id)?;
         Ok(region)
     }
 

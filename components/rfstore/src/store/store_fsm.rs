@@ -196,6 +196,7 @@ impl RaftBatchSystem {
         self.workers = Some(workers);
 
         let (mut io_worker, io_sender) = IoWorker::new(
+            ctx.store.id,
             ctx.engines.raft.clone(),
             self.router.clone(),
             ctx.trans.clone(),
@@ -279,7 +280,6 @@ impl RaftBatchSystem {
     fn load_peers(&self, ctx: &GlobalContext, store_meta: &mut StoreMeta) -> Result<Vec<PeerFsm>> {
         // Scan region meta to get saved regions.
         let mut local_states = vec![];
-        let mut last_peer_id: u64 = 0;
         let rfengine = &ctx.engines.raft;
         let mut regions_to_peers = rfengine.get_region_peer_map();
         if let Some(black_list) = store_meta.black_list.as_ref() {
@@ -288,13 +288,9 @@ impl RaftBatchSystem {
         let mut tomb_stone_peers = vec![];
         for (_, peer_id) in regions_to_peers {
             rfengine.iterate_peer_states(peer_id, true, |key, val| {
-                if peer_id == last_peer_id {
-                    return;
-                }
                 if key[0] != REGION_META_KEY_BYTE {
-                    return;
+                    return true;
                 }
-                last_peer_id = peer_id;
                 let mut local_state = RegionLocalState::default();
                 local_state.merge_from_bytes(val).unwrap();
                 if local_state.state != PeerState::Tombstone {
@@ -305,6 +301,7 @@ impl RaftBatchSystem {
                         .remove_shard(local_state.get_region().get_id());
                     tomb_stone_peers.push((peer_id, local_state.get_region().get_id()));
                 }
+                false
             });
         }
         // When a source peer is merged, the tombstone state is set, but it's not
@@ -341,6 +338,7 @@ impl RaftBatchSystem {
         for (peer_id, region_id) in tombstone_peers {
             rfengine.iterate_peer_states(peer_id, false, |k, _| {
                 rwb.set_state(peer_id, region_id, k, &[]);
+                true
             });
             rwb.truncate_raft_log(peer_id, region_id, TRUNCATE_ALL_INDEX);
         }
@@ -1606,7 +1604,7 @@ impl<'a> StoreMsgHandler<'a> {
     fn on_destroy_peer(&mut self, region_id: u64, merged_target: Option<Region>) {
         let peer = self.get_peer(region_id);
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
-        fail_point!("destroy_peer");
+        fail_point!("destroy_peer", |_| {});
         info!(
             "starts destroy";
             "tag" => peer_fsm.peer.tag(),

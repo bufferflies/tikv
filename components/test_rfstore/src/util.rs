@@ -1,5 +1,5 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{path::Path, sync::Arc, thread, time::Duration};
+use std::{fmt::Write, path::Path, sync::Arc, thread, time::Duration};
 
 use cloud_encryption::MasterKey;
 use cloud_server::TikvServer;
@@ -8,35 +8,38 @@ use kvengine::{dfs::Dfs, WRITE_CF};
 use kvproto::{
     metapb::RegionEpoch,
     raft_cmdpb::{CmdType, CustomRequest, RaftCmdRequest, RaftCmdResponse},
+    raft_serverpb::RegionLocalState,
 };
 use pd_client::PdClient;
-use rfengine::RfEngine;
+use protobuf::Message;
+use rand::RngCore;
+use rfengine::{RfEngine, REGION_META_KEY_BYTE};
 use rfstore::store::{
     rlog, Callback, CustomBuilder, Engines, ExtCallback, ReadResponse, WriteResponse,
 };
 use security::SecurityManager;
-use tempfile::TempDir;
 use test_raftstore::Config;
 use tikv_util::{debug, escape, mpsc::future, warn};
 
+use crate::{Cluster, Simulator};
+
 pub fn create_test_engine(
     cfg: &Config,
+    dir: &std::path::Path,
     pd: Arc<dyn PdClient>,
     dfs: Arc<dyn Dfs>,
     rate_limiter: Arc<IoRateLimiter>,
     master_key: MasterKey,
     security_mgr: Arc<SecurityManager>,
-) -> (Engines, TempDir) {
-    let dir = test_util::temp_dir("test_cluster", cfg.prefer_mem);
+) -> Engines {
     let mut cfg: Config = cfg.clone();
-    cfg.storage.data_dir = dir.path().to_str().unwrap().to_string();
-    cfg.raft_store.raftdb_path = cfg.infer_raft_db_path(None).unwrap();
-    cfg.raft_engine.mut_config().dir = cfg.infer_raft_engine_path(None).unwrap();
+    cfg.storage.data_dir = dir.to_str().unwrap().to_string();
+    cfg.rfengine.wal_sync_dir = format!("{}/wal", dir.display());
 
-    let raft_db_path = Path::new(&cfg.raft_store.raftdb_path);
+    let rfengine_dir = dir.join("rfengine");
     let data_dir = Path::new(&cfg.storage.data_dir);
     let rf_engine = RfEngine::open(
-        raft_db_path,
+        rfengine_dir.as_path(),
         &cfg.rfengine,
         Some(data_dir),
         Some(cfg.dfs.clone()),
@@ -63,13 +66,12 @@ pub fn create_test_engine(
         security_mgr,
     )
     .unwrap();
-    let engines = Engines::new(
+    Engines::new(
         kv_engine,
         rf_engine,
         (sender, receiver),
         meta_iter.take_black_list(),
-    );
-    (engines, dir)
+    )
 }
 
 #[derive(Default)]
@@ -151,21 +153,29 @@ pub fn must_get(
     value: Option<&[u8]>,
 ) {
     for _ in 1..300 {
-        let snapshot = engine.get_snap_access(region_id).unwrap();
-        let item = snapshot.get(cf, key, 0);
-        let res = item.get_value();
-        if let Some(value) = value {
-            if !res.is_empty() {
-                assert_eq!(value, res);
+        if let Some(snapshot) = engine.get_snap_access(region_id) {
+            let item = snapshot.get(cf, key, 0);
+            let res = item.get_value();
+            if let Some(value) = value {
+                if !res.is_empty() {
+                    assert_eq!(value, res);
+                    return;
+                }
+            } else if res.is_empty() {
                 return;
             }
-        } else if res.is_empty() {
-            return;
         }
+
         thread::sleep(Duration::from_millis(20));
     }
+
     debug!("last try to get {}", log_wrappers::hex_encode_upper(key));
-    let snapshot = engine.get_snap_access(region_id).unwrap();
+    let snapshot = match engine.get_snap_access(region_id) {
+        Some(s) => s,
+        None => {
+            panic!("engine snap for {} is none.", region_id)
+        }
+    };
     let item = snapshot.get(cf, key, 0);
     let res = item.get_value();
     if (value.is_none() && res.is_empty()) || (value.is_some() && value.unwrap() == res) {
@@ -183,6 +193,23 @@ pub fn must_get_equal(engine: &kvengine::Engine, region_id: u64, key: &[u8], val
     must_get(engine, region_id, WRITE_CF, key, Some(value));
 }
 
+pub fn must_get_none(engine: &kvengine::Engine, region_id: u64, key: &[u8]) {
+    must_get(engine, region_id, WRITE_CF, key, None);
+}
+
+pub fn shard_must_not_exist(engine: &kvengine::Engine, region_id: u64) {
+    for _ in 1..300 {
+        if engine.get_snap_access(region_id).is_none() {
+            return;
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+    if engine.get_snap_access(region_id).is_some() {
+        panic!("engine snap for {} is not none.", region_id);
+    }
+}
+
 pub fn new_put_cmd(key: &[u8], value: &[u8]) -> CustomRequest {
     let mut builder = CustomBuilder::new();
     builder.set_type(rlog::TYPE_ONE_PC);
@@ -198,4 +225,48 @@ pub fn new_write_request(
     let mut req = test_raftstore::new_base_request(region_id, epoch, false);
     req.set_custom_request(request);
     req
+}
+
+pub fn load_region_local_state(engine: &RfEngine, peer_id: u64) -> Option<RegionLocalState> {
+    let mut state = None;
+    engine.iterate_peer_states(peer_id, true, |key, val| {
+        if key[0] != REGION_META_KEY_BYTE {
+            return true;
+        }
+        let mut local_state = RegionLocalState::default();
+        local_state.merge_from_bytes(val).unwrap();
+        state = Some(local_state);
+        false
+    });
+    state
+}
+
+pub fn put_till_size<T: Simulator>(
+    cluster: &mut Cluster<T>,
+    limit: u64,
+    range: &mut dyn Iterator<Item = u64>,
+) -> Vec<u8> {
+    assert!(limit > 0);
+    let mut len = 0;
+    let mut rng = rand::thread_rng();
+    let mut key = String::new();
+    let mut value = vec![0; 64];
+    while len < limit {
+        let batch_size = std::cmp::min(1024, limit - len);
+        let mut builder = CustomBuilder::new();
+        builder.set_type(rlog::TYPE_ONE_PC);
+        for _ in 0..batch_size / 74 + 1 {
+            key.clear();
+            let key_id = range.next().unwrap();
+            write!(key, "{:09}", key_id).unwrap();
+            rng.fill_bytes(&mut value);
+            // plus 1 for the extra encoding prefix
+            len += key.len() as u64 + 1;
+            len += value.len() as u64;
+            builder.append_one_pc(key.as_bytes(), &value, false, false, 1, 2);
+        }
+        let req = builder.build();
+        cluster.put_custom(key.as_bytes(), req).unwrap();
+    }
+    key.into_bytes()
 }

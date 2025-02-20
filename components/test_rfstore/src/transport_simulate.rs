@@ -230,11 +230,10 @@ impl<C: RaftStoreRouter> CasualRouter for SimulateTransport<C> {
 
 impl<C: RaftStoreRouter> RaftStoreRouter for SimulateTransport<C> {
     fn send_raft_msg(&self, msg: RaftMessage) {
-        filter_send(&self.filters, msg, |m| {
+        let _ = filter_send(&self.filters, msg, |m| {
             self.ch.send_raft_msg(m);
             Ok(())
-        })
-        .unwrap();
+        });
     }
 
     fn significant_send(&self, region_id: u64, msg: SignificantMsg) {

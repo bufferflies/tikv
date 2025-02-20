@@ -4150,7 +4150,7 @@ dependencies = [
 [[package]]
 name = "libtitan_sys"
 version = "0.0.1"
-source = "git+https://github.com/tikv/rust-rocksdb.git#2096b9a161f93e437f7adee49e68cd1570aea42f"
+source = "git+https://github.com/tikv/rust-rocksdb.git?branch=tikv-6.5#ecbd6840f81372c30bab4a980e7ae9c91994a421"
 dependencies = [
  "bzip2-sys",
  "cc",

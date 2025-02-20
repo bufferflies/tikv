@@ -379,10 +379,11 @@ impl RfEngineCore {
     }
 
     /// Iterates states of the region in order or in desc order if `desc` is
-    /// true until `f` returns error.
+    /// true until `f` returns error. The ietrator will stop if the function
+    /// returns false.
     pub fn iterate_peer_states<F>(&self, peer_id: u64, desc: bool, mut f: F)
     where
-        F: FnMut(&[u8], &[u8]),
+        F: FnMut(&[u8], &[u8]) -> bool,
     {
         let peer_data = self.peers.get(&peer_id);
         let peer_data = match &peer_data {
@@ -393,11 +394,15 @@ impl RfEngineCore {
         let states = &peer_data.meta.states;
         if desc {
             for (k, v) in states.iter().rev() {
-                f(k.chunk(), v.chunk());
+                if !f(k.chunk(), v.chunk()) {
+                    break;
+                }
             }
         } else {
             for (k, v) in states.iter() {
-                f(k.chunk(), v.chunk());
+                if !f(k.chunk(), v.chunk()) {
+                    break;
+                }
             }
         }
     }
@@ -1487,6 +1492,7 @@ mod tests {
                 } else {
                     expect_index += 1;
                 }
+                true
             });
             assert_eq!(expect_index, if desc { 0 } else { 11 });
         }

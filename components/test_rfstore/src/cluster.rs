@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use cloud_encryption::MasterKey;
 use cloud_server::server::Result as ServerResult;
 use collections::{HashMap, HashSet};
 use engine_traits::{CompactExt, MiscExt, Peekable, RaftEngineReadOnly, CF_DEFAULT};
@@ -149,10 +150,11 @@ pub struct Cluster<T: Simulator> {
     dfs: Arc<dyn Dfs>,
 
     pub paths: Vec<TempDir>,
-    pub dbs: Vec<Engines>,
     // pub store_metas: HashMap<u64, Arc<Mutex<StoreMeta>>>,
     pub io_rate_limiter: Option<Arc<IoRateLimiter>>,
     pub engines: HashMap<u64, Engines>,
+    pub engine_dirs: HashMap<u64, TempDir>,
+    pub closed_engines: HashSet<u64>,
     // key_managers_map: HashMap<u64, Option<Arc<DataKeyManager>>>,
     pub labels: HashMap<u64, HashMap<String, String>>,
     group_props: HashMap<u64, GroupProperties>,
@@ -183,9 +185,10 @@ impl<T: Simulator> Cluster<T> {
             count,
             dfs: Arc::new(TempDirFs::default()),
             paths: vec![],
-            dbs: vec![],
             io_rate_limiter: None,
             engines: HashMap::default(),
+            closed_engines: HashSet::default(),
+            engine_dirs: HashMap::default(),
             labels: HashMap::default(),
             group_props: HashMap::default(),
             sim,
@@ -211,59 +214,53 @@ impl<T: Simulator> Cluster<T> {
         Ok(())
     }
 
-    /// Engines in a just created cluster are not bootstrapped, which means they
-    /// are not associated with a `node_id`. Call `Cluster::start` can bootstrap
-    /// all nodes in the cluster.
-    ///
-    /// However sometimes a node can be bootstrapped externally. This function
-    /// can be called to mark them as bootstrapped in `Cluster`.
-    pub fn set_bootstrapped(&mut self, node_id: u64, offset: usize) {
-        let engines = self.dbs[offset].clone();
-        // let key_mgr = self.key_managers[offset].clone();
-        assert!(self.engines.insert(node_id, engines).is_none());
-        // assert!(self.key_managers_map.insert(node_id, key_mgr).is_none());
-    }
-
-    fn create_engine(&mut self) {
+    fn create_engine(&mut self) -> (Engines, TempDir) {
+        let dir = test_util::temp_dir("test_node_", self.cfg.prefer_mem);
         let master_key = self
             .dfs
             .get_runtime()
             .block_on(self.cfg.security.new_master_key());
-        let (engines, dir) = create_test_engine(
+        let engines = self.do_create_engine(&dir, master_key);
+        (engines, dir)
+    }
+
+    fn do_create_engine(&self, dir: &TempDir, master_key: MasterKey) -> Engines {
+        create_test_engine(
             &self.cfg,
+            dir.path(),
             self.pd_client.clone(),
             self.dfs.clone(),
             self.io_rate_limiter.clone().unwrap(),
             master_key,
             self.security_manager.clone(),
-        );
-        self.dbs.push(engines);
-        self.paths.push(dir);
+        )
     }
 
-    pub fn create_engines(&mut self) {
+    pub fn create_engines(&mut self) -> Vec<(Engines, TempDir)> {
         self.io_rate_limiter = Some(Arc::new(
             self.cfg
                 .storage
                 .io_rate_limit
                 .build(true /* enable_statistics */),
         ));
+        let mut engines = Vec::with_capacity(self.count);
         for _ in 0..self.count {
-            self.create_engine();
+            engines.push(self.create_engine());
         }
+        engines
     }
 
     pub fn start(&mut self) -> ServerResult<()> {
         // Try recover from last shutdown.
-        let node_ids: Vec<u64> = self.engines.iter().map(|(&id, _)| id).collect();
+        let mut node_ids: Vec<u64> = self.engines.keys().copied().collect();
+        node_ids.sort();
         for node_id in node_ids {
             self.run_node(node_id)?;
         }
 
         // Try start new nodes.
         for _ in 0..self.count - self.engines.len() {
-            self.create_engine();
-            let engines = self.dbs.last().unwrap().clone();
+            let (engines, dir) = self.create_engine();
             // let key_mgr = self.key_managers.last().unwrap().clone();
 
             // Initialize raftstore channels.
@@ -287,6 +284,7 @@ impl<T: Simulator> Cluster<T> {
                 system,
             )?;
             self.group_props.insert(node_id, props);
+            self.engine_dirs.insert(node_id, dir);
             self.engines.insert(node_id, engines);
             // self.store_metas.insert(node_id, store_meta);
             // self.key_managers_map.insert(node_id, key_mgr);
@@ -311,16 +309,16 @@ impl<T: Simulator> Cluster<T> {
     // Bootstrap the store with fixed ID (like 1, 2, .. 5) and
     // initialize first region in all stores, then start the cluster.
     pub fn run(&mut self) {
-        self.create_engines();
-        self.bootstrap_region().unwrap();
+        let engines = self.create_engines();
+        self.bootstrap_region(engines).unwrap();
         self.start().unwrap();
     }
 
     // Bootstrap the store with fixed ID (like 1, 2, .. 5) and
     // initialize first region in store 1, then start the cluster.
     pub fn run_conf_change(&mut self) -> u64 {
-        self.create_engines();
-        let region_id = self.bootstrap_conf_change();
+        let engines = self.create_engines();
+        let region_id = self.bootstrap_conf_change(engines);
         self.start().unwrap();
         region_id
     }
@@ -331,6 +329,16 @@ impl<T: Simulator> Cluster<T> {
 
     pub fn run_node(&mut self, node_id: u64) -> ServerResult<()> {
         debug!("starting node {}", node_id);
+        if self.closed_engines.contains(&node_id) {
+            let engine = self.engines.remove(&node_id).unwrap();
+            let master_key = engine.kv.get_master_key();
+            engine.raft.stop_worker(false);
+            engine.kv.close();
+
+            let new_engines = self.do_create_engine(&self.engine_dirs[&node_id], master_key);
+            self.engines.insert(node_id, new_engines);
+            self.closed_engines.remove(&node_id);
+        }
         let engines = self.engines[&node_id].clone();
         // let key_mgr = self.key_managers_map[&node_id].clone();
 
@@ -367,6 +375,9 @@ impl<T: Simulator> Cluster<T> {
         }
         self.pd_client.shutdown_store(node_id);
         debug!("node {} stopped", node_id);
+        // NOTE: we do not close engines here because some test cases need to read
+        // from engines after node is stop, so we postpone this action at run_node.
+        self.closed_engines.insert(node_id);
     }
 
     pub fn get_engine(&self, node_id: u64) -> kvengine::Engine {
@@ -626,10 +637,12 @@ impl<T: Simulator> Cluster<T> {
     /// Peer 1 is in node 1, store 1, etc.
     ///
     /// Must be called after `create_engines`.
-    pub fn bootstrap_region(&mut self) -> Result<()> {
-        for (i, engines) in self.dbs.iter().enumerate() {
+    pub fn bootstrap_region(&mut self, engines: Vec<(Engines, TempDir)>) -> Result<()> {
+        for (i, (engines, dir)) in engines.into_iter().enumerate() {
             let id = i as u64 + 1;
-            self.engines.insert(id, engines.clone());
+            self.engine_dirs.insert(id, dir);
+            self.engines.insert(id, engines);
+
             // let store_meta =
             // Arc::new(Mutex::new(StoreMeta::new(PENDING_MSG_CAP)));
             // self.store_metas.insert(id, store_meta);
@@ -649,8 +662,8 @@ impl<T: Simulator> Cluster<T> {
             bootstrap_store(engines, self.id(), id).unwrap();
         }
 
-        for engines in self.engines.values() {
-            prepare_bootstrap_cluster(engines, &region)?;
+        for (&id, engines) in &self.engines {
+            prepare_bootstrap_cluster(engines, &region, id)?;
         }
 
         self.bootstrap_cluster(region);
@@ -659,10 +672,11 @@ impl<T: Simulator> Cluster<T> {
     }
 
     // Return first region id.
-    pub fn bootstrap_conf_change(&mut self) -> u64 {
-        for (i, engines) in self.dbs.iter().enumerate() {
+    pub fn bootstrap_conf_change(&mut self, engines: Vec<(Engines, TempDir)>) -> u64 {
+        for (i, (engines, dir)) in engines.into_iter().enumerate() {
             let id = i as u64 + 1;
-            self.engines.insert(id, engines.clone());
+            self.engine_dirs.insert(id, dir);
+            self.engines.insert(id, engines);
             // let store_meta =
             // Arc::new(Mutex::new(StoreMeta::new(PENDING_MSG_CAP)));
             // self.store_metas.insert(id, store_meta);
@@ -678,7 +692,7 @@ impl<T: Simulator> Cluster<T> {
         let peer_id = 1;
 
         let region = initial_region(node_id, region_id, peer_id);
-        prepare_bootstrap_cluster(&self.engines[&node_id], &region).unwrap();
+        prepare_bootstrap_cluster(&self.engines[&node_id], &region, peer_id).unwrap();
         self.bootstrap_cluster(region);
         region_id
     }
@@ -711,12 +725,12 @@ impl<T: Simulator> Cluster<T> {
     }
 
     pub fn add_new_engine(&mut self) -> u64 {
-        self.create_engine();
+        let (engines, dir) = self.create_engine();
         self.count += 1;
         let node_id = self.count as u64;
 
-        let engines = self.dbs.last().unwrap().clone();
         bootstrap_store(&engines, self.id(), node_id).unwrap();
+        self.engine_dirs.insert(node_id, dir);
         self.engines.insert(node_id, engines);
 
         // let key_mgr = self.key_managers.last().unwrap().clone();
@@ -1112,12 +1126,6 @@ impl<T: Simulator> Cluster<T> {
         let resp = self.request(start, vec![req], false, Duration::from_secs(5));
         if resp.get_header().has_error() {
             panic!("response {:?} has error", resp);
-        }
-    }
-
-    pub fn must_flush_cf(&mut self, cf: &str, sync: bool) {
-        for engines in &self.dbs {
-            engines.kv.flush_cf(cf, sync).unwrap();
         }
     }
 

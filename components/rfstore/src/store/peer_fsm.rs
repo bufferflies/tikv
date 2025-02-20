@@ -971,6 +971,12 @@ impl<'a> PeerMsgHandler<'a> {
         &mut self,
         msg: &RaftCmdRequest,
     ) -> Result<Option<RaftCmdResponse>> {
+        fail_point!(
+            "fail_pre_propose_split",
+            msg.has_admin_request()
+                && msg.get_admin_request().get_cmd_type() == AdminCmdType::BatchSplit,
+            |_| Err(Error::Other(box_err!("fail_point")))
+        );
         // Check store_id, make sure that the msg is dispatched to the right place.
         if let Err(e) = _util::check_store_id(msg, self.store_id()) {
             self.ctx
@@ -1994,6 +2000,8 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
 
+        fail_point!("on_raft_log_gc_tick", |_| {});
+
         let last_idx = self.peer.get_store().last_index();
         let replicated_idx = if self.peer.is_leader() {
             self.peer
@@ -2306,6 +2314,11 @@ impl<'a> PeerMsgHandler<'a> {
             // Return error to trigger rollback merge.
             Err(box_err!("on_schedule_merge_error failpoint"))
         });
+        fail_point!(
+            "on_check_merge_not_1001",
+            self.fsm.peer_id() != 1001,
+            |_| Ok(())
+        );
         let (request, target_id) = {
             let state = self.fsm.peer.pending_merge_state.as_ref().unwrap();
             let expect_region = state.get_target();

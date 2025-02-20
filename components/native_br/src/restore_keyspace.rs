@@ -1207,6 +1207,7 @@ impl BackupCluster {
             let mut states = vec![];
             rf.iterate_peer_states(peer_id, false, |k, v| {
                 states.push((k.to_vec(), v.to_vec()));
+                true
             });
             error!(
                 "failed to load peer raft state, store_id: {}, region_id: {}, peer_id: {}, state: {:?}",

@@ -1090,6 +1090,11 @@ impl Applier {
         ctx: &mut ApplyContext,
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
+        fail_point!(
+            "apply_before_split_1_3",
+            self.id() == 3 && self.region_id() == 1,
+            |_| { unreachable!() }
+        );
         let star_time = Instant::now();
         // Write the engine before run finish split, or we will get shard not match
         // error.
@@ -1323,6 +1328,10 @@ impl Applier {
         {
             return;
         }
+
+        fail_point!("rfstore_on_handle_apply", |_| {});
+        fail_point!("on_handle_apply_1003", self.peer.id == 1003, |_| {});
+        fail_point!("on_handle_apply_2", self.peer.id == 2, |_| {});
 
         if self.paused_apply_queue.must_not_paused() {
             self.process_apply_msg(ctx, apply);

@@ -13,6 +13,7 @@ use std::{
 };
 
 use crossbeam::channel::RecvTimeoutError;
+use fail::fail_point;
 use kvproto::{errorpb, raft_cmdpb::RaftCmdResponse};
 use raft_proto::eraftpb::MessageType;
 use raftstore::store::{
@@ -689,6 +690,9 @@ fn batch_end(ctx: &mut RaftContext, batch_duration: Duration) {
 }
 
 pub(crate) struct IoWorker {
+    // this field is used for failpoint test.
+    #[allow(dead_code)]
+    store_id: u64,
     engine: rfengine::RfEngine,
     receiver: Receiver<Option<IoTask>>,
     router: RaftRouter,
@@ -698,6 +702,7 @@ pub(crate) struct IoWorker {
 
 impl IoWorker {
     pub(crate) fn new(
+        store_id: u64,
         engine: rfengine::RfEngine,
         router: RaftRouter,
         trans: Box<dyn Transport>,
@@ -705,6 +710,7 @@ impl IoWorker {
         let (sender, receiver) = tikv_util::mpsc::bounded(256);
         (
             Self {
+                store_id,
                 engine,
                 receiver,
                 router,
@@ -746,6 +752,7 @@ impl IoWorker {
     }
 
     fn handle_tasks(&mut self, tasks: Vec<IoTask>) {
+        fail_point!("rfstore_before_save_on_store_1", self.store_id == 1, |_| {});
         let timer = tikv_util::time::Instant::now();
         if !self.wb.is_empty() {
             let wb = mem::take(&mut self.wb);

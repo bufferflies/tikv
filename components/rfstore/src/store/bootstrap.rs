@@ -68,8 +68,11 @@ pub fn load_store_ident(engines: &Engines) -> Option<StoreIdent> {
 /// The first phase of bootstrap cluster
 ///
 /// Write the first region meta and prepare state.
-pub fn prepare_bootstrap_cluster(engines: &Engines, region: &metapb::Region) -> Result<()> {
-    let peer_id = region.get_peers().first().unwrap().id;
+pub fn prepare_bootstrap_cluster(
+    engines: &Engines,
+    region: &metapb::Region,
+    peer_id: u64,
+) -> Result<()> {
     let mut state = RegionLocalState::default();
     state.set_region(region.clone());
     let mut raft_wb = rfengine::WriteBatch::new();

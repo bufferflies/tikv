@@ -145,7 +145,7 @@ impl Simulator for NodeCluster {
 
         node.start(
             engines,
-            Box::new(self.trans.clone()),
+            Box::new(simulate_trans.clone()),
             pd_worker,
             store_meta,
             coprocessor_host,
@@ -268,6 +268,7 @@ impl Simulator for NodeCluster {
 // Compare to server cluster, node cluster does not have server layer and
 // storage layer.
 pub fn new_node_cluster(id: u16, count: usize) -> Cluster<NodeCluster> {
+    assert!(id > 0);
     let pd_client = Arc::new(TestPdClient::new(id as u64, false));
     let sim = Arc::new(RwLock::new(NodeCluster::new(Arc::clone(&pd_client))));
     Cluster::new(id, count, sim, pd_client)
