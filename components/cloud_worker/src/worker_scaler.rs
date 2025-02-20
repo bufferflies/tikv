@@ -25,6 +25,8 @@ use serde_json::json;
 use tikv_util::{box_err, config::ReadableSize, error, info, time::Instant, warn};
 use tokio::sync::RwLock;
 
+use crate::metrics::WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC;
+
 const CLEAN_UP_WORKER_TICK_INTERVAL: u64 = 60;
 const WORKER_MIN_STORAGE_GB: usize = 16;
 const DEFAULT_LOAD_DATA_WORKER_NAME: &str = "load-data-worker";
@@ -49,6 +51,8 @@ const LOAD_DATA_WORKER_NODE_GROUP_NAME: &str = "load-data-worker";
 const LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM: f64 = 46.0;
 
 const NETWORK_PROTOCOL: &str = "TCP";
+
+const WORKER_SCALER_QUERY_FAILURES_LIMIT: usize = 10;
 
 pub const LOAD_DATA_WORKER_ENV: &str = "TIKV_LOAD_DATA_WORKER";
 pub const LOAD_DATA_WORKER_WORKER_NUM_ENV: &str = "TIKV_LOAD_DATA_WORKER_WORKER_NUM_ENV";
@@ -142,6 +146,7 @@ pub(crate) struct WorkerPod {
     flushed_files: usize,
     created_files: usize,
     ingested_regions: usize,
+    query_failures: usize,
 }
 
 impl WorkerPod {
@@ -216,9 +221,20 @@ impl WorkerPod {
                     );
                 }
             }
+            // reset query_failures
+            self.query_failures = 0;
+            WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC
+                .with_label_values(&[&self.name])
+                .reset();
         } else {
             warn!("failed get pod {} task states", self.name);
-            self.canceled = true;
+            WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC
+                .with_label_values(&[&self.name])
+                .inc();
+            self.query_failures += 1;
+            if self.query_failures > WORKER_SCALER_QUERY_FAILURES_LIMIT {
+                self.canceled = true;
+            }
         }
         if self.finished_at > 0 {
             let finished_duration = now_timestamp - self.finished_at;
@@ -443,8 +459,8 @@ impl WorkerScaler {
         let pod_container = pod_template_spec.containers.first_mut().unwrap();
         let core_num = sts_config.core_num;
         let request_cpu = format!("{}", core_num);
-        let request_memory = format!("{}Gi", core_num * 2.0);
-        let limit_cpu = format!("{}", core_num * 2.0);
+        let request_memory = format!("{}Gi", core_num * 4.0);
+        let limit_cpu = format!("{}", core_num);
         let limit_memory = format!("{}Gi", core_num * 4.0);
         pod_container.resources = Some(
             serde_json::from_value(json!({
@@ -656,6 +672,7 @@ impl WorkerScaler {
         if worker_pod.started_at == 0 {
             worker_pod.init(task_id, &pod);
         }
+
         // `canceled` flag will be set. We did not clean up the task
         // immediately, this way we can ensure that the pod can survive for
         // `CLEAN_UP_WORKER_TICK_INTERVAL` after completion.
@@ -848,10 +865,8 @@ fn calculate_num_cores(data_size_gb: usize, max_cores: f64) -> f64 {
         4.0
     } else if data_size_gb > 5 {
         2.0
-    } else if data_size_gb > 1 {
-        1.0
     } else {
-        0.5
+        1.0
     };
     cores.min(max_cores)
 }
@@ -863,7 +878,7 @@ mod tests {
 
     use crate::worker_scaler::{
         new_worker_pod_name, new_worker_svc_name, parse_task_id_by_pod_name,
-        parse_task_id_by_pvc_name, WorkerPod,
+        parse_task_id_by_pvc_name, WorkerPod, WORKER_SCALER_QUERY_FAILURES_LIMIT,
     };
 
     fn new_worker_pvc_name(pvc_template_name: &str, task_id: &str) -> String {
@@ -890,6 +905,13 @@ mod tests {
         // worker pod is not canceled if no task states and not expired.
         worker_pod.update_task_states(None, now_ts + 40, 60);
         assert!(!worker_pod.canceled);
+
+        // worker pod is not canceled if no task states and expired,
+        // and retry retry count is less than the limit
+        for _i in 0..WORKER_SCALER_QUERY_FAILURES_LIMIT {
+            worker_pod.update_task_states(None, now_ts + 100, 60);
+            assert!(!worker_pod.canceled);
+        }
 
         // worker pod is canceled if no task states and expired.
         worker_pod.update_task_states(None, now_ts + 100, 60);

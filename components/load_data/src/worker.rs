@@ -50,7 +50,7 @@ use crate::{
 pub const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 
 pub const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-pub const RETRY_SLEEP_DURATION: Duration = Duration::from_millis(100);
+pub const RETRY_SLEEP_DURATION: Duration = Duration::from_secs(1);
 pub const MAX_RETRY_TIMES: usize = 10;
 pub const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 

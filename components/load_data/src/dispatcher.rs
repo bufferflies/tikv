@@ -19,6 +19,7 @@ use tikv_util::{
     codec::bytes::encode_bytes,
     error, info,
     mpsc::{Receiver, Sender},
+    sys::SysQuota,
     time::Instant,
 };
 
@@ -40,10 +41,8 @@ use crate::{
 };
 
 pub const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
-const TOTAL_FLUSH_FILE_CONCURRENCY: usize = 32;
 const TOTAL_CREATE_FILE_CONCURRENCY: usize = 128;
 const TOTAL_INGEST_CONCURRENCY: usize = 16;
-const MAX_FLUSH_FILE_CONCURRENCY_PER_WORKER: usize = 8;
 const MAX_CREATE_FILE_CONCURRENCY_PER_WORKER: usize = 32;
 const MAX_INGEST_CONCURRENCY_PER_WORKER: usize = 4;
 
@@ -130,14 +129,21 @@ impl Dispatcher {
             thread_handle: None,
         };
 
+        let total_mem = SysQuota::memory_limit_in_bytes();
+        let per_worker_mem = total_mem / kvpairs_worker_nums;
+        let flush_file_concurrency = calculate_flush_file_concurrency(per_worker_mem);
+
         let task_dir = ctx.dir.join(task_ctx.task_id.as_str());
-        let flush_file_concurrency = (TOTAL_FLUSH_FILE_CONCURRENCY / kvpairs_worker_nums as usize)
-            .min(MAX_FLUSH_FILE_CONCURRENCY_PER_WORKER);
         let create_file_concurrency = (TOTAL_CREATE_FILE_CONCURRENCY
             / building_worker_nums as usize)
             .min(MAX_CREATE_FILE_CONCURRENCY_PER_WORKER);
         let ingest_concurrency = (TOTAL_INGEST_CONCURRENCY / building_worker_nums as usize)
             .min(MAX_INGEST_CONCURRENCY_PER_WORKER);
+
+        info!(
+            "{} run dispatcher, flush_file_concurrency: {}, create_file_concurrency: {}, ingest_concurrency: {}",
+            task_ctx.task_id, flush_file_concurrency, create_file_concurrency, ingest_concurrency
+        );
         Self {
             config,
             ctx,
@@ -704,6 +710,19 @@ pub async fn get_shard_meta(
                 continue;
             }
         }
+    }
+}
+
+fn calculate_flush_file_concurrency(mem: u64) -> usize {
+    let mem_gb = mem / 1024 / 1024 / 1024;
+    if mem_gb >= 8 {
+        8
+    } else if mem_gb >= 4 {
+        4
+    } else if mem_gb >= 2 {
+        2
+    } else {
+        1
     }
 }
 

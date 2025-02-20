@@ -86,4 +86,11 @@ lazy_static! {
         "Bucketed histogram of remote compaction request duration",
         exponential_buckets(0.0005, 2.0, 20).unwrap()
     ).unwrap();
+
+    pub static ref WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
+        "tikv_worker_worker_scaler_query_FAILURES_counter",
+        "Total count of worker scaler failures in querying task state",
+        &["task_id"],
+    )
+    .unwrap();
 }
