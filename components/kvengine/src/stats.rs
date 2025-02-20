@@ -251,7 +251,10 @@ impl super::Engine {
 pub struct ShardStats {
     pub id: u64,
     pub ver: u64,
+    pub keyspace: u32,
+    #[serde(serialize_with = "serialize_bytes_as_hex")]
     pub start: Bytes,
+    #[serde(serialize_with = "serialize_bytes_as_hex")]
     pub end: Bytes,
     pub inner_key_off: usize,
     pub active: bool,
@@ -296,6 +299,7 @@ pub struct ShardStats {
     pub ready_to_destroy_range: bool,
     pub truncate_ts: Option<u64>,
     pub trim_over_bound: bool,
+    pub manual_major_compaction: bool,
     pub storage_class: StorageClass,
     // Txn File Stats
     pub txn_file_locks: usize,
@@ -592,7 +596,7 @@ impl super::Shard {
         let compaction_cf = priority.as_ref().map_or(0, |x| x.cf());
         let compaction_level = priority.as_ref().map_or(0, |x| x.level());
         let compaction_score = priority.as_ref().map_or(0f64, |x| x.score());
-        let pending_ops = self.pending_ops.read().unwrap();
+        let pending_ops = self.pending_ops.read().unwrap().clone();
         let txn_file_locks = data.lock_txn_files.len();
         let schema_version = data
             .schema_file
@@ -619,6 +623,7 @@ impl super::Shard {
         ShardStats {
             id: self.id,
             ver: self.ver,
+            keyspace: self.keyspace_id,
             start: self.outer_start.clone(),
             end: self.outer_end.clone(),
             inner_key_off: data.inner_key_off,
@@ -661,6 +666,7 @@ impl super::Shard {
             ready_to_destroy_range: Self::ready_to_destroy_range(&pending_ops.del_prefixes, &data),
             truncate_ts: pending_ops.truncate_ts.map(|x| x.inner()),
             trim_over_bound: pending_ops.trim_over_bound,
+            manual_major_compaction: pending_ops.manual_major_compaction,
             storage_class: pending_ops.storage_class,
             txn_file_locks,
             schema_version,
@@ -679,6 +685,14 @@ pub fn max_ts_by_cf(max_ts: u64, cf: usize, cf_max_ts: u64) -> u64 {
     } else {
         max_ts
     }
+}
+
+pub fn serialize_bytes_as_hex<S>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let hex_str = log_wrappers::hex_encode_upper(bytes);
+    serializer.serialize_str(&hex_str)
 }
 
 #[cfg(test)]
