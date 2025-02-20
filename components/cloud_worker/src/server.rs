@@ -27,6 +27,7 @@ use kvengine::{
 use pd_client::PdClient;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
+use replication_worker::ReplicationWorker;
 use rfstore::store::{PdIdAllocator, RegionSnapshot};
 use tikv::{
     coprocessor::{
@@ -59,6 +60,7 @@ pub(crate) struct Context {
     pub cache_fs: Arc<CacheFs>,
     pub load_manager: Arc<LoadDataManager>,
     pub br_manager: Arc<NativeBrManager>,
+    pub cdc_replication_worker: ReplicationWorker,
     pub txn_chunk_handler: Arc<TxnChunkHandler>,
     pub pd: Arc<dyn PdClient>,
     pub master_key: MasterKey,
@@ -147,6 +149,7 @@ where
                             }
                             resp
                         }
+                        "/cdc" => ctx.cdc_replication_worker.handle_http_request(req).await,
                         "/coprocessor" => handle_remote_coprocessor(ctx, req).await,
                         "/load_data" => {
                             load_data::handle_load_data(ctx.load_manager.clone(), req).await

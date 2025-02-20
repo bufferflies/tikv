@@ -1463,6 +1463,7 @@ dependencies = [
  "prometheus",
  "protobuf",
  "rand 0.8.5",
+ "replication_worker",
  "rfenginepb",
  "rfstore",
  "schema",
@@ -6284,6 +6285,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a83fa3702a688b9359eccba92d153ac33fd2e8462f9e0e3fdf155239ea7792e"
 dependencies = [
  "winapi 0.3.9",
+]
+
+[[package]]
+name = "replication_worker"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hyper",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -244,6 +244,8 @@ fn start_server(
         config.txn_chunk_manager,
     );
 
+    let cdc_replication_worker = replication_worker::ReplicationWorker::new();
+
     let ctx = Arc::new(server::Context {
         compression_lvl,
         checksum_type,
@@ -252,6 +254,7 @@ fn start_server(
         pd: pd.clone(),
         load_manager: load_manager.clone(),
         br_manager,
+        cdc_replication_worker,
         txn_chunk_handler,
         master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),

@@ -39,6 +39,7 @@ pd_client = { path = "../../components/pd_client", default-features = false }
 prometheus = { version = "0.13", features = ["nightly"] }
 protobuf = "2.8"
 rand = "0.8"
+replication_worker = { path = "../../components/replication_worker" }
 rfenginepb = { path = "../../components/rfenginepb" }
 rfstore = { path = "../../components/rfstore" }
 schema = { workspace = true }
