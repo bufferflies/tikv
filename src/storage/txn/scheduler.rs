@@ -681,7 +681,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         }
     }
 
-    fn force_spawn<F>(&self, f: F, cid: u64)
+    pub fn force_spawn<F>(&self, f: F, cid: u64)
     where
         F: Future<Output = ()> + Send + 'static,
     {

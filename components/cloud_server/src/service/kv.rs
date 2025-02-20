@@ -57,6 +57,16 @@ use crate::server::{Error, Result as ServerResult};
 const GRPC_MSG_MAX_BATCH_SIZE: usize = 128;
 const GRPC_MSG_NOTIFY_SIZE: usize = 8;
 
+macro_rules! has_data_in_prefix {
+    ($snap:expr, $prefix:expr) => {{
+        if $snap.is_sync() {
+            $snap.has_data_in_prefix($prefix)
+        } else {
+            $snap.has_data_in_prefix_async($prefix).await
+        }
+    }};
+}
+
 /// Service handles the RPC messages for the `Tikv` service.
 pub struct Service<T: RaftStoreRouter, L: LockManager, F: KvFormat> {
     store_id: u64,
@@ -339,7 +349,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             for region in &regions {
                 tikv_util::set_current_region(region.id());
                 if let Some(snap) = kv.get_snap_access(region.id()) {
-                    if !snap.has_data_in_prefix(&prefix) {
+                    if !has_data_in_prefix!(snap, &prefix) {
                         continue;
                     }
                 }
@@ -400,7 +410,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                     for region in &regions {
                         tikv_util::set_current_region(region.id());
                         if let Some(snap) = kv.get_snap_access(region.id()) {
-                            if snap.has_data_in_prefix(&prefix) {
+                            if has_data_in_prefix!(snap, &prefix) {
                                 applied = false;
                                 break;
                             }
@@ -448,7 +458,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             GRPC_MSG_FAIL_COUNTER.unsafe_destroy_range.inc();
         })
         .map(|_| ());
-        ctx.spawn(task);
+        self.storage.get_scheduler().force_spawn(task, 0);
     }
 
     fn coprocessor_stream(
