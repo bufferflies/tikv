@@ -25,7 +25,8 @@ use pd_client::PdClient;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfengine::{
-    iterator::WalIterator, RaftLogOp, RfEngine, RAFT_STATE_KEY_BYTE, TRUNCATE_ALL_INDEX,
+    iterator::WalIterator, RaftLogOp, RfEngine, RAFT_STATE_KEY_BYTE, REGION_META_KEY_BYTE,
+    TRUNCATE_ALL_INDEX,
 };
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::store::{
@@ -65,6 +66,7 @@ pub struct RegionProgress {
     pub synced_index: u64,
     pub commit_index: u64,
     pub truncated_index: u64,
+    pub version: u64,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -107,7 +109,7 @@ pub struct MergedEngine {
     manifest: Manifest,
     region_progresses: HashMap<u64, RegionProgress>,
     store_progresses: HashMap<u64, StoreProgress>,
-    updated_regions: HashSet<u64>,
+    updated_regions: HashMap<u64, u64>, // region_id -> region_version
     raft: RfEngine,
     kv: kvengine::Engine,
     recover_handler: RecoverHandler,
@@ -175,7 +177,7 @@ impl MergedEngine {
             manifest,
             region_progresses,
             store_progresses,
-            updated_regions: HashSet::new(),
+            updated_regions: HashMap::new(),
             raft,
             kv,
             recover_handler,
@@ -238,6 +240,7 @@ impl MergedEngine {
                 )
                 .max(RAFT_INIT_LOG_INDEX);
                 region_progress.truncated_index = truncated_index;
+                region_progress.version = region_version;
                 // merge states
                 let mut batch = rfengine::WriteBatch::new();
                 origin.iterate_peer_states(peer_id, false, |k, v| {
@@ -295,6 +298,7 @@ impl MergedEngine {
             region_progress.truncated_index = merged_raft
                 .get_truncated_index(region_id)
                 .unwrap_or(RAFT_INIT_LOG_INDEX);
+            region_progress.version = region_version;
         }
 
         Ok(region_progersses)
@@ -454,6 +458,22 @@ impl MergedEngine {
                         }
                     }
                 }
+                if let Some(v) =
+                    origin_wb.get_latest_state(peer_id, region_id, &[REGION_META_KEY_BYTE])
+                {
+                    if !v.is_empty() {
+                        let mut region_local_state =
+                            kvproto::raft_serverpb::RegionLocalState::new();
+                        region_local_state.merge_from_bytes(v).unwrap();
+                        let new_version = region_local_state
+                            .get_region()
+                            .get_region_epoch()
+                            .get_version();
+                        if progress.version < new_version {
+                            progress.version = new_version;
+                        }
+                    }
+                }
                 origin_wb.read_peer_logs(peer_id, |logs| {
                     for log_op in logs {
                         if let Some(existing_op) = progress.entries.get(&log_op.index) {
@@ -464,7 +484,7 @@ impl MergedEngine {
                         progress.entries.insert(log_op.index, log_op.clone());
                     }
                 });
-                self.updated_regions.insert(region_id);
+                self.updated_regions.insert(region_id, progress.version);
             }
         }
         let store_progress = self.store_progresses.entry(store_id).or_default();
@@ -494,7 +514,12 @@ impl MergedEngine {
             router: None,
             destroying: &mut destroying,
         };
-        let updated_regions: Vec<u64> = self.updated_regions.iter().copied().collect();
+        let mut updated_regions_with_ver: Vec<(u64, u64)> = self.updated_regions.drain().collect();
+        updated_regions_with_ver.sort_by_key(|(_, version)| *version);
+        let updated_regions = updated_regions_with_ver
+            .iter()
+            .map(|(region_id, _)| *region_id)
+            .collect::<Vec<_>>();
         self.sync_merged_for_regions(&mut ctx, &updated_regions)?;
         let mut raft_wb = rfengine::WriteBatch::new();
         for updated_region in updated_regions {
@@ -523,10 +548,18 @@ impl MergedEngine {
         let mut new_regions = vec![];
         let merged_store_id = self.ctx.config.merged_store_id;
         for &updated_region in updated_regions {
-            if self.raft.get_truncated_index(updated_region).is_none() {
-                // newly split region is handled after parent regions.
-                new_regions.push(updated_region);
-                continue;
+            match self.raft.get_truncated_index(updated_region) {
+                Some(truncated_idx) => {
+                    if truncated_idx == TRUNCATE_ALL_INDEX {
+                        // region is merged.
+                        continue;
+                    }
+                }
+                None => {
+                    // newly split region is handled after parent regions.
+                    new_regions.push(updated_region);
+                    continue;
+                }
             }
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
             let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
@@ -585,6 +618,16 @@ impl MergedEngine {
                         self.kv.rollback_merge(shard.id, shard.ver, entry.index);
                     } else if admin_req.has_commit_merge() {
                         let source = last_change_set.unwrap();
+                        ctx.raft
+                            .iterate_peer_states(source.shard_id, false, |k, _| {
+                                ctx.raft_wb
+                                    .set_state(source.shard_id, source.shard_id, k, &[]);
+                            });
+                        ctx.raft_wb.truncate_raft_log(
+                            source.shard_id,
+                            source.shard_id,
+                            TRUNCATE_ALL_INDEX,
+                        );
                         let source_cs = self.kv.prepare_change_set(
                             source,
                             false,
@@ -621,6 +664,9 @@ impl MergedEngine {
             }
         }
         if !new_regions.is_empty() {
+            if new_regions.len() == updated_regions.len() {
+                panic!("all updated regions are new regions {:?}", new_regions);
+            }
             self.sync_merged_for_regions(ctx, &new_regions)
         } else {
             Ok(())

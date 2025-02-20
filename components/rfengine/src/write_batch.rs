@@ -58,11 +58,7 @@ impl WriteBatch {
 
     pub fn get_truncated_idx(&self, peer_id: u64) -> Option<u64> {
         let peer_batch = self.peers.get(&peer_id)?;
-        if peer_batch.truncated_idx > 0 {
-            Some(peer_batch.truncated_idx)
-        } else {
-            None
-        }
+        Some(peer_batch.truncated_idx)
     }
 
     pub fn clear_peer(&mut self, peer_id: u64) {

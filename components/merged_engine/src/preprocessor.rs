@@ -30,7 +30,10 @@ impl Preprocessor {
         region_id: u64,
         master_key: &MasterKey,
     ) -> Self {
-        let shard_meta = rfstore::store::load_engine_meta(raft, store_id, region_id).unwrap();
+        let shard_meta = rfstore::store::load_engine_meta(raft, store_id, region_id)
+            .unwrap_or_else(|| {
+                panic!("failed to load engine meta for region {}", region_id);
+            });
         let encryption_key = shard_meta
             .get_property(ENCRYPTION_KEY)
             .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
