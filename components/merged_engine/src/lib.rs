@@ -564,7 +564,7 @@ impl MergedEngine {
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
             let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
             let high: u64 = progress.commit_index + 1;
-            let preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
+            let mut preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
                 Preprocessor::new(
                     &self.raft,
                     ctx.store_id,
@@ -572,8 +572,8 @@ impl MergedEngine {
                     &self.ctx.master_key,
                 )
             });
-            let mut preprocessor_ref = preprocessor.as_ref();
             let mut hs = eraftpb::HardState::default();
+            let mut preprocessor_ref = preprocessor.as_ref();
             for log_index in low..high {
                 let mut entry = progress.entries.get(&log_index).unwrap().to_entry();
                 let admin_req = update_entry(&mut entry, merged_store_id);
@@ -639,6 +639,16 @@ impl MergedEngine {
                         self.kv
                             .commit_merge(shard.id, shard.ver, &source_cs, entry.index)?
                     }
+                    self.preprocessors.remove(&updated_region);
+                    preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
+                        Preprocessor::new(
+                            &self.raft,
+                            ctx.store_id,
+                            updated_region,
+                            &self.ctx.master_key,
+                        )
+                    });
+                    preprocessor_ref = preprocessor.as_ref();
                 }
             }
             preprocessor_ref.write_raft_state(ctx);
