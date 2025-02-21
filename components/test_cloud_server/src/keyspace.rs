@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
+use api_version::ApiV2;
 use bytes::BufMut;
 use codec::number::NumberEncoder;
 use dashmap::{
@@ -139,7 +139,6 @@ impl KeyspaceManagerCore {
 
     fn set_keyspace_meta(&self, keyspace_id: u32, mut meta: KeyspaceMetaCore) {
         let mut keyspace = self.keyspaces.get_mut(&keyspace_id).unwrap();
-        assert_eq!(keyspace.inner_key_off, meta.inner_key_off);
 
         // Rewrite the del_prefixes with new keyspace prefix.
         let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
@@ -267,7 +266,6 @@ impl KeyspaceManagerCore {
 }
 
 pub struct CreateKeyspaceOptions {
-    pub enable_inner_key_off: bool,
     pub table_count: usize,
     pub schema_enable_ratio: f64,
     pub storage_class_fn: Box<dyn Fn(i64) -> StorageClass>,
@@ -276,7 +274,6 @@ pub struct CreateKeyspaceOptions {
 impl Default for CreateKeyspaceOptions {
     fn default() -> Self {
         Self {
-            enable_inner_key_off: true,
             table_count: 0,
             schema_enable_ratio: 0.0,
             storage_class_fn: Box::new(|_| StorageClass::default()),
@@ -313,7 +310,6 @@ pub struct KeyspaceMetaCore {
     /// equal to TiDB index in `tidb::TidbCluster`.
     name: String,
 
-    inner_key_off: usize,
     tables: DashMap<i64 /* table_id */, TableMeta>,
 
     /// Used to verify data considering the delete prefixes state of shard.
@@ -333,7 +329,6 @@ impl fmt::Debug for KeyspaceMetaCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeyspaceMetaCore")
             .field("name", &self.name)
-            .field("inner_key_off", &self.inner_key_off)
             .field(
                 "tables",
                 &self
@@ -372,7 +367,6 @@ impl KeyspaceMeta {
         Self {
             core: KeyspaceMetaCore {
                 name,
-                inner_key_off: KEYSPACE_PREFIX_LEN * options.enable_inner_key_off as usize,
                 tables,
                 del_prefixes: kvengine::DeletePrefixes::new_with_keyspace_id(keyspace_id),
                 pending_destroy_range: Default::default(),

@@ -60,8 +60,8 @@ pub enum Error {
     HttpError(http::StatusCode, String),
     #[error("Retry limit exceeded, last error {0}")]
     RetryLimitExceeded(Box<Error>),
-    #[error("Keyspace {0} inner_key_off not enabled")]
-    KeyspaceInnerKeyOffNotEnabled(u32 /* region id */),
+    #[error("Restore other keyspace from/to default keyspace")]
+    RestoreWithDefaultKeyspace,
     #[error("Backup for keyspace {0} is empty")]
     BackupEmptyForKeyspace(u32 /* keyspace id */),
     #[error("Reach concurrency limit {0}")]

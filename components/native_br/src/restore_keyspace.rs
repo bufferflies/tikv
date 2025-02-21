@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use api_version::ApiV2;
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
 use cloud_encryption::{EncryptionKey, MasterKey};
 use cloud_server::{RestoreShardResponse, TikvServer};
@@ -58,7 +58,7 @@ use crate::{
     },
     error::{
         Error,
-        Error::{KeyspaceInnerKeyOffNotEnabled, MetaNotFound, RetryLimitExceeded},
+        Error::{MetaNotFound, RetryLimitExceeded},
         Result,
     },
     lock::LockResolver,
@@ -195,6 +195,20 @@ pub fn restore_keyspace(
     truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> Result<RestoredKeyspace> {
+    let keyspace_tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
+
+    let inplace_restore = target_keyspace_id == keyspace_id;
+    if !inplace_restore
+        && (ApiV2::is_default_keyspace(keyspace_id)
+            || ApiV2::is_default_keyspace(target_keyspace_id))
+    {
+        error!(
+            "{} restore other keyspace from/to default keyspace",
+            keyspace_tag
+        );
+        return Err(Error::RestoreWithDefaultKeyspace);
+    }
+
     let working_dir = match working_path {
         Some(p) => TempDir::new_in(p, WORKING_PATH_PREFIX),
         None => TempDir::new(WORKING_PATH_PREFIX),
@@ -202,13 +216,9 @@ pub fn restore_keyspace(
     .unwrap();
     let working_path = working_dir.path().to_path_buf();
 
-    let inplace_restore = target_keyspace_id == keyspace_id;
-
     let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
     let (target_keyspace_start, target_keyspace_end) =
         ApiV2::get_txn_keyspace_range(target_keyspace_id);
-
-    let keyspace_tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
 
     reporter.report_step(RestoreStep::LoadBackupMeta);
     let (cluster_backup, archive_reader) =
@@ -327,12 +337,6 @@ pub fn restore_keyspace(
         truncate_ts_cnt,
         cluster.truncate_ts
     );
-
-    // Check if the backup enable inner_key_offset.
-    if !inplace_restore && !cluster.is_inner_key_off_enabled() {
-        error!("Keyspace {} inner_key_offset not enabled", keyspace_tag);
-        return Err(KeyspaceInnerKeyOffNotEnabled(keyspace_id));
-    }
 
     let inner_split_keys = cluster.get_region_split_keys(&target_keyspace_start);
 
@@ -1706,10 +1710,6 @@ impl BackupCluster {
         self.sorted_shards.len()
     }
 
-    fn is_inner_key_off_enabled(&self) -> bool {
-        self.inner_key_off() != 0
-    }
-
     pub fn get_shard_metas_before_flush(&self) -> Vec<ShardMeta> {
         let mut shards = Vec::with_capacity(self.sorted_shards.len());
         let guard = self.meta_applier.as_ref().unwrap().shards.read().unwrap();
@@ -1950,13 +1950,21 @@ impl BackupCluster {
                 region.target_region.get_start_key(),
                 region.target_region.get_end_key(),
             );
-            // When `inner_key_off` of a backup shard is `0`, it has tables with keyspace
-            // prefix. So set the target shard as `inner_key_off == 0`.
-            meta.inner_key_off = shards
+            meta.inner_key_off = self.target_inner_key_off();
+
+            let shards_change_inner_key_off = shards
                 .iter()
-                .map(|shard| shard.inner_key_off())
-                .min()
-                .unwrap();
+                .filter_map(|shard| {
+                    (shard.inner_key_off() != meta.inner_key_off).then_some(shard.region_id)
+                })
+                .collect::<Vec<_>>();
+            if !shards_change_inner_key_off.is_empty() {
+                info!(
+                    "{} shards change inner key offset after restore", self.tag();
+                    "shards" => ?shards_change_inner_key_off, "target_inner_key_off" => meta.inner_key_off
+                );
+            }
+
             if let Some(encryption_key) = self.get_keyspace_exported_encryption_key() {
                 meta.set_property(ENCRYPTION_KEY, encryption_key.as_slice());
             }
@@ -2105,14 +2113,12 @@ impl BackupCluster {
             .collect()
     }
 
-    // When `inner_key_off` of a backup shard is `0`, it has tables with keyspace
-    // prefix. So consider the whole keyspace as `inner_key_off == 0`.
-    fn inner_key_off(&self) -> usize {
-        self.shards
-            .values()
-            .map(|shard| shard.inner_key_off())
-            .min()
-            .unwrap()
+    fn target_inner_key_off(&self) -> usize {
+        if self.target_keyspace_id > 0 {
+            KEYSPACE_PREFIX_LEN
+        } else {
+            0
+        }
     }
 
     fn is_inplace_restore(&self) -> bool {

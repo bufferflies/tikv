@@ -352,10 +352,7 @@ fn prepare_cluster(
     cluster.keyspace_manager().create_keyspaces(
         &keyspace_ids,
         keyspace_names,
-        &CreateKeyspaceOptions {
-            enable_inner_key_off: switches.enable_inner_key_off,
-            ..Default::default()
-        },
+        &CreateKeyspaceOptions::default(),
         Some(&mut rng),
     );
     KEYSPACE_COUNTER.store(initial_keyspace_count, Ordering::Relaxed);

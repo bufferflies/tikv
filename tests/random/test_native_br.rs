@@ -189,7 +189,6 @@ pub(crate) fn spawn_restore_keyspace(
     restore_config: RestoreConfig,
     keyspace_manager: KeyspaceManager,
     s3fs: &S3Fs,
-    enable_inner_key_off: bool,
     timeout: Duration,
 ) -> JoinHandle<()> {
     let s3fs = s3fs.clone();
@@ -215,7 +214,7 @@ pub(crate) fn spawn_restore_keyspace(
             };
 
             let source_keyspace = backup.keyspace_id;
-            let branching = enable_inner_key_off && rng.gen_bool(0.5);
+            let branching = source_keyspace > 0 && rng.gen_bool(0.5);
             let (target_keyspace, target_keyspace_lock_guard) = if branching {
                 let (new_keyspace, lock_guard) = runtime.block_on(create_new_keyspace(
                     &pd_client,

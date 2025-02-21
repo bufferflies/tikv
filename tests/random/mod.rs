@@ -471,7 +471,6 @@ async fn create_new_keyspace(
             new_keyspace,
             TidbCluster::keyspace_name(new_keyspace as u16),
             &CreateKeyspaceOptions {
-                enable_inner_key_off: true,
                 table_count: initial_table_count,
                 schema_enable_ratio,
                 ..Default::default()

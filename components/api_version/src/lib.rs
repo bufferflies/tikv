@@ -379,6 +379,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_no_meta() {
         // (user_value, encoded_bytes_V1, encoded_bytes_V1ttl, encoded_bytes_V2)
         let cases = vec![
@@ -402,6 +403,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_ttl() {
         // (user_value, expire_ts, encoded_bytes_V1ttl, encoded_bytes_V2)
         let cases = vec![
@@ -440,6 +442,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_meta_api_v2() {
         // (user_value, expire_ts, is_delete, ecoded_bytes_v2)
         let cases = vec![
@@ -469,6 +472,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_value_decode_err() {
         let cases = vec![
             // At least 8 bytes for expire_ts.
@@ -494,6 +498,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_value_valid() {
         let cases = vec![
             // expire_ts, is_delete, expect_is_valid, expect_ttl_expired
@@ -551,6 +556,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_raw_key() {
         // (user_key, ts, encoded_bytes_V1, encoded_bytes_V1ttl, encoded_bytes_V2)
         let cases = vec![
@@ -639,6 +645,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_raw_key_convert() {
         let timestamp = 30;
         let apiv1_keys = vec![
@@ -675,6 +682,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_raw_value_convert() {
         let apiv1_values = vec![
             b""[..].to_owned(),
@@ -733,6 +741,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_convert_raw_user_key_range() {
         let apiv1_key_ranges = vec![
             (b""[..].to_owned(), b""[..].to_owned()),

@@ -174,7 +174,6 @@ fn test_random_all() {
             restore_config.clone(),
             keyspace_manager.clone(),
             &s3fs,
-            switches.enable_inner_key_off,
             TIMEOUT,
         ));
     }
@@ -467,7 +466,6 @@ fn prepare_cluster(
         &keyspaces,
         keyspace_names,
         &CreateKeyspaceOptions {
-            enable_inner_key_off: switches.enable_inner_key_off,
             table_count: INITIAL_TABLE_COUNT,
             schema_enable_ratio: TABLE_SCHEMA_ENABLE_RATIO,
             storage_class_fn,
