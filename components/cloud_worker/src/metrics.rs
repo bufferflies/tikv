@@ -88,7 +88,7 @@ lazy_static! {
     ).unwrap();
 
     pub static ref WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
-        "tikv_worker_worker_scaler_query_FAILURES_counter",
+        "tikv_worker_worker_scaler_query_failures_counter",
         "Total count of worker scaler failures in querying task state",
         &["task_id"],
     )
