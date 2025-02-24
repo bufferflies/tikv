@@ -26,6 +26,7 @@ use crate::{
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub const CHECKPOINT_WORKER_PREFIX: &str = "LOAD_DATA_CHECK_POINT_";
+pub const CHECKPOINT_TMP_FILE_SUFFIX: &str = ".tmp";
 
 pub const CANCELLED_TASK_EXPIRE_SEC: i64 = 3 * 60 * 60; // 3h
 pub const FINISHED_TASK_EXPIRE_SEC: i64 = 3 * 60; // 3m
@@ -264,7 +265,7 @@ impl LocalFileCheckpointStorage {
         // Get mutex lock.
         let _lock = FILE_LOCK.lock();
 
-        let tmp_file_path = self.file_name.clone() + ".tmp";
+        let tmp_file_path = self.file_name.clone() + CHECKPOINT_TMP_FILE_SUFFIX;
         let tmp_file = self.data_path.join(tmp_file_path);
 
         let mut file = OpenOptions::new()

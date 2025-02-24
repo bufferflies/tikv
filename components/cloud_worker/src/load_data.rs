@@ -26,7 +26,7 @@ use load_data::{
     },
 };
 use pd_client::PdClient;
-use tikv_util::{debug, info};
+use tikv_util::{debug, error, info};
 
 use crate::{
     common::{get_body, get_param, make_response},
@@ -354,7 +354,12 @@ impl LoadDataManager {
             let file_name = file.file_name();
             let str_file_name = file_name.to_string_lossy();
 
-            if str_file_name.starts_with(checkpoint::CHECKPOINT_WORKER_PREFIX) {
+            if str_file_name.ends_with(checkpoint::CHECKPOINT_TMP_FILE_SUFFIX) {
+                let path = file.path();
+                if let Err(err) = fs::remove_file(path) {
+                    error!("failed to remove checkpoint tmp file: {}", err);
+                }
+            } else if str_file_name.starts_with(checkpoint::CHECKPOINT_WORKER_PREFIX) {
                 let path = file.path();
                 self.recover_task_by_checkpoint_file(path.clone());
             }
