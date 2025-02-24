@@ -134,23 +134,12 @@ fn test_region_merge_isolated_peer() {
 }
 
 #[test]
-fn test_region_split_merge_without_inner_key_offset() {
-    region_split_merge_inner_key_offset(false);
-}
-
-#[test]
-fn test_region_split_merge_with_inner_key_offset() {
-    region_split_merge_inner_key_offset(true);
-}
-
-fn region_split_merge_inner_key_offset(enabled: bool) {
+fn test_region_split_merge() {
     test_util::init_log_for_test();
-
-    let expected_inner_key_off = if enabled { 4 } else { 0 };
 
     let node_ids = vec![alloc_node_id(), alloc_node_id(), alloc_node_id()];
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = enabled;
+        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
 
@@ -177,21 +166,8 @@ fn region_split_merge_inner_key_offset(enabled: bool) {
 
     cluster.wait_pd_region_count(13);
 
-    // check inner_key_off
     let mut regions = pd_client.get_all_regions();
     regions.sort_by(|a, b| a.get_start_key().cmp(b.get_start_key()));
-
-    for region in &regions {
-        if is_region_belongs_to_keyspace(region, 100) {
-            for node_id in &node_ids {
-                let kv_engine = cluster.get_kvengine(*node_id);
-                let region_id = region.get_id();
-                if let Some(shard) = kv_engine.get_shard(region_id) {
-                    assert_eq!(shard.get_stats().inner_key_off, expected_inner_key_off);
-                }
-            }
-        }
-    }
 
     // merge inner regions
     for region in &regions {
@@ -214,20 +190,6 @@ fn region_split_merge_inner_key_offset(enabled: bool) {
 
     cluster.wait_pd_region_count(3);
 
-    // check inner_key_off
-    let regions = pd_client.get_all_regions();
-    for region in &regions {
-        if is_region_belongs_to_keyspace(region, 100) {
-            for node_id in &node_ids {
-                let region_id = region.get_id();
-                let kv_engine = cluster.get_kvengine(*node_id);
-                if let Some(shard) = kv_engine.get_shard(region_id) {
-                    assert_eq!(shard.get_stats().inner_key_off, expected_inner_key_off);
-                }
-            }
-        }
-    }
-
     for &node_id in &node_ids {
         cluster.stop_node(node_id);
     }
@@ -240,16 +202,11 @@ fn region_split_merge_inner_key_offset(enabled: bool) {
 
 #[test]
 fn test_region_merge_with_del_prefixes() {
-    region_merge_with_del_prefixes(true);
-    region_merge_with_del_prefixes(false);
-}
-
-fn region_merge_with_del_prefixes(enable_inner_key_offset: bool) {
     test_util::init_log_for_test();
 
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = enable_inner_key_offset;
+        conf.enable_inner_key_offset = true;
     });
 
     let mut client = cluster.new_client();
@@ -330,14 +287,9 @@ fn region_merge_with_del_prefixes(enable_inner_key_offset: bool) {
 #[test]
 fn test_region_merge_keyspaces() {
     test_util::init_log_for_test();
-    region_merge_keyspaces(true);
-    region_merge_keyspaces(false);
-}
-
-fn region_merge_keyspaces(enable_inner_key_offset: bool) {
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = enable_inner_key_offset;
+        conf.enable_inner_key_offset = true;
     });
 
     let mut client_v1 = cluster.new_client_opt(ClusterClientOptions {

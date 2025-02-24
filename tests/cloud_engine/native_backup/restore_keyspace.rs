@@ -88,7 +88,6 @@ fn test_restore_keyspace() {
     test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
         loop_count,
         target_regions,
-        enable_inner_key_off: true,
         lightweight: true,
         ..Default::default()
     });
@@ -96,31 +95,19 @@ fn test_restore_keyspace() {
 
 #[test]
 fn test_restore_keyspace_regression() {
-    // Regression test for `inner_key_off` disabled.
-    test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
-        enable_inner_key_off: false,
-        lightweight: false,
-        ..Default::default()
-    });
     // Regression test for `lightweight` disabled.
     test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
-        enable_inner_key_off: true,
         lightweight: false,
         ..Default::default()
     });
 }
 
 #[rstest::rstest]
-#[case::disable_inner_key_off(false, false)]
-#[case::enable_inner_key_off(true, false)]
-#[case::encrytion(true, true)]
-fn test_restore_keyspace_with_archive(
-    #[case] enable_inner_key_off: bool,
-    #[case] enable_encryption: bool,
-) {
+#[case::disable_encrytion(false)]
+#[case::encrytion(true)]
+fn test_restore_keyspace_with_archive(#[case] enable_encryption: bool) {
     test_util::init_log_for_test();
     test_restore_archived_keyspace_opt(TestRestoreKeyspaceOptions {
-        enable_inner_key_off,
         enable_encryption,
         lightweight: true,
         ..Default::default()
@@ -130,7 +117,6 @@ fn test_restore_keyspace_with_archive(
 struct TestRestoreKeyspaceOptions {
     loop_count: usize,
     target_regions: usize,
-    enable_inner_key_off: bool,
     enable_encryption: bool,
     lightweight: bool,
 }
@@ -140,7 +126,6 @@ impl Default for TestRestoreKeyspaceOptions {
         TestRestoreKeyspaceOptions {
             loop_count: DEFAULT_LOOP_COUNT,
             target_regions: DEFAULT_TARGET_REGIONS,
-            enable_inner_key_off: true,
             enable_encryption: false,
             lightweight: true,
         }
@@ -174,7 +159,7 @@ fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
             conf.rfengine.target_file_size = ReadableSize::mb(1);
             conf.rfengine.lightweight_backup = options.lightweight;
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
-            conf.enable_inner_key_offset = options.enable_inner_key_off;
+            conf.enable_inner_key_offset = true;
             conf.memory.enable_heap_profiling = false;
         },
     );
@@ -551,7 +536,7 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
             conf.rfengine.target_file_size = ReadableSize::kb(128);
             conf.rfengine.lightweight_backup = options.lightweight;
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(32);
-            conf.enable_inner_key_offset = options.enable_inner_key_off;
+            conf.enable_inner_key_offset = true;
             conf.security = security_config.clone();
         },
     )

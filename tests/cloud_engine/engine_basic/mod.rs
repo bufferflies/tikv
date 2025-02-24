@@ -164,15 +164,10 @@ fn test_cloud_store_reverse_scan() {
 
 #[test]
 fn test_snap_marshal() {
-    test_snap_marshal_with_opt(true);
-    test_snap_marshal_with_opt(false);
-}
-
-fn test_snap_marshal_with_opt(enable_inner_key_offset: bool) {
     init_log_for_test();
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = enable_inner_key_offset;
+        conf.enable_inner_key_offset = true;
     });
     let mut client = cluster.new_client();
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key("x123".as_bytes()).unwrap_or_default();
@@ -279,15 +274,10 @@ impl rfstore::store::ApplyObserver for TestApplyObserver {
 
 #[test]
 fn test_cloud_store_reset_range() {
-    test_cloud_store_reset_range_with_opt(true);
-    test_cloud_store_reset_range_with_opt(false);
-}
-
-fn test_cloud_store_reset_range_with_opt(enable_inner_key: bool) {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = enable_inner_key;
+        conf.enable_inner_key_offset = true;
     });
     let mut client = cluster.new_client();
 

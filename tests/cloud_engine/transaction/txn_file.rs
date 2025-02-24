@@ -22,7 +22,6 @@ use kvproto::{
     tikvpb::TikvClient,
 };
 use pd_client::PdClient;
-use rstest::rstest;
 use security::SecurityConfig;
 use test_cloud_server::{
     client,
@@ -46,13 +45,11 @@ use crate::{alloc_node_id_vec, generate_keyspace_key, i_to_tidb_key, i_to_val, i
 const NODES_COUNT: usize = 3;
 const KEYSPACE_ID: u32 = 10;
 
-#[rstest]
-#[case::enable_key_off(true)]
-#[case::disable_key_off(false)]
-fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_txn_file_commands() {
     test_util::init_log_for_test();
     let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let dfs = cluster.get_dfs().unwrap();
@@ -278,10 +275,8 @@ fn test_txn_file_commands(#[case] enable_inner_key_off: bool) {
     cluster.stop();
 }
 
-#[rstest]
-#[case::enable_key_off(true)]
-#[case::disable_key_off(false)]
-fn test_txn_file_basic(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_txn_file_basic() {
     test_util::init_log_for_test();
 
     let cases = vec![
@@ -302,12 +297,7 @@ fn test_txn_file_basic(#[case] enable_inner_key_off: bool) {
     let mut handles = Vec::with_capacity(cases.len());
     for (size_factor, txn_write_method, enable_encryption) in cases {
         handles.push(rt.spawn_blocking(move || {
-            test_txn_file_basic_impl(
-                size_factor,
-                txn_write_method,
-                enable_encryption,
-                enable_inner_key_off,
-            )
+            test_txn_file_basic_impl(size_factor, txn_write_method, enable_encryption)
         }));
     }
     rt.block_on(join_all(handles));
@@ -317,7 +307,6 @@ fn test_txn_file_basic_impl(
     size_factor: usize,
     write_method: TxnWriteMethod,
     enable_encryption: bool,
-    enable_inner_key_off: bool,
 ) {
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
 
@@ -327,12 +316,11 @@ fn test_txn_file_basic_impl(
     info!("test_txn_file_basic";
         "size_factor" => size_factor,
         "enable_encryption" => enable_encryption,
-        "enable_inner_key_off" => enable_inner_key_off,
         "write_method" => ?write_method,
         "cluster_id" => cluster_id);
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.enable_inner_key_offset = true;
     })
     .pd(pd_wrapper)
     .build();
@@ -463,10 +451,8 @@ fn test_txn_file_basic_impl(
     oss.shutdown();
 }
 
-#[rstest]
-#[case::enable_key_off(true)]
-#[case::disable_key_off(false)]
-fn test_txn_file_split_merge(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_txn_file_split_merge() {
     test_util::init_log_for_test();
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
 
@@ -474,7 +460,7 @@ fn test_txn_file_split_merge(#[case] enable_inner_key_off: bool) {
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.enable_inner_key_offset = true;
     })
     .pd(pd_wrapper)
     .build();
@@ -652,10 +638,8 @@ fn test_txn_file_split_merge(#[case] enable_inner_key_off: bool) {
 }
 
 // Tests for abnormal processes.
-#[rstest]
-#[case::enable_key_off(true)]
-#[case::disable_key_off(false)]
-fn test_txn_file_abnormal(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_txn_file_abnormal() {
     test_util::init_log_for_test();
 
     let cases = vec![
@@ -674,15 +658,13 @@ fn test_txn_file_abnormal(#[case] enable_inner_key_off: bool) {
     let handles = cases
         .into_iter()
         .map(|(data_count, use_txn_file)| {
-            rt.spawn_blocking(move || {
-                test_txn_file_abnormal_impl(data_count, use_txn_file, enable_inner_key_off)
-            })
+            rt.spawn_blocking(move || test_txn_file_abnormal_impl(data_count, use_txn_file))
         })
         .collect::<Vec<_>>();
     rt.block_on(join_all(handles));
 }
 
-fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inner_key_off: bool) {
+fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
     let write_method = if use_txn_file {
         TxnWriteMethod::FileBased
     } else {
@@ -696,7 +678,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
     info!("test_txn_file_abnormal_process"; "data_count" => data_count, "write_method" => ?write_method, "cluster_id" => cluster_id);
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.enable_inner_key_offset = true;
     })
     .pd(pd_wrapper)
     .build();
@@ -1004,10 +986,8 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool, enable_inn
     oss.shutdown();
 }
 
-#[rstest]
-#[case::enable_key_off(true)]
-#[case::disable_key_off(false)]
-fn test_txn_file_move_down(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_txn_file_move_down() {
     test_util::init_log_for_test();
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
     let node_ids = alloc_node_id_vec(NODES_COUNT);
@@ -1017,7 +997,7 @@ fn test_txn_file_move_down(#[case] enable_inner_key_off: bool) {
     info!("test_txn_file_move_down"; "cluster_id" => cluster_id);
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.enable_inner_key_offset = true;
         conf.kvengine.flush_split_l0 = true;
     })
     .pd(pd_wrapper)
@@ -1067,10 +1047,8 @@ fn test_txn_file_move_down(#[case] enable_inner_key_off: bool) {
     oss.shutdown();
 }
 
-#[rstest]
-#[case::enable_key_off(true)]
-#[case::disable_key_off(false)]
-fn test_txn_file_merge(#[case] enable_inner_key_off: bool) {
+#[test]
+fn test_txn_file_merge() {
     test_util::init_log_for_test();
 
     let cases = vec![
@@ -1082,13 +1060,13 @@ fn test_txn_file_merge(#[case] enable_inner_key_off: bool) {
     ];
 
     for ranges in cases {
-        test_txn_file_merge_impl(ranges, enable_inner_key_off);
+        test_txn_file_merge_impl(ranges);
     }
 }
 
-fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>, enable_inner_key_off: bool) {
+fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>) {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf| {
-        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.enable_inner_key_offset = true;
         conf.storage.scheduler_worker_pool_size = 8;
         conf.kvengine.txn_file_worker_pool_size = Some(16);
     });

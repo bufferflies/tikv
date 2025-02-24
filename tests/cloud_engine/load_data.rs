@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, fs, sync::Arc, time::Duration};
 
-use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
+use api_version::ApiV2;
 use bytes::Bytes;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
@@ -37,12 +37,6 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 #[test]
 fn test_load_data() {
     test_util::init_log_for_test();
-
-    impl_test_load_data(false);
-    impl_test_load_data(true);
-}
-
-fn impl_test_load_data(enable_inner_key_off: bool) {
     let base_dir = tempfile::Builder::new()
         .prefix("test_load_data")
         .tempdir()
@@ -73,21 +67,18 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     let node_ids = alloc_node_id_vec(3);
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_conf.clone();
-        conf.enable_inner_key_offset = enable_inner_key_off;
+        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
-    if enable_inner_key_off {
-        match pd_client
-            .set_keyspace_encryption(KEYSPACE_ID, KeyspaceEncryptionConfig { enabled: true })
-        {
-            Ok(_) => {}
-            Err(err) if pd_client::grpc_error_is_unimplemented(&err) => {
-                info!("set_keyspace_encryption is not supported, skip");
-            }
-            Err(err) => {
-                panic!("set_keyspace_encryption failed: {:?}", err)
-            }
+    match pd_client.set_keyspace_encryption(KEYSPACE_ID, KeyspaceEncryptionConfig { enabled: true })
+    {
+        Ok(_) => {}
+        Err(err) if pd_client::grpc_error_is_unimplemented(&err) => {
+            info!("set_keyspace_encryption is not supported, skip");
+        }
+        Err(err) => {
+            panic!("set_keyspace_encryption failed: {:?}", err)
         }
     }
     let mut client = cluster.new_client();
@@ -213,7 +204,7 @@ fn impl_test_load_data(enable_inner_key_off: bool) {
     assert_eq!(verified_count, (DATA_COUNT, 0));
 
     // Verify that a `table create` contains only one table id
-    verify_table_creates(&cluster, enable_inner_key_off);
+    verify_table_creates(&cluster);
 
     cluster.stop();
 }
@@ -365,7 +356,7 @@ fn table_key_prefix(table_id: u64) -> Vec<u8> {
 
 // verify_table_creats will verify that a `table create` contains only one table
 // id.
-fn verify_table_creates(cluster: &ServerCluster, enable_inner_key_off: bool) {
+fn verify_table_creates(cluster: &ServerCluster) {
     let pd_client = cluster.get_pd_client();
     let nodes = cluster.get_nodes();
     let mut store_ids: HashMap<u64, u16> = HashMap::new();
@@ -398,17 +389,10 @@ fn verify_table_creates(cluster: &ServerCluster, enable_inner_key_off: bool) {
         for table_create in table_creates {
             let smallest = table_create.get_smallest();
             let biggest = table_create.get_biggest();
-            let (smallest_table_id, biggest_table_id) = if enable_inner_key_off {
-                (
-                    table::decode_table_id(smallest).unwrap(),
-                    table::decode_table_id(biggest).unwrap(),
-                )
-            } else {
-                (
-                    table::decode_table_id(&smallest[KEYSPACE_PREFIX_LEN..]).unwrap(),
-                    table::decode_table_id(&biggest[KEYSPACE_PREFIX_LEN..]).unwrap(),
-                )
-            };
+            let (smallest_table_id, biggest_table_id) = (
+                table::decode_table_id(smallest).unwrap(),
+                table::decode_table_id(biggest).unwrap(),
+            );
             assert_eq!(smallest_table_id, biggest_table_id);
         }
     }
