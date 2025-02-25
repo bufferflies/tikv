@@ -2246,6 +2246,10 @@ impl<'a> PreprocessRef<'a> {
                 "{} preprocess_prepare_merge denied, unconverted l0s : {:?}",
                 tag, shard_meta.unconverted_l0s
             );
+            // Send the prepare merge message to applier to make it wait for flush.
+            // Then unconverted l0 is added and the kvengine can correctly deny the prepare
+            // merge.
+            ctx.apply_msgs.msgs.push(ApplyMsg::PrepareMerge);
             return;
         }
 
