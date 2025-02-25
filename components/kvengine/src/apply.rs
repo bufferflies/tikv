@@ -228,6 +228,7 @@ pub(crate) fn create_snapshot_tables(
             }
         }
         vector_indexes.sort();
+        builder.set_columnar_table_ids(snap.get_columnar_table_ids().to_vec());
     }
     builder.set_l0_tbls(l0_tbls);
     builder.set_blob_tbls(blob_tbl_map);
@@ -365,7 +366,7 @@ impl EngineCore {
             new_l0_tbls.extend_from_slice(old_data.l0_tbls.as_slice());
             let mut col_levels = old_data.col_levels.clone();
             if old_data.schema_file.is_some()
-                && shard.get_columnar_snap_version() > 0
+                && !old_data.columnar_table_ids.is_empty()
                 && !self.opts.ignore_columnar_table_load
             {
                 col_levels.unconverted_l0s.extend_from_slice(l0s.as_slice());
@@ -433,8 +434,6 @@ impl EngineCore {
         // peers in some corner cases. e.g. the parent shard has inconsistency schema
         // file or col_snap_version.
         builder.set_schema_file(cs.get_schema_file());
-        let col_snap_version = initial_flush.get_columnar_snap_version();
-        store_u64(&shard.col_snap_version, col_snap_version);
         let new_data = builder.build();
         info!("{} apply_initial_flush", shard.tag(); "seq" => cs.sequence);
         shard.set_data(new_data);
@@ -739,6 +738,8 @@ impl EngineCore {
         let mut del_files = HashMap::new();
         let mut builder = ShardDataBuilder::new(data.clone());
         self.get_tables_from_table_change(&mut builder, &data, cs, tc, &mut del_files);
+        let columnar_table_ids = tc.get_columnar_table_ids();
+        builder.set_columnar_table_ids(columnar_table_ids.to_vec());
         shard.set_data(builder.build());
         shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
         self.remove_dfs_files(shard, del_files);
@@ -929,7 +930,6 @@ impl EngineCore {
         debug_assert!(!cs.has_parent());
         store_bool(&new_shard.initial_flushed, true);
         store_u64(&new_shard.snap_version, snap.base_version + cs.sequence);
-        store_u64(&new_shard.col_snap_version, snap.columnar_snap_version);
 
         let old_data = old_shard.get_data();
         let old_inner_key_off = old_data.inner_key_off;
@@ -993,8 +993,8 @@ impl EngineCore {
         builder.set_schema_file(None);
         builder.set_columnar_levels(ColumnarLevels::new());
         builder.set_vector_indexes(VectorIndexes::default());
+        builder.set_columnar_table_ids(vec![]);
         shard.set_data(builder.build());
-        store_u64(&shard.col_snap_version, 0);
     }
 
     fn apply_columnar_compaction(&self, shard: &Shard, cs: &ChangeSet) {
@@ -1022,7 +1022,7 @@ impl EngineCore {
         new_col_levels
             .unconverted_l0s
             .retain(|l0| !col_comp.row_l0s.contains(&l0.id()));
-        if shard.get_columnar_snap_version() == 0 {
+        if old_data.columnar_table_ids.is_empty() {
             let new_flushed_l0_tbls: Vec<L0Table> = old_data
                 .l0_tbls
                 .iter()
@@ -1031,21 +1031,22 @@ impl EngineCore {
                 .collect();
             new_col_levels.unconverted_l0s.extend(new_flushed_l0_tbls);
         }
+        let mut columnar_table_ids = old_data.columnar_table_ids.clone();
         let schema_file = if col_comp.get_snap_version() == 0 {
             new_col_levels.unconverted_l0s.clear();
+            columnar_table_ids.clear();
             None
         } else {
+            columnar_table_ids.extend_from_slice(col_comp.get_columnar_table_ids());
+            columnar_table_ids.sort_unstable();
+            columnar_table_ids.dedup();
             old_data.schema_file.clone()
         };
         let mut builder = ShardDataBuilder::new(old_data);
         builder.set_schema_file(schema_file);
         builder.set_columnar_levels(new_col_levels);
+        builder.set_columnar_table_ids(columnar_table_ids);
         shard.set_data(builder.build());
-        if shard.get_columnar_snap_version() < col_comp.get_snap_version()
-            || col_comp.get_snap_version() == 0
-        {
-            store_u64(&shard.col_snap_version, col_comp.get_snap_version());
-        }
     }
 
     fn apply_update_vector_index(&self, shard: &Shard, cs: &ChangeSet) {

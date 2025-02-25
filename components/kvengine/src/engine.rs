@@ -585,6 +585,7 @@ impl EngineCore {
                 }
             }
         }
+        let columnar_table_ids = data.columnar_table_ids.clone();
         self.send_flush_msg(FlushMsg::Tasks(vec![FlushTask::new_initial(
             shard,
             InitialFlush {
@@ -592,7 +593,7 @@ impl EngineCore {
                 base_version,
                 data_sequence,
                 shard_data: data,
-                columnar_snap_version: shard.get_columnar_snap_version(),
+                columnar_table_ids,
                 max_ts,
                 properties,
             },

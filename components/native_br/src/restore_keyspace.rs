@@ -26,7 +26,7 @@ use kvengine::{
     limiter::StoreLimiter,
     table::{BoundedDataSet, DataBound, InnerKey},
     IdAllocator, IdVer, LoadTableFilterFn, ShardMeta, ShardRange, ShardStats, ShardTag,
-    ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY, INITIAL_SNAP_VERSION,
+    ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
@@ -2008,7 +2008,7 @@ impl BackupCluster {
                     meta.schema_restore_ver = self.truncate_ts;
                     // Update columnar_snap_version to initial value to guarantee the new flushed
                     // l0s can be added to unconverted_l0s in target shard.
-                    meta.columnar_snap_version = INITIAL_SNAP_VERSION;
+                    meta.columnar_table_ids = shard.meta.columnar_table_ids.clone();
                 }
             }
 

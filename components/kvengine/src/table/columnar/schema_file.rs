@@ -1,6 +1,6 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, ops::Deref, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut};
@@ -17,6 +17,7 @@ use crate::{
         file::File,
         ChecksumType, DataBound, InnerKey, OwnedInnerKey, NO_COMPRESSION,
     },
+    util::get_table_id_from_data_bound,
     Properties,
 };
 
@@ -235,10 +236,10 @@ impl SchemaFile {
             }
         }
         if end_key.len() >= TABLE_PREFIX_KEY_LEN
-            && &end_key[TABLE_PREFIX_KEY_LEN..] < RECORD_PREFIX_SEP
+            && &end_key[TABLE_PREFIX_KEY_LEN..] <= RECORD_PREFIX_SEP
         {
-            // When end key is smaller than the table first record key, it doesn't overlap
-            // the table.
+            // When end key is smaller than or equal to the table first record key, it
+            // doesn't overlap the table.
             end_table_id -= 1;
         }
         if start_table_id == end_table_id && start_table_id > 0 && start_table_id < i64::MAX {
@@ -262,8 +263,8 @@ impl SchemaFile {
         smallest: InnerKey<'_>,
         biggest: InnerKey<'_>,
     ) -> Vec<i64> {
-        let start_table_id = decode_table_id(smallest.deref()).unwrap_or(0);
-        let end_table_id = decode_table_id(biggest.deref()).unwrap_or(i64::MAX);
+        let data_bound = DataBound::new(smallest, biggest, true);
+        let (start_table_id, end_table_id) = get_table_id_from_data_bound(data_bound);
         self.core
             .tables
             .values()
@@ -499,6 +500,11 @@ mod tests {
             OverlapCase {
                 start_key: encode_table_key(keyspace_id, 1, true, b""),
                 end_key: encode_table_key(keyspace_id, 10, true, b""),
+                overlap: false,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 1, true, b""),
+                end_key: encode_table_key(keyspace_id, 10, true, b"0"),
                 overlap: true,
             },
             OverlapCase {

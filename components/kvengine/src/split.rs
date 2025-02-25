@@ -22,7 +22,10 @@ use schema::schema::StorageClass;
 use slog_global::info;
 
 use crate::{
-    table::{columnar::ColumnarLevels, vector_index::VectorIndexes, BoundedDataSet},
+    table::{
+        columnar::ColumnarLevels, vector_index::VectorIndexes, BoundedDataSet, DataBound, InnerKey,
+    },
+    util::{get_table_id_from_data_bound, merge_columnar_table_ids},
     *,
 };
 
@@ -108,10 +111,6 @@ impl Engine {
                 store_u64(&new_shard.write_sequence, initial_seq);
             }
             store_u64(&new_shard.snap_version, old_shard.get_snap_version());
-            store_u64(
-                &new_shard.col_snap_version,
-                old_shard.get_columnar_snap_version(),
-            );
             if !old_del_prefixes.is_empty() {
                 // We need to use the old shard's DEL_PREFIXES_KEY to overwrite the new shard's
                 // DEL_PREFIXES_KEY. because the destroy_range compaction may have not
@@ -183,6 +182,13 @@ impl Engine {
                     }
                 }
             }
+            let (min_table_id, max_table_id) = get_table_id_from_data_bound(new_shard.data_bound());
+            let columnar_table_ids: Vec<_> = old_data
+                .columnar_table_ids
+                .iter()
+                .filter(|&&table_id| table_id >= min_table_id && table_id <= max_table_id)
+                .copied()
+                .collect();
             let mut builder = ShardDataBuilder::new(new_shard.get_data());
             builder.set_mem_tbls(new_mem_tbls);
             builder.set_l0_tbls(new_l0s);
@@ -192,6 +198,7 @@ impl Engine {
             builder.set_schema_file(schema_file);
             builder.set_columnar_levels(new_col_levels);
             builder.set_vector_indexes(new_vec_indexes);
+            builder.set_columnar_table_ids(columnar_table_ids);
             new_shard.set_data(builder.build());
         }
         for shard in new_shards.drain(..) {
@@ -455,18 +462,6 @@ impl Engine {
             &new_shard.snap_version,
             max(old_shard.get_snap_version(), source_snap_version),
         );
-        if old_shard.get_columnar_snap_version() == 0 && old_shard.get_schema_file().is_some() {
-            // Target shard is waiting for columnar major compaction, do
-            // nothing.
-        } else {
-            store_u64(
-                &new_shard.col_snap_version,
-                max(
-                    old_shard.get_columnar_snap_version(),
-                    source_snap.get_columnar_snap_version(),
-                ),
-            );
-        }
 
         let data = if !clear_source {
             // merge source DEL_PREFIXES_KEY to new shard
@@ -553,6 +548,17 @@ impl Engine {
             if schema_file.is_none() && source.schema_file.is_some() {
                 schema_file = source.schema_file.clone();
             }
+            let source_data_bound = DataBound::new(
+                InnerKey::from_outer_key(source_snap.get_outer_start()),
+                InnerKey::from_outer_key(source_snap.get_outer_end()),
+                false,
+            );
+            let columnar_table_ids = merge_columnar_table_ids(
+                &source_snap.columnar_table_ids,
+                &old_data.columnar_table_ids,
+                source_data_bound,
+                old_data.data_bound(),
+            );
             let mut builder = ShardDataBuilder::new(old_data);
             builder.set_range(new_shard.range.clone());
             if clear_target {
@@ -568,6 +574,7 @@ impl Engine {
             builder.set_columnar_levels(columnar_levels);
             builder.set_schema_file(schema_file);
             builder.set_vector_indexes(vector_indexes);
+            builder.set_columnar_table_ids(columnar_table_ids);
             builder.build()
         } else {
             info!(
@@ -631,10 +638,6 @@ impl Engine {
         store_u64(
             &new_shard.snap_version,
             new_shard.get_base_version() + sequence,
-        );
-        store_u64(
-            &new_shard.col_snap_version,
-            old_shard.get_columnar_snap_version(),
         );
         new_shard
     }

@@ -90,7 +90,7 @@ pub(crate) async fn prepare_columnar(
             set_col SET('set-1', 'set-2', 'set-3'), \
             bool_col BOOLEAN, \
             json_col JSON, \
-            default_col INT DEFAULT 100) COMMENT='columnar_engine'"
+            default_col INT DEFAULT 100)"
         ),
         // We should set tiflash replica to enable tidb plan tiflash replica.
         format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` set tiflash replica 1"),
@@ -100,7 +100,7 @@ pub(crate) async fn prepare_columnar(
             document TEXT,
             embedding VECTOR({VECTOR_DIMENSION}),
             VECTOR INDEX idx_embedding((VEC_COSINE_DISTANCE(embedding)))
-            ) COMMENT='columnar_engine'"
+            )"
         ),
         format!(
             "alter table `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` set tiflash replica 1"
@@ -132,28 +132,23 @@ pub(crate) async fn prepare_columnar(
 }
 
 async fn trigger_columnar_major_compaction(pool: &Pool<MySql>) {
+    let tag = "trigger_columnar_major_compaction";
     // remove columnar replica.
     let sql =
         format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` set tiflash replica 0");
-    sqlx::query(&sql).execute(pool).await.unwrap();
-    // remove table comment
-    let sql = format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` comment ''");
+    info!("{}: executing sql", tag; "sql" => &sql);
     sqlx::query(&sql).execute(pool).await.unwrap();
     // wait columnar replica cleared
     tokio::time::sleep(Duration::from_secs(10)).await;
 
-    // add table comment
-    let sql = format!(
-        "alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` comment 'columnar_engine'"
-    );
-    sqlx::query(&sql).execute(pool).await.unwrap();
     // add columnar replica.
     let sql =
         format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` set tiflash replica 1");
+    info!("{}: executing sql", tag; "sql" => &sql);
     sqlx::query(&sql).execute(pool).await.unwrap();
     // wait columnar replica ready
     wait_tiflash_or_columnar_replicas_available(
-        "trigger_columnar_major_compaction",
+        tag,
         pool,
         COLUMNAR_DB_NAME,
         COLUMNAR_TABLE_NAME,
@@ -243,6 +238,8 @@ pub(crate) async fn run_columnar_workload(
         tokio::time::sleep(Duration::from_secs(60)).await;
         info!("pause columnar workload trigger columnar major compaction");
         pause_signal.store(true, Relaxed);
+        // wait for already running workload done
+        tokio::time::sleep(Duration::from_secs(5)).await;
         trigger_columnar_major_compaction(&pool_copy).await;
         pause_signal.store(false, Relaxed);
     }));

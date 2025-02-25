@@ -408,8 +408,8 @@ impl TxnChunkManagerCore {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn unsafe_remove(&self, txn_chunk_id: u64) -> bool {
+    // NOTE: used by test & TiFlash proxy.
+    pub fn unsafe_remove(&self, txn_chunk_id: u64) -> bool {
         let _ = self.remove_chunk_file(txn_chunk_id);
         self.txn_chunks.remove(&txn_chunk_id).is_some()
     }

@@ -75,6 +75,7 @@ message ColumnarCompaction {
   uint64 snap_version = 2;
   repeated uint64 row_l0s = 3;
   uint32 target_level = 4;
+  repeated int64 columnar_table_ids = 5;
 }
 
 message UpdateVectorIndex {
@@ -96,6 +97,7 @@ message Flush {
 }
 
 message Snapshot {
+  reserved 14; // deprecated columnar_snap_version.
   bytes outer_start = 1;
   bytes outer_end = 2;
   Properties properties = 3;
@@ -108,9 +110,9 @@ message Snapshot {
   uint32 inner_key_off = 11;
   repeated ColumnarCreate columnarCreates = 12;
   SchemaMeta schema_meta = 13;
-  uint64 columnar_snap_version = 14;
   repeated uint64 unconverted_l0s = 15;
   repeated VectorIndex vector_indexes = 16;
+  repeated int64 columnar_table_ids = 17;
 }
 
 message L0Create {
@@ -188,6 +190,9 @@ message TableChange {
   // Columnar Tables that created by destroy range / truncate ts / compaction /
   // trim over bound.
   repeated ColumnarCreate columnarCreates = 5;
+  // Columnar table ids need to update after trim over bound. New columnar table
+  // ids will be set to this field.
+  repeated int64 columnar_table_ids = 6;
 }
 
 message TxnFileRefs { repeated TxnFileRef txn_file_refs = 1; }

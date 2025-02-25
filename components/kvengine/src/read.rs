@@ -288,7 +288,6 @@ pub struct SnapAccessCore {
     base_version: u64,
     meta_seq: u64,
     write_sequence: u64,
-    columnar_snap_version: u64,
     data: ShardData,
     get_hint: Mutex<Hint>,
     blob_table_prefetch_size: usize,
@@ -307,12 +306,10 @@ impl SnapAccessCore {
         let base_version = shard.get_base_version();
         let meta_seq = shard.get_meta_sequence();
         let write_sequence = shard.get_write_sequence();
-        let columnar_snap_version = shard.get_columnar_snap_version();
         let is_sync = data.is_sync();
         Self {
             tag: shard.tag(),
             write_sequence,
-            columnar_snap_version,
             meta_seq,
             base_version,
             managed_ts: 0,
@@ -957,7 +954,7 @@ impl SnapAccessCore {
             schema_meta.set_version(schema_file.get_version());
             snap.set_schema_meta(schema_meta);
         }
-        snap.set_columnar_snap_version(self.columnar_snap_version);
+        snap.set_columnar_table_ids(self.data.columnar_table_ids.clone());
         let vector_indexes = snap.mut_vector_indexes();
         for index in self.data.vector_indexes.get_all() {
             let mut vec_idx = pb::VectorIndex::new();
@@ -1432,7 +1429,7 @@ impl SnapAccessCore {
         scan_ctx: Option<&TableScanCtx>,
         read_ts: u64,
     ) -> Option<ColumnarMvccReader> {
-        if self.columnar_snap_version == 0 || !self.read_columnar {
+        if !self.data.columnar_table_ids.contains(&table_id) || !self.read_columnar {
             return None;
         }
         let schema = self.new_schema_from_columns(table_id, columns)?;

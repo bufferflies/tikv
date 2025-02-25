@@ -97,7 +97,7 @@ pub(crate) struct InitialFlush {
     pub(crate) base_version: u64,
     pub(crate) data_sequence: u64,
     pub(crate) shard_data: ShardData,
-    pub(crate) columnar_snap_version: u64,
+    pub(crate) columnar_table_ids: Vec<i64>,
     pub(crate) max_ts: u64,
     pub(crate) properties: Option<kvenginepb::Properties>,
 }
@@ -189,12 +189,12 @@ impl Engine {
         let flush = task.initial.take().unwrap();
         let tag = ShardTag::new(self.get_engine_id(), task.id_ver);
         info!(
-            "{} initial flush {} mem-tables, base_version {}, data_sequence {}, columnar_snap_version {}",
+            "{} initial flush {} mem-tables, base_version {}, data_sequence {}, columnar_table_ids {:?}",
             tag,
             flush.mem_tbls.len(),
             flush.base_version,
             flush.data_sequence,
-            flush.columnar_snap_version
+            flush.columnar_table_ids
         );
         let mut cs = new_change_set(task.id_ver.id, task.id_ver.ver);
         let initial_flush = cs.mut_initial_flush();
@@ -307,7 +307,7 @@ impl Engine {
                 });
             }
         }
-        initial_flush.set_columnar_snap_version(flush.columnar_snap_version);
+        initial_flush.set_columnar_table_ids(flush.columnar_table_ids.clone());
         for vec_idx in flush.shard_data.vector_indexes.get_all() {
             let mut vec_idx_pb = pb::VectorIndex::new();
             vec_idx_pb.set_table_id(vec_idx_pb.table_id);

@@ -1107,26 +1107,14 @@ impl Engine {
         let mut smallest = data.l0_tbls[0].smallest();
         let mut biggest = data.l0_tbls[0].biggest();
         let mut estimated_blob_size = 0;
-        let columnar_snap_version = shard.get_columnar_snap_version();
         let unconverted_l0s: HashSet<u64> = data.get_unconverted_l0s().iter().cloned().collect();
         for l0 in &data.l0_tbls {
             // Skip unconverted l0s.
             // After region merge there may have l0s with l0.version() <
             // columnar_snap_version already converted exists and will not be added
-            // to unconverted_l0s. So we need check the unconverted_l0s and
-            // assert the l0.version().
+            // to unconverted_l0s. So we need check the unconverted_l0s.
             if unconverted_l0s.contains(&l0.id()) {
                 info!("{} skip unconverted l0 {}", tag, l0.id());
-                assert!(
-                    l0.version() > columnar_snap_version,
-                    "{} unconverted l0 {} snap_version: {} columnar_snap_version: {} l0 version: {}, unconverted_l0s: {:?}",
-                    tag,
-                    l0.id(),
-                    shard.get_snap_version(),
-                    columnar_snap_version,
-                    l0.version(),
-                    data.get_unconverted_l0s()
-                );
                 continue;
             }
 
@@ -1221,7 +1209,6 @@ impl Engine {
             return None;
         }
         let mut move_down_l0s = vec![];
-        let columnar_snap_version = shard.get_columnar_snap_version();
         let tag = shard.tag();
         let unconverted_l0s: HashSet<u64> =
             shard_data.get_unconverted_l0s().iter().cloned().collect();
@@ -1232,16 +1219,6 @@ impl Engine {
             // Avoid unconverted l0s compaction.
             if unconverted_l0s.contains(&l0_tbl.id()) {
                 info!("{} skip unconverted l0 {}", tag, l0_tbl.id());
-                assert!(
-                    l0_tbl.version() > columnar_snap_version,
-                    "{} unconverted l0 {} snap_version: {} columnar_snap_version: {} l0 version: {}, unconverted_l0s: {:?}",
-                    tag,
-                    l0_tbl.id(),
-                    shard.get_snap_version(),
-                    columnar_snap_version,
-                    l0_tbl.version(),
-                    shard_data.get_unconverted_l0s()
-                );
                 continue;
             }
             let l0_write_cf_tbl = l0_tbl.get_cf(WRITE_CF).as_ref().unwrap();
@@ -2304,6 +2281,7 @@ fn merge_table_change(
     tb.set_columnar_creates(col_tbl.take_columnar_creates());
     tb.file_ids_map = row_tbl.file_ids_map;
     tb.file_ids_map.extend(col_tbl.file_ids_map);
+    tb.columnar_table_ids = col_tbl.columnar_table_ids;
     tb
 }
 
@@ -2629,6 +2607,19 @@ fn compact_destroy_range(
     Ok(destroy)
 }
 
+fn clear_all_columnar_files(files: &[(u64, u32)]) -> pb::TableChange {
+    let mut deletes = vec![];
+    for &(id, level) in files.iter() {
+        let mut delete = pb::ColumnarDelete::new();
+        delete.set_id(id);
+        delete.set_level(level);
+        deletes.push(delete);
+    }
+    let mut tc = pb::TableChange::new();
+    tc.set_columnar_deletes(deletes.into());
+    tc
+}
+
 async fn compact_destroy_range_for_columnar(
     ctx: &CompactionCtx,
     columnar_build_opts: &ColumnarTableBuildOptions,
@@ -2640,6 +2631,10 @@ async fn compact_destroy_range_for_columnar(
     let req = &ctx.req;
     let dfs = &ctx.dfs;
     assert!(!del_prefix.is_empty() && !files.is_empty());
+
+    if schema_file_id.is_none() || schema_file_id.unwrap() == 0 {
+        return Ok(clear_all_columnar_files(files));
+    }
 
     let opts = dfs::Options::default()
         .with_shard(req.shard_id, req.shard_ver)
@@ -2902,6 +2897,10 @@ async fn compact_truncate_ts_for_columnar(
     let dfs = &ctx.dfs;
     assert!(!files.is_empty());
 
+    if schema_file_id.is_none() || schema_file_id.unwrap() == 0 {
+        return Ok(clear_all_columnar_files(files));
+    }
+
     let opts = dfs::Options::default()
         .with_shard(req.shard_id, req.shard_ver)
         .with_type(FileType::Columnar);
@@ -3152,6 +3151,10 @@ async fn compact_trim_over_bound_for_columnar(
     assert!(!files.is_empty());
     assert!(files.len() <= req.file_ids.len());
 
+    if schema_file_id.is_none() || schema_file_id.unwrap() == 0 {
+        return Ok(clear_all_columnar_files(files));
+    }
+
     let opts = dfs::Options::default()
         .with_shard(req.shard_id, req.shard_ver)
         .with_type(FileType::Columnar);
@@ -3183,6 +3186,7 @@ async fn compact_trim_over_bound_for_columnar(
 
     let mut deletes = vec![];
     let mut creates = vec![];
+    let mut columnar_table_ids: HashSet<i64> = HashSet::new();
     let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
     let mut cnt = 0;
     for &(id, level) in files.iter() {
@@ -3231,6 +3235,7 @@ async fn compact_trim_over_bound_for_columnar(
             if !columnar_file.has_table(table_id) {
                 continue;
             }
+            columnar_table_ids.insert(table_id);
             let schema = schema_file.get_table(table_id).unwrap();
             let reader = ColumnarTableReader::new(
                 &columnar_file,
@@ -3303,6 +3308,7 @@ async fn compact_trim_over_bound_for_columnar(
     let mut table_change = pb::TableChange::new();
     table_change.set_columnar_deletes(deletes.into());
     table_change.set_columnar_creates(creates.into());
+    table_change.set_columnar_table_ids(columnar_table_ids.into_iter().collect());
     info!(
         "finish columnar trim over bound compaction, table_change: {:?}",
         table_change
@@ -4033,7 +4039,6 @@ async fn columnar_major_compact(
     .pop()
     .unwrap();
     let schema_file = SchemaFile::open(schema_file_data)?;
-    let columnar_changes = ret.mut_columnar_change();
     let blob_tbls = load_blob_tables(fs.clone(), &major_compaction.blob_tables, opts)?;
     let l0_files = load_table_files(
         &major_compaction.l0_tables,
@@ -4078,17 +4083,22 @@ async fn columnar_major_compact(
             tbls.push(tbl.clone());
         });
     }
+    let all_columnar_table_ids = schema_file.export_schemas().into_keys().collect();
     if tbls.is_empty() {
+        ret.set_columnar_table_ids(all_columnar_table_ids);
         return Ok(ret);
     }
     let overlap_tables = schema_file.overlap_columnar_tables(
         InnerKey::from_inner_buf(smallest.as_ref().unwrap()),
         InnerKey::from_inner_buf(biggest.as_ref().unwrap()),
     );
+    let columnar_table_ids = ret.mut_columnar_table_ids();
     if overlap_tables.is_empty() {
-        return Ok(ret);
+        columnar_table_ids.extend_from_slice(&all_columnar_table_ids);
+    } else {
+        columnar_table_ids.extend_from_slice(&overlap_tables);
     }
-
+    let columnar_changes = ret.mut_columnar_change();
     for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
         let mut tbl_delete = pb::ColumnarDelete::new();
         tbl_delete.set_level(level as u32);
@@ -4173,6 +4183,8 @@ async fn convert_row_file_to_columnar_file(
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
+    let columnar_table_ids = ret.mut_columnar_table_ids();
+    columnar_table_ids.extend_from_slice(&overlap_tables);
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
         Some(columnar_compaction.snap_version),
@@ -4271,7 +4283,7 @@ async fn compact_columnar_l0_files(
     let opts = dfs::Options::default()
         .with_type(FileType::Columnar)
         .with_shard(ctx.req.shard_id, ctx.req.shard_ver);
-    let tbl_changes = ret.mut_columnar_change();
+
     let col_file_ids: Vec<u64> = columnar_compaction
         .source_columnar_files
         .iter()
@@ -4280,11 +4292,14 @@ async fn compact_columnar_l0_files(
             f.1
         })
         .collect();
-    for id in &col_file_ids {
-        let mut col_delete = pb::ColumnarDelete::default();
-        col_delete.set_id(*id);
-        col_delete.set_level(0);
-        tbl_changes.mut_columnar_deletes().push(col_delete);
+    {
+        let tbl_changes = ret.mut_columnar_change();
+        for id in &col_file_ids {
+            let mut col_delete = pb::ColumnarDelete::default();
+            col_delete.set_id(*id);
+            col_delete.set_level(0);
+            tbl_changes.mut_columnar_deletes().push(col_delete);
+        }
     }
     let col_files = load_table_files(
         &col_file_ids,
@@ -4313,6 +4328,8 @@ async fn compact_columnar_l0_files(
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
+    let columnar_table_ids = ret.mut_columnar_table_ids();
+    columnar_table_ids.extend_from_slice(&overlap_tables);
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
         Some(snap_version),
@@ -4359,6 +4376,7 @@ async fn compact_columnar_l0_files(
         cnt += 1;
         persist_columnar_file(1, &mut file_builder, tx, ctx.dfs.clone(), opts);
     }
+    let tbl_changes = ret.mut_columnar_change();
     let mut errors = vec![];
     for _ in 0..cnt {
         match rx.recv().unwrap() {
@@ -4457,6 +4475,8 @@ async fn compact_columnar_l1_files(
         return Ok(ret);
     }
     overlap_tables.sort();
+    let columnar_table_ids = ret.mut_columnar_table_ids();
+    columnar_table_ids.extend_from_slice(&overlap_tables);
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
         None,
@@ -4506,6 +4526,7 @@ async fn compact_columnar_l1_files(
         cnt += 1;
         persist_columnar_file(2, &mut file_builder, tx, ctx.dfs.clone(), opts);
     }
+    let tbl_changes = ret.mut_columnar_change();
     let mut errors = vec![];
     for _ in 0..cnt {
         match rx.recv().unwrap() {

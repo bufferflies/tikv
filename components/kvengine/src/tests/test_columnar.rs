@@ -489,6 +489,7 @@ fn test_columnar_destroy_range() {
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema_file(Some(schema_file));
     builder.set_columnar_levels(col_levels);
+    builder.set_columnar_table_ids(vec![table_id]);
     shard.set_data(builder.build());
     let mut del_prefixes = DeletePrefixes::new_with_keyspace_id(shard.keyspace_id);
     let mut table_prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
@@ -498,7 +499,6 @@ fn test_columnar_destroy_range() {
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
     *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::DestroyRange);
-    shard.col_snap_version.store(1, Ordering::SeqCst);
     engine.trigger_compact(id_ver);
     info!("trigger columnar destroy range compaction {}", shard.tag());
     let ok = try_wait(
@@ -576,12 +576,12 @@ fn test_columnar_truncate_ts() {
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema_file(Some(schema_file));
     builder.set_columnar_levels(col_levels);
+    builder.set_columnar_table_ids(vec![table_id]);
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
     shard.pending_ops.write().unwrap().truncate_ts = Some(TruncateTs::from(200));
     *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::TruncateTs);
-    shard.col_snap_version.store(1, Ordering::SeqCst);
     engine.trigger_compact(id_ver);
     info!("trigger columnar truncate ts compaction {}", shard.tag());
     let ok = try_wait(
@@ -667,6 +667,7 @@ fn test_columnar_trim_over_bound() {
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema_file(Some(schema_file));
     builder.set_columnar_levels(col_levels);
+    builder.set_columnar_table_ids(vec![table_id]);
     shard.set_data(builder.build());
     // Split shard by handle key 800
     let split_key = [keyspace_prefix(keyspace_id), encode_row_key(table_id, 800)].concat();
@@ -681,7 +682,6 @@ fn test_columnar_trim_over_bound() {
     let shard = engine.get_shard(shard_id).unwrap();
     // Read before trim over bound data.
     shard.initial_flushed.store(true, Ordering::SeqCst);
-    shard.col_snap_version.store(1, Ordering::SeqCst);
     let snap = shard.new_snap_access();
     let mut mvcc_reader = snap
         .new_columnar_mvcc_reader(table_id, &schema.columns, None, u64::MAX)
@@ -701,7 +701,6 @@ fn test_columnar_trim_over_bound() {
     let ok = try_wait(|| shard.get_data().get_col_table_counts(0) == 2, 5);
     assert!(ok, "columnar trim over bound compaction failed");
     std::thread::sleep(Duration::from_secs(2));
-    shard.col_snap_version.store(1, Ordering::SeqCst);
     let snap = shard.new_snap_access();
     let mut mvcc_reader = snap
         .new_columnar_mvcc_reader(table_id, &schema.columns, None, u64::MAX)

@@ -37,7 +37,7 @@ use crate::{
         vector_index::VectorIndexes,
         BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, TxnFile,
     },
-    util::{evenly_distribute, TxnFileRefPropertyHelper},
+    util::{evenly_distribute, get_table_id_from_data_bound, TxnFileRefPropertyHelper},
     *,
 };
 
@@ -101,9 +101,6 @@ pub struct Shard {
     // snap_version is the latest L0 table's version, equals to:
     //     ShardMeta.data_sequence + ShardMeta.base_version
     pub(crate) snap_version: AtomicU64,
-    // col_snap_version is the latest L0 table's version that has been compacted to
-    // columnar file. It is used to determine whether the columnar file is up-to-date.
-    pub(crate) col_snap_version: AtomicU64,
 
     pub(crate) compaction_priority: RwLock<Option<CompactionPriority>>,
 
@@ -215,7 +212,6 @@ impl Shard {
             meta_seq: Default::default(),
             write_sequence: Default::default(),
             snap_version: Default::default(),
-            col_snap_version: Default::default(),
             compaction_priority: RwLock::new(None),
             encryption_key,
             outdated_schema_ver: Default::default(),
@@ -280,9 +276,6 @@ impl Shard {
         shard
             .snap_version
             .store(snap.base_version + snap.data_sequence, Release);
-        shard
-            .col_snap_version
-            .store(cs.get_snapshot().get_columnar_snap_version(), Release);
         shard
     }
 
@@ -826,7 +819,11 @@ impl Shard {
     }
 
     pub fn get_columnar_snap_version(&self) -> u64 {
-        self.col_snap_version.load(Ordering::Acquire)
+        self.get_data().get_columnar_snap_version()
+    }
+
+    pub fn get_columnar_table_ids(&self) -> Vec<i64> {
+        self.get_data().columnar_table_ids.clone()
     }
 
     pub fn get_meta_sequence(&self) -> u64 {
@@ -938,12 +935,13 @@ impl Shard {
                 return;
             }
         }
-        if data.has_files_need_major_compact() && self.get_columnar_snap_version() == 0 {
+        // TODO: support columnar major compaction partial tables in the shard.
+        if data.has_files_need_major_compact() && data.columnar_table_ids.is_empty() {
             let mut lock = self.compaction_priority.write().unwrap();
             *lock = Some(CompactionPriority::ColumnarMajor { score: f64::MAX });
             return;
         }
-        if data.schema_file.is_none() && self.get_columnar_snap_version() > 0 {
+        if data.schema_file.is_none() && !data.columnar_table_ids.is_empty() {
             let mut lock = self.compaction_priority.write().unwrap();
             *lock = Some(CompactionPriority::ColumnarClear);
             return;
@@ -1080,7 +1078,7 @@ impl Shard {
     }
 
     fn get_vector_index_priority(&self, data: &ShardData) -> Option<CompactionPriority> {
-        if self.get_columnar_snap_version() == 0 {
+        if data.columnar_table_ids.is_empty() {
             return None;
         }
         let schema_file = data.schema_file.as_ref()?;
@@ -1389,6 +1387,7 @@ pub(crate) struct ShardDataBuilder {
     schema_file: Option<Option<SchemaFile>>,
     columnar_levels: Option<ColumnarLevels>,
     vector_indexes: Option<VectorIndexes>,
+    columnar_table_ids: Option<Vec<i64>>,
 }
 
 impl ShardDataBuilder {
@@ -1406,6 +1405,7 @@ impl ShardDataBuilder {
             schema_file: None,
             columnar_levels: None,
             vector_indexes: None,
+            columnar_table_ids: None,
         }
     }
 
@@ -1453,6 +1453,10 @@ impl ShardDataBuilder {
         self.vector_indexes = Some(vector_indexes);
     }
 
+    pub(crate) fn set_columnar_table_ids(&mut self, columnar_table_ids: Vec<i64>) {
+        self.columnar_table_ids = Some(columnar_table_ids);
+    }
+
     pub(crate) fn build(mut self) -> ShardData {
         ShardData::new(
             self.range.take().unwrap_or_else(|| self.old.range.clone()),
@@ -1486,6 +1490,9 @@ impl ShardDataBuilder {
             self.vector_indexes
                 .take()
                 .unwrap_or_else(|| self.old.vector_indexes.clone()),
+            self.columnar_table_ids
+                .take()
+                .unwrap_or_else(|| self.old.columnar_table_ids.clone()),
         )
     }
 }
@@ -1503,6 +1510,7 @@ impl fmt::Debug for ShardData {
             .field("sst_files", &self.get_all_sst_files())
             .field("txn_chunks", &self.get_txn_chunks())
             .field("columnar_files", &self.get_all_columnar_files())
+            .field("columnar_table_ids", &self.columnar_table_ids)
             .field("mem_table_max_ts", &self.get_mem_table_max_ts())
             .field("mem_table_size", &self.get_mem_table_size())
             .field("l0_total_size", &self.get_l0_total_size())
@@ -1546,6 +1554,7 @@ impl ShardData {
             None,
             ColumnarLevels::new(),
             VectorIndexes::default(),
+            vec![],
         )
     }
 
@@ -1563,6 +1572,7 @@ impl ShardData {
         schema_file: Option<SchemaFile>,
         col_levels: ColumnarLevels,
         vector_indexes: VectorIndexes,
+        columnar_table_ids: Vec<i64>,
     ) -> Self {
         assert!(!mem_tbls.is_empty());
 
@@ -1581,6 +1591,7 @@ impl ShardData {
                 schema_file,
                 col_levels,
                 vector_indexes,
+                columnar_table_ids,
             }),
         }
     }
@@ -1601,6 +1612,9 @@ pub(crate) struct ShardDataCore {
     pub(crate) schema_file: Option<SchemaFile>,
     pub(crate) col_levels: ColumnarLevels,
     pub(crate) vector_indexes: VectorIndexes,
+    // columnar_table_ids is the list of columnar table ids that have been columnar major
+    // compacted.
+    pub(crate) columnar_table_ids: Vec<i64>,
 }
 
 impl Deref for ShardDataCore {
@@ -1723,6 +1737,20 @@ impl ShardDataCore {
         }
         files.sort_unstable();
         files
+    }
+
+    pub(crate) fn get_columnar_snap_version(&self) -> u64 {
+        let mut max_version = 0;
+        for cl in self.col_levels.levels.iter() {
+            if cl.level < 2 {
+                for f in cl.files.iter() {
+                    max_version = cmp::max(max_version, f.get_l0_version().unwrap_or(0));
+                }
+            } else {
+                max_version = cmp::max(max_version, self.col_levels.l2_snap_version);
+            }
+        }
+        max_version
     }
 
     // Return (max_ts).
@@ -1860,6 +1888,20 @@ impl ShardDataCore {
         if self.schema_file.is_none() {
             return false;
         }
+        let schema_table_ids = self.schema_file.as_ref().unwrap().export_schemas();
+        let (min_table_id, max_table_id) = get_table_id_from_data_bound(self.data_bound());
+        let mut has_overlap = false;
+        for (table_id, table_schema) in schema_table_ids {
+            if table_schema.with_columnar() && table_id >= min_table_id && table_id <= max_table_id
+            {
+                has_overlap = true;
+                break;
+            }
+        }
+        if !has_overlap {
+            return false;
+        }
+
         let unconverted_l0s: HashSet<u64> = self
             .col_levels
             .unconverted_l0s

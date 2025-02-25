@@ -369,9 +369,7 @@ fn test_covert_row_to_columnar() {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    let snap_version = shard.get_snap_version();
-                    let columnar_snap_version = shard.get_columnar_snap_version();
-                    if snap_version == columnar_snap_version {
+                    if shard.get_columnar_table_ids().contains(&table_id) {
                         shard_id = Some(id_ver.id);
                         return true;
                     }
@@ -385,11 +383,10 @@ fn test_covert_row_to_columnar() {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    let snap_version = shard.get_snap_version();
-                    let columnar_snap_version = shard.get_columnar_snap_version();
                     info!(
-                        "shard: {:?}, snap_version: {}, columnar_snap_version: {}",
-                        id_ver, snap_version, columnar_snap_version
+                        "shard: {:?}, columnar_table_ids: {:?}",
+                        id_ver,
+                        shard.get_columnar_table_ids()
                     );
                 }
             }
@@ -488,9 +485,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    let snap_version = shard.get_snap_version();
-                    let columnar_snap_version = shard.get_columnar_snap_version();
-                    if snap_version == columnar_snap_version {
+                    if shard.get_columnar_table_ids().contains(&table_id) {
                         return true;
                     }
                 }
@@ -683,9 +678,7 @@ fn test_region_merge_with_columnar() {
             let mut columnar_count = 0;
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    let snap_version = shard.get_snap_version();
-                    let columnar_snap_version = shard.get_columnar_snap_version();
-                    if snap_version == columnar_snap_version {
+                    if shard.get_columnar_table_ids().contains(&table_id) {
                         columnar_count += 1;
                         if columnar_count == 2 {
                             return true;
@@ -701,11 +694,10 @@ fn test_region_merge_with_columnar() {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    let snap_version = shard.get_snap_version();
-                    let columnar_snap_version = shard.get_columnar_snap_version();
                     info!(
-                        "shard: {:?}, snap_version: {}, columnar_snap_version: {}",
-                        id_ver, snap_version, columnar_snap_version
+                        "shard: {:?}, columnar_table_ids: {:?}",
+                        id_ver,
+                        shard.get_columnar_table_ids()
                     );
                 }
             }
@@ -806,9 +798,7 @@ fn test_columnar_ia_file() {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    let snap_version = shard.get_snap_version();
-                    let columnar_snap_version = shard.get_columnar_snap_version();
-                    if snap_version == columnar_snap_version {
+                    if shard.get_columnar_table_ids().contains(&table_id) {
                         return true;
                     }
                 }
@@ -959,9 +949,7 @@ fn test_columnar_scan_with_filter() {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    let snap_version = shard.get_snap_version();
-                    let columnar_snap_version = shard.get_columnar_snap_version();
-                    if snap_version == columnar_snap_version {
+                    if shard.get_columnar_table_ids().contains(&table_id) {
                         shard_id = Some(id_ver.id);
                         return true;
                     }

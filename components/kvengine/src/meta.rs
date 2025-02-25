@@ -22,7 +22,10 @@ use super::*;
 use crate::{
     dfs::FileType,
     table::{BoundedDataSet, DataBound, InnerKey},
-    util::{TxnFileLocks, TxnFileRefPropertyHelper},
+    util::{
+        get_table_id_from_data_bound, merge_columnar_table_ids, TxnFileLocks,
+        TxnFileRefPropertyHelper,
+    },
 };
 
 #[derive(Default, Clone, Debug)]
@@ -55,7 +58,7 @@ pub struct ShardMeta {
     pub schema_file_id: u64,
     pub schema_file_ver: i64,
     pub schema_restore_ver: u64,
-    pub columnar_snap_version: u64,
+    pub columnar_table_ids: Vec<i64>,
     pub unconverted_l0s: Vec<u64>,
     pub vector_indexes: Vec<kvenginepb::VectorIndex>,
 
@@ -103,7 +106,7 @@ impl ShardMeta {
             base_version: snap.base_version,
             data_sequence: snap.data_sequence,
             max_ts: snap.max_ts,
-            columnar_snap_version: snap.columnar_snap_version,
+            columnar_table_ids: snap.columnar_table_ids.clone(),
             unconverted_l0s: snap.unconverted_l0s.clone(),
             txn_file_locks,
             ..Default::default()
@@ -570,7 +573,7 @@ impl ShardMeta {
             self.add_file(l0.id, FileMeta::from_l0_table(l0));
             new_l0s.push(l0.id);
         }
-        if self.schema_file_id > 0 && self.columnar_snap_version > 0 {
+        if self.schema_file_id > 0 && !self.columnar_table_ids.is_empty() {
             self.unconverted_l0s.extend_from_slice(&new_l0s);
         }
         let new_data_seq = flush.get_version() - self.base_version;
@@ -620,7 +623,7 @@ impl ShardMeta {
         info!("{} apply_initial_flush", self.tag();
             "prop" => ?new_meta.properties,
             "data_seq" => new_meta.data_sequence,
-            "columnar_snap_version" => new_meta.columnar_snap_version,
+            "columnar_table_ids" => ?new_meta.columnar_table_ids,
             "max_ts" => new_meta.max_ts);
         *self = new_meta;
     }
@@ -793,6 +796,8 @@ impl ShardMeta {
         assert!(cs.has_trim_over_bound());
         self.apply_table_change(cs.get_trim_over_bound());
         self.apply_table_change_to_unconverted_l0s(cs.get_trim_over_bound());
+        let columnar_table_ids = cs.get_trim_over_bound().get_columnar_table_ids();
+        self.columnar_table_ids = columnar_table_ids.to_vec();
         self.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
     }
 
@@ -894,7 +899,14 @@ impl ShardMeta {
                 meta.data_sequence = initial_seq;
                 meta.seq = initial_seq;
             }
-            meta.columnar_snap_version = old.columnar_snap_version;
+            let (min_table_id, max_table_id) = get_table_id_from_data_bound(meta.data_bound());
+            let columnar_table_ids: Vec<_> = old
+                .columnar_table_ids
+                .iter()
+                .filter(|&&table_id| table_id >= min_table_id && table_id <= max_table_id)
+                .copied()
+                .collect();
+            meta.columnar_table_ids = columnar_table_ids;
             // Although `max_ts` will be updated in initial flush again, still set here to
             // avoid issue in unexpected corner case.
             meta.max_ts = self.max_ts;
@@ -949,7 +961,7 @@ impl ShardMeta {
         }
         self.unconverted_l0s
             .retain(|unconverted_l0| !comp.row_l0s.contains(unconverted_l0));
-        if self.columnar_snap_version == 0 {
+        if self.columnar_table_ids.is_empty() {
             let new_flushed_l0s: Vec<u64> = self
                 .files
                 .iter()
@@ -962,10 +974,13 @@ impl ShardMeta {
         }
         if comp.snap_version == 0 {
             self.schema_file_id = 0;
-            self.columnar_snap_version = 0;
+            self.columnar_table_ids.clear();
             self.unconverted_l0s.clear();
         } else {
-            self.columnar_snap_version = self.columnar_snap_version.max(comp.snap_version);
+            self.columnar_table_ids
+                .extend_from_slice(&comp.columnar_table_ids);
+            self.columnar_table_ids.sort_unstable();
+            self.columnar_table_ids.dedup();
         }
     }
 
@@ -996,7 +1011,7 @@ impl ShardMeta {
         self.schema_file_id = 0;
         self.schema_restore_ver = 0;
         self.schema_file_ver = 0;
-        self.columnar_snap_version = 0;
+        self.columnar_table_ids.clear();
         self.unconverted_l0s.clear();
         self.vector_indexes.clear();
         self.files.retain(|_, fm| {
@@ -1017,7 +1032,7 @@ impl ShardMeta {
         snap.set_base_version(self.base_version);
         snap.set_data_sequence(self.data_sequence);
         snap.set_max_ts(self.max_ts);
-        snap.set_columnar_snap_version(self.columnar_snap_version);
+        snap.set_columnar_table_ids(self.columnar_table_ids.clone());
         for (k, v) in self.files.iter() {
             match v.file_type {
                 FileType::Sst => {
@@ -1248,12 +1263,16 @@ impl ShardMeta {
         let target_mem_tbl_version = self.base_version + sequence;
         self.base_version = max(source_mem_tbl_version, target_mem_tbl_version) - sequence;
         self.data_sequence = sequence;
-        if self.columnar_snap_version == 0 && self.schema_file_id > 0 {
+        if self.columnar_table_ids.is_empty() && self.schema_file_id > 0 {
             // Target shard is waiting for columnar major compaction, do
             // nothing.
         } else {
-            self.columnar_snap_version =
-                max(self.columnar_snap_version, source.columnar_snap_version);
+            self.columnar_table_ids = merge_columnar_table_ids(
+                &source.columnar_table_ids,
+                &self.columnar_table_ids,
+                source.data_bound(),
+                self.data_bound(),
+            );
         }
         self.parent = Some(Box::new(parent));
         self.seq = sequence;
