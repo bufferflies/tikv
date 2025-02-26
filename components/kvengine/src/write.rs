@@ -308,10 +308,11 @@ impl Engine {
         let txn_file_ref = txn_file_refs.take_txn_file_refs().pop().unwrap();
         let old_data = shard.get_data();
         let mut lock_txn_files = old_data.lock_txn_files.clone();
+        let encryption_key = shard.get_encryption_key();
 
         let txn_file = self
             .txn_chunk_mgr
-            .load_txn_file_from_ref(shard.id, shard.ver, &txn_file_ref, true, None)
+            .load_txn_file_from_ref(shard.id, shard.ver, &txn_file_ref, true, encryption_key)
             .unwrap();
 
         let (is_commit, is_rollback) = Self::merge_txn_file_ref(shard, txn_file_ref);

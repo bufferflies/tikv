@@ -477,9 +477,13 @@ impl TxnChunkManagerCore {
             let txn_chunk = if !is_prepared {
                 self.prepare(chunk_id, encryption_key.clone())?
             } else {
-                self.get(chunk_id).ok_or_else(|| -> Error {
-                    box_err!("txn chunk is not prepared, chunk_id {}", chunk_id)
-                })?
+                // The chunk may be removed by `unsafe_remove` in some use cases even if it is
+                // prepared. If the chunk is not prepared, give a chance to prepare it.
+                self.get(chunk_id)
+                    .or_else(|| self.prepare(chunk_id, encryption_key.clone()).ok())
+                    .ok_or_else(|| -> Error {
+                        box_err!("txn chunk is not prepared, chunk_id {}", chunk_id)
+                    })?
             };
             chunks.push(txn_chunk);
         }
@@ -500,11 +504,17 @@ impl TxnChunkManagerCore {
             .flat_map(|txn_file_ref| txn_file_ref.chunk_ids.iter())
             .copied()
             .collect::<Vec<_>>();
-        self.prepare_txn_chunks(txn_chunks_id, encryption_key)?;
+        self.prepare_txn_chunks(txn_chunks_id, encryption_key.clone())?;
         txn_file_refs
             .iter()
             .map(|txn_file_ref| {
-                self.load_txn_file_from_ref(shard_id, shard_ver, txn_file_ref, true, None)
+                self.load_txn_file_from_ref(
+                    shard_id,
+                    shard_ver,
+                    txn_file_ref,
+                    true,
+                    encryption_key.clone(),
+                )
             })
             .collect()
     }
