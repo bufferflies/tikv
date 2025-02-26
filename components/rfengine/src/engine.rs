@@ -532,6 +532,12 @@ impl RfEngineCore {
         }
         let pending_compaction_wals = self.pending_compaction_wals();
         ENGINE_PENDING_COMPACTION_WALS_GAUGE.set(pending_compaction_wals as i64);
+        // Flush metrics.
+        ENGINE_RESOUCE_USAGE.memory.set(total_mem_size as i64);
+        ENGINE_RESOUCE_USAGE.disk.set(disk_size as i64); // TODO: move it to CSE.store_size
+        ENGINE_ENTRIES_COUNT.set(total_mem_entries as i64);
+        ENGINE_TOTAL_WALS_GAUGE.set(num_files as i64);
+
         EngineStats {
             total_mem_size,
             total_mem_entries,

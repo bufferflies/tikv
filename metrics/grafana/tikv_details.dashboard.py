@@ -5236,13 +5236,47 @@ def RaftEngine() -> RowPanel:
     layout.row(
         [
             graph_panel(
+                title="Resource Usage",
+                description="The resource usage of Raft Engine",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "raft_engine_resouce_usage_bytes",
+                            by_labels=["type"],  # override default by instance.
+                        ),
+                        legend_format="{{type}}",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Entry Count",
+                description="The average number of raft log entries",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_avg(
+                            "raft_engine_total_entries_count",
+                            by_labels=[],
+                        ),
+                        legend_format="entries",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
                 title="Operation",
                 description="The count of operations per second",
                 yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
                 targets=[
                     target(
                         expr=expr_sum_rate(
-                            "raft_engine_write_apply_duration_seconds_count",
+                            "raft_engine_persist_duration_seconds_count",
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="write",
@@ -5250,28 +5284,36 @@ def RaftEngine() -> RowPanel:
                     ),
                     target(
                         expr=expr_sum_rate(
-                            "raft_engine_read_entry_duration_seconds_count",
+                            "raft_engine_fetch_entries_duration_seconds_count",
                             by_labels=[],  # override default by instance.
                         ),
-                        legend_format="read_entry",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_sum_rate(
-                            "raft_engine_read_message_duration_seconds_count",
-                            by_labels=[],  # override default by instance.
-                        ),
-                        legend_format="read_message",
+                        legend_format="fetch_entry",
                         additional_groupby=True,
                     ),
                 ],
             ),
-            graph_panel_histogram_quantiles(
-                title="Write Duration",
-                description="The time used in write operation",
+            graph_panel(
+                title="Duration of Read/Write",
+                description="The time used in read/write operation",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
-                metric="raft_engine_write_duration_seconds",
-                hide_count=True,
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "raft_engine_persist_duration_seconds",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="write",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "raft_engine_fetch_entries_duration_seconds",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="read",
+                        additional_groupby=True,
+                    ),
+                ],
             ),
         ]
     )
@@ -5284,18 +5326,10 @@ def RaftEngine() -> RowPanel:
                 targets=[
                     target(
                         expr=expr_sum_rate(
-                            "raft_engine_write_size_sum",
+                            "raft_engine_region_write_batch_size_sum",
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="write",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_sum_rate(
-                            "raft_engine_background_rewrite_bytes_sum",
-                            by_labels=["type"],
-                        ),
-                        legend_format="rewrite-{{type}}",
                         additional_groupby=True,
                     ),
                 ],
@@ -5307,23 +5341,23 @@ def RaftEngine() -> RowPanel:
                 targets=[
                     target(
                         expr=expr_histogram_quantile(
-                            0.99, "raft_engine_write_preprocess_duration_seconds"
-                        ),
-                        legend_format="wait",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_histogram_quantile(
-                            0.99, "raft_engine_write_leader_duration_seconds"
+                            0.99, "raft_engine_wal_write_duration_seconds"
                         ),
                         legend_format="wal",
                         additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
-                            0.99, "raft_engine_write_apply_duration_seconds"
+                            0.99, "raft_engine_apply_duration_seconds"
                         ),
                         legend_format="apply",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99, "raft_engine_take_snapshot_duration_seconds"
+                        ),
+                        legend_format="snapshot",
                         additional_groupby=True,
                     ),
                 ],
@@ -5336,40 +5370,33 @@ def RaftEngine() -> RowPanel:
                 title="Bytes / Written",
                 description="The bytes per write",
                 yaxes=yaxes(left_format=UNITS.BYTES_IEC),
-                metric="raft_engine_write_size",
+                metric="raft_engine_region_write_batch_size",
                 hide_count=True,
             ),
             graph_panel(
-                title="WAL Duration Breakdown (999%)",
+                title="Duration of WAL Operation (999%)",
                 description="999% duration breakdown of WAL write operation",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 targets=[
                     target(
                         expr=expr_histogram_quantile(
-                            0.999, "raft_engine_write_leader_duration_seconds"
+                            0.999, "raft_engine_truncate_duration_seconds"
                         ),
-                        legend_format="total",
+                        legend_format="truncate",
                         additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
-                            0.999, "raft_engine_sync_log_duration_seconds"
-                        ),
-                        legend_format="sync",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_histogram_quantile(
-                            0.999, "raft_engine_allocate_log_duration_seconds"
-                        ),
-                        legend_format="allocate",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_histogram_quantile(
-                            0.999, "raft_engine_rotate_log_duration_seconds"
+                            0.999, "raft_engine_rotate_duration_seconds"
                         ),
                         legend_format="rotate",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.999, "raft_engine_compact_wal_duration_seconds"
+                        ),
+                        legend_format="compact_wal",
                         additional_groupby=True,
                     ),
                 ],
@@ -5385,53 +5412,34 @@ def RaftEngine() -> RowPanel:
                 targets=[
                     target(
                         expr=expr_avg(
-                            "raft_engine_log_file_count",
-                            by_labels=["type"],
+                            "raft_engine_pending_compaction_wals",
+                            by_labels=[],
                         ),
+                        legend_format="pending_compaction",
                         additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
-                            "raft_engine_swap_file_count",
-                            by_labels=[],  # override default by instance.
+                            "raft_engine_total_wals_count",
+                            by_labels=[],
                         ),
-                        legend_format="swap",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_avg(
-                            "raft_engine_recycled_file_count",
-                            by_labels=["type"],
-                        ),
-                        legend_format="{{type}}-recycle",
+                        legend_format="total",
                         additional_groupby=True,
                     ),
                 ],
             ),
             graph_panel(
                 title="Other Durations (99%)",
-                description="The 99% duration of operations other than write",
+                description="The 99% duration of operations of raft engine",
                 yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
                 targets=[
                     target(
                         expr=expr_histogram_quantile(
-                            0.999, "raft_engine_read_entry_duration_seconds"
+                            0.999,
+                            "raft_engine_backup_duration_seconds",
+                            by_labels=["type"],
                         ),
-                        legend_format="read_entry",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_histogram_quantile(
-                            0.999, "raft_engine_read_message_duration_seconds"
-                        ),
-                        legend_format="read_message",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_histogram_quantile(
-                            0.999, "raft_engine_purge_duration_seconds"
-                        ),
-                        legend_format="purge",
+                        legend_format="backup",
                         additional_groupby=True,
                     ),
                 ],
@@ -5441,24 +5449,51 @@ def RaftEngine() -> RowPanel:
     layout.row(
         [
             graph_panel(
-                title="Entry Count",
-                description="The average number of log entries",
+                title="Raft Log GC Size",
+                description="The size of GCed raft log",
                 yaxes=yaxes(left_format=UNITS.SHORT),
                 targets=[
                     target(
                         expr=expr_avg(
-                            "raft_engine_log_entry_count",
-                            by_labels=["type"],
+                            "raft_engine_log_file_gc_size",
+                            by_labels=["status"],
                         ),
                         additional_groupby=True,
                     ),
                 ],
             ),
-            graph_panel_histogram_quantiles(
-                title="Write Compression Ratio",
-                description="The compression ratio per write",
-                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
-                metric="raft_engine_write_compression_ratio",
+            graph_panel(
+                title="Backup Count",
+                description="The average number of raft engine backup",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_avg(
+                            "raft_engine_backup_counter",
+                            by_labels=["status"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            stat_panel(
+                title="DFS Worker Status",
+                targets=[
+                    target(
+                        expr=expr_simple("raft_engine_dfs_worker_healthy"),
+                        legend_format="{{ instance }}",
+                    ),
+                ],
+                mappings=[
+                    StatValueMappings(
+                        StatValueMappingItem("Unhealthy", "0", "red"),
+                        StatValueMappingItem("Healthy", "1", "green"),
+                    ),
+                ],
             ),
         ]
     )

@@ -7,27 +7,29 @@ use prometheus_static_metric::*;
 use crate::*;
 
 make_static_metric! {
-    pub label_enum LogQueueKind {
-        rewrite,
-        append,
-    }
-
-    pub struct LogQueueHistogramVec: Histogram {
-        "type" => LogQueueKind,
-    }
-
-    pub struct LogQueueCounterVec: IntCounter {
-        "type" => LogQueueKind,
-    }
-
-    pub struct LogQueueGaugeVec: IntGauge {
-        "type" => LogQueueKind,
+    pub struct ResourceUsageIntGaugeVec: IntGauge {
+        "type" => {
+            memory,
+            disk,
+        },
     }
 }
 
 pub fn flush_engine_properties(_engine: &RfEngine, _name: &str) {}
 
 lazy_static! {
+    pub static ref ENGINE_RESOUCE_USAGE: ResourceUsageIntGaugeVec = register_static_int_gauge_vec!(
+        ResourceUsageIntGaugeVec,
+        "raft_engine_resouce_usage_bytes",
+        "Total number of resource usage",
+        &["type"],
+    )
+    .unwrap();
+    pub static ref ENGINE_ENTRIES_COUNT: IntGauge = register_int_gauge!(
+        "raft_engine_total_entries_count",
+        "Total number of raft entries"
+    )
+    .unwrap();
     pub static ref ENGINE_PERSIST_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_persist_duration_seconds",
         "Bucketed histogram of Raft Engine persist duration",
@@ -68,6 +70,11 @@ lazy_static! {
         "raft_engine_compact_wal_duration_seconds",
         "Bucketed histogram of Raft Engine compact WAL duration",
         exponential_buckets(0.0005, 1.8, 26).unwrap()
+    )
+    .unwrap();
+    pub static ref ENGINE_TOTAL_WALS_GAUGE: IntGauge = register_int_gauge!(
+        "raft_engine_total_wals_count",
+        "Total number of raft WAL logs"
     )
     .unwrap();
     pub static ref ENGINE_PENDING_COMPACTION_WALS_GAUGE: IntGauge = register_int_gauge!(
