@@ -70,6 +70,14 @@ impl WriteBatch {
         self.entries.len()
     }
 
+    pub fn size(&self) -> usize {
+        let mut total_size = 0;
+        for e in &self.entries {
+            total_size += e.encoded_full_size();
+        }
+        total_size
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

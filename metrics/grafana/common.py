@@ -656,6 +656,8 @@ def target(
             )
         if additional_groupby:
             expr.append_by_labels(ADDITIONAL_GROUPBY)
+            if legend_format is None:
+                legend_format = ""
             legend_format += " {{" + ADDITIONAL_GROUPBY + "}}"
     elif isinstance(expr, OpExpr):
         assert legend_format is not None, "legend_format must be specified"

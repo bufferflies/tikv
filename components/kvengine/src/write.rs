@@ -9,6 +9,7 @@ use protobuf::Message;
 use slog_global::info;
 
 use crate::{
+    metrics::*,
     table::{self, memtable, InnerKey, TxnFile},
     util::TxnFileRefPropertyHelper,
     *,
@@ -121,6 +122,14 @@ impl WriteBatch {
         num
     }
 
+    pub fn size(&self) -> usize {
+        let mut size = 0;
+        for wb in &self.cf_batches {
+            size += wb.size();
+        }
+        size
+    }
+
     pub fn get_cf_mut(&mut self, cf: usize) -> &mut memtable::WriteBatch {
         &mut self.cf_batches[cf]
     }
@@ -185,6 +194,10 @@ impl Engine {
         u64,   // mem_tbl_size
         usize, // unpersisted_props_size
     )> {
+        let _t = ENGINE_WRITE_DURATION.start_timer();
+        ENGINE_WRITE_FLOW.keys.observe(wb.num_entries() as f64);
+        ENGINE_WRITE_FLOW.bytes.observe(wb.size() as f64);
+
         let shard = self.get_shard(wb.shard_id).unwrap_or_else(|| {
             let tag = ShardTag::new(self.get_engine_id(), IdVer::new(wb.shard_id, 0));
             panic!("{} unable to get shard", tag);

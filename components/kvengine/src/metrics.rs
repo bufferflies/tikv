@@ -9,27 +9,57 @@ use prometheus_static_metric::*;
 use crate::*;
 
 make_static_metric! {
-    pub label_enum LogQueueKind {
-        rewrite,
-        append,
+    pub label_enum SeekType {
+        seek,
+        next,
+        prev,
     }
 
-    pub struct LogQueueHistogramVec: Histogram {
-        "type" => LogQueueKind,
+    pub label_enum WriteFlowType {
+        keys,
+        bytes,
     }
 
-    pub struct LogQueueCounterVec: IntCounter {
-        "type" => LogQueueKind,
+    pub struct SeekDurationVec: Histogram {
+        "type" => SeekType,
     }
 
-    pub struct LogQueueGaugeVec: IntGauge {
-        "type" => LogQueueKind,
+    pub struct WriteFlowVec: Histogram {
+        "type" => WriteFlowType,
     }
 }
 
 pub fn flush_engine_properties(_engine: &Engine, _name: &str) {}
 
 lazy_static! {
+    pub static ref ENGINE_GET_DURATION: Histogram = register_histogram!(
+        "kv_engine_get_duration_seconds",
+        "Bucketed histogram of KV Engine get duration",
+        exponential_buckets(0.00005, 1.8, 26).unwrap()
+    )
+    .unwrap();
+    pub static ref ENGINE_SEEK_DURATION: SeekDurationVec = register_static_histogram_vec!(
+        SeekDurationVec,
+        "kv_engine_seek_duration_seconds",
+        "Bucketed histogram of KV Engine seek duration",
+        &["type"],
+        exponential_buckets(0.00005, 1.8, 26).unwrap()
+    )
+    .unwrap();
+    pub static ref ENGINE_WRITE_DURATION: Histogram = register_histogram!(
+        "kv_engine_write_duration_seconds",
+        "Bucketed histogram of KV Engine write duration",
+        exponential_buckets(0.00005, 1.8, 26).unwrap()
+    )
+    .unwrap();
+    pub static ref ENGINE_WRITE_FLOW: WriteFlowVec = register_static_histogram_vec!(
+        WriteFlowVec,
+        "kv_engine_write_flow",
+        "Bucketed histogram of KV Engine write flow",
+        &["type"],
+        exponential_buckets(8.0, 2.0, 20).unwrap()
+    )
+    .unwrap();
     pub static ref ENGINE_ARENA_GROW_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "kv_engine_arena_grow_duration_seconds",
         "Bucketed histogram of KV Engine arena grow duration",

@@ -28,6 +28,7 @@ use crate::{
     dfs::FileType,
     ia::types::FileSegmentIdent,
     limiter::RegionLimiter,
+    metrics::*,
     table::{
         blobtable::blobtable::BlobPrefetcher,
         columnar::{
@@ -475,6 +476,8 @@ impl SnapAccessCore {
     /// is none.
     #[maybe_async::both]
     pub async fn get(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
+        let _t = ENGINE_GET_DURATION.start_timer();
+
         let mut version = version;
         if version == 0 {
             version = u64::MAX;
@@ -501,6 +504,8 @@ impl SnapAccessCore {
     }
 
     pub fn get_non_txn_file_lock(&self, key: &[u8]) -> Item<'_> {
+        let _t = ENGINE_GET_DURATION.start_timer();
+
         let inner_key = InnerKey::from_outer_key(key);
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
@@ -1111,6 +1116,8 @@ impl SnapAccessCore {
 
     #[maybe_async::both]
     pub async fn get_newer(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
+        let _t = ENGINE_GET_DURATION.start_timer();
+
         let inner_key = InnerKey::from_outer_key(key);
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
@@ -1647,6 +1654,8 @@ impl Iterator {
 
     #[maybe_async::both]
     pub async fn next(&mut self) {
+        let _t = ENGINE_SEEK_DURATION.next.start_timer();
+
         if self.all_versions
             && self.valid()
             && next_version!(self.inner).await
@@ -1691,6 +1700,8 @@ impl Iterator {
     // direction. Behavior would be reversed is iterating backwards.
     #[maybe_async::both]
     pub async fn seek(&mut self, key: &[u8]) {
+        let _t = ENGINE_SEEK_DURATION.seek.start_timer();
+
         if key.len() <= self.data.inner_key_off {
             self.inner.rewind().await;
         } else {
@@ -1705,6 +1716,8 @@ impl Iterator {
     // with a seek().
     #[maybe_async::both]
     pub async fn rewind(&mut self) {
+        let _t = ENGINE_SEEK_DURATION.seek.start_timer();
+
         self.inner.rewind().await;
         if self.inner.valid() {
             if self.reversed {

@@ -13,7 +13,7 @@ use std::{
         Arc, Mutex, MutexGuard,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bytes::BufMut;
@@ -169,9 +169,14 @@ impl Engine {
             core: Arc::new(core),
             meta_change_listener,
         };
-
-        info!("engine load {} shards", metas.len());
+        let timer = Instant::now();
+        let count = metas.len();
         tikv_util::init_task_local_sync(|| en.load_shards(metas, recoverer, None))?;
+        info!(
+            "engine finished loading shards";
+            "count" => count,
+            "duration" => ?timer.elapsed()
+        );
         en.loaded.store(true, Ordering::Relaxed);
         let flush_en = en.clone();
         en.add_worker_handle(
