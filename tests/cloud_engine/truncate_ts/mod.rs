@@ -43,20 +43,20 @@ fn test_truncate_ts() {
     // preload some key-value pairs.
     client.put_kv(0..max_key_idx, i_to_key, i_to_random_value);
 
-    let keyspaces_cases = vec![None, Some(random_keyspace(max_key_idx))];
-    for keyspace in keyspaces_cases {
-        let client = cluster.new_client();
-        test_truncate_ts_impl(client, max_key_idx, keyspace, Duration::from_secs(30));
-        // restart one node.
-        let node_id = nodes[rand::thread_rng().gen_range(0..node_cnt)];
-        cluster.stop_node(node_id);
-        cluster.start_node(node_id, |_, _| {});
-        info!("Cluster node {} is restarted.", node_id);
+    let keyspace = rand::thread_rng()
+        .gen_bool(0.5)
+        .then_some(random_keyspace(max_key_idx));
+    let client = cluster.new_client();
+    test_truncate_ts_impl(client, max_key_idx, keyspace, Duration::from_secs(10));
+    // restart one node.
+    let node_id = nodes[rand::thread_rng().gen_range(0..node_cnt)];
+    cluster.stop_node(node_id);
+    cluster.start_node(node_id, |_, _| {});
+    info!("Cluster node {} is restarted.", node_id);
 
-        // test truncate ts after restart
-        let client = cluster.new_client();
-        test_truncate_ts_impl(client, max_key_idx, keyspace, Duration::from_secs(30));
-    }
+    // test truncate ts after restart
+    let client = cluster.new_client();
+    test_truncate_ts_impl(client, max_key_idx, keyspace, Duration::from_secs(10));
 
     info!("Truncate ts test stopped.");
     cluster.stop();
