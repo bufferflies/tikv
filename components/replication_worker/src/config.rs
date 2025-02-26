@@ -1,8 +1,10 @@
+// Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
+
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct ReplicaConfig {
     #[serde(default)]
     pub bdr_mode: bool,
@@ -40,7 +42,7 @@ pub struct ReplicaConfig {
     pub sync_point_retention: Duration,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct ConsistentConfig {
     #[serde(default)]
     flush_interval: u64,
@@ -62,7 +64,7 @@ pub struct ConsistentConfig {
     flush_concurrency: i32,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct FilterConfig {
     #[serde(default)]
     event_filters: Vec<EventFilter>,
@@ -72,7 +74,7 @@ pub struct FilterConfig {
     rules: Vec<String>,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct EventFilter {
     #[serde(default)]
     ignore_delete_value_expr: Vec<String>,
@@ -90,13 +92,13 @@ pub struct EventFilter {
     matcher: Vec<String>,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct MounterConfig {
     #[serde(default = "default_mounter_worker_num")]
     worker_num: i32,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct SinkConfig {
     #[serde(default)]
     column_selectors: Vec<ColumnSelector>,
@@ -126,7 +128,7 @@ pub struct SinkConfig {
     debezium: DebeziumConfig,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct ColumnSelector {
     #[serde(default)]
     columns: Vec<String>,
@@ -134,7 +136,7 @@ pub struct ColumnSelector {
     matcher: Vec<String>,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct CsvConfig {
     #[serde(default = "default_csv_delimiter")]
     delimiter: String,
@@ -148,7 +150,7 @@ pub struct CsvConfig {
     binary_encoding_method: String,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct Dispatcher {
     #[serde(default)]
     matcher: Vec<String>,
@@ -158,7 +160,7 @@ pub struct Dispatcher {
     topic: String,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct CloudStorageConfig {
     #[serde(default)]
     worker_count: i32,
@@ -176,13 +178,13 @@ pub struct CloudStorageConfig {
     output_raw_change_event: bool,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct OpenConfig {
     #[serde(default = "default_true")]
     output_old_value: bool,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct DebeziumConfig {
     #[serde(default = "default_true")]
     output_old_value: bool,

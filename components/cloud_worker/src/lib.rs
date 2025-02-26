@@ -45,6 +45,7 @@ use kvproto::metapb::Store;
 pub use metrics::REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM;
 use pd_client::PdClient;
 use prometheus::labels;
+use replication_worker::{ReplicationWorker, ReplicationWorkerConfig};
 pub use schema_manager::{
     broadcast_schema_update_to_all_stores, SchemaManager, SchemaManagerConfig,
 };
@@ -244,8 +245,22 @@ fn start_server(
         config.txn_chunk_manager,
     );
 
-    let cdc_replication_worker = replication_worker::ReplicationWorker::new();
-
+    let replication_scheduler = if config.replication_worker.enabled {
+        ReplicationWorker::new(
+            pd.clone(),
+            s3fs.clone(),
+            config.data_dir.clone(),
+            config.security.clone(),
+            config.replication_worker.clone(),
+        )
+        .map(|mut replication_worker| {
+            let scheduler = replication_worker.scheduler();
+            thread::spawn(move || replication_worker.run());
+            scheduler
+        })
+    } else {
+        None
+    };
     let ctx = Arc::new(server::Context {
         compression_lvl,
         checksum_type,
@@ -254,7 +269,7 @@ fn start_server(
         pd: pd.clone(),
         load_manager: load_manager.clone(),
         br_manager,
-        cdc_replication_worker,
+        replication_scheduler,
         txn_chunk_handler,
         master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),
@@ -680,6 +695,7 @@ pub struct Config {
     pub ia: IaConfig,
 
     pub local_gc: LocalGcConfig,
+    pub replication_worker: ReplicationWorkerConfig,
     // Note: Fields of simple (not structure) type can not be the last. Otherwise serializing the
     // config will meet the "ValueAfterTable" error.
     // See https://docs.rs/toml/0.5.11/toml/ser/enum.Error.html#variant.ValueAfterTable.
@@ -718,6 +734,7 @@ impl Default for Config {
             push_metrics_interval: ReadableDuration::secs(30),
             read_columnar: false,
             local_gc: LocalGcConfig::default(),
+            replication_worker: ReplicationWorkerConfig::default(),
         }
     }
 }

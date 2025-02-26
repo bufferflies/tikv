@@ -279,6 +279,7 @@ members = [
   "components/raftstore",
   "components/raftstore-v2",
   "components/recovery",
+  "components/replication_worker",
   "components/resolved_ts",
   "components/resource_metering",
   "components/rfengine",
@@ -368,6 +369,7 @@ raft_log_engine = { path = "components/raft_log_engine" }
 raftstore = { path = "components/raftstore", default-features = false }
 raftstore_v2 = { path = "components/raftstore-v2", default-features = false }
 recovery = { path = "components/recovery" }
+replication_worker = { path = "components/replication_worker" }
 resolved_ts = { path = "components/resolved_ts" }
 resource_metering = { path = "components/resource_metering" }
 rfengine = { path = "components/rfengine" }

@@ -14,11 +14,11 @@ mod observer;
 mod old_value;
 mod service;
 
-pub use channel::{recv_timeout, CdcEvent, MemoryQuota};
+pub use channel::{channel, recv_timeout, CdcEvent, Drain, MemoryQuota, Sink};
 pub use config::CdcConfigManager;
-pub use delegate::Delegate;
+pub use delegate::{Delegate, Downstream};
 pub use endpoint::{CdcTxnExtraScheduler, Endpoint, Task, Validate};
 pub use errors::{Error, Result};
 pub use observer::CdcObserver;
 pub use old_value::OldValueCache;
-pub use service::{FeatureGate, Service};
+pub use service::{Conn, ConnId, FeatureGate, Service};

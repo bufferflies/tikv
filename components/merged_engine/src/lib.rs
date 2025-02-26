@@ -12,12 +12,18 @@ use std::{
     sync::Arc,
 };
 
+use api_version::ApiV2;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::MasterKey;
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
-use kvengine::{dfs::S3Fs, limiter::StoreLimiter, RecoverHandler as RecoverHandlerTrait};
-use kvproto::{metapb, metapb::Peer, raft_cmdpb::AdminRequest, raft_serverpb::StoreIdent};
+use kvengine::{dfs::S3Fs, limiter::StoreLimiter};
+use kvproto::{
+    metapb,
+    metapb::Peer,
+    raft_cmdpb::AdminRequest,
+    raft_serverpb::{RegionLocalState, StoreIdent},
+};
 use native_br::common::{
     collect_snapshot_meta_rlog_files, replay_wal_logs_from_backup, ReplayWalLogsContext,
 };
@@ -26,14 +32,15 @@ use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfengine::{
     iterator::WalIterator, RaftLogOp, RfEngine, RAFT_STATE_KEY_BYTE, REGION_META_KEY_BYTE,
-    TRUNCATE_ALL_INDEX,
+    REGION_META_KEY_PREFIX, TRUNCATE_ALL_INDEX,
 };
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::store::{
-    get_preprocess_cmd, state::RaftState, ApplyMsgs, MetaChangeListener, PdIdAllocator,
-    PreprocessContext, RecoverHandler, RAFT_INIT_LOG_INDEX,
+    get_preprocess_cmd, state::RaftState, ApplyContext, ApplyMsgs, MetaChangeListener,
+    PdIdAllocator, PreprocessContext, RecoverHandler, RAFT_INIT_LOG_INDEX,
 };
 use security::SecurityConfig;
+use serde_derive::{Deserialize, Serialize};
 use tikv::config::TikvConfig;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
@@ -52,7 +59,9 @@ pub struct MergedEngineContext {
     pub security_config: Arc<SecurityConfig>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
 pub struct MergedEngineConfig {
     pub block_cache_size: ReadableSize,
     pub timeout_fetch_wal: ReadableDuration,
@@ -60,13 +69,38 @@ pub struct MergedEngineConfig {
     pub mem_table_size: ReadableSize,
 }
 
-#[derive(Clone, Default, Debug)]
+impl Default for MergedEngineConfig {
+    fn default() -> Self {
+        Self {
+            block_cache_size: ReadableSize::mb(128),
+            timeout_fetch_wal: ReadableDuration::secs(30),
+            merged_store_id: 1024,
+            mem_table_size: ReadableSize::mb(128),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct RegionProgress {
+    pub keyspace_id: u32,
     pub entries: HashMap<u64, RaftLogOp>,
     pub synced_index: u64,
     pub commit_index: u64,
     pub truncated_index: u64,
     pub version: u64,
+}
+
+impl RegionProgress {
+    pub fn new(keyspace_id: u32) -> Self {
+        Self {
+            keyspace_id,
+            entries: HashMap::new(),
+            synced_index: 0,
+            commit_index: 0,
+            truncated_index: 0,
+            version: 0,
+        }
+    }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -219,13 +253,16 @@ impl MergedEngine {
                     continue;
                 }
                 let region_state = rfstore::store::load_last_peer_state(&origin, peer_id).unwrap();
+                let keyspace_id =
+                    ApiV2::get_u32_keyspace_id_by_key(region_state.get_region().get_start_key())
+                        .unwrap_or_default();
                 let region_version = region_state.get_region().get_region_epoch().get_version();
                 let raft_state =
                     rfstore::store::load_peer_raft_state(&origin, peer_id, region_version).unwrap();
                 let commit = raft_state.get_commit();
                 let region_progress = region_progresses
                     .entry(region_id)
-                    .or_insert(RegionProgress::default());
+                    .or_insert(RegionProgress::new(keyspace_id));
                 if region_progress.commit_index >= commit {
                     continue;
                 }
@@ -290,9 +327,12 @@ impl MergedEngine {
             let raft_state =
                 rfstore::store::load_peer_raft_state(merged_raft, peer_id, region_version).unwrap();
             let commit = raft_state.get_commit();
+            let keyspace_id =
+                ApiV2::get_u32_keyspace_id_by_key(region_state.get_region().get_start_key())
+                    .unwrap_or_default();
             let region_progress = region_progersses
                 .entry(region_id)
-                .or_insert(RegionProgress::default());
+                .or_insert(RegionProgress::new(keyspace_id));
             region_progress.commit_index = commit;
             region_progress.synced_index = commit;
             region_progress.truncated_index = merged_raft
@@ -402,6 +442,16 @@ impl MergedEngine {
         self.store_progresses.get(&store_id).cloned()
     }
 
+    pub fn get_keyspace_regions(&self, keyspace_id: u32) -> Vec<u64> {
+        let mut regions = Vec::new();
+        for (&region_id, progress) in &self.region_progresses {
+            if progress.keyspace_id == keyspace_id {
+                regions.push(region_id);
+            }
+        }
+        regions
+    }
+
     pub fn update_wal(
         &mut self,
         store_id: u64,
@@ -439,7 +489,20 @@ impl MergedEngine {
         for mut origin_wb in origin_batches {
             let region_peer_map = origin_wb.get_region_peer_map();
             for (&region_id, &peer_id) in &region_peer_map {
-                let progress = self.region_progresses.entry(region_id).or_default();
+                let progress = self.region_progresses.entry(region_id).or_insert_with(|| {
+                    let bin = origin_wb
+                        .get_latest_state(peer_id, region_id, REGION_META_KEY_PREFIX)
+                        .unwrap_or_else(|| {
+                            panic!("store {} region {} meta not found", store_id, region_id);
+                        });
+                    let mut region_local_state = RegionLocalState::new();
+                    region_local_state.merge_from_bytes(bin).unwrap();
+                    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(
+                        region_local_state.get_region().get_start_key(),
+                    )
+                    .unwrap_or_default();
+                    RegionProgress::new(keyspace_id)
+                });
                 if let Some(truncated_idx) = origin_wb.get_truncated_idx(peer_id) {
                     if progress.truncated_index < truncated_idx
                         && truncated_idx != TRUNCATE_ALL_INDEX
@@ -495,7 +558,7 @@ impl MergedEngine {
         Ok(())
     }
 
-    pub fn sync_merged(&mut self) -> Result<()> {
+    pub fn sync_merged(&mut self, apply_ctx: &mut ApplyContext) -> Result<()> {
         // Prepare context.
         let mut raft_wb = rfengine::WriteBatch::new();
         let mut remove_dependents = Vec::new();
@@ -520,7 +583,7 @@ impl MergedEngine {
             .iter()
             .map(|(region_id, _)| *region_id)
             .collect::<Vec<_>>();
-        self.sync_merged_for_regions(&mut ctx, &updated_regions)?;
+        self.sync_merged_for_regions(&mut ctx, apply_ctx, &updated_regions)?;
         let mut raft_wb = rfengine::WriteBatch::new();
         for updated_region in updated_regions {
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
@@ -543,6 +606,7 @@ impl MergedEngine {
     fn sync_merged_for_regions(
         &mut self,
         ctx: &mut PreprocessContext<'_>,
+        apply_ctx: &mut ApplyContext,
         updated_regions: &[u64],
     ) -> Result<()> {
         let mut new_regions = vec![];
@@ -605,7 +669,7 @@ impl MergedEngine {
                     let shard = self.kv.get_shard(updated_region).unwrap();
                     shard.sync_data_sequence(&shard_meta);
                     self.recover_handler
-                        .recover(&self.kv, &shard, &shard_meta)?;
+                        .recover_with_apply_ctx(apply_ctx, &shard, &shard_meta)?;
                 }
                 if let Some(admin_req) = admin_req {
                     let shard = self.kv.get_shard(updated_region).unwrap();
@@ -669,7 +733,7 @@ impl MergedEngine {
                 let shard_meta = preprocessor_ref.shard_meta.as_ref().unwrap();
                 shard.sync_data_sequence(shard_meta);
                 self.recover_handler
-                    .recover(&self.kv, &shard, shard_meta)
+                    .recover_with_apply_ctx(apply_ctx, &shard, shard_meta)
                     .unwrap();
             }
         }
@@ -677,7 +741,7 @@ impl MergedEngine {
             if new_regions.len() == updated_regions.len() {
                 panic!("all updated regions are new regions {:?}", new_regions);
             }
-            self.sync_merged_for_regions(ctx, &new_regions)
+            self.sync_merged_for_regions(ctx, apply_ctx, &new_regions)
         } else {
             Ok(())
         }

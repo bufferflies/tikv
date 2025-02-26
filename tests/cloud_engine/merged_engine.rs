@@ -9,6 +9,7 @@ use merged_engine::{MergedEngine, MergedEngineConfig, MergedEngineContext};
 use native_br::{backup, backup::BackupType, common::send_request_to_store};
 use pd_client::PdClient;
 use rand::Rng;
+use rfstore::store::ApplyContext;
 use security::GetSecurityManager;
 use test_cloud_server::{
     client::{RefStore, RequestOptions},
@@ -292,7 +293,8 @@ fn update_merged_engine(
             .update_wal(store_id, epoch, start_off, data)
             .unwrap();
     }
-    merged_engine.sync_merged().unwrap();
+    let mut apply_ctx = ApplyContext::new(merged_engine.get_kv(), None);
+    merged_engine.sync_merged(&mut apply_ctx).unwrap();
 }
 
 fn kv_engine_to_ref_store(kv: &kvengine::Engine) -> RefStore {

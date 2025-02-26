@@ -1,8 +1,25 @@
+// Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
+
 use chrono::Utc;
 use hyper::{Body, Method, Request, Response, Result, StatusCode};
 use serde::{Deserialize, Serialize};
 
-use crate::{config::ReplicaConfig, ReplicationWorker};
+use crate::{config::ReplicaConfig, CdcMsg};
+
+#[derive(Clone)]
+pub struct ReplicationScheduler {
+    sender: tikv_util::mpsc::Sender<CdcMsg>,
+}
+
+impl ReplicationScheduler {
+    pub fn new(sender: tikv_util::mpsc::Sender<CdcMsg>) -> Self {
+        Self { sender }
+    }
+
+    pub fn schedule(&self, msg: CdcMsg) {
+        let _ = self.sender.send(msg);
+    }
+}
 
 #[derive(Serialize)]
 struct ErrorResponse {
@@ -25,8 +42,8 @@ struct ChangefeedItem {
     error: Option<ErrorInfo>,
 }
 
-#[derive(Deserialize)]
-struct ChangefeedRequest {
+#[derive(Deserialize, Clone, Debug)]
+pub struct ChangefeedRequest {
     changefeed_id: Option<String>,
     replica_config: Option<ReplicaConfig>,
     sink_uri: String,
@@ -66,7 +83,21 @@ struct TaskStatus {
     table_ids: Vec<u64>,
 }
 
-impl ReplicationWorker {
+pub async fn handle_cdc_request(
+    scheduler: Option<&ReplicationScheduler>,
+    req: Request<Body>,
+) -> Result<Response<Body>> {
+    if let Some(scheduler) = scheduler {
+        scheduler.handle_http_request(req).await
+    } else {
+        Ok(Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Body::empty())
+            .unwrap())
+    }
+}
+
+impl ReplicationScheduler {
     fn error_response(status: StatusCode, msg: &str, code: &str) -> Response<Body> {
         let error = ErrorResponse {
             error_msg: msg.to_string(),
@@ -81,7 +112,7 @@ impl ReplicationWorker {
     pub async fn handle_http_request(&self, req: Request<Body>) -> Result<Response<Body>> {
         let keyspace_id = {
             if let Some(keyspace_str) = extract_param(req.uri(), "keyspace_id") {
-                match keyspace_str.parse::<u64>() {
+                match keyspace_str.parse::<u32>() {
                     Ok(keyspace_id) => keyspace_id,
                     Err(_) => {
                         return Ok(Self::error_response(
@@ -108,7 +139,7 @@ impl ReplicationWorker {
             }
             (&Method::POST, "/cdc/api/v2/changefeeds") => {
                 let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
-                Self::handle_create_changefeed(keyspace_id, &body_bytes)
+                self.handle_create_changefeed(keyspace_id, &body_bytes)
             }
 
             (&Method::DELETE, path) if path.starts_with("/cdc/api/v2/changefeeds/") => {
@@ -125,7 +156,7 @@ impl ReplicationWorker {
         Ok(response)
     }
 
-    fn handle_delete_changefeed(_keyspace_id: u64, path: &str) -> Response<Body> {
+    fn handle_delete_changefeed(_keyspace_id: u32, path: &str) -> Response<Body> {
         if let Some(_change_id) = path.strip_prefix("/cdc/api/v2/changefeeds/") {
             // TODO: Implement actual deletion logic
             Response::builder()
@@ -141,7 +172,7 @@ impl ReplicationWorker {
         }
     }
 
-    fn handle_list_changefeeds(_keyspace_id: u64, uri: &hyper::Uri) -> Response<Body> {
+    fn handle_list_changefeeds(_keyspace_id: u32, uri: &hyper::Uri) -> Response<Body> {
         fn is_valid_state(state: &str) -> bool {
             matches!(
                 state,
@@ -186,7 +217,7 @@ impl ReplicationWorker {
             .unwrap()
     }
 
-    fn handle_get_changefeed(_keyspace_id: u64, path: &str) -> Response<Body> {
+    fn handle_get_changefeed(_keyspace_id: u32, path: &str) -> Response<Body> {
         if let Some(changefeed_id) = path.strip_prefix("/cdc/api/v2/changefeeds/") {
             if changefeed_id.is_empty() {
                 return Self::error_response(
@@ -225,17 +256,17 @@ impl ReplicationWorker {
         }
     }
 
-    fn handle_create_changefeed(_keyspace_id: u64, body_bytes: &[u8]) -> Response<Body> {
+    fn handle_create_changefeed(&self, keyspace_id: u32, body_bytes: &[u8]) -> Response<Body> {
         match serde_json::from_slice::<ChangefeedRequest>(body_bytes) {
-            Ok(changefeed_req) => {
-                if changefeed_req.sink_uri.is_empty() {
+            Ok(request) => {
+                if request.sink_uri.is_empty() {
                     return Self::error_response(
                         StatusCode::BAD_REQUEST,
                         "sink_uri is required",
                         "CDC:ErrInvalidRequestBody",
                     );
                 }
-                changefeed_req.replica_config.as_ref().and_then(|config| {
+                request.replica_config.as_ref().and_then(|config| {
                     if let Err(msg) = config.validate() {
                         return Some(Self::error_response(
                             StatusCode::BAD_REQUEST,
@@ -245,20 +276,24 @@ impl ReplicationWorker {
                     }
                     None
                 });
+                let _ = self.sender.send(CdcMsg::NewTask {
+                    keyspace_id,
+                    request: request.clone(),
+                });
                 let response = ChangefeedResponse {
                     admin_job_type: 0,
                     checkpoint_time: "0".to_string(),
                     checkpoint_ts: 0,
-                    config: changefeed_req.replica_config.unwrap_or_default(),
+                    config: request.replica_config.unwrap_or_default(),
                     create_time: Utc::now().to_string(),
                     creator_version: "0.0.0".to_owned(),
                     error: None,
-                    id: changefeed_req.changefeed_id.unwrap_or_default(),
+                    id: request.changefeed_id.unwrap_or_default(),
                     resolved_ts: 0,
-                    sink_uri: changefeed_req.sink_uri,
-                    start_ts: changefeed_req.start_ts.unwrap_or(0),
+                    sink_uri: request.sink_uri,
+                    start_ts: request.start_ts.unwrap_or(0),
                     state: "normal".to_string(),
-                    target_ts: changefeed_req.target_ts.unwrap_or(0),
+                    target_ts: request.target_ts.unwrap_or(0),
                     task_status: vec![],
                 };
                 Response::builder()
@@ -289,16 +324,17 @@ mod tests {
 
     use super::*;
 
-    impl ReplicationWorker {
+    impl ReplicationScheduler {
         fn new_test() -> Self {
             // TODO: Add proper initialization when needed
-            Self {}
+            let (sender, _) = tikv_util::mpsc::unbounded();
+            ReplicationScheduler { sender }
         }
     }
 
     #[tokio::test]
     async fn test_create_changefeed() {
-        let worker = ReplicationWorker::new_test();
+        let worker = ReplicationScheduler::new_test();
         let req = request::Builder::new()
             .method(Method::POST)
             .uri("/cdc/api/v2/changefeeds?keyspace_id=1")
@@ -316,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_changefeeds() {
-        let worker = ReplicationWorker::new_test();
+        let worker = ReplicationScheduler::new_test();
         let req = request::Builder::new()
             .method(Method::GET)
             .uri("/cdc/api/v2/changefeeds?keyspace_id=1&state=normal")
@@ -329,7 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_changefeed() {
-        let worker = ReplicationWorker::new_test();
+        let worker = ReplicationScheduler::new_test();
         let req = request::Builder::new()
             .method(Method::GET)
             .uri("/cdc/api/v2/changefeeds/test1?keyspace_id=1")
@@ -342,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_changefeed() {
-        let worker = ReplicationWorker::new_test();
+        let worker = ReplicationScheduler::new_test();
         let req = request::Builder::new()
             .method(Method::DELETE)
             .uri("/cdc/api/v2/changefeeds/test1?keyspace_id=1")
@@ -355,7 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_request() {
-        let worker = ReplicationWorker::new_test();
+        let worker = ReplicationScheduler::new_test();
         // Missing keyspace_id for list changefeeds
         let req = request::Builder::new()
             .method(Method::GET)
