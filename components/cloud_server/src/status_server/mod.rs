@@ -1658,7 +1658,8 @@ impl StatusServer {
     /// Clear columnar data of the specified keyspace or shard.
     ///
     /// If keyspace_id is 0, clear all columnar data of all shards.
-    /// POST /clear_columnar?[keyspace_id=xxx][shard_id=1]
+    /// POST /clear_columnar?
+    /// [keyspace_id=xxx][shard_id=1][confirm_all=true|false]
     async fn handle_clear_columnar(
         req: Request<Body>,
         router: RaftRouter,
@@ -1677,8 +1678,22 @@ impl StatusServer {
                     return Ok(bad_request_resp("keyspace_id not found"));
                 }
             };
-            // If keyspace_id is 0, clear all columnar data of all shards.
+            // If keyspace_id is 0, clear all columnar data of all shards. To avoid mistake,
+            // we require confirm_all to be true.
             let (start, end) = if keyspace_id == 0 {
+                // Check confirm_all to avoid mistake.
+                if !query_pairs.contains_key("confirm_all") {
+                    return Ok(bad_request_resp("param confirm_all not found"));
+                }
+                let confirmed = match get_bool_param(&query_pairs, "confirm_all") {
+                    Some(confirmed) => confirmed,
+                    None => return Ok(bad_request_resp("param confirm_all must be true or false")),
+                };
+                if !confirmed {
+                    return Ok(bad_request_resp(
+                        "please set param confirm_all to true to clear all columnar data",
+                    ));
+                }
                 (vec![TXN_KEY_PREFIX], GLOBAL_SHARD_END_KEY.to_vec())
             } else {
                 ApiV2::get_txn_keyspace_range(keyspace_id as u32)
@@ -1745,6 +1760,10 @@ fn get_last_path_segment(path: &str) -> &str {
 
 fn get_uint_param(query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>, key: &str) -> Option<u64> {
     query_pairs.get(key).and_then(|v| u64::from_str(v).ok())
+}
+
+fn get_bool_param(query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>, key: &str) -> Option<bool> {
+    query_pairs.get(key).and_then(|v| bool::from_str(v).ok())
 }
 
 impl StatusServer {
