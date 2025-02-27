@@ -143,16 +143,43 @@ impl SsTable {
     }
 
     #[maybe_async::both]
-    pub async fn has_overlap(&self, data_bound: DataBound<'_>) -> bool {
-        if !self.data_bound().overlap_bound(data_bound) {
-            return false;
-        }
+    async fn check_overlap_by_seek(&self, data_bound: DataBound<'_>) -> bool {
         let mut it = self.new_iterator(false, true);
         it.seek(data_bound.lower_bound).await;
         if !it.valid() {
             return it.error().is_some();
         }
         !data_bound.less_than_key(it.key())
+    }
+
+    #[maybe_async::both]
+    pub async fn has_overlap(&self, data_bound: DataBound<'_>) -> bool {
+        if !self.data_bound().overlap_bound(data_bound) {
+            return false;
+        }
+        self.check_overlap_by_seek(data_bound).await
+    }
+
+    /// Used when seek on async tables is expensive and strictly overlapped is
+    /// not necessary.
+    pub fn has_overlap_loose(&self, data_bound: DataBound<'_>) -> bool {
+        if !self.data_bound().overlap_bound(data_bound) {
+            return false;
+        }
+        !self.is_sync() || self.check_overlap_by_seek(data_bound)
+    }
+
+    #[maybe_async::both]
+    pub async fn has_any_overlap<'a>(
+        &self,
+        bounds: impl std::iter::Iterator<Item = DataBound<'a>>,
+    ) -> bool {
+        for bound in bounds {
+            if self.has_overlap(bound).await {
+                return true;
+            }
+        }
+        false
     }
 
     #[maybe_async::both]
@@ -1569,5 +1596,86 @@ mod tests {
         b.iter(|| {
             test::black_box(t.decode_filter(&data).unwrap());
         });
+    }
+
+    #[maybe_async::test]
+    async fn test_has_overlap() {
+        // k0000 ~ k0009
+        let (t, _) = create_sst_table("k", 10).await;
+
+        // lower_bound, upper_bound, upper_inclusive, expected
+        let cases: Vec<(&'static str, &'static str, bool, bool)> = vec![
+            ("k0", "k00", false, false),
+            ("k000", "k0000", false, false),
+            ("k000", "k0000", true, true),
+            ("k0000", "k00000", false, true),
+            ("k00000", "k00001", false, false), // inner no overlap.
+            ("k0001", "k00010", false, true),
+            ("k00010", "k0002", false, false), // inner no overlap.
+            ("k00010", "k0002", true, true),
+            ("k0000", "k0009", false, true),
+            ("k00090", "k00091", true, false),
+        ];
+
+        for (lower, upper, upper_inclusive, expected) in cases {
+            let lower_bound = InnerKey::from_inner_buf(lower.as_bytes());
+            let upper_bound = InnerKey::from_inner_buf(upper.as_bytes());
+            let data_bound = DataBound {
+                lower_bound,
+                upper_bound,
+                upper_inclusive,
+            };
+            let has_overlap = t.has_overlap(data_bound).await;
+            assert_eq!(
+                has_overlap, expected,
+                "case: {} {} {} {}",
+                lower, upper, upper_inclusive, expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_has_overlap_loose() {
+        // k0000 ~ k0009
+        let (t_sync, _) = create_sst_table("k", 10);
+        let (t_async, _) = create_sst_table_async("k", 10).await;
+
+        // lower_bound, upper_bound, upper_inclusive, sync_expected, async_expected
+        let cases: Vec<(&'static str, &'static str, bool, bool, bool)> = vec![
+            ("k0", "k00", false, false, false),
+            ("k000", "k0000", false, false, false),
+            ("k000", "k0000", true, true, true),
+            ("k0000", "k00000", false, true, true),
+            ("k00000", "k00001", false, false, true), // inner no overlap.
+            ("k0001", "k00010", false, true, true),
+            ("k00010", "k0002", false, false, true), // inner no overlap.
+            ("k00010", "k0002", true, true, true),
+            ("k0000", "k0009", false, true, true),
+            ("k00090", "k00091", true, false, false),
+        ];
+
+        for (lower, upper, upper_inclusive, sync_expected, async_expected) in cases {
+            let lower_bound = InnerKey::from_inner_buf(lower.as_bytes());
+            let upper_bound = InnerKey::from_inner_buf(upper.as_bytes());
+            let data_bound = DataBound {
+                lower_bound,
+                upper_bound,
+                upper_inclusive,
+            };
+
+            let has_overlap = t_sync.has_overlap_loose(data_bound);
+            assert_eq!(
+                has_overlap, sync_expected,
+                "sync case: {} {} {} {}",
+                lower, upper, upper_inclusive, sync_expected
+            );
+
+            let has_overlap = t_async.has_overlap_loose(data_bound);
+            assert_eq!(
+                has_overlap, async_expected,
+                "async case: {} {} {} {}",
+                lower, upper, upper_inclusive, async_expected
+            );
+        }
     }
 }

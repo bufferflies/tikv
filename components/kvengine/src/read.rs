@@ -881,20 +881,12 @@ impl SnapAccessCore {
                 if ignore_locks && cf == WRITE_CF && v.size() == 0 {
                     continue;
                 }
-                let is_sync = v.is_cf_sync(cf);
                 let mut overlap = false;
                 for (outer_start, outer_end) in outer_ranges {
                     let inner_start = InnerKey::from_outer_key(outer_start);
                     let inner_end = InnerKey::from_outer_end_key(outer_end);
                     let data_bound = DataBound::new(inner_start, inner_end, false);
-                    let range_overlap = if is_sync {
-                        v.has_overlap(data_bound)
-                    } else {
-                        // Check the bound only as `has_overlap` for async tables is expensive and
-                        // requires async execution.
-                        v.data_bound().overlap_bound(data_bound)
-                    };
-                    if range_overlap {
+                    if v.has_overlap_loose(data_bound) {
                         overlap = true;
                         break;
                     }

@@ -10,13 +10,16 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
+use file_system::IoType;
 use kvenginepb as pb;
 use kvenginepb::{L0Create, SchemaMeta};
 use tikv_util::{
     info, mpsc,
+    sys::{thread::ThreadBuildWrapper, SysQuota},
     time::{monotonic_raw_now, timespec_to_ns},
     Either,
 };
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender as Sender};
 
 use crate::{
     table::{
@@ -110,15 +113,27 @@ impl InitialFlush {
 
 impl Engine {
     pub(crate) fn run_flush_worker(&self, rx: mpsc::Receiver<FlushMsg>) {
+        let concurrency = (SysQuota::cpu_cores_quota() as usize / 3).max(2);
+        let pool = tokio::runtime::Builder::new_multi_thread()
+            .thread_name("flush-worker")
+            .worker_threads(concurrency)
+            .enable_all()
+            .after_start_wrapper(|| {
+                file_system::set_io_type(IoType::Flush);
+            })
+            .before_stop_wrapper(|| {})
+            .build()
+            .unwrap();
         let mut worker = FlushWorker {
             shards: Default::default(),
             receiver: rx,
             engine: self.clone(),
+            pool,
         };
         worker.run();
     }
 
-    pub(crate) fn flush_normal(&self, task: FlushTask) -> Result<pb::ChangeSet> {
+    pub(crate) async fn flush_normal(&self, task: FlushTask) -> Result<pb::ChangeSet> {
         fail_point!("kvengine_flush_normal", |_| Err(dfs::Error::Io(
             "injected error".to_string()
         )
@@ -153,18 +168,18 @@ impl Engine {
             }
             flush.set_properties(filtered_props);
         }
-        let results = self.build_l0_tables(m, &task);
+        let results = self.build_l0_tables(m, &task).await;
         if results.is_empty() {
             return Ok(cs);
         }
         let num_l0s = results.len();
-        let (tx, rx) = mpsc::bounded(num_l0s);
+        let (tx, mut rx) = unbounded_channel();
         for (l0_create, data) in results {
             self.persist_table(l0_create, data, tx.clone(), task.id_ver);
         }
         let mut errs = vec![];
         for _ in 0..num_l0s {
-            match rx.recv().unwrap() {
+            match rx.recv().await.unwrap() {
                 Ok(l0_create) => {
                     if self.opts.table_builder_options.flush_split_l0 {
                         flush.mut_l0_creates().push(l0_create);
@@ -184,7 +199,7 @@ impl Engine {
         Ok(cs)
     }
 
-    pub(crate) fn flush_initial(&self, mut task: FlushTask) -> Result<pb::ChangeSet> {
+    pub(crate) async fn flush_initial(&self, mut task: FlushTask) -> Result<pb::ChangeSet> {
         fail_point!("kvengine_flush_initial");
         let flush = task.initial.take().unwrap();
         let tag = ShardTag::new(self.get_engine_id(), task.id_ver);
@@ -235,25 +250,27 @@ impl Engine {
             l0_create.set_size(l0.size() as u32);
             initial_flush.mut_l0_creates().push(l0_create);
         }
-        flush.shard_data.for_each_level(|cf, lvl| {
-            for tbl in lvl.tables.iter() {
-                if task.table_double_overbound(tbl.smallest(), tbl.biggest())
-                    && !tbl.has_overlap(task.range.data_bound())
-                {
-                    // only double overbound tables may not have any data in the shard range.
-                    continue;
+        for cf in 0..NUM_CFS {
+            let scf = flush.shard_data.get_cf(cf);
+            for lvl in &scf.levels {
+                for tbl in lvl.tables.iter() {
+                    if task.table_double_overbound(tbl.smallest(), tbl.biggest())
+                        && !tbl.has_overlap_async(task.range.data_bound()).await
+                    {
+                        // only double overbound tables may not have any data in the shard range.
+                        continue;
+                    }
+                    let mut tbl_create = pb::TableCreate::new();
+                    tbl_create.set_id(tbl.id());
+                    tbl_create.set_cf(cf as i32);
+                    tbl_create.set_level(lvl.level as u32);
+                    tbl_create.set_smallest(tbl.smallest().to_vec());
+                    tbl_create.set_biggest(tbl.biggest().to_vec());
+                    tbl_create.set_meta_offset(tbl.meta_offset());
+                    initial_flush.mut_table_creates().push(tbl_create);
                 }
-                let mut tbl_create = pb::TableCreate::new();
-                tbl_create.set_id(tbl.id());
-                tbl_create.set_cf(cf as i32);
-                tbl_create.set_level(lvl.level as u32);
-                tbl_create.set_smallest(tbl.smallest().to_vec());
-                tbl_create.set_biggest(tbl.biggest().to_vec());
-                tbl_create.set_meta_offset(tbl.meta_offset());
-                initial_flush.mut_table_creates().push(tbl_create);
             }
-            false
-        });
+        }
 
         for blob in flush.shard_data.blob_tbl_map.values() {
             let mut blob_create = pb::BlobCreate::new();
@@ -324,10 +341,10 @@ impl Engine {
             initial_flush.mut_vector_indexes().push(vec_idx_pb);
         }
 
-        let (tx, rx) = mpsc::unbounded();
+        let (tx, mut rx) = unbounded_channel();
         let mut send_cnt = 0;
         for m in &flush.mem_tbls {
-            let results = self.build_l0_tables(m, &task);
+            let results = self.build_l0_tables(m, &task).await;
             for (l0_create, data) in results {
                 self.persist_table(l0_create, data, tx.clone(), task.id_ver);
                 send_cnt += 1;
@@ -335,7 +352,7 @@ impl Engine {
         }
         let mut errs = vec![];
         for _ in 0..send_cnt {
-            match rx.recv().unwrap() {
+            match rx.recv().await.unwrap() {
                 Ok(l0_create) => {
                     if initial_flush.has_schema_meta() {
                         initial_flush.mut_unconverted_l0s().push(l0_create.get_id());
@@ -353,7 +370,11 @@ impl Engine {
         Err(errs.pop().unwrap())
     }
 
-    pub(crate) fn build_l0_tables(&self, m: &CfTable, task: &FlushTask) -> Vec<(L0Create, Bytes)> {
+    pub(crate) async fn build_l0_tables(
+        &self,
+        m: &CfTable,
+        task: &FlushTask,
+    ) -> Vec<(L0Create, Bytes)> {
         let start = task.inner_start();
         let end = task.inner_end();
         let opts = &self.opts.table_builder_options;
@@ -367,7 +388,11 @@ impl Engine {
             };
         let checksum_type = self.comp_client.checksum_type;
         let mut l0s = vec![];
-        let mut fids = self.id_allocator.alloc_id(fid_count as usize).unwrap();
+        let mut fids = self
+            .id_allocator
+            .alloc_id_async(fid_count as usize)
+            .await
+            .unwrap();
         let l0_fid = fids.pop().unwrap();
         if l0_builder_start_cf == LOCK_CF {
             let mut write_cf_builder = Builder::new(
@@ -397,9 +422,16 @@ impl Engine {
                     // ensure a single key's multiple versions are stored
                     // in a single file.
                     l0s.push(Self::finish_builder_for_l0(&mut write_cf_builder));
-                    let next_fid = fids
-                        .pop()
-                        .unwrap_or_else(|| self.id_allocator.alloc_id(1).unwrap().pop().unwrap());
+                    let next_fid = match fids.pop() {
+                        Some(fid) => fid,
+                        None => self
+                            .id_allocator
+                            .alloc_id_async(1)
+                            .await
+                            .unwrap()
+                            .pop()
+                            .unwrap(),
+                    };
                     write_cf_builder.reset(next_fid);
                 }
                 let v = it.value();
@@ -471,7 +503,7 @@ impl Engine {
         &self,
         l0_create: pb::L0Create,
         data: Bytes,
-        tx: tikv_util::mpsc::Sender<Result<pb::L0Create>>,
+        tx: Sender<Result<pb::L0Create>>,
         id_ver: IdVer,
     ) {
         let fs_clone = self.fs.clone();
@@ -484,10 +516,14 @@ impl Engine {
                 )
                 .await;
             if let Err(e) = res {
-                tx.send(Err(e.into())).unwrap();
+                let _ = tx
+                    .send(Err(e.into()))
+                    .map_err(|e| warn!("{} send error {:?}", id_ver, e));
                 return;
             }
-            tx.send(Ok(l0_create)).unwrap();
+            let _ = tx
+                .send(Ok(l0_create))
+                .map_err(|e| warn!("{} send error {:?}", id_ver, e));
         });
     }
 }
@@ -520,6 +556,7 @@ pub(crate) struct FlushWorker {
     shards: HashMap<u64, ShardTaskManager>,
     receiver: mpsc::Receiver<FlushMsg>,
     engine: Engine,
+    pool: tokio::runtime::Runtime,
 }
 
 impl FlushWorker {
@@ -578,14 +615,14 @@ impl FlushWorker {
 
     fn spawn_flush_task(&mut self, task: FlushTask, term: u64) {
         let engine = self.engine.clone();
-        std::thread::spawn(move || {
+        self.pool.spawn(tikv_util::init_task_local(async move {
             let table_version = task.table_version();
             let id_ver = task.id_ver;
             tikv_util::set_current_region(id_ver.id);
             let res = if task.normal.is_some() {
-                engine.flush_normal(task)
+                engine.flush_normal(task).await
             } else {
-                engine.flush_initial(task)
+                engine.flush_initial(task).await
             };
             engine.send_flush_msg(FlushMsg::Result(FlushResult {
                 id_ver,
@@ -593,7 +630,7 @@ impl FlushWorker {
                 term,
                 res,
             }));
-        });
+        }));
     }
 }
 
