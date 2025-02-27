@@ -38,7 +38,7 @@ use rand::{thread_rng, Rng};
 use schema::schema::StorageClass;
 use tikv_util::{
     box_err,
-    codec::bytes::decode_bytes,
+    codec::bytes::{decode_bytes, encode_bytes, encode_bytes_maybe_empty},
     debug, error, info,
     store::{find_peer, is_learner, region_on_same_stores},
     time::duration_to_sec,
@@ -2417,9 +2417,10 @@ impl<'a> PeerMsgHandler<'a> {
             callback.invoke_with_response(message_error("invalid changeset"));
             return;
         }
-        let encoded_start_key =
-            Key::from_raw(cs.get_restore_shard().get_outer_start()).into_encoded();
-        let encoded_end_key = Key::from_raw(cs.get_restore_shard().get_outer_end()).into_encoded();
+        // The start key of first region is b"", but `encode_bytes(b""") ==
+        // 0000000000000000F7`.
+        let encoded_start_key = encode_bytes_maybe_empty(cs.get_restore_shard().get_outer_start());
+        let encoded_end_key = encode_bytes(cs.get_restore_shard().get_outer_end());
         if encoded_start_key != region.get_start_key() || encoded_end_key != region.get_end_key() {
             let err_msg = format!(
                 "invalid snapshot range: [{:?},{:?}), expect: [{:?},{:?})",

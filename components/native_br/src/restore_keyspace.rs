@@ -216,9 +216,9 @@ pub fn restore_keyspace(
     .unwrap();
     let working_path = working_dir.path().to_path_buf();
 
-    let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
+    let (keyspace_start, keyspace_end) = ApiV2::get_keyspace_range_by_id(keyspace_id);
     let (target_keyspace_start, target_keyspace_end) =
-        ApiV2::get_txn_keyspace_range(target_keyspace_id);
+        ApiV2::get_keyspace_range_by_id(target_keyspace_id);
 
     reporter.report_step(RestoreStep::LoadBackupMeta);
     let (cluster_backup, archive_reader) =
@@ -670,7 +670,7 @@ impl Drop for BackupCluster {
 
 impl BackupCluster {
     pub fn reset_keyspace(&mut self, keyspace_id: u32, target_keyspace_id: u32) -> Result<()> {
-        let (keyspace_start, keyspace_end) = ApiV2::get_txn_keyspace_range(keyspace_id);
+        let (keyspace_start, keyspace_end) = ApiV2::get_keyspace_range_by_id(keyspace_id);
         self.tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
         self.keyspace_id = keyspace_id;
         self.target_keyspace_id = target_keyspace_id;
@@ -721,7 +721,7 @@ impl BackupCluster {
         let (keyspace_start, keyspace_end) = if archiving {
             (Vec::default(), GLOBAL_SHARD_END_KEY.to_vec())
         } else {
-            ApiV2::get_txn_keyspace_range(keyspace_id)
+            ApiV2::get_keyspace_range_by_id(keyspace_id)
         };
         let security_conf = restore_conf.security.clone();
         let master_key = dfs.get_runtime().block_on(security_conf.new_master_key());
@@ -2114,10 +2114,10 @@ impl BackupCluster {
     }
 
     fn target_inner_key_off(&self) -> usize {
-        if self.target_keyspace_id > 0 {
-            KEYSPACE_PREFIX_LEN
-        } else {
+        if ApiV2::is_default_keyspace(self.target_keyspace_id) {
             0
+        } else {
+            KEYSPACE_PREFIX_LEN
         }
     }
 

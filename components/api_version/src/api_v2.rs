@@ -17,6 +17,7 @@ pub const RAW_KEY_PREFIX_END: u8 = RAW_KEY_PREFIX + 1;
 pub const TXN_KEY_PREFIX: u8 = b'x';
 pub const TIDB_META_KEY_PREFIX: u8 = b'm';
 pub const TIDB_TABLE_KEY_PREFIX: u8 = b't';
+pub const DEFAULT_KEYSPACE_ID: u32 = 0;
 pub const DEFAULT_KEY_SPACE_ID: [u8; 3] = [0, 0, 0]; // reserve 3 bytes for key space id.
 pub const DEFAULT_KEY_SPACE_ID_END: [u8; 3] = [0, 0, 1];
 pub const KEYSPACE_ID_LEN: usize = DEFAULT_KEY_SPACE_ID.len();
@@ -286,7 +287,7 @@ impl ApiV2 {
 
     #[inline]
     pub fn is_default_keyspace(keyspace_id: u32) -> bool {
-        keyspace_id == 0
+        keyspace_id == DEFAULT_KEYSPACE_ID
     }
 
     pub fn get_keyspace_prefix_by_id(keyspace_id: u32) -> Vec<u8> {
@@ -296,6 +297,19 @@ impl ApiV2 {
         let mut start_key = keyspace_id.to_be_bytes();
         start_key[0] = TXN_KEY_PREFIX;
         start_key.to_vec()
+    }
+
+    pub fn get_keyspace_end_by_id(keyspace_id: u32) -> Vec<u8> {
+        if Self::is_default_keyspace(keyspace_id) {
+            return vec![TXN_KEY_PREFIX, 0, 0, 0];
+        }
+        Self::get_keyspace_prefix_by_id(keyspace_id + 1)
+    }
+
+    pub fn get_keyspace_range_by_id(keyspace_id: u32) -> (Vec<u8>, Vec<u8>) {
+        let start_key = Self::get_keyspace_prefix_by_id(keyspace_id);
+        let end_key = Self::get_keyspace_end_by_id(keyspace_id);
+        (start_key, end_key)
     }
 
     pub fn get_keyspace_prefix(key: &[u8]) -> Option<&[u8]> {
@@ -587,13 +601,15 @@ mod tests {
 
     #[test]
     fn test_get_keyspace_prefix_by_id() {
-        let cases: Vec<(u32, Vec<u8>)> = vec![
-            (0, vec![]),
-            (1, vec![b'x', 0, 0, 0x01]),
-            (100, vec![b'x', 0, 0, 0x64]),
+        let cases: Vec<(u32, Vec<u8>, Vec<u8>)> = vec![
+            (0, vec![], vec![b'x', 0, 0, 0]),
+            (1, vec![b'x', 0, 0, 0x01], vec![b'x', 0, 0, 0x02]),
+            (100, vec![b'x', 0, 0, 0x64], vec![b'x', 0, 0, 0x65]),
         ];
-        for (keyspace_id, prefix) in cases {
+        for (keyspace_id, prefix, end) in cases {
             assert_eq!(&ApiV2::get_keyspace_prefix_by_id(keyspace_id), &prefix);
+            assert_eq!(&ApiV2::get_keyspace_end_by_id(keyspace_id), &end);
+            assert_eq!(ApiV2::get_keyspace_range_by_id(keyspace_id), (prefix, end),);
         }
     }
 

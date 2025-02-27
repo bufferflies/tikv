@@ -98,6 +98,18 @@ fn it_works() {
 }
 
 #[test]
+fn test_default_keyspace() {
+    test_util::init_log_for_test();
+    let node_ids = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(node_ids.clone(), |_, _| {});
+    let mut client = cluster.new_client();
+
+    client.put_kv(0..100, i_to_tidb_key, i_to_val);
+    assert_eq!(client.verify_data_with_ref_store(), (100, 0));
+    cluster.stop();
+}
+
+#[test]
 fn test_split_regions() {
     test_util::init_log_for_test();
     let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, _| {});
@@ -685,6 +697,10 @@ fn test_builtin_dfs() {
 
 fn i_to_key(i: usize) -> Vec<u8> {
     format!("xkey{:08}", i).into_bytes()
+}
+
+fn i_to_tidb_key(i: usize) -> Vec<u8> {
+    format!("t_key{:08}", i).into_bytes()
 }
 
 fn i_to_val(i: usize) -> Vec<u8> {

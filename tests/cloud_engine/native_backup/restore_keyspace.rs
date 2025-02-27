@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use api_version::ApiV2;
 use bytes::Bytes;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use cloud_worker::broadcast_schema_update_to_all_stores;
@@ -31,6 +32,7 @@ use native_br::{
 };
 use pd_client::PdClient;
 use rand::prelude::*;
+use rstest::rstest;
 use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
     client::{
@@ -95,6 +97,7 @@ fn test_restore_keyspace() {
 
 #[test]
 fn test_restore_keyspace_regression() {
+    test_util::init_log_for_test();
     // Regression test for `lightweight` disabled.
     test_restore_keyspace_opt(TestRestoreKeyspaceOptions {
         lightweight: false,
@@ -102,7 +105,7 @@ fn test_restore_keyspace_regression() {
     });
 }
 
-#[rstest::rstest]
+#[rstest]
 #[case::disable_encrytion(false)]
 #[case::encrytion(true)]
 fn test_restore_keyspace_with_archive(#[case] enable_encryption: bool) {
@@ -133,7 +136,9 @@ impl Default for TestRestoreKeyspaceOptions {
 }
 
 fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
+    // keyspace_id, data_count, shuffle_regions, has_learner, loop_count
     let cases = [
+        (0, 100, None, false, 1),
         (1, 1, None, false, 1),
         (
             1,
@@ -168,16 +173,14 @@ fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
     let mut client = cluster.new_client();
 
     // Split keyspaces.
-    for keyspace_id in 0..=KEYSPACE_COUNT {
-        client.split(&get_keyspace_prefix(keyspace_id as u32));
-    }
+    client.split_keyspaces(0..KEYSPACE_COUNT as u32);
     cluster.wait_pd_region_count(KEYSPACE_COUNT + 2);
 
     // Import basic data.
-    for keyspace_id in 0..KEYSPACE_COUNT {
+    for keyspace_id in 0..KEYSPACE_COUNT as u32 {
         client.put_kv(
             0..BASIC_DATA_COUNT,
-            gen_keyspace_key(keyspace_id as u32),
+            gen_keyspace_key(keyspace_id),
             i_to_val(BASIC_DATA_LEN),
         );
     }
@@ -192,10 +195,7 @@ fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
 
         if has_learner {
             pd_client.disable_default_operator(); // To prevent PD removing learners due to exceed `max-replicas`.
-            let (start, end) = (
-                get_keyspace_prefix(keyspace_id),
-                get_keyspace_prefix(keyspace_id + 1),
-            );
+            let (start, end) = ApiV2::get_keyspace_range_by_id(keyspace_id);
             add_learners(&mut cluster, &start, &end);
             check_learners(&cluster, &start, &end, NODES_COUNT - 3, 10);
             step!("add learner done");
@@ -239,10 +239,7 @@ fn test_restore_keyspace_impl(
     let mut rng = rand::thread_rng();
     let mut client = cluster.new_client();
     let i_to_key = gen_keyspace_key(keyspace_id);
-    let (keyspace_start, keyspace_end) = (
-        get_keyspace_prefix(keyspace_id),
-        get_keyspace_prefix(keyspace_id + 1),
-    );
+    let (keyspace_start, keyspace_end) = ApiV2::get_keyspace_range_by_id(keyspace_id);
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
@@ -341,7 +338,7 @@ fn test_restore_keyspace_impl(
 
     // Shuffle regions.
     if let (Some(shuffle_regions), 0) = (shuffle_regions, loop_idx) {
-        let keyspace_prefix = get_keyspace_prefix(keyspace_id);
+        let keyspace_prefix = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
         let region_count = client.pd_client.get_regions_number();
         let mut i = 0;
         while i < shuffle_regions {
@@ -496,17 +493,13 @@ fn test_restore_keyspace_impl(
     }
 
     // Write more data to verify the sequences.
-    for id in 0..KEYSPACE_COUNT {
-        let count = if id as u32 == keyspace_id {
+    for id in 0..KEYSPACE_COUNT as u32 {
+        let count = if id == keyspace_id {
             data_count
         } else {
             BASIC_DATA_COUNT
         };
-        client.put_kv(
-            0..count,
-            gen_keyspace_key(id as u32),
-            i_to_val(FINAL_DATA_LEN),
-        );
+        client.put_kv(0..count, gen_keyspace_key(id), i_to_val(FINAL_DATA_LEN));
     }
     client.verify_data_with_ref_store();
     step!("verify more writes done");
@@ -553,17 +546,18 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
     ));
 
     // Split keyspaces.
-    for keyspace_id in 0..=KEYSPACE_COUNT as u32 {
+    for keyspace_id in 0..KEYSPACE_COUNT as u32 {
         if options.enable_encryption {
             let cfg = KeyspaceEncryptionConfig { enabled: true };
             pd_client.set_keyspace_encryption(keyspace_id, cfg).unwrap();
         }
-        client.split(&get_keyspace_prefix(keyspace_id));
     }
+    client.split_keyspaces(0..KEYSPACE_COUNT as u32);
+
     cluster.wait_pd_region_count(KEYSPACE_COUNT + 2);
 
-    for keyspace_id in 0..KEYSPACE_COUNT {
-        let i_to_key = gen_keyspace_key(keyspace_id as u32);
+    for keyspace_id in 0..KEYSPACE_COUNT as u32 {
+        let i_to_key = gen_keyspace_key(keyspace_id);
 
         // To make secondary keys in another region.
         if max_data_count >= 10 {
@@ -886,30 +880,16 @@ fn test_restore_archived_keyspace_impl(
     }
 
     // Write more data to verify the sequences.
-    for id in 0..KEYSPACE_COUNT {
-        let count = if id as u32 == keyspace_id {
+    for id in 0..KEYSPACE_COUNT as u32 {
+        let count = if id == keyspace_id {
             data_count
         } else {
             BASIC_DATA_COUNT
         };
-        client.put_kv(
-            0..count,
-            gen_keyspace_key(id as u32),
-            i_to_val(FINAL_DATA_LEN),
-        );
+        client.put_kv(0..count, gen_keyspace_key(id), i_to_val(FINAL_DATA_LEN));
     }
-    client.verify_data_with_ref_store();
-    step!("verify more writes done");
-}
-
-#[test]
-fn test_restore_keyspace_with_resolve_locks_sync() {
-    test_restore_keyspace_with_resolve_locks(false);
-}
-
-#[test]
-fn test_restore_keyspace_with_resolve_locks_async() {
-    test_restore_keyspace_with_resolve_locks(true);
+    let verify_res = client.verify_data_with_ref_store();
+    step!("verify more writes done, verify result: {:?}", verify_res);
 }
 
 /// This test is to verify that `restore_keyspace` can resolve locks.
@@ -918,7 +898,10 @@ fn test_restore_keyspace_with_resolve_locks_async() {
 /// key is committed but the secondary keys are not in a transaction.
 ///
 /// See https://github.com/tidbcloud/cloud-storage-engine/issues/1134.
-fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
+#[rstest]
+#[case::sync(false)]
+#[case::async_commit(true)]
+fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     const KEYSPACE_ID: u32 = 1;
 
     test_util::init_log_for_test();
@@ -962,8 +945,7 @@ fn test_restore_keyspace_with_resolve_locks(async_commit: bool) {
     if async_commit {
         client.set_async_commit();
     }
-    client.split(&get_keyspace_prefix(KEYSPACE_ID));
-    client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
+    client.split_keyspace(KEYSPACE_ID);
 
     // Import data
     let i_to_key = gen_keyspace_key(KEYSPACE_ID);
@@ -1141,8 +1123,7 @@ fn test_restore_keyspace_with_no_chunk() {
     );
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
-    client.split(&get_keyspace_prefix(KEYSPACE_ID));
-    client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
+    client.split_keyspace(KEYSPACE_ID);
 
     // Import small data
     let i_to_key = gen_keyspace_key(KEYSPACE_ID);
@@ -1218,8 +1199,7 @@ fn test_restore_keyspace_with_slow_dfs() {
     );
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
-    client.split(&get_keyspace_prefix(KEYSPACE_ID));
-    client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
+    client.split_keyspace(KEYSPACE_ID);
 
     // Import data.
     let i_to_key = gen_keyspace_key(KEYSPACE_ID);
@@ -1332,8 +1312,7 @@ fn test_restore_keyspace_with_schema() {
     );
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
-    client.split(&get_keyspace_prefix(KEYSPACE_ID));
-    client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
+    client.split_keyspace(KEYSPACE_ID);
 
     // Import small data
     let i_to_key = gen_keyspace_key(KEYSPACE_ID);
@@ -1548,8 +1527,7 @@ fn test_restore_keyspace_with_failed_store_impl(
     });
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
-    client.split(&get_keyspace_prefix(KEYSPACE_ID));
-    client.split(&get_keyspace_prefix(KEYSPACE_ID + 1));
+    client.split_keyspace(KEYSPACE_ID);
 
     // Import small data
     let i_to_key = gen_keyspace_key(KEYSPACE_ID);
@@ -1720,15 +1698,9 @@ fn i_to_val(expected_len: usize) -> impl Fn(usize) -> Vec<u8> {
     }
 }
 
-fn get_keyspace_prefix(keyspace_id: u32) -> Vec<u8> {
-    let mut prefix = keyspace_id.to_be_bytes();
-    prefix[0] = b'x';
-    prefix.to_vec()
-}
-
 fn gen_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
     move |i: usize| -> Vec<u8> {
-        let mut key = get_keyspace_prefix(keyspace_id);
+        let mut key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
         key.extend(i_to_key(i));
         key
     }

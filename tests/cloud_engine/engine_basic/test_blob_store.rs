@@ -106,7 +106,7 @@ fn test_per_keyspace_config() {
     // Trigger switching and flushing memtable.
     let flush_memtable = |cluster: &ServerCluster, node_ids: &[u16], region_id: u64| {
         let mut client = cluster.new_client();
-        let ctx = client.new_rpc_ctx(region_id).unwrap();
+        let ctx = client.new_rpc_ctx(region_id, b"").unwrap();
         let mut req = RaftCmdRequest::default();
         let mut header = RaftRequestHeader::default();
         header.set_region_id(ctx.get_region_id());

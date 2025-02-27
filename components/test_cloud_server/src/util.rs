@@ -230,16 +230,16 @@ pub fn build_schemas(tables: &[TableSchemaOptions]) -> Vec<Schema> {
 
 pub fn get_keyspace_split_keys(keyspace_id: u32) -> Vec<Vec<u8>> {
     vec![
-        ApiV2::get_txn_keyspace_prefix(keyspace_id),
-        ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+        ApiV2::get_keyspace_prefix_by_id(keyspace_id),
+        ApiV2::get_keyspace_prefix_by_id(keyspace_id + 1),
     ]
     .into_iter()
-    .map(|k| Key::from_raw(&k).into_encoded())
+    .filter_map(|k| (!k.is_empty()).then(|| Key::from_raw(&k).into_encoded()))
     .collect()
 }
 
 pub fn get_table_split_keys(keyspace_id: u32, table_ids: &[i64]) -> Vec<Vec<u8>> {
-    let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(keyspace_id);
+    let keyspace_prefix = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
     let mut dup_table_ids = table_ids
         .iter()
         .flat_map(|&id| [id, id + 1])

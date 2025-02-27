@@ -3,12 +3,8 @@
 use std::{thread, time::Duration};
 
 use futures::executor::block_on;
-use kvproto::kvrpcpb;
 use pd_client::PdClient;
-use test_cloud_server::{
-    client::{ClusterClientOptions, RequestOptions},
-    try_wait, ServerCluster,
-};
+use test_cloud_server::{client::RequestOptions, try_wait, ServerCluster};
 use test_pd_client::PdClientExt;
 use tikv::config::TikvConfig;
 use tikv_util::{
@@ -292,10 +288,6 @@ fn test_region_merge_keyspaces() {
         conf.enable_inner_key_offset = true;
     });
 
-    let mut client_v1 = cluster.new_client_opt(ClusterClientOptions {
-        api_version: kvrpcpb::ApiVersion::V1,
-        ..Default::default()
-    });
     let mut client = cluster.new_client();
     // 1. Generate 1 APIv1 region and 2 keyspace regions.
     // 2. Put some keys to the regions.
@@ -328,8 +320,8 @@ fn test_region_merge_keyspaces() {
     };
 
     // put some APIv1 keys
-    client_v1.put_kv(0..10, i_to_key_v1, i_to_val);
-    let ref_store = client_v1.dump_ref_store();
+    client.put_kv(0..10, i_to_key_v1, i_to_val);
+    let ref_store = client.dump_ref_store();
     // put some keys into 2 keyspace regions
     client.put_kv(0..100, generate_ks100_ext_key, i_to_val);
     client.put_kv(0..100, generate_ks101_ext_key, i_to_val);
@@ -358,7 +350,7 @@ fn test_region_merge_keyspaces() {
     // merge APIv1 & keyspace region.
     client.try_merge(&[], &ks100);
     cluster.wait_pd_region_count(2);
-    client_v1
+    client
         .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
         .unwrap();
 

@@ -2,6 +2,7 @@
 
 use std::{
     borrow::Cow,
+    cmp,
     collections::{BTreeMap, HashMap, HashSet},
     ops::{
         Bound::{Excluded, Included, Unbounded},
@@ -17,7 +18,7 @@ use std::{
 
 use api_version::{
     api_v2::{self, TXN_KEY_PREFIX},
-    ApiV2, KvFormat,
+    ApiV2, KeyMode, KvFormat,
 };
 use bstr::ByteSlice;
 use bytes::Bytes;
@@ -55,7 +56,7 @@ use tikv_util::{
 };
 
 use crate::{
-    must_wait, try_wait, try_wait_result,
+    try_wait, try_wait_result,
     txn::{
         lock_resolver::{LockResolver, ResolveLocksOptions},
         txn_file::{TxnFileChunk, TxnFileHelper},
@@ -150,7 +151,6 @@ impl DerefMut for RefStore {
 #[derive(Clone)]
 pub struct ClusterClientOptions {
     pub with_lock_resolver: bool,
-    pub api_version: kvrpcpb::ApiVersion,
     pub txn_file_max_chunk_size: Option<usize>,
 }
 
@@ -158,7 +158,6 @@ impl Default for ClusterClientOptions {
     fn default() -> Self {
         Self {
             with_lock_resolver: true,
-            api_version: kvrpcpb::ApiVersion::V2,
             txn_file_max_chunk_size: None,
         }
     }
@@ -179,8 +178,6 @@ pub struct ClusterClient {
     // So we need the `Option<Box>` to resolve circular dependency.
     // TODO: separate methods of RPCs (kv_xxx) from ClusterClient.
     pub(crate) lock_resolver: Option<Box<LockResolver>>,
-
-    pub(crate) api_version: kvrpcpb::ApiVersion,
 
     pub(crate) txn_file_helper: Option<Arc<TxnFileHelper>>,
 }
@@ -256,7 +253,6 @@ impl Clone for ClusterClient {
                 max_ts: Default::default(),
                 async_commit: self.async_commit,
                 lock_resolver: None,
-                api_version: self.api_version,
                 txn_file_helper: self.txn_file_helper.clone(),
             }
         };
@@ -519,7 +515,7 @@ impl ClusterClient {
         let timeout = Duration::from_secs(15);
         while start_time.saturating_elapsed() < timeout {
             let ctx = self
-                .new_rpc_ctx(region_id)
+                .new_rpc_ctx(region_id, &pk)
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
                 return self.kv_prewrite(pk, secondary_keys, muts, ts);
@@ -665,7 +661,7 @@ impl ClusterClient {
         let timeout = Duration::from_secs(15);
         while start_time.saturating_elapsed() < timeout {
             let ctx = self
-                .new_rpc_ctx(region_id)
+                .new_rpc_ctx(region_id, &muts.primary())
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
                 return self.kv_commit(muts, start_ts, commit_ts);
@@ -737,7 +733,7 @@ impl ClusterClient {
         let timeout = Duration::from_secs(15);
         while start_time.saturating_elapsed() < timeout {
             let ctx = self
-                .new_rpc_ctx(region_id)
+                .new_rpc_ctx(region_id, &muts.primary())
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
                 return self.kv_rollback(muts, start_ts);
@@ -799,7 +795,7 @@ impl ClusterClient {
         let mut tag = ShardTag::default();
         while stat_time.saturating_elapsed() < timeout {
             let region_id = self.get_region_id(primary_key);
-            let ctx = self.new_rpc_ctx(region_id).unwrap();
+            let ctx = self.new_rpc_ctx(region_id, primary_key).unwrap();
             tag = Self::tag_from_ctx(&ctx);
             let client = self.get_kv_client(ctx.get_peer().get_store_id());
             let mut req = kvrpcpb::CheckTxnStatusRequest::default();
@@ -878,7 +874,7 @@ impl ClusterClient {
                 return Ok(());
             }
 
-            let ctx = self.new_rpc_ctx(region.id).unwrap();
+            let ctx = self.new_rpc_ctx(region.id, &key).unwrap();
             tag = Self::tag_from_ctx(&ctx);
             let client = self.get_kv_client(ctx.get_peer().get_store_id());
             req.set_context(ctx);
@@ -1311,8 +1307,8 @@ impl ClusterClient {
         self.channels.keys().copied().collect()
     }
 
-    pub fn new_rpc_ctx(&mut self, region_id: u64) -> Option<Context> {
-        self.new_rpc_ctx_opt(region_id, &RequestOptions::default())
+    pub fn new_rpc_ctx(&mut self, region_id: u64, key: &[u8]) -> Option<Context> {
+        self.new_rpc_ctx_opt(region_id, key, &RequestOptions::default())
     }
 
     fn tag_from_ctx(ctx: &Context) -> kvengine::ShardTag {
@@ -1344,7 +1340,12 @@ impl ClusterClient {
             })
     }
 
-    pub fn new_rpc_ctx_opt(&mut self, region_id: u64, options: &RequestOptions) -> Option<Context> {
+    pub fn new_rpc_ctx_opt(
+        &mut self,
+        region_id: u64,
+        key: &[u8],
+        options: &RequestOptions,
+    ) -> Option<Context> {
         if self.get_peer_for_request(region_id, options).is_none() {
             let ok = try_wait(
                 || {
@@ -1359,7 +1360,7 @@ impl ClusterClient {
         }
         let (region, peer) = self.get_peer_for_request(region_id, options).unwrap();
         let mut ctx = Context::new();
-        ctx.set_api_version(self.api_version);
+        ctx.set_api_version(api_version_of_key(key));
         ctx.set_region_id(region_id);
         ctx.set_region_epoch(region.epoch.clone());
         ctx.set_peer(peer.clone());
@@ -1376,7 +1377,7 @@ impl ClusterClient {
         let timeout = Duration::from_secs(timeout_secs as u64);
         while start.saturating_elapsed() < timeout {
             let region_id = self.get_region_id(key);
-            let ctx = self.new_rpc_ctx(region_id).unwrap();
+            let ctx = self.new_rpc_ctx(region_id, key).unwrap();
             let tag = Self::tag_from_ctx(&ctx);
             let client = self.get_kv_client(ctx.get_peer().get_store_id());
             let mut split_req = SplitRegionRequest::default();
@@ -1430,32 +1431,36 @@ impl ClusterClient {
     }
 
     pub fn split_keyspace(&mut self, keyspace_id: u32) {
-        let (start_key, end_key) = api_version::ApiV2::get_txn_keyspace_range(keyspace_id);
-        let encoded_start = encode_bytes(&start_key);
-        let encoded_end = encode_bytes(&end_key);
-        let region = self.pd_client.get_region(&encoded_start).unwrap();
-        let keys = vec![encoded_start, encoded_end];
-        self.pd_client
-            .must_split_region(region, kvproto::pdpb::CheckPolicy::Usekey, keys);
+        let mut keys = vec![];
+        let (start, end) = ApiV2::get_keyspace_range_by_id(keyspace_id);
+        if !start.is_empty() {
+            keys.push(encode_bytes(&start));
+        }
+        keys.push(encode_bytes(&end));
+        block_on(
+            self.pd_client
+                .split_regions_with_retry(keys, Duration::from_secs(60)),
+        )
+        .unwrap();
     }
 
-    pub fn split_keyspaces(&mut self, keyspace_ids: Range<u32>) {
+    pub fn split_keyspaces(&mut self, keyspace_ids: impl IntoIterator<Item = u32>) {
         let mut keys = vec![];
         for keyspace_id in keyspace_ids {
-            let prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
-            keys.push(encode_bytes(&prefix));
+            let (start, end) = ApiV2::get_keyspace_range_by_id(keyspace_id);
+            if !start.is_empty() {
+                keys.push(encode_bytes(&start));
+            }
+            keys.push(encode_bytes(&end));
         }
-        let region = self.pd_client.get_region(keys.first().unwrap()).unwrap();
-        self.pd_client
-            .split_region(region, kvproto::pdpb::CheckPolicy::Usekey, keys.clone());
-        must_wait(
-            || {
-                let region = self.pd_client.get_region(keys.first().unwrap()).unwrap();
-                region.get_end_key() == keys.get(1).unwrap()
-            },
-            20,
-            || "split_keyspace".to_string(),
-        );
+        keys.sort();
+        keys.dedup();
+        let timeout_secs = cmp::max(keys.len() * 3, 60);
+        block_on(
+            self.pd_client
+                .split_regions_with_retry(keys, Duration::from_secs(timeout_secs as u64)),
+        )
+        .unwrap();
     }
 
     pub fn merge(&mut self, source_key: &[u8], target_key: &[u8]) {
@@ -1604,7 +1609,7 @@ impl ClusterClient {
         req.mut_context().set_isolation_level(IsolationLevel::Si);
 
         while start_time.saturating_elapsed() < timeout {
-            let ctx = self.new_rpc_ctx(region_id);
+            let ctx = self.new_rpc_ctx(region_id, req.get_ranges()[0].get_start());
 
             if ctx.is_none() {
                 continue;
@@ -1679,7 +1684,7 @@ impl ClusterClient {
         let mut store_id_errors = vec![];
         while start_time.saturating_elapsed() < timeout {
             let region_id = self.get_region_id(key);
-            let ctx = self.new_rpc_ctx_opt(region_id, options);
+            let ctx = self.new_rpc_ctx_opt(region_id, key, options);
             if ctx.is_none() {
                 continue;
             }
@@ -2452,5 +2457,12 @@ impl TxnMutations {
                 req.set_is_txn_file(true);
             }
         }
+    }
+}
+
+fn api_version_of_key(key: &[u8]) -> kvrpcpb::ApiVersion {
+    match ApiV2::parse_key_mode(key) {
+        KeyMode::Txn | KeyMode::Raw => kvrpcpb::ApiVersion::V2,
+        _ => kvrpcpb::ApiVersion::V1,
     }
 }

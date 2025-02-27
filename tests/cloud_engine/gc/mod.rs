@@ -189,7 +189,7 @@ fn test_raft_log_gc() {
     let flush_memtable = |cluster: &ServerCluster, node_ids: &[u16]| {
         let mut client = cluster.new_client();
         let region_id = client.get_region_id(&[]);
-        let ctx = client.new_rpc_ctx(region_id).unwrap();
+        let ctx = client.new_rpc_ctx(region_id, b"").unwrap();
         ctx.get_peer().get_store_id();
         let mut req = RaftCmdRequest::default();
         let mut header = RaftRequestHeader::default();

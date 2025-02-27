@@ -82,6 +82,14 @@ pub fn encode_bytes(bs: &[u8]) -> Vec<u8> {
     encode_order_bytes(bs, false)
 }
 
+pub fn encode_bytes_maybe_empty(bs: &[u8]) -> Vec<u8> {
+    if bs.is_empty() {
+        vec![]
+    } else {
+        encode_bytes(bs)
+    }
+}
+
 pub fn encode_bytes_desc(bs: &[u8]) -> Vec<u8> {
     encode_order_bytes(bs, true)
 }

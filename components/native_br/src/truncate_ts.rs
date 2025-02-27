@@ -44,7 +44,7 @@ pub fn truncate_ts_with_cfg(
         .build()
         .unwrap();
 
-    let range = keyspace_id.map(|id| ApiV2::get_txn_keyspace_range(id));
+    let range = keyspace_id.map(|id| ApiV2::get_keyspace_range_by_id(id));
     if !config.skip_resolve_lock {
         if let Err(e) = runtime.block_on(resolve_async_commit_locks(&config, range.clone())) {
             error!("resolve_async_commit_locks error: {:?}", e);

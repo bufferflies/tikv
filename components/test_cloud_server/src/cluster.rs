@@ -549,7 +549,6 @@ impl ServerCluster {
             max_ts: Default::default(),
             async_commit: false,
             lock_resolver,
-            api_version: options.api_version,
             txn_file_helper,
         }
     }
@@ -667,7 +666,7 @@ impl ServerCluster {
 
     pub fn flush_memtable(&self, region_id: u64) -> std::result::Result<(), Error> {
         let mut client = self.new_client();
-        let ctx = client.new_rpc_ctx(region_id).unwrap();
+        let ctx = client.new_rpc_ctx(region_id, b"").unwrap();
         let store_id = ctx.get_peer().get_store_id();
         let version = ctx.get_region_epoch().get_version();
         let tag = format!("{}:{}:{}", store_id, region_id, version);

@@ -57,7 +57,7 @@ fn test_txn_file_commands() {
     let mut client = cluster.new_client();
     let mut prepare_ctx = |key: &[u8]| -> (u64, kvrpcpb::Context, TikvClient) {
         let region_id = client.get_region_id(key);
-        let ctx = client.new_rpc_ctx(region_id).unwrap();
+        let ctx = client.new_rpc_ctx(region_id, key).unwrap();
         let kv_client = client.get_kv_client(ctx.get_peer().get_store_id());
         (region_id, ctx, kv_client)
     };
@@ -1076,7 +1076,7 @@ fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>) {
     let prepare_ctx =
         |client: &mut ClusterClient, key: &[u8]| -> (u64, kvrpcpb::Context, TikvClient) {
             let region_id = client.get_region_id(key);
-            let ctx = client.new_rpc_ctx(region_id).unwrap();
+            let ctx = client.new_rpc_ctx(region_id, key).unwrap();
             let kv_client = client.get_kv_client(ctx.get_peer().get_store_id());
             (region_id, ctx, kv_client)
         };

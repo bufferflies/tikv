@@ -25,7 +25,7 @@ impl ClusterClient {
         mut req: kvproto::coprocessor::Request,
     ) -> kvproto::coprocessor::Response {
         let region = self.get_region_by_key(&req.ranges[0].start);
-        let ctx = self.new_rpc_ctx(region.id).unwrap();
+        let ctx = self.new_rpc_ctx(region.id, &req.ranges[0].start).unwrap();
         let store_id = ctx.get_peer().get_store_id();
         let kv_client = self.get_kv_client(store_id);
         req.set_context(ctx);
