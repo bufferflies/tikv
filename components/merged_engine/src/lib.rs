@@ -13,11 +13,12 @@ use std::{
 };
 
 use api_version::ApiV2;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::MasterKey;
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
-use kvengine::{dfs::S3Fs, limiter::StoreLimiter};
+use kvengine::{dfs::S3Fs, limiter::StoreLimiter, MetaIterator, ShardMeta};
+use kvenginepb::ChangeSet;
 use kvproto::{
     metapb,
     metapb::Peer,
@@ -44,7 +45,7 @@ use serde_derive::{Deserialize, Serialize};
 use tikv::config::TikvConfig;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
-    mpsc, warn,
+    info, mpsc, warn,
 };
 
 use crate::{manifest::Manifest, preprocessor::Preprocessor};
@@ -103,7 +104,7 @@ impl RegionProgress {
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct StoreProgress {
     pub store_id: u64,
     pub epoch: u32,
@@ -111,9 +112,7 @@ pub struct StoreProgress {
 }
 
 impl StoreProgress {
-    const SIZE: usize = 20;
-
-    pub(crate) fn encode(&self, buf: &mut BytesMut) {
+    pub(crate) fn encode(&self, buf: &mut Vec<u8>) {
         buf.put_u64_le(self.store_id);
         buf.put_u32_le(self.epoch);
         buf.put_u64_le(self.offset);
@@ -138,11 +137,25 @@ impl StoreProgress {
     }
 }
 
+struct EmptyMetaIterator {}
+
+impl MetaIterator for EmptyMetaIterator {
+    fn iterate<F>(&mut self, _: F) -> kvengine::Result<()>
+    where
+        F: FnMut(ChangeSet),
+    {
+        Ok(())
+    }
+
+    fn engine_id(&self) -> u64 {
+        0
+    }
+}
+
 pub struct MergedEngine {
     ctx: MergedEngineContext,
     manifest: Manifest,
     region_progresses: HashMap<u64, RegionProgress>,
-    store_progresses: HashMap<u64, StoreProgress>,
     updated_regions: HashMap<u64, u64>, // region_id -> region_version
     raft: RfEngine,
     kv: kvengine::Engine,
@@ -151,10 +164,10 @@ pub struct MergedEngine {
 }
 
 impl MergedEngine {
-    pub fn new(ctx: MergedEngineContext, backup_meta: ClusterBackupMeta) -> Self {
+    pub fn new(ctx: MergedEngineContext, backup_meta: ClusterBackupMeta) -> Result<Self> {
         let merged_dir = ctx.local_dir.join("merged");
         let merged_cfg = rfengine::RfEngineConfig::default();
-        let raft = RfEngine::open(merged_dir.as_path(), &merged_cfg, None, None).unwrap();
+        let raft = RfEngine::open(merged_dir.as_path(), &merged_cfg, None, None)?;
         let merged_store_id = ctx.config.merged_store_id;
         if let Some(store_ident) = rfengine::load_store_ident(&raft) {
             if store_ident.get_store_id() != merged_store_id {
@@ -170,20 +183,16 @@ impl MergedEngine {
             rfengine::save_store_ident(&raft, &store_ident);
         }
         raft.set_engine_id(merged_store_id);
-        let mut manifest = Manifest::open(&merged_dir).unwrap();
-        let (region_progresses, store_progresses) = if manifest.store_progresses.is_empty() {
+        let manifest_dir = ctx.local_dir.join("manifest");
+        let mut manifest = Manifest::open(&manifest_dir)?;
+        let region_progresses = if manifest.store_progresses.is_empty() {
             let (region_progresses, store_progresses) =
-                Self::recover_from_backup(&ctx, &backup_meta, &raft).unwrap();
-            manifest
-                .update_store_progresses(store_progresses.values(), store_progresses.len())
-                .unwrap();
-            (region_progresses, store_progresses)
+                Self::recover_from_backup(&ctx, &backup_meta, &raft)?;
+            manifest.store_progresses = store_progresses;
+            manifest.persist()?;
+            region_progresses
         } else {
-            // TODO: load region progresses from RfEngine.
-            (
-                Self::recover_from_merged_raft_engine(&raft).unwrap(),
-                manifest.store_progresses.clone(),
-            )
+            Self::recover_from_merged_raft_engine(&raft)?
         };
         let mut preprocessors = HashMap::new();
         for (region_id, _) in raft.get_region_peer_map() {
@@ -197,7 +206,7 @@ impl MergedEngine {
         let store_limiter = Arc::new(StoreLimiter::dummy());
         let mut recover_handler = RecoverHandler::new(raft.clone());
         recover_handler.set_merged_engine(true);
-        let mut meta_iter = recover_handler.clone();
+        let mut meta_iter = EmptyMetaIterator {};
         let kv = Self::init_kv_engine(
             &ctx,
             io_rate_limiter,
@@ -206,17 +215,58 @@ impl MergedEngine {
             recover_handler.clone(),
         )
         .unwrap();
-        Self {
+        Self::load_shards(
+            &ctx,
+            &kv,
+            recover_handler.clone(),
+            manifest.keyspace_ids.clone(),
+        )?;
+        Ok(Self {
             ctx,
             manifest,
             region_progresses,
-            store_progresses,
             updated_regions: HashMap::new(),
             raft,
             kv,
             recover_handler,
             preprocessors,
+        })
+    }
+
+    pub fn load_keyspaces(&mut self, keyspace_ids: Vec<u32>) -> Result<()> {
+        let mut new_keyspaces = HashSet::new();
+        for keyspace_id in keyspace_ids {
+            if self.manifest.add_keyspace_id(keyspace_id) {
+                new_keyspaces.insert(keyspace_id);
+            }
         }
+        info!("load keyspaces {:?}", new_keyspaces);
+        self.manifest.persist()?;
+        Self::load_shards(
+            &self.ctx,
+            &self.kv,
+            self.recover_handler.clone(),
+            new_keyspaces,
+        )
+    }
+
+    fn load_shards(
+        ctx: &MergedEngineContext,
+        kv: &kvengine::Engine,
+        mut recoverer: RecoverHandler,
+        keyspace_ids: HashSet<u32>,
+    ) -> Result<()> {
+        let engine_id = ctx.config.merged_store_id;
+        let mut metas = HashMap::new();
+        recoverer.iterate(|cs| {
+            let meta = ShardMeta::new(engine_id, &cs);
+            if keyspace_ids.contains(&meta.range.keyspace_id) {
+                info!("load keyspace insert cs {:?}", cs);
+                metas.insert(meta.id, meta);
+            }
+        })?;
+        kv.load_shards(metas, recoverer, None)?;
+        Ok(())
     }
 
     pub fn close(&self) {
@@ -439,7 +489,7 @@ impl MergedEngine {
     }
 
     pub fn get_store_progress(&self, store_id: u64) -> Option<StoreProgress> {
-        self.store_progresses.get(&store_id).cloned()
+        self.manifest.store_progresses.get(&store_id).cloned()
     }
 
     pub fn get_keyspace_regions(&self, keyspace_id: u32) -> Vec<u64> {
@@ -459,7 +509,8 @@ impl MergedEngine {
         offset: u64,
         data: Bytes,
     ) -> Result<()> {
-        let cur_offset = if let Some(store_progress) = self.store_progresses.get(&store_id) {
+        let cur_offset = if let Some(store_progress) = self.manifest.store_progresses.get(&store_id)
+        {
             if store_progress.epoch != epoch_id || store_progress.offset != offset {
                 return Err(rfengine::Error::Other(format!(
                     "{} epoch or offset mismatch, expect ({}, {}), got ({}, {}), wal_len: {}",
@@ -550,11 +601,8 @@ impl MergedEngine {
                 self.updated_regions.insert(region_id, progress.version);
             }
         }
-        let store_progress = self.store_progresses.entry(store_id).or_default();
-        store_progress.epoch = epoch_id;
-        store_progress.offset = new_offset;
         self.manifest
-            .update_store_progresses(std::iter::once(&*store_progress), 1)?;
+            .update_store_progress(store_id, epoch_id, new_offset);
         Ok(())
     }
 
@@ -600,6 +648,7 @@ impl MergedEngine {
             progress.synced_index = progress.commit_index;
         }
         self.raft.write(raft_wb)?;
+        self.manifest.persist()?;
         Ok(())
     }
 
@@ -727,14 +776,22 @@ impl MergedEngine {
             let wb = mem::take(ctx.raft_wb);
             ctx.raft.write(wb)?;
             for &updated_region in remain_updated_regions.keys() {
-                let shard = self.kv.get_shard(updated_region).unwrap();
                 let preprocessor = self.preprocessors.get_mut(&updated_region).unwrap();
                 let preprocessor_ref = preprocessor.as_ref();
                 let shard_meta = preprocessor_ref.shard_meta.as_ref().unwrap();
-                shard.sync_data_sequence(shard_meta);
-                self.recover_handler
-                    .recover_with_apply_ctx(apply_ctx, &shard, shard_meta)
-                    .unwrap();
+                if let Some(shard) = self.kv.get_shard(updated_region) {
+                    shard.sync_data_sequence(shard_meta);
+                    self.recover_handler
+                        .recover_with_apply_ctx(apply_ctx, &shard, shard_meta)
+                        .unwrap();
+                } else {
+                    debug_assert!(
+                        !self
+                            .manifest
+                            .keyspace_ids
+                            .contains(&shard_meta.range.keyspace_id)
+                    );
+                }
             }
         }
         if !new_regions.is_empty() {

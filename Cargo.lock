@@ -4377,7 +4377,7 @@ dependencies = [
  "api_version",
  "bytes",
  "cloud_encryption",
- "crc32c",
+ "crc32fast",
  "file_system",
  "kvengine",
  "kvenginepb",

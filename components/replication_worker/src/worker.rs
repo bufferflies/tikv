@@ -93,7 +93,7 @@ impl ReplicationWorker {
             })
             .ok()?;
         let backup_ts = TimeStamp::new(cluster_backup.backup_ts);
-        let merged_engine = MergedEngine::new(ctx.clone(), cluster_backup);
+        let merged_engine = MergedEngine::new(ctx.clone(), cluster_backup).ok()?;
         let apply_ctx = ApplyContext::new(merged_engine.get_kv(), None);
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let registered = Arc::new(RwLock::new(HashSet::new()));

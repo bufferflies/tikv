@@ -79,10 +79,11 @@ fn test_merged_engine() {
         },
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
     };
-    let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone());
+    let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
+    merged_engine.load_keyspaces(vec![keyspace_id]).unwrap();
     let merged_kv = merged_engine.get_kv();
     let all_shards = merged_kv.get_all_shard_id_vers();
-    assert_eq!(all_shards.len(), 4);
+    assert_eq!(all_shards.len(), 2);
     let ref_store = kv_engine_to_ref_store(&merged_kv);
     client
         .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
@@ -178,10 +179,11 @@ fn test_merged_engine_restart() {
         },
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
     };
-    let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone());
+    let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
+    merged_engine.load_keyspaces(vec![keyspace_id]).unwrap();
     let merged_kv = merged_engine.get_kv();
     let all_shards = merged_kv.get_all_shard_id_vers();
-    assert_eq!(all_shards.len(), 4);
+    assert_eq!(all_shards.len(), 2);
     let mut ref_store = kv_engine_to_ref_store(&merged_kv);
     client
         .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
@@ -222,7 +224,7 @@ fn test_merged_engine_restart() {
         }
     }
     merged_engine.close();
-    let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone());
+    let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
     let merged_kv = merged_engine.get_kv();
     let ref_store = kv_engine_to_ref_store(&merged_kv);
     client
