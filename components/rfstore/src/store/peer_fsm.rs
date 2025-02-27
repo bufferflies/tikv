@@ -1544,22 +1544,22 @@ impl<'a> PeerMsgHandler<'a> {
         let update_schema_meta = change_set.mut_update_schema_meta();
         update_schema_meta.set_file_id(schema_file.get_file_id());
         update_schema_meta.set_version(schema_file.get_version());
-        if shard_meta.schema_restore_ver != schema_file.get_restore_version() {
+        if shard_meta.schema.restore_ver() != schema_file.get_restore_version() {
             info!(
                 "{} skip stale schema file id {}, restore_version not match, expected {}, actual {}",
                 tag,
                 schema_file.get_file_id(),
-                shard_meta.schema_restore_ver,
+                shard_meta.schema.restore_ver(),
                 schema_file.get_restore_version()
             );
             return;
         }
-        if shard_meta.schema_file_ver >= schema_file.get_version() {
+        if shard_meta.schema.file_ver() >= schema_file.get_version() {
             info!("{} skip stale schema file", tag);
             return;
         }
         if !overlap {
-            if shard_meta.schema_file_id > 0 {
+            if shard_meta.schema.is_valid() {
                 info!("{} update schema file, remove non overlap", tag);
                 update_schema_meta.set_file_id(0);
             } else {
@@ -1589,11 +1589,11 @@ impl<'a> PeerMsgHandler<'a> {
 
     fn check_schema(&mut self, shard: &Arc<Shard>) {
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
-        if shard_meta.schema_file_id == 0 {
+        if !shard_meta.schema.is_valid() {
             return;
         }
         if let Some(schema_file) = shard.get_schema_file() {
-            if shard_meta.schema_file_ver != schema_file.get_version() {
+            if shard_meta.schema.file_ver() != schema_file.get_version() {
                 return;
             }
             if shard.get_checked_schema_ver() >= schema_file.get_version() {
@@ -1645,7 +1645,7 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
-        if shard_meta.schema_file_id == 0 && shard_meta.schema_file_ver == 0 {
+        if !shard_meta.schema.is_valid() {
             return;
         }
         let mut change_set = kvengine::new_change_set(shard_meta.id, shard_meta.ver);

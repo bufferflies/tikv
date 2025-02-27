@@ -1995,17 +1995,19 @@ impl BackupCluster {
                 // And they will be adjusted at server side in `restore_shard` procedure.
                 meta.base_version = cmp::max(meta.base_version, shard.table_version());
                 properties_helper.merge_shard_meta(&shard.meta);
-                if shard.meta.schema_file_id > 0 {
+                if shard.meta.schema.is_valid() {
                     if new_schema_file_id.is_none() {
                         // Get the schema file and update schema_restore_version. Then put the new
                         // schema file to dfs.
                         new_schema_file_id = Some(
-                            self.update_schema_file_restore_version(shard.meta.schema_file_id)?,
+                            self.update_schema_file_restore_version(shard.meta.schema.file_id())?,
                         );
                     }
-                    meta.schema_file_id = new_schema_file_id.unwrap();
-                    meta.schema_file_ver = shard.meta.schema_file_ver;
-                    meta.schema_restore_ver = self.truncate_ts;
+                    meta.schema.update_by_restore(
+                        new_schema_file_id.unwrap(),
+                        shard.meta.schema.file_ver(),
+                        self.truncate_ts,
+                    );
                     // Update columnar_snap_version to initial value to guarantee the new flushed
                     // l0s can be added to unconverted_l0s in target shard.
                     meta.columnar_table_ids = shard.meta.columnar_table_ids.clone();

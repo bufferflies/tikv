@@ -1059,7 +1059,7 @@ impl Engine {
                 col_file_ids: col_over_bounds,
                 block_size: self.opts.table_builder_options.block_size,
                 columnar_build_opts: self.opts.columnar_build_options,
-                schema_file_id: Some(meta.schema_file_id),
+                schema_file_id: Some(meta.schema.file_id()),
                 spec: InPlaceCompaction::TrimOverBound,
             };
             req.compaction_tp = CompactionType::InPlaceWithColumnar(in_place_compaction_ctx);

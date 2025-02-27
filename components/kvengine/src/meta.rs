@@ -55,9 +55,7 @@ pub struct ShardMeta {
     /// `max_ts` is the max ts in all sst files.
     pub max_ts: u64,
     pub parent: Option<Box<ShardMeta>>,
-    pub schema_file_id: u64,
-    pub schema_file_ver: i64,
-    pub schema_restore_ver: u64,
+    pub schema: SchemaFileMeta,
     pub columnar_table_ids: Vec<i64>,
     pub unconverted_l0s: Vec<u64>,
     pub vector_indexes: Vec<kvenginepb::VectorIndex>,
@@ -128,10 +126,7 @@ impl ShardMeta {
             meta.parent = Some(parent_meta);
         }
         if snap.has_schema_meta() {
-            let sm = snap.get_schema_meta();
-            meta.schema_file_id = sm.get_file_id();
-            meta.schema_file_ver = sm.get_version();
-            meta.schema_restore_ver = sm.get_restore_version();
+            meta.schema = SchemaFileMeta::from_snapshot(snap);
         }
         for vec_idx in snap.get_vector_indexes() {
             meta.vector_indexes.push(vec_idx.clone());
@@ -292,10 +287,7 @@ impl ShardMeta {
             return;
         }
         if cs.has_update_schema_meta() {
-            let sm = cs.get_update_schema_meta();
-            self.schema_file_id = sm.get_file_id();
-            self.schema_file_ver = sm.get_version();
-            assert_eq!(self.schema_restore_ver, sm.get_restore_version());
+            self.schema.update_from_schema_meta(cs);
             return;
         }
         if cs.has_columnar_compaction() {
@@ -471,7 +463,7 @@ impl ShardMeta {
         }
         if cs.has_update_schema_meta() {
             let schema_version = cs.get_update_schema_meta().get_version();
-            if schema_version <= self.schema_file_ver {
+            if schema_version <= self.schema.file_ver() {
                 info!(
                     "{} skip duplicated update schema meta version {}",
                     self.tag(),
@@ -573,7 +565,7 @@ impl ShardMeta {
             self.add_file(l0.id, FileMeta::from_l0_table(l0));
             new_l0s.push(l0.id);
         }
-        if self.schema_file_id > 0 && !self.columnar_table_ids.is_empty() {
+        if self.schema.is_valid() && !self.columnar_table_ids.is_empty() {
             self.unconverted_l0s.extend_from_slice(&new_l0s);
         }
         let new_data_seq = flush.get_version() - self.base_version;
@@ -910,9 +902,7 @@ impl ShardMeta {
             // Although `max_ts` will be updated in initial flush again, still set here to
             // avoid issue in unexpected corner case.
             meta.max_ts = self.max_ts;
-            meta.schema_file_id = self.schema_file_id;
-            meta.schema_file_ver = self.schema_file_ver;
-            meta.schema_restore_ver = self.schema_restore_ver;
+            meta.schema = self.schema.clone();
             if let Some(storage_class) = &old_storage_class {
                 meta.set_property(STORAGE_CLASS_KEY, storage_class);
             }
@@ -923,7 +913,7 @@ impl ShardMeta {
             for (fid, fm) in &old.files {
                 if new_shard_bound.overlap_bound(fm.data_bound()) {
                     if fm.get_level() == 0
-                        && new_shard.schema_file_id > 0
+                        && new_shard.schema.is_valid()
                         && old.unconverted_l0s.contains(fid)
                     {
                         new_shard.unconverted_l0s.push(*fid);
@@ -973,7 +963,6 @@ impl ShardMeta {
             self.unconverted_l0s.extend(new_flushed_l0s);
         }
         if comp.snap_version == 0 {
-            self.schema_file_id = 0;
             self.columnar_table_ids.clear();
             self.unconverted_l0s.clear();
         } else {
@@ -1008,9 +997,7 @@ impl ShardMeta {
 
     pub fn clear_columnar(&mut self) {
         info!("{} shard_meta apply clear_columnar", self.tag());
-        self.schema_file_id = 0;
-        self.schema_restore_ver = 0;
-        self.schema_file_ver = 0;
+        self.schema.clear();
         self.columnar_table_ids.clear();
         self.unconverted_l0s.clear();
         self.vector_indexes.clear();
@@ -1074,13 +1061,7 @@ impl ShardMeta {
                 FileType::VectorIndex => {} // already handled in vector_indexes.
             }
         }
-        if self.schema_file_ver > 0 {
-            let mut sm = SchemaMeta::new();
-            sm.set_file_id(self.schema_file_id);
-            sm.set_version(self.schema_file_ver);
-            sm.set_restore_version(self.schema_restore_ver);
-            snap.set_schema_meta(sm);
-        }
+        self.schema.to_snapshot(&mut snap);
         snap.set_unconverted_l0s(self.unconverted_l0s.clone());
         snap.set_vector_indexes(self.vector_indexes.clone().into());
         cs.set_snapshot(snap);
@@ -1241,10 +1222,7 @@ impl ShardMeta {
             ) {
                 self.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
             }
-            if source.schema_file_ver >= self.schema_file_ver {
-                self.schema_file_id = source.schema_file_id;
-                self.schema_file_ver = source.schema_file_ver;
-            }
+            self.schema.merge_from(&self.tag(), &source.schema);
         } else {
             info!(
                 "{} clear data of source region on merge, source: {:?}",
@@ -1263,17 +1241,12 @@ impl ShardMeta {
         let target_mem_tbl_version = self.base_version + sequence;
         self.base_version = max(source_mem_tbl_version, target_mem_tbl_version) - sequence;
         self.data_sequence = sequence;
-        if self.columnar_table_ids.is_empty() && self.schema_file_id > 0 {
-            // Target shard is waiting for columnar major compaction, do
-            // nothing.
-        } else {
-            self.columnar_table_ids = merge_columnar_table_ids(
-                &source.columnar_table_ids,
-                &self.columnar_table_ids,
-                source.data_bound(),
-                self.data_bound(),
-            );
-        }
+        self.columnar_table_ids = merge_columnar_table_ids(
+            &source.columnar_table_ids,
+            &self.columnar_table_ids,
+            source.data_bound(),
+            self.data_bound(),
+        );
         self.parent = Some(Box::new(parent));
         self.seq = sequence;
     }
@@ -1561,6 +1534,96 @@ trait MetaReader {
     fn iterate_meta<F>(&self, f: F) -> Result<()>
     where
         F: Fn(&pb::ChangeSet) -> Result<()>;
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct SchemaFileMeta {
+    schema_file_id: u64,
+    schema_file_ver: i64,
+    schema_restore_ver: u64,
+}
+
+impl SchemaFileMeta {
+    pub fn is_valid(&self) -> bool {
+        self.schema_file_id > 0
+    }
+
+    #[inline]
+    pub fn file_id(&self) -> u64 {
+        self.schema_file_id
+    }
+
+    #[inline]
+    pub fn file_ver(&self) -> i64 {
+        self.schema_file_ver
+    }
+
+    #[inline]
+    pub fn restore_ver(&self) -> u64 {
+        self.schema_restore_ver
+    }
+
+    pub fn from_snapshot(snap: &pb::Snapshot) -> Self {
+        debug_assert!(snap.has_schema_meta());
+        let sm = snap.get_schema_meta();
+        Self {
+            schema_file_id: sm.get_file_id(),
+            schema_file_ver: sm.get_version(),
+            schema_restore_ver: sm.get_restore_version(),
+        }
+    }
+
+    pub fn update_from_schema_meta(&mut self, cs: &pb::ChangeSet) {
+        debug_assert!(cs.has_update_schema_meta());
+        let sm = cs.get_update_schema_meta();
+        self.schema_file_id = sm.get_file_id();
+        self.schema_file_ver = sm.get_version();
+        assert_eq!(self.schema_restore_ver, sm.get_restore_version());
+    }
+
+    pub fn update_by_restore(
+        &mut self,
+        new_file_id: u64,
+        schema_file_ver: i64,
+        schema_restore_ver: u64,
+    ) {
+        self.schema_file_id = new_file_id;
+        self.schema_file_ver = schema_file_ver;
+        self.schema_restore_ver = schema_restore_ver;
+    }
+
+    pub fn clear(&mut self) {
+        self.schema_file_id = 0;
+        self.schema_file_ver = 0;
+        self.schema_restore_ver = 0;
+    }
+
+    pub fn to_snapshot(&self, snap: &mut pb::Snapshot) {
+        if self.is_valid() {
+            let mut sm = SchemaMeta::new();
+            sm.set_file_id(self.schema_file_id);
+            sm.set_version(self.schema_file_ver);
+            sm.set_restore_version(self.schema_restore_ver);
+            snap.set_schema_meta(sm);
+        }
+    }
+
+    pub fn merge_from(&mut self, tag: &ShardTag, source: &SchemaFileMeta) {
+        if source.schema_restore_ver == self.schema_restore_ver
+            && source.schema_file_ver >= self.schema_file_ver
+        {
+            self.schema_file_id = source.schema_file_id;
+            self.schema_file_ver = source.schema_file_ver;
+        } else if source.schema_restore_ver != self.schema_restore_ver
+            && source.schema_file_id > self.schema_file_id
+        {
+            // Happens during restore and only one of the source/target has been restored.
+            // The restored schema should have larger schema file id.
+            info!("{} merge schema file meta with different restore ver", tag;
+                "current" => ?self, "source" => ?source);
+            *self = source.clone();
+        }
+    }
 }
 
 #[cfg(test)]
