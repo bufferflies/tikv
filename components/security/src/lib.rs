@@ -156,6 +156,13 @@ impl SecurityConfig {
         let master_key = vec![1u8; 32];
         MasterKey::new(&master_key)
     }
+
+    pub fn override_from_env(&mut self) {
+        self.master_key.override_from_env();
+        tikv_util::config::env_or_default("CA_PATH", &mut self.ca_path);
+        tikv_util::config::env_or_default("CERT_PATH", &mut self.cert_path);
+        tikv_util::config::env_or_default("KEY_PATH", &mut self.key_path);
+    }
 }
 
 pub trait GetSecurityManager {

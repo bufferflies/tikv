@@ -97,7 +97,7 @@ fn get_backup_config_from_args(args: &BackupArgs) -> BackupConfig {
         config.tolerate_err = args.tolerate_err;
     }
     config.dfs.override_from_env();
-    config.security.master_key.override_from_env();
+    config.security.override_from_env();
     config
 }
 

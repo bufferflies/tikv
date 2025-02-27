@@ -29,7 +29,7 @@ impl CommonConfig {
         }
         // override from ENV
         config.dfs.override_from_env();
-        config.security.master_key.override_from_env();
+        config.security.override_from_env();
         config
     }
 

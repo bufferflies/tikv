@@ -109,7 +109,7 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
     config.skip_no_meta_days = args.skip_no_meta_days;
     config.dry_run = args.dry_run;
     config.dfs.override_from_env();
-    config.security.master_key.override_from_env();
+    config.security.override_from_env();
     config.data_dir = args.data_dir.clone();
     config.fetch_wal_timeout = args.fetch_wal_timeout.0;
     config.check_data_dir();

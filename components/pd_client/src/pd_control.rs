@@ -1,13 +1,13 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use bstr::ByteSlice;
 use bytes::Bytes;
 use http::Method;
 use kvproto::metapb;
 use security::{RestfulClient, SecurityManager};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use slog_global::debug;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
@@ -24,6 +24,7 @@ const PD_REGIONS_STORE_PATH: &str = "pd/api/v1/regions/store";
 const PD_KEYSPACE_PATH: &str = "pd/api/v2/keyspaces";
 const PD_PLACEMENT_RULE_GROUP_PATH: &str = "pd/api/v1/config/placement-rule";
 const PD_PLACEMENT_RULE_PATH: &str = "pd/api/v1/config/rule";
+const PD_REGION_PATH: &str = "pd/api/v1/region";
 const PD_STATS_REGION: &str = "pd/api/v1/stats/region";
 const PD_HEALTH_PATH: &str = "health";
 const PD_SCHEDULERS_PATH: &str = "pd/api/v1/schedulers";
@@ -103,6 +104,18 @@ impl PdControl {
         let path = format!("{PD_PLACEMENT_RULE_PATH}/{TIFLASH_GROUP}/{rule_id}");
         let _ = self.client.delete(path).await?;
         Ok(())
+    }
+
+    // Ref: https://github.com/tidbcloud/pd-cse/blob/release-8.1-keyspace/server/api/region.go
+    pub async fn get_region(&self, encoded_key: &[u8]) -> Result<Option<RegionInfo>> {
+        let hex_key = log_wrappers::hex_encode_upper(encoded_key);
+        let path = format!("{PD_REGION_PATH}/key/{}?format=hex", hex_key);
+        let region_info: RegionInfo = self.client.get(path).await?;
+        if region_info.id == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(region_info))
+        }
     }
 
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/stats.go
@@ -190,6 +203,16 @@ impl PdControl {
         Ok(())
     }
 
+    pub async fn merge_regions(
+        &self,
+        source_region_id: u64,
+        target_region_id: u64,
+    ) -> Result<String> {
+        let operator = RegionMergeOperator::new(source_region_id, target_region_id);
+        let msg: Option<String> = self.client.post(PD_OPERATORS_PATH, &operator).await?;
+        Ok(msg.unwrap_or_default())
+    }
+
     pub async fn get_stores(&self) -> Result<Vec<StoreInfo>> {
         let resp: StoresInfoResponse = self.client.get(PD_STORES_PATH).await?;
         Ok(resp.stores)
@@ -246,12 +269,29 @@ pub struct KeyspaceMeta {
     pub config: HashMap<String, String>,
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegionInfo {
     pub id: u64,
-    pub start_key: String,
-    pub end_key: String,
+    #[serde(deserialize_with = "from_hex")]
+    pub start_key: Vec<u8>,
+    #[serde(deserialize_with = "from_hex")]
+    pub end_key: Vec<u8>,
+    pub approximate_size: u64,
+}
+
+impl fmt::Debug for RegionInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegionInfo")
+            .field("id", &self.id)
+            .field(
+                "start_key",
+                &log_wrappers::hex_encode_upper(&self.start_key),
+            )
+            .field("end_key", &log_wrappers::hex_encode_upper(&self.end_key))
+            .field("approximate_size", &self.approximate_size)
+            .finish()
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -470,6 +510,24 @@ pub enum OpKind {
     OpWitness = 1 << 9,
 }
 
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+struct RegionMergeOperator {
+    pub name: String,
+    pub source_region_id: u64,
+    pub target_region_id: u64,
+}
+
+impl RegionMergeOperator {
+    pub fn new(source_region_id: u64, target_region_id: u64) -> Self {
+        Self {
+            name: "merge-region".to_string(),
+            source_region_id,
+            target_region_id,
+        }
+    }
+}
+
 // Ref: https://github.com/tidbcloud/pd-cse/blob/release-8.1-keyspace/pkg/response/store.go
 #[derive(Default, Deserialize, Debug)]
 pub struct StoresInfoResponse {
@@ -498,6 +556,30 @@ pub struct StoreStatus {
     pub available: ReadableSize,
     pub leader_count: u64,
     pub region_count: u64,
+}
+
+fn from_hex<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct HexVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for HexVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a hex string")
+        }
+
+        fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            hex::decode(value).map_err(serde::de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_str(HexVisitor)
 }
 
 #[cfg(test)]

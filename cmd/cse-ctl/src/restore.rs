@@ -255,7 +255,7 @@ fn get_restore_pd_config_from_args(args: &RestorePdArgs) -> RestoreConfig {
     }
     config.new_store_id_delta = args.new_store_id_delta;
     config.dfs.override_from_env();
-    config.security.master_key.override_from_env();
+    config.security.override_from_env();
     config
 }
 
@@ -268,7 +268,7 @@ fn get_restore_tikv_config_from_args(args: &RestoreTikvArgs) -> RestoreConfig {
     // Override config file from args
     config.wal_target_size = args.wal_target_size;
     config.dfs.override_from_env();
-    config.security.master_key.override_from_env();
+    config.security.override_from_env();
     config.skip_resolve_lock = false;
     config
 }
@@ -293,7 +293,7 @@ pub fn get_restore_keyspace_config_from_args(args: &RestoreKeyspaceArgs) -> Rest
         config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
     config.dfs.override_from_env();
-    config.security.master_key.override_from_env();
+    config.security.override_from_env();
     config.skip_resolve_lock = false;
     config
 }

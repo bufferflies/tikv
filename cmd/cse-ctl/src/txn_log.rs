@@ -63,7 +63,7 @@ impl ShowTxnLogConfig {
             config.timestamp = args.start_ts;
         }
         config.dfs.override_from_env();
-        config.security.master_key.override_from_env();
+        config.security.override_from_env();
         if config.data_dir.is_empty() {
             config.data_dir = ".".to_string();
         }

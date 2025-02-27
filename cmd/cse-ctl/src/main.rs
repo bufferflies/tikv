@@ -12,6 +12,7 @@ mod dfsgc;
 mod http;
 mod mvcc;
 mod recovery;
+mod region;
 mod restore;
 mod sst;
 mod stats;
@@ -26,6 +27,7 @@ use std::{env, fs::OpenOptions, io, sync::LazyLock};
 use backup::{execute_show_backup_list, ShowBackupListArgs};
 use clap::{Args, Parser, Subcommand};
 use native_br::common::step_to_stdout;
+use region::{execute_region_command, RegionCommand};
 use slog::Drain;
 
 use crate::{
@@ -88,6 +90,9 @@ fn main() {
         }
         Test(args) => {
             execute_test(args);
+        }
+        Region(region_cmd) => {
+            execute_region_command(region_cmd);
         }
     }
 }
@@ -164,6 +169,8 @@ pub enum Commands {
     Http(HttpArgs),
     /// Run test tools.
     Test(TestArgs),
+    /// Region related commands.
+    Region(RegionCommand),
 }
 
 #[derive(Args)]

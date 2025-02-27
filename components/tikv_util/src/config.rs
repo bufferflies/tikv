@@ -1722,6 +1722,12 @@ impl RaftDataStateMachine {
     }
 }
 
+pub fn env_or_default<T: FromStr>(name: &str, val: &mut T) {
+    if let Some(v) = std::env::var(name).ok().and_then(|v| v.parse::<T>().ok()) {
+        *val = v;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs::File, io::Write, path::Path};

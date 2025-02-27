@@ -206,7 +206,7 @@ impl TikvServer {
             TikvServer::connect_to_pd_cluster(config, env.clone(), Arc::clone(&security_mgr));
 
         config.dfs.override_from_env();
-        config.security.master_key.override_from_env();
+        config.security.override_from_env();
 
         // If zstd_compression_level is not set, set it to default value
         if config.dfs.zstd_compression_level.is_empty() {
