@@ -8,7 +8,7 @@ use crate::storage::{
     lock_manager::LockManager,
     mvcc::{MvccTxn, SnapshotReader},
     txn::{
-        cleanup,
+        cleanup, cleanup_async,
         commands::{
             Command, CommandExt, ReaderWithStats, ReleasedLocks, ResponsePolicy, TypedCommand,
             WriteCommand, WriteContext, WriteResult,
@@ -61,13 +61,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Cleanup {
         let mut released_locks = ReleasedLocks::new();
         // The rollback must be protected, see more on
         // [issue #7364](https://github.com/tikv/tikv/issues/7364)
-        released_locks.push(cleanup(
-            &mut txn,
-            &mut reader,
-            self.key,
-            self.current_ts,
-            true,
-        )?);
+        released_locks.push(cleanup(&mut txn, &mut reader, self.key, self.current_ts, true).await?);
 
         let mut write_data = WriteData::from_modifies(txn.into_modifies());
         write_data.set_req_type(ReqType::Rollback);

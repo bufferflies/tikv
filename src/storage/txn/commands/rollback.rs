@@ -8,7 +8,7 @@ use crate::storage::{
     lock_manager::LockManager,
     mvcc::{MvccTxn, SnapshotReader},
     txn::{
-        cleanup,
+        cleanup, cleanup_async,
         commands::{
             Command, CommandExt, ReaderWithStats, ReleasedLocks, ResponsePolicy, TypedCommand,
             WriteCommand, WriteContext, WriteResult,
@@ -59,7 +59,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Rollback {
         for k in self.keys {
             // Rollback is called only if the transaction is known to fail. Under the
             // circumstances, the rollback record needn't be protected.
-            let released_lock = cleanup(&mut txn, &mut reader, k, TimeStamp::zero(), false)?;
+            let released_lock = cleanup(&mut txn, &mut reader, k, TimeStamp::zero(), false).await?;
             released_locks.push(released_lock);
         }
 
