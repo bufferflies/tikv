@@ -11,7 +11,7 @@ use std::{
 use cloud_encryption::MasterKey;
 use cloud_server::server::Result as ServerResult;
 use collections::{HashMap, HashSet};
-use engine_traits::{CompactExt, MiscExt, Peekable, RaftEngineReadOnly, CF_DEFAULT};
+use engine_traits::{CompactExt, MiscExt, Peekable, CF_DEFAULT};
 use file_system::IoRateLimiter;
 use futures::{self, channel::oneshot, executor::block_on, future::BoxFuture, StreamExt};
 use kvengine::dfs::Dfs;
@@ -21,17 +21,17 @@ use kvproto::{
     metapb::{self, PeerRole, RegionEpoch, StoreLabel},
     pdpb::{self, StoreReport},
     raft_cmdpb::*,
-    raft_serverpb::{
-        PeerState, RaftApplyState, RaftLocalState, RaftMessage, RaftTruncatedState,
-        RegionLocalState,
-    },
+    raft_serverpb::{PeerState, RaftApplyState, RaftMessage, RegionLocalState},
 };
 use pd_client::{BucketStat, PdClient};
 use raft::eraftpb::ConfChangeType;
 use rfstore::{
     router::{RaftRouter, RaftStoreRouter},
     store::{
-        bootstrap_store, initial_region, prepare_bootstrap_cluster, transport::CasualRouter,
+        bootstrap_store, initial_region, load_last_peer_state, load_last_raft_state,
+        load_raft_truncated_state, prepare_bootstrap_cluster,
+        state::{RaftState, RaftTruncatedState},
+        transport::CasualRouter,
         Callback, CasualMessage, Engines, RaftBatchSystem, StoreMeta, WriteResponse,
         INIT_EPOCH_CONF_VER, INIT_EPOCH_VER, PENDING_MSG_CAP,
     },
@@ -43,9 +43,8 @@ use test_cloud_server::cluster::new_test_config;
 use test_pd_client::{PdClientExt, TestPdClient};
 use test_raftstore::{
     is_error_response, new_admin_request, new_change_peer_request, new_change_peer_v2_request,
-    new_delete_cmd, new_delete_range_cmd, new_get_cf_cmd, new_prepare_merge, new_region_detail_cmd,
-    new_region_leader_cmd, new_request, new_status_request, new_store, new_transfer_leader_cmd,
-    sleep_ms, Config,
+    new_get_cf_cmd, new_prepare_merge, new_region_detail_cmd, new_region_leader_cmd, new_request,
+    new_status_request, new_store, new_transfer_leader_cmd, sleep_ms, Config,
 };
 use tikv::config::TikvConfig;
 use tikv_util::{
@@ -1093,39 +1092,8 @@ impl<T: Simulator> Cluster<T> {
     }
 
     pub fn must_delete(&mut self, key: &[u8]) {
-        self.must_delete_cf(CF_DEFAULT, key)
-    }
-
-    pub fn must_delete_cf(&mut self, cf: &str, key: &[u8]) {
-        let resp = self.request(
-            key,
-            vec![new_delete_cmd(cf, key)],
-            false,
-            Duration::from_secs(5),
-        );
-        if resp.get_header().has_error() {
-            panic!("response {:?} has error", resp);
-        }
-    }
-
-    pub fn must_delete_range_cf(&mut self, cf: &str, start: &[u8], end: &[u8]) {
-        let resp = self.request(
-            start,
-            vec![new_delete_range_cmd(cf, start, end)],
-            false,
-            Duration::from_secs(5),
-        );
-        if resp.get_header().has_error() {
-            panic!("response {:?} has error", resp);
-        }
-    }
-
-    pub fn must_notify_delete_range_cf(&mut self, cf: &str, start: &[u8], end: &[u8]) {
-        let mut req = new_delete_range_cmd(cf, start, end);
-        req.mut_delete_range().set_notify_only(true);
-        let resp = self.request(start, vec![req], false, Duration::from_secs(5));
-        if resp.get_header().has_error() {
-            panic!("response {:?} has error", resp);
+        if let Err(e) = self.put_custom(key, new_delete_cmd(key)) {
+            panic!("has error: {:?}", e);
         }
     }
 
@@ -1166,21 +1134,24 @@ impl<T: Simulator> Cluster<T> {
         status_resp.take_region_detail()
     }
 
-    pub fn truncated_state(&self, region_id: u64, store_id: u64) -> RaftTruncatedState {
-        self.apply_state(region_id, store_id).take_truncated_state()
+    pub fn truncated_state(&self, peer_id: u64, store_id: u64) -> Option<RaftTruncatedState> {
+        load_raft_truncated_state(&self.get_raft_engine(store_id), peer_id)
     }
 
-    pub fn wait_log_truncated(&self, region_id: u64, store_id: u64, index: u64) {
+    pub fn wait_log_truncated(&self, peer_id: u64, store_id: u64, index: u64) {
         let timer = Instant::now();
         loop {
-            let truncated_state = self.truncated_state(region_id, store_id);
-            if truncated_state.get_index() >= index {
-                return;
+            let truncated_state = self.truncated_state(peer_id, store_id);
+            if let Some(truncated_state) = &truncated_state {
+                if truncated_state.get_index() >= index {
+                    return;
+                }
             }
+
             if timer.saturating_elapsed() >= Duration::from_secs(5) {
                 panic!(
-                    "[region {}] log is still not truncated to {}: {:?} on store {}",
-                    region_id, index, truncated_state, store_id,
+                    "[peer {}] log is still not truncated to {}: {:?} on store {}",
+                    peer_id, index, truncated_state, store_id,
                 );
             }
             thread::sleep(Duration::from_millis(10));
@@ -1204,33 +1175,36 @@ impl<T: Simulator> Cluster<T> {
         }
     }
 
-    pub fn wait_tombstone(&self, region_id: u64, peer: metapb::Peer, check_exist: bool) {
+    pub fn wait_tombstone(&self, peer: metapb::Peer, check_exist: bool) {
         let timer = Instant::now();
-        let mut state;
+        let mut region_state = None;
         loop {
-            state = self.region_local_state(region_id, peer.get_store_id());
-            if state.get_state() == PeerState::Tombstone
-                && (!check_exist || state.get_region().get_peers().contains(&peer))
-            {
-                return;
+            if let Some(state) = self.region_local_state(peer.id, peer.get_store_id()) {
+                region_state = Some(state.clone());
+                if state.get_state() == PeerState::Tombstone
+                    && (!check_exist || state.get_region().get_peers().contains(&peer))
+                {
+                    return;
+                }
             }
+
             if timer.saturating_elapsed() > Duration::from_secs(5) {
                 break;
             }
             thread::sleep(Duration::from_millis(10));
         }
         panic!(
-            "{:?} is still not gc in region {} {:?}",
-            peer, region_id, state
+            "{:?} is still not gc in region state {:?}",
+            peer, region_state
         );
     }
 
     pub fn wait_destroy_and_clean(&self, region_id: u64, peer: metapb::Peer) {
         let timer = Instant::now();
-        self.wait_tombstone(region_id, peer.clone(), false);
+        self.wait_tombstone(peer.clone(), false);
         let mut state;
         loop {
-            state = self.get_raft_local_state(region_id, peer.get_store_id());
+            state = self.raft_state(peer.id, peer.get_store_id());
             if state.is_none() {
                 return;
             }
@@ -1253,24 +1227,13 @@ impl<T: Simulator> Cluster<T> {
             .unwrap_or_default()
     }
 
-    pub fn get_raft_local_state(&self, region_id: u64, store_id: u64) -> Option<RaftLocalState> {
-        self.engines[&store_id]
-            .raft
-            .get_raft_state(region_id)
-            .unwrap()
+    pub fn raft_state(&self, peer_id: u64, store_id: u64) -> Option<RaftState> {
+        load_last_raft_state(&self.get_raft_engine(store_id), peer_id)
     }
 
-    pub fn raft_local_state(&self, region_id: u64, store_id: u64) -> RaftLocalState {
-        self.get_raft_local_state(region_id, store_id).unwrap()
-    }
-
-    pub fn region_local_state(&self, region_id: u64, store_id: u64) -> RegionLocalState {
-        let shard = self.get_engine(store_id).get_shard(region_id).unwrap();
-
+    pub fn region_local_state(&self, peer_id: u64, store_id: u64) -> Option<RegionLocalState> {
         let raft_engine = self.get_raft_engine(store_id);
-        let peer_id = *raft_engine.get_region_peer_map().get(&region_id).unwrap();
-
-        raft_engine.load_region_state(peer_id, shard.ver).unwrap()
+        load_last_peer_state(&raft_engine, peer_id)
     }
 
     pub fn must_peer_state(&self, region_id: u64, store_id: u64, peer_state: PeerState) {
@@ -1296,26 +1259,42 @@ impl<T: Simulator> Cluster<T> {
 
     pub fn wait_last_index(
         &mut self,
-        region_id: u64,
+        peer_id: u64,
         store_id: u64,
         expected: u64,
         timeout: Duration,
     ) {
         let timer = Instant::now();
         loop {
-            let raft_state = self.raft_local_state(region_id, store_id);
+            let raft_state = self.raft_state(peer_id, store_id).unwrap();
             let cur_index = raft_state.get_last_index();
             if cur_index >= expected {
                 return;
             }
             if timer.saturating_elapsed() >= timeout {
                 panic!(
-                    "[region {}] last index still not reach {}: {:?}",
-                    region_id, expected, raft_state
+                    "[peer {}] last index still not reach {}: {:?}",
+                    peer_id, expected, raft_state
                 );
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    pub fn add_send_filter_on_node(&mut self, node_id: u64, filter: Box<dyn Filter>) {
+        self.sim.wl().add_send_filter(node_id, filter);
+    }
+
+    pub fn clear_send_filter_on_node(&mut self, node_id: u64) {
+        self.sim.wl().clear_send_filters(node_id);
+    }
+
+    pub fn add_recv_filter_on_node(&mut self, node_id: u64, filter: Box<dyn Filter>) {
+        self.sim.wl().add_recv_filter(node_id, filter);
+    }
+
+    pub fn clear_recv_filter_on_node(&mut self, node_id: u64) {
+        self.sim.wl().clear_recv_filters(node_id);
     }
 
     pub fn add_send_filter<F: FilterFactory>(&self, factory: F) {
@@ -1475,7 +1454,7 @@ impl<T: Simulator> Cluster<T> {
         while now < deadline {
             if let Some(leader) = self.leader_of_region(region_id) {
                 let raft_apply_state = self.apply_state(region_id, leader.get_store_id());
-                let raft_local_state = self.raft_local_state(region_id, leader.get_store_id());
+                let raft_local_state = self.raft_state(leader.id, leader.get_store_id()).unwrap();
                 // If term matches and apply to commit index, then it must apply to current
                 // term.
                 if raft_apply_state.applied_index == raft_apply_state.commit_index
@@ -1745,10 +1724,13 @@ impl<T: Simulator> Cluster<T> {
     pub fn must_gc_peer(&mut self, region_id: u64, node_id: u64, peer: metapb::Peer) {
         for _ in 0..250 {
             self.gc_peer(region_id, node_id, peer.clone());
-            if self.region_local_state(region_id, node_id).get_state() == PeerState::Tombstone {
-                return;
+            if let Some(state) = self.region_local_state(peer.id, node_id) {
+                if state.get_state() != PeerState::Tombstone {
+                    sleep_ms(20);
+                    continue;
+                }
             }
-            sleep_ms(20);
+            return;
         }
 
         panic!(

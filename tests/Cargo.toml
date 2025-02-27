@@ -20,6 +20,11 @@ path = "cloud_engine/mod.rs"
 required-features = ["testexport"]
 
 [[test]]
+name = "cloud_integrations"
+path = "cloud_integrations/mod.rs"
+required-features = ["testexport"]
+
+[[test]]
 name = "random"
 path = "random/mod.rs"
 required-features = ["testexport"]

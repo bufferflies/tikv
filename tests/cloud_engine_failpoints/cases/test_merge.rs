@@ -14,7 +14,7 @@ use kvproto::raft_serverpb::PeerState;
 use pd_client::PdClient;
 use rfstore::store::Callback;
 use test_cloud_server::{client::ClusterClient, ServerCluster};
-use test_raftstore::{adjust_config_for_merge, new_peer, sleep_ms};
+use test_raftstore::{configure_for_merge, new_peer, peer_on_store, sleep_ms};
 use test_rfstore::{
     load_region_local_state, must_get_equal, must_get_none, new_node_cluster, new_put_cmd,
     new_write_request, IsolationFilterFactory,
@@ -111,7 +111,7 @@ fn spawn_merge(
 #[test]
 fn test_rfstore_node_merge_rollback() {
     let mut cluster = new_node_cluster(1, 3);
-    adjust_config_for_merge(&mut cluster.cfg);
+    configure_for_merge(&mut cluster.cfg);
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
 
@@ -163,7 +163,8 @@ fn test_rfstore_node_merge_rollback() {
     region.mut_region_epoch().set_version(4);
     for i in 1..3 {
         must_get_equal(&cluster.get_engine(i), region.get_id(), b"k11", b"v11");
-        let state = cluster.region_local_state(region.get_id(), i);
+        let peer = peer_on_store(&region, i);
+        let state = cluster.region_local_state(peer.id, i).unwrap();
         assert_eq!(state.get_state(), PeerState::Normal);
         assert_eq!(*state.get_region(), region);
     }
@@ -191,7 +192,8 @@ fn test_rfstore_node_merge_rollback() {
     region.mut_region_epoch().set_version(6);
     for i in 1..3 {
         must_get_equal(&cluster.get_engine(i), region.get_id(), b"k12", b"v12");
-        let state = cluster.region_local_state(region.get_id(), i);
+        let peer = peer_on_store(&region, i);
+        let state = cluster.region_local_state(peer.id, i).unwrap();
         assert_eq!(state.get_state(), PeerState::Normal);
         assert_eq!(*state.get_region(), region);
     }
@@ -201,7 +203,7 @@ fn test_rfstore_node_merge_rollback() {
 #[test]
 fn test_rfstore_node_merge_restart() {
     let mut cluster = new_node_cluster(1, 3);
-    adjust_config_for_merge(&mut cluster.cfg);
+    configure_for_merge(&mut cluster.cfg);
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
     cluster.run();
@@ -294,7 +296,7 @@ fn test_rfstore_node_merge_restart() {
 #[test]
 fn test_rfstore_node_merge_recover_snapshot() {
     let mut cluster = new_node_cluster(1, 3);
-    adjust_config_for_merge(&mut cluster.cfg);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.raft_log_gc_size_limit = Some(ReadableSize::kb(1));
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
@@ -341,7 +343,7 @@ fn test_rfstore_node_merge_recover_snapshot() {
 #[test]
 fn test_rfstore_node_multiple_rollback_merge() {
     let mut cluster = new_node_cluster(1, 3);
-    adjust_config_for_merge(&mut cluster.cfg);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.right_derive_when_split = true;
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();

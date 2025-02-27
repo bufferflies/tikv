@@ -918,7 +918,7 @@ fn test_conf_change_fast() {
     // Sets heartbeat timeout to more than 5 seconds. It also changes the election
     // timeout, but it's OK as the cluster starts with only one peer, it will
     // campaigns immediately.
-    configure_for_lease_read(&mut cluster, Some(5000), None);
+    configure_for_lease_read(&mut cluster.cfg, Some(5000), None);
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
     let r1 = cluster.run_conf_change();

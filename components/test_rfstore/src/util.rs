@@ -1,5 +1,14 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{fmt::Write, path::Path, sync::Arc, thread, time::Duration};
+use std::{
+    fmt::Write,
+    path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 use cloud_encryption::MasterKey;
 use cloud_server::TikvServer;
@@ -20,8 +29,16 @@ use rfstore::store::{
 use security::SecurityManager;
 use test_raftstore::Config;
 use tikv_util::{debug, escape, mpsc::future, warn};
+use txn_types::Key;
 
 use crate::{Cluster, Simulator};
+
+fn gen_ts() -> u64 {
+    // a counter to generate sequential timestamp value.
+    static TS_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    TS_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
 
 pub fn create_test_engine(
     cfg: &Config,
@@ -213,8 +230,12 @@ pub fn shard_must_not_exist(engine: &kvengine::Engine, region_id: u64) {
 pub fn new_put_cmd(key: &[u8], value: &[u8]) -> CustomRequest {
     let mut builder = CustomBuilder::new();
     builder.set_type(rlog::TYPE_ONE_PC);
-    builder.append_one_pc(key, value, false, false, 1, 2);
+    builder.append_one_pc(key, value, false, false, gen_ts(), gen_ts());
     builder.build()
+}
+
+pub fn new_delete_cmd(key: &[u8]) -> CustomRequest {
+    new_put_cmd(key, &[])
 }
 
 pub fn new_write_request(
@@ -244,6 +265,7 @@ pub fn load_region_local_state(engine: &RfEngine, peer_id: u64) -> Option<Region
 pub fn put_till_size<T: Simulator>(
     cluster: &mut Cluster<T>,
     limit: u64,
+    prefix: &str,
     range: &mut dyn Iterator<Item = u64>,
 ) -> Vec<u8> {
     assert!(limit > 0);
@@ -251,22 +273,31 @@ pub fn put_till_size<T: Simulator>(
     let mut rng = rand::thread_rng();
     let mut key = String::new();
     let mut value = vec![0; 64];
+    let mut count = 0;
+    let mut key_len = 0;
     while len < limit {
         let batch_size = std::cmp::min(1024, limit - len);
         let mut builder = CustomBuilder::new();
         builder.set_type(rlog::TYPE_ONE_PC);
-        for _ in 0..batch_size / 74 + 1 {
+        for _ in 0..batch_size / 82 + 1 {
             key.clear();
             let key_id = range.next().unwrap();
-            write!(key, "{:09}", key_id).unwrap();
+            write!(key, "{}{:09}", prefix, key_id).unwrap();
             rng.fill_bytes(&mut value);
-            // plus 1 for the extra encoding prefix
-            len += key.len() as u64 + 1;
+            // Encoded key match key format.
+            let enc_key = Key::from_raw(key.as_bytes()).into_encoded();
+            len += enc_key.len() as u64;
+            key_len = enc_key.len();
             len += value.len() as u64;
-            builder.append_one_pc(key.as_bytes(), &value, false, false, 1, 2);
+            builder.append_one_pc(&enc_key, &value, false, false, 1, 2);
+            count += 1;
         }
         let req = builder.build();
         cluster.put_custom(key.as_bytes(), req).unwrap();
     }
+    println!(
+        "put till size, key_len: {} len: {}, kv count: {}",
+        key_len, len, count
+    );
     key.into_bytes()
 }

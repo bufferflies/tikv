@@ -267,8 +267,11 @@ impl Simulator for NodeCluster {
 
 // Compare to server cluster, node cluster does not have server layer and
 // storage layer.
-pub fn new_node_cluster(id: u16, count: usize) -> Cluster<NodeCluster> {
-    assert!(id > 0);
+pub fn new_node_cluster(mut id: u16, count: usize) -> Cluster<NodeCluster> {
+    // 0 is invalid cluster id.
+    if id == 0 {
+        id = 1;
+    }
     let pd_client = Arc::new(TestPdClient::new(id as u64, false));
     let sim = Arc::new(RwLock::new(NodeCluster::new(Arc::clone(&pd_client))));
     Cluster::new(id, count, sim, pd_client)

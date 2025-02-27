@@ -423,8 +423,12 @@ fn test_stale_read_while_applying_snapshot() {
 // min(`target_safe_ts`, `source_safe_ts`)
 #[test]
 fn test_stale_read_while_region_merge() {
-    let (mut cluster, pd_client, _) =
-        prepare_for_stale_read_before_run(new_peer(1, 1), Some(Box::new(configure_for_merge)));
+    let (mut cluster, pd_client, _) = prepare_for_stale_read_before_run(
+        new_peer(1, 1),
+        Some(Box::new(|cluster| {
+            configure_for_merge(&mut cluster.cfg);
+        })),
+    );
 
     cluster.must_split(&cluster.get_region(&[]), b"key3");
     let source = pd_client.get_region(b"key1").unwrap();
@@ -481,8 +485,12 @@ fn test_stale_read_while_region_merge() {
 // any incoming write
 #[test]
 fn test_stale_read_after_merge() {
-    let (mut cluster, pd_client, _) =
-        prepare_for_stale_read_before_run(new_peer(1, 1), Some(Box::new(configure_for_merge)));
+    let (mut cluster, pd_client, _) = prepare_for_stale_read_before_run(
+        new_peer(1, 1),
+        Some(Box::new(|cluster| {
+            configure_for_merge(&mut cluster.cfg);
+        })),
+    );
 
     cluster.must_split(&cluster.get_region(&[]), b"key3");
     let source = pd_client.get_region(b"key1").unwrap();
@@ -510,8 +518,12 @@ fn test_stale_read_after_merge() {
 // whether there are new kv write into its key range
 #[test]
 fn test_read_source_region_after_target_region_merged() {
-    let (mut cluster, pd_client, leader_client) =
-        prepare_for_stale_read_before_run(new_peer(1, 1), Some(Box::new(configure_for_merge)));
+    let (mut cluster, pd_client, leader_client) = prepare_for_stale_read_before_run(
+        new_peer(1, 1),
+        Some(Box::new(|cluster| {
+            configure_for_merge(&mut cluster.cfg);
+        })),
+    );
 
     // Write on source region
     let k1_commit_ts1 = leader_client.must_kv_write(
@@ -571,8 +583,12 @@ fn test_read_source_region_after_target_region_merged() {
 // merge, after merge rollbacked it should resume updating
 #[test]
 fn test_stale_read_after_rollback_merge() {
-    let (mut cluster, pd_client, leader_client) =
-        prepare_for_stale_read_before_run(new_peer(1, 1), Some(Box::new(configure_for_merge)));
+    let (mut cluster, pd_client, leader_client) = prepare_for_stale_read_before_run(
+        new_peer(1, 1),
+        Some(Box::new(|cluster| {
+            configure_for_merge(&mut cluster.cfg);
+        })),
+    );
 
     // Write on source region
     leader_client.must_kv_write(

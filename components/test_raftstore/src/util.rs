@@ -634,11 +634,7 @@ pub fn configure_for_snapshot<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.cfg.raft_store.snap_mgr_gc_tick_interval = ReadableDuration::millis(50);
 }
 
-pub fn configure_for_merge<T: Simulator>(cluster: &mut Cluster<T>) {
-    adjust_config_for_merge(&mut cluster.cfg)
-}
-
-pub fn adjust_config_for_merge(cfg: &mut TikvConfig) {
+pub fn configure_for_merge(cfg: &mut TikvConfig) {
     // Avoid log compaction which will prevent merge.
     cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(10);
     cfg.raft_store.raft_log_gc_threshold = 1000;
@@ -652,34 +648,37 @@ pub fn adjust_config_for_merge(cfg: &mut TikvConfig) {
 }
 
 pub fn ignore_merge_target_integrity<T: Simulator>(cluster: &mut Cluster<T>) {
-    cluster.cfg.raft_store.dev_assert = false;
-    cluster.pd_client.ignore_merge_target_integrity();
+    config_ignore_merge_target_integrity(&mut cluster.cfg, &cluster.pd_client);
 }
 
-pub fn configure_for_lease_read<T: Simulator>(
-    cluster: &mut Cluster<T>,
+pub fn config_ignore_merge_target_integrity(cfg: &mut TikvConfig, pd_client: &TestPdClient) {
+    cfg.raft_store.dev_assert = false;
+    pd_client.ignore_merge_target_integrity();
+}
+
+pub fn configure_for_lease_read(
+    cfg: &mut TikvConfig,
     base_tick_ms: Option<u64>,
     election_ticks: Option<usize>,
 ) -> Duration {
     if let Some(base_tick_ms) = base_tick_ms {
-        cluster.cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(base_tick_ms);
+        cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(base_tick_ms);
     }
-    let base_tick_interval = cluster.cfg.raft_store.raft_base_tick_interval.0;
+    let base_tick_interval = cfg.raft_store.raft_base_tick_interval.0;
     if let Some(election_ticks) = election_ticks {
-        cluster.cfg.raft_store.raft_election_timeout_ticks = election_ticks;
+        cfg.raft_store.raft_election_timeout_ticks = election_ticks;
     }
-    let election_ticks = cluster.cfg.raft_store.raft_election_timeout_ticks as u32;
+    let election_ticks = cfg.raft_store.raft_election_timeout_ticks as u32;
     let election_timeout = base_tick_interval * election_ticks;
     // Adjust max leader lease.
-    cluster.cfg.raft_store.raft_store_max_leader_lease =
+    cfg.raft_store.raft_store_max_leader_lease =
         ReadableDuration(election_timeout - base_tick_interval);
     // Use large peer check interval, abnormal and max leader missing duration to
     // make a valid config, that is election timeout x 2 < peer stale state
     // check < abnormal < max leader missing duration.
-    cluster.cfg.raft_store.peer_stale_state_check_interval = ReadableDuration(election_timeout * 3);
-    cluster.cfg.raft_store.abnormal_leader_missing_duration =
-        ReadableDuration(election_timeout * 4);
-    cluster.cfg.raft_store.max_leader_missing_duration = ReadableDuration(election_timeout * 5);
+    cfg.raft_store.peer_stale_state_check_interval = ReadableDuration(election_timeout * 3);
+    cfg.raft_store.abnormal_leader_missing_duration = ReadableDuration(election_timeout * 4);
+    cfg.raft_store.max_leader_missing_duration = ReadableDuration(election_timeout * 5);
 
     election_timeout
 }

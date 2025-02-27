@@ -315,7 +315,7 @@ fn test_delay_split_region() {
     cluster.cfg.raft_store.raft_log_gc_threshold = 500;
     // To stable the test, we use a large hearbeat timeout 200ms(100ms * 2).
     // And to elect leader quickly, set election timeout to 1s(100ms * 10).
-    configure_for_lease_read(&mut cluster, Some(100), Some(10));
+    configure_for_lease_read(&mut cluster.cfg, Some(100), Some(10));
 
     // We use three nodes for this test.
     cluster.run();
@@ -857,7 +857,7 @@ fn test_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
 fn test_node_split_update_region_right_derive() {
     let mut cluster = new_node_cluster(0, 3);
     // Election timeout and max leader lease is 1s.
-    configure_for_lease_read(&mut cluster, Some(100), Some(10));
+    configure_for_lease_read(&mut cluster.cfg, Some(100), Some(10));
 
     cluster.run();
 

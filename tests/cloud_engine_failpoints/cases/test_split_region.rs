@@ -17,7 +17,7 @@ use rfstore::{
     store::{Callback, WriteResponse},
     Result,
 };
-use test_raftstore::{adjust_config_for_merge, find_peer, new_peer, sleep_ms};
+use test_raftstore::{configure_for_merge, find_peer, new_peer, sleep_ms};
 use test_rfstore::{
     check_messages, must_get_equal, new_node_cluster, shard_must_not_exist, CloneFilterFactory,
     Direction, Filter, IsolationFilterFactory, MessageTypeNotifier, RegionPacketFilter, Simulator,
@@ -115,7 +115,7 @@ fn test_rfstore_follower_slow_split() {
 #[test]
 fn test_split_not_to_split_existing_region() {
     let mut cluster = new_node_cluster(1, 4);
-    adjust_config_for_merge(&mut cluster.cfg);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.right_derive_when_split = true;
     cluster.cfg.raft_store.apply_batch_system.max_batch_size = Some(1);
     cluster.cfg.raft_store.apply_batch_system.pool_size = 2;
@@ -193,7 +193,7 @@ fn test_split_not_to_split_existing_region() {
 #[test]
 fn test_split_not_to_split_existing_tombstone_region() {
     let mut cluster = new_node_cluster(1, 3);
-    adjust_config_for_merge(&mut cluster.cfg);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.right_derive_when_split = true;
     cluster.cfg.raft_store.store_batch_system.max_batch_size = Some(1);
     cluster.cfg.raft_store.store_batch_system.pool_size = 2;

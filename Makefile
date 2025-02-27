@@ -482,4 +482,4 @@ test-cloud-engine-integration: pre-test
 		--test-threads=4
 
 test-cloud-engine-integration-with-nextest:
-	cargo nextest run -P ci -p tests --test cloud_engine --test cloud_engine_failpoints -j 2
+	cargo nextest run -P ci -p tests --test cloud_engine --test cloud_engine_failpoints --test cloud_integrations -j 2

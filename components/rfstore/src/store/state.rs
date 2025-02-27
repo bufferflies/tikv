@@ -123,4 +123,8 @@ impl RaftTruncatedState {
         self.truncated_index_term = data.get_u64_le();
         self.truncated_index = data.get_u64_le();
     }
+
+    pub fn get_index(&self) -> u64 {
+        self.truncated_index
+    }
 }

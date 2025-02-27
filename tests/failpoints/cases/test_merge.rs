@@ -29,7 +29,7 @@ use txn_types::{Key, PessimisticLock};
 #[test]
 fn test_node_merge_rollback() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
 
@@ -117,7 +117,7 @@ fn test_node_merge_rollback() {
 #[test]
 fn test_node_merge_restart() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.run();
 
     let pd_client = Arc::clone(&cluster.pd_client);
@@ -202,7 +202,7 @@ fn test_node_merge_restart() {
 #[test]
 fn test_node_merge_catch_up_logs_restart() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.run();
 
     cluster.must_put(b"k1", b"v1");
@@ -243,7 +243,7 @@ fn test_node_merge_catch_up_logs_restart() {
 #[test]
 fn test_node_merge_catch_up_logs_leader_election() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(10);
     cluster.cfg.raft_store.raft_election_timeout_ticks = 25;
     cluster.cfg.raft_store.raft_log_gc_threshold = 12;
@@ -297,7 +297,7 @@ fn test_node_merge_catch_up_logs_leader_election() {
 #[test]
 fn test_node_merge_catch_up_logs_no_need() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(10);
     cluster.cfg.raft_store.raft_election_timeout_ticks = 25;
     cluster.cfg.raft_store.raft_log_gc_threshold = 12;
@@ -367,7 +367,7 @@ fn test_node_merge_catch_up_logs_no_need() {
 #[test]
 fn test_node_merge_recover_snapshot() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.raft_log_gc_threshold = 12;
     cluster.cfg.raft_store.raft_log_gc_count_limit = Some(12);
     let pd_client = Arc::clone(&cluster.pd_client);
@@ -425,7 +425,7 @@ fn test_node_merge_multiple_snapshots_not_together() {
 
 fn test_node_merge_multiple_snapshots(together: bool) {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     ignore_merge_target_integrity(&mut cluster);
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
@@ -535,7 +535,7 @@ fn test_node_merge_multiple_snapshots(together: bool) {
 #[test]
 fn test_node_merge_restart_after_apply_premerge_before_apply_compact_log() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.merge_max_log_gap = 10;
     cluster.cfg.raft_store.raft_log_gc_count_limit = Some(11);
     // Rely on this config to trigger a compact log
@@ -618,7 +618,7 @@ fn test_node_merge_restart_after_apply_premerge_before_apply_compact_log() {
 #[test]
 fn test_node_failed_merge_before_succeed_merge() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.merge_max_log_gap = 30;
     cluster.cfg.raft_store.store_batch_system.max_batch_size = Some(1);
     cluster.cfg.raft_store.store_batch_system.pool_size = 2;
@@ -707,7 +707,7 @@ fn test_node_failed_merge_before_succeed_merge() {
 #[test]
 fn test_node_merge_transfer_leader() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.store_batch_system.max_batch_size = Some(1);
     cluster.cfg.raft_store.store_batch_system.pool_size = 2;
     let pd_client = Arc::clone(&cluster.pd_client);
@@ -769,7 +769,7 @@ fn test_node_merge_transfer_leader() {
 #[test]
 fn test_node_merge_cascade_merge_with_apply_yield() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
 
@@ -808,7 +808,7 @@ fn test_node_merge_cascade_merge_with_apply_yield() {
 #[test]
 fn test_node_multiple_rollback_merge() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.right_derive_when_split = true;
     cluster.cfg.raft_store.merge_check_tick_interval = ReadableDuration::millis(20);
     let pd_client = Arc::clone(&cluster.pd_client);
@@ -1209,7 +1209,7 @@ fn test_node_merge_crash_when_snapshot() {
 #[test]
 fn test_prewrite_before_max_ts_is_synced() {
     let mut cluster = new_server_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.run();
 
     // Transfer leader to node 1 first to ensure all operations happen on node 1
@@ -1266,7 +1266,7 @@ fn test_prewrite_before_max_ts_is_synced() {
 #[test]
 fn test_source_peer_read_delegate_after_apply() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
 
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
@@ -1315,7 +1315,7 @@ fn test_source_peer_read_delegate_after_apply() {
 #[test]
 fn test_merge_with_concurrent_pessimistic_locking() {
     let mut cluster = new_server_cluster(0, 2);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.pessimistic_txn.pipelined = true;
     cluster.cfg.pessimistic_txn.in_memory = true;
     cluster.run();
@@ -1403,7 +1403,7 @@ fn test_merge_with_concurrent_pessimistic_locking() {
 #[test]
 fn test_merge_pessimistic_locks_with_concurrent_prewrite() {
     let mut cluster = new_server_cluster(0, 2);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.pessimistic_txn.pipelined = true;
     cluster.cfg.pessimistic_txn.in_memory = true;
     let pd_client = Arc::clone(&cluster.pd_client);
@@ -1488,7 +1488,7 @@ fn test_merge_pessimistic_locks_with_concurrent_prewrite() {
 #[test]
 fn test_retry_pending_prepare_merge_fail() {
     let mut cluster = new_server_cluster(0, 2);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.pessimistic_txn.pipelined = true;
     cluster.cfg.pessimistic_txn.in_memory = true;
     let pd_client = Arc::clone(&cluster.pd_client);
@@ -1565,7 +1565,7 @@ fn test_retry_pending_prepare_merge_fail() {
 #[test]
 fn test_merge_pessimistic_locks_propose_fail() {
     let mut cluster = new_server_cluster(0, 2);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     cluster.cfg.pessimistic_txn.pipelined = true;
     cluster.cfg.pessimistic_txn.in_memory = true;
     let pd_client = Arc::clone(&cluster.pd_client);
@@ -1634,7 +1634,7 @@ fn test_merge_pessimistic_locks_propose_fail() {
 #[test]
 fn test_destroy_source_peer_while_merging() {
     let mut cluster = new_node_cluster(0, 5);
-    configure_for_merge(&mut cluster);
+    configure_for_merge(&mut cluster.cfg);
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
 
