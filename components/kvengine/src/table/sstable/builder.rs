@@ -584,8 +584,36 @@ impl BlockBuffer {
     }
 }
 
+// Used to build data blocks from key-value entries for storage.
+//
+// The Block Format is as follows:
+// +---------------------+
+// | Checksum            |  (4 bytes)
+// +---------------------+
+// | Block Format ID     |  (4 bytes)
+// +---------------------+
+// | Number of Entries   |  (4 bytes)
+// +---------------------+
+// | Entry Offset 1      |  (4 bytes)
+// +---------------------+
+// | Entry Offset 2      |  (4 bytes)
+// +---------------------+
+// | ...                 |
+// +---------------------+
+// | Common Prefix Length |  (2 bytes)
+// +---------------------+
+// | Common Prefix Data   |  (variable length)
+// +---------------------+
+// | Entry 1 Key         |  (variable length)
+// | Entry 1 Value       |  (variable length)
+// +---------------------+
+// | Entry 2 Key         |  (variable length)
+// | Entry 2 Value       |  (variable length)
+// +---------------------+
+// | ...                 |
+// +---------------------+
 #[derive(Default)]
-struct BlockBuilder {
+pub struct BlockBuilder {
     // Final block data after encoding and compression
     buf: Vec<u8>,
     // Temporary buffer for collecting entries before building block
@@ -604,6 +632,10 @@ struct BlockBuilder {
 }
 
 impl BlockBuilder {
+    pub fn get_buf(&self) -> &Vec<u8> {
+        &self.buf
+    }
+
     fn same_last_key(&self, key: &[u8]) -> bool {
         if self.block.tmp_keys.length() > 0 {
             let last = self.block.tmp_keys.get_last();
@@ -621,7 +653,7 @@ impl BlockBuilder {
         }
     }
 
-    fn add_entry(&mut self, key: &[u8], val: Value, blob_ref: Option<BlobRef>) {
+    pub fn add_entry(&mut self, key: &[u8], val: Value, blob_ref: Option<BlobRef>) {
         self.block.tmp_keys.append(key);
         self.block.tmp_vals.append_value(val, blob_ref);
         self.block.old_vers.push(0);
@@ -644,7 +676,7 @@ impl BlockBuilder {
         self.block.kv_size - self.block.tmp_keys.length() * self.block.common_prefix_len
     }
 
-    fn finish_block(&mut self, sst_fid: u64, checksum_tp: ChecksumType) {
+    pub fn finish_block(&mut self, sst_fid: u64, checksum_tp: ChecksumType) {
         self.block_keys.append(self.block.tmp_keys.get_entry(0));
         self.block_addrs
             .push(BlockAddress::new(sst_fid, self.buf.len() as u32));

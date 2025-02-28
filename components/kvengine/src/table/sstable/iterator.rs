@@ -18,6 +18,8 @@ use crate::table::{
 pub struct BlockIterator {
     num_entries: usize,
     b: Bytes,
+    /// Index of the current entry in the block.
+    /// This is a 0-based index, meaning the first entry is at index 0.
     idx: i32,
     err: Option<table::Error>,
 
@@ -634,5 +636,134 @@ impl table::Iterator for TableIterator {
     #[cfg(debug_assertions)]
     fn tag(&self) -> String {
         format!("sst:{:?}", self.t.id())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+    use crate::table::{sstable::builder::BlockBuilder, ChecksumType};
+
+    // Helper function to create block data for testing using BlockBuilder
+    // The generated block data does not include the checksum field.
+    fn create_test_block_data(num_entries: usize) -> Bytes {
+        let mut builder = BlockBuilder::default();
+        for i in 0..num_entries {
+            let key = format!("key{}", i);
+            let value = format!("value{}", i);
+            builder.add_entry(
+                key.as_bytes(),
+                Value::new_with_version(value.as_bytes(), 0),
+                None,
+            );
+        }
+        let sst_fid = 123; // Example SST file ID
+        let checksum_type = ChecksumType::Crc32c; // Example checksum type
+        builder.finish_block(sst_fid, checksum_type);
+        let block_data = builder.get_buf()[4..].to_vec(); // Skip the first 4 bytes of the buffer, which is the checksum
+        Bytes::from(block_data)
+    }
+
+    #[test]
+    fn test_block_iterator_set_block() {
+        let mut iterator = BlockIterator::default();
+        let block_data = create_test_block_data(2); // Create block data with 2 entries
+        iterator.set_block(block_data.clone());
+
+        assert_eq!(iterator.b, block_data);
+        assert!(iterator.err.is_none());
+        assert_eq!(iterator.idx, 0);
+        assert_eq!(iterator.num_entries, 2);
+    }
+
+    #[test]
+    fn test_block_iterator_load_entries() {
+        let mut iterator = BlockIterator::default();
+        let block_data = create_test_block_data(2); // Create block data with 2 entries
+        iterator.set_block(block_data);
+        iterator.load_entries();
+
+        assert_eq!(iterator.num_entries, 2);
+        assert!(!iterator.entry_offs.is_empty());
+        assert_eq!(iterator.entry_offs.len(), 2 * mem::size_of::<u32>()); // Each entry offset is a u32
+    }
+
+    #[test]
+    fn test_block_iterator_seek() {
+        let mut iterator = BlockIterator::default();
+        let block_data = create_test_block_data(3); // Create block data with 3 entries
+        iterator.set_block(block_data);
+        iterator.load_entries();
+
+        // Seek to a key that exists
+        iterator.seek(InnerKey::from_inner_buf(b"key1"));
+        assert_eq!(iterator.idx, 1); // Assuming key1 is at index 1
+
+        // Seek to a key that does not exist
+        iterator.seek(InnerKey::from_inner_buf(b"key3"));
+        assert_eq!(iterator.idx, 3);
+        iterator.seek(InnerKey::from_inner_buf(b"key4"));
+        assert_eq!(iterator.idx, 3);
+    }
+
+    #[test]
+    fn test_block_iterator_next() {
+        let mut iterator = BlockIterator::default();
+        let block_data = create_test_block_data(3); // Create block data with 3 entries
+        iterator.set_block(block_data);
+        iterator.load_entries();
+
+        iterator.next();
+        assert_eq!(iterator.idx, 1); // Should move to the next entry
+
+        iterator.next();
+        assert_eq!(iterator.idx, 2); // Should move to the last entry
+
+        iterator.next();
+        assert_eq!(iterator.idx, 3); // Should be out of bounds
+        assert!(iterator.err.is_some()); // Should set an error
+    }
+
+    #[test]
+    fn test_block_iterator_prev() {
+        let mut iterator = BlockIterator::default();
+        let block_data = create_test_block_data(3); // Create block data with 3 entries
+        iterator.set_block(block_data);
+        iterator.load_entries();
+
+        iterator.idx = 2; // Set to last entry
+        iterator.prev();
+        assert_eq!(iterator.idx, 1); // Should move to the previous entry
+
+        iterator.prev();
+        assert_eq!(iterator.idx, 0); // Should move to the first entry
+
+        iterator.prev();
+        assert_eq!(iterator.idx, -1); // Should be out of bounds
+        assert!(iterator.err.is_some()); // Should set an error
+    }
+
+    #[test]
+    fn test_block_iterator_seek_to_first() {
+        let mut iterator = BlockIterator::default();
+        let block_data = create_test_block_data(3); // Create block data with 3 entries
+        iterator.set_block(block_data);
+        iterator.load_entries();
+
+        iterator.seek_to_first();
+        assert_eq!(iterator.idx, 0); // Should point to the first entry
+    }
+
+    #[test]
+    fn test_block_iterator_seek_to_last() {
+        let mut iterator = BlockIterator::default();
+        let block_data = create_test_block_data(3); // Create block data with 3 entries
+        iterator.set_block(block_data);
+        iterator.load_entries();
+
+        iterator.seek_to_last();
+        assert_eq!(iterator.idx, 2); // Should point to the last entry
     }
 }

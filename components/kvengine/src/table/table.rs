@@ -256,12 +256,22 @@ unsafe impl Send for Value {}
 // Value is a short life struct used to pass value across iterators.
 // It is valid until iterator call next or next_version.
 // As long as the value is never escaped, there will be no dangling pointer.
+//
+// The Value format is as follows:
+// | meta   | user_meta_len | version |      user_meta      |     value       |
+// | 1 byte |    1 byte     | 8 bytes | user_meta_len bytes | value_len bytes |
 #[derive(Debug, Copy, Clone)]
 pub struct Value {
-    /// Points to start of user_meta_len at offset VALUE_VERSION_OFF +
+    /// Points to start of user_meta at offset VALUE_VERSION_OFF +
     /// serialized(version).
     ptr: *const u8,
-    /// Bit flags
+    /// Bit flags representing the state of the value.
+    ///
+    /// Each bit in the `meta` field indicates a specific property:
+    /// - Bit 1 (BIT_DELETE): Value has been marked for deletion.
+    /// - Bit 2 (BIT_HAS_OLD_VERSION): Value has an old version available.
+    /// - Bit 3 (BIT_BLOB_REF): Value is a reference to a blob (set if
+    ///   `blob_ptr` points to a `BlobRef`).
     pub meta: u8,
     /// User defined opaque meta data,
     user_meta_len: u8,
@@ -270,6 +280,11 @@ pub struct Value {
     /// The row version
     pub version: u64,
 
+    /// Pointer to blob data, which can represent two states:
+    /// 1. If `BIT_BLOB_REF` is set, this pointer points to a `BlobRef`,
+    ///    indicating that the value is a reference to external blob data.
+    /// 2. If `BIT_BLOB_REF` is not set, this pointer points to the actual blob
+    ///    data stored in memory.
     blob_ptr: *const u8,
 }
 
@@ -281,6 +296,49 @@ impl Value {
             user_meta_len: Default::default(),
             len: Default::default(),
             version: Default::default(),
+            blob_ptr: ptr::null(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_with_version(data: &[u8], version: u64) -> Self {
+        let len = data.len() as u32;
+        let ptr = data.as_ptr();
+
+        Value {
+            ptr,
+            meta: 0,
+            user_meta_len: 0,
+            len,
+            version,
+            blob_ptr: ptr::null(),
+        }
+    }
+
+    pub(crate) fn new_with_meta_version(
+        meta: u8,
+        version: u64,
+        user_meta_len: u8,
+        buf: &[u8],
+    ) -> Self {
+        assert!(buf.len() >= user_meta_len as usize);
+        Self {
+            ptr: buf.as_ptr(),
+            meta,
+            user_meta_len,
+            len: buf.len() as u32 - user_meta_len as u32,
+            version,
+            blob_ptr: ptr::null(),
+        }
+    }
+
+    pub(crate) fn new_tombstone(version: u64) -> Self {
+        Self {
+            ptr: ptr::null(),
+            meta: BIT_DELETE,
+            user_meta_len: 0,
+            len: 0,
+            version,
             blob_ptr: ptr::null(),
         }
     }
@@ -334,34 +392,6 @@ impl Value {
             meta,
             user_meta_len,
             len: (buf.len() - offset - user_meta_len as usize) as u32,
-            version,
-            blob_ptr: ptr::null(),
-        }
-    }
-
-    pub(crate) fn new_with_meta_version(
-        meta: u8,
-        version: u64,
-        user_meta_len: u8,
-        buf: &[u8],
-    ) -> Self {
-        assert!(buf.len() >= user_meta_len as usize);
-        Self {
-            ptr: buf.as_ptr(),
-            meta,
-            user_meta_len,
-            len: buf.len() as u32 - user_meta_len as u32,
-            version,
-            blob_ptr: ptr::null(),
-        }
-    }
-
-    pub(crate) fn new_tombstone(version: u64) -> Self {
-        Self {
-            ptr: ptr::null(),
-            meta: BIT_DELETE,
-            user_meta_len: 0,
-            len: 0,
             version,
             blob_ptr: ptr::null(),
         }
@@ -995,6 +1025,242 @@ impl std::fmt::Debug for DumpKv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_value_new() {
+        let value = Value::new(); // Create a new Value instance
+
+        // Assert the fields
+        assert_eq!(value.meta, 0); // Meta should be default (0)
+        assert_eq!(value.user_meta_len, 0); // User metadata length should be 0
+        assert_eq!(value.len, 0); // Length should be 0
+        assert_eq!(value.version, 0); // Version should be default (0)
+        assert!(value.ptr.is_null()); // Pointer should be null
+        assert!(value.blob_ptr.is_null()); // Blob pointer should be null
+        assert!(value.is_empty()); // Value should be empty
+    }
+
+    #[test]
+    fn test_value_new_with_version() {
+        let value = Value::new_with_version(b"test_value", 100);
+        assert_eq!(value.version, 100);
+        assert_eq!(value.value_len(), 10); // Length of "test_value"
+        assert!(!value.is_empty());
+    }
+
+    #[test]
+    fn test_value_new_with_meta_and_version() {
+        let user_meta = b"meta_data";
+        let meta = BIT_DELETE; // Example meta flag
+        let value = Value::new_with_meta_version(meta, 100, user_meta.len() as u8, user_meta);
+
+        // Assert the fields
+        assert_eq!(value.version, 100);
+        assert_eq!(value.user_meta_len, user_meta.len() as u8); // Length of user_meta
+        assert_eq!(value.meta, meta); // Check the meta field
+        assert_eq!(value.value_len(), 0); // Length of value should be 0 since we didn't set it
+        assert!(!value.is_empty());
+    }
+
+    #[test]
+    fn test_value_new_tombstone() {
+        let version = 100; // Example version
+        let value = Value::new_tombstone(version); // Create a new tombstone Value instance
+
+        // Assert the fields
+        assert_eq!(value.meta, BIT_DELETE); // Meta should indicate deletion
+        assert_eq!(value.user_meta_len, 0); // User metadata length should be 0
+        assert_eq!(value.len, 0); // Length should be 0
+        assert_eq!(value.version, version); // Version should be the one provided
+        assert!(value.ptr.is_null()); // Pointer should be null
+        assert!(value.blob_ptr.is_null()); // Blob pointer should be null
+    }
+
+    #[test]
+    fn test_value_is_deleted() {
+        let mut value = Value::new_with_version(b"", 100);
+        value.meta |= BIT_DELETE; // Mark as deleted
+        assert!(value.is_deleted());
+    }
+
+    #[test]
+    fn test_value_is_blob_ref() {
+        let mut value = Value::new_with_version(b"", 100);
+        value.set_blob_ref(); // Set as blob reference
+        assert!(value.is_blob_ref());
+    }
+
+    #[test]
+    fn test_value_encoded_size() {
+        let user_meta = b"user_meta"; // Example user metadata
+        let data = b"test_value"; // Actual value
+
+        // Create a combined data buffer that includes user_meta and data
+        let combined_data = [&user_meta[..], &data[..]].concat();
+
+        // Create a Value instance with user metadata
+        let value = Value::new_with_meta_version(
+            1,                        // Meta (set to 1 to indicate some state)
+            100,                      // Version
+            user_meta.len() as u8,    // Length of user metadata
+            combined_data.as_slice(), // Combined data
+        );
+
+        // Calculate the expected encoded size
+        let expected_size = 1 + 1 + VALUE_VERSION_LEN + user_meta.len() + data.len(); // Meta + user_meta_len + version + user_meta + value
+
+        // Assert the encoded size
+        assert_eq!(value.encoded_size(), expected_size); // Check the encoded size
+    }
+
+    #[test]
+    fn test_encode_buf() {
+        let meta: u8 = 1; // Example meta value
+        let user_meta = b"user_meta"; // Example user metadata
+        let version: u64 = 100; // Example version
+        let value = b"test_value"; // Actual value
+
+        // Call the encode_buf function
+        let encoded = Value::encode_buf(meta, user_meta, version, value);
+
+        // Calculate the expected size
+        let expected_size = 1 + 1 + VALUE_VERSION_LEN + user_meta.len() + value.len(); // Meta + user_meta_len + version + user_meta + value
+
+        // Assert the encoded size
+        assert_eq!(encoded.len(), expected_size);
+
+        // Verify the encoded data
+        assert_eq!(encoded[0], meta); // Check meta
+        assert_eq!(encoded[1], user_meta.len() as u8); // Check user metadata length
+
+        let version_from_encoded = LittleEndian::read_u64(
+            &encoded[VALUE_VERSION_OFF..VALUE_VERSION_OFF + VALUE_VERSION_LEN],
+        );
+        assert_eq!(version_from_encoded, version); // Check version
+
+        // Check user metadata
+        assert_eq!(
+            &encoded[VALUE_VERSION_OFF + VALUE_VERSION_LEN
+                ..VALUE_VERSION_OFF + VALUE_VERSION_LEN + user_meta.len()],
+            user_meta
+        );
+
+        // Check value data
+        assert_eq!(
+            &encoded[VALUE_VERSION_OFF + VALUE_VERSION_LEN + user_meta.len()..],
+            value
+        );
+    }
+
+    #[test]
+    fn test_value_encode() {
+        let user_meta = b"user_meta"; // Example user metadata
+        let data = b"test_value";
+        let combined_data = [&user_meta[..], &data[..]].concat();
+        let value = Value::new_with_meta_version(
+            1,                     // Meta
+            100,                   // Version
+            user_meta.len() as u8, // Length of user metadata
+            combined_data.as_slice(),
+        );
+
+        let mut buf = vec![0; value.encoded_size()];
+        value.encode(&mut buf);
+
+        // Verify the encoded data
+        assert_eq!(buf[0], 1); // Meta
+        assert_eq!(buf[1], user_meta.len() as u8); // User metadata length
+        let version =
+            LittleEndian::read_u64(&buf[VALUE_VERSION_OFF..VALUE_VERSION_OFF + VALUE_VERSION_LEN]);
+        assert_eq!(version, 100); // Compare the extracted version with 100
+        assert_eq!(
+            &buf[VALUE_VERSION_OFF + VALUE_VERSION_LEN
+                ..VALUE_VERSION_OFF + VALUE_VERSION_LEN + user_meta.len()],
+            user_meta
+        ); // User metadata
+        assert_eq!(
+            &buf[VALUE_VERSION_OFF + VALUE_VERSION_LEN + user_meta.len()..],
+            b"test_value"
+        ); // Value data
+    }
+
+    #[test]
+    fn test_value_decode() {
+        let user_meta = b"user_meta"; // Example user metadata
+        let data = b"test_value"; // Actual value
+
+        // Create a buffer with enough space for meta, user_meta_len, version, and value
+        let mut buf = vec![0; 29];
+        buf[0] = 1; // Meta
+        buf[1] = user_meta.len() as u8; // User meta length
+        LittleEndian::write_u64(&mut buf[VALUE_VERSION_OFF..], 100); // Version
+        let user_meta_start = VALUE_VERSION_OFF + VALUE_VERSION_LEN;
+        buf[user_meta_start..user_meta_start + user_meta.len()].copy_from_slice(user_meta); // User metadata
+        let value_start = user_meta_start + user_meta.len();
+        buf[value_start..value_start + data.len()].copy_from_slice(data); // Value data
+
+        // Decode the value from the buffer
+        let value = Value::decode(&buf);
+
+        // Assert the fields
+        assert_eq!(value.meta, 1); // Check the meta field
+        assert_eq!(value.user_meta_len, user_meta.len() as u8); // Length of user_meta
+        assert_eq!(value.version, 100);
+        assert_eq!(value.user_meta(), user_meta); // Check user metadata
+        assert_eq!(value.get_value(), data); // Check the actual value
+    }
+
+    #[test]
+    fn test_value_encode_with_blob_ref() {
+        let mut value = Value::new_with_version(b"test_value", 100);
+        value.set_blob_ref(); // Set as blob reference
+        let mut buf = vec![0; value.encoded_size_with_blob_ref()];
+        value.encode_with_blob_ref(
+            &mut buf,
+            BlobRef {
+                fid: 42,
+                offset: 100,
+                len: 100,
+                original_len: 100,
+            },
+        );
+
+        // Verify the encoded data
+        assert_eq!(buf[0], 4); // Meta with blob ref
+        assert_eq!(buf[1], 0); // User meta length
+        let version =
+            LittleEndian::read_u64(&buf[VALUE_VERSION_OFF..VALUE_VERSION_OFF + VALUE_VERSION_LEN]);
+        assert_eq!(version, 100); // Compare the extracted version with 100
+        // Check blob reference data
+        let blob_ref = BlobRef::deserialize(&buf[VALUE_VERSION_OFF + VALUE_VERSION_LEN..]);
+        assert_eq!(blob_ref.fid, 42);
+        assert_eq!(blob_ref.offset, 100);
+        assert_eq!(blob_ref.len, 100);
+        assert_eq!(blob_ref.original_len, 100);
+    }
+
+    #[test]
+    fn test_value_get_blob_ref() {
+        let mut value = Value::new_with_version(b"", 100);
+        value.set_blob_ref(); // Set as blob reference
+        let buf = vec![0; 100];
+        value.fill_in_blob(&buf);
+        assert!(!value.is_blob_ref());
+    }
+
+    #[test]
+    fn test_get_version() {
+        // Prepare a buffer with a known version
+        let version_value: u64 = 12345;
+        let mut buf = vec![0; VALUE_VERSION_LEN];
+        LittleEndian::write_u64(&mut buf, version_value); // Write the version into the buffer
+
+        // Call the get_version function
+        let version = Value::get_version(&buf);
+
+        // Assert that the retrieved version matches the expected value
+        assert_eq!(version, version_value);
+    }
 
     #[test]
     fn test_data_bound_overlap() {
