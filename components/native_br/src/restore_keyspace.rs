@@ -330,7 +330,7 @@ pub fn restore_keyspace(
     step!("Keyspace {keyspace_tag} flush {flush_cnt} shards");
 
     reporter.report_step(RestoreStep::TruncateTs);
-    let truncate_ts_cnt = cluster.truncate_ts()?;
+    let truncate_ts_cnt = runtime.block_on(cluster.truncate_ts())?;
     step!(
         "Keyspace {} truncate {} shards to ts {}",
         keyspace_tag,
@@ -411,7 +411,8 @@ pub fn restore_keyspace(
 
         // Align target regions.
         reporter.report_step(RestoreStep::AlignRegions);
-        let (aligned_regions, trimmed_shards_cnt) = cluster.align_target_regions(target_regions)?;
+        let (aligned_regions, trimmed_shards_cnt) =
+            cluster.align_target_regions(target_regions, runtime)?;
         step!(
             "Keyspace {} align {} backup shards to {} target regions and trim {} over bound shards",
             keyspace_tag,
@@ -1811,10 +1812,10 @@ impl BackupCluster {
         Err(box_err!("wait_for_mem_table_flush timeout"))
     }
 
-    fn truncate_ts(&mut self) -> Result<usize> {
+    async fn truncate_ts(&mut self) -> Result<usize> {
         let mut truncate_cnt = 0_usize;
         for shard_id in self.get_shards_need_flush_and_truncate() {
-            truncate_cnt += self.truncate_shard_ts(shard_id)? as usize;
+            truncate_cnt += self.truncate_shard_ts(shard_id).await? as usize;
         }
         Ok(truncate_cnt)
     }
@@ -1865,13 +1866,14 @@ impl BackupCluster {
     fn align_target_regions(
         &mut self,
         target_regions: Vec<RawRegion>,
+        runtime: &Runtime,
     ) -> Result<(
         Vec<AlignedRegion>,
         usize, // number of trimmed shards
     )> {
         let aligned_regions =
             Self::align_target_regions_impl(&self.sorted_shards, &self.shards, target_regions);
-        let trimmed_shards_cnt = self.trim_over_bound_shards(&aligned_regions)?;
+        let trimmed_shards_cnt = runtime.block_on(self.trim_over_bound_shards(&aligned_regions))?;
         Ok((aligned_regions, trimmed_shards_cnt))
     }
 
@@ -2020,7 +2022,7 @@ impl BackupCluster {
         Ok((target_shards, sstables_cnt))
     }
 
-    fn truncate_shard_ts(&mut self, shard_id: u64) -> Result<bool /* has_truncate_ts */> {
+    async fn truncate_shard_ts(&mut self, shard_id: u64) -> Result<bool /* has_truncate_ts */> {
         let shard_meta = &self.get_shard(shard_id).unwrap().meta;
         let kvengine = self.kv_engine.as_ref().unwrap();
         let shard = kvengine
@@ -2028,7 +2030,8 @@ impl BackupCluster {
             .expect("Could not find shard with meta");
         let keyspace_id = self.keyspace_id;
         let mut res_cs = kvengine
-            .truncate_with_ts(&shard, self.truncate_ts.into())?
+            .truncate_with_ts(&shard, self.truncate_ts.into())
+            .await?
             .unwrap();
         if res_cs.has_truncate_ts() && !ShardMeta::is_empty_table_change(res_cs.get_truncate_ts()) {
             let shard = self.get_shard_mut(shard_id).unwrap();
@@ -2050,11 +2053,11 @@ impl BackupCluster {
         }
     }
 
-    fn trim_over_bound(&mut self, shard_id: u64) -> Result<bool /* has_trim_over_bound */> {
+    async fn trim_over_bound(&mut self, shard_id: u64) -> Result<bool /* has_trim_over_bound */> {
         let shard = self.get_shard(shard_id).unwrap();
         let kvengine = self.kv_engine.as_ref().unwrap();
 
-        let mut res_cs = kvengine.trim_over_bound_by_meta(&shard.meta)?;
+        let mut res_cs = kvengine.trim_over_bound_by_meta(&shard.meta).await?;
         let keyspace_id = self.keyspace_id;
         if res_cs.has_trim_over_bound() {
             let shard = self.get_shard_mut(shard_id).unwrap();
@@ -2076,7 +2079,7 @@ impl BackupCluster {
         }
     }
 
-    fn trim_over_bound_shards(
+    async fn trim_over_bound_shards(
         &mut self,
         aligned_regions: &[AlignedRegion],
     ) -> Result<usize /* number of trimmed shards */> {
@@ -2093,7 +2096,7 @@ impl BackupCluster {
                 unique_shards.insert(shard_id);
 
                 // TODO: Run in parallel.
-                if self.trim_over_bound(shard_id)? {
+                if self.trim_over_bound(shard_id).await? {
                     trim_shards_cnt += 1;
                 }
             }

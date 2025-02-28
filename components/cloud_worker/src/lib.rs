@@ -264,6 +264,7 @@ fn start_server(
     let ctx = Arc::new(server::Context {
         compression_lvl,
         checksum_type,
+        thread_pool: thread_pool.handle().clone(),
         s3fs: s3fs.clone(),
         cache_fs,
         pd: pd.clone(),

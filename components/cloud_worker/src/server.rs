@@ -56,6 +56,7 @@ use crate::{
 pub(crate) struct Context {
     pub compression_lvl: i32,
     pub checksum_type: ChecksumType,
+    pub thread_pool: tokio::runtime::Handle,
     pub s3fs: Arc<S3Fs>,
     pub cache_fs: Arc<CacheFs>,
     pub load_manager: Arc<LoadDataManager>,
@@ -134,6 +135,7 @@ where
 
                             let allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
                             let resp = kvengine::handle_remote_compaction(
+                                ctx.thread_pool.clone(),
                                 ctx.s3fs.clone(),
                                 req,
                                 ctx.compression_lvl,

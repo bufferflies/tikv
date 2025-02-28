@@ -8,14 +8,15 @@ use std::{
     ops::{Deref, Sub},
     path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use api_version::ApiV2;
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
-use futures::executor::block_on;
+use file_system::IoType;
+use futures::future::try_join_all;
 use http::StatusCode;
 use hyper::Client;
 use itertools::{Either, Itertools};
@@ -33,7 +34,8 @@ use tidb_query_datatype::{
     },
     VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC,
 };
-use tikv_util::mpsc;
+use tikv_util::{box_err, retry::sleep_async, sys::thread::ThreadBuildWrapper, time::Instant};
+use tokio::sync::mpsc;
 
 use crate::{
     dfs,
@@ -95,7 +97,7 @@ impl RemoteCompactors {
         let mut remote_urls = Vec::new();
         if !remote_url.is_empty() {
             remote_urls.push(RemoteCompactor::new(remote_url, true));
-        };
+        }
         Self {
             remote_urls,
             index: 0,
@@ -205,7 +207,10 @@ impl CompactionClient {
         // compactor when the compactor is not permanent and the last failure is
         // less than the retry interval.
         if remote_compactors.remote_urls.is_empty()
-            || (remote_compactors.last_failure.elapsed().le(&RETRY_INTERVAL)
+            || (remote_compactors
+                .last_failure
+                .saturating_elapsed()
+                .le(&RETRY_INTERVAL)
                 && !remote_compactors.remote_urls[0].permanent)
         {
             RemoteCompactor::default()
@@ -218,7 +223,7 @@ impl CompactionClient {
         }
     }
 
-    pub(crate) fn compact(&self, req: CompactionRequest) -> Result<pb::ChangeSet> {
+    pub(crate) async fn compact(&self, req: CompactionRequest) -> Result<pb::ChangeSet> {
         let encryption_key = if req.exported_encryption_key.is_empty() {
             None
         } else {
@@ -241,25 +246,16 @@ impl CompactionClient {
         let req = &ctx.req;
         let mut remote_compactor = self.get_remote_compactor();
         if remote_compactor.remote_url.is_empty() {
-            local_compact(&ctx)
+            local_compact(&ctx).await
         } else {
-            let (tx, rx) = tikv_util::mpsc::bounded(1);
             let mut retry_cnt = 0;
             loop {
-                let tx = tx.clone();
-                let req_clone = req.clone();
-                let client = self.clone();
-                let remote_url = remote_compactor.remote_url.clone();
-                self.dfs.get_runtime().spawn(async move {
-                    let result = client.remote_compact(&req_clone, remote_url).await;
-                    tx.send(result).unwrap();
-                });
-                match rx.recv().unwrap() {
+                match self.remote_compact(req, &remote_compactor.remote_url).await {
                     result @ Ok(_) => break result,
                     Err(e @ IncompatibleRemoteCompactor { .. }) => {
                         if self.allow_fallback_local {
                             warn!("fall back to local compactor due to error: {:?}", e);
-                            break local_compact(&ctx);
+                            break local_compact(&ctx).await;
                         } else {
                             warn!(
                                 "remote compactor is incompatible and local compaction is not allowed"
@@ -284,7 +280,7 @@ impl CompactionClient {
                             || (remote_compactor.permanent && retry_cnt >= 5)
                         {
                             if self.allow_fallback_local {
-                                break local_compact(&ctx);
+                                break local_compact(&ctx).await;
                             } else {
                                 warn!(
                                     "no remote compactor available and local compaction is not allowed"
@@ -292,7 +288,7 @@ impl CompactionClient {
                                 break Err(FallbackLocalCompactorDisabled);
                             }
                         }
-                        std::thread::sleep(Duration::from_secs(1));
+                        sleep_async(Duration::from_secs(1)).await;
                     }
                 }
             }
@@ -302,25 +298,27 @@ impl CompactionClient {
     async fn remote_compact(
         &self,
         comp_req: &CompactionRequest,
-        remote_url: String,
+        remote_url: &str,
     ) -> Result<pb::ChangeSet> {
         let body_str = serde_json::to_string(&comp_req).unwrap();
         let req = hyper::Request::builder()
             .method(hyper::Method::POST)
-            .uri(remote_url.clone())
+            .uri(remote_url)
             .header("content-type", "application/json")
             .body(hyper::Body::from(body_str))?;
         let tag = ShardTag::from_comp_req(comp_req);
-        info!("{} send request to remote compactor", tag);
+        debug!("{} send request to remote compactor", tag);
+        let start_time = Instant::now_coarse();
         let response = self.client.as_ref().unwrap().request(req).await?;
-        info!("{} got response from remote compactor", tag);
         let status = response.status();
+        info!("{} got response from remote compactor", tag;
+            "status" => ?status, "takes" => ?start_time.saturating_elapsed());
         let body = hyper::body::to_bytes(response.into_body()).await?;
         if !status.is_success() {
             let err_msg = String::from_utf8_lossy(body.chunk()).to_string();
             return if status == INCOMPATIBLE_COMPACTOR_ERROR_CODE {
                 Err(IncompatibleRemoteCompactor {
-                    url: remote_url,
+                    url: remote_url.to_string(),
                     msg: err_msg,
                 })
             } else {
@@ -565,12 +563,12 @@ impl Engine {
         }
     }
 
-    pub(crate) fn run_compaction(&self, compact_rx: mpsc::Receiver<CompactMsg>) {
+    pub(crate) fn run_compaction(&self, compact_rx: tikv_util::mpsc::Receiver<CompactMsg>) {
         let mut runner = CompactRunner::new(self.clone(), compact_rx);
         runner.run();
     }
 
-    pub(crate) fn compact(&self, shard: Arc<Shard>) -> Option<Result<pb::ChangeSet>> {
+    pub(crate) async fn compact(&self, shard: Arc<Shard>) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
         if !shard.ready_to_compact() {
             info!("Shard {} is not ready for compaction", tag);
@@ -578,26 +576,28 @@ impl Engine {
         }
         store_bool(&shard.compacting, true);
         match shard.get_compaction_priority() {
-            Some(CompactionPriority::L0 { .. }) => self.trigger_l0_compaction(&shard),
+            Some(CompactionPriority::L0 { .. }) => self.trigger_l0_compaction(&shard).await,
             Some(CompactionPriority::L1Plus { cf, level, .. }) => {
-                self.trigger_l1_plus_compaction(&shard, cf, level)
+                self.trigger_l1_plus_compaction(&shard, cf, level).await
             }
-            Some(CompactionPriority::Major { .. }) => self.trigger_major_compaction(&shard),
-            Some(CompactionPriority::DestroyRange) => self.destroy_range(&shard).transpose(),
-            Some(CompactionPriority::TruncateTs) => self.truncate_ts(&shard).transpose(),
-            Some(CompactionPriority::TrimOverBound) => self.trim_over_bound(&shard).transpose(),
-            Some(CompactionPriority::L0ToColumnar) => self.trigger_l0_to_columnar(&shard),
+            Some(CompactionPriority::Major { .. }) => self.trigger_major_compaction(&shard).await,
+            Some(CompactionPriority::DestroyRange) => self.destroy_range(&shard).await.transpose(),
+            Some(CompactionPriority::TruncateTs) => self.truncate_ts(&shard).await.transpose(),
+            Some(CompactionPriority::TrimOverBound) => {
+                self.trim_over_bound(&shard).await.transpose()
+            }
+            Some(CompactionPriority::L0ToColumnar) => self.trigger_l0_to_columnar(&shard).await,
             Some(CompactionPriority::ColumnarL0 { .. }) => {
-                self.trigger_columnar_l0_compaction(&shard)
+                self.trigger_columnar_l0_compaction(&shard).await
             }
             Some(CompactionPriority::ColumnarL1 { .. }) => {
-                self.trigger_columnar_l1_compaction(&shard)
+                self.trigger_columnar_l1_compaction(&shard).await
             }
             Some(CompactionPriority::ColumnarMajor { .. }) => {
-                self.trigger_columnar_major_compaction(&shard)
+                self.trigger_columnar_major_compaction(&shard).await
             }
             Some(CompactionPriority::ColumnarClear) => {
-                self.trigger_remove_columnar_compaction(&shard)
+                self.trigger_remove_columnar_compaction(&shard).await
             }
             Some(CompactionPriority::UpdateVectorIndex {
                 table_id,
@@ -605,7 +605,10 @@ impl Engine {
                 col_id,
                 rebuild,
                 ..
-            }) => self.trigger_vector_index_update(&shard, table_id, index_id, col_id, rebuild),
+            }) => {
+                self.trigger_vector_index_update(&shard, table_id, index_id, col_id, rebuild)
+                    .await
+            }
             None => {
                 info!("Shard {} is not urgent for compaction", tag);
                 store_bool(&shard.compacting, false);
@@ -614,7 +617,7 @@ impl Engine {
         }
     }
 
-    pub(crate) fn set_alloc_ids_for_request(
+    pub(crate) async fn set_alloc_ids_for_request(
         &self,
         req: &mut CompactionRequest,
         cur_num_files: usize,
@@ -622,7 +625,8 @@ impl Engine {
     ) {
         let ids = self
             .id_allocator
-            .alloc_id(num_files_at_most * 2 + 16 + cur_num_files)
+            .alloc_id_async(num_files_at_most * 2 + 16 + cur_num_files)
+            .await
             .unwrap();
         req.file_ids = ids;
     }
@@ -684,7 +688,7 @@ impl Engine {
         }
     }
 
-    fn destroy_range(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
+    async fn destroy_range(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
         let del_prefixes = shard.get_del_prefixes();
         if del_prefixes.is_empty() {
             info!(
@@ -713,23 +717,25 @@ impl Engine {
                 overlaps.push((t.id(), 0, -1));
             }
         }
-        data.for_each_level(|cf, lh| {
-            for t in lh.tables.as_slice() {
-                if del_prefixes.cover_range(t.smallest(), t.biggest()) {
-                    let mut delete = pb::TableDelete::default();
-                    delete.set_id(t.id());
-                    delete.set_level(lh.level as u32);
-                    delete.set_cf(cf as i32);
-                    deletes.push(delete);
-                } else if del_prefixes
-                    .inner_delete_bounds()
-                    .any(|bound| t.has_overlap(bound))
-                {
-                    overlaps.push((t.id(), lh.level as u32, cf as i32));
+        for cf in 0..NUM_CFS {
+            let scf = data.get_cf(cf);
+            for lh in &scf.levels {
+                for t in lh.tables.as_slice() {
+                    if del_prefixes.cover_range(t.smallest(), t.biggest()) {
+                        let mut delete = pb::TableDelete::default();
+                        delete.set_id(t.id());
+                        delete.set_level(lh.level as u32);
+                        delete.set_cf(cf as i32);
+                        deletes.push(delete);
+                    } else if t
+                        .has_any_overlap_async(del_prefixes.inner_delete_bounds())
+                        .await
+                    {
+                        overlaps.push((t.id(), lh.level as u32, cf as i32));
+                    }
                 }
             }
-            false
-        });
+        }
 
         let mut columnar_deletes = vec![];
         data.for_each_columnar_level(|cl| {
@@ -781,7 +787,8 @@ impl Engine {
             let mut req = self.new_compact_request_with_shard(shard);
             req.file_ids = self
                 .id_allocator
-                .alloc_id(overlaps.len() + col_overlaps.len())
+                .alloc_id_async(overlaps.len() + col_overlaps.len())
+                .await
                 .unwrap();
             let in_place_compaction_type = InPlaceCompaction::DestroyRange(del_prefixes.marshal());
             let in_place_compaction = InPlaceCompactionCtx {
@@ -793,7 +800,7 @@ impl Engine {
                 spec: in_place_compaction_type,
             };
             req.compaction_tp = CompactionType::InPlaceWithColumnar(in_place_compaction);
-            let mut cs = self.comp_client.compact(req)?;
+            let mut cs = self.comp_client.compact(req).await?;
             let dr = cs.mut_destroy_range();
             deletes.extend(dr.take_table_deletes().into_iter());
             columnar_deletes.extend(dr.take_columnar_deletes().into_iter());
@@ -808,12 +815,13 @@ impl Engine {
         Ok(Some(cs))
     }
 
-    pub(crate) fn truncate_ts(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
+    pub(crate) async fn truncate_ts(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
         self.truncate_with_ts(shard, shard.get_truncate_ts().unwrap())
+            .await
     }
 
     // Also used by keyspace restore
-    pub fn truncate_with_ts(
+    pub async fn truncate_with_ts(
         &self,
         shard: &Shard,
         truncate_ts: TruncateTs,
@@ -863,7 +871,8 @@ impl Engine {
             let mut req = self.new_compact_request_with_shard(shard);
             req.file_ids = self
                 .id_allocator
-                .alloc_id(overlaps.len() + col_overlaps.len())
+                .alloc_id_async(overlaps.len() + col_overlaps.len())
+                .await
                 .unwrap();
             let in_place_compaction = InPlaceCompaction::TruncateTs(truncate_ts.inner());
             let in_place_compaction_ctx = InPlaceCompactionCtx {
@@ -875,7 +884,7 @@ impl Engine {
                 spec: in_place_compaction,
             };
             req.compaction_tp = CompactionType::InPlaceWithColumnar(in_place_compaction_ctx);
-            self.comp_client.compact(req)?
+            self.comp_client.compact(req).await?
         };
         cs.set_shard_id(shard.id);
         cs.set_shard_ver(shard.ver);
@@ -884,7 +893,7 @@ impl Engine {
         Ok(Some(cs))
     }
 
-    fn trim_over_bound(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
+    async fn trim_over_bound(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
         let data = shard.get_data();
         if !shard.get_trim_over_bound() {
             // `data.trim_over_bound is possible to be false.
@@ -973,7 +982,8 @@ impl Engine {
             let mut req = self.new_compact_request_with_shard(shard);
             req.file_ids = self
                 .id_allocator
-                .alloc_id(overlaps.len() + col_overlaps.len())
+                .alloc_id_async(overlaps.len() + col_overlaps.len())
+                .await
                 .unwrap();
             let inplace_compaction = InPlaceCompactionCtx {
                 file_ids: overlaps,
@@ -984,7 +994,7 @@ impl Engine {
                 spec: InPlaceCompaction::TrimOverBound,
             };
             req.compaction_tp = CompactionType::InPlaceWithColumnar(inplace_compaction);
-            let mut cs = self.comp_client.compact(req)?;
+            let mut cs = self.comp_client.compact(req).await?;
             let tc = cs.mut_trim_over_bound();
             deletes.extend(tc.take_table_deletes().into_iter());
             columnar_deletes.extend(tc.take_columnar_deletes().into_iter());
@@ -999,7 +1009,7 @@ impl Engine {
         Ok(Some(cs))
     }
 
-    pub fn trim_over_bound_by_meta(&self, meta: &ShardMeta) -> Result<pb::ChangeSet> {
+    pub async fn trim_over_bound_by_meta(&self, meta: &ShardMeta) -> Result<pb::ChangeSet> {
         // Tables that are entirely over bound.
         let mut deletes = vec![];
         let mut columnar_deletes = vec![];
@@ -1053,7 +1063,11 @@ impl Engine {
             cs
         } else {
             let mut req = self.new_compact_request_with_meta(meta);
-            req.file_ids = self.id_allocator.alloc_id(over_bounds.len()).unwrap();
+            req.file_ids = self
+                .id_allocator
+                .alloc_id_async(over_bounds.len())
+                .await
+                .unwrap();
             let in_place_compaction_ctx = InPlaceCompactionCtx {
                 file_ids: over_bounds,
                 col_file_ids: col_over_bounds,
@@ -1063,7 +1077,7 @@ impl Engine {
                 spec: InPlaceCompaction::TrimOverBound,
             };
             req.compaction_tp = CompactionType::InPlaceWithColumnar(in_place_compaction_ctx);
-            let mut cs = self.comp_client.compact(req)?;
+            let mut cs = self.comp_client.compact(req).await?;
             let tc = cs.mut_trim_over_bound();
             deletes.extend(tc.take_table_deletes().into_iter());
             columnar_deletes.extend(tc.take_columnar_deletes().into_iter());
@@ -1088,7 +1102,10 @@ impl Engine {
         None
     }
 
-    pub(crate) fn trigger_l0_compaction(&self, shard: &Shard) -> Option<Result<pb::ChangeSet>> {
+    pub(crate) async fn trigger_l0_compaction(
+        &self,
+        shard: &Shard,
+    ) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
         let data = shard.get_data();
         if data.l0_tbls.is_empty() {
@@ -1191,7 +1208,8 @@ impl Engine {
             &mut req,
             l0_tbls.len() + multi_cfs_l1_tbls.len(),
             estimated_num_files,
-        );
+        )
+        .await;
         let l0_compaction = L0Compaction {
             safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
             l0_tables: l0_tbls,
@@ -1201,7 +1219,7 @@ impl Engine {
         };
         req.compaction_tp = CompactionType::L0(l0_compaction);
         info!("start compact L0 for {}", tag);
-        Some(self.comp_client.compact(req))
+        Some(self.comp_client.compact(req).await)
     }
 
     fn try_move_down_l0(&self, shard: &Shard, shard_data: &ShardData) -> Option<pb::ChangeSet> {
@@ -1266,7 +1284,7 @@ impl Engine {
         Some(cs)
     }
 
-    fn trigger_l1_plus_compaction(
+    async fn trigger_l1_plus_compaction(
         &self,
         shard: &Shard,
         cf: isize,
@@ -1430,7 +1448,8 @@ impl Engine {
             &mut req,
             upper_level_table_ids.len() + lower_level_table_ids.len(),
             estimated_num_files,
-        );
+        )
+        .await;
         let l1_plus: L1PlusCompaction = L1PlusCompaction {
             cf,
             level,
@@ -1449,10 +1468,13 @@ impl Engine {
             req.file_ids.len(),
             upper_size + lower_size,
         );
-        Some(self.comp_client.compact(req))
+        Some(self.comp_client.compact(req).await)
     }
 
-    pub(crate) fn trigger_major_compaction(&self, shard: &Shard) -> Option<Result<pb::ChangeSet>> {
+    pub(crate) async fn trigger_major_compaction(
+        &self,
+        shard: &Shard,
+    ) -> Option<Result<pb::ChangeSet>> {
         if self.opts.compaction_request_version < MAJOR_COMPACTION_MIN_REQUEST_VERSION {
             return Some(Err(CompactionNotRetryable(format!(
                 "trigger_major_compaction: compaction_request_version must >= {}",
@@ -1501,7 +1523,8 @@ impl Engine {
             &mut req,
             data.l0_tbls.len() + num_ln_files + data.blob_tbl_map.len(),
             estimated_num_files,
-        );
+        )
+        .await;
         let major_compaction = MajorCompaction {
             safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
             l0_tables: data.l0_tbls.iter().map(|t| t.id()).collect(),
@@ -1518,14 +1541,14 @@ impl Engine {
             total_size,
         );
         let update_inner_key_offset = self.opts.update_inner_key_offset;
-        Some(self.comp_client.compact(req).map(|mut cs| {
+        Some(self.comp_client.compact(req).await.map(|mut cs| {
             let major_compaction = cs.mut_major_compaction();
             major_compaction.set_update_inner_key_offset(update_inner_key_offset);
             cs
         }))
     }
 
-    pub(crate) fn trigger_remove_columnar_compaction(
+    pub(crate) async fn trigger_remove_columnar_compaction(
         &self,
         shard: &Shard,
     ) -> Option<Result<pb::ChangeSet>> {
@@ -1550,10 +1573,13 @@ impl Engine {
         };
         req.compaction_tp = CompactionType::ColumnarMajor(columnar_major_compaction);
         info!("start remove columnar for {}", tag);
-        Some(self.comp_client.compact(req))
+        Some(self.comp_client.compact(req).await)
     }
 
-    pub(crate) fn trigger_l0_to_columnar(&self, shard: &Shard) -> Option<Result<pb::ChangeSet>> {
+    pub(crate) async fn trigger_l0_to_columnar(
+        &self,
+        shard: &Shard,
+    ) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
         let data = shard.get_data();
         if data.col_levels.unconverted_l0s.is_empty() {
@@ -1580,15 +1606,16 @@ impl Engine {
             columnar_config: self.opts.columnar_build_options,
         };
         req.compaction_tp = CompactionType::Columnar(columnar_compaction);
-        self.set_alloc_ids_for_request(&mut req, num_l0s, num_l0s);
+        self.set_alloc_ids_for_request(&mut req, num_l0s, num_l0s)
+            .await;
         info!(
             "start covert L0 to columnar for {}, num_l0s {}",
             tag, num_l0s
         );
-        Some(self.comp_client.compact(req))
+        Some(self.comp_client.compact(req).await)
     }
 
-    pub(crate) fn trigger_columnar_major_compaction(
+    pub(crate) async fn trigger_columnar_major_compaction(
         &self,
         shard: &Shard,
     ) -> Option<Result<pb::ChangeSet>> {
@@ -1639,7 +1666,8 @@ impl Engine {
             &mut req,
             data.l0_tbls.len() + num_ln_files + data.blob_tbl_map.len(),
             estimated_num_files,
-        );
+        )
+        .await;
         let major_compaction = ColumnarMajorCompaction {
             safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
             l0_tables: data.l0_tbls.iter().map(|t| t.id()).collect(),
@@ -1658,10 +1686,10 @@ impl Engine {
             total_size,
         );
 
-        Some(self.comp_client.compact(req))
+        Some(self.comp_client.compact(req).await)
     }
 
-    pub(crate) fn trigger_columnar_l0_compaction(
+    pub(crate) async fn trigger_columnar_l0_compaction(
         &self,
         shard: &Shard,
     ) -> Option<Result<pb::ChangeSet>> {
@@ -1706,7 +1734,8 @@ impl Engine {
         let schema_file_id = data.schema_file.as_ref().unwrap().get_file_id();
         let columnar_config = self.opts.columnar_build_options;
         let estimated_num_files = total_size as usize / columnar_config.max_columnar_table_size;
-        self.set_alloc_ids_for_request(&mut req, l0_tbl_ids.len(), estimated_num_files);
+        self.set_alloc_ids_for_request(&mut req, l0_tbl_ids.len(), estimated_num_files)
+            .await;
         let col_compaction = ColumnarCompaction {
             level: 0,
             safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
@@ -1718,10 +1747,10 @@ impl Engine {
         };
         req.compaction_tp = CompactionType::Columnar(col_compaction);
         info!("start columnar compact L0 for {}", tag);
-        Some(self.comp_client.compact(req))
+        Some(self.comp_client.compact(req).await)
     }
 
-    pub(crate) fn trigger_columnar_l1_compaction(
+    pub(crate) async fn trigger_columnar_l1_compaction(
         &self,
         shard: &Shard,
     ) -> Option<Result<pb::ChangeSet>> {
@@ -1793,7 +1822,8 @@ impl Engine {
             &mut req,
             l1_tbl_ids.len() + l2_tbl_ids.len(),
             estimated_num_files,
-        );
+        )
+        .await;
         let schema_file_id = data.schema_file.as_ref().unwrap().get_file_id();
         let columnar_compaction = ColumnarCompaction {
             level,
@@ -1812,10 +1842,10 @@ impl Engine {
             req.file_ids.len(),
             total_size,
         );
-        Some(self.comp_client.compact(req))
+        Some(self.comp_client.compact(req).await)
     }
 
-    pub(crate) fn trigger_vector_index_update(
+    pub(crate) async fn trigger_vector_index_update(
         &self,
         shard: &Shard,
         table_id: i64,
@@ -1866,7 +1896,7 @@ impl Engine {
             col_file_ids,
             remove_file_ids,
         });
-        Some(self.comp_client.compact(req))
+        Some(self.comp_client.compact(req).await)
     }
 
     pub(crate) fn handle_compact_response(&self, cs: pb::ChangeSet) {
@@ -2021,7 +2051,7 @@ impl BoundedDataSet for KeyRange {
     }
 }
 
-fn load_table_files(
+async fn load_table_files(
     tbl_ids: &[u64],
     fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
@@ -2029,13 +2059,13 @@ fn load_table_files(
     for_restore: bool,
 ) -> Result<Vec<Arc<dyn File>>> {
     if local_dir.is_none() {
-        return load_table_files_from_dfs(tbl_ids, fs, opts);
+        return load_table_files_from_dfs(tbl_ids, fs, opts).await;
     }
 
     let (mut files_loaded, files_failed) =
         load_table_files_from_local(tbl_ids, local_dir.unwrap(), for_restore, opts);
     if !files_failed.is_empty() {
-        files_loaded.extend(load_table_files_from_dfs(&files_failed, fs, opts)?);
+        files_loaded.extend(load_table_files_from_dfs(&files_failed, fs, opts).await?);
     }
     Ok(files_loaded)
 }
@@ -2080,39 +2110,32 @@ fn load_table_files_from_local(
     (files_loaded, files_failed)
 }
 
-fn load_table_files_from_dfs(
+async fn load_table_files_from_dfs(
     tbl_ids: &[u64],
     fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
 ) -> Result<Vec<Arc<dyn File>>> {
-    let mut files = vec![];
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(u64, Bytes)>>(tbl_ids.len());
-    for id in tbl_ids {
-        let aid = *id;
-        let atx = tx.clone();
+    let mut tasks = Vec::with_capacity(tbl_ids.len());
+    for &id in tbl_ids {
         let afs = fs.clone();
-        fs.get_runtime().spawn(async move {
-            let res = afs
-                .read_file(aid, opts)
+        let task = fs.get_runtime().spawn(async move {
+            afs.read_file(id, opts)
                 .await
-                .map(|data| (aid, data))
-                .map_err(|e| Error::DfsError(e));
-            atx.send(res).map_err(|_| "send file data failed").unwrap();
+                .map(|data| (id, data))
+                .map_err(|e| Error::DfsError(e))
         });
+        tasks.push(task);
     }
-    let mut errors = vec![];
-    for _ in tbl_ids {
-        match rx.recv().unwrap() {
-            Err(err) => errors.push(err),
-            Ok((id, data)) => {
-                let file: Arc<dyn File> = Arc::new(InMemFile::new(id, data));
-                files.push(file);
-            }
-        }
-    }
-    if !errors.is_empty() {
-        return Err(errors.pop().unwrap());
-    }
+    let results: Vec<(u64, Bytes)> = try_join_all(tasks)
+        .await
+        .map_err(|e| -> Error { box_err!("load_table_files_from_dfs: {:?}", e) })?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let files: Vec<Arc<dyn File>> = results
+        .into_iter()
+        .map(|(id, data)| Arc::new(InMemFile::new(id, data)) as _)
+        .collect();
+    debug_assert_eq!(files.len(), tbl_ids.len());
     Ok(files)
 }
 
@@ -2147,42 +2170,37 @@ fn files_to_columnar_tables(files: Vec<Arc<dyn File>>) -> Vec<ColumnarFile> {
         .collect()
 }
 
-fn load_blob_tables(
+async fn load_blob_tables(
     fs: Arc<dyn dfs::Dfs>,
     blob_table_ids: &[u64],
     opts: dfs::Options,
 ) -> Result<HashMap<u64, BlobTable>> {
-    let mut blob_tables = HashMap::new();
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(u64, Bytes)>>(blob_table_ids.len());
-    for id in blob_table_ids {
-        let aid = *id;
-        let atx = tx.clone();
+    let mut tasks = Vec::with_capacity(blob_table_ids.len());
+    for &id in blob_table_ids {
         let afs = fs.clone();
-        fs.get_runtime().spawn(async move {
-            let res = afs
-                .read_file(aid, opts)
+        let task = fs.get_runtime().spawn(async move {
+            afs.read_file(id, opts)
                 .await
-                .map(|data| (aid, data))
-                .map_err(|e| Error::DfsError(e));
-            atx.send(res).map_err(|_| "send file data failed").unwrap();
+                .map(|data| (id, data))
+                .map_err(|e| Error::DfsError(e))
         });
+        tasks.push(task);
     }
-    let mut errors = vec![];
-    for _ in blob_table_ids {
-        match rx.recv().unwrap() {
-            Err(err) => errors.push(err),
-            Ok((id, data)) => {
-                blob_tables.insert(id, BlobTable::from_bytes(data)?);
-            }
-        }
+    let results = try_join_all(tasks)
+        .await
+        .map_err(|e| -> Error { box_err!("load_blob_tables: {:?}", e) })?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let mut blob_tables = HashMap::new();
+    for (id, data) in results {
+        blob_tables.insert(id, BlobTable::from_bytes(data)?);
     }
-    if !errors.is_empty() {
-        return Err(errors.pop().unwrap());
-    }
+    debug_assert_eq!(blob_tables.len(), blob_table_ids.len());
     Ok(blob_tables)
 }
 
 pub async fn handle_remote_compaction(
+    thread_pool: tokio::runtime::Handle,
     dfs: Arc<dyn dfs::Dfs>,
     req: hyper::Request<hyper::Body>,
     compression_lvl: i32,
@@ -2231,26 +2249,19 @@ pub async fn handle_remote_compaction(
         for_restore: false,
         checksum_type,
     };
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
+    let task = thread_pool.spawn(tikv_util::init_task_local(async move {
         tikv_util::set_current_region(ctx.req.shard_id);
-        let result = local_compact(&ctx);
-        if let Err(err) = tx.send(result) {
-            // Send failed only when `rx` is dropped, should happen only when the server is
-            // shutting down.
-            let tag = ShardTag::from_comp_req(&ctx.req);
-            warn!("{} failed to send compaction result: {:?}", tag, err);
-        }
-    });
-    match rx.await.unwrap() {
-        Ok(cs) => {
+        local_compact(&ctx).await
+    }));
+    match task.await {
+        Ok(Ok(cs)) => {
             let data = cs.write_to_bytes().unwrap();
             Ok(hyper::Response::builder()
                 .status(200)
                 .body(data.into())
                 .unwrap())
         }
-        Err(err) => {
+        err @ Err(_) | err @ Ok(Err(_)) => {
             let err_str = format!("{:?}", err);
             error!("compaction failed {}", err_str);
             let body = hyper::Body::from(err_str);
@@ -2317,13 +2328,9 @@ impl LocalIdAllocator {
             panic!("compaction runs out of file ids");
         })
     }
-
-    fn block_on_alloc_id(&mut self) -> u64 {
-        block_on(self.alloc_id())
-    }
 }
 
-fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
+async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
     let req = &ctx.req;
     if req.compactor_version != CURRENT_COMPACTOR_VERSION {
         return Err(CompactionNotRetryable(format!(
@@ -2345,23 +2352,17 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             spec,
         } => match spec {
             InPlaceCompaction::DestroyRange(del_prefix) => {
-                cs.set_destroy_range(compact_destroy_range(
-                    ctx,
-                    *block_size,
-                    file_ids,
-                    del_prefix,
-                )?);
+                cs.set_destroy_range(
+                    compact_destroy_range(ctx, *block_size, file_ids, del_prefix).await?,
+                );
             }
             InPlaceCompaction::TrimOverBound => {
-                cs.set_trim_over_bound(compact_trim_over_bound(ctx, *block_size, file_ids)?);
+                cs.set_trim_over_bound(compact_trim_over_bound(ctx, *block_size, file_ids).await?);
             }
             InPlaceCompaction::TruncateTs(truncate_ts) => {
-                cs.set_truncate_ts(compact_truncate_ts(
-                    ctx,
-                    *block_size,
-                    file_ids,
-                    *truncate_ts,
-                )?);
+                cs.set_truncate_ts(
+                    compact_truncate_ts(ctx, *block_size, file_ids, *truncate_ts).await?,
+                );
             }
             InPlaceCompaction::Unknown => unreachable!(),
         },
@@ -2375,19 +2376,20 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
         }) => match spec {
             InPlaceCompaction::DestroyRange(del_prefix) => {
                 let row_tb = if !file_ids.is_empty() {
-                    compact_destroy_range(ctx, *block_size, file_ids, del_prefix)?
+                    compact_destroy_range(ctx, *block_size, file_ids, del_prefix).await?
                 } else {
                     pb::TableChange::new()
                 };
                 let col_tb = if !col_file_ids.is_empty() {
-                    block_on(compact_destroy_range_for_columnar(
+                    compact_destroy_range_for_columnar(
                         ctx,
                         columnar_build_opts,
                         col_file_ids,
                         &mut id_allocator,
                         *schema_file_id,
                         del_prefix,
-                    ))?
+                    )
+                    .await?
                 } else {
                     pb::TableChange::new()
                 };
@@ -2395,18 +2397,19 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             }
             InPlaceCompaction::TrimOverBound => {
                 let row_tb = if !file_ids.is_empty() {
-                    compact_trim_over_bound(ctx, *block_size, file_ids)?
+                    compact_trim_over_bound(ctx, *block_size, file_ids).await?
                 } else {
                     pb::TableChange::new()
                 };
                 let col_tb = if !col_file_ids.is_empty() {
-                    block_on(compact_trim_over_bound_for_columnar(
+                    compact_trim_over_bound_for_columnar(
                         ctx,
                         columnar_build_opts,
                         col_file_ids,
                         &mut id_allocator,
                         *schema_file_id,
-                    ))?
+                    )
+                    .await?
                 } else {
                     pb::TableChange::new()
                 };
@@ -2414,19 +2417,20 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             }
             InPlaceCompaction::TruncateTs(truncate_ts) => {
                 let row_tb = if !file_ids.is_empty() {
-                    compact_truncate_ts(ctx, *block_size, file_ids, *truncate_ts)?
+                    compact_truncate_ts(ctx, *block_size, file_ids, *truncate_ts).await?
                 } else {
                     pb::TableChange::new()
                 };
                 let col_tb = if !col_file_ids.is_empty() {
-                    block_on(compact_truncate_ts_for_columnar(
+                    compact_truncate_ts_for_columnar(
                         ctx,
                         columnar_build_opts,
                         col_file_ids,
                         &mut id_allocator,
                         *schema_file_id,
                         *truncate_ts,
-                    ))?
+                    )
+                    .await?
                 } else {
                     pb::TableChange::new()
                 };
@@ -2435,38 +2439,32 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             InPlaceCompaction::Unknown => unreachable!(),
         },
         CompactionType::L0(l0_compaction) => {
-            cs.set_compaction(l0_compact_v3(ctx, l0_compaction, &mut id_allocator)?);
+            cs.set_compaction(l0_compact_v3(ctx, l0_compaction, &mut id_allocator).await?);
         }
         CompactionType::L1Plus(l1_plus_compaction) => {
-            cs.set_compaction(l1_plus_compact_v3(
-                ctx,
-                l1_plus_compaction,
-                &mut id_allocator,
-            )?);
+            cs.set_compaction(
+                l1_plus_compact_v3(ctx, l1_plus_compaction, &mut id_allocator).await?,
+            );
         }
         CompactionType::Major(major_compaction) => {
-            cs.set_major_compaction(major_compact_v3(ctx, major_compaction, &mut id_allocator)?);
+            cs.set_major_compaction(
+                major_compact_v3(ctx, major_compaction, &mut id_allocator).await?,
+            );
         }
         CompactionType::Columnar(columnar_compaction) => {
-            cs.set_columnar_compaction(block_on(columnar_compact(
-                ctx,
-                columnar_compaction,
-                &mut id_allocator,
-            ))?);
+            cs.set_columnar_compaction(
+                columnar_compact(ctx, columnar_compaction, &mut id_allocator).await?,
+            );
         }
         CompactionType::ColumnarMajor(columnar_major_compaction) => {
-            cs.set_columnar_compaction(block_on(columnar_major_compact(
-                ctx,
-                columnar_major_compaction,
-                &mut id_allocator,
-            ))?);
+            cs.set_columnar_compaction(
+                columnar_major_compact(ctx, columnar_major_compaction, &mut id_allocator).await?,
+            );
         }
         CompactionType::VectorIndex(update_vec_idx) => {
-            cs.set_update_vector_index(block_on(update_vector_index(
-                ctx,
-                update_vec_idx,
-                &mut id_allocator,
-            ))?);
+            cs.set_update_vector_index(
+                update_vector_index(ctx, update_vec_idx, &mut id_allocator).await?,
+            );
         }
         CompactionType::Unknown => unreachable!(),
     }
@@ -2474,7 +2472,7 @@ fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
 }
 
 /// Compact files in place to remove data covered by delete prefixes.
-fn compact_destroy_range(
+async fn compact_destroy_range(
     ctx: &CompactionCtx,
     block_size: usize,
     files: &[(u64, u32, i32)],
@@ -2494,7 +2492,8 @@ fn compact_destroy_range(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?
+    )
+    .await?
     .into_iter()
     .map(|file| (file.id(), file))
     .collect();
@@ -2503,7 +2502,7 @@ fn compact_destroy_range(
     let mut deletes = vec![];
     let mut creates = vec![];
     let del_prefixes = DeletePrefixes::unmarshal(del_prefix, req.keyspace_id());
-    let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
+    let mut tasks = Vec::with_capacity(req.file_ids.len());
     for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
         let mut delete = pb::TableDelete::new();
         delete.set_id(id);
@@ -2574,11 +2573,14 @@ fn compact_destroy_range(
             let res = builder.finish(0, &mut buf);
             (buf.into(), res.smallest, res.biggest, res.meta_offset)
         };
-        let tx = tx.clone();
         let dfs_clone = dfs.clone();
-        dfs.get_runtime().spawn(async move {
-            tx.send(dfs_clone.create(new_id, data, opts).await).unwrap();
+        let task = dfs.get_runtime().spawn(async move {
+            dfs_clone
+                .create(new_id, data, opts)
+                .await
+                .map_err(|e| Error::DfsError(e))
         });
+        tasks.push(task);
         let mut create = pb::TableCreate::new();
         create.set_id(new_id);
         create.set_level(level);
@@ -2591,16 +2593,12 @@ fn compact_destroy_range(
         destroy.mut_file_ids_map().push(id);
         destroy.mut_file_ids_map().push(new_id);
     }
-    let mut errors = creates
-        .iter()
-        .filter_map(|_| match rx.recv().unwrap() {
-            Ok(_) => None,
-            Err(e) => Some(e),
-        })
-        .collect::<Vec<_>>();
-    if !errors.is_empty() {
-        return Err(errors.pop().unwrap().into());
-    }
+    let results: Vec<()> = try_join_all(tasks)
+        .await
+        .map_err(|e| -> Error { box_err!("compact_destroy_range: {:?}", e) })?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    debug_assert_eq!(creates.len(), results.len());
 
     destroy.set_table_deletes(deletes.into());
     destroy.set_table_creates(creates.into());
@@ -2645,7 +2643,8 @@ async fn compact_destroy_range_for_columnar(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?
+    )
+    .await?
     .into_iter()
     .map(|file| (file.id(), file))
     .collect();
@@ -2657,7 +2656,8 @@ async fn compact_destroy_range_for_columnar(
             dfs::Options::default().with_type(FileType::Schema),
             ctx.local_dir.as_ref(),
             false,
-        )?
+        )
+        .await?
         .pop()
         .unwrap();
         Some(SchemaFile::open(file).unwrap())
@@ -2668,7 +2668,7 @@ async fn compact_destroy_range_for_columnar(
     let mut deletes = vec![];
     let mut creates = vec![];
     let del_prefixes = Arc::new(DeletePrefixes::unmarshal(del_prefix, req.keyspace_id()));
-    let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
+    let (tx, mut rx) = mpsc::channel(req.file_ids.len());
     let mut cnt = 0;
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&req.outer_start).unwrap_or_default();
     for &(id, level) in files.iter() {
@@ -2734,7 +2734,7 @@ async fn compact_destroy_range_for_columnar(
     }
     let mut errors = vec![];
     for _ in 0..cnt {
-        match rx.recv().unwrap() {
+        match rx.recv().await.unwrap() {
             Err(err) => errors.push(err),
             Ok(create) => {
                 creates.push(create);
@@ -2750,7 +2750,7 @@ async fn compact_destroy_range_for_columnar(
     Ok(destroy)
 }
 
-fn compact_truncate_ts(
+async fn compact_truncate_ts(
     ctx: &CompactionCtx,
     block_size: usize,
     files: &[(u64, u32, i32)],
@@ -2769,7 +2769,8 @@ fn compact_truncate_ts(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?
+    )
+    .await?
     .into_iter()
     .map(|file| (file.id(), file))
     .collect();
@@ -2777,7 +2778,7 @@ fn compact_truncate_ts(
     let mut table_change = pb::TableChange::new();
     let mut deletes = vec![];
     let mut creates = vec![];
-    let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
+    let mut tasks = Vec::with_capacity(req.file_ids.len());
     for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
         let file = table_files.remove(&id).unwrap();
         let mut delete = pb::TableDelete::new();
@@ -2850,11 +2851,14 @@ fn compact_truncate_ts(
             (buf.into(), res.smallest, res.biggest, res.meta_offset)
         };
 
-        let tx = tx.clone();
         let dfs_clone = dfs.clone();
-        dfs.get_runtime().spawn(async move {
-            tx.send(dfs_clone.create(new_id, data, opts).await).unwrap();
+        let task = dfs.get_runtime().spawn(async move {
+            dfs_clone
+                .create(new_id, data, opts)
+                .await
+                .map_err(|e| Error::DfsError(e))
         });
+        tasks.push(task);
 
         let mut create = pb::TableCreate::new();
         create.set_id(new_id);
@@ -2869,16 +2873,12 @@ fn compact_truncate_ts(
         table_change.mut_file_ids_map().push(new_id);
     }
 
-    let mut errors = creates
-        .iter()
-        .filter_map(|_| match rx.recv().unwrap() {
-            Ok(_) => None,
-            Err(e) => Some(e),
-        })
-        .collect::<Vec<_>>();
-    if !errors.is_empty() {
-        return Err(errors.pop().unwrap().into());
-    }
+    let results: Vec<()> = try_join_all(tasks)
+        .await
+        .map_err(|e| -> Error { box_err!("compact_truncate_ts: {:?}", e) })?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    debug_assert_eq!(creates.len(), results.len());
 
     table_change.set_table_deletes(deletes.into());
     table_change.set_table_creates(creates.into());
@@ -2910,7 +2910,8 @@ async fn compact_truncate_ts_for_columnar(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?
+    )
+    .await?
     .into_iter()
     .map(|file| (file.id(), file))
     .collect();
@@ -2922,7 +2923,8 @@ async fn compact_truncate_ts_for_columnar(
             dfs::Options::default().with_type(FileType::Schema),
             ctx.local_dir.as_ref(),
             false,
-        )?
+        )
+        .await?
         .pop()
         .unwrap();
         Some(SchemaFile::open(file).unwrap())
@@ -2932,7 +2934,7 @@ async fn compact_truncate_ts_for_columnar(
 
     let mut deletes = vec![];
     let mut creates = vec![];
-    let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
+    let (tx, mut rx) = mpsc::channel(req.file_ids.len());
     let mut cnt = 0;
     for &(id, level) in files.iter() {
         let schema_file = schema_file.as_ref().unwrap();
@@ -2987,7 +2989,7 @@ async fn compact_truncate_ts_for_columnar(
     }
     let mut errors = vec![];
     for _ in 0..cnt {
-        match rx.recv().unwrap() {
+        match rx.recv().await.unwrap() {
             Err(err) => errors.push(err),
             Ok(create) => {
                 creates.push(create);
@@ -3008,7 +3010,7 @@ async fn compact_truncate_ts_for_columnar(
 }
 
 /// Compact files in place to remove data out of shard bound.
-fn compact_trim_over_bound(
+async fn compact_trim_over_bound(
     ctx: &CompactionCtx,
     block_size: usize,
     files: &[(u64, u32, i32)],
@@ -3027,7 +3029,8 @@ fn compact_trim_over_bound(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?
+    )
+    .await?
     .into_iter()
     .map(|file| (file.id(), file))
     .collect();
@@ -3035,7 +3038,7 @@ fn compact_trim_over_bound(
     let mut table_change = pb::TableChange::new();
     let mut deletes = vec![];
     let mut creates = vec![];
-    let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
+    let mut tasks = Vec::with_capacity(req.file_ids.len());
     for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
         let file = table_files.remove(&id).unwrap();
 
@@ -3104,11 +3107,14 @@ fn compact_trim_over_bound(
             let res = builder.finish(0, &mut buf);
             (buf.into(), res.smallest, res.biggest, res.meta_offset)
         };
-        let tx = tx.clone();
         let dfs_clone = dfs.clone();
-        dfs.get_runtime().spawn(async move {
-            tx.send(dfs_clone.create(new_id, data, opts).await).unwrap();
+        let task = dfs.get_runtime().spawn(async move {
+            dfs_clone
+                .create(new_id, data, opts)
+                .await
+                .map_err(|e| Error::DfsError(e))
         });
+        tasks.push(task);
 
         let mut create = pb::TableCreate::new();
         create.set_id(new_id);
@@ -3123,16 +3129,12 @@ fn compact_trim_over_bound(
         table_change.mut_file_ids_map().push(new_id);
     }
 
-    let mut errors = creates
-        .iter()
-        .filter_map(|_| match rx.recv().unwrap() {
-            Ok(_) => None,
-            Err(e) => Some(e),
-        })
-        .collect::<Vec<_>>();
-    if !errors.is_empty() {
-        return Err(errors.pop().unwrap().into());
-    }
+    let results: Vec<()> = try_join_all(tasks)
+        .await
+        .map_err(|e| -> Error { box_err!("compact_trim_over_bound: {:?}", e) })?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    debug_assert_eq!(creates.len(), results.len());
 
     table_change.set_table_deletes(deletes.into());
     table_change.set_table_creates(creates.into());
@@ -3164,7 +3166,8 @@ async fn compact_trim_over_bound_for_columnar(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?
+    )
+    .await?
     .into_iter()
     .map(|file| (file.id(), file))
     .collect();
@@ -3176,7 +3179,8 @@ async fn compact_trim_over_bound_for_columnar(
             dfs::Options::default().with_type(FileType::Schema),
             ctx.local_dir.as_ref(),
             false,
-        )?
+        )
+        .await?
         .pop()
         .unwrap();
         Some(SchemaFile::open(file).unwrap())
@@ -3187,7 +3191,7 @@ async fn compact_trim_over_bound_for_columnar(
     let mut deletes = vec![];
     let mut creates = vec![];
     let mut columnar_table_ids: HashSet<i64> = HashSet::new();
-    let (tx, rx) = tikv_util::mpsc::bounded(req.file_ids.len());
+    let (tx, mut rx) = mpsc::channel(req.file_ids.len());
     let mut cnt = 0;
     for &(id, level) in files.iter() {
         let schema_file = schema_file.as_ref().unwrap();
@@ -3295,7 +3299,7 @@ async fn compact_trim_over_bound_for_columnar(
 
     let mut errors = vec![];
     for _ in 0..cnt {
-        match rx.recv().unwrap() {
+        match rx.recv().await.unwrap() {
             Err(err) => errors.push(err),
             Ok(create) => {
                 creates.push(create);
@@ -3316,6 +3320,7 @@ async fn compact_trim_over_bound_for_columnar(
     Ok(table_change)
 }
 
+#[derive(Debug)]
 enum FilePersistResult {
     TableCreate(pb::TableCreate),
     BlobTableCreate(pb::BlobCreate),
@@ -3342,13 +3347,15 @@ fn persist_sst(
 
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
-        tx.send(
-            fs_clone
-                .create(id, buf.into(), opts)
-                .await
-                .map(|_| FilePersistResult::TableCreate(tbl_create)),
-        )
-        .unwrap();
+        let _ = tx
+            .send(
+                fs_clone
+                    .create(id, buf.into(), opts)
+                    .await
+                    .map(|_| FilePersistResult::TableCreate(tbl_create)),
+            )
+            .await
+            .map_err(|e| warn!("{} persist_sst: {:?}", id, e));
     });
 }
 
@@ -3367,13 +3374,15 @@ fn persist_blob_table(
     blob_table_create.set_biggest(biggest.to_vec());
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
-        tx.send(
-            fs_clone
-                .create(id, buf, opts)
-                .await
-                .map(|_| FilePersistResult::BlobTableCreate(blob_table_create)),
-        )
-        .unwrap();
+        let _ = tx
+            .send(
+                fs_clone
+                    .create(id, buf, opts)
+                    .await
+                    .map(|_| FilePersistResult::BlobTableCreate(blob_table_create)),
+            )
+            .await
+            .map_err(|e| warn!("{} persist_blob_table: {:?}", id, e));
     });
 }
 
@@ -3394,17 +3403,19 @@ fn persist_columnar_file(
     columnar_create.set_meta_offset(meta_offset as u32);
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
-        tx.send(
-            fs_clone
-                .create(id, buf.into(), opts.with_type(FileType::Columnar))
-                .await
-                .map(|_| columnar_create),
-        )
-        .unwrap();
+        let _ = tx
+            .send(
+                fs_clone
+                    .create(id, buf.into(), opts.with_type(FileType::Columnar))
+                    .await
+                    .map(|_| columnar_create),
+            )
+            .await
+            .map_err(|e| warn!("{} persist_columnar_file: {:?}", id, e));
     });
 }
 
-fn compact_for_cf(
+async fn compact_for_cf(
     ctx: &CompactionCtx,
     iter: &mut Box<dyn table::Iterator>,
     safe_ts: u64,
@@ -3423,8 +3434,8 @@ fn compact_for_cf(
     let fs = &ctx.dfs;
     let compression_lvl = ctx.compression_lvl;
     let checksum_tp = ctx.checksum_type;
-    let (tx, rx) = tikv_util::mpsc::bounded(ctx.req.file_ids.len());
-    let mut cur_sst_id = id_allocator.block_on_alloc_id();
+    let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
+    let mut cur_sst_id = id_allocator.alloc_id().await;
 
     let mut sst_builder = sstable::Builder::new(
         cur_sst_id,
@@ -3440,7 +3451,7 @@ fn compact_for_cf(
     let mut decompressed_blob_buf = vec![];
     let mut decryption_buf = vec![];
     let mut blob_table_builder = if let Some(config) = bt_config {
-        cur_blob_table_id = id_allocator.block_on_alloc_id();
+        cur_blob_table_id = id_allocator.alloc_id().await;
         Some((
             config,
             BlobTableBuilder::new(
@@ -3487,7 +3498,7 @@ fn compact_for_cf(
                         fs.clone(),
                         opts,
                     );
-                    cur_sst_id = id_allocator.block_on_alloc_id();
+                    cur_sst_id = id_allocator.alloc_id().await;
                     sst_builder.reset(cur_sst_id);
                 }
                 if let Some((bt_config, bt_builder)) = &mut blob_table_builder {
@@ -3500,7 +3511,7 @@ fn compact_for_cf(
                             fs.clone(),
                             opts,
                         );
-                        cur_blob_table_id = id_allocator.block_on_alloc_id();
+                        cur_blob_table_id = id_allocator.alloc_id().await;
                         bt_builder.reset(cur_blob_table_id);
                     }
                 }
@@ -3637,7 +3648,7 @@ fn compact_for_cf(
     let mut sst_creates = vec![];
     let mut blob_table_creates = vec![];
     for _ in 0..cnt {
-        match rx.recv().unwrap() {
+        match rx.recv().await.unwrap() {
             Err(err) => errors.push(err),
             Ok(FilePersistResult::TableCreate(tbl_create)) => {
                 sst_creates.push(tbl_create);
@@ -3653,7 +3664,7 @@ fn compact_for_cf(
     Ok((sst_creates, blob_table_creates))
 }
 
-fn l0_compact_v3(
+async fn l0_compact_v3(
     ctx: &CompactionCtx,
     l0_compaction: &L0Compaction,
     id_allocator: &mut LocalIdAllocator,
@@ -3667,7 +3678,8 @@ fn l0_compact_v3(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?;
+    )
+    .await?;
     let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     let mut comp = pb::Compaction::new();
@@ -3691,7 +3703,8 @@ fn l0_compact_v3(
             opts,
             ctx.local_dir.as_ref(),
             ctx.for_restore,
-        )?;
+        )
+        .await?;
         let mut l1_tbls = files_to_tables(l1_files, ctx.encryption_key.clone());
         l1_tbls.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         let mut iters: Vec<Box<dyn table::Iterator>> = vec![];
@@ -3719,7 +3732,8 @@ fn l0_compact_v3(
             true,
             &HashMap::new(),
             id_allocator,
-        )?;
+        )
+        .await?;
         all_sst_creates.extend(sst_creates);
         all_bt_creates.extend(bt_creates);
     }
@@ -3728,7 +3742,7 @@ fn l0_compact_v3(
     Ok(comp)
 }
 
-fn l1_plus_compact_v3(
+async fn l1_plus_compact_v3(
     ctx: &CompactionCtx,
     l1_plus_compaction: &L1PlusCompaction,
     id_allocator: &mut LocalIdAllocator,
@@ -3742,7 +3756,8 @@ fn l1_plus_compact_v3(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?;
+    )
+    .await?;
     let mut upper_tables = files_to_tables(upper_files, ctx.encryption_key.clone());
     upper_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let lower_files = load_table_files(
@@ -3751,7 +3766,8 @@ fn l1_plus_compact_v3(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?;
+    )
+    .await?;
     let mut lower_tables = files_to_tables(lower_files, ctx.encryption_key.clone());
     lower_tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
     let upper_iter = Box::new(ConcatIterator::new_with_tables(upper_tables, false, false));
@@ -3770,7 +3786,8 @@ fn l1_plus_compact_v3(
         l1_plus_compaction.keep_latest_obsolete_tombstone,
         &HashMap::new(),
         id_allocator,
-    )?;
+    )
+    .await?;
     let mut comp = pb::Compaction::new();
     comp.set_top_deletes(l1_plus_compaction.upper_level.clone());
     comp.set_cf(l1_plus_compaction.cf as i32);
@@ -3780,7 +3797,7 @@ fn l1_plus_compact_v3(
     Ok(comp)
 }
 
-fn major_compact_v3(
+async fn major_compact_v3(
     ctx: &CompactionCtx,
     major_compaction: &MajorCompaction,
     id_allocator: &mut LocalIdAllocator,
@@ -3791,14 +3808,15 @@ fn major_compact_v3(
     let mut ret = pb::MajorCompaction::new();
     ret.mut_old_blob_tables()
         .extend_from_slice(&major_compaction.blob_tables);
-    let blob_tables = load_blob_tables(fs.clone(), &major_compaction.blob_tables, opts)?;
+    let blob_tables = load_blob_tables(fs.clone(), &major_compaction.blob_tables, opts).await?;
     let l0_files = load_table_files(
         &major_compaction.l0_tables,
         fs.clone(),
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?;
+    )
+    .await?;
     let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     l0_tbls.iter().for_each(|tbl| {
@@ -3833,7 +3851,8 @@ fn major_compact_v3(
                     opts,
                     ctx.local_dir.as_ref(),
                     ctx.for_restore,
-                )?;
+                )
+                .await?;
                 let mut tables = files_to_tables(files, ctx.encryption_key.clone());
                 tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
                 let level_concat_iter =
@@ -3857,7 +3876,8 @@ fn major_compact_v3(
             false,
             &blob_tables,
             id_allocator,
-        )?;
+        )
+        .await?;
         for sst_create in sst_creates {
             ret.mut_sstable_change()
                 .mut_table_creates()
@@ -3945,7 +3965,7 @@ async fn transform_for_columnar(
     let opts = dfs::Options::default()
         .with_shard(ctx.req.shard_id, ctx.req.shard_ver)
         .with_type(FileType::Columnar);
-    let (tx, rx) = tikv_util::mpsc::bounded(ctx.req.file_ids.len());
+    let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
         None,
@@ -3990,7 +4010,7 @@ async fn transform_for_columnar(
     let mut errors = vec![];
     let mut columnar_creates = Vec::with_capacity(cnt);
     for _ in 0..cnt {
-        match rx.recv().unwrap() {
+        match rx.recv().await.unwrap() {
             Err(err) => errors.push(err),
             Ok(tbl_create) => {
                 columnar_creates.push(tbl_create);
@@ -4035,18 +4055,20 @@ async fn columnar_major_compact(
         dfs::Options::default().with_type(FileType::Schema),
         ctx.local_dir.as_ref(),
         false,
-    )?
+    )
+    .await?
     .pop()
     .unwrap();
     let schema_file = SchemaFile::open(schema_file_data)?;
-    let blob_tbls = load_blob_tables(fs.clone(), &major_compaction.blob_tables, opts)?;
+    let blob_tbls = load_blob_tables(fs.clone(), &major_compaction.blob_tables, opts).await?;
     let l0_files = load_table_files(
         &major_compaction.l0_tables,
         fs.clone(),
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?;
+    )
+    .await?;
     let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     let mut tbls = vec![];
@@ -4070,7 +4092,8 @@ async fn columnar_major_compact(
             opts,
             ctx.local_dir.as_ref(),
             ctx.for_restore,
-        )?;
+        )
+        .await?;
         let mut tables = files_to_tables(files, ctx.encryption_key.clone());
         tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         tables.iter().for_each(|tbl| {
@@ -4159,9 +4182,15 @@ async fn convert_row_file_to_columnar_file(
     let opts = dfs::Options::default()
         .with_type(FileType::Schema)
         .with_shard(ctx.req.shard_id, ctx.req.shard_ver);
-    let runtime = ctx.dfs.get_runtime();
     let schema_file_id = columnar_compaction.schema_file_id;
-    let schema_file_data = runtime.block_on(ctx.dfs.read_file(schema_file_id, opts))?;
+    let schema_file_data = {
+        let dfs = ctx.dfs.clone();
+        ctx.dfs
+            .get_runtime()
+            .spawn(async move { dfs.read_file(schema_file_id, opts).await })
+            .await
+            .map_err(|e| -> Error { box_err!("read schema file: {:?}", e) })??
+    };
     let schema_file = SchemaFile::open(Arc::new(InMemFile::new(schema_file_id, schema_file_data)))?;
     let l0_ids: Vec<u64> = columnar_compaction
         .source_row_files
@@ -4175,7 +4204,8 @@ async fn convert_row_file_to_columnar_file(
         opts,
         ctx.local_dir.as_ref(),
         ctx.for_restore,
-    )?;
+    )
+    .await?;
     let l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     let smallest = l0_tbls.iter().map(|l0| l0.smallest()).min().unwrap();
     let biggest = l0_tbls.iter().map(|l0| l0.biggest()).max().unwrap();
@@ -4191,7 +4221,7 @@ async fn convert_row_file_to_columnar_file(
         ctx.encryption_key.clone(),
     );
     let mut cnt = 0;
-    let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
+    let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     for overlap_table in overlap_tables {
         let schema = schema_file.get_table(overlap_table).unwrap();
         let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
@@ -4235,7 +4265,7 @@ async fn convert_row_file_to_columnar_file(
     let change = ret.mut_columnar_change();
     let mut errors = vec![];
     for _ in 0..cnt {
-        match rx.recv().unwrap() {
+        match rx.recv().await.unwrap() {
             Err(err) => errors.push(err),
             Ok(col_create) => {
                 change.mut_columnar_creates().push(col_create);
@@ -4276,7 +4306,8 @@ async fn compact_columnar_l0_files(
         dfs::Options::default().with_type(FileType::Schema),
         ctx.local_dir.as_ref(),
         false,
-    )?
+    )
+    .await?
     .pop()
     .unwrap();
     let schema_file = SchemaFile::open(schema_file_data)?;
@@ -4307,7 +4338,8 @@ async fn compact_columnar_l0_files(
         opts,
         ctx.local_dir.as_ref(),
         false,
-    )?;
+    )
+    .await?;
     let col_tbls = files_to_columnar_tables(col_files);
     let snap_version = col_tbls
         .iter()
@@ -4335,7 +4367,7 @@ async fn compact_columnar_l0_files(
         Some(snap_version),
         ctx.encryption_key.clone(),
     );
-    let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
+    let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     let mut cnt = 0;
     for table_id in overlap_tables {
         let schema = schema_file.get_table(table_id).unwrap();
@@ -4379,7 +4411,7 @@ async fn compact_columnar_l0_files(
     let tbl_changes = ret.mut_columnar_change();
     let mut errors = vec![];
     for _ in 0..cnt {
-        match rx.recv().unwrap() {
+        match rx.recv().await.unwrap() {
             Err(err) => errors.push(err),
             Ok(col_create) => {
                 tbl_changes.mut_columnar_creates().push(col_create);
@@ -4412,7 +4444,8 @@ async fn compact_columnar_l1_files(
         dfs::Options::default().with_type(FileType::Schema),
         ctx.local_dir.as_ref(),
         false,
-    )?
+    )
+    .await?
     .pop()
     .unwrap();
     let schema_file = SchemaFile::open(schema_file_data)?;
@@ -4438,7 +4471,8 @@ async fn compact_columnar_l1_files(
         opts,
         ctx.local_dir.as_ref(),
         false,
-    )?;
+    )
+    .await?;
     if l1_tbl_files.is_empty() {
         return Ok(ret);
     }
@@ -4458,7 +4492,8 @@ async fn compact_columnar_l1_files(
         opts,
         ctx.local_dir.as_ref(),
         false,
-    )?;
+    )
+    .await?;
     let mut l2_tbls = files_to_columnar_tables(l2_tbl_files);
     l2_tbls.sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()));
     for tbl in &l2_tbls {
@@ -4482,7 +4517,7 @@ async fn compact_columnar_l1_files(
         None,
         ctx.encryption_key.clone(),
     );
-    let (tx, rx) = mpsc::bounded(ctx.req.file_ids.len());
+    let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     let mut cnt = 0;
     for table_id in overlap_tables {
         let schema = schema_file.get_table(table_id).unwrap();
@@ -4529,7 +4564,7 @@ async fn compact_columnar_l1_files(
     let tbl_changes = ret.mut_columnar_change();
     let mut errors = vec![];
     for _ in 0..cnt {
-        match rx.recv().unwrap() {
+        match rx.recv().await.unwrap() {
             Err(err) => errors.push(err),
             Ok(col_create) => {
                 tbl_changes.mut_columnar_creates().push(col_create);
@@ -4559,7 +4594,8 @@ async fn update_vector_index(
         dfs::Options::default().with_type(FileType::Schema),
         ctx.local_dir.as_ref(),
         false,
-    )?
+    )
+    .await?
     .pop()
     .unwrap();
     let schema_file = SchemaFile::open(schema_file_data)?;
@@ -4594,7 +4630,8 @@ async fn update_vector_index(
         opts,
         ctx.local_dir.as_ref(),
         false,
-    )?;
+    )
+    .await?;
     let mut columnar_files = vec![];
     for file in files {
         let columnar_file = ColumnarFile::open(file)?;
@@ -4694,7 +4731,7 @@ pub(crate) enum CompactMsg {
 
 pub(crate) struct CompactRunner {
     engine: Engine,
-    rx: mpsc::Receiver<CompactMsg>,
+    rx: tikv_util::mpsc::Receiver<CompactMsg>,
     /// task_id is the identity of each compaction job.
     ///
     /// When a shard is set to inactive, all the compaction jobs of this shard
@@ -4716,10 +4753,22 @@ pub(crate) struct CompactRunner {
 
     /// blocked contains the keyspace shards that are blocked for compaction.
     blocked: HashMap<u32, HashSet<IdVer>>,
+
+    thread_pool: tokio::runtime::Runtime,
 }
 
 impl CompactRunner {
-    pub(crate) fn new(engine: Engine, rx: mpsc::Receiver<CompactMsg>) -> Self {
+    pub(crate) fn new(engine: Engine, rx: tikv_util::mpsc::Receiver<CompactMsg>) -> Self {
+        let thread_pool = tokio::runtime::Builder::new_multi_thread()
+            .thread_name("compact-runner")
+            .worker_threads(engine.opts.num_compactors)
+            .enable_all()
+            .after_start_wrapper(|| {
+                file_system::set_io_type(IoType::Compaction);
+            })
+            .before_stop_wrapper(|| {})
+            .build()
+            .unwrap();
         Self {
             engine,
             rx,
@@ -4729,6 +4778,7 @@ impl CompactRunner {
             pending: Default::default(),
             paused_seq: Default::default(),
             blocked: Default::default(),
+            thread_pool,
         }
     }
 
@@ -4810,15 +4860,16 @@ impl CompactRunner {
         self.running.insert(id_ver, task_id);
         self.pending.remove(&id_ver); // Remove from pending if it's there.
         let engine = self.engine.clone();
-        std::thread::spawn(move || {
-            tikv_util::set_current_region(id_ver.id);
-            let result = Box::new(engine.compact(shard));
-            engine.send_compact_msg(CompactMsg::Finish {
-                task_id,
-                id_ver,
-                result,
-            });
-        });
+        self.thread_pool
+            .spawn(tikv_util::init_task_local(async move {
+                tikv_util::set_current_region(id_ver.id);
+                let result = Box::new(engine.compact(shard).await);
+                engine.send_compact_msg(CompactMsg::Finish {
+                    task_id,
+                    id_ver,
+                    result,
+                });
+            }));
     }
 
     fn compaction_finished(
