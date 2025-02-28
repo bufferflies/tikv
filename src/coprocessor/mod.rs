@@ -106,6 +106,8 @@ pub struct ReqContext {
     pub tag: ReqTag,
 
     /// The rpc context carried in the request
+    ///
+    /// NOTE: Must be immutable. It's also used by remote cop.
     pub context: kvrpcpb::Context,
 
     /// Scan ranges of this request
@@ -152,7 +154,7 @@ pub struct ReqContext {
 impl ReqContext {
     pub fn new(
         tag: ReqTag,
-        mut context: kvrpcpb::Context,
+        context: kvrpcpb::Context, // Must be immutable. It's also used by remote cop.
         ranges: Vec<coppb::KeyRange>,
         max_handle_duration: Duration,
         peer: Option<String>,
@@ -166,8 +168,8 @@ impl ReqContext {
             deadline_duration = Duration::from_millis(context.max_execution_duration_ms);
         }
         let deadline = Deadline::from_now(deadline_duration);
-        let bypass_locks = TsSet::from_u64s(context.take_resolved_locks());
-        let access_locks = TsSet::from_u64s(context.take_committed_locks());
+        let bypass_locks = TsSet::from_u64s(context.get_resolved_locks().to_vec());
+        let access_locks = TsSet::from_u64s(context.get_committed_locks().to_vec());
         let lower_bound = match ranges.first().as_ref() {
             Some(range) => range.start.clone(),
             None => vec![],
