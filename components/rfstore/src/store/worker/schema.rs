@@ -80,6 +80,7 @@ impl SchemaRunner {
             .kv
             .get_shard_with_ver(region.get_id(), region.get_region_epoch().version)
         {
+            let mut storage_class_property: Option<StorageClass> = None;
             if let Some(schema_file) = shard.get_schema_file() {
                 if schema_version != schema_file.get_version() {
                     return;
@@ -93,23 +94,30 @@ impl SchemaRunner {
                     Either::Left(table_id) => {
                         // The table fully covers the region.
                         let schema = schema_file.get_table(table_id).unwrap();
-                        let sc = schema.get_storage_class();
-                        debug_assert!(sc.is_specified());
-                        if self.update_storage_class(&tag, &shard, sc, schema_version) {
-                            shard.set_checked_schema_ver(schema_version);
-                            info!("{} update storage class", tag; "sc" => ?sc, "schema_version" => schema_version);
+                        if shard.get_storage_class() != schema.get_storage_class() {
+                            storage_class_property = Some(schema.get_storage_class());
                         }
                     }
                     Either::Right(table_inner_keys) => {
                         if !table_inner_keys.is_empty() {
                             // The overlapped keys of tables require exclusive region.
                             self.split_regions_for_tables(&tag, &shard, &region, &table_inner_keys);
-                        } else {
-                            // No table requires exclusive region, nothing to do.
-                            shard.set_checked_schema_ver(schema_version);
+                            return;
+                        } else if shard.get_storage_class().is_specified() {
+                            storage_class_property = Some(StorageClass::Unspecified);
                         }
                     }
                 }
+            } else if shard.get_storage_class().is_specified() {
+                storage_class_property = Some(StorageClass::Unspecified);
+            }
+            if let Some(storage_class) = storage_class_property {
+                if self.update_storage_class(&tag, &shard, storage_class, schema_version) {
+                    shard.set_checked_schema_ver(schema_version);
+                    info!("{} update shard storage class to {:?}", tag, shard.get_storage_class(); "schema_version" => schema_version);
+                }
+            } else {
+                shard.set_checked_schema_ver(schema_version);
             }
         } else {
             info!("{} handle storage class: skip, shard not found/match", tag;
@@ -151,7 +159,7 @@ impl SchemaRunner {
         let mut cs = kvengine::new_change_set(shard.id, shard.ver);
         cs.set_property_key(STORAGE_CLASS_KEY.to_string());
         cs.set_property_value(storage_class.marshal());
-        info!("{} propose update storage_class property", tag; "sc" => ?storage_class);
+        info!("{} propose update storage class property", tag; "sc" => ?storage_class);
         let msg = StoreMsg::GenerateEngineChangeSet(cs);
         if let Err(e) = self.router.store_sender.send(msg) {
             warn!("{} failed to to send meta change message", tag; "err" => ?e, "sc" => ?storage_class);

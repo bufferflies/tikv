@@ -28,9 +28,9 @@ use kvengine::{
             build_schema_file, filter::TableScanCtx, new_int_handle_column_info,
             new_version_column_info, ColumnarFilterReader, Schema, SchemaBuf,
         },
-        sstable::BlockCache,
+        sstable::{BlockCache, BlockCacheType},
     },
-    ColumnarStatusResp, Properties, SnapAccess, WRITE_CF,
+    ColumnarStatusResp, Properties, SnapAccess, STORAGE_CLASS_KEY, WRITE_CF,
 };
 use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
@@ -42,7 +42,6 @@ use test_cloud_server::{
     keyspace::CreateKeyspaceOptions,
     must_wait,
     oss::prepare_dfs,
-    util::get_keyspace_split_keys,
     ServerCluster,
 };
 use test_pd_client::PdClientExt;
@@ -54,10 +53,17 @@ use tidb_query_datatype::{
     expr::EvalContext,
     Collation, FieldTypeAccessor, FieldTypeTp,
 };
-use tikv_util::{codec::bytes::encode_bytes, info};
+use tikv_util::{
+    codec::bytes::encode_bytes,
+    config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
+    info,
+};
 use tipb::ColumnInfo;
 
 use crate::{alloc_node_id, request_dump_snapshot_on_store};
+
+const SEGMENT_SIZE: i64 = 64;
+const FREQ_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[test]
 fn test_schema_file() {
@@ -169,141 +175,11 @@ fn test_schema_file() {
 }
 
 #[test]
-fn test_schema_file_with_storage_class() {
+fn test_covert_row_to_columnar_with_ia() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
-    let cluster = ServerCluster::new(vec![node_id], |_, _| {});
-    let dfs = cluster.get_dfs().unwrap();
-    let keyspace_id = 9;
-    let km = cluster.keyspace_manager();
-    let pd_client = cluster.get_pd_client();
-    dfs.get_runtime().block_on(async move {
-        km.create_single_keyspace(
-            keyspace_id,
-            format!("ks{}", keyspace_id),
-            &CreateKeyspaceOptions {
-                table_count: 4,
-                ..Default::default()
-            },
-            false,
-        )
-        .await;
-        let keyspace_split_keys = get_keyspace_split_keys(keyspace_id);
-        pd_client
-            .split_regions_with_retry(keyspace_split_keys, Duration::from_secs(10))
-            .await
-            .unwrap();
-    });
-    let ks_meta = km.get_keyspace_meta(keyspace_id).unwrap();
-    let table_ids = ks_meta.get_all_available_tables();
-    let mut schemas = vec![];
-    for table_id in [table_ids[1], table_ids[3]] {
-        let mut schema_buf = SchemaBuf::default();
-        schema_buf.table_id = table_id;
-        schema_buf.set_storage_class(StorageClass::Ia);
-        schemas.push(schema_buf.into());
-    }
-    let schema_version = 10;
-    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
-    let schema_file_id = 100;
-    let opts = dfs::Options::default().with_type(FileType::Schema);
-    dfs.get_runtime()
-        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
-        .unwrap();
-    let kvengine = cluster.get_kvengine(node_id);
-    assert_eq!(kvengine.get_all_shard_id_vers().len(), 3);
-    let status_addr = cluster.status_addr(node_id);
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        schema_file_id,
-    ));
-    must_wait(
-        || {
-            let all_ids_vers = kvengine.get_all_shard_id_vers();
-            let mut shard_with_ia_count = 0;
-            for &id_ver in &kvengine.get_all_shard_id_vers() {
-                let shard = kvengine.get_shard(id_ver.id).unwrap();
-                if shard.get_schema_file().is_some()
-                    && shard.get_storage_class() == StorageClass::Ia
-                {
-                    shard_with_ia_count += 1;
-                }
-            }
-            all_ids_vers.len() == 7 && shard_with_ia_count == 2
-        },
-        20,
-        || "failed to wait storage class ia".to_string(),
-    );
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_covert_row_to_columnar_with_ia");
 
-    // convert IA to STANDARD.
-    let mut new_schemas = vec![];
-    let mut schema_buf_0 = SchemaBuf::default();
-    schema_buf_0.table_id = table_ids[1];
-    schema_buf_0.set_storage_class(StorageClass::Ia);
-    new_schemas.push(schema_buf_0.into());
-    let mut schema_buf_1 = SchemaBuf::default();
-    schema_buf_1.table_id = table_ids[3];
-    schema_buf_1.set_storage_class(StorageClass::Standard);
-    new_schemas.push(schema_buf_1.into());
-    let new_schema_version = 11;
-    let new_schema_file_data = build_schema_file(keyspace_id, new_schema_version, new_schemas, 0);
-    let new_schema_file_id = 101;
-    dfs.get_runtime()
-        .block_on(dfs.create(new_schema_file_id, new_schema_file_data.into(), opts))
-        .unwrap();
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        new_schema_file_id,
-    ));
-
-    must_wait(
-        || {
-            let mut shard_with_ia_count = 0;
-            let mut shard_with_standard_count = 0;
-            for &id_ver in &kvengine.get_all_shard_id_vers() {
-                let shard = kvengine.get_shard(id_ver.id).unwrap();
-                if shard.get_schema_file().is_some() {
-                    if shard.get_storage_class() == StorageClass::Ia {
-                        shard_with_ia_count += 1;
-                    } else if shard.get_storage_class() == StorageClass::Standard {
-                        shard_with_standard_count += 1;
-                    }
-                }
-            }
-            shard_with_ia_count == 1 && shard_with_standard_count == 1
-        },
-        10,
-        || "failed to wait storage class".to_string(),
-    );
-
-    // test schema file will not update if version is older.
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        schema_file_id,
-    ));
-    std::thread::sleep(Duration::from_secs(3));
-    for &id_ver in &kvengine.get_all_shard_id_vers() {
-        let shard = kvengine.get_shard(id_ver.id).unwrap();
-        if shard.get_schema_file().is_some() {
-            let sf = shard.get_schema_file().unwrap();
-            if sf.is_tombstone() {
-                assert_eq!(sf.get_version(), new_schema_version);
-            } else {
-                assert_eq!(sf.get_file_id(), new_schema_file_id);
-            }
-            let stats = shard.get_stats();
-            assert_eq!(stats.schema_version, new_schema_version);
-        }
-    }
-}
-
-#[test]
-fn test_covert_row_to_columnar() {
-    test_util::init_log_for_test();
-    let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
         conf.enable_inner_key_offset = true;
         conf.kvengine
@@ -313,6 +189,11 @@ fn test_covert_row_to_columnar() {
             .columnar_table_build_options
             .pack_max_row_count = 9;
         conf.kvengine.read_columnar = true;
+        conf.dfs = dfs_config.clone();
+        conf.kvengine.ia.segment_size = SEGMENT_SIZE;
+        conf.kvengine.ia.freq_update_interval = ReadableDuration(FREQ_UPDATE_INTERVAL);
+        conf.kvengine.ia.mem_cap = AbsoluteOrPercentSize::Abs(ReadableSize(1024 * 128));
+        conf.kvengine.ia.disk_cap = AbsoluteOrPercentSize::Abs(ReadableSize(1024 * 1024));
     });
     let dfs = cluster.get_dfs().unwrap();
     let (keyspace_id, table_ids) = dfs
@@ -331,6 +212,7 @@ fn test_covert_row_to_columnar() {
     let status_addr = cluster.status_addr(node_id);
 
     let kvengine = cluster.get_kvengine(node_id);
+    assert!(kvengine.is_ia_enabled());
     must_wait(
         || {
             dfs.get_runtime().block_on(send_schema_file_request(
@@ -412,6 +294,189 @@ fn test_covert_row_to_columnar() {
         let str_val = gen_str_val(i);
         assert_eq!(columns[1].get_not_null_value(i), &str_val);
     }
+
+    cluster.stop();
+    oss.shutdown();
+}
+
+#[test]
+fn test_sst_and_columnar_with_ia() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_sst_and_columnar_with_ia");
+
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.enable_inner_key_offset = true;
+        conf.kvengine
+            .columnar_table_build_options
+            .max_columnar_table_size = 1024;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 9;
+        conf.kvengine.read_columnar = true;
+        conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);
+        conf.rocksdb.writecf.block_size = ReadableSize(512);
+        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(2);
+        conf.coprocessor.region_split_size = ReadableSize::kb(512);
+        conf.coprocessor.region_bucket_size = ReadableSize::kb(64);
+        conf.storage.block_cache.capacity = Some(ReadableSize::kb(16));
+        conf.dfs = dfs_config.clone();
+        conf.kvengine.ia.segment_size = SEGMENT_SIZE;
+        conf.kvengine.ia.freq_update_interval = ReadableDuration(FREQ_UPDATE_INTERVAL);
+        conf.kvengine.ia.mem_cap = AbsoluteOrPercentSize::Abs(ReadableSize::kb(64));
+        conf.kvengine.ia.disk_cap = AbsoluteOrPercentSize::Abs(ReadableSize::kb(1024));
+        conf.kvengine.block_cache_type = BlockCacheType::Quick;
+    });
+    let dfs = cluster.get_dfs().unwrap();
+    let (keyspace_id, table_ids) = dfs
+        .get_runtime()
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
+    let table_id = table_ids[1];
+    let mut schema_buf = build_columnar_schema_buf(table_id);
+    schema_buf.set_storage_class(StorageClass::Ia);
+    let schemas: Vec<Schema> = vec![schema_buf.clone().into()];
+    let schema = schemas[0].clone();
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
+    let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    dfs.get_runtime()
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    let status_addr = cluster.status_addr(node_id);
+
+    let kvengine = cluster.get_kvengine(node_id);
+    assert!(kvengine.is_ia_enabled());
+    must_wait(
+        || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if shard.get_schema_file().is_some() && shard.use_ia() {
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build schema file".to_string(),
+    );
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    client.put_kv(
+        0..100,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    client.put_kv(
+        100..200,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    let mut shard_id = None;
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    let stats = shard.get_stats();
+                    let snap_version = shard.get_snap_version();
+                    let columnar_snap_version = shard.get_columnar_snap_version();
+                    if stats.cfs[0].levels[0].num_tables > 0
+                        && snap_version == columnar_snap_version
+                    {
+                        let (_, sst_ia_file_ids) = shard.get_local_sst_files();
+                        assert!(!sst_ia_file_ids.is_empty());
+                        shard_id = Some(id_ver.id);
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || {
+            // dump shard info
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    let snap_version = shard.get_snap_version();
+                    let columnar_snap_version = shard.get_columnar_snap_version();
+                    info!(
+                        "shard: {:?}, snap_version: {}, columnar_snap_version: {}",
+                        id_ver, snap_version, columnar_snap_version
+                    );
+                }
+            }
+            "failed to build columnar file".to_string()
+        },
+    );
+    client.verify_data_with_ref_store();
+    let shard_id = shard_id.unwrap();
+    let shard = kvengine.get_shard(shard_id).unwrap();
+    let snap_access = shard.new_snap_access();
+    let ts = client.get_ts().into_inner();
+    let mut columnar_reader = snap_access
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts)
+        .unwrap();
+    block_on(columnar_reader.set_int_handle_range(0, Some(190))).unwrap();
+    let mut block = columnar::Block::new(&schema);
+    let read_rows = block_on(columnar_reader.read_block(&mut block, 200)).unwrap();
+    assert_eq!(read_rows, 190);
+    for i in 0..read_rows {
+        let handle = block.get_handle_buf().get_int_handle_value(i);
+        assert_eq!(handle, i as i64);
+        let columns = block.get_columns();
+        assert_eq!(columns[0].get_not_null_value(i).get_i64_le(), i as i64);
+        let str_val = gen_str_val(i);
+        assert_eq!(columns[1].get_not_null_value(i), &str_val);
+    }
+
+    // Change IA files to Local amd remove storage class property
+    let mut schema_buf_1 = schema_buf.clone();
+    schema_buf_1.set_storage_class(StorageClass::Unspecified);
+    let new_schemas: Vec<Schema> = vec![schema_buf_1.into()];
+    let new_schema_version = 11;
+    let new_schema_file_data = build_schema_file(keyspace_id, new_schema_version, new_schemas, 0);
+    let new_schema_file_id = 101;
+    dfs.get_runtime()
+        .block_on(dfs.create(new_schema_file_id, new_schema_file_data.into(), opts))
+        .unwrap();
+    dfs.get_runtime().block_on(send_schema_file_request(
+        &status_addr,
+        keyspace_id,
+        new_schema_file_id,
+    ));
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if shard.get_schema_file().is_some()
+                        && !shard.get_storage_class().is_specified()
+                    {
+                        assert!(shard.get_property(STORAGE_CLASS_KEY).is_none());
+                        let (_, sst_ia_file_ids) = shard.get_local_sst_files();
+                        assert!(sst_ia_file_ids.is_empty());
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to reload local file and remove storage class property".to_string(),
+    );
+    client.verify_data_with_ref_store();
+
+    cluster.stop();
+    oss.shutdown();
 }
 
 #[test]
@@ -1017,14 +1082,14 @@ fn build_where_expr(cols: &[ColumnInfo], col_id: i64, val: i64) -> tipb::Expr {
     cond
 }
 
-fn gen_row_key(keyspace_id: u32, table_id: i64, i: usize) -> Vec<u8> {
+pub(crate) fn gen_row_key(keyspace_id: u32, table_id: i64, i: usize) -> Vec<u8> {
     let mut key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
     let table_key = encode_row_key(table_id, i as i64);
     key.extend_from_slice(&table_key);
     key
 }
 
-fn gen_row_val(ctx: &Mutex<EvalContext>, i: usize) -> Vec<u8> {
+pub(crate) fn gen_row_val(ctx: &Mutex<EvalContext>, i: usize) -> Vec<u8> {
     let mut row_val = vec![];
     let str_val = gen_str_val(i);
     let cols = vec![
@@ -1036,7 +1101,7 @@ fn gen_row_val(ctx: &Mutex<EvalContext>, i: usize) -> Vec<u8> {
     row_val
 }
 
-fn gen_str_val(i: usize) -> Vec<u8> {
+pub(crate) fn gen_str_val(i: usize) -> Vec<u8> {
     let repeat = 1 + i % 16;
     format!("abc_{}", i).repeat(repeat).into_bytes()
 }
@@ -1044,27 +1109,30 @@ fn gen_str_val(i: usize) -> Vec<u8> {
 fn build_schemas(table_ids: Vec<i64>) -> Vec<Schema> {
     let mut schemas = vec![];
     for &columnar_table_id in &table_ids {
-        let mut c1 = ColumnInfo::new();
-        c1.set_column_id(1);
-        c1.set_tp(FieldTypeTp::LongLong.to_u8().unwrap() as i32);
-        let mut c2 = ColumnInfo::new();
-        c2.set_column_id(2);
-        c2.set_tp(FieldTypeTp::VarChar.to_u8().unwrap() as i32);
-        c2.set_column_len(255);
-        c2.set_collation(Collation::Utf8Mb4Bin as i32);
-        let schema = SchemaBuf {
-            table_id: columnar_table_id,
-            handle_column: new_int_handle_column_info(),
-            version_column: new_version_column_info(),
-            columns: vec![c1, c2],
-            pk_col_ids: vec![],
-            vector_indexes: vec![],
-            properties: Properties::default(),
-        }
-        .into();
+        let schema = build_columnar_schema_buf(columnar_table_id).into();
         schemas.push(schema);
     }
     schemas
+}
+
+fn build_columnar_schema_buf(table_id: i64) -> SchemaBuf {
+    let mut c1 = ColumnInfo::new();
+    c1.set_column_id(1);
+    c1.set_tp(FieldTypeTp::LongLong.to_u8().unwrap() as i32);
+    let mut c2 = ColumnInfo::new();
+    c2.set_column_id(2);
+    c2.set_tp(FieldTypeTp::VarChar.to_u8().unwrap() as i32);
+    c2.set_column_len(255);
+    c2.set_collation(Collation::Utf8Mb4Bin as i32);
+    SchemaBuf {
+        table_id,
+        handle_column: new_int_handle_column_info(),
+        version_column: new_version_column_info(),
+        columns: vec![c1, c2],
+        pk_col_ids: vec![],
+        vector_indexes: vec![],
+        properties: Properties::default(),
+    }
 }
 
 async fn send_schema_file_request(status_addr: &str, keyspace_id: u32, schema_file_id: u64) {

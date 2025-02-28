@@ -498,9 +498,18 @@ impl SchemaManager {
                     continue;
                 }
             }
-            let need_update_schema = table_infos
-                .iter()
-                .any(|ti| ti.build_columnar() || ti.with_storage_class());
+            let old_storage_class_schemas = if let Ok(Some(schema_file)) = &local_schema_file {
+                schema_file.export_storage_class_schemas()
+            } else {
+                HashMap::default()
+            };
+            // If the old specified storage class becomes unspecified, the storage class is
+            // removed from the schema file.
+            let need_update_schema = table_infos.iter().any(|ti| {
+                ti.build_columnar()
+                    || ti.with_storage_class()
+                    || old_storage_class_schemas.contains_key(&ti.id)
+            });
             if cur_schema_version == 0 && !need_update_schema {
                 continue;
             }

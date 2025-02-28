@@ -337,6 +337,16 @@ impl ShardMeta {
                         .properties
                         .set(cs.get_property_key(), cs.get_property_value()),
                 };
+            } else if cs.get_property_key() == STORAGE_CLASS_KEY {
+                let sc = StorageClass::unmarshal(Some(cs.get_property_value()));
+                // If the storage class of the cs is unspecified, do not set the storage class
+                // property to the shard meta.
+                if sc.is_specified() {
+                    self.properties
+                        .set(cs.get_property_key(), cs.get_property_value());
+                } else {
+                    self.properties.remove(cs.get_property_key());
+                }
             } else {
                 self.properties
                     .set(cs.get_property_key(), cs.get_property_value());

@@ -292,6 +292,9 @@ impl ServerCluster {
         for (_, worker) in self.tikv_workers.drain() {
             worker.shutdown();
         }
+        if let Some(schema_manager) = self.schema_manager.take() {
+            schema_manager.shutdown()
+        }
     }
 
     // Stop node gracefully.

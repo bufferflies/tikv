@@ -1,6 +1,6 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{ops::Range, sync::Arc};
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use api_version::ApiV2;
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use tikv_util::{
 
 use crate::{
     load_schema,
-    schema::{SchemaDiff, TableInfo, STATE_PUBLIC},
+    schema::{DbInfo, SchemaDiff, StorageClass, TableInfo, STATE_PUBLIC},
     KvScanner,
 };
 
@@ -20,6 +20,7 @@ const TIDB_SCHEMA_DIFF_PREFIX: &[u8] = b"Diff";
 const TIDB_META_KEY_PREFIX: u8 = b'm';
 const STRING_DATA_TYPE: u8 = b's';
 const HASH_DATA_TYPE: u8 = b'h';
+const TIDB_DBS: &[u8] = b"DBs";
 
 // Sync schema for keyspace_id if needed.
 pub async fn sync_schema(
@@ -160,6 +161,59 @@ async fn get_schema_diff(
     Ok(schema_diffs_res)
 }
 
+// The method generates storage class schema data for testing the schema
+// manager.
+pub fn generate_storage_class_schema_data_for_test(
+    keyspace_id: u32,
+    db_id: i64,
+    table_id: i64,
+    schema_version: i64,
+    storage_class: StorageClass,
+    init: bool,
+) -> Result<HashMap<Vec<u8>, Vec<u8>>, String> {
+    let mut kv_pairs: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+
+    if init {
+        // db info
+        let db_key = dbs_db_key(keyspace_id, db_id);
+        let mut db_info = DbInfo::default();
+        db_info.id = db_id;
+        db_info.state = STATE_PUBLIC;
+        let db_data = serde_json::to_string(&db_info).map_err(|e| e.to_string())?;
+        kv_pairs.insert(db_key, db_data.into_bytes());
+    } else {
+        // schema diff
+        let diff_key = schema_diff_key(keyspace_id, schema_version);
+        let mut schema_diff = SchemaDiff::default();
+        schema_diff.version = schema_version;
+        schema_diff.schema_id = db_id;
+        schema_diff.table_id = table_id;
+        let diff_value = serde_json::to_string(&schema_diff).map_err(|e| e.to_string())?;
+        kv_pairs.insert(diff_key, diff_value.into_bytes());
+    }
+
+    // table info
+    let schema_data_key = schema_data_key(keyspace_id, db_id, table_id);
+    let mut table_info = TableInfo::default();
+    table_info.id = table_id;
+    table_info.state = STATE_PUBLIC;
+    if storage_class.is_specified() {
+        table_info.storage_class_tier = Some(storage_class.display().to_string());
+    } else {
+        table_info.storage_class_tier = None
+    }
+    let schema_data = serde_json::to_string(&table_info).map_err(|e| e.to_string())?;
+    kv_pairs.insert(schema_data_key, schema_data.into_bytes());
+
+    // schema version
+    kv_pairs.insert(
+        schema_version_key(keyspace_id).to_vec(),
+        schema_version.to_string().into_bytes(),
+    );
+
+    Ok(kv_pairs)
+}
+
 fn schema_version_key(keyspace_id: u32) -> Vec<u8> {
     let mut key = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
     let encoded_key = encode_bytes(TIDB_SCHEMA_VERSION_KEY);
@@ -193,6 +247,19 @@ fn schema_data_key(keyspace_id: u32, db_id: i64, table_id: i64) -> Vec<u8> {
     key.extend_from_slice(&enc_db_key);
     key.encode_u64(HASH_DATA_TYPE as u64).unwrap();
     key.extend_from_slice(&enc_table_key);
+
+    key
+}
+
+fn dbs_db_key(keyspace_id: u32, db_id: i64) -> Vec<u8> {
+    let mut key = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+    let enc_dbs = encode_bytes(TIDB_DBS);
+    let enc_db_key = encode_bytes(format!("DB:{}", db_id).as_bytes());
+    key.reserve(enc_dbs.len() + enc_db_key.len() + 1 + 8);
+    key.push(TIDB_META_KEY_PREFIX);
+    key.extend_from_slice(&enc_dbs);
+    key.encode_u64(HASH_DATA_TYPE as u64).unwrap();
+    key.extend_from_slice(&enc_db_key);
 
     key
 }

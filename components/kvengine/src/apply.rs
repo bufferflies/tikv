@@ -11,6 +11,7 @@ use std::{
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use kvenginepb as pb;
+use schema::schema::StorageClass;
 
 use crate::{
     context::PrepareType,
@@ -967,7 +968,6 @@ impl EngineCore {
 
     fn apply_update_storage_class(&self, shard: &Shard, cs: &ChangeSet) {
         assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
-        shard.set_property(STORAGE_CLASS_KEY, cs.get_property_value());
         if !cs.ln_tables.is_empty() {
             let old_data = shard.get_data();
             let mut scf_builder = ShardCfBuilder::new(WRITE_CF);
@@ -983,6 +983,27 @@ impl EngineCore {
             let mut builder = ShardDataBuilder::new(old_data);
             builder.set_cfs(new_cfs);
             shard.set_data(builder.build());
+        }
+        let sc = StorageClass::unmarshal(Some(cs.get_property_value()));
+        // The unspecified storage class only reloads files, but does not set the
+        // storage class property.
+        if !sc.is_specified() {
+            info!(
+                "shard {} del storage class property, reload files {}",
+                shard.tag(),
+                cs.ln_tables.len(),
+            );
+            shard.del_property(STORAGE_CLASS_KEY);
+            let mut pending_ops = shard.pending_ops.write().unwrap();
+            pending_ops.storage_class = StorageClass::Unspecified;
+        } else {
+            shard.set_property(STORAGE_CLASS_KEY, cs.get_property_value());
+            info!(
+                "shard {} set storage class to {:?}, reload files {}",
+                shard.tag(),
+                sc,
+                cs.ln_tables.len(),
+            );
         }
     }
 

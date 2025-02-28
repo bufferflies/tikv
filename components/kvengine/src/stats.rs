@@ -301,6 +301,7 @@ pub struct ShardStats {
     pub trim_over_bound: bool,
     pub manual_major_compaction: bool,
     pub storage_class: StorageClass,
+    pub checked_schema_version: i64,
     // Txn File Stats
     pub txn_file_locks: usize,
     // Columnar Stats
@@ -668,6 +669,7 @@ impl super::Shard {
             trim_over_bound: pending_ops.trim_over_bound,
             manual_major_compaction: pending_ops.manual_major_compaction,
             storage_class: pending_ops.storage_class,
+            checked_schema_version: self.get_checked_schema_ver(),
             txn_file_locks,
             schema_version,
             schema_restore_version,

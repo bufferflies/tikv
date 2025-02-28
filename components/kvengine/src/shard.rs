@@ -770,6 +770,13 @@ impl Shard {
         data.get_all_sst_files()
     }
 
+    // return STANDARD ids, IA ids
+    pub fn get_local_sst_files(&self) -> (Vec<u64>, Vec<u64>) {
+        let use_ia = self.use_ia();
+        let data = self.get_data();
+        data.get_local_sst_files(use_ia)
+    }
+
     pub fn get_txn_chunks(&self) -> Vec<u64> {
         let data = self.get_data();
         data.get_txn_chunks()
@@ -1650,6 +1657,34 @@ impl ShardDataCore {
         });
         files.sort_unstable();
         files
+    }
+
+    // return STANDARD ids, IA ids
+    pub(crate) fn get_local_sst_files(&self, use_ia: bool) -> (Vec<u64>, Vec<u64>) {
+        let mut files = Vec::new();
+        let mut ia_files = Vec::new();
+        for l0 in &self.l0_tbls {
+            files.push(l0.id());
+        }
+        for blob_tbl_id in self.blob_tbl_map.keys() {
+            files.push(*blob_tbl_id);
+        }
+        self.for_each_level(|cf, lh| {
+            if cf != WRITE_CF || !use_ia {
+                for tbl in lh.tables.iter() {
+                    files.push(tbl.id())
+                }
+            } else {
+                for tbl in lh.tables.iter() {
+                    assert!(!tbl.is_sync());
+                    ia_files.push(tbl.id())
+                }
+            }
+            false
+        });
+        files.sort_unstable();
+        ia_files.sort_unstable();
+        (files, ia_files)
     }
 
     pub(crate) fn get_txn_chunks(&self) -> Vec<u64> {

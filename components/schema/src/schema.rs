@@ -12,7 +12,7 @@ use tidb_query_datatype::{
     Collation, FieldTypeFlag, FieldTypeTp,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DbInfo {
     #[serde(rename = "id")]
     pub id: i64,
@@ -35,7 +35,7 @@ pub struct CiStr {
 
 pub const STATE_PUBLIC: SchemaState = SchemaState(5);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TableInfo {
     pub id: i64,
     pub name: CiStr,
@@ -74,14 +74,21 @@ impl TableInfo {
     }
 
     pub fn with_storage_class(&self) -> bool {
-        self.storage_class_tier.as_ref().is_some()
+        self.storage_class() != StorageClass::Unspecified
     }
 
     pub fn storage_class(&self) -> StorageClass {
-        self.storage_class_tier
+        let mut storage_class = self
+            .storage_class_tier
             .as_deref()
             .and_then(|x| x.try_into().ok())
-            .unwrap_or(StorageClass::Unspecified)
+            .unwrap_or(StorageClass::Unspecified);
+        if storage_class == StorageClass::Standard {
+            // The standard storage class is not set to schema file and shard, need to be
+            // changed to unspecified.
+            storage_class = StorageClass::Unspecified;
+        }
+        storage_class
     }
 }
 
@@ -221,7 +228,7 @@ pub struct PartitionDefinition {
 
 // SchemaDiff contains the schema modification at a particular schema version.
 // It is used to reduce schema reload cost.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SchemaDiff {
     pub version: i64,
     #[serde(rename = "type")]
@@ -234,7 +241,7 @@ pub struct SchemaDiff {
     pub affected_opts: Option<Vec<AffectedOption>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionType(u8);
 
 // AffectedOption is used when a ddl affects multi tables.

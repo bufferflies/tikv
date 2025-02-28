@@ -8,4 +8,4 @@ pub mod schema;
 mod sync;
 
 pub use load::{load_schema, KvScanner};
-pub use sync::{sync_schema, KvGetter};
+pub use sync::{generate_storage_class_schema_data_for_test, sync_schema, KvGetter};

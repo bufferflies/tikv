@@ -33,6 +33,7 @@ mod merge;
 mod merged_engine;
 mod native_backup;
 mod replica_read;
+mod storage_class;
 mod transaction;
 mod truncate_ts;
 

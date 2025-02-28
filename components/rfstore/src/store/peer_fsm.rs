@@ -1582,34 +1582,36 @@ impl<'a> PeerMsgHandler<'a> {
         info!(
             "{} propose update schema file {}",
             tag,
-            schema_file.get_file_id()
+            update_schema_meta.get_file_id();
+            "schema_version" => update_schema_meta.get_version(),
         );
         self.propose_change_set(change_set);
     }
 
     fn check_schema(&mut self, shard: &Arc<Shard>) {
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
-        if !shard_meta.schema.is_valid() {
+        if !shard_meta.schema.is_valid() && !shard_meta.get_storage_class().is_specified() {
             return;
         }
+        let schema_version = shard_meta.schema.file_ver();
         if let Some(schema_file) = shard.get_schema_file() {
             if shard_meta.schema.file_ver() != schema_file.get_version() {
                 return;
             }
-            if shard.get_checked_schema_ver() >= schema_file.get_version() {
-                return;
-            }
-            if !self.ctx.global.schema_scheduler.is_busy() {
-                let task = SchemaTask::StorageClass {
-                    region: self.region().clone(),
-                    schema_version: schema_file.get_version(),
-                };
-                if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {
-                    error!("check schema failed";
-                        "region_id" => self.region_id(),
-                        "err" => ?e
-                    );
-                }
+        }
+        if shard.get_checked_schema_ver() >= schema_version {
+            return;
+        }
+        if !self.ctx.global.schema_scheduler.is_busy() {
+            let task = SchemaTask::StorageClass {
+                region: self.region().clone(),
+                schema_version,
+            };
+            if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {
+                error!("check schema failed";
+                    "region_id" => self.region_id(),
+                    "err" => ?e
+                );
             }
         }
     }

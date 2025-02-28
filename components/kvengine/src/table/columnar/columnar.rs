@@ -93,6 +93,10 @@ impl SchemaBuf {
             self.properties.remove(STORAGE_CLASS_KEY);
         }
     }
+
+    pub fn get_storage_class(&self) -> StorageClass {
+        StorageClass::unmarshal(self.properties.get(STORAGE_CLASS_KEY).as_deref())
+    }
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -130,10 +134,6 @@ impl Schema {
             || !self.columns.is_empty()
             || !self.pk_col_ids.is_empty()
             || !self.vector_indexes.is_empty()
-    }
-
-    pub fn get_storage_class(&self) -> StorageClass {
-        StorageClass::unmarshal(self.properties.get(STORAGE_CLASS_KEY).as_deref())
     }
 
     pub fn find_column_by_id(&self, id: i64) -> Option<&ColumnInfo> {

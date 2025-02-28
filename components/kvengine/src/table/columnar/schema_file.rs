@@ -205,6 +205,9 @@ impl SchemaFile {
 
     // overlap checks if the Shard contains any rows in any of the schema tables.
     pub fn overlap(&self, mut start_key: &[u8], mut end_key: &[u8], keyspace_id: u32) -> bool {
+        if self.core.tables.is_empty() {
+            return false;
+        }
         if keyspace_id != self.get_keyspace_id() {
             return false;
         }
@@ -344,6 +347,12 @@ impl SchemaFile {
         self.core.tables.clone()
     }
 
+    pub fn export_storage_class_schemas(&self) -> HashMap<i64, Schema> {
+        let mut tables = self.export_schemas();
+        tables.retain(|_, schema| schema.get_storage_class().is_specified());
+        tables
+    }
+
     pub fn schema_count(&self) -> usize {
         self.core.tables.len()
     }
@@ -394,7 +403,7 @@ pub fn build_schema_file(
     data
 }
 
-fn encode_table_prefix_key(table_id: i64) -> OwnedInnerKey {
+pub fn encode_table_prefix_key(table_id: i64) -> OwnedInnerKey {
     let mut key = Vec::with_capacity(TABLE_PREFIX_KEY_LEN);
     key.put(TABLE_PREFIX);
     key.encode_i64(table_id).unwrap();
