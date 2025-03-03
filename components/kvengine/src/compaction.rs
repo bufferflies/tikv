@@ -1125,14 +1125,18 @@ impl Engine {
         let mut biggest = data.l0_tbls[0].biggest();
         let mut estimated_blob_size = 0;
         let unconverted_l0s: HashSet<u64> = data.get_unconverted_l0s().iter().cloned().collect();
-        for l0 in &data.l0_tbls {
+        // Reversely iterate to ensure that older tables are compacted to L1 first.
+        // When any L0 table will not be compacted, we should stop the iteration.
+        // TODO: continue to choose newer L0 tables which have not overlapping with
+        // older ones.
+        for l0 in data.l0_tbls.iter().rev() {
             // Skip unconverted l0s.
             // After region merge there may have l0s with l0.version() <
             // columnar_snap_version already converted exists and will not be added
             // to unconverted_l0s. So we need check the unconverted_l0s.
             if unconverted_l0s.contains(&l0.id()) {
                 info!("{} skip unconverted l0 {}", tag, l0.id());
-                continue;
+                break;
             }
 
             if smallest > l0.smallest() {
@@ -1156,6 +1160,9 @@ impl Engine {
             );
             return None;
         }
+        // Keep the L0 tables in order. It's not necessary (will be sorted again after
+        // `load_table_files`) but for safety.
+        l0_tbls.reverse();
 
         for cf in 0..NUM_CFS {
             let lh = data.get_cf(cf).get_level(1);
@@ -1194,12 +1201,13 @@ impl Engine {
         if let Some(build_opts) = &bt_config {
             if estimated_blob_size < build_opts.target_blob_table_size as u64 {
                 bt_config = None;
+            } else {
+                info!(
+                    "{} build blob in L0 compaction, estimated blob size {}, blob table build options {:?}",
+                    tag, estimated_blob_size, bt_config
+                );
             }
         }
-        info!(
-            "{} build blob in L0 compaction, estimated blob size {}, blob table build options {:?}",
-            tag, estimated_blob_size, bt_config
-        );
         let estimated_num_files = total_size as usize
             / bt_config.map_or(sst_config.max_table_size, |c| {
                 std::cmp::min(c.max_blob_table_size, sst_config.max_table_size)
@@ -2439,17 +2447,13 @@ async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             InPlaceCompaction::Unknown => unreachable!(),
         },
         CompactionType::L0(l0_compaction) => {
-            cs.set_compaction(l0_compact_v3(ctx, l0_compaction, &mut id_allocator).await?);
+            cs.set_compaction(l0_compact(ctx, l0_compaction, &mut id_allocator).await?);
         }
         CompactionType::L1Plus(l1_plus_compaction) => {
-            cs.set_compaction(
-                l1_plus_compact_v3(ctx, l1_plus_compaction, &mut id_allocator).await?,
-            );
+            cs.set_compaction(l1_plus_compact(ctx, l1_plus_compaction, &mut id_allocator).await?);
         }
         CompactionType::Major(major_compaction) => {
-            cs.set_major_compaction(
-                major_compact_v3(ctx, major_compaction, &mut id_allocator).await?,
-            );
+            cs.set_major_compaction(major_compact(ctx, major_compaction, &mut id_allocator).await?);
         }
         CompactionType::Columnar(columnar_compaction) => {
             cs.set_columnar_compaction(
@@ -3664,7 +3668,7 @@ async fn compact_for_cf(
     Ok((sst_creates, blob_table_creates))
 }
 
-async fn l0_compact_v3(
+async fn l0_compact(
     ctx: &CompactionCtx,
     l0_compaction: &L0Compaction,
     id_allocator: &mut LocalIdAllocator,
@@ -3742,7 +3746,7 @@ async fn l0_compact_v3(
     Ok(comp)
 }
 
-async fn l1_plus_compact_v3(
+async fn l1_plus_compact(
     ctx: &CompactionCtx,
     l1_plus_compaction: &L1PlusCompaction,
     id_allocator: &mut LocalIdAllocator,
@@ -3797,7 +3801,7 @@ async fn l1_plus_compact_v3(
     Ok(comp)
 }
 
-async fn major_compact_v3(
+async fn major_compact(
     ctx: &CompactionCtx,
     major_compaction: &MajorCompaction,
     id_allocator: &mut LocalIdAllocator,
