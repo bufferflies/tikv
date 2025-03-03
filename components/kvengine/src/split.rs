@@ -25,7 +25,7 @@ use crate::{
     table::{
         columnar::ColumnarLevels, vector_index::VectorIndexes, BoundedDataSet, DataBound, InnerKey,
     },
-    util::{get_table_id_from_data_bound, merge_columnar_table_ids},
+    util::{get_table_id_from_data_bound, keys_belong_to_same_table, merge_columnar_table_ids},
     *,
 };
 
@@ -305,11 +305,10 @@ impl Engine {
                 let source_ia = source_storage_class == StorageClass::Ia;
                 let target_ia = target_storage_class == StorageClass::Ia;
                 if source_ia && target_ia {
-                    let source_table_prefix =
-                        &source_shard.outer_start[0..KEYSPACE_PREFIX_LEN + 1 + 8];
-                    let target_table_prefix =
-                        &target_shard.outer_start[0..KEYSPACE_PREFIX_LEN + 1 + 8];
-                    !source_table_prefix.eq(target_table_prefix)
+                    !keys_belong_to_same_table(
+                        source_shard.inner_start(),
+                        target_shard.inner_start(),
+                    )
                 } else {
                     true
                 }

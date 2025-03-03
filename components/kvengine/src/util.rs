@@ -14,7 +14,7 @@ use tikv_util::box_err;
 use tokio::task::JoinHandle;
 
 use crate::{
-    table::{DataBound, TxnFile},
+    table::{DataBound, InnerKey, TxnFile},
     DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY,
 };
 
@@ -465,6 +465,16 @@ pub fn get_table_id_from_data_bound(data_bound: DataBound<'_>) -> (i64, i64) {
     (start_table_id, end_table_id)
 }
 
+/// Return true when both keys are table keys and they belong to the same table.
+///
+/// Should check `ApiV2::is_belongs_to_same_keyspace()` first if the keys can
+/// belong to different keyspace.
+pub fn keys_belong_to_same_table(k0: InnerKey<'_>, k1: InnerKey<'_>) -> bool {
+    k0.len() >= TABLE_PREFIX_KEY_LEN
+        && k1.len() >= TABLE_PREFIX_KEY_LEN
+        && k0[..TABLE_PREFIX_KEY_LEN] == k1[..TABLE_PREFIX_KEY_LEN]
+}
+
 #[cfg(any(test, feature = "testexport"))]
 pub mod test_util {
     use std::sync::Mutex;
@@ -605,5 +615,53 @@ mod tests {
                 b"x0201077".to_vec(),
             ]
         );
+    }
+
+    #[test]
+    fn test_keys_belong_to_same_table() {
+        let cases: Vec<(&'static str, &'static str, bool)> = vec![
+            (
+                "7800002A7480000000000000015F728000000000000001", // table id before `5F72`
+                "7800002A7480000000000000015F728000000000000002",
+                true,
+            ),
+            (
+                "7800002A7480000000000000015F728000000000000001",
+                "7800002A7480000000000000025F728000000000000001",
+                false,
+            ),
+            (
+                "7480000000000000015F728000000000000001",
+                "7480000000000000015F728000000000000001",
+                true,
+            ),
+            (
+                "7480000000000000015F728000000000000001",
+                "7480000000000000025F728000000000000001",
+                false,
+            ),
+            (
+                "7800002A",
+                "7800002A7480000000000000115F728000000000000001",
+                false,
+            ),
+            (
+                "7800002A7480000000000000015F728000000000000001",
+                "7800002AFF",
+                false,
+            ),
+        ];
+
+        for (k0, k1, expected) in cases {
+            let key0 = hex::decode(k0).unwrap();
+            let key1 = hex::decode(k1).unwrap();
+            assert_eq!(
+                keys_belong_to_same_table(
+                    InnerKey::from_outer_key(&key0),
+                    InnerKey::from_outer_key(&key1)
+                ),
+                expected
+            );
+        }
     }
 }
