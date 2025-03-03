@@ -647,7 +647,9 @@ impl MergedEngine {
             progress.entries.clear();
             progress.synced_index = progress.commit_index;
         }
-        self.raft.write(raft_wb)?;
+        if !raft_wb.is_empty() {
+            self.raft.write(raft_wb)?;
+        }
         self.manifest.persist()?;
         Ok(())
     }
