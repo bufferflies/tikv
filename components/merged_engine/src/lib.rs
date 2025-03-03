@@ -313,6 +313,37 @@ impl MergedEngine {
                 let region_progress = region_progresses
                     .entry(region_id)
                     .or_insert(RegionProgress::new(keyspace_id));
+                if raft_state.get_last_index() > commit {
+                    // Fetch uncommitted entries, and insert them into region progress, so that they
+                    // will be replayed when commit index advances (during sync_merged).
+                    let mut entry_buf = Vec::new();
+                    let low_idx = commit + 1;
+                    let high_idx = raft_state.get_last_index() + 1;
+                    if let Err(err) = origin.fetch_raft_entries_to(
+                        peer_id,
+                        low_idx,
+                        high_idx,
+                        None,
+                        &mut entry_buf,
+                    ) {
+                        panic!(
+                            "fetch raft entries failed for region {}, low: {}, high: {}, err: {}",
+                            region_id, low_idx, high_idx, err
+                        );
+                    }
+                    for entry in entry_buf.iter() {
+                        if let Some(existing_op) = region_progress.entries.get(&entry.index) {
+                            if existing_op.term >= entry.term as u32 {
+                                continue;
+                            }
+                        }
+                        region_progress
+                            .entries
+                            .insert(entry.index, RaftLogOp::new(entry));
+                    }
+                }
+                // Committed entries will be replayed right away during the recovery process
+                // below.
                 if region_progress.commit_index >= commit {
                     continue;
                 }
@@ -690,7 +721,16 @@ impl MergedEngine {
             let mut hs = eraftpb::HardState::default();
             let mut preprocessor_ref = preprocessor.as_ref();
             for log_index in low..high {
-                let mut entry = progress.entries.get(&log_index).unwrap().to_entry();
+                let mut entry = progress
+                    .entries
+                    .get(&log_index)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "entry not found for region {}, log index {}",
+                            updated_region, log_index
+                        )
+                    })
+                    .to_entry();
                 let admin_req = update_entry(&mut entry, merged_store_id);
                 let err = preprocessor_ref.preprocess_committed_entry(ctx, &entry);
                 if let Some(err) = err {
