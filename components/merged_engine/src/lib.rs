@@ -710,6 +710,9 @@ impl MergedEngine {
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
             let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
             let high: u64 = progress.commit_index + 1;
+            if low >= high {
+                continue;
+            }
             let mut preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
                 Preprocessor::new(
                     &self.raft,
@@ -804,6 +807,11 @@ impl MergedEngine {
                         )
                     });
                     preprocessor_ref = preprocessor.as_ref();
+                    preprocessor_ref.raft_state.set_hard_state(&hs);
+                    preprocessor_ref.raft_state.set_last_index(log_index);
+                    preprocessor_ref
+                        .raft_state
+                        .set_last_preprocessed_index(*preprocessor_ref.preprocessed_index);
                 }
             }
             preprocessor_ref.write_raft_state(ctx);
