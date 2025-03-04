@@ -90,8 +90,12 @@ impl ArenaAddr {
 }
 
 pub struct Arena {
+    /// ArenaSegment for storing both skip list nodes and keys.
     nodes: ArenaSegment,
+    /// ArenaSegment for storing values.
     values: ArenaSegment,
+    /// Atomic counter tracking the total memory usage of both 'nodes' and
+    /// 'values' segments.
     total_size: Arc<AtomicU32>,
     pub(crate) rand_id: i32,
 }

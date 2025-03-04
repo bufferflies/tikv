@@ -39,6 +39,48 @@ impl L0Footer {
     }
 }
 
+// The L0Table format is as follows:
+// +-------------------------+
+// |         L0 File         |
+// |                         |
+// |  +-------------------+  |
+// |  |     SSTable 1     |  | <--- Data from Builder 1 (CF 1)
+// |  | +---------------+ |  |
+// |  | |    Block 1    | |  |
+// |  | +---------------+ |  |
+// |  | |    Block 2    | |  |
+// |  | +---------------+ |  |
+// |  | |     ...       | |  |
+// |  | +---------------+ |  |
+// |  | |    Index      | |  |
+// |  | +---------------+ |  |
+// |  | |    Footer     | |  |
+// |  | +---------------+ |  |
+// |  +-------------------+  |
+// |  |     SSTable 2     |  | <--- Data from Builder 2 (CF 2)
+// |  |                   |  |
+// |  |                   |  |
+// |  +-------------------+  |
+// |  |     SSTable 3     |  | <--- Data from Builder 3 (CF 3)
+// |  |                   |  |
+// |  |                   |  |
+// |  +-------------------+  |
+// |                         |
+// |          ...            |
+// |                         |
+// |  +-------------------+  |
+// |  |      Footer       |  | <--- L0 Table Footer
+// |  | +-------------+ | |  |
+// |  | |    Offsets    | |  | <--- Offsets of SSTables
+// |  | +-------------+ | |  |
+// |  | |    Version    | |  | <--- Version number
+// |  | +-------------+ | |  |
+// |  | |  Num of CFS   | |  | <--- Number of column families
+// |  | +-------------+ | |  |
+// |  | | MAGIC_NUMBER  | |  | <--- Magic number for validation
+// |  | +-------------+ | |  |
+// |  +-----------------+ |  |
+// +-------------------------+
 #[derive(Clone)]
 pub struct L0Table {
     core: Arc<L0TableCore>,
@@ -298,7 +340,13 @@ impl BoundedDataSet for L0TableCore {
     }
 }
 
+// Used to build L0Table from key value pairs.
+//
+// For detailed table format specification, refer to the comment above
+// `L0Table`.
 pub struct L0Builder {
+    // A vector of builders used to construct the L0 table.
+    // Each builder is responsible for adding key-value pairs and managing their respective states.
     builders: Vec<Builder>,
     version: u64,
     count: usize,
@@ -401,5 +449,84 @@ impl L0Builder {
 
     pub fn get_fid(&self) -> u64 {
         self.fid
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_l0_builder_basic() {
+        // Test the creation of a new L0Builder instance
+        let mut builder = L0Builder::new(1, 1024, 1, ChecksumType::Crc32c, None, None);
+        assert_eq!(builder.get_fid(), 1); // Ensure the fid is set correctly
+        assert!(builder.is_empty()); // Ensure the builder is empty upon creation
+
+        // Test adding a key-value pair to the L0Builder
+        let key = InnerKey::from_inner_buf(b"test_key");
+        let value = Value::new_with_version(b"test_value", 1);
+        builder.add(0, key, &value, None);
+        assert!(!builder.is_empty()); // Ensure the builder is not empty after adding an entry
+
+        // Test finishing the L0Builder and creating an L0Table
+        let (l0_create, bytes) = builder.finish();
+
+        // Ensure the created L0Table has the expected properties
+        assert_eq!(l0_create.get_id(), 1); // Check the ID of the created L0Table
+        assert!(!bytes.is_empty()); // Ensure the byte array is not empty
+
+        // Test is_empty on a new builder
+        let mut builder2 = L0Builder::new(2, 1024, 1, ChecksumType::Crc32c, None, None);
+        assert!(builder2.is_empty()); // Ensure new builder is empty
+
+        // Test is_empty after adding an entry
+        let key = InnerKey::from_inner_buf(b"test_key2");
+        let value = Value::new_with_version(b"test_value2", 1);
+        builder2.add(0, key, &value, None);
+        assert!(!builder2.is_empty()); // Ensure the builder is not empty after adding an entry
+    }
+
+    #[test]
+    fn test_l0_footer_default() {
+        // Test the default values of L0Footer.
+        let footer = L0Footer::default();
+        assert_eq!(footer.version, 0); // Ensure the default version is 0.
+        assert_eq!(footer.num_cfs, 0); // Ensure the default number of column families is 0.
+        assert_eq!(footer.magic, 0); // Ensure the default magic number is 0.
+    }
+
+    #[test]
+    fn test_l0_footer_unmarshal() {
+        // Test the unmarshal method of L0Footer.
+        let mut footer = L0Footer::default();
+        let data: [u8; 16] = [
+            1, 0, 0, 0, 0, 0, 0, 0, // version = 1
+            2, 0, 0, 0, // num_cfs = 2
+            0xEF, 0xBE, 0xAD, 0xDE, // magic = 0xDEADBEEF in little endian
+        ];
+        footer.unmarshal(&data);
+
+        assert_eq!(footer.version, 1); // Check that version is set correctly.
+        assert_eq!(footer.num_cfs, 2); // Check that num_cfs is set correctly.
+        assert_eq!(footer.magic, 0xDEADBEEF); // Check that magic number is set correctly.
+    }
+
+    #[test]
+    fn test_l0_footer_is_match() {
+        // Test the is_match method of L0Footer.
+        let mut footer = L0Footer::default();
+
+        // Test with a valid magic number.
+        footer.magic = MAGIC_NUMBER;
+        assert!(footer.is_match()); // Ensure it matches with MAGIC_NUMBER.
+
+        // Test with another valid magic number.
+        footer.magic = MAGIC_NUMBER_SPLIT_L0;
+        assert!(footer.is_match()); // Ensure it matches with MAGIC_NUMBER_SPLIT_L0.
+
+        // Test with an invalid magic number.
+        footer.magic = 0x12345678;
+        assert!(!footer.is_match()); // Ensure it does not match with an invalid magic number.
     }
 }

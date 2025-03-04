@@ -34,6 +34,32 @@ const IDX_TTL_LEVELS: [u64; 4] = [60 * 8, 60 * 4, 60 * 2, 60];
 const FILTER_TTL_LEVELS: [u64; 4] = [60 * 2, 60, 30, 15];
 const SMALL_VALUE_SIZE: u64 = 96;
 
+/// The SSTable format:
+/// +-------------------+
+/// | Current Data Block|
+/// |-------------------|
+/// | key3@v3 -> value3 |  // Latest version handled by block_builder
+/// | key4@v2 -> value2 |
+/// | key5@v1 -> value1 |
+/// +-------------------+
+/// | Old Data Block    |
+/// |-------------------|
+/// | key3@v2 -> value2 |  // Older version handled by old_builder
+/// | key3@v1 -> value1 |
+/// | key4@v1 -> value1 |
+/// +-------------------+
+/// | Index Block       |
+/// |-------------------|
+/// | key3 -> Current Data Block |
+/// | key3 -> Old Data Block     |
+/// | key4 -> Current Data Block |
+/// | key4 -> Old Data Block     |
+/// | key5 -> Current Data Block |
+/// +-------------------+
+/// | Bloom Filter      |
+/// +-------------------+
+/// | Footer            |
+/// +-------------------+
 #[derive(Clone)]
 pub struct SsTable {
     core: Arc<SsTableCore>,
@@ -832,8 +858,13 @@ pub enum BlockCacheType {
 
 #[derive(Clone)]
 pub enum BlockCache {
+    /// Moka cache implementation, which uses a segmented cache for storing
+    /// blocks.
     Moka(SegmentedCache<BlockCacheKey, Bytes>),
+    /// Quick cache implementation, which uses a synchronous cache for storing
+    /// blocks.
     Quick(Arc<quick_cache::sync::Cache<BlockCacheKey, Bytes, BlockWeighter>>),
+    /// No caching; all data will be read directly from the source.
     None,
 }
 
@@ -1255,6 +1286,7 @@ mod tests {
         for n in nums {
             let (t, _) = create_sst_table("key", *n).await;
             let mut it = t.new_iterator(false, true);
+            // Seek to the first element, if the iterator is not in reversed mode.
             it.rewind().await;
             assert!(it.valid());
             let v = it.value();

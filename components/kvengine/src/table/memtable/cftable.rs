@@ -207,3 +207,169 @@ impl CfTableCore {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table::{memtable::WriteBatch, InnerKey};
+
+    /// Test basic operations on an empty CfTable
+    #[test]
+    fn test_empty_cftable() {
+        let table = CfTable::new();
+
+        // Test empty state
+        assert!(table.is_empty());
+        assert_eq!(table.size(), 0);
+        assert_eq!(table.skip_list_entries(), 0);
+        assert_eq!(table.get_version(), 0);
+        assert!(!table.is_force_switch());
+
+        // Test empty properties
+        assert!(table.get_properties().is_none());
+    }
+
+    /// Test version management
+    #[test]
+    fn test_version_management() {
+        let table = CfTable::new();
+
+        // Set and verify version
+        table.set_version(42);
+        assert_eq!(table.get_version(), 42);
+
+        // Create split table and verify version inheritance
+        let split_table = table.new_split();
+        assert_eq!(split_table.get_version(), 42);
+
+        // Verify version independence after split
+        split_table.set_version(100);
+        assert_eq!(split_table.get_version(), 100);
+        assert_eq!(table.get_version(), 42);
+    }
+
+    /// Test force switch functionality
+    #[test]
+    fn test_force_switch() {
+        let table = CfTable::new();
+        assert!(!table.is_force_switch());
+
+        table.set_force_switch();
+        assert!(table.is_force_switch());
+
+        // Test force switch in split table
+        let split_table = table.new_split();
+        assert!(split_table.is_force_switch());
+    }
+
+    /// Test data operations across different CFs
+    #[test]
+    fn test_cf_operations() {
+        let table = CfTable::new();
+
+        // Write data to different CFs
+        for cf in 0..NUM_CFS {
+            let tbl = table.get_cf(cf);
+            let mut wb = WriteBatch::new();
+            wb.put(
+                InnerKey::from_inner_buf(format!("key_{}", cf).as_bytes()),
+                0,
+                &[0],
+                1,
+                format!("value_{}", cf).as_bytes(),
+            );
+            tbl.put_batch(&mut wb, None, cf);
+        }
+
+        // Verify data presence
+        assert!(!table.is_empty());
+        assert!(table.size() > 0);
+        assert_eq!(table.skip_list_entries(), NUM_CFS);
+
+        // Check data in each CF
+        for cf in 0..NUM_CFS {
+            let tbl = table.get_cf(cf);
+            let mut it = tbl.new_iterator(false);
+            it.rewind();
+            assert!(it.valid());
+            assert_eq!(it.key().deref(), format!("key_{}", cf).as_bytes());
+        }
+    }
+
+    /// Test data bound checking
+    #[test]
+    fn test_data_bound_checking() {
+        let table = CfTable::new();
+
+        // Insert test data
+        let cf = WRITE_CF;
+        let tbl = table.get_cf(cf);
+        let mut wb = WriteBatch::new();
+        wb.put(InnerKey::from_inner_buf(b"key_50"), 0, &[0], 1, b"value_50");
+        tbl.put_batch(&mut wb, None, cf);
+
+        // Test bounds
+        let bound = DataBound {
+            lower_bound: InnerKey::from_inner_buf(b"key_00"),
+            upper_bound: InnerKey::from_inner_buf(b"key_99"),
+            upper_inclusive: true,
+        };
+        assert!(table.has_data_in_bound(bound));
+
+        let bound = DataBound {
+            lower_bound: InnerKey::from_inner_buf(b"key_60"),
+            upper_bound: InnerKey::from_inner_buf(b"key_99"),
+            upper_inclusive: true,
+        };
+        assert!(!table.has_data_in_bound(bound));
+    }
+
+    /// Test properties management
+    #[test]
+    fn test_properties() {
+        let table = CfTable::new();
+
+        // Initially no properties
+        assert!(table.get_properties().is_none());
+
+        // Set and get properties
+        let props = kvenginepb::Properties::default();
+        table.set_properties(props.clone());
+
+        // Test properties in split table
+        let split_table = table.new_split();
+        assert!(split_table.get_properties().is_some());
+    }
+
+    /// Test data max timestamp
+    #[test]
+    fn test_data_max_ts() {
+        let table = CfTable::new();
+
+        // Write data with different timestamps to different CFs
+        let write_cf = table.get_cf(WRITE_CF);
+        let mut wb = WriteBatch::new();
+        wb.put(
+            InnerKey::from_inner_buf(b"key1"),
+            0,
+            &[0],
+            100, // timestamp
+            b"value1",
+        );
+        write_cf.put_batch(&mut wb, None, WRITE_CF);
+
+        let extra_cf = table.get_cf(EXTRA_CF);
+        wb.reset();
+        wb.put(
+            InnerKey::from_inner_buf(b"key2"),
+            0,
+            &[0],
+            200, // timestamp
+            b"value2",
+        );
+        extra_cf.put_batch(&mut wb, None, EXTRA_CF);
+
+        // Max timestamp should be 200
+        assert_eq!(table.data_max_ts(), 200);
+    }
+}

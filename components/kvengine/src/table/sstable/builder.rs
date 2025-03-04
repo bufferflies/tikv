@@ -118,35 +118,9 @@ impl EntrySlice {
     }
 }
 
-/// A struct that manages the construction of a Sorted String Table (SST)
-/// format.
+/// A struct that manages the construction of a sstable format.
 ///
-/// The SSTable format:
-/// +-------------------+
-/// | Current Data Block|
-/// |-------------------|
-/// | key3@v3 -> value3 |  // Latest version handled by block_builder
-/// | key4@v2 -> value2 |
-/// | key5@v1 -> value1 |
-/// +-------------------+
-/// | Old Data Block    |
-/// |-------------------|
-/// | key3@v2 -> value2 |  // Older version handled by old_builder
-/// | key3@v1 -> value1 |
-/// | key4@v1 -> value1 |
-/// +-------------------+
-/// | Index Block       |
-/// |-------------------|
-/// | key3 -> Current Data Block |
-/// | key3 -> Old Data Block     |
-/// | key4 -> Current Data Block |
-/// | key4 -> Old Data Block     |
-/// | key5 -> Current Data Block |
-/// +-------------------+
-/// | Bloom Filter      |
-/// +-------------------+
-/// | Footer            |
-/// +-------------------+
+/// For the sstable format specification, refer to the comment above `SsTable`.
 #[derive(Default)]
 pub struct Builder {
     /// The unique identifier for the SSTable being built.
@@ -584,34 +558,34 @@ impl BlockBuffer {
     }
 }
 
-// Used to build data blocks from key-value entries for storage.
-//
-// The Block Format is as follows:
-// +---------------------+
-// | Checksum            |  (4 bytes)
-// +---------------------+
-// | Block Format ID     |  (4 bytes)
-// +---------------------+
-// | Number of Entries   |  (4 bytes)
-// +---------------------+
-// | Entry Offset 1      |  (4 bytes)
-// +---------------------+
-// | Entry Offset 2      |  (4 bytes)
-// +---------------------+
-// | ...                 |
-// +---------------------+
-// | Common Prefix Length |  (2 bytes)
-// +---------------------+
-// | Common Prefix Data   |  (variable length)
-// +---------------------+
-// | Entry 1 Key         |  (variable length)
-// | Entry 1 Value       |  (variable length)
-// +---------------------+
-// | Entry 2 Key         |  (variable length)
-// | Entry 2 Value       |  (variable length)
-// +---------------------+
-// | ...                 |
-// +---------------------+
+/// Used to build data blocks from key-value entries for storage.
+///
+/// The Block format is as follows:
+/// +---------------------+
+/// | Checksum            |  (4 bytes)
+/// +---------------------+
+/// | Block Format ID     |  (4 bytes)
+/// +---------------------+
+/// | Number of Entries   |  (4 bytes)
+/// +---------------------+
+/// | Entry Offset 1      |  (4 bytes)
+/// +---------------------+
+/// | Entry Offset 2      |  (4 bytes)
+/// +---------------------+
+/// | ...                 |
+/// +---------------------+
+/// | Common Prefix Length |  (2 bytes)
+/// +---------------------+
+/// | Common Prefix Data   |  (variable length)
+/// +---------------------+
+/// | Entry 1 Key         |  (variable length)
+/// | Entry 1 Value       |  (variable length)
+/// +---------------------+
+/// | Entry 2 Key         |  (variable length)
+/// | Entry 2 Value       |  (variable length)
+/// +---------------------+
+/// | ...                 |
+/// +---------------------+
 #[derive(Default)]
 pub struct BlockBuilder {
     // Final block data after encoding and compression
