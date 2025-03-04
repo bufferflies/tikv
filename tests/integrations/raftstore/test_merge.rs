@@ -1215,7 +1215,7 @@ fn test_sync_max_ts_after_region_merge_impl<F: KvFormat>() {
 fn test_merge_snapshot_demote() {
     let mut cluster = new_node_cluster(0, 4);
     configure_for_merge(&mut cluster.cfg);
-    configure_for_snapshot(&mut cluster);
+    configure_for_snapshot(&mut cluster.cfg);
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
 

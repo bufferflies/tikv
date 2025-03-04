@@ -347,8 +347,12 @@ fn test_new_leader_init_resolver() {
 // applying snapshot
 #[test]
 fn test_stale_read_while_applying_snapshot() {
-    let (mut cluster, pd_client, leader_client) =
-        prepare_for_stale_read_before_run(new_peer(1, 1), Some(Box::new(configure_for_snapshot)));
+    let (mut cluster, pd_client, leader_client) = prepare_for_stale_read_before_run(
+        new_peer(1, 1),
+        Some(Box::new(|cluster| {
+            configure_for_snapshot(&mut cluster.cfg);
+        })),
+    );
     let mut follower_client2 = PeerClient::new(&cluster, 1, new_peer(2, 2));
     follower_client2.ctx.set_stale_read(true);
 

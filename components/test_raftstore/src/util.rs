@@ -626,12 +626,12 @@ pub fn configure_for_hibernate<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.cfg.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(10);
 }
 
-pub fn configure_for_snapshot<T: Simulator>(cluster: &mut Cluster<T>) {
+pub fn configure_for_snapshot(cfg: &mut TikvConfig) {
     // Truncate the log quickly so that we can force sending snapshot.
-    cluster.cfg.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(20);
-    cluster.cfg.raft_store.raft_log_gc_count_limit = Some(2);
-    cluster.cfg.raft_store.merge_max_log_gap = 1;
-    cluster.cfg.raft_store.snap_mgr_gc_tick_interval = ReadableDuration::millis(50);
+    cfg.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(20);
+    cfg.raft_store.raft_log_gc_count_limit = Some(2);
+    cfg.raft_store.merge_max_log_gap = 1;
+    cfg.raft_store.snap_mgr_gc_tick_interval = ReadableDuration::millis(50);
 }
 
 pub fn configure_for_merge(cfg: &mut TikvConfig) {

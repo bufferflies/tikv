@@ -328,7 +328,7 @@ fn test_flashback_for_check_is_in_persist() {
 #[test]
 fn test_flashback_for_apply_snapshot() {
     let mut cluster = new_node_cluster(0, 3);
-    configure_for_snapshot(&mut cluster);
+    configure_for_snapshot(&mut cluster.cfg);
     cluster.run();
 
     cluster.must_transfer_leader(1, new_peer(3, 3));

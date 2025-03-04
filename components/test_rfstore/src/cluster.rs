@@ -150,7 +150,7 @@ pub struct Cluster<T: Simulator> {
 
     pub paths: Vec<TempDir>,
     // pub store_metas: HashMap<u64, Arc<Mutex<StoreMeta>>>,
-    pub io_rate_limiter: Option<Arc<IoRateLimiter>>,
+    pub io_rate_limiter: Arc<IoRateLimiter>,
     pub engines: HashMap<u64, Engines>,
     pub engine_dirs: HashMap<u64, TempDir>,
     pub closed_engines: HashSet<u64>,
@@ -175,6 +175,12 @@ impl<T: Simulator> Cluster<T> {
         cfg.tikv = new_test_config(cfg.cfg_dir.as_ref().unwrap().path(), id, count);
         cfg.tikv.cfg_path = cfg_path;
 
+        let io_rate_limiter = Arc::new(
+            cfg.storage
+                .io_rate_limit
+                .build(true /* enable_statistics */),
+        );
+
         let security_manager = Arc::new(SecurityManager::new(&cfg.security).unwrap());
         // TODO: In the future, maybe it's better to test both case where
         // `use_delete_range` is true and false
@@ -184,7 +190,7 @@ impl<T: Simulator> Cluster<T> {
             count,
             dfs: Arc::new(TempDirFs::default()),
             paths: vec![],
-            io_rate_limiter: None,
+            io_rate_limiter,
             engines: HashMap::default(),
             closed_engines: HashSet::default(),
             engine_dirs: HashMap::default(),
@@ -229,19 +235,13 @@ impl<T: Simulator> Cluster<T> {
             dir.path(),
             self.pd_client.clone(),
             self.dfs.clone(),
-            self.io_rate_limiter.clone().unwrap(),
+            self.io_rate_limiter.clone(),
             master_key,
             self.security_manager.clone(),
         )
     }
 
     pub fn create_engines(&mut self) -> Vec<(Engines, TempDir)> {
-        self.io_rate_limiter = Some(Arc::new(
-            self.cfg
-                .storage
-                .io_rate_limit
-                .build(true /* enable_statistics */),
-        ));
         let mut engines = Vec::with_capacity(self.count);
         for _ in 0..self.count {
             engines.push(self.create_engine());
