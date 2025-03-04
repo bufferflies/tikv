@@ -562,7 +562,7 @@ fn prepare_cluster(
         true,
         Duration::from_secs(10),
     );
-    let last_retry_time = Instant::now_coarse();
+    let mut last_retry_time = Instant::now_coarse();
     must_wait(
         || {
             let Some(shard) = cluster.get_active_shard_by_key(&table_key) else {
@@ -580,6 +580,7 @@ fn prepare_cluster(
                     true,
                     Duration::from_secs(10),
                 );
+                last_retry_time = Instant::now_coarse();
             }
             ok
         },
