@@ -942,12 +942,7 @@ impl Shard {
                 return;
             }
         }
-        // TODO: support columnar major compaction partial tables in the shard.
-        if data.has_files_need_major_compact() && data.columnar_table_ids.is_empty() {
-            let mut lock = self.compaction_priority.write().unwrap();
-            *lock = Some(CompactionPriority::ColumnarMajor { score: f64::MAX });
-            return;
-        }
+
         if data.schema_file.is_none() && !data.columnar_table_ids.is_empty() {
             let mut lock = self.compaction_priority.write().unwrap();
             *lock = Some(CompactionPriority::ColumnarClear);
@@ -1019,6 +1014,15 @@ impl Shard {
             };
             Some(max_pri)
         } else {
+            // TODO: support columnar major compaction partial tables in the shard.
+            // NOTE: we set the columnar major compaction priority lower than sst compaction
+            // to avoid sst compaction being blocked by columnar major compaction.
+            if data.has_files_need_major_compact() && data.columnar_table_ids.is_empty() {
+                let mut lock = self.compaction_priority.write().unwrap();
+                *lock = Some(CompactionPriority::ColumnarMajor);
+                return;
+            }
+
             // TODO: use dependent base_size for columnar
             let col_l0_score =
                 data.get_columnar_level_stats(0).columnar_size as f64 / self.opt.base_size as f64;

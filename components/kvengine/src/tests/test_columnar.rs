@@ -361,8 +361,7 @@ fn test_columnar_major_compaction() {
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
-    *shard.compaction_priority.write().unwrap() =
-        Some(CompactionPriority::ColumnarMajor { score: 2.0 });
+    *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor);
     engine.trigger_compact(id_ver);
     info!("trigger columnar major compaction {}", shard.tag());
     let ok = try_wait(

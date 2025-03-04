@@ -1935,9 +1935,7 @@ pub(crate) enum CompactionPriority {
     ColumnarL1 {
         score: f64,
     },
-    ColumnarMajor {
-        score: f64,
-    },
+    ColumnarMajor,
     ColumnarClear,
     UpdateVectorIndex {
         score: f64,
@@ -1960,7 +1958,7 @@ impl CompactionPriority {
             CompactionPriority::L0ToColumnar => 2.0,
             CompactionPriority::ColumnarL0 { score } => *score,
             CompactionPriority::ColumnarL1 { score } => *score,
-            CompactionPriority::ColumnarMajor { score } => *score,
+            CompactionPriority::ColumnarMajor => 1.5,
             CompactionPriority::ColumnarClear => f64::MAX,
             CompactionPriority::UpdateVectorIndex { score, .. } => *score,
         }
@@ -1977,7 +1975,7 @@ impl CompactionPriority {
             CompactionPriority::L0ToColumnar => 0,
             CompactionPriority::ColumnarL0 { .. } => 0,
             CompactionPriority::ColumnarL1 { .. } => 1,
-            CompactionPriority::ColumnarMajor { .. } => -1,
+            CompactionPriority::ColumnarMajor => -1,
             CompactionPriority::ColumnarClear => -1,
             CompactionPriority::UpdateVectorIndex { .. } => -1,
         }
@@ -1994,7 +1992,7 @@ impl CompactionPriority {
             CompactionPriority::L0ToColumnar => 0,
             CompactionPriority::ColumnarL0 { .. } => -1,
             CompactionPriority::ColumnarL1 { .. } => -1,
-            CompactionPriority::ColumnarMajor { .. } => -1,
+            CompactionPriority::ColumnarMajor => -1,
             CompactionPriority::ColumnarClear => -1,
             CompactionPriority::UpdateVectorIndex { .. } => -1,
         }
