@@ -681,9 +681,9 @@ fn batch_end(ctx: &mut RaftContext, batch_duration: Duration) {
     if batch_duration > Duration::from_millis(50) {
         info!("raft worker batch loop takes {:?}", batch_duration);
     }
-    ctx.raft_metrics
-        .store_time
-        .observe(duration_to_sec(batch_duration));
+    let dur = duration_to_sec(batch_duration);
+    ctx.raft_metrics.store_time.observe(dur);
+    ctx.raft_metrics.process_ready.observe(dur);
     ctx.raft_metrics.maybe_flush();
     ctx.current_time = None;
     ctx.global.destroying.clear();

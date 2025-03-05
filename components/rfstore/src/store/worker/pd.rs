@@ -690,12 +690,16 @@ impl PdRunner {
                             "has_tiflash_replicas" => has_tiflash_replicas,
                         );
                         STORE_SIZE_GAUGE_VEC
-                            .with_label_values(&["used", region_id_str, keyspace_id_str])
+                            .with_label_values(&[
+                                if has_tiflash_replicas {
+                                    "tiflash_used"
+                                } else {
+                                    "used"
+                                },
+                                region_id_str,
+                                keyspace_id_str,
+                            ])
                             .set(size as i64);
-                        let tiflash_size = if has_tiflash_replicas { size } else { 0 };
-                        STORE_SIZE_GAUGE_VEC
-                            .with_label_values(&["tiflash_used", region_id_str, keyspace_id_str])
-                            .set(tiflash_size as i64);
                     }
                 }
             }

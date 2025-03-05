@@ -60,9 +60,13 @@ impl Ticker {
         sched.run_at = self.tick + sched.interval;
     }
 
-    pub(crate) fn is_on_tick(&self, tick: PeerTick) -> bool {
-        let sched = &self.schedules[tick.idx];
+    fn is_on_schedule(&self, idx: usize) -> bool {
+        let sched = &self.schedules[idx];
         sched.run_at == self.tick
+    }
+
+    pub(crate) fn is_on_tick(&self, tick: PeerTick) -> bool {
+        self.is_on_schedule(tick.idx)
     }
 
     pub(crate) fn schedule_store(&mut self, tick: StoreTick) {
@@ -75,12 +79,11 @@ impl Ticker {
     }
 
     pub(crate) fn is_on_store_tick(&self, tick: StoreTick) -> bool {
-        let sched = &self.schedules[tick.idx];
-        sched.run_at == self.tick
+        self.is_on_schedule(tick.idx)
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) struct PeerTick {
     idx: usize,
 }

@@ -88,6 +88,7 @@ impl InMemFs {
             pending_remove: Default::default(),
             runtime: tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
+                .thread_name("memory-fs")
                 .enable_all()
                 .build()
                 .unwrap(),

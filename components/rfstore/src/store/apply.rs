@@ -789,7 +789,9 @@ impl Applier {
         let (mem_table_size, unpersisted_props_size) = writable_mem_tbl_state.unwrap_or_default();
         mem_states.update(mem_table_size, unpersisted_props_size);
         self.maybe_propose_switch_mem_table(ctx, timer);
-        ctx.apply_time.observe(timer.saturating_elapsed_secs());
+        let elapsed = timer.saturating_elapsed_secs();
+        ctx.apply_time.observe(elapsed); // waterfall
+        STORE_APPLY_LOG_HISTOGRAM.observe(elapsed);
         // self.metrics.written_bytes += wb.estimated_size() as u64;
         // self.metrics.written_keys += wb.num_entries() as u64;
         let mut resp = RaftCmdResponse::default();
