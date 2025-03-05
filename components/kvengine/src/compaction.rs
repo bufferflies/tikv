@@ -67,7 +67,6 @@ const MAJOR_COMPACTION_MIN_REQUEST_VERSION: u32 = 3;
 
 // Do not skip L1 tables if there are too many small L1 tables.
 const MAX_SKIP_L1_TABLES: usize = 16;
-pub const INITIAL_SNAP_VERSION: u64 = 1;
 
 static RETRY_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -1630,6 +1629,7 @@ impl Engine {
         info!("trigger_major_compaction for {}", shard.tag());
         let mut req = self.new_compact_request_with_shard(shard);
         let data = shard.get_data();
+        let snap_version = shard.get_snap_version();
         if data.schema_file.is_none() {
             store_bool(&shard.compacting, false);
             warn!(
@@ -1665,7 +1665,7 @@ impl Engine {
             .iter()
             .map(|t| t.version())
             .max()
-            .unwrap_or(INITIAL_SNAP_VERSION);
+            .unwrap_or(snap_version);
         total_size += data.l0_tbls.iter().map(|t| t.size()).sum::<u64>();
         total_size += data.blob_tbl_map.values().map(|t| t.size()).sum::<u64>();
         let columnar_config = self.opts.columnar_build_options;
