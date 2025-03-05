@@ -117,28 +117,44 @@ impl RfEngine {
 }
 
 pub struct RfEngineCore {
+    /// The primary directory holding engine data (e.g., WAL files).
     pub dir: PathBuf,
 
+    /// An optional directory for synchronous WAL writes. When set, WAL files
+    /// are synchronously written to `wal_sync_dir` and asynchronously written
+    /// to `dir`. `wal_sync_dir` is write-only, while `dir` handles reads as
+    /// well (e.g. compaction and backup). This setup allows `wal_sync_dir` to
+    /// use dedicated IOPS for writes, reducing tail latency.
     pub wal_sync_dir: Option<PathBuf>,
 
+    /// The sync WAL writer.
     pub(crate) writer: Mutex<WalWriter>,
 
+    /// A concurrent map for storing all peers' in-memory state.
     pub(crate) peers: dashmap::DashMap<u64, RwLock<PeerData>>,
 
+    /// For each `region_id`, holds a set of peer IDs that depend on this
+    /// region’s logs, preventing their early truncation.
     pub(crate) dependants: dashmap::DashMap<u64, RwLock<HashSet<u64>>>,
 
+    /// A channel sender used to schedule background tasks (e.g., WAL rotation,
+    /// truncation).
     pub(crate) task_sender: Sender<ServiceTask>,
 
+    /// A handle for the background worker thread.
     pub(crate) service_worker_handle: Mutex<Option<JoinHandle<()>>>,
 
+    /// A unique id for this engine instance.
     pub(crate) engine_id: Arc<AtomicU64>,
 
+    /// Whether lightweight backup mode is enabled.
     pub(crate) lightweight: bool,
 
-    // Initializes current epoch id during loading engine and update it after wal rotation of sync
-    // writer.
+    /// Tracks the latest epoch ID for WAL. Initialized during engine load and
+    /// updated after wal rotation of the sync writer.
     pub(crate) current_epoch_id: Arc<AtomicU32>,
 
+    /// Tracks the epoch ID that has been compacted.
     pub(crate) compacted_epoch: Arc<AtomicU32>,
 
     _lock: fslock::LockFile, // hold lock to avoid release
@@ -558,6 +574,15 @@ impl RfEngineCore {
 
     /// Returns the index that truncating to the given index can limit the
     /// memory usage to size.
+    ///
+    /// For example, given a size limit of 400 and the following blocks:
+    /// [
+    ///     {size=100, last_index=10},
+    ///     {size=200, last_index=30},
+    ///     {size=300, last_index=60}
+    /// ]
+    /// The function will return 30, meaning that truncating logs with index <=
+    /// 30 will reduce memory usage below 400.
     pub fn index_to_truncate_to_size(&self, peer_id: u64, size: usize) -> u64 {
         self.peers
             .get(&peer_id)
@@ -1203,6 +1228,16 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let cfg = Config::new(128 * 1024_usize);
         let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
+        assert_eq!(engine.is_empty(), true);
+
+        let init_stats = engine.get_engine_stats();
+        assert_eq!(init_stats.total_mem_size, 0);
+        assert_eq!(init_stats.total_mem_entries, 0);
+        assert!(init_stats.num_files > 0);
+        assert!(init_stats.disk_size > 0);
+        assert_eq!(init_stats.pending_compaction_wals, 0);
+        assert_eq!(init_stats.top_10_size_peers.len(), 0);
+
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
             let (key, val) = make_state_kv(2, 1);
@@ -1210,8 +1245,10 @@ mod tests {
             wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
         }
         engine.write(wb).unwrap();
+        assert_eq!(engine.is_empty(), false);
 
         let mut truncated_regions = vec![];
+        let mut truncated_idx = 0;
         for idx in 1..=1050_u64 {
             let mut wb = WriteBatch::new();
             for peer_id in 1..=10_u64 {
@@ -1223,13 +1260,35 @@ mod tests {
                 let (key, val) = make_state_kv(1, idx);
                 wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
                 if idx % 100 == 0 && peer_id != 1 {
-                    truncated_regions.push((peer_id, region_id, idx - 100));
-                    wb.truncate_raft_log(peer_id, region_id, idx - 100);
+                    truncated_idx = idx - 100;
+                    truncated_regions.push((peer_id, region_id, truncated_idx));
+                    wb.truncate_raft_log(peer_id, region_id, truncated_idx);
                 }
             }
             engine.write(wb).unwrap();
         }
         assert_eq!(engine.peers.len(), 10);
+        for peer_id in 2..=10_u64 {
+            assert_eq!(engine.get_truncated_index(peer_id), Some(truncated_idx));
+            assert_eq!(
+                engine.index_to_truncate_to_size(peer_id, 0),
+                engine.get_last_index(peer_id).unwrap()
+            );
+            let peer_stats = engine.get_peer_stats(peer_id);
+            assert_eq!(peer_stats.peer_id, peer_id);
+            assert_eq!(peer_stats.num_logs as u64, 1050 - truncated_idx);
+            assert_eq!(peer_stats.truncated_idx, truncated_idx);
+        }
+
+        let stats = engine.get_engine_stats();
+        assert!(stats.total_mem_size > 0);
+        assert_eq!(
+            stats.total_mem_entries as u64,
+            (1050-900+1) /* peer 1 */ + (1050-truncated_idx)*9 // peer 2 to 10
+        );
+        assert!(stats.pending_compaction_wals > 0);
+        assert_eq!(stats.top_10_size_peers.len(), 10);
+
         let wal_cnt = engine
             .dir
             .read_dir()
@@ -1523,6 +1582,7 @@ mod tests {
 
         // Test `add_dependent` and `remove_dependent`.
         engine.add_dependent(1, 1);
+        engine.add_dependent(1, 2);
         assert!(
             engine
                 .dependants
@@ -1532,6 +1592,11 @@ mod tests {
                 .unwrap()
                 .contains(&1)
         );
+        engine.with_dependents(1, |_dep| {
+            assert_eq!(_dep.len(), 2);
+        });
+        engine.remove_dependent(1, 2);
+        assert!(engine.has_dependents(1));
         engine.remove_dependent(1, 1);
         assert!(
             !engine
@@ -1542,6 +1607,7 @@ mod tests {
                 .unwrap()
                 .contains(&1)
         );
+        assert!(!engine.has_dependents(1));
     }
 
     #[test]
@@ -1747,5 +1813,102 @@ mod tests {
         }
 
         assert!(ok);
+    }
+
+    #[test]
+    fn test_get_region_peer_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::new(128 * 1024);
+        let engine = RfEngine::open(dir.path(), &cfg, None, None).unwrap();
+
+        // ---------------------
+        // Region 10: two peers (peer 1 -> older, peer 2 -> newer)
+        // ---------------------
+        // 1) Write something for peer 1, region 10:
+        let mut wb = WriteBatch::new();
+        wb.append_raft_log(
+            1,
+            10,
+            &new_raft_entry(EntryType::EntryNormal, 1, 1, b"data", 0),
+        );
+        engine.write(wb).unwrap();
+
+        // 2) Write something for peer 2, region 10 (the "newer" peer).
+        let mut wb = WriteBatch::new();
+        wb.append_raft_log(
+            2,
+            10,
+            &new_raft_entry(EntryType::EntryNormal, 2, 1, b"data", 0),
+        );
+        engine.write(wb).unwrap();
+
+        // At this point, region 10 should map to peer_id = 2 (newer).
+        let map = engine.get_region_peer_map();
+        assert_eq!(map.get(&10), Some(&2), "peer 2 should override peer 1");
+
+        // 3) Truncate the newer peer to TRUNCATE_ALL_INDEX, which means that region
+        // is destroyed.
+        let mut wb = WriteBatch::new();
+        wb.truncate_raft_log(2, 10, TRUNCATE_ALL_INDEX);
+        engine.write(wb).unwrap();
+
+        // Because the newest peer is truncated, region 10 should be removed entirely.
+        let map = engine.get_region_peer_map();
+        assert!(!map.contains_key(&10), "region 10 should be removed");
+
+        // ---------------------
+        // Region 20: multiple peers, confirm the highest ID remains.
+        // ---------------------
+        // Add peer 5 (older) and peer 7 (newer) to the same region 20.
+        for pid in [5u64, 7u64] {
+            let mut wb = WriteBatch::new();
+            wb.append_raft_log(
+                pid,
+                20,
+                &new_raft_entry(EntryType::EntryNormal, pid, 1, b"data", 0),
+            );
+            engine.write(wb).unwrap();
+        }
+        // get_region_peer_map should pick peer 7 for region 20.
+        let map = engine.get_region_peer_map();
+        assert_eq!(map.get(&20), Some(&7), "peer 7 should override peer 5");
+    }
+
+    #[test]
+    fn test_load_store_region_states() {
+        init_logger();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let cfg = Config::new(128 * 1024_usize);
+        let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
+
+        let cluster_id = 1;
+        let store_id = 2;
+        let engine_id = 3;
+
+        engine.set_engine_id(engine_id);
+        assert_eq!(engine.get_engine_id(), engine_id);
+
+        let mut ident = StoreIdent::default();
+        ident.set_cluster_id(cluster_id);
+        ident.set_store_id(store_id);
+        let bin = ident.write_to_bytes().unwrap();
+        let mut wb = WriteBatch::new();
+        wb.set_state(0, 0, STORE_IDENT_KEY, bin.as_slice());
+        engine.write(wb).unwrap();
+
+        let loaded_ident = load_store_ident(&engine).unwrap();
+        assert_eq!(loaded_ident.cluster_id, cluster_id);
+        assert_eq!(loaded_ident.store_id, store_id);
+
+        let peer_id = 5;
+        let region_id = 6;
+        let region_epoch = 11;
+        let mut wb = WriteBatch::new();
+        let (key, val) = make_region_state(region_epoch, 12 /* keyspace_id */);
+        wb.set_state(peer_id, region_id, &key, &val);
+        engine.write(wb).unwrap();
+
+        let state = engine.load_region_state(peer_id, region_epoch);
+        assert!(state.is_some(), "the region state should not be None");
     }
 }
