@@ -109,7 +109,8 @@ pub(crate) const MEMORY_CAPACITY_RATIO: f64 = 0.8; // Reserve 20% memory for PD,
 
 #[test]
 fn test_random_with_tidb() {
-    let _logger_guard = test_util::init_log_for_test_async();
+    init_logger();
+    let prepare_time = Instant::now_coarse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(4)
@@ -178,7 +179,13 @@ fn test_random_with_tidb() {
     // Statistics.
     let stats = WorkloadStats::collect();
 
-    info!("TEST SUCCEED: region_number {}, {:?}", region_number, stats);
+    println!(
+        "TEST SUCCEED: elapsed {:?},{:?}, region_number {}, {:?}",
+        prepare_time.saturating_elapsed(),
+        start_time.saturating_elapsed(),
+        region_number,
+        stats
+    );
 }
 
 pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {

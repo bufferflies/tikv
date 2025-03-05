@@ -109,6 +109,7 @@ bytes = "1.1"
 cdc = { workspace = true }
 chrono = "0.4"
 cloud_encryption = { workspace = true }
+cloud_server = { workspace = true }
 cloud_worker = { workspace = true }
 collections = { workspace = true }
 crc64fast = "0.1"

@@ -44,8 +44,8 @@ const TIKV_WORKER_THREADS_COUNT: usize = 2;
 
 #[test]
 fn test_random_upgrade() {
-    let _logger_guard = test_util::init_log_for_test_async();
-
+    init_logger();
+    let prepare_time = Instant::now_coarse();
     let temp_dir = std::env::temp_dir();
     tikv_util::set_panic_hook(false, temp_dir.to_str().unwrap()); // To prevent temp dirs from being dropped on error.
 
@@ -240,7 +240,13 @@ fn test_random_upgrade() {
     // Statistics.
     let stats = WorkloadStats::collect();
 
-    info!("TEST SUCCEED: region_number {}, {:?}", region_number, stats);
+    println!(
+        "TEST SUCCEED: elapsed {:?},{:?}, region_number {}, {:?}",
+        prepare_time.saturating_elapsed(),
+        start_time.saturating_elapsed(),
+        region_number,
+        stats
+    );
 }
 
 fn prepare_tikv_servers(

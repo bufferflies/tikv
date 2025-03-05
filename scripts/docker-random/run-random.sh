@@ -147,12 +147,19 @@ for i in $(seq -w 1 100000); do
 
     LOG="$LOG_PATH"/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID".log
     CLUSTER_LOGS="$LOG_PATH"/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID"_tc
-    /random/random-bin test_random_"$TESTNAME" >"$LOG" 2>&1 || true
+    /random/random-bin test_random_"$TESTNAME" --nocapture >"$LOG" 2>&1 || true
     if grep -q 'TEST SUCCEED' "$LOG"; then
         grep 'TEST SUCCEED' "$LOG"
         rm "$LOG"
         rm -rf "$TMPDIR" || true
     else
+        TIKV_LOG="$TMPDIR"/tikv.log
+        if [ -f "$TIKV_LOG" ]; then
+            grep -E 'CRIT|FATAL|panicked' "$TIKV_LOG" >>"$LOG" || true
+            mkdir -p "$CLUSTER_LOGS"
+            cp "$TMPDIR"/tikv*.log "$CLUSTER_LOGS" || true
+        fi
+
         # For logs of TiDB cluster components
         if compgen -G "$TMPDIR/tc*" >/dev/null; then
             chmod +r "$TMPDIR"/tc*/*.log

@@ -685,3 +685,24 @@ impl Running {
         self.0.load(Ordering::Acquire)
     }
 }
+
+const LOG_MAX_SIZE_MB: u64 = 150; // Can be uploaded to GitHub after compressed.
+const LOG_MAX_BACKUPS: usize = 20;
+
+pub(crate) fn init_logger() {
+    let filename = std::env::temp_dir().join("tikv.log");
+    let log_config = tikv::config::LogConfig {
+        file: tikv::config::File {
+            filename: filename.to_str().unwrap().to_owned(),
+            max_size: LOG_MAX_SIZE_MB,
+            max_backups: LOG_MAX_BACKUPS,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tikv_config = TikvConfig {
+        log: log_config,
+        ..Default::default()
+    };
+    cloud_server::setup::initial_logger(&tikv_config);
+}

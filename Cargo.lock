@@ -8423,6 +8423,7 @@ dependencies = [
  "cdc",
  "chrono",
  "cloud_encryption",
+ "cloud_server",
  "cloud_worker",
  "codec",
  "collections",

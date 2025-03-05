@@ -63,8 +63,8 @@ const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(4); // Small size to
 
 #[test]
 fn test_random_all() {
-    // Use async log to avoid performance issue caused by I/O blocking.
-    let _logger_guard = test_util::init_log_for_test_async();
+    init_logger();
+    let prepare_time = Instant::now_coarse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(4)
@@ -289,43 +289,15 @@ fn test_random_all() {
     cluster.stop();
 
     // Statistics.
-    let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
-    let total_txn_file_write_count = TXN_FILE_WRITE_COUNTER.load(Ordering::SeqCst);
-    let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
-    let total_table_count = TABLE_COUNTER.load(Ordering::SeqCst);
-    let total_drop_table_count = DROP_TABLE_COUNTER.load(Ordering::SeqCst);
-    let total_merge_count = MERGE_COUNTER.load(Ordering::SeqCst);
-    let total_move_count = MOVE_COUNTER.load(Ordering::SeqCst);
-    let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
-    let total_node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
-    let total_backup_count = BACKUP_COUNTER.load(Ordering::SeqCst);
-    let total_backup_tolerated_err_count = BACKUP_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
-    let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
-    let total_restore_tolerated_err_count = RESTORE_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
-    let total_load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
-    let total_manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
-    let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
+    let stats = WorkloadStats::collect();
     let region_number = pd_client.get_regions_number();
-    info!(
-        "TEST SUCCEED: write {}, txn file write {}, keyspace {}, table {}, drop table {}, region {}, merge {}, move {}, transfer {}, node restart {}, backup {}, backup_tolerated_err {}, restore {}, restore_tolerated_err {}, load_data {}, manual_major_compact {}, verified_records {}, gc {}",
-        total_write_count,
-        total_txn_file_write_count,
-        total_keyspace_count,
-        total_table_count,
-        total_drop_table_count,
+    println!(
+        "TEST SUCCEED: elapsed {:?},{:?}, region {}, verified_records {}, {:?}",
+        prepare_time.saturating_elapsed(),
+        start_time.saturating_elapsed(),
         region_number,
-        total_merge_count,
-        total_move_count,
-        total_transfer_count,
-        total_node_restart,
-        total_backup_count,
-        total_backup_tolerated_err_count,
-        total_restore_count,
-        total_restore_tolerated_err_count,
-        total_load_data_count,
-        total_manual_major_compact,
         verified_records_count,
-        total_gc_resolved_locks,
+        stats,
     );
 }
 
@@ -599,6 +571,68 @@ impl Switches {
             enable_inner_key_off,
             update_inner_key_off,
             ia_table_ratio,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct WorkloadStats {
+    total_write_count: usize,
+    total_txn_file_write_count: usize,
+    total_keyspace_count: usize,
+    total_table_count: usize,
+    total_drop_table_count: usize,
+    total_merge_count: usize,
+    total_move_count: usize,
+    total_transfer_count: usize,
+    total_node_restart: usize,
+    total_backup_count: usize,
+    total_backup_tolerated_err_count: usize,
+    total_restore_count: usize,
+    total_restore_tolerated_err_count: usize,
+    total_load_data_count: usize,
+    total_manual_major_compact: usize,
+    total_gc_resolved_locks: usize,
+}
+
+impl WorkloadStats {
+    fn collect() -> Self {
+        let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
+        let total_txn_file_write_count = TXN_FILE_WRITE_COUNTER.load(Ordering::SeqCst);
+        let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
+        let total_table_count = TABLE_COUNTER.load(Ordering::SeqCst);
+        let total_drop_table_count = DROP_TABLE_COUNTER.load(Ordering::SeqCst);
+        let total_merge_count = MERGE_COUNTER.load(Ordering::SeqCst);
+        let total_move_count = MOVE_COUNTER.load(Ordering::SeqCst);
+        let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
+        let total_node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
+        let total_backup_count = BACKUP_COUNTER.load(Ordering::SeqCst);
+        let total_backup_tolerated_err_count = BACKUP_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
+        let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
+        let total_restore_tolerated_err_count =
+            RESTORE_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
+        let total_load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
+        let total_manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
+        let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
+
+        Self {
+            total_write_count,
+            total_txn_file_write_count,
+            total_keyspace_count,
+            total_table_count,
+            total_drop_table_count,
+            total_merge_count,
+            total_move_count,
+            total_transfer_count,
+            total_node_restart,
+            total_backup_count,
+            total_backup_tolerated_err_count,
+            total_restore_count,
+            total_restore_tolerated_err_count,
+            total_load_data_count,
+            total_manual_major_compact,
+            total_gc_resolved_locks,
         }
     }
 }
