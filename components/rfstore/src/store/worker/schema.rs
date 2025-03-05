@@ -6,12 +6,14 @@ use std::{
 };
 
 use kvengine::{
-    table::{BoundedDataSet, OwnedInnerKey},
-    Shard, STORAGE_CLASS_KEY,
+    table::{columnar::SchemaFile, BoundedDataSet, OwnedInnerKey},
+    SchemaFileMeta, Shard, ShardMeta, STORAGE_CLASS_KEY,
 };
 use kvproto::{metapb, metapb::Region};
 use schema::schema::StorageClass;
-use tikv_util::{codec::bytes::encode_bytes, info, time::Instant, warn, worker::Runnable, Either};
+use tikv_util::{
+    codec::bytes::encode_bytes, debug, info, time::Instant, warn, worker::Runnable, Either,
+};
 
 use crate::{
     store::{Callback, CasualMessage, PeerMsg, PeerTag, RegionIdVer, StoreMsg},
@@ -21,7 +23,7 @@ use crate::{
 pub enum SchemaTask {
     StorageClass {
         region: metapb::Region,
-        schema_version: i64,
+        schema_meta: SchemaFileMeta,
     },
 }
 
@@ -30,12 +32,12 @@ impl Display for SchemaTask {
         match self {
             SchemaTask::StorageClass {
                 ref region,
-                ref schema_version,
+                ref schema_meta,
             } => {
                 write!(
                     f,
-                    "check schema of region {} schema_version {}",
-                    region.id, schema_version
+                    "check schema of region {} schema_meta {:?}",
+                    region.id, schema_meta
                 )
             }
         }
@@ -54,8 +56,8 @@ impl Runnable for SchemaRunner {
         match task {
             SchemaTask::StorageClass {
                 region,
-                schema_version,
-            } => self.handle_storage_class(region, schema_version),
+                schema_meta,
+            } => self.handle_storage_class(region, schema_meta),
         }
     }
 }
@@ -74,23 +76,30 @@ impl SchemaRunner {
         PeerTag::new(self.store_id, id_ver)
     }
 
-    fn handle_storage_class(&self, region: metapb::Region, schema_version: i64) {
+    fn handle_storage_class(&self, region: metapb::Region, schema_meta: SchemaFileMeta) {
         let tag = self.peer_tag(&region);
         if let Ok(shard) = self
             .kv
             .get_shard_with_ver(region.get_id(), region.get_region_epoch().version)
         {
-            let mut storage_class_property: Option<StorageClass> = None;
-            if let Some(schema_file) = shard.get_schema_file() {
-                if schema_version != schema_file.get_version() {
-                    return;
-                }
-                if shard.get_checked_schema_ver() >= schema_version {
-                    return;
-                }
+            let schema_file = shard.get_schema_file();
+            if !schema_file_is_matched_with_meta(schema_file.as_ref(), &schema_meta) {
+                debug!("{} handle storage class: skip, schema file is changed", tag;
+                    "schema_meta" => ?schema_meta, "schema_file" => ?schema_file);
+                return;
+            }
+            if shard_is_matched_with_schema(shard.as_ref(), &schema_meta) {
+                debug!("{} handle storage class: skip, shard is up-to-date", tag;
+                    "schema_meta" => ?schema_meta, "checked_ver" => shard.get_checked_schema_ver());
+                return;
+            }
 
-                info!("{} handle storage class", tag; "schema_version" => schema_version);
-                match schema_file.overlap_storage_class_tables(shard.range.data_bound()) {
+            let schema_version = schema_file.as_ref().map_or(0, |x| x.get_version());
+            let mut storage_class_property: Option<StorageClass> = None;
+            if let Some(schema_file) = schema_file {
+                let overlapped = schema_file.overlap_storage_class_tables(shard.range.data_bound());
+                info!("{} handle storage class", tag; "schema_version" => schema_version, "overlapped" => ?overlapped);
+                match overlapped {
                     Either::Left(table_id) => {
                         // The table fully covers the region.
                         let schema = schema_file.get_table(table_id).unwrap();
@@ -104,6 +113,7 @@ impl SchemaRunner {
                             self.split_regions_for_tables(&tag, &shard, &region, &table_inner_keys);
                             return;
                         } else if shard.get_storage_class().is_specified() {
+                            // No table with specified storage class covers this region.
                             storage_class_property = Some(StorageClass::Unspecified);
                         }
                     }
@@ -111,17 +121,20 @@ impl SchemaRunner {
             } else if shard.get_storage_class().is_specified() {
                 storage_class_property = Some(StorageClass::Unspecified);
             }
+
             if let Some(storage_class) = storage_class_property {
                 if self.update_storage_class(&tag, &shard, storage_class, schema_version) {
                     shard.set_checked_schema_ver(schema_version);
                     info!("{} update shard storage class to {:?}", tag, shard.get_storage_class(); "schema_version" => schema_version);
                 }
             } else {
+                debug!("{} handle storage class: skip, no need to update", tag;
+                    "schema_meta" => ?schema_meta, "schema_version" => schema_version, "shard.sc" => ?shard.get_storage_class());
                 shard.set_checked_schema_ver(schema_version);
             }
         } else {
             info!("{} handle storage class: skip, shard not found/match", tag;
-                "region" => ?region, "schema_version" => schema_version);
+                "region" => ?region, "schema_meta" => ?schema_meta);
         }
     }
 
@@ -189,5 +202,33 @@ impl SchemaRunner {
                 break false;
             }
         }
+    }
+}
+
+pub(crate) fn schema_file_is_matched_with_meta(
+    schema_file: Option<&SchemaFile>,
+    schema_meta: &SchemaFileMeta,
+) -> bool {
+    match (schema_meta.is_valid(), schema_file) {
+        (false, None) => true,
+        (true, Some(schema_file)) => schema_meta.file_ver() == schema_file.get_version(),
+        _ => false,
+    }
+}
+
+pub(crate) fn shard_is_matched_with_meta(shard: &Shard, shard_meta: &ShardMeta) -> bool {
+    let schema_meta = &shard_meta.schema;
+    if schema_meta.is_valid() {
+        shard.get_checked_schema_ver() >= schema_meta.file_ver()
+    } else {
+        !shard_meta.get_storage_class().is_specified()
+    }
+}
+
+pub(crate) fn shard_is_matched_with_schema(shard: &Shard, schema_meta: &SchemaFileMeta) -> bool {
+    if schema_meta.is_valid() {
+        shard.get_checked_schema_ver() >= schema_meta.file_ver()
+    } else {
+        !shard.get_storage_class().is_specified()
     }
 }

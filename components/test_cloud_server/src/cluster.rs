@@ -1296,36 +1296,83 @@ pub fn put_mut(key: &str, val: &str) -> Mutation {
     mutation
 }
 
-pub fn must_wait<F, FnMsg>(mut f: F, seconds: usize, fail_msg: FnMsg)
+pub struct TryWaiter {
+    timeout: Duration,
+    interval: Duration,
+}
+
+impl Default for TryWaiter {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(5),
+            interval: Duration::from_millis(100),
+        }
+    }
+}
+
+impl TryWaiter {
+    pub fn timeout_dur(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            ..Default::default()
+        }
+    }
+
+    pub fn timeout(secs: usize) -> Self {
+        Self::timeout_dur(Duration::from_secs(secs as u64))
+    }
+
+    #[must_use]
+    pub fn interval_dur(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+
+    #[must_use]
+    pub fn interval(self, secs: usize) -> Self {
+        self.interval_dur(Duration::from_secs(secs as u64))
+    }
+
+    #[must_use]
+    pub fn try_wait<F>(&self, mut f: F) -> bool
+    where
+        F: FnMut() -> bool,
+    {
+        let begin = Instant::now_coarse();
+        while begin.saturating_elapsed() < self.timeout {
+            if f() {
+                return true;
+            }
+            sleep(self.interval)
+        }
+        false
+    }
+
+    pub fn must_wait<F, FnMsg>(&self, f: F, fail_msg: FnMsg)
+    where
+        F: FnMut() -> bool,
+        FnMsg: FnOnce() -> String,
+    {
+        if !self.try_wait(f) {
+            panic!("{}", fail_msg());
+        }
+    }
+}
+
+pub fn must_wait<F, FnMsg>(f: F, seconds: usize, fail_msg: FnMsg)
 where
     F: FnMut() -> bool,
     FnMsg: FnOnce() -> String,
 {
-    let begin = Instant::now_coarse();
-    let timeout = Duration::from_secs(seconds as u64);
-    while begin.saturating_elapsed() < timeout {
-        if f() {
-            return;
-        }
-        sleep(Duration::from_millis(100))
-    }
-    panic!("{}", fail_msg());
+    TryWaiter::timeout(seconds).must_wait(f, fail_msg);
 }
 
 #[must_use]
-pub fn try_wait<F>(mut f: F, seconds: usize) -> bool
+pub fn try_wait<F>(f: F, seconds: usize) -> bool
 where
     F: FnMut() -> bool,
 {
-    let begin = Instant::now_coarse();
-    let timeout = Duration::from_secs(seconds as u64);
-    while begin.saturating_elapsed() < timeout {
-        if f() {
-            return true;
-        }
-        sleep(Duration::from_millis(100))
-    }
-    false
+    TryWaiter::timeout(seconds).try_wait(f)
 }
 
 /// Return `None` when then the premise is not satisfied.
@@ -1653,4 +1700,26 @@ pub enum MajorCompactionTarget {
     Keyspace(u32),
     Region(u64),
     Table { keyspace_id: u32, table_id: i64 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_wait() {
+        let mut cnt = 0;
+        let ok = try_wait(
+            || {
+                cnt += 1;
+                false
+            },
+            1,
+        );
+        assert!(!ok);
+        assert!(cnt >= 8);
+
+        let ok = try_wait(|| true, 1);
+        assert!(ok);
+    }
 }

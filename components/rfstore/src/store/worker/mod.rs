@@ -2,7 +2,7 @@
 
 mod gc;
 mod pd;
-mod schema;
+pub mod schema;
 
 pub use self::{
     gc::{GcRunner, GcTask},

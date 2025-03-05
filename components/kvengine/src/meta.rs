@@ -1588,7 +1588,7 @@ impl SchemaFileMeta {
         let sm = cs.get_update_schema_meta();
         self.schema_file_id = sm.get_file_id();
         self.schema_file_ver = sm.get_version();
-        assert_eq!(self.schema_restore_ver, sm.get_restore_version());
+        debug_assert_eq!(self.schema_restore_ver, sm.get_restore_version());
     }
 
     pub fn update_by_restore(

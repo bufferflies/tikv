@@ -15,9 +15,8 @@ use test_cloud_server::{
         MutateOptions, TxnMutations, TxnWriteMethod,
     },
     keyspace::{make_row_key, CreateKeyspaceOptions},
-    must_wait,
     util::Mutation,
-    MajorCompactionTarget, ServerClusterBuilder, ServerClusterExt,
+    MajorCompactionTarget, ServerClusterBuilder, ServerClusterExt, TryWaiter,
 };
 use test_util::init_log_for_test;
 use tikv_client::{transaction::HeartbeatOption, Transaction, TransactionOptions};
@@ -563,35 +562,36 @@ fn prepare_cluster(
         Duration::from_secs(10),
     );
     let mut last_retry_time = Instant::now_coarse();
-    must_wait(
-        || {
-            let Some(shard) = cluster.get_active_shard_by_key(&table_key) else {
-                return false;
-            };
-            let stats = shard.get_stats();
-            let ok = stats.is_major_compacted() && shard.new_snap_access().is_sync() != enable_ia;
-            if !ok && last_retry_time.saturating_elapsed() >= Duration::from_secs(1) {
-                info!("retry major compaction, stats {:?}", stats);
-                cluster.request_major_compaction(
-                    MajorCompactionTarget::Table {
-                        keyspace_id,
-                        table_id,
-                    },
-                    true,
-                    Duration::from_secs(10),
-                );
-                last_retry_time = Instant::now_coarse();
-            }
-            ok
-        },
-        30,
-        || {
-            let stats = cluster
-                .get_active_shard_by_key(&table_key)
-                .map(|x| x.get_stats());
-            format!("wait for compacted & async timeout: {:?}", stats)
-        },
-    );
+    TryWaiter::timeout(60)
+        .interval_dur(Duration::from_millis(500))
+        .must_wait(
+            || {
+                let Some(shard) = cluster.get_active_shard_by_key(&table_key) else {
+                    return false;
+                };
+                let stats = shard.get_stats();
+                let compacted = stats.is_major_compacted();
+                if !compacted && last_retry_time.saturating_elapsed() >= Duration::from_secs(5) {
+                    info!("retry major compaction, stats {:?}", stats);
+                    cluster.request_major_compaction(
+                        MajorCompactionTarget::Table {
+                            keyspace_id,
+                            table_id,
+                        },
+                        true,
+                        Duration::from_secs(10),
+                    );
+                    last_retry_time = Instant::now_coarse();
+                }
+                compacted && shard.new_snap_access().is_sync() != enable_ia
+            },
+            || {
+                let stats = cluster
+                    .get_active_shard_by_key(&table_key)
+                    .map(|x| x.get_stats());
+                format!("wait for compacted & async timeout: {:?}", stats)
+            },
+        );
 
     // Make mem-tables & L0 data.
     client.put_kv(

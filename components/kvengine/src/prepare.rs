@@ -220,6 +220,7 @@ impl EngineCore {
             "{} is preparing change set, loading file by ids", tag;
             "ids" => ?ids.keys(),
             "encryption_key" => ?encryption_key,
+            "shard_use_ia" => shard_use_ia,
         );
         self.load_tables_by_ids(
             cs.shard_id,

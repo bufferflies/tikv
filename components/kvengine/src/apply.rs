@@ -960,6 +960,7 @@ impl EngineCore {
     }
 
     fn apply_update_schema_meta(&self, shard: &Shard, cs: &ChangeSet) {
+        info!("{} apply update schema meta", shard.tag(); "schema_file" => ?cs.schema_file);
         let old_data = shard.get_data();
         let mut builder = ShardDataBuilder::new(old_data);
         builder.set_schema_file(cs.schema_file.clone());
@@ -968,6 +969,7 @@ impl EngineCore {
 
     fn apply_update_storage_class(&self, shard: &Shard, cs: &ChangeSet) {
         assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
+        info!("{} apply update storage class", shard.tag(); "cs" => ?cs, "ln_tables" => ?cs.ln_tables);
         if !cs.ln_tables.is_empty() {
             let old_data = shard.get_data();
             let mut scf_builder = ShardCfBuilder::new(WRITE_CF);

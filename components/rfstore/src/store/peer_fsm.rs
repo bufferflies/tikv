@@ -55,6 +55,7 @@ use crate::{
         msg::Callback,
         notify_req_region_removed,
         peer::{Peer, StaleState},
+        schema::{schema_file_is_matched_with_meta, shard_is_matched_with_meta},
         util as _util, ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines,
         MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady, RaftApplyState,
         RaftCommand, RaftContext, SignificantMsg, SnapState, StoreMeta, StoreMsg, Ticker,
@@ -1589,23 +1590,33 @@ impl<'a> PeerMsgHandler<'a> {
     }
 
     fn check_schema(&mut self, shard: &Arc<Shard>) {
+        let tag = self.peer.tag();
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
-        if !shard_meta.schema.is_valid() && !shard_meta.get_storage_class().is_specified() {
+        let schema_meta = &shard_meta.schema;
+        let schema_file = shard.get_schema_file();
+        debug!("{} check schema", tag;
+            "schema_file_meta" => ?schema_meta,
+            "meta.storage_class" => ?shard_meta.get_storage_class(),
+            "shard.storage_class" => ?shard.get_storage_class(),
+            "checked_schema_ver" => shard.get_checked_schema_ver(),
+            "schema_file" => ?schema_file,
+        );
+
+        if !schema_file_is_matched_with_meta(schema_file.as_ref(), schema_meta) {
+            // Wait for schema file to be updated.
+            debug!("{} check schema: skip, schema file is stale", tag;
+                "schema_meta" => ?schema_meta, "schema_file" => ?schema_file);
             return;
         }
-        let schema_version = shard_meta.schema.file_ver();
-        if let Some(schema_file) = shard.get_schema_file() {
-            if shard_meta.schema.file_ver() != schema_file.get_version() {
-                return;
-            }
-        }
-        if shard.get_checked_schema_ver() >= schema_version {
+        if shard_is_matched_with_meta(shard.as_ref(), shard_meta) {
+            debug!("{} check schema: skip, shard is up-to-date", tag);
             return;
         }
+
         if !self.ctx.global.schema_scheduler.is_busy() {
             let task = SchemaTask::StorageClass {
                 region: self.region().clone(),
-                schema_version,
+                schema_meta: schema_meta.clone(),
             };
             if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {
                 error!("check schema failed";
@@ -1613,6 +1624,8 @@ impl<'a> PeerMsgHandler<'a> {
                     "err" => ?e
                 );
             }
+        } else {
+            debug!("{} schema scheduler is busy", tag);
         }
     }
 
