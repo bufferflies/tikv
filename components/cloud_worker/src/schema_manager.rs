@@ -37,7 +37,7 @@ use schema::schema::{
 };
 use security::{SecurityConfig, SecurityManager};
 use tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC;
-use tikv_client::{BoundRange, Key, TransactionOptions, Value};
+use tikv_client::{BoundRange, Key, KvPair, TransactionOptions, Value};
 use tikv_util::{box_err, config::ReadableDuration, debug, error, info};
 
 use crate::{error::Result, get_all_stores_except_tiflash, server::Context};
@@ -868,17 +868,35 @@ impl schema::KvScanner for SchemaManager {
         let mut snapshot = self
             .txn_client
             .snapshot(start_ts, TransactionOptions::new_pessimistic());
-        let scan_range: BoundRange = (start.to_vec()..end.to_vec()).into();
-        let kv_pairs = snapshot
-            .scan(scan_range, u32::MAX)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut pairs = vec![];
-        for kv_pair in kv_pairs {
-            let key = kv_pair.key().clone();
-            let val = kv_pair.into_value();
-            pairs.push((key.into(), val));
+
+        const BATCH_SIZE: u32 = 10240;
+        let mut pairs = Vec::new();
+        let mut current_key = start.to_vec();
+
+        loop {
+            let scan_range: BoundRange = (current_key.clone()..end.to_vec()).into();
+            let batch: Vec<KvPair> = snapshot
+                .scan(scan_range, BATCH_SIZE)
+                .await
+                .map_err(|e| e.to_string())?
+                .collect();
+            let batch_len = batch.len();
+            if batch_len == 0 {
+                // end of scan
+                break;
+            }
+            current_key = batch.last().unwrap().key().clone().into();
+            current_key.push(0);
+
+            for KvPair(key, val) in batch {
+                pairs.push((key.into(), val));
+            }
+            if batch_len < BATCH_SIZE as usize {
+                // end of scan, no need to continue
+                break;
+            }
         }
+
         Ok(pairs)
     }
 }
