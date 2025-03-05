@@ -1733,6 +1733,30 @@ impl StatusServer {
         ))))
     }
 
+    /// Enable/disable to build columnar tables
+    ///
+    /// POST /build_columnar?switch=true|false
+    async fn handle_build_columnar(
+        req: Request<Body>,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        if let Some(switch) = get_bool_param(&query_pairs, "switch") {
+            let previous = engine.opts.set_build_columnar(switch);
+            info!("build columnar switch: {} -> {}", previous, switch);
+            Ok(make_response(
+                StatusCode::OK,
+                format!("build columnar: {} -> {}", previous, switch),
+            ))
+        } else {
+            Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "param switch not found",
+            ))
+        }
+    }
+
     pub fn stop(self) {
         let _ = self.tx.send(());
         self.thread_pool.shutdown_timeout(Duration::from_secs(3));
@@ -2083,6 +2107,9 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/clear_columnar") => {
                                 Self::handle_clear_columnar(req, router).await
+                            }
+                            (Method::POST, path) if path.starts_with("/build_columnar") => {
+                                Self::handle_build_columnar(req, engine).await
                             }
                             (Method::GET, path) if path.starts_with("/dfs/") => {
                                 Self::handle_dfs_file_read(req, engine).await

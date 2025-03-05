@@ -1626,14 +1626,14 @@ impl Engine {
         &self,
         shard: &Shard,
     ) -> Option<Result<pb::ChangeSet>> {
-        info!("trigger_major_compaction for {}", shard.tag());
+        info!("{} trigger_columnar_major_compaction", shard.tag());
         let mut req = self.new_compact_request_with_shard(shard);
         let data = shard.get_data();
         let snap_version = shard.get_snap_version();
-        if data.schema_file.is_none() {
+        if !shard.opt.build_columnar() || data.schema_file.is_none() {
             store_bool(&shard.compacting, false);
             warn!(
-                "trigger_major_compaction: no schema file found for {}, skip",
+                "{} trigger_columnar_major_compaction: disabled or no schema, skip",
                 shard.tag()
             );
             return None;
@@ -1688,7 +1688,7 @@ impl Engine {
         };
         req.compaction_tp = CompactionType::ColumnarMajor(major_compaction);
         info!(
-            "start major compact for columnar {}, num_ids: {}, input_size: {}",
+            "start columnar major compact for columnar {}, num_ids: {}, input_size: {}",
             shard.tag(),
             req.file_ids.len(),
             total_size,

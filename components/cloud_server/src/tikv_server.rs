@@ -1072,7 +1072,6 @@ impl TikvServer {
         kv_opts.compaction_tombs_ratio = conf.kvengine.compaction_tombs_ratio;
         kv_opts.compaction_tombs_count = conf.kvengine.compaction_tombs_count;
         kv_opts.for_restore = for_restore;
-        kv_opts.read_columnar = conf.kvengine.read_columnar;
 
         kv_opts.flow_control.enable = conf.storage.flow_control.enable;
         kv_opts.flow_control.soft_region_mem_limit =
@@ -1091,9 +1090,12 @@ impl TikvServer {
                 let size = (total_mem >> 30) as usize / 2;
                 size.clamp(2, 64)
             });
+
+        kv_opts.ignore_columnar_table_load = conf.kvengine.ignore_columnar_table_load;
+        kv_opts.set_build_columnar(conf.kvengine.build_columnar);
+        kv_opts.read_columnar = conf.kvengine.read_columnar;
         kv_opts.columnar_build_options = conf.kvengine.columnar_table_build_options;
         kv_opts.vector_index_build_options = conf.kvengine.vector_index_build_options;
-        kv_opts.ignore_columnar_table_load = conf.kvengine.ignore_columnar_table_load;
 
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator::new(pd.clone()));

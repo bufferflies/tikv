@@ -1,6 +1,13 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use dyn_clone::DynClone;
@@ -84,10 +91,12 @@ pub struct Options {
 
     /// Enable IA by setting `ia.mem_cap > 0 && ia.disk_cap > 0`.
     pub ia: IaConfig,
+
     /// Ignore columnar table load and ingest when start kvengine. This is used
     /// for clear columnar replica in all shards when encounter critical issue.
     pub ignore_columnar_table_load: bool,
-
+    /// Enable building columnar table.
+    build_columnar: AtomicBool,
     /// Enable columnar table read.
     pub read_columnar: bool,
 }
@@ -123,8 +132,19 @@ impl Default for Options {
             txn_file_worker_pool_size: 16,
             ia: Default::default(),
             ignore_columnar_table_load: false,
+            build_columnar: AtomicBool::new(false),
             read_columnar: false,
         }
+    }
+}
+
+impl Options {
+    pub fn build_columnar(&self) -> bool {
+        self.build_columnar.load(Ordering::Relaxed)
+    }
+
+    pub fn set_build_columnar(&self, switch: bool) -> bool /* previous */ {
+        self.build_columnar.swap(switch, Ordering::Relaxed)
     }
 }
 

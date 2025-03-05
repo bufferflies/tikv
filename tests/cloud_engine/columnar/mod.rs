@@ -188,6 +188,7 @@ fn test_covert_row_to_columnar_with_ia() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.build_columnar = true;
         conf.kvengine.read_columnar = true;
         conf.dfs = dfs_config.clone();
         conf.kvengine.ia.segment_size = SEGMENT_SIZE;
@@ -313,6 +314,7 @@ fn test_sst_and_columnar_with_ia() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.build_columnar = true;
         conf.kvengine.read_columnar = true;
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);
         conf.rocksdb.writecf.block_size = ReadableSize(512);
@@ -494,6 +496,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.build_columnar = true;
         conf.dfs = dfs_config.clone();
     });
     let dfs = cluster.get_dfs().unwrap();
@@ -680,6 +683,7 @@ fn test_region_merge_with_columnar() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.build_columnar = true;
         conf.kvengine.read_columnar = true;
     });
     let dfs = cluster.get_dfs().unwrap();
@@ -810,6 +814,7 @@ fn test_columnar_ia_file() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.build_columnar = true;
         conf.dfs = dfs_config.clone();
     });
     let dfs = cluster.get_dfs().unwrap();
@@ -962,6 +967,7 @@ fn test_columnar_scan_with_filter() {
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 9;
+        conf.kvengine.build_columnar = true;
         conf.kvengine.read_columnar = true;
     });
     let dfs = cluster.get_dfs().unwrap();

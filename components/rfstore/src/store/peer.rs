@@ -2088,15 +2088,6 @@ impl<'a> PreprocessRef<'a> {
                 })?;
             return Err(Error::KeyErrors(key_errs));
         }
-        if let Some(kv) = ctx.kv {
-            if kv.opts.ignore_columnar_table_load && shard_meta.schema.is_valid() {
-                return Err(Error::Other(box_err!(
-                    "{} preprocess_pending_splits denied, ignore_columnar_table_load with schema_file_id: {}",
-                    tag,
-                    shard_meta.schema.file_id()
-                )));
-            }
-        }
 
         let regions = split_gen_new_region_metas(
             self.store_id(),

@@ -71,16 +71,19 @@ pub struct Config {
     /// The remote coprocessor address to run heavy coprocessor requests.
     pub remote_coprocessor_addr: String,
 
-    /// the minimum number of blocks for a coprocessor request to be run on
+    /// The minimum number of blocks for a coprocessor request to be run on
     /// remote worker.
     pub remote_coprocessor_min_blocks_size: usize,
 
-    /// if enabled, flush large L0 file will split into multiple files.
+    /// If enabled, flush large L0 file will split into multiple files.
     pub flush_split_l0: bool,
-    /// if enabled, major compaction will update inner key offset from 0 to 4.
+    /// If enabled, major compaction will update inner key offset from 0 to 4.
     pub update_inner_key_offset: bool,
-    /// if enabled, columnar table will not be loaded.
+
+    /// If enabled, columnar table will not be loaded. Used for troubleshooting.
     pub ignore_columnar_table_load: bool,
+    /// Enable building columnar table. Default is false.
+    pub build_columnar: bool,
     /// Enable columnar table read. Default is false.
     pub read_columnar: bool,
 
@@ -126,6 +129,7 @@ impl Default for Config {
             columnar_table_build_options: Default::default(),
             vector_index_build_options: Default::default(),
             ignore_columnar_table_load: false,
+            build_columnar: false,
             read_columnar: false,
         }
     }

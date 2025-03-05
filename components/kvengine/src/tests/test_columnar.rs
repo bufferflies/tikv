@@ -291,6 +291,7 @@ fn test_columnar_major_compaction() {
         file_id
     };
     let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    engine.opts.set_build_columnar(true);
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, false);

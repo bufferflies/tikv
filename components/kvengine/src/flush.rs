@@ -279,9 +279,7 @@ impl Engine {
             blob_create.set_biggest(blob.biggest_key().to_vec());
             initial_flush.mut_blob_creates().push(blob_create);
         }
-        if !self.opts.ignore_columnar_table_load
-            && let Some(schema_file) = &flush.shard_data.schema_file
-        {
+        if let Some(schema_file) = &flush.shard_data.schema_file {
             // After split, the schema file may not overlap the schema file anymore.
             if schema_file.overlap(
                 &task.range.outer_start,
@@ -293,52 +291,57 @@ impl Engine {
                 schema_meta.set_version(schema_file.get_version());
                 schema_meta.set_keyspace_id(schema_file.get_keyspace_id());
                 initial_flush.set_schema_meta(schema_meta);
-                // Filter out the unconverted_l0s not in the l0s created in this flush.
-                let unconverted_l0s = flush
-                    .shard_data
-                    .col_levels
-                    .unconverted_l0s
-                    .iter()
-                    .filter_map(|l0| {
-                        if l0_ids.contains(&l0.id()) {
-                            Some(l0.id())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                initial_flush.set_unconverted_l0s(unconverted_l0s);
 
-                flush.shard_data.for_each_columnar_level(|cl| {
-                    for col_file in cl.files.iter() {
-                        // TODO: check col_file has_overlap with task.range to avoid useless flush.
-                        let mut tbl = pb::ColumnarCreate::new();
-                        tbl.set_id(col_file.id());
-                        tbl.set_level(cl.level as u32);
-                        tbl.set_smallest(col_file.get_smallest().to_vec());
-                        tbl.set_biggest(col_file.get_biggest().to_vec());
-                        tbl.set_meta_offset(col_file.get_meta_offset());
-                        initial_flush.mut_columnar_creates().push(tbl);
+                if !self.opts.ignore_columnar_table_load {
+                    // Filter out the unconverted_l0s not in the l0s created in this flush.
+                    let unconverted_l0s = flush
+                        .shard_data
+                        .col_levels
+                        .unconverted_l0s
+                        .iter()
+                        .filter_map(|l0| {
+                            if l0_ids.contains(&l0.id()) {
+                                Some(l0.id())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    initial_flush.set_unconverted_l0s(unconverted_l0s);
+
+                    flush.shard_data.for_each_columnar_level(|cl| {
+                        for col_file in cl.files.iter() {
+                            // TODO: check col_file has_overlap with task.range to avoid useless
+                            // flush.
+                            let mut tbl = pb::ColumnarCreate::new();
+                            tbl.set_id(col_file.id());
+                            tbl.set_level(cl.level as u32);
+                            tbl.set_smallest(col_file.get_smallest().to_vec());
+                            tbl.set_biggest(col_file.get_biggest().to_vec());
+                            tbl.set_meta_offset(col_file.get_meta_offset());
+                            initial_flush.mut_columnar_creates().push(tbl);
+                        }
+                        false
+                    });
+
+                    initial_flush.set_columnar_table_ids(flush.columnar_table_ids.clone());
+                    for vec_idx in flush.shard_data.vector_indexes.get_all() {
+                        let mut vec_idx_pb = pb::VectorIndex::new();
+                        vec_idx_pb.set_table_id(vec_idx_pb.table_id);
+                        vec_idx_pb.set_index_id(vec_idx_pb.index_id);
+                        vec_idx_pb.set_col_id(vec_idx_pb.col_id);
+                        for vec_idx_file in &vec_idx.files {
+                            let mut vec_idx_file_pb = pb::VectorIndexFile::new();
+                            vec_idx_file_pb.set_id(vec_idx_file.file_id());
+                            vec_idx_file_pb.set_smallest(vec_idx_file.smallest().to_vec());
+                            vec_idx_file_pb.set_biggest(vec_idx_file.biggest().to_vec());
+                            vec_idx_file_pb.set_snap_version(vec_idx_file.snap_version());
+                            vec_idx_pb.mut_files().push(vec_idx_file_pb);
+                        }
+                        initial_flush.mut_vector_indexes().push(vec_idx_pb);
                     }
-                    false
-                });
+                }
             }
-        }
-        initial_flush.set_columnar_table_ids(flush.columnar_table_ids.clone());
-        for vec_idx in flush.shard_data.vector_indexes.get_all() {
-            let mut vec_idx_pb = pb::VectorIndex::new();
-            vec_idx_pb.set_table_id(vec_idx_pb.table_id);
-            vec_idx_pb.set_index_id(vec_idx_pb.index_id);
-            vec_idx_pb.set_col_id(vec_idx_pb.col_id);
-            for vec_idx_file in &vec_idx.files {
-                let mut vec_idx_file_pb = pb::VectorIndexFile::new();
-                vec_idx_file_pb.set_id(vec_idx_file.file_id());
-                vec_idx_file_pb.set_smallest(vec_idx_file.smallest().to_vec());
-                vec_idx_file_pb.set_biggest(vec_idx_file.biggest().to_vec());
-                vec_idx_file_pb.set_snap_version(vec_idx_file.snap_version());
-                vec_idx_pb.mut_files().push(vec_idx_file_pb);
-            }
-            initial_flush.mut_vector_indexes().push(vec_idx_pb);
         }
 
         let (tx, mut rx) = unbounded_channel();
@@ -354,7 +357,10 @@ impl Engine {
         for _ in 0..send_cnt {
             match rx.recv().await.unwrap() {
                 Ok(l0_create) => {
-                    if initial_flush.has_schema_meta() {
+                    if !self.opts.ignore_columnar_table_load
+                        && initial_flush.has_schema_meta()
+                        && !initial_flush.get_columnar_table_ids().is_empty()
+                    {
                         initial_flush.mut_unconverted_l0s().push(l0_create.get_id());
                     }
                     initial_flush.mut_l0_creates().push(l0_create);

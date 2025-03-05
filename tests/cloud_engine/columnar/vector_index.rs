@@ -47,6 +47,7 @@ fn test_build_vector_index() {
             .columnar_table_build_options
             .pack_max_row_count = 9;
         conf.kvengine.vector_index_build_options.delta_size = 1024;
+        conf.kvengine.build_columnar = true;
         conf.kvengine.read_columnar = true;
     });
     let dfs = cluster.get_dfs().unwrap();

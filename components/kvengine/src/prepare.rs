@@ -55,10 +55,8 @@ impl EngineCore {
         encryption_key: Option<EncryptionKey>, /* encryption_key will be ignored if cs is
                                                 * snapshot or restore_shard */
     ) -> Result<ChangeSet> {
-        let ignore_columnar = self.opts.ignore_columnar_table_load;
         let mut ids: HashMap<u64, FileMeta> = HashMap::new();
         let mut lock_txn_file_refs: Vec<TxnFileRef> = vec![];
-        let mut schema_file = None;
         let mut cs = ChangeSet::new(cs);
         let mut snap = None;
         let mut schema_meta = None;
@@ -184,19 +182,21 @@ impl EngineCore {
                 schema_meta = Some(snap.get_schema_meta());
             }
         }
-        if let Some(schema_meta) = schema_meta {
+        let schema_file = if let Some(schema_meta) = schema_meta {
             let schema_file_id = schema_meta.get_file_id();
             if schema_file_id == 0 {
                 // Set schema_file to None if schema file id is 0, no need to mark tombstone.
-                schema_file = None;
-            } else if !ignore_columnar {
-                schema_file = Some(
+                None
+            } else {
+                Some(
                     self.fs
                         .get_runtime()
                         .block_on(self.load_schema_file(schema_file_id))?,
-                );
+                )
             }
-        }
+        } else {
+            None
+        };
 
         let tag = ShardTag::new(self.get_engine_id(), IdVer::from_change_set(&cs));
         if let Some(table_filter) = table_filter {
@@ -209,11 +209,10 @@ impl EngineCore {
                 .collect();
         }
 
-        if ignore_columnar {
+        if self.opts.ignore_columnar_table_load {
             ids.retain(|_, meta| {
                 meta.file_type != FileType::Columnar && meta.file_type != FileType::VectorIndex
             });
-            schema_file = None;
         }
 
         info!(

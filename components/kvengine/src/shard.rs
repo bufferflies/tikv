@@ -440,10 +440,9 @@ impl Shard {
             );
         }
 
-        let opts = Options {
-            read_columnar: ctx.read_columnar,
-            ..Default::default()
-        };
+        let mut opts = Options::default();
+        opts.read_columnar = ctx.read_columnar;
+
         let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(opts), &ctx.master_key);
         let mut builder = ShardDataBuilder::new(shard.get_data());
         builder.set_mem_tbls(mem_tbls);
@@ -943,34 +942,12 @@ impl Shard {
             }
         }
 
-        if data.schema_file.is_none() && !data.columnar_table_ids.is_empty() {
+        if let Some(columnar_priority) = self.get_columnar_compaction_high_priority(&data) {
             let mut lock = self.compaction_priority.write().unwrap();
-            *lock = Some(CompactionPriority::ColumnarClear);
+            *lock = Some(columnar_priority);
             return;
         }
-        // ColumnarMajor compaction must be done before converting L0 to columnar.
-        if data.schema_file.is_some() && !data.col_levels.unconverted_l0s.is_empty() {
-            // Schema is outdated, wait for update or clear columnar if there are too many
-            // unconverted L0.
-            if self.get_outdated_schema_ver() == data.schema_file.as_ref().unwrap().get_version() {
-                if data.col_levels.unconverted_l0s.len() > MAX_UNCONVERTED_L0_FILE_COUNTS {
-                    warn!(
-                        "{} schema is outdated and has {} unconverted L0 files, clear schema file and columnar files.",
-                        self.tag(),
-                        data.col_levels.unconverted_l0s.len()
-                    );
-                    let mut lock = self.compaction_priority.write().unwrap();
-                    *lock = Some(CompactionPriority::ColumnarClear);
-                    return;
-                } else {
-                    // Do nothing, give it a chance to update schema file.
-                    return;
-                }
-            }
-            let mut lock = self.compaction_priority.write().unwrap();
-            *lock = Some(CompactionPriority::L0ToColumnar);
-            return;
-        }
+
         let mut score = 0.0;
         let mut cf_with_highest_score = -1;
         let mut level_with_highest_score = 0;
@@ -1002,7 +979,7 @@ impl Shard {
                 }
             }
         }
-        let mut priority = if score > 1.0 {
+        let priority = if score > 1.0 {
             let max_pri = if level_with_highest_score == 0 {
                 CompactionPriority::L0 { score }
             } else {
@@ -1014,57 +991,103 @@ impl Shard {
             };
             Some(max_pri)
         } else {
-            // TODO: support columnar major compaction partial tables in the shard.
-            // NOTE: we set the columnar major compaction priority lower than sst compaction
+            // NOTE: the columnar compaction priority should be lower than sst compaction
             // to avoid sst compaction being blocked by columnar major compaction.
-            if data.has_files_need_major_compact() && data.columnar_table_ids.is_empty() {
-                let mut lock = self.compaction_priority.write().unwrap();
-                *lock = Some(CompactionPriority::ColumnarMajor);
-                return;
-            }
-
-            // TODO: use dependent base_size for columnar
-            let col_l0_score =
-                data.get_columnar_level_stats(0).columnar_size as f64 / self.opt.base_size as f64;
-            let col_l1_score = data.get_columnar_level_stats(1).columnar_size as f64
-                / (10 * self.opt.base_size) as f64;
-            if data.schema_file.is_some()
-                && (data.get_col_table_counts(0) > MAX_COL_L0_FILE_COUNTS
-                    || (col_l0_score >= col_l1_score && col_l0_score > 1.0))
-            {
-                Some(CompactionPriority::ColumnarL0 {
-                    score: col_l0_score,
-                })
-            } else if data.schema_file.is_some()
-                && (data.get_col_table_counts(1) > MAX_COL_L1_FILE_COUNTS
-                    || (col_l0_score < col_l1_score && col_l1_score > 1.0))
-            {
-                if let Some(priority) = Self::maybe_override_by_vector_index(&data) {
-                    Some(priority)
-                } else {
-                    Some(CompactionPriority::ColumnarL1 {
-                        score: col_l1_score,
-                    })
-                }
-            } else {
-                let handle_priority_none = || -> Option<CompactionPriority> {
-                    if !data.l0_tbls.is_empty() {
-                        // Trigger L0 compaction for test purpose.
-                        fail::fail_point!("refresh_compaction_priority_for_l0", |_| {
-                            Some(CompactionPriority::L0 { score: 2.0 })
-                        });
-                    }
-                    None
-                };
-                handle_priority_none()
-            }
+            self.get_columnar_compaction_priority(&data)
+                .or_else(|| self.get_vector_index_priority(&data))
         };
-        if priority.is_none() {
-            // Only build vector index when there is no other compaction task.
-            priority = self.get_vector_index_priority(&data);
-        }
+
+        // Trigger L0 compaction for test purpose.
+        let priority = priority.or_else(|| {
+            let handle_priority_none = || -> Option<CompactionPriority> {
+                if !data.l0_tbls.is_empty() {
+                    fail::fail_point!("refresh_compaction_priority_for_l0", |_| {
+                        Some(CompactionPriority::L0 { score: 2.0 })
+                    });
+                }
+                None
+            };
+            handle_priority_none()
+        });
+
         let mut lock = self.compaction_priority.write().unwrap();
         *lock = priority;
+    }
+
+    fn get_columnar_compaction_high_priority(
+        &self,
+        data: &ShardData,
+    ) -> Option<CompactionPriority> {
+        if self.opt.ignore_columnar_table_load {
+            return None;
+        }
+
+        if data.schema_file.is_none() && !data.columnar_table_ids.is_empty() {
+            return Some(CompactionPriority::ColumnarClear);
+        }
+
+        // ColumnarMajor compaction must be done before converting L0 to columnar.
+        if data.schema_file.is_some() && !data.col_levels.unconverted_l0s.is_empty() {
+            // Schema is outdated, wait for update or clear columnar if there are too many
+            // unconverted L0.
+            if self.get_outdated_schema_ver() == data.schema_file.as_ref().unwrap().get_version() {
+                if data.col_levels.unconverted_l0s.len() > MAX_UNCONVERTED_L0_FILE_COUNTS {
+                    warn!(
+                        "{} schema is outdated and has {} unconverted L0 files, clear schema file and columnar files.",
+                        self.tag(),
+                        data.col_levels.unconverted_l0s.len()
+                    );
+                    return Some(CompactionPriority::ColumnarClear);
+                } else {
+                    // Do nothing, give it a chance to update schema file.
+                    return None;
+                }
+            }
+            return Some(CompactionPriority::L0ToColumnar);
+        }
+
+        None
+    }
+
+    fn get_columnar_compaction_priority(&self, data: &ShardData) -> Option<CompactionPriority> {
+        if self.opt.ignore_columnar_table_load {
+            return None;
+        }
+
+        // TODO: support columnar major compaction partial tables in the shard.
+        if self.opt.build_columnar()
+            && data.has_files_need_major_compact()
+            && data.columnar_table_ids.is_empty()
+        {
+            return Some(CompactionPriority::ColumnarMajor);
+        }
+
+        // TODO: use dependent base_size for columnar
+        let col_l0_score =
+            data.get_columnar_level_stats(0).columnar_size as f64 / self.opt.base_size as f64;
+        let col_l1_score = data.get_columnar_level_stats(1).columnar_size as f64
+            / (10 * self.opt.base_size) as f64;
+        if data.schema_file.is_some()
+            && (data.get_col_table_counts(0) > MAX_COL_L0_FILE_COUNTS
+                || (col_l0_score >= col_l1_score && col_l0_score > 1.0))
+        {
+            Some(CompactionPriority::ColumnarL0 {
+                score: col_l0_score,
+            })
+        } else if data.schema_file.is_some()
+            && (data.get_col_table_counts(1) > MAX_COL_L1_FILE_COUNTS
+                || (col_l0_score < col_l1_score && col_l1_score > 1.0))
+        {
+            if let Some(priority) = Self::maybe_override_by_vector_index(data) {
+                Some(priority)
+            } else {
+                Some(CompactionPriority::ColumnarL1 {
+                    score: col_l1_score,
+                })
+            }
+        } else {
+            None
+        }
     }
 
     // To prevent L1 columnar compaction invalidate existing vector index, we
