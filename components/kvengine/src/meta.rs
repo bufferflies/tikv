@@ -22,10 +22,8 @@ use super::*;
 use crate::{
     dfs::FileType,
     table::{BoundedDataSet, DataBound, InnerKey},
-    util::{
-        get_table_id_from_data_bound, merge_columnar_table_ids, TxnFileLocks,
-        TxnFileRefPropertyHelper,
-    },
+    table_id::{get_table_id_from_data_bound, merge_columnar_table_ids},
+    util::{TxnFileLocks, TxnFileRefPropertyHelper},
 };
 
 #[derive(Default, Clone, Debug)]

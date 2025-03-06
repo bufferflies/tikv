@@ -39,6 +39,7 @@ pub mod shard;
 pub mod split;
 pub mod stats;
 pub mod table;
+pub mod table_id;
 pub mod txn_chunk_manager;
 pub mod util;
 pub mod write;

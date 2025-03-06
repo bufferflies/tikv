@@ -16,9 +16,9 @@ use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    table::columnar::SchemaFile, CheckMergeResult, IdVer, Shard, TruncateTs, DEL_PREFIXES_KEY,
-    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE,
-    TRUNCATE_TS_KEY,
+    table::columnar::SchemaFile, table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard,
+    TruncateTs, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE,
+    MANUAL_MAJOR_COMPACTION_ENABLE, TRUNCATE_TS_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -46,7 +46,7 @@ use tikv_util::{
 };
 use txn_types::{Key, WriteBatchFlags};
 
-use super::{RequestInspector, SchemaTask};
+use super::{PeerStat, RequestInspector, SchemaTask};
 use crate::{
     store::{
         cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
@@ -1201,16 +1201,20 @@ impl<'a> PeerMsgHandler<'a> {
     fn on_split_region_check_tick(&mut self) -> bool /* should_split */ {
         self.ticker.schedule(PEER_TICK_SPLIT_CHECK);
         if let Some(shard) = self.ctx.global.engines.kv.get_shard(self.region_id()) {
-            let mut estimated_size = shard.get_estimated_size();
+            let estimated_size = shard.get_estimated_size();
             let estimated_entries = shard.get_estimated_entries();
             let estimated_kv_size = shard.get_estimated_kv_size();
-            if shard.get_storage_class() == StorageClass::Ia {
-                estimated_size = cmp::max(estimated_size, self.ctx.cfg.region_split_size.0);
-            }
             // use 1 for empty size as 0 is for unknown size in PD.
             self.peer.peer_stat.approximate_size = cmp::max(estimated_size, 1);
             self.peer.peer_stat.approximate_keys = estimated_entries;
             self.peer.peer_stat.approximate_kv_size = estimated_kv_size;
+            let region_split_size = self.ctx.cfg.region_split_size.0;
+            Self::adjust_peer_stat_for_storage_class(
+                &mut self.peer.peer_stat,
+                shard.as_ref(),
+                region_split_size,
+            );
+
             if !self.fsm.peer.is_leader() {
                 return false;
             }
@@ -1268,6 +1272,26 @@ impl<'a> PeerMsgHandler<'a> {
             }
         }
         false
+    }
+
+    fn adjust_peer_stat_for_storage_class(
+        peer_stat: &mut PeerStat,
+        shard: &Shard,
+        region_split_size: u64,
+    ) {
+        if shard.get_storage_class() == StorageClass::Ia {
+            // Adjust region size to prevent merge when the region is on the boundary of
+            // table.
+            if is_table_boundary_key(shard.inner_start())
+                || is_table_boundary_key(shard.inner_end())
+            {
+                peer_stat.approximate_size =
+                    cmp::max(peer_stat.approximate_size, region_split_size);
+            }
+
+            // Reduce storage cost by half.
+            peer_stat.approximate_kv_size /= 2;
+        }
     }
 
     fn schedule_ask_split(&mut self, split_keys: Vec<Vec<u8>>) {

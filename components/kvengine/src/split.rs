@@ -25,7 +25,7 @@ use crate::{
     table::{
         columnar::ColumnarLevels, vector_index::VectorIndexes, BoundedDataSet, DataBound, InnerKey,
     },
-    util::{get_table_id_from_data_bound, keys_belong_to_same_table, merge_columnar_table_ids},
+    table_id::{get_table_id_from_data_bound, keys_belong_to_same_table, merge_columnar_table_ids},
     *,
 };
 

@@ -37,7 +37,8 @@ use crate::{
         vector_index::VectorIndexes,
         BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, TxnFile,
     },
-    util::{evenly_distribute, get_table_id_from_data_bound, TxnFileRefPropertyHelper},
+    table_id::get_table_id_from_data_bound,
+    util::{evenly_distribute, TxnFileRefPropertyHelper},
     *,
 };
 

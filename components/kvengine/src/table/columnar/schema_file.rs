@@ -8,7 +8,7 @@ use protobuf::Message;
 use tidb_query_datatype::codec::table::{
     decode_table_id, INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
 };
-use tikv_util::{codec::number::NumberEncoder, Either};
+use tikv_util::Either;
 
 use crate::{
     table::{
@@ -17,7 +17,7 @@ use crate::{
         file::File,
         ChecksumType, DataBound, InnerKey, OwnedInnerKey, NO_COMPRESSION,
     },
-    util::get_table_id_from_data_bound,
+    table_id::{encode_table_prefix_key, get_table_id_from_data_bound},
     Properties,
 };
 
@@ -402,13 +402,6 @@ pub fn build_schema_file(
     footer.checksum = checksum_type.checksum(&data);
     footer.write_to(&mut data);
     data
-}
-
-pub fn encode_table_prefix_key(table_id: i64) -> OwnedInnerKey {
-    let mut key = Vec::with_capacity(TABLE_PREFIX_KEY_LEN);
-    key.put(TABLE_PREFIX);
-    key.encode_i64(table_id).unwrap();
-    OwnedInnerKey::new(key.into())
 }
 
 #[cfg(test)]

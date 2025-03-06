@@ -5,9 +5,8 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use bytes::Bytes;
 use kvengine::{
     self,
-    table::{
-        columnar::encode_table_prefix_key, sstable::BlockCacheType, BoundedDataSet, DataBound,
-    },
+    table::{sstable::BlockCacheType, BoundedDataSet, DataBound},
+    table_id::encode_table_prefix_key,
     STORAGE_CLASS_KEY,
 };
 use kvproto::kvrpcpb;
