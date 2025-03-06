@@ -5418,6 +5418,148 @@ def RaftEngine() -> RowPanel:
     return layout.row_panel
 
 
+def CloudWorkerService() -> RowPanel:
+    layout = Layout(title="Cloud Worker Service")
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Compaction Request duration",
+            heatmap_description="The time consumed to handle remote compaction requests",
+            graph_title="Compaction Request duration",
+            graph_description="The time consumed to handle remote compaction requests",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_worker_remote_compact_request_duration_seconds",
+        ),
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Snapshot Request duration",
+            heatmap_description="The time consumed to handle remote copr snapshot duration",
+            graph_title="Snapshot Request duration",
+            graph_description="The time consumed to handle remote copr snapshot duration",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_worker_remote_cop_snapshot_duration_seconds",
+        ),
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Copr Request duration",
+            heatmap_description="The time consumed to handle remote coprocessor read requests",
+            graph_title="Copr Request duration",
+            graph_description="The time consumed to handle remote coprocessor read requests",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_worker_remote_cop_request_duration_seconds",
+        ),
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Remote Copr Response Size",
+                description="The size of remote coprocessor response",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_cop_dag_response_size",
+                            by_labels=[],
+                        ),
+                        legend_format="dag",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_analyze_response_size",
+                            by_labels=[],
+                        ),
+                        legend_format="analyze",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_checksum_response_size",
+                            by_labels=[],
+                        ),
+                        legend_format="checksum",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Remote Copr Request Operations",
+                description="The qps of remote coprocessor requests",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_cop_dag_request_counter",
+                            by_labels=[],
+                        ),
+                        legend_format="dag",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_cop_dag_request_counter",
+                            by_labels=[],
+                        ),
+                        legend_format="analyze",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_cop_dag_request_counter",
+                            by_labels=[],
+                        ),
+                        legend_format="checksum",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Native BR RPC Duration",
+                description=None,
+                yaxes=yaxes(left_format=UNITS.SECONDS, log_base=1),
+                targets=[
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "tikv_worker_native_br_duration_seconds",
+                        ),
+                        legend_format="total-99",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "tikv_worker_native_br_duration_seconds",
+                            by_labels=["type"],
+                        ),
+                        legend_format="{{type}}-99",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Native BR RPC Operations",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_native_br_counter",
+                            by_labels=["type"],
+                        ),
+                        additional_groupby=True,
+                    )
+                ],
+            ),
+        ]
+    )
+    return layout.row_panel
+
+
 def PessimisticLocking() -> RowPanel:
     layout = Layout(title="Pessimistic Locking")
     layout.row(
@@ -7515,6 +7657,7 @@ dashboard = Dashboard(
         RaftEngine(),
         KvEngine(),
         InMemoryEngine(),
+        CloudWorkerService(),
         # Scheduler and Read Pools
         FlowControl(),
         Scheduler(),
