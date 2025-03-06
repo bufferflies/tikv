@@ -670,7 +670,7 @@ impl EngineCore {
     }
 }
 
-pub(crate) fn collect_snap_lock_txn_file_refs(snap: &kvenginepb::Snapshot) -> Vec<TxnFileRef> {
+pub fn collect_snap_lock_txn_file_refs(snap: &kvenginepb::Snapshot) -> Vec<TxnFileRef> {
     let props = snap.get_properties();
     debug_assert_eq!(props.keys.len(), props.values.len());
     for (key, val) in props.get_keys().iter().zip(props.get_values().iter()) {

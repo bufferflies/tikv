@@ -141,7 +141,7 @@ impl GcRunner {
             let entry = e.ctx("gc.entry")?;
             let path = entry.path();
             if path.is_dir() && path.file_name() == Some(OsStr::new("txn")) {
-                self.remove_kv_garbage_txn_files(path, txn_chunk_ids)?;
+                self.remove_kv_garbage_txn_files(path, txn_chunk_ids, blacklist_file_ids.as_ref())?;
                 continue;
             }
             let path_str = path.to_str().unwrap();
@@ -244,6 +244,7 @@ impl GcRunner {
         &self,
         txn_path: PathBuf,
         kv_txn_chunk_ids: &HashSet<u64>,
+        blacklist_file_ids: &HashSet<u64>,
     ) -> kvengine::Result<()> {
         let store_id = self.kv.get_engine_id();
         let entries = fs::read_dir(txn_path.as_path()).ctx("gc.txn.read_dir")?;
@@ -268,6 +269,7 @@ impl GcRunner {
             } else if filename.ends_with(".txn") {
                 if let Some(id) = kvengine::txn_chunk_manager::parse_txn_chunk_id(filename) {
                     if !kv_txn_chunk_ids.contains(&id)
+                        && !blacklist_file_ids.contains(&id)
                         && txn_chunk_manager.gc_chunk_file(id, self.timeout, store_id)
                     {
                         info!("{} local file GC remove txn chunk", store_id; "filename" => filename, "id" => id);

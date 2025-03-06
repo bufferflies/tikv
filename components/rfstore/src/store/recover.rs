@@ -6,7 +6,7 @@ use api_version::ApiV2;
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use collections::HashSet;
-use kvengine::{Engine, Shard, ShardMeta};
+use kvengine::{collect_snap_lock_txn_file_refs, Engine, Shard, ShardMeta};
 use kvenginepb::ChangeSet;
 use kvproto::{
     metapb,
@@ -446,6 +446,12 @@ impl kvengine::MetaIterator for RecoverHandler {
                                 self.files_in_blacklist.push(file.get_id());
                             }
                         });
+                        collect_snap_lock_txn_file_refs(snap)
+                            .into_iter()
+                            .flat_map(|r| r.chunk_ids)
+                            .for_each(|chunk_id| {
+                                self.files_in_blacklist.push(chunk_id);
+                            });
                         continue;
                     }
                 }
