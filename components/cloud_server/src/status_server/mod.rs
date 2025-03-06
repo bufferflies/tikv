@@ -1421,7 +1421,8 @@ impl StatusServer {
         }
         if config.range.is_some() {
             let range = config.range.as_ref().unwrap();
-            if range.0.is_empty() || range.1.is_empty() {
+            // For default keyspace, the range is [b"", b"0000"]
+            if range.1.is_empty() {
                 return Err(box_err!("Unsupported range {:?}", range));
             }
         }
