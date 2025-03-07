@@ -32,6 +32,8 @@ use tikv_util::{
 use super::*;
 use crate::RaftRouter;
 
+const MERGED_WRITE_BATCH_MAX_SIZE: usize = 4 * 1024 * 1024; // 4 MiB.
+
 #[derive(Clone)]
 pub(crate) struct PeerStates {
     pub(crate) applier: Arc<Mutex<Applier>>,
@@ -642,13 +644,21 @@ impl IoWorker {
         while let Ok(Some(task)) = self.receiver.recv() {
             let len = self.receiver.len();
             let mut tasks = Vec::with_capacity(len + 1);
+
+            let mut total_estimated_size = task.raft_wb.estimated_size();
             tasks.push(task);
             for _ in 0..len {
+                if total_estimated_size >= MERGED_WRITE_BATCH_MAX_SIZE {
+                    break;
+                }
+
                 let task = self.receiver.recv().unwrap();
                 if task.is_none() {
                     return;
                 }
-                tasks.push(task.unwrap());
+                let task = task.unwrap();
+                total_estimated_size += task.raft_wb.estimated_size();
+                tasks.push(task);
             }
             for task in &mut tasks {
                 if !task.raft_wb.is_empty() {

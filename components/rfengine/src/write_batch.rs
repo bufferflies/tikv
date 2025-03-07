@@ -107,6 +107,10 @@ impl WriteBatch {
     pub fn get_region_peer_map(&self) -> HashMap<u64, u64> {
         self.peers.iter().map(|(k, v)| (v.region_id, *k)).collect()
     }
+
+    pub fn estimated_size(&self) -> usize {
+        self.peers.values().map(|b| b.estimated_size()).sum()
+    }
 }
 
 /// `RegionBatch` is a batch of modifications in one region.
@@ -205,6 +209,10 @@ impl PeerBatch {
         self.raft_logs
             .iter()
             .fold(len, |acc, l| acc + l.encoded_len())
+    }
+
+    pub(crate) fn estimated_size(&self) -> usize {
+        self.raft_logs.iter().map(|l| l.encoded_len()).sum()
     }
 
     ///  +-----------+-------------+-----------------+---------------+--------------+--------------+-----------------+------------+-------------------+--------------+-----+------------------+-----+--------------+-----+
