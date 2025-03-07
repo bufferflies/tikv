@@ -4,7 +4,6 @@ use rand::Rng;
 
 mod test_compaction;
 mod test_merge;
-mod test_stats;
 mod test_trim_over_bound;
 
 pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
