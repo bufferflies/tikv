@@ -18,6 +18,7 @@ debug-trace-mem-table = []
 
 [dependencies]
 aligned-vec = "0.6.1"
+aliyun = { workspace = true }
 api_version = { path = "../api_version" }
 arrow-buffer = "53.1.0"
 async-recursion = "1.1"

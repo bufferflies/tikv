@@ -246,6 +246,7 @@ members = [
   "components/causal_ts",
   "components/cdc",
   "components/cloud",
+  "components/cloud/aliyun",
   "components/cloud/aws",
   "components/cloud/azure",
   "components/cloud/gcp",
@@ -323,6 +324,7 @@ default-members = ["cmd/tikv-server", "cmd/cse-ctl", "cmd/tikv-worker"]
 api_version = { path = "components/api_version" }
 aws = { path = "components/cloud/aws" }
 azure = { path = "components/cloud/azure" }
+aliyun = { path = "components/cloud/aliyun" }
 backup = { path = "components/backup", default-features = false }
 backup-stream = { path = "components/backup-stream", default-features = false }
 batch-system = { path = "components/batch-system" }

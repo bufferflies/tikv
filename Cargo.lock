@@ -84,6 +84,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aliyun"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "http",
+ "hyper",
+ "hyper-tls",
+ "rusoto_core",
+ "rusoto_credential",
+ "serde",
+ "serde_derive",
+ "serde_ignored",
+ "serde_json",
+]
+
+[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3855,6 +3872,7 @@ name = "kvengine"
 version = "0.0.1"
 dependencies = [
  "aligned-vec",
+ "aliyun",
  "anyhow",
  "api_version",
  "arrow-buffer",

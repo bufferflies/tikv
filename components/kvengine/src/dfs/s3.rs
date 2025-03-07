@@ -132,14 +132,24 @@ impl S3FsCore {
             let https_connector = HttpsConnector::new_with_connector(http_connector);
             let http_client = HttpClient::from_connector_with_config(https_connector, config);
             if key_id.is_empty() {
-                rusoto_core::Client::new_with(default_provider, http_client)
+                if endpoint.contains(aliyun::DOMAIN_STRING) {
+                    let ali_provider = aliyun::new_credential_provider().unwrap();
+                    rusoto_core::Client::new_with(ali_provider, http_client)
+                } else {
+                    rusoto_core::Client::new_with(default_provider, http_client)
+                }
             } else {
                 rusoto_core::Client::new_with(static_provider, http_client)
             }
         } else {
             let http_client = HttpClient::from_connector_with_config(http_connector, config);
             if key_id.is_empty() {
-                rusoto_core::Client::new_with(default_provider, http_client)
+                if endpoint.contains(aliyun::DOMAIN_STRING) {
+                    let ali_provider = aliyun::new_credential_provider().unwrap();
+                    rusoto_core::Client::new_with(ali_provider, http_client)
+                } else {
+                    rusoto_core::Client::new_with(default_provider, http_client)
+                }
             } else {
                 rusoto_core::Client::new_with(static_provider, http_client)
             }
