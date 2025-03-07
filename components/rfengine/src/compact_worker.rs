@@ -14,6 +14,7 @@ use std::{
     },
     thread,
     thread::JoinHandle,
+    time::Duration,
 };
 
 use api_version::ApiV2;
@@ -29,6 +30,7 @@ use rfenginepb::{
 };
 use slog_global::*;
 use tikv_util::{
+    backoff,
     mpsc::{Receiver, Sender},
     sys::thread::StdThreadBuildWrapper,
     time::Instant,
@@ -47,6 +49,8 @@ const MAX_WAL_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
 // Maximum size of snapshot. This size is determined by maximum object size of
 // S3, which is 5 GiB.
 const MAX_SNAPSHOT_SIZE: u64 = 4500 * 1024 * 1024; // 4.5 GiB
+
+const COMPACT_RETRY_TIMES: usize = 30;
 
 pub(crate) struct WorkerHandle {
     pub(crate) task_sender: Sender<CompactTask>,
@@ -134,6 +138,34 @@ impl CompactWorker {
         }
     }
 
+    fn handle_compact_with_backoff(&mut self, epoch_id: u32) {
+        let mut back_off = backoff::ExponentialBackoff::new(
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            COMPACT_RETRY_TIMES,
+        );
+        let engine_id = self.manifest.get_engine_id();
+        loop {
+            let next_delay = back_off.next_delay();
+            if next_delay.is_err() {
+                panic!("compact epoch {} retry times exceeded", epoch_id);
+            }
+            match self.compact(epoch_id) {
+                Ok(_) => break,
+                Err(err) => {
+                    error!(
+                        "{}: failed to compact epoch {} retry_times: {}, {:?}",
+                        engine_id,
+                        epoch_id,
+                        back_off.current_attempts(),
+                        err
+                    );
+                    thread::sleep(next_delay.unwrap());
+                }
+            }
+        }
+    }
+
     fn handle_compact(&mut self, epoch_id: u32) {
         info!("handle compact {}", epoch_id);
         if let Err(err) = self.compact(epoch_id) {
@@ -142,6 +174,8 @@ impl CompactWorker {
                 "{}: failed to compact epoch {} {:?}",
                 engine_id, epoch_id, err
             );
+            self.handle_compact_with_backoff(epoch_id);
+            info!("handle compact {} success after retry", epoch_id);
         }
 
         if self.manifest.should_snapshot() {
