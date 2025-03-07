@@ -14,6 +14,7 @@
 //! See https://github.com/tidbcloud/cloud-storage-engine/issues/1710 for more details.
 
 mod debug;
+pub mod gc;
 pub mod ia_file;
 pub mod manager;
 mod queue;

@@ -11,7 +11,12 @@ use std::{
 };
 
 use collections::HashSet;
-use kvengine::{table::sstable, IoContext};
+use kvengine::{
+    context::IaCtx,
+    ia::gc::{IaGcConfig, IaGcRunner},
+    table::sstable,
+    IoContext,
+};
 use kvproto::import_sstpb::SwitchMode;
 use sst_importer::SstImporter;
 use tikv_util::{error, info, warn, worker::Runnable};
@@ -32,6 +37,7 @@ impl Display for GcTask {
 #[derive(Default)]
 pub struct CollectFileIds {
     pub sst_file_ids: HashSet<u64>,
+    pub async_sst_file_ids: HashSet<u64>,
     pub blacklist_file_ids: Arc<HashSet<u64>>,
     pub txn_chunk_ids: HashSet<u64>,
     pub col_file_ids: HashSet<u64>,
@@ -43,6 +49,7 @@ pub struct CollectFileIds {
 /// resource.
 pub struct GcRunner {
     kv: kvengine::Engine,
+    ia_gc_runner: Option<IaGcRunner>,
     importer: Arc<SstImporter>,
     timeout: Duration,
 }
@@ -62,14 +69,35 @@ impl Runnable for GcRunner {
 
 impl GcRunner {
     pub fn new(kv: kvengine::Engine, importer: Arc<SstImporter>, timeout: Duration) -> Self {
+        let ia_gc_runner = match kv.ia_ctx() {
+            IaCtx::Enabled(ia_mgr, meta_path) => {
+                #[cfg_attr(not(feature = "textexport"), allow(unused_mut))]
+                let mut config = IaGcConfig::default();
+
+                // For test purpose:
+                #[cfg(feature = "testexport")]
+                if timeout <= Duration::from_secs(60) {
+                    config = IaGcConfig::new_for_test();
+                    warn!("IA gc runner use test config: {:?}", config);
+                }
+
+                Some(IaGcRunner::new(
+                    config,
+                    ia_mgr.clone(),
+                    meta_path.as_path().to_path_buf(),
+                ))
+            }
+            IaCtx::Disabled => None,
+        };
         Self {
             kv,
+            ia_gc_runner,
             importer,
             timeout,
         }
     }
 
-    fn gc_kv_files(&self) -> kvengine::Result<()> {
+    fn gc_kv_files(&mut self) -> kvengine::Result<()> {
         let collect_file_ids = self.collect_file_ids();
         self.remove_garbage_files(&collect_file_ids)?;
         Ok(())
@@ -89,9 +117,9 @@ impl GcRunner {
         collect_file_ids.blacklist_file_ids = self.kv.get_files_in_blacklist();
         for &id_ver in &shard_id_vers {
             let shard = self.kv.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
-            collect_file_ids
-                .sst_file_ids
-                .extend(shard.get_all_sst_files());
+            let (sst_files, async_sst_files) = shard.get_local_sst_files();
+            collect_file_ids.sst_file_ids.extend(sst_files);
+            collect_file_ids.async_sst_file_ids.extend(async_sst_files);
             collect_file_ids
                 .txn_chunk_ids
                 .extend(shard.get_txn_chunks());
@@ -126,9 +154,10 @@ impl GcRunner {
             .map_err(|_| kvengine::Error::Other(format!("invalid file name {}", key).into()))
     }
 
-    fn remove_garbage_files(&self, collect_file_ids: &CollectFileIds) -> kvengine::Result<()> {
+    fn remove_garbage_files(&mut self, collect_file_ids: &CollectFileIds) -> kvengine::Result<()> {
         let CollectFileIds {
             sst_file_ids,
+            async_sst_file_ids,
             blacklist_file_ids,
             txn_chunk_ids,
             col_file_ids,
@@ -140,10 +169,16 @@ impl GcRunner {
         for e in entries {
             let entry = e.ctx("gc.entry")?;
             let path = entry.path();
+
             if path.is_dir() && path.file_name() == Some(OsStr::new("txn")) {
                 self.remove_kv_garbage_txn_files(path, txn_chunk_ids, blacklist_file_ids.as_ref())?;
                 continue;
             }
+            if path.is_dir() && path.file_name() == Some(OsStr::new("ia")) {
+                self.remove_kv_garbage_ia_files(path, async_sst_file_ids, blacklist_file_ids)?;
+                continue;
+            }
+
             let path_str = path.to_str().unwrap();
             if path_str.ends_with(".tmp") {
                 let meta = entry
@@ -281,6 +316,23 @@ impl GcRunner {
                 warn!("unexpected file {:?}", path);
             }
         }
+        Ok(())
+    }
+
+    fn remove_kv_garbage_ia_files(
+        &mut self,
+        _: PathBuf,
+        async_sst_file_ids: &HashSet<u64>,
+        blacklist_file_ids: &HashSet<u64>,
+    ) -> kvengine::Result<()> {
+        let Some(ia_gc_runner) = self.ia_gc_runner.as_mut() else {
+            return Ok(());
+        };
+
+        let ignore = |file_id| {
+            async_sst_file_ids.contains(&file_id) || blacklist_file_ids.contains(&file_id)
+        };
+        ia_gc_runner.run(ignore);
         Ok(())
     }
 

@@ -772,9 +772,8 @@ impl Shard {
 
     // return STANDARD ids, IA ids
     pub fn get_local_sst_files(&self) -> (Vec<u64>, Vec<u64>) {
-        let use_ia = self.use_ia();
         let data = self.get_data();
-        data.get_local_sst_files(use_ia)
+        data.get_local_sst_files()
     }
 
     pub fn get_txn_chunks(&self) -> Vec<u64> {
@@ -1670,49 +1669,44 @@ impl ShardDataCore {
     }
 
     pub(crate) fn get_all_sst_files(&self) -> Vec<u64> {
-        let mut files = Vec::new();
-        for l0 in &self.l0_tbls {
-            files.push(l0.id());
-        }
-        for blob_tbl_id in self.blob_tbl_map.keys() {
-            files.push(*blob_tbl_id);
-        }
-        self.for_each_level(|_cf, lh| {
-            for tbl in lh.tables.iter() {
-                files.push(tbl.id())
-            }
-            false
-        });
+        let (mut files, async_files) = self.get_local_sst_files();
+        files.extend(async_files);
         files.sort_unstable();
         files
     }
 
     // return STANDARD ids, IA ids
-    pub(crate) fn get_local_sst_files(&self, use_ia: bool) -> (Vec<u64>, Vec<u64>) {
+    pub(crate) fn get_local_sst_files(&self) -> (Vec<u64> /* files */, Vec<u64> /* async_files */) {
         let mut files = Vec::new();
-        let mut ia_files = Vec::new();
+        let mut async_files = Vec::new();
         for l0 in &self.l0_tbls {
             files.push(l0.id());
         }
         for blob_tbl_id in self.blob_tbl_map.keys() {
             files.push(*blob_tbl_id);
         }
+        let mut is_sync: Option<bool> = None;
         self.for_each_level(|cf, lh| {
-            if cf != WRITE_CF || !use_ia {
+            if !Self::can_use_ia(cf, lh) {
                 for tbl in lh.tables.iter() {
                     files.push(tbl.id())
                 }
             } else {
                 for tbl in lh.tables.iter() {
-                    assert!(!tbl.is_sync());
-                    ia_files.push(tbl.id())
+                    let is_sync = *is_sync.get_or_insert(tbl.is_sync());
+                    debug_assert_eq!(is_sync, tbl.is_sync());
+                    if is_sync {
+                        files.push(tbl.id());
+                    } else {
+                        async_files.push(tbl.id())
+                    }
                 }
             }
             false
         });
         files.sort_unstable();
-        ia_files.sort_unstable();
-        (files, ia_files)
+        async_files.sort_unstable();
+        (files, async_files)
     }
 
     pub(crate) fn get_txn_chunks(&self) -> Vec<u64> {
@@ -1773,6 +1767,11 @@ impl ShardDataCore {
                 }
             }
         }
+    }
+
+    #[inline]
+    fn can_use_ia(cf: usize, _lv: &LevelHandler) -> bool {
+        cf == WRITE_CF
     }
 
     pub(crate) fn for_each_columnar_level<F>(&self, mut f: F)

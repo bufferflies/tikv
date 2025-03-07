@@ -6,6 +6,9 @@ license = "Apache-2.0"
 edition = "2018"
 publish = false
 
+[features]
+testexport = ["kvengine/testexport"]
+
 [dependencies]
 api_version = { path = "../../components/api_version", default-features = false }
 async-trait = "0.1"

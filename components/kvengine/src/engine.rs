@@ -884,6 +884,10 @@ impl EngineCore {
         self.ia_ctx.is_enabled()
     }
 
+    pub fn ia_ctx(&self) -> &IaCtx {
+        &self.ia_ctx
+    }
+
     pub fn get_txn_chunk_manager(&self) -> TxnChunkManager {
         self.txn_chunk_mgr.clone()
     }

@@ -20,7 +20,7 @@ use hyper::{http, Body, Request};
 use kvengine::{
     dfs,
     dfs::{Dfs, FileType},
-    ia::util::IaConfig,
+    ia::{gc::IaGcConfig, util::IaConfig},
     table::{columnar::build_schema_file, sstable::BlockCacheType},
     txn_chunk_manager::TxnChunkManagerConfig,
     ShardStats,
@@ -814,9 +814,7 @@ impl ServerCluster {
                 },
                 local_gc: LocalGcConfig {
                     interval: ReadableDuration::secs(10),
-                    meta_lifetime: ReadableDuration::secs(30),
-                    segment_interval: ReadableDuration::secs(0), // Run on every `interval`.
-                    segment_tmp_lifetime: ReadableDuration::secs(10),
+                    ia: IaGcConfig::new_for_test(),
                 },
                 ..Default::default()
             };

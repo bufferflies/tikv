@@ -3,10 +3,10 @@
 use std::{assert_matches::assert_matches, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use bytes::{Buf, Bytes};
-use cloud_worker::local_gc::{LocalGcConfig, LocalGcRunner};
 use kvengine::{
     dfs::{FileType, S3Fs},
     ia::{
+        gc::{IaGcConfig, IaGcRunner},
         ia_file::{table_meta_file_local_path, IaFile},
         manager::IaManager,
         types::{FileSegmentData, FileSegmentIdent},
@@ -397,19 +397,19 @@ fn test_local_gc() {
 
         // No meta is GCed.
         {
-            let config = LocalGcConfig::default();
-            let mut local_gc_runner = LocalGcRunner::new(config, mgr.clone(), meta_path.clone());
-            assert_eq!(local_gc_runner.meta_file_gc().unwrap(), 0);
+            let config = IaGcConfig::default();
+            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), meta_path.clone());
+            assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), 0);
         }
 
         // All metas are GCed.
         {
-            let config = LocalGcConfig {
+            let config = IaGcConfig {
                 meta_lifetime: ReadableDuration::ZERO,
                 ..Default::default()
             };
-            let mut local_gc_runner = LocalGcRunner::new(config, mgr.clone(), meta_path.clone());
-            assert_eq!(local_gc_runner.meta_file_gc().unwrap(), file_count);
+            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), meta_path.clone());
+            assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), file_count);
 
             // Opened IA files are not affected.
             assert_eq!(ia1.multi_read_async(5, 10).await.unwrap(), data1_5_10);
@@ -418,12 +418,12 @@ fn test_local_gc() {
 
         // No segment is GCed.
         {
-            let config = LocalGcConfig {
+            let config = IaGcConfig {
                 segment_interval: ReadableDuration::ZERO,
                 ..Default::default()
             };
-            let mut local_gc_runner = LocalGcRunner::new(config, mgr.clone(), meta_path.clone());
-            assert_eq!(local_gc_runner.segment_gc().unwrap(), 0);
+            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), meta_path.clone());
+            assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 0);
 
             assert_eq!(ia1.multi_read_async(5, 10).await.unwrap(), data1_5_10);
             assert_eq!(ia2.multi_read_async(100, 64).await.unwrap(), data2_100_64);
@@ -443,13 +443,13 @@ fn test_local_gc() {
                 .unwrap();
             let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.clone().into()).unwrap();
 
-            let config = LocalGcConfig {
+            let config = IaGcConfig {
                 segment_interval: ReadableDuration::ZERO,
                 ..Default::default()
             };
-            let mut local_gc_runner = LocalGcRunner::new(config, mgr, meta_path.clone());
-            local_gc_runner.set_segment_path(segment_path.clone()); // Change to original path which has segments.
-            assert!(local_gc_runner.segment_gc().unwrap() > 0); // The number of segments is not determined.
+            let mut gc_runner = IaGcRunner::new(config, mgr, meta_path.clone());
+            gc_runner.set_segment_path(segment_path.clone()); // Change to original path which has segments.
+            assert!(gc_runner.segment_gc(|_| false).unwrap() > 0); // The number of segments is not determined.
 
             assert!(fs::read_dir(&segment_path).unwrap().next().is_none());
         }
@@ -460,22 +460,21 @@ fn test_local_gc() {
             assert!(fs::read_dir(&segment_path).unwrap().next().is_some());
 
             {
-                let config = LocalGcConfig::default();
-                let mut local_gc_runner =
-                    LocalGcRunner::new(config, mgr.clone(), meta_path.clone());
-                local_gc_runner.set_segment_path(segment_path.clone());
-                assert_eq!(local_gc_runner.segment_gc().unwrap(), 0);
+                let config = IaGcConfig::default();
+                let mut gc_runner = IaGcRunner::new(config, mgr.clone(), meta_path.clone());
+                gc_runner.set_segment_path(segment_path.clone());
+                assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 0);
             }
 
             {
-                let config = LocalGcConfig {
+                let config = IaGcConfig {
                     segment_interval: ReadableDuration::ZERO,
                     segment_tmp_lifetime: ReadableDuration::ZERO,
                     ..Default::default()
                 };
-                let mut local_gc_runner = LocalGcRunner::new(config, mgr, meta_path.clone());
-                local_gc_runner.set_segment_path(segment_path.clone());
-                assert_eq!(local_gc_runner.segment_gc().unwrap(), 1);
+                let mut gc_runner = IaGcRunner::new(config, mgr, meta_path.clone());
+                gc_runner.set_segment_path(segment_path.clone());
+                assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 1);
                 assert!(fs::read_dir(&segment_path).unwrap().next().is_none());
             }
         }
