@@ -57,11 +57,16 @@ pub struct TableInfo {
 }
 
 impl TableInfo {
-    pub fn with_columnar(&self) -> bool {
-        !self.cols.as_ref().map(|c| c.is_empty()).unwrap_or(true) && self.build_columnar()
+    #[inline]
+    pub fn with_required_changes(&self) -> bool {
+        self.with_columnar() || self.with_storage_class()
     }
 
-    pub fn build_columnar(&self) -> bool {
+    pub fn with_columnar(&self) -> bool {
+        self.cols.as_ref().is_some_and(|cols| !cols.is_empty()) && self.build_columnar()
+    }
+
+    fn build_columnar(&self) -> bool {
         if self.comment.contains("columnar_engine") {
             return true;
         }
@@ -74,7 +79,7 @@ impl TableInfo {
     }
 
     pub fn with_storage_class(&self) -> bool {
-        self.storage_class() != StorageClass::Unspecified
+        self.storage_class().is_specified()
     }
 
     pub fn storage_class(&self) -> StorageClass {
@@ -260,8 +265,11 @@ pub struct SchemaVersionResponse {
     pub schemas: Vec<TableInfo>,
 }
 
+/// Storage class tier strings which are the same with TiDB.
 const STORAGE_CLASS_TIER_STANDARD: &str = "STANDARD";
 const STORAGE_CLASS_TIER_IA: &str = "IA";
+
+const STORAGE_CLASS_STR_UNSPECIFIED: &str = "UNSPECIFIED";
 
 #[repr(u8)]
 #[derive(PartialEq, Clone, Copy, Default, Serialize, Deserialize)]
@@ -284,9 +292,9 @@ pub enum StorageClass {
 impl StorageClass {
     pub fn display(&self) -> &'static str {
         match self {
-            Self::Unspecified => "UNSPECIFIED",
-            Self::Standard => "STANDARD",
-            Self::Ia => "IA",
+            Self::Unspecified => STORAGE_CLASS_STR_UNSPECIFIED,
+            Self::Standard => STORAGE_CLASS_TIER_STANDARD,
+            Self::Ia => STORAGE_CLASS_TIER_IA,
         }
     }
 
@@ -317,6 +325,11 @@ impl StorageClass {
     #[inline]
     pub fn require_exclusive_region(&self) -> bool {
         matches!(self, Self::Ia)
+    }
+
+    #[inline]
+    pub fn is_sync(&self) -> bool {
+        matches!(self, Self::Unspecified | Self::Standard)
     }
 }
 

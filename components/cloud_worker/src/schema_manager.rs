@@ -40,7 +40,11 @@ use tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC;
 use tikv_client::{BoundRange, Key, KvPair, TransactionOptions, Value};
 use tikv_util::{box_err, config::ReadableDuration, debug, error, info};
 
-use crate::{error::Result, get_all_stores_except_tiflash, server::Context};
+use crate::{
+    error::{Error, Result},
+    get_all_stores_except_tiflash,
+    server::Context,
+};
 
 const DEFAULT_TIMEOUT: ReadableDuration = ReadableDuration::secs(5);
 const KEYSPACE_REFRESH_INTERVAL: ReadableDuration = ReadableDuration::secs(30);
@@ -358,6 +362,7 @@ impl SchemaManager {
                     tokio::time::sleep(self_clone.config.keyspace_refresh_interval.0).await;
                     continue;
                 }
+                debug!("schema manager: keyspace stats: {:?}", keyspace_stats);
                 // Refresh keyspaces schema version.
                 if let Err(e) = self_clone
                     .refresh_keyspace_schema(&keyspace_stats, &stores)
@@ -421,21 +426,14 @@ impl SchemaManager {
             // 1. Try to read schema file from local.
             let local_schema_file =
                 read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id);
-            let cur_schema_version = local_schema_file
-                .as_ref()
-                .map(|f| {
-                    f.as_ref()
-                        .map(|s| Some(s.get_version()))
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
 
             // Check the remote schema_version in store shard_stats to ensure the state
             // applied to kvengine.
-            if let Ok(Some(schema_file)) = &local_schema_file {
+            let cur_schema_version = if let Ok(Some(schema_file)) = &local_schema_file {
+                let cur_schema_version = schema_file.get_version();
                 let cur_restore_version = schema_file.get_restore_version();
                 debug!(
-                    "keyspace_id: {}, schema_file_id: {}, schema_version: {}, restore_version: {}",
+                    "{}: schema_file_id: {}, schema_version: {}, restore_version: {}",
                     keyspace_id,
                     schema_file.get_file_id(),
                     schema_file.get_version(),
@@ -443,7 +441,7 @@ impl SchemaManager {
                 );
                 if self.check_if_keyspace_restored(
                     keyspace_shard_stats,
-                    cur_schema_version.unwrap(),
+                    cur_schema_version,
                     cur_restore_version,
                 ) {
                     // If the keyspace is just restored, the schema_restore_version in shard will be
@@ -452,10 +450,16 @@ impl SchemaManager {
                     if let Some((_, files)) = self.meta_file.remove_keyspace(keyspace_id) {
                         let file_ids: Vec<u64> = files.iter().map(|f| f.0).collect();
                         remove_schema_file_from_local(&self.config.dir, keyspace_id, &file_ids)
-                            .unwrap();
+                            .map_err(|err| -> Error {
+                                box_err!(
+                                    "{}: remove_schema_file_from_local failed {:?}",
+                                    keyspace_id,
+                                    err
+                                )
+                            })?;
                     }
                     info!(
-                        "keyspace_id: {} is restored, remove local schema files",
+                        "{}: keyspace is restored, remove local schema files",
                         keyspace_id
                     );
                     continue;
@@ -463,7 +467,7 @@ impl SchemaManager {
                 if self
                     .check_store_schema_version(
                         keyspace_id,
-                        cur_schema_version.unwrap(),
+                        cur_schema_version,
                         schema_file,
                         keyspace_shard_stats,
                         stores,
@@ -472,32 +476,43 @@ impl SchemaManager {
                 {
                     continue;
                 }
-            }
+                Some(cur_schema_version)
+            } else {
+                None
+            };
 
             // 2. Check the latest schema version compare with cache, if any
             // update, fetch all the new schemas and update to S3.
+            let checked_version = self.meta_file.get_checked_version(keyspace_id);
+            if let (Some(checked), Some(cur)) = (checked_version, cur_schema_version) {
+                debug_assert!(checked >= cur, "{} {}", checked, cur);
+            }
+            let checked_version = checked_version.or(cur_schema_version);
+
             let kv_scanner = Arc::new(self.clone());
             let kv_getter = Arc::new(self.clone());
             let (schema_version, table_infos) =
-                schema::sync_schema(kv_getter, kv_scanner, keyspace_id, cur_schema_version)
+                schema::sync_schema(kv_getter, kv_scanner, keyspace_id, checked_version)
                     .await
-                    .map_err(|e| crate::error::Error::SchemaError(e))?;
-            debug!(
-                "schema_version: {}, table_infos: {:?}",
-                schema_version, table_infos
-            );
-            let cur_schema_version = cur_schema_version.unwrap_or(0);
-            if let Some(checked_schema_version) = self.meta_file.get_checked_version(keyspace_id) {
-                if cur_schema_version < checked_schema_version
-                    && checked_schema_version == schema_version
-                {
-                    debug!(
-                        "skip checked schema_version, keyspace_id: {} cur_schema_version: {} checked_schema_version: {}",
-                        keyspace_id, cur_schema_version, checked_schema_version
-                    );
-                    continue;
+                    .map_err(|e| Error::SchemaError(e))?;
+            if checked_version.is_some_and(|v| v == schema_version) {
+                debug!("{}: schema is up-to-date, skip", keyspace_id; "schema_ver" => schema_version,
+                    "cur_ver" => ?cur_schema_version, "checked_ver" => ?checked_version);
+                if self.meta_file.get_checked_version(keyspace_id).is_none() {
+                    self.meta_file
+                        .add_checked_version(keyspace_id, schema_version);
                 }
+                continue;
             }
+            info!(
+                "{}: sync schema: schema_version: {}, checked_version: {:?}, table_infos: {}",
+                keyspace_id,
+                schema_version,
+                checked_version,
+                table_infos.len()
+            );
+            debug!("{}: sync schema", keyspace_id; "schema_ver" => schema_version, "tables" => ?table_infos);
+
             let old_storage_class_schemas = if let Ok(Some(schema_file)) = &local_schema_file {
                 schema_file.export_storage_class_schemas()
             } else {
@@ -506,89 +521,84 @@ impl SchemaManager {
             // If the old specified storage class becomes unspecified, the storage class is
             // removed from the schema file.
             let need_update_schema = table_infos.iter().any(|ti| {
-                ti.build_columnar()
-                    || ti.with_storage_class()
-                    || old_storage_class_schemas.contains_key(&ti.id)
+                ti.with_required_changes() || old_storage_class_schemas.contains_key(&ti.id)
             });
-            if cur_schema_version == 0 && !need_update_schema {
+            if cur_schema_version.is_none() && !need_update_schema {
+                debug!("{}: schema has no required changes, skip", keyspace_id;
+                    "schema_version" => schema_version, "tables" => ?table_infos);
+                self.meta_file
+                    .add_checked_version(keyspace_id, schema_version);
                 continue;
             }
-            if cur_schema_version < schema_version {
-                if table_infos.is_empty() {
-                    continue;
-                }
-                let schema_restore_version = keyspace_shard_stats
-                    .iter()
-                    .map(|s| s.schema_restore_version)
-                    .max()
-                    .unwrap_or(0);
-                info!(
-                    "schema need to be rebuilt, keyspace: {} cur_schema_version: {} schema_version: {} schema_restore_version: {}",
-                    keyspace_id, cur_schema_version, schema_version, schema_restore_version
-                );
-                // 3. Build the schema file and upload to S3.
-                let schemas = self.build_new_schema(
-                    keyspace_id,
-                    &local_schema_file,
-                    schema_version,
-                    table_infos,
-                );
-                if schemas.is_none() {
-                    continue;
-                }
 
-                // build schema file with the schema restore version from shard stats.
-                let new_schema_file_data = columnar::build_schema_file(
-                    keyspace_id,
-                    schema_version,
-                    schemas.unwrap(),
-                    schema_restore_version,
-                );
-                let file_id = *self
-                    .id_allocator
-                    .alloc_id(1)
-                    .map_err(|e| crate::error::Error::Other(box_err!(e.to_string())))?
-                    .first()
-                    .unwrap();
-                let dfs = self.ctx.s3fs.clone();
-                let tx_clone = tx.clone();
-                spawn_task_count += 1;
-                runtime.spawn(async move {
-                    let data = Bytes::from(new_schema_file_data.clone());
-                    let opts = dfs::Options::default().with_type(dfs::FileType::Schema);
-                    if let Err(err) = dfs.create(file_id, data.clone(), opts).await {
-                        tx_clone
-                            .send((
-                                keyspace_id,
-                                file_id,
-                                schema_version,
-                                data,
-                                Err(crate::error::Error::DfsError(err)),
-                            ))
-                            .unwrap();
-                    } else {
-                        tx_clone
-                            .send((keyspace_id, file_id, schema_version, data, Ok(file_id)))
-                            .unwrap();
-                    }
-                });
-            } else {
-                debug!("schema has no changes, keyspace_id: {}", keyspace_id);
+            let schema_restore_version = keyspace_shard_stats
+                .iter()
+                .map(|s| s.schema_restore_version)
+                .max()
+                .unwrap_or(0);
+            info!("{}: sync schema: rebuild schema", keyspace_id;
+                "cur_schema_ver" => ?cur_schema_version,
+                "schema_ver" => schema_version,
+                "schema_restore_ver" => schema_restore_version,
+                "table_infos" => table_infos.len());
+            // 3. Build the schema file and upload to S3.
+            let schemas = self.build_new_schema(&local_schema_file, table_infos);
+            debug!("{}: build new schema", keyspace_id; "schemas" => ?schemas, "cur_schema_ver" => ?cur_schema_version, "schema_ver" => schema_version);
+            if schemas.is_none() {
+                self.meta_file
+                    .add_checked_version(keyspace_id, schema_version);
+                continue;
             }
+
+            // build schema file with the schema restore version from shard stats.
+            let new_schema_file_data = columnar::build_schema_file(
+                keyspace_id,
+                schema_version,
+                schemas.unwrap(),
+                schema_restore_version,
+            );
+            let file_id = *self
+                .id_allocator
+                .alloc_id(1)
+                .map_err(|e| Error::Other(box_err!(e.to_string())))?
+                .first()
+                .unwrap();
+            let dfs = self.ctx.s3fs.clone();
+            let tx_clone = tx.clone();
+            spawn_task_count += 1;
+            runtime.spawn(async move {
+                let data = Bytes::from(new_schema_file_data.clone());
+                let opts = dfs::Options::default().with_type(dfs::FileType::Schema);
+                if let Err(err) = dfs.create(file_id, data.clone(), opts).await {
+                    tx_clone
+                        .send((
+                            keyspace_id,
+                            file_id,
+                            schema_version,
+                            data,
+                            Err(Error::DfsError(err)),
+                        ))
+                        .unwrap();
+                } else {
+                    tx_clone
+                        .send((keyspace_id, file_id, schema_version, data, Ok(file_id)))
+                        .unwrap();
+                }
+            });
         }
 
         for _ in 0..spawn_task_count {
             let (keyspace_id, file_id, schema_version, data, res) = rx.recv().unwrap();
             if let Err(err) = res {
                 error!(
-                    "failed to update schema file, keyspace_id: {} file_id: {} err: {:?}",
+                    "{}: failed to update schema file, file_id: {} err: {:?}",
                     keyspace_id, file_id, err
                 );
                 continue;
             }
             // 4. Callback TiKV to update the new schema file to shard meta.
             info!(
-                "broadcast schema update to stores, keyspace_id: {} file_id: {} schema_version: {}",
+                "{}: broadcast schema update to stores, file_id: {} schema_version: {}",
                 keyspace_id, file_id, schema_version
             );
             if let Err(err) = broadcast_schema_update_to_all_stores(
@@ -601,7 +611,7 @@ impl SchemaManager {
             .await
             {
                 error!(
-                    "failed to broadcast schema update, keyspace_id: {} file_id: {} err: {:?}",
+                    "{}: failed to broadcast schema update, file_id: {} err: {:?}",
                     keyspace_id, file_id, err
                 );
                 continue;
@@ -610,17 +620,20 @@ impl SchemaManager {
                 write_schema_file_to_local(&self.config.dir, keyspace_id, file_id, data)
             {
                 error!(
-                    "failed to write schema file to local, keyspace_id: {} file_id: {} err: {:?}",
+                    "{}: failed to write schema file to local, file_id: {} err: {:?}",
                     keyspace_id, file_id, err
                 );
                 continue;
             }
             self.meta_file
                 .add_file(keyspace_id, file_id, schema_version);
+            self.meta_file
+                .add_checked_version(keyspace_id, schema_version);
         }
         // Save meta_file.
         let meta = self.meta_file.write();
-        write_meta_file_to_local(&self.config.dir, Bytes::from(meta)).unwrap();
+        write_meta_file_to_local(&self.config.dir, Bytes::from(meta))
+            .map_err(|err| -> Error { box_err!("write_meta_file_to_local failed: {:?}", err) })?;
         Ok(())
     }
 
@@ -702,9 +715,7 @@ impl SchemaManager {
 
     fn build_new_schema(
         &self,
-        keyspace_id: u32,
         local_schema_file: &Result<Option<SchemaFile>>,
-        schema_version: i64,
         table_infos: Vec<TableInfo>,
     ) -> Option<Vec<Schema>> {
         // 3. Build the schema file and upload to S3.
@@ -715,7 +726,7 @@ impl SchemaManager {
         };
         let mut to_be_removed = vec![];
         for ti in table_infos {
-            if !ti.with_columnar() && !ti.with_storage_class() {
+            if !ti.with_required_changes() {
                 to_be_removed.push(ti.id);
                 continue;
             }
@@ -725,10 +736,7 @@ impl SchemaManager {
         if let Ok(Some(schema_file)) = &local_schema_file {
             // Check if the schemas contains in schema file to avoid useless update.
             if schema_file.contains(&schemas) && !schema_file.has_overlap_ids(&to_be_removed) {
-                // The schema change is not related to columnar, skip.
-                // Record the schema version to skip in later loop.
-                self.meta_file
-                    .add_checked_version(keyspace_id, schema_version);
+                // The schema has no change or not relevant, skip.
                 return None;
             }
 
