@@ -894,7 +894,9 @@ impl KvPairsWorker {
             let val_len = val.len();
             let row_id = merge_iter.row_id();
             let row_id_len = row_id.len();
-            if buf.len() + 2 + key_len + 4 + val_len + 2 + row_id_len > buf.capacity() {
+            if buf.len() + 2 + key_len + 4 + val_len + 2 + row_id_len > buf.capacity()
+                && !buf.is_empty()
+            {
                 return Ok((buf, kv_count));
             }
 
@@ -1348,7 +1350,7 @@ impl BuildingWorker {
             let val = merge_iter.value();
             let val_len = val.len();
 
-            if buf.len() + 2 + key_len + 4 + val_len > buf.capacity() {
+            if buf.len() + 2 + key_len + 4 + val_len > buf.capacity() && !buf.is_empty() {
                 return Ok(buf);
             }
             let table_id = merge_iter.table_id();
