@@ -1016,9 +1016,7 @@ impl ShardMeta {
         });
     }
 
-    pub fn to_change_set(&self) -> pb::ChangeSet {
-        let mut cs = new_change_set(self.id, self.ver);
-        cs.set_sequence(self.seq);
+    fn new_snapshop_pb(&self) -> pb::Snapshot {
         let mut snap = pb::Snapshot::new();
         snap.set_outer_start(self.range.outer_start.to_vec());
         snap.set_outer_end(self.range.outer_end.to_vec());
@@ -1028,50 +1026,35 @@ impl ShardMeta {
         snap.set_data_sequence(self.data_sequence);
         snap.set_max_ts(self.max_ts);
         snap.set_columnar_table_ids(self.columnar_table_ids.clone());
-        for (k, v) in self.files.iter() {
+        self.schema.to_snapshot(&mut snap);
+        snap.set_unconverted_l0s(self.unconverted_l0s.clone());
+        snap.set_vector_indexes(self.vector_indexes.clone().into());
+        snap
+    }
+
+    pub fn to_change_set(&self) -> pb::ChangeSet {
+        let mut cs = new_change_set(self.id, self.ver);
+        cs.set_sequence(self.seq);
+        let mut snap = self.new_snapshop_pb();
+        for (&k, v) in self.files.iter() {
             match v.file_type {
                 FileType::Sst => {
                     if v.get_level() == 0 {
-                        let mut l0 = pb::L0Create::new();
-                        l0.set_id(*k);
-                        l0.set_smallest(v.smallest.to_vec());
-                        l0.set_biggest(v.biggest.to_vec());
-                        l0.set_size(v.l0_size);
-                        snap.mut_l0_creates().push(l0);
+                        snap.mut_l0_creates().push(v.to_l0_create(k));
                     } else {
-                        let mut tbl = pb::TableCreate::new();
-                        tbl.set_id(*k);
-                        tbl.set_cf(v.cf as i32);
-                        tbl.set_level(v.get_level());
-                        tbl.set_smallest(v.smallest.to_vec());
-                        tbl.set_biggest(v.biggest.to_vec());
-                        tbl.set_meta_offset(v.table_meta_off);
-                        snap.mut_table_creates().push(tbl);
+                        snap.mut_table_creates().push(v.to_table_create(k));
                     }
                 }
                 FileType::TxnChunk | FileType::Schema => unreachable!("not loaded to file meta"),
                 FileType::Columnar => {
-                    let mut col_file = pb::ColumnarCreate::new();
-                    col_file.set_id(*k);
-                    col_file.set_level(v.get_level());
-                    col_file.set_smallest(v.smallest.to_vec());
-                    col_file.set_biggest(v.biggest.to_vec());
-                    col_file.set_meta_offset(v.table_meta_off);
-                    snap.mut_columnar_creates().push(col_file);
+                    snap.mut_columnar_creates().push(v.to_columnar_create(k));
                 }
                 FileType::Blob => {
-                    let mut blob = pb::BlobCreate::new();
-                    blob.set_id(*k);
-                    blob.set_smallest(v.smallest.to_vec());
-                    blob.set_biggest(v.biggest.to_vec());
-                    snap.mut_blob_creates().push(blob);
+                    snap.mut_blob_creates().push(v.to_blob_create(k));
                 }
                 FileType::VectorIndex => {} // already handled in vector_indexes.
             }
         }
-        self.schema.to_snapshot(&mut snap);
-        snap.set_unconverted_l0s(self.unconverted_l0s.clone());
-        snap.set_vector_indexes(self.vector_indexes.clone().into());
         cs.set_snapshot(snap);
         if let Some(parent) = &self.parent {
             cs.set_parent(parent.to_change_set());
@@ -1329,17 +1312,10 @@ impl ShardMeta {
     ) -> Option<pb::Snapshot> {
         debug_assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
         let mut snap = pb::Snapshot::new();
-        for (k, v) in self.files.iter() {
+        for (&k, v) in self.files.iter() {
             if v.file_type == FileType::Sst && v.get_level() > 0 && v.get_cf() as usize == WRITE_CF
             {
-                let mut tbl = pb::TableCreate::new();
-                tbl.set_id(*k);
-                tbl.set_cf(v.cf as i32);
-                tbl.set_level(v.get_level());
-                tbl.set_smallest(v.smallest.to_vec());
-                tbl.set_biggest(v.biggest.to_vec());
-                tbl.set_meta_offset(v.table_meta_off);
-                snap.mut_table_creates().push(tbl);
+                snap.mut_table_creates().push(v.to_table_create(k));
             }
         }
         if snap.table_creates.is_empty() {
@@ -1505,6 +1481,44 @@ impl FileMeta {
 
     pub fn from_schema_meta() -> Self {
         Self::new(0, 0, FileType::Schema, &[], &[], 0, 0)
+    }
+
+    pub fn to_l0_create(&self, id: u64) -> kvenginepb::L0Create {
+        let mut l0_create = kvenginepb::L0Create::new();
+        l0_create.set_id(id);
+        l0_create.set_smallest(self.smallest.to_vec());
+        l0_create.set_biggest(self.biggest.to_vec());
+        l0_create.set_size(self.l0_size);
+        l0_create
+    }
+
+    pub fn to_table_create(&self, id: u64) -> kvenginepb::TableCreate {
+        let mut table_create = kvenginepb::TableCreate::new();
+        table_create.set_id(id);
+        table_create.set_cf(self.cf as i32);
+        table_create.set_level(self.get_level());
+        table_create.set_smallest(self.smallest.to_vec());
+        table_create.set_biggest(self.biggest.to_vec());
+        table_create.set_meta_offset(self.table_meta_off);
+        table_create
+    }
+
+    pub fn to_columnar_create(&self, id: u64) -> kvenginepb::ColumnarCreate {
+        let mut columnar_create = kvenginepb::ColumnarCreate::new();
+        columnar_create.set_id(id);
+        columnar_create.set_level(self.get_level());
+        columnar_create.set_smallest(self.smallest.to_vec());
+        columnar_create.set_biggest(self.biggest.to_vec());
+        columnar_create.set_meta_offset(self.table_meta_off);
+        columnar_create
+    }
+
+    pub fn to_blob_create(&self, id: u64) -> kvenginepb::BlobCreate {
+        let mut blob_create = kvenginepb::BlobCreate::new();
+        blob_create.set_id(id);
+        blob_create.set_smallest(self.smallest.to_vec());
+        blob_create.set_biggest(self.biggest.to_vec());
+        blob_create
     }
 }
 

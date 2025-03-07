@@ -56,6 +56,9 @@ use crate::{
         vector_index::VectorIndexBuilder,
         BoundedDataSet, ChecksumType, DataBound, InnerKey,
     },
+    util::{
+        new_blob_create_pb, new_columnar_create_pb, new_table_create_pb, new_vector_index_file_pb,
+    },
     Error::{
         CompactionNotRetryable, FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor,
         RemoteCompaction, TableError,
@@ -472,6 +475,18 @@ pub struct VectorIndexUpdate {
     schema_file_id: u64,
     col_file_ids: Vec<(u64, u32)>,
     remove_file_ids: Vec<u64>,
+}
+
+impl VectorIndexUpdate {
+    /// `added` field should be set outside of this function if needed.
+    pub fn to_pb_without_added(&self) -> pb::UpdateVectorIndex {
+        let mut update = pb::UpdateVectorIndex::new();
+        update.set_table_id(self.table_id);
+        update.set_index_id(self.index_id);
+        update.set_col_id(self.col_id);
+        update.set_removed(self.remove_file_ids.clone());
+        update
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -1264,14 +1279,7 @@ impl Engine {
             {
                 continue;
             }
-            let mut table_create = pb::TableCreate::default();
-            table_create.set_id(l0_tbl.id());
-            table_create.set_level(1);
-            table_create.set_cf(WRITE_CF as i32);
-            table_create.set_smallest(l0_write_cf_tbl.smallest().to_vec());
-            table_create.set_biggest(l0_write_cf_tbl.biggest().to_vec());
-            table_create.set_meta_offset(l0_write_cf_tbl.meta_offset());
-            move_down_l0s.push(table_create);
+            move_down_l0s.push(l0_write_cf_tbl.to_table_create(WRITE_CF, 1));
         }
         if move_down_l0s.is_empty() {
             info!("{} no l0 to move down", tag);
@@ -1419,16 +1427,7 @@ impl Engine {
             comp.set_top_deletes(upper_level_table_ids);
             let tbl_creates = upper_level_candidates[upper_left_idx..upper_right_idx]
                 .iter()
-                .map(|top_tbl| {
-                    let mut tbl_create = pb::TableCreate::new();
-                    tbl_create.set_id(top_tbl.id());
-                    tbl_create.set_cf(cf as i32);
-                    tbl_create.set_level(level as u32 + 1);
-                    tbl_create.set_smallest(top_tbl.smallest().to_vec());
-                    tbl_create.set_biggest(top_tbl.biggest().to_vec());
-                    tbl_create.set_meta_offset(top_tbl.meta_offset());
-                    tbl_create
-                })
+                .map(|top_tbl| top_tbl.to_table_create(cf as usize, level + 1))
                 .collect::<Vec<_>>();
             comp.set_table_creates(tbl_creates.into());
             let mut cs = new_change_set(shard.id, shard.ver);
@@ -2583,13 +2582,7 @@ async fn compact_destroy_range(
                 .map_err(|e| Error::DfsError(e))
         });
         tasks.push(task);
-        let mut create = pb::TableCreate::new();
-        create.set_id(new_id);
-        create.set_level(level);
-        create.set_cf(cf);
-        create.set_smallest(smallest);
-        create.set_biggest(biggest);
-        create.set_meta_offset(meta_offset);
+        let create = new_table_create_pb(new_id, level, cf, smallest, biggest, meta_offset);
         creates.push(create);
 
         destroy.mut_file_ids_map().push(id);
@@ -2862,13 +2855,7 @@ async fn compact_truncate_ts(
         });
         tasks.push(task);
 
-        let mut create = pb::TableCreate::new();
-        create.set_id(new_id);
-        create.set_level(level);
-        create.set_cf(cf);
-        create.set_smallest(smallest);
-        create.set_biggest(biggest);
-        create.set_meta_offset(meta_offset);
+        let create = new_table_create_pb(new_id, level, cf, smallest, biggest, meta_offset);
         creates.push(create);
 
         table_change.mut_file_ids_map().push(id);
@@ -3118,13 +3105,7 @@ async fn compact_trim_over_bound(
         });
         tasks.push(task);
 
-        let mut create = pb::TableCreate::new();
-        create.set_id(new_id);
-        create.set_level(level);
-        create.set_cf(cf);
-        create.set_smallest(smallest);
-        create.set_biggest(biggest);
-        create.set_meta_offset(meta_offset);
+        let create = new_table_create_pb(new_id, level, cf, smallest, biggest, meta_offset);
         creates.push(create);
 
         table_change.mut_file_ids_map().push(id);
@@ -3339,13 +3320,14 @@ fn persist_sst(
 ) {
     let mut buf = Vec::with_capacity(builder.estimated_size());
     let res = builder.finish(0, &mut buf);
-    let mut tbl_create = pb::TableCreate::new();
-    tbl_create.set_id(id);
-    tbl_create.set_cf(cf as i32);
-    tbl_create.set_level(target_lvl);
-    tbl_create.set_smallest(res.smallest);
-    tbl_create.set_biggest(res.biggest);
-    tbl_create.set_meta_offset(res.meta_offset);
+    let tbl_create = new_table_create_pb(
+        id,
+        target_lvl,
+        cf as i32,
+        res.smallest,
+        res.biggest,
+        res.meta_offset,
+    );
 
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
@@ -3369,11 +3351,8 @@ fn persist_blob_table(
     opts: dfs::Options,
 ) {
     let buf = builder.finish();
-    let mut blob_table_create = pb::BlobCreate::new();
-    blob_table_create.set_id(id);
     let (smallest, biggest) = builder.smallest_biggest_key();
-    blob_table_create.set_smallest(smallest.to_vec());
-    blob_table_create.set_biggest(biggest.to_vec());
+    let blob_table_create = new_blob_create_pb(id, smallest.to_vec(), biggest.to_vec());
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
         let _ = tx
@@ -3397,12 +3376,13 @@ fn persist_columnar_file(
 ) {
     let id = builder.file_id;
     let (buf, meta_offset) = builder.build();
-    let mut columnar_create = pb::ColumnarCreate::new();
-    columnar_create.set_id(id);
-    columnar_create.set_smallest(builder.smallest.clone());
-    columnar_create.set_biggest(builder.biggest.clone());
-    columnar_create.set_level(target_lvl);
-    columnar_create.set_meta_offset(meta_offset as u32);
+    let columnar_create = new_columnar_create_pb(
+        id,
+        target_lvl,
+        builder.smallest.clone(),
+        builder.biggest.clone(),
+        meta_offset as u32,
+    );
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
         let _ = tx
@@ -4649,11 +4629,7 @@ async fn update_vector_index(
         );
         readers.push(Box::new(reader));
     }
-    let mut ret = pb::UpdateVectorIndex::new();
-    ret.set_table_id(update_vec_idx.table_id);
-    ret.set_index_id(update_vec_idx.index_id);
-    ret.set_col_id(update_vec_idx.col_id);
-    ret.set_removed(update_vec_idx.remove_file_ids.clone());
+    let mut ret = update_vec_idx.to_pb_without_added();
     if readers.is_empty() {
         info!("update vector index result {:?}", ret);
         return Ok(ret);
@@ -4683,11 +4659,12 @@ async fn update_vector_index(
     let _enter = fs.get_runtime().enter();
     fs.create(file_id, buf.into(), opts.with_type(FileType::VectorIndex))
         .await?;
-    let mut vec_idx_file = pb::VectorIndexFile::new();
-    vec_idx_file.id = file_id;
-    vec_idx_file.snap_version = update_vec_idx.snap_version;
-    vec_idx_file.smallest = vec_builder.smallest.clone();
-    vec_idx_file.biggest = vec_builder.biggest.clone();
+    let vec_idx_file = new_vector_index_file_pb(
+        file_id,
+        update_vec_idx.snap_version,
+        vec_builder.smallest.clone(),
+        vec_builder.biggest.clone(),
+    );
     ret.set_added(vec![vec_idx_file].into());
     info!("update vector index result {:?}", ret);
     Ok(ret)

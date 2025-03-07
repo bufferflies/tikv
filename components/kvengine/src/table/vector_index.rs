@@ -157,6 +157,19 @@ impl VectorIndex {
         }
         Ok(results)
     }
+
+    pub fn to_vector_index_pb(&self) -> kvenginepb::VectorIndex {
+        let mut vec_idx_pb = kvenginepb::VectorIndex::new();
+        vec_idx_pb.set_table_id(self.table_id);
+        vec_idx_pb.set_index_id(self.index_id);
+        vec_idx_pb.set_col_id(self.col_id);
+        for vec_idx_file in &self.files {
+            vec_idx_pb
+                .mut_files()
+                .push(vec_idx_file.to_vector_index_file_pb());
+        }
+        vec_idx_pb
+    }
 }
 
 // index file format:
@@ -436,6 +449,15 @@ impl VectorIndexFile {
             results.push(item);
         }
         Ok(results)
+    }
+
+    pub fn to_vector_index_file_pb(&self) -> kvenginepb::VectorIndexFile {
+        let mut vec_idx_file_pb = kvenginepb::VectorIndexFile::new();
+        vec_idx_file_pb.set_id(self.file_id());
+        vec_idx_file_pb.set_snap_version(self.snap_version());
+        vec_idx_file_pb.set_smallest(self.smallest().to_vec());
+        vec_idx_file_pb.set_biggest(self.biggest().to_vec());
+        vec_idx_file_pb
     }
 }
 

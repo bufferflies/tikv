@@ -19,6 +19,7 @@ use hyper::Body;
 use kvengine::{
     dfs::Options,
     table::{sstable::Builder, InnerKey, Value},
+    util::new_table_create_pb,
     IdVer, ShardTag, UserMeta, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
 use kvproto::{encryptionpb::EncryptionMethod, metapb, pdpb};
@@ -1885,13 +1886,14 @@ pub fn build_ingest_files(
         if !inner_end_key.is_empty() && sst_meta.smallest.as_slice() >= inner_end_key {
             break;
         }
-        let mut table_create = kvenginepb::TableCreate::new();
-        table_create.set_id(sst_meta.id);
-        table_create.set_cf(WRITE_CF as i32);
-        table_create.set_level(WRITE_CF_BOTTOM_LEVEL);
-        table_create.set_smallest(sst_meta.smallest.clone());
-        table_create.set_biggest(sst_meta.biggest.clone());
-        table_create.set_meta_offset(sst_meta.meta_offset);
+        let table_create = new_table_create_pb(
+            sst_meta.id,
+            WRITE_CF_BOTTOM_LEVEL,
+            WRITE_CF as i32,
+            sst_meta.smallest.clone(),
+            sst_meta.biggest.clone(),
+            sst_meta.meta_offset,
+        );
         table_creates.push(table_create);
     }
     cs

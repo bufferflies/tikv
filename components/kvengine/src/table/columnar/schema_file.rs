@@ -4,6 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut};
+use kvenginepb::SchemaMeta;
 use protobuf::Message;
 use tidb_query_datatype::codec::table::{
     decode_table_id, INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
@@ -365,6 +366,14 @@ impl SchemaFile {
             self.core.tables.values().cloned().collect(),
             self.get_restore_version(),
         )
+    }
+
+    pub fn to_schema_meta(&self) -> SchemaMeta {
+        let mut schema_meta = SchemaMeta::new();
+        schema_meta.set_file_id(self.get_file_id());
+        schema_meta.set_version(self.get_version());
+        schema_meta.set_keyspace_id(self.get_keyspace_id());
+        schema_meta
     }
 }
 

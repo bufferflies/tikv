@@ -41,6 +41,7 @@ use crate::{
         BoundedDataSet, DataBound, InnerKey, ZSTD_COMPRESSION,
     },
     txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
+    util::{new_blob_create_pb, new_l0_create_pb, new_table_create_pb},
     *,
 };
 
@@ -636,11 +637,8 @@ impl EngineCore {
         let mut fids = vec![];
 
         for (id, smallest, biggest) in meta.get_blob_files() {
-            let mut blob_create = kvenginepb::BlobCreate::new();
+            let blob_create = new_blob_create_pb(id, smallest.to_vec(), biggest.to_vec());
             warn!("ingest blob file: {}, {:?}, {:?}", id, smallest, biggest);
-            blob_create.set_id(id);
-            blob_create.set_smallest(smallest);
-            blob_create.set_biggest(biggest);
             ingest_files.mut_blob_creates().push(blob_create);
         }
 
@@ -672,20 +670,18 @@ impl EngineCore {
                         buf.put_u64_le(l0_version);
                         buf.put_u32_le(NUM_CFS as u32);
                         buf.put_u32_le(MAGIC_NUMBER);
-                        let mut l0_create = kvenginepb::L0Create::new();
-                        l0_create.set_id(id);
-                        l0_create.set_smallest(res.smallest);
-                        l0_create.set_biggest(res.biggest);
-                        l0_create.set_size(buf.len() as u32);
+                        let l0_create =
+                            new_l0_create_pb(id, res.smallest, res.biggest, buf.len() as u32);
                         ingest_files.mut_l0_creates().push(l0_create);
                     } else {
-                        let mut tbl_create = kvenginepb::TableCreate::new();
-                        tbl_create.set_id(id);
-                        tbl_create.set_cf(0);
-                        tbl_create.set_level(level);
-                        tbl_create.set_smallest(res.smallest);
-                        tbl_create.set_biggest(res.biggest);
-                        tbl_create.set_meta_offset(res.meta_offset);
+                        let tbl_create = new_table_create_pb(
+                            id,
+                            level,
+                            0,
+                            res.smallest,
+                            res.biggest,
+                            res.meta_offset,
+                        );
                         ingest_files.mut_table_creates().push(tbl_create);
                     }
                     tbl_cnt += 1;

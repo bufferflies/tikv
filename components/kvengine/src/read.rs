@@ -15,7 +15,6 @@ use cloud_encryption::EncryptionKey;
 use kvenginepb as pb;
 use kvenginepb::TxnFileRefs;
 use log_wrappers::Value as LogValue;
-use pb::SchemaMeta;
 use protobuf::Message;
 use tikv_util::{
     box_try,
@@ -854,23 +853,14 @@ impl SnapAccessCore {
                 continue;
             }
             overlapped_count += 1;
-            let mut l0 = pb::L0Create::new();
-            l0.set_id(v.id());
-            l0.set_smallest(v.smallest().to_vec());
-            l0.set_biggest(v.biggest().to_vec());
-            l0.set_size(v.size() as u32);
-            snap.mut_l0_creates().push(l0);
+            snap.mut_l0_creates().push(v.to_l0_create());
             l0_ids.insert(v.id());
         }
         for (k, v) in self.data.blob_tbl_map.iter() {
             assert_eq!(k, &v.id());
             count += 1;
             // FIXME: Overlap check
-            let mut blob = pb::BlobCreate::new();
-            blob.set_id(v.id());
-            blob.set_smallest(v.smallest_key().to_vec());
-            blob.set_biggest(v.biggest_key().to_vec());
-            snap.mut_blob_creates().push(blob);
+            snap.mut_blob_creates().push(v.to_blob_create());
         }
         self.data.for_each_level(|cf, lh| {
             if cf == LOCK_CF {
@@ -895,14 +885,8 @@ impl SnapAccessCore {
                     continue;
                 }
                 overlapped_count += 1;
-                let mut tbl = pb::TableCreate::new();
-                tbl.set_id(v.id());
-                tbl.set_cf(cf as i32);
-                tbl.set_level(lh.level as u32);
-                tbl.set_smallest(v.smallest().to_vec());
-                tbl.set_biggest(v.biggest().to_vec());
-                tbl.set_meta_offset(v.meta_offset());
-                snap.mut_table_creates().push(tbl);
+                snap.mut_table_creates()
+                    .push(v.to_table_create(cf, lh.level));
             }
             false
         });
@@ -923,13 +907,8 @@ impl SnapAccessCore {
                     continue;
                 }
                 overlapped_count += 1;
-                let mut tbl = pb::ColumnarCreate::new();
-                tbl.set_id(col_file.id());
-                tbl.set_level(cl.level as u32);
-                tbl.set_smallest(col_file.get_smallest().to_vec());
-                tbl.set_biggest(col_file.get_biggest().to_vec());
-                tbl.set_meta_offset(col_file.get_meta_offset());
-                snap.mut_columnar_creates().push(tbl);
+                snap.mut_columnar_creates()
+                    .push(col_file.to_columnar_create(cl.level));
             }
             false
         });
@@ -940,29 +919,12 @@ impl SnapAccessCore {
             }
         });
         if let Some(schema_file) = &self.data.schema_file {
-            let mut schema_meta = SchemaMeta::default();
-            schema_meta.set_file_id(schema_file.get_file_id());
-            schema_meta.set_keyspace_id(self.get_keyspace_id());
-            schema_meta.set_version(schema_file.get_version());
-            snap.set_schema_meta(schema_meta);
+            snap.set_schema_meta(schema_file.to_schema_meta());
         }
         snap.set_columnar_table_ids(self.data.columnar_table_ids.clone());
         let vector_indexes = snap.mut_vector_indexes();
         for index in self.data.vector_indexes.get_all() {
-            let mut vec_idx = pb::VectorIndex::new();
-            vec_idx.set_table_id(index.table_id);
-            vec_idx.set_index_id(index.index_id);
-            vec_idx.set_col_id(index.col_id);
-            let files = vec_idx.mut_files();
-            for file in index.files.iter() {
-                let mut file_meta = pb::VectorIndexFile::new();
-                file_meta.set_id(file.file_id());
-                file_meta.set_snap_version(file.snap_version());
-                file_meta.set_smallest(file.smallest().to_vec());
-                file_meta.set_biggest(file.biggest().to_vec());
-                files.push(file_meta);
-            }
-            vector_indexes.push(vec_idx);
+            vector_indexes.push(index.to_vector_index_pb());
         }
 
         info!(

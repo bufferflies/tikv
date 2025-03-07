@@ -4,6 +4,7 @@ use std::{cmp, collections::HashMap, sync::Arc};
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
+use kvenginepb::BlobCreate;
 
 use super::{builder::*, BlobRef};
 use crate::{
@@ -269,6 +270,14 @@ impl BlobTable {
 
     pub const fn footer_size() -> usize {
         BLOB_TABLE_FOOTER_SIZE
+    }
+
+    pub fn to_blob_create(&self) -> BlobCreate {
+        let mut blob_create = BlobCreate::new();
+        blob_create.set_id(self.id());
+        blob_create.set_smallest(self.smallest_key().to_vec());
+        blob_create.set_biggest(self.biggest_key().to_vec());
+        blob_create
     }
 }
 

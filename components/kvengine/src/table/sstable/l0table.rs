@@ -14,6 +14,7 @@ use crate::{
         blobtable::BlobRef, file::File, table::Result, BoundedDataSet, ChecksumType, DataBound,
         Error, InnerKey, Value, NO_COMPRESSION,
     },
+    util::new_l0_create_pb,
     LOCK_CF, NUM_CFS, WRITE_CF,
 };
 
@@ -280,6 +281,15 @@ impl L0TableCore {
     pub fn is_write_cf_only(&self) -> bool {
         self.footer.magic == MAGIC_NUMBER_SPLIT_L0
     }
+
+    pub fn to_l0_create(&self) -> L0Create {
+        let mut l0_create = L0Create::new();
+        l0_create.set_id(self.id());
+        l0_create.set_smallest(self.smallest().to_vec());
+        l0_create.set_biggest(self.biggest().to_vec());
+        l0_create.set_size(self.size() as u32);
+        l0_create
+    }
 }
 
 impl BoundedDataSet for L0TableCore {
@@ -355,11 +365,7 @@ impl L0Builder {
         buf.put_u32_le(NUM_CFS as u32);
         buf.put_u32_le(MAGIC_NUMBER);
         let (smallest, biggest) = self.smallest_biggest();
-        let mut l0_create = L0Create::new();
-        l0_create.set_id(self.fid);
-        l0_create.set_smallest(smallest);
-        l0_create.set_biggest(biggest);
-        l0_create.set_size(buf.len() as u32);
+        let l0_create = new_l0_create_pb(self.fid, smallest, biggest, buf.len() as u32);
         (l0_create, buf.into())
     }
 

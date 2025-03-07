@@ -28,6 +28,76 @@ pub fn evenly_distribute(total: usize, count: usize) -> Vec<usize> {
     ret
 }
 
+pub fn new_l0_create_pb(
+    id: u64,
+    smallest: Vec<u8>,
+    biggest: Vec<u8>,
+    size: u32,
+) -> kvenginepb::L0Create {
+    let mut l0_create = kvenginepb::L0Create::new();
+    l0_create.set_id(id);
+    l0_create.set_smallest(smallest);
+    l0_create.set_biggest(biggest);
+    l0_create.set_size(size);
+    l0_create
+}
+
+pub fn new_table_create_pb(
+    id: u64,
+    level: u32,
+    cf: i32,
+    smallest: Vec<u8>,
+    biggest: Vec<u8>,
+    meta_offset: u32,
+) -> kvenginepb::TableCreate {
+    let mut tbl_create = kvenginepb::TableCreate::new();
+    tbl_create.set_id(id);
+    tbl_create.set_level(level);
+    tbl_create.set_cf(cf);
+    tbl_create.set_smallest(smallest);
+    tbl_create.set_biggest(biggest);
+    tbl_create.set_meta_offset(meta_offset);
+    tbl_create
+}
+
+pub fn new_blob_create_pb(id: u64, smallest: Vec<u8>, biggest: Vec<u8>) -> kvenginepb::BlobCreate {
+    let mut blob_create = kvenginepb::BlobCreate::new();
+    blob_create.set_id(id);
+    blob_create.set_smallest(smallest);
+    blob_create.set_biggest(biggest);
+    blob_create
+}
+
+pub fn new_columnar_create_pb(
+    id: u64,
+    level: u32,
+    smallest: Vec<u8>,
+    biggest: Vec<u8>,
+    meta_offset: u32,
+) -> kvenginepb::ColumnarCreate {
+    let mut col_create = kvenginepb::ColumnarCreate::new();
+    col_create.set_id(id);
+    col_create.set_level(level);
+    col_create.set_smallest(smallest);
+    col_create.set_biggest(biggest);
+    col_create.set_meta_offset(meta_offset);
+    col_create
+}
+
+pub fn new_vector_index_file_pb(
+    id: u64,
+    snap_version: u64,
+    smallest: Vec<u8>,
+    biggest: Vec<u8>,
+) -> kvenginepb::VectorIndexFile {
+    let mut vec_idx_file = kvenginepb::VectorIndexFile::new();
+    vec_idx_file.set_id(id);
+    vec_idx_file.set_snap_version(snap_version);
+    vec_idx_file.set_smallest(smallest);
+    vec_idx_file.set_biggest(biggest);
+    vec_idx_file
+}
+
 /// Helper for merging or splitting properties.
 ///
 /// Currently only delete prefixes are handled.

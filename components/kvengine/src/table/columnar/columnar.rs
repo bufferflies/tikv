@@ -5,6 +5,7 @@ use std::{convert::TryInto, ops::Deref, sync::Arc};
 use aligned_vec::{avec, AVec};
 use bytes::{Buf, BufMut};
 use collections::HashMap;
+use kvenginepb::ColumnarCreate;
 use protobuf::Message;
 use schema::schema::StorageClass;
 use tidb_query_datatype::{FieldTypeAccessor, FieldTypeFlag, FieldTypeTp};
@@ -807,6 +808,16 @@ impl ColumnarFile {
 
     pub fn get_encryption_ver(&self) -> u32 {
         self.core.encryption_ver
+    }
+
+    pub fn to_columnar_create(&self, lvl: usize) -> ColumnarCreate {
+        let mut columnar_create = ColumnarCreate::new();
+        columnar_create.set_id(self.id());
+        columnar_create.set_level(lvl as u32);
+        columnar_create.set_smallest(self.get_smallest().to_vec());
+        columnar_create.set_biggest(self.get_biggest().to_vec());
+        columnar_create.set_meta_offset(self.get_meta_offset());
+        columnar_create
     }
 }
 

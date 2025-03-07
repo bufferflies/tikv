@@ -13,6 +13,7 @@ use api_version::ApiV2;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
+use kvenginepb::TableCreate;
 use moka::sync::SegmentedCache;
 use xorf::{BinaryFuse8, Filter};
 
@@ -660,6 +661,17 @@ impl SsTableCore {
             self.file.as_ref(),
             self.encryption_key.as_ref(),
         )
+    }
+
+    pub fn to_table_create(&self, cf: usize, lvl: usize) -> TableCreate {
+        let mut table_create = TableCreate::new();
+        table_create.set_id(self.id());
+        table_create.set_smallest(self.smallest().to_vec());
+        table_create.set_biggest(self.biggest().to_vec());
+        table_create.set_cf(cf as i32);
+        table_create.set_level(lvl as u32);
+        table_create.set_meta_offset(self.meta_offset());
+        table_create
     }
 }
 

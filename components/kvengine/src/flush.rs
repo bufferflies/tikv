@@ -12,7 +12,7 @@ use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use file_system::IoType;
 use kvenginepb as pb;
-use kvenginepb::{L0Create, SchemaMeta};
+use kvenginepb::L0Create;
 use tikv_util::{
     info, mpsc,
     sys::{thread::ThreadBuildWrapper, SysQuota},
@@ -26,7 +26,7 @@ use crate::{
         memtable, memtable::CfTable, sstable, sstable::Builder, BoundedDataSet, InnerKey,
         NO_COMPRESSION,
     },
-    util::TxnFileRefPropertyHelper,
+    util::{new_l0_create_pb, TxnFileRefPropertyHelper},
     *,
 };
 
@@ -242,13 +242,8 @@ impl Engine {
                 // only double overbound tables may not have any data in the shard range.
                 continue;
             }
-            let mut l0_create = L0Create::new();
-            l0_create.set_id(l0.id());
             l0_ids.insert(l0.id());
-            l0_create.set_smallest(l0.smallest().to_vec());
-            l0_create.set_biggest(l0.biggest().to_vec());
-            l0_create.set_size(l0.size() as u32);
-            initial_flush.mut_l0_creates().push(l0_create);
+            initial_flush.mut_l0_creates().push(l0.to_l0_create());
         }
         for cf in 0..NUM_CFS {
             let scf = flush.shard_data.get_cf(cf);
@@ -260,24 +255,15 @@ impl Engine {
                         // only double overbound tables may not have any data in the shard range.
                         continue;
                     }
-                    let mut tbl_create = pb::TableCreate::new();
-                    tbl_create.set_id(tbl.id());
-                    tbl_create.set_cf(cf as i32);
-                    tbl_create.set_level(lvl.level as u32);
-                    tbl_create.set_smallest(tbl.smallest().to_vec());
-                    tbl_create.set_biggest(tbl.biggest().to_vec());
-                    tbl_create.set_meta_offset(tbl.meta_offset());
-                    initial_flush.mut_table_creates().push(tbl_create);
+                    initial_flush
+                        .mut_table_creates()
+                        .push(tbl.to_table_create(cf, lvl.level));
                 }
             }
         }
 
         for blob in flush.shard_data.blob_tbl_map.values() {
-            let mut blob_create = pb::BlobCreate::new();
-            blob_create.set_id(blob.id());
-            blob_create.set_smallest(blob.smallest_key().to_vec());
-            blob_create.set_biggest(blob.biggest_key().to_vec());
-            initial_flush.mut_blob_creates().push(blob_create);
+            initial_flush.mut_blob_creates().push(blob.to_blob_create());
         }
         if let Some(schema_file) = &flush.shard_data.schema_file {
             // After split, the schema file may not overlap the schema file anymore.
@@ -286,11 +272,7 @@ impl Engine {
                 &task.range.outer_end,
                 task.range.keyspace_id,
             ) {
-                let mut schema_meta = SchemaMeta::new();
-                schema_meta.set_file_id(schema_file.get_file_id());
-                schema_meta.set_version(schema_file.get_version());
-                schema_meta.set_keyspace_id(schema_file.get_keyspace_id());
-                initial_flush.set_schema_meta(schema_meta);
+                initial_flush.set_schema_meta(schema_file.to_schema_meta());
 
                 if !self.opts.ignore_columnar_table_load {
                     // Filter out the unconverted_l0s not in the l0s created in this flush.
@@ -313,32 +295,18 @@ impl Engine {
                         for col_file in cl.files.iter() {
                             // TODO: check col_file has_overlap with task.range to avoid useless
                             // flush.
-                            let mut tbl = pb::ColumnarCreate::new();
-                            tbl.set_id(col_file.id());
-                            tbl.set_level(cl.level as u32);
-                            tbl.set_smallest(col_file.get_smallest().to_vec());
-                            tbl.set_biggest(col_file.get_biggest().to_vec());
-                            tbl.set_meta_offset(col_file.get_meta_offset());
-                            initial_flush.mut_columnar_creates().push(tbl);
+                            initial_flush
+                                .mut_columnar_creates()
+                                .push(col_file.to_columnar_create(cl.level));
                         }
                         false
                     });
 
                     initial_flush.set_columnar_table_ids(flush.columnar_table_ids.clone());
                     for vec_idx in flush.shard_data.vector_indexes.get_all() {
-                        let mut vec_idx_pb = pb::VectorIndex::new();
-                        vec_idx_pb.set_table_id(vec_idx_pb.table_id);
-                        vec_idx_pb.set_index_id(vec_idx_pb.index_id);
-                        vec_idx_pb.set_col_id(vec_idx_pb.col_id);
-                        for vec_idx_file in &vec_idx.files {
-                            let mut vec_idx_file_pb = pb::VectorIndexFile::new();
-                            vec_idx_file_pb.set_id(vec_idx_file.file_id());
-                            vec_idx_file_pb.set_smallest(vec_idx_file.smallest().to_vec());
-                            vec_idx_file_pb.set_biggest(vec_idx_file.biggest().to_vec());
-                            vec_idx_file_pb.set_snap_version(vec_idx_file.snap_version());
-                            vec_idx_pb.mut_files().push(vec_idx_file_pb);
-                        }
-                        initial_flush.mut_vector_indexes().push(vec_idx_pb);
+                        initial_flush
+                            .mut_vector_indexes()
+                            .push(vec_idx.to_vector_index_pb());
                     }
                 }
             }
@@ -497,11 +465,12 @@ impl Engine {
     fn finish_builder_for_l0(builder: &mut Builder) -> (L0Create, Bytes) {
         let mut data_buf = Vec::with_capacity(builder.estimated_size());
         let mut res = builder.finish(0, &mut data_buf);
-        let mut l0_create = L0Create::new();
-        l0_create.set_id(res.id);
-        l0_create.set_smallest(mem::take(&mut res.smallest));
-        l0_create.set_biggest(mem::take(&mut res.biggest));
-        l0_create.set_size(data_buf.len() as u32);
+        let l0_create = new_l0_create_pb(
+            res.id,
+            mem::take(&mut res.smallest),
+            mem::take(&mut res.biggest),
+            data_buf.len() as u32,
+        );
         (l0_create, data_buf.into())
     }
 
