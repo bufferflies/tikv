@@ -12,6 +12,7 @@ use std::{
         atomic::{AtomicU32, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use bytes::{Buf, BufMut};
@@ -288,6 +289,7 @@ pub(crate) struct WalWriter {
     pub(crate) file_off: u64,
     pub(crate) compacted_epoch: Arc<AtomicU32>,
     pub(crate) writer_type: WriterType,
+    pub(crate) write_throttle_duration: Duration,
 }
 
 impl WalWriter {
@@ -297,6 +299,7 @@ impl WalWriter {
         compression_threshold: usize,
         compacted_epoch: Arc<AtomicU32>,
         writer_type: WriterType,
+        write_throttle_duration: Duration,
     ) -> Self {
         let version = Version::V2;
         let mut buf = DmaBuffer::new(INITIAL_BUF_SIZE);
@@ -318,6 +321,7 @@ impl WalWriter {
             file_off: 0,
             compacted_epoch,
             writer_type,
+            write_throttle_duration,
         }
     }
 
@@ -413,6 +417,9 @@ impl WalWriter {
             self.buf.as_mut().put_u32_le(self.epoch_id);
             rotated = true;
         }
+        if let Some(duration) = self.need_throttle() {
+            std::thread::sleep(duration);
+        }
 
         let timer = Instant::now_coarse();
         self.file().write_all_at(self.buf.as_ref(), self.file_off)?;
@@ -473,6 +480,23 @@ impl WalWriter {
     fn safe_to_rotate(&self) -> bool {
         let compacted_epoch = self.compacted_epoch.load(Ordering::SeqCst);
         compacted_epoch + 4 > self.epoch_id
+    }
+
+    // When WAL compact is slow, we should slow down to make the compaction catch
+    // up.
+    // If the current epoch id is 5, the compacted_epoch can be 1, 2, 3, 4,
+    // we sleep for write_throttle_duration when compacted_epoch is 2,
+    // sleep for write_throttle_duration * 4 when compacted_epoch is 1.
+    fn need_throttle(&self) -> Option<Duration> {
+        let compacted_epoch = self.compacted_epoch.load(Ordering::SeqCst);
+        if self.epoch_id < 4 {
+            return None;
+        }
+        match (compacted_epoch + 3).cmp(&self.epoch_id) {
+            cmp::Ordering::Less => Some(self.write_throttle_duration * 4),
+            cmp::Ordering::Equal => Some(self.write_throttle_duration),
+            cmp::Ordering::Greater => None,
+        }
     }
 
     pub(crate) fn rotate(&mut self) -> Result<()> {

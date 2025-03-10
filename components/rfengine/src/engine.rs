@@ -179,6 +179,7 @@ impl RfEngineCore {
             compression_threshold,
             compacted_epoch.clone(),
             writer_type,
+            cfg.write_throttle_duration.0,
         );
         let dfs_worker_healthy = dfs_worker::Healthy::default();
         let mut en = Self {
@@ -204,6 +205,7 @@ impl RfEngineCore {
                     compression_threshold,
                     compacted_epoch.clone(),
                     WriterType::Async,
+                    cfg.write_throttle_duration.0,
                 );
                 async_wal_writer.open_file(manifest.epoch_id + 1, async_offset)?;
                 Some(async_wal_writer)
@@ -246,6 +248,7 @@ impl RfEngineCore {
                 compacted_epoch.clone(),
                 lightweight_backup_config,
                 dfs_worker_healthy,
+                cfg.compact_wal_sync_concurrency,
             );
             let join_handle = thread::spawn(move || service_worker.run());
             let mut guard = en.service_worker_handle.lock().unwrap();

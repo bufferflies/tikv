@@ -77,6 +77,7 @@ impl ServiceWorker {
         compacted_epoch: Arc<AtomicU32>,
         lightweight_backup_config: Option<LightweightBackupConfig>,
         healthy: Healthy,
+        compact_wal_sync_concurrency: usize,
     ) -> Self {
         let s3fs = lightweight_backup_config.as_ref().map(|cfg| {
             let s3fs = kvengine::dfs::S3Fs::new_from_config(cfg.dfs_config.clone());
@@ -92,6 +93,7 @@ impl ServiceWorker {
             lightweight_backup_config.as_ref(),
             s3fs.clone(),
             healthy.clone(),
+            compact_wal_sync_concurrency,
         );
         let handle = std::thread::Builder::new()
             .name("compact-wal-worker".to_string())

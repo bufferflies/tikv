@@ -6,7 +6,9 @@ use std::{
     collections::HashMap,
     fmt::{Display, Formatter},
     fs,
+    fs::File,
     io::{Read, Seek, SeekFrom, Write},
+    mem,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -70,6 +72,9 @@ pub(crate) struct CompactWorker {
     // Used to cache small rlogs to reduce disk IO when taking snapshot.
     rlog_cache: RlogCache,
     healthy: Healthy,
+
+    sync_concurrency: usize,
+    files_to_sync: Vec<File>,
 }
 
 impl CompactWorker {
@@ -81,6 +86,7 @@ impl CompactWorker {
         lightweight_backup_cfg: Option<&LightweightBackupConfig>,
         s3fs: Option<Arc<S3Fs>>,
         healthy: Healthy,
+        sync_concurrency: usize,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
         let rlog_cache = if let Some(config) = lightweight_backup_cfg {
@@ -100,6 +106,8 @@ impl CompactWorker {
             last_snap_epoch_id: 0,
             rlog_cache,
             healthy,
+            sync_concurrency,
+            files_to_sync: vec![],
         }
     }
 
@@ -223,6 +231,7 @@ impl CompactWorker {
             }
             change_set.mut_peers().push(peer_meta_pb);
         }
+        self.sync_files();
         let _ = file_system::sync_dir(self.dir.as_path());
 
         self.manifest.handle_compaction(change_set)?;
@@ -271,7 +280,8 @@ impl CompactWorker {
         }
         let mut file = fs::File::create(filename)?;
         file.write_all(&self.buf)?;
-        file.sync_data()?;
+        // delay the files_to_sync to sync files in parallel.
+        self.files_to_sync.push(file);
         let mut file = rfenginepb::RaftLogFile::default();
         file.first_index = first;
         file.last_index = last;
@@ -648,6 +658,35 @@ impl CompactWorker {
             backup_callback(task, Ok(backup_meta), "incr_success", ob_start_time);
         });
     }
+
+    fn sync_files(&mut self) {
+        if self.files_to_sync.is_empty() {
+            return;
+        }
+        let group_size = (self.files_to_sync.len() / self.sync_concurrency) + 1;
+        let mut group_files = vec![];
+        let mut join_handles = vec![];
+        for file in self.files_to_sync.drain(..) {
+            group_files.push(file);
+            if group_files.len() == group_size {
+                let files = mem::take(&mut group_files);
+                let handle = thread::spawn(|| {
+                    for file in files {
+                        file.sync_data().unwrap()
+                    }
+                });
+                join_handles.push(handle);
+            }
+        }
+        if !group_files.is_empty() {
+            for file in group_files {
+                file.sync_data().unwrap()
+            }
+        }
+        for handle in join_handles {
+            handle.join().unwrap();
+        }
+    }
 }
 
 /// Magic Number of rlog files. It's picked by running
@@ -975,6 +1014,7 @@ mod tests {
             None,
             None,
             dfs_worker::Healthy::default(),
+            1,
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 80, RANDOM_STR_MAX_LEN / 2)
@@ -1103,6 +1143,7 @@ mod tests {
             None,
             None,
             dfs_worker::Healthy::default(),
+            1,
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 100 * 5, RANDOM_STR_MAX_LEN * 100 / 2)
@@ -1193,6 +1234,7 @@ mod tests {
             1024,
             AtomicU32::new(cs.epoch_id + 1).into(),
             WriterType::Sync,
+            cfg.write_throttle_duration.0,
         );
         wal_writer.open_file(cs.epoch_id + 1, 0).unwrap();
         // checksum inner should succeeds.
