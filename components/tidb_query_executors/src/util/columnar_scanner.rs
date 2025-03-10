@@ -33,7 +33,7 @@ use tidb_query_datatype::{
     expr::EvalContext,
     EvalType, FieldTypeTp,
 };
-use tikv_util::buffer_vec::BufferVec;
+use tikv_util::{buffer_vec::BufferVec, info};
 use tipb::TableScan;
 use txn_types::{Key, Lock, TsSet};
 
@@ -299,6 +299,8 @@ pub fn build_columnar_scanner(
     if ApiV2::parse_key_mode(&key_range.start) != KeyMode::Txn {
         return None;
     }
+    let table_id = table_scan.get_table_id();
+    let schema = snap.new_schema_from_columns(table_id, table_scan.get_columns())?;
 
     // Decimal encoding in columnar is for TiFlash only. It is not supported TiKV
     // yet.
@@ -307,15 +309,13 @@ pub fn build_columnar_scanner(
         .iter()
         .any(|col_info| col_info.get_tp() == FieldTypeTp::NewDecimal.to_u8().unwrap() as i32)
     {
-        warn!("build_columnar_scanner, decimal is not supported yet");
+        info!("build_columnar_scanner, decimal is not supported yet");
         return None;
     }
 
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&key_range.start).unwrap();
     let start_table_key = &key_range.start[KEYSPACE_PREFIX_LEN..];
     let end_table_key = &key_range.end[KEYSPACE_PREFIX_LEN..];
-    let table_id = table_scan.get_table_id();
-    let schema = snap.new_schema_from_columns(table_id, table_scan.get_columns())?;
     let (start_handle, end_handle) = if schema.is_common_handle() {
         let start_handle = table::decode_common_handle(start_table_key).ok()?;
         let end_handle = table::decode_common_handle(end_table_key).ok()?;

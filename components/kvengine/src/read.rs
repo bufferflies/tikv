@@ -1356,6 +1356,9 @@ impl SnapAccessCore {
     }
 
     pub fn new_schema_from_columns(&self, table_id: i64, columns: &[ColumnInfo]) -> Option<Schema> {
+        if !self.read_columnar || !self.data.columnar_table_ids.contains(&table_id) {
+            return None;
+        }
         let schema_file = self.data.schema_file.as_ref()?;
         let table_schema = schema_file.get_table(table_id)?;
         if !table_schema.with_columnar() {
@@ -1383,9 +1386,6 @@ impl SnapAccessCore {
         scan_ctx: Option<&TableScanCtx>,
         read_ts: u64,
     ) -> Option<ColumnarMvccReader> {
-        if !self.data.columnar_table_ids.contains(&table_id) || !self.read_columnar {
-            return None;
-        }
         let schema = self.new_schema_from_columns(table_id, columns)?;
         let filter_op = scan_ctx.map(|ctx| ctx.to_filter_operator());
         let mut readers = self.collect_column_row_readers(&schema);
