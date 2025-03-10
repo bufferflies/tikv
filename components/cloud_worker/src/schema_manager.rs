@@ -54,6 +54,8 @@ const META_FILE_MAGIC: u32 = 0x5E9EDFF4;
 const META_FILE_FORMAT_VER: u16 = 1;
 const META_FILE_NAME: &str = "schemas.meta";
 
+const TIKV_STORE_LABEL_TIER_KEY: &str = "serverless.tidbcloud.com/tier";
+
 #[derive(Clone, Default)]
 pub struct ApiV2NoPrefixCodec {}
 
@@ -254,6 +256,8 @@ pub struct SchemaManagerConfig {
     pub enabled: bool,
     // `whitelist_file` is a json file contains a list of keyspace_id.
     pub whitelist_file: Option<PathBuf>,
+    // The tier of TiKV stores to push schema file. Used for canary release.
+    pub tikv_stores_tier: Option<String>,
 }
 
 impl Default for SchemaManagerConfig {
@@ -264,7 +268,8 @@ impl Default for SchemaManagerConfig {
             schema_refresh_threshold: SCHEMA_REFRESH_THRESHOLD,
             http_timeout: DEFAULT_TIMEOUT,
             enabled: false,
-            whitelist_file: None, // None means no whitelist filtering
+            whitelist_file: None,   // None means no whitelist filtering.
+            tikv_stores_tier: None, // None means match all stores.
         }
     }
 }
@@ -277,6 +282,7 @@ impl SchemaManagerConfig {
         http_timeout: ReadableDuration,
         enabled: bool,
         whitelist_file: Option<PathBuf>,
+        tikv_stores_tier: Option<String>,
     ) -> Self {
         Self {
             dir,
@@ -285,6 +291,7 @@ impl SchemaManagerConfig {
             http_timeout,
             enabled,
             whitelist_file,
+            tikv_stores_tier,
         }
     }
 }
@@ -347,7 +354,7 @@ impl SchemaManager {
         runtime.spawn(async move {
             loop {
                 // Get all keyspaces stats from store.
-                let stores = get_all_stores_except_tiflash(&self_clone.ctx.pd).unwrap_or_default();
+                let (stores, _) = self_clone.get_tikv_stores();
                 if stores.is_empty() {
                     tokio::time::sleep(self_clone.config.keyspace_refresh_interval.0).await;
                     continue;
@@ -856,7 +863,7 @@ impl SchemaManagerCore {
             MetaFile::new()
         };
         let id_allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
-        Self {
+        let mgr = Self {
             ctx,
             security_mgr,
             config,
@@ -864,7 +871,17 @@ impl SchemaManagerCore {
             meta_file,
             id_allocator,
             whitelist_keyspaces,
+        };
+
+        if let Some(tikv_stores_tier) = &mgr.config.tikv_stores_tier {
+            let (stores, stores_not_match) = mgr.get_tikv_stores();
+            info!("schema manager: TiKV stores with matched tier: {:?}", stores_status_addr(&stores);
+                "tier" => tikv_stores_tier,
+                "not_match" => ?stores_status_addr(&stores_not_match),
+            );
         }
+
+        mgr
     }
 
     // Return whether the keyspace_id is in the whitelist, return true if whitelist
@@ -873,6 +890,27 @@ impl SchemaManagerCore {
         self.whitelist_keyspaces
             .as_ref()
             .map_or(true, |whitelist| whitelist.contains(&keyspace_id))
+    }
+
+    fn get_tikv_stores(&self) -> (Vec<Store>, Vec<Store> /* stores_not_match */) {
+        let all_stores = match get_all_stores_except_tiflash(&self.ctx.pd) {
+            Ok(stores) => stores,
+            Err(err) => {
+                warn!("schema manager: get stores failed: {:?}", err);
+                return (vec![], vec![]);
+            }
+        };
+
+        if let Some(tikv_stores_tier) = &self.config.tikv_stores_tier {
+            all_stores.into_iter().partition(|store| {
+                store.get_labels().iter().any(|label| {
+                    label.key.eq_ignore_ascii_case(TIKV_STORE_LABEL_TIER_KEY)
+                        && label.value.eq_ignore_ascii_case(tikv_stores_tier)
+                })
+            })
+        } else {
+            (all_stores, vec![])
+        }
     }
 }
 
@@ -1151,6 +1189,11 @@ async fn get_keyspace_stats_from_store(
         send_request_to_store_with_retry(req, store, security_mgr.as_ref(), timeout).await?;
     let resp: Vec<ShardStatsLite> = serde_json::from_slice(&resp_bytes)?;
     Ok(resp)
+}
+
+#[inline]
+fn stores_status_addr(stores: &[Store]) -> Vec<&str> {
+    stores.iter().map(|s| s.get_status_address()).collect()
 }
 
 #[cfg(test)]
