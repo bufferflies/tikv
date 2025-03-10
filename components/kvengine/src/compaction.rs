@@ -1546,7 +1546,8 @@ impl Engine {
             req.file_ids.len(),
             total_size,
         );
-        let update_inner_key_offset = self.opts.update_inner_key_offset;
+        let update_inner_key_offset =
+            self.opts.update_inner_key_offset && data.prepend_keyspace_id().is_some();
         Some(self.comp_client.compact(req).await.map(|mut cs| {
             let major_compaction = cs.mut_major_compaction();
             major_compaction.set_update_inner_key_offset(update_inner_key_offset);

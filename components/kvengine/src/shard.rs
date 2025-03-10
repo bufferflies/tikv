@@ -1218,6 +1218,9 @@ impl Shard {
             if priority.is_some() {
                 return false;
             }
+
+            info!("{} trigger major compaction for tombstones", self.tag();
+                "tombs" => tombs, "write_entries" => write_entries, "ratio" => tombs_ratio, "safe_ts" => safe_ts);
             *priority = Some(CompactionPriority::Major { score: tombs_ratio });
             return true;
         }
