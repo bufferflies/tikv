@@ -38,7 +38,7 @@ use schema::schema::{
 use security::{SecurityConfig, SecurityManager};
 use tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC;
 use tikv_client::{BoundRange, Key, KvPair, TransactionOptions, Value};
-use tikv_util::{box_err, config::ReadableDuration, debug, error, info};
+use tikv_util::{box_err, config::ReadableDuration, debug, error, info, warn};
 
 use crate::{
     error::{Error, Result},
@@ -425,11 +425,18 @@ impl SchemaManager {
             }
             // 1. Try to read schema file from local.
             let local_schema_file =
-                read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id);
+                match read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id) {
+                    Ok(Some(local_schema_file)) => Some(local_schema_file),
+                    Ok(None) => None,
+                    Err(err) => {
+                        warn!("read schema file from local failed: {:?}", err);
+                        None
+                    }
+                };
 
             // Check the remote schema_version in store shard_stats to ensure the state
             // applied to kvengine.
-            let cur_schema_version = if let Ok(Some(schema_file)) = &local_schema_file {
+            let cur_schema_version = if let Some(schema_file) = &local_schema_file {
                 let cur_schema_version = schema_file.get_version();
                 let cur_restore_version = schema_file.get_restore_version();
                 debug!(
@@ -440,6 +447,7 @@ impl SchemaManager {
                     cur_restore_version,
                 );
                 if self.check_if_keyspace_restored(
+                    keyspace_id,
                     keyspace_shard_stats,
                     cur_schema_version,
                     cur_restore_version,
@@ -513,7 +521,7 @@ impl SchemaManager {
             );
             debug!("{}: sync schema", keyspace_id; "schema_ver" => schema_version, "tables" => ?table_infos);
 
-            let old_storage_class_schemas = if let Ok(Some(schema_file)) = &local_schema_file {
+            let old_storage_class_schemas = if let Some(schema_file) = &local_schema_file {
                 schema_file.export_storage_class_schemas()
             } else {
                 HashMap::default()
@@ -523,7 +531,7 @@ impl SchemaManager {
             let need_update_schema = table_infos.iter().any(|ti| {
                 ti.with_required_changes() || old_storage_class_schemas.contains_key(&ti.id)
             });
-            if cur_schema_version.is_none() && !need_update_schema {
+            if local_schema_file.is_some() && !need_update_schema {
                 debug!("{}: schema has no required changes, skip", keyspace_id;
                     "schema_version" => schema_version, "tables" => ?table_infos);
                 self.meta_file
@@ -542,7 +550,7 @@ impl SchemaManager {
                 "schema_restore_ver" => schema_restore_version,
                 "table_infos" => table_infos.len());
             // 3. Build the schema file and upload to S3.
-            let schemas = self.build_new_schema(&local_schema_file, table_infos);
+            let schemas = self.build_new_schema(local_schema_file.as_ref(), table_infos);
             debug!("{}: build new schema", keyspace_id; "schemas" => ?schemas, "cur_schema_ver" => ?cur_schema_version, "schema_ver" => schema_version);
             if schemas.is_none() {
                 self.meta_file
@@ -640,6 +648,7 @@ impl SchemaManager {
     // return true if the keyspace is just restored.
     fn check_if_keyspace_restored(
         &self,
+        keyspace_id: u32,
         keyspace_shard_stats: &[ShardStatsLite],
         cur_schema_version: i64,
         cur_restore_version: u64,
@@ -656,8 +665,14 @@ impl SchemaManager {
             .unwrap_or_default();
         // If the schema_version in local schema file is larger than shard stats, or the
         // restore_version is inconsistent, it means the keyspace is just restored.
-        if cur_schema_version > stats_schema_version || stats_restore_version != cur_restore_version
-        {
+        if stats_restore_version > cur_restore_version {
+            info!("{}: keyspace restored", keyspace_id;
+                "stats_restore_ver" => stats_restore_version,
+                "cur_restore_ver" => cur_restore_version,
+                "stats_schema_ver" => stats_schema_version,
+                "cur_schema_ver" => cur_schema_version,
+                "keyspace_shard_stats" => ?keyspace_shard_stats,
+            );
             return true;
         }
         false
@@ -715,11 +730,11 @@ impl SchemaManager {
 
     fn build_new_schema(
         &self,
-        local_schema_file: &Result<Option<SchemaFile>>,
+        local_schema_file: Option<&SchemaFile>,
         table_infos: Vec<TableInfo>,
     ) -> Option<Vec<Schema>> {
         // 3. Build the schema file and upload to S3.
-        let mut schemas = if let Ok(Some(schema_file)) = local_schema_file {
+        let mut schemas = if let Some(schema_file) = local_schema_file {
             Vec::with_capacity(table_infos.len() + schema_file.schema_count())
         } else {
             Vec::with_capacity(table_infos.len())
@@ -733,7 +748,7 @@ impl SchemaManager {
             schemas.push(table_info_to_schema(&ti));
         }
 
-        if let Ok(Some(schema_file)) = &local_schema_file {
+        if let Some(schema_file) = &local_schema_file {
             // Check if the schemas contains in schema file to avoid useless update.
             if schema_file.contains(&schemas) && !schema_file.has_overlap_ids(&to_be_removed) {
                 // The schema has no change or not relevant, skip.
