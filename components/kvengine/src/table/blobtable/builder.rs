@@ -69,10 +69,6 @@ pub const BLOB_ENTRY_LENGTH_OFFSET: usize = mem::size_of::<Checksum>();
 pub const BLOB_ENTRY_VALUE_OFFSET: usize = BLOB_ENTRY_META_SIZE;
 
 impl BlobFooter {
-    pub fn data_len(&self) -> usize {
-        self.properties_offset as usize
-    }
-
     pub fn properties_len(&self, table_size: usize) -> usize {
         table_size - BLOB_TABLE_FOOTER_SIZE - self.properties_offset as usize
     }
@@ -157,6 +153,29 @@ impl BlobTableBuilder {
             fid,
             buf: vec![],
             checksum_tp: 0,
+            compression_tp,
+            compression_lvl,
+            min_blob_size,
+            total_blob_size: 0,
+            smallest_key: vec![],
+            biggest_key: vec![],
+            encryption_key,
+            compressed_buf: vec![],
+        }
+    }
+
+    pub fn new_with_checksum_type(
+        fid: u64,
+        compression_tp: u8,
+        compression_lvl: i32,
+        min_blob_size: u32,
+        encryption_key: Option<EncryptionKey>,
+        checksum_type: ChecksumType,
+    ) -> Self {
+        Self {
+            fid,
+            buf: vec![],
+            checksum_tp: checksum_type as u8,
             compression_tp,
             compression_lvl,
             min_blob_size,
@@ -343,5 +362,91 @@ impl BlobTableBuilder {
 
     pub fn total_blob_size(&self) -> u64 {
         self.total_blob_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table::Value;
+
+    #[test]
+    fn test_blob_table_builder_getters_and_reset() {
+        // Create builder with specific properties
+        let mut builder = BlobTableBuilder::new(
+            42,               // file id
+            ZSTD_COMPRESSION, // compression type
+            3,                // compression level
+            1024,             // min blob size
+            None,             // encryption key
+        );
+
+        // Add test data
+        let test_data = vec![b'x'; 2048];
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+        let small_key = InnerKey::from_inner_buf(b"aaa_key");
+        let big_key = InnerKey::from_inner_buf(b"zzz_key");
+
+        builder.add(big_key, &value);
+        builder.add(small_key, &value);
+
+        // Test getters
+        assert_eq!(
+            builder.get_fid(),
+            42,
+            "get_fid() should return correct file id"
+        );
+        assert_eq!(
+            builder.total_blob_size(),
+            test_data.len() as u64 * 2,
+            "total_blob_size() should reflect sum of all blob sizes"
+        );
+        assert!(
+            !builder.is_empty(),
+            "is_empty() should return false after adding data"
+        );
+
+        // Test boundary keys
+        let (smallest, biggest) = builder.smallest_biggest_key();
+        assert_eq!(
+            smallest,
+            small_key.deref(),
+            "smallest_key should be lexicographically smallest"
+        );
+        assert_eq!(
+            biggest,
+            big_key.deref(),
+            "biggest_key should be lexicographically biggest"
+        );
+
+        // Test reset
+        builder.reset(43);
+
+        // Verify state after reset
+        assert_eq!(
+            builder.get_fid(),
+            43,
+            "get_fid() should return new file id after reset"
+        );
+        assert_eq!(
+            builder.total_blob_size(),
+            0,
+            "total_blob_size() should be 0 after reset"
+        );
+        assert!(
+            builder.is_empty(),
+            "is_empty() should return true after reset"
+        );
+
+        let (smallest, biggest) = builder.smallest_biggest_key();
+        assert!(
+            smallest.is_empty(),
+            "smallest_key should be empty after reset"
+        );
+        assert!(
+            biggest.is_empty(),
+            "biggest_key should be empty after reset"
+        );
     }
 }

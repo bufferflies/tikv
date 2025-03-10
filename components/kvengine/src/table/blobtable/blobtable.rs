@@ -391,8 +391,12 @@ mod tests {
     use rstest::rstest;
     use test_util::init_log_for_test;
 
-    use super::BlobTable;
-    use crate::table::{blobtable::BlobRef, file::InMemFile, InnerKey, Value, NO_COMPRESSION};
+    use super::*;
+    use crate::table::{
+        blobtable::{builder::BlobTableBuilder, BlobRef},
+        file::InMemFile,
+        InnerKey, Value, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
+    };
 
     fn get_blob_text(max_len: usize, rng: &mut ThreadRng) -> String {
         let len = rng.gen_range(1..max_len);
@@ -418,8 +422,7 @@ mod tests {
         } else {
             None
         };
-        let mut builder =
-            super::BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0, encryption_key.clone());
+        let mut builder = BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0, encryption_key.clone());
         let mut test_data = Vec::new();
         let meta: u8 = 0;
 
@@ -434,7 +437,7 @@ mod tests {
         }
 
         let file = InMemFile::new(1, builder.finish());
-        let table = super::BlobTable::new(Arc::new(file)).unwrap();
+        let table = BlobTable::new(Arc::new(file)).unwrap();
         let mut decryption_buf = vec![];
         for td in test_data {
             let blob = table
@@ -461,8 +464,7 @@ mod tests {
         } else {
             None
         };
-        let mut builder =
-            super::BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0, encryption_key.clone());
+        let mut builder = BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0, encryption_key.clone());
         let mut offsets = Vec::new();
         for i in 0..100 {
             let key_str = format!("key_{:03}", i);
@@ -475,14 +477,214 @@ mod tests {
             offsets.push(blob_ref);
         }
         let file = InMemFile::new(1, builder.finish());
-        let table = super::BlobTable::new(Arc::new(file)).unwrap();
-        let blob_tables: HashMap<u64, BlobTable> = [(1, table)].into();
-        let mut prefetcher =
-            super::BlobPrefetcher::new(Arc::new(blob_tables), 1000, encryption_key);
+        let table = BlobTable::new(Arc::new(file)).unwrap();
+        let blob_tables: HashMap<u64, BlobTable> = [(1, table.clone())].into();
+        let mut prefetcher = BlobPrefetcher::new(Arc::new(blob_tables), 1000, encryption_key);
         for i in 0..100 {
             let expected_val = format!("val_{:03}", i);
             let val = prefetcher.get(&offsets[i]).unwrap();
             assert_eq!(val, expected_val.as_bytes());
         }
+    }
+
+    /// Test compression with different types and levels
+    #[test]
+    fn test_blob_compression_effectiveness() {
+        // Create highly compressible data (repeating pattern)
+        let test_data = vec![b'a'; 10000];
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+
+        // Test different compression configurations
+        let configs = [
+            (NO_COMPRESSION, 0, "no compression"),
+            (LZ4_COMPRESSION, 1, "LZ4 low level"),
+            (LZ4_COMPRESSION, 9, "LZ4 high level"),
+            (ZSTD_COMPRESSION, 1, "ZSTD low level"),
+            (ZSTD_COMPRESSION, 9, "ZSTD high level"),
+        ];
+
+        // Store compression results for comparison
+        let mut results = Vec::new();
+
+        for &(compression_type, compression_level, desc) in &configs {
+            let mut builder =
+                BlobTableBuilder::new(1, compression_type, compression_level, 0, None);
+            let blob_ref = builder.add(InnerKey::from_inner_buf(b"test_key"), &value);
+
+            let file = Arc::new(InMemFile::new(1, builder.finish()));
+            let table = BlobTable::new(file).unwrap();
+            let mut decryption_buf = vec![];
+
+            let decompressed = table.get(&blob_ref, &mut decryption_buf, None).unwrap();
+            assert_eq!(decompressed, test_data, "Data corrupted with {}", desc);
+
+            // Record compressed size for comparison
+            results.push((compression_type, compression_level, blob_ref.len, desc));
+        }
+
+        // Find uncompressed size as baseline
+        let uncompressed_size = results
+            .iter()
+            .find(|&&(tp, ..)| tp == NO_COMPRESSION)
+            .map(|&(_, _, size, _)| size)
+            .unwrap();
+
+        // Verify compression effectiveness
+        for &(tp, level, size, desc) in &results {
+            if tp == NO_COMPRESSION {
+                continue;
+            }
+
+            // All compression should be better than no compression
+            assert!(
+                size < uncompressed_size,
+                "{} (size: {}) should be smaller than uncompressed (size: {})",
+                desc,
+                size,
+                uncompressed_size
+            );
+
+            // High compression levels should be better than or equal to low levels
+            if level == 9 {
+                let low_level_size = results
+                    .iter()
+                    .find(|&&(t, l, ..)| t == tp && l == 1)
+                    .map(|&(_, _, s, _)| s)
+                    .unwrap();
+
+                assert!(
+                    size <= low_level_size,
+                    "High level {} (size: {}) should be smaller than or equal to low level (size: {})",
+                    desc,
+                    size,
+                    low_level_size
+                );
+            }
+        }
+
+        // Compare different algorithms (optional, as one might not always be better)
+        let lz4_high = results
+            .iter()
+            .find(|&&(tp, level, ..)| tp == LZ4_COMPRESSION && level == 9)
+            .map(|&(_, _, size, _)| size)
+            .unwrap();
+
+        let zstd_high = results
+            .iter()
+            .find(|&&(tp, level, ..)| tp == ZSTD_COMPRESSION && level == 9)
+            .map(|&(_, _, size, _)| size)
+            .unwrap();
+
+        // Note that zstd does not always better, as it depends on data
+        // characteristics. But in this test workload, it works better.
+        assert!(zstd_high < lz4_high);
+    }
+
+    /// Test boundary keys (smallest_key and biggest_key methods)
+    #[test]
+    fn test_blob_table_boundary_keys() {
+        // Create a blob table with multiple entries in specific order
+        let mut builder = BlobTableBuilder::new(1, 0, 0, 0, None);
+
+        // Adding keys in non-sorted order to test the boundary keys
+        let small_key = InnerKey::from_inner_buf(b"aaa_small_key");
+        let medium_key = InnerKey::from_inner_buf(b"mmm_medium_key");
+        let large_key = InnerKey::from_inner_buf(b"zzz_large_key");
+
+        // Add test data for each key
+        let test_data = b"test_data".to_vec();
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+
+        // Add entries in mixed order
+        builder.add(medium_key, &value);
+        builder.add(large_key, &value);
+        builder.add(small_key, &value);
+
+        // Create the blob table
+        let file_data = builder.finish();
+        let file = Arc::new(InMemFile::new(1, file_data.clone()));
+        let table = BlobTable::new(file).unwrap();
+
+        // Test smallest_key and biggest_key methods
+        assert_eq!(
+            table.smallest_key(),
+            small_key,
+            "smallest_key should return the lexicographically smallest key"
+        );
+        assert_eq!(
+            table.biggest_key(),
+            large_key,
+            "biggest_key should return the lexicographically largest key"
+        );
+    }
+
+    #[test]
+    fn test_blob_table_getters() {
+        // Create a blob table with specific properties
+        let mut builder = BlobTableBuilder::new_with_checksum_type(
+            42,               // specific id
+            ZSTD_COMPRESSION, // specific compression type
+            3,                // compression level
+            1024,             // min blob size
+            None,
+            ChecksumType::Crc32,
+        );
+
+        // Add some test data to ensure non-zero total_blob_size
+        let test_data = vec![b'x'; 2048]; // 2KB data
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+        builder.add(InnerKey::from_inner_buf(b"test_key"), &value);
+
+        let file = Arc::new(InMemFile::new(42, builder.finish()));
+        let table = BlobTable::new(file).unwrap();
+
+        // Test all getter methods
+        assert_eq!(table.id(), 42, "id() should return correct file id");
+        assert_eq!(
+            table.version(),
+            BLOB_FORMAT_V1 as u64,
+            "version() should return correct version"
+        );
+        assert!(table.size() > 0, "size() should return non-zero value");
+        assert!(
+            table.total_blob_size() > 0,
+            "total_blob_size() should return non-zero value"
+        );
+        assert_eq!(
+            table.compression_tp(),
+            ZSTD_COMPRESSION,
+            "compression_tp() should return correct type"
+        );
+        assert_eq!(
+            table.compression_lvl(),
+            3,
+            "compression_lvl() should return correct level"
+        );
+        assert_eq!(
+            table.min_blob_size(),
+            1024,
+            "min_blob_size() should return correct value"
+        );
+        assert_eq!(
+            BlobTable::footer_size(),
+            BLOB_TABLE_FOOTER_SIZE,
+            "footer_size() should return correct size"
+        );
+
+        // Test smallest_biggest_key() returns same as individual getters
+        let (small, big) = table.smallest_biggest_key();
+        assert_eq!(
+            small,
+            table.smallest_key(),
+            "smallest_key from tuple should match direct getter"
+        );
+        assert_eq!(
+            big,
+            table.biggest_key(),
+            "biggest_key from tuple should match direct getter"
+        );
     }
 }
