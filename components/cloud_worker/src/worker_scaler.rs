@@ -48,7 +48,9 @@ const K8S_LABEL_COMPONENT: &str = "app.kubernetes.io/component";
 const K8S_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
 
 const LOAD_DATA_WORKER_NODE_GROUP_NAME: &str = "load-data-worker";
-const LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM: f64 = 46.0;
+// In order to let the load data worker pod exclusively occupy the node of the
+// node group, we use one-half of the node's CPU number as the request.
+const LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM: f64 = 48.0 / 2.0 + 1.0;
 
 const NETWORK_PROTOCOL: &str = "TCP";
 
@@ -462,7 +464,17 @@ impl WorkerScaler {
         let request_memory = format!("{}Gi", core_num * 4.0);
         let limit_cpu = format!("{}", core_num);
         let limit_memory = format!("{}Gi", core_num * 4.0);
-        pod_container.resources = Some(
+        let resources = if sts_config.enable_node_group {
+            // If the pod use `LOAD_DATA_WORKER_NODE_GROUP_NAME`, the pod will
+            // exclusively occupy the node, so we don't need to set limits.
+            serde_json::from_value(json!({
+                "requests": {
+                    "cpu": request_cpu,
+                    "memory": request_memory
+                },
+            }))
+            .unwrap()
+        } else {
             serde_json::from_value(json!({
                 "requests": {
                     "cpu": request_cpu,
@@ -473,8 +485,10 @@ impl WorkerScaler {
                     "memory": limit_memory
                 },
             }))
-            .unwrap(),
-        );
+            .unwrap()
+        };
+
+        pod_container.resources = Some(resources);
         // disable liveness probe because we don't want the pod to be restarted by k8s.
         pod_container.liveness_probe = None;
         // add environment variable to prevent the load-data-worker to run
@@ -855,7 +869,6 @@ fn calculate_num_workers(core_num: f64) -> usize {
 
 fn calculate_num_cores(data_size_gb: usize, max_cores: f64) -> f64 {
     let cores: f64 = if data_size_gb > 500 {
-        // in order to exclusively use the node by worker
         LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM
     } else if data_size_gb > 100 {
         14.0
