@@ -4,10 +4,7 @@ use std::{
     ops,
     ops::Deref,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering::Relaxed},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -27,6 +24,7 @@ use crate::{
         },
         util::{new_local_store, LocalStore},
     },
+    metrics::{ENGINE_IA_READ_SEGMENT_CACHE_MISS, ENGINE_IA_READ_SEGMENT_DURATION_HISTOGRAM},
     table::{Error, Result},
     try_some,
     util::WorkerPool,
@@ -170,8 +168,6 @@ impl IaManager {
             table_metas: Default::default(),
             table_meta_mtime_interval: opts.table_meta_mtime_interval,
             fifo,
-            cache_hit_counter: Default::default(),
-            cache_miss_counter: Default::default(),
             dfs_concurrency,
             dfs_keyspace_concurrency_limit: opts.dfs_keyspace_concurrency,
             dfs_keyspace_concurrency: Default::default(),
@@ -196,8 +192,6 @@ pub struct IaManagerCore {
     table_meta_mtime_interval: Duration,
 
     fifo: S3FifoHandle,
-    cache_hit_counter: AtomicU64,
-    cache_miss_counter: AtomicU64,
 
     dfs_concurrency: Arc<Semaphore>,
     dfs_keyspace_concurrency_limit: usize,
@@ -263,10 +257,16 @@ impl IaManagerCore {
 
         let start_time = Instant::now_coarse();
         debug!("read segment"; "ident" => %ident, "start_off" => start_off, "end_off" => end_off);
+        let on_finish = |cache_hit: bool| {
+            let elapsed = start_time.saturating_elapsed();
+            ENGINE_IA_READ_SEGMENT_DURATION_HISTOGRAM.observe(elapsed.as_secs_f64());
+            if !cache_hit {
+                ENGINE_IA_READ_SEGMENT_CACHE_MISS.inc();
+            }
+            debug!("read segment finished"; "ident" => %ident, "elapsed" => ?elapsed, "cache_hit" => cache_hit);
+        };
         if let Some(()) = self.read_segment_from_cache(&ident, read_at)? {
-            debug!("read segment finished (cache hit)";
-                "ident" => %ident,
-                "elapsed" => ?start_time.saturating_elapsed());
+            on_finish(true);
             return Ok(());
         }
 
@@ -275,10 +275,7 @@ impl IaManagerCore {
 
             // Check cache again. Another thread may have filled the cache.
             if let Some(()) = self.read_segment_from_cache(&ident, read_at)? {
-                debug!("read segment finished (cache hit)";
-                    "ident" => %ident,
-                    "elapsed" => ?start_time.saturating_elapsed());
-
+                on_finish(true);
                 // Not necessary to remove ident from `loading_segments`, as there must be
                 // another concurrent request read the segment from remote.
                 return Ok(());
@@ -298,10 +295,7 @@ impl IaManagerCore {
         self.fifo.read(ident.clone(), false)?;
 
         read_at.read_from_segment_bytes(&ident, &data);
-        self.cache_miss_counter.fetch_add(1, Relaxed);
-        debug!("read segment finished (cache missed)";
-            "ident" => %ident,
-            "elapsed" => ?start_time.saturating_elapsed());
+        on_finish(false);
         Ok(())
     }
 
@@ -343,7 +337,6 @@ impl IaManagerCore {
 
         if res.is_some() {
             self.fifo.read(ident.clone(), false)?;
-            self.cache_hit_counter.fetch_add(1, Relaxed);
         }
         Ok(res)
     }
@@ -435,10 +428,10 @@ impl IaManagerCore {
     }
 
     pub fn cache_hit_rate(&self) -> f64 {
-        let hit = self.cache_hit_counter.load(Relaxed);
-        let miss = self.cache_miss_counter.load(Relaxed);
-        if hit + miss > 0 {
-            hit as f64 / (hit + miss) as f64
+        let total = ENGINE_IA_READ_SEGMENT_DURATION_HISTOGRAM.get_sample_count();
+        let miss = ENGINE_IA_READ_SEGMENT_CACHE_MISS.get();
+        if total > 0 {
+            (total - miss) as f64 / total as f64
         } else {
             0.0
         }

@@ -75,6 +75,17 @@ lazy_static! {
         "Total memory size of IA manager segments",
     )
     .unwrap();
+    pub static ref ENGINE_IA_READ_SEGMENT_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "kv_engine_ia_read_segment_duration_seconds",
+        "Histogram of read IA segment duration",
+        exponential_buckets(5e-5, 2.0, 20).unwrap() // 50us ~ 26s
+    )
+    .unwrap();
+    pub static ref ENGINE_IA_READ_SEGMENT_CACHE_MISS: IntCounter = register_int_counter!(
+        "kv_engine_ia_read_segment_cache_miss",
+        "Counter of read IA segment cache miss",
+    )
+    .unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {

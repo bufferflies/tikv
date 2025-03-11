@@ -12,6 +12,7 @@ use crate::{
         ENGINE_OPEN_FILES, ENGINE_REGION_HUGE_L0_TABLE_BYTES_HISTOGRAM,
         ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM,
     },
+    shard::ShardData,
     table::{BoundedDataSet, DataBound, InnerKey},
     IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
 };
@@ -55,6 +56,7 @@ pub struct EngineStats {
     pub columnar_levels: Vec<ColumnarLevelStats>,
     pub vector_indexes: VectorIndexStats,
     pub top_10_write: Vec<ShardStats>,
+    pub ia: StorageClassStats,
 }
 
 impl EngineStats {
@@ -180,6 +182,9 @@ impl super::Engine {
             }
             engine_stats.vector_indexes.data_size += shard.vector_indexes.data_size;
             engine_stats.vector_indexes.num_files += shard.vector_indexes.num_files;
+            if matches!(shard.storage_class, StorageClass::Ia) {
+                engine_stats.ia.add_ia_shard(shard);
+            }
         }
         ENGINE_OPEN_FILES.set(engine_stats.open_files);
         shard_stats.sort_by(|a, b| {
@@ -301,6 +306,7 @@ pub struct ShardStats {
     pub trim_over_bound: bool,
     pub manual_major_compaction: bool,
     pub storage_class: StorageClass,
+    pub is_sync: bool,
     pub checked_schema_version: i64,
     // Txn File Stats
     pub txn_file_locks: usize,
@@ -325,6 +331,14 @@ impl ShardStats {
             && self.l0_table_count == 0
             && bottom_most_level.level == crate::CF_LEVELS[WRITE_CF]
             && bottom_most_level.num_tables != 0
+    }
+
+    pub fn for_each_cf_level(&self, mut f: impl FnMut((usize, &LevelStats))) {
+        for (cf, cf_stats) in self.cfs.iter().enumerate() {
+            cf_stats.levels.iter().for_each(|lv| {
+                f((cf, lv));
+            });
+        }
     }
 }
 
@@ -429,6 +443,36 @@ pub struct LevelStats {
     pub kv_size: u64,
     pub in_use_blob_size: u64,
     pub columnar_size: u64,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct StorageClassStats {
+    /// Number of shards using the specified storage class.
+    pub num_shards: usize,
+    /// Number of tables (e.g. SsTables, not TiDB tables).
+    pub num_tables: usize,
+    /// Total size of the tables.
+    pub data_size: u64,
+    /// Total kv size (before discount).
+    pub kv_size: u64,
+}
+
+impl StorageClassStats {
+    pub fn add_ia_shard(&mut self, shard: &ShardStats) {
+        self.num_shards += 1;
+        if !shard.is_sync {
+            // Conversion to async would be later than storage class.
+            shard.for_each_cf_level(|(cf, lv)| {
+                if ShardData::can_use_ia(cf, lv.level) {
+                    self.num_tables += lv.num_tables;
+                    self.data_size += lv.data_size;
+                    self.kv_size += lv.kv_size;
+                }
+            })
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -669,6 +713,7 @@ impl super::Shard {
             trim_over_bound: pending_ops.trim_over_bound,
             manual_major_compaction: pending_ops.manual_major_compaction,
             storage_class: pending_ops.storage_class,
+            is_sync: data.is_sync(),
             checked_schema_version: self.get_checked_schema_ver(),
             txn_file_locks,
             schema_version,

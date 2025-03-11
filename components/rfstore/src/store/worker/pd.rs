@@ -845,6 +845,13 @@ impl PdRunner {
             .with_label_values(&["kv", "table_filter"])
             .set(kv_engine_stats.in_mem_filter_size as i64);
 
+        STORE_ENGINE_SIZE_GAUGE_VEC
+            .with_label_values(&["kv", "ia"])
+            .set(kv_engine_stats.ia.data_size as i64);
+        STORE_ENGINE_SIZE_GAUGE_VEC
+            .with_label_values(&["kv", "ia_kv"])
+            .set(kv_engine_stats.ia.kv_size as i64);
+
         let rf_engine_stats = store_info.rf_engine.get_engine_stats();
         STORE_ENGINE_SIZE_GAUGE_VEC
             .with_label_values(&["raft", "raft"])

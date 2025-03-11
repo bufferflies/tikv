@@ -1288,9 +1288,6 @@ impl<'a> PeerMsgHandler<'a> {
                 peer_stat.approximate_size =
                     cmp::max(peer_stat.approximate_size, region_split_size);
             }
-
-            // Reduce storage cost by half.
-            peer_stat.approximate_kv_size /= 2;
         }
     }
 

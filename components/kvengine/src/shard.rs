@@ -1632,6 +1632,11 @@ impl ShardData {
             }),
         }
     }
+
+    #[inline]
+    pub fn can_use_ia(cf: usize, level: usize) -> bool {
+        cf == WRITE_CF && level > 0
+    }
 }
 
 pub(crate) struct ShardDataCore {
@@ -1690,7 +1695,7 @@ impl ShardDataCore {
         }
         let mut is_sync: Option<bool> = None;
         self.for_each_level(|cf, lh| {
-            if !Self::can_use_ia(cf, lh) {
+            if !ShardData::can_use_ia(cf, lh.level) {
                 for tbl in lh.tables.iter() {
                     files.push(tbl.id())
                 }
@@ -1770,11 +1775,6 @@ impl ShardDataCore {
                 }
             }
         }
-    }
-
-    #[inline]
-    fn can_use_ia(cf: usize, _lv: &LevelHandler) -> bool {
-        cf == WRITE_CF
     }
 
     pub(crate) fn for_each_columnar_level<F>(&self, mut f: F)
