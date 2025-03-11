@@ -56,6 +56,14 @@ pub(crate) async fn prepare_columnar(
 
     let decimal_precision: u8 = rand::random::<u8>() % 50 + 10;
     let decimal_points: u8 = rand::random::<u8>() % decimal_precision.min(10);
+    let partition_table = if rand::random::<u8>() % 2 == 0 {
+        format!(
+            "partition by KEY() partitions {}",
+            rand::random::<u8>() % 4 + 1
+        )
+    } else {
+        "".to_string()
+    };
 
     let sqls = vec![
         format!("drop database if exists `{COLUMNAR_DB_NAME}`"),
@@ -90,7 +98,7 @@ pub(crate) async fn prepare_columnar(
             set_col SET('set-1', 'set-2', 'set-3'), \
             bool_col BOOLEAN, \
             json_col JSON, \
-            default_col INT DEFAULT 100)"
+            default_col INT DEFAULT 100) {partition_table}"
         ),
         // We should set tiflash replica to enable tidb plan tiflash replica.
         format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` set tiflash replica 1"),

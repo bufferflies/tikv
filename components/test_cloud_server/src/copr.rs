@@ -2,8 +2,10 @@
 
 use api_version::ApiV2;
 use kvengine::table::columnar::{
-    new_common_handle_column_info, new_int_handle_column_info, Schema, SchemaBuf,
+    new_common_handle_column_info, new_int_handle_column_info, new_version_column_info, Schema,
+    SchemaBuf,
 };
+use schema::schema::StorageClass;
 use tidb_query_datatype::{
     codec::{
         data_type::VectorFloat32,
@@ -46,11 +48,9 @@ pub fn build_schema(ddl: &str) -> Schema {
     for part in pkd_def_str.split(", ") {
         pk_ids.push(parse_col_id_str(part));
     }
-    let mut schema_buf = SchemaBuf::default();
-    schema_buf.table_id = tbl_id;
     let mut pk_is_handle = false;
-    if pk_ids.is_empty() {
-        schema_buf.handle_column = new_int_handle_column_info();
+    let handle_column = if pk_ids.is_empty() {
+        new_int_handle_column_info()
     } else if pk_ids.len() == 1 {
         let (pk_col_id, pk_col_type, _) = col_defs
             .iter()
@@ -60,14 +60,16 @@ pub fn build_schema(ddl: &str) -> Schema {
             let mut col_info = new_int_handle_column_info();
             col_info.set_column_id(*pk_col_id);
             col_info.set_pk_handle(true);
-            schema_buf.handle_column = col_info;
             pk_is_handle = true;
+            col_info
         } else {
-            schema_buf.handle_column = new_common_handle_column_info();
+            new_common_handle_column_info()
         }
     } else {
-        schema_buf.handle_column = new_common_handle_column_info();
-    }
+        new_common_handle_column_info()
+    };
+    let version_column = new_version_column_info();
+    let mut columns = vec![];
     let mut pk_columns = vec![];
     for (col_id, col_type, notnull) in col_defs {
         let mut col_info = make_column_info(col_id, col_type, notnull);
@@ -81,7 +83,7 @@ pub fn build_schema(ddl: &str) -> Schema {
             if notnull {
                 col_info.set_flag(FieldTypeFlag::NOT_NULL.bits() as i32);
             }
-            schema_buf.columns.push(col_info);
+            columns.push(col_info);
         }
     }
     pk_columns.sort_by(|a, b| {
@@ -95,9 +97,18 @@ pub fn build_schema(ddl: &str) -> Schema {
             .unwrap();
         position_a.cmp(&position_b)
     });
-    schema_buf.columns.extend_from_slice(&pk_columns);
-    schema_buf.pk_col_ids = pk_ids;
-    schema_buf.into()
+    columns.extend_from_slice(&pk_columns);
+    SchemaBuf::new(
+        tbl_id,
+        handle_column,
+        version_column,
+        columns,
+        pk_ids,
+        vec![],
+        StorageClass::default(),
+        None,
+    )
+    .into()
 }
 
 pub fn build_row_key(

@@ -574,11 +574,10 @@ impl VectorItemsReader {
             return None;
         }
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
-        let mut inner_schema_buf = schema.to_schema_buf();
-        inner_schema_buf
-            .columns
-            .retain(|c| c.get_column_id() != vector_index.col_id);
-        let inner_schema: Schema = inner_schema_buf.into();
+        let inner_schema: Schema = schema
+            .to_schema_buf()
+            .retain_columns(|c| c.get_column_id() != vector_index.col_id)
+            .into();
         for columnar_level in &col_levels.levels {
             if columnar_level.level == 2 {
                 let concat_reader = ColumnarConcatReader::new(
@@ -894,6 +893,7 @@ mod tests {
     use std::{fs, sync::Arc};
 
     use bstr::ByteSlice;
+    use schema::schema::StorageClass;
     use tidb_query_datatype::{
         codec::{
             data_type::VectorFloat32,
@@ -979,18 +979,27 @@ mod tests {
     ) -> VectorIndexFile {
         let mut builder =
             VectorIndexBuilder::new(3, "cosine", snap_version, 1, 1, 1, common_handle).unwrap();
-        let mut schema_buf = SchemaBuf::default();
-        if common_handle {
-            schema_buf.handle_column = new_common_handle_column_info();
+        let handle_column = if common_handle {
+            new_common_handle_column_info()
         } else {
-            schema_buf.handle_column = new_int_handle_column_info();
-        }
-        schema_buf.version_column = new_version_column_info();
+            new_int_handle_column_info()
+        };
+        let version_column = new_version_column_info();
         let mut vec_col_info = ColumnInfo::new();
         vec_col_info.set_column_id(1);
         vec_col_info.set_tp(FieldTypeTp::TiDbVectorFloat32 as i32);
         vec_col_info.set_flen(TEST_DIMENSION as isize);
-        schema_buf.columns.push(vec_col_info);
+        let columns = vec![vec_col_info];
+        let schema_buf = SchemaBuf::new(
+            1,
+            handle_column,
+            version_column,
+            columns,
+            vec![],
+            vec![],
+            StorageClass::default(),
+            None,
+        );
         let schema = Schema::new(schema_buf);
         let mut block = Block::new(&schema);
         for i in start..end {

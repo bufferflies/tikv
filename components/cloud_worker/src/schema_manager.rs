@@ -1,7 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     ops::Deref,
     path::{Path, PathBuf},
@@ -27,13 +27,13 @@ use kvengine::{
         file::{File, LocalFile},
         ChecksumType, NO_COMPRESSION,
     },
-    IdAllocator, Properties, ShardStatsLite,
+    IdAllocator, ShardStatsLite,
 };
 use kvproto::metapb::Store;
 use native_br::common::send_request_to_store_with_retry;
 use rfstore::store::PdIdAllocator;
 use schema::schema::{
-    convert_column_infos_to_tipb, ColumnInfo, IndexInfo, TableInfo, VectorIndexInfo,
+    convert_column_infos_to_tipb, ColumnInfo, IndexInfo, StorageClass, TableInfo, VectorIndexInfo,
 };
 use security::{SecurityConfig, SecurityManager};
 use tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC;
@@ -531,7 +531,7 @@ impl SchemaManager {
             let old_storage_class_schemas = if let Some(schema_file) = &local_schema_file {
                 schema_file.export_storage_class_schemas()
             } else {
-                HashMap::default()
+                BTreeMap::default()
             };
             // If the old specified storage class becomes unspecified, the storage class is
             // removed from the schema file.
@@ -770,12 +770,23 @@ impl SchemaManager {
     }
 }
 
+fn table_info_to_partition_sc(ti: &TableInfo) -> Option<Vec<(i64, StorageClass)>> {
+    ti.partition.as_ref().map(|p| {
+        p.definitions
+            .iter()
+            .map(|d| (d.id, d.storage_class()))
+            .collect::<Vec<_>>()
+    })
+}
+
 fn table_info_to_schema(ti: &TableInfo) -> Schema {
     let storage_class = ti.storage_class();
+    let partitions = table_info_to_partition_sc(ti);
     if !ti.with_columnar() {
         let mut schema_buf = SchemaBuf::default();
         schema_buf.table_id = ti.id;
         schema_buf.set_storage_class(storage_class);
+        schema_buf.partitions = partitions;
         return schema_buf.into();
     }
     let ti_cols = ti.cols.as_ref().unwrap();
@@ -806,15 +817,16 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
         new_int_handle_column_info()
     };
     let vector_indexes = parse_vector_indexes(ti_cols, ti.index_info.as_ref());
-    let mut schema_buf = SchemaBuf {
-        table_id: ti.id,
+    let mut schema_buf = SchemaBuf::new(
+        ti.id,
         handle_column,
-        version_column: new_version_column_info(),
+        new_version_column_info(),
         columns,
         pk_col_ids,
         vector_indexes,
-        properties: Properties::default(),
-    };
+        StorageClass::default(),
+        partitions,
+    );
     schema_buf.set_storage_class(storage_class);
     schema_buf.into()
 }
@@ -1066,7 +1078,7 @@ fn find_latest_schema_file<P: AsRef<Path>>(dir_path: P) -> Result<Option<String>
 }
 
 fn merge_schema_diffs(
-    mut base: HashMap<i64, Schema>,
+    mut base: BTreeMap<i64, Schema>,
     added: Vec<Schema>,
     removed_ids: &[i64],
 ) -> Vec<Schema> {
@@ -1201,15 +1213,13 @@ mod tests {
     use std::fs;
 
     use bytes::Bytes;
-    use kvengine::{
-        table::{
-            columnar::{
-                build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
-            },
-            file::LocalFile,
+    use kvengine::table::{
+        columnar::{
+            build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
         },
-        Properties,
+        file::LocalFile,
     };
+    use schema::schema::StorageClass;
     use tikv_util::info;
 
     use super::{
@@ -1243,30 +1253,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut schemas = vec![];
         for i in 0..=10 {
-            let schema = SchemaBuf {
-                table_id: i,
-                handle_column: new_int_handle_column_info(),
-                version_column: new_version_column_info(),
-                columns: vec![new_int_handle_column_info()],
-                pk_col_ids: vec![],
-                vector_indexes: vec![],
-                properties: Properties::default(),
-            }
-            .into();
-            schemas.push(schema);
+            let schema = SchemaBuf::new(
+                i,
+                new_int_handle_column_info(),
+                new_version_column_info(),
+                vec![new_int_handle_column_info()],
+                vec![],
+                vec![],
+                StorageClass::default(),
+                None,
+            );
+            schemas.push(schema.into());
         }
         let schema_file_data = build_schema_file(1234, 100, schemas.clone(), 0);
         write_schema_file_to_local(dir.path(), 1234, 1000, Bytes::from(schema_file_data)).unwrap();
         schemas.push(
-            SchemaBuf {
-                table_id: 11,
-                handle_column: new_int_handle_column_info(),
-                version_column: new_version_column_info(),
-                columns: vec![new_int_handle_column_info()],
-                pk_col_ids: vec![],
-                vector_indexes: vec![],
-                properties: Properties::default(),
-            }
+            SchemaBuf::new(
+                11,
+                new_int_handle_column_info(),
+                new_version_column_info(),
+                vec![new_int_handle_column_info()],
+                vec![],
+                vec![],
+                StorageClass::default(),
+                None,
+            )
             .into(),
         );
         let schema_file_data = build_schema_file(1234, 201, schemas, 12345);

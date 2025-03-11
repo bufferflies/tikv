@@ -4089,7 +4089,7 @@ async fn columnar_major_compact(
             tbls.push(tbl.clone());
         });
     }
-    let all_columnar_table_ids = schema_file.export_schemas().into_keys().collect();
+    let all_columnar_table_ids = schema_file.export_backend_table_ids();
     if tbls.is_empty() {
         ret.set_columnar_table_ids(all_columnar_table_ids);
         return Ok(ret);
@@ -4588,10 +4588,9 @@ async fn update_vector_index(
         .iter()
         .find(|idx| idx.index_id == update_vec_idx.index_id)
         .unwrap();
-    let mut schema_buf = full_schema.to_schema_buf();
-    schema_buf
-        .columns
-        .retain(|c| c.get_column_id() == vec_idx_def.col_id);
+    let schema_buf = full_schema
+        .to_schema_buf()
+        .retain_columns(|c| c.get_column_id() == vec_idx_def.col_id);
     let vector_col_schema = Schema::new(schema_buf);
     let dimension = vector_col_schema.columns[0].get_column_len() as usize;
     let metric = vec_idx_def

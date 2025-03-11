@@ -223,6 +223,13 @@ message Schema {
   repeated VectorIndexDef vector_indexes = 4;
   repeated string keys = 5;
   repeated bytes values = 6;
+  repeated Partition partitions = 7;
+}
+
+message Partition {
+  int64 id = 1;
+  repeated string keys = 2;
+  repeated bytes values = 3;
 }
 
 message VectorIndex {

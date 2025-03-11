@@ -8110,6 +8110,7 @@ pub struct Schema {
     pub vector_indexes: ::protobuf::RepeatedField<VectorIndexDef>,
     pub keys: ::protobuf::RepeatedField<::std::string::String>,
     pub values: ::protobuf::RepeatedField<::std::vec::Vec<u8>>,
+    pub partitions: ::protobuf::RepeatedField<Partition>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -8265,11 +8266,41 @@ impl Schema {
     pub fn take_values(&mut self) -> ::protobuf::RepeatedField<::std::vec::Vec<u8>> {
         ::std::mem::replace(&mut self.values, ::protobuf::RepeatedField::new())
     }
+
+    // repeated .enginepb.Partition partitions = 7;
+
+
+    pub fn get_partitions(&self) -> &[Partition] {
+        &self.partitions
+    }
+    pub fn clear_partitions(&mut self) {
+        self.partitions.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_partitions(&mut self, v: ::protobuf::RepeatedField<Partition>) {
+        self.partitions = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_partitions(&mut self) -> &mut ::protobuf::RepeatedField<Partition> {
+        &mut self.partitions
+    }
+
+    // Take field
+    pub fn take_partitions(&mut self) -> ::protobuf::RepeatedField<Partition> {
+        ::std::mem::replace(&mut self.partitions, ::protobuf::RepeatedField::new())
+    }
 }
 
 impl ::protobuf::Message for Schema {
     fn is_initialized(&self) -> bool {
         for v in &self.vector_indexes {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.partitions {
             if !v.is_initialized() {
                 return false;
             }
@@ -8303,6 +8334,9 @@ impl ::protobuf::Message for Schema {
                 6 => {
                     ::protobuf::rt::read_repeated_bytes_into(wire_type, is, &mut self.values)?;
                 },
+                7 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.partitions)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -8334,6 +8368,10 @@ impl ::protobuf::Message for Schema {
         for value in &self.values {
             my_size += ::protobuf::rt::bytes_size(6, &value);
         };
+        for value in &self.partitions {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -8359,6 +8397,11 @@ impl ::protobuf::Message for Schema {
         };
         for v in &self.values {
             os.write_bytes(6, &v)?;
+        };
+        for v in &self.partitions {
+            os.write_tag(7, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
         };
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -8432,6 +8475,11 @@ impl ::protobuf::Message for Schema {
                     |m: &Schema| { &m.values },
                     |m: &mut Schema| { &mut m.values },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<Partition>>(
+                    "partitions",
+                    |m: &Schema| { &m.partitions },
+                    |m: &mut Schema| { &mut m.partitions },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Schema>(
                     "Schema",
                     fields,
@@ -8460,6 +8508,7 @@ impl ::protobuf::Clear for Schema {
         self.vector_indexes.clear();
         self.keys.clear();
         self.values.clear();
+        self.partitions.clear();
         self.unknown_fields.clear();
     }
 }
@@ -8475,6 +8524,7 @@ impl ::protobuf::PbPrint for Schema {
         ::protobuf::PbPrint::fmt(&self.vector_indexes, "vector_indexes", buf);
         ::protobuf::PbPrint::fmt(&self.keys, "keys", buf);
         ::protobuf::PbPrint::fmt(&self.values, "values", buf);
+        ::protobuf::PbPrint::fmt(&self.partitions, "partitions", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -8491,11 +8541,275 @@ impl ::std::fmt::Debug for Schema {
         ::protobuf::PbPrint::fmt(&self.vector_indexes, "vector_indexes", &mut s);
         ::protobuf::PbPrint::fmt(&self.keys, "keys", &mut s);
         ::protobuf::PbPrint::fmt(&self.values, "values", &mut s);
+        ::protobuf::PbPrint::fmt(&self.partitions, "partitions", &mut s);
         write!(f, "{}", s)
     }
 }
 
 impl ::protobuf::reflect::ProtobufValue for Schema {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct Partition {
+    // message fields
+    pub id: i64,
+    pub keys: ::protobuf::RepeatedField<::std::string::String>,
+    pub values: ::protobuf::RepeatedField<::std::vec::Vec<u8>>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a Partition {
+    fn default() -> &'a Partition {
+        <Partition as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl Partition {
+    pub fn new() -> Partition {
+        ::std::default::Default::default()
+    }
+
+    // int64 id = 1;
+
+
+    pub fn get_id(&self) -> i64 {
+        self.id
+    }
+    pub fn clear_id(&mut self) {
+        self.id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_id(&mut self, v: i64) {
+        self.id = v;
+    }
+
+    // repeated string keys = 2;
+
+
+    pub fn get_keys(&self) -> &[::std::string::String] {
+        &self.keys
+    }
+    pub fn clear_keys(&mut self) {
+        self.keys.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keys(&mut self, v: ::protobuf::RepeatedField<::std::string::String>) {
+        self.keys = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_keys(&mut self) -> &mut ::protobuf::RepeatedField<::std::string::String> {
+        &mut self.keys
+    }
+
+    // Take field
+    pub fn take_keys(&mut self) -> ::protobuf::RepeatedField<::std::string::String> {
+        ::std::mem::replace(&mut self.keys, ::protobuf::RepeatedField::new())
+    }
+
+    // repeated bytes values = 3;
+
+
+    pub fn get_values(&self) -> &[::std::vec::Vec<u8>] {
+        &self.values
+    }
+    pub fn clear_values(&mut self) {
+        self.values.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_values(&mut self, v: ::protobuf::RepeatedField<::std::vec::Vec<u8>>) {
+        self.values = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_values(&mut self) -> &mut ::protobuf::RepeatedField<::std::vec::Vec<u8>> {
+        &mut self.values
+    }
+
+    // Take field
+    pub fn take_values(&mut self) -> ::protobuf::RepeatedField<::std::vec::Vec<u8>> {
+        ::std::mem::replace(&mut self.values, ::protobuf::RepeatedField::new())
+    }
+}
+
+impl ::protobuf::Message for Partition {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_int64()?;
+                    self.id = tmp;
+                },
+                2 => {
+                    ::protobuf::rt::read_repeated_string_into(wire_type, is, &mut self.keys)?;
+                },
+                3 => {
+                    ::protobuf::rt::read_repeated_bytes_into(wire_type, is, &mut self.values)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        for value in &self.keys {
+            my_size += ::protobuf::rt::string_size(2, &value);
+        };
+        for value in &self.values {
+            my_size += ::protobuf::rt::bytes_size(3, &value);
+        };
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.id != 0 {
+            os.write_int64(1, self.id)?;
+        }
+        for v in &self.keys {
+            os.write_string(2, &v)?;
+        };
+        for v in &self.values {
+            os.write_bytes(3, &v)?;
+        };
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> Partition {
+        Partition::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt64>(
+                    "id",
+                    |m: &Partition| { &m.id },
+                    |m: &mut Partition| { &mut m.id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "keys",
+                    |m: &Partition| { &m.keys },
+                    |m: &mut Partition| { &mut m.keys },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "values",
+                    |m: &Partition| { &m.values },
+                    |m: &mut Partition| { &mut m.values },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<Partition>(
+                    "Partition",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static Partition {
+        static mut instance: ::protobuf::lazy::Lazy<Partition> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const Partition,
+        };
+        unsafe {
+            instance.get(Partition::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for Partition {
+    fn clear(&mut self) {
+        self.id = 0;
+        self.keys.clear();
+        self.values.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for Partition {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.id, "id", buf);
+        ::protobuf::PbPrint::fmt(&self.keys, "keys", buf);
+        ::protobuf::PbPrint::fmt(&self.values, "values", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for Partition {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.id, "id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.keys, "keys", &mut s);
+        ::protobuf::PbPrint::fmt(&self.values, "values", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for Partition {
     fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
@@ -9548,21 +9862,24 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     r_meta\x18\x04\x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\
     \x01(\x0cB\0\x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11i\
     nner_lower_bound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\
-    \x18\x08\x20\x01(\x0cB\0:\0\"\x9d\x01\n\x06Schema\x12\x12\n\x08table_id\
+    \x18\x08\x20\x01(\x0cB\0:\0\"\xc8\x01\n\x06Schema\x12\x12\n\x08table_id\
     \x18\x01\x20\x01(\x03B\0\x12\x11\n\x07columns\x18\x02\x20\x03(\x0cB\0\
     \x12\x14\n\npk_col_ids\x18\x03\x20\x03(\x03B\0\x122\n\x0evector_indexes\
     \x18\x04\x20\x03(\x0b2\x18.enginepb.VectorIndexDefB\0\x12\x0e\n\x04keys\
-    \x18\x05\x20\x03(\tB\0\x12\x10\n\x06values\x18\x06\x20\x03(\x0cB\0:\0\"u\
-    \n\x0bVectorIndex\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\
-    \n\x08index_id\x18\x02\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\
-    \x01(\x03B\0\x12*\n\x05files\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIn\
-    dexFileB\0:\0\"`\n\x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\
-    \x04B\0\x12\x16\n\x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08s\
-    mallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\
-    \x0cB\0:\0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\
-    \x03B\0\x12\x10\n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kin\
-    d\x18\x03\x20\x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\
-    \x15\n\x0bspec_values\x18\x05\x20\x03(\x0cB\0:\0B\0b\x06proto3\
+    \x18\x05\x20\x03(\tB\0\x12\x10\n\x06values\x18\x06\x20\x03(\x0cB\0\x12)\
+    \n\npartitions\x18\x07\x20\x03(\x0b2\x13.enginepb.PartitionB\0:\0\"=\n\t\
+    Partition\x12\x0c\n\x02id\x18\x01\x20\x01(\x03B\0\x12\x0e\n\x04keys\x18\
+    \x02\x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"u\n\
+    \x0bVectorIndex\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\
+    \x08index_id\x18\x02\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01\
+    (\x03B\0\x12*\n\x05files\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexF\
+    ileB\0:\0\"`\n\x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\
+    \0\x12\x16\n\x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smalle\
+    st\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\
+    \0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\
+    \x12\x10\n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\
+    \x03\x20\x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\
+    \x0bspec_values\x18\x05\x20\x03(\x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

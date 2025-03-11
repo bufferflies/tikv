@@ -214,9 +214,16 @@ pub fn build_schemas(tables: &[TableSchemaOptions]) -> Vec<Schema> {
             c2.set_column_len(255);
             c2.set_collation(Collation::Utf8Mb4Bin as i32);
 
-            schema.handle_column = new_int_handle_column_info();
-            schema.version_column = new_version_column_info();
-            schema.columns = vec![c1, c2];
+            schema = SchemaBuf::new(
+                opts.table_id,
+                new_int_handle_column_info(),
+                new_version_column_info(),
+                vec![c1, c2],
+                vec![],
+                vec![],
+                StorageClass::default(),
+                None,
+            )
         }
 
         if opts.storage_class.is_specified() {

@@ -18,7 +18,7 @@ use kvengine::{
     table::columnar::{
         build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
     },
-    Properties, WRITE_CF,
+    WRITE_CF,
 };
 use kvproto::metapb;
 use native_br::{
@@ -33,6 +33,7 @@ use native_br::{
 use pd_client::PdClient;
 use rand::prelude::*;
 use rstest::rstest;
+use schema::schema::StorageClass;
 use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
     client::{
@@ -1322,15 +1323,16 @@ fn test_restore_keyspace_with_schema() {
     // Set schema file
     let mut schemas = vec![];
     for i in 0..=10 {
-        let schema = SchemaBuf {
-            table_id: i,
-            handle_column: new_int_handle_column_info(),
-            version_column: new_version_column_info(),
-            columns: vec![new_int_handle_column_info()],
-            pk_col_ids: vec![],
-            vector_indexes: vec![],
-            properties: Properties::default(),
-        }
+        let schema = SchemaBuf::new(
+            i,
+            new_int_handle_column_info(),
+            new_version_column_info(),
+            vec![new_int_handle_column_info()],
+            vec![],
+            vec![],
+            StorageClass::default(),
+            None,
+        )
         .into();
         schemas.push(schema);
     }

@@ -231,6 +231,26 @@ pub struct PartitionDefinition {
     pub storage_class_tier: Option<String>,
 }
 
+impl PartitionDefinition {
+    pub fn with_storage_class(&self) -> bool {
+        self.storage_class() != StorageClass::Unspecified
+    }
+
+    pub fn storage_class(&self) -> StorageClass {
+        let mut storage_class = self
+            .storage_class_tier
+            .as_deref()
+            .and_then(|x| x.try_into().ok())
+            .unwrap_or(StorageClass::Unspecified);
+        if storage_class == StorageClass::Standard {
+            // The standard storage class is not set to schema file and shard, need to be
+            // changed to unspecified.
+            storage_class = StorageClass::Unspecified;
+        }
+        storage_class
+    }
+}
+
 // SchemaDiff contains the schema modification at a particular schema version.
 // It is used to reduce schema reload cost.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -270,6 +290,7 @@ const STORAGE_CLASS_TIER_STANDARD: &str = "STANDARD";
 const STORAGE_CLASS_TIER_IA: &str = "IA";
 
 const STORAGE_CLASS_STR_UNSPECIFIED: &str = "UNSPECIFIED";
+const STORAGE_CLASS_KEY: &str = "_storage_class";
 
 #[repr(u8)]
 #[derive(PartialEq, Clone, Copy, Default, Serialize, Deserialize)]
@@ -331,6 +352,16 @@ impl StorageClass {
     pub fn is_sync(&self) -> bool {
         matches!(self, Self::Unspecified | Self::Standard)
     }
+
+    pub fn apply_to_schema_pb(&self, schema: &mut kvenginepb::Schema) {
+        schema.mut_keys().push(STORAGE_CLASS_KEY.to_string());
+        schema.mut_values().push(self.marshal());
+    }
+
+    pub fn apply_to_partition_pb(&self, partition: &mut kvenginepb::Partition) {
+        partition.mut_keys().push(STORAGE_CLASS_KEY.to_string());
+        partition.mut_values().push(self.marshal());
+    }
 }
 
 impl TryFrom<&str> for StorageClass {
@@ -363,6 +394,36 @@ impl TryFrom<u8> for StorageClass {
                 Err(format!("Unknown storage class: {}", value))
             }
         }
+    }
+}
+
+impl From<&kvenginepb::Schema> for StorageClass {
+    fn from(value: &kvenginepb::Schema) -> Self {
+        let keys = value.get_keys();
+        let vals = value.get_values();
+        for i in 0..keys.len() {
+            let key = &keys[i];
+            let val = &vals[i];
+            if key == STORAGE_CLASS_KEY {
+                return StorageClass::unmarshal(Some(val.as_slice()));
+            }
+        }
+        StorageClass::Unspecified
+    }
+}
+
+impl From<&kvenginepb::Partition> for StorageClass {
+    fn from(value: &kvenginepb::Partition) -> Self {
+        let keys = value.get_keys();
+        let vals = value.get_values();
+        for i in 0..keys.len() {
+            let key = &keys[i];
+            let val = &vals[i];
+            if key == STORAGE_CLASS_KEY {
+                return StorageClass::unmarshal(Some(val.as_slice()));
+            }
+        }
+        StorageClass::Unspecified
     }
 }
 

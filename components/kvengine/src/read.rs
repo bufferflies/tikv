@@ -1364,18 +1364,21 @@ impl SnapAccessCore {
         if !table_schema.with_columnar() {
             return None;
         }
-        let mut schema_buf = SchemaBuf {
+        let columns = columns
+            .iter()
+            .filter(|c| !c.get_pk_handle() && c.get_column_id() != HANDLE_COL_ID as i64)
+            .cloned()
+            .collect::<Vec<_>>();
+        let schema_buf = SchemaBuf::new(
             table_id,
-            handle_column: table_schema.handle_column.clone(),
-            version_column: table_schema.version_column.clone(),
-            columns: columns.to_vec(),
-            pk_col_ids: table_schema.pk_col_ids.clone(),
-            vector_indexes: table_schema.vector_indexes.clone(),
-            properties: table_schema.properties.clone(),
-        };
-        schema_buf
-            .columns
-            .retain(|c| !c.get_pk_handle() && c.get_column_id() != HANDLE_COL_ID as i64);
+            table_schema.handle_column.clone(),
+            table_schema.version_column.clone(),
+            columns,
+            table_schema.pk_col_ids.clone(),
+            table_schema.vector_indexes.clone(),
+            table_schema.get_storage_class(),
+            None,
+        );
         Some(Schema::new(schema_buf))
     }
 

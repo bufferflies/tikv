@@ -7001,6 +7001,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "kvenginepb",
  "log_wrappers",
  "serde",
  "serde_derive",

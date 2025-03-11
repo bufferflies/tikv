@@ -12,6 +12,7 @@ api_version = { workspace = true }
 async-trait = "0.1"
 bytes = "1.0"
 chrono = "0.4"
+kvenginepb = { workspace = true }
 log_wrappers = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"

@@ -1953,17 +1953,14 @@ impl ShardDataCore {
         if self.schema_file.is_none() {
             return false;
         }
-        let schema_table_ids = self.schema_file.as_ref().unwrap().export_schemas();
+
         let (min_table_id, max_table_id) = get_table_id_from_data_bound(self.data_bound());
-        let mut has_overlap = false;
-        for (table_id, table_schema) in schema_table_ids {
-            if table_schema.with_columnar() && table_id >= min_table_id && table_id <= max_table_id
-            {
-                has_overlap = true;
-                break;
-            }
-        }
-        if !has_overlap {
+        if !self
+            .schema_file
+            .as_ref()
+            .unwrap()
+            .overlap_columnar_table_ids(min_table_id, max_table_id)
+        {
             return false;
         }
 
@@ -2337,26 +2334,6 @@ impl Properties {
     pub fn apply_pb(self, props: &kvenginepb::Properties) -> Self {
         let keys = props.get_keys();
         let vals = props.get_values();
-        for i in 0..keys.len() {
-            let key = &keys[i];
-            let val = &vals[i];
-            self.set(key, val.as_slice());
-        }
-        self
-    }
-
-    pub fn to_schema_pb(&self) -> kvenginepb::Schema {
-        let mut schema = kvenginepb::Schema::new();
-        self.m.iter().for_each(|r| {
-            schema.keys.push(r.key().clone());
-            schema.values.push(r.value().to_vec());
-        });
-        schema
-    }
-
-    pub fn apply_schema_pb(self, schema: &kvenginepb::Schema) -> Self {
-        let keys = schema.get_keys();
-        let vals = schema.get_values();
         for i in 0..keys.len() {
             let key = &keys[i];
             let val = &vals[i];

@@ -11,18 +11,15 @@ use schema::schema::StorageClass;
 use tidb_query_datatype::{FieldTypeAccessor, FieldTypeFlag, FieldTypeTp};
 use tipb::ColumnInfo;
 
-use crate::{
-    table::{
-        columnar::builder::{
-            TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
-            PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
-        },
-        file::File,
-        parse_prop_data, search,
-        sstable::{L0Table, PROP_KEY_ENCRYPTION_VER},
-        BoundedDataSet, DataBound, InnerKey, LZ4_COMPRESSION,
+use crate::table::{
+    columnar::builder::{
+        TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
+        PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
     },
-    Properties, STORAGE_CLASS_KEY,
+    file::File,
+    parse_prop_data, search,
+    sstable::{L0Table, PROP_KEY_ENCRYPTION_VER},
+    BoundedDataSet, DataBound, InnerKey, LZ4_COMPRESSION,
 };
 
 pub const HANDLE_COL_ID: i32 = -1;
@@ -32,13 +29,128 @@ pub const COLUMNAR_MAGIC: u32 = 0xc01e32ae;
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct SchemaBuf {
+    pub inner: Arc<SchemaBufInner>,
+    pub partitions: Option<Vec<(i64, StorageClass)>>,
     pub table_id: i64,
+    pub property_sc: StorageClass,
+    pub is_sub_partition: bool,
+}
+
+impl Deref for SchemaBuf {
+    type Target = SchemaBufInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl SchemaBuf {
+    pub fn new(
+        table_id: i64,
+        handle_column: ColumnInfo,
+        version_column: ColumnInfo,
+        columns: Vec<ColumnInfo>,
+        pk_col_ids: Vec<i64>,
+        vector_indexes: Vec<VectorIndexDef>,
+        property_sc: StorageClass,
+        partitions: Option<Vec<(i64, StorageClass)>>,
+    ) -> Self {
+        Self {
+            table_id,
+            inner: Arc::new(SchemaBufInner {
+                handle_column,
+                version_column,
+                columns,
+                pk_col_ids,
+                vector_indexes,
+            }),
+            partitions,
+            property_sc,
+            is_sub_partition: false,
+        }
+    }
+
+    pub fn retain_columns<F>(&self, f: F) -> Self
+    where
+        F: FnMut(&ColumnInfo) -> bool,
+    {
+        let mut columns = self.inner.columns.clone();
+        columns.retain(f);
+        SchemaBuf::new(
+            self.table_id,
+            self.handle_column.clone(),
+            self.version_column.clone(),
+            columns,
+            self.pk_col_ids.clone(),
+            self.vector_indexes.clone(),
+            self.property_sc,
+            self.partitions.clone(),
+        )
+    }
+
+    pub fn to_partition_schema(&self, partition_id: i64, sc: StorageClass) -> SchemaBuf {
+        SchemaBuf {
+            table_id: partition_id,
+            inner: self.inner.clone(),
+            partitions: None,
+            property_sc: sc,
+            is_sub_partition: true,
+        }
+    }
+
+    pub fn to_partition_schemas(&self) -> Vec<Schema> {
+        self.partitions
+            .as_ref()
+            .map(|btree| {
+                btree
+                    .iter()
+                    .map(|(id, sc)| self.to_partition_schema(*id, *sc).into())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[inline]
+    pub fn is_sub_partition(&self) -> bool {
+        self.is_sub_partition
+    }
+
+    #[inline]
+    pub fn set_storage_class(&mut self, storage_class: StorageClass) {
+        self.property_sc = storage_class;
+    }
+
+    #[inline]
+    pub fn get_storage_class(&self) -> StorageClass {
+        self.property_sc
+    }
+
+    #[inline]
+    pub fn is_partitioned_table(&self) -> bool {
+        self.partitions.is_some()
+    }
+
+    pub fn remove_pk_col_from_columns(&mut self) {
+        let handle_col_id = self.handle_column.get_column_id();
+        let mut columns = self.columns.clone();
+        columns.retain(|c| c.get_column_id() != handle_col_id);
+        self.inner = Arc::new(SchemaBufInner {
+            handle_column: self.handle_column.clone(),
+            version_column: self.version_column.clone(),
+            columns,
+            pk_col_ids: self.pk_col_ids.clone(),
+            vector_indexes: self.vector_indexes.clone(),
+        });
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct SchemaBufInner {
     pub handle_column: ColumnInfo,
     pub version_column: ColumnInfo,
     pub columns: Vec<ColumnInfo>,
     pub pk_col_ids: Vec<i64>,
     pub vector_indexes: Vec<VectorIndexDef>,
-    pub properties: Properties,
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -77,26 +189,6 @@ impl VectorIndexDef {
             index_kind: vec_idx_pb.index_kind.clone(),
             specs,
         }
-    }
-}
-
-impl SchemaBuf {
-    pub fn remove_pk_col_from_columns(&mut self) {
-        let handle_col_id = self.handle_column.get_column_id();
-        self.columns.retain(|c| c.get_column_id() != handle_col_id);
-    }
-
-    pub fn set_storage_class(&mut self, storage_class: StorageClass) {
-        if storage_class.is_specified() {
-            self.properties
-                .set(STORAGE_CLASS_KEY, &storage_class.marshal());
-        } else {
-            self.properties.remove(STORAGE_CLASS_KEY);
-        }
-    }
-
-    pub fn get_storage_class(&self) -> StorageClass {
-        StorageClass::unmarshal(self.properties.get(STORAGE_CLASS_KEY).as_deref())
     }
 }
 

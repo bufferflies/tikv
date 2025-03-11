@@ -13,6 +13,7 @@ use kvengine::{
     },
 };
 use pd_client::PdClient;
+use schema::schema::StorageClass;
 use test_cloud_server::{
     copr::{build_row_key, build_row_val},
     must_wait, ServerCluster,
@@ -225,18 +226,16 @@ fn test_build_vector_index() {
 }
 
 fn build_vector_schema(table_id: i64) -> Schema {
-    let mut schema_buf = SchemaBuf::default();
-    schema_buf.table_id = table_id;
-    schema_buf.pk_col_ids = vec![1];
-    schema_buf.handle_column = new_int_handle_column_info();
-    schema_buf.handle_column.set_column_id(1);
-    schema_buf.handle_column.set_pk_handle(true);
-    schema_buf.version_column = new_version_column_info();
+    let pk_col_ids = vec![1];
+    let mut handle_column = new_int_handle_column_info();
+    handle_column.set_column_id(1);
+    handle_column.set_pk_handle(true);
+    let version_column = new_version_column_info();
     let mut vector_column = ColumnInfo::new();
     vector_column.set_column_id(2);
     vector_column.set_flen(3);
     vector_column.set_tp(FieldTypeTp::TiDbVectorFloat32 as i32);
-    schema_buf.columns = vec![vector_column];
+    let columns = vec![vector_column];
     let mut vector_index_def = VectorIndexDef::default();
     vector_index_def.index_id = 1;
     vector_index_def.col_id = 2;
@@ -247,6 +246,16 @@ fn build_vector_schema(table_id: i64) -> Schema {
             .as_bytes()
             .to_vec(),
     );
-    schema_buf.vector_indexes = vec![vector_index_def];
-    schema_buf.into()
+    let vector_indexes = vec![vector_index_def];
+    SchemaBuf::new(
+        table_id,
+        handle_column,
+        version_column,
+        columns,
+        pk_col_ids,
+        vector_indexes,
+        StorageClass::default(),
+        None,
+    )
+    .into()
 }

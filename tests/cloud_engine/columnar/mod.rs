@@ -30,7 +30,7 @@ use kvengine::{
         },
         sstable::{BlockCache, BlockCacheType},
     },
-    ColumnarStatusResp, Properties, SnapAccess, STORAGE_CLASS_KEY, WRITE_CF,
+    ColumnarStatusResp, SnapAccess, STORAGE_CLASS_KEY, WRITE_CF,
 };
 use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
@@ -1130,15 +1130,16 @@ fn build_columnar_schema_buf(table_id: i64) -> SchemaBuf {
     c2.set_tp(FieldTypeTp::VarChar.to_u8().unwrap() as i32);
     c2.set_column_len(255);
     c2.set_collation(Collation::Utf8Mb4Bin as i32);
-    SchemaBuf {
+    SchemaBuf::new(
         table_id,
-        handle_column: new_int_handle_column_info(),
-        version_column: new_version_column_info(),
-        columns: vec![c1, c2],
-        pk_col_ids: vec![],
-        vector_indexes: vec![],
-        properties: Properties::default(),
-    }
+        new_int_handle_column_info(),
+        new_version_column_info(),
+        vec![c1, c2],
+        vec![],
+        vec![],
+        StorageClass::default(),
+        None,
+    )
 }
 
 async fn send_schema_file_request(status_addr: &str, keyspace_id: u32, schema_file_id: u64) {

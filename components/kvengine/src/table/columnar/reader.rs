@@ -1764,6 +1764,7 @@ pub mod tests {
     use proptest::{arbitrary::any, proptest};
     use rand::Rng;
     use rstest::rstest;
+    use schema::schema::StorageClass;
     use test_util::init_log_for_test;
     use tidb_query_datatype::{
         codec::row::v2::encoder_for_test::{Column, RowEncoder},
@@ -1836,22 +1837,28 @@ pub mod tests {
     }
 
     pub fn new_schema(table_id: i64, common_handle: bool) -> Schema {
-        let mut schema_buf = SchemaBuf::default();
-        schema_buf.table_id = table_id;
-        if common_handle {
-            schema_buf.handle_column = new_common_handle_column_info();
+        let handle_column = if common_handle {
+            new_common_handle_column_info()
         } else {
-            schema_buf.handle_column = new_int_handle_column_info();
-        }
-        schema_buf.version_column = new_version_column_info();
+            new_int_handle_column_info()
+        };
+        let version_column = new_version_column_info();
         let mut col_1 = new_column_info(1);
         col_1.set_tp(FieldTypeTp::LongLong as i32);
         let mut col_2 = new_column_info(2);
         col_2.set_tp(FieldTypeTp::VarChar as i32);
         col_2.set_collation(Utf8Mb4GeneralCi as i32);
-        schema_buf.columns.push(col_1);
-        schema_buf.columns.push(col_2);
-        Schema::new(schema_buf)
+        let columns = vec![col_1, col_2];
+        Schema::new(SchemaBuf::new(
+            table_id,
+            handle_column,
+            version_column,
+            columns,
+            vec![],
+            vec![],
+            StorageClass::default(),
+            None,
+        ))
     }
 
     pub fn build_table(
