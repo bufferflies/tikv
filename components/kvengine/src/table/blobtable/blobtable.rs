@@ -158,7 +158,9 @@ impl BlobTable {
                 decryption_buf.clear();
                 encryption_key.decrypt(
                     data_slice,
-                    self.id(),
+                    // Must use blob_ref.fid instead of self.id(), since self.file is not
+                    // initialized by BlobTable::from_bytes() at preload.
+                    blob_ref.fid,
                     blob_ref.offset,
                     self.encryption_ver,
                     decryption_buf,
@@ -452,6 +454,72 @@ mod tests {
 
     fn new_test_encryption_key() -> EncryptionKey {
         EncryptionKey::new(b"cipher".to_vec(), b"plain".to_vec(), 0)
+    }
+
+    /// Test preloaded functionality with different compression and
+    /// encryption settings
+    #[rstest]
+    #[case::enable_encryption_no_compression(true, NO_COMPRESSION)]
+    #[case::enable_encryption_compression(true, ZSTD_COMPRESSION)]
+    #[case::disable_encryption_no_compression(false, NO_COMPRESSION)]
+    #[case::disable_encryption_compression(false, ZSTD_COMPRESSION)]
+    fn test_preloaded(#[case] enable_encryption: bool, #[case] compression_type: u8) {
+        let encryption_key = if enable_encryption {
+            Some(new_test_encryption_key())
+        } else {
+            None
+        };
+
+        let mut builder = BlobTableBuilder::new(1, compression_type, 0, 0, encryption_key.clone());
+
+        // Add test data
+        let test_data = b"test_data".to_vec();
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+        let blob_ref = builder.add(InnerKey::from_inner_buf(b"test_key"), &value);
+
+        // Create a preloaded table from the blob data
+        let table_data = builder.finish();
+        let table = BlobTable::from_bytes(table_data).unwrap();
+
+        // Buffers needed for decompression and decryption
+        let mut decompress_buf = vec![];
+        let mut decrypt_buf = vec![];
+
+        // Test retrieval using get_from_preloaded
+        let result = table.get_from_preloaded(
+            &blob_ref,
+            true,
+            true,
+            &mut decompress_buf,
+            &mut decrypt_buf,
+            encryption_key.clone(),
+        );
+
+        // Verify the result
+        assert!(result.is_ok(), "Data retrieval should succeed");
+        let retrieved_value = result.unwrap();
+        assert_eq!(
+            retrieved_value,
+            test_data.as_slice(),
+            "Retrieved data should match original"
+        );
+
+        // Verify that buffer reuse works by using the same buffers again
+        let result2 = table.get_from_preloaded(
+            &blob_ref,
+            true,
+            true,
+            &mut decompress_buf,
+            &mut decrypt_buf,
+            encryption_key,
+        );
+        assert!(result2.is_ok(), "Second retrieval should succeed");
+        assert_eq!(
+            result2.unwrap(),
+            test_data.as_slice(),
+            "Second retrieval should match original"
+        );
     }
 
     #[rstest]
