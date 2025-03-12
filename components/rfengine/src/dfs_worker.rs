@@ -445,8 +445,7 @@ pub fn assemble_wal_chunks(chunks: Vec<Bytes>) -> Result<BytesMut> {
         let header = ChunkHeader::decode(chunk.slice(0..ChunkHeader::len()).chunk())?;
         let decompressed_data = match header.compression_type {
             CompressionType::Lz4Compression => Bytes::from(
-                decompress_lz4(chunk.slice(ChunkHeader::len()..).chunk())
-                    .map_err(|err| Error::from(err))?,
+                decompress_lz4(chunk.slice(ChunkHeader::len()..).chunk()).map_err(Error::from)?,
             ),
             CompressionType::NoCompression => chunk.slice(ChunkHeader::len()..),
         };

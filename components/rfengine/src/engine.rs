@@ -1228,7 +1228,7 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let cfg = Config::new(128 * 1024_usize);
         let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
-        assert_eq!(engine.is_empty(), true);
+        assert!(engine.is_empty());
 
         let init_stats = engine.get_engine_stats();
         assert_eq!(init_stats.total_mem_size, 0);
@@ -1245,7 +1245,7 @@ mod tests {
             wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
         }
         engine.write(wb).unwrap();
-        assert_eq!(engine.is_empty(), false);
+        assert!(!engine.is_empty());
 
         let mut truncated_regions = vec![];
         let mut truncated_idx = 0;
@@ -1671,7 +1671,7 @@ mod tests {
             offsets.pop().unwrap();
             for (idx, offset) in offsets.iter().enumerate() {
                 if idx == 0 || idx == offsets.len() / 2 || idx == offsets.len() - 1 {
-                    for pos in &vec![0, 4, 8, 12] {
+                    for pos in &[0, 4, 8, 12] {
                         let fd = OpenOptions::new()
                             .read(true)
                             .write(true)

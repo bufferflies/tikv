@@ -51,9 +51,10 @@ impl RfEngineCore {
         let mut async_offset = 0;
         if self.is_async_wal_enabled() && load_async {
             let mut async_it = WalIterator::new(self.dir.to_path_buf(), epoch_id);
-            match async_it.iterate_batch(|_, _| {
+            let iteration_result = async_it.iterate_batch(|_, _| {
                 async_batch_cnt += 1;
-            }) {
+            });
+            match iteration_result {
                 Ok(_) => {
                     async_offset = async_it.offset;
                 }
@@ -71,7 +72,7 @@ impl RfEngineCore {
         }
         let mut sync_batch_idx = 0;
         let mut it = WalIterator::new(self.wal_dir().to_path_buf(), epoch_id);
-        match it.iterate_batch(|data, _| {
+        let sync_iteration_result = it.iterate_batch(|data, _| {
             sync_batch_idx += 1;
             let mut wb = if self.is_async_wal_enabled() && sync_batch_idx > async_batch_cnt {
                 Some(WriteBatch::new())
@@ -90,7 +91,8 @@ impl RfEngineCore {
             if let Some(wb) = wb {
                 self.task_sender.send(ServiceTask::Write { wb }).unwrap();
             }
-        }) {
+        });
+        match sync_iteration_result {
             Ok(_) => {}
             Err(Error::Corruption {
                 msg, offset, data, ..
