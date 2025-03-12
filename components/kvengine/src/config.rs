@@ -5,7 +5,7 @@ use std::{
     error::Error,
 };
 
-use tikv_util::config::ReadableDuration;
+use tikv_util::config::{AbsoluteOrPercentSize, ReadableDuration};
 
 use crate::{
     ia::util::IaConfig,
@@ -125,7 +125,12 @@ impl Default for Config {
             block_cache_type: BlockCacheType::Moka,
             blob_table_build_options: Default::default(),
             per_keyspace_configs: vec![],
-            ia: Default::default(),
+            ia: IaConfig {
+                mem_cap: AbsoluteOrPercentSize::Percent(15.0),
+                disk_cap: AbsoluteOrPercentSize::Percent(70.0),
+                dynamic_capacity: true,
+                ..Default::default()
+            },
             columnar_table_build_options: Default::default(),
             vector_index_build_options: Default::default(),
             ignore_columnar_table_load: false,

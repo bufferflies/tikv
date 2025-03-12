@@ -277,6 +277,8 @@ const IA_DFS_CONCURRENCY_DEF: usize = 64;
 const IA_DFS_KEYSPACE_CONCURRENCY_DEF: usize = 20;
 const IA_FD_CACHE_CAPACITY_DEF: usize = 102400; // 100k
 const IA_TABLE_META_MTIME_INTERVAL_DEF: Duration = Duration::from_secs(3600); // 1 hour
+const IA_DYNAMIC_CACHE_CAPACITY_DEF: bool = false;
+const IA_CACHE_CAP_TO_TOTAL_DATA_SIZE_RATIO_DEF: f64 = 0.2; // 20%
 
 const MAIN_QUEUE_CAPACITY_FACTOR: i64 = 10; // Main queue is 10x larger than small queue.
 
@@ -363,6 +365,8 @@ pub struct IaManagerOptionsBuilder {
     dfs_keyspace_concurrency: Option<usize>,
     fd_cache_capacity: Option<usize>,
     table_meta_mtime_interval: Option<Duration>,
+    dynamic_capacity: bool,
+    cache_cap_to_total_data_size_ratio: Option<f64>,
 }
 
 impl IaManagerOptionsBuilder {
@@ -397,25 +401,47 @@ impl IaManagerOptionsBuilder {
         self
     }
 
+    pub fn dynamic_capacity(mut self, enable: bool) -> Self {
+        self.dynamic_capacity = enable;
+        self
+    }
+
+    pub fn cache_cap_to_total_data_size_ratio(mut self, ratio: f64) -> Self {
+        self.cache_cap_to_total_data_size_ratio = Some(ratio);
+        self
+    }
+
     pub fn build(mut self) -> Result<IaManagerOptions> {
-        let mut options = IaManagerOptions::default();
-
-        let cap = self.capacity.take().unwrap_or_default();
-        cap.build_options(&mut options)?;
-
-        options.segment_size = self.segment_size.unwrap_or(IA_SEGMENT_SIZE_DEF);
-        options.freq_update_interval = self
+        let segment_size = self.segment_size.unwrap_or(IA_SEGMENT_SIZE_DEF);
+        let freq_update_interval = self
             .freq_update_interval
             .unwrap_or(IA_FREQ_UPDATE_INTERVAL_DEF);
-        options.dfs_concurrency = self.dfs_concurrency.unwrap_or(IA_DFS_CONCURRENCY_DEF);
-        options.dfs_keyspace_concurrency = self
+        let dfs_concurrency = self.dfs_concurrency.unwrap_or(IA_DFS_CONCURRENCY_DEF);
+        let dfs_keyspace_concurrency = self
             .dfs_keyspace_concurrency
             .unwrap_or(IA_DFS_KEYSPACE_CONCURRENCY_DEF);
-        options.fd_cache_capacity = self.fd_cache_capacity.unwrap_or(IA_FD_CACHE_CAPACITY_DEF);
-        options.table_meta_mtime_interval = self
+        let fd_cache_capacity = self.fd_cache_capacity.unwrap_or(IA_FD_CACHE_CAPACITY_DEF);
+        let table_meta_mtime_interval = self
             .table_meta_mtime_interval
             .unwrap_or(IA_TABLE_META_MTIME_INTERVAL_DEF);
+        let cache_cap_to_total_data_size_ratio = self
+            .cache_cap_to_total_data_size_ratio
+            .unwrap_or(IA_CACHE_CAP_TO_TOTAL_DATA_SIZE_RATIO_DEF);
 
+        let mut options = IaManagerOptions {
+            small_queue: QueueOptions::default(),
+            main_queue: QueueOptions::default(),
+            segment_size,
+            freq_update_interval,
+            dfs_concurrency,
+            dfs_keyspace_concurrency,
+            fd_cache_capacity,
+            table_meta_mtime_interval,
+            dynamic_capacity: self.dynamic_capacity,
+            cache_cap_to_total_data_size_ratio,
+        };
+        let cap = self.capacity.take().unwrap_or_default();
+        cap.build_options(&mut options)?;
         Ok(options)
     }
 }
@@ -434,6 +460,8 @@ pub struct IaConfig {
     pub dfs_keyspace_concurrency: usize,
     pub fd_cache_capacity: usize,
     pub table_meta_mtime_interval: ReadableDuration,
+    pub dynamic_capacity: bool,
+    pub cache_cap_to_total_data_size_ratio: f64,
 }
 
 impl Default for IaConfig {
@@ -447,6 +475,8 @@ impl Default for IaConfig {
             dfs_keyspace_concurrency: IA_DFS_KEYSPACE_CONCURRENCY_DEF,
             fd_cache_capacity: IA_FD_CACHE_CAPACITY_DEF,
             table_meta_mtime_interval: ReadableDuration(IA_TABLE_META_MTIME_INTERVAL_DEF),
+            dynamic_capacity: IA_DYNAMIC_CACHE_CAPACITY_DEF,
+            cache_cap_to_total_data_size_ratio: IA_CACHE_CAP_TO_TOTAL_DATA_SIZE_RATIO_DEF,
         }
     }
 }
@@ -461,6 +491,8 @@ impl IaConfig {
             .dfs_concurrency(self.dfs_concurrency, self.dfs_keyspace_concurrency)
             .fd_cache_capacity(self.fd_cache_capacity)
             .table_meta_mtime_interval(self.table_meta_mtime_interval.0)
+            .dynamic_capacity(self.dynamic_capacity)
+            .cache_cap_to_total_data_size_ratio(self.cache_cap_to_total_data_size_ratio)
             .build()
     }
 }

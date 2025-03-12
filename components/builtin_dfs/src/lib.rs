@@ -82,39 +82,43 @@ impl BuiltinDfs {
     }
 
     async fn get_stores(&self, opts: &Options) -> dfs::Result<Vec<u64>> {
-        match opts.file_type {
-            FileType::TxnChunk | FileType::Schema => {
-                let store_cache_rl = self.store_cache.rl();
-                let empty = store_cache_rl.is_empty();
-                drop(store_cache_rl);
-                if empty {
-                    let mut store_cache = self.store_cache.wl();
-                    let mut stores = self
-                        .pd
-                        .get_all_stores(true)
-                        .map_err(|e| dfs::Error::Other(e.to_string()))?;
-                    stores.retain(|store| {
-                        !store
-                            .get_labels()
-                            .iter()
-                            .any(|l| l.key == "engine" && l.value == "tiflash")
-                            && store.state == metapb::StoreState::Up
-                    });
-                    for store in stores {
-                        store_cache.insert(store.id, store);
-                    }
+        if opts.shard_id == 0 {
+            // opts.end_off.is_some(): IA segments.
+            debug_assert!(
+                opts.file_type == FileType::TxnChunk
+                    || opts.file_type == FileType::Schema
+                    || opts.end_off.is_some(),
+                "shard_id is missing: {:?}",
+                opts
+            );
+            let store_cache_rl = self.store_cache.rl();
+            let empty = store_cache_rl.is_empty();
+            drop(store_cache_rl);
+            if empty {
+                let mut store_cache = self.store_cache.wl();
+                let mut stores = self
+                    .pd
+                    .get_all_stores(true)
+                    .map_err(|e| dfs::Error::Other(e.to_string()))?;
+                stores.retain(|store| {
+                    !store
+                        .get_labels()
+                        .iter()
+                        .any(|l| l.key == "engine" && l.value == "tiflash")
+                        && store.state == metapb::StoreState::Up
+                });
+                for store in stores {
+                    store_cache.insert(store.id, store);
                 }
-                let store_cache = self.store_cache.rl();
-                let mut store_ids: Vec<u64> = store_cache.keys().cloned().collect();
-                drop(store_cache);
-                store_ids.sort();
-                store_ids.truncate(3);
-                return Ok(store_ids);
             }
-            _ => {
-                assert_ne!(opts.shard_id, 0)
-            }
+            let store_cache = self.store_cache.rl();
+            let mut store_ids: Vec<u64> = store_cache.keys().cloned().collect();
+            drop(store_cache);
+            store_ids.sort();
+            store_ids.truncate(3);
+            return Ok(store_ids);
         }
+
         {
             let guard = self.region_cache.read().unwrap();
             if let Some(region) = guard.get(&opts.shard_id) {

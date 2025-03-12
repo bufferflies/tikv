@@ -17,7 +17,7 @@ use engine_traits::{CfNamesExt, MiscExt};
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::{compat::Future01CompatExt, FutureExt};
-use kvengine::GLOBAL_SHARD_END_KEY;
+use kvengine::{context::IaCtx, GLOBAL_SHARD_END_KEY};
 use kvproto::{
     metapb,
     metapb::Region,
@@ -823,6 +823,9 @@ impl PdRunner {
         store_info
             .kv_engine
             .notify_memtables_size(kv_engine_stats.mem_tables_size);
+        if let IaCtx::Enabled(mgr, _) = store_info.kv_engine.ia_ctx() {
+            mgr.notify_total_data_size(kv_engine_stats.ia.data_size);
+        }
         for &id_ver in &kv_engine_stats.ready_destroy_range_shards {
             store_info.kv_engine.trigger_compact(id_ver);
         }

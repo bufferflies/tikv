@@ -75,6 +75,16 @@ lazy_static! {
         "Total memory size of IA manager segments",
     )
     .unwrap();
+    pub static ref ENGINE_IA_MAIN_QUEUE_CAPACITY: IntGauge = register_int_gauge!(
+        "kv_engine_ia_main_queue_capacity",
+        "Capacity of IA main queue",
+    )
+    .unwrap();
+    pub static ref ENGINE_IA_SMALL_QUEUE_CAPACITY: IntGauge = register_int_gauge!(
+        "kv_engine_ia_small_queue_capacity",
+        "Capacity of IA small queue",
+    )
+    .unwrap();
     pub static ref ENGINE_IA_READ_SEGMENT_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "kv_engine_ia_read_segment_duration_seconds",
         "Histogram of read IA segment duration",

@@ -4,6 +4,7 @@ use std::{assert_matches::assert_matches, fs, path::PathBuf, sync::Arc, time::Du
 
 use bytes::{Buf, Bytes};
 use kvengine::{
+    dfs,
     dfs::{FileType, S3Fs},
     ia::{
         gc::{IaGcConfig, IaGcRunner},
@@ -88,10 +89,17 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
         .unwrap();
 
         let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.into()).unwrap();
-        let table_meta_data =
-            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, temp_dir, &mgr)
-                .await
-                .unwrap();
+        let dfs_opts = dfs::Options::default().with_shard(1, 1);
+        let table_meta_data = IaFile::prepare_table_meta(
+            file_id,
+            file_type,
+            table_meta_off,
+            temp_dir,
+            &dfs_opts,
+            &mgr,
+        )
+        .await
+        .unwrap();
         let table_meta_file = InMemFile::new(file_id, table_meta_data);
         let ia_file =
             IaFile::open(file_id, file_type, Arc::new(table_meta_file), mgr.clone()).unwrap();
@@ -180,10 +188,18 @@ fn test_init() {
                 files.push((file_id, file_type, table_meta_off));
             }
 
+            let dfs_opts = dfs::Options::default().with_shard(1, 1);
             for (file_id, file_type, table_meta_off) in files {
-                IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &mgr)
-                    .await
-                    .unwrap();
+                IaFile::prepare_table_meta(
+                    file_id,
+                    file_type,
+                    table_meta_off,
+                    &local_path,
+                    &dfs_opts,
+                    &mgr,
+                )
+                .await
+                .unwrap();
             }
 
             let ia1 = IaFile::open_in_path(1, file_type, &local_path, mgr.clone()).unwrap();
@@ -276,10 +292,17 @@ fn test_abnormal_local_file() {
         let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.into()).unwrap();
 
         {
-            let table_meta_data =
-                IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &mgr)
-                    .await
-                    .unwrap();
+            let dfs_opts = dfs::Options::default().with_shard(1, 1);
+            let table_meta_data = IaFile::prepare_table_meta(
+                file_id,
+                file_type,
+                table_meta_off,
+                &local_path,
+                &dfs_opts,
+                &mgr,
+            )
+            .await
+            .unwrap();
             let table_meta_file = InMemFile::new(file_id, table_meta_data);
             let ia_file =
                 IaFile::open(file_id, file_type, Arc::new(table_meta_file), mgr.clone()).unwrap();
@@ -311,9 +334,17 @@ fn test_abnormal_local_file() {
             // First open file failed due to local meta not found.
             IaFile::open_in_path(file_id, file_type, &local_path, mgr.clone()).unwrap_err();
             // Prepare again.
-            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &local_path, &mgr)
-                .await
-                .unwrap();
+            let dfs_opts = dfs::Options::default().with_shard(1, 1);
+            IaFile::prepare_table_meta(
+                file_id,
+                file_type,
+                table_meta_off,
+                &local_path,
+                &dfs_opts,
+                &mgr,
+            )
+            .await
+            .unwrap();
             let ia_file =
                 IaFile::open_in_path(file_id, file_type, &local_path, mgr.clone()).unwrap();
 
@@ -378,10 +409,18 @@ fn test_local_gc() {
             files.push((file_id, file_type, table_meta_off));
         }
 
+        let dfs_opts = dfs::Options::default().with_shard(1, 1);
         for (file_id, file_type, table_meta_off) in files {
-            IaFile::prepare_table_meta(file_id, file_type, table_meta_off, &meta_path, &mgr)
-                .await
-                .unwrap();
+            IaFile::prepare_table_meta(
+                file_id,
+                file_type,
+                table_meta_off,
+                &meta_path,
+                &dfs_opts,
+                &mgr,
+            )
+            .await
+            .unwrap();
         }
 
         let ia1 = IaFile::open_in_path(1, file_type, &meta_path, mgr.clone()).unwrap();

@@ -216,6 +216,7 @@ impl IaFile {
         ftype: FileType,
         table_meta_off: u64,
         data_dir: &Path,
+        opts: &dfs::Options,
         ia_mgr: &IaManager,
     ) -> Result<Bytes> {
         let local_path = table_meta_file_local_path(file_id, ftype, data_dir);
@@ -238,9 +239,7 @@ impl IaFile {
                 Bytes::from(bytes)
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
-                let opts = dfs::Options::default()
-                    .with_type(ftype)
-                    .with_start_off(table_meta_off);
+                let opts = opts.with_type(ftype).with_start_off(table_meta_off);
                 let bytes = ia_mgr
                     .get_dfs()
                     .read_file(file_id, opts)

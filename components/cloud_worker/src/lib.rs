@@ -383,10 +383,11 @@ fn create_ia_ctx(
         let segment_path = ia_path.join("segment");
         fs::create_dir_all(&segment_path)
             .map_err(|err| format!("create segment path failed: {err:?}"))?;
-        let opts = config
+        let mut opts = config
             .ia
             .to_manager_options(segment_path)
             .map_err(|err| format!("build IA options failed: {err:?}"))?;
+        opts.dynamic_capacity = false; // Always disable dynamic capacity.
 
         let ia_mgr = IaManager::new(opts, Arc::new(s3fs.clone()), runtime.clone().into())
             .map_err(|err| format!("create IA manager failed: {err:?}"))?;

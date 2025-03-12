@@ -1,16 +1,24 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    io::{Read, Write},
     ops,
     ops::Deref,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes};
 use dashmap::DashMap;
-use tikv_util::{deadline::Deadline, time::Instant};
+use tikv_util::{
+    codec::number::{I64_SIZE, U8_SIZE},
+    deadline::Deadline,
+    time::Instant,
+};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
@@ -24,11 +32,19 @@ use crate::{
         },
         util::{new_local_store, LocalStore},
     },
-    metrics::{ENGINE_IA_READ_SEGMENT_CACHE_MISS, ENGINE_IA_READ_SEGMENT_DURATION_HISTOGRAM},
+    metrics::{
+        ENGINE_IA_MAIN_QUEUE_CAPACITY, ENGINE_IA_READ_SEGMENT_CACHE_MISS,
+        ENGINE_IA_READ_SEGMENT_DURATION_HISTOGRAM, ENGINE_IA_SMALL_QUEUE_CAPACITY,
+    },
     table::{Error, Result},
     try_some,
     util::WorkerPool,
 };
+
+const MANIFEST_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
+
+const SMALL_QUEUE_MIN_SEGMENT_COUNT: i64 = 64;
+const MAIN_QUEUE_MIN_SEGMENT_COUNT: i64 = 256;
 
 /// `buf` can be empty, which means to request the specified range of data but
 /// do not actually read it. Used to prefetch segments from remote.
@@ -111,11 +127,38 @@ pub struct IaManagerOptions {
     pub fd_cache_capacity: usize,
 
     pub table_meta_mtime_interval: Duration,
+
+    /// Whether to enable dynamic capacity adjustment.
+    pub dynamic_capacity: bool,
+
+    /// The ratio of cache capacity to total data size.
+    ///
+    /// Used to dynamic adjust the cache capacity when total data size of IA
+    /// changed.
+    pub cache_cap_to_total_data_size_ratio: f64,
 }
 
 impl IaManagerOptions {
     pub fn total_capacity(&self) -> i64 {
         self.small_queue.cap + self.main_queue.cap
+    }
+
+    #[inline]
+    pub fn small_queue_min_cap(&self) -> i64 {
+        if self.dynamic_capacity {
+            (self.segment_size * SMALL_QUEUE_MIN_SEGMENT_COUNT).min(self.small_queue.cap)
+        } else {
+            self.small_queue.cap
+        }
+    }
+
+    #[inline]
+    pub fn main_queue_min_cap(&self) -> i64 {
+        if self.dynamic_capacity {
+            (self.segment_size * MAIN_QUEUE_MIN_SEGMENT_COUNT).min(self.main_queue.cap)
+        } else {
+            self.main_queue.cap
+        }
     }
 }
 
@@ -140,16 +183,18 @@ impl IaManager {
         );
 
         info!("create IA manager"; "opts" => ?opts);
-        let main_store = new_local_store(opts.main_queue.path, opts.fd_cache_capacity);
+        let main_store = new_local_store(opts.main_queue.path.clone(), opts.fd_cache_capacity);
         let segments = Arc::new(LocalSegmentMap::default());
         let segment_data_ctx = SegmentDataContext {
             segments: segments.clone(),
             main_store: main_store.clone(),
         };
 
+        let small_queue_cap = Arc::new(AtomicI64::new(opts.small_queue_min_cap()));
+        let main_queue_cap = Arc::new(AtomicI64::new(opts.main_queue_min_cap()));
         let fifo = S3FifoHandle::new(
-            opts.small_queue.cap,
-            opts.main_queue.cap,
+            small_queue_cap.clone(),
+            main_queue_cap.clone(),
             opts.segment_size,
             opts.freq_update_interval,
             runtime.handle(),
@@ -159,18 +204,19 @@ impl IaManager {
         let dfs_concurrency = Arc::new(Semaphore::new(opts.dfs_concurrency));
 
         let core = Arc::new(IaManagerCore {
-            segment_size: opts.segment_size,
+            opts,
             fs,
             runtime,
             main_store,
             loading_segments: Default::default(),
             segments,
             table_metas: Default::default(),
-            table_meta_mtime_interval: opts.table_meta_mtime_interval,
+            small_queue_cap,
+            main_queue_cap,
             fifo,
             dfs_concurrency,
-            dfs_keyspace_concurrency_limit: opts.dfs_keyspace_concurrency,
             dfs_keyspace_concurrency: Default::default(),
+            last_persist_manifest_time: AtomicI64::new(Instant::now_coarse().second()),
         });
 
         let mgr = Self { core };
@@ -180,7 +226,7 @@ impl IaManager {
 }
 
 pub struct IaManagerCore {
-    segment_size: i64,
+    opts: IaManagerOptions,
     fs: Arc<dyn dfs::Dfs>,
     runtime: WorkerPool,
     main_store: Arc<dyn LocalStore>,
@@ -189,13 +235,15 @@ pub struct IaManagerCore {
     segments: Arc<LocalSegmentMap>,
 
     table_metas: Arc<DashMap<u64 /* file_id */, TableMetaInfo>>,
-    table_meta_mtime_interval: Duration,
 
+    small_queue_cap: Arc<AtomicI64>,
+    main_queue_cap: Arc<AtomicI64>,
     fifo: S3FifoHandle,
 
     dfs_concurrency: Arc<Semaphore>,
-    dfs_keyspace_concurrency_limit: usize,
     dfs_keyspace_concurrency: Arc<DashMap<u32 /* keyspace_id */, Arc<Semaphore>>>,
+
+    last_persist_manifest_time: AtomicI64,
 }
 
 impl IaManagerCore {
@@ -208,17 +256,35 @@ impl IaManagerCore {
     }
 
     pub(crate) fn segment_size(&self) -> i64 {
-        self.segment_size
+        self.opts.segment_size
     }
 
     fn init(&self) -> Result<()> {
+        if let Some(path) = self.main_store.path() {
+            match Manifest::read_from_path(path) {
+                Ok(Some(manifest)) => {
+                    self.init_from_manifest(&manifest);
+                }
+                Ok(None) => {}
+                Err(err) => warn!("open manifest failed: {:?}", err),
+            }
+        }
+
         self.main_store.init()?;
         let mut entries = self.main_store.scan()?;
         if let Some(segments) = entries.remove("seg") {
             self.init_segments(segments)?;
         }
 
+        ENGINE_IA_MAIN_QUEUE_CAPACITY.set(self.main_queue_cap.load(Ordering::Relaxed));
+        ENGINE_IA_SMALL_QUEUE_CAPACITY.set(self.small_queue_cap.load(Ordering::Relaxed));
+
         Ok(())
+    }
+
+    fn init_from_manifest(&self, manifest: &Manifest) {
+        info!("init from manifest: {:?}", manifest);
+        self.adjust_queue_cap(manifest.main_queue_cap);
     }
 
     // TODO: take snapshot for queue & restore from it.
@@ -415,9 +481,7 @@ impl IaManagerCore {
                 let sem = self
                     .dfs_keyspace_concurrency
                     .entry(keyspace_id)
-                    .or_insert_with(|| {
-                        Arc::new(Semaphore::new(self.dfs_keyspace_concurrency_limit))
-                    })
+                    .or_insert_with(|| Arc::new(Semaphore::new(self.opts.dfs_keyspace_concurrency)))
                     .clone();
                 Some(sem.acquire_owned().await.unwrap())
             }
@@ -462,7 +526,9 @@ impl IaManagerCore {
                 let now = Instant::now_coarse();
                 let last_set_mtime =
                     Instant::from_timespec_second_coarse(meta.last_set_mtime_instant_sec);
-                if now.saturating_duration_since(last_set_mtime) >= self.table_meta_mtime_interval {
+                if now.saturating_duration_since(last_set_mtime)
+                    >= self.opts.table_meta_mtime_interval
+                {
                     meta.last_set_mtime_instant_sec = now.second();
                     true
                 } else {
@@ -474,6 +540,78 @@ impl IaManagerCore {
 
     pub fn remove_table_meta(&self, file_id: u64) {
         self.table_metas.remove(&file_id);
+    }
+
+    pub fn notify_total_data_size(&self, total_data_size: u64) {
+        let main_queue_cap =
+            (total_data_size as f64 * self.opts.cache_cap_to_total_data_size_ratio) as i64;
+        self.adjust_queue_cap(main_queue_cap);
+        self.persist_manifest();
+    }
+
+    fn adjust_queue_cap(&self, main_queue_cap: i64) {
+        if !self.opts.dynamic_capacity {
+            return;
+        }
+
+        let main_cap =
+            main_queue_cap.clamp(self.opts.main_queue_min_cap(), self.opts.main_queue.cap);
+
+        // Should use f64. Otherwise, overflow may happen.
+        let small_cap = (main_cap as f64 / self.opts.main_queue.cap as f64
+            * self.opts.small_queue.cap as f64) as i64;
+        let small_cap = small_cap.max(self.opts.small_queue_min_cap());
+
+        let old_main_cap = self.main_queue_cap.swap(main_cap, Ordering::Relaxed);
+        let old_small_cap = self.small_queue_cap.swap(small_cap, Ordering::Relaxed);
+
+        if old_main_cap != main_cap || old_small_cap != small_cap {
+            ENGINE_IA_MAIN_QUEUE_CAPACITY.set(main_cap);
+            ENGINE_IA_SMALL_QUEUE_CAPACITY.set(small_cap);
+            info!(
+                "adjust queue cap: small: {}->{}, main: {}->{}",
+                old_small_cap, small_cap, old_main_cap, main_cap
+            );
+        }
+    }
+
+    fn persist_manifest(&self) {
+        let Some(path) = self.main_store.path() else {
+            return;
+        };
+
+        let last_time_secs = self.last_persist_manifest_time.load(Ordering::Relaxed);
+        if Instant::from_timespec_second_coarse(last_time_secs).saturating_elapsed()
+            < Self::manifest_persist_interval()
+        {
+            return;
+        }
+        if self
+            .last_persist_manifest_time
+            .compare_exchange_weak(
+                last_time_secs,
+                Instant::now_coarse().second(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+
+        let main_queue_cap = self.main_queue_cap.load(Ordering::Relaxed);
+        let manifest = Manifest { main_queue_cap };
+        if let Err(err) = manifest.persist_to_path(path) {
+            warn!("persist manifest failed"; "err" => ?err);
+        }
+    }
+
+    #[inline]
+    fn manifest_persist_interval() -> Duration {
+        if cfg!(debug_assertion) {
+            return Duration::from_secs(3);
+        }
+        MANIFEST_PERSIST_INTERVAL
     }
 }
 
@@ -579,5 +717,83 @@ impl SegmentDataContext {
             main_store: Arc::new(crate::ia::util::LocalMemoryStore::default()),
             segments: Arc::new(LocalSegmentMap::default()),
         }
+    }
+}
+
+const MANIFEST_FORMAT_VER: u8 = 1;
+const MANIFEST_FILE_NAME: &str = "manifest";
+
+#[derive(Debug, PartialEq)]
+struct Manifest {
+    main_queue_cap: i64,
+    // TODO: main queue snapshot
+}
+
+impl Manifest {
+    fn marshal(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(U8_SIZE /* ver */ + I64_SIZE /* main_queue_cap */);
+        buf.put_u8(MANIFEST_FORMAT_VER);
+        buf.put_i64_le(self.main_queue_cap);
+        buf
+    }
+
+    fn unmarshal(mut data: &[u8]) -> Result<Self> {
+        if data.len() < U8_SIZE + I64_SIZE {
+            return Err(Error::IaMgr("manifest data too small".to_string()));
+        }
+
+        let ver = data.get_u8();
+        if ver != MANIFEST_FORMAT_VER {
+            return Err(Error::IaMgr(format!("manifest version not match: {ver}")));
+        }
+
+        let main_queue_cap = data.get_i64_le();
+        Ok(Self { main_queue_cap })
+    }
+
+    fn persist_to_path(&self, path: &Path) -> std::io::Result<()> {
+        let mut f = tempfile::Builder::new()
+            .prefix(MANIFEST_FILE_NAME)
+            .tempfile_in(path)?;
+        f.write_all(&self.marshal())?;
+        f.flush()?;
+        f.persist(path.join(MANIFEST_FILE_NAME))?;
+        Ok(())
+    }
+
+    fn read_from_path(path: &Path) -> Result<Option<Self>> {
+        let mut f = match std::fs::File::open(path.join(MANIFEST_FILE_NAME)) {
+            Ok(f) => f,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(err) => return Err(Error::IaMgr(format!("open manifest error {err:?}"))),
+        };
+        let mut data = vec![];
+        f.read_to_end(&mut data)
+            .map_err(|e| Error::IaMgr(format!("read manifest error {e:?}")))?;
+        Ok(Some(Self::unmarshal(&data)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(Manifest::read_from_path(dir.path()).unwrap().is_none());
+
+        let manifest = Manifest {
+            main_queue_cap: 1024,
+        };
+        manifest
+            .persist_to_path(dir.path())
+            .expect("persist manifest");
+
+        let manifest1 = Manifest::read_from_path(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest1, manifest);
     }
 }

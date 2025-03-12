@@ -1084,6 +1084,8 @@ impl TikvServer {
             conf.storage.flow_control.min_region_speed_limit.0;
 
         kv_opts.ia = conf.kvengine.ia.clone();
+        kv_opts.ia.dynamic_capacity = true; // Always enable dynamic capacity.
+
         kv_opts.txn_file_worker_pool_size =
             conf.kvengine.txn_file_worker_pool_size.unwrap_or_else(|| {
                 // 32GB -> 16, 16GB -> 8

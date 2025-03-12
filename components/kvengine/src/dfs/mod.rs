@@ -447,7 +447,7 @@ impl Dfs for LocalFs {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub file_type: FileType,
     pub shard_id: u64,

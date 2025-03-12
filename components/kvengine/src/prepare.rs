@@ -337,7 +337,7 @@ impl EngineCore {
                         .await
                         .map(|data| (data, None)),
                     IaCtx::Enabled(ia_mgr, data_dir) => {
-                        let opts = dfs::Options::default()
+                        let opts = opts
                             .with_type(fm.file_type)
                             .with_start_off(fm.table_meta_off as u64);
                         fs.read_file(id, opts)

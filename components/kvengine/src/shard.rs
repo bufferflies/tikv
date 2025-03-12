@@ -480,6 +480,7 @@ impl Shard {
                         fm.file_type,
                         fm.table_meta_off as u64,
                         data_dir.deref(),
+                        opts,
                         ia_mgr,
                     )
                     .await?;

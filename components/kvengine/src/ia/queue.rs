@@ -7,7 +7,10 @@ use std::{
     cmp,
     collections::{HashMap, VecDeque},
     fmt,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    },
     thread::JoinHandle,
     time::Duration,
 };
@@ -35,8 +38,8 @@ pub(crate) struct S3FifoHandle {
 impl S3FifoHandle {
     /// `small_cap` can be `0` to disable small queue for test.
     pub(crate) fn new(
-        small_cap: i64,
-        main_cap: i64,
+        small_cap: Arc<AtomicI64>,
+        main_cap: Arc<AtomicI64>,
         item_size: i64,
         freq_update_interval: Duration,
         runtime: WorkerPoolHandle,
@@ -179,8 +182,8 @@ struct S3Fifo {
 impl S3Fifo {
     /// `small_cap` can be `0` to disable small queue for test.
     fn new(
-        small_cap: i64,
-        main_cap: i64,
+        small_cap: Arc<AtomicI64>,
+        main_cap: Arc<AtomicI64>,
         avg_item_size: i64,
         freq_update_interval: Duration,
         task_tx: crossbeam::channel::Sender<FifoTask>,
@@ -189,9 +192,9 @@ impl S3Fifo {
         segment_data_ctx: SegmentDataContext,
     ) -> Self {
         #[cfg(not(any(test, feature = "testexport")))]
-        assert!(small_cap > 0);
+        assert!(small_cap.load(Ordering::Relaxed) > 0);
 
-        let main_queue_len = main_cap / avg_item_size;
+        let main_queue_len = main_cap.load(Ordering::Relaxed) / avg_item_size;
         let mut ghost_queue = vec![];
         ghost_queue.resize(main_queue_len as usize, None);
         Self {
@@ -279,7 +282,8 @@ impl S3Fifo {
 
     fn evict_small(&mut self, ident: &FileSegmentIdent) {
         debug!("fifo.evict_small"; "for" => %ident);
-        while self.small_queue.is_oversize() {
+        let mut cap = None;
+        while self.small_queue.is_oversize(&mut cap) {
             let Some((tail, queue_item)) = self.small_queue.pop() else {
                 break;
             };
@@ -317,7 +321,8 @@ impl S3Fifo {
 
     fn evict_main(&mut self, ident: &FileSegmentIdent) {
         debug!("fifo.evict_main"; "for" => %ident);
-        while self.main_queue.is_oversize() {
+        let mut cap = None;
+        while self.main_queue.is_oversize(&mut cap) {
             let Some((tail, queue_item)) = self.main_queue.pop_with_zero_freq() else {
                 break;
             };
@@ -548,15 +553,15 @@ impl QueueItem {
 struct Queue {
     items: HashMap<FileSegmentIdent, QueueItemMeta>,
     queue: VecDeque<FileSegmentIdent>,
-    cap: i64,
+    cap: Arc<AtomicI64>,
     total_size: i64,
 }
 
 impl Queue {
-    fn new(cap: i64, item_size: i64) -> Self {
+    fn new(cap: Arc<AtomicI64>, item_size: i64) -> Self {
         Self {
             items: HashMap::new(),
-            queue: VecDeque::with_capacity((cap / item_size) as usize),
+            queue: VecDeque::with_capacity((cap.load(Ordering::Relaxed) / item_size) as usize),
             cap,
             total_size: 0,
         }
@@ -596,12 +601,12 @@ impl Queue {
         None
     }
 
-    fn is_oversize(&self) -> bool {
-        self.total_size > self.cap
+    fn is_oversize(&self, cap: &mut Option<i64>) -> bool {
+        self.total_size > *cap.get_or_insert_with(|| self.capacity())
     }
 
     fn capacity(&self) -> i64 {
-        self.cap
+        self.cap.load(Ordering::Relaxed)
     }
 }
 
@@ -636,8 +641,8 @@ mod benches {
         let worker_pool = WorkerPool::from(runtime.handle().clone());
         let segment_data_ctx = SegmentDataContext::new_for_test();
         let fifo = Arc::new(S3FifoHandle::new(
-            small_cap,
-            main_cap,
+            Arc::new(AtomicI64::new(small_cap)),
+            Arc::new(AtomicI64::new(main_cap)),
             1,
             Duration::ZERO,
             worker_pool.handle(),
