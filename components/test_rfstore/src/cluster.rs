@@ -13,7 +13,7 @@ use cloud_server::server::Result as ServerResult;
 use collections::{HashMap, HashSet};
 use engine_traits::{CompactExt, MiscExt, Peekable, CF_DEFAULT};
 use file_system::IoRateLimiter;
-use futures::{self, channel::oneshot, executor::block_on, future::BoxFuture, StreamExt};
+use futures::{self, executor::block_on, future::BoxFuture, StreamExt};
 use kvengine::dfs::Dfs;
 use kvproto::{
     errorpb::Error as PbError,
@@ -21,16 +21,16 @@ use kvproto::{
     metapb::{self, PeerRole, RegionEpoch, StoreLabel},
     pdpb::{self, StoreReport},
     raft_cmdpb::*,
-    raft_serverpb::{PeerState, RaftApplyState, RaftMessage, RegionLocalState},
+    raft_serverpb::{PeerState, RaftMessage, RegionLocalState},
 };
 use pd_client::{BucketStat, PdClient};
 use raft::eraftpb::ConfChangeType;
 use rfstore::{
     router::{RaftRouter, RaftStoreRouter},
     store::{
-        bootstrap_store, initial_region, load_last_peer_state, load_last_raft_state,
-        load_raft_truncated_state, prepare_bootstrap_cluster,
-        state::{RaftState, RaftTruncatedState},
+        bootstrap_store, initial_region, load_apply_state, load_last_peer_state,
+        load_last_raft_state, load_raft_truncated_state, prepare_bootstrap_cluster,
+        state::{RaftApplyState, RaftState, RaftTruncatedState},
         transport::CasualRouter,
         Callback, CasualMessage, Engines, RaftBatchSystem, StoreMeta, WriteResponse,
         INIT_EPOCH_CONF_VER, INIT_EPOCH_VER, PENDING_MSG_CAP,
@@ -1161,7 +1161,7 @@ impl<T: Simulator> Cluster<T> {
     pub fn wait_applied_index(&mut self, region_id: u64, store_id: u64, index: u64) {
         let timer = Instant::now();
         loop {
-            let applied_index = self.apply_state(region_id, store_id).applied_index;
+            let applied_index = self.apply_state(region_id, store_id).get_applied_index();
             if applied_index >= index {
                 return;
             }
@@ -1220,11 +1220,7 @@ impl<T: Simulator> Cluster<T> {
     }
 
     pub fn apply_state(&self, region_id: u64, store_id: u64) -> RaftApplyState {
-        let key = keys::apply_state_key(region_id);
-        self.get_engine(store_id)
-            .get_msg_cf::<RaftApplyState>(engine_traits::CF_RAFT, &key)
-            .unwrap()
-            .unwrap_or_default()
+        load_apply_state(&self.get_engine(store_id), region_id)
     }
 
     pub fn raft_state(&self, peer_id: u64, store_id: u64) -> Option<RaftState> {
@@ -1425,48 +1421,6 @@ impl<T: Simulator> Cluster<T> {
             .set_flags(WriteBatchFlags::FLASHBACK.bits());
         let router = self.sim.rl().get_router(store_id).unwrap();
         router.send_command(req, cb);
-    }
-
-    pub fn must_send_wait_flashback_msg(&mut self, region_id: u64, cmd_type: AdminCmdType) {
-        self.wait_applied_to_current_term(region_id, Duration::from_secs(3));
-        let (result_tx, result_rx) = oneshot::channel();
-        self.must_send_flashback_msg(
-            region_id,
-            cmd_type,
-            Callback::write(Box::new(move |resp| {
-                if resp.response.get_header().has_error() {
-                    result_tx
-                        .send(Some(resp.response.get_header().get_error().clone()))
-                        .unwrap();
-                    return;
-                }
-                result_tx.send(None).unwrap();
-            })),
-        );
-        if let Some(e) = block_on(result_rx).unwrap() {
-            panic!("call flashback msg {:?} failed, error: {:?}", cmd_type, e);
-        }
-    }
-
-    pub fn wait_applied_to_current_term(&mut self, region_id: u64, timeout: Duration) {
-        let mut now = Instant::now();
-        let deadline = now + timeout;
-        while now < deadline {
-            if let Some(leader) = self.leader_of_region(region_id) {
-                let raft_apply_state = self.apply_state(region_id, leader.get_store_id());
-                let raft_local_state = self.raft_state(leader.id, leader.get_store_id()).unwrap();
-                // If term matches and apply to commit index, then it must apply to current
-                // term.
-                if raft_apply_state.applied_index == raft_apply_state.commit_index
-                    && raft_apply_state.commit_term == raft_local_state.get_hard_state().get_term()
-                {
-                    return;
-                }
-            }
-            thread::sleep(Duration::from_millis(10));
-            now = Instant::now();
-        }
-        panic!("region {} is not applied to current term", region_id,);
     }
 
     pub fn must_split(&mut self, region: &metapb::Region, split_key: &[u8]) {

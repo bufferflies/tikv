@@ -35,6 +35,14 @@ impl RaftApplyState {
         let term = term_val.as_slice().get_u64_le();
         Self::new(index, term)
     }
+
+    pub fn get_applied_index(&self) -> u64 {
+        self.applied_index
+    }
+
+    pub fn get_applied_index_term(&self) -> u64 {
+        self.applied_index_term
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]

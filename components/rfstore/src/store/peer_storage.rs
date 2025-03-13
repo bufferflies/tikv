@@ -593,7 +593,11 @@ fn init_apply_state(kv_engine: &kvengine::Engine, region: &metapb::Region) -> Ra
     if region.get_peers().is_empty() {
         return RaftApplyState::new(0, 0);
     }
-    if let Some(shard) = kv_engine.get_shard(region.get_id()) {
+    load_apply_state(kv_engine, region.id)
+}
+
+pub fn load_apply_state(kv_engine: &kvengine::Engine, region_id: u64) -> RaftApplyState {
+    if let Some(shard) = kv_engine.get_shard(region_id) {
         let mut term_bin = shard.get_property(TERM_KEY).unwrap();
         let applied_index = shard.get_write_sequence();
         return RaftApplyState::new(applied_index, term_bin.get_u64_le());

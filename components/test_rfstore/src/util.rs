@@ -13,9 +13,10 @@ use std::{
 use cloud_encryption::MasterKey;
 use cloud_server::TikvServer;
 use file_system::IoRateLimiter;
+use futures::{future::BoxFuture, StreamExt};
 use kvengine::{dfs::Dfs, WRITE_CF};
 use kvproto::{
-    metapb::RegionEpoch,
+    metapb::{self, RegionEpoch},
     raft_cmdpb::{CmdType, CustomRequest, RaftCmdRequest, RaftCmdResponse},
     raft_serverpb::RegionLocalState,
 };
@@ -23,12 +24,13 @@ use pd_client::PdClient;
 use protobuf::Message;
 use rand::RngCore;
 use rfengine::{RfEngine, REGION_META_KEY_BYTE};
-use rfstore::store::{
-    rlog, Callback, CustomBuilder, Engines, ExtCallback, ReadResponse, WriteResponse,
+use rfstore::{
+    store::{rlog, Callback, CustomBuilder, Engines, ExtCallback, ReadResponse, WriteResponse},
+    Result,
 };
 use security::SecurityManager;
-use test_raftstore::Config;
-use tikv_util::{debug, escape, mpsc::future, warn};
+use test_raftstore::{new_get_cmd, new_request, Config};
+use tikv_util::{debug, escape, mpsc::future, warn, HandyRwLock};
 use txn_types::Key;
 
 use crate::{Cluster, Simulator};
@@ -260,6 +262,97 @@ pub fn load_region_local_state(engine: &RfEngine, peer_id: u64) -> Option<Region
         false
     });
     state
+}
+
+// Issue a read request on the specified peer.
+pub fn read_on_peer<T: Simulator>(
+    cluster: &mut Cluster<T>,
+    peer: metapb::Peer,
+    region: &metapb::Region,
+    key: &[u8],
+    read_quorum: bool,
+    timeout: Duration,
+) -> Result<RaftCmdResponse> {
+    let mut request = new_request(
+        region.get_id(),
+        region.get_region_epoch().clone(),
+        vec![new_get_cmd(key)],
+        read_quorum,
+    );
+    request.mut_header().set_peer(peer);
+    cluster.read(None, request, timeout)
+}
+
+pub fn must_get_value(resp: &RaftCmdResponse) -> Vec<u8> {
+    if resp.get_header().has_error() {
+        panic!("failed to read {:?}", resp);
+    }
+    assert_eq!(resp.get_responses().len(), 1);
+    assert_eq!(resp.get_responses()[0].get_cmd_type(), CmdType::Get);
+    assert!(resp.get_responses()[0].has_get());
+    resp.get_responses()[0].get_get().get_value().to_vec()
+}
+
+pub fn async_read_on_peer<T: Simulator>(
+    cluster: &mut Cluster<T>,
+    peer: metapb::Peer,
+    region: &metapb::Region,
+    key: &[u8],
+    read_quorum: bool,
+) -> BoxFuture<'static, RaftCmdResponse> {
+    let node_id = peer.get_store_id();
+    let mut request = new_request(
+        region.get_id(),
+        region.get_region_epoch().clone(),
+        vec![new_get_cmd(key)],
+        read_quorum,
+    );
+    request.mut_header().set_peer(peer);
+    let (tx, mut rx) = future::bounded(1, future::WakePolicy::Immediately);
+    let cb = Callback::Read(Box::new(move |resp| drop(tx.send(resp.response))));
+    cluster.sim.wl().async_read(node_id, None, request, cb);
+    Box::pin(async move {
+        let fut = rx.next();
+        fut.await.unwrap()
+    })
+}
+
+pub fn must_read_on_peer<T: Simulator>(
+    cluster: &mut Cluster<T>,
+    peer: metapb::Peer,
+    region: &metapb::Region,
+    key: &[u8],
+    value: &[u8],
+) {
+    let timeout = Duration::from_secs(5);
+    match read_on_peer(cluster, peer, region, key, false, timeout) {
+        Ok(ref resp) if value == must_get_value(resp).as_slice() => (),
+        other => panic!(
+            "read key {}, expect value {:?}, got {:?}",
+            log_wrappers::hex_encode_upper(key),
+            value,
+            other
+        ),
+    }
+}
+
+pub fn must_error_read_on_peer<T: Simulator>(
+    cluster: &mut Cluster<T>,
+    peer: metapb::Peer,
+    region: &metapb::Region,
+    key: &[u8],
+    timeout: Duration,
+) {
+    if let Ok(mut resp) = read_on_peer(cluster, peer, region, key, false, timeout) {
+        if !resp.get_header().has_error() {
+            let value = resp.mut_responses()[0].mut_get().take_value();
+            panic!(
+                "key {}, expect error but got {}",
+                log_wrappers::hex_encode_upper(key),
+                escape(&value)
+            );
+        }
+    }
 }
 
 pub fn put_till_size<T: Simulator>(
