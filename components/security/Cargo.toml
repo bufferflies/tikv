@@ -5,6 +5,7 @@ edition = "2018"
 publish = false
 
 [dependencies]
+aliyun = { workspace = true }
 aws = { workspace = true }
 base64 = "0.13"
 bstr = "0.2"

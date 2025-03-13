@@ -147,6 +147,11 @@ impl SecurityConfig {
                     .unwrap();
             let master_key_plain_text = aws_kms.decrypt_data_key(&encrypted_key).await.unwrap();
             return MasterKey::new(&master_key_plain_text);
+        } else if self.master_key.vendor == "aliyun" {
+            let master_key_plain_text = aliyun::decrypt_master_key(&self.master_key.cipher_text)
+                .await
+                .unwrap();
+            return MasterKey::new(&master_key_plain_text);
         } else if self.master_key.vendor == "test" {
             let mut master_key = self.master_key.key_id.as_bytes().to_vec();
             master_key.resize(32, 11);
