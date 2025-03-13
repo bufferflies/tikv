@@ -6,10 +6,11 @@ mod preprocessor;
 
 use std::{
     cmp::max,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     mem,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use api_version::ApiV2;
@@ -17,7 +18,7 @@ use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::MasterKey;
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
-use kvengine::{dfs::S3Fs, limiter::StoreLimiter, MetaIterator, ShardMeta};
+use kvengine::{dfs::S3Fs, limiter::StoreLimiter, MetaIterator, Shard, ShardMeta, TERM_KEY};
 use kvenginepb::ChangeSet;
 use kvproto::{
     metapb,
@@ -32,13 +33,18 @@ use pd_client::PdClient;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfengine::{
-    iterator::WalIterator, RaftLogOp, RfEngine, RAFT_STATE_KEY_BYTE, REGION_META_KEY_BYTE,
+    iterator::WalIterator, RaftLogOp, RfEngine, WriteBatch, RAFT_STATE_KEY_BYTE,
     REGION_META_KEY_PREFIX, TRUNCATE_ALL_INDEX,
 };
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
-use rfstore::store::{
-    get_preprocess_cmd, state::RaftState, ApplyContext, ApplyMsgs, MetaChangeListener,
-    PdIdAllocator, PreprocessContext, RecoverHandler, RAFT_INIT_LOG_INDEX,
+use rfstore::{
+    store::{
+        get_preprocess_cmd,
+        state::{RaftApplyState, RaftState},
+        Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator, PeerMsg,
+        PreprocessContext, PreprocessRef, RecoverHandler, StoreMsg, RAFT_INIT_LOG_INDEX,
+    },
+    RaftRouter,
 };
 use security::SecurityConfig;
 use serde_derive::{Deserialize, Serialize};
@@ -49,6 +55,8 @@ use tikv_util::{
 };
 
 use crate::{manifest::Manifest, preprocessor::Preprocessor};
+
+const RAFT_WRITE_BATCH_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct MergedEngineContext {
@@ -88,7 +96,6 @@ pub struct RegionProgress {
     pub synced_index: u64,
     pub commit_index: u64,
     pub truncated_index: u64,
-    pub version: u64,
 }
 
 impl RegionProgress {
@@ -99,7 +106,6 @@ impl RegionProgress {
             synced_index: 0,
             commit_index: 0,
             truncated_index: 0,
-            version: 0,
         }
     }
 }
@@ -156,11 +162,15 @@ pub struct MergedEngine {
     ctx: MergedEngineContext,
     manifest: Manifest,
     region_progresses: HashMap<u64, RegionProgress>,
-    updated_regions: HashMap<u64, u64>, // region_id -> region_version
+    updated_regions: HashSet<u64>,
     raft: RfEngine,
     kv: kvengine::Engine,
     recover_handler: RecoverHandler,
     preprocessors: HashMap<u64, Preprocessor>,
+    appliers: HashMap<u64, Applier>,
+    peer_receiver: mpsc::Receiver<(u64, Box<PeerMsg>)>,
+    _store_receiver: mpsc::Receiver<StoreMsg>, // applier never send store message.
+    router: RaftRouter,
 }
 
 impl MergedEngine {
@@ -221,15 +231,23 @@ impl MergedEngine {
             recover_handler.clone(),
             manifest.keyspace_ids.clone(),
         )?;
+
+        let (store_sender, store_receiver) = mpsc::unbounded();
+        let (peer_sender, peer_receiver) = mpsc::unbounded();
+        let router = RaftRouter::new(peer_sender, store_sender);
         Ok(Self {
             ctx,
             manifest,
             region_progresses,
-            updated_regions: HashMap::new(),
+            updated_regions: HashSet::new(),
             raft,
             kv,
             recover_handler,
             preprocessors,
+            appliers: HashMap::new(),
+            _store_receiver: store_receiver,
+            peer_receiver,
+            router,
         })
     }
 
@@ -248,6 +266,10 @@ impl MergedEngine {
             self.recover_handler.clone(),
             new_keyspaces,
         )
+    }
+
+    pub fn get_router(&self) -> RaftRouter {
+        self.router.clone()
     }
 
     fn load_shards(
@@ -358,7 +380,6 @@ impl MergedEngine {
                 )
                 .max(RAFT_INIT_LOG_INDEX);
                 region_progress.truncated_index = truncated_index;
-                region_progress.version = region_version;
                 // merge states
                 let mut batch = rfengine::WriteBatch::new();
                 origin.iterate_peer_states(peer_id, false, |k, v| {
@@ -419,7 +440,6 @@ impl MergedEngine {
             region_progress.truncated_index = merged_raft
                 .get_truncated_index(region_id)
                 .unwrap_or(RAFT_INIT_LOG_INDEX);
-            region_progress.version = region_version;
         }
 
         Ok(region_progersses)
@@ -585,6 +605,9 @@ impl MergedEngine {
                     .unwrap_or_default();
                     RegionProgress::new(keyspace_id)
                 });
+                if progress.truncated_index == TRUNCATE_ALL_INDEX {
+                    continue;
+                }
                 if let Some(truncated_idx) = origin_wb.get_truncated_idx(peer_id) {
                     if progress.truncated_index < truncated_idx
                         && truncated_idx != TRUNCATE_ALL_INDEX
@@ -603,22 +626,6 @@ impl MergedEngine {
                         }
                     }
                 }
-                if let Some(v) =
-                    origin_wb.get_latest_state(peer_id, region_id, &[REGION_META_KEY_BYTE])
-                {
-                    if !v.is_empty() {
-                        let mut region_local_state =
-                            kvproto::raft_serverpb::RegionLocalState::new();
-                        region_local_state.merge_from_bytes(v).unwrap();
-                        let new_version = region_local_state
-                            .get_region()
-                            .get_region_epoch()
-                            .get_version();
-                        if progress.version < new_version {
-                            progress.version = new_version;
-                        }
-                    }
-                }
                 origin_wb.read_peer_logs(peer_id, |logs| {
                     for log_op in logs {
                         if let Some(existing_op) = progress.entries.get(&log_op.index) {
@@ -629,7 +636,7 @@ impl MergedEngine {
                         progress.entries.insert(log_op.index, log_op.clone());
                     }
                 });
-                self.updated_regions.insert(region_id, progress.version);
+                self.updated_regions.insert(region_id);
             }
         }
         self.manifest
@@ -645,6 +652,7 @@ impl MergedEngine {
         let raft_cfg = rfstore::store::Config::default();
         let mut destroying = HashSet::new();
         let raft_engine = self.raft.clone();
+        let router = self.router.clone();
         let mut ctx = PreprocessContext {
             store_id: self.ctx.config.merged_store_id,
             kv: None,
@@ -653,31 +661,22 @@ impl MergedEngine {
             remove_dependents: &mut remove_dependents,
             apply_msgs: &mut apply_msgs,
             cfg: &raft_cfg,
-            router: None,
+            router: Some(&router),
             destroying: &mut destroying,
         };
-        let mut updated_regions_with_ver: Vec<(u64, u64)> = self.updated_regions.drain().collect();
-        updated_regions_with_ver.sort_by_key(|(_, version)| *version);
-        let updated_regions = updated_regions_with_ver
-            .iter()
-            .map(|(region_id, _)| *region_id)
-            .collect::<Vec<_>>();
-        self.sync_merged_for_regions(&mut ctx, apply_ctx, &updated_regions)?;
-        let mut raft_wb = rfengine::WriteBatch::new();
-        for updated_region in updated_regions {
-            let progress = self.region_progresses.get_mut(&updated_region).unwrap();
-            if let Some(truncated) = self.raft.get_truncated_index(updated_region) {
-                if progress.truncated_index > truncated {
-                    raft_wb.truncate_raft_log(
-                        updated_region,
-                        updated_region,
-                        progress.truncated_index,
-                    );
-                }
-            }
-            progress.entries.clear();
-            progress.synced_index = progress.commit_index;
-        }
+        let mut prepared_msgs = HashMap::new();
+        let updated_regions: Vec<u64> = self.updated_regions.drain().collect();
+        let mut destroyed_regions = HashSet::new();
+        self.sync_merged_for_regions(
+            &mut ctx,
+            apply_ctx,
+            &updated_regions,
+            &mut destroyed_regions,
+            &mut prepared_msgs,
+        )?;
+        self.handle_prepared_msgs(&mut ctx, prepared_msgs, apply_ctx);
+        self.truncate_regions(&updated_regions, &mut raft_wb);
+        self.destroy_regions(destroyed_regions, &mut raft_wb);
         if !raft_wb.is_empty() {
             self.raft.write(raft_wb)?;
         }
@@ -690,30 +689,27 @@ impl MergedEngine {
         ctx: &mut PreprocessContext<'_>,
         apply_ctx: &mut ApplyContext,
         updated_regions: &[u64],
+        destroyed_regions: &mut HashSet<u64>,
+        prepared_msgs: &mut HashMap<u64, Vec<(u64, Box<PeerMsg>)>>,
     ) -> Result<()> {
-        let mut new_regions = vec![];
+        let mut update_queue = VecDeque::from(updated_regions.to_vec());
         let merged_store_id = self.ctx.config.merged_store_id;
-        for &updated_region in updated_regions {
-            match self.raft.get_truncated_index(updated_region) {
-                Some(truncated_idx) => {
-                    if truncated_idx == TRUNCATE_ALL_INDEX {
-                        // region is merged.
-                        continue;
-                    }
-                }
-                None => {
-                    // newly split region is handled after parent regions.
-                    new_regions.push(updated_region);
-                    continue;
-                }
-            }
+        let mut merged_wb = rfengine::WriteBatch::new();
+        let mut merged_wb_estimated_size = 0;
+        let mut finished_regions = HashSet::new();
+        while let Some(updated_region) = update_queue.pop_front() {
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
             let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
             let high: u64 = progress.commit_index + 1;
             if low >= high {
                 continue;
             }
-            let mut preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
+            if self.raft.get_truncated_index(updated_region).is_none() {
+                // region is newly inserted, should process parent first.
+                update_queue.push_back(updated_region);
+                continue;
+            }
+            let preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
                 Preprocessor::new(
                     &self.raft,
                     ctx.store_id,
@@ -721,8 +717,10 @@ impl MergedEngine {
                     &self.ctx.master_key,
                 )
             });
-            let mut hs = eraftpb::HardState::default();
             let mut preprocessor_ref = preprocessor.as_ref();
+            let mut entries = Vec::new();
+            let mut postponed = false;
+            // preprocess entries.
             for log_index in low..high {
                 let mut entry = progress
                     .entries
@@ -734,14 +732,34 @@ impl MergedEngine {
                         )
                     })
                     .to_entry();
-                let admin_req = update_entry(&mut entry, merged_store_id);
+                let mut admin_req = update_entry(&mut entry, merged_store_id);
+                if let Some(admin) = admin_req.as_ref() {
+                    if admin.has_commit_merge() {
+                        let commit_merge = admin.get_commit_merge();
+                        if !finished_regions.contains(&commit_merge.get_source().get_id()) {
+                            // need to process source region first.
+                            update_queue.push_back(updated_region);
+                            progress.synced_index = log_index - 1;
+                            postponed = true;
+                            info!(
+                                "{} postponed at {}, low {}, high {}",
+                                updated_region, log_index, low, high
+                            );
+                            break;
+                        }
+                    }
+                }
                 let err = preprocessor_ref.preprocess_committed_entry(ctx, &entry);
                 if let Some(err) = err {
                     warn!("preprocess committed entry failed"; "region_id" => updated_region, "err" => ?err);
+                    // clear failed command.
+                    admin_req = None;
+                    entry.set_data(Bytes::new());
                 }
                 preprocessor_ref
                     .raft_state
                     .set_last_preprocessed_index(*preprocessor_ref.preprocessed_index);
+                let mut hs = eraftpb::HardState::default();
                 hs.set_term(1);
                 hs.set_vote(updated_region);
                 hs.set_commit(progress.commit_index);
@@ -749,33 +767,11 @@ impl MergedEngine {
                 preprocessor_ref.raft_state.set_last_index(log_index);
                 ctx.raft_wb
                     .append_raft_log(updated_region, updated_region, &entry);
-                let last_change_set = ctx.apply_msgs.get_last_change_set();
-                if last_change_set.is_some() || admin_req.is_some() {
-                    let shard_meta = rfstore::store::load_engine_meta(
-                        &self.raft,
-                        merged_store_id,
-                        updated_region,
-                    )
-                    .unwrap();
-                    preprocessor_ref.write_raft_state(ctx);
-                    let wb = mem::take(ctx.raft_wb);
-                    ctx.raft.write(wb)?;
-                    let shard = self.kv.get_shard(updated_region).unwrap();
-                    shard.sync_data_sequence(&shard_meta);
-                    self.recover_handler
-                        .recover_with_apply_ctx(apply_ctx, &shard, &shard_meta)?;
-                }
                 if let Some(admin_req) = admin_req {
-                    let shard = self.kv.get_shard(updated_region).unwrap();
-                    if admin_req.has_splits() {
-                        let pending_split = last_change_set.unwrap();
-                        self.kv.split(pending_split, RAFT_INIT_LOG_INDEX)?;
-                    } else if admin_req.has_prepare_merge() {
-                        self.kv.prepare_merge(shard.id, shard.ver, entry.index)?;
-                    } else if admin_req.has_rollback_merge() {
-                        self.kv.rollback_merge(shard.id, shard.ver, entry.index);
-                    } else if admin_req.has_commit_merge() {
+                    if admin_req.has_commit_merge() {
+                        let last_change_set = ctx.apply_msgs.get_last_change_set();
                         let source = last_change_set.unwrap();
+                        destroyed_regions.insert(source.shard_id);
                         ctx.raft
                             .iterate_peer_states(source.shard_id, false, |k, _| {
                                 ctx.raft_wb
@@ -786,72 +782,144 @@ impl MergedEngine {
                             source.shard_id,
                             TRUNCATE_ALL_INDEX,
                         );
-                        let source_cs = self.kv.prepare_change_set(
-                            source,
-                            false,
-                            false,
-                            None,
-                            None,
-                            shard.get_encryption_key(),
-                        )?;
-                        self.kv
-                            .commit_merge(shard.id, shard.ver, &source_cs, entry.index)?
+                        // the source must have been applied already, we can remove it now.
+                        self.kv.remove_shard(source.shard_id);
                     }
-                    self.preprocessors.remove(&updated_region);
-                    preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
-                        Preprocessor::new(
-                            &self.raft,
-                            ctx.store_id,
-                            updated_region,
-                            &self.ctx.master_key,
-                        )
-                    });
-                    preprocessor_ref = preprocessor.as_ref();
-                    preprocessor_ref.raft_state.set_hard_state(&hs);
-                    preprocessor_ref.raft_state.set_last_index(log_index);
-                    preprocessor_ref
-                        .raft_state
-                        .set_last_preprocessed_index(*preprocessor_ref.preprocessed_index);
                 }
+                entries.push(entry);
+            }
+            if !postponed {
+                finished_regions.insert(updated_region);
+            }
+            if ctx.raft_wb.is_empty() {
+                continue;
             }
             preprocessor_ref.write_raft_state(ctx);
-        }
-        if !ctx.raft_wb.is_empty() {
-            let remain_updated_regions = ctx.raft_wb.get_region_peer_map();
-            for updated_region in remain_updated_regions.keys() {
-                let preprocessor = self.preprocessors.get_mut(updated_region).unwrap();
-                let mut preprocessor_ref = preprocessor.as_ref();
-                preprocessor_ref.write_raft_state(ctx);
+            let mut wb = mem::take(ctx.raft_wb);
+            ctx.raft.apply(&mut wb);
+            merged_wb_estimated_size += wb.estimated_size();
+            merged_wb.merge_write_batch(wb);
+            if merged_wb_estimated_size > RAFT_WRITE_BATCH_SIZE {
+                ctx.raft.persist(merged_wb)?;
+                merged_wb = WriteBatch::new();
             }
-            let wb = mem::take(ctx.raft_wb);
-            ctx.raft.write(wb)?;
-            for &updated_region in remain_updated_regions.keys() {
-                let preprocessor = self.preprocessors.get_mut(&updated_region).unwrap();
-                let preprocessor_ref = preprocessor.as_ref();
-                let shard_meta = preprocessor_ref.shard_meta.as_ref().unwrap();
-                if let Some(shard) = self.kv.get_shard(updated_region) {
-                    shard.sync_data_sequence(shard_meta);
-                    self.recover_handler
-                        .recover_with_apply_ctx(apply_ctx, &shard, shard_meta)
-                        .unwrap();
+            let shard = self.kv.get_shard(updated_region);
+            if shard.is_none() {
+                // shard is not in the keyspace range, skip apply.
+                continue;
+            }
+            let shard = shard.unwrap();
+            // apply committed entries.
+            let applier = self
+                .appliers
+                .entry(updated_region)
+                .or_insert_with(|| Self::new_applier(&shard, preprocessor_ref, low - 1));
+            ctx.build_apply_msg_for_replication(entries);
+            ctx.handle_apply_msgs_for_replication(applier, apply_ctx);
+            // We keep waiting for paused region because later region may depend on it.
+            while applier.is_paused() {
+                let msgs = if let Some(msgs) = prepared_msgs.remove(&updated_region) {
+                    // received by previous region, handle it now.
+                    msgs
                 } else {
-                    debug_assert!(
-                        !self
-                            .manifest
-                            .keyspace_ids
-                            .contains(&shard_meta.range.keyspace_id)
-                    );
-                }
+                    let (id, peer_msg) =
+                        match self.peer_receiver.recv_timeout(Duration::from_secs(3)) {
+                            Ok((id, msg)) => (id, msg),
+                            Err(err) => {
+                                if err.is_timeout() {
+                                    warn!("waiting for region {} to unpause", updated_region);
+                                    continue;
+                                }
+                                return Err(Error::Other(Box::new(err)));
+                            }
+                        };
+                    if id != updated_region {
+                        // For another region, handle it later.
+                        prepared_msgs.entry(id).or_default().push((id, peer_msg));
+                        continue;
+                    }
+                    vec![(id, peer_msg)]
+                };
+                Self::apply_prepared_msgs(ctx, applier, msgs, apply_ctx);
             }
+            preprocessor.sync_region();
         }
-        if !new_regions.is_empty() {
-            if new_regions.len() == updated_regions.len() {
-                panic!("all updated regions are new regions {:?}", new_regions);
+        if !merged_wb.is_empty() {
+            self.raft.persist(merged_wb)?;
+        }
+        Ok(())
+    }
+
+    fn handle_prepared_msgs(
+        &mut self,
+        ctx: &mut PreprocessContext<'_>,
+        mut prepared_msgs: HashMap<u64, Vec<(u64, Box<PeerMsg>)>>,
+        apply_ctx: &mut ApplyContext,
+    ) {
+        let msg_count = self.peer_receiver.len();
+        for _ in 0..msg_count {
+            let (id, peer_msg) = self.peer_receiver.recv().unwrap();
+            prepared_msgs.entry(id).or_default().push((id, peer_msg));
+        }
+        for (region_id, msgs) in prepared_msgs {
+            let applier = self.appliers.get_mut(&region_id).unwrap();
+            Self::apply_prepared_msgs(ctx, applier, msgs, apply_ctx);
+        }
+    }
+
+    fn truncate_regions(&mut self, regions: &[u64], raft_wb: &mut WriteBatch) {
+        for &region_id in regions {
+            let progress = self.region_progresses.get_mut(&region_id).unwrap();
+            let truncated_idx = self.raft.get_truncated_index(region_id).unwrap();
+            if progress.truncated_index > truncated_idx {
+                raft_wb.truncate_raft_log(region_id, region_id, progress.truncated_index);
             }
-            self.sync_merged_for_regions(ctx, apply_ctx, &new_regions)
-        } else {
-            Ok(())
+            let commit_index = progress.commit_index;
+            // We need to keep the uncommitted index for the next round.
+            progress.entries.retain(|&index, _| index > commit_index);
+            progress.synced_index = progress.commit_index;
         }
+    }
+
+    fn destroy_regions(&mut self, destroyed_regions: HashSet<u64>, raft_wb: &mut WriteBatch) {
+        for region_id in destroyed_regions {
+            self.raft.iterate_peer_states(region_id, false, |k, _| {
+                raft_wb.set_state(region_id, region_id, k, &[]);
+            });
+            raft_wb.truncate_raft_log(region_id, region_id, TRUNCATE_ALL_INDEX);
+            self.appliers.remove(&region_id);
+            self.kv.remove_shard(region_id);
+            self.preprocessors.remove(&region_id);
+            let progress = self.region_progresses.get_mut(&region_id).unwrap();
+            progress.truncated_index = TRUNCATE_ALL_INDEX;
+        }
+    }
+
+    fn new_applier(
+        shard: &Shard,
+        preprocess_ref: PreprocessRef<'_>,
+        applied_index: u64,
+    ) -> Applier {
+        let encryption_key = shard.get_encryption_key();
+        let term_val = shard.get_property(TERM_KEY).unwrap();
+        let term = term_val.chunk().get_u64_le();
+        Applier::new_for_replication(
+            preprocess_ref.region.clone(),
+            encryption_key,
+            RaftApplyState::new(applied_index, term),
+        )
+    }
+
+    fn apply_prepared_msgs(
+        ctx: &mut PreprocessContext<'_>,
+        applier: &mut Applier,
+        msgs: Vec<(u64, Box<PeerMsg>)>,
+        apply_ctx: &mut ApplyContext,
+    ) {
+        for (_, msg) in msgs {
+            ctx.build_prepared_msg_for_replication(msg);
+        }
+        ctx.handle_apply_msgs_for_replication(applier, apply_ctx);
     }
 }
 

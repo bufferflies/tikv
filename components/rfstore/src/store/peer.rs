@@ -1750,7 +1750,6 @@ impl Peer {
             vec![]
         };
         let apply_msg = ApplyMsg::Apply(MsgApply {
-            _region_id: self.region_id,
             term: self.term(),
             entries: committed_entries,
             new_role,
@@ -4082,5 +4081,40 @@ impl<'a> PreprocessContext<'a> {
     // See https://github.com/tidbcloud/cloud-storage-engine/issues/1540.
     pub fn add_remove_dependent(&mut self, parent_id: u64, dependent_id: u64) {
         self.remove_dependents.push((parent_id, dependent_id));
+    }
+
+    pub fn build_apply_msg_for_replication(&mut self, entries: Vec<Entry>) {
+        let msg = ApplyMsg::Apply(MsgApply::new_for_replication(entries));
+        self.apply_msgs.msgs.push(msg);
+    }
+
+    pub fn handle_apply_msgs_for_replication(
+        &mut self,
+        applier: &mut Applier,
+        apply_ctx: &mut ApplyContext,
+    ) {
+        for msg in self.apply_msgs.msgs.drain(..) {
+            applier.handle_msg(apply_ctx, msg);
+        }
+    }
+
+    pub fn build_prepared_msg_for_replication(&mut self, peer_msg: Box<PeerMsg>) {
+        match *peer_msg {
+            PeerMsg::PrepareChangeSetResult(res, _) => self
+                .apply_msgs
+                .msgs
+                .push(ApplyMsg::ApplyChangeSet(res.unwrap())),
+            PeerMsg::PrepareCommitMergeResult(res, commit_index) => {
+                self.apply_msgs.msgs.push(ApplyMsg::ResumeCommitMerge {
+                    source: res.unwrap(),
+                    commit_index,
+                })
+            }
+            PeerMsg::PrepareTxnFileResult { entry_index, .. } => self
+                .apply_msgs
+                .msgs
+                .push(ApplyMsg::ResumeTxnFile(entry_index)),
+            _ => {}
+        }
     }
 }

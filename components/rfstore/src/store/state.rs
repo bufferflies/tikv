@@ -7,7 +7,7 @@ use super::peer_storage::{RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM};
 use crate::store::TERM_KEY;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RaftApplyState {
+pub struct RaftApplyState {
     pub(crate) applied_index: u64,
     pub(crate) applied_index_term: u64,
 }
@@ -22,7 +22,7 @@ impl Default for RaftApplyState {
 }
 
 impl RaftApplyState {
-    pub(crate) fn new(applied_index: u64, applied_index_term: u64) -> Self {
+    pub fn new(applied_index: u64, applied_index_term: u64) -> Self {
         Self {
             applied_index,
             applied_index_term,

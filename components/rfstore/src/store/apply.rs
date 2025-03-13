@@ -231,7 +231,7 @@ pub(crate) struct ApplyBatch {
 /// located at this store, and it will get the corresponding applier to
 /// handle the apply task to make the code logic more clear.
 #[derive(Default)]
-pub(crate) struct Applier {
+pub struct Applier {
     pub(crate) peer: metapb::Peer,
     pub(crate) term: u64,
     pub(crate) region: metapb::Region,
@@ -332,7 +332,7 @@ impl Applier {
         Self::new_from_reg(reg)
     }
 
-    pub(crate) fn new_from_reg(reg: MsgRegistration) -> Self {
+    pub fn new_from_reg(reg: MsgRegistration) -> Self {
         Self {
             peer: reg.peer,
             term: reg.term,
@@ -341,6 +341,14 @@ impl Applier {
             encryption_key: reg.encryption_key,
             ..Default::default()
         }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        !self.paused_apply_queue.paused_sequences.is_empty()
+    }
+
+    pub fn get_apply_state(&self) -> RaftApplyState {
+        self.apply_state
     }
 
     fn tag(&self) -> PeerTag {
@@ -380,6 +388,23 @@ impl Applier {
         }
     }
 
+    pub fn new_for_replication(
+        region: metapb::Region,
+        encryption_key: Option<EncryptionKey>,
+        apply_state: RaftApplyState,
+    ) -> Self {
+        let peer = region.peers.first().cloned().unwrap();
+        Self {
+            peer,
+            term: apply_state.applied_index_term,
+            region,
+            apply_state,
+            snap: None,
+            encryption_key,
+            ..Default::default()
+        }
+    }
+
     fn clear_caches(&mut self) {
         self.snap.take();
         self.lock_cache.clear();
@@ -394,7 +419,7 @@ impl Applier {
         self.get_peer().get_id()
     }
 
-    pub(crate) fn region_id(&self) -> u64 {
+    pub fn region_id(&self) -> u64 {
         self.region.get_id()
     }
 
@@ -2650,7 +2675,6 @@ mod tests {
                 })
                 .collect();
             MsgApply {
-                _region_id: 0,
                 term: 0,
                 entries,
                 new_role: None,

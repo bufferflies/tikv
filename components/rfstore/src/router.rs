@@ -162,10 +162,7 @@ pub struct RaftRouter {
 }
 
 impl RaftRouter {
-    pub(crate) fn new(
-        peer_sender: Sender<(u64, Box<PeerMsg>)>,
-        store_sender: Sender<StoreMsg>,
-    ) -> Self {
+    pub fn new(peer_sender: Sender<(u64, Box<PeerMsg>)>, store_sender: Sender<StoreMsg>) -> Self {
         Self {
             store_sender,
             peer_sender,

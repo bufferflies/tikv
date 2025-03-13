@@ -20,117 +20,25 @@ use test_pd_client::TestPdClient;
 use tikv::config::TikvConfig;
 use tikv_util::{
     codec::bytes::encode_bytes,
-    config::{ReadableDuration, ReadableSize},
+    config::{env_or_default, ReadableDuration, ReadableSize},
 };
 
 use crate::{alloc_node_id_vec, i_to_key};
 
 #[test]
 fn test_merged_engine() {
+    let mut count = 1;
+    env_or_default("TEST_MERGED_ENGINE_COUNT", &mut count);
     test_util::init_log_for_test();
-    let (base_dir, _oss, dfs_conf) = prepare_dfs("test_merged_engine");
-    let node_ids = alloc_node_id_vec(4);
-    let cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
-        conf.dfs = dfs_conf.clone();
-        conf.rfengine.lightweight_backup = true;
-        conf.rfengine.target_file_size = ReadableSize::mb(16);
-        conf.enable_inner_key_offset = true;
-    });
-    cluster.wait_region_replicated(&[], 3);
-    let pd_client = cluster.get_pd_client();
-    pd_client.disable_default_operator();
-    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
-    let mut client = cluster.new_client();
-    client.split_keyspace(keyspace_id);
-    let split_key = encode_bytes(&crate::i_to_key(700));
-    block_on(pd_client.split_regions(vec![split_key])).unwrap();
-    for i in 0..10 {
-        client.put_kv(i * 100..i * 100 + 50, crate::i_to_key, crate::i_to_val);
-    }
-    let backup_config = backup::BackupConfig {
-        dfs: dfs_conf.clone(),
-        tolerate_err: 1,
-        skip_keyspace_meta: true,
-        ..Default::default()
-    };
-    let (_backup_key, backup_meta) = backup::backup_cluster(
-        backup_config.clone(),
-        BackupType::Lightweight,
-        "merged_engine".to_string(),
-        pd_client.as_ref(),
-        None,
-    )
-    .unwrap();
-    let s3fs = Arc::new(S3Fs::new_from_config(dfs_conf));
-    let ctx = MergedEngineContext {
-        pd: pd_client.clone(),
-        fs: s3fs,
-        local_dir: base_dir.path().join("merged_engine"),
-        master_key: cluster.get_kvengine(node_ids[0]).get_master_key(),
-        config: MergedEngineConfig {
-            block_cache_size: ReadableSize::mb(1),
-            timeout_fetch_wal: ReadableDuration::secs(10),
-            merged_store_id: 1024,
-            mem_table_size: cluster
-                .get_node_config(node_ids[0])
-                .rocksdb
-                .writecf
-                .write_buffer_size,
-        },
-        security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
-    };
-    let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
-    merged_engine.load_keyspaces(vec![keyspace_id]).unwrap();
-    let merged_kv = merged_engine.get_kv();
-    let all_shards = merged_kv.get_all_shard_id_vers();
-    assert_eq!(all_shards.len(), 2);
-    let ref_store = kv_engine_to_ref_store(&merged_kv);
-    client
-        .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
-        .unwrap();
-    let scheduler = cluster.new_scheduler();
-    let mut rng = rand::thread_rng();
-    for i in 0..10 {
-        client.put_kv(i * 100 + 50..i * 100 + 60, crate::i_to_key, crate::i_to_val);
-        if i < 8 {
-            if rng.gen_bool(0.5) {
-                let encoded_key_500 = encode_bytes(&crate::i_to_key(i * 100));
-                block_on(pd_client.split_regions(vec![encoded_key_500])).unwrap();
-            } else {
-                scheduler.move_random_region();
-            }
-        } else {
-            scheduler.merge_random_region(true);
-        }
-        if rng.gen_bool(0.2) {
-            update_merged_engine(&pd_client, &cluster, &mut merged_engine);
-            let ref_store = kv_engine_to_ref_store(&merged_kv);
-            client
-                .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
-                .unwrap();
-        }
-    }
-    update_merged_engine(&pd_client, &cluster, &mut merged_engine);
-    let ref_store = kv_engine_to_ref_store(&merged_kv);
-    client
-        .verify_data_with_given_ref_store(&ref_store, None, &RequestOptions::default())
-        .unwrap();
-    let merged_raft = merged_engine.get_raft();
-    let region_peers = merged_raft.get_region_peer_map();
-    for (region_id, _) in region_peers {
-        if let Some(progress) = merged_engine.get_region_progress(region_id) {
-            let truncated_index = merged_raft.get_truncated_index(region_id).unwrap();
-            assert_eq!(progress.truncated_index, truncated_index);
-        }
+    for _ in 0..count {
+        test_merged_engine_once();
     }
 }
 
-#[test]
-fn test_merged_engine_restart() {
-    test_util::init_log_for_test();
+fn test_merged_engine_once() {
     let (base_dir, _oss, dfs_conf) = prepare_dfs("test_merged_engine_restart");
     let node_ids = alloc_node_id_vec(4);
-    let cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
+    let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_conf.clone();
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.target_file_size = ReadableSize::mb(16);
@@ -263,6 +171,7 @@ fn test_merged_engine_restart() {
             assert_eq!(progress.truncated_index, truncated_index);
         }
     }
+    cluster.stop();
 }
 
 fn update_merged_engine(
@@ -295,7 +204,8 @@ fn update_merged_engine(
             .update_wal(store_id, epoch, start_off, data)
             .unwrap();
     }
-    let mut apply_ctx = ApplyContext::new(merged_engine.get_kv(), None);
+    let router = merged_engine.get_router();
+    let mut apply_ctx = ApplyContext::new(merged_engine.get_kv(), Some(router));
     merged_engine.sync_merged(&mut apply_ctx).unwrap();
 }
 

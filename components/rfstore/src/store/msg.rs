@@ -186,7 +186,6 @@ impl RaftCommand {
 
 #[derive(Debug)]
 pub struct MsgApply {
-    pub(crate) _region_id: u64,
     pub(crate) term: u64,
     pub(crate) entries: Vec<eraftpb::Entry>,
     pub(crate) new_role: Option<raft::StateRole>,
@@ -217,7 +216,6 @@ impl MsgApply {
         std::mem::swap(&mut split_cbs, &mut self.cbs);
 
         Some(MsgApply {
-            _region_id: self._region_id,
             term: self.term,
             entries: split_entries,
             new_role: self.new_role,
@@ -236,6 +234,16 @@ impl MsgApply {
     #[inline]
     pub fn last_raft_index(&self) -> Option<u64> {
         self.entries.last().map(|e| e.get_index())
+    }
+
+    pub fn new_for_replication(entries: Vec<eraftpb::Entry>) -> Self {
+        Self {
+            term: 1,
+            entries,
+            new_role: None,
+            cbs: vec![],
+            bucket_meta: None,
+        }
     }
 }
 

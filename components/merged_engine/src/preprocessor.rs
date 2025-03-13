@@ -89,4 +89,10 @@ impl Preprocessor {
             encryption_key: &mut self.encryption_key,
         }
     }
+
+    pub(crate) fn sync_region(&mut self) {
+        if let Some(new_region) = self.preprocessed_region.take() {
+            self.region = new_region;
+        }
+    }
 }
