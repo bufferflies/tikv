@@ -213,7 +213,7 @@ impl PeerFsm {
 }
 
 pub(crate) struct PeerMsgHandler<'a> {
-    fsm: &'a mut PeerFsm,
+    pub(crate) fsm: &'a mut PeerFsm,
     pub(crate) ctx: &'a mut RaftContext,
 }
 
@@ -640,7 +640,7 @@ impl<'a> PeerMsgHandler<'a> {
     }
 
     // return false means the message is invalid, and can be ignored.
-    fn validate_raft_msg(&mut self, msg: &RaftMessage) -> bool {
+    pub(crate) fn validate_raft_msg(&mut self, msg: &RaftMessage) -> bool {
         let region_id = msg.get_region_id();
         let to = msg.get_to_peer();
 
@@ -680,7 +680,7 @@ impl<'a> PeerMsgHandler<'a> {
     /// Checks if the message is sent to the correct peer.
     ///
     /// Returns true means that the message can be dropped silently.
-    fn check_msg(&mut self, msg: &RaftMessage) -> bool {
+    pub(crate) fn check_msg(&mut self, msg: &RaftMessage) -> bool {
         let from_epoch = msg.get_region_epoch();
         let from_store_id = msg.get_from_peer().get_store_id();
 
@@ -967,7 +967,7 @@ impl<'a> PeerMsgHandler<'a> {
         Ok(())
     }
 
-    fn pre_propose_raft_command(
+    pub(crate) fn pre_propose_raft_command(
         &mut self,
         msg: &RaftCmdRequest,
     ) -> Result<Option<RaftCmdResponse>> {

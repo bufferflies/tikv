@@ -27,6 +27,9 @@ pub mod transport;
 pub mod util;
 pub mod worker;
 
+#[cfg(test)]
+mod tests;
+
 pub use apply::*;
 pub use bootstrap::*;
 pub use config::*;
