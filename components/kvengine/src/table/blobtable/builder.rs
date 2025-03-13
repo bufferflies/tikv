@@ -152,6 +152,10 @@ impl BlobTableBuilder {
         Self {
             fid,
             buf: vec![],
+            // TODO(xxx): Enabling checksum is recommended in the future, as it is a crucial data
+            // integrity feature that must be adopted by the storage format.
+            // The likely reason it is currently disabled is the lack of blob cache, which could
+            // cause performance degradation when checksum is enabled.
             checksum_tp: 0,
             compression_tp,
             compression_lvl,

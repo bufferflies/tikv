@@ -15,6 +15,20 @@ use crate::{
     },
 };
 
+fn verify_blob_checksum(checksum_type: u8, meta_slice: &[u8], data_slice: &[u8]) -> Result<()> {
+    if checksum_type == ChecksumType::None as u8 {
+        return Ok(());
+    }
+
+    let checksum = LittleEndian::read_u32(meta_slice);
+    let got_checksum = ChecksumType::from(checksum_type).checksum(data_slice);
+    if checksum != got_checksum {
+        Err(Error::InvalidChecksum("blob checksum mismatch".to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct BlobTable {
     file: Option<Arc<dyn File>>,
@@ -110,6 +124,8 @@ impl BlobTable {
             )?;
         let meta_slice = &data.chunk()[..BLOB_ENTRY_META_SIZE];
         let mut data_slice = &data.chunk()[BLOB_ENTRY_META_SIZE..];
+        verify_blob_checksum(self.footer.checksum_type, meta_slice, data_slice)?;
+
         if let Some(encryption_key) = &encryption_key {
             decryption_buf.clear();
             encryption_key.decrypt(
@@ -153,6 +169,8 @@ impl BlobTable {
             ..blob_ref.offset as usize + BLOB_ENTRY_VALUE_OFFSET + blob_ref.len as usize];
         let meta_slice = &data[..BLOB_ENTRY_META_SIZE];
         let mut data_slice = &data[BLOB_ENTRY_META_SIZE..];
+        verify_blob_checksum(self.footer.checksum_type, meta_slice, data_slice)?;
+
         if let Some(encryption_key) = &encryption_key {
             if need_decrypt {
                 decryption_buf.clear();
@@ -191,13 +209,8 @@ impl BlobTable {
         original_len: u32,
         decompressed_buf: &mut Vec<u8>,
     ) -> Result<bool> {
-        let checksum = LittleEndian::read_u32(meta_slice);
         let compressed_len = LittleEndian::read_u32(&meta_slice[BLOB_ENTRY_LENGTH_OFFSET..]);
         assert_eq!(compressed_len, size);
-        let got_checksum = ChecksumType::from(self.footer.checksum_type).checksum(compressed_data);
-        if checksum != got_checksum {
-            return Err(Error::InvalidChecksum("blob checksum mismatch".to_owned()));
-        }
         match self.footer.compression_type {
             NO_COMPRESSION => Ok(false), // in place decoding
             LZ4_COMPRESSION => {
@@ -359,6 +372,8 @@ impl BlobPrefetcher {
         let data = &buffer[start_off..start_off + BLOB_ENTRY_VALUE_OFFSET + blob_ref.len as usize];
         let meta_slice = &data[..BLOB_ENTRY_META_SIZE];
         let mut data_slice = &data[BLOB_ENTRY_META_SIZE..];
+        verify_blob_checksum(blob_table.footer.checksum_type, meta_slice, data_slice)?;
+
         if let Some(encryption_key) = &self.encryption_key {
             let encryption_ver = blob_table.encryption_ver;
             self.decryption_buffer.clear();
@@ -395,9 +410,12 @@ mod tests {
 
     use super::*;
     use crate::table::{
-        blobtable::{builder::BlobTableBuilder, BlobRef},
+        blobtable::{
+            builder::{BlobTableBuilder, BLOB_ENTRY_META_SIZE},
+            BlobRef,
+        },
         file::InMemFile,
-        InnerKey, Value, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
+        Error, InnerKey, Value, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
     };
 
     fn get_blob_text(max_len: usize, rng: &mut ThreadRng) -> String {
@@ -647,6 +665,90 @@ mod tests {
         // Note that zstd does not always better, as it depends on data
         // characteristics. But in this test workload, it works better.
         assert!(zstd_high < lz4_high);
+    }
+
+    /// Test data integrity with corrupted blobs using different access methods
+    #[rstest]
+    #[case::enable_encryption_no_compression(true, NO_COMPRESSION)]
+    #[case::enable_encryption_compression(true, ZSTD_COMPRESSION)]
+    #[case::disable_encryption_no_compression(false, NO_COMPRESSION)]
+    #[case::disable_encryption_compression(false, ZSTD_COMPRESSION)]
+    fn test_blob_data_integrity(#[case] enable_encryption: bool, #[case] compression_type: u8) {
+        let encryption_key = if enable_encryption {
+            Some(new_test_encryption_key())
+        } else {
+            None
+        };
+
+        // Setup common test data
+        let mut builder = BlobTableBuilder::new_with_checksum_type(
+            1,
+            compression_type,
+            0,
+            0,
+            encryption_key.clone(),
+            ChecksumType::Crc32,
+        );
+
+        let test_data = b"test_data".to_vec();
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+        let blob_ref = builder.add(InnerKey::from_inner_buf(b"test_key"), &value);
+
+        // Corrupt the data
+        let mut file_data = builder.finish().to_vec();
+        let corrupt_pos = blob_ref.offset as usize + BLOB_ENTRY_META_SIZE;
+        file_data[corrupt_pos] ^= 0xFF; // Flip some bits
+
+        // Test Method 1: Standard Access
+        {
+            let file = Arc::new(InMemFile::new(1, Bytes::from(file_data.clone())));
+            let table = BlobTable::new(file).unwrap();
+            let mut decryption_buf = vec![];
+
+            let result = table.get(&blob_ref, &mut decryption_buf, None);
+            assert!(
+                result.is_err(),
+                "Standard access: Should detect corrupted data"
+            );
+            assert!(matches!(result, Err(Error::InvalidChecksum(_))));
+        }
+
+        // Test Method 2: Preloaded Access
+        {
+            let table = BlobTable::from_bytes(Bytes::from(file_data.clone())).unwrap();
+            let mut decompress_buf = vec![];
+            let mut decrypt_buf = vec![];
+
+            let result = table.get_from_preloaded(
+                &blob_ref,
+                compression_type != NO_COMPRESSION,
+                enable_encryption,
+                &mut decompress_buf,
+                &mut decrypt_buf,
+                encryption_key.clone(),
+            );
+            assert!(
+                result.is_err(),
+                "Preloaded access: Should detect corrupted data"
+            );
+            assert!(matches!(result, Err(Error::InvalidChecksum(_))));
+        }
+
+        // Test Method 3: Prefetched Access
+        {
+            let file = Arc::new(InMemFile::new(1, Bytes::from(file_data.clone())));
+            let table = BlobTable::new(file).unwrap();
+            let blob_tables: HashMap<u64, BlobTable> = [(1, table)].into();
+            let mut prefetcher = BlobPrefetcher::new(Arc::new(blob_tables), 1000, encryption_key);
+
+            let result = prefetcher.get(&blob_ref);
+            assert!(
+                result.is_err(),
+                "Prefetched access: Should detect corrupted data"
+            );
+            assert!(matches!(result, Err(Error::InvalidChecksum(_))));
+        }
     }
 
     /// Test boundary keys (smallest_key and biggest_key methods)
