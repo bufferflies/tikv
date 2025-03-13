@@ -29,6 +29,9 @@ pub enum Error {
     #[error("Overload protection due to {0}")]
     OverloadProtection(String),
 
+    #[error("Remote coprocessor network error {0:?}")]
+    RemoteNetwork(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -133,6 +136,7 @@ impl ErrorCodeExt for Error {
             Error::DeadlineExceeded => error_code::coprocessor::DEADLINE_EXCEEDED,
             Error::MaxPendingTasksExceeded => error_code::coprocessor::MAX_PENDING_TASKS_EXCEEDED,
             Error::OverloadProtection(_) => error_code::coprocessor::OVERLOAD_PROTECTION,
+            Error::RemoteNetwork(_) => error_code::coprocessor::REMOTE_NETWORK,
             Error::Other(_) => error_code::UNKNOWN,
         }
     }

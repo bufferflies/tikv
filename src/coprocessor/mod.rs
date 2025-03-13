@@ -39,7 +39,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use checksum::checksum_crc64_xor;
-pub use endpoint::{parse_request_and_handle_remote_cop, prefetch_ia_remote_segments};
+pub use endpoint::{
+    make_error_response, parse_request_and_handle_remote_cop, prefetch_ia_remote_segments,
+};
 use engine_traits::PerfLevel;
 use kvproto::{coprocessor as coppb, kvrpcpb};
 use lazy_static::lazy_static;

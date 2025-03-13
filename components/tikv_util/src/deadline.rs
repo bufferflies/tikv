@@ -44,14 +44,14 @@ impl Deadline {
     }
 
     /// Returns error if the deadline is exceeded.
-    pub fn check(&self) -> std::result::Result<(), DeadlineError> {
+    pub fn check(&self) -> std::result::Result<Duration, DeadlineError> {
         fail_point!("deadline_check_fail", |_| Err(DeadlineError));
 
         let now = Instant::now_coarse();
         if self.deadline <= now {
             return Err(DeadlineError);
         }
-        Ok(())
+        Ok(self.deadline - now)
     }
 
     // Returns the deadline instant of the std library.

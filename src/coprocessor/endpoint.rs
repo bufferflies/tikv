@@ -1261,6 +1261,10 @@ macro_rules! make_error_response_common {
                 $tag = "overload_protection";
                 $resp.set_other_error($e.to_string());
             }
+            Error::RemoteNetwork(_) => {
+                $tag = "remote_network";
+                $resp.set_other_error($e.to_string());
+            }
             Error::Other(_) => {
                 $tag = "other";
                 warn!("unexpected other error encountered processing coprocessor task";
@@ -1282,7 +1286,7 @@ fn make_error_batch_response(batch_resp: &mut coppb::StoreBatchTaskResponse, e: 
     make_error_response_common!(batch_resp, tag, e);
 }
 
-fn make_error_response(e: Error) -> coppb::Response {
+pub fn make_error_response(e: Error) -> coppb::Response {
     debug!(
         "error-response";
         "err" => %e
@@ -1324,6 +1328,10 @@ fn make_error_delegate_response(e: Error) -> coppb::DelegateResponse {
         }
         Error::OverloadProtection(_) => {
             tag = "overload_protection";
+            resp.set_other_error(e.to_string());
+        }
+        Error::RemoteNetwork(_) => {
+            tag = "remote_network";
             resp.set_other_error(e.to_string());
         }
         Error::Other(_) => {

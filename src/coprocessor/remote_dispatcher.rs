@@ -4,6 +4,7 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
+use http::header;
 use kvengine::{SnapAccess, LOCK_CF};
 use kvproto::{coprocessor::Response, kvrpcpb::ExecDetailsV2};
 use protobuf::Message;
@@ -26,13 +27,14 @@ use crate::{
 const REMOTE_REQUEST_CACHE_CAPACITY: u64 = 64;
 
 pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 5);
-pub const INCOMPLETE_MESSAGE: &str = "connection closed before message completed";
 
 pub const REMOTE_COP_FORMAT_V1: u32 = 1;
 
 const RETRY_MAX_ATTEMPTS: usize = 10;
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+
+const CONTENT_TYPE_PROTOBUF: &str = "application/protobuf";
 
 #[derive(Default, Debug)]
 pub struct RemoteRequest {
@@ -51,7 +53,8 @@ pub async fn remote_request(
     let req = hyper::Request::builder()
         .method(hyper::Method::POST)
         .uri(remote_addr)
-        .header("content-type", "application/octet-stream")
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::ACCEPT, CONTENT_TYPE_PROTOBUF)
         .body(hyper::Body::from(req_body))
         .map_err(|e| Error::Other(e.to_string()))?;
     let client = remote_ctx.client.clone();
@@ -59,18 +62,19 @@ pub async fn remote_request(
         .runtime
         .spawn(async move {
             tokio::time::timeout_at(deadline.to_tokio_instant(), async move {
-                let response = client.request(req).await.map_err(|e| {
-                    if e.is_incomplete_message() {
-                        Error::Other(INCOMPLETE_MESSAGE.to_string())
-                    } else {
-                        Error::Other(e.to_string())
-                    }
-                })?;
+                let response = client
+                    .request(req)
+                    .await
+                    .map_err(|e| Error::RemoteNetwork(e.to_string()))?;
+                let headers = response.headers();
+                let is_pb_resp = headers
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|x| x == CONTENT_TYPE_PROTOBUF);
                 let success = response.status().is_success();
                 let body = hyper::body::to_bytes(response.into_body())
                     .await
                     .map_err(|e| Error::Other(e.to_string()))?;
-                if !success {
+                if !success && !is_pb_resp {
                     return Err(Error::Other(
                         String::from_utf8_lossy(body.chunk()).to_string(),
                     ));
@@ -94,47 +98,31 @@ pub async fn remote_handle_request(
     info!("handle {} request, {}", req_type, tag);
     let key = remote_req.key.clone();
     let req_body = remote_req.req_body.clone();
-    let result = remote_ctx
+    let resp = remote_ctx
         .remote_request_cache
-        .get_with(key, async move {
-            remote_request(
+        .try_get_with(key, async move {
+            let resp_body = remote_request(
                 remote_ctx,
                 &remote_ctx.remote_worker_url,
                 tag,
                 req_body,
                 deadline,
             )
-            .await
+            .await?;
+            let mut resp = Response::default();
+            resp.merge_from_bytes(&resp_body)
+                .map_err(|err| Error::Other(format!("{tag}: decode response failed: {err:?}")))?;
+            Ok(resp)
         })
-        .await;
-    let mut invalidate_cache = false;
-    let ret = match result {
-        result @ Ok(_) => result,
-        Err(Error::Other(e)) => {
-            if e.eq(INCOMPLETE_MESSAGE) {
-                invalidate_cache = true;
-            }
-            Err(Error::Other(e))
-        }
-        Err(Error::DeadlineExceeded) => {
-            invalidate_cache = true;
-            Err(Error::DeadlineExceeded)
-        }
-        Err(e) => Err(e),
-    };
-    if invalidate_cache {
-        let key = &remote_req.key;
-        warn!(
-            "{} other failed, incomplete message error, invalidate cached value for the key [:{}]",
-            req_type, key,
-        );
-        remote_ctx.remote_request_cache.invalidate(key).await;
-    }
-    ret.map(|resp_body| {
-        let mut resp = Response::default();
-        resp.merge_from_bytes(&resp_body).unwrap();
+        .await
+        .map_err(|err: Arc<Error>| err.as_ref().clone())?;
+
+    debug_assert!(
+        !resp.has_region_error() && !resp.has_locked(),
+        "unexpected error in remote cop resp: {:?}",
         resp
-    })
+    );
+    Ok(resp)
 }
 
 pub async fn remote_handle_request_with_retry(
@@ -149,14 +137,12 @@ pub async fn remote_handle_request_with_retry(
     loop {
         match remote_handle_request(req_type, tag, remote_ctx, remote_req, deadline).await {
             Ok(resp) => return Ok(resp),
-            Err(err @ Error::DeadlineExceeded) => return Err(err),
-            Err(err) => {
+            Err(err @ Error::RemoteNetwork(_)) => {
                 if deadline.check().is_err() {
                     warn!("{}:{}: deadline is exceeded", tag, req_type);
                     return Err(err);
                 }
 
-                // TODO: distinguish from retryable and not retryable error.
                 if let Ok(delay) = backoff.next_delay() {
                     sleep_async(delay).await;
                 } else {
@@ -164,6 +150,7 @@ pub async fn remote_handle_request_with_retry(
                     return Err(err);
                 }
             }
+            Err(err) => return Err(err),
         }
     }
 }
@@ -185,7 +172,7 @@ pub struct RemoteContextCore {
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
     pub cop_min_blocks_size: usize,
     pub runtime: tokio::runtime::Handle,
-    pub remote_request_cache: moka::future::Cache<String, Result<Vec<u8>>>,
+    pub remote_request_cache: moka::future::Cache<String, Response>,
     pub client: security::HttpClient,
 }
 
@@ -275,7 +262,13 @@ pub(crate) fn try_remote_dag_handler(
         return None;
     }
     COPR_REMOTE_DAG_ESTIMATE_BLOCKS_HISTOGRAM.observe(blocks_size as f64);
-    let tag = format!("ks{}:{}:{}", keyspace_id, snap.get_id(), snap.get_version());
+    let tag = format!(
+        "ks{}:{}:{}:{}",
+        keyspace_id,
+        snap.get_id(),
+        snap.get_version(),
+        req_ctx.txn_start_ts.into_inner()
+    );
     info!(
         "{} send remote coprocessor blocks_size:{}",
         tag, blocks_size
@@ -379,20 +372,17 @@ impl RemoteDagDispatcher {
             .await
             {
                 Ok(data) => return Ok(data),
-                Err(err @ Error::DeadlineExceeded) => return Err(err),
-                Err(err) => {
+                Err(err @ Error::RemoteNetwork(_)) => {
+                    let dur_left: Duration =
+                        deadline.check().map_err(|_| Error::DeadlineExceeded)?;
+
                     error!(
-                        "{} dispatch remote coprocessor error {:?}, attempts {}",
+                        "{} dispatch remote coprocessor error {:?}, attempts {}, {:?} until deadline",
                         self.tag,
                         err,
                         backoff.current_attempts(),
+                        dur_left,
                     );
-
-                    if deadline.check().is_err() {
-                        return Err(Error::DeadlineExceeded);
-                    }
-
-                    // TODO: distinguish from retryable and not retryable error.
                     if let Ok(delay) = backoff.next_delay() {
                         sleep_async(delay).await;
                     } else {
@@ -401,6 +391,7 @@ impl RemoteDagDispatcher {
                         return Err(err);
                     }
                 }
+                Err(err) => return Err(err),
             }
         }
     }

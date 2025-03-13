@@ -7,6 +7,7 @@ define_error_codes!(
     DEADLINE_EXCEEDED => ("DeadlineExceeded", "", ""),
     MAX_PENDING_TASKS_EXCEEDED => ("MaxPendingTasksExceeded", "", ""),
     OVERLOAD_PROTECTION => ("OverloadProtection", "", ""),
+    REMOTE_NETWORK => ("RemoteNetwork", "", ""),
 
     INVALID_DATA_TYPE => ("InvalidDataType", "", ""),
     ENCODING => ("Encoding", "", ""),
