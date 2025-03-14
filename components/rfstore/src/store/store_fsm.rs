@@ -314,6 +314,7 @@ impl RaftBatchSystem {
         let store_id = ctx.store.id;
         for local_state in &local_states {
             let region = local_state.get_region();
+            tikv_util::set_current_region_thread_local(region.get_id());
             let mut peer =
                 PeerFsm::create(store_id, &ctx.cfg.value(), ctx.engines.clone(), region)?;
             if local_state.get_state() == PeerState::Merging {
