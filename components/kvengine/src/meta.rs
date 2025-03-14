@@ -214,18 +214,21 @@ impl ShardMeta {
         self.files.insert(id, file_meta);
     }
 
-    fn delete_file(&mut self, id: u64, level: u32) {
-        if self.has_file_at_level(id, level) {
+    fn delete_file(&mut self, id: u64, level: u32, ft: FileType) {
+        if self.has_file_at_level(id, level, ft) {
             self.files.remove(&id);
         }
     }
 
-    fn has_file_at_level(&self, id: u64, level: u32) -> bool {
-        self.file_level(id) == Some(level)
+    fn has_file_at_level(&self, id: u64, level: u32, ft: FileType) -> bool {
+        self.file_level(id, ft) == Some(level)
     }
 
-    fn file_level(&self, id: u64) -> Option<u32> {
-        self.files.get(&id).map(|fm| fm.get_level())
+    fn file_level(&self, id: u64, ft: FileType) -> Option<u32> {
+        self.files
+            .get(&id)
+            .filter(|fm| fm.file_type == ft)
+            .map(|fm| fm.get_level())
     }
 
     pub fn get_property(&self, key: &str) -> Option<Bytes> {
@@ -371,20 +374,61 @@ impl ShardMeta {
     }
 
     pub fn is_duplicated_major_compaction(&self, comp: &mut pb::MajorCompaction) -> bool {
-        let ssts_already_deleted = comp
-            .get_sstable_change()
-            .get_table_deletes()
-            .iter()
-            .any(|sst_delete| !self.has_file_at_level(sst_delete.get_id(), sst_delete.get_level()));
+        let ssts_already_deleted =
+            comp.get_sstable_change()
+                .get_table_deletes()
+                .iter()
+                .any(|sst_delete| {
+                    !self.has_file_at_level(
+                        sst_delete.get_id(),
+                        sst_delete.get_level(),
+                        FileType::Sst,
+                    )
+                });
         let blobs_already_deleted = comp
             .get_old_blob_tables()
             .iter()
-            .any(|blob_tbl_delete| !self.has_file_at_level(*blob_tbl_delete, 0));
+            .any(|blob_tbl_delete| !self.has_file_at_level(*blob_tbl_delete, 0, FileType::Blob));
         if ssts_already_deleted || blobs_already_deleted {
             info!("{} skip duplicated major compaction {:?}", self.tag(), comp);
             // set compaction to be conflicted, so that newly created files will be GCed.
             comp.conflicted = true;
             return true;
+        }
+        false
+    }
+
+    pub fn is_duplicated_columnar_compaction(&self, comp: &pb::ColumnarCompaction) -> bool {
+        match comp.get_target_level() {
+            0 => {
+                // L0 to columnar compaction.
+                let unconverted_l0s = self.unconverted_l0s.iter().collect::<HashSet<_>>();
+                if comp
+                    .get_row_l0s()
+                    .iter()
+                    .any(|l0| !unconverted_l0s.contains(l0))
+                {
+                    return true;
+                }
+            }
+            1 | 2 => {
+                // L0/L1 or major columnar compaction.
+                let col_already_deleted = comp
+                    .get_columnar_change()
+                    .get_columnar_deletes()
+                    .iter()
+                    .any(|delete| {
+                        !self.has_file_at_level(
+                            delete.get_id(),
+                            delete.get_level(),
+                            FileType::Columnar,
+                        )
+                    });
+                if col_already_deleted {
+                    return true;
+                }
+            }
+            _ => {}
         }
         false
     }
@@ -430,6 +474,16 @@ impl ShardMeta {
             if self.is_duplicated_major_compaction(comp) {
                 return true;
             }
+        }
+        if cs.has_columnar_compaction()
+            && self.is_duplicated_columnar_compaction(cs.get_columnar_compaction())
+        {
+            info!(
+                "{} skip duplicated columnar compaction {:?}",
+                self.tag(),
+                cs
+            );
+            return true;
         }
         if cs.has_destroy_range() && self.is_duplicated_table_change(cs.get_destroy_range()) {
             info!("{} skip duplicated destroy range {:?}", self.tag(), cs);
@@ -488,7 +542,7 @@ impl ShardMeta {
     }
 
     fn is_compaction_file_deleted(&self, id: u64, level: u32, comp: &mut pb::Compaction) -> bool {
-        if !self.has_file_at_level(id, level) {
+        if !self.has_file_at_level(id, level, FileType::Sst) {
             info!(
                 "{} skip duplicated compaction file {} at level {}, already deleted.",
                 self.tag(),
@@ -646,10 +700,10 @@ impl ShardMeta {
             return;
         }
         for id in comp.get_top_deletes() {
-            self.delete_file(*id, comp.level);
+            self.delete_file(*id, comp.level, FileType::Sst);
         }
         for id in comp.get_bottom_deletes() {
-            self.delete_file(*id, comp.level + 1);
+            self.delete_file(*id, comp.level + 1, FileType::Sst);
         }
         for tbl in comp.get_table_creates() {
             self.add_file(tbl.get_id(), FileMeta::from_table(tbl));
@@ -662,13 +716,13 @@ impl ShardMeta {
     fn apply_major_compaction(&mut self, cs: &pb::ChangeSet) {
         let comp = cs.get_major_compaction();
         for delete in comp.get_sstable_change().get_table_deletes() {
-            self.delete_file(delete.get_id(), delete.get_level());
+            self.delete_file(delete.get_id(), delete.get_level(), FileType::Sst);
         }
         for create in comp.get_sstable_change().get_table_creates() {
             self.add_file(create.id, FileMeta::from_table(create));
         }
         for delete in comp.get_old_blob_tables() {
-            self.delete_file(*delete, 0);
+            self.delete_file(*delete, 0, FileType::Blob);
         }
         for create in comp.get_new_blob_tables() {
             self.add_file(create.get_id(), FileMeta::from_blob_table(create));
@@ -688,13 +742,11 @@ impl ShardMeta {
     }
 
     fn is_duplicated_table_change(&self, tc: &pb::TableChange) -> bool {
-        tc.get_table_deletes()
-            .iter()
-            .any(|deleted| !self.has_file_at_level(deleted.get_id(), deleted.get_level()))
-            || tc
-                .get_columnar_deletes()
-                .iter()
-                .any(|deleted| !self.has_file_at_level(deleted.get_id(), deleted.get_level()))
+        tc.get_table_deletes().iter().any(|deleted| {
+            !self.has_file_at_level(deleted.get_id(), deleted.get_level(), FileType::Sst)
+        }) || tc.get_columnar_deletes().iter().any(|deleted| {
+            !self.has_file_at_level(deleted.get_id(), deleted.get_level(), FileType::Columnar)
+        })
     }
 
     pub fn is_empty_table_change(tc: &pb::TableChange) -> bool {
@@ -706,13 +758,13 @@ impl ShardMeta {
 
     fn apply_table_change(&mut self, tc: &pb::TableChange) {
         for deleted in tc.get_table_deletes() {
-            self.delete_file(deleted.get_id(), deleted.get_level());
+            self.delete_file(deleted.get_id(), deleted.get_level(), FileType::Sst);
         }
         for created in tc.get_table_creates() {
             self.add_file(created.get_id(), FileMeta::from_table(created));
         }
         for deleted in tc.get_columnar_deletes() {
-            self.delete_file(deleted.get_id(), deleted.get_level());
+            self.delete_file(deleted.get_id(), deleted.get_level(), FileType::Columnar);
         }
         for created in tc.get_columnar_creates() {
             self.add_file(created.get_id(), FileMeta::from_columnar_table(created));
