@@ -745,6 +745,24 @@ def Server() -> RowPanel:
     )
     layout.row(
         [
+            graph_panel_histogram_quantiles(
+                title="Huge memtable size",
+                description="Histogram of huge mem table bytes for regions",
+                metric="kv_engine_region_huge_mem_table_bytes",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                hide_count=True,
+            ),
+            graph_panel_histogram_quantiles(
+                title="Huge l0 table size",
+                description="Histogram of huge l0 table bytes for regions",
+                metric="kv_engine_region_huge_l0_table_bytes",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                hide_count=True,
+            ),
+        ]
+    )
+    layout.row(
+        [
             heatmap_panel(
                 title="Region written bytes",
                 metric="tikv_region_written_bytes_bucket",
@@ -3143,6 +3161,40 @@ def FlowControl() -> RowPanel:
     layout.row(
         [
             graph_panel(
+                title="Flow controller actions (Region)",
+                description="",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_throttle_action_total",
+                            label_selectors=['level="region"'],
+                            by_labels=["level", "type"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Flow controller actions (Store)",
+                description="",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_throttle_action_total",
+                            label_selectors=['level="store"'],
+                            by_labels=["level", "type"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
                 title="Scheduler flow",
                 description="",
                 yaxes=yaxes(left_format=UNITS.BYTES_IEC),
@@ -3192,109 +3244,6 @@ def FlowControl() -> RowPanel:
                             "tikv_scheduler_throttle_cf",
                         ).extra(" != 0"),
                         legend_format="{{instance}}-{{cf}}",
-                    ),
-                ],
-            ),
-        ]
-    )
-    layout.row(
-        [
-            graph_panel(
-                title="Flow controller actions",
-                description="",
-                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
-                targets=[
-                    target(
-                        expr=expr_sum_rate(
-                            "tikv_scheduler_throttle_action_total",
-                            by_labels=["type", "cf"],
-                        ),
-                        additional_groupby=True,
-                    ),
-                ],
-            ),
-            graph_panel(
-                title="Flush/L0 flow",
-                description="",
-                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
-                targets=[
-                    target(
-                        expr=expr_sum(
-                            "tikv_scheduler_l0_flow",
-                            by_labels=["instance", "cf"],
-                        ),
-                        legend_format="{{cf}}_l0_flow-{{instance}}",
-                    ),
-                    target(
-                        expr=expr_sum(
-                            "tikv_scheduler_flush_flow",
-                            by_labels=["instance", "cf"],
-                        ),
-                        legend_format="{{cf}}_flush_flow-{{instance}}",
-                    ),
-                    target(
-                        expr=expr_sum(
-                            "tikv_scheduler_l0_flow",
-                        ),
-                        legend_format="total_l0_flow-{{instance}}",
-                    ),
-                    target(
-                        expr=expr_sum(
-                            "tikv_scheduler_flush_flow",
-                        ),
-                        legend_format="total_flush_flow-{{instance}}",
-                    ),
-                ],
-            ),
-        ]
-    )
-    layout.row(
-        [
-            graph_panel(
-                title="Flow controller factors",
-                description="",
-                targets=[
-                    target(
-                        expr=expr_max(
-                            "tikv_scheduler_l0",
-                        ),
-                        legend_format="l0-{{instance}}",
-                    ),
-                    target(
-                        expr=expr_max(
-                            "tikv_scheduler_memtable",
-                        ),
-                        legend_format="memtable-{{instance}}",
-                    ),
-                    target(
-                        expr=expr_max(
-                            "tikv_scheduler_l0_avg",
-                        ),
-                        legend_format="avg_l0-{{instance}}",
-                    ),
-                ],
-            ),
-            graph_panel(
-                title="Compaction pending bytes",
-                description="",
-                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
-                targets=[
-                    target(
-                        expr=expr_sum(
-                            "tikv_engine_pending_compaction_bytes",
-                            label_selectors=['db="kv"'],
-                            by_labels=["cf"],
-                        ),
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_sum(
-                            "tikv_scheduler_pending_compaction_bytes",
-                            by_labels=["cf"],
-                        ).extra(" / 10000000"),
-                        legend_format="pending-bytes",
-                        hide=True,
-                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5198,6 +5147,124 @@ def KvEngine() -> RowPanel:
                 metric="kv_engine_write_flow",
                 label_selectors=['type="keys"'],
                 hide_count=True,
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Block Cache Miss",
+                description="The miss count of block cache",
+                yaxes=yaxes(left_format=UNITS.COUNTS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_cache_miss",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Files Count",
+                description="The number of files in KV Engine",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_avg(
+                            "kv_engine_open_files",
+                            by_labels=[],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Throuputs of DFS",
+                description="The throughput of DFS operations",
+                yaxes=yaxes(left_format=UNITS.BYTES_SEC_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_dfs_throughput_bytes",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="{{type}}",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel_histogram_quantiles(
+                title="DFS duration",
+                description="The duration of DFS operations in ms",
+                yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
+                metric="kv_engine_dfs_latency_ms",
+                hide_count=True,
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Read/Write Retries of DFS",
+                description="The count of DFS Read/Write retries",
+                yaxes=yaxes(left_format=UNITS.COUNTS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_dfs_rw_retry_count",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="{{type}}",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="CacheFS Hit",
+                description="Count of CacheFS hit",
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_cachefs_req_count",
+                            label_selectors=['type="hit"'],
+                            by_labels=["instance"],
+                        ),
+                        legend_format="count-{{instance}}",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="CacheFS Hit Rate",
+                description="CacheFS hit rate",
+                yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
+                targets=[
+                    target(
+                        expr=expr_operator(
+                            expr_sum_rate(
+                                "kv_engine_cachefs_req_count",
+                                label_selectors=['type="hit"'],
+                                by_labels=["instance"],
+                            ),
+                            "/",
+                            expr_sum_rate(
+                                "kv_engine_cachefs_req_count",
+                                by_labels=["instance"],
+                            ),
+                        ),
+                        legend_format="rate-{{instance}}",
+                        additional_groupby=True,
+                    ),
+                ],
             ),
         ]
     )
