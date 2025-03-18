@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes};
 use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
+use fail::fail_point;
 use farmhash::fingerprint64;
 use futures::StreamExt;
 use http::{header::CONTENT_RANGE, StatusCode};
@@ -668,6 +669,14 @@ impl S3FsCore {
         storage_class: Option<&str>,
         checksum: Option<u32>, // checksum saved in big-endian order
     ) -> crate::dfs::Result<()> {
+        fail_point!(
+            "s3fs_put_wal_chunks_error",
+            key.contains("wal_chunks"),
+            |_| Err(Error::Other(
+                "s3fs_put_wal_chunks_error failpoint".to_string(),
+            ))
+        );
+
         let mut retry_cnt = 0;
         let start_time = Instant::now();
         let data_len = data.len();

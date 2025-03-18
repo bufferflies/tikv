@@ -219,7 +219,7 @@ impl RfEngineCore {
                 if data_dir.is_some() && panic_mark_dfs_worker_file_exists(data_dir.unwrap()) {
                     // If panic_mark_dfs_worker_file exists, skip init dfs worker thread and mark
                     // dfs worker unhealthy.
-                    dfs_worker_healthy.set_unhealthy();
+                    dfs_worker_healthy.set_unhealthy(u32::MAX, "open");
                     error!(
                         "lightweight backup is enabled, but panic_mark_dfs_worker_file exists, skip init dfs worker thread"
                     );

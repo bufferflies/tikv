@@ -5,7 +5,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -18,8 +18,8 @@ use tikv_util::mpsc::{Receiver, Sender};
 
 use crate::{
     compact_worker::CompactTask, compress_lz4, decompress_lz4, get_integral_wal_chunks,
-    last_wal_chunk_file_key, metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE, parse_wal_chunk_key,
-    wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name, Error, Result,
+    last_wal_chunk_file_key, manifest::Manifest, metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE,
+    parse_wal_chunk_key, wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name, Error, Result,
 };
 
 #[derive(Debug)]
@@ -186,21 +186,29 @@ impl ObjectStorageWorker {
             Err(err) => {
                 // Disable lightweight backup if init failed.
                 error!("dfs worker init failed, set unhealthy"; "err" => ?err);
-                self.healthy.set_unhealthy();
+                self.healthy.set_unhealthy(self.epoch_id, "init");
             }
         }
         while let Ok(task) = self.task_rx.recv() {
+            if let ObjectStorageTask::Close = task {
+                info!("ObjectStorageWorker close");
+                return;
+            }
+
             // If dfs worker is unhealthy, skip handle some tasks and downgrade to disable
             // lightweight backup.
             // Try to recover when receive snapshot task.
-            if !self.healthy.is_healthy() {
+            if !self
+                .healthy
+                .is_healthy(task.epoch_id().unwrap_or(self.epoch_id))
+            {
                 continue;
             }
             match task {
                 ObjectStorageTask::Sync { epoch_id, file_off } => {
                     if let Err(err) = self.handle_sync(epoch_id, file_off) {
                         error!("dfs worker handle_sync failed, set unhealthy"; "err" => ?err);
-                        self.healthy.set_unhealthy()
+                        self.healthy.set_unhealthy(epoch_id, "handle sync")
                     }
                 }
                 ObjectStorageTask::Rotate { epoch_id, file_off } => {
@@ -211,26 +219,23 @@ impl ObjectStorageWorker {
                         );
                         if let Err(err) = self.handle_sync(epoch_id, file_off) {
                             error!("dfs worker handle_sync failed, set unhealthy"; "err" => ?err);
-                            self.healthy.set_unhealthy();
+                            self.healthy.set_unhealthy(epoch_id, "handle sync");
                             return;
                         }
                     }
                     if let Err(err) = self.handle_rotate(epoch_id) {
                         error!("dfs worker handle_rotate failed, set unhealthy"; "err" => ?err);
-                        self.healthy.set_unhealthy();
+                        self.healthy.set_unhealthy(epoch_id, "handle rotate");
                     }
                 }
                 ObjectStorageTask::Flush => {
                     // Send flush task before close in normal case. If close without flush, we can
                     // construct the case for wal chunk recovery in random test.
                     if !self.buf.is_empty() && self.next_chunk(false).is_err() {
-                        self.healthy.set_unhealthy();
+                        self.healthy.set_unhealthy(self.epoch_id, "handle flush");
                     }
                 }
-                ObjectStorageTask::Close => {
-                    info!("ObjectStorageWorker close");
-                    return;
-                }
+                ObjectStorageTask::Close => unreachable!(),
             }
         }
     }
@@ -262,10 +267,11 @@ impl ObjectStorageWorker {
         let fs = self.s3fs.clone();
         let healthy = self.healthy.clone();
         let acquired = self.memory_limiter.acquire(chunk.len())?;
+        let epoch_id = self.epoch_id;
         self.s3fs.get_runtime().spawn_blocking(move || {
             if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
                 error!("{} put wal chunk failed", store_id; "err" => ?err);
-                healthy.set_unhealthy();
+                healthy.set_unhealthy(epoch_id, "put wal chunk");
             }
             drop(acquired);
         });
@@ -402,10 +408,11 @@ impl ObjectStorageWorker {
         let fs = self.s3fs.clone();
         let healthy = self.healthy.clone();
         let acquired = self.memory_limiter.acquire(chunk.len())?;
+        let epoch_id = self.epoch_id;
         self.s3fs.get_runtime().spawn_blocking(move || {
             if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
                 error!("{} put wal chunk failed", store_id, ; "err" => ?err);
-                healthy.set_unhealthy();
+                healthy.set_unhealthy(epoch_id, "put wal chunk");
             }
             drop(acquired);
         });
@@ -545,28 +552,51 @@ pub(crate) enum ObjectStorageTask {
     Close,
 }
 
+impl ObjectStorageTask {
+    fn epoch_id(&self) -> Option<u32> {
+        match self {
+            Self::Sync { epoch_id, .. } | Self::Rotate { epoch_id, .. } => Some(*epoch_id),
+            Self::Flush | Self::Close => None,
+        }
+    }
+}
+
 #[derive(Clone)]
-pub(crate) struct Healthy(Arc<AtomicBool>);
+pub(crate) struct Healthy(
+    Arc<AtomicU32>, // The epoch id since which DFS worker is healthy.
+);
 
 impl Default for Healthy {
     fn default() -> Self {
-        Self(Arc::new(AtomicBool::new(true)))
+        Self(Arc::new(AtomicU32::new(0)))
     }
 }
 
 impl Healthy {
     pub(crate) fn set_healthy(&self) {
         RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(1);
-        self.0.store(true, Ordering::Release)
+        self.0.store(0, Ordering::Release);
     }
 
-    pub(crate) fn set_unhealthy(&self) {
+    pub(crate) fn set_unhealthy(&self, current_epoch: u32, ctx: &str) {
         RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(0);
-        self.0.store(false, Ordering::Release)
+        let next_snapshot_epoch = Manifest::next_snapshot_epoch(current_epoch);
+        self.0.fetch_max(next_snapshot_epoch, Ordering::Release);
+        warn!("dfs worker unhealthy"; "ctx" => ctx,
+            "current_epoch" => current_epoch, "next_snapshot" => next_snapshot_epoch);
     }
 
-    pub(crate) fn is_healthy(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+    pub(crate) fn is_healthy(&self, current_epoch: u32) -> bool {
+        current_epoch >= self.0.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn check_healthy(&self, current_epoch: u32) -> bool {
+        let ok = self.is_healthy(current_epoch);
+        if ok {
+            info!("dfs worker become healthy"; "epoch" => current_epoch);
+            RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(1);
+        }
+        ok
     }
 }
 

@@ -332,7 +332,9 @@ impl ServiceWorker {
                 Instant::now(),
             );
         }
-        if !self.dfs_worker_healthy.is_healthy() {
+        let async_writer = self.async_wal_writer.as_ref().unwrap();
+
+        if !self.dfs_worker_healthy.is_healthy(async_writer.epoch_id) {
             return backup_callback(
                 task,
                 Err("dfs worker unhealthy".to_string()),
@@ -341,7 +343,6 @@ impl ServiceWorker {
             );
         }
 
-        let async_writer = self.async_wal_writer.as_ref().unwrap();
         let mut backup_meta = StoreBackupMeta::default();
         backup_meta.set_store_id(self.engine_id.load(Ordering::SeqCst));
         backup_meta.set_epoch(async_writer.epoch_id);

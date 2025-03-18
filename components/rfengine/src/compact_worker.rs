@@ -63,7 +63,14 @@ pub(crate) struct CompactWorker {
     dir: PathBuf,
     manifest: Manifest,
     task_rx: Receiver<CompactTask>,
-    snap_task_handle: Option<JoinHandle<std::result::Result<u32, String>>>,
+    snap_task_handle: Option<
+        JoinHandle<
+            std::result::Result<
+                u32,           // epoch_id
+                (u32, String), // epoch_id, err
+            >,
+        >,
+    >,
     buf: Vec<u8>,
     compacted_epoch: Arc<AtomicU32>,
     s3fs: Option<Arc<S3Fs>>,
@@ -296,10 +303,11 @@ impl CompactWorker {
         self.try_join_snap_task();
         let engine_id = self.manifest.get_engine_id();
         if self.has_unfinished_snap_task() {
-            self.healthy.set_unhealthy();
+            self.healthy
+                .set_unhealthy(self.manifest.epoch_id, "snapshot task unfinished");
             warn!("{}: snapshot task unfinished", engine_id);
         }
-        if !self.healthy.is_healthy() {
+        if !self.healthy.check_healthy(self.manifest.epoch_id) {
             warn!("{}: skip unhealthy snapshot backup", engine_id);
             return;
         }
@@ -316,7 +324,8 @@ impl CompactWorker {
                 engine_id,
                 rlog_obj_res.unwrap_err()
             );
-            self.healthy.set_unhealthy();
+            self.healthy
+                .set_unhealthy(self.manifest.epoch_id, "create snapshot rlog");
             return;
         }
         let rlog_obj = rlog_obj_res.unwrap();
@@ -348,8 +357,8 @@ impl CompactWorker {
             .spawn_wrapper(move || {
                 for obj in [meta_obj, rlog_obj] {
                     if let Err(err) = s3fs.put_objects(vec![obj]) {
-                        error!("{} put snapshot object failed", engine_id; "err" => ?err);
-                        return Err(err);
+                        error!("{} put snapshot object failed", engine_id; "err" => ?err, "epoch" => epoch_id);
+                        return Err((epoch_id, err));
                     }
                 }
                 Ok(epoch_id)
@@ -370,8 +379,8 @@ impl CompactWorker {
                 Ok(epoch_id) => {
                     self.last_snap_epoch_id = epoch_id;
                 }
-                Err(err) => {
-                    self.healthy.set_unhealthy();
+                Err((epoch_id, err)) => {
+                    self.healthy.set_unhealthy(epoch_id, "join snapshot task");
                     let engine_id = self.manifest.get_engine_id();
                     error!("{} joined snapshot task failed {:?}", engine_id, err);
                 }

@@ -18,7 +18,10 @@ use bytes::{Buf, BufMut};
 use protobuf::Message;
 use tikv_util::{error, info, warn};
 
-use crate::{metrics::RFENGINE_RLOG_GC_SIZE, raft_log_file_name, PeerMeta, TRUNCATE_ALL_INDEX};
+use crate::{
+    metrics::RFENGINE_RLOG_GC_SIZE, raft_log_file_name, writer::EPOCH_ROTATE_LEN, PeerMeta,
+    TRUNCATE_ALL_INDEX,
+};
 
 const REWRITE_DIFF: u32 = 10;
 
@@ -267,11 +270,16 @@ impl Manifest {
         self.engine_id.load(Ordering::SeqCst)
     }
 
-    // Check if we should do snapshot in `handle_rotate`.
-    //
-    // We only do snapshot every 4 epochs.
+    /// Check if we should do snapshot in `handle_rotate`.
+    ///
+    /// We only do snapshot every EPOCH_ROTATE_LEN(4) epochs.
     pub(crate) fn should_snapshot(&self) -> bool {
-        self.epoch_id % 4 == 0
+        self.epoch_id % EPOCH_ROTATE_LEN == 0
+    }
+
+    /// The epoch of next snapshot.
+    pub(crate) fn next_snapshot_epoch(epoch_id: u32) -> u32 {
+        (epoch_id + EPOCH_ROTATE_LEN) / EPOCH_ROTATE_LEN * EPOCH_ROTATE_LEN
     }
 }
 
@@ -297,4 +305,17 @@ pub(crate) fn persist_change_set(
     offset += buf.len() as u64;
     file.sync_data()?;
     Ok(offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_next_snapshot_epoch() {
+        assert_eq!(Manifest::next_snapshot_epoch(0), 4);
+        assert_eq!(Manifest::next_snapshot_epoch(1), 4);
+        assert_eq!(Manifest::next_snapshot_epoch(3), 4);
+        assert_eq!(Manifest::next_snapshot_epoch(4), 8);
+    }
 }

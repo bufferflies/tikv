@@ -22,6 +22,7 @@ pub mod load;
 mod log_batch;
 pub mod manifest;
 mod metrics;
+pub use metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE; // For test purpose.
 pub mod service_worker;
 pub mod traits;
 pub mod utils;
