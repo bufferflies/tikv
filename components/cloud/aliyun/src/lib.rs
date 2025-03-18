@@ -1,15 +1,14 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fs, time::Duration};
+use std::{fs, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use aws::ActiveRefreshingProvider;
 use chrono::Utc;
 use crypto::{hmac::Hmac, mac::Mac, sha1::Sha1};
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
-use rusoto_credential::{
-    AutoRefreshingProvider, AwsCredentials, CredentialsError, ProvideAwsCredentials,
-};
+use rusoto_credential::{AwsCredentials, CredentialsError, ProvideAwsCredentials};
 use serde_derive::{Deserialize, Serialize};
 
 pub const OIDC_PROVIDER_ARN: &str = "ALIBABA_CLOUD_OIDC_PROVIDER_ARN";
@@ -106,10 +105,9 @@ impl ProvideAwsCredentials for AssumeRoleWithOidcProvider {
     }
 }
 
-pub fn new_credential_provider()
--> Result<AutoRefreshingProvider<AssumeRoleWithOidcProvider>, CredentialsError> {
+pub fn new_credential_provider() -> Result<ActiveRefreshingProvider, CredentialsError> {
     let assume_role_provider = AssumeRoleWithOidcProvider::new()?;
-    let auto_refreshing_provider = AutoRefreshingProvider::new(assume_role_provider)?;
+    let auto_refreshing_provider = ActiveRefreshingProvider::new(Arc::new(assume_role_provider));
     Ok(auto_refreshing_provider)
 }
 

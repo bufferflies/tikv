@@ -88,6 +88,7 @@ name = "aliyun"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws",
  "base64 0.13.0",
  "chrono",
  "http",
@@ -410,6 +411,7 @@ dependencies = [
  "async-trait",
  "base64 0.13.0",
  "bytes",
+ "chrono",
  "cloud",
  "fail 0.5.0",
  "futures 0.3.28",

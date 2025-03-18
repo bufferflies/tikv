@@ -1,8 +1,12 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::io::{self, Error, ErrorKind};
+use std::{
+    io::{self, Error, ErrorKind},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use cloud::metrics;
 use futures::{future::TryFutureExt, Future};
 use rusoto_core::{
@@ -189,8 +193,87 @@ impl ProvideAwsCredentials for DefaultCredentialsProvider {
     }
 }
 
+/// ActiveRefreshingProvider try to refresh the credentials much early than the
+/// expiration time. So we can tolerate credential service down for half of the
+/// expire duration.
+#[derive(Clone)]
+pub struct ActiveRefreshingProvider {
+    inner: Arc<dyn ProvideAwsCredentials + Send + Sync>,
+    state: Arc<tokio::sync::Mutex<CredentialsState>>,
+}
+
+struct CredentialsState {
+    current: Option<AwsCredentials>,
+    refresh_at: Option<DateTime<Utc>>,
+}
+
+impl CredentialsState {
+    fn set_credentials(&mut self, creds: AwsCredentials) {
+        self.refresh_at = creds.expires_at().map(|expire_at| {
+            let now = Utc::now();
+            let expire_secs = expire_at - now;
+            now + expire_secs / 2
+        });
+        self.current = Some(creds);
+    }
+
+    fn need_refresh(&self) -> bool {
+        self.refresh_at.map(|t| t < Utc::now()).unwrap_or_default()
+    }
+
+    fn is_expired(&self) -> bool {
+        match self.current.as_ref() {
+            None => true,
+            Some(creds) => {
+                if let Some(expired_at) = creds.expires_at() {
+                    *expired_at < Utc::now()
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+impl ActiveRefreshingProvider {
+    pub fn new(inner: Arc<dyn ProvideAwsCredentials + Send + Sync>) -> ActiveRefreshingProvider {
+        ActiveRefreshingProvider {
+            inner,
+            state: Arc::new(tokio::sync::Mutex::new(CredentialsState {
+                current: None,
+                refresh_at: None,
+            })),
+        }
+    }
+}
+
+#[async_trait]
+impl ProvideAwsCredentials for ActiveRefreshingProvider {
+    async fn credentials(&self) -> Result<AwsCredentials, CredentialsError> {
+        let mut state = self.state.lock().await;
+        if state.is_expired() {
+            let creds = self.inner.credentials().await?;
+            state.set_credentials(creds.clone());
+        } else if state.need_refresh() {
+            let creds_res = self.inner.credentials().await;
+            match creds_res {
+                Ok(creds) => {
+                    state.set_credentials(creds.clone());
+                }
+                Err(err) => {
+                    warn!("failed to refresh credentials {:?}", err);
+                    state.refresh_at = Some(Utc::now() + chrono::Duration::seconds(3));
+                }
+            }
+        }
+        Ok(state.current.as_ref().unwrap().clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{sync::Mutex, time::Duration};
+
     #[allow(unused_imports)]
     use super::*;
 
@@ -212,5 +295,95 @@ mod tests {
         fail::remove("retry_count");
 
         std::env::remove_var(AWS_WEB_IDENTITY_TOKEN_FILE);
+    }
+
+    #[derive(Clone)]
+    struct MockProvider {
+        creds: Arc<Mutex<Option<AwsCredentials>>>,
+    }
+
+    impl MockProvider {
+        fn new() -> Self {
+            MockProvider {
+                creds: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn set_credentials(&self, creds: Option<AwsCredentials>) {
+            let mut guard = self.creds.lock().unwrap();
+            *guard = creds;
+        }
+    }
+
+    #[async_trait]
+    impl ProvideAwsCredentials for MockProvider {
+        async fn credentials(&self) -> Result<AwsCredentials, CredentialsError> {
+            let creds = self.creds.lock().unwrap();
+            if creds.is_none() {
+                return Err(CredentialsError::new("no credentials"));
+            }
+            Ok(creds.as_ref().unwrap().clone())
+        }
+    }
+
+    fn new_mock_credential(expire_at: DateTime<Utc>) -> AwsCredentials {
+        AwsCredentials::new(
+            "access_key".to_string(),
+            "access_secret".to_string(),
+            None,
+            Some(expire_at),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_active_refreshing_provider() {
+        let mock_provider = MockProvider::new();
+        let provider = ActiveRefreshingProvider::new(Arc::new(mock_provider.clone()));
+        let res = provider.credentials().await;
+        res.unwrap_err();
+        let expire_at_1 = Utc::now() + chrono::Duration::seconds(2);
+        mock_provider.set_credentials(Some(new_mock_credential(expire_at_1)));
+        let res = provider.credentials().await;
+        res.unwrap();
+        let state = provider.state.lock().await;
+        assert!(state.refresh_at.is_some());
+        let refresh_at = state.refresh_at.unwrap();
+        drop(state);
+        assert!(refresh_at < expire_at_1);
+
+        let expire_at_2 = Utc::now() + chrono::Duration::seconds(3);
+        mock_provider.set_credentials(Some(new_mock_credential(expire_at_2)));
+        // Before refresh_at, we still get the original credential.
+        let res = provider.credentials().await;
+        let creds = res.unwrap();
+        assert_eq!(creds.expires_at().as_ref().unwrap().clone(), expire_at_1);
+
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        // When after refresh at, we get the latest credential.
+        let expire_at_3 = Utc::now() + chrono::Duration::seconds(2);
+        mock_provider.set_credentials(Some(new_mock_credential(expire_at_3)));
+        let res = provider.credentials().await;
+        let creds = res.unwrap();
+        assert_eq!(creds.expires_at().as_ref().unwrap().clone(), expire_at_3);
+
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        mock_provider.set_credentials(None);
+
+        // After refresh at, we failed to refresh the credential, still use the old one.
+        let creds = provider.credentials().await.unwrap();
+        assert_eq!(creds.expires_at().as_ref().unwrap().clone(), expire_at_3);
+
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+
+        // After expire, and the provider is still unavailable, we get the error.
+        let res = provider.credentials().await;
+        res.unwrap_err();
+
+        // When inner provider is available, we get the latest credential.
+        let expire_at_4 = Utc::now() + chrono::Duration::seconds(2);
+        mock_provider.set_credentials(Some(new_mock_credential(expire_at_4)));
+        let creds = provider.credentials().await.unwrap();
+        assert_eq!(*creds.expires_at().as_ref().unwrap(), expire_at_4);
     }
 }
