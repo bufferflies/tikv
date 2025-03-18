@@ -114,10 +114,6 @@ while [[ $# -gt 0 ]]; do
 	--no-restart-tso-svc)
 		RUN_ARGS+=("--no-restart-tso-svc")
 		;;
-	--enable-inner-key-off-ratio)
-		RUN_ARGS+=("--enable-inner-key-off-ratio" "$2")
-		shift
-		;;
 	--ia-table-ratio)
 		RUN_ARGS+=("--ia-table-ratio" "$2")
 		shift

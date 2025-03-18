@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use kvengine::{dfs::DFSConfig, ShardStats};
+use kvengine::dfs::DFSConfig;
 use pd_client::pd_control::{PdControl, StoreInfo};
 use rand::prelude::*;
 use security::SecurityConfig;
@@ -17,7 +17,7 @@ use test_cloud_server::{
     oss::prepare_dfs,
     tidb::*,
     tikv_bin::{TikvServers, TikvWorkers},
-    MajorCompactionTarget, ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
+    ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
 use tikv_util::{config::ReadableDuration, info, time::Instant};
@@ -28,12 +28,8 @@ const TIKV_STORE_RESTART_INTERVAL: Duration = Duration::from_secs(10); // Interv
 const TEST_DURATION_BEFORE_UPGRADE: Duration = Duration::from_secs(60);
 const TEST_DURATION_AFTER_UPGRADE: Duration = Duration::from_secs(60);
 const TEST_DURATION_AFTER_DOWNGRADE: Duration = Duration::from_secs(60);
-const TEST_DURATION_AFTER_UPDATE_CONFIGS: Duration = Duration::from_secs(60);
 
 const EVICT_LEADERS_TIMEOUT: Duration = Duration::from_secs(30);
-
-const REQUEST_MAJOR_COMPACTION_TIMEOUT: Duration = Duration::from_secs(60);
-const WAIT_PREFIX_KEYSPACE_TABLES_COMPACTED_TIMEOUT: Duration = Duration::from_secs(300);
 
 const WAIT_STORE_STATE_TIMEOUT: Duration = Duration::from_secs(60);
 const WAIT_TIKV_SERVER_HEALTHY_TIMEOUT: Duration = Duration::from_secs(150); // Recover will take a long time.
@@ -140,7 +136,7 @@ fn test_random_upgrade() {
     }
     info!("after downgrade: finished"; "stats" => ?WorkloadStats::collect());
 
-    // Upgrade again.
+    // Upgrade again for verify cluster.
     switch_workers_version(
         Workers::TikvWorkers(&tikv_workers),
         Workers::ServerCluster(&cluster),
@@ -155,60 +151,7 @@ fn test_random_upgrade() {
         &upgrade_switches,
     );
 
-    // Enable `update_inner_key_offset`.
-    update_servers_configs(
-        Servers::ServerCluster(&cluster),
-        |_, conf| {
-            conf.enable_inner_key_offset = true;
-            conf.kvengine.update_inner_key_offset = upgrade_switches.update_inner_key_offset;
-        },
-        &server_configs,
-        pd_ctl.as_ref(),
-        &upgrade_switches,
-    );
-
     let mut cluster = cluster.into_inner();
-
-    if !switches.enable_inner_key_off {
-        let stats = cluster.find_shard_with_stats(|_, stats| stats.keyspace_prefix_tables > 0);
-        assert!(
-            stats.is_some(),
-            "no keyspace prefix tables found, stats: {:?}",
-            cluster.get_data_stats()
-        );
-    }
-
-    // After update configs.
-    let start_time = Instant::now_coarse();
-    while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_update_configs.0 / 2 {
-        random_node_restart(&mut cluster, |_, _| {});
-    }
-    info!("after update configs: finished"; "stats" => ?WorkloadStats::collect());
-
-    if upgrade_switches.update_inner_key_offset {
-        // Trigger major compaction and wait for keyspace prefix tables compacted.
-        {
-            let start_time = Instant::now_coarse();
-            for keyspace_id in keyspace_manager.get_all_keyspaces() {
-                cluster.request_major_compaction(
-                    MajorCompactionTarget::Keyspace(keyspace_id),
-                    true,
-                    REQUEST_MAJOR_COMPACTION_TIMEOUT,
-                );
-            }
-
-            wait_for_keyspace_prefix_tables_compacted_and_retry(&cluster);
-            info!("major compaction: finished"; "takes" => ?start_time.saturating_elapsed());
-        }
-
-        // After major compaction.
-        let start_time = Instant::now_coarse();
-        while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_update_configs.0 / 2
-        {
-            random_node_restart(&mut cluster, |_, _| {});
-        }
-        info!("after major compaction: finished"; "stats" => ?WorkloadStats::collect());
-    }
 
     // Finish.
     info!("test finished, stopping all workers");
@@ -460,6 +403,7 @@ fn switch_servers_version<F>(
     info!("tikv-server: switch version finished"; "from" => from.tag(), "to" => to.tag());
 }
 
+#[allow(unused)]
 fn update_servers_configs<F>(
     servers: Servers<'_>,
     update_conf: F,
@@ -598,59 +542,12 @@ fn random_tikv_servers_restart(tikv_servers: &TikvServers) {
     NODE_RESTART_COUNTER.fetch_add(1, Ordering::Relaxed);
 }
 
-fn wait_for_keyspace_prefix_tables_compacted_and_retry(cluster: &ServerCluster) {
-    let mut last_retry_time = Instant::now_coarse();
-    let mut keyspace_prefix_regions = vec![];
-    try_wait_result(
-        || {
-            if last_retry_time.saturating_elapsed() > Duration::from_secs(10) {
-                let mut get_keyspace_prefix_regions = |_, stats: &ShardStats| -> bool {
-                    if stats.keyspace_prefix_tables > 0 {
-                        keyspace_prefix_regions.push(stats.id);
-                    }
-                    false
-                };
-                cluster.find_shard_with_stats(&mut get_keyspace_prefix_regions);
-                if keyspace_prefix_regions.is_empty() {
-                    return Ok(());
-                }
-                keyspace_prefix_regions.sort_unstable();
-                keyspace_prefix_regions.dedup();
-
-                info!("wait for keyspace prefix tables compacted: retry"; "regions" => ?keyspace_prefix_regions);
-                for region_id in keyspace_prefix_regions.drain(..) {
-                    cluster.request_major_compaction(
-                        MajorCompactionTarget::Region(region_id),
-                        true,
-                        REQUEST_MAJOR_COMPACTION_TIMEOUT,
-                    );
-                }
-                last_retry_time = Instant::now_coarse();
-            }
-
-            match cluster.find_shard_with_stats(|_, stats| stats.keyspace_prefix_tables > 0) {
-                None => Ok(()),
-                Some(stats) => Err(stats),
-            }
-        },
-        WAIT_PREFIX_KEYSPACE_TABLES_COMPACTED_TIMEOUT.as_secs() as usize,
-    )
-    .unwrap_or_else(|stats| {
-        panic!(
-            "wait for keyspace prefix tables compacted timeout: {:?}",
-            stats
-        )
-    });
-}
-
 #[derive(Debug)]
 struct UpgradeTestSwitches {
     test_dur_before_upgrade: ReadableDuration,
     test_dur_after_upgrade: ReadableDuration,
     test_dur_after_downgrade: ReadableDuration,
-    test_dur_after_update_configs: ReadableDuration,
     graceful_restart: bool,
-    update_inner_key_offset: bool,
 }
 
 impl UpgradeTestSwitches {
@@ -669,21 +566,14 @@ impl UpgradeTestSwitches {
             "TEST_DUR_AFTER_DOWNGRADE",
             ReadableDuration(TEST_DURATION_AFTER_DOWNGRADE),
         );
-        let test_dur_after_update_configs = env_param(
-            "TEST_DUR_AFTER_UPDATE_CONFIGS",
-            ReadableDuration(TEST_DURATION_AFTER_UPDATE_CONFIGS),
-        );
 
         let graceful_restart = rng.gen_ratio(1, 5);
-        let update_inner_key_offset = env_switch("UPDATE_INNER_KEY_OFFSET");
 
         Self {
             test_dur_before_upgrade,
             test_dur_after_upgrade,
             test_dur_after_downgrade,
-            test_dur_after_update_configs,
             graceful_restart,
-            update_inner_key_offset,
         }
     }
 }

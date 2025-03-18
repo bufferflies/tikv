@@ -148,12 +148,7 @@ fn test_random_all() {
             TABLE_SCHEMA_ENABLE_RATIO,
             TIMEOUT,
         ),
-        spawn_major_compact(
-            cluster.get_pd_client(),
-            keyspace_manager.clone(),
-            switches.update_inner_key_off,
-            TIMEOUT,
-        ),
+        spawn_major_compact(cluster.get_pd_client(), keyspace_manager.clone(), TIMEOUT),
     ];
 
     let restore_config = RestoreConfig {
@@ -243,12 +238,7 @@ fn test_random_all() {
     let start_time = Instant::now();
     while start_time.saturating_elapsed() < TIMEOUT {
         // Restart nodes.
-        let update_conf = |_, conf: &mut TikvConfig| {
-            // Only update config of one node.
-            // It's similar to rolling restart.
-            conf.kvengine.update_inner_key_offset = switches.update_inner_key_off;
-        };
-        random_node_restart(&mut cluster, update_conf);
+        random_node_restart(&mut cluster, |_, _| {});
     }
 
     // Finish.
@@ -332,7 +322,7 @@ fn prepare_cluster(
 
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
-        conf.enable_inner_key_offset = switches.enable_inner_key_off;
+        conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
 
         conf.coprocessor.region_split_size = ReadableSize::kb(256);
@@ -357,6 +347,7 @@ fn prepare_cluster(
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.flush_split_l0 = true;
         conf.kvengine.per_keyspace_configs = per_keyspace_configs.clone();
+        conf.kvengine.update_inner_key_offset = true;
         if enable_ia {
             conf.kvengine.ia = IaConfig {
                 mem_cap: IA_MEM_CAP_DEF.into(),
@@ -493,26 +484,6 @@ fn prepare_cluster(
         move_scheduler.move_random_region();
     }
 
-    // Restart cluster with inner key offset enabled
-    if !switches.enable_inner_key_off {
-        // The `inner_key_off` of new region is determined by config. So wait for all
-        // shards to be split before change config.
-        // Otherwise, `inner_key_off` of peers would be different.
-        for key in keyspace_keys {
-            cluster.wait_region_replicated(&key, 3);
-        }
-
-        let nodes = cluster.get_nodes();
-        for &node_id in &nodes {
-            cluster.stop_node(node_id);
-        }
-        for node_id in nodes {
-            cluster.start_node(node_id, |_, conf| {
-                conf.enable_inner_key_offset = true;
-            });
-        }
-    }
-
     cluster
 }
 
@@ -554,24 +525,14 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
 
 #[derive(Debug)]
 pub(crate) struct Switches {
-    pub enable_inner_key_off: bool,
-    pub update_inner_key_off: bool,
     pub ia_table_ratio: f64,
 }
 
 impl Switches {
     pub fn from_env() -> Self {
-        let mut rng = thread_rng();
-
-        let enable_inner_key_off: bool = rng.gen_bool(env_param("ENABLE_INNER_KEY_OFF_RATIO", 0.5));
-        let update_inner_key_off = !enable_inner_key_off && env_switch("UPDATE_INNER_KEY_OFF");
         let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.2);
 
-        Self {
-            enable_inner_key_off,
-            update_inner_key_off,
-            ia_table_ratio,
-        }
+        Self { ia_table_ratio }
     }
 }
 

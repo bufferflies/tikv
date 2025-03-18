@@ -300,7 +300,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
     move |_node_id: u16, conf: &mut TikvConfig| {
         let mut rng = thread_rng();
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = switches.enable_inner_key_off;
+        conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
 
         conf.coprocessor.region_split_size = REGION_SIZE;
@@ -326,6 +326,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.block_cache_type = switches.block_cache_type;
+        conf.kvengine.update_inner_key_offset = true;
 
         conf.kvengine.build_columnar = switches.columnar_switch_on;
         conf.kvengine
@@ -685,7 +686,6 @@ pub(crate) async fn connect_tidb(
 
 #[derive(Debug)]
 pub(crate) struct Switches {
-    pub enable_inner_key_off: bool,
     pub remote_cop_min_block_size: usize,
     pub block_cache_type: BlockCacheType,
     pub columnar_switch_on: bool,
@@ -702,7 +702,6 @@ impl Switches {
     pub fn from_env() -> Self {
         let mut rng = thread_rng();
 
-        let enable_inner_key_off: bool = rng.gen_bool(env_param("ENABLE_INNER_KEY_OFF_RATIO", 0.5));
         // Random min block size to generate more or less workloads for cop workers.
         let remote_cop_min_block_size = env_switch(USE_REMOTE_COP_ENV_KEY) as usize
             * (*REMOTE_COP_MIN_BLOCK_SIZE_OPTIONS.choose(&mut rng).unwrap());
@@ -724,7 +723,6 @@ impl Switches {
         let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
 
         Self {
-            enable_inner_key_off,
             remote_cop_min_block_size,
             block_cache_type,
             columnar_switch_on,
