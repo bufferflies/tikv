@@ -30,6 +30,7 @@ use kvengine::{
     IdAllocator, ShardStatsLite,
 };
 use kvproto::metapb::Store;
+use log_wrappers::hex_encode_upper;
 use native_br::common::send_request_to_store_with_retry;
 use rfstore::store::PdIdAllocator;
 use schema::schema::{
@@ -981,14 +982,16 @@ impl schema::KvGetter for SchemaManager {
             .txn_client
             .current_timestamp()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("schema manager: get timestamp failed: {e:?})"))?;
         let mut snapshot = self
             .txn_client
             .snapshot(start_ts.clone(), TransactionOptions::new_pessimistic());
-        let val = snapshot
-            .get(key.to_vec())
-            .await
-            .map_err(|e| e.to_string())?;
+        let val = snapshot.get(key.to_vec()).await.map_err(|e| {
+            format!(
+                "schema manager: kv get failed: {}: {e:?})",
+                hex_encode_upper(key)
+            )
+        })?;
         Ok(val)
     }
 
@@ -1000,14 +1003,14 @@ impl schema::KvGetter for SchemaManager {
             .txn_client
             .current_timestamp()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("schema manager: get timestamp failed: {e:?})"))?;
         let mut snapshot = self
             .txn_client
             .snapshot(start_ts, TransactionOptions::new_pessimistic());
         let pairs: HashMap<Key, Value> = snapshot
             .batch_get(keys.to_vec())
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("schema manager: kv batch get failed: {e:?})"))?
             .map(|pair| (pair.0, pair.1))
             .collect();
         let mut vals = Vec::with_capacity(keys.len());

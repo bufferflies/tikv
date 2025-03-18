@@ -109,8 +109,8 @@ pub async fn send_request_to_store(
         let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
         let err_msg = body.to_str_lossy().to_string();
         error!(
-            "send request to store failed, store {}, status {:?}, err {}",
-            store.id, status, err_msg
+            "send request to store failed, store {}, status {:?}, err {}, uri {:?}",
+            store.id, status, err_msg, uri_str
         );
         return Err(Error::HttpError(status, err_msg));
     }
