@@ -402,8 +402,10 @@ pub struct LevelStatsLite {
     pub entries: u64,
     // The followings are for WRITE_CF only.
     pub kv_size: u64,
-    pub tombs: u64,
-    pub entries_write_cf: u64,
+    // The followings are for WRITE_CF & level 2+ only.
+    pub lv2plus_max_ts: u64,
+    pub lv2plus_tombs: u64,
+    pub lv2plus_entries_write_cf: u64,
     // The following is for WRITE_CF & EXTRA_CF
     pub max_ts: u64,
     // The following is for Columnar.
@@ -417,8 +419,9 @@ impl LevelStatsLite {
         self.entries += other.entries;
         if cf == WRITE_CF {
             self.kv_size += other.kv_size;
-            self.tombs += other.tombs;
-            self.entries_write_cf += other.entries_write_cf;
+            self.lv2plus_max_ts = cmp::max(self.lv2plus_max_ts, other.lv2plus_max_ts);
+            self.lv2plus_tombs += other.lv2plus_tombs;
+            self.lv2plus_entries_write_cf += other.lv2plus_entries_write_cf;
             self.columnar_size += other.columnar_size;
         }
         self.max_ts = max_ts_by_cf(self.max_ts, cf, other.max_ts);
@@ -769,14 +772,16 @@ mod tests {
             blob_size: 20000,
             kv_size: 8000,
             entries: 2000,
-            tombs: 1000,
-            entries_write_cf: 1500,
+            lv2plus_max_ts: 50,
+            lv2plus_tombs: 1000,
+            lv2plus_entries_write_cf: 1500,
             max_ts: 100,
             columnar_size: 30000,
         };
         let mut stats2 = stats1.clone();
 
         stats2.max_ts = 110;
+        stats2.lv2plus_max_ts = 60;
         stats1.add(&stats2, WRITE_CF);
         assert_eq!(
             stats1,
@@ -785,14 +790,16 @@ mod tests {
                 blob_size: 40000,
                 kv_size: 16000,
                 entries: 4000,
-                tombs: 2000,
-                entries_write_cf: 3000,
+                lv2plus_max_ts: 60,
+                lv2plus_tombs: 2000,
+                lv2plus_entries_write_cf: 3000,
                 max_ts: 110,
                 columnar_size: 60000,
             }
         );
 
         stats2.max_ts = 120;
+        stats2.lv2plus_max_ts = 70;
         stats1.add(&stats2, LOCK_CF);
         assert_eq!(
             stats1,
@@ -801,9 +808,10 @@ mod tests {
                 blob_size: 60000,
                 kv_size: 16000, // unchanged
                 entries: 6000,
-                tombs: 2000,            // unchanged
-                entries_write_cf: 3000, // unchanged
-                max_ts: 110,            // unchanged
+                lv2plus_max_ts: 60,
+                lv2plus_tombs: 2000,            // unchanged
+                lv2plus_entries_write_cf: 3000, // unchanged
+                max_ts: 110,                    // unchanged
                 columnar_size: 60000,
             }
         );
@@ -817,8 +825,9 @@ mod tests {
                 blob_size: 80000,
                 kv_size: 16000, // unchanged
                 entries: 8000,
-                tombs: 2000,            // unchanged
-                entries_write_cf: 3000, // unchanged
+                lv2plus_max_ts: 60,             // unchanged
+                lv2plus_tombs: 2000,            // unchanged
+                lv2plus_entries_write_cf: 3000, // unchanged
                 max_ts: 130,
                 columnar_size: 60000,
             }
@@ -830,13 +839,14 @@ mod tests {
         assert_eq!(
             stats1,
             LevelStatsLite {
-                data_size: 40000,       // unchanged
-                blob_size: 80000,       // unchanged
-                kv_size: 16000,         // unchanged
-                entries: 8000,          // unchanged
-                tombs: 2000,            // unchanged
-                entries_write_cf: 3000, // unchanged
-                max_ts: 130,            // unchanged
+                data_size: 40000,               // unchanged
+                blob_size: 80000,               // unchanged
+                kv_size: 16000,                 // unchanged
+                entries: 8000,                  // unchanged
+                lv2plus_max_ts: 60,             // unchanged
+                lv2plus_tombs: 2000,            // unchanged
+                lv2plus_entries_write_cf: 3000, // unchanged
+                max_ts: 130,                    // unchanged
                 columnar_size: 70000,
             }
         );

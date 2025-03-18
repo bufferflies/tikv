@@ -1244,6 +1244,10 @@ fn test_refresh_stats() {
 
     let mut write_cf_builder = ShardCfBuilder::new(WRITE_CF);
     write_cf_builder.add_table(
+        new_table(&engine, 11, 100, 200, 101, true, &mut saved_vals),
+        3,
+    );
+    write_cf_builder.add_table(
         new_table(&engine, 12, 50, 150, 102, false, &mut saved_vals),
         2,
     );
@@ -1277,12 +1281,13 @@ fn test_refresh_stats() {
     shard.refresh_states();
 
     // size per entry: key 9, value 18
-    assert_eq!(shard.get_estimated_entries(), 340); // 100 + 20 + 100 + 20 + 100
+    assert_eq!(shard.get_estimated_entries(), 440); // 100 + 100 + 20 + 100 + 20 + 100
     assert_eq!(load_u64(&shard.sst_max_ts), 150); // max(WRITE_CF, EXTRA_CF). TODO: test with mem tables.
     assert_eq!(shard.get_max_ts(), 150); // max(WRITE_CF, EXTRA_CF)
-    assert_eq!(shard.get_estimated_kv_size(), 2880); // 100*27 + 20*9
-    assert_eq!(load_u64(&shard.tombs), 20); // WRITE_CF only
-    assert_eq!(load_u64(&shard.entries_write_cf), 120); // WRITE_CF only
+    assert_eq!(shard.get_estimated_kv_size(), 3780); // 100*27 + 120*9
+    assert_eq!(load_u64(&shard.lv2plus_max_ts), 102); // max(WRITE_CF & Level 2+)
+    assert_eq!(load_u64(&shard.lv2plus_tombs), 100); // WRITE_CF & Level 2+ only
+    assert_eq!(load_u64(&shard.lv2plus_entries_write_cf), 200); // WRITE_CF & Level 2+ only
 }
 
 #[test]

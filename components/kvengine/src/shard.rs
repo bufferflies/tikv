@@ -88,8 +88,11 @@ pub struct Shard {
     pub(crate) estimated_kv_size: AtomicU64,
 
     pub(crate) sst_max_ts: AtomicU64, // the max_ts of sst files (mem-tables excluded)
-    pub(crate) tombs: AtomicU64,      // number of tombstone entries
-    pub(crate) entries_write_cf: AtomicU64, // number of entries in WRITE_CF
+
+    // Used for tombstone gc. Stats are collected from WRITE_CF & level 2+ only.
+    pub(crate) lv2plus_max_ts: AtomicU64, // the max_ts of sst files
+    pub(crate) lv2plus_tombs: AtomicU64,  // number of tombstone entries
+    pub(crate) lv2plus_entries_write_cf: AtomicU64, // number of entries in WRITE_CF
 
     // meta_seq is the raft log index of the applied change set.
     // Because change set are applied in the worker thread, the value is usually smaller
@@ -208,8 +211,9 @@ impl Shard {
             max_ts: Default::default(),
             estimated_kv_size: Default::default(),
             sst_max_ts: Default::default(),
-            tombs: Default::default(),
-            entries_write_cf: Default::default(),
+            lv2plus_max_ts: Default::default(),
+            lv2plus_tombs: Default::default(),
+            lv2plus_entries_write_cf: Default::default(),
             meta_seq: Default::default(),
             write_sequence: Default::default(),
             snap_version: Default::default(),
@@ -560,8 +564,13 @@ impl Shard {
             std::cmp::max(lv_stats.max_ts, data.get_mem_table_max_ts()),
         );
         store_u64(&self.estimated_kv_size, lv_stats.kv_size);
-        store_u64(&self.tombs, lv_stats.tombs);
-        store_u64(&self.entries_write_cf, lv_stats.entries_write_cf);
+
+        store_u64(&self.lv2plus_max_ts, lv_stats.lv2plus_max_ts);
+        store_u64(&self.lv2plus_tombs, lv_stats.lv2plus_tombs);
+        store_u64(
+            &self.lv2plus_entries_write_cf,
+            lv_stats.lv2plus_entries_write_cf,
+        );
 
         data.refresh_for_limiter(&self.tag());
     }
@@ -1201,17 +1210,22 @@ impl Shard {
             return false;
         }
 
-        let sst_max_ts = self.sst_max_ts.load(Ordering::Relaxed);
-        if sst_max_ts > safe_ts {
+        let lv2plus_max_ts = self.lv2plus_max_ts.load(Ordering::Relaxed);
+        if lv2plus_max_ts > safe_ts {
             return false;
         }
 
-        let tombs = self.tombs.load(Ordering::Relaxed);
+        let tombs = self.lv2plus_tombs.load(Ordering::Relaxed);
         if tombs < self.opt.compaction_tombs_count {
             return false;
         }
 
-        let write_entries = self.entries_write_cf.load(Ordering::Relaxed);
+        let write_entries = self.lv2plus_entries_write_cf.load(Ordering::Relaxed);
+        if write_entries < tombs {
+            // To handle the corner case that entries & tombs are not consistent.
+            return false;
+        }
+
         let tombs_ratio = tombs as f64 / write_entries as f64;
         if tombs_ratio >= self.opt.compaction_tombs_ratio && !self.get_data().has_unconverted_l0s()
         {
@@ -1221,7 +1235,8 @@ impl Shard {
             }
 
             info!("{} trigger major compaction for tombstones", self.tag();
-                "tombs" => tombs, "write_entries" => write_entries, "ratio" => tombs_ratio, "safe_ts" => safe_ts);
+                "tombs" => tombs, "write_entries" => write_entries, "ratio" => tombs_ratio,
+                "max_ts" => lv2plus_max_ts, "safe_ts" => safe_ts);
             *priority = Some(CompactionPriority::Major { score: tombs_ratio });
             return true;
         }
@@ -1843,14 +1858,10 @@ impl ShardDataCore {
                 stats.data_size += l0.size();
                 stats.entries += l0.entries();
                 stats.kv_size += l0.kv_size();
-                stats.tombs += l0.tombs();
-                stats.entries_write_cf += l0.entries_write_cf();
             } else {
                 stats.data_size += l0.size() / 2;
                 stats.entries += l0.entries() / 2;
                 stats.kv_size += l0.kv_size() / 2;
-                stats.tombs += l0.tombs() / 2;
-                stats.entries_write_cf += l0.entries_write_cf() / 2;
             }
             stats.max_ts = cmp::max(stats.max_ts, l0.max_ts());
         });
@@ -1866,8 +1877,11 @@ impl ShardDataCore {
                 stats.entries += tbl.entries as u64 / 2;
                 if cf == WRITE_CF {
                     stats.kv_size += tbl.kv_size / 2;
-                    stats.tombs += tbl.tombs as u64 / 2;
-                    stats.entries_write_cf += tbl.entries as u64 / 2;
+                    if level.level >= 2 {
+                        stats.lv2plus_max_ts = cmp::max(stats.lv2plus_max_ts, tbl.max_ts);
+                        stats.lv2plus_tombs += tbl.tombs as u64 / 2;
+                        stats.lv2plus_entries_write_cf += tbl.entries as u64 / 2;
+                    }
                 }
             } else {
                 stats.data_size += tbl.size();
@@ -1875,8 +1889,11 @@ impl ShardDataCore {
                 stats.entries += tbl.entries as u64;
                 if cf == WRITE_CF {
                     stats.kv_size += tbl.kv_size;
-                    stats.tombs += tbl.tombs as u64;
-                    stats.entries_write_cf += tbl.entries as u64;
+                    if level.level >= 2 {
+                        stats.lv2plus_max_ts = cmp::max(stats.lv2plus_max_ts, tbl.max_ts);
+                        stats.lv2plus_tombs += tbl.tombs as u64;
+                        stats.lv2plus_entries_write_cf += tbl.entries as u64;
+                    }
                 }
             }
             stats.max_ts = cmp::max(stats.max_ts, tbl.max_ts);
