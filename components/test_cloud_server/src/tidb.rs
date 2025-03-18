@@ -775,6 +775,13 @@ struct TidbConfig {
     use_autoscaler: bool,
     tikv_client: TikvClientConfig,
     tiflash_replicas: Option<TiFlashReplicas>,
+    security: TidbConfigSecurity,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct TidbConfigSecurity {
+    enable_sem: bool, // Disable "sem" to enable async commit & 1pc.
 }
 
 #[derive(Serialize)]

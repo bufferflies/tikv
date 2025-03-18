@@ -128,6 +128,7 @@ pub enum TsSet {
     /// `Set` is suitable when there are many timestamps **and** it will be
     /// queried multiple times.
     Set(Arc<HashSet<TimeStamp>>),
+    All,
 }
 
 impl Default for TsSet {
@@ -184,6 +185,7 @@ impl TsSet {
             TsSet::Empty => false,
             TsSet::Vec(vec) => vec.contains(&ts),
             TsSet::Set(set) => set.contains(&ts),
+            TsSet::All => true,
         }
     }
 }

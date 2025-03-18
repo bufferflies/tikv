@@ -118,6 +118,10 @@ while [[ $# -gt 0 ]]; do
 		RUN_ARGS+=("--ia-table-ratio" "$2")
 		shift
 		;;
+	--async-commit-ratio)
+		RUN_ARGS+=("--async-commit-ratio" "$2")
+		shift
+		;;
 	--upgrade-test-duration)
 		RUN_ARGS+=("--upgrade-test-duration" "$2")
 		shift
@@ -140,7 +144,7 @@ fi
 
 BUILD_IMAGE_ARGS=""
 if [ "$REBUILD_IMAGE" -eq 1 ]; then
-  BUILD_IMAGE_ARGS+=" --pull --no-cache"
+	BUILD_IMAGE_ARGS+=" --pull --no-cache"
 fi
 
 IMAGE="amazonlinux:2023.5.20241001.1"
@@ -148,14 +152,14 @@ if [ "$TESTNAME" = "with_tidb" ]; then
 	docker build $BUILD_IMAGE_ARGS -t random-tidb --build-arg TIDB_VERSION="$TIDB_VERSION" - <Dockerfile.tidb
 	IMAGE="random-tidb"
 elif [ "$TESTNAME" = "upgrade" ]; then
-  if [ -z "$TIKV_VERSION" ]; then
-    echo "ERROR: --tikv-version is required for upgrade test"
-    exit 1
-  fi
+	if [ -z "$TIKV_VERSION" ]; then
+		echo "ERROR: --tikv-version is required for upgrade test"
+		exit 1
+	fi
 	docker build $BUILD_IMAGE_ARGS -t random-upgrade \
-	  --build-arg TIDB_VERSION="$TIDB_VERSION" \
-	  --build-arg TIKV_VERSION="$TIKV_VERSION" \
-	  - <Dockerfile.upgrade
+		--build-arg TIDB_VERSION="$TIDB_VERSION" \
+		--build-arg TIKV_VERSION="$TIKV_VERSION" \
+		- <Dockerfile.upgrade
 	IMAGE="random-upgrade"
 elif [ "$MEMORY_PROFILE" -eq 1 ]; then
 	# Parse profile dumps in an environment different with container for random test would fail to translate the addresses to symbols.

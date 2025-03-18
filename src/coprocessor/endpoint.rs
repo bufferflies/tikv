@@ -986,7 +986,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
     } else {
         None
     };
-    let req_ctx: ReqContext;
+    let mut req_ctx: ReqContext;
     let mut handler = match req.get_tp() {
         REQ_TYPE_DAG => {
             let mut dag = DagRequest::default();
@@ -1020,6 +1020,9 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 cache_match_version,
                 PerfLevel::Uninitialized,
             );
+            // FIXME: Fix the `Locked` error of async commit.
+            req_ctx.bypass_locks = TsSet::All;
+
             let data_version = snap.ext().get_data_version();
             let store = CloudStore::new(
                 snap,

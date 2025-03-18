@@ -14,7 +14,7 @@ use pd_client::{
 };
 use rand::prelude::*;
 use security::SecurityConfig;
-use sqlx::ConnectOptions;
+use sqlx::{ConnectOptions, Executor, Row as _};
 use test_cloud_server::{
     oss::prepare_dfs, tidb::*, tikv_worker_cop_url, try_wait_async, ServerCluster,
     ServerClusterBuilder, TikvWorkerOptions,
@@ -421,17 +421,7 @@ pub(crate) fn prepare_workloads(
     switches: &Switches,
     runtime: &Runtime,
 ) {
-    if !switches.global_use_txn_file {
-        runtime.block_on(async {
-            for keyspace_id in keyspace_manager.get_all_keyspaces() {
-                let pool = connect_tidb(tc, keyspace_manager, keyspace_id).await;
-                sqlx::query("SET GLOBAL tidb_disable_txn_file = 'ON'")
-                    .execute(&pool)
-                    .await
-                    .unwrap();
-            }
-        });
-    }
+    runtime.block_on(prepare_tidb_variables(tc, keyspace_manager, switches));
 
     let mut prepare_tasks = vec![];
     if switches.tpc_switch_on {
@@ -474,6 +464,52 @@ pub(crate) fn prepare_workloads(
     runtime
         .block_on(futures::future::try_join_all(prepare_tasks))
         .unwrap();
+}
+
+async fn prepare_tidb_variables(
+    tc: &TidbCluster,
+    keyspace_manager: &KeyspaceManager,
+    switches: &Switches,
+) {
+    let mut switch_sqls = vec![];
+    if !switches.global_use_txn_file {
+        switch_sqls.push("SET GLOBAL tidb_disable_txn_file = 'ON'");
+    }
+    if switches.async_commit_switch_on {
+        switch_sqls.push("SET GLOBAL tidb_enable_async_commit = 'ON'");
+        switch_sqls.push("SET GLOBAL tidb_enable_1pc = 'ON'");
+    }
+
+    let variables = vec![
+        ("tidb_disable_txn_file", !switches.global_use_txn_file),
+        ("tidb_enable_async_commit", switches.async_commit_switch_on),
+        ("tidb_enable_1pc", switches.async_commit_switch_on),
+    ];
+
+    if !switch_sqls.is_empty() {
+        for keyspace_id in keyspace_manager.get_all_keyspaces() {
+            let pool = connect_tidb(tc, keyspace_manager, keyspace_id).await;
+
+            let mut conn = pool.acquire().await.unwrap();
+            for &sql in &switch_sqls {
+                info!("{}: TiDB var: {}", keyspace_id, sql);
+                conn.execute(sql).await.unwrap();
+            }
+            conn.detach(); // Drop the connection, as we set global variables only.    
+        }
+    }
+
+    // Verify variables.
+    for keyspace_id in keyspace_manager.get_all_keyspaces() {
+        let pool = connect_tidb(tc, keyspace_manager, keyspace_id).await;
+        for &(var, expect) in &variables {
+            let sql = format!("SELECT @@{var}");
+            let row = pool.fetch_one(sql.as_str()).await.unwrap();
+            let val: i64 = row.get(0);
+            info!("{}: TiDB var: {} = {}", keyspace_id, var, val);
+            assert_eq!(val, expect as i64, "{} {} {}", sql, val, expect);
+        }
+    }
 }
 
 pub(crate) fn start_workloads(
@@ -696,6 +732,7 @@ pub(crate) struct Switches {
     pub unique_workload_switch_on: bool,
     pub global_use_txn_file: bool,
     pub restart_tso_svc: bool,
+    pub async_commit_switch_on: bool,
 }
 
 impl Switches {
@@ -721,6 +758,7 @@ impl Switches {
         let global_use_txn_file = global_use_txn_file && rng.gen_bool(ENABLE_GLOBAL_TXN_FILE_RATIO);
 
         let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
+        let async_commit_switch_on = rng.gen_bool(env_param("ASYNC_COMMIT_RATIO", 0.1));
 
         Self {
             remote_cop_min_block_size,
@@ -733,6 +771,7 @@ impl Switches {
             unique_workload_switch_on,
             global_use_txn_file,
             restart_tso_svc,
+            async_commit_switch_on,
         }
     }
 }
