@@ -371,7 +371,7 @@ impl MergedEngine {
                 }
                 let merged_commit_index = region_progress.commit_index;
                 region_progress.commit_index = commit;
-                region_progress.synced_index = commit;
+                region_progress.synced_index = raft_state.get_last_preprocessed_index();
                 let truncated_index = max(
                     region_progress.truncated_index,
                     origin
