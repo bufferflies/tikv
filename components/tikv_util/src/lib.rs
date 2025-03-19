@@ -472,6 +472,20 @@ where
     }
 }
 
+impl<L, R> PartialEq for Either<L, R>
+where
+    L: PartialEq,
+    R: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Either::Left(l), Either::Left(r)) => l == r,
+            (Either::Right(l), Either::Right(r)) => l == r,
+            _ => false,
+        }
+    }
+}
+
 /// A simple ring queue with fixed capacity.
 pub struct RingQueue<T> {
     buf: VecDeque<T>,

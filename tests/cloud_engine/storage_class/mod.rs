@@ -11,6 +11,7 @@ use kvengine::{
 };
 use kvproto::kvrpcpb;
 use pd_client::PdClient;
+use rstest::rstest;
 use schema::{generate_storage_class_schema_data_for_test, schema::StorageClass};
 use test_cloud_server::{
     client::ClusterClient,
@@ -37,8 +38,10 @@ use crate::{
 const SEGMENT_SIZE: i64 = 64;
 const FREQ_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
-#[test]
-fn test_storage_class_with_schema_manager() {
+#[rstest]
+#[case(false)]
+#[case::partitioned(true)]
+fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_storage_class_with_schema_manager");
@@ -80,24 +83,30 @@ fn test_storage_class_with_schema_manager() {
     let ctx = Mutex::new(EvalContext::default());
 
     let table_id = table_ids[1];
-    let table_start_key = encode_table_prefix_key(table_id);
-    let table_end_key = encode_table_prefix_key(table_id + 1);
+    let partition_id = partitioned.then_some(table_ids[2]);
+    let backend_table_id = partition_id.unwrap_or(table_id);
+
+    let mut tables = None;
+    let mut partitions = partition_id.map(|id| vec![id]);
+
+    let table_start_key = encode_table_prefix_key(backend_table_id);
+    let table_end_key = encode_table_prefix_key(backend_table_id + 1);
     let table_bound = DataBound::new(table_start_key.as_ref(), table_end_key.as_ref(), false);
 
-    let mut init = true;
     let mut schema_version = 10;
     let mut update_schema = |client: &mut ClusterClient, storage_class: StorageClass| {
         let kv_pairs = generate_storage_class_schema_data_for_test(
             keyspace_id,
             db_id,
             table_id,
+            partition_id,
+            partitions.take(),
             schema_version,
             storage_class,
-            init,
+            &mut tables,
         )
         .unwrap();
         put_kv_pairs(client, kv_pairs);
-        init = false;
         schema_version += 1;
     };
 
@@ -107,12 +116,12 @@ fn test_storage_class_with_schema_manager() {
     // Create WriteCF ln files
     client.put_kv(
         0..100,
-        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_key(keyspace_id, backend_table_id, i),
         |i: usize| gen_row_val(&ctx, i),
     );
     client.put_kv(
         100..200,
-        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_key(keyspace_id, backend_table_id, i),
         |i: usize| gen_row_val(&ctx, i),
     );
     client.verify_data_with_ref_store();
@@ -160,12 +169,12 @@ fn test_storage_class_with_schema_manager() {
     // Create incremental IA files
     client.put_kv(
         200..300,
-        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_key(keyspace_id, backend_table_id, i),
         |i: usize| gen_row_val(&ctx, i),
     );
     client.put_kv(
         300..400,
-        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_key(keyspace_id, backend_table_id, i),
         |i: usize| gen_row_val(&ctx, i),
     );
     must_wait(
@@ -217,8 +226,10 @@ fn test_storage_class_with_schema_manager() {
     oss.shutdown();
 }
 
-#[test]
-fn test_region_split_and_merge_with_storage_class() {
+#[rstest]
+#[case(false)]
+#[case::partitioned(true)]
+fn test_region_split_and_merge_with_storage_class(#[case] partitioned: bool) {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let (_temp_dir, mut oss, dfs_config) =
@@ -262,21 +273,28 @@ fn test_region_split_and_merge_with_storage_class() {
     let pd_client = cluster.get_pd_client();
     let ctx = Mutex::new(EvalContext::default());
 
-    let mut init = true;
+    let mut tables = None;
+    let mut partitions = partitioned.then(|| table_ids.clone());
     let mut schema_version = 10;
     let mut update_schema =
-        |client: &mut ClusterClient, storage_class: StorageClass, table_id: i64| {
+        |client: &mut ClusterClient, storage_class: StorageClass, backend_table_id: i64| {
+            let (table_id, partition_id) = if partitioned {
+                (65535, Some(backend_table_id))
+            } else {
+                (backend_table_id, None)
+            };
             let kv_pairs = generate_storage_class_schema_data_for_test(
                 keyspace_id,
                 db_id,
                 table_id,
+                partition_id,
+                partitions.take(),
                 schema_version,
                 storage_class,
-                init,
+                &mut tables,
             )
             .unwrap();
             put_kv_pairs(client, kv_pairs);
-            init = false;
             schema_version += 1;
         };
 

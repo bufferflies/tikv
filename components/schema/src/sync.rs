@@ -216,7 +216,7 @@ pub mod test_utils {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::schema::{DbInfo, StorageClass};
+    use crate::schema::{DbInfo, PartitionDefinition, PartitionInfo, StorageClass};
 
     const TIDB_DBS: &[u8] = b"DBs";
 
@@ -226,13 +226,15 @@ pub mod test_utils {
         keyspace_id: u32,
         db_id: i64,
         table_id: i64,
+        partition_id: Option<i64>, // The partition to be set as `storage_class`.
+        partitions: Option<Vec<i64>>, // All partitions.
         schema_version: i64,
         storage_class: StorageClass,
-        init: bool,
+        current: &mut Option<HashMap<i64 /* table_id */, TableInfo>>,
     ) -> Result<HashMap<Vec<u8>, Vec<u8>>, String> {
         let mut kv_pairs: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
 
-        if init {
+        if current.is_none() {
             // db info
             let db_key = dbs_db_key(keyspace_id, db_id);
             let mut db_info = DbInfo::default();
@@ -251,16 +253,51 @@ pub mod test_utils {
             kv_pairs.insert(diff_key, diff_value.into_bytes());
         }
 
+        let mut tables = current.take().unwrap_or_default();
+
         // table info
         let schema_data_key = schema_data_key(keyspace_id, db_id, table_id);
-        let mut table_info = TableInfo::default();
-        table_info.id = table_id;
-        table_info.state = STATE_PUBLIC;
-        if storage_class.is_specified() {
-            table_info.storage_class_tier = Some(storage_class.display().to_string());
-        } else {
-            table_info.storage_class_tier = None
+        let mut table_info = tables.remove(&table_id).unwrap_or_else(|| {
+            let mut table_info = TableInfo::default();
+            table_info.id = table_id;
+            table_info.state = STATE_PUBLIC;
+            table_info
+        });
+
+        if let Some(partitions) = partitions {
+            let definitions = partitions
+                .into_iter()
+                .map(|id| PartitionDefinition {
+                    id,
+                    ..Default::default()
+                })
+                .collect();
+            let par_info = PartitionInfo {
+                definitions,
+                ..Default::default()
+            };
+            table_info.partition = Some(par_info);
         }
+
+        let target_sc = if let Some(partition_id) = partition_id {
+            &mut table_info
+                .partition
+                .as_mut()
+                .unwrap()
+                .definitions
+                .iter_mut()
+                .find(|p| p.id == partition_id)
+                .unwrap()
+                .storage_class_tier
+        } else {
+            &mut table_info.storage_class_tier
+        };
+        *target_sc = if storage_class.is_specified() {
+            Some(storage_class.display().to_string())
+        } else {
+            None
+        };
+
         let schema_data = serde_json::to_string(&table_info).map_err(|e| e.to_string())?;
         kv_pairs.insert(schema_data_key, schema_data.into_bytes());
 
@@ -270,6 +307,8 @@ pub mod test_utils {
             schema_version.to_string().into_bytes(),
         );
 
+        tables.insert(table_id, table_info.clone());
+        *current = Some(tables);
         Ok(kv_pairs)
     }
 

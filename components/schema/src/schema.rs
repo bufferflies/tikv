@@ -79,7 +79,13 @@ impl TableInfo {
     }
 
     pub fn with_storage_class(&self) -> bool {
-        self.storage_class().is_specified()
+        self.storage_class().is_specified() || self.partition_with_storage_class()
+    }
+
+    fn partition_with_storage_class(&self) -> bool {
+        self.partition
+            .as_ref()
+            .is_some_and(|p| p.definitions.iter().any(|d| d.with_storage_class()))
     }
 
     pub fn storage_class(&self) -> StorageClass {
@@ -189,11 +195,11 @@ pub struct FieldType {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SchemaState(u8);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PartitionType(usize);
 
 // PartitionInfo provides table partition info.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PartitionInfo {
     #[serde(rename = "type")]
     pub type_: PartitionType,
@@ -220,7 +226,7 @@ pub struct PartitionState {
 }
 
 // PartitionDefinition defines a single partition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PartitionDefinition {
     pub id: i64,
     pub name: CiStr,
@@ -233,7 +239,7 @@ pub struct PartitionDefinition {
 
 impl PartitionDefinition {
     pub fn with_storage_class(&self) -> bool {
-        self.storage_class() != StorageClass::Unspecified
+        self.storage_class().is_specified()
     }
 
     pub fn storage_class(&self) -> StorageClass {

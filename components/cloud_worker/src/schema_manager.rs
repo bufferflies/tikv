@@ -22,7 +22,7 @@ use kvengine::{
         columnar,
         columnar::{
             new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
-            Schema, SchemaBuf, SchemaFile, VectorIndexDef,
+            Schema, SchemaBufBuilder, SchemaFile, VectorIndexDef,
         },
         file::{File, LocalFile},
         ChecksumType, NO_COMPRESSION,
@@ -529,19 +529,20 @@ impl SchemaManager {
             );
             debug!("{}: sync schema", keyspace_id; "schema_ver" => schema_version, "tables" => ?table_infos);
 
-            let old_storage_class_schemas = if let Some(schema_file) = &local_schema_file {
-                schema_file.export_storage_class_schemas()
-            } else {
-                BTreeMap::default()
-            };
+            let old_storage_class_tables = local_schema_file
+                .as_ref()
+                .map(|schema_file| schema_file.tables_with_storage_class());
             // If the old specified storage class becomes unspecified, the storage class is
             // removed from the schema file.
             let need_update_schema = table_infos.iter().any(|ti| {
-                ti.with_required_changes() || old_storage_class_schemas.contains_key(&ti.id)
+                ti.with_required_changes()
+                    || old_storage_class_tables
+                        .as_ref()
+                        .is_some_and(|tables| tables.contains(&ti.id))
             });
             if local_schema_file.is_some() && !need_update_schema {
                 debug!("{}: schema has no required changes, skip", keyspace_id;
-                    "schema_version" => schema_version, "tables" => ?table_infos);
+                    "schema_version" => schema_version, "tables" => ?table_infos, "old_sc_tables" => ?old_storage_class_tables);
                 self.meta_file
                     .add_checked_version(keyspace_id, schema_version);
                 continue;
@@ -781,55 +782,51 @@ fn table_info_to_partition_sc(ti: &TableInfo) -> Option<Vec<(i64, StorageClass)>
 }
 
 fn table_info_to_schema(ti: &TableInfo) -> Schema {
-    let storage_class = ti.storage_class();
-    let partitions = table_info_to_partition_sc(ti);
-    if !ti.with_columnar() {
-        let mut schema_buf = SchemaBuf::default();
-        schema_buf.table_id = ti.id;
-        schema_buf.set_storage_class(storage_class);
-        schema_buf.partitions = partitions;
-        return schema_buf.into();
-    }
-    let ti_cols = ti.cols.as_ref().unwrap();
-    let mut ti_pk_cols = vec![];
-    if let Some(idx_info) = ti.index_info.as_ref() {
-        let pk_idx = idx_info.iter().find(|idx| idx.is_primary);
-        if let Some(pk_idx) = pk_idx {
-            for idx_col in &pk_idx.idx_cols {
-                ti_pk_cols.push(ti_cols[idx_col.offset as usize].clone());
+    let mut builder = SchemaBufBuilder::new(ti.id);
+    builder
+        .storage_class(ti.storage_class())
+        .partitions(table_info_to_partition_sc(ti));
+
+    if ti.with_columnar() {
+        let ti_cols = ti.cols.as_ref().unwrap();
+        let mut ti_pk_cols = vec![];
+        if let Some(idx_info) = ti.index_info.as_ref() {
+            let pk_idx = idx_info.iter().find(|idx| idx.is_primary);
+            if let Some(pk_idx) = pk_idx {
+                for idx_col in &pk_idx.idx_cols {
+                    ti_pk_cols.push(ti_cols[idx_col.offset as usize].clone());
+                }
             }
         }
+        let pk_col_ids: Vec<i64> = ti_pk_cols.iter().map(|c| c.id).collect();
+        let pk_cols = convert_column_infos_to_tipb(&ti_pk_cols, ti.pk_is_handle);
+        let mut columns = convert_column_infos_to_tipb(ti.cols.as_ref().unwrap(), ti.pk_is_handle);
+        columns.retain(|c| !pk_col_ids.contains(&c.get_column_id()));
+        if !ti.pk_is_handle {
+            // make sure the common handle columns are ordered by offset.
+            columns.extend_from_slice(&pk_cols);
+        }
+        let handle_column = if ti.is_common_handle {
+            new_common_handle_column_info()
+        } else if ti.pk_is_handle {
+            let pk_handle_col = columns.iter().find(|c| c.get_pk_handle()).unwrap().clone();
+            columns.retain(|c| !c.get_pk_handle());
+            pk_handle_col
+        } else {
+            new_int_handle_column_info()
+        };
+        let vector_indexes = parse_vector_indexes(ti_cols, ti.index_info.as_ref());
+
+        builder.columns(
+            handle_column,
+            new_version_column_info(),
+            columns,
+            pk_col_ids,
+            vector_indexes,
+        );
     }
-    let pk_col_ids: Vec<i64> = ti_pk_cols.iter().map(|c| c.id).collect();
-    let pk_cols = convert_column_infos_to_tipb(&ti_pk_cols, ti.pk_is_handle);
-    let mut columns = convert_column_infos_to_tipb(ti.cols.as_ref().unwrap(), ti.pk_is_handle);
-    columns.retain(|c| !pk_col_ids.contains(&c.get_column_id()));
-    if !ti.pk_is_handle {
-        // make sure the common handle columns are ordered by offset.
-        columns.extend_from_slice(&pk_cols);
-    }
-    let handle_column = if ti.is_common_handle {
-        new_common_handle_column_info()
-    } else if ti.pk_is_handle {
-        let pk_handle_col = columns.iter().find(|c| c.get_pk_handle()).unwrap().clone();
-        columns.retain(|c| !c.get_pk_handle());
-        pk_handle_col
-    } else {
-        new_int_handle_column_info()
-    };
-    let vector_indexes = parse_vector_indexes(ti_cols, ti.index_info.as_ref());
-    let mut schema_buf = SchemaBuf::new(
-        ti.id,
-        handle_column,
-        new_version_column_info(),
-        columns,
-        pk_col_ids,
-        vector_indexes,
-        StorageClass::default(),
-        partitions,
-    );
-    schema_buf.set_storage_class(storage_class);
-    schema_buf.into()
+
+    builder.build().into()
 }
 
 #[derive(Default, Deserialize)]

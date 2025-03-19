@@ -144,6 +144,66 @@ impl SchemaBuf {
     }
 }
 
+#[derive(Default)]
+pub struct SchemaBufBuilder {
+    table_id: i64,
+    handle_column: Option<ColumnInfo>,
+    version_column: Option<ColumnInfo>,
+    columns: Vec<ColumnInfo>,
+    pk_col_ids: Vec<i64>,
+    vector_indexes: Vec<VectorIndexDef>,
+    property_sc: StorageClass,
+    partitions: Option<Vec<(i64, StorageClass)>>,
+}
+
+impl SchemaBufBuilder {
+    pub fn new(table_id: i64) -> Self {
+        Self {
+            table_id,
+            ..Default::default()
+        }
+    }
+
+    pub fn storage_class(&mut self, sc: StorageClass) -> &mut Self {
+        self.property_sc = sc;
+        self
+    }
+
+    pub fn partitions(&mut self, partitions: Option<Vec<(i64, StorageClass)>>) -> &mut Self {
+        self.partitions = partitions;
+        self
+    }
+
+    pub fn columns(
+        &mut self,
+        handle_column: ColumnInfo,
+        version_column: ColumnInfo,
+        columns: Vec<ColumnInfo>,
+        pk_col_ids: Vec<i64>,
+        vector_indexes: Vec<VectorIndexDef>,
+    ) -> &mut Self {
+        self.handle_column = Some(handle_column);
+        self.version_column = Some(version_column);
+        self.columns = columns;
+        self.pk_col_ids = pk_col_ids;
+        self.vector_indexes = vector_indexes;
+        self
+    }
+
+    pub fn build(self) -> SchemaBuf {
+        SchemaBuf::new(
+            self.table_id,
+            self.handle_column.unwrap_or_default(),
+            self.version_column.unwrap_or_default(),
+            self.columns,
+            self.pk_col_ids,
+            self.vector_indexes,
+            self.property_sc,
+            self.partitions,
+        )
+    }
+}
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct SchemaBufInner {
     pub handle_column: ColumnInfo,

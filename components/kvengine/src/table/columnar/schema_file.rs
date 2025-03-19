@@ -7,6 +7,7 @@ use std::{
 
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut};
+use collections::HashSet;
 use kvenginepb::SchemaMeta;
 use protobuf::Message;
 use schema::schema::StorageClass;
@@ -18,7 +19,9 @@ use tikv_util::Either;
 use crate::{
     table::{
         self,
-        columnar::{builder::new_version_column_info, columnar::Schema, SchemaBuf, VectorIndexDef},
+        columnar::{
+            builder::new_version_column_info, columnar::Schema, SchemaBufBuilder, VectorIndexDef,
+        },
         file::File,
         ChecksumType, DataBound, InnerKey, OwnedInnerKey, NO_COMPRESSION,
     },
@@ -130,50 +133,42 @@ impl SchemaFile {
             } else {
                 None
             };
-            if schema_pb.columns.is_empty() {
-                let mut schema_buf = SchemaBuf::default();
-                schema_buf.table_id = table_id;
-                schema_buf.set_storage_class(property_sc);
-                tables.insert(table_id, Schema::new(schema_buf.clone()));
-                // Add partitions to tables.
-                if let Some(partitions) = partitions {
-                    for (partition_id, sc) in partitions {
-                        let partition_schema: Schema =
-                            schema_buf.to_partition_schema(partition_id, sc).into();
-                        tables.insert(partition_id, partition_schema);
-                    }
-                }
-                continue;
-            }
-            let mut columns = Vec::with_capacity(schema_pb.columns.len());
-            for col_data in &schema_pb.columns {
-                let mut column_info = tipb::ColumnInfo::new();
-                column_info.merge_from_bytes(col_data).unwrap();
-                columns.push(column_info);
-            }
-            let handle_column = columns.pop().unwrap();
-            let vector_indexes = schema_pb
-                .vector_indexes
-                .iter()
-                .map(|vec_idx| {
-                    let vec_col = columns
-                        .iter()
-                        .find(|c| c.get_column_id() == vec_idx.col_id)
-                        .unwrap();
-                    VectorIndexDef::from_pb(vec_col.get_column_len() as usize, vec_idx)
-                })
-                .collect();
 
-            let schema_buf = SchemaBuf::new(
-                table_id,
-                handle_column,
-                new_version_column_info(),
-                columns,
-                schema_pb.pk_col_ids,
-                vector_indexes,
-                property_sc,
-                partitions.clone(),
-            );
+            let mut builder = SchemaBufBuilder::new(table_id);
+            builder.storage_class(property_sc);
+            builder.partitions(partitions.clone());
+
+            if !schema_pb.columns.is_empty() {
+                let mut columns = Vec::with_capacity(schema_pb.columns.len());
+                for col_data in &schema_pb.columns {
+                    let mut column_info = tipb::ColumnInfo::new();
+                    column_info.merge_from_bytes(col_data).unwrap();
+                    columns.push(column_info);
+                }
+                let handle_column = columns.pop().unwrap();
+                let vector_indexes = schema_pb
+                    .vector_indexes
+                    .iter()
+                    .map(|vec_idx| {
+                        let vec_col = columns
+                            .iter()
+                            .find(|c| c.get_column_id() == vec_idx.col_id)
+                            .unwrap();
+                        VectorIndexDef::from_pb(vec_col.get_column_len() as usize, vec_idx)
+                    })
+                    .collect();
+
+                builder.columns(
+                    handle_column,
+                    new_version_column_info(),
+                    columns,
+                    schema_pb.pk_col_ids,
+                    vector_indexes,
+                );
+            }
+
+            let schema_buf = builder.build();
+
             // Add partitions to tables.
             if let Some(partitions) = partitions {
                 for (partition_id, sc) in partitions {
@@ -342,6 +337,11 @@ impl SchemaFile {
     ) -> Either<i64 /* table_id */, Vec<OwnedInnerKey> /* overlapped_keys */> {
         let mut overlapped_keys = Vec::new();
         for (&table_id, schema) in self.core.tables.iter() {
+            if schema.is_partitioned_table() {
+                // Storage class is only set to partitions for partitioned tables.
+                continue;
+            }
+
             let sc = schema.get_storage_class();
             if !sc.is_specified() {
                 continue;
@@ -420,10 +420,20 @@ impl SchemaFile {
             .collect::<Vec<_>>()
     }
 
-    pub fn export_storage_class_schemas(&self) -> BTreeMap<i64, Schema> {
-        let mut tables = self.export_schemas();
-        tables.retain(|_, schema| schema.get_storage_class().is_specified());
-        tables
+    // Note: This function return table id of regular & partitioned tables, but not
+    // partition id of sub partitions.
+    pub fn tables_with_storage_class(&self) -> HashSet<i64> {
+        self.core
+            .tables
+            .iter()
+            .filter_map(|(&table_id, schema)| {
+                let with_storage_class = match schema.partitions.as_ref() {
+                    Some(partitions) => partitions.iter().any(|(_, sc)| sc.is_specified()),
+                    None => !schema.is_sub_partition() && schema.get_storage_class().is_specified(),
+                };
+                with_storage_class.then_some(table_id)
+            })
+            .collect()
     }
 
     pub fn schema_count(&self) -> usize {
@@ -497,7 +507,10 @@ pub fn build_schema_file(
 
 #[cfg(test)]
 mod tests {
+    use std::iter::FromIterator;
+
     use api_version::{api_v2::TIDB_META_KEY_PREFIX, ApiV2};
+    use bytes::Bytes;
     use schema::schema::StorageClass;
     use tidb_query_datatype::{
         codec::table::RECORD_PREFIX_SEP, Collation::Utf8Mb4GeneralCi, FieldTypeTp,
@@ -506,7 +519,10 @@ mod tests {
 
     use super::*;
     use crate::table::{
-        columnar::builder::{new_common_handle_column_info, new_int_handle_column_info},
+        columnar::{
+            builder::{new_common_handle_column_info, new_int_handle_column_info},
+            SchemaBuf,
+        },
         file::InMemFile,
     };
 
@@ -1012,11 +1028,176 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_schema_file_overlap_storage_class() {
+        let keyspace_id = 1;
+        let schema_version = 1234i64;
+
+        let schema_1 = Schema::new(SchemaBuf::new(
+            10,
+            new_common_handle_column_info(),
+            new_version_column_info(),
+            vec![new_column_info(3, true), new_column_info(4, false)],
+            vec![],
+            vec![],
+            StorageClass::Ia,
+            None,
+        ));
+
+        let partitions = vec![
+            (21, StorageClass::default()),
+            (22, StorageClass::Ia),
+            (23, StorageClass::default()),
+        ];
+        let schema_2 = Schema::new(SchemaBuf::new(
+            20,
+            new_int_handle_column_info(),
+            new_version_column_info(),
+            vec![new_column_info(3, false), new_column_info(4, true)],
+            vec![],
+            vec![],
+            StorageClass::default(),
+            Some(partitions),
+        ));
+
+        let schemas = vec![schema_1, schema_2];
+        let data = build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
+        let file = Arc::new(InMemFile::new(100, data.into()));
+        let schema_file = SchemaFile::open(file).unwrap();
+
+        let sc_tables = schema_file.tables_with_storage_class();
+        assert_eq!(sc_tables, HashSet::from_iter([10, 20]));
+
+        for case in vec![
+            ScOverlapCase {
+                start_key: ApiV2::get_keyspace_prefix_by_id(keyspace_id),
+                end_key: encode_meta_key(keyspace_id, b"def"),
+                expect: Either::Right(vec![]),
+            },
+            ScOverlapCase {
+                start_key: ApiV2::get_keyspace_prefix_by_id(keyspace_id),
+                end_key: ApiV2::get_keyspace_prefix_by_id(keyspace_id + 1),
+                expect: Either::Right(vec![
+                    encode_table_prefix(keyspace_id, 10),
+                    encode_table_prefix(keyspace_id, 11),
+                    encode_table_prefix(keyspace_id, 22),
+                    encode_table_prefix(keyspace_id, 23),
+                ]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 20, false, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                expect: Either::Right(vec![
+                    encode_table_prefix(keyspace_id, 22),
+                    encode_table_prefix(keyspace_id, 23),
+                ]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 21, true, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                expect: Either::Right(vec![
+                    encode_table_prefix(keyspace_id, 22),
+                    encode_table_prefix(keyspace_id, 23),
+                ]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 23, true, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                expect: Either::Right(vec![]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 24, true, b""),
+                end_key: ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
+                expect: Either::Right(vec![]),
+            },
+            ScOverlapCase {
+                start_key: encode_meta_key(keyspace_id, b"abc"),
+                end_key: encode_meta_key(keyspace_id, b"def"),
+                expect: Either::Right(vec![]),
+            },
+            ScOverlapCase {
+                start_key: encode_meta_key(keyspace_id, b"abc"),
+                end_key: encode_table_key(keyspace_id, 13, true, b""),
+                expect: Either::Right(vec![
+                    encode_table_prefix(keyspace_id, 10),
+                    encode_table_prefix(keyspace_id, 11),
+                ]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 1, true, b""),
+                end_key: encode_table_key(keyspace_id, 10, false, b""),
+                expect: Either::Right(vec![encode_table_prefix(keyspace_id, 10)]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 1, true, b""),
+                end_key: encode_table_key(keyspace_id, 10, true, b""),
+                expect: Either::Right(vec![encode_table_prefix(keyspace_id, 10)]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 1, true, b""),
+                end_key: encode_table_key(keyspace_id, 10, true, b"0"),
+                expect: Either::Right(vec![encode_table_prefix(keyspace_id, 10)]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, true, b""),
+                end_key: encode_table_key(keyspace_id, 13, false, b""),
+                expect: Either::Right(vec![encode_table_prefix(keyspace_id, 11)]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 10, false, b"123"),
+                expect: Either::Left(10),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 10, true, b"123"),
+                expect: Either::Left(10),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 21, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 21, true, b"123"),
+                expect: Either::Right(vec![]),
+            },
+            ScOverlapCase {
+                start_key: encode_table_key(keyspace_id, 22, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 22, true, b"123"),
+                expect: Either::Left(22),
+            },
+        ] {
+            let range = DataBound::new(
+                InnerKey::from_outer_key(&case.start_key),
+                InnerKey::from_outer_end_key(&case.end_key),
+                false,
+            );
+            let expect: Either<i64, Vec<OwnedInnerKey>> = match case.expect {
+                Either::Left(table_id) => Either::Left(table_id),
+                Either::Right(ref keys) => Either::Right(
+                    keys.iter()
+                        .map(|key| OwnedInnerKey::new(Bytes::copy_from_slice(key)))
+                        .collect(),
+                ),
+            };
+            assert_eq!(
+                schema_file.overlap_storage_class_tables(range),
+                expect,
+                "{:?}",
+                case
+            );
+        }
+    }
+
     #[derive(Debug)]
     struct OverlapCase {
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         overlap: bool,
+    }
+
+    #[derive(Debug)]
+    struct ScOverlapCase {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        expect: Either<i64, Vec<Vec<u8>>>,
     }
 
     fn encode_table_key(keyspace_id: u32, table_id: i64, is_row: bool, suffix: &[u8]) -> Vec<u8> {
@@ -1030,6 +1211,14 @@ mod tests {
             key.put(INDEX_PREFIX_SEP);
         }
         key.put(suffix);
+        key
+    }
+
+    fn encode_table_prefix(keyspace_id: u32, table_id: i64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(KEYSPACE_PREFIX_LEN + TABLE_PREFIX_KEY_LEN);
+        key.put(ApiV2::get_txn_keyspace_prefix(keyspace_id).as_slice());
+        key.put(TABLE_PREFIX);
+        key.encode_i64(table_id).unwrap();
         key
     }
 
