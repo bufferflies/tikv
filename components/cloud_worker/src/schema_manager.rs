@@ -256,9 +256,9 @@ pub struct SchemaManagerConfig {
     pub http_timeout: ReadableDuration,
     pub enabled: bool,
     // `whitelist_file` is a json file contains a list of keyspace_id.
-    pub whitelist_file: Option<PathBuf>,
+    pub whitelist_file: PathBuf,
     // The tier of TiKV stores to push schema file. Used for canary release.
-    pub tikv_stores_tier: Option<String>,
+    pub tikv_stores_tier: String,
 }
 
 impl Default for SchemaManagerConfig {
@@ -269,8 +269,8 @@ impl Default for SchemaManagerConfig {
             schema_refresh_threshold: SCHEMA_REFRESH_THRESHOLD,
             http_timeout: DEFAULT_TIMEOUT,
             enabled: false,
-            whitelist_file: None,   // None means no whitelist filtering.
-            tikv_stores_tier: None, // None means match all stores.
+            whitelist_file: PathBuf::new(), // Empty means no whitelist filtering.
+            tikv_stores_tier: "".to_string(), // Empty means match all stores.
         }
     }
 }
@@ -282,8 +282,8 @@ impl SchemaManagerConfig {
         schema_refresh_threshold: u64,
         http_timeout: ReadableDuration,
         enabled: bool,
-        whitelist_file: Option<PathBuf>,
-        tikv_stores_tier: Option<String>,
+        whitelist_file: PathBuf,
+        tikv_stores_tier: String,
     ) -> Self {
         Self {
             dir,
@@ -853,19 +853,18 @@ impl SchemaManagerCore {
         txn_client: TxnClient,
     ) -> Self {
         let whitelist_keyspaces: Option<HashSet<u32>> =
-            config.whitelist_file.as_ref().map(|path| {
-                let data = fs::read_to_string(path).unwrap();
+            (!config.whitelist_file.as_os_str().is_empty()).then(|| {
+                let data = fs::read_to_string(&config.whitelist_file).unwrap();
                 let whitelist: WhiteListKeyspace = serde_json::from_str(&data).unwrap();
-                whitelist.keyspace_ids.iter().cloned().collect()
+                let whitelist_keyspaces: HashSet<u32> =
+                    whitelist.keyspace_ids.iter().cloned().collect();
+                info!(
+                    "whitelist keyspaces count: {}, keyspaces: {:?}",
+                    whitelist_keyspaces.len(),
+                    whitelist_keyspaces
+                );
+                whitelist_keyspaces
             });
-        info!(
-            "read whitelist keyspaces count: {}, keyspaces: {:?}",
-            whitelist_keyspaces
-                .as_ref()
-                .map(|s| s.len())
-                .unwrap_or_default(),
-            whitelist_keyspaces
-        );
         let meta_file_path = config.dir.join(META_FILE_NAME);
         let meta_file = if meta_file_path.exists() {
             MetaFile::open(LocalFile::open(0, meta_file_path.as_path(), false).unwrap()).unwrap()
@@ -883,10 +882,10 @@ impl SchemaManagerCore {
             whitelist_keyspaces,
         };
 
-        if let Some(tikv_stores_tier) = &mgr.config.tikv_stores_tier {
+        if !mgr.config.tikv_stores_tier.is_empty() {
             let (stores, stores_not_match) = mgr.get_tikv_stores();
             info!("schema manager: TiKV stores with matched tier: {:?}", stores_status_addr(&stores);
-                "tier" => tikv_stores_tier,
+                "tier" => &mgr.config.tikv_stores_tier,
                 "not_match" => ?stores_status_addr(&stores_not_match),
             );
         }
@@ -911,11 +910,13 @@ impl SchemaManagerCore {
             }
         };
 
-        if let Some(tikv_stores_tier) = &self.config.tikv_stores_tier {
+        if !self.config.tikv_stores_tier.is_empty() {
             all_stores.into_iter().partition(|store| {
                 store.get_labels().iter().any(|label| {
                     label.key.eq_ignore_ascii_case(TIKV_STORE_LABEL_TIER_KEY)
-                        && label.value.eq_ignore_ascii_case(tikv_stores_tier)
+                        && label
+                            .value
+                            .eq_ignore_ascii_case(&self.config.tikv_stores_tier)
                 })
             })
         } else {
