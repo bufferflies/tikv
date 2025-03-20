@@ -67,6 +67,7 @@ yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
 
 [dev-dependencies]
 file_system = { workspace = true }
+rstest = "0.18"
 security = { workspace = true }
 tempfile = "3"
 test_pd_client = { workspace = true }

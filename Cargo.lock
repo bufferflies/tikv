@@ -6588,6 +6588,7 @@ dependencies = [
  "raftstore",
  "rand 0.8.5",
  "rfengine",
+ "rstest",
  "schema",
  "security",
  "serde",

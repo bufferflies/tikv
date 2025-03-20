@@ -1160,7 +1160,7 @@ impl<'a> PeerMsgHandler<'a> {
         });
     }
 
-    fn on_schedule_half_split_region(
+    pub(crate) fn on_schedule_half_split_region(
         &mut self,
         region_epoch: RegionEpoch,
         policy: CheckPolicy,
@@ -1404,7 +1404,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.ctx.global.pd_scheduler.schedule(task).unwrap();
     }
 
-    fn validate_split_region(
+    pub(crate) fn validate_split_region(
         &mut self,
         epoch: &metapb::RegionEpoch,
         split_keys: &[Vec<u8>],
@@ -1507,7 +1507,12 @@ impl<'a> PeerMsgHandler<'a> {
         Ok(())
     }
 
-    fn on_delete_prefix(&mut self, region_version: u64, prefix: Vec<u8>, callback: Callback) {
+    pub(crate) fn on_delete_prefix(
+        &mut self,
+        region_version: u64,
+        prefix: Vec<u8>,
+        callback: Callback,
+    ) {
         if !self.peer.is_leader() {
             // As delete prefix requests are sent to all stores, not leader error can be
             // ignored.
@@ -1535,7 +1540,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.propose_raft_command(cmd, callback, None);
     }
 
-    fn on_manual_major_compact(&mut self, major_compact: bool, callback: Callback) {
+    pub(crate) fn on_manual_major_compact(&mut self, major_compact: bool, callback: Callback) {
         if !self.peer.is_leader() {
             callback.invoke_with_response(RaftCmdResponse::default());
             return;
@@ -2485,7 +2490,7 @@ impl<'a> PeerMsgHandler<'a> {
         }
     }
 
-    fn on_restore_shard(&mut self, mut cs: kvenginepb::ChangeSet, callback: Callback) {
+    pub(crate) fn on_restore_shard(&mut self, mut cs: kvenginepb::ChangeSet, callback: Callback) {
         let tag = self.peer.tag();
         let region = self.peer.get_preprocessed_region();
 
