@@ -28,7 +28,7 @@ use tokio::sync::RwLock;
 use crate::metrics::WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC;
 
 const CLEAN_UP_WORKER_TICK_INTERVAL: u64 = 60;
-const WORKER_MIN_STORAGE_GB: usize = 16;
+const WORKER_MIN_STORAGE_GB: usize = 20;
 const DEFAULT_LOAD_DATA_WORKER_NAME: &str = "load-data-worker";
 const DEFAULT_LOAD_DATA_WORKER_PORT: u16 = 19500;
 const DEFAULT_MAX_SIZE: ReadableSize = ReadableSize::gb(1024);
@@ -458,6 +458,7 @@ impl WorkerScaler {
             tolerations.first_mut().unwrap().value =
                 Some(LOAD_DATA_WORKER_NODE_GROUP_NAME.to_string());
         }
+
         let pod_container = pod_template_spec.containers.first_mut().unwrap();
         let core_num = sts_config.core_num;
         let request_cpu = format!("{}", core_num);
