@@ -150,6 +150,7 @@ raft = { version = "0.7.0", default-features = false, features = ["protobuf-code
 raft_log_engine = { workspace = true }
 raftstore = { workspace = true }
 rand = "0.8.3"
+replication_worker = { workspace = true }
 rfengine = { workspace = true }
 rfenginepb = { workspace = true }
 rfstore = { workspace = true }

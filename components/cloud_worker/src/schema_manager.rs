@@ -30,7 +30,6 @@ use kvengine::{
     IdAllocator, ShardStatsLite,
 };
 use kvproto::metapb::Store;
-use log_wrappers::hex_encode_upper;
 use native_br::common::send_request_to_store_with_retry;
 use rfstore::store::PdIdAllocator;
 use schema::schema::{
@@ -987,7 +986,7 @@ impl schema::KvGetter for SchemaManager {
         let val = snapshot.get(key.to_vec()).await.map_err(|e| {
             format!(
                 "schema manager: kv get failed: {}: {e:?})",
-                hex_encode_upper(key)
+                log_wrappers::Value::key(key)
             )
         })?;
         Ok(val)

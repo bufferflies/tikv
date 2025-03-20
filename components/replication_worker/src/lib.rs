@@ -1,11 +1,13 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod apply_observer;
 mod config;
 mod scheduler;
 mod worker;
 
+pub use apply_observer::{CdcApplyObserver, RegionEvents};
 use cdc::MemoryQuota;
-use kvproto::{cdcpb_grpc::ChangeData, tikvpb_grpc::Tikv};
+use kvproto::{cdcpb_grpc::ChangeData, raft_cmdpb::AdminRequest, tikvpb_grpc::Tikv};
 use merged_engine::MergedEngineConfig;
 pub use scheduler::{handle_cdc_request, ReplicationScheduler};
 use serde_derive::{Deserialize, Serialize};
@@ -55,6 +57,15 @@ pub enum CdcMsg {
     NewTask {
         keyspace_id: u32,
         request: ChangefeedRequest,
+    },
+    Applied {
+        region_id: u64,
+        region_events: RegionEvents,
+    },
+    AppliedAdmin {
+        region_id: u64,
+        region_version: u64,
+        admin: AdminRequest,
     },
     RemoveTask {
         keyspace_id: u32,

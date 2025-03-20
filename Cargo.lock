@@ -8535,6 +8535,7 @@ dependencies = [
  "raftstore",
  "rand 0.8.5",
  "rand_xorshift",
+ "replication_worker",
  "resource_metering",
  "rfengine",
  "rfenginepb",

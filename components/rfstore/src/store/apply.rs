@@ -2349,6 +2349,14 @@ pub use kvengine::shard::TERM_KEY;
 pub trait ApplyObserver: Send {
     fn on_apply(&mut self, region_id: u64, log_index: u64, wb: &WriteBatch);
 
+    fn on_apply_admin(
+        &mut self,
+        region_id: u64,
+        region_version: u64,
+        log_index: u64,
+        admin: &AdminRequest,
+    );
+
     fn flush(&mut self);
 }
 

@@ -16,6 +16,7 @@ use grpcio_health::{create_health, HealthService, ServingStatus};
 use kvengine::dfs::{Dfs, S3Fs};
 use kvproto::{
     cdcpb::{create_change_data, Event},
+    raft_cmdpb::AdminRequest,
     tikvpb::create_tikv,
 };
 use merged_engine::{MergedEngine, MergedEngineContext};
@@ -27,8 +28,8 @@ use tikv_util::{error, info, thd_name};
 use txn_types::TimeStamp;
 
 use crate::{
-    scheduler::ChangefeedRequest, CdcMsg, ReplicationScheduler, ReplicationService,
-    ReplicationWorkerConfig,
+    apply_observer::RegionEvents, scheduler::ChangefeedRequest, CdcMsg, ReplicationScheduler,
+    ReplicationService, ReplicationWorkerConfig,
 };
 
 #[allow(dead_code)]
@@ -188,6 +189,19 @@ impl ReplicationWorker {
                 keyspace_id,
                 request,
             } => self.handle_new_task(keyspace_id, request),
+            CdcMsg::Applied {
+                region_id,
+                region_events,
+            } => {
+                self.handle_applied(region_id, region_events)?;
+            }
+            CdcMsg::AppliedAdmin {
+                region_id,
+                region_version,
+                admin,
+            } => {
+                self.handle_applied_admin(region_id, region_version, admin);
+            }
             CdcMsg::RemoveTask {
                 keyspace_id,
                 change_feed_id,
@@ -204,5 +218,20 @@ impl ReplicationWorker {
     fn handle_new_task(&mut self, keyspace_id: u32, request: ChangefeedRequest) {
         // TODO: implement this
         info!("new task {} {:?}", keyspace_id, request);
+    }
+
+    fn handle_applied(&mut self, region_id: u64, region_events: RegionEvents) -> cdc::Result<()> {
+        // TODO: implement this
+        info!(
+            "applied {} with {} events",
+            region_id,
+            region_events.events.len()
+        );
+        Ok(())
+    }
+
+    fn handle_applied_admin(&mut self, region_id: u64, region_version: u64, admin: AdminRequest) {
+        // TODO: implement this
+        info!("applied admin {} {} {:?}", region_id, region_version, admin);
     }
 }
