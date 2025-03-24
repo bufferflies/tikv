@@ -51,7 +51,36 @@ impl Deref for ChangeSet {
 
 impl Debug for ChangeSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.change_set.fmt(f)
+        let mut de = f.debug_struct("ChangeSet");
+        de.field("change_set", &self.change_set);
+        if !self.l0_tables.is_empty() {
+            de.field("l0_tables", &self.l0_tables.keys());
+        }
+        if !self.ln_tables.is_empty() {
+            de.field("ln_tables", &self.ln_tables.keys());
+        }
+        if !self.blob_tables.is_empty() {
+            de.field("blob_tables", &self.blob_tables.keys());
+        }
+        if !self.unloaded_tables.is_empty() {
+            de.field("unloaded_tables", &self.unloaded_tables.keys());
+        }
+        if !self.lock_txn_files.is_empty() {
+            de.field(
+                "lock_txn_files",
+                &self.lock_txn_files.iter().map(|x| x.id()),
+            );
+        }
+        if let Some(schema_file) = &self.schema_file {
+            de.field("schema_file", &schema_file.get_file_id());
+        }
+        if !self.col_files.is_empty() {
+            de.field("col_files", &self.col_files.keys());
+        }
+        if !self.vec_index_files.is_empty() {
+            de.field("vec_index_files", &self.vec_index_files.keys());
+        }
+        de.finish()
     }
 }
 
@@ -969,7 +998,7 @@ impl EngineCore {
 
     fn apply_update_storage_class(&self, shard: &Shard, cs: &ChangeSet) {
         assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
-        info!("{} apply update storage class", shard.tag(); "cs" => ?cs, "ln_tables" => ?cs.ln_tables);
+        info!("{} apply update storage class", shard.tag(); "cs" => ?cs);
         if !cs.ln_tables.is_empty() {
             let old_data = shard.get_data();
             let mut scf_builder = ShardCfBuilder::new(WRITE_CF);

@@ -17,6 +17,9 @@ pub const MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG: &str =
 pub const MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG: &str =
     "fail to merge source region with unconverted l0s";
 
+pub const MERGE_REGION_WITH_INCONSISTENT_STORAGE_CLASS: &str =
+    "fail to merge regions with inconsistent storage class";
+
 // Used in `kvproto::Error::message` to indicate that the ingest is overlapped
 // with existed data. Clients will check error type by this string.
 // (`kvproto::Error` doesn't have suitable error type, so use fixed string)

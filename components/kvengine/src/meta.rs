@@ -243,6 +243,14 @@ impl ShardMeta {
         self.properties.set_bytes(key, value);
     }
 
+    fn set_property_from_other(&mut self, key: &str, other: &ShardMeta) {
+        if let Some(value) = other.get_property(key) {
+            self.set_property_bytes(key, value);
+        } else {
+            self.del_property(key);
+        }
+    }
+
     pub fn del_property(&mut self, key: &str) -> Option<Bytes> {
         self.properties.remove(key)
     }
@@ -1199,21 +1207,12 @@ impl ShardMeta {
     }
 
     pub fn commit_merge(&mut self, source: &ShardMeta, sequence: u64) {
-        let source_storage_class = source.get_property(STORAGE_CLASS_KEY);
-        let old_storage_class = self.get_property(STORAGE_CLASS_KEY);
-
         // If the regions are not belong to the same keyspace, reset the encryption_key
         // property.
         let belongs_to_same_keyspace =
             ApiV2::is_belongs_to_same_keyspace(&source.range.outer_start, &self.range.outer_start);
         if !belongs_to_same_keyspace {
             self.del_property(ENCRYPTION_KEY);
-        } else if source_storage_class.is_some() && old_storage_class.is_some() {
-            let source_storage_class = source_storage_class.unwrap();
-            let target_storage_class = old_storage_class.unwrap();
-            if source_storage_class.eq(&target_storage_class) {
-                self.set_property(STORAGE_CLASS_KEY, &target_storage_class);
-            }
         }
 
         let (clear_source, clear_target) =
@@ -1237,6 +1236,7 @@ impl ShardMeta {
             self.vector_indexes.clear();
             // remove DEL_PREFIXES_KEY property if exists
             self.del_property(DEL_PREFIXES_KEY);
+            self.del_property(STORAGE_CLASS_KEY);
         }
         if !clear_source {
             for (&id, source_file) in &source.files {
@@ -1249,10 +1249,13 @@ impl ShardMeta {
                 self.merge_vector_index(vec_idx);
             }
 
-            // `inner_key_off` will be different when merge regions of different keyspaces.
             if clear_target {
+                // `inner_key_off` will be different when merge regions of different keyspaces.
                 parent.inner_key_off = source.inner_key_off;
                 self.inner_key_off = source.inner_key_off;
+
+                parent.set_property_from_other(STORAGE_CLASS_KEY, source);
+                self.set_property_from_other(STORAGE_CLASS_KEY, source);
             }
 
             // merge DEL_PREFIXES_KEY from source if needed

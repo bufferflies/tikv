@@ -1718,12 +1718,18 @@ impl ShardDataCore {
             } else {
                 for tbl in lh.tables.iter() {
                     let is_sync = *is_sync.get_or_insert(tbl.is_sync());
-                    debug_assert_eq!(is_sync, tbl.is_sync());
                     if is_sync {
                         files.push(tbl.id());
                     } else {
                         async_files.push(tbl.id())
                     }
+                    debug_assert_eq!(
+                        is_sync,
+                        tbl.is_sync(),
+                        "files {:?}, async_files {:?}",
+                        files,
+                        async_files
+                    );
                 }
             }
             false
@@ -2399,6 +2405,7 @@ impl PartialEq for Properties {
 }
 
 pub fn get_shard_property(key: &str, props: &kvenginepb::Properties) -> Option<Vec<u8>> {
+    debug_assert_eq!(props.get_keys().len(), props.get_values().len());
     let keys = props.get_keys();
     for i in 0..keys.len() {
         if key == keys[i] {
@@ -2406,6 +2413,19 @@ pub fn get_shard_property(key: &str, props: &kvenginepb::Properties) -> Option<V
         }
     }
     None
+}
+
+pub fn set_shard_property(key: &str, props: &mut kvenginepb::Properties, val: Vec<u8>) {
+    debug_assert_eq!(props.get_keys().len(), props.get_values().len());
+    let keys = props.get_keys();
+    for i in 0..keys.len() {
+        if key == keys[i] {
+            props.values[i] = val;
+            return;
+        }
+    }
+    props.keys.push(key.to_string());
+    props.values.push(val);
 }
 
 /// Returns the ingest id if it is a legacy ingest request from the TiDB BR

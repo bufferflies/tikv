@@ -15,7 +15,8 @@ use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    get_shard_property, util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY, STORAGE_CLASS_KEY,
+    get_shard_property, set_shard_property, util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY,
+    STORAGE_CLASS_KEY,
 };
 use kvproto::{
     disk_usage::DiskUsage,
@@ -2338,6 +2339,21 @@ impl<'a> PreprocessRef<'a> {
             PeerState::Tombstone,
             Some(merge_state),
         );
+
+        // Get storage class after `new_meta.commit_merge`. As storage class would be
+        // changed in there.
+        let source_sc = source_meta.get_storage_class();
+        let target_sc = new_meta.get_storage_class();
+        if source_sc != target_sc {
+            set_shard_property(
+                STORAGE_CLASS_KEY,
+                source.mut_snapshot().mut_properties(),
+                target_sc.marshal(),
+            );
+            warn!("{} preprocess commit merge: storage class mismatch", self.tag();
+                "source_sc" => ?source_sc, "target_sc" => ?target_sc, "source" => ?source);
+        }
+
         let apply_msg = ApplyMsg::PrepareCommitMerge {
             source,
             commit_index: entry.index,

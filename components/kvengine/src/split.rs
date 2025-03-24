@@ -395,22 +395,10 @@ impl Engine {
         self.prepare_update_shard_version(&old_shard, sequence, true);
         let source_snap = source.get_snapshot();
 
-        let mut source_properties = Properties::new();
-        source_properties = source_properties.apply_pb(source_snap.get_properties());
-        let source_storage_class = source_properties.get(STORAGE_CLASS_KEY);
-        let old_storage_class = old_shard.get_property(STORAGE_CLASS_KEY);
-
         let belongs_to_same_keyspace =
             ApiV2::is_belongs_to_same_keyspace(&source_snap.outer_start, &old_shard.outer_start);
         if !belongs_to_same_keyspace {
             old_shard.del_property(ENCRYPTION_KEY);
-        } else if source_storage_class.is_some() && old_storage_class.is_some() {
-            let source_storage_class = source_storage_class.unwrap();
-            let target_storage_class = old_storage_class.unwrap();
-            // If two shards have storage class property, only the same IA table can be
-            // merged in the previous merge check.
-            assert!(source_storage_class.eq(&target_storage_class));
-            old_shard.set_property(STORAGE_CLASS_KEY, &target_storage_class);
         }
 
         let (clear_source, clear_target) =
@@ -423,6 +411,8 @@ impl Engine {
                 old_shard.range,
             );
             old_shard.set_property(DEL_PREFIXES_KEY, &[]);
+            let source_sc = get_shard_property(STORAGE_CLASS_KEY, source_snap.get_properties());
+            old_shard.set_property(STORAGE_CLASS_KEY, source_sc.as_deref().unwrap_or_default());
             old_shard.set_data_opt(
                 ShardData::new_empty(
                     old_shard.range.clone(),
@@ -469,6 +459,16 @@ impl Engine {
                 new_shard.keyspace_id,
             ) {
                 new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
+            }
+
+            let source_sc = StorageClass::unmarshal(
+                get_shard_property(STORAGE_CLASS_KEY, source_snap.get_properties()).as_deref(),
+            );
+            let target_sc = old_shard.get_storage_class();
+            if source_sc != target_sc {
+                warn!("{} commit merge: storage class mismatch", old_shard.tag();
+                    "source" => ?source, "target" => ?target_sc);
+                debug_assert!(false);
             }
 
             // merge shard data
