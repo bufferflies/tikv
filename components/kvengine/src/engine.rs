@@ -162,6 +162,7 @@ impl Engine {
             txn_chunk_mgr,
             ia_ctx,
             schema_files: Arc::new(DashMap::new()),
+            worker_handles: Default::default(),
         };
         let en = Engine {
             core: Arc::new(core),
@@ -172,30 +173,36 @@ impl Engine {
         tikv_util::init_task_local_sync(|| en.load_shards(metas, recoverer, None))?;
         en.loaded.store(true, Ordering::Relaxed);
         let flush_en = en.clone();
-        thread::Builder::new()
-            .name("flush".to_string())
-            .spawn_wrapper(move || {
-                flush_en.run_flush_worker(flush_rx);
-            })
-            .unwrap();
+        en.add_worker_handle(
+            thread::Builder::new()
+                .name("flush".to_string())
+                .spawn_wrapper(move || {
+                    flush_en.run_flush_worker(flush_rx);
+                })
+                .unwrap(),
+        );
         if !opts.for_restore {
             // Disable compaction for restore, as some tables are not loaded from DFS.
             let compact_en = en.clone();
-            thread::Builder::new()
-                .name("compaction".to_string())
-                .spawn_wrapper(move || {
-                    compact_en.run_compaction(compact_rx);
-                })
-                .unwrap();
+            en.add_worker_handle(
+                thread::Builder::new()
+                    .name("compaction".to_string())
+                    .spawn_wrapper(move || {
+                        compact_en.run_compaction(compact_rx);
+                    })
+                    .unwrap(),
+            );
         } else {
             warn!("compaction is disabled");
         }
-        thread::Builder::new()
-            .name("free_mem".to_string())
-            .spawn_wrapper(move || {
-                free_mem(free_rx);
-            })
-            .unwrap();
+        en.add_worker_handle(
+            thread::Builder::new()
+                .name("free_mem".to_string())
+                .spawn_wrapper(move || {
+                    free_mem(free_rx);
+                })
+                .unwrap(),
+        );
         Ok(en)
     }
 
@@ -284,6 +291,8 @@ impl Engine {
         }
         self.flush_tx.send(FlushMsg::Stop).unwrap();
         self.free_tx.send(FreeMemMsg::Stop).unwrap();
+
+        self.join_workers();
     }
 
     pub fn notify_memtables_size(&self, size: u64) {
@@ -316,6 +325,7 @@ pub struct EngineCore {
     pub(crate) ia_ctx: IaCtx,
     pub(crate) files_in_blacklist: Arc<HashSet<u64>>,
     pub(crate) schema_files: Arc<DashMap<u64, SchemaFile>>,
+    worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
 impl Drop for EngineCore {
@@ -894,6 +904,24 @@ impl EngineCore {
 
     pub fn get_keyspace_config(&self, keyspace_id: u32) -> Option<&PerKeyspaceConfig> {
         self.per_keyspace_configs.get(&keyspace_id)
+    }
+
+    fn add_worker_handle(&self, handle: thread::JoinHandle<()>) {
+        self.worker_handles.lock().unwrap().push(handle);
+    }
+
+    fn join_workers(&self) {
+        let handles = self
+            .worker_handles
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect::<Vec<_>>();
+        for handle in handles {
+            if let Err(e) = handle.join() {
+                warn!("Failed to join worker thread: {:?}", e);
+            }
+        }
     }
 }
 
