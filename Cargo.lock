@@ -1885,7 +1885,6 @@ dependencies = [
  "api_version",
  "async-trait",
  "bytes",
- "cc",
  "chrono",
  "clap 3.2.22",
  "cloud_encryption",
@@ -9054,7 +9053,6 @@ dependencies = [
 name = "tikv-worker"
 version = "0.1.0"
 dependencies = [
- "cc",
  "chrono",
  "clap 2.34.0",
  "cloud_worker",
