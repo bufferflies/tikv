@@ -748,12 +748,16 @@ fn async_commit_timestamps(
         let concurrency_manager = txn.concurrency_manager.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         handle.spawn_blocking(move || {
-            tx.send(futures_executor::block_on(
+            if let Err(e) = tx.send(futures_executor::block_on(
                 concurrency_manager.lock_key(&key),
-            ))
-            .unwrap();
+            )) {
+                // Should happen only when the outer scheduler is dropped.
+                warn!("send error: {:?}", e);
+            }
         });
-        rx.recv().unwrap()
+        // Should happen only when the runtime is dropped.
+        rx.recv()
+            .map_err(|e| -> Error { box_err!("recv error: {:?}", e) })?
     } else {
         futures_executor::block_on(txn.concurrency_manager.lock_key(key))
     };
