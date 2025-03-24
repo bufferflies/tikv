@@ -671,6 +671,7 @@ impl ObjectStorageService {
         info!("start_server on port {}", self.port());
     }
 
+    // Note: In tests, drop all clients (e.g. `S3Fs`) before calling this method.
     pub fn graceful_shutdown(&mut self) {
         if let Some(handle) = self.svc_handle.take() {
             let close_tx = self.close_tx.take().unwrap();
