@@ -715,11 +715,11 @@ pub async fn get_shard_meta(
 
 fn calculate_flush_file_concurrency(mem: u64) -> usize {
     let mem_gb = mem / 1024 / 1024 / 1024;
-    if mem_gb >= 8 {
+    if mem_gb >= 16 {
         8
-    } else if mem_gb >= 4 {
+    } else if mem_gb >= 8 {
         4
-    } else if mem_gb >= 2 {
+    } else if mem_gb >= 4 {
         2
     } else {
         1
