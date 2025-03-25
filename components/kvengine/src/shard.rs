@@ -838,6 +838,10 @@ impl Shard {
         self.get_data().get_columnar_snap_version()
     }
 
+    pub fn get_columnar_l2_snap_version(&self) -> u64 {
+        self.get_data().col_levels.l2_snap_version
+    }
+
     pub fn get_columnar_table_ids(&self) -> Vec<i64> {
         self.get_data().columnar_table_ids.clone()
     }
@@ -1059,17 +1063,62 @@ impl Shard {
         None
     }
 
+    fn get_table_ids_need_columnar_major_compaction(
+        &self,
+        data: &ShardData,
+    ) -> (
+        Vec<i64>, // table ids that need to add columnar
+        Vec<i64>, // table ids that need to clear columnar
+    ) {
+        if self.get_schema_file().is_none() {
+            // Return empty table ids means no table need to add or clear columnar.
+            return (vec![], vec![]);
+        }
+        // Collect table ids that exists only in shard or schema file. If table id only
+        // exists in schema file, it means the table need to add columnar; If table id
+        // only exists in shard, it means the table need to clear columnar.
+        let tables_in_shard = data
+            .columnar_table_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let tables_in_schema = self
+            .get_schema_file()
+            .as_ref()
+            .map(|schema| {
+                schema
+                    .overlap_columnar_tables(data.range.inner_start(), data.range.inner_end())
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        (
+            tables_in_schema
+                .difference(&tables_in_shard)
+                .cloned()
+                .collect(),
+            tables_in_shard
+                .difference(&tables_in_schema)
+                .cloned()
+                .collect(),
+        )
+    }
+
     fn get_columnar_compaction_priority(&self, data: &ShardData) -> Option<CompactionPriority> {
         if self.opt.ignore_columnar_table_load {
             return None;
         }
 
-        // TODO: support columnar major compaction partial tables in the shard.
+        let (table_ids_to_add, table_ids_to_clear) =
+            self.get_table_ids_need_columnar_major_compaction(data);
         if self.opt.build_columnar()
             && data.has_files_need_major_compact()
-            && data.columnar_table_ids.is_empty()
+            && (!table_ids_to_add.is_empty() || !table_ids_to_clear.is_empty())
         {
-            return Some(CompactionPriority::ColumnarMajor);
+            return Some(CompactionPriority::ColumnarMajor {
+                table_ids_to_add,
+                table_ids_to_clear,
+            });
         }
 
         // TODO: use dependent base_size for columnar

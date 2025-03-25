@@ -1035,9 +1035,11 @@ impl ShardMeta {
             self.unconverted_l0s.clear();
         } else {
             self.columnar_table_ids
-                .extend_from_slice(&comp.columnar_table_ids);
+                .extend_from_slice(comp.get_columnar_table_ids());
             self.columnar_table_ids.sort_unstable();
             self.columnar_table_ids.dedup();
+            self.columnar_table_ids
+                .retain(|id| !comp.get_columnar_table_ids_to_clear().contains(id));
         }
     }
 

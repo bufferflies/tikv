@@ -10,7 +10,10 @@ use std::{
 use bytes::{Buf, Bytes};
 use futures::executor::block_on;
 use rand::prelude::*;
-use tidb_query_datatype::{codec::table::encode_row_key, expr::EvalContext};
+use tidb_query_datatype::{
+    codec::table::{encode_row_key, encode_row_key_prefix},
+    expr::EvalContext,
+};
 
 use crate::{
     compaction::CompactionPriority,
@@ -35,7 +38,8 @@ use crate::{
         keyspace_prefix, new_test_engine_opt, prepare_table_region, try_wait, Splitter, TestEngine,
         DEF_BLOCK_SIZE, KEYSPACE_ID,
     },
-    DeletePrefixes, IdVer, LevelHandler, TruncateTs, DEL_PREFIXES_KEY, EXTRA_CF, LOCK_CF, WRITE_CF,
+    DeletePrefixes, IdVer, LevelHandler, SnapAccess, TruncateTs, DEL_PREFIXES_KEY, EXTRA_CF,
+    LOCK_CF, WRITE_CF,
 };
 
 #[test]
@@ -362,7 +366,10 @@ fn test_columnar_major_compaction() {
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
-    *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor);
+    *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor {
+        table_ids_to_add: vec![table_id],
+        table_ids_to_clear: vec![],
+    });
     engine.trigger_compact(id_ver);
     info!("trigger columnar major compaction {}", shard.tag());
     let ok = try_wait(
@@ -403,6 +410,266 @@ fn test_columnar_major_compaction() {
         block_on(mvcc_row_reader.read_block(&mut row_block, usize::MAX)).unwrap();
     info!("merge_reader read block with {} rows", merge_reader_counts);
     verify_columnar_with_blocks(&row_block, &block);
+
+    // Remove columnar compaction.
+    let data = shard.get_data();
+    shard.set_data(ShardDataBuilder::new(data).build());
+    *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarClear);
+    engine.trigger_compact(id_ver);
+    info!("trigger remove columnar compaction {}", shard.tag());
+    let ok = try_wait(
+        || {
+            info!(
+                "wait remove columnar compaction {} l0 files: {}, l1 files: {}, l2 files: {}",
+                shard.tag(),
+                shard.get_data().col_levels.levels[0].files.len(),
+                shard.get_data().col_levels.levels[1].files.len(),
+                shard.get_data().col_levels.levels[2].files.len()
+            );
+            shard.get_data().col_levels.levels[2].files.is_empty()
+        },
+        5,
+    );
+    assert!(ok);
+    assert_eq!(shard.get_columnar_snap_version(), 0);
+    assert!(shard.get_data().schema_file.is_none());
+}
+
+#[test]
+fn test_columnar_major_compaction_multiple_tables() {
+    use crate::{
+        table::{
+            columnar::{ColumnarMergeReader, ColumnarMvccReader},
+            table::BoundedDataSet,
+        },
+        table_id::get_table_id_from_data_bound,
+    };
+
+    ::test_util::init_log_for_test();
+    let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    engine.opts.set_build_columnar(true);
+    let keyspace_id = KEYSPACE_ID;
+    let table_ids = vec![1, 2, 3, 4, 5];
+    let mut schemas = vec![];
+    // Split to keep tables in same region.
+    let split_key_1 = [keyspace_prefix(keyspace_id), encode_row_key_prefix(1)].concat();
+    let split_key_2 = [keyspace_prefix(keyspace_id), encode_row_key_prefix(6)].concat();
+    let mut splitter = Splitter::new(
+        vec![split_key_1, split_key_2],
+        IdVer::new(1, 1),
+        5,
+        apply_tx.clone(),
+    );
+    let handle = thread::spawn(move || {
+        splitter.run();
+    });
+    handle.join().unwrap();
+
+    for &table_id in &table_ids {
+        let schema = new_schema(table_id, false);
+        schemas.push(schema);
+    }
+    let mut file_id = 100;
+    let mut allocate_id = || {
+        file_id += 1;
+        file_id
+    };
+
+    let schema_version = 10;
+    // Build schema file for the first 3 tables.
+    let schemas_1 = schemas[0..3].to_vec();
+    let schema_file_data_1 = build_schema_file(keyspace_id, schema_version, schemas_1, 0);
+    let fs = engine.fs.clone();
+    let schema_raw_file_1 = Arc::new(InMemFile::new(
+        allocate_id(),
+        Bytes::from(schema_file_data_1),
+    ));
+    fs.get_runtime()
+        .block_on(
+            fs.create(
+                schema_raw_file_1.id(),
+                schema_raw_file_1
+                    .read(0, schema_raw_file_1.size() as usize)
+                    .unwrap(),
+                dfs::Options::default().with_type(FileType::Schema),
+            ),
+        )
+        .unwrap();
+    let schema_file = SchemaFile::open(schema_raw_file_1).unwrap();
+    let mut saved_vals = vec![];
+    let mut l1_tbls = vec![];
+    let mut l2_tbls = vec![];
+    for (idx, &table_id) in table_ids.iter().enumerate().rev() {
+        let l1_tbl_0 = new_sst_table_for_columnar(
+            &engine,
+            allocate_id(),
+            table_id,
+            300,
+            900,
+            350 + idx as u64,
+            &mut saved_vals,
+        );
+        l1_tbls.push(l1_tbl_0);
+        let l1_tbl_1 = new_sst_table_for_columnar(
+            &engine,
+            allocate_id(),
+            table_id,
+            1000,
+            1500,
+            350 + idx as u64,
+            &mut saved_vals,
+        );
+        l1_tbls.push(l1_tbl_1);
+        let l2_tbl_0 = new_sst_table_for_columnar(
+            &engine,
+            allocate_id(),
+            table_id,
+            0,
+            1000,
+            100 + idx as u64,
+            &mut saved_vals,
+        );
+        l2_tbls.push(l2_tbl_0);
+        let l2_tbl_1 = new_sst_table_for_columnar(
+            &engine,
+            allocate_id(),
+            table_id,
+            1000,
+            2000,
+            100 + idx as u64,
+            &mut saved_vals,
+        );
+        l2_tbls.push(l2_tbl_1);
+    }
+    l1_tbls.sort_by_key(|tbl| tbl.smallest().to_vec());
+    l2_tbls.sort_by_key(|tbl| tbl.smallest().to_vec());
+    let level_handler_1 = LevelHandler::new(1, l1_tbls.clone());
+    let level_handler_2 = LevelHandler::new(2, l2_tbls.clone());
+    let mut write_cf = ShardCf::new(WRITE_CF);
+    write_cf.set_level(level_handler_1);
+    write_cf.set_level(level_handler_2);
+
+    let shard = engine.get_shard(1).unwrap();
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_cfs([write_cf, ShardCf::new(LOCK_CF), ShardCf::new(EXTRA_CF)]);
+    builder.set_schema_file(Some(schema_file.clone()));
+    shard.set_data(builder.build());
+    shard.initial_flushed.store(true, Ordering::SeqCst);
+    let id_ver = shard.id_ver();
+    *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor {
+        table_ids_to_add: schema_file.export_backend_table_ids(),
+        table_ids_to_clear: vec![],
+    });
+    engine.trigger_compact(id_ver);
+    info!("trigger columnar major compaction {}", shard.tag());
+    let ok = try_wait(
+        || {
+            info!(
+                "wait columnar major compaction {} l0 files: {}, l1 files: {}, l2 files: {}",
+                shard.tag(),
+                shard.get_data().col_levels.levels[0].files.len(),
+                shard.get_data().col_levels.levels[1].files.len(),
+                shard.get_data().col_levels.levels[2].files.len()
+            );
+            !shard.get_data().col_levels.levels[2].files.is_empty()
+        },
+        5,
+    );
+    assert!(ok, "columnar major compaction failed");
+    let verify_columnar_for_table = |schema_file: &SchemaFile, snap: &SnapAccess, table_id: i64| {
+        let schema = schema_file.get_table(table_id).unwrap();
+        let mut mvcc_reader = snap
+            .new_columnar_mvcc_reader(table_id, &schema.columns, None, 500)
+            .unwrap();
+        // Use a random end int handle
+        let end_handle = thread_rng().gen_range(500..2100);
+        block_on(mvcc_reader.set_int_handle_range(0, Some(end_handle))).unwrap();
+        let mut block = Block::new(schema);
+        let mvcc_reader_counts = block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
+        info!("mvcc_reader read block with {} rows", mvcc_reader_counts);
+        let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
+        for tbl in l1_tbls.iter().chain(l2_tbls.iter()) {
+            let data_bound = tbl.data_bound();
+            let (min_table_id, max_table_id) = get_table_id_from_data_bound(data_bound);
+            if table_id < min_table_id || table_id > max_table_id {
+                continue;
+            }
+            let iter = tbl.new_iterator(false, false);
+            let reader = ColumnarRowTableReader::new(schema.clone(), iter, None, false, None);
+            columnar_readers.push(Box::new(reader));
+        }
+        let merged_reader = ColumnarMergeReader::new(schema.clone(), columnar_readers);
+        let mut mvcc_row_reader = ColumnarMvccReader::new(Box::new(merged_reader), schema, 500);
+        block_on(mvcc_row_reader.set_int_handle_range(0, Some(end_handle))).unwrap();
+        let mut row_block = Block::new(schema);
+        let merge_reader_counts =
+            block_on(mvcc_row_reader.read_block(&mut row_block, usize::MAX)).unwrap();
+        info!("merge_reader read block with {} rows", merge_reader_counts);
+        verify_columnar_with_blocks(&row_block, &block);
+    };
+    let snap = shard.new_snap_access();
+    for table_id in schema_file.export_backend_table_ids() {
+        verify_columnar_for_table(&schema_file, &snap, table_id);
+    }
+
+    // Add table id 4 & 5 to schema file and remove table id 3 from schema file.
+    let schemas_2 = vec![
+        schemas[0].clone(),
+        schemas[1].clone(),
+        schemas[3].clone(),
+        schemas[4].clone(),
+    ];
+    let schema_file_data_2 = build_schema_file(keyspace_id, schema_version + 1, schemas_2, 0);
+    let schema_raw_file_2 = Arc::new(InMemFile::new(
+        allocate_id(),
+        Bytes::from(schema_file_data_2),
+    ));
+    fs.get_runtime()
+        .block_on(
+            fs.create(
+                schema_raw_file_2.id(),
+                schema_raw_file_2
+                    .read(0, schema_raw_file_2.size() as usize)
+                    .unwrap(),
+                dfs::Options::default().with_type(FileType::Schema),
+            ),
+        )
+        .unwrap();
+    let schema_file = SchemaFile::open(schema_raw_file_2).unwrap();
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_schema_file(Some(schema_file.clone()));
+    shard.set_data(builder.build());
+    *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor {
+        table_ids_to_add: vec![4, 5],
+        table_ids_to_clear: vec![3],
+    });
+    engine.trigger_compact(id_ver);
+    info!("trigger columnar major compaction {}", shard.tag());
+    let ok = try_wait(
+        || {
+            info!(
+                "wait columnar major compaction {} l0 files: {}, l1 files: {}, l2 files: {}, columnar_table_ids: {:?}",
+                shard.tag(),
+                shard.get_data().col_levels.levels[0].files.len(),
+                shard.get_data().col_levels.levels[1].files.len(),
+                shard.get_data().col_levels.levels[2].files.len(),
+                shard.get_data().columnar_table_ids
+            );
+            !shard.get_data().columnar_table_ids.contains(&3)
+                && shard.get_data().columnar_table_ids.contains(&4)
+                && shard.get_data().columnar_table_ids.contains(&5)
+        },
+        5,
+    );
+    assert!(ok, "columnar major compaction failed");
+    let snap = shard.new_snap_access();
+    let table_ids = schema_file.export_backend_table_ids();
+    assert!(table_ids.contains(&4));
+    assert!(table_ids.contains(&5));
+    assert!(!table_ids.contains(&3));
+    for table_id in table_ids {
+        verify_columnar_for_table(&schema_file, &snap, table_id);
+    }
 
     // Remove columnar compaction.
     let data = shard.get_data();

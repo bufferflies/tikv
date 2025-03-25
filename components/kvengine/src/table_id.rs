@@ -71,6 +71,17 @@ pub fn get_table_id_from_data_bound(data_bound: DataBound<'_>) -> (i64, i64) {
     (start_table_id, end_table_id)
 }
 
+/// Return true if the range of data bound overlaps with any of the table ids.
+pub(crate) fn is_bound_overlap_with_table_ids(
+    data_bound: DataBound<'_>,
+    table_ids: &[i64],
+) -> bool {
+    let (min_table_id, max_table_id) = get_table_id_from_data_bound(data_bound);
+    table_ids
+        .iter()
+        .any(|&id| id >= min_table_id && id <= max_table_id)
+}
+
 /// Return true when both keys are table keys and they belong to the same table.
 ///
 /// Should check `ApiV2::is_belongs_to_same_keyspace()` first if the keys can
@@ -159,6 +170,52 @@ mod tests {
             let key = hex::decode(k).unwrap();
             assert_eq!(
                 is_table_boundary_key(InnerKey::from_inner_buf(&key)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_bound_overlap_with_table_ids() {
+        let cases: Vec<(&'static str, &'static str, &[i64], bool)> = vec![
+            (
+                "748000000000000001",
+                "7480000000000000015F728000000000000001",
+                &[1, 2, 3],
+                true,
+            ),
+            (
+                "7480000000000000025F728000000000000001",
+                "748000000000000003",
+                &[4, 5, 6],
+                false,
+            ),
+            (
+                "748000000000000001",
+                "7480000000000000045F728000000000000001",
+                &[3],
+                true,
+            ),
+            (
+                "748000000000000004",
+                "7480000000000000095F728000000000000001",
+                &[1, 2, 3],
+                false,
+            ),
+        ];
+
+        for (lower_bound, upper_bound, table_ids, expected) in cases {
+            let lower_bound = hex::decode(lower_bound).unwrap();
+            let upper_bound = hex::decode(upper_bound).unwrap();
+            assert_eq!(
+                is_bound_overlap_with_table_ids(
+                    DataBound::new(
+                        InnerKey::from_inner_buf(&lower_bound),
+                        InnerKey::from_inner_buf(&upper_bound),
+                        true
+                    ),
+                    table_ids
+                ),
                 expected
             );
         }

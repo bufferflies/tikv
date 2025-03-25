@@ -1092,6 +1092,8 @@ impl EngineCore {
             columnar_table_ids.extend_from_slice(col_comp.get_columnar_table_ids());
             columnar_table_ids.sort_unstable();
             columnar_table_ids.dedup();
+            columnar_table_ids
+                .retain(|id| !col_comp.get_columnar_table_ids_to_clear().contains(id));
             old_data.schema_file.clone()
         };
         let mut builder = ShardDataBuilder::new(old_data);

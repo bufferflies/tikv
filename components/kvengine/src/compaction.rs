@@ -56,6 +56,7 @@ use crate::{
         vector_index::VectorIndexBuilder,
         BoundedDataSet, ChecksumType, DataBound, InnerKey,
     },
+    table_id::{get_table_id_from_data_bound, is_bound_overlap_with_table_ids},
     util::{
         new_blob_create_pb, new_columnar_create_pb, new_table_create_pb, new_vector_index_file_pb,
     },
@@ -443,8 +444,11 @@ pub struct ColumnarMajorCompaction {
     blob_tables: Vec<u64>,
     old_columnar_tables: Vec<(usize /* level */, u64 /* file id */)>,
     schema_file_id: u64,
+    table_ids: (Vec<i64>, Vec<i64>), /* (table ids that need to add columnar, table ids that
+                                      * need to clear columnar) */
     columnar_config: ColumnarTableBuildOptions,
     snap_version: u64,
+    target_level: u32, // target level for columnar tables create
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -607,8 +611,15 @@ impl Engine {
             Some(CompactionPriority::ColumnarL1 { .. }) => {
                 self.trigger_columnar_l1_compaction(&shard).await
             }
-            Some(CompactionPriority::ColumnarMajor { .. }) => {
-                self.trigger_columnar_major_compaction(&shard).await
+            Some(CompactionPriority::ColumnarMajor {
+                table_ids_to_add,
+                table_ids_to_clear,
+            }) => {
+                self.trigger_columnar_major_compaction(
+                    &shard,
+                    (table_ids_to_add, table_ids_to_clear),
+                )
+                .await
             }
             Some(CompactionPriority::ColumnarClear) => {
                 self.trigger_remove_columnar_compaction(&shard).await
@@ -1575,8 +1586,10 @@ impl Engine {
             blob_tables: vec![],
             old_columnar_tables,
             schema_file_id: 0,
+            table_ids: (vec![], vec![]),
             snap_version: 0,
             columnar_config: self.opts.columnar_build_options,
+            target_level: 2, // Set target level to 2 for clear columnar to reset l2_snap_version.
         };
         req.compaction_tp = CompactionType::ColumnarMajor(columnar_major_compaction);
         info!("start remove columnar for {}", tag);
@@ -1625,11 +1638,17 @@ impl Engine {
     pub(crate) async fn trigger_columnar_major_compaction(
         &self,
         shard: &Shard,
+        table_ids: (Vec<i64>, Vec<i64>),
     ) -> Option<Result<pb::ChangeSet>> {
-        info!("{} trigger_columnar_major_compaction", shard.tag());
+        info!(
+            "{} trigger_columnar_major_compaction, table_ids_to_add: {:?}, table_ids_to_clear: {:?}",
+            shard.tag(),
+            table_ids.0,
+            table_ids.1
+        );
+        let (tables_to_add, tables_to_clear) = &table_ids;
         let mut req = self.new_compact_request_with_shard(shard);
         let data = shard.get_data();
-        let snap_version = shard.get_snap_version();
         if !shard.opt.build_columnar() || data.schema_file.is_none() {
             store_bool(&shard.compacting, false);
             warn!(
@@ -1648,43 +1667,106 @@ impl Engine {
                 continue;
             }
             num_ln_files += lh.tables.len();
-            ln_tables.push((lh.level, lh.tables.iter().map(|t| t.id()).collect()));
+            ln_tables.push((
+                lh.level,
+                lh.tables
+                    .iter()
+                    .filter_map(|t| {
+                        let data_bound = t.data_bound();
+                        let (min_table_id, max_table_id) = get_table_id_from_data_bound(data_bound);
+                        if tables_to_add
+                            .iter()
+                            .any(|&id| id >= min_table_id && id <= max_table_id)
+                        {
+                            Some(t.id())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+            ));
             total_size += lh.tables.iter().map(|t| t.size()).sum::<u64>();
         }
 
+        // Check if columnar file in level 2 overlaps with the tables to add.
+        let has_columnar_file_overlap = data.col_levels.levels[2].files.iter().any(|col| {
+            let data_bound = col.data_bound();
+            is_bound_overlap_with_table_ids(data_bound, tables_to_add)
+        });
+        // NOTE: add the columnar table to old_columnar_tables if the columnar file
+        // contains the table.
         let mut old_columnar_tables = vec![];
-
         data.col_levels.levels.iter().for_each(|col_level| {
-            col_level.files.iter().for_each(|table| {
-                old_columnar_tables.push((col_level.level, table.get_file().id()));
-            });
+            col_level
+                .files
+                .iter()
+                .filter(|col| tables_to_clear.iter().any(|&id| col.has_table(id)))
+                .for_each(|table| {
+                    old_columnar_tables.push((col_level.level, table.get_file().id()));
+                });
         });
 
-        let snap_version = data
+        let l0_tbls = data
             .l0_tbls
             .iter()
-            .map(|t| t.version())
-            .max()
-            .unwrap_or(snap_version);
-        total_size += data.l0_tbls.iter().map(|t| t.size()).sum::<u64>();
-        total_size += data.blob_tbl_map.values().map(|t| t.size()).sum::<u64>();
+            .filter(|t| {
+                let data_bound = t.data_bound();
+                let (min_table_id, max_table_id) = get_table_id_from_data_bound(data_bound);
+                tables_to_add
+                    .iter()
+                    .any(|&id| id >= min_table_id && id <= max_table_id)
+                    && !data.get_unconverted_l0s().contains(&t.id())
+            })
+            .collect::<Vec<_>>();
+
+        let mut snap_version = shard.get_columnar_l2_snap_version();
+        let target_level = if !has_columnar_file_overlap {
+            // If target_level is 2 and snap_version is 0, snap_version should be updated.
+            if snap_version == 0 {
+                snap_version = l0_tbls
+                    .iter()
+                    .map(|t| t.version())
+                    .max()
+                    .unwrap_or(shard.get_snap_version());
+            }
+            2
+        } else {
+            1
+        };
+
+        let blob_tbls = data
+            .blob_tbl_map
+            .values()
+            .filter(|t| {
+                let data_bound = t.data_bound();
+                let (min_table_id, max_table_id) = get_table_id_from_data_bound(data_bound);
+                tables_to_add
+                    .iter()
+                    .any(|&id| id >= min_table_id && id <= max_table_id)
+            })
+            .collect::<Vec<_>>();
+
+        total_size += l0_tbls.iter().map(|t| t.size()).sum::<u64>();
+        total_size += blob_tbls.iter().map(|t| t.size()).sum::<u64>();
         let columnar_config = self.opts.columnar_build_options;
         let estimated_num_files = total_size as usize / columnar_config.max_columnar_table_size;
         self.set_alloc_ids_for_request(
             &mut req,
-            data.l0_tbls.len() + num_ln_files + data.blob_tbl_map.len(),
+            l0_tbls.len() + num_ln_files + blob_tbls.len(),
             estimated_num_files,
         )
         .await;
         let major_compaction = ColumnarMajorCompaction {
             safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
-            l0_tables: data.l0_tbls.iter().map(|t| t.id()).collect(),
+            l0_tables: l0_tbls.iter().map(|t| t.id()).collect(),
             ln_tables,
-            blob_tables: data.blob_tbl_map.keys().copied().collect(),
+            blob_tables: blob_tbls.iter().map(|t| t.id()).collect(),
             old_columnar_tables,
             schema_file_id,
+            table_ids,
             columnar_config,
             snap_version,
+            target_level,
         };
         req.compaction_tp = CompactionType::ColumnarMajor(major_compaction);
         info!(
@@ -1935,7 +2017,10 @@ pub(crate) enum CompactionPriority {
     ColumnarL1 {
         score: f64,
     },
-    ColumnarMajor,
+    ColumnarMajor {
+        table_ids_to_add: Vec<i64>,
+        table_ids_to_clear: Vec<i64>,
+    },
     ColumnarClear,
     UpdateVectorIndex {
         score: f64,
@@ -1958,7 +2043,7 @@ impl CompactionPriority {
             CompactionPriority::L0ToColumnar => 2.0,
             CompactionPriority::ColumnarL0 { score } => *score,
             CompactionPriority::ColumnarL1 { score } => *score,
-            CompactionPriority::ColumnarMajor => 1.5,
+            CompactionPriority::ColumnarMajor { .. } => 1.5,
             CompactionPriority::ColumnarClear => f64::MAX,
             CompactionPriority::UpdateVectorIndex { score, .. } => *score,
         }
@@ -1975,7 +2060,7 @@ impl CompactionPriority {
             CompactionPriority::L0ToColumnar => 0,
             CompactionPriority::ColumnarL0 { .. } => 0,
             CompactionPriority::ColumnarL1 { .. } => 1,
-            CompactionPriority::ColumnarMajor => -1,
+            CompactionPriority::ColumnarMajor { .. } => -1,
             CompactionPriority::ColumnarClear => -1,
             CompactionPriority::UpdateVectorIndex { .. } => -1,
         }
@@ -1992,7 +2077,7 @@ impl CompactionPriority {
             CompactionPriority::L0ToColumnar => 0,
             CompactionPriority::ColumnarL0 { .. } => -1,
             CompactionPriority::ColumnarL1 { .. } => -1,
-            CompactionPriority::ColumnarMajor => -1,
+            CompactionPriority::ColumnarMajor { .. } => -1,
             CompactionPriority::ColumnarClear => -1,
             CompactionPriority::UpdateVectorIndex { .. } => -1,
         }
@@ -3941,6 +4026,7 @@ async fn transform_for_columnar(
     overlap_tables: Vec<i64>,
     schema_file: &SchemaFile,
     target_lvl: u32,
+    snap_version: Option<u64>,
     columnar_config: &ColumnarTableBuildOptions,
     id_allocator: &mut LocalIdAllocator,
 ) -> Result<Vec<ColumnarCreate>> {
@@ -3951,7 +4037,7 @@ async fn transform_for_columnar(
     let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
-        None,
+        snap_version,
         ctx.encryption_key.clone(),
     );
     let mut cnt = 0;
@@ -4007,43 +4093,21 @@ async fn transform_for_columnar(
     Ok(columnar_creates)
 }
 
-async fn columnar_major_compact(
+// NOTE: For tables that need to add columnar, the table should not exist in the
+// shard columnar files, so the old_columnar_tables should be empty.
+async fn columnar_major_compact_for_add_tables(
     ctx: &CompactionCtx,
     major_compaction: &ColumnarMajorCompaction,
     id_allocator: &mut LocalIdAllocator,
-) -> Result<pb::ColumnarCompaction> {
-    let mut ret = pb::ColumnarCompaction::new();
-    ret.set_snap_version(major_compaction.snap_version);
-    ret.set_target_level(2);
-    if major_compaction.snap_version == 0 {
-        let columnar_changes = ret.mut_columnar_change();
-        for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
-            let mut tbl_delete = pb::ColumnarDelete::new();
-            tbl_delete.set_level(level as u32);
-            tbl_delete.set_id(file_id);
-            columnar_changes.mut_columnar_deletes().push(tbl_delete);
-        }
-        return Ok(ret);
-    }
-    // Set row l0s for filter the new flushed l0 tables during apply major
-    // compaction
-    ret.set_row_l0s(major_compaction.l0_tables.clone());
-    let req = &ctx.req;
-    let tag = req.get_tag();
+    schema_file: SchemaFile,
+) -> Result<pb::TableChange> {
+    let mut table_changes = pb::TableChange::new();
     let fs = &ctx.dfs;
-    let opts = dfs::Options::default().with_shard(req.shard_id, req.shard_ver);
-    let schema_file_data = load_table_files(
-        &[major_compaction.schema_file_id],
-        fs.clone(),
-        dfs::Options::default().with_type(FileType::Schema),
-        ctx.local_dir.as_ref(),
-        false,
-    )
-    .await?
-    .pop()
-    .unwrap();
-    let schema_file = SchemaFile::open(schema_file_data)?;
+    let opts = dfs::Options::default()
+        .with_shard(ctx.req.shard_id, ctx.req.shard_ver)
+        .with_type(FileType::Blob);
     let blob_tbls = load_blob_tables(fs.clone(), &major_compaction.blob_tables, opts).await?;
+    let opts = opts.with_type(FileType::Sst);
     let l0_files = load_table_files(
         &major_compaction.l0_tables,
         fs.clone(),
@@ -4089,45 +4153,213 @@ async fn columnar_major_compact(
             tbls.push(tbl.clone());
         });
     }
-    let all_columnar_table_ids = schema_file.export_backend_table_ids();
     if tbls.is_empty() {
-        ret.set_columnar_table_ids(all_columnar_table_ids);
-        return Ok(ret);
+        return Ok(table_changes);
     }
     let overlap_tables = schema_file.overlap_columnar_tables(
         InnerKey::from_inner_buf(smallest.as_ref().unwrap()),
         InnerKey::from_inner_buf(biggest.as_ref().unwrap()),
     );
-    let columnar_table_ids = ret.mut_columnar_table_ids();
-    if overlap_tables.is_empty() {
-        columnar_table_ids.extend_from_slice(&all_columnar_table_ids);
+    let snap_version = if major_compaction.target_level == 2 {
+        None
     } else {
-        columnar_table_ids.extend_from_slice(&overlap_tables);
-    }
-    let columnar_changes = ret.mut_columnar_change();
-    for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
-        let mut tbl_delete = pb::ColumnarDelete::new();
-        tbl_delete.set_level(level as u32);
-        tbl_delete.set_id(file_id);
-        columnar_changes.mut_columnar_deletes().push(tbl_delete);
-    }
-
+        // Level 1 columnar file need sort by snap_version. Use the shard's
+        // l2_snap_version as the new columnar file l0_version.
+        Some(major_compaction.snap_version)
+    };
     let columnar_creates = transform_for_columnar(
         ctx,
         &tbls,
         Some(Arc::new(blob_tbls)),
         overlap_tables,
         &schema_file,
-        2,
+        major_compaction.target_level,
+        snap_version,
         &major_compaction.columnar_config,
         id_allocator,
     )
     .await?;
     for columnar_create in columnar_creates {
-        columnar_changes
-            .mut_columnar_creates()
-            .push(columnar_create);
+        table_changes.mut_columnar_creates().push(columnar_create);
     }
+    Ok(table_changes)
+}
+
+async fn columnar_major_compact_for_clear_tables(
+    ctx: &CompactionCtx,
+    major_compaction: &ColumnarMajorCompaction,
+    id_allocator: &mut LocalIdAllocator,
+    schema_file: SchemaFile,
+) -> Result<pb::TableChange> {
+    let mut table_changes = pb::TableChange::new();
+    let fs = &ctx.dfs;
+    let opts = dfs::Options::default()
+        .with_shard(ctx.req.shard_id, ctx.req.shard_ver)
+        .with_type(FileType::Columnar);
+    let file_ids = major_compaction
+        .old_columnar_tables
+        .iter()
+        .map(|(_, id)| *id)
+        .collect::<Vec<_>>();
+    let columnar_files = load_table_files(
+        &file_ids,
+        fs.clone(),
+        opts,
+        ctx.local_dir.as_ref(),
+        ctx.for_restore,
+    )
+    .await?;
+    let mut columnar_files = columnar_files
+        .into_iter()
+        .map(|f| (f.id(), f))
+        .collect::<HashMap<_, _>>();
+    let mut creates = vec![];
+    let mut deletes = vec![];
+    let (tx, mut rx) = mpsc::channel(major_compaction.old_columnar_tables.len());
+    let schema_file = &schema_file;
+    let mut cnt = 0;
+    // Inplace compact the columnar tables.
+    for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
+        let mut tbl_delete = pb::ColumnarDelete::new();
+        tbl_delete.set_level(level as u32);
+        tbl_delete.set_id(file_id);
+        deletes.push(tbl_delete);
+
+        let file = columnar_files.remove(&file_id).unwrap();
+        let columnar_table = ColumnarFile::open(file)?;
+        let overlap_tables = schema_file
+            .overlap_columnar_tables(columnar_table.get_smallest(), columnar_table.get_biggest());
+        if overlap_tables.is_empty() {
+            continue;
+        }
+        let mut file_builder = ColumnarFileBuilder::new(
+            id_allocator.alloc_id().await,
+            columnar_table.get_l0_version(),
+            ctx.encryption_key.clone(),
+        );
+        // The table_ids_to_clear not exist in overlap_tables, so after the compaction,
+        // the table_ids_to_clear will be deleted.
+        for table_id in overlap_tables {
+            let schema = schema_file.get_table(table_id).unwrap();
+            let reader = ColumnarTableReader::new(
+                &columnar_table,
+                schema.clone(),
+                None,
+                ctx.encryption_key.clone(),
+            );
+            let mut compact_reader =
+                ColumnarCompactReader::new(Box::new(reader), level as u32, schema, ctx.req.safe_ts);
+            compact_reader.set_unbounded_handle_range().await?;
+            compact_table_for_columnar(
+                ctx,
+                &mut compact_reader,
+                &mut file_builder,
+                schema,
+                level as u32,
+                &mut cnt,
+                tx.clone(),
+                &major_compaction.columnar_config,
+                id_allocator,
+            )
+            .await?;
+        }
+        if file_builder.num_tables() > 0 {
+            cnt += 1;
+            persist_columnar_file(
+                level as u32,
+                &mut file_builder,
+                tx.clone(),
+                ctx.dfs.clone(),
+                opts,
+            );
+        }
+    }
+    let mut errors = vec![];
+    for _ in 0..cnt {
+        match rx.recv().await.unwrap() {
+            Err(err) => errors.push(err),
+            Ok(create) => {
+                creates.push(create);
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors.pop().unwrap().into());
+    }
+    table_changes.set_columnar_creates(creates.into());
+    table_changes.set_columnar_deletes(deletes.into());
+
+    Ok(table_changes)
+}
+
+async fn columnar_major_compact(
+    ctx: &CompactionCtx,
+    major_compaction: &ColumnarMajorCompaction,
+    id_allocator: &mut LocalIdAllocator,
+) -> Result<pb::ColumnarCompaction> {
+    let mut ret = pb::ColumnarCompaction::new();
+    ret.set_snap_version(major_compaction.snap_version);
+    ret.set_target_level(major_compaction.target_level);
+    // Clear all columnar tables.
+    if major_compaction.snap_version == 0 {
+        let columnar_changes = ret.mut_columnar_change();
+        for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
+            let mut tbl_delete = pb::ColumnarDelete::new();
+            tbl_delete.set_level(level as u32);
+            tbl_delete.set_id(file_id);
+            columnar_changes.mut_columnar_deletes().push(tbl_delete);
+        }
+        return Ok(ret);
+    }
+    // Set row l0s for filter the new flushed l0 tables during apply major
+    // compaction
+    ret.set_row_l0s(major_compaction.l0_tables.clone());
+    let req = &ctx.req;
+    let tag = req.get_tag();
+    let fs = &ctx.dfs;
+    let schema_file_data = load_table_files(
+        &[major_compaction.schema_file_id],
+        fs.clone(),
+        dfs::Options::default().with_type(FileType::Schema),
+        ctx.local_dir.as_ref(),
+        false,
+    )
+    .await?
+    .pop()
+    .unwrap();
+    let schema_file = SchemaFile::open(schema_file_data)?;
+    let (table_ids_to_add, table_ids_to_clear) = &major_compaction.table_ids;
+    ret.set_columnar_table_ids(table_ids_to_add.clone());
+    ret.set_columnar_table_ids_to_clear(table_ids_to_clear.clone());
+    // TiDB table ids that need to add or clear columnar. For table ids needed to
+    // add columnar, we filter out the sst tables overlapped with the table range
+    // and create new columnar tables. For table ids needed to clear columnar, we
+    // delete the existing columnar tables through columnar inplace compaction.
+    let mut add_table_changes = if !table_ids_to_add.is_empty() {
+        columnar_major_compact_for_add_tables(
+            ctx,
+            major_compaction,
+            id_allocator,
+            schema_file.clone(),
+        )
+        .await?
+    } else {
+        pb::TableChange::new()
+    };
+    let mut clear_table_changes = if !table_ids_to_clear.is_empty() {
+        columnar_major_compact_for_clear_tables(ctx, major_compaction, id_allocator, schema_file)
+            .await?
+    } else {
+        pb::TableChange::new()
+    };
+
+    let columnar_changes = ret.mut_columnar_change();
+    columnar_changes.set_columnar_creates(add_table_changes.take_columnar_creates());
+    clear_table_changes
+        .take_columnar_creates()
+        .into_iter()
+        .for_each(|c| columnar_changes.mut_columnar_creates().push(c));
+    columnar_changes.set_columnar_deletes(clear_table_changes.take_columnar_deletes());
     info!(
         "{} columnar_major_compaction, tbl_changes: {:?}",
         tag, columnar_changes

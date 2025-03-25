@@ -76,6 +76,7 @@ message ColumnarCompaction {
   repeated uint64 row_l0s = 3;
   uint32 target_level = 4;
   repeated int64 columnar_table_ids = 5;
+  repeated int64 columnar_table_ids_to_clear = 6;
 }
 
 message UpdateVectorIndex {
