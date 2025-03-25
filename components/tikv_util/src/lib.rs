@@ -159,7 +159,8 @@ task_local! {
 
 pub fn set_current_region(region_id: u64) {
     if tokio::runtime::Handle::try_current().is_ok() {
-        debug_assert!(TASK_CURRENT_REGION.try_with(|c| c.set(region_id)).is_ok());
+        let try_ok = TASK_CURRENT_REGION.try_with(|c| c.set(region_id)).is_ok();
+        debug_assert!(try_ok);
     } else {
         CURRENT_REGION.with(|c| c.set(region_id))
     }
