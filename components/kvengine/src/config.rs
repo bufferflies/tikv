@@ -16,7 +16,7 @@ use crate::{
 };
 
 pub(crate) const DEFAULT_COMPACTION_REQUEST_VERSION: u32 = 3;
-pub(crate) const DEFAULT_COMPACTION_TOMBS_RATIO: f64 = 0.2;
+pub(crate) const DEFAULT_COMPACTION_TOMBS_RATIO: f64 = 0.3;
 pub(crate) const DEFAULT_COMPACTION_TOMBS_COUNT: u64 = 10000;
 
 /// The maximum size of a memtable is limited to 128MB. Otherwise it's possible

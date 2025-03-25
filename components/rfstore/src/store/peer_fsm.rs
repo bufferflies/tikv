@@ -2546,6 +2546,9 @@ impl<'a> PeerMsgHandler<'a> {
     }
 
     fn check_gc_tombstones(&self) {
+        if !self.peer.is_leader() {
+            return;
+        }
         let kv = &self.ctx.global.engines.kv;
         if let Some(shard) = kv.get_shard(self.region_id()) {
             let safe_ts = kv.get_keyspace_gc_safepoint_v2(shard.keyspace_id);
