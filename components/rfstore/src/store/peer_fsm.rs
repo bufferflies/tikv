@@ -63,8 +63,8 @@ use crate::{
         PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK,
         PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
-    DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_INCONSISTENT_STORAGE_CLASS,
-    MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG, MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG,
+    DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
+    MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG,
 };
 
 /// Limits the maximum number of regions returned by error.
@@ -2286,6 +2286,10 @@ impl<'a> PeerMsgHandler<'a> {
             let state = self.fsm.peer.pending_merge_state.as_ref().unwrap();
             let expect_region = state.get_target();
 
+            // NOTE: Should NOT check the validation of merge with target region.
+            // The state of target region would not be consistent between peers, and lead to
+            // the merge be rollback & commit at the same time.
+            // See https://github.com/tidbcloud/cloud-storage-engine/issues/2503.
             if let Some(source_meta) = self.fsm.peer.get_store().shard_meta.as_ref() {
                 if source_meta.has_txn_file_locks() {
                     let tag = self.peer.tag();
@@ -2311,22 +2315,6 @@ impl<'a> PeerMsgHandler<'a> {
                         tag,
                         MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG
                     ));
-                }
-
-                if let Some(shard) = self.ctx.global.engines.kv.get_shard(expect_region.get_id()) {
-                    let source_sc = source_meta.get_storage_class();
-                    let target_sc = shard.get_storage_class();
-                    if source_sc != target_sc {
-                        let tag = self.peer.tag();
-                        info!("{} fail to schedule merge: source and target storage class not match", tag;
-                            "source" => ?source_sc, "target" => ?target_sc,
-                        );
-                        return Err(box_err!(
-                            "{}: {}",
-                            tag,
-                            MERGE_REGION_WITH_INCONSISTENT_STORAGE_CLASS
-                        ));
-                    }
                 }
             }
 
