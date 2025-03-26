@@ -727,6 +727,7 @@ impl Shard {
     }
 
     pub fn set_property(&self, key: &str, val: &[u8]) {
+        // TODO: remove property if available.
         self.properties.set(key, val);
         // sync shard pending ops when set shard property.
         match key {
@@ -746,6 +747,9 @@ impl Shard {
                 pending_ops.trim_over_bound = !val.is_empty();
             }
             MANUAL_MAJOR_COMPACTION => {
+                if val.is_empty() {
+                    self.properties.remove(MANUAL_MAJOR_COMPACTION);
+                }
                 let mut pending_ops = self.pending_ops.write().unwrap();
                 pending_ops.manual_major_compaction = !val.is_empty();
             }

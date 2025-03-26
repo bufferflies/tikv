@@ -87,6 +87,12 @@ impl ShardMeta {
         };
 
         let properties = Properties::new().apply_pb(snap.get_properties());
+
+        // To fix the issue that `MANUAL_MAJOR_COMPACTION` is not removed after apply
+        // major compaction.
+        // TODO: remove after next upgrade.
+        properties.remove(MANUAL_MAJOR_COMPACTION);
+
         let txn_file_locks = TxnFileRefPropertyHelper::from_property(properties.get(TXN_FILE_REF))
             .unwrap()
             .into_txn_file_locks(snap.data_sequence);
@@ -735,6 +741,8 @@ impl ShardMeta {
         for create in comp.get_new_blob_tables() {
             self.add_file(create.get_id(), FileMeta::from_blob_table(create));
         }
+        self.del_property(MANUAL_MAJOR_COMPACTION);
+
         if comp.update_inner_key_offset && self.range.keyspace_id > 0 && self.inner_key_off == 0 {
             self.inner_key_off = KEYSPACE_PREFIX_LEN;
             debug_assert!(
