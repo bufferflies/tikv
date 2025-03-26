@@ -1135,7 +1135,6 @@ impl Engine {
         let data = shard.get_data();
         if data.l0_tbls.is_empty() {
             info!("{} zero L0 tables", tag);
-            store_bool(&shard.compacting, false);
             return None;
         }
         if let Some(res) = self.try_move_down_l0(shard, &data) {
@@ -1178,7 +1177,6 @@ impl Engine {
             total_size += l0.size();
         }
         if l0_tbls.is_empty() {
-            store_bool(&shard.compacting, false);
             info!(
                 "{} trigger_l0_compaction, none l0 table after filtering",
                 tag
@@ -1322,7 +1320,6 @@ impl Engine {
         let upper_level = &scf.levels[level - 1];
         let lower_level = &scf.levels[level];
         if upper_level.tables.len() == 0 {
-            store_bool(&shard.compacting, false);
             info!("{} no upper level {} table", tag, level - 1);
             return None;
         }
@@ -1369,7 +1366,6 @@ impl Engine {
             }
         }
         if upper_left_idx == upper_right_idx {
-            store_bool(&shard.compacting, false);
             info!("{} no candidate for l1_plus_compaction", tag);
             return None;
         }
@@ -1508,7 +1504,6 @@ impl Engine {
                 shard.tag(),
                 data.get_unconverted_l0s()
             );
-            store_bool(&shard.compacting, false);
             return None;
         }
         let mut req = self.new_compact_request_with_shard(shard);
@@ -1604,7 +1599,6 @@ impl Engine {
         let data = shard.get_data();
         if data.col_levels.unconverted_l0s.is_empty() {
             info!("{} no unconverted l0s to convert to columnar", tag);
-            store_bool(&shard.compacting, false);
             return None;
         }
         let schema_file = shard.get_schema_file()?;
@@ -1650,7 +1644,6 @@ impl Engine {
         let mut req = self.new_compact_request_with_shard(shard);
         let data = shard.get_data();
         if !shard.opt.build_columnar() || data.schema_file.is_none() {
-            store_bool(&shard.compacting, false);
             warn!(
                 "{} trigger_columnar_major_compaction: disabled or no schema, skip",
                 shard.tag()
@@ -1791,7 +1784,6 @@ impl Engine {
                 "{} no columnar base level tables, skip trigger_columnar_l0_compaction",
                 tag
             );
-            store_bool(&shard.compacting, false);
             return None;
         }
         if data.schema_file.is_none() {
@@ -1799,7 +1791,6 @@ impl Engine {
                 "{} no schema file found, skip trigger_columnar_l0_compaction",
                 tag
             );
-            store_bool(&shard.compacting, false);
             return None;
         }
         let mut req = self.new_compact_request_with_shard(shard);
@@ -1853,7 +1844,6 @@ impl Engine {
                 "{} no columnar level 1 tables, skip trigger_columnar_l1_compaction",
                 tag
             );
-            store_bool(&shard.compacting, false);
             return None;
         }
         if data.schema_file.is_none() {
@@ -1861,7 +1851,6 @@ impl Engine {
                 "{} no schema file found, skip trigger_columnar_l1_compaction",
                 tag
             );
-            store_bool(&shard.compacting, false);
             return None;
         }
 
@@ -5103,17 +5092,21 @@ impl CompactRunner {
             return;
         }
         self.running.remove(&id_ver);
-        match result {
+
+        let need_reset_compacting = match result {
             Some(Ok(resp)) => {
                 self.engine.handle_compact_response(resp);
                 self.notified.insert(id_ver);
                 self.schedule_pending_compaction();
+                false
             }
             Some(Err(FallbackLocalCompactorDisabled)) => {
                 error!("shard {} local compaction disabled, no need retry", tag);
+                true
             }
             Some(Err(CompactionNotRetryable(e))) => {
                 error!("shard {} compaction failed {}, not retryable", tag, e);
+                true
             }
             Some(Err(TableError(table::Error::SchemaOutOfDate(e)))) => {
                 error!("shard {} decode row to columnar failed {}", tag, e);
@@ -5122,10 +5115,12 @@ impl CompactRunner {
                         shard.set_outdated_schema_ver(schema_file.get_version());
                     }
                 }
+                true
             }
             Some(Err(e)) => {
                 error!("shard {} compaction failed {}, retrying", tag, e);
                 self.compact(id_ver);
+                false
             }
             None => {
                 info!("shard {} got empty compaction result", tag);
@@ -5135,6 +5130,13 @@ impl CompactRunner {
                     self.engine.refresh_shard_states(&shard);
                 }
                 self.schedule_pending_compaction();
+                true
+            }
+        };
+        if need_reset_compacting {
+            let shard = self.engine.get_shard_with_ver(id_ver.id, id_ver.ver).ok();
+            if let Some(shard) = shard {
+                store_bool(&shard.compacting, false);
             }
         }
     }
