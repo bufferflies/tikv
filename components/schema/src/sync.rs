@@ -1,9 +1,10 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{ops::Range, sync::Arc};
+use std::sync::Arc;
 
 use api_version::ApiV2;
 use async_trait::async_trait;
+use log_wrappers::Value as LogValue;
 use tikv_util::{
     codec::{bytes::encode_bytes, number::NumberEncoder},
     debug, info, warn,
@@ -60,12 +61,20 @@ pub async fn sync_schema(
             "{}: sync_schema: current version {}, schema meta version {}",
             keyspace_id, cur_version, schema_version
         );
-        let version_range = cur_version + 1..schema_version + 1;
+        let version_range = cur_version + 1..=schema_version;
         let schema_diffs = get_schema_diff(kv_getter.clone(), version_range, keyspace_id).await?;
         debug!(
             "{}: sync_schema: schema diffs {:?}",
             keyspace_id, schema_diffs
         );
+        let last_diff_ver = schema_diffs
+            .last()
+            .map(|diff| diff.version)
+            .unwrap_or(cur_version);
+        if last_diff_ver < schema_version {
+            warn!("{}: sync_schema: some schema diffs not synced", keyspace_id;
+                "schema_ver" => schema_version, "last_diff_ver" => last_diff_ver);
+        }
         for diff in schema_diffs {
             if diff.regenerate_schema_map {
                 return sync_all_schemas(kv_scanner, keyspace_id, schema_version).await;
@@ -106,7 +115,7 @@ pub async fn sync_schema(
             }
         }
 
-        Ok((schema_version, table_infos))
+        Ok((last_diff_ver, table_infos))
     } else {
         sync_all_schemas(kv_scanner, keyspace_id, schema_version).await
     }
@@ -130,37 +139,42 @@ async fn sync_all_schemas(
 
 async fn get_schema_diff(
     kv_getter: Arc<dyn KvGetter>,
-    range: Range<i64>, // Schema version range (exclusive_start, inclusive_end]
+    range: impl IntoIterator<Item = i64>,
     keyspace_id: u32,
 ) -> Result<Vec<SchemaDiff>, String> {
-    let (start, end) = (range.start, range.end);
-    let mut schema_diff_keys = Vec::with_capacity((end - start) as usize);
-    range.into_iter().for_each(|ver| {
+    let schema_vers = range.into_iter().collect::<Vec<_>>();
+    let mut schema_diff_keys = Vec::with_capacity(schema_vers.len());
+    schema_vers.iter().for_each(|&ver| {
         schema_diff_keys.push(schema_diff_key(keyspace_id, ver));
     });
     let schema_diffs = kv_getter.batch_get(&schema_diff_keys).await?;
+    debug_assert_eq!(schema_diff_keys.len(), schema_diffs.len());
+
     let mut schema_diffs_res = Vec::with_capacity(schema_diffs.len());
-    for (idx, schema_diff) in schema_diffs.into_iter().enumerate() {
+    for ((&ver, diff_key), schema_diff) in schema_vers
+        .iter()
+        .zip(schema_diff_keys.iter())
+        .zip(schema_diffs.into_iter())
+    {
         if schema_diff.is_none() {
-            warn!(
-                "sync_schema, keyspace {} schema diff for ver {} not found",
-                keyspace_id,
-                start + 1 + idx as i64
-            );
+            warn!("{}: sync_schema: schema diff not found", keyspace_id;
+                "ver" => ver, "diff_key" => LogValue::key(diff_key));
             continue;
         }
         let schema_diff = schema_diff.unwrap();
         let res: serde_json::Result<SchemaDiff> = serde_json::from_slice(&schema_diff);
         match res {
             Ok(schema_diff) => {
+                debug_assert_eq!(
+                    schema_diff.version, ver,
+                    "schema diff version mismatch: {:?}",
+                    schema_diff
+                );
                 schema_diffs_res.push(schema_diff);
             }
             Err(err) => {
                 return Err(format!(
-                    "keyspace {} schema diff ver {} decode failed, err {:?}",
-                    keyspace_id,
-                    start + 1 + idx as i64,
-                    err
+                    "keyspace {keyspace_id} schema diff ver {ver} decode failed: {err:?}",
                 ));
             }
         }
@@ -169,7 +183,7 @@ async fn get_schema_diff(
 }
 
 fn schema_version_key(keyspace_id: u32) -> Vec<u8> {
-    let mut key = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+    let mut key = api_version::ApiV2::get_keyspace_prefix_by_id(keyspace_id);
     let encoded_key = encode_bytes(TIDB_SCHEMA_VERSION_KEY);
     key.reserve(encoded_key.len() + 1 + 8);
     key.push(TIDB_META_KEY_PREFIX);
@@ -180,7 +194,7 @@ fn schema_version_key(keyspace_id: u32) -> Vec<u8> {
 
 fn schema_diff_key(keyspace_id: u32, ver: i64) -> Vec<u8> {
     let ver_str = ver.to_string();
-    let mut key = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+    let mut key = api_version::ApiV2::get_keyspace_prefix_by_id(keyspace_id);
     let mut raw_key = TIDB_SCHEMA_DIFF_PREFIX.to_vec();
     raw_key.push(b':');
     raw_key.extend_from_slice(ver_str.as_bytes());
@@ -193,7 +207,7 @@ fn schema_diff_key(keyspace_id: u32, ver: i64) -> Vec<u8> {
 }
 
 fn schema_data_key(keyspace_id: u32, db_id: i64, table_id: i64) -> Vec<u8> {
-    let mut key = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+    let mut key = api_version::ApiV2::get_keyspace_prefix_by_id(keyspace_id);
     let enc_db_key = encode_bytes(format!("DB:{}", db_id).as_bytes());
     let enc_table_key = encode_bytes(format!("Table:{}", table_id).as_bytes());
     key.reserve(enc_db_key.len() + enc_table_key.len() + 1 + 8);
@@ -313,7 +327,7 @@ pub mod test_utils {
     }
 
     fn dbs_db_key(keyspace_id: u32, db_id: i64) -> Vec<u8> {
-        let mut key = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+        let mut key = api_version::ApiV2::get_keyspace_prefix_by_id(keyspace_id);
         let enc_dbs = encode_bytes(TIDB_DBS);
         let enc_db_key = encode_bytes(format!("DB:{}", db_id).as_bytes());
         key.reserve(enc_dbs.len() + enc_db_key.len() + 1 + 8);
