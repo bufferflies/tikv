@@ -50,7 +50,8 @@ use crate::{
     load_data::{self, LoadDataManager},
     metrics::*,
     native_br::{self, NativeBrManager},
-    txn_chunk::{handle_txn_chunk, TxnChunkHandler},
+    txn_chunk,
+    txn_chunk::TxnChunkHandler,
     worker_limiter::WorkerLimiter,
 };
 
@@ -159,10 +160,8 @@ where
                             )
                             .await
                         }
-                        "/coprocessor" => handle_remote_coprocessor(ctx, req).await,
-                        "/load_data" => {
-                            load_data::handle_load_data(ctx.load_manager.clone(), req).await
-                        }
+                        "/coprocessor" => handle_coprocessor(ctx, req).await,
+                        "/load_data" => handle_load_data(ctx, req).await,
                         "/metrics" => handle_get_metrics(req).await,
                         "/debug/pprof/profile" => {
                             StatusServer::<u8, u8>::dump_cpu_prof_to_resp(req).await
@@ -181,11 +180,12 @@ where
                                     .unwrap())
                             }
                         }
+                        "/debug/sleep" => handle_sleep(ctx).await,
                         native_br::BACKUPS_API_PATH => {
                             native_br::handle_backup(ctx.br_manager.clone(), req).await
                         }
                         path if path.starts_with(native_br::RESTORE_KEYSPACE_API_PATH) => {
-                            native_br::handle_restore_keyspace(ctx.br_manager.clone(), req).await
+                            handle_restore_keyspace(ctx, req).await
                         }
                         "/txn_chunk" => handle_txn_chunk(ctx, req).await,
                         _ => Ok(hyper::Response::builder()
@@ -198,6 +198,77 @@ where
         }
     }));
     Box::new(server)
+}
+
+// Helper function to spawn a task on the thread pool and await its result
+async fn spawn_and_await<F, T>(thread_pool: tokio::runtime::Handle, f: F) -> T
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static + std::fmt::Debug,
+{
+    let handle = thread_pool.spawn(tikv_util::init_task_local(f));
+    match handle.await {
+        Ok(res) => res,
+        Err(err) => {
+            panic!("spawn and await failed: {:?}", err);
+        }
+    }
+}
+
+async fn handle_coprocessor(
+    ctx: Arc<Context>,
+    req: hyper::Request<hyper::Body>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    spawn_and_await(ctx.thread_pool.clone(), handle_remote_coprocessor(ctx, req)).await
+}
+
+async fn handle_load_data(
+    ctx: Arc<Context>,
+    req: hyper::Request<hyper::Body>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    let load_data_manager = ctx.load_manager.clone();
+    spawn_and_await(
+        ctx.thread_pool.clone(),
+        load_data::handle_load_data(load_data_manager, req),
+    )
+    .await
+}
+
+async fn handle_restore_keyspace(
+    ctx: Arc<Context>,
+    req: hyper::Request<hyper::Body>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    let br_manager = ctx.br_manager.clone();
+    spawn_and_await(
+        ctx.thread_pool.clone(),
+        native_br::handle_restore_keyspace(br_manager, req),
+    )
+    .await
+}
+
+async fn handle_txn_chunk(
+    ctx: Arc<Context>,
+    req: hyper::Request<hyper::Body>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    spawn_and_await(
+        ctx.thread_pool.clone(),
+        txn_chunk::handle_txn_chunk(ctx, req),
+    )
+    .await
+}
+
+// Debug API to sleep for 60 seconds
+async fn handle_sleep(ctx: Arc<Context>) -> hyper::Result<hyper::Response<hyper::Body>> {
+    spawn_and_await(ctx.thread_pool.clone(), async move {
+        info!("sleep for 60 seconds");
+        std::thread::sleep(Duration::from_secs(60));
+        info!("sleep done");
+        Ok(hyper::Response::builder()
+            .status(200)
+            .body(hyper::Body::from("ok"))
+            .unwrap())
+    })
+    .await
 }
 
 const DEFAULT_COP_TIMEOUT: Duration = Duration::from_secs(20);

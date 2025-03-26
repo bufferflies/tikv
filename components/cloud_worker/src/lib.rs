@@ -112,17 +112,25 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
             .build()
             .unwrap(),
     );
+    let hyper_runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("hyper-server")
+            .build()
+            .unwrap(),
+    );
 
     let running_ctl = RunningController::default();
     let server = start_server(
         config,
         config_file_path,
         thread_pool.clone(),
+        hyper_runtime.clone(),
         pd,
         &running_ctl,
     );
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    thread_pool.spawn(async move {
+    hyper_runtime.spawn(async move {
         let res = server.await;
         tx.send(res).unwrap();
     });
@@ -139,6 +147,7 @@ fn start_server(
     config: Config,
     config_file_path: Option<PathBuf>,
     thread_pool: Arc<Runtime>,
+    hyper_runtime: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
     running_ctl: &RunningController,
 ) -> ServerFuture {
@@ -176,7 +185,7 @@ fn start_server(
     let checksum_type = config.checksum_type;
 
     let incoming = {
-        let _enter = thread_pool.enter();
+        let _enter = hyper_runtime.enter();
         hyper::server::conn::AddrIncoming::bind(&addr)
     }
     .unwrap();
@@ -416,6 +425,7 @@ pub struct CloudWorker {
     config: Config,
     config_file_path: Option<PathBuf>,
     thread_pool: Arc<Runtime>,
+    hyper_runtime: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
 
     svc_handle: Option<JoinHandle<()>>,
@@ -438,10 +448,18 @@ impl CloudWorker {
                 .build()
                 .unwrap(),
         );
+        let hyper_runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("hyper-server")
+                .build()
+                .unwrap(),
+        );
         CloudWorker {
             config,
             config_file_path,
             thread_pool,
+            hyper_runtime,
             pd,
             svc_handle: None,
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -458,6 +476,7 @@ impl CloudWorker {
             self.config.clone(),
             self.config_file_path.clone(),
             self.thread_pool.clone(),
+            self.hyper_runtime.clone(),
             self.pd.clone(),
             &self.running_ctl,
         );
@@ -465,7 +484,7 @@ impl CloudWorker {
         info!("{} cloud_worker server start", addr; "config" => ?self.config);
 
         let notify = self.notify.clone();
-        let svc_handle = self.thread_pool.spawn(async move {
+        let svc_handle = self.hyper_runtime.spawn(async move {
             tokio::select! {
                 _ = notify.notified() => {
                     info!("{} cloud_worker server shutdown", addr);
@@ -485,7 +504,7 @@ impl CloudWorker {
     pub fn shutdown(mut self) {
         if let Some(handle) = self.svc_handle.take() {
             self.notify.notify_waiters();
-            self.thread_pool.block_on(async { handle.await.unwrap() })
+            self.hyper_runtime.block_on(async { handle.await.unwrap() })
         }
     }
 }
