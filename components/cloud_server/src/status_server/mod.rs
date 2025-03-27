@@ -704,7 +704,7 @@ impl StatusServer {
         } else if path.starts_with("/kvengine/active_lite") {
             // get all active shard stats lite.
             let all_active_lite = engine.get_all_active_shard_stats_lite();
-            res = serde_json::to_string_pretty(&all_active_lite);
+            res = serde_json::to_string(&all_active_lite);
         } else if path.starts_with("/kvengine/files") {
             let mut all_shard_files: Vec<(u64, Vec<u64>)> = engine
                 .get_all_shard_id_vers()

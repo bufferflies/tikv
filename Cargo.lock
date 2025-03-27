@@ -7046,6 +7046,7 @@ dependencies = [
  "serde_derive",
  "serde_ignored",
  "serde_json",
+ "serde_repr",
  "slog",
  "slog-global",
  "slog-term",

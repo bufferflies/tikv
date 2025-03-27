@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use serde_repr::{Deserialize_repr, Serialize_repr};
 use tidb_query_datatype::{
     codec::{
         datum,
@@ -298,8 +299,8 @@ const STORAGE_CLASS_TIER_IA: &str = "IA";
 const STORAGE_CLASS_STR_UNSPECIFIED: &str = "UNSPECIFIED";
 const STORAGE_CLASS_KEY: &str = "_storage_class";
 
+#[derive(PartialEq, Clone, Copy, Default, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
-#[derive(PartialEq, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClass {
     /// User doesn't specify the storage class.

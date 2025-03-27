@@ -606,17 +606,21 @@ impl SchemaManager {
         for _ in 0..spawn_task_count {
             let (keyspace_id, file_id, schema_version, data, res) = rx.recv().unwrap();
             if let Err(err) = res {
-                error!(
-                    "{}: failed to update schema file, file_id: {} err: {:?}",
-                    keyspace_id, file_id, err
-                );
+                error!("{}: failed to update schema file", keyspace_id;
+                    "file_id" => file_id, "schema_ver" => schema_version, "err" => ?err);
                 continue;
             }
+            if let Err(err) =
+                write_schema_file_to_local(&self.config.dir, keyspace_id, file_id, data)
+            {
+                error!("{}: failed to write schema file to local", keyspace_id;
+                    "file_id" => file_id, "schema_ver" => schema_version, "err" => ?err);
+                continue;
+            }
+
             // 4. Callback TiKV to update the new schema file to shard meta.
-            info!(
-                "{}: broadcast schema update to stores, file_id: {} schema_version: {}",
-                keyspace_id, file_id, schema_version
-            );
+            info!("{}: broadcast schema update to stores", keyspace_id;
+                "file_id" => file_id, "schema_ver" => schema_version);
             if let Err(err) = broadcast_schema_update_to_all_stores(
                 stores,
                 self.security_mgr.clone(),
@@ -626,21 +630,12 @@ impl SchemaManager {
             )
             .await
             {
-                error!(
-                    "{}: failed to broadcast schema update, file_id: {} err: {:?}",
-                    keyspace_id, file_id, err
-                );
-                continue;
+                // Go on to save checked version on error as it would be partial successful.
+                // `check_store_schema_version` in next round will update the failed stores.
+                error!("{}: failed to broadcast schema update", keyspace_id;
+                    "file_id" => file_id, "schema_ver" => schema_version, "err" => ?err);
             }
-            if let Err(err) =
-                write_schema_file_to_local(&self.config.dir, keyspace_id, file_id, data)
-            {
-                error!(
-                    "{}: failed to write schema file to local, file_id: {} err: {:?}",
-                    keyspace_id, file_id, err
-                );
-                continue;
-            }
+
             self.meta_file
                 .add_file(keyspace_id, file_id, schema_version);
             self.meta_file
@@ -697,14 +692,27 @@ impl SchemaManager {
     ) -> bool {
         let mut need_broadcast = false;
         for shard_stats in keyspace_shard_stats {
-            let start_key = shard_stats.start.to_vec();
-            let end_key = shard_stats.end.to_vec();
-            if schema_file.overlap(&start_key, &end_key, keyspace_id)
-                && cur_schema_version > shard_stats.schema_version
+            if cur_schema_version <= shard_stats.schema_version {
+                // Schema version fallback will happen in production env, e.g. re-deploy the
+                // schema manager.
+                debug_assert_eq!(
+                    cur_schema_version, shard_stats.schema_version,
+                    "schema version fallback: {:?}, cur: {}",
+                    shard_stats, cur_schema_version,
+                );
+                continue;
+            }
+
+            // When shard is `with_schema` but not overlapped with schema file, it means
+            // that the schema has changed to having no required changes (i.e.
+            // storage class & columnar) for the shard, but the relevant data
+            // has not been cleared.
+            if shard_stats.with_schema()
+                || schema_file.overlap(&shard_stats.start, &shard_stats.end, keyspace_id)
             {
                 info!(
-                    "store has stale schema version, keyspace_id: {} shard_id: {} set cur_schema_version from {} to {}",
-                    keyspace_id, shard_stats.id, shard_stats.schema_version, cur_schema_version
+                    "{}: store has stale schema version", keyspace_id;
+                    "shard_ver" => shard_stats.schema_version, "cur_ver" => cur_schema_version, "shard" => ?shard_stats,
                 );
                 need_broadcast = true;
                 break;

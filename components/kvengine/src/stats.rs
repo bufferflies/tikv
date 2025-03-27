@@ -313,6 +313,7 @@ pub struct ShardStats {
     // Columnar Stats
     pub schema_version: i64,
     pub schema_restore_version: u64,
+    pub columnar_tables: usize,
     pub columnar_levels: Vec<ColumnarLevelStats>,
     pub vector_indexes: VectorIndexStats,
 }
@@ -355,6 +356,8 @@ pub struct ShardStatsLite {
     pub total_size: u64,
     pub schema_version: i64,
     pub schema_restore_version: u64,
+    pub storage_class: StorageClass,
+    pub columnar_tables: usize,
 }
 
 impl From<ShardStats> for ShardStatsLite {
@@ -368,7 +371,15 @@ impl From<ShardStats> for ShardStatsLite {
             total_size: s.total_size,
             schema_version: s.schema_version,
             schema_restore_version: s.schema_restore_version,
+            storage_class: s.storage_class,
+            columnar_tables: s.columnar_tables,
         }
+    }
+}
+
+impl ShardStatsLite {
+    pub fn with_schema(&self) -> bool {
+        self.storage_class.is_specified() || self.columnar_tables > 0
     }
 }
 
@@ -652,6 +663,7 @@ impl super::Shard {
             .as_ref()
             .map(|sf| sf.get_restore_version())
             .unwrap_or_default();
+        let columnar_tables = data.columnar_table_ids.len();
         let mut columnar_levels = vec![ColumnarLevelStats::default(); COLUMNAR_LEVELS];
         for (i, l) in data.col_levels.levels.iter().enumerate() {
             columnar_levels[i].num_files = l.files.len();
@@ -717,6 +729,7 @@ impl super::Shard {
             txn_file_locks,
             schema_version,
             schema_restore_version,
+            columnar_tables,
             columnar_levels,
             vector_indexes,
         }
