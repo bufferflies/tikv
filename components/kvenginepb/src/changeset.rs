@@ -7061,7 +7061,6 @@ pub struct TableChange {
     pub file_ids_map: ::std::vec::Vec<u64>,
     pub columnar_deletes: ::protobuf::RepeatedField<ColumnarDelete>,
     pub columnar_creates: ::protobuf::RepeatedField<ColumnarCreate>,
-    pub columnar_table_ids: ::std::vec::Vec<i64>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -7202,31 +7201,6 @@ impl TableChange {
     pub fn take_columnar_creates(&mut self) -> ::protobuf::RepeatedField<ColumnarCreate> {
         ::std::mem::replace(&mut self.columnar_creates, ::protobuf::RepeatedField::new())
     }
-
-    // repeated int64 columnar_table_ids = 6;
-
-
-    pub fn get_columnar_table_ids(&self) -> &[i64] {
-        &self.columnar_table_ids
-    }
-    pub fn clear_columnar_table_ids(&mut self) {
-        self.columnar_table_ids.clear();
-    }
-
-    // Param is passed by value, moved
-    pub fn set_columnar_table_ids(&mut self, v: ::std::vec::Vec<i64>) {
-        self.columnar_table_ids = v;
-    }
-
-    // Mutable pointer to the field.
-    pub fn mut_columnar_table_ids(&mut self) -> &mut ::std::vec::Vec<i64> {
-        &mut self.columnar_table_ids
-    }
-
-    // Take field
-    pub fn take_columnar_table_ids(&mut self) -> ::std::vec::Vec<i64> {
-        ::std::mem::replace(&mut self.columnar_table_ids, ::std::vec::Vec::new())
-    }
 }
 
 impl ::protobuf::Message for TableChange {
@@ -7273,9 +7247,6 @@ impl ::protobuf::Message for TableChange {
                 5 => {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.columnar_creates)?;
                 },
-                6 => {
-                    ::protobuf::rt::read_repeated_int64_into(wire_type, is, &mut self.columnar_table_ids)?;
-                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -7307,9 +7278,6 @@ impl ::protobuf::Message for TableChange {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         };
-        for value in &self.columnar_table_ids {
-            my_size += ::protobuf::rt::value_size(6, *value, ::protobuf::wire_format::WireTypeVarint);
-        };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -7338,9 +7306,6 @@ impl ::protobuf::Message for TableChange {
             os.write_tag(5, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
-        };
-        for v in &self.columnar_table_ids {
-            os.write_int64(6, *v)?;
         };
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -7409,11 +7374,6 @@ impl ::protobuf::Message for TableChange {
                     |m: &TableChange| { &m.columnar_creates },
                     |m: &mut TableChange| { &mut m.columnar_creates },
                 ));
-                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeInt64>(
-                    "columnar_table_ids",
-                    |m: &TableChange| { &m.columnar_table_ids },
-                    |m: &mut TableChange| { &mut m.columnar_table_ids },
-                ));
                 ::protobuf::reflect::MessageDescriptor::new::<TableChange>(
                     "TableChange",
                     fields,
@@ -7441,7 +7401,6 @@ impl ::protobuf::Clear for TableChange {
         self.file_ids_map.clear();
         self.columnar_deletes.clear();
         self.columnar_creates.clear();
-        self.columnar_table_ids.clear();
         self.unknown_fields.clear();
     }
 }
@@ -7456,7 +7415,6 @@ impl ::protobuf::PbPrint for TableChange {
         ::protobuf::PbPrint::fmt(&self.file_ids_map, "file_ids_map", buf);
         ::protobuf::PbPrint::fmt(&self.columnar_deletes, "columnar_deletes", buf);
         ::protobuf::PbPrint::fmt(&self.columnar_creates, "columnar_creates", buf);
-        ::protobuf::PbPrint::fmt(&self.columnar_table_ids, "columnar_table_ids", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -7472,7 +7430,6 @@ impl ::std::fmt::Debug for TableChange {
         ::protobuf::PbPrint::fmt(&self.file_ids_map, "file_ids_map", &mut s);
         ::protobuf::PbPrint::fmt(&self.columnar_deletes, "columnar_deletes", &mut s);
         ::protobuf::PbPrint::fmt(&self.columnar_creates, "columnar_creates", &mut s);
-        ::protobuf::PbPrint::fmt(&self.columnar_table_ids, "columnar_table_ids", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -9892,38 +9849,37 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\
     \n\x06max_ts\x18\x05\x20\x01(\x04B\0:\0\"C\n\nProperties\x12\x11\n\x07sh\
     ardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\
-    \x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"\x8d\x02\n\x0bTableChan\
+    \x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"\xef\x01\n\x0bTableChan\
     ge\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDelete\
     B\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreat\
     eB\0\x12\x16\n\x0cfile_ids_map\x18\x03\x20\x03(\x04B\0\x123\n\x0fcolumna\
     rDeletes\x18\x04\x20\x03(\x0b2\x18.enginepb.ColumnarDeleteB\0\x123\n\x0f\
-    columnarCreates\x18\x05\x20\x03(\x0b2\x18.enginepb.ColumnarCreateB\0\x12\
-    \x1c\n\x12columnar_table_ids\x18\x06\x20\x03(\x03B\0:\0\">\n\x0bTxnFileR\
-    efs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\x14.enginepb.TxnFileRefB\
-    \0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08start_ts\x18\x01\x20\x01(\x04\
-    B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\0\x12\x11\n\x07version\
-    \x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\x04\x20\x01(\x0cB\0\
-    \x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\0\x12\x13\n\tshard_v\
-    er\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_bound\x18\x07\x20\
-    \x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\x20\x01(\x0cB\0:\0\"\
-    \xc8\x01\n\x06Schema\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\
-    \x11\n\x07columns\x18\x02\x20\x03(\x0cB\0\x12\x14\n\npk_col_ids\x18\x03\
-    \x20\x03(\x03B\0\x122\n\x0evector_indexes\x18\x04\x20\x03(\x0b2\x18.engi\
-    nepb.VectorIndexDefB\0\x12\x0e\n\x04keys\x18\x05\x20\x03(\tB\0\x12\x10\n\
-    \x06values\x18\x06\x20\x03(\x0cB\0\x12)\n\npartitions\x18\x07\x20\x03(\
-    \x0b2\x13.enginepb.PartitionB\0:\0\"=\n\tPartition\x12\x0c\n\x02id\x18\
-    \x01\x20\x01(\x03B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\
-    \x06values\x18\x03\x20\x03(\x0cB\0:\0\"u\n\x0bVectorIndex\x12\x12\n\x08t\
-    able_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\
-    \x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05files\x18\
-    \x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"`\n\x0fVectorInde\
-    xFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\x0csnap_version\
-    \x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\
-    \x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\0\"z\n\x0eVectorIndexDef\
-    \x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\
-    \x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\x13\
-    \n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\x20\
-    \x03(\x0cB\0:\0B\0b\x06proto3\
+    columnarCreates\x18\x05\x20\x03(\x0b2\x18.enginepb.ColumnarCreateB\0:\0\
+    \">\n\x0bTxnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\x14.eng\
+    inepb.TxnFileRefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08start_ts\x18\
+    \x01\x20\x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\0\x12\
+    \x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\x04\
+    \x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\0\
+    \x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_b\
+    ound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\x20\
+    \x01(\x0cB\0:\0\"\xc8\x01\n\x06Schema\x12\x12\n\x08table_id\x18\x01\x20\
+    \x01(\x03B\0\x12\x11\n\x07columns\x18\x02\x20\x03(\x0cB\0\x12\x14\n\npk_\
+    col_ids\x18\x03\x20\x03(\x03B\0\x122\n\x0evector_indexes\x18\x04\x20\x03\
+    (\x0b2\x18.enginepb.VectorIndexDefB\0\x12\x0e\n\x04keys\x18\x05\x20\x03(\
+    \tB\0\x12\x10\n\x06values\x18\x06\x20\x03(\x0cB\0\x12)\n\npartitions\x18\
+    \x07\x20\x03(\x0b2\x13.enginepb.PartitionB\0:\0\"=\n\tPartition\x12\x0c\
+    \n\x02id\x18\x01\x20\x01(\x03B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\
+    \x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"u\n\x0bVectorIndex\x12\
+    \x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\
+    \x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05f\
+    iles\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"`\n\x0fVe\
+    ctorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\x0csnap_\
+    version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\
+    \x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\0\"z\n\x0eVectorIn\
+    dexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\
+    \x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\
+    \x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\
+    \x20\x03(\x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

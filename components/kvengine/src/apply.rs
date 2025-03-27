@@ -786,8 +786,6 @@ impl EngineCore {
         let mut del_files = HashMap::new();
         let mut builder = ShardDataBuilder::new(data.clone());
         self.get_tables_from_table_change(&mut builder, &data, cs, tc, &mut del_files);
-        let columnar_table_ids = tc.get_columnar_table_ids();
-        builder.set_columnar_table_ids(columnar_table_ids.to_vec());
         shard.set_data(builder.build());
         shard.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
         self.remove_dfs_files(shard, del_files);

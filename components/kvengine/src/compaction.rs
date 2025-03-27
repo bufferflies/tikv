@@ -1027,6 +1027,7 @@ impl Engine {
             tc.set_columnar_deletes(columnar_deletes.into());
             cs
         };
+
         cs.set_shard_id(shard.id);
         cs.set_shard_ver(shard.ver);
         cs.set_property_key(TRIM_OVER_BOUND.to_string());
@@ -2372,7 +2373,6 @@ fn merge_table_change(
     tb.set_columnar_creates(col_tbl.take_columnar_creates());
     tb.file_ids_map = row_tbl.file_ids_map;
     tb.file_ids_map.extend(col_tbl.file_ids_map);
-    tb.columnar_table_ids = col_tbl.columnar_table_ids;
     tb
 }
 
@@ -3248,7 +3248,6 @@ async fn compact_trim_over_bound_for_columnar(
 
     let mut deletes = vec![];
     let mut creates = vec![];
-    let mut columnar_table_ids: HashSet<i64> = HashSet::new();
     let (tx, mut rx) = mpsc::channel(req.file_ids.len());
     let mut cnt = 0;
     for &(id, level) in files.iter() {
@@ -3297,7 +3296,6 @@ async fn compact_trim_over_bound_for_columnar(
             if !columnar_file.has_table(table_id) {
                 continue;
             }
-            columnar_table_ids.insert(table_id);
             let schema = schema_file.get_table(table_id).unwrap();
             let reader = ColumnarTableReader::new(
                 &columnar_file,
@@ -3370,7 +3368,6 @@ async fn compact_trim_over_bound_for_columnar(
     let mut table_change = pb::TableChange::new();
     table_change.set_columnar_deletes(deletes.into());
     table_change.set_columnar_creates(creates.into());
-    table_change.set_columnar_table_ids(columnar_table_ids.into_iter().collect());
     info!(
         "finish columnar trim over bound compaction, table_change: {:?}",
         table_change

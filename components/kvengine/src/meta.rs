@@ -855,8 +855,6 @@ impl ShardMeta {
         assert!(cs.has_trim_over_bound());
         self.apply_table_change(cs.get_trim_over_bound());
         self.apply_table_change_to_unconverted_l0s(cs.get_trim_over_bound());
-        let columnar_table_ids = cs.get_trim_over_bound().get_columnar_table_ids();
-        self.columnar_table_ids = columnar_table_ids.to_vec();
         self.set_property(TRIM_OVER_BOUND, TRIM_OVER_BOUND_DISABLE);
     }
 

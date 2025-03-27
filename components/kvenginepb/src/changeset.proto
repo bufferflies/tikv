@@ -191,9 +191,6 @@ message TableChange {
   // Columnar Tables that created by destroy range / truncate ts / compaction /
   // trim over bound.
   repeated ColumnarCreate columnarCreates = 5;
-  // Columnar table ids need to update after trim over bound. New columnar table
-  // ids will be set to this field.
-  repeated int64 columnar_table_ids = 6;
 }
 
 message TxnFileRefs { repeated TxnFileRef txn_file_refs = 1; }
