@@ -100,7 +100,7 @@ fn test_columnar_l0_compaction() {
     col_levels.add_file(1, ColumnarFile::open(l1_tbl_1).unwrap());
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
-    builder.set_schema_file(Some(schema_file));
+    builder.set_schema(schema_file.get_version(), Some(schema_file));
     builder.set_columnar_levels(col_levels);
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
@@ -218,7 +218,7 @@ fn test_columnar_l1_compaction() {
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_2).unwrap());
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
-    builder.set_schema_file(Some(schema_file));
+    builder.set_schema(schema_file.get_version(), Some(schema_file));
     builder.set_columnar_levels(col_levels);
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
@@ -362,7 +362,7 @@ fn test_columnar_major_compaction() {
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_cfs([write_cf, ShardCf::new(LOCK_CF), ShardCf::new(EXTRA_CF)]);
-    builder.set_schema_file(Some(schema_file));
+    builder.set_schema(schema_file.get_version(), Some(schema_file));
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
@@ -552,7 +552,7 @@ fn test_columnar_major_compaction_multiple_tables() {
     let shard = engine.get_shard(1).unwrap();
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_cfs([write_cf, ShardCf::new(LOCK_CF), ShardCf::new(EXTRA_CF)]);
-    builder.set_schema_file(Some(schema_file.clone()));
+    builder.set_schema(schema_file.get_version(), Some(schema_file.clone()));
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
@@ -637,7 +637,7 @@ fn test_columnar_major_compaction_multiple_tables() {
         .unwrap();
     let schema_file = SchemaFile::open(schema_raw_file_2).unwrap();
     let mut builder = ShardDataBuilder::new(shard.get_data());
-    builder.set_schema_file(Some(schema_file.clone()));
+    builder.set_schema(schema_file.get_version(), Some(schema_file.clone()));
     shard.set_data(builder.build());
     *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor {
         table_ids_to_add: vec![4, 5],
@@ -754,7 +754,7 @@ fn test_columnar_destroy_range() {
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
     let mut builder = ShardDataBuilder::new(shard.get_data());
-    builder.set_schema_file(Some(schema_file));
+    builder.set_schema(schema_file.get_version(), Some(schema_file));
     builder.set_columnar_levels(col_levels);
     builder.set_columnar_table_ids(vec![table_id]);
     shard.set_data(builder.build());
@@ -841,7 +841,7 @@ fn test_columnar_truncate_ts() {
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
     let mut builder = ShardDataBuilder::new(shard.get_data());
-    builder.set_schema_file(Some(schema_file));
+    builder.set_schema(schema_file.get_version(), Some(schema_file));
     builder.set_columnar_levels(col_levels);
     builder.set_columnar_table_ids(vec![table_id]);
     shard.set_data(builder.build());
@@ -932,7 +932,7 @@ fn test_columnar_trim_over_bound() {
     col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
-    builder.set_schema_file(Some(schema_file));
+    builder.set_schema(schema_file.get_version(), Some(schema_file));
     builder.set_columnar_levels(col_levels);
     builder.set_columnar_table_ids(vec![table_id]);
     shard.set_data(builder.build());

@@ -140,8 +140,26 @@ impl ChangeSet {
         self.schema_file = schema_file
     }
 
+    #[inline]
     pub fn get_schema_file(&self) -> Option<SchemaFile> {
         self.schema_file.clone()
+    }
+
+    pub fn get_schema_version(&self) -> i64 {
+        if let Some(schema_file) = &self.schema_file {
+            schema_file.get_version()
+        } else if self.has_update_schema_meta() {
+            self.get_update_schema_meta().get_version()
+        } else if let Some(snap) = kvenginepb::get_any_snap_from_changeset(&self.change_set) {
+            if snap.has_schema_meta() {
+                snap.get_schema_meta().get_version()
+            } else {
+                0
+            }
+        } else {
+            debug_assert!(false, "changeset has no schema: {:?}", self);
+            0
+        }
     }
 
     pub fn into_inner(self) -> kvenginepb::ChangeSet {
@@ -463,7 +481,7 @@ impl EngineCore {
         // here to ensure the schema file and col_snap_version consistency between
         // peers in some corner cases. e.g. the parent shard has inconsistency schema
         // file or col_snap_version.
-        builder.set_schema_file(cs.get_schema_file());
+        builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
         let new_data = builder.build();
         info!("{} apply_initial_flush", shard.tag(); "seq" => cs.sequence);
         shard.set_data(new_data);
@@ -948,7 +966,7 @@ impl EngineCore {
             self.opts.for_restore,
             prepare_type,
         );
-        builder.set_schema_file(cs.schema_file.clone());
+        builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
         let new_data = builder.build();
         let new_inner_key_off = new_data.inner_key_off;
         new_shard.set_data(new_data);
@@ -992,7 +1010,7 @@ impl EngineCore {
         info!("{} apply update schema meta", shard.tag(); "schema_file" => ?cs.schema_file);
         let old_data = shard.get_data();
         let mut builder = ShardDataBuilder::new(old_data);
-        builder.set_schema_file(cs.schema_file.clone());
+        builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
         shard.set_data(builder.build());
     }
 
@@ -1042,7 +1060,7 @@ impl EngineCore {
         info!("{} shard apply clear_columnar", shard.tag());
         let old_data = shard.get_data();
         let mut builder = ShardDataBuilder::new(old_data);
-        builder.set_schema_file(None);
+        builder.clear_schema();
         builder.set_columnar_levels(ColumnarLevels::new());
         builder.set_vector_indexes(VectorIndexes::default());
         builder.set_columnar_table_ids(vec![]);
@@ -1084,20 +1102,27 @@ impl EngineCore {
             new_col_levels.unconverted_l0s.extend(new_flushed_l0_tbls);
         }
         let mut columnar_table_ids = old_data.columnar_table_ids.clone();
-        let schema_file = if col_comp.get_snap_version() == 0 {
+        let mut clear_schema = false;
+        if col_comp.get_snap_version() == 0 {
             new_col_levels.unconverted_l0s.clear();
             columnar_table_ids.clear();
-            None
+
+            // Clear the schema to re-sync.
+            // TODO: Clear only when schema is outdated.
+            clear_schema = true;
+            warn!("{} apply columnar compaction: clear schema", shard.tag();
+                "schema" => ?old_data.schema_file, "schema_version" => old_data.schema_version);
         } else {
             columnar_table_ids.extend_from_slice(col_comp.get_columnar_table_ids());
             columnar_table_ids.sort_unstable();
             columnar_table_ids.dedup();
             columnar_table_ids
                 .retain(|id| !col_comp.get_columnar_table_ids_to_clear().contains(id));
-            old_data.schema_file.clone()
         };
         let mut builder = ShardDataBuilder::new(old_data);
-        builder.set_schema_file(schema_file);
+        if clear_schema {
+            builder.clear_schema();
+        }
         builder.set_columnar_levels(new_col_levels);
         builder.set_columnar_table_ids(columnar_table_ids);
         shard.set_data(builder.build());

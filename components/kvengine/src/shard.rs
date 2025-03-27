@@ -458,7 +458,7 @@ impl Shard {
             ignore_lock,
             ctx.prepare_type,
         );
-        builder.set_schema_file(cs.schema_file.clone());
+        builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
         shard.id = cs.shard_id;
         shard.set_data(builder.build());
         Ok(shard)
@@ -1490,7 +1490,7 @@ pub(crate) struct ShardDataBuilder {
     unloaded_tbls: Option<HashMap<u64, FileMeta>>,
     blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
     lock_txn_files: Option<Vec<TxnFile>>,
-    schema_file: Option<Option<SchemaFile>>,
+    schema: Option<(i64 /* schema_version */, Option<SchemaFile>)>,
     columnar_levels: Option<ColumnarLevels>,
     vector_indexes: Option<VectorIndexes>,
     columnar_table_ids: Option<Vec<i64>>,
@@ -1508,7 +1508,7 @@ impl ShardDataBuilder {
             unloaded_tbls: None,
             blob_tbls: None,
             lock_txn_files: None,
-            schema_file: None,
+            schema: None,
             columnar_levels: None,
             vector_indexes: None,
             columnar_table_ids: None,
@@ -1547,8 +1547,18 @@ impl ShardDataBuilder {
         self.lock_txn_files = Some(lock_txn_files);
     }
 
-    pub(crate) fn set_schema_file(&mut self, schema_file: Option<SchemaFile>) {
-        self.schema_file = Some(schema_file);
+    pub(crate) fn set_schema(&mut self, schema_version: i64, schema_file: Option<SchemaFile>) {
+        debug_assert!(
+            schema_file
+                .as_ref()
+                .map_or(true, |x| x.get_version() == schema_version)
+        );
+        self.schema = Some((schema_version, schema_file));
+    }
+
+    #[inline]
+    pub(crate) fn clear_schema(&mut self) {
+        self.set_schema(0, None);
     }
 
     pub(crate) fn set_columnar_levels(&mut self, columnar_levels: ColumnarLevels) {
@@ -1564,6 +1574,10 @@ impl ShardDataBuilder {
     }
 
     pub(crate) fn build(mut self) -> ShardData {
+        let (schema_version, schema_file) = self
+            .schema
+            .take()
+            .unwrap_or_else(|| (self.old.schema_version, self.old.schema_file.clone()));
         ShardData::new(
             self.range.take().unwrap_or_else(|| self.old.range.clone()),
             self.inner_key_off
@@ -1587,9 +1601,8 @@ impl ShardDataBuilder {
                 .unwrap_or_else(|| self.old.lock_txn_files.clone()),
             self.old.limiter.clone(),
             self.old.update_counter + 1,
-            self.schema_file
-                .take()
-                .unwrap_or_else(|| self.old.schema_file.clone()),
+            schema_version,
+            schema_file,
             self.columnar_levels
                 .take()
                 .unwrap_or_else(|| self.old.col_levels.clone()),
@@ -1622,6 +1635,9 @@ impl fmt::Debug for ShardData {
             .field("l0_total_size", &self.get_l0_total_size())
             .field("unloaded_tbls", &self.unloaded_tbls)
             .field("update_counter", &self.update_counter)
+            .field("schema_version", &self.schema_version)
+            .field("schema_file", &self.schema_file)
+            .field("columnar_table_ids", &self.columnar_table_ids)
             .finish()
     }
 }
@@ -1657,6 +1673,7 @@ impl ShardData {
             vec![],
             limiter,
             INITIAL_UPDATE_COUNTER,
+            0,
             None,
             ColumnarLevels::new(),
             VectorIndexes::default(),
@@ -1675,6 +1692,7 @@ impl ShardData {
         lock_txn_files: Vec<TxnFile>,
         limiter: RegionLimiter,
         update_counter: u64,
+        schema_version: i64,
         schema_file: Option<SchemaFile>,
         col_levels: ColumnarLevels,
         vector_indexes: VectorIndexes,
@@ -1694,6 +1712,7 @@ impl ShardData {
                 unloaded_tbls,
                 limiter,
                 update_counter,
+                schema_version,
                 schema_file,
                 col_levels,
                 vector_indexes,
@@ -1720,6 +1739,9 @@ pub(crate) struct ShardDataCore {
     pub(crate) unloaded_tbls: HashMap<u64, FileMeta>,
     pub limiter: RegionLimiter,
     pub update_counter: u64,
+    /// `schema_version` is used to indicate the schema version even if the
+    /// `schema_file` is None.
+    pub(crate) schema_version: i64,
     pub(crate) schema_file: Option<SchemaFile>,
     pub(crate) col_levels: ColumnarLevels,
     pub(crate) vector_indexes: VectorIndexes,

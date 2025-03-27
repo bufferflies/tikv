@@ -646,11 +646,7 @@ impl super::Shard {
         let compaction_score = priority.as_ref().map_or(0f64, |x| x.score());
         let pending_ops = self.pending_ops.read().unwrap().clone();
         let txn_file_locks = data.lock_txn_files.len();
-        let schema_version = data
-            .schema_file
-            .as_ref()
-            .map(|sf| sf.get_version())
-            .unwrap_or_default();
+        let schema_version = data.schema_version;
         let schema_restore_version = data
             .schema_file
             .as_ref()

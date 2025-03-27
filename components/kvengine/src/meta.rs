@@ -12,7 +12,7 @@ use api_version::{
 };
 use bytes::{Buf, Bytes};
 use kvenginepb as pb;
-use kvenginepb::{SchemaMeta, TxnFileRef, VectorIndex};
+use kvenginepb::{get_any_snap_from_changeset, SchemaMeta, TxnFileRef, VectorIndex};
 use protobuf::Message;
 use schema::schema::StorageClass;
 use slog_global::*;
@@ -76,16 +76,7 @@ pub struct ShardMeta {
 impl ShardMeta {
     pub fn new(engine_id: u64, cs: &pb::ChangeSet) -> Self {
         assert!(cs.has_snapshot() || cs.has_initial_flush() || cs.has_restore_shard());
-        let snap = if cs.has_snapshot() {
-            cs.get_snapshot()
-        } else if cs.has_initial_flush() {
-            cs.get_initial_flush()
-        } else if cs.has_restore_shard() {
-            cs.get_restore_shard()
-        } else {
-            unreachable!();
-        };
-
+        let snap = get_any_snap_from_changeset(cs).unwrap();
         let properties = Properties::new().apply_pb(snap.get_properties());
 
         // To fix the issue that `MANUAL_MAJOR_COMPACTION` is not removed after apply
