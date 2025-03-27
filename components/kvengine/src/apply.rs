@@ -1106,9 +1106,8 @@ impl EngineCore {
             columnar_table_ids.clear();
 
             // Clear the schema to re-sync.
-            // TODO: Clear only when schema is outdated.
-            clear_schema = true;
-            warn!("{} apply columnar compaction: clear schema", shard.tag();
+            clear_schema = old_data.has_too_many_unconverted_l0s();
+            warn!("{} apply columnar compaction: too many unconverted l0s, clear schema", shard.tag();
                 "schema" => ?old_data.schema_file, "schema_version" => old_data.schema_version);
         } else {
             columnar_table_ids.extend_from_slice(col_comp.get_columnar_table_ids());

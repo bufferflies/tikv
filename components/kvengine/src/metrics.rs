@@ -96,6 +96,11 @@ lazy_static! {
         "Counter of read IA segment cache miss",
     )
     .unwrap();
+    pub static ref ENGINE_COLUMNAR_TOO_MANY_UNCONVERTED_L0S: IntCounter = register_int_counter!(
+        "kv_engine_columnar_too_many_unconverted_l0s",
+        "Counter of columnar has too many unconverted L0s",
+    )
+    .unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {

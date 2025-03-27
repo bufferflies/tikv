@@ -432,7 +432,7 @@ fn test_columnar_major_compaction() {
     );
     assert!(ok);
     assert_eq!(shard.get_columnar_snap_version(), 0);
-    assert!(shard.get_data().schema_file.is_none());
+    assert!(shard.get_data().schema_file.is_some());
 }
 
 #[test]
@@ -692,7 +692,7 @@ fn test_columnar_major_compaction_multiple_tables() {
     );
     assert!(ok);
     assert_eq!(shard.get_columnar_snap_version(), 0);
-    assert!(shard.get_data().schema_file.is_none());
+    assert!(shard.get_data().schema_file.is_some());
 }
 
 #[test]

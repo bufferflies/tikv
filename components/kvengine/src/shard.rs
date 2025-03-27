@@ -26,6 +26,7 @@ use crate::{
     context::{IaCtx, PrepareType, SnapCtx},
     ia::{ia_file::IaFile, types::FileSegmentIdent},
     limiter::RegionLimiter,
+    metrics::ENGINE_COLUMNAR_TOO_MANY_UNCONVERTED_L0S,
     table::{
         self,
         blobtable::blobtable::BlobTable,
@@ -1049,7 +1050,8 @@ impl Shard {
             // Schema is outdated, wait for update or clear columnar if there are too many
             // unconverted L0.
             if self.get_outdated_schema_ver() == data.schema_file.as_ref().unwrap().get_version() {
-                if data.col_levels.unconverted_l0s.len() > MAX_UNCONVERTED_L0_FILE_COUNTS {
+                if data.has_too_many_unconverted_l0s() {
+                    ENGINE_COLUMNAR_TOO_MANY_UNCONVERTED_L0S.inc();
                     warn!(
                         "{} schema is outdated and has {} unconverted L0 files, clear schema file and columnar files.",
                         self.tag(),
@@ -2090,6 +2092,10 @@ impl ShardDataCore {
 
     pub fn has_unconverted_l0s(&self) -> bool {
         !self.col_levels.unconverted_l0s.is_empty()
+    }
+
+    pub(crate) fn has_too_many_unconverted_l0s(&self) -> bool {
+        self.col_levels.unconverted_l0s.len() > MAX_UNCONVERTED_L0_FILE_COUNTS
     }
 
     pub(crate) fn is_sync(&self) -> bool {
