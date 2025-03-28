@@ -5281,7 +5281,7 @@ def RaftEngine() -> RowPanel:
                 yaxes=yaxes(left_format=UNITS.BYTES_IEC),
                 targets=[
                     target(
-                        expr=expr_sum_rate(
+                        expr=expr_sum(
                             "raft_engine_resouce_usage_bytes",
                             by_labels=["type"],  # override default by instance.
                         ),
