@@ -26,7 +26,7 @@ use kvproto::{
     pdpb::CheckPolicy,
     raft_cmdpb::{
         AdminCmdType, AdminRequest, CmdType, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader,
-        Request, StatusCmdType, StatusResponse,
+        StatusCmdType, StatusResponse,
     },
     raft_serverpb::{ExtraMessageType, PeerState, RaftMessage},
 };
@@ -745,7 +745,7 @@ impl<'a> PeerMsgHandler<'a> {
         }
     }
 
-    fn handle_gc_peer_msg(&mut self, msg: &RaftMessage) {
+    pub(crate) fn handle_gc_peer_msg(&mut self, msg: &RaftMessage) {
         let from_epoch = msg.get_region_epoch();
         if !util::is_epoch_stale(self.fsm.peer.region().get_region_epoch(), from_epoch) {
             return;
@@ -807,7 +807,7 @@ impl<'a> PeerMsgHandler<'a> {
 
     /// Check if a request is valid if it has valid prepare_merge/commit_merge
     /// proposal.
-    fn check_merge_proposal(
+    pub(crate) fn check_merge_proposal(
         &mut self,
         msg: &RaftCmdRequest,
         store_meta: Option<&mut StoreMeta>,
@@ -1560,7 +1560,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.propose_raft_command(cmd, callback, None);
     }
 
-    fn on_update_schema_file(&mut self, schema_file: SchemaFile) {
+    pub(crate) fn on_update_schema_file(&mut self, schema_file: SchemaFile) {
         if !self.peer.is_leader() {
             return;
         }
@@ -1652,7 +1652,47 @@ impl<'a> PeerMsgHandler<'a> {
         }
     }
 
-    fn on_check_leader(&mut self, shard_ver: u64, callback: Callback) {
+    fn check_schema(&mut self, shard: &Arc<Shard>) {
+        let tag = self.peer.tag();
+        let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
+        let schema_meta = &shard_meta.schema;
+        let schema_file = shard.get_schema_file();
+        debug!("{} check schema", tag;
+            "schema_file_meta" => ?schema_meta,
+            "meta.storage_class" => ?shard_meta.get_storage_class(),
+            "shard.storage_class" => ?shard.get_storage_class(),
+            "checked_schema_ver" => shard.get_checked_schema_ver(),
+            "schema_file" => ?schema_file,
+        );
+
+        if !schema_file_is_matched_with_meta(schema_file.as_ref(), schema_meta) {
+            // Wait for schema file to be updated.
+            debug!("{} check schema: skip, schema file is stale", tag;
+                "schema_meta" => ?schema_meta, "schema_file" => ?schema_file);
+            return;
+        }
+        if shard_is_matched_with_meta(shard.as_ref(), shard_meta) {
+            debug!("{} check schema: skip, shard is up-to-date", tag);
+            return;
+        }
+
+        if !self.ctx.global.schema_scheduler.is_busy() {
+            let task = SchemaTask::StorageClass {
+                region: self.region().clone(),
+                schema_meta: schema_meta.clone(),
+            };
+            if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {
+                error!("check schema failed";
+                    "region_id" => self.region_id(),
+                    "err" => ?e
+                );
+            }
+        } else {
+            debug!("{} schema scheduler is busy", tag);
+        }
+    }
+
+    pub(crate) fn on_check_leader(&mut self, shard_ver: u64, callback: Callback) {
         let mut resp = RaftCmdResponse::default();
         // If the peer is not leader or not applied to current term, return not_leader
         // error. The client should sleep and retry.
@@ -1692,7 +1732,21 @@ impl<'a> PeerMsgHandler<'a> {
         self.propose_change_set(change_set);
     }
 
-    fn on_ingest_files(&mut self, cs: kvenginepb::ChangeSet, callback: Callback) {
+    fn on_clear_columnar(&mut self) {
+        if !self.peer.is_leader() {
+            return;
+        }
+        let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
+        if !shard_meta.schema.is_valid() {
+            return;
+        }
+        let mut change_set = kvengine::new_change_set(shard_meta.id, shard_meta.ver);
+        change_set.set_clear_columnar(true);
+        info!("{} propose clear_columnar", self.peer.tag());
+        self.propose_change_set(change_set);
+    }
+
+    pub(crate) fn on_ingest_files(&mut self, cs: kvenginepb::ChangeSet, callback: Callback) {
         if !self.peer.is_leader() {
             let mut resp = RaftCmdResponse::default();
             let header = resp.mut_header();
@@ -2181,7 +2235,10 @@ impl<'a> PeerMsgHandler<'a> {
     /// If everything is ok, the answer should always be true because PD should
     /// ensure all target peers exist. So if not, error log will be printed
     /// and return false.
-    fn is_merge_target_region_stale(&self, target_region: &metapb::Region) -> Result<bool> {
+    pub(crate) fn is_merge_target_region_stale(
+        &self,
+        target_region: &metapb::Region,
+    ) -> Result<bool> {
         let target_peer_id = find_peer(target_region, self.ctx.store_id())
             .unwrap()
             .get_id();
@@ -2602,20 +2659,6 @@ impl<'a> PeerMsgHandler<'a> {
                 .inc();
         }
     }
-}
-
-pub fn new_read_index_request(
-    region_id: u64,
-    region_epoch: RegionEpoch,
-    peer: metapb::Peer,
-) -> RaftCmdRequest {
-    let mut request = RaftCmdRequest::default();
-    request.mut_header().set_region_id(region_id);
-    request.mut_header().set_region_epoch(region_epoch);
-    request.mut_header().set_peer(peer);
-    let mut cmd = Request::default();
-    cmd.set_cmd_type(CmdType::ReadIndex);
-    request
 }
 
 pub fn new_admin_request(region_id: u64, peer: metapb::Peer) -> RaftCmdRequest {

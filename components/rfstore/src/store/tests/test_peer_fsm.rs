@@ -2,13 +2,22 @@
 
 use std::time::Duration;
 
+use kvengine::table::{
+    columnar::{Schema, SchemaBuf, SchemaFile},
+    file::InMemFile,
+};
 use kvenginepb::TxnFileRef;
 use kvproto::{
     metapb,
     pdpb::CheckPolicy,
-    raft_cmdpb::{CmdType, RaftCmdRequest, Request},
-    raft_serverpb::RaftMessage,
+    raft_cmdpb::{
+        AdminCmdType, AdminRequest, CmdType, CommitMergeRequest, PrepareMergeRequest,
+        RaftCmdRequest, Request,
+    },
+    raft_serverpb::{PeerState, RaftMessage, RegionLocalState},
 };
+use protobuf::Message;
+use raft::StateRole::{Follower, Leader};
 
 use super::*;
 use crate::{
@@ -26,13 +35,24 @@ struct TestConfig {
 fn build_test_env(cfg: TestConfig) -> (PeerFsm, RaftContext, TempDir) {
     let (engines, tmp_dir) = new_test_engines();
     let mut region = initial_region(1, 1, 1);
-    region.mut_peers().push(new_peer(2, 2));
-    region.mut_peers().push(new_peer(3, 3));
+    append_peer(&mut region, 2, 2);
+    append_peer(&mut region, 3, 3);
 
     // Build the peer FSM
     let fsm = new_test_peer_fsm(engines.clone(), &region).expect("Failed to create test PeerFsm");
     let raft_ctx = new_test_raft_ctx(engines, cfg.pd_scheduler);
     (fsm, raft_ctx, tmp_dir)
+}
+
+fn set_region_epoch(region: &mut metapb::Region, version: u64, conf_ver: u64) {
+    let mut epoch = metapb::RegionEpoch::new();
+    epoch.set_version(version);
+    epoch.set_conf_ver(conf_ver);
+    region.set_region_epoch(epoch);
+}
+
+fn append_peer(region: &mut metapb::Region, store_id: u64, peer_id: u64) {
+    region.mut_peers().push(new_peer(store_id, peer_id));
 }
 
 #[test]
@@ -76,6 +96,11 @@ fn test_validate_raft_msg() {
 
     raft_msg.set_region_epoch(metapb::RegionEpoch::default());
     assert!(handler.validate_raft_msg(&raft_msg));
+
+    let mut msg = raft::eraftpb::Message::default();
+    msg.set_term(5);
+    raft_msg.set_message(msg);
+    assert!(MsgDebug(&raft_msg).to_string().contains("term: 5"));
 }
 
 #[test]
@@ -146,7 +171,7 @@ fn test_pre_propose_raft_command() {
         let mut r = Request::default();
         r.set_cmd_type(CmdType::Get);
         req.mut_requests().push(r);
-        fsm.peer.raft_group.raft.r.state = raft::StateRole::Follower;
+        fsm.peer.raft_group.raft.r.state = Follower;
 
         let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
         let err = handler.pre_propose_raft_command(&req).unwrap_err();
@@ -158,7 +183,7 @@ fn test_pre_propose_raft_command() {
         );
 
         // Make the peer a leader for the tests below
-        fsm.peer.raft_group.raft.r.state = raft::StateRole::Leader;
+        fsm.peer.raft_group.raft.r.state = Leader;
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -345,7 +370,7 @@ fn test_half_split_region() {
     // SCENARIO: Not leader => no task scheduled
     // ─────────────────────────────────────────────────────────────────────────────
     {
-        fsm.peer.raft_group.raft.state = raft::StateRole::Follower;
+        fsm.peer.raft_group.raft.state = Follower;
 
         let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
         handler.on_schedule_half_split_region(
@@ -362,7 +387,7 @@ fn test_half_split_region() {
     // ─────────────────────────────────────────────────────────────────────────────
     {
         // Make the peer a leader first.
-        fsm.peer.raft_group.raft.state = raft::StateRole::Leader;
+        fsm.peer.raft_group.raft.state = Leader;
         // Assign a higher region version to simulate a stale command.
         let mut r = region.clone();
         r.mut_region_epoch().set_version(99);
@@ -478,7 +503,7 @@ fn test_validate_split_region() {
     // SCENARIO: Epoch mismatch => returns `Error::EpochNotMatch`
     // ─────────────────────────────────────────────────────────────────────────────
     {
-        fsm.peer.raft_group.raft.state = raft::StateRole::Leader;
+        fsm.peer.raft_group.raft.state = Leader;
         let mut invalid_epoch = valid_epoch.clone();
         invalid_epoch.set_version(fsm.peer.region().get_region_epoch().get_version() + 1);
         let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
@@ -522,6 +547,7 @@ fn test_validate_split_region() {
     }
 }
 
+use kvengine::table::columnar::build_schema_file;
 use rstest::rstest;
 
 fn callback_expect_no_error() -> Callback {
@@ -530,6 +556,28 @@ fn callback_expect_no_error() -> Callback {
         assert!(
             !header.has_error(),
             "expected no error, got: {:?}",
+            header.get_error()
+        );
+    }))
+}
+
+fn callback_expect_not_leader() -> Callback {
+    Callback::write(Box::new(|resp| {
+        let header = resp.response.get_header();
+        assert!(
+            header.get_error().has_not_leader(),
+            "expected NotLeader error, got: {:?}",
+            header.get_error()
+        );
+    }))
+}
+
+fn callback_expect_region_not_initialized() -> Callback {
+    Callback::write(Box::new(|resp| {
+        let header = resp.response.get_header();
+        assert!(
+            header.get_error().has_region_not_initialized(),
+            "expected RegionNotInitialized error, got: {:?}",
             header.get_error()
         );
     }))
@@ -546,10 +594,24 @@ fn callback_expect_epoch_not_match() -> Callback {
     }))
 }
 
+fn callback_expect_err_msg(expected_msg: &str) -> Callback {
+    let expected_msg = expected_msg.to_string();
+    Callback::write(Box::new(move |resp| {
+        let header = resp.response.get_header();
+        let err_msg = header.get_error().get_message();
+        assert!(
+            err_msg.contains(&expected_msg),
+            "Expected error message to contain '{}', got: {}",
+            expected_msg,
+            err_msg
+        );
+    }))
+}
+
 #[rstest]
-#[case::not_leader(raft::StateRole::Follower, false, false, callback_expect_no_error)]
-#[case::epoch_mismatch(raft::StateRole::Leader, true, false, callback_expect_epoch_not_match)]
-#[case::success(raft::StateRole::Leader, false, true, callback_expect_no_error)]
+#[case::not_leader(Follower, false, false, callback_expect_no_error)]
+#[case::epoch_mismatch(Leader, true, false, callback_expect_epoch_not_match)]
+#[case::success(Leader, false, true, callback_expect_no_error)]
 fn test_on_delete_prefix(
     #[case] role: raft::StateRole,
     #[case] version_mismatch: bool,
@@ -585,9 +647,9 @@ fn test_on_delete_prefix(
 }
 
 #[rstest]
-#[case::not_leader(raft::StateRole::Follower, false, false, callback_expect_no_error)]
-#[case::version_mismatch(raft::StateRole::Leader, true, false, callback_expect_no_error)]
-#[case::success(raft::StateRole::Leader, false, true, callback_expect_no_error)]
+#[case::not_leader(Follower, false, false, callback_expect_no_error)]
+#[case::version_mismatch(Leader, true, false, callback_expect_no_error)]
+#[case::success(Leader, false, true, callback_expect_no_error)]
 fn test_on_truncate_ts(
     #[case] role: raft::StateRole,
     #[case] version_mismatch: bool,
@@ -622,9 +684,9 @@ fn test_on_truncate_ts(
 }
 
 #[rstest]
-#[case::not_leader(raft::StateRole::Follower, true, false, callback_expect_no_error)]
-#[case::leader_major_compact_true(raft::StateRole::Leader, true, true, callback_expect_no_error)]
-#[case::leader_major_compact_false(raft::StateRole::Leader, false, true, callback_expect_no_error)]
+#[case::not_leader(Follower, true, false, callback_expect_no_error)]
+#[case::leader_major_compact_true(Leader, true, true, callback_expect_no_error)]
+#[case::leader_major_compact_false(Leader, false, true, callback_expect_no_error)]
 fn test_on_manual_major_compact(
     #[case] role: raft::StateRole,
     #[case] major_compact: bool,
@@ -651,5 +713,330 @@ fn test_on_manual_major_compact(
         proposed, expected_proposal,
         "role={:?}, major_compact={} => expected_proposal={}, got {}",
         role, major_compact, expected_proposal, proposed
+    );
+}
+
+#[rstest]
+#[case::not_leader(Follower, false, false, false)]
+#[case::mismatch_restore_ver(Leader, true, false, false)]
+#[case::stale_file_ver(Leader, false, true, false)]
+#[case::success(Leader, false, false, true)]
+fn test_on_update_schema_file(
+    #[case] role: raft::StateRole,
+    #[case] mismatch_restore_ver: bool,
+    #[case] stale_file_ver: bool,
+    #[case] expected_proposal: bool,
+) {
+    test_util::init_log_for_test();
+    let (mut fsm, mut raft_ctx, _tmp_dir) = build_test_env(TestConfig::default());
+    let schema_file_ver = 10;
+    let schema_restore_ver = 100;
+    {
+        let mut shard_meta = kvengine::ShardMeta::default();
+        shard_meta.schema_restore_ver = schema_restore_ver;
+        shard_meta.schema_file_ver = schema_file_ver;
+        shard_meta.schema_file_id = 99;
+        shard_meta.range.outer_start = bytes::Bytes::from(b"k00000".to_vec());
+        shard_meta.range.outer_end = bytes::Bytes::from(b"k99999".to_vec());
+        assert!(shard_meta.initial_flushed());
+        fsm.peer.mut_store().shard_meta = Some(shard_meta);
+    }
+
+    let file_restore_ver = if mismatch_restore_ver {
+        schema_restore_ver + 1
+    } else {
+        schema_restore_ver
+    };
+    let file_version = if stale_file_ver {
+        schema_file_ver - 1
+    } else {
+        schema_file_ver + 1
+    };
+    let data = build_schema_file(
+        0,
+        file_version,
+        vec![Schema::new(SchemaBuf::default())],
+        file_restore_ver,
+    );
+
+    fsm.peer.raft_group.raft.state = role;
+    let old_propose_count = raft_ctx.raft_metrics.propose.all.get();
+    let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
+    handler
+        .on_update_schema_file(SchemaFile::open(Arc::new(InMemFile::new(0, data.into()))).unwrap());
+
+    let new_propose_count = raft_ctx.raft_metrics.propose.all.get();
+    let proposed = new_propose_count > old_propose_count;
+    assert_eq!(
+        proposed, expected_proposal,
+        "role={:?}, mismatch_restore_ver={}, stale_file_ver={} => expected_proposal={}, got {}",
+        role, mismatch_restore_ver, stale_file_ver, expected_proposal, proposed
+    );
+}
+
+#[rstest]
+#[case::not_leader(Follower, false, false, callback_expect_not_leader)]
+#[case::leader_not_applied(Leader, true, false, callback_expect_not_leader)]
+#[case::epoch_mismatch(Leader, false, true, callback_expect_epoch_not_match)]
+#[case::leader_success(Leader, false, false, callback_expect_no_error)]
+fn test_on_check_leader(
+    #[case] role: raft::StateRole,
+    #[case] not_applied_to_current_term: bool,
+    #[case] version_mismatch: bool,
+    #[case] cb_factory: fn() -> Callback,
+) {
+    test_util::init_log_for_test();
+    let (mut fsm, mut raft_ctx, _tmp_dir) = build_test_env(TestConfig::default());
+    let mut shard_ver = fsm.peer.region().get_region_epoch().version;
+    if version_mismatch {
+        shard_ver += 1;
+    }
+
+    if not_applied_to_current_term {
+        let mut apply_state = fsm.peer.get_store().apply_state();
+        apply_state.applied_index_term = fsm.peer.raft_group.raft.term.saturating_sub(1);
+        fsm.peer.mut_store().set_applied_state(apply_state);
+    }
+    fsm.peer.raft_group.raft.state = role;
+
+    let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
+    handler.on_check_leader(shard_ver, cb_factory());
+}
+
+#[rstest]
+#[case::not_leader(Follower, false, false, callback_expect_not_leader)]
+#[case::not_initial_flushed(Leader, true, false, callback_expect_region_not_initialized)]
+#[case::epoch_mismatch(Leader, false, true, callback_expect_epoch_not_match)]
+#[case::leader_success(Leader, false, false, callback_expect_no_error)]
+fn test_on_ingest_files(
+    #[case] role: raft::StateRole,
+    #[case] not_initial_flushed: bool,
+    #[case] shard_version_mismatch: bool,
+    #[case] cb_factory: fn() -> Callback,
+) {
+    test_util::init_log_for_test();
+    let (mut fsm, mut raft_ctx, _tmp_dir) = build_test_env(TestConfig::default());
+
+    fsm.peer.raft_group.raft.state = role;
+
+    let mut cs = kvenginepb::ChangeSet::default();
+    cs.shard_ver = fsm.peer.region().get_region_epoch().version;
+    if shard_version_mismatch {
+        cs.shard_ver += 1;
+    }
+
+    if not_initial_flushed {
+        fsm.peer.mut_store().shard_meta.as_mut().unwrap().parent = Some(Box::default());
+        assert!(!fsm.get_peer().get_store().initial_flushed());
+    }
+
+    let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
+    handler.on_ingest_files(cs, cb_factory());
+}
+
+#[rstest]
+#[case::invalid_cmd(
+    Leader,
+    true,
+    false,
+    false,
+    Some("invalid changeset"),
+    false,
+    callback_expect_no_error
+)]
+#[case::invalid_snap_range(
+    Leader,
+    false,
+    true,
+    false,
+    Some("invalid snapshot range"),
+    false,
+    callback_expect_no_error
+)]
+#[case::not_leader(Follower, false, false, false, None, false, callback_expect_not_leader)]
+#[case::epoch_mismatch(
+    Leader,
+    false,
+    false,
+    true,
+    None,
+    false,
+    callback_expect_epoch_not_match
+)]
+#[case::leader_success(Leader, false, false, false, None, true, callback_expect_no_error)]
+fn test_on_restore_shard(
+    #[case] role: raft::StateRole,
+    #[case] invalid_command: bool,
+    #[case] invalid_snap_range: bool,
+    #[case] epoch_mismatch: bool,
+    #[case] expect_err_msg: Option<&str>,
+    #[case] expect_proposal: bool,
+    #[case] cb_factory: fn() -> Callback,
+) {
+    test_util::init_log_for_test();
+    let (mut fsm, mut raft_ctx, _tmp_dir) = build_test_env(TestConfig::default());
+    fsm.peer.raft_group.raft.state = role;
+
+    let mut cs = kvenginepb::ChangeSet::default();
+    cs.shard_ver = fsm.peer.region().get_region_epoch().version;
+    if epoch_mismatch {
+        cs.shard_ver += 1;
+    }
+
+    let cb = if let Some(msg) = expect_err_msg {
+        callback_expect_err_msg(msg)
+    } else {
+        cb_factory()
+    };
+
+    let mut region = fsm.peer.region().clone();
+    region.set_start_key(tikv_util::codec::bytes::encode_bytes(b"k00000"));
+    region.set_end_key(tikv_util::codec::bytes::encode_bytes(b"k99999"));
+    fsm.peer.mut_store().set_region(region.clone());
+
+    if !invalid_command {
+        let rs = cs.mut_restore_shard();
+        if invalid_snap_range {
+            // Set wrong outer start/end keys.
+            rs.set_outer_start(b"bad_start".to_vec());
+            rs.set_outer_end(b"bad_end".to_vec());
+        } else {
+            rs.set_outer_start(raw_start_key(&region));
+            rs.set_outer_end(raw_end_key(&region));
+        }
+    }
+
+    let old_propose_count = raft_ctx.raft_metrics.propose.all.get();
+    let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
+    handler.on_restore_shard(cs, cb);
+    let proposed = raft_ctx.raft_metrics.propose.all.get() > old_propose_count;
+    assert_eq!(
+        proposed, expect_proposal,
+        "expect_proposal={}, but got {}",
+        expect_proposal, proposed
+    );
+}
+
+#[rstest]
+#[case::missing_local_state(None, false)]
+#[case::local_epoch_is_newer(Some((PeerState::Normal, 10)), true)]
+#[case::local_tombstone(Some((PeerState::Tombstone, 5)), true)]
+#[case::local_not_tombstone(Some((PeerState::Normal, 5)), false)]
+fn test_is_merge_target_region_stale(
+    #[case] local_state_info: Option<(PeerState, u64)>, // peer_state, epoch version
+    #[case] expected_is_stale: bool,
+) {
+    test_util::init_log_for_test();
+    let (mut fsm, mut raft_ctx, _tmp_dir) = build_test_env(TestConfig::default());
+    let target_peer_id = 1001;
+    let store_id = fsm.peer.get_store().store_id;
+    raft_ctx.global.store.set_id(store_id);
+
+    // Write the local target peer state into rfengine.
+    if let Some((peer_state, ver)) = local_state_info {
+        let mut local_state = RegionLocalState::new();
+        local_state.set_state(peer_state);
+
+        let mut region = metapb::Region::new();
+        set_region_epoch(&mut region, ver, ver);
+        append_peer(&mut region, store_id, target_peer_id);
+        local_state.set_region(region);
+
+        let encoded = local_state.write_to_bytes().unwrap();
+        let key = rfengine::region_state_key(target_peer_id);
+        let mut wb = rfengine::WriteBatch::new();
+        wb.set_state(target_peer_id, 0, &key, &encoded);
+        raft_ctx.global.engines.raft.write(wb).unwrap();
+    }
+
+    let mut target_region = metapb::Region::new();
+    set_region_epoch(&mut target_region, 5, 5);
+    append_peer(&mut target_region, store_id, target_peer_id);
+
+    let handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
+    let res = handler
+        .is_merge_target_region_stale(&target_region)
+        .unwrap();
+    assert_eq!(
+        res, expected_is_stale,
+        "local_state={:?}, expected_is_stale={}",
+        local_state_info, expected_is_stale
+    );
+}
+
+#[rstest]
+#[case::mismatch(true)]
+#[case::correct(false)]
+fn test_on_prepared_txn_file(#[case] mismatch: bool) {
+    test_util::init_log_for_test();
+    let (mut fsm, mut raft_ctx, _tmp_dir) = build_test_env(TestConfig::default());
+    let mut peer_id = fsm.peer.peer.get_id();
+    if mismatch {
+        peer_id += 1;
+    }
+
+    let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
+    handler.on_prepared_txn_file(123, peer_id);
+    let pushed = !raft_ctx.apply_msgs.msgs.is_empty();
+    assert_eq!(pushed, !mismatch);
+}
+
+#[rstest]
+#[case::prepare_not_sibling(AdminCmdType::PrepareMerge, false)]
+#[case::prepare_not_same_stores(AdminCmdType::PrepareMerge, true)]
+#[case::commit_not_sibling(AdminCmdType::CommitMerge, false)]
+#[case::commit_not_same_stores(AdminCmdType::CommitMerge, true)]
+fn test_check_merge_proposal(#[case] cmd_type: AdminCmdType, #[case] is_sibling: bool) {
+    test_util::init_log_for_test();
+    let (mut fsm, mut raft_ctx, _tmp) = build_test_env(TestConfig::default());
+
+    let mut fsm_region = fsm.peer.region().clone();
+    fsm_region.set_start_key(tikv_util::codec::bytes::encode_bytes(b"k00000"));
+    fsm_region.set_end_key(tikv_util::codec::bytes::encode_bytes(b"k00001"));
+    fsm.peer.mut_store().set_region(fsm_region.clone());
+
+    let mut store_meta = StoreMeta::new(0);
+    store_meta.cop_host = Some(CoprocessorHost::default());
+
+    let mut region = metapb::Region::default();
+    if is_sibling {
+        region.set_start_key(tikv_util::codec::bytes::encode_bytes(b"k00001"));
+        region.set_end_key(tikv_util::codec::bytes::encode_bytes(b"k00002"));
+    }
+
+    let mut admin_req = AdminRequest::default();
+    admin_req.set_cmd_type(cmd_type);
+    match cmd_type {
+        AdminCmdType::PrepareMerge => {
+            let target_region = region.clone();
+            let mut prep = PrepareMergeRequest::default();
+            prep.set_target(target_region.clone());
+            admin_req.set_prepare_merge(prep);
+            store_meta.region_map.put(target_region);
+        }
+        AdminCmdType::CommitMerge => {
+            let source_region = region.clone();
+            let mut cm = CommitMergeRequest::default();
+            cm.set_source(source_region);
+            admin_req.set_commit_merge(cm);
+        }
+        _ => {}
+    }
+
+    let mut req = RaftCmdRequest::default();
+    req.set_admin_request(admin_req);
+
+    // In this test, an error is always expected, either due to regions not being
+    // siblings or a mismatch in store configurations.
+    let expect_err_substr = if !is_sibling { "sibling" } else { "match" };
+    let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
+    let err_str = handler
+        .check_merge_proposal(&req, Some(&mut store_meta))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err_str.contains(expect_err_substr),
+        "unexpected error: {:?}",
+        err_str
     );
 }
