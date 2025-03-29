@@ -1634,19 +1634,12 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
 
-        if !self.ctx.global.schema_scheduler.is_busy() {
-            let task = SchemaTask::StorageClass {
-                region: self.region().clone(),
-                schema_meta: schema_meta.clone(),
-            };
-            if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {
-                error!("check schema failed";
-                    "region_id" => self.region_id(),
-                    "err" => ?e
-                );
-            }
-        } else {
-            debug!("{} schema scheduler is busy", tag);
+        let task = SchemaTask::StorageClass {
+            region: self.region().clone(),
+            schema_meta: schema_meta.clone(),
+        };
+        if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {
+            info!("{} check schema: schedule task failed", tag; "err" => ?e, "schema_meta" => ?schema_meta);
         }
     }
 

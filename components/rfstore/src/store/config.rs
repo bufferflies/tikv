@@ -107,6 +107,8 @@ pub struct Config {
     pub main_worker_max_util: usize,
 
     pub aux_worker_max_util: usize,
+
+    pub schema_worker_count: usize,
 }
 
 impl Default for Config {
@@ -158,6 +160,7 @@ impl Default for Config {
             // The aux worker's max CPU utilization is lower because it must sync with main
             // worker.
             aux_worker_max_util: 60,
+            schema_worker_count: 1,
         }
     }
 }
@@ -223,6 +226,8 @@ impl Config {
         cfg.local_file_gc_tick_interval = old.local_file_gc_tick_interval;
         cfg.local_file_gc_timeout = old.local_file_gc_timeout;
 
+        cfg.schema_worker_count = (num_cpus / 16).max(1);
+
         if cfg!(debug_assertions) && cfg.raft_base_tick_interval.as_millis() < 100 {
             // It is a test config, adjust the fields not included in the old.
             cfg.update_safe_ts_interval.0 = cfg.raft_base_tick_interval.0 * 60;
@@ -237,6 +242,8 @@ impl Config {
             }
             cfg.main_worker_max_util = 16;
             cfg.aux_worker_max_util = 12;
+
+            cfg.schema_worker_count = cfg.schema_worker_count.max(2);
         }
 
         cfg.capacity = old.capacity;

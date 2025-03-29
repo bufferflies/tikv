@@ -131,8 +131,8 @@ impl RaftBatchSystem {
 
         let schema_worker_name = "schema-worker";
         let mut schema_worker = Builder::new(schema_worker_name)
-            .thread_count(1)
-            .pending_capacity(1)
+            .thread_count(cfg.value().schema_worker_count)
+            .pending_capacity(256)
             .create()
             .lazy_build(schema_worker_name);
         let schema_runner =
