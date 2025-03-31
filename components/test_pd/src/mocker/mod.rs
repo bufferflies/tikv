@@ -179,4 +179,11 @@ pub trait PdMocker {
     fn report_buckets(&self, _: &ReportBucketsRequest) -> Option<Result<ReportBucketsResponse>> {
         None
     }
+
+    fn update_service_gc_safe_point(
+        &self,
+        _: &UpdateServiceGcSafePointRequest,
+    ) -> Option<Result<UpdateServiceGcSafePointResponse>> {
+        None
+    }
 }

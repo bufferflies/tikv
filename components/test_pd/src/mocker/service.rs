@@ -1,7 +1,7 @@
 // Copyright 2017 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     Mutex,
 };
 
@@ -25,6 +25,7 @@ pub struct Service {
     leaders: Mutex<HashMap<u64, Peer>>,
     feature_gate: Mutex<String>,
     tso_logical: AtomicI64,
+    service_gc_safepoint: AtomicU64,
 }
 
 impl Service {
@@ -39,6 +40,7 @@ impl Service {
             leaders: Mutex::new(HashMap::default()),
             feature_gate: Mutex::new(String::default()),
             tso_logical: AtomicI64::default(),
+            service_gc_safepoint: Default::default(),
         }
     }
 
@@ -353,6 +355,42 @@ impl PdMocker for Service {
         let mut resp = GetGcSafePointResponse::default();
         let header = self.header();
         resp.set_header(header);
+        Some(Ok(resp))
+    }
+
+    fn update_service_gc_safe_point(
+        &self,
+        req: &UpdateServiceGcSafePointRequest,
+    ) -> Option<Result<UpdateServiceGcSafePointResponse>> {
+        // WARNING:
+        // This mocker is only used for testing the behavior that the client yeets an
+        // error if failed to update the service safe point. So it lacks the functions
+        // below, you may need to extend this when needed:
+        //
+        // - Upload many service safe points. (For now, `service_id` will be ignored.)
+        // - Remove the service safe point when request with `ttl` = 0.
+        // - The safe point `gc_worker` always exists with the latest GC safe point.
+
+        let val = self
+            .service_gc_safepoint
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v > req.safe_point {
+                    None
+                } else {
+                    Some(req.safe_point)
+                }
+            });
+        let val = match val {
+            Ok(_) => req.safe_point,
+            Err(v) => v,
+        };
+
+        let mut resp = UpdateServiceGcSafePointResponse::default();
+        let header = self.header();
+        resp.set_header(header);
+        resp.set_min_safe_point(val);
+        resp.set_ttl(req.get_ttl());
+        resp.set_service_id(req.get_service_id().to_owned());
         Some(Ok(resp))
     }
 }

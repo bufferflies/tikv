@@ -1194,6 +1194,7 @@ impl PdClient for RpcClient {
                     .with_label_values(&["update_service_safe_point"])
                     .observe(duration_to_sec(begin.saturating_elapsed()));
                 check_resp_header(resp.get_header())?;
+                crate::check_update_service_safe_point_resp(&resp, safe_point.into_inner())?;
                 Ok(())
             }) as PdFuture<_>
         };

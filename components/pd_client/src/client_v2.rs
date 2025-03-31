@@ -1430,6 +1430,7 @@ impl PdClient for RpcClient {
                 .observe(duration_to_sec(timer.saturating_elapsed()));
             let resp = raw_client.check_resp(resp)?;
             check_resp_header(resp.get_header())?;
+            crate::check_update_service_safe_point_resp(&resp, safe_point.into_inner())?;
             Ok(())
         })
     }

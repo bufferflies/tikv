@@ -647,3 +647,16 @@ pub fn take_peer_address(store: &mut metapb::Store) -> String {
         store.take_address()
     }
 }
+
+fn check_update_service_safe_point_resp(
+    resp: &pdpb::UpdateServiceGcSafePointResponse,
+    required_safepoint: u64,
+) -> Result<()> {
+    if resp.min_safe_point > required_safepoint {
+        return Err(Error::UnsafeServiceGcSafePoint {
+            requested: required_safepoint.into(),
+            current_minimal: resp.min_safe_point.into(),
+        });
+    }
+    Ok(())
+}
