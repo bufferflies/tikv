@@ -219,6 +219,7 @@ pub struct TableIterator {
 impl fmt::Debug for TableIterator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TableIterator")
+            .field("t", &self.t)
             .field("b_pos", &self.b_pos)
             .field("bi", &self.bi)
             .field("old_b_pos", &self.old_b_pos)
@@ -628,5 +629,10 @@ impl table::Iterator for TableIterator {
 
     fn valid(&self) -> bool {
         self.err.is_none()
+    }
+
+    #[cfg(debug_assertions)]
+    fn tag(&self) -> String {
+        format!("sst:{:?}", self.t.id())
     }
 }

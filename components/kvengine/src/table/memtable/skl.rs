@@ -915,6 +915,11 @@ impl Iterator for SkIterator {
     fn valid(&self) -> bool {
         !self.n.is_null()
     }
+
+    #[cfg(debug_assertions)]
+    fn tag(&self) -> String {
+        "skl".to_string()
+    }
 }
 
 #[cfg(test)]

@@ -898,6 +898,11 @@ impl Iterator for SkipOpTxnFileIterator {
     fn valid(&self) -> bool {
         self.inner.valid()
     }
+
+    #[cfg(debug_assertions)]
+    fn tag(&self) -> String {
+        format!("txn-op:{}", self.inner.file.chunk_ids().iter().join(","))
+    }
 }
 
 pub struct TxnFileIterator {
@@ -1099,6 +1104,11 @@ impl Iterator for TxnFileIterator {
                 .as_ref()
                 .map(|it| it.valid())
                 .unwrap_or_default()
+    }
+
+    #[cfg(debug_assertions)]
+    fn tag(&self) -> String {
+        format!("txn:{}", self.file.chunk_ids().iter().join(","))
     }
 }
 

@@ -123,6 +123,35 @@ pub trait Iterator: Send {
             next!(self).await
         }
     }
+
+    // NOTE: `rewind_and_dump` has side effect. Use with Caution.
+    #[cfg(debug_assertions)]
+    fn rewind_and_dump(&mut self) -> Vec<(String, Vec<DumpKv>)> {
+        use bytes::Bytes;
+        let mut kvs = vec![];
+        self.rewind();
+        while self.valid() {
+            let key = OwnedInnerKey::from(self.key());
+            let v = self.value();
+            let value = if v.is_deleted() {
+                None
+            } else {
+                Some(Bytes::copy_from_slice(v.get_value()))
+            };
+            kvs.push(DumpKv {
+                key,
+                ver: v.version,
+                value,
+            });
+            self.next_all_version();
+        }
+        vec![(self.tag(), kvs)]
+    }
+
+    #[cfg(debug_assertions)]
+    fn tag(&self) -> String {
+        String::new()
+    }
 }
 
 pub const NO_COMPRESSION: u8 = 0;
@@ -944,6 +973,20 @@ pub fn add_property(buf: &mut Vec<u8>, key: &[u8], val: &[u8]) {
     buf.extend_from_slice(key);
     buf.put_u32_le(val.len() as u32);
     buf.extend_from_slice(val);
+}
+
+#[cfg(debug_assertions)]
+pub struct DumpKv {
+    pub key: OwnedInnerKey,
+    pub ver: u64,
+    pub value: Option<bytes::Bytes>,
+}
+
+#[cfg(debug_assertions)]
+impl std::fmt::Debug for DumpKv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}:{}:{:?}", self.key, self.ver, self.value)
+    }
 }
 
 #[cfg(test)]

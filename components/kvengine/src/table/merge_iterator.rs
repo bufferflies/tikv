@@ -80,7 +80,10 @@ impl Iterator for MergeIterator<'_> {
             return false;
         }
         if self.smaller.ver == self.bigger.ver {
-            debug_assert!(false, "ver is equal: {:?}", self);
+            debug_assert!(false, "ver is equal: {:?}", {
+                let current = format!("{:?}", self);
+                (current, self.rewind_and_dump())
+            });
             // have duplicated key in the two iterators.
             if self.bigger.iter.next_version() {
                 self.bigger.reset();
@@ -120,6 +123,19 @@ impl Iterator for MergeIterator<'_> {
     fn valid(&self) -> bool {
         self.smaller.valid
     }
+
+    #[cfg(debug_assertions)]
+    fn rewind_and_dump(&mut self) -> Vec<(String, Vec<crate::table::DumpKv>)> {
+        let mut kvs = vec![];
+        kvs.extend(self.smaller.iter.rewind_and_dump());
+        kvs.extend(self.bigger.iter.rewind_and_dump());
+        kvs
+    }
+
+    #[cfg(debug_assertions)]
+    fn tag(&self) -> String {
+        "merge".to_string()
+    }
 }
 
 impl<'a> MergeIterator<'a> {
@@ -144,11 +160,10 @@ impl<'a> MergeIterator<'a> {
             match self.smaller.iter.key().cmp(&self.bigger.iter.key()) {
                 Equal => {
                     self.same_key = true;
-                    debug_assert!(
-                        self.smaller.ver != self.bigger.ver,
-                        "ver is equal: {:?}",
-                        self
-                    );
+                    debug_assert!(self.smaller.ver != self.bigger.ver, "ver is equal: {:?}", {
+                        let current = format!("{:?}", self);
+                        (current, self.rewind_and_dump())
+                    });
                     if self.smaller.ver < self.bigger.ver {
                         self.swap();
                     }
@@ -432,5 +447,10 @@ impl Iterator for AsyncMergeIterator<'_> {
 
     fn valid(&self) -> bool {
         self.len > 0
+    }
+
+    #[cfg(debug_assertions)]
+    fn tag(&self) -> String {
+        "merge".to_string()
     }
 }

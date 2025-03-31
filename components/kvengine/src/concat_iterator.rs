@@ -188,6 +188,21 @@ impl Iterator for ConcatIterator {
             None => false,
         }
     }
+
+    #[cfg(debug_assertions)]
+    fn rewind_and_dump(&mut self) -> Vec<(String, Vec<crate::table::DumpKv>)> {
+        let mut kvs = vec![];
+        for idx in 0..self.num_tables() {
+            self.set_idx(idx as i32);
+            kvs.extend(self.iter.as_mut().unwrap().rewind_and_dump());
+        }
+        kvs
+    }
+
+    #[cfg(debug_assertions)]
+    fn tag(&self) -> String {
+        "concat".to_string()
+    }
 }
 
 #[cfg(test)]
