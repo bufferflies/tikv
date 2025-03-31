@@ -2581,8 +2581,6 @@ struct PeerPreprocessor {
     raft_hard_state: eraftpb::HardState,
     raft_state: RaftState,
     pending_merge_state: Option<MergeState>,
-    first_no_kv_idx: u64,
-    last_no_kv_idx: u64,
     learner_skip_idx: u64,
     encryption_key: Option<EncryptionKey>,
 }
@@ -2628,8 +2626,6 @@ impl PeerPreprocessor {
             raft_hard_state: shard.raft_state.get_hard_state(),
             raft_state: shard.raft_state,
             pending_merge_state: merge_state,
-            first_no_kv_idx: 0, // truncated ?
-            last_no_kv_idx: 0,  // truncated ?
             learner_skip_idx: 0,
             encryption_key: None,
         }
@@ -2647,8 +2643,6 @@ impl PeerPreprocessor {
             raft_hard_state: self.raft_hard_state.clone(),
             raft_state: &mut self.raft_state,
             pending_merge_state: &mut self.pending_merge_state,
-            first_no_kv_idx: &mut self.first_no_kv_idx,
-            last_no_kv_idx: &mut self.last_no_kv_idx,
             learner_skip_idx: &mut self.learner_skip_idx,
             encryption_key: &mut self.encryption_key,
         }

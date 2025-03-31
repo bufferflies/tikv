@@ -41,8 +41,8 @@ use rfstore::{
     store::{
         get_preprocess_cmd,
         state::{RaftApplyState, RaftState},
-        Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator, PeerMsg,
-        PreprocessContext, PreprocessRef, RecoverHandler, StoreMsg, RAFT_INIT_LOG_INDEX,
+        write_engine_meta, Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator,
+        PeerMsg, PreprocessContext, PreprocessRef, RecoverHandler, StoreMsg, RAFT_INIT_LOG_INDEX,
     },
     RaftRouter,
 };
@@ -873,6 +873,14 @@ impl MergedEngine {
             let progress = self.region_progresses.get_mut(&region_id).unwrap();
             let truncated_idx = self.raft.get_truncated_index(region_id).unwrap();
             if progress.truncated_index > truncated_idx {
+                if let Some(preprocessor) = self.preprocessors.get_mut(&region_id) {
+                    if let Some(shard_meta) = preprocessor.as_ref().shard_meta {
+                        if shard_meta.data_sequence < progress.truncated_index {
+                            shard_meta.data_sequence = progress.truncated_index;
+                            write_engine_meta(raft_wb, region_id, shard_meta);
+                        }
+                    }
+                }
                 raft_wb.truncate_raft_log(region_id, region_id, progress.truncated_index);
             }
             let commit_index = progress.commit_index;

@@ -1999,7 +1999,7 @@ impl ShardDataCore {
     }
 
     pub fn all_persisted(&self) -> bool {
-        self.mem_tbls.len() == 1 && self.mem_tbls[0].size() == 0
+        self.mem_tbls.len() == 1 && self.mem_tbls[0].size() == 0 && !self.has_txn_file_locks()
     }
 
     pub(crate) fn has_mem_over_bound_data(&self) -> bool {

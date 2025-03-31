@@ -19,8 +19,7 @@ use fail::fail_point;
 use kvengine::{
     encode_extra_txn_status_key, get_shard_property, mvcc, table::InnerKey, util::PropertiesHelper,
     ChangeSet, Engine, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF,
-    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_ENABLE, TRIM_OVER_BOUND,
-    TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
+    TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
 };
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use kvproto::{
@@ -770,12 +769,6 @@ impl Applier {
             TYPE_TRIGGER_TRIM_OVER_BOUND => {
                 let parameter = cl.get_trigger_trim_over_bound();
                 self.trigger_trim_over_bound(parameter, wb, engine, ctx.router.as_ref());
-            }
-            TYPE_TRIGGER_MAJOR_COMPACTION => {
-                let shard = engine.get_shard(self.region_id()).unwrap();
-                if !shard.get_manual_major_compaction() {
-                    wb.set_property(MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_ENABLE);
-                }
             }
             TYPE_TXN_FILE_REF => {
                 let txn_file_ref = cl.get_txn_file_ref().unwrap();

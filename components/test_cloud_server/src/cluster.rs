@@ -592,7 +592,18 @@ impl ServerCluster {
         for server in self.servers.values() {
             let store_id = server.get_store_id();
             let kv_engine = server.get_kv_engine();
-            stats.add(store_id, kv_engine.get_all_shard_stats_ext(skip_shards));
+            let all_shard_stats = kv_engine.get_all_shard_stats_ext(skip_shards);
+            let filtered_shards: Vec<u64> = all_shard_stats.iter().map(|s| s.id).collect();
+            stats.add(store_id, all_shard_stats);
+            let raft = server.get_raft_engine();
+            let rpm = raft.get_region_peer_map();
+            let mut truncated_indexes = vec![];
+            for shard_id in filtered_shards {
+                let &peer_id = rpm.get(&shard_id).unwrap();
+                let truncated_idx = raft.get_truncated_index(peer_id).unwrap_or_default();
+                truncated_indexes.push((shard_id, truncated_idx));
+            }
+            stats.add_truncated_index(store_id, truncated_indexes);
         }
         stats
     }
@@ -1485,6 +1496,18 @@ impl ClusterDataStats {
         }
     }
 
+    fn add_truncated_index(&mut self, store_id: u64, truncated_indexes: Vec<(u64, u64)>) {
+        for (region_id, truncated_idx) in truncated_indexes {
+            let region_shard_stats = self
+                .regions
+                .entry(region_id)
+                .or_insert_with(|| RegionShardStats::new(region_id));
+            region_shard_stats
+                .truncated_index
+                .insert(store_id, truncated_idx);
+        }
+    }
+
     pub fn check_data(
         &self,
     ) -> Result<
@@ -1629,6 +1652,8 @@ pub struct RegionShardStats {
     region_id: u64,
     // store_id -> ShardStats
     shard_stats: HashMap<u64, ShardStats>,
+    // store_id -> truncated index
+    truncated_index: HashMap<u64, u64>,
 }
 
 impl RegionShardStats {
@@ -1636,6 +1661,7 @@ impl RegionShardStats {
         Self {
             region_id,
             shard_stats: Default::default(),
+            truncated_index: Default::default(),
         }
     }
 
@@ -1690,7 +1716,27 @@ impl RegionShardStats {
         if stats.compaction_score > 2.0 {
             bail!("compaction score too large: {}", stats.compaction_score);
         }
+        self.check_truncate_index()?;
         Ok(stats)
+    }
+
+    fn check_truncate_index(&self) -> anyhow::Result<()> {
+        for (store_id, shard_stat) in &self.shard_stats {
+            if shard_stat.mem_table_size > 0 || shard_stat.txn_file_locks > 0 {
+                continue;
+            }
+            let &truncated_index = self.truncated_index.get(store_id).unwrap();
+            if truncated_index != shard_stat.write_sequence {
+                bail!(
+                    "{}:{}: empty mem-table shard not truncated, expect: {}, got: {}",
+                    store_id,
+                    self.region_id,
+                    shard_stat.write_sequence,
+                    truncated_index
+                );
+            }
+        }
+        Ok(())
     }
 }
 

@@ -18,7 +18,7 @@ use fail::fail_point;
 use kvengine::{
     table::columnar::SchemaFile, table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard,
     TruncateTs, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE,
-    MANUAL_MAJOR_COMPACTION_ENABLE, TRUNCATE_TS_KEY,
+    MANUAL_MAJOR_COMPACTION_ENABLE, TERM_KEY, TRUNCATE_TS_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -46,7 +46,7 @@ use tikv_util::{
 };
 use txn_types::{Key, WriteBatchFlags};
 
-use super::{PeerStat, RequestInspector, SchemaTask};
+use super::{write_engine_meta, PeerStat, RequestInspector, SchemaTask};
 use crate::{
     store::{
         cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
@@ -2016,8 +2016,9 @@ impl<'a> PeerMsgHandler<'a> {
             // index to followers.
             last_idx
         };
+        let peer_id = self.peer_id();
         let size_limit_index = engines.raft.index_to_truncate_to_size(
-            self.peer_id(),
+            peer_id,
             self.ctx.cfg.raft_log_gc_size_limit.unwrap().0 as usize,
         );
 
@@ -2029,7 +2030,38 @@ impl<'a> PeerMsgHandler<'a> {
         to_truncate_idx = cmp::min(to_truncate_idx, applied_idx);
 
         // Shouldn't truncate unpersisted logs.
-        let persisted_log_idx = self.peer.get_store().data_persisted_log_index().unwrap();
+        let mut persisted_log_idx = self.peer.get_store().data_persisted_log_index().unwrap();
+        if persisted_log_idx < to_truncate_idx && applied_idx == last_idx {
+            // It's possible that the shard mem-table is empty but the data sequence is
+            // smaller. All the entries between persisted_log_idx and last_idx are no kv
+            // entries, there is no chance to trigger flush, the data sequence fall behind.
+            if let Some(shard) = self.ctx.global.engines.kv.get_shard(self.region_id()) {
+                let shard_write_sequence = shard.get_write_sequence();
+                if shard.data_all_persisted() && shard_write_sequence > persisted_log_idx {
+                    // Advance the data sequence to the shard write sequence.
+                    //
+                    // The leader change empty entry doesn't update the shard write sequence.
+                    // So there can be many empty entries that can not be GCed.
+
+                    // Update data sequence to shard write sequence instead of last index because
+                    // we don't want to pay the cost to rewrite shard meta on each leader change.
+                    let store = self.peer.mut_store();
+                    let term = store.term(shard_write_sequence).unwrap();
+                    // workaround for borrow checker.
+                    let mut shard_meta = store.shard_meta.take().unwrap();
+                    shard_meta.data_sequence = shard_write_sequence;
+                    shard_meta.set_property(TERM_KEY, &term.to_le_bytes());
+                    write_engine_meta(&mut self.ctx.raft_wb, peer_id, &shard_meta);
+                    self.peer.mut_store().shard_meta = Some(shard_meta);
+                    persisted_log_idx = shard_write_sequence;
+                    info!(
+                        "{} shard meta advanced data sequence to {}",
+                        self.peer.tag(),
+                        shard_write_sequence
+                    );
+                }
+            }
+        }
         to_truncate_idx = cmp::min(to_truncate_idx, persisted_log_idx);
 
         // Check if we need to handle pending_truncate.

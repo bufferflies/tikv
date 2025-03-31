@@ -97,7 +97,7 @@ fn test_raft_log_gc() {
         cfg.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(100);
         cfg.raft_store.pd_heartbeat_tick_interval = ReadableDuration::millis(100);
         cfg.raft_store.hibernate_regions = false;
-        cfg.raft_store.max_peer_down_duration = ReadableDuration::secs(2);
+        cfg.raft_store.max_peer_down_duration = ReadableDuration::secs(7);
         cfg.rocksdb.writecf.write_buffer_size = ReadableSize::kb(16);
     });
     cluster.wait_region_replicated(&[], 3);
@@ -244,25 +244,35 @@ fn test_raft_log_gc() {
     flush_memtable(&cluster, &node_ids);
     std::thread::sleep(Duration::from_millis(200));
     // Leader's truncated index doesn't change immediately.
-    let &peer_id = peer_ids.get(&node_ids[0]).unwrap();
-    assert_eq!(
-        cluster
-            .get_rfengine(node_ids[0])
-            .get_peer_stats(peer_id)
-            .truncated_idx,
-        curr_truncated_idxes[0]
-    );
-    // Wait for marking down peer.
-    std::thread::sleep(Duration::from_secs(3));
-    let truncated_idx = cluster
-        .get_rfengine(node_ids[0])
-        .get_peer_stats(peer_id)
+    let region = client.get_region_by_key(&[]);
+    let leader_peer_id = region.peers[region.leader_idx].id;
+    let &leader_peer_node = peer_ids
+        .iter()
+        .find(|(_, &peer_id)| peer_id == leader_peer_id)
+        .unwrap()
+        .0;
+    let leader_truncate_idx = cluster
+        .get_rfengine(leader_peer_node)
+        .get_peer_stats(leader_peer_id)
         .truncated_idx;
-    assert!(
-        truncated_idx > curr_truncated_idxes[0],
-        "{:?} {:?}",
-        truncated_idx,
-        curr_truncated_idxes[0]
+    assert_eq!(leader_truncate_idx, curr_truncated_idxes[0]);
+    // Wait for marking down peer.
+    must_wait(
+        || {
+            let leader_truncate_idx = cluster
+                .get_rfengine(leader_peer_node)
+                .get_peer_stats(leader_peer_id)
+                .truncated_idx;
+            leader_truncate_idx > curr_truncated_idxes[0]
+        },
+        10,
+        || {
+            let leader_truncate_idx = cluster
+                .get_rfengine(leader_peer_node)
+                .get_peer_stats(leader_peer_id)
+                .truncated_idx;
+            format!("{:?} {:?}", leader_truncate_idx, curr_truncated_idxes[0])
+        },
     );
     cluster.stop();
 }

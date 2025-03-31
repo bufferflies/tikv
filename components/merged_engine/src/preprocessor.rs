@@ -17,8 +17,6 @@ pub(crate) struct Preprocessor {
     raft_hard_state: HardState,
     raft_state: RaftState,
     pending_merge_state: Option<MergeState>,
-    first_no_kv_idx: u64,
-    last_no_kv_idx: u64,
     learner_skip_idx: u64,
     encryption_key: Option<EncryptionKey>,
 }
@@ -64,8 +62,6 @@ impl Preprocessor {
             raft_hard_state,
             raft_state,
             pending_merge_state: None,
-            first_no_kv_idx: raft_index,
-            last_no_kv_idx: raft_index,
             learner_skip_idx: raft_index,
             encryption_key,
         }
@@ -83,8 +79,6 @@ impl Preprocessor {
             raft_hard_state: self.raft_hard_state.clone(),
             raft_state: &mut self.raft_state,
             pending_merge_state: &mut self.pending_merge_state,
-            first_no_kv_idx: &mut self.first_no_kv_idx,
-            last_no_kv_idx: &mut self.last_no_kv_idx,
             learner_skip_idx: &mut self.learner_skip_idx,
             encryption_key: &mut self.encryption_key,
         }

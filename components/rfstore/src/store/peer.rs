@@ -447,9 +447,6 @@ pub(crate) struct Peer {
     pub(crate) last_committed_split_idx: u64,
     /// The index of last sent snapshot
     last_sent_snapshot_idx: u64,
-    /// The range of no kv index, used to advance shard meta data sequence.
-    pub(crate) first_no_kv_idx: u64,
-    pub(crate) last_no_kv_idx: u64,
     /// preprocessed_index is used to avoid duplicated preprocess execution.
     pub(crate) preprocessed_index: u64,
 
@@ -590,8 +587,6 @@ impl Peer {
             last_urgent_proposal_idx: u64::MAX,
             last_committed_split_idx: 0,
             last_sent_snapshot_idx: 0,
-            first_no_kv_idx: truncated,
-            last_no_kv_idx: truncated,
             preprocessed_index: 0,
             learner_skip_idx: 0,
             pending_truncate: None,
@@ -1799,9 +1794,7 @@ impl<'a> PreprocessRef<'a> {
             return None;
         }
         *self.preprocessed_index = entry.index;
-        let mut no_kv = entry.data.is_empty();
         if let Some(cmd) = get_preprocess_cmd(entry) {
-            no_kv = true;
             if cmd.has_custom_request() {
                 let custom_req = cmd.get_custom_request();
                 if is_engine_meta_log(custom_req.get_data()) {
@@ -1809,7 +1802,6 @@ impl<'a> PreprocessRef<'a> {
                         preprocess_err = Some(e);
                     }
                 } else if is_txn_file_ref(custom_req.get_data()) {
-                    no_kv = false;
                     if let Err(e) = self.preprocess_txn_file_ref(ctx, entry, custom_req) {
                         preprocess_err = Some(e);
                     }
@@ -1834,37 +1826,8 @@ impl<'a> PreprocessRef<'a> {
             }
         } else if entry.entry_type != eraftpb::EntryType::EntryNormal {
             self.preprocess_conf_change(ctx, entry);
-            no_kv = true;
-        }
-        if no_kv {
-            self.try_advance_meta(ctx, entry);
         }
         preprocess_err
-    }
-
-    pub(crate) fn try_advance_meta(&mut self, ctx: &mut PreprocessContext<'_>, entry: &Entry) {
-        if entry.index != *self.last_no_kv_idx + 1 {
-            // There is kv raft log, reset first.
-            *self.first_no_kv_idx = entry.index;
-        }
-        *self.last_no_kv_idx = entry.index;
-        let first_no_kv_idx = *self.first_no_kv_idx;
-        let last_no_kv_idx = *self.last_no_kv_idx;
-        let peer_id = self.peer_id();
-        let shard_meta = self.mut_shard_meta();
-        if shard_meta.initial_flushed()
-            && shard_meta.data_sequence + 1 >= first_no_kv_idx
-            && shard_meta.data_sequence != last_no_kv_idx
-        {
-            shard_meta.data_sequence = last_no_kv_idx;
-            shard_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
-            write_engine_meta(ctx.raft_wb, peer_id, shard_meta);
-            info!(
-                "{} shard meta advanced data sequence to {}",
-                self.tag(),
-                entry.index
-            );
-        }
     }
 
     pub(crate) fn preprocess_change_set(
@@ -3954,8 +3917,6 @@ pub struct PreprocessRef<'a> {
     pub raft_hard_state: eraftpb::HardState,
 
     pub preprocessed_index: &'a mut u64,
-    pub first_no_kv_idx: &'a mut u64,
-    pub last_no_kv_idx: &'a mut u64,
 
     pub last_committed_split_idx: &'a mut u64,
     pub pending_truncate: &'a mut Option<(u64 /* term */, u64 /* index */)>,
@@ -3975,8 +3936,6 @@ impl<'a> PreprocessRef<'a> {
             pending_truncate,
             pending_merge_state,
             preprocessed_index,
-            first_no_kv_idx,
-            last_no_kv_idx,
             learner_skip_idx,
             encryption_key,
         ) = (
@@ -3985,8 +3944,6 @@ impl<'a> PreprocessRef<'a> {
             &mut peer.pending_truncate,
             &mut peer.pending_merge_state,
             &mut peer.preprocessed_index,
-            &mut peer.first_no_kv_idx,
-            &mut peer.last_no_kv_idx,
             &mut peer.learner_skip_idx,
             &mut peer.encryption_key,
         );
@@ -4007,8 +3964,6 @@ impl<'a> PreprocessRef<'a> {
             raft_state,
             raft_hard_state,
             preprocessed_index,
-            first_no_kv_idx,
-            last_no_kv_idx,
             last_committed_split_idx,
             pending_truncate,
             pending_merge_state,

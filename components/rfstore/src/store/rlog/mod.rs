@@ -30,7 +30,6 @@ pub const TYPE_ENGINE_META: CustomRaftlogType = 7;
 pub const TYPE_RESOLVE_LOCK: CustomRaftlogType = 8;
 pub const TYPE_SWITCH_MEM_TABLE: CustomRaftlogType = 9;
 pub const TYPE_TRIGGER_TRIM_OVER_BOUND: CustomRaftlogType = 10;
-pub const TYPE_TRIGGER_MAJOR_COMPACTION: CustomRaftlogType = 11;
 pub const TYPE_TXN_FILE_REF: CustomRaftlogType = 12;
 
 const HEADER_SIZE: usize = 2;
