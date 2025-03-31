@@ -1,6 +1,8 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp::max, default::Default, fs, ops::Deref, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, default::Default, fs, ops::Deref, str::FromStr, sync::Arc, time::Duration,
+};
 
 use dashmap::{mapref::entry::Entry, DashMap};
 use futures::StreamExt;
@@ -28,7 +30,7 @@ use tokio::sync::RwLock;
 use crate::metrics::WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC;
 
 const CLEAN_UP_WORKER_TICK_INTERVAL: u64 = 60;
-const WORKER_MIN_STORAGE_GB: usize = 20;
+const DEFAULT_LOAD_DATA_WORKER_MIN_STORAGE_GB: usize = 20;
 const DEFAULT_LOAD_DATA_WORKER_NAME: &str = "load-data-worker";
 const DEFAULT_LOAD_DATA_WORKER_PORT: u16 = 19500;
 const DEFAULT_MAX_SIZE: ReadableSize = ReadableSize::gb(1024);
@@ -47,10 +49,8 @@ const K8S_LABEL_SERVICE: &str = "app.kubernetes.io/service";
 const K8S_LABEL_COMPONENT: &str = "app.kubernetes.io/component";
 const K8S_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
 
-const LOAD_DATA_WORKER_NODE_GROUP_NAME: &str = "load-data-worker";
-// In order to let the load data worker pod exclusively occupy the node of the
-// node group, we use one-half of the node's CPU number as the request.
-const LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM: f64 = 48.0 / 2.0 + 1.0;
+const LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_NAME: &str = "load-data-worker";
+const LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_CPU_NUM: f64 = 48.0;
 
 const NETWORK_PROTOCOL: &str = "TCP";
 
@@ -58,6 +58,22 @@ const WORKER_SCALER_QUERY_FAILURES_LIMIT: usize = 10;
 
 pub const LOAD_DATA_WORKER_ENV: &str = "TIKV_LOAD_DATA_WORKER";
 pub const LOAD_DATA_WORKER_WORKER_NUM_ENV: &str = "TIKV_LOAD_DATA_WORKER_WORKER_NUM_ENV";
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct StsConfig {
+    pub min_data_size_gb: usize,
+    // The following fields are used to generate sts.
+    pub request_cpu: f64,
+    pub request_memory: f64,
+    pub limit_cpu: f64,
+    pub limit_memory: f64,
+    pub storage_size_gb: usize,
+    pub node_group: String,
+    // The following fields are used to configure the load-data-worker.
+    pub worker_num: usize,
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -73,7 +89,9 @@ pub struct WorkerScalerConfig {
     pub spawn_running_tasks: usize,
     pub worker_max_cores: f64,
     pub expire_seconds: i64,
+    pub worker_min_storage_gb: usize,
     pub worker_count_limit: usize,
+    pub sts_configs: Vec<StsConfig>,
 }
 
 impl Default for WorkerScalerConfig {
@@ -89,6 +107,8 @@ impl Default for WorkerScalerConfig {
             spawn_running_tasks: DEFAULT_SPAWN_RUNNING_TASKS,
             worker_max_cores: DEFAULT_WORKER_MAX_CORES,
             expire_seconds: DEFAULT_EXPIRE_SECONDS,
+            worker_min_storage_gb: DEFAULT_LOAD_DATA_WORKER_MIN_STORAGE_GB,
+            sts_configs: vec![],
             worker_count_limit: DEFAULT_WORKER_COUNT_LIMIT,
         }
     }
@@ -97,6 +117,26 @@ impl Default for WorkerScalerConfig {
 impl WorkerScalerConfig {
     fn label_selector(&self) -> String {
         format!("{}={}", K8S_LABEL_NAME, self.name)
+    }
+
+    fn merge_sts_configs(&mut self, mut sts_configs: HashMap<usize, StsConfig>) {
+        for sts_config in self.sts_configs.drain(..) {
+            // make sure stst_config is valid
+            if sts_config.request_cpu == 0.0
+                || sts_config.limit_cpu == 0.0
+                || sts_config.worker_num == 0
+            {
+                continue;
+            }
+            sts_configs.insert(sts_config.min_data_size_gb, sts_config);
+        }
+        let mut sts_configs_list: Vec<_> = sts_configs.into_iter().map(|c| c.1).collect();
+        sts_configs_list.sort_by(|a, b| a.min_data_size_gb.cmp(&b.min_data_size_gb));
+        self.sts_configs = sts_configs_list;
+        info!(
+            "worker scaler config final sts configs: {:?}",
+            self.sts_configs
+        );
     }
 }
 
@@ -125,16 +165,6 @@ pub(crate) struct WorkerScalerCore {
     http_client: security::HttpClient,
     pods_map: DashMap<String, Arc<RwLock<WorkerPod>>>,
     security_mgr: Arc<SecurityManager>,
-}
-
-struct StsConfig {
-    // The following fields are used to generate sts.
-    core_num: f64,
-    storage_size_gb: usize,
-    enable_node_group: bool,
-
-    // The following fields are used to configure the load-data-worker.
-    worker_num: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -282,6 +312,8 @@ impl WorkerScaler {
         let pod_api: Api<Pod> = Api::namespaced(kube_client.clone(), &cfg.namespace);
         let sts_template = sts_api.get(&cfg.template_sts_name).await?;
         let in_k8s = fs::read(K8S_NAMESPACE_PATH).is_ok();
+        let mut config = cfg.clone();
+        config.merge_sts_configs(gen_default_sts_configs());
         let worker_scaler = Self {
             core: Arc::new(WorkerScalerCore {
                 sts_template,
@@ -290,7 +322,7 @@ impl WorkerScaler {
                 pvc_api,
                 pod_api,
                 pods_map: dashmap::DashMap::default(),
-                config: cfg.clone(),
+                config,
                 cluster_id,
                 in_k8s,
                 http_client: security_mgr.http_client(hyper::Client::builder()).unwrap(),
@@ -390,7 +422,7 @@ impl WorkerScaler {
         }
 
         if create_worker {
-            let sts_config = gen_sts_config(data_size_gb, self.config.worker_max_cores);
+            let sts_config = get_sts_config(data_size_gb, &self.config);
             let sts_name = new_worker_sts_name(task_id);
             let svc_name = new_worker_svc_name(task_id);
             self.create_sts(task_id, sts_name.clone(), sts_config)
@@ -447,49 +479,36 @@ impl WorkerScaler {
         labels.insert(K8S_LABEL_SERVICE.to_string(), sts_name.clone());
         pod_metadata.labels = Some(labels);
         let pod_template_spec = pod_template.spec.as_mut().unwrap();
-        if sts_config.enable_node_group {
+
+        if !sts_config.node_group.is_empty() {
             pod_template_spec.node_selector = Some(
                 serde_json::from_value(json!({
-                    "serverless.tidbcloud.com/node": LOAD_DATA_WORKER_NODE_GROUP_NAME,
+                    "serverless.tidbcloud.com/node": sts_config.node_group,
                 }))
                 .unwrap(),
             );
             let tolerations = pod_template_spec.tolerations.as_mut().unwrap();
-            tolerations.first_mut().unwrap().value =
-                Some(LOAD_DATA_WORKER_NODE_GROUP_NAME.to_string());
+            tolerations.first_mut().unwrap().value = Some(sts_config.node_group);
         }
 
         let pod_container = pod_template_spec.containers.first_mut().unwrap();
-        let core_num = sts_config.core_num;
-        let request_cpu = format!("{}", core_num);
-        let request_memory = format!("{}Gi", core_num * 4.0);
-        let limit_cpu = format!("{}", core_num);
-        let limit_memory = format!("{}Gi", core_num * 4.0);
-        let resources = if sts_config.enable_node_group {
-            // If the pod use `LOAD_DATA_WORKER_NODE_GROUP_NAME`, the pod will
-            // exclusively occupy the node, so we don't need to set limits.
-            serde_json::from_value(json!({
-                "requests": {
-                    "cpu": request_cpu,
-                    "memory": request_memory
-                },
-            }))
-            .unwrap()
-        } else {
-            serde_json::from_value(json!({
-                "requests": {
-                    "cpu": request_cpu,
-                    "memory": request_memory
-                },
-                "limits": {
-                    "cpu": limit_cpu,
-                    "memory": limit_memory
-                },
-            }))
-            .unwrap()
-        };
-
+        let request_cpu = format!("{}", sts_config.request_cpu);
+        let request_memory = format!("{}Gi", sts_config.request_memory);
+        let limit_cpu = format!("{}", sts_config.limit_cpu);
+        let limit_memory = format!("{}Gi", sts_config.limit_memory);
+        let resources = serde_json::from_value(json!({
+            "requests": {
+                "cpu": request_cpu,
+                "memory": request_memory
+            },
+            "limits": {
+                "cpu": limit_cpu,
+                "memory": limit_memory
+            },
+        }))
+        .unwrap();
         pod_container.resources = Some(resources);
+
         // disable liveness probe because we don't want the pod to be restarted by k8s.
         pod_container.liveness_probe = None;
         // add environment variable to prevent the load-data-worker to run
@@ -842,57 +861,113 @@ async fn get_proc_output(mut attached: AttachedProcess) -> String {
     out
 }
 
-fn gen_sts_config(data_size_gb: usize, max_cores: f64) -> StsConfig {
-    let core_num = calculate_num_cores(data_size_gb, max_cores);
-    let worker_num = calculate_num_workers(core_num);
-    let storage_size_gb = max(data_size_gb / worker_num * 3, WORKER_MIN_STORAGE_GB);
-
-    // align with `calculate_num_cores`
-    let enable_node_group = core_num == LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM;
-    StsConfig {
-        core_num,
-        storage_size_gb,
-        enable_node_group,
-        worker_num,
-    }
+fn gen_default_sts_configs() -> HashMap<usize, StsConfig> {
+    // In order to let the load data worker pod exclusively occupy the node of the
+    // node group, we use one-half of the node's CPU number as the request.
+    let large_data_request_cpu = LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_CPU_NUM / 2.0 + 1.0;
+    let sts_configs_list = vec![
+        StsConfig {
+            min_data_size_gb: 500,
+            request_cpu: large_data_request_cpu,
+            request_memory: 0.0,
+            limit_cpu: LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_CPU_NUM,
+            limit_memory: 0.0,
+            node_group: LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_NAME.to_string(),
+            worker_num: 16,
+            storage_size_gb: 0,
+        },
+        StsConfig {
+            min_data_size_gb: 100,
+            request_cpu: 14.0,
+            request_memory: 0.0,
+            limit_cpu: 14.0,
+            limit_memory: 0.0,
+            node_group: "".to_string(),
+            worker_num: 4,
+            storage_size_gb: 0,
+        },
+        StsConfig {
+            min_data_size_gb: 50,
+            request_cpu: 7.0,
+            request_memory: 0.0,
+            limit_cpu: 7.0,
+            limit_memory: 0.0,
+            node_group: "".to_string(),
+            worker_num: 1,
+            storage_size_gb: 0,
+        },
+        StsConfig {
+            min_data_size_gb: 10,
+            request_cpu: 3.5,
+            request_memory: 0.0,
+            limit_cpu: 3.5,
+            limit_memory: 0.0,
+            node_group: "".to_string(),
+            worker_num: 1,
+            storage_size_gb: 0,
+        },
+        StsConfig {
+            min_data_size_gb: 1,
+            request_cpu: 2.0,
+            request_memory: 0.0,
+            limit_cpu: 2.0,
+            limit_memory: 0.0,
+            node_group: "".to_string(),
+            worker_num: 1,
+            storage_size_gb: 0,
+        },
+        StsConfig {
+            min_data_size_gb: 0,
+            request_cpu: 1.0,
+            request_memory: 0.0,
+            limit_cpu: 1.0,
+            limit_memory: 0.0,
+            node_group: "".to_string(),
+            worker_num: 1,
+            storage_size_gb: 0,
+        },
+    ];
+    let sts_configs_map: HashMap<_, _> = sts_configs_list
+        .into_iter()
+        .map(|c| (c.min_data_size_gb, c))
+        .collect();
+    sts_configs_map
 }
 
-fn calculate_num_workers(core_num: f64) -> usize {
-    // align with `calculate_num_cores`
-    if core_num == LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM {
-        16
-    } else if core_num == 14.0 {
-        8
-    } else {
-        1
+fn get_sts_config(data_size_gb: usize, config: &WorkerScalerConfig) -> StsConfig {
+    let mut sts_config = find_sts_config(data_size_gb, config);
+    if sts_config.storage_size_gb == 0 {
+        sts_config.storage_size_gb = data_size_gb / sts_config.worker_num * 3;
     }
+    sts_config.storage_size_gb = config.worker_min_storage_gb.max(sts_config.storage_size_gb);
+
+    sts_config.request_cpu = config.worker_max_cores.min(sts_config.request_cpu);
+    if sts_config.request_memory == 0.0 {
+        sts_config.request_memory = sts_config.request_cpu * 4.0;
+    }
+    if sts_config.limit_memory == 0.0 {
+        sts_config.limit_memory = sts_config.limit_cpu * 4.0;
+    }
+    sts_config
 }
 
-fn calculate_num_cores(data_size_gb: usize, max_cores: f64) -> f64 {
-    let cores: f64 = if data_size_gb > 500 {
-        LOAD_DATA_WORKER_NODE_GROUP_CORES_NUM
-    } else if data_size_gb > 100 {
-        14.0
-    } else if data_size_gb > 50 {
-        8.0
-    } else if data_size_gb > 10 {
-        4.0
-    } else if data_size_gb > 5 {
-        2.0
-    } else {
-        1.0
-    };
-    cores.min(max_cores)
+fn find_sts_config(data_size_gb: usize, config: &WorkerScalerConfig) -> StsConfig {
+    let index = config
+        .sts_configs
+        .partition_point(|c| c.min_data_size_gb <= data_size_gb);
+    config.sts_configs[index - 1].clone()
 }
 
 #[cfg(test)]
 mod tests {
     use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::Time};
     use load_data::task::LoadTaskStates;
+    use rand::prelude::*;
 
     use crate::worker_scaler::{
-        new_worker_pod_name, new_worker_svc_name, parse_task_id_by_pod_name,
-        parse_task_id_by_pvc_name, WorkerPod, WORKER_SCALER_QUERY_FAILURES_LIMIT,
+        find_sts_config, gen_default_sts_configs, new_worker_pod_name, new_worker_svc_name,
+        parse_task_id_by_pod_name, parse_task_id_by_pvc_name, StsConfig, WorkerPod,
+        WorkerScalerConfig, WORKER_SCALER_QUERY_FAILURES_LIMIT,
     };
 
     fn new_worker_pvc_name(pvc_template_name: &str, task_id: &str) -> String {
@@ -983,6 +1058,101 @@ mod tests {
             let pvc_name = new_worker_pvc_name(pvc_template_name, task_id);
             assert_eq!(task_id, parse_task_id_by_pod_name(pod_name.as_str()));
             assert_eq!(task_id, parse_task_id_by_pvc_name(pvc_name.as_str()));
+        }
+    }
+
+    #[test]
+    fn test_config_merge_sts_configs() {
+        let mut config = WorkerScalerConfig::default();
+        // test override default config
+        config.sts_configs.push(StsConfig {
+            min_data_size_gb: 10,
+            request_cpu: 100.0,
+            request_memory: 0.0,
+            limit_cpu: 100.0,
+            limit_memory: 0.0,
+            node_group: "".to_string(),
+            worker_num: 1,
+            storage_size_gb: 0,
+        });
+        // test invalid config
+        config.sts_configs.push(StsConfig {
+            min_data_size_gb: 50,
+            request_cpu: 0.0,
+            request_memory: 0.0,
+            limit_cpu: 200.0,
+            limit_memory: 0.0,
+            node_group: "".to_string(),
+            worker_num: 0,
+            storage_size_gb: 0,
+        });
+        // test new config
+        config.sts_configs.push(StsConfig {
+            min_data_size_gb: 200,
+            request_cpu: 200.0,
+            request_memory: 0.0,
+            limit_cpu: 200.0,
+            limit_memory: 0.0,
+            node_group: "load-data-worker".to_string(),
+            worker_num: 1,
+            storage_size_gb: 0,
+        });
+
+        let mut sts_configs_map = gen_default_sts_configs();
+        config.merge_sts_configs(sts_configs_map.clone());
+        assert!(
+            config.sts_configs.first().unwrap().min_data_size_gb
+                < config.sts_configs.last().unwrap().min_data_size_gb
+        );
+
+        let sts_config = sts_configs_map.get_mut(&10).unwrap();
+        sts_config.request_cpu = 100.0;
+        sts_config.limit_cpu = 100.0;
+        sts_config.worker_num = 1;
+        sts_configs_map.insert(
+            200,
+            StsConfig {
+                min_data_size_gb: 200,
+                request_cpu: 200.0,
+                request_memory: 0.0,
+                limit_cpu: 200.0,
+                limit_memory: 0.0,
+                node_group: "load-data-worker".to_string(),
+                worker_num: 1,
+                storage_size_gb: 0,
+            },
+        );
+
+        let mut target_sts_configs: Vec<_> = sts_configs_map.into_iter().map(|c| c.1).collect();
+        target_sts_configs.sort_by(|a, b| a.min_data_size_gb.cmp(&b.min_data_size_gb));
+        assert_eq!(config.sts_configs, target_sts_configs);
+    }
+
+    #[test]
+    fn test_find_sts_config() {
+        let mut rng = thread_rng();
+        let mut test_cases = vec![];
+        let n = rng.gen_range(0..100);
+        for i in 0..n {
+            test_cases.push(rng.gen_range(0..i * 10 + 1));
+        }
+
+        let mut config = WorkerScalerConfig::default();
+        let default_sts_configs = gen_default_sts_configs();
+        config.merge_sts_configs(default_sts_configs.clone());
+
+        for data_size_gb in test_cases.drain(..) {
+            let sts_config = find_sts_config(data_size_gb, &config);
+            let key: usize = match data_size_gb {
+                500.. => 500,
+                100..=499 => 100,
+                50..=99 => 50,
+                10..=49 => 10,
+                1..=9 => 1,
+                _ => 0,
+            };
+            let target_sts_config = default_sts_configs.get(&key).unwrap().clone();
+            assert_eq!(sts_config, target_sts_config);
         }
     }
 }
