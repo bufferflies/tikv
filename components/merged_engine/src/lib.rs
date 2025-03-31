@@ -331,15 +331,15 @@ impl MergedEngine {
                 let region_version = region_state.get_region().get_region_epoch().get_version();
                 let raft_state =
                     rfstore::store::load_peer_raft_state(&origin, peer_id, region_version).unwrap();
-                let commit = raft_state.get_commit();
+                let preprocess_index = raft_state.get_last_preprocessed_index();
                 let region_progress = region_progresses
                     .entry(region_id)
                     .or_insert(RegionProgress::new(keyspace_id));
-                if raft_state.get_last_index() > commit {
+                if raft_state.get_last_index() > preprocess_index {
                     // Fetch uncommitted entries, and insert them into region progress, so that they
                     // will be replayed when commit index advances (during sync_merged).
                     let mut entry_buf = Vec::new();
-                    let low_idx = commit + 1;
+                    let low_idx = preprocess_index + 1;
                     let high_idx = raft_state.get_last_index() + 1;
                     if let Err(err) = origin.fetch_raft_entries_to(
                         peer_id,
@@ -366,12 +366,13 @@ impl MergedEngine {
                 }
                 // Committed entries will be replayed right away during the recovery process
                 // below.
+                let commit = raft_state.get_commit();
                 if region_progress.commit_index >= commit {
                     continue;
                 }
                 let merged_commit_index = region_progress.commit_index;
                 region_progress.commit_index = commit;
-                region_progress.synced_index = raft_state.get_last_preprocessed_index();
+                region_progress.synced_index = preprocess_index;
                 let truncated_index = max(
                     region_progress.truncated_index,
                     origin
