@@ -546,7 +546,31 @@ pub trait ColumnarFilterReader: Send {
         end_handle: Option<i64>,
     ) -> crate::table::Result<()>;
     fn get_schema(&self) -> &Schema;
-    async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
+
+    // Try read block, return the number of rows read and whether the reader is
+    // drained.
+    async fn try_read_block(
+        &mut self,
+        block: &mut Block,
+        limit: usize,
+    ) -> crate::table::Result<(usize /* read_row */, bool /* drained */)>;
+
+    // Return size may be less than limit, and it doesn't mean the reader is drained
+    // if the return size above 0.
+    async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+        loop {
+            let (read_row, drained) = self.try_read_block(block, limit).await?;
+            if drained {
+                return Ok(0);
+            }
+            if read_row > 0 {
+                return Ok(read_row);
+            }
+            // If all rows are filtered, we should try to read next block.
+            continue;
+        }
+    }
+
     async fn set_unbounded_handle_range(&mut self) -> crate::table::Result<()> {
         if self.get_schema().is_common_handle() {
             self.set_handle_range(&[], GLOBAL_COMMON_HANDLE_END).await?;
@@ -679,73 +703,67 @@ impl ColumnarFilterReader for ColumnarMvccReader {
         self.src.schema()
     }
 
-    // Return size may be less than limit, and it doesn't mean the reader is drained
-    // if the return size above 0.
-    async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
-        loop {
-            self.filter.clear();
-            block.reset();
-            let read_row = self.src.read(block, limit).await?;
-            if read_row == 0 {
-                // Return 0 rows means the reader is drained.
-                return Ok(0);
-            }
-            if block.handles.fixed_size > 0 {
-                for i in 0..block.handles.length() {
-                    let handle = block.handles.get_int_handle_value(i);
-                    let version = block.versions.get_version(i);
-                    if version > self.read_ts
-                        || (self.prev_int_handle.is_some()
-                            && handle == self.prev_int_handle.unwrap())
-                    {
-                        self.filter.finish_range(i);
-                        continue;
-                    }
-                    if block.versions.is_null(i) {
-                        self.prev_int_handle = Some(handle);
-                        self.filter.finish_range(i);
-                        continue;
-                    }
-                    if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
-                        self.filter.finish_range(i);
-                        break;
-                    }
-                    self.filter.start_range(i);
-                    self.prev_int_handle = Some(handle);
-                }
-            } else {
-                let length = block.handles.length();
-                let last_handle = block.handles.get_not_null_value(length - 1);
-                let check_handle = last_handle >= self.end_handle.as_slice();
-                for i in 0..block.handles.length() {
-                    let handle = block.handles.get_not_null_value(i);
-                    let version = block.versions.get_version(i);
-                    if version > self.read_ts || handle == self.prev_common_handle {
-                        self.filter.finish_range(i);
-                        continue;
-                    }
-                    if block.versions.is_null(i) {
-                        self.prev_common_handle = handle.to_vec();
-                        self.filter.finish_range(i);
-                        continue;
-                    }
-                    if check_handle && handle >= self.end_handle.as_slice() {
-                        self.filter.finish_range(i);
-                        break;
-                    }
-                    self.filter.start_range(i);
-                    self.prev_common_handle = handle.to_vec();
-                }
-            }
-            self.filter.finish_range(read_row);
-            let filtered_rows = self.filter.do_filter(read_row, block);
-            // If all rows are filtered, we should try to read next block.
-            if filtered_rows == 0 {
-                info!("mvcc_reader read_block: all rows are filtered, try to read next block");
-                continue;
-            }
-            return Ok(filtered_rows);
+    async fn try_read_block(
+        &mut self,
+        block: &mut Block,
+        limit: usize,
+    ) -> crate::table::Result<(usize /* read_row */, bool /* drained */)> {
+        self.filter.clear();
+        block.reset();
+        let read_row = self.src.read(block, limit).await?;
+        if read_row == 0 {
+            // Return 0 rows means the reader is drained.
+            return Ok((0, true));
         }
+        if block.handles.fixed_size > 0 {
+            for i in 0..block.handles.length() {
+                let handle = block.handles.get_int_handle_value(i);
+                let version = block.versions.get_version(i);
+                if version > self.read_ts
+                    || (self.prev_int_handle.is_some() && handle == self.prev_int_handle.unwrap())
+                {
+                    self.filter.finish_range(i);
+                    continue;
+                }
+                if block.versions.is_null(i) {
+                    self.prev_int_handle = Some(handle);
+                    self.filter.finish_range(i);
+                    continue;
+                }
+                if self.end_int_handle.is_some() && handle >= self.end_int_handle.unwrap() {
+                    self.filter.finish_range(i);
+                    break;
+                }
+                self.filter.start_range(i);
+                self.prev_int_handle = Some(handle);
+            }
+        } else {
+            let length = block.handles.length();
+            let last_handle = block.handles.get_not_null_value(length - 1);
+            let check_handle = last_handle >= self.end_handle.as_slice();
+            for i in 0..block.handles.length() {
+                let handle = block.handles.get_not_null_value(i);
+                let version = block.versions.get_version(i);
+                if version > self.read_ts || handle == self.prev_common_handle {
+                    self.filter.finish_range(i);
+                    continue;
+                }
+                if block.versions.is_null(i) {
+                    self.prev_common_handle = handle.to_vec();
+                    self.filter.finish_range(i);
+                    continue;
+                }
+                if check_handle && handle >= self.end_handle.as_slice() {
+                    self.filter.finish_range(i);
+                    break;
+                }
+                self.filter.start_range(i);
+                self.prev_common_handle = handle.to_vec();
+            }
+        }
+        self.filter.finish_range(read_row);
+        let filtered_rows = self.filter.do_filter(read_row, block);
+        Ok((filtered_rows, false))
     }
 }
 
@@ -808,12 +826,16 @@ impl ColumnarFilterReader for ColumnarCompactReader {
         self.src.schema()
     }
 
-    async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+    async fn try_read_block(
+        &mut self,
+        block: &mut Block,
+        limit: usize,
+    ) -> crate::table::Result<(usize /* read_row */, bool /* drained */)> {
         self.filter.clear();
         block.reset();
         let read_row = self.src.read(block, limit).await?;
         if read_row == 0 {
-            return Ok(0);
+            return Ok((0, true));
         }
         if block.handles.fixed_size > 0 {
             for i in 0..block.handles.length() {
@@ -863,7 +885,7 @@ impl ColumnarFilterReader for ColumnarCompactReader {
             }
         }
         self.filter.finish_range(read_row);
-        Ok(self.filter.do_filter(read_row, block))
+        Ok((self.filter.do_filter(read_row, block), false))
     }
 }
 
@@ -919,12 +941,16 @@ impl ColumnarFilterReader for ColumnarTruncateTsReader {
         self.src.schema()
     }
 
-    async fn read_block(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize> {
+    async fn try_read_block(
+        &mut self,
+        block: &mut Block,
+        limit: usize,
+    ) -> crate::table::Result<(usize /* read_row */, bool /* drained */)> {
         self.filter.clear();
         block.reset();
         let read_row = self.src.read(block, limit).await?;
         if read_row == 0 {
-            return Ok(0);
+            return Ok((0, true));
         }
         if block.handles.fixed_size > 0 {
             for i in 0..block.handles.length() {
@@ -959,7 +985,7 @@ impl ColumnarFilterReader for ColumnarTruncateTsReader {
             }
         }
         self.filter.finish_range(read_row);
-        Ok(self.filter.do_filter(read_row, block))
+        Ok((self.filter.do_filter(read_row, block), false))
     }
 }
 
@@ -1868,8 +1894,34 @@ pub mod tests {
         end: i32,
         version: u64,
     ) -> (Arc<dyn File>, Vec<RefRow>) {
-        let (tbl, mut refs) =
-            build_table_with_encryption(file_id, &[schema.clone()], start, end, version, None);
+        let (tbl, mut refs) = build_table_with_encryption(
+            file_id,
+            &[schema.clone()],
+            start,
+            end,
+            version,
+            false,
+            None,
+        );
+        (tbl, refs.pop().unwrap())
+    }
+
+    pub fn build_table_with_all_rows_deleted(
+        file_id: u64,
+        schema: &Schema,
+        start: i32,
+        end: i32,
+        version: u64,
+    ) -> (Arc<dyn File>, Vec<RefRow>) {
+        let (tbl, mut refs) = build_table_with_encryption(
+            file_id,
+            &[schema.clone()],
+            start,
+            end,
+            version,
+            true,
+            None,
+        );
         (tbl, refs.pop().unwrap())
     }
 
@@ -1880,7 +1932,7 @@ pub mod tests {
         end: i32,
         version: u64,
     ) -> (Arc<dyn File>, Vec<Vec<RefRow>>) {
-        build_table_with_encryption(file_id, schemas, start, end, version, None)
+        build_table_with_encryption(file_id, schemas, start, end, version, false, None)
     }
 
     fn new_test_encryption_key() -> EncryptionKey {
@@ -1893,6 +1945,7 @@ pub mod tests {
         start: i32,
         end: i32,
         version: u64,
+        all_deleted: bool, // generate all deleted rows
         encryption_key: Option<EncryptionKey>,
     ) -> (Arc<dyn File>, Vec<Vec<RefRow>>) {
         let mut rng = rand::thread_rng();
@@ -1907,12 +1960,24 @@ pub mod tests {
             let mut ref_rows = vec![];
             let is_common_handle = get_fixed_size(&schema.handle_column) == 0;
             for i in start..end {
-                ref_rows.push(new_ref_row(i, version, is_common_handle));
+                let mut ref_row = new_ref_row(i, version, is_common_handle);
+                if all_deleted {
+                    ref_row.is_deleted = true;
+                }
+                ref_rows.push(ref_row);
                 if rng.gen_ratio(1, 8) {
-                    ref_rows.push(new_ref_row(i, version - 1, is_common_handle));
+                    let mut ref_row = new_ref_row(i, version - 1, is_common_handle);
+                    if all_deleted {
+                        ref_row.is_deleted = true;
+                    }
+                    ref_rows.push(ref_row);
                 }
                 if rng.gen_ratio(1, 16) {
-                    ref_rows.push(new_ref_row(i, version - 2, is_common_handle));
+                    let mut ref_row = new_ref_row(i, version - 2, is_common_handle);
+                    if all_deleted {
+                        ref_row.is_deleted = true;
+                    }
+                    ref_rows.push(ref_row);
                 }
             }
             let mut eval_ctx = EvalContext::default();
@@ -2150,6 +2215,7 @@ pub mod tests {
                 100,
                 150,
                 100,
+                false,
                 encryption_key.clone(),
             );
             let (file_2, mut ref_2) = build_table_with_encryption(
@@ -2158,6 +2224,7 @@ pub mod tests {
                 140,
                 190,
                 110,
+                false,
                 encryption_key.clone(),
             );
             let (file_3, mut ref_3) = build_table_with_encryption(
@@ -2166,6 +2233,7 @@ pub mod tests {
                 185,
                 240,
                 120,
+                false,
                 encryption_key.clone(),
             );
             let files = vec![file_1, file_2, file_3];
@@ -2324,5 +2392,30 @@ pub mod tests {
             let merged_refs = merge_refs(vec![ref_row], 0, Some(110), None, None);
             verify_with_ref_rows(&block, &merged_refs);
         }
+    }
+
+    #[test]
+    fn test_filter_reader_drained() {
+        init_log_for_test();
+        let schema = new_schema(1, false);
+        let (file_1, ref_1) = build_table(1, &schema, 100, 200, 100);
+        let (file_2, ref_2) = build_table(2, &schema, 150, 250, 200);
+        let (file_3, ref_3) = build_table(3, &schema, 200, 300, 300);
+        let (file_4, ref_4) = build_table_with_all_rows_deleted(4, &schema, 50, 150, 90);
+        let files = vec![file_1, file_2, file_3, file_4];
+        let ref_rows = vec![ref_1, ref_2, ref_3, ref_4];
+        let mut block = Block::new(&schema);
+        let mut compact_reader = new_compact_reader(&schema, 2, &files, 250);
+        block_on(compact_reader.set_unbounded_handle_range()).unwrap();
+        loop {
+            let mut read_block = Block::new(&schema);
+            let rows = block_on(compact_reader.read_block(&mut read_block, 10)).unwrap();
+            if rows == 0 {
+                break;
+            }
+            block.append(&read_block, 0, rows);
+        }
+        let merged_refs = merge_refs(ref_rows.clone(), 2, None, Some(250), None);
+        verify_with_ref_rows(&block, &merged_refs);
     }
 }
