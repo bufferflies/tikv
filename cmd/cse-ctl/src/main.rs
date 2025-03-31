@@ -13,6 +13,7 @@ mod http;
 mod mvcc;
 mod recovery;
 mod region;
+mod resolve_lock;
 mod restore;
 mod sst;
 mod stats;
@@ -38,6 +39,7 @@ use crate::{
     http::HttpArgs,
     mvcc::{execute_mvcc, MvccArgs},
     recovery::{execute_recovery, RecoveryArgs},
+    resolve_lock::{execute_resolve_lock, ResolveLockArgs},
     restore::{execute_restore_command, RestoreCommand},
     sst::{execute_scan_bad_table, execute_show_sst, ScanBadTableFileArgs, ShowSstArgs},
     stats::{execute_stats, StatsArgs},
@@ -74,6 +76,9 @@ fn main() {
         }
         TruncateTs(args) => {
             execute_truncate_ts(args);
+        }
+        ResolveLock(arg) => {
+            execute_resolve_lock(arg);
         }
         CheckTable(args) => {
             execute_check_table(args);
@@ -157,6 +162,8 @@ pub enum Commands {
     Stats(StatsArgs),
     /// Truncate newer data than given ts
     TruncateTs(TruncateTsArgs),
+    /// Resolve lock
+    ResolveLock(ResolveLockArgs),
     /// CheckTable check data consistency on each table.
     CheckTable(CheckTableArgs),
     /// Mvcc gets the mvcc information of given keys.

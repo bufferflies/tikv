@@ -1917,6 +1917,7 @@ dependencies = [
  "test_util",
  "tidb_query_datatype",
  "tikv",
+ "tikv-client",
  "tikv_util",
  "time",
  "tokio",
