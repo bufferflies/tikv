@@ -44,6 +44,20 @@ lazy_static! {
         &["task_id", "state"],
     )
     .unwrap();
+    pub static ref LOAD_DATA_INGEST_RANEG_GROUP_FAILURES_COUNTER: IntCounterVec =
+        register_int_counter_vec!(
+            "tikv_worker_load_data_ingest_range_group_failures_counter",
+            "Total count of worker scaler failures in ingesting range group",
+            &["task_id"],
+        )
+        .unwrap();
+    pub static ref LOAD_DATA_SPLIT_REGION_FAILURES_COUNTER: IntCounterVec =
+        register_int_counter_vec!(
+            "tikv_worker_load_data_split_region_failures_counter",
+            "Total count of worker scaler failures in spliting region",
+            &["task_id"],
+        )
+        .unwrap();
 }
 
 pub fn remove_metrics(task_id: &str, keyspace_id: Option<String>) {
@@ -56,6 +70,8 @@ pub fn remove_metrics(task_id: &str, keyspace_id: Option<String>) {
     if let Some(keyspace_id) = keyspace_id {
         let _ = LOAD_DATA_WRU_COST_COUNTER.remove_label_values(&[&keyspace_id, task_id]);
     }
+    let _ = LOAD_DATA_INGEST_RANEG_GROUP_FAILURES_COUNTER.remove_label_values(&[task_id]);
+    let _ = LOAD_DATA_SPLIT_REGION_FAILURES_COUNTER.remove_label_values(&[task_id]);
 
     let _ = LOAD_DATA_TASK_STATE
         .remove_label_values(&[task_id, LoadDataWorkerState::InitTask.as_str()]);

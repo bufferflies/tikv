@@ -41,7 +41,10 @@ use crate::{
     checkpoint::{FileMeta, LocalFileCheckpointStorage},
     error::{Error, Result},
     kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator, SstMeta},
-    metrics::LOAD_DATA_WRU_COST_COUNTER,
+    metrics::{
+        LOAD_DATA_INGEST_RANEG_GROUP_FAILURES_COUNTER, LOAD_DATA_SPLIT_REGION_FAILURES_COUNTER,
+        LOAD_DATA_WRU_COST_COUNTER,
+    },
     task::{
         FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskScheduler,
         PutChunkResult, TaskContext,
@@ -52,7 +55,7 @@ pub const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 
 pub const ALLOCATE_ID_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub const RETRY_SLEEP_DURATION: Duration = Duration::from_secs(1);
-pub const MAX_RETRY_TIMES: usize = 10;
+pub const MAX_RETRY_TIMES: usize = 1000;
 pub const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 
 // the following constants are used to calculate RU consumption
@@ -1564,9 +1567,13 @@ impl BuildingWorker {
                         "{} worker-{} split failed {:?}",
                         self.task_ctx.task_id, self.worker_id, err
                     );
+                    LOAD_DATA_SPLIT_REGION_FAILURES_COUNTER
+                        .with_label_values(&[&self.task_ctx.task_id])
+                        .inc();
                     if retry >= MAX_RETRY_TIMES {
                         return Err(Error::PdError(err));
                     }
+
                     std::thread::sleep(std::cmp::min(
                         MAX_SLEEP_DURATION,
                         2_u32.pow(retry as u32) * RETRY_SLEEP_DURATION,
@@ -1622,9 +1629,15 @@ impl BuildingWorker {
             ) {
                 Ok(_) => {
                     debug_assert!(success_ranges.covered(&outer_first_key, &outer_last_key));
+                    LOAD_DATA_INGEST_RANEG_GROUP_FAILURES_COUNTER
+                        .with_label_values(&[&self.task_ctx.task_id])
+                        .reset();
                     return Ok(());
                 }
                 Err(err) if Self::is_ingest_error_retryable(&err) => {
+                    LOAD_DATA_INGEST_RANEG_GROUP_FAILURES_COUNTER
+                        .with_label_values(&[&self.task_ctx.task_id])
+                        .inc();
                     warn!(
                         "{} worker-{} ingest_group_to_range failed {:?}, retry {}",
                         self.task_ctx.task_id, self.worker_id, err, retry
