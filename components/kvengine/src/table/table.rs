@@ -148,6 +148,9 @@ pub trait Iterator: Send {
         vec![(self.tag(), kvs)]
     }
 
+    #[cfg(not(debug_assertions))]
+    fn rewind_and_dump(&self) {}
+
     #[cfg(debug_assertions)]
     fn tag(&self) -> String {
         String::new()
