@@ -162,6 +162,7 @@ impl Engine {
             txn_chunk_mgr,
             ia_ctx,
             schema_files: Arc::new(DashMap::new()),
+            available_space_bytes: AtomicU64::new(0),
             worker_handles: Default::default(),
         };
         let en = Engine {
@@ -325,6 +326,7 @@ pub struct EngineCore {
     pub(crate) ia_ctx: IaCtx,
     pub(crate) files_in_blacklist: Arc<HashSet<u64>>,
     pub(crate) schema_files: Arc<DashMap<u64, SchemaFile>>,
+    available_space_bytes: AtomicU64, // Set during store heartbeat.
     worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
@@ -904,6 +906,20 @@ impl EngineCore {
 
     pub fn get_keyspace_config(&self, keyspace_id: u32) -> Option<&PerKeyspaceConfig> {
         self.per_keyspace_configs.get(&keyspace_id)
+    }
+
+    pub fn available_space(&self) -> u64 {
+        self.available_space_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn is_low_space(&self) -> bool {
+        fail::fail_point!("engine_is_low_space", |_| true);
+
+        self.available_space() < self.opts.low_space_threshold
+    }
+
+    pub fn set_available_space(&self, bytes: u64) {
+        self.available_space_bytes.store(bytes, Ordering::Relaxed);
     }
 
     fn add_worker_handle(&self, handle: thread::JoinHandle<()>) {

@@ -14,7 +14,7 @@ use kvproto::kvrpcpb::ApiVersion;
 use libc::c_int;
 use online_config::OnlineConfig;
 use tikv_util::{
-    config::{self, ReadableDuration, ReadableSize},
+    config::{self, AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     sys::SysQuota,
 };
 
@@ -62,6 +62,8 @@ pub struct Config {
     #[online_config(skip)]
     pub reserve_raft_space: ReadableSize,
     #[online_config(skip)]
+    pub low_space_threshold: AbsoluteOrPercentSize,
+    #[online_config(skip)]
     pub enable_async_apply_prewrite: bool,
     #[online_config(skip)]
     pub api_version: u8,
@@ -92,6 +94,7 @@ impl Default for Config {
             scheduler_pending_write_threshold: ReadableSize::mb(DEFAULT_SCHED_PENDING_WRITE_MB),
             reserve_space: ReadableSize::gb(DEFAULT_RESERVED_SPACE_GB),
             reserve_raft_space: ReadableSize::gb(DEFAULT_RESERVED_RAFT_SPACE_GB),
+            low_space_threshold: AbsoluteOrPercentSize::Percent(20.),
             enable_async_apply_prewrite: false,
             api_version: 1,
             enable_ttl: false,

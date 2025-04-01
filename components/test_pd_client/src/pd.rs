@@ -2054,8 +2054,9 @@ impl PdClient for TestPdClient {
         ready(Ok(())).boxed()
     }
 
-    fn scatter_regions_by_id(&self, _regions_id: Vec<u64>) -> Result<()> {
+    fn scatter_regions_by_id(&self, regions_id: Vec<u64>) -> Result<()> {
         self.check_bootstrap()?;
+        info!("scatter regions: {:?}", regions_id);
         // TODO: implement this method
         Ok(())
     }

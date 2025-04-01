@@ -763,6 +763,7 @@ impl PdRunner {
         // We only care about rocksdb SST file size, so we should check disk available
         // here.
         available = cmp::min(available, disk_stats.available_space());
+        store_info.kv_engine.set_available_space(available);
 
         if available == 0 {
             warn!("no available space");

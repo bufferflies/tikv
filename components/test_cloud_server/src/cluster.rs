@@ -45,7 +45,7 @@ use tikv::{config::TikvConfig, import::SstImporter};
 use tikv_util::{
     box_err,
     codec::bytes::encode_bytes,
-    config::{ReadableDuration, ReadableSize},
+    config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     error, info,
     sys::SysQuota,
     thread_group::GroupProperties,
@@ -1190,6 +1190,7 @@ pub fn new_test_config(
     config.storage.api_version = 2;
     config.storage.enable_ttl = true;
     config.storage.scheduler_concurrency = 4096;
+    config.storage.low_space_threshold = AbsoluteOrPercentSize::Abs(ReadableSize::mb(1));
     config.server.cluster_id = 1;
     config.server.addr = node_addr(node_id);
     config.server.status_addr = node_status_addr(node_id);

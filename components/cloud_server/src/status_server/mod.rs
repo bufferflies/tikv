@@ -72,6 +72,7 @@ use tikv::{
 };
 use tikv_util::{
     codec::bytes::decode_bytes,
+    config::ReadableSize,
     future::paired_future_callback,
     logger::set_log_level,
     metrics::{dump, dump_to},
@@ -782,10 +783,22 @@ impl StatusServer {
         Ok(cs)
     }
 
-    async fn ingest_files(req: Request<Body>, router: RaftRouter) -> hyper::Result<Response<Body>> {
+    async fn ingest_files(
+        req: Request<Body>,
+        router: RaftRouter,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
         let cs = Self::get_change_set_request(req).await?;
         let shard_id = cs.get_shard_id();
         info!("[{}] receive ingest_files request: {:?}", shard_id, cs);
+
+        if let Err(errpb) = check_available_space(&engine) {
+            warn!("[{}] reject ingest files, low space", shard_id);
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                errpb.write_to_bytes().unwrap(),
+            ));
+        }
 
         let (cb, fut) = paired_future_callback();
         let callback = Callback::write(Box::new(move |res| {
@@ -2095,7 +2108,7 @@ impl StatusServer {
                                 Self::add_remote_compactor(req, engine.comp_client.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/ingest_files") => {
-                                Self::ingest_files(req, router).await
+                                Self::ingest_files(req, router, engine).await
                             }
                             (Method::POST, path) if path.starts_with("/unsafe_recover") => {
                                 Self::unsafe_recover(req, rfengine, engine).await
@@ -2404,6 +2417,26 @@ where
         .status(status_code)
         .body(message.into())
         .unwrap()
+}
+
+fn check_available_space(
+    engine: &kvengine::Engine,
+) -> std::result::Result<(), kvproto::errorpb::Error> {
+    if engine.is_low_space() {
+        let disk_full = kvproto::errorpb::DiskFull {
+            store_id: vec![engine.get_engine_id()],
+            reason: format!(
+                "available space is low: {}",
+                ReadableSize(engine.available_space()).as_mb_f64()
+            ),
+            ..Default::default()
+        };
+        let mut errpb = kvproto::errorpb::Error::default();
+        errpb.set_disk_full(disk_full);
+        Err(errpb)
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]

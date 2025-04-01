@@ -12,9 +12,20 @@ use load_data::{
     },
 };
 use rand::prelude::SliceRandom;
+use thiserror::Error;
 use tikv_util::{error, time::Instant};
 
 use crate::{client::RefStore, try_wait};
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("task canceled: {0}")]
+    Canceled(String),
+    #[error("wait task finished timeout: {0:?}")]
+    Timeout(load_data::task::LoadTaskStates),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn init_task(
     config: LoadDataConfig,
@@ -188,27 +199,26 @@ where
     ref_store
 }
 
-pub fn build(
-    scheduler: &LoadTaskScheduler,
-    compression_type: u8,
-    timeout: Duration,
-) -> std::result::Result<(), String> {
+pub fn build(scheduler: &LoadTaskScheduler, compression_type: u8, timeout: Duration) -> Result<()> {
     scheduler
         .sender
         .send(LoadTaskMsg::Build { compression_type })
         .unwrap();
+    try_wait_finished(scheduler, timeout)
+}
 
+pub fn try_wait_finished(scheduler: &LoadTaskScheduler, timeout: Duration) -> Result<()> {
     let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < timeout {
         if scheduler.is_finished() {
             return Ok(());
         } else if scheduler.is_canceled() {
             error!("build task canceled"; "error_msg" => scheduler.error_msg(), "states" => ?scheduler.states());
-            return Err(format!("task canceled: {}", scheduler.error_msg()));
+            return Err(Error::Canceled(scheduler.error_msg()));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    panic!("build timeout, states: {:?}", scheduler.states());
+    Err(Error::Timeout(scheduler.states()))
 }
 
 pub fn cleanup(scheduler: &LoadTaskScheduler, worker_handle: std::thread::JoinHandle<()>) {

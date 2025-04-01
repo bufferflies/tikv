@@ -1666,6 +1666,7 @@ impl BuildingWorker {
         match err {
             Error::RegionNotFound(_)
             | Error::LeaderNotFound(_)
+            | Error::StoreDiskFull(_)
             | Error::RegionError(..)
             | Error::PdError(_)
             | Error::HyperError(_)
@@ -1700,15 +1701,21 @@ impl BuildingWorker {
             self.task_ctx.task_id, self.worker_id, regions
         );
 
+        let mut disk_full_regions = vec![];
         let mut errors = vec![];
-        let mut handle_ingest_res = |res: Result<metapb::Region>| match res {
-            Ok(region) => {
+        let mut handle_ingest_res = |(region, res): (metapb::Region, Result<()>)| match res {
+            Ok(()) => {
                 let success_start = max(region.get_start_key(), outer_first_key.as_slice());
                 let success_end = min(region.get_end_key(), outer_last_key.as_slice());
                 success_ranges.insert(success_start.to_vec(), success_end.to_vec());
                 self.scheduler.add_ingested_regions();
             }
-            Err(err) => errors.push(err),
+            Err(err) => {
+                if matches!(err, Error::StoreDiskFull(_)) {
+                    disk_full_regions.push(region.id);
+                }
+                errors.push(err);
+            }
         };
 
         let (tx, rx) = tikv_util::mpsc::unbounded();
@@ -1739,7 +1746,7 @@ impl BuildingWorker {
                     task_id, worker_id, region, leader, cs
                 );
                 let res = ingest_files_to_leader(pd_cli, cs, &region, leader).await;
-                let _ = tx.send(res.map(|_| region));
+                let _ = tx.send((region, res));
             });
             if msg_cnt < self.ingest_concurrency {
                 msg_cnt += 1;
@@ -1749,6 +1756,15 @@ impl BuildingWorker {
         }
         for _ in 0..msg_cnt {
             handle_ingest_res(rx.recv().unwrap());
+        }
+
+        if !disk_full_regions.is_empty() {
+            info!("{} worker-{} scatter regions due to disk full", self.task_ctx.task_id, self.worker_id;
+                "regions" => ?disk_full_regions);
+            if let Err(err) = self.ctx.pd.scatter_regions_by_id(disk_full_regions.clone()) {
+                warn!("{} worker-{} scatter regions failed", self.task_ctx.task_id, self.worker_id;
+                    "regions" => ?disk_full_regions, "err" => ?err);
+            }
         }
 
         if !errors.is_empty() {
@@ -1855,6 +1871,8 @@ pub async fn ingest_files_to_leader(
                 .starts_with(rfstore::errors::INGEST_OVERLAP_ERROR_TAG)
             {
                 return Err(Error::IngestOverlap(errpb.take_message()));
+            } else if errpb.has_disk_full() {
+                return Err(Error::StoreDiskFull(errpb.take_disk_full().store_id));
             } else {
                 return Err(Error::RegionError(region.get_id(), errpb));
             }

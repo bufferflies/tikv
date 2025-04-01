@@ -183,17 +183,15 @@ pub struct Config {
     #[doc(hidden)]
     pub simplify_metrics: bool,
 
-    // Server labels to specify some attributes about this server.
     #[online_config(skip)]
-    pub labels: HashMap<String, String>,
-
-    #[online_config(skip)]
-    #[serde(skip_serializing)]
     pub push_metrics_addr: String,
 
     #[online_config(skip)]
-    #[serde(skip_serializing)]
     pub push_metrics_interval: ReadableDuration,
+
+    // Server labels to specify some attributes about this server.
+    #[online_config(skip)]
+    pub labels: HashMap<String, String>,
 
     // deprecated. use readpool.coprocessor.xx_concurrency.
     #[doc(hidden)]

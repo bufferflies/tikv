@@ -17,7 +17,9 @@ use pd_client::PdClient;
 use protobuf::Message;
 use test_cloud_server::{
     client::{RefStore, RequestOptions},
-    load_data::{build, cleanup, init_task, put_chunks},
+    load_data::{
+        build, cleanup, init_task, put_chunks, Error as LoadDataError, Result as LoadDataResult,
+    },
     oss::ObjectStorageService,
     ServerCluster,
 };
@@ -273,7 +275,7 @@ fn test_load_data_overlap() {
     ));
     let master_key = cluster.get_kvengine(node_ids[0]).get_master_key();
 
-    let do_load_data = || -> std::result::Result<RefStore, String> {
+    let do_load_data = || -> LoadDataResult<RefStore> {
         let load_data_dir = base_dir.path().join("load_data");
         fs::create_dir_all(&load_data_dir).unwrap();
         let start_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
@@ -321,8 +323,12 @@ fn test_load_data_overlap() {
     assert_eq!(verified_count, (DATA_COUNT, 0));
 
     // Ingest overlap data.
-    let err = do_load_data().unwrap_err();
-    assert!(err.contains("Ingest::Overlap: region has overlap data"));
+    match do_load_data().unwrap_err() {
+        LoadDataError::Canceled(msg) => {
+            assert!(msg.contains("Ingest::Overlap: region has overlap data"))
+        }
+        err => panic!("unexpected error: {:?}", err),
+    }
 
     // Verify no data corruption.
     let verified_count = client

@@ -28,6 +28,8 @@ pub enum Error {
     RegionNotFound(u64),
     #[error("leader of region {0} not found")]
     LeaderNotFound(u64),
+    #[error("TiKV store disk full {0:?}")]
+    StoreDiskFull(Vec<u64>),
     #[error("region {0} error {1:?}")]
     RegionError(u64, kvproto::errorpb::Error),
     #[error("too many duplicated keys {0}")]

@@ -35,7 +35,7 @@ use tikv::{
         BlockCacheConfig, Config as StorageConfig, FlowControlConfig, IoRateLimitConfig,
     },
 };
-use tikv_util::config::{LogFormat, ReadableDuration, ReadableSize};
+use tikv_util::config::{AbsoluteOrPercentSize, LogFormat, ReadableDuration, ReadableSize};
 
 mod dynamic;
 mod test_config_client;
@@ -124,7 +124,7 @@ fn test_serde_custom_tikv_config() {
         reject_messages_on_memory_ratio: 0.8,
         simplify_metrics: false,
         push_metrics_addr: String::default(),
-        push_metrics_interval: ReadableDuration::secs(0),
+        push_metrics_interval: ReadableDuration::secs(10),
     };
     value.readpool = ReadPoolConfig {
         unified: UnifiedReadPoolConfig {
@@ -720,6 +720,7 @@ fn test_serde_custom_tikv_config() {
             other_priority: IoPriority::Low,
         },
         background_error_recovery_window: ReadableDuration::hours(1),
+        low_space_threshold: AbsoluteOrPercentSize::Percent(10.),
     };
     value.coprocessor = CopConfig {
         split_region_on_table: false,
