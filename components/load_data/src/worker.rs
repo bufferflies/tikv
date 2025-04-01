@@ -16,9 +16,11 @@ use bytes::{Buf, BufMut, Bytes};
 use encryption::{DecrypterReader, EncrypterWriter, Iv};
 use http::Request;
 use hyper::Body;
+use keys::next_key;
 use kvengine::{
     dfs::Options,
     table::{sstable::Builder, InnerKey, Value},
+    table_id::encode_table_prefix_key,
     util::new_table_create_pb,
     IdVer, ShardTag, UserMeta, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
@@ -27,6 +29,9 @@ use pd_client::PdClient;
 use protobuf::Message;
 use rfengine::compress_lz4;
 use rfstore::store::{raw_end_key, raw_start_key};
+use tidb_query_datatype::codec::table::{
+    decode_table_id, ID_LEN, INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX_KEY_LEN,
+};
 use tikv_util::{
     box_err,
     codec::bytes::{decode_bytes, encode_bytes},
@@ -1921,11 +1926,18 @@ pub fn gen_split_keys(
     include_bound: bool,
 ) -> Vec<Vec<u8>> {
     let mut keys = vec![];
+    let smallest = ssts.first().unwrap().smallest.as_slice();
+    let biggest = ssts.last().unwrap().biggest.as_slice();
+    let (start_key, end_key) = calculate_bound_key(smallest, biggest).unwrap_or_else(|| {
+        warn!("failed to calculate bound key, fallback to use first and last key");
+        // split at last key so the last region will not be split by other concurrent
+        // load_data and get epoch not match error.
+        let mut last_key = ssts.last().unwrap().biggest.to_vec();
+        last_key.push(0);
+        (smallest.to_vec(), last_key)
+    });
     if include_bound {
-        keys.push(new_region_key(
-            outer_key_prefix,
-            ssts.first().unwrap().smallest.as_slice(),
-        ));
+        keys.push(new_region_key(outer_key_prefix, &start_key));
     }
     let mut size = 0;
     for sst in ssts {
@@ -1936,13 +1948,44 @@ pub fn gen_split_keys(
         size += sst.size;
     }
     if include_bound {
-        // split at last key so the last region will not be split by other concurrent
-        // load_data and get epoch not match error.
-        let mut last_key = ssts.last().unwrap().biggest.to_vec();
-        last_key.push(0);
-        keys.push(new_region_key(outer_key_prefix, last_key.as_slice()));
+        keys.push(new_region_key(outer_key_prefix, &end_key));
     }
     keys
+}
+
+fn calculate_bound_key(smallest: &[u8], biggest: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let first_table_id = decode_table_id(smallest).ok()?;
+    let last_table_id = decode_table_id(biggest).ok()?;
+    if first_table_id != last_table_id {
+        // ingest task should only contains one table.
+        return None;
+    }
+    let smallest_is_row_key = smallest[TABLE_PREFIX_KEY_LEN..].starts_with(RECORD_PREFIX_SEP);
+    let biggest_is_row_key = biggest[TABLE_PREFIX_KEY_LEN..].starts_with(RECORD_PREFIX_SEP);
+    let table_bound = (
+        encode_table_prefix_key(first_table_id).to_vec(),
+        encode_table_prefix_key(first_table_id + 1).to_vec(),
+    );
+    if smallest_is_row_key != biggest_is_row_key {
+        // ingest task should only contains row key or only contains index key.
+        return None;
+    }
+    if smallest_is_row_key {
+        return Some(table_bound);
+    }
+    // index key
+    let index_prefix_len = TABLE_PREFIX_KEY_LEN + INDEX_PREFIX_SEP.len() + ID_LEN;
+    if smallest.len() <= index_prefix_len || biggest.len() <= index_prefix_len {
+        // invalid index key.
+        return None;
+    }
+    let smallest_prefix = &smallest[..index_prefix_len];
+    let biggest_prefix = &biggest[..index_prefix_len];
+    if smallest_prefix != biggest_prefix {
+        // ingest task should only contain one index.
+        return None;
+    }
+    Some((smallest_prefix.to_vec(), next_key(smallest_prefix)))
 }
 
 pub fn new_region_key(outer_key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
@@ -1954,7 +1997,7 @@ pub fn new_region_key(outer_key_prefix: &[u8], raw_key: &[u8]) -> Vec<u8> {
 pub fn get_ssts_in_range(ssts: &[SstMeta], start: InnerKey<'_>, end: InnerKey<'_>) -> Vec<SstMeta> {
     let position = ssts
         .binary_search_by(|sst| InnerKey::from_inner_buf(&sst.smallest).cmp(&start))
-        .unwrap();
+        .unwrap_or_else(|not_found_pos| not_found_pos);
     let mut matched = vec![];
     for i in position..ssts.len() {
         let sst = &ssts[i];
@@ -2067,5 +2110,33 @@ mod tests {
 
         let target_key_comm_prefix = vec![b't', 128, 0, 0, 0, 0, 0, 0, 1, b'_'];
         assert_eq!(key_comm_prefix, target_key_comm_prefix);
+    }
+
+    #[test]
+    fn test_calculate_bound_key() {
+        let cases: Vec<(&[u8], &[u8], Option<(Vec<u8>, Vec<u8>)>)> = vec![
+            (b"t00000001_r00000001", b"t00000002_r00000002", None),
+            (b"t00000001_i00000004", b"t00000001_r00000001", None),
+            (b"t00000001_i00000", b"t00000001_i00000004aaa", None),
+            (b"t00000001_i00000003aaa", b"t00000001_i00000004aaa", None),
+            (
+                b"t00000001_r",
+                b"t00000001_r",
+                Some((b"t00000001".to_vec(), b"t00000002".to_vec())),
+            ),
+            (
+                b"t00000001_i00000003aba",
+                b"t00000001_i00000003abc",
+                Some((
+                    b"t00000001_i00000003".to_vec(),
+                    b"t00000001_i00000004".to_vec(),
+                )),
+            ),
+        ];
+        for (start, end, expected) in cases {
+            let start = start.to_vec();
+            let end = end.to_vec();
+            assert_eq!(calculate_bound_key(&start, &end), expected);
+        }
     }
 }
