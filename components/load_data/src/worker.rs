@@ -1586,6 +1586,9 @@ impl BuildingWorker {
                 }
                 Ok(regions_id) => {
                     new_regions_id.extend_from_slice(&regions_id);
+                    LOAD_DATA_SPLIT_REGION_FAILURES_COUNTER
+                        .with_label_values(&[&self.task_ctx.task_id])
+                        .reset();
                     break;
                 }
             }

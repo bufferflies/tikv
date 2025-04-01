@@ -29,7 +29,7 @@ use crate::{
     },
     error::{Error, Result},
     kv::DuplicateEntry,
-    metrics::remove_metrics,
+    metrics::{remove_metrics, LOAD_DATA_GET_SHARD_META_FAILURES_COUNTER},
     task::{
         FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskMsg, LoadTaskScheduler,
         LoadTaskStates, PutChunkResult, TaskContext,
@@ -40,7 +40,7 @@ use crate::{
     },
 };
 
-pub const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
+pub const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(36000); // 10h
 const TOTAL_CREATE_FILE_CONCURRENCY: usize = 128;
 const TOTAL_INGEST_CONCURRENCY: usize = 16;
 const MAX_CREATE_FILE_CONCURRENCY_PER_WORKER: usize = 32;
@@ -651,6 +651,7 @@ pub async fn get_shard_meta(
     let mut retry = 0;
     loop {
         if start_time.saturating_elapsed() >= timeout {
+            LOAD_DATA_GET_SHARD_META_FAILURES_COUNTER.reset();
             return Err(Error::Other(box_err!(
                 "get_shard_meta failed, key: {:?}",
                 shard_raw_key
@@ -660,6 +661,7 @@ pub async fn get_shard_meta(
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
         retry += 1;
+        LOAD_DATA_GET_SHARD_META_FAILURES_COUNTER.inc();
 
         let region_res = pd.get_region_async(&encoded_key).await;
         if region_res.is_err() {
@@ -691,12 +693,18 @@ pub async fn get_shard_meta(
         match http_client.request(req).await {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    let body = hyper::body::to_bytes(resp.into_body()).await?;
+                    let result = hyper::body::to_bytes(resp.into_body()).await;
+                    if result.is_err() {
+                        error!("get_shard_meta failed, error: {:?}", result.unwrap_err());
+                        continue;
+                    }
+                    let body = result.unwrap();
                     let mut cs = kvenginepb::ChangeSet::default();
                     cs.merge_from_bytes(&body)?;
                     if cs.shard_id == 0 {
                         continue;
                     }
+                    LOAD_DATA_GET_SHARD_META_FAILURES_COUNTER.reset();
                     return Ok(cs);
                 } else {
                     continue;

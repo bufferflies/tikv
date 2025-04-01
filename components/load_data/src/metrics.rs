@@ -58,6 +58,11 @@ lazy_static! {
             &["task_id"],
         )
         .unwrap();
+    pub static ref LOAD_DATA_GET_SHARD_META_FAILURES_COUNTER: IntCounter = register_int_counter!(
+        "tikv_worker_load_data_get_shard_meta_failures_counter",
+        "Total count of worker scaler failures in getting shard meta",
+    )
+    .unwrap();
 }
 
 pub fn remove_metrics(task_id: &str, keyspace_id: Option<String>) {
