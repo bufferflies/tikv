@@ -58,4 +58,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: run.log
-          path: ${{ runner.temp }}/run.log
+          path: ${{ runner.temp }}/run*.log

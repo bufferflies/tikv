@@ -15,6 +15,7 @@ mod test_upgrade;
 
 use std::{
     collections::HashSet,
+    path::PathBuf,
     str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -678,7 +679,9 @@ const LOG_MAX_SIZE_MB: u64 = 150; // Can be uploaded to GitHub after compressed.
 const LOG_MAX_BACKUPS: usize = 20;
 
 pub(crate) fn init_logger() {
-    let filename = std::env::temp_dir().join("tikv.log");
+    let filename = std::env::var("LOG_FILE")
+        .map(|s| PathBuf::from(s))
+        .unwrap_or_else(|_| std::env::temp_dir().join("tikv.log"));
     let log_config = tikv::config::LogConfig {
         file: tikv::config::File {
             filename: filename.to_str().unwrap().to_owned(),
