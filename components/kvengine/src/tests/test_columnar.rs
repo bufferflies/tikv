@@ -411,6 +411,9 @@ fn test_columnar_major_compaction() {
     info!("merge_reader read block with {} rows", merge_reader_counts);
     verify_columnar_with_blocks(&row_block, &block);
 
+    let ok = try_wait(|| shard.compaction_priority.read().unwrap().is_none(), 5);
+    assert!(ok, "wait other compaction failed");
+
     // Remove columnar compaction.
     let data = shard.get_data();
     shard.set_data(ShardDataBuilder::new(data).build());
@@ -636,6 +639,10 @@ fn test_columnar_major_compaction_multiple_tables() {
         )
         .unwrap();
     let schema_file = SchemaFile::open(schema_raw_file_2).unwrap();
+
+    let ok = try_wait(|| shard.compaction_priority.read().unwrap().is_none(), 5);
+    assert!(ok, "wait other compaction failed");
+
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), Some(schema_file.clone()));
     shard.set_data(builder.build());
@@ -670,6 +677,9 @@ fn test_columnar_major_compaction_multiple_tables() {
     for table_id in table_ids {
         verify_columnar_for_table(&schema_file, &snap, table_id);
     }
+
+    let ok = try_wait(|| shard.compaction_priority.read().unwrap().is_none(), 5);
+    assert!(ok, "wait other compaction failed");
 
     // Remove columnar compaction.
     let data = shard.get_data();
