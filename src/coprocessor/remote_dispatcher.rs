@@ -73,7 +73,7 @@ pub async fn remote_request(
                 let success = response.status().is_success();
                 let body = hyper::body::to_bytes(response.into_body())
                     .await
-                    .map_err(|e| Error::Other(e.to_string()))?;
+                    .map_err(|e| Error::RemoteNetwork(e.to_string()))?;
                 if !success && !is_pb_resp {
                     return Err(Error::Other(
                         String::from_utf8_lossy(body.chunk()).to_string(),
