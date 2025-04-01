@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use api_version::{ApiV2, KeyMode, KvFormat};
+use api_version::{api_v2::DEFAULT_KEYSPACE_ID, ApiV2, KeyMode, KvFormat};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use dashmap::DashMap;
@@ -427,7 +427,9 @@ impl SchemaManager {
         for (&keyspace_id, keyspace_shard_stats) in keyspace_stats.iter().filter(|(_, v)| {
             v.iter().map(|s| s.total_size).sum::<u64>() > self.config.schema_refresh_threshold
         }) {
-            if !self.in_whitelist(keyspace_id) {
+            // Skip the default keyspace. The tikv-client not support the default keyspace
+            // with ApiV2NoPrefixCodec.
+            if !self.in_whitelist(keyspace_id) || keyspace_id == DEFAULT_KEYSPACE_ID {
                 continue;
             }
             // 1. Try to read schema file from local.
