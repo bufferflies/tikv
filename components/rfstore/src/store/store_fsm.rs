@@ -435,7 +435,6 @@ impl RegionMap {
     fn get_overlap_regions(&mut self, new_region: &Region) -> Option<Vec<(u64, Vec<u8>)>> {
         let start_key = raw_start_key(new_region);
         let end_key = raw_end_key(new_region);
-        let new_version = new_region.get_region_epoch().get_version();
         let mut regions = vec![];
         let mut outdated_keys = vec![];
         for (range_end_key, region_id) in self.region_ranges.range((Excluded(start_key), Unbounded))
@@ -445,16 +444,12 @@ impl RegionMap {
                 outdated_keys.push(range_end_key.clone());
                 continue;
             }
-            let region = self.regions.get(region_id).unwrap();
+            let region = region.unwrap();
             let region_start_key = raw_start_key(region);
             if region_start_key >= end_key {
                 break;
             }
-            if region.get_region_epoch().get_version() >= new_version {
-                warn!(
-                    "region {:?} overlap {:?} has newer epoch version",
-                    new_region, region
-                );
+            if Self::current_region_is_newer(region, new_region) {
                 return None;
             }
             let raw_end_key = raw_end_key(region);
@@ -464,6 +459,32 @@ impl RegionMap {
             self.region_ranges.remove(&outdated_key);
         }
         Some(regions)
+    }
+
+    fn current_region_is_newer(current_region: &Region, new_region: &Region) -> bool {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let current_epoch = current_region.get_region_epoch();
+        let new_epoch = new_region.get_region_epoch();
+        match current_epoch.version.cmp(&new_epoch.version) {
+            Greater => {
+                warn!(
+                    "region {:?} overlap {:?} has newer epoch version",
+                    new_region, current_region
+                );
+                true
+            }
+            Equal => {
+                if current_epoch.conf_ver >= new_epoch.conf_ver {
+                    warn!(
+                        "region {:?} overlap {:?} has newer or equal conf_ver",
+                        new_region, current_region
+                    );
+                }
+                // Return true to indicate that the current region do not need to be removed.
+                true
+            }
+            Less => false,
+        }
     }
 
     pub fn remove(&mut self, region_id: u64) {
@@ -1955,6 +1976,48 @@ impl<'a> StoreMsgHandler<'a> {
                 "{} store_fsm::on_restore_shard_result: notify pd, peer_id: {}",
                 tag,
                 peer_fsm.peer_id(),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_current_region_is_newer() {
+        // (current: (ver, conf_ver), new: (ver, conf_ver), expect)
+        let cases = vec![
+            ((2080, 74240), (2081, 74240), (false, true)),
+            ((100, 1001), (100, 1000), (true, true)), // Consider newer when version is equal.
+            ((100, 1000), (100, 1000), (true, true)),
+        ];
+
+        for (current, new, expect) in cases {
+            let current_epoch = metapb::RegionEpoch {
+                version: current.0,
+                conf_ver: current.1,
+                ..Default::default()
+            };
+            let mut current_region = metapb::Region::new();
+            current_region.set_region_epoch(current_epoch);
+
+            let new_epoch = metapb::RegionEpoch {
+                version: new.0,
+                conf_ver: new.1,
+                ..Default::default()
+            };
+            let mut new_region = metapb::Region::new();
+            new_region.set_region_epoch(new_epoch);
+
+            assert_eq!(
+                RegionMap::current_region_is_newer(&current_region, &new_region),
+                expect.0,
+            );
+            assert_eq!(
+                RegionMap::current_region_is_newer(&new_region, &current_region),
+                expect.1,
             );
         }
     }
