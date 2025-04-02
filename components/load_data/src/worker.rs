@@ -648,19 +648,16 @@ impl KvPairsWorker {
             return Err(Error::Canceled);
         }
 
-        if !self.kv_pairs.is_empty() || self.l0_file_metas.len() < self.l0_file_idx {
-            error!(
-                "{} worker-{} has {} not yet flushed kv pairs, {} unhandled files",
-                self.task_ctx.task_id,
-                self.worker_id,
-                self.kv_pairs.len(),
-                self.l0_file_idx - self.l0_file_metas.len()
-            );
-            return Err(Error::CheckError(format!(
-                "has {} not yet flushed kv pairs, {} unhandled files",
-                self.kv_pairs.len(),
-                self.l0_file_idx - self.l0_file_metas.len()
-            )));
+        if !self.kv_pairs.is_empty() {
+            self.flush_mem_buf();
+        }
+
+        if self.l0_file_metas.len() + self.flush_file_errs.len() < self.l0_file_idx {
+            let recv_count = self.l0_file_idx
+                - self.flush_file_errs.len()
+                - self.l0_file_metas.len()
+                - self.unhandled_flush_files.len();
+            self.recv_flush_file(recv_count)?;
         }
 
         if skip_sort {
