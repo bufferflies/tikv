@@ -599,7 +599,13 @@ impl ServerCluster {
             let rpm = raft.get_region_peer_map();
             let mut truncated_indexes = vec![];
             for shard_id in filtered_shards {
-                let &peer_id = rpm.get(&shard_id).unwrap();
+                let Some(&peer_id) = rpm.get(&shard_id) else {
+                    warn!(
+                        "{}:{} get truncated index: peer not found",
+                        store_id, shard_id
+                    );
+                    continue;
+                };
                 let truncated_idx = raft.get_truncated_index(peer_id).unwrap_or_default();
                 truncated_indexes.push((shard_id, truncated_idx));
             }
@@ -1722,11 +1728,14 @@ impl RegionShardStats {
     }
 
     fn check_truncate_index(&self) -> anyhow::Result<()> {
+        let mut checked_shards = 0;
         for (store_id, shard_stat) in &self.shard_stats {
             if shard_stat.mem_table_size > 0 || shard_stat.txn_file_locks > 0 {
                 continue;
             }
-            let &truncated_index = self.truncated_index.get(store_id).unwrap();
+            let Some(&truncated_index) = self.truncated_index.get(store_id) else {
+                continue;
+            };
             if truncated_index != shard_stat.write_sequence {
                 bail!(
                     "{}:{}: empty mem-table shard not truncated, expect: {}, got: {}",
@@ -1736,7 +1745,9 @@ impl RegionShardStats {
                     truncated_index
                 );
             }
+            checked_shards += 1;
         }
+        info!("check truncate index done, shards: {}", checked_shards);
         Ok(())
     }
 }
