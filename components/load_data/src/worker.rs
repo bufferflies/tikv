@@ -1497,12 +1497,17 @@ impl BuildingWorker {
         sst_metas.sort_by(|a, b| a.id.cmp(&b.id));
         let start = Instant::now();
         let outer_key_prefix = self.task_ctx.outer_key_prefix.to_vec();
-        let coarse_split_keys = gen_split_keys(
-            &outer_key_prefix,
-            &sst_metas,
-            self.config.coarse_split_size,
-            true,
-        );
+        let sst_groups = group_ssts_by_table_id(&sst_metas);
+        let mut coarse_split_keys = vec![];
+        for sst_group in sst_groups {
+            coarse_split_keys.extend(gen_split_keys(
+                &outer_key_prefix,
+                sst_group,
+                self.config.coarse_split_size,
+                true,
+            ));
+        }
+        coarse_split_keys.dedup();
         let new_regions_id = self.split_regions(&coarse_split_keys)?;
         let result = self.ctx.pd.scatter_regions_by_id(new_regions_id);
         if let Err(err) = result {
@@ -1940,6 +1945,23 @@ pub fn build_ingest_files(
     cs
 }
 
+pub fn group_ssts_by_table_id(sst_metas: &[SstMeta]) -> Vec<&[SstMeta]> {
+    let mut groups = vec![];
+    let mut start = 0;
+    let mut cur_table_id = decode_table_id(&sst_metas[0].smallest).unwrap();
+    for (i, sst_meta) in sst_metas.iter().enumerate() {
+        let table_id = decode_table_id(&sst_meta.smallest).unwrap();
+        if table_id != cur_table_id {
+            groups.push(&sst_metas[start..i]);
+            start = i;
+            cur_table_id = table_id;
+            continue;
+        }
+    }
+    groups.push(&sst_metas[start..]);
+    groups
+}
+
 pub fn gen_split_keys(
     outer_key_prefix: &[u8],
     ssts: &[SstMeta],
@@ -2079,6 +2101,8 @@ pub fn verify_regions_boundary(
 
 #[cfg(test)]
 mod tests {
+    use tidb_query_datatype::codec::table::encode_row_key;
+
     use super::*;
 
     #[test]
@@ -2159,5 +2183,37 @@ mod tests {
             let end = end.to_vec();
             assert_eq!(calculate_bound_key(&start, &end), expected);
         }
+    }
+
+    fn make_sst(table_id: i64, smallest: i64, biggest: i64) -> SstMeta {
+        SstMeta {
+            id: (table_id * 1000 + smallest) as u64,
+            smallest: encode_row_key(table_id, smallest),
+            biggest: encode_row_key(table_id, biggest),
+            size: 100,
+            meta_offset: 10,
+            uncompressed_size: 0,
+            keys: 10,
+        }
+    }
+
+    #[test]
+    fn test_group_ssts_by_table_id() {
+        let ssts = [
+            make_sst(1, 1, 2),
+            make_sst(1, 3, 4),
+            make_sst(2, 1, 2),
+            make_sst(2, 3, 4),
+            make_sst(2, 5, 6),
+            make_sst(5, 3, 4),
+            make_sst(6, 5, 6),
+            make_sst(6, 7, 8),
+        ];
+        let groups = group_ssts_by_table_id(&ssts);
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0].len(), 2);
+        assert_eq!(groups[1].len(), 3);
+        assert_eq!(groups[2].len(), 1);
+        assert_eq!(groups[3].len(), 2);
     }
 }
