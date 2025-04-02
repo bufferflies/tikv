@@ -1524,15 +1524,10 @@ impl BuildingWorker {
             let inner_start_key = InnerKey::from_outer_key(&raw_start_key);
             let inner_end_key = InnerKey::from_outer_end_key(&raw_end_key);
             let group_ssts = get_ssts_in_range(&sst_metas, inner_start_key, inner_end_key);
-            assert!(
-                !group_ssts.is_empty(),
-                "raw start {:?}, raw end {:?}, inner start {:?}, inner end {:?}, ssts {:?}",
-                raw_start_key,
-                raw_end_key,
-                inner_start_key,
-                inner_end_key,
-                sst_metas
-            );
+            if group_ssts.is_empty() {
+                // It's possible that the range between two bound keys has no sst files.
+                continue;
+            }
             self.ingest_group(group_ssts)?;
         }
         info!(
