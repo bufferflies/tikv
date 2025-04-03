@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::future::Future;
+use std::{fmt, future::Future};
 
 use bytes::{Buf, Bytes};
 use collections::HashMap;
@@ -320,6 +320,19 @@ pub struct TxnFileLocks {
     // Log index on changed. Only used for (debug) assert that seq is increasing.
     seq: u64,
     inner: HashMap<u64 /* txn start_ts */, Bytes /* lock_val_prefix */>,
+}
+
+impl fmt::Display for TxnFileLocks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let txns = self.inner.keys().take(5).collect::<Vec<_>>();
+        write!(
+            f,
+            "{{ seq:{}, len:{}, txns:{:?} }}",
+            self.seq,
+            self.inner.len(),
+            txns
+        )
+    }
 }
 
 impl TxnFileLocks {

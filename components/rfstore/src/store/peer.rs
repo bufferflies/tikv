@@ -2021,7 +2021,7 @@ impl<'a> PreprocessRef<'a> {
         }
         if shard_meta.has_txn_file_locks() {
             warn!("{} preprocess_pending_splits denied, shard has txn file locks", tag;
-                "txn_file_locks" => ?self.shard_meta().txn_file_locks(),
+                "txn_file_locks" => %self.shard_meta().txn_file_locks(),
             );
             let mut first_split_key = req
                 .get_admin_request()

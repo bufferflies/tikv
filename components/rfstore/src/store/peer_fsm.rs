@@ -1459,20 +1459,21 @@ impl<'a> PeerMsgHandler<'a> {
 
         if let Some(shard_meta) = self.peer.get_store().shard_meta.as_ref() {
             if shard_meta.has_txn_file_locks() {
-                info!("prepare split: txn file locks exist, retry later";
-                    "tag" => self.peer.tag(),
-                    "txn_file_locks" => ?shard_meta.txn_file_locks(),
+                let tag = self.peer.tag();
+                info!("{} prepare split: txn file locks exist, retry later", tag;
+                    "txn_file_locks" => %shard_meta.txn_file_locks(),
                 );
                 let raw_key =
                     decode_bytes(&mut split_keys.first().unwrap().as_slice(), false).unwrap();
                 let key_errs = shard_meta
                     .txn_file_locks()
-                    .get_key_errors(&raw_key).map_err(|err| {
-                    error!("{} validate_split_region: get txn file key errors failed", self.peer.tag();
+                    .get_key_errors(&raw_key)
+                    .map_err(|err| {
+                        error!("{} validate_split_region: get txn file key errors failed", tag;
                         "txn_file_locks" => ?shard_meta.txn_file_locks(),
                         "err" => ?err);
-                    Error::Other(box_err!("get txn file key errors failed"))
-                })?;
+                        Error::Other(box_err!("get txn file key errors failed"))
+                    })?;
                 return Err(Error::KeyErrors(key_errs));
             }
         }
@@ -2320,7 +2321,7 @@ impl<'a> PeerMsgHandler<'a> {
                     let tag = self.peer.tag();
                     info!("{} fail to schedule merge: source region has txn file locks", tag;
                         "target" => ?expect_region,
-                        "txn_file_locks" => ?source_meta.txn_file_locks(),
+                        "txn_file_locks" => %source_meta.txn_file_locks(),
                     );
                     return Err(box_err!(
                         "{}: {}",
