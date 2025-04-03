@@ -535,13 +535,24 @@ impl SchemaManager {
                 .map(|schema_file| schema_file.tables_with_storage_class());
             // If the old specified storage class becomes unspecified, the storage class is
             // removed from the schema file.
-            let need_update_schema = table_infos.iter().any(|ti| {
-                ti.with_required_changes()
+            let sc_need_update_schema = table_infos.iter().any(|ti| {
+                ti.with_storage_class()
                     || old_storage_class_tables
                         .as_ref()
                         .is_some_and(|tables| tables.contains(&ti.id))
             });
-            if local_schema_file.is_some() && !need_update_schema {
+            let columnar_need_update_schema = table_infos.iter().any(|ti| {
+                // local schema file not exist, need to update.
+                if local_schema_file.is_none() {
+                    return true;
+                }
+                // If ti has columnar or schema has columnar, need to update.
+                let local_schema = local_schema_file.as_ref().unwrap().get_table(ti.id);
+                ti.with_columnar() || local_schema.map(|s| s.with_columnar()).unwrap_or_default()
+            });
+
+            if local_schema_file.is_some() && !sc_need_update_schema && !columnar_need_update_schema
+            {
                 debug!("{}: schema has no required changes, skip", keyspace_id;
                     "schema_version" => schema_version, "tables" => ?table_infos, "old_sc_tables" => ?old_storage_class_tables);
                 self.meta_file
