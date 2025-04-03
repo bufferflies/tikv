@@ -58,7 +58,7 @@ use tikv_util::{
     sys::{record_global_memory_usage, SysQuota},
     time::Instant,
 };
-use tokio::{runtime::Runtime, task::JoinHandle};
+use tokio::runtime::Runtime;
 pub use txn_chunk::CreateTxnChunkResp;
 
 use crate::{
@@ -129,16 +129,21 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
         pd,
         &running_ctl,
     );
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    hyper_runtime.spawn(async move {
-        let res = server.await;
-        tx.send(res).unwrap();
-    });
+    let (close_tx, close_rx) = tokio::sync::oneshot::channel();
     if cfg!(unix) {
-        cloud_server::signal_handler::wait_for_signal();
-    } else {
-        rx.recv().unwrap().unwrap();
+        thread::spawn(move || {
+            cloud_server::signal_handler::wait_for_signal();
+            close_tx.send(()).unwrap();
+        });
     }
+    hyper_runtime.block_on(async move {
+        tokio::select! {
+            res = server => {
+                res.expect("cloud worker exit with error");
+            }
+            _ = close_rx => {}
+        }
+    });
 }
 
 // `config_file_path`: optional path to the config file which cloud_worker will
@@ -428,7 +433,7 @@ pub struct CloudWorker {
     hyper_runtime: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
 
-    svc_handle: Option<JoinHandle<()>>,
+    svc_handle: Option<thread::JoinHandle<()>>,
     notify: Arc<tokio::sync::Notify>,
     running_ctl: RunningController,
 }
@@ -484,19 +489,22 @@ impl CloudWorker {
         info!("{} cloud_worker server start", addr; "config" => ?self.config);
 
         let notify = self.notify.clone();
-        let svc_handle = self.hyper_runtime.spawn(async move {
-            tokio::select! {
-                _ = notify.notified() => {
-                    info!("{} cloud_worker server shutdown", addr);
-                }
-                res = server => {
-                    if let Err(e) = res {
-                        error!("{} cloud_worker server error: {:?}", addr, e);
-                    } else {
-                        info!("{} cloud_worker server graceful shutdown", addr);
+        let handle = self.hyper_runtime.handle().clone();
+        let svc_handle = thread::spawn(move || {
+            handle.block_on(async move {
+                tokio::select! {
+                    _ = notify.notified() => {
+                        info!("{} cloud_worker server shutdown", addr);
+                    }
+                    res = server => {
+                        if let Err(e) = res {
+                            error!("{} cloud_worker server error: {:?}", addr, e);
+                        } else {
+                            info!("{} cloud_worker server graceful shutdown", addr);
+                        }
                     }
                 }
-            }
+            })
         });
         self.svc_handle = Some(svc_handle);
     }
@@ -504,7 +512,7 @@ impl CloudWorker {
     pub fn shutdown(mut self) {
         if let Some(handle) = self.svc_handle.take() {
             self.notify.notify_waiters();
-            self.hyper_runtime.block_on(async { handle.await.unwrap() })
+            handle.join().unwrap();
         }
     }
 }

@@ -223,7 +223,7 @@ impl Default for Config {
             advertise_addr: DEFAULT_ADVERTISE_LISTENING_ADDR.to_owned(),
             status_addr: DEFAULT_STATUS_ADDR.to_owned(),
             advertise_status_addr: DEFAULT_ADVERTISE_LISTENING_ADDR.to_owned(),
-            status_thread_pool_size: 1,
+            status_thread_pool_size: 2,
             max_grpc_send_msg_len: DEFAULT_MAX_GRPC_SEND_MSG_LEN,
             raft_client_grpc_send_msg_buffer: 512 * 1024,
             raft_client_queue_size: 8192,

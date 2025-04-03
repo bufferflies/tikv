@@ -180,6 +180,7 @@ where
                                     .unwrap())
                             }
                         }
+                        #[cfg(debug_assertions)]
                         "/debug/sleep" => handle_sleep(ctx).await,
                         native_br::BACKUPS_API_PATH => {
                             native_br::handle_backup(ctx.br_manager.clone(), req).await
@@ -258,17 +259,15 @@ async fn handle_txn_chunk(
 }
 
 // Debug API to sleep for 60 seconds
-async fn handle_sleep(ctx: Arc<Context>) -> hyper::Result<hyper::Response<hyper::Body>> {
-    spawn_and_await(ctx.thread_pool.clone(), async move {
-        info!("sleep for 60 seconds");
-        std::thread::sleep(Duration::from_secs(60));
-        info!("sleep done");
-        Ok(hyper::Response::builder()
-            .status(200)
-            .body(hyper::Body::from("ok"))
-            .unwrap())
-    })
-    .await
+#[cfg(debug_assertions)]
+async fn handle_sleep(_ctx: Arc<Context>) -> hyper::Result<hyper::Response<hyper::Body>> {
+    info!("sleep for 5 seconds");
+    std::thread::sleep(Duration::from_secs(5));
+    info!("sleep done");
+    Ok(hyper::Response::builder()
+        .status(200)
+        .body(hyper::Body::from("ok"))
+        .unwrap())
 }
 
 const DEFAULT_COP_TIMEOUT: Duration = Duration::from_secs(20);

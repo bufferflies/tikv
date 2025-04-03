@@ -130,6 +130,7 @@ struct SyncRegionByIdRequest {
 
 pub struct StatusServer {
     thread_pool: Runtime,
+    hyper_pool: Runtime,
     tx: Sender<()>,
     rx: Option<Receiver<()>>,
     addr: Option<SocketAddr>,
@@ -156,10 +157,18 @@ impl StatusServer {
             .after_start_wrapper(|| debug!("Status server started"))
             .before_stop_wrapper(|| debug!("stopping status server"))
             .build()?;
+        let hyper_pool = Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(status_thread_pool_size)
+            .thread_name("status-hyper")
+            .after_start_wrapper(|| debug!("Hyper server started"))
+            .before_stop_wrapper(|| debug!("stopping hyper server"))
+            .build()?;
 
         let (tx, rx) = oneshot::channel::<()>();
         Ok(StatusServer {
             thread_pool,
+            hyper_pool,
             tx,
             rx: Some(rx),
             addr: None,
@@ -2051,6 +2060,13 @@ impl StatusServer {
                                 info!("debug fail point API finish");
                                 Ok(Response::default())
                             }
+                            #[cfg(debug_assertions)]
+                            (Method::GET, "/debug/sleep") => {
+                                info!("sleep for 5 seconds");
+                                std::thread::sleep(Duration::from_secs(5));
+                                info!("sleep done");
+                                Ok(Response::default())
+                            }
                             (Method::GET, path) if path.starts_with("/region") => {
                                 Self::dump_region_meta(req, router).await
                             }
@@ -2148,7 +2164,10 @@ impl StatusServer {
                 let _ = rx.await;
             })
             .map_err(|e| error!("Status server error: {:?}", e));
-        self.thread_pool.spawn(graceful);
+        let handle = self.hyper_pool.handle().clone();
+        std::thread::spawn(move || {
+            let _ = handle.block_on(graceful);
+        });
     }
 
     pub fn start(&mut self, status_addr: String) -> Result<()> {
