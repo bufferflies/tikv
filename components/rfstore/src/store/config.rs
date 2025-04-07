@@ -109,6 +109,8 @@ pub struct Config {
     pub aux_worker_max_util: usize,
 
     pub schema_worker_count: usize,
+
+    pub peer_idle_duration: ReadableDuration,
 }
 
 impl Default for Config {
@@ -161,6 +163,7 @@ impl Default for Config {
             // worker.
             aux_worker_max_util: 60,
             schema_worker_count: 1,
+            peer_idle_duration: ReadableDuration::secs(180),
         }
     }
 }
@@ -244,6 +247,7 @@ impl Config {
             cfg.aux_worker_max_util = 12;
 
             cfg.schema_worker_count = cfg.schema_worker_count.max(2);
+            cfg.peer_idle_duration = ReadableDuration::secs(5);
         }
 
         cfg.capacity = old.capacity;

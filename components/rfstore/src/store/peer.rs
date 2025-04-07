@@ -513,6 +513,7 @@ pub(crate) struct Peer {
     pub check_stale_peers: Vec<metapb::Peer>,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) encryption_buf: Vec<u8>,
+    pub(crate) last_active_time: tikv_util::time::Instant,
 }
 
 impl Peer {
@@ -608,6 +609,7 @@ impl Peer {
             check_stale_peers: vec![],
             encryption_key,
             encryption_buf: vec![],
+            last_active_time: tikv_util::time::Instant::now_coarse(),
         };
         // If this region has only one peer and I am the one, campaign directly.
         if region.get_peers().len() == 1 && region.get_peers()[0].get_store_id() == store_id {

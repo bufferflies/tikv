@@ -2,7 +2,8 @@
 
 use std::{
     cmp::min,
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, HashMap, HashSet},
+    fmt::Debug,
     mem,
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
@@ -13,6 +14,7 @@ use std::{
 
 use crossbeam::channel::RecvTimeoutError;
 use kvproto::{errorpb, raft_cmdpb::RaftCmdResponse};
+use raft_proto::eraftpb::MessageType;
 use raftstore::store::{
     metrics::{
         STORE_WRITE_RAFTDB_DURATION_HISTOGRAM, STORE_WRITE_SEND_DURATION_HISTOGRAM,
@@ -30,7 +32,7 @@ use tikv_util::{
 };
 
 use super::*;
-use crate::RaftRouter;
+use crate::{store::metrics::IDLE_PEER_COUNT, RaftRouter};
 
 const MERGED_WRITE_BATCH_MAX_SIZE: usize = 4 * 1024 * 1024; // 4 MiB.
 
@@ -93,6 +95,30 @@ impl PeerInbox {
         if statistics.is_none() {
             return;
         }
+        // We are in main raft worker thread, so we can check the idle time.
+        if ctx.is_main_worker
+            && start.saturating_duration_since(peer_fsm.peer.last_active_time)
+                > ctx.cfg.peer_idle_duration.0
+            && !peer_fsm.peer.pending_remove
+        {
+            let store = peer_fsm.peer.get_store();
+            // The heartbeat message generate persist ready, if we send it to idle, we will
+            // receive PersistReady message soon, then it will wakeup instantly, so we check
+            // persist ready to avoid this.
+            let has_persist_ready = ctx
+                .persist_readies
+                .last()
+                .map(|p| p.region_id == region_id)
+                .unwrap_or_default();
+            if !has_persist_ready
+                && store.is_initialized()
+                && store.snap_state == SnapState::Relax
+                && store.applied_index() == store.last_index()
+            {
+                // The peer is idle for a long time, we can send it to idle worker.
+                ctx.pending_idles.push(region_id);
+            }
+        }
         let statistics = statistics.unwrap();
         // Filter out the elapsed time longer than recorded and replace the minimum one
         // if any.
@@ -154,6 +180,7 @@ pub(crate) struct RaftWorker {
     // worker count.
     cpu_util: Arc<AtomicUsize>,
     active_aux_count: usize,
+    idle_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 const MAX_BATCH_COUNT: usize = 1024;
@@ -196,6 +223,7 @@ impl RaftWorker {
                 aux_handles: vec![],
                 cpu_util,
                 active_aux_count: 0,
+                idle_handle: None,
             },
             apply_receivers,
         )
@@ -221,6 +249,15 @@ impl RaftWorker {
                 .unwrap();
             self.aux_handles.push(aux_handle);
         }
+        let idle_ctx = RaftContext::new(self.ctx.global.clone(), false);
+        let (idle_sender, idle_receiver) = tikv_util::mpsc::unbounded();
+        let mut idle_worker = RaftIdleWorker::new(idle_ctx, idle_receiver);
+        let idle_handle = std::thread::Builder::new()
+            .name("raftstore_idle".to_string())
+            .spawn_wrapper(move || idle_worker.run())
+            .unwrap();
+        self.ctx.idle_sender = Some(idle_sender);
+        self.idle_handle = Some(idle_handle);
         loop {
             self.handle_store_msg();
             if self.store_fsm.stopped {
@@ -244,6 +281,17 @@ impl RaftWorker {
                     Some(&mut inbox_peer_stats),
                 );
             });
+            for idle_region in mem::take(&mut self.ctx.pending_idles) {
+                let peer_state = self.ctx.get_peer(idle_region);
+                let idle = IdlePeer::new(idle_region, peer_state);
+                let idle_sender = self.ctx.idle_sender.as_ref().unwrap();
+                idle_sender
+                    .send((idle_region, Box::new(PeerMsg::Idle(idle))))
+                    .unwrap();
+                let store_id = self.ctx.store_id();
+                info!("{}:{}: region is idle", store_id, idle_region);
+                self.ctx.idle_regions.insert(idle_region);
+            }
             let process_inbox_duration = loop_start.saturating_elapsed();
             if process_inbox_duration > Duration::from_millis(50) {
                 inbox_peer_stats.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
@@ -330,6 +378,10 @@ impl RaftWorker {
         for handle in self.aux_handles.drain(..) {
             let _ = handle.join();
         }
+        self.ctx.idle_sender.take();
+        if let Some(handle) = self.idle_handle.take() {
+            let _ = handle.join();
+        }
     }
 
     fn handle_store_msg(&mut self) {
@@ -383,8 +435,11 @@ impl RaftWorker {
         let mut tick_cnt = 0;
         for seg_idx in self.tick_seg_idx..next_tick_seg_idx {
             let peer_map = &self.ctx.peers[seg_idx];
-            peer_map.iter().for_each(
-                |(&region_id, peer)| match inboxes.inboxes.entry(region_id) {
+            for (region_id, peer) in peer_map.iter() {
+                if self.ctx.idle_regions.contains(region_id) {
+                    continue;
+                }
+                match inboxes.inboxes.entry(*region_id) {
                     Entry::Occupied(mut entry) => {
                         entry.get_mut().msgs.push(Box::new(PeerMsg::Tick));
                         tick_cnt += 1;
@@ -396,8 +451,8 @@ impl RaftWorker {
                         });
                         tick_cnt += 1;
                     }
-                },
-            );
+                }
+            }
         }
         self.batch_msg_count += tick_cnt;
         if next_tick_seg_idx == PEER_SEGMENTS {
@@ -410,6 +465,23 @@ impl RaftWorker {
     }
 
     fn append_msg(&mut self, inboxes: &mut Inboxes, region_id: u64, msg: Box<PeerMsg>) {
+        if let PeerMsg::WakeUp(idle_peer) = *msg {
+            self.ctx.idle_regions.remove(&region_id);
+            self.batch_msg_count += idle_peer.messages.len();
+            inboxes.inboxes.insert(
+                region_id,
+                PeerInbox {
+                    peer: idle_peer.peer_states,
+                    msgs: idle_peer.messages,
+                },
+            );
+            return;
+        }
+        if self.ctx.idle_regions.contains(&region_id) {
+            let idle_sender = self.ctx.idle_sender.as_ref().unwrap();
+            idle_sender.send((region_id, msg)).unwrap();
+            return;
+        }
         if let Some(inbox) = inboxes.inboxes.get_mut(&region_id) {
             inbox.msgs.push(msg);
             self.batch_msg_count += 1;
@@ -449,6 +521,9 @@ impl RaftWorker {
             PeerMsg::Persisted(_) => {}
             PeerMsg::PrepareCommitMergeResult(..) => {}
             PeerMsg::PrepareTxnFileResult { .. } => {}
+            PeerMsg::Idle(_) => {}
+            PeerMsg::WakeUp(_) => {}
+            PeerMsg::StoreMsgForWakeUp(_) => unreachable!("included in wakeup"),
         }
     }
 
@@ -511,7 +586,7 @@ impl RaftAuxWorker {
         apply_senders: Vec<Sender<Option<ApplyBatch>>>,
         io_sender: Sender<Option<IoTask>>,
     ) -> (Self, Receiver<()>) {
-        let ctx = RaftContext::new(ctx);
+        let ctx = RaftContext::new(ctx, false);
         let (task_tx, task_rx) = tikv_util::mpsc::bounded(1);
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(1);
         (
@@ -711,5 +786,177 @@ impl IoWorker {
         }
         let send_time = duration_to_sec(timer.saturating_elapsed());
         STORE_WRITE_SEND_DURATION_HISTOGRAM.observe(send_time);
+    }
+}
+
+pub struct IdlePeer {
+    pub(crate) region_id: u64,
+    pub(crate) peer_states: PeerStates,
+    #[allow(clippy::vec_box)]
+    pub(crate) messages: Vec<Box<PeerMsg>>,
+}
+
+impl Debug for IdlePeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdlePeer")
+            .field("region_id", &self.region_id)
+            .field("messages", &self.messages.len())
+            .finish()
+    }
+}
+
+impl IdlePeer {
+    fn new(region_id: u64, peer_states: PeerStates) -> Self {
+        IdlePeer {
+            region_id,
+            peer_states,
+            messages: vec![],
+        }
+    }
+
+    fn need_wake_up(&self) -> bool {
+        self.messages.iter().any(|msg| !Self::is_heartbeat(msg))
+    }
+
+    fn is_heartbeat(msg: &PeerMsg) -> bool {
+        match msg {
+            PeerMsg::RaftMessage(raft_msg) => matches!(
+                raft_msg.get_message().get_msg_type(),
+                MessageType::MsgHeartbeat | MessageType::MsgHeartbeatResponse
+            ),
+            _ => {
+                debug!("not heartbeat msg {:?}", msg);
+                false
+            }
+        }
+    }
+
+    fn process(&mut self, ctx: &mut RaftContext) {
+        let mut peer_fsm = self.peer_states.peer_fsm.lock().unwrap();
+        if peer_fsm.stopped {
+            return;
+        }
+        tikv_util::set_current_region_thread_local(self.region_id);
+        PeerMsgHandler::new(&mut peer_fsm, ctx).handle_msgs(&mut self.messages);
+        if peer_fsm.peer.raft_group.has_ready() {
+            let mut ready = peer_fsm.peer.raft_group.ready();
+            let raft_messages = if !ready.messages().is_empty() {
+                let leader_messages = ready.take_messages();
+                peer_fsm.peer.build_raft_messages(ctx, leader_messages)
+            } else if !ready.persisted_messages().is_empty() {
+                // We only have heart beat message in the ready, there is nothing to persist,
+                // so we can send messages directly without go through IoTask.
+                let follower_messages = ready.take_persisted_messages();
+                peer_fsm.peer.build_raft_messages(ctx, follower_messages)
+            } else {
+                vec![]
+            };
+            let ready_number = ready.number();
+            peer_fsm.peer.raft_group.advance_append_async(ready);
+            peer_fsm.peer.raft_group.on_persist_ready(ready_number);
+            for raft_message in raft_messages {
+                ctx.global.trans.send(raft_message).unwrap();
+            }
+        }
+    }
+}
+
+pub(crate) struct RaftIdleWorker {
+    ctx: RaftContext,
+    rx: Receiver<(u64, Box<PeerMsg>)>,
+    idle_peers: HashMap<u64, IdlePeer>,
+    last_tick: Instant,
+}
+
+impl RaftIdleWorker {
+    fn new(ctx: RaftContext, rx: Receiver<(u64, Box<PeerMsg>)>) -> Self {
+        RaftIdleWorker {
+            ctx,
+            rx,
+            idle_peers: HashMap::default(),
+            last_tick: Instant::now(),
+        }
+    }
+
+    fn run(&mut self) {
+        let mut update_regions = HashSet::new();
+        loop {
+            let loop_start = match self.receive_msgs(&mut update_regions) {
+                Ok(start_time) => start_time,
+                Err(_) => return,
+            };
+            for region_id in &update_regions {
+                let idle_peer = self.idle_peers.get(region_id).unwrap();
+                if idle_peer.need_wake_up() {
+                    let store_id = self.ctx.store_id();
+                    let idle_peer = self.idle_peers.remove(region_id).unwrap();
+                    let mut peer_fsm = idle_peer.peer_states.peer_fsm.lock().unwrap();
+                    peer_fsm.peer.last_active_time = tikv_util::time::Instant::now_coarse();
+                    drop(peer_fsm);
+                    info!("{}:{}: wake up", store_id, region_id);
+                    self.ctx
+                        .global
+                        .router
+                        .send(*region_id, PeerMsg::WakeUp(idle_peer));
+                }
+            }
+            IDLE_PEER_COUNT.set(self.idle_peers.len() as i64);
+            let tick_interval = self.ctx.cfg.raft_base_tick_interval.as_millis();
+            let elapsed = self.last_tick.saturating_elapsed().as_millis() as u64;
+            if elapsed >= tick_interval {
+                for idle_peer in self.idle_peers.values_mut() {
+                    idle_peer.messages.push(Box::new(PeerMsg::Tick));
+                    idle_peer.process(&mut self.ctx);
+                }
+                self.last_tick = Instant::now();
+            } else {
+                for region_id in update_regions.iter() {
+                    if let Some(idle_peer) = self.idle_peers.get_mut(region_id) {
+                        idle_peer.process(&mut self.ctx);
+                    }
+                }
+            }
+            update_regions.clear();
+            if self.ctx.global.trans.need_flush() {
+                self.ctx.global.trans.flush();
+            }
+            if loop_start.saturating_elapsed() > Duration::from_millis(100) {
+                info!("raft idle worker batch loop takes {:?}", loop_start);
+            }
+        }
+    }
+
+    fn receive_msgs(
+        &mut self,
+        update_regions: &mut HashSet<u64>,
+    ) -> Result<tikv_util::time::Instant, RecvTimeoutError> {
+        let res = self.rx.recv_timeout(Duration::from_millis(10));
+        let receive_time = tikv_util::time::Instant::now();
+        let mut messages = vec![];
+        match res {
+            Ok((region_id, msg)) => {
+                messages.push((region_id, msg));
+            }
+            Err(RecvTimeoutError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        let msg_len = self.rx.len();
+        for _ in 0..msg_len {
+            let (region_id, msg) = self.rx.recv()?;
+            messages.push((region_id, msg));
+        }
+        for (region_id, message) in messages {
+            if let Some(idle_peer) = self.idle_peers.get_mut(&region_id) {
+                idle_peer.messages.push(message);
+                update_regions.insert(region_id);
+            } else if let PeerMsg::Idle(idle_peer) = *message {
+                self.idle_peers.insert(region_id, idle_peer);
+                IDLE_PEER_COUNT.set(self.idle_peers.len() as i64);
+            } else {
+                // The peer has been waked up, resend the message to main thread.
+                self.ctx.global.router.send(region_id, *message);
+            }
+        }
+        Ok(receive_time)
     }
 }
