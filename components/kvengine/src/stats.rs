@@ -239,7 +239,7 @@ impl super::Engine {
                     false,
                 );
                 if shard.get_data().keyspace_id == keyspace_id && shard.overlap_bound(table_bound) {
-                    if shard.get_schema_file().is_some() {
+                    if shard.has_columnar_table(table_id) {
                         ready += 1;
                     }
                     total += 1;

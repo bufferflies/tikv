@@ -69,7 +69,16 @@ const FREQ_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 fn test_schema_file() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
-    let mut cluster = ServerCluster::new(vec![node_id], |_, _| {});
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.enable_inner_key_offset = true;
+        conf.kvengine
+            .columnar_table_build_options
+            .max_columnar_table_size = 1024;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 9;
+        conf.kvengine.build_columnar = true;
+    });
     let dfs = cluster.get_dfs().unwrap();
     let (keyspace_id, table_ids) = dfs
         .get_runtime()
@@ -83,6 +92,14 @@ fn test_schema_file() {
         .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
         .unwrap();
     let status_addr = cluster.status_addr(node_id);
+
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    client.put_kv(
+        0..100,
+        |i: usize| gen_row_key(keyspace_id, table_ids[1], i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
 
     let kvengine = cluster.get_kvengine(node_id);
     let all_ids_vers = kvengine.get_all_shard_id_vers();
@@ -107,7 +124,7 @@ fn test_schema_file() {
         || "failed to wait schema file".to_string(),
     );
 
-    // test schema_file will be set to None if not longer overlap.
+    // test schema_file will be set to None if no longer overlap.
     let new_schemas = build_schemas(vec![table_ids[1]]);
     let new_schema_version = 11;
     let new_schema_file_data = build_schema_file(keyspace_id, new_schema_version, new_schemas, 0);
@@ -134,7 +151,7 @@ fn test_schema_file() {
             shard_with_schema_file_ids.len() == 1
                 && shard_with_schema_file_ids[0] == new_schema_file_id
         },
-        10,
+        5,
         || "failed to wait schema file".to_string(),
     );
 
@@ -145,32 +162,44 @@ fn test_schema_file() {
         schema_file_id,
     ));
     std::thread::sleep(Duration::from_secs(3));
-    for &id_ver in &all_ids_vers {
-        let shard = kvengine.get_shard(id_ver.id).unwrap();
-        if shard.get_schema_file().is_some() {
-            let sf = shard.get_schema_file().unwrap();
-            if sf.is_tombstone() {
-                assert_eq!(sf.get_version(), new_schema_version);
-            } else {
-                assert_eq!(sf.get_file_id(), new_schema_file_id);
+    must_wait(
+        || {
+            for &id_ver in &all_ids_vers {
+                let shard = kvengine.get_shard(id_ver.id).unwrap();
+                if shard.get_schema_file().is_some() {
+                    let sf = shard.get_schema_file().unwrap();
+                    if sf.is_tombstone() {
+                        assert_eq!(sf.get_version(), new_schema_version);
+                    } else {
+                        assert_eq!(sf.get_file_id(), new_schema_file_id);
+                    }
+                    let stats = shard.get_stats();
+                    if stats.schema_version != new_schema_version {
+                        return false;
+                    }
+                }
             }
-            let stats = shard.get_stats();
-            assert_eq!(stats.schema_version, new_schema_version);
-        }
-    }
+            true
+        },
+        3,
+        || "failed to wait schema file".to_string(),
+    );
 
     // test collect columnar status api
-    let columnar_status = dfs
-        .get_runtime()
-        .block_on(send_collect_columnar_status_request(
-            &status_addr,
-            keyspace_id,
-            table_ids[1],
-        ));
-    assert!(
-        columnar_status.total > 0 && columnar_status.ready == columnar_status.total,
-        "columnar status is not ready, columnar_status: {:#?}",
-        columnar_status
+    must_wait(
+        || {
+            let columnar_status = dfs
+                .get_runtime()
+                .block_on(send_collect_columnar_status_request(
+                    &status_addr,
+                    keyspace_id,
+                    table_ids[1],
+                ));
+            info!("columnar status: {:#?}", columnar_status);
+            columnar_status.total > 0 && columnar_status.ready == columnar_status.total
+        },
+        5,
+        || "columnar status is not ready".to_string(),
     );
 }
 

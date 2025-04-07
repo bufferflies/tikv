@@ -1387,6 +1387,11 @@ impl Shard {
         self.data.read().unwrap().schema_file.clone()
     }
 
+    pub fn has_columnar_table(&self, table_id: i64) -> bool {
+        let data = self.get_data();
+        data.schema_file.is_some() && data.columnar_table_ids.contains(&table_id)
+    }
+
     pub fn has_unconverted_l0s(&self) -> bool {
         self.get_data().has_unconverted_l0s()
     }
