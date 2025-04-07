@@ -130,7 +130,7 @@ struct SyncRegionByIdRequest {
 
 pub struct StatusServer {
     thread_pool: Runtime,
-    hyper_pool: Runtime,
+    hyper_pool: Arc<Runtime>,
     tx: Sender<()>,
     rx: Option<Receiver<()>>,
     addr: Option<SocketAddr>,
@@ -168,7 +168,7 @@ impl StatusServer {
         let (tx, rx) = oneshot::channel::<()>();
         Ok(StatusServer {
             thread_pool,
-            hyper_pool,
+            hyper_pool: Arc::new(hyper_pool),
             tx,
             rx: Some(rx),
             addr: None,
@@ -2164,9 +2164,9 @@ impl StatusServer {
                 let _ = rx.await;
             })
             .map_err(|e| error!("Status server error: {:?}", e));
-        let handle = self.hyper_pool.handle().clone();
+        let hyper_pool = self.hyper_pool.clone();
         std::thread::spawn(move || {
-            let _ = handle.block_on(graceful);
+            let _ = hyper_pool.block_on(graceful);
         });
     }
 
@@ -2174,7 +2174,7 @@ impl StatusServer {
         let addr = SocketAddr::from_str(&status_addr)?;
 
         let incoming = {
-            let _enter = self.thread_pool.enter();
+            let _enter = self.hyper_pool.enter();
             AddrIncoming::bind(&addr)
         }?;
         self.addr = Some(incoming.local_addr());
