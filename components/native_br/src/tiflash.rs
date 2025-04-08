@@ -12,12 +12,13 @@ use slog_global::{error, info};
 use tikv_util::{box_err, retry::sleep_async, time::Instant};
 
 use crate::{
-    common::{get_tiflash_storage_stores, send_request_to_store},
+    common::{get_tiflash_storage_stores, send_request_to_store_with_retry},
     error::{Error, Result},
 };
 
 const WAIT_TIFLASH_REMOVE_REPLICA_INTERVAL: Duration = Duration::from_secs(1);
 const WAIT_TIFLASH_REMOVE_REPLICA_TIMEOUT: Duration = Duration::from_secs(30);
+const GET_TIFLASH_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
@@ -36,8 +37,10 @@ async fn get_tiflash_keyspace_status(
         "{}/tiflash/sync-region/keyspace/{}",
         &store.status_address, keyspace_id
     ))?;
-    let req = Request::get(uri.clone()).body(Body::empty()).unwrap();
-    match send_request_to_store(req, &store, security_mgr).await {
+    let req = || Request::get(uri.clone()).body(Body::empty()).unwrap();
+    match send_request_to_store_with_retry(req, &store, security_mgr, GET_TIFLASH_STATUS_TIMEOUT)
+        .await
+    {
         Ok(resp) => Ok(serde_json::from_slice(&resp).unwrap()),
         Err(e) => Err(box_err!(
             "Fail to get tiflash keyspace {keyspace_id} status {uri}, err {:?}",

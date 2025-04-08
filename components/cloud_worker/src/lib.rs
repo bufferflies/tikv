@@ -777,6 +777,7 @@ impl Config {
             dfs: self.dfs.clone(),
             tolerate_err,
             skip_keyspace_meta: false,
+            timeout: self.native_br.instant_backup_timeout / 2,
         }
     }
     pub fn to_restore_config(&self) -> RestoreConfig {

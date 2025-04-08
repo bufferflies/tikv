@@ -1,6 +1,6 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use api_version::ApiV2;
 use futures::executor::block_on;
@@ -198,7 +198,12 @@ fn update_merged_engine(
             .unwrap();
         let runtime = dfs.get_runtime();
         let data = runtime
-            .block_on(send_request_to_store(req, &store, &security_mgr))
+            .block_on(send_request_to_store(
+                req,
+                &store,
+                &security_mgr,
+                Duration::from_secs(10),
+            ))
             .unwrap();
         merged_engine
             .update_wal(store_id, epoch, start_off, data)

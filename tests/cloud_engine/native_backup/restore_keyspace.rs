@@ -1471,34 +1471,21 @@ enum RestoreResult {
     DependsOnTolerateErr,
 }
 
-#[test]
-fn test_restore_keyspace_with_failed_store() {
-    test_util::init_log_for_test();
-    let cases = vec![
-        // fail_on_backup, fail_on_restore, fail_on_same_node, expected
-        (true, false, false, RestoreResult::AlwaysSucceed),
-        (false, true, false, RestoreResult::DependsOnTolerateErr),
-        (true, true, false, RestoreResult::AlwaysFail),
-        (true, true, true, RestoreResult::AlwaysSucceed),
-    ];
-    for (fail_on_backup, fail_on_restore, fail_on_same_node, expected) in cases {
-        test_restore_keyspace_with_failed_store_impl(
-            fail_on_backup,
-            fail_on_restore,
-            fail_on_same_node,
-            expected,
-        );
-    }
-}
-
-// fail_on_same_node: whether backup and restore fail on the same node.
-fn test_restore_keyspace_with_failed_store_impl(
-    fail_on_backup: bool,
-    fail_on_restore: bool,
-    fail_on_same_node: bool,
-    expected: RestoreResult,
+// Arguments: (fail_on_backup, fail_on_restore, fail_on_same_node, expected)
+// fail_on_same_node: Whether backup and restore fail on the same node.
+#[rstest]
+#[case::fail_on_backup(true, false, false, RestoreResult::AlwaysSucceed)]
+#[case::fail_on_restore(false, true, false, RestoreResult::DependsOnTolerateErr)]
+#[case::both(true, true, false, RestoreResult::AlwaysFail)]
+#[case::fail_on_same_node(true, true, true, RestoreResult::AlwaysSucceed)]
+fn test_restore_keyspace_with_failed_store(
+    #[case] fail_on_backup: bool,
+    #[case] fail_on_restore: bool,
+    #[case] fail_on_same_node: bool,
+    #[case] expected: RestoreResult,
 ) {
-    info!("test_restore_keyspace_with_failed_store_impl";
+    test_util::init_log_for_test();
+    info!("test_restore_keyspace_with_failed_store";
         "fail_on_backup" => fail_on_backup,
         "fail_on_restore" => fail_on_restore,
         "fail_on_same_node" => fail_on_same_node,
@@ -1545,6 +1532,7 @@ fn test_restore_keyspace_with_failed_store_impl(
             dfs: dfs_config,
             tolerate_err: 1,
             skip_keyspace_meta: true,
+            timeout: ReadableDuration::secs(3),
             ..Default::default()
         };
 
@@ -1593,10 +1581,11 @@ fn test_restore_keyspace_with_failed_store_impl(
         stop_node(&mut cluster, true, restore_failed_node);
     }
 
+    // Set small timeouts to make the test faster.
     let mut restore_config = RestoreConfig {
         tolerate_err: 0,
-        timeout_fetch_wal: ReadableDuration::secs(1), /* Set a small timeout to make the test
-                                                       * faster. */
+        timeout_fetch_wal: ReadableDuration::secs(1),
+        timeout_restore_snapshot: ReadableDuration::secs(3),
         ..Default::default()
     };
 

@@ -20,13 +20,15 @@ use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info, warn};
 use tikv::storage::mvcc::TimeStamp;
-use tikv_util::{retry::try_wait_result_async, timer::GLOBAL_TIMER_HANDLE};
+use tikv_util::{
+    config::ReadableDuration, retry::try_wait_result_async, timer::GLOBAL_TIMER_HANDLE,
+};
 
 use crate::{
     common::{
         create_pd_client, generate_etcd_connect_opt, get_all_stores_except_tiflash,
-        get_latest_backup_meta, send_request_to_store, INCREMENTAL_BACKUP_FILE_NAME_FORMAT,
-        INCREMENTAL_BACKUP_FOLDER_FORMAT,
+        get_latest_backup_meta, send_request_to_store_with_retry,
+        INCREMENTAL_BACKUP_FILE_NAME_FORMAT, INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, SharedError},
 };
@@ -329,18 +331,19 @@ pub fn backup_cluster_with_ts(
     let security_mgr = pd_client.get_security_mgr();
     let (tx, rx) = std::sync::mpsc::sync_channel(num_stores);
     for store in stores {
-        let config = get_backup_config(
+        let rf_config = get_backup_config(
             &cluster_backup_meta,
             cluster_id,
             store.id,
             backup_type.clone(),
         );
-        if let Some(config) = config {
+        if let Some(rf_config) = rf_config {
             runtime.spawn(backup_store(
-                config,
+                rf_config,
                 store,
                 tx.clone(),
                 security_mgr.clone(),
+                config.timeout.0,
             ));
         } else {
             // Treat tolerated error in incremental backup as error, to make sure that
@@ -412,14 +415,19 @@ async fn backup_store(
     store: Store,
     tx: SyncSender<Result<StoreBackupMeta>>,
     security_mgr: Arc<SecurityManager>,
+    timeout: Duration,
 ) {
     let uri = security_mgr
         .build_uri(format!("{}/rfengine/backup", &store.status_address))
         .unwrap();
     info!("Start backup with config {}", config);
     let json_string = serde_json::to_string(&config).unwrap();
-    let req = Request::post(uri).body(Body::from(json_string)).unwrap();
-    match send_request_to_store(req, &store, security_mgr.as_ref()).await {
+    let req = || {
+        Request::post(uri.clone())
+            .body(Body::from(json_string.clone()))
+            .unwrap()
+    };
+    match send_request_to_store_with_retry(req, &store, security_mgr.as_ref(), timeout).await {
         Ok(resp) => {
             let mut store_backup_meta = StoreBackupMeta::default();
             store_backup_meta.merge_from_bytes(&resp).unwrap();
@@ -617,7 +625,7 @@ async fn backup_pd_keyspace_meta(
     Ok(())
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct BackupConfig {
@@ -626,6 +634,20 @@ pub struct BackupConfig {
     pub dfs: DFSConfig,
     pub tolerate_err: usize,
     pub skip_keyspace_meta: bool,
+    pub timeout: ReadableDuration,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            pd: pd_client::Config::default(),
+            security: SecurityConfig::default(),
+            dfs: DFSConfig::default(),
+            tolerate_err: 0,
+            skip_keyspace_meta: false,
+            timeout: ReadableDuration::secs(30),
+        }
+    }
 }
 
 /// Incremental Backup ID, name, and S3 path

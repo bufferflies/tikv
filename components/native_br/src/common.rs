@@ -92,10 +92,14 @@ pub async fn send_request_to_store(
     req: Request<Body>,
     store: &Store,
     security_mgr: &SecurityManager,
+    timeout: Duration,
 ) -> Result<Bytes> {
+    debug_assert!(!timeout.is_zero());
     let client = security_mgr.http_client(hyper::Client::builder())?;
     let uri_str = format!("{}", req.uri());
-    let resp = client.request(req).await;
+    let resp = tokio::time::timeout(timeout, client.request(req))
+        .await
+        .map_err(|_| Error::Timeout(format!("request {uri_str} timeout"), timeout.as_secs()))?;
     if let Err(err) = resp {
         error!(
             "send request to store failed, store {}, err {:?}, uri {:?}",
@@ -104,22 +108,32 @@ pub async fn send_request_to_store(
         return Err(err.into());
     }
     let resp = resp.unwrap();
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-        let err_msg = body.to_str_lossy().to_string();
+    let status = resp.status();
+    let body = tokio::time::timeout(timeout, hyper::body::to_bytes(resp.into_body()))
+        .await
+        .map_err(|_| {
+            Error::Timeout(
+                format!("read response from {uri_str} timeout"),
+                timeout.as_secs(),
+            )
+        })?;
+    if !status.is_success() {
+        let err_msg = body
+            .map(|x| x.to_str_lossy().to_string())
+            .unwrap_or_default();
         error!(
             "send request to store failed, store {}, status {:?}, err {}, uri {:?}",
             store.id, status, err_msg, uri_str
         );
         return Err(Error::HttpError(status, err_msg));
     }
-    match hyper::body::to_bytes(resp.into_body()).await {
+    match body {
         Ok(body) => Ok(body),
         Err(e) => Err(box_err!("{:?} {:?}", store, e)),
     }
 }
 
+/// Send request with timeout of `timeout / 2` for each retry.
 pub async fn send_request_to_store_with_retry<F>(
     build_req: F,
     store: &Store,
@@ -129,12 +143,13 @@ pub async fn send_request_to_store_with_retry<F>(
 where
     F: Fn() -> Request<Body>,
 {
-    let is_error_retryable = |err: &Error| matches!(err, Error::HttpRequestError(_));
+    let is_error_retryable =
+        |err: &Error| matches!(err, Error::HttpRequestError(_) | Error::Timeout(..));
     let mut last_err: Option<Error> = None;
     let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < timeout {
         let req = build_req();
-        match send_request_to_store(req, store, security_mgr).await {
+        match send_request_to_store(req, store, security_mgr, timeout / 2).await {
             Ok(resp) => return Ok(resp),
             Err(err) if is_error_retryable(&err) => {
                 last_err = Some(err);

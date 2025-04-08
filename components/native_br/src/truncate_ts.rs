@@ -19,12 +19,13 @@ use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
 use crate::{
-    common::{get_all_stores_except_tiflash, send_request_to_store},
+    common::{get_all_stores_except_tiflash, send_request_to_store_with_retry},
     error::Error,
 };
 
 const MAX_WAIT_TRUNCATE_TS_CNT: usize = 10;
 const TRUNCATE_TS_QUERY_INTERVAL: Duration = Duration::from_secs(10);
+const TRUNCATE_TS_STORE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -172,8 +173,19 @@ async fn request_truncate_ts_store(
         range,
     };
     let json_string = serde_json::to_string(&config).unwrap();
-    let req = Request::post(uri).body(Body::from(json_string)).unwrap();
-    match send_request_to_store(req, &store, security_mgr.as_ref()).await {
+    let req = || {
+        Request::post(uri.clone())
+            .body(Body::from(json_string.clone()))
+            .unwrap()
+    };
+    match send_request_to_store_with_retry(
+        req,
+        &store,
+        security_mgr.as_ref(),
+        TRUNCATE_TS_STORE_TIMEOUT,
+    )
+    .await
+    {
         Ok(resp) => {
             let resp: Vec<ShardTruncateTsStats> = serde_json::from_slice(&resp).unwrap();
             tx.send(Ok((store_id, resp))).unwrap()
