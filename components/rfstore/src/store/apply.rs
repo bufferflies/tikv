@@ -776,17 +776,18 @@ impl Applier {
             }
             _ => panic!("unknown custom log type"),
         }
-        let mem_table_size = ctx.engine.write(wb, cl.get_raw());
+        let writable_mem_tbl_state = ctx.engine.write(wb, cl.get_raw());
         if let Some(observer) = &mut observer {
             observer.on_apply(self.region_id(), log_index, wb);
         }
         drop(wb_ref);
         ctx.observer = observer;
         let mem_states = self.mut_mem_table_state(engine);
-        if mem_states.mem_table_size > 0 && mem_table_size == 0 {
+        if writable_mem_tbl_state.is_none() {
             mem_states.set_switch_time(timer);
         }
-        mem_states.mem_table_size = mem_table_size;
+        let (mem_table_size, unpersisted_props_size) = writable_mem_tbl_state.unwrap_or_default();
+        mem_states.update(mem_table_size, unpersisted_props_size);
         self.maybe_propose_switch_mem_table(ctx, timer);
         ctx.apply_time.observe(timer.saturating_elapsed_secs());
         // self.metrics.written_bytes += wb.estimated_size() as u64;
@@ -1570,7 +1571,8 @@ impl Applier {
         self.mem_table_state.get_or_insert_with(|| {
             let shard = engine.get_shard(region_id).unwrap();
             let max_mem_table_size = engine.opts.max_mem_table_size;
-            MemTableState::new(shard.get_writable_mem_table_size(), max_mem_table_size)
+            let (size, unpersisted_props_size) = shard.get_writable_mem_table_state();
+            MemTableState::new(size, unpersisted_props_size, max_mem_table_size)
         })
     }
 
@@ -1586,6 +1588,7 @@ impl Applier {
         let mem_state = self.mut_mem_table_state(&ctx.engine);
         if mem_state.need_switch(&tag, now) {
             let mut custom_builder = CustomBuilder::new();
+            // Only set `mem_table_size` for backward compatibility.
             custom_builder.set_switch_mem_table(mem_state.mem_table_size);
             let mut req = self.new_raft_cmd_request();
             req.set_custom_request(custom_builder.build());
@@ -1930,6 +1933,7 @@ pub(crate) fn is_change_set_affect_mem_table(cs: &kvenginepb::ChangeSet) -> bool
 
 struct MemTableState {
     mem_table_size: u64,
+    unpersisted_props_size: usize,
     max_mem_table_size: u64,
     init_time: Instant,
     last_switch_time: Option<Instant>,
@@ -1951,9 +1955,10 @@ const MAX_JITTER_SECONDS: u64 = 4096;
 const PROPOSE_SWITCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl MemTableState {
-    fn new(mem_table_size: u64, max_mem_table_size: u64) -> Self {
+    fn new(mem_table_size: u64, unpersisted_props_size: usize, max_mem_table_size: u64) -> Self {
         Self {
             mem_table_size,
+            unpersisted_props_size,
             max_mem_table_size,
             init_time: Instant::now(),
             last_switch_time: None,
@@ -1961,8 +1966,14 @@ impl MemTableState {
         }
     }
 
+    fn update(&mut self, mem_table_size: u64, unpersisted_props_size: usize) {
+        self.mem_table_size = mem_table_size;
+        self.unpersisted_props_size = unpersisted_props_size;
+    }
+
     fn need_switch(&self, tag: &PeerTag, now: Instant) -> bool {
-        if self.mem_table_size == 0 {
+        let total_size = self.mem_table_size + self.unpersisted_props_size as u64;
+        if total_size == 0 {
             return false;
         }
         if let Some(proposed_time) = self.proposed_time {
@@ -1975,14 +1986,14 @@ impl MemTableState {
         if cfg!(debug_assertions) && self.max_mem_table_size < BYTES_MB {
             // running in test mode, use probability algorithm to switch for better
             // coverage.
-            let size_ratio = self.mem_table_size as f64 / self.max_mem_table_size as f64;
+            let size_ratio = total_size as f64 / self.max_mem_table_size as f64;
             return size_ratio > 0.75 && rand::thread_rng().gen_bool(0.1);
         }
         // Avoid too many mem-tables flush at the same time.
-        let jitter_seconds = self.mem_table_size % MAX_JITTER_SECONDS;
+        let jitter_seconds = total_size % MAX_JITTER_SECONDS;
         // We don't need to propose on hard limit, it is handled by the engine.
         let duration_secs_to_switch = min(
-            STANDARD_MEMORY_SIZE_DURATION / self.mem_table_size,
+            STANDARD_MEMORY_SIZE_DURATION / total_size,
             MAX_SWITCH_SECONDS + jitter_seconds,
         );
         self.get_duration_since_last_switch(now).as_secs() > duration_secs_to_switch
@@ -2637,7 +2648,7 @@ mod tests {
             Case::new(1).check_at(25 * 60 * 60).result(true),
         ];
         for case in cases {
-            let mut states = MemTableState::new(case.size_kb * 1024, BYTES_MB);
+            let mut states = MemTableState::new(case.size_kb * 1024, 0usize, BYTES_MB);
             states.proposed_time = case
                 .propose_time
                 .map(|secs| Instant::now() + Duration::from_secs(secs));

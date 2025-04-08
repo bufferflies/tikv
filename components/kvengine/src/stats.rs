@@ -267,6 +267,7 @@ pub struct ShardStats {
     pub flushed: bool,
     pub mem_table_count: usize,
     pub mem_table_size: u64,
+    pub mem_table_unpersisted_props_size: usize,
     pub l0_table_count: usize,
     pub blob_table_count: usize,
     pub in_use_blob_size: u64,
@@ -515,8 +516,10 @@ impl super::Shard {
         let data = self.get_data();
         let mem_table_count = data.mem_tbls.len();
         let mut mem_table_size = 0;
+        let mut mem_table_unpersisted_props_size = 0;
         for mem_tbl in data.mem_tbls.as_slice() {
             mem_table_size += mem_tbl.size();
+            mem_table_unpersisted_props_size = mem_tbl.unpersisted_props_size();
             max_ts = cmp::max(max_ts, mem_tbl.data_max_ts());
         }
         total_size += mem_table_size;
@@ -688,6 +691,7 @@ impl super::Shard {
             flushed: self.get_initial_flushed(),
             mem_table_count,
             mem_table_size,
+            mem_table_unpersisted_props_size,
             l0_table_count,
             blob_table_count,
             l0_table_size,

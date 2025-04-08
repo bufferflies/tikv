@@ -33,14 +33,15 @@ struct MemTableProp {
     skl_size: u64,
     txn_files_size: u64,
     prefixed_size: u64,
+    unpersisted_props_size: usize,
 }
 
 impl fmt::Debug for MemTableProp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "size:{}+{},{}",
-            self.skl_size, self.txn_files_size, self.prefixed_size
+            "size:{}+{},{},props:{}",
+            self.skl_size, self.txn_files_size, self.prefixed_size, self.unpersisted_props_size,
         )
     }
 }
@@ -115,6 +116,7 @@ impl Tracer {
         let store_id = shard.engine_id;
         let region_id = shard.id;
         let (skl_size, txn_files_size) = mem_tbl.skl_and_txn_files_size();
+        let unpersisted_props_size = mem_tbl.unpersisted_props_size();
         let mem_tbl_action = MemTableAction {
             store_id,
             log_idx,
@@ -122,6 +124,7 @@ impl Tracer {
                 skl_size,
                 txn_files_size,
                 prefixed_size: prefixed_mem_tbl_size,
+                unpersisted_props_size,
             },
             ty,
         };

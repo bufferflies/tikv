@@ -1730,7 +1730,7 @@ impl RegionShardStats {
     fn check_truncate_index(&self) -> anyhow::Result<()> {
         let mut checked_shards = 0;
         for (store_id, shard_stat) in &self.shard_stats {
-            if shard_stat.mem_table_size > 0 || shard_stat.txn_file_locks > 0 {
+            if shard_stat.mem_table_size > 0 || shard_stat.mem_table_unpersisted_props_size > 0 {
                 continue;
             }
             let Some(&truncated_index) = self.truncated_index.get(store_id) else {

@@ -175,8 +175,16 @@ impl Engine {
         mem_table.set_properties(props);
     }
 
+    // Return `None` when mem table is switched.
     // `_custom_log` is for debug trace only.
-    pub fn write(&self, wb: &mut WriteBatch, _custom_log: &[u8]) -> u64 {
+    pub fn write(
+        &self,
+        wb: &mut WriteBatch,
+        _custom_log: &[u8],
+    ) -> Option<(
+        u64,   // mem_tbl_size
+        usize, // unpersisted_props_size
+    )> {
         let shard = self.get_shard(wb.shard_id).unwrap_or_else(|| {
             let tag = ShardTag::new(self.get_engine_id(), IdVer::new(wb.shard_id, 0));
             panic!("{} unable to get shard", tag);
@@ -274,6 +282,10 @@ impl Engine {
                     shard.properties.set(k.as_str(), v.chunk());
                 }
             }
+
+            if is_property_must_persist(k.as_str()) {
+                mem_tbl.add_unpersisted_props_size(k.len() + v.len());
+            }
         }
         if need_refresh_shard_states {
             self.refresh_shard_states(&shard);
@@ -284,6 +296,7 @@ impl Engine {
         if data.prepend_keyspace_id().is_some() {
             size += (skip_list_entries * KEYSPACE_PREFIX_LEN) as u64;
         }
+        let unpersisted_props_size = mem_tbl.unpersisted_props_size();
 
         #[cfg(feature = "debug-trace-mem-table")]
         if !self.opts.for_restore {
@@ -295,9 +308,9 @@ impl Engine {
             if let Err(err) = self.trigger_flush(&shard) {
                 warn!("{} trigger_flush error: {:?}", shard.tag(), err);
             }
-            0
+            None
         } else {
-            size
+            Some((size, unpersisted_props_size))
         }
     }
 

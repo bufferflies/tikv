@@ -156,6 +156,19 @@ pub fn is_property_need_flush(key: &str) -> bool {
     matches!(key, TERM_KEY) || is_property_need_initial_flush(key)
 }
 
+// The properties must persist before advance data sequence.
+// See `ShardData::all_persisted` and `PeerMsgHandler::on_raft_log_gc_tick`.
+// Some properties in `is_property_need_flush` are not considered as "must
+// persist" for performance:
+// - TERM_KEY: Specially handle in `PeerMsgHandler::on_raft_log_gc_tick`.
+// - INGEST_ID_KEY: deprecated for legacy import.
+// - TRIM_OVER_BOUND: safe to ignore.
+// - MANUAL_MAJOR_COMPACTION: safe to ignore.
+#[inline]
+pub fn is_property_must_persist(key: &str) -> bool {
+    matches!(key, TXN_FILE_REF)
+}
+
 // Properties will change in parent shard during recovery.
 // See `Shard::add_parent_data`.
 const PROPERTIES_COPY_FROM_PARENT_IN_RECOVERY: &[&str] = &[DEL_PREFIXES_KEY, TXN_FILE_REF];
@@ -1329,14 +1342,19 @@ impl Shard {
         SnapAccess::new(self)
     }
 
-    pub fn get_writable_mem_table_size(&self) -> u64 {
+    pub fn get_writable_mem_table_state(
+        &self,
+    ) -> (
+        u64,   // mem_table_size
+        usize, // unpersisted_props_size
+    ) {
         let guard = self.data.read().unwrap();
         let mem_tbl = &guard.mem_tbls[0];
         let mut size = mem_tbl.size();
         if guard.prepend_keyspace_id().is_some() {
             size += (mem_tbl.skip_list_entries() * KEYSPACE_PREFIX_LEN) as u64;
         }
-        size
+        (size, mem_tbl.unpersisted_props_size())
     }
 
     pub fn has_over_bound_data(&self) -> bool {
@@ -2004,7 +2022,9 @@ impl ShardDataCore {
     }
 
     pub fn all_persisted(&self) -> bool {
-        self.mem_tbls.len() == 1 && self.mem_tbls[0].size() == 0 && !self.has_txn_file_locks()
+        self.mem_tbls.len() == 1
+            && self.mem_tbls[0].size() == 0
+            && self.mem_tbls[0].unpersisted_props_size() == 0
     }
 
     pub(crate) fn has_mem_over_bound_data(&self) -> bool {

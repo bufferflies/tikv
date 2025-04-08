@@ -5,7 +5,7 @@ use std::{
     iter::Iterator as StdIterator,
     ops::Deref,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -48,6 +48,7 @@ impl CfTable {
         let ver = AtomicU64::new(self.ver.load(Ordering::Acquire));
         let force_switch = AtomicBool::new(self.force_switch.load(Ordering::Acquire));
         let props = Mutex::new(self.core.props.lock().unwrap().clone());
+        let unpersisted_props_size = AtomicUsize::new(self.core.unpersisted_props_size());
         Self {
             core: Arc::new(CfTableCore {
                 tbls,
@@ -55,6 +56,7 @@ impl CfTable {
                 ver,
                 force_switch,
                 props,
+                unpersisted_props_size,
             }),
         }
     }
@@ -67,6 +69,7 @@ impl CfTable {
         let ver = AtomicU64::new(self.ver.load(Ordering::Acquire));
         let force_switch = AtomicBool::new(self.force_switch.load(Ordering::Acquire));
         let props = Mutex::new(self.core.props.lock().unwrap().clone());
+        let unpersisted_props_size = AtomicUsize::new(self.core.unpersisted_props_size());
         Self {
             core: Arc::new(CfTableCore {
                 tbls,
@@ -74,6 +77,7 @@ impl CfTable {
                 ver,
                 force_switch,
                 props,
+                unpersisted_props_size,
             }),
         }
     }
@@ -85,6 +89,7 @@ pub struct CfTableCore {
     ver: AtomicU64,
     force_switch: AtomicBool,
     props: Mutex<Option<kvenginepb::Properties>>,
+    unpersisted_props_size: AtomicUsize,
 }
 
 impl Default for CfTableCore {
@@ -106,6 +111,7 @@ impl CfTableCore {
             ver: AtomicU64::new(0),
             force_switch: AtomicBool::new(false),
             props: Mutex::new(None),
+            unpersisted_props_size: AtomicUsize::default(),
         }
     }
 
@@ -140,6 +146,15 @@ impl CfTableCore {
 
     pub fn get_properties(&self) -> Option<kvenginepb::Properties> {
         self.props.lock().unwrap().clone()
+    }
+
+    pub fn add_unpersisted_props_size(&self, size: usize) {
+        self.unpersisted_props_size
+            .fetch_add(size, Ordering::Release);
+    }
+
+    pub fn unpersisted_props_size(&self) -> usize {
+        self.unpersisted_props_size.load(Ordering::Acquire)
     }
 
     pub fn get_version(&self) -> u64 {
