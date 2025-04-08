@@ -15,7 +15,7 @@ use security::{RestfulClient, SecurityManager};
 use serde_derive::Serialize;
 use tikv_util::info;
 
-use crate::try_wait_result_async;
+use crate::{must_wait, try_wait_result_async};
 
 const TIFLASH_HTTP_PORT_BASE: u16 = 8123;
 const TIFLASH_TCP_PORT_BASE: u16 = 9000;
@@ -238,20 +238,26 @@ impl TiFlashServers {
         let mut minio = self.minio.lock().unwrap();
         *minio = Some(child);
 
-        // Configure mc client
-        let status = Command::new("mc")
-            .arg("alias")
-            .arg("set")
-            .arg("local") // alias name
-            .arg(format!("http://127.0.0.1:{}", MINIO_PORT))
-            .arg("minioadmin")
-            .arg("minioadmin")
-            .status()
-            .unwrap_or_else(|e| panic!("failed to configure mc: {}", e));
-
-        if !status.success() {
-            panic!("failed to configure mc client");
-        }
+        // Configure mc client, wait the minio server to be ready and retry.
+        must_wait(
+            || {
+                let status = Command::new("mc")
+                    .arg("alias")
+                    .arg("set")
+                    .arg("local") // alias name
+                    .arg(format!("http://127.0.0.1:{}", MINIO_PORT))
+                    .arg("minioadmin")
+                    .arg("minioadmin")
+                    .status()
+                    .unwrap_or_else(|e| panic!("failed to configure mc: {}", e));
+                if status.success() {
+                    return true;
+                }
+                false
+            },
+            5,
+            || "failed to configure mc client".to_string(),
+        );
 
         // Create bucket if it doesn't exist
         let status = Command::new("mc")
