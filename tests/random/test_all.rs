@@ -352,7 +352,7 @@ fn prepare_cluster(
             conf.kvengine.ia = IaConfig {
                 mem_cap: IA_MEM_CAP_DEF.into(),
                 disk_cap: IA_DISK_CAP_DEF.into(),
-                segment_size: conf.rocksdb.writecf.block_size.0 as i64 * 8,
+                segment_size: conf.rocksdb.writecf.block_size.0 as i64 * 2,
                 freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
                 ..Default::default()
             }

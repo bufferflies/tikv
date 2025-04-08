@@ -76,9 +76,16 @@ fn test_random_upgrade() {
     let tikv_worker_addr = tikv_workers.endpoints().pop().unwrap();
     start_components(&tc, tikv_worker_addr, &switches, &dfs_config, &runtime);
     prepare_workloads(&tc, &keyspace_manager, &switches, &runtime);
+    let tables = block_on(collect_tables(&tc, &keyspace_manager, &switches));
     let running = Running::new_start();
-    let async_handles =
-        start_workloads(&tc, &keyspace_manager, &switches, &runtime, running.clone());
+    let async_handles = start_workloads(
+        &tc,
+        &keyspace_manager,
+        &switches,
+        &runtime,
+        &tables,
+        running.clone(),
+    );
 
     let worker_configs = cluster.tikv_worker_configs().clone();
     let server_configs = cluster.get_node_configs().clone();
@@ -166,7 +173,7 @@ fn test_random_upgrade() {
         stop_schedulers(pd_ctl).await;
 
         info!("verify cluster");
-        verify_cluster(&mut cluster, &switches).await;
+        verify_cluster(&mut cluster, &switches, &tables).await;
     });
 
     // Stop cluster.
@@ -286,7 +293,7 @@ fn prepare_cluster(
     tikv_workers.start_all(cluster.tikv_worker_configs());
     block_on(tikv_workers.must_all_healthy(WAIT_TIKV_WORKER_HEALTHY_TIMEOUT));
 
-    if switches.columnar_switch_on {
+    if switches.columnar_switch_on || switches.ia_table_ratio > 0.0 {
         cluster.start_schema_manager(alloc_node_id());
     }
     cluster.wait_region_replicated(&[], 3);

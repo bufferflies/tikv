@@ -11,6 +11,18 @@ const TPCC_WAREHOUSES: usize = 2;
 const TPCC_MAX_PROCS: usize = 1;
 const TPCC_THREADS: usize = 4; // Number of threads for each TPCC workload.
 
+pub(crate) const TPCC_TABLES: &[&str] = &[
+    "customer",
+    "district",
+    "history",
+    "item",
+    "new_order",
+    "order_line",
+    "orders",
+    "stock",
+    "warehouse",
+];
+
 pub(crate) async fn prepare_tpcc(
     tc: TidbCluster,
     keyspace_manager: KeyspaceManager,

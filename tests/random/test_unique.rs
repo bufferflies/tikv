@@ -21,8 +21,8 @@ use crate::{
 };
 
 const UNIQUE_WORKLOAD_CONCURRENCY: usize = 4;
-const UNIQUE_DB_NAME: &str = "uniq";
-const UNIQUE_TABLE_NAME: &str = "rows";
+pub(crate) const UNIQUE_DB_NAME: &str = "uniq";
+pub(crate) const UNIQUE_TABLE_NAME: &str = "rows";
 
 const VALUE0_MAX: i32 = 1000;
 const VALUE1_MAX: i32 = VALUE0_MAX * 10; // To generate index key in a wider range.

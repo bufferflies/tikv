@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ops,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
     thread::sleep,
     time::Duration,
@@ -880,7 +880,12 @@ impl ServerCluster {
     }
 
     pub fn start_schema_manager(&mut self, worker_idx: u16) {
+        assert!(self.schema_manager.is_none());
         let tikv_config = self.confs.iter().next().unwrap().1;
+        let dir = self
+            .tmp_dir
+            .path()
+            .join(format!("schema-manager-{worker_idx}"));
         let worker_config = cloud_worker::Config {
             addr: tikv_worker_addr(worker_idx),
             cop_addr: "".to_string(),
@@ -888,7 +893,7 @@ impl ServerCluster {
             security: tikv_config.security.clone(),
             dfs: tikv_config.dfs.clone(),
             schema_manager: cloud_worker::SchemaManagerConfig {
-                dir: PathBuf::from(tikv_config.storage.data_dir.clone()),
+                dir,
                 schema_refresh_threshold: 1,
                 enabled: true,
                 keyspace_refresh_interval: ReadableDuration::secs(3),

@@ -1,23 +1,28 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    convert::TryInto,
     ops::Div,
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
-use kvengine::{dfs::DFSConfig, table::sstable::BlockCacheType};
+use anyhow::Context;
+use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
+use kvengine::{dfs::DFSConfig, ia::util::IaConfig, table::sstable::BlockCacheType};
 use pd_client::{
     pd_control,
     pd_control::{OpKind, PdControl, PdScheduleConfig},
 };
 use rand::prelude::*;
+use schema::schema::StorageClass;
 use security::SecurityConfig;
 use sqlx::{ConnectOptions, Executor, Row as _};
 use test_cloud_server::{
-    oss::prepare_dfs, tidb::*, tikv_worker_cop_url, try_wait_async, ServerCluster,
-    ServerClusterBuilder, TikvWorkerOptions,
+    oss::prepare_dfs, table::TableMeta, tidb::*, tikv_worker_cop_url, try_wait_async,
+    ServerCluster, ServerClusterBuilder, TikvWorkerOptions, IA_DISK_CAP_DEF,
+    IA_FREQ_UPDATE_INTERVAL_DEF, IA_MEM_CAP_DEF,
 };
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
@@ -32,11 +37,14 @@ use tokio::runtime::Runtime;
 use crate::{
     test_columnar::{prepare_columnar, run_columnar_workload},
     test_jepsen::*,
+    test_storage_class::*,
     test_tpc::*,
     test_txn_file::{TXN_CHUNK_MAX_SIZE, TXN_FILE_MIN_SIZE},
     test_unique::*,
     *,
 };
+
+pub(crate) type Result<T> = anyhow::Result<T>;
 
 pub(crate) const REGION_SIZE: ReadableSize = ReadableSize::mb(1);
 // TiDB has records with 200kb+ size (see "mysql.stats_history"), so set bucket
@@ -141,9 +149,16 @@ fn test_random_with_tidb() {
     let tikv_worker_addr = cluster.tikv_worker_endpoints().pop().unwrap();
     start_components(&tc, tikv_worker_addr, &switches, &dfs_config, &runtime);
     prepare_workloads(&tc, &keyspace_manager, &switches, &runtime);
+    let tables = block_on(collect_tables(&tc, &keyspace_manager, &switches));
     let running = Running::new_start();
-    let async_handles =
-        start_workloads(&tc, &keyspace_manager, &switches, &runtime, running.clone());
+    let async_handles = start_workloads(
+        &tc,
+        &keyspace_manager,
+        &switches,
+        &runtime,
+        &tables,
+        running.clone(),
+    );
 
     // Main loop.
     let start_time = Instant::now();
@@ -166,7 +181,7 @@ fn test_random_with_tidb() {
         stop_schedulers(pd_ctl).await;
 
         info!("verify cluster");
-        verify_cluster(&mut cluster, &switches).await;
+        verify_cluster(&mut cluster, &switches, &tables).await;
     });
 
     // Stop cluster.
@@ -263,7 +278,7 @@ fn prepare_cluster(
             ..Default::default()
         },
     );
-    if switches.columnar_switch_on {
+    if switches.columnar_switch_on || switches.ia_table_ratio > 0.0 {
         cluster.start_schema_manager(alloc_node_id());
     }
     cluster.wait_region_replicated(&[], 3);
@@ -314,8 +329,8 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.raft_store.pd_heartbeat_tick_interval = ReadableDuration::secs(5);
         conf.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(500);
 
-        conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
-        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
+        conf.rocksdb.writecf.block_size = ReadableSize::kb(2);
+        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(32);
 
         conf.rfengine.target_file_size = ReadableSize::mb(8);
         conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
@@ -335,6 +350,14 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.kvengine.columnar_table_build_options.pack_max_size = 32 * 128;
         conf.kvengine.vector_index_build_options.delta_size = 128;
         conf.kvengine.vector_index_build_options.rebuild_file_count = 2;
+
+        conf.kvengine.ia = IaConfig {
+            mem_cap: IA_MEM_CAP_DEF.into(),
+            disk_cap: IA_DISK_CAP_DEF.into(),
+            segment_size: conf.rocksdb.writecf.block_size.0 as i64 * 4,
+            freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
+            ..Default::default()
+        };
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
@@ -495,7 +518,7 @@ async fn prepare_tidb_variables(
                 info!("{}: TiDB var: {}", keyspace_id, sql);
                 conn.execute(sql).await.unwrap();
             }
-            conn.detach(); // Drop the connection, as we set global variables only.    
+            conn.detach(); // Drop the connection, as we set global variables only.
         }
     }
 
@@ -512,11 +535,69 @@ async fn prepare_tidb_variables(
     }
 }
 
+pub(crate) async fn collect_tables(
+    tc: &TidbCluster,
+    keyspace_manager: &KeyspaceManager,
+    switches: &Switches,
+) -> Vec<Arc<TableMeta>> {
+    let mut tables = vec![];
+    let all_keyspaces = keyspace_manager.get_all_keyspaces();
+
+    if switches.tpc_switch_on {
+        for &keyspace_id in &all_keyspaces {
+            for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
+                let db = db_name_by_tpc_idx(tpc_idx);
+                for table_name in TPCC_TABLES {
+                    tables.push(
+                        query_table_meta(tc, keyspace_manager, keyspace_id, &db, table_name)
+                            .await
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+    }
+
+    if switches.jepsen_switch_on {
+        tables.push(
+            query_table_meta(
+                tc,
+                keyspace_manager,
+                JEPSEN_WORKLOAD_KEYSPACE,
+                BANK_DB_NAME,
+                ACCOUNTS_TABLE_NAME,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+
+    if switches.unique_workload_switch_on {
+        tables.push(
+            query_table_meta(
+                tc,
+                keyspace_manager,
+                UNIQUE_WORKLOAD_KEYSPACE,
+                UNIQUE_DB_NAME,
+                UNIQUE_TABLE_NAME,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+
+    // TODO: tables of columnar workload
+
+    info!("workload tables: {:?}", &tables);
+    tables.into_iter().map(|t| Arc::new(t)).collect()
+}
+
 pub(crate) fn start_workloads(
     tc: &TidbCluster,
     keyspace_manager: &KeyspaceManager,
     switches: &Switches,
     runtime: &Runtime,
+    tables: &[Arc<TableMeta>],
     running: Running,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut async_handles = vec![];
@@ -557,6 +638,16 @@ pub(crate) fn start_workloads(
             tc.clone(),
             keyspace_manager.clone(),
             COLUMNAR_WORKLOAD_KEYSPACE,
+            running.clone(),
+        )));
+    }
+    if switches.ia_table_ratio > 0.0 && !tables.is_empty() {
+        async_handles.push(runtime.spawn(spawn_alter_storage_class(
+            tc.clone(),
+            keyspace_manager.clone(),
+            tables.to_vec(),
+            switches.ia_table_ratio,
+            Duration::from_secs(10),
             running.clone(),
         )));
     }
@@ -647,7 +738,15 @@ pub(crate) async fn check_and_stop_components(tc: &TidbCluster) {
 }
 
 // TODO: merge to `verify_cluster` in `test_all.rs`.
-pub(crate) async fn verify_cluster(cluster: &mut ServerCluster, switches: &Switches) {
+pub(crate) async fn verify_cluster(
+    cluster: &mut ServerCluster,
+    switches: &Switches,
+    tables: &[Arc<TableMeta>],
+) {
+    if switches.ia_table_ratio > 0.0 {
+        check_storage_class(cluster, tables, Duration::from_secs(180));
+    }
+
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
@@ -696,7 +795,7 @@ pub(crate) fn spawn_restart_tso_svc(
     tokio::spawn(task)
 }
 
-pub(crate) async fn connect_tidb(
+async fn connect_tidb_impl(
     tc: &TidbCluster,
     keyspace_manager: &KeyspaceManager,
     keyspace_id: u32,
@@ -720,6 +819,75 @@ pub(crate) async fn connect_tidb(
         .unwrap()
 }
 
+pub(crate) async fn connect_tidb(
+    tc: &TidbCluster,
+    keyspace_manager: &KeyspaceManager,
+    keyspace_id: u32,
+) -> sqlx::MySqlPool {
+    lazy_static::lazy_static! {
+        static ref POOLS: DashMap<u32 /* keyspace_id */, sqlx::MySqlPool> = DashMap::new();
+    }
+
+    match POOLS.entry(keyspace_id) {
+        DashMapEntry::Occupied(entry) => entry.get().clone(),
+        DashMapEntry::Vacant(entry) => {
+            let pool = connect_tidb_impl(tc, keyspace_manager, keyspace_id).await;
+            entry.insert(pool.clone());
+            pool
+        }
+    }
+}
+
+pub(crate) struct TidbTableSchema {
+    pub id: i64,
+    pub storage_class: StorageClass,
+}
+
+pub(crate) async fn query_tidb_table_schema<'a, E>(
+    executor: E,
+    db: &str,
+    table: &str,
+) -> Result<TidbTableSchema>
+where
+    E: sqlx::Executor<'a, Database = sqlx::MySql>,
+{
+    let query = "SELECT TIDB_TABLE_ID, TIDB_STORAGE_CLASS FROM INFORMATION_SCHEMA.TABLES \
+                       WHERE TABLE_SCHEMA = ? and TABLE_NAME = ? LIMIT 1";
+    let row = sqlx::query(query)
+        .bind(db)
+        .bind(table)
+        .fetch_one(executor)
+        .await
+        .context("select_schema")?;
+    let table_id: i64 = row.get("TIDB_TABLE_ID");
+    let storage_class: String = row.get("TIDB_STORAGE_CLASS");
+    let meta = TidbTableSchema {
+        id: table_id,
+        storage_class: storage_class.as_str().try_into().unwrap(),
+    };
+    Ok(meta)
+}
+
+async fn query_table_meta(
+    tc: &TidbCluster,
+    keyspace_manager: &KeyspaceManager,
+    keyspace_id: u32,
+    db: &str,
+    table: &str,
+) -> Result<TableMeta> {
+    let pool = connect_tidb(tc, keyspace_manager, keyspace_id).await;
+    let schema = query_tidb_table_schema(&pool, db, table)
+        .await
+        .context("query_schema")?;
+    Ok(TableMeta::new_tidb_table(
+        schema.id,
+        keyspace_id,
+        db.to_string(),
+        table.to_string(),
+        schema.storage_class,
+    ))
+}
+
 #[derive(Debug)]
 pub(crate) struct Switches {
     pub remote_cop_min_block_size: usize,
@@ -733,6 +901,7 @@ pub(crate) struct Switches {
     pub global_use_txn_file: bool,
     pub restart_tso_svc: bool,
     pub async_commit_switch_on: bool,
+    pub ia_table_ratio: f64,
 }
 
 impl Switches {
@@ -759,6 +928,7 @@ impl Switches {
 
         let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
         let async_commit_switch_on = rng.gen_bool(env_param("ASYNC_COMMIT_RATIO", 0.1));
+        let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.2);
 
         Self {
             remote_cop_min_block_size,
@@ -772,6 +942,7 @@ impl Switches {
             global_use_txn_file,
             restart_tso_svc,
             async_commit_switch_on,
+            ia_table_ratio,
         }
     }
 }
@@ -786,6 +957,7 @@ pub(crate) struct WorkloadStats {
     pub total_jepsen_bank_retry: usize,
     pub total_unique_workload: usize,
     pub total_unique_conflict: usize,
+    pub total_async_shards: usize,
 }
 
 impl WorkloadStats {
@@ -797,6 +969,7 @@ impl WorkloadStats {
         let total_jepsen_bank_retry = JEPSEN_BANK_TXN_RETRY_COUNTER.load(Ordering::SeqCst);
         let total_unique_workload = UNIQUE_WORKLOAD_TXN_COUNTER.load(Ordering::SeqCst);
         let total_unique_conflict = UNIQUE_WORKLOAD_CONFLICT_COUNTER.load(Ordering::SeqCst);
+        let total_async_shards = ASYNC_SHARD_COUNTER.load(Ordering::SeqCst);
         Self {
             total_keyspace_count,
             total_node_restart,
@@ -805,6 +978,7 @@ impl WorkloadStats {
             total_jepsen_bank_retry,
             total_unique_workload,
             total_unique_conflict,
+            total_async_shards,
         }
     }
 }

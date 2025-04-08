@@ -1662,10 +1662,10 @@ impl StatusServer {
             callback,
         });
         let res = future.await;
-        if res.is_err() {
+        if let Err(err) = res {
             return Ok(make_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to get regions in range",
+                format!("failed to get regions in range: {err:?}"),
             ));
         }
         let region_id_vers = res.unwrap();
@@ -1728,10 +1728,10 @@ impl StatusServer {
                 callback,
             });
             let res = future.await;
-            if res.is_err() {
+            if let Err(err) = res {
                 return Ok(make_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to get regions in range",
+                    format!("failed to get regions in range: {err:?}"),
                 ));
             }
             let region_id_vers = res.unwrap();

@@ -7,6 +7,7 @@ mod test_drop_table;
 mod test_jepsen;
 mod test_load_data;
 mod test_native_br;
+mod test_storage_class;
 mod test_tidb;
 mod test_tpc;
 mod test_txn_file;
@@ -87,6 +88,9 @@ lazy_static::lazy_static! {
     pub static ref UNIQUE_WORKLOAD_CONFLICT_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref COLUMNAR_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref COLUMNAR_RETRY_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref ALTER_TABLE_IA_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref ALTER_TABLE_NON_IA_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref ASYNC_SHARD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(90);

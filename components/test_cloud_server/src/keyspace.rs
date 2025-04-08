@@ -304,6 +304,8 @@ impl ops::DerefMut for KeyspaceMeta {
 /// Used for keyspace meta backup & restore without locks.
 #[derive(Clone)]
 pub struct KeyspaceMetaCore {
+    keyspace_id: u32,
+
     /// Used to locate TiDB in `tidb::TidbCluster`.
     ///
     /// As keyspace id is allocated by PD (in real PD servers), it may not be
@@ -328,6 +330,7 @@ pub struct KeyspaceMetaCore {
 impl fmt::Debug for KeyspaceMetaCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeyspaceMetaCore")
+            .field("id", &self.keyspace_id)
             .field("name", &self.name)
             .field(
                 "tables",
@@ -348,7 +351,12 @@ impl KeyspaceMeta {
         let mut tables_schema_opts = vec![];
         for _ in 0..options.table_count {
             let is_schema_enabled = rand::thread_rng().gen_bool(options.schema_enable_ratio);
-            let table = TableMeta::new(true, is_schema_enabled, StorageClass::default());
+            let table = TableMeta::new(
+                keyspace_id,
+                true,
+                is_schema_enabled,
+                StorageClass::default(),
+            );
             let table_id = table.id();
             let storage_class = (options.storage_class_fn)(table_id);
             table.set_storage_class(storage_class);
@@ -366,6 +374,7 @@ impl KeyspaceMeta {
         let schemas = build_schemas(&tables_schema_opts);
         Self {
             core: KeyspaceMetaCore {
+                keyspace_id,
                 name,
                 tables,
                 del_prefixes: kvengine::DeletePrefixes::new_with_keyspace_id(keyspace_id),
@@ -406,7 +415,12 @@ impl KeyspaceMeta {
         is_schema_enabled: bool,
         storage_class: StorageClass,
     ) -> i64 {
-        let table = TableMeta::new(is_available, is_schema_enabled, storage_class);
+        let table = TableMeta::new(
+            self.keyspace_id,
+            is_available,
+            is_schema_enabled,
+            storage_class,
+        );
         let table_id = table.id();
         self.tables.insert(table.id(), table);
         table_id

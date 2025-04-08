@@ -17,16 +17,16 @@ use tikv_util::{debug, error, info, time::Instant};
 use crate::{
     env_param,
     sql_util::{
-        gen_padding, get_engine_hint, is_error_retryable, retry_or_panic,
-        wait_tiflash_or_columnar_replicas_available, Transaction, MAX_PADDING_SIZE,
+        gen_padding, get_engine_hint, retry_or_panic, wait_tiflash_or_columnar_replicas_available,
+        Transaction, MAX_PADDING_SIZE,
     },
     test_tidb::connect_tidb,
     Running, JEPSEN_BANK_TXN_COUNTER, JEPSEN_BANK_TXN_RETRY_COUNTER,
 };
 
 pub(crate) const JEPSEN_BANK_WORKLOAD_CONCURRENCY: usize = 4;
-const BANK_DB_NAME: &str = "jepsen-bank";
-const ACCOUNTS_TABLE_NAME: &str = "accounts";
+pub(crate) const BANK_DB_NAME: &str = "jepsen-bank";
+pub(crate) const ACCOUNTS_TABLE_NAME: &str = "accounts";
 const BANK_ACCOUNTS: usize = 10;
 const BANK_TXN_FILE_RATIO: f64 = 0.5;
 

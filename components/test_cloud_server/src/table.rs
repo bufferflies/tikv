@@ -12,6 +12,9 @@ static NEXT_TABLE_ID: AtomicI64 = AtomicI64::new(1);
 #[derive(Default)]
 pub struct TableMeta {
     id: i64,
+    keyspace_id: u32,
+    db_name: String,
+    table_name: String,
     /// `is_available` indicates whether the table is available for read/write.
     /// It is set to `false` when the table is being "load_data" after
     /// "destroy_table".
@@ -29,6 +32,9 @@ impl Clone for TableMeta {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
+            keyspace_id: self.keyspace_id,
+            db_name: self.db_name.clone(),
+            table_name: self.table_name.clone(),
             is_available: AtomicBool::new(self.is_available()),
             is_schema_enabled: AtomicBool::new(self.is_schema_enabled()),
             storage_class: AtomicU8::new(self.storage_class() as u8),
@@ -38,9 +44,16 @@ impl Clone for TableMeta {
 
 impl fmt::Debug for TableMeta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TableMeta")
-            .field("id", &self.id)
-            .field("is_available", &self.is_available())
+        let mut de = f.debug_struct("TableMeta");
+        de.field("id", &self.id)
+            .field("keyspace", &self.keyspace_id);
+        if !self.db_name.is_empty() {
+            de.field("db_name", &self.db_name);
+        }
+        if !self.table_name.is_empty() {
+            de.field("table_name", &self.table_name);
+        }
+        de.field("is_available", &self.is_available())
             .field("is_schema_enabled", &self.is_schema_enabled())
             .field("storage_class", &self.storage_class())
             .finish()
@@ -48,18 +61,56 @@ impl fmt::Debug for TableMeta {
 }
 
 impl TableMeta {
-    pub fn new(is_available: bool, is_schema_enabled: bool, storage_class: StorageClass) -> Self {
+    pub fn new(
+        keyspace_id: u32,
+        is_available: bool,
+        is_schema_enabled: bool,
+        storage_class: StorageClass,
+    ) -> Self {
         let id = NEXT_TABLE_ID.fetch_add(1, Ordering::SeqCst);
         Self {
             id,
+            keyspace_id,
+            db_name: String::new(),
+            table_name: String::new(),
             is_available: AtomicBool::new(is_available),
             is_schema_enabled: AtomicBool::new(is_schema_enabled),
             storage_class: AtomicU8::new(storage_class as u8),
         }
     }
 
+    pub fn new_tidb_table(
+        table_id: i64,
+        keyspace_id: u32,
+        db_name: String,
+        table_name: String,
+        storage_class: StorageClass,
+    ) -> Self {
+        Self {
+            id: table_id,
+            keyspace_id,
+            db_name,
+            table_name,
+            is_available: AtomicBool::new(true),
+            is_schema_enabled: AtomicBool::new(true),
+            storage_class: AtomicU8::new(storage_class as u8),
+        }
+    }
+
     pub fn id(&self) -> i64 {
         self.id
+    }
+
+    pub fn keyspace_id(&self) -> u32 {
+        self.keyspace_id
+    }
+
+    pub fn db_name(&self) -> &str {
+        &self.db_name
+    }
+
+    pub fn table_name(&self) -> &str {
+        &self.table_name
     }
 
     pub fn is_available(&self) -> bool {

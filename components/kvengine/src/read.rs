@@ -261,6 +261,22 @@ impl SnapAccess {
     }
 }
 
+#[cfg(any(test, feature = "testexport"))]
+impl SnapAccess {
+    pub fn display(&self) -> pb::ChangeSet {
+        let outer_range = (self.data.outer_start.clone(), self.data.outer_end.clone());
+        self.to_change_set(&[outer_range], false)
+    }
+
+    pub fn write_cf_level_n_is_empty(&self) -> bool {
+        self.data
+            .get_cf(WRITE_CF)
+            .levels
+            .iter()
+            .all(|lh| lh.tables.is_empty())
+    }
+}
+
 impl Deref for SnapAccess {
     type Target = SnapAccessCore;
 
@@ -863,12 +879,12 @@ impl SnapAccessCore {
             snap.mut_blob_creates().push(v.to_blob_create());
         }
         self.data.for_each_level(|cf, lh| {
-            if cf == LOCK_CF {
+            if ignore_locks && cf == LOCK_CF {
                 return false;
             }
             for v in lh.tables.iter() {
                 count += 1;
-                if ignore_locks && cf == WRITE_CF && v.size() == 0 {
+                if v.size() == 0 {
                     continue;
                 }
                 let mut overlap = false;

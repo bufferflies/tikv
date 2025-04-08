@@ -56,7 +56,7 @@ macro_rules! retry_or_panic {
     ($expr:expr, $on_retry:expr) => {{
         match $expr {
             Ok(r) => r,
-            Err(e) if is_error_retryable(&e) => {
+            Err(e) if $crate::sql_util::is_error_retryable(&e) => {
                 info!("meet error, retry: {:?}", e);
 
                 // To fix clippy error: "try not to call a closure in the expression where it is

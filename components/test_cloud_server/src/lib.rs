@@ -10,7 +10,7 @@ pub mod keyspace;
 pub mod load_data;
 pub mod oss;
 pub mod scheduler;
-mod table;
+pub mod table;
 pub mod tidb;
 mod tiflash;
 pub mod tpc;
