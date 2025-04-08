@@ -1309,7 +1309,7 @@ impl Peer {
         }
     }
 
-    fn on_role_changed(&mut self, ctx: &mut RaftContext, ready: &Ready) {
+    pub(crate) fn on_role_changed(&mut self, ctx: &mut RaftContext, ready: &Ready) {
         // Update leader lease when the Raft state changes.
         if let Some(ss) = ready.ss() {
             match ss.raft_state {

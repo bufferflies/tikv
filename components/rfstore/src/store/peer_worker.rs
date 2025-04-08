@@ -840,6 +840,7 @@ impl IdlePeer {
         PeerMsgHandler::new(&mut peer_fsm, ctx).handle_msgs(&mut self.messages);
         if peer_fsm.peer.raft_group.has_ready() {
             let mut ready = peer_fsm.peer.raft_group.ready();
+            peer_fsm.peer.on_role_changed(ctx, &ready);
             let raft_messages = if !ready.messages().is_empty() {
                 let leader_messages = ready.take_messages();
                 peer_fsm.peer.build_raft_messages(ctx, leader_messages)
