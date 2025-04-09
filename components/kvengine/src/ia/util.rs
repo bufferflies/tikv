@@ -495,6 +495,14 @@ impl IaConfig {
             .cache_cap_to_total_data_size_ratio(self.cache_cap_to_total_data_size_ratio)
             .build()
     }
+
+    pub fn disabled() -> Self {
+        Self {
+            mem_cap: 0.into(),
+            disk_cap: 0.into(),
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(any(test, feature = "testexport"))]

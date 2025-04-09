@@ -23,6 +23,7 @@ use hyper::Body;
 use itertools::Itertools;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
+    ia::util::IaConfig,
     limiter::StoreLimiter,
     table::{BoundedDataSet, DataBound, InnerKey},
     IdAllocator, IdVer, LoadTableFilterFn, ShardMeta, ShardRange, ShardStats, ShardTag,
@@ -1113,6 +1114,7 @@ impl BackupCluster {
 
         config.raft_engine.enable = false;
         config.rfengine.lightweight_backup = false;
+        config.kvengine.ia = IaConfig::disabled(); // TODO: Use IA ?
 
         TikvServer::init_config(config).get_current()
     }
