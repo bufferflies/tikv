@@ -1637,46 +1637,6 @@ impl<'a> PeerMsgHandler<'a> {
         }
     }
 
-    fn check_schema(&mut self, shard: &Arc<Shard>) {
-        let tag = self.peer.tag();
-        let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
-        let schema_meta = &shard_meta.schema;
-        let schema_file = shard.get_schema_file();
-        debug!("{} check schema", tag;
-            "schema_file_meta" => ?schema_meta,
-            "meta.storage_class" => ?shard_meta.get_storage_class(),
-            "shard.storage_class" => ?shard.get_storage_class(),
-            "checked_schema_ver" => shard.get_checked_schema_ver(),
-            "schema_file" => ?schema_file,
-        );
-
-        if !schema_file_is_matched_with_meta(schema_file.as_ref(), schema_meta) {
-            // Wait for schema file to be updated.
-            debug!("{} check schema: skip, schema file is stale", tag;
-                "schema_meta" => ?schema_meta, "schema_file" => ?schema_file);
-            return;
-        }
-        if shard_is_matched_with_meta(shard.as_ref(), shard_meta) {
-            debug!("{} check schema: skip, shard is up-to-date", tag);
-            return;
-        }
-
-        if !self.ctx.global.schema_scheduler.is_busy() {
-            let task = SchemaTask::StorageClass {
-                region: self.region().clone(),
-                schema_meta: schema_meta.clone(),
-            };
-            if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {
-                error!("check schema failed";
-                    "region_id" => self.region_id(),
-                    "err" => ?e
-                );
-            }
-        } else {
-            debug!("{} schema scheduler is busy", tag);
-        }
-    }
-
     pub(crate) fn on_check_leader(&mut self, shard_ver: u64, callback: Callback) {
         let mut resp = RaftCmdResponse::default();
         // If the peer is not leader or not applied to current term, return not_leader
@@ -1701,20 +1661,6 @@ impl<'a> PeerMsgHandler<'a> {
                 .push(self.region().clone());
         }
         callback.invoke_with_response(resp);
-    }
-
-    fn on_clear_columnar(&mut self) {
-        if !self.peer.is_leader() {
-            return;
-        }
-        let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
-        if !shard_meta.schema.is_valid() {
-            return;
-        }
-        let mut change_set = kvengine::new_change_set(shard_meta.id, shard_meta.ver);
-        change_set.set_clear_columnar(true);
-        info!("{} propose clear_columnar", self.peer.tag());
-        self.propose_change_set(change_set);
     }
 
     fn on_clear_columnar(&mut self) {

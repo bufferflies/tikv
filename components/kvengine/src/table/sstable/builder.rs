@@ -1246,7 +1246,6 @@ mod tests {
             3,                    // compression_lvl
             ChecksumType::Crc32c, // checksum_type
             None,                 // encryption_key
-            None,                 // prepend_keyspace_id
         )
     }
 
@@ -1313,7 +1312,6 @@ mod tests {
             3,                    // compression_lvl
             ChecksumType::Crc32c, // checksum_type
             None,                 // encryption_key
-            None,                 // prepend_keyspace_id
         );
 
         assert!(builder.is_empty()); // Should be true for a new builder
@@ -1337,7 +1335,6 @@ mod tests {
             3,                    // compression_lvl
             ChecksumType::Crc32c, // checksum_type
             None,                 // encryption_key
-            None,                 // prepend_keyspace_id
         );
 
         // Insert multiple keys
@@ -1370,7 +1367,6 @@ mod tests {
             3,                    // compression_lvl
             ChecksumType::Crc32c, // checksum_type
             None,                 // encryption_key
-            None,                 // prepend_keyspace_id
         );
 
         // Insert multiple keys
@@ -1430,28 +1426,6 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_add_with_keyspace_id() {
-        let mut builder = Builder::new(
-            123,                  // sst_fid
-            4096,                 // block_size
-            LZ4_COMPRESSION,      // compression_tp
-            3,                    // compression_lvl
-            ChecksumType::Crc32c, // checksum_type
-            None,                 // encryption_key
-            Some(42),             // prepend_keyspace_id - test with keyspace ID
-        );
-
-        let raw_key = b"test_key".to_vec();
-        let key = InnerKey::from_inner_buf(&raw_key);
-        let value = create_test_value(100, b"test_value");
-
-        builder.add(key, &value, None);
-
-        // Should have successfully added entry with keyspace ID prepended
-        assert!(!builder.block_builder.block.tmp_keys.buf.is_empty());
-    }
-
-    #[test]
     fn test_builder_add_with_blob_ref() {
         let mut builder = create_test_builder();
 
@@ -1482,7 +1456,6 @@ mod tests {
             3,                    // compression_lvl
             ChecksumType::Crc32c, // checksum_type
             encryption_key,       // encryption_key (None for now)
-            None,                 // prepend_keyspace_id
         );
 
         let raw_key = b"test_key".to_vec();

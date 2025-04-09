@@ -172,7 +172,7 @@ impl<T: Simulator> Cluster<T> {
     ) -> Cluster<T> {
         let mut cfg = Config::new(TikvConfig::default(), true);
         let cfg_path = cfg.tikv.cfg_path;
-        cfg.tikv = new_test_config(cfg.cfg_dir.as_ref().unwrap().path(), id, count);
+        cfg.tikv = new_test_config(cfg.cfg_dir.as_ref().unwrap().path(), id, count, 1.0);
         cfg.tikv.cfg_path = cfg_path;
 
         let io_rate_limiter = Arc::new(

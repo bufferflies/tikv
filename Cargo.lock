@@ -4131,7 +4131,7 @@ dependencies = [
 [[package]]
 name = "librocksdb_sys"
 version = "0.1.0"
-source = "git+https://github.com/tikv/rust-rocksdb.git?branch=tikv-6.5#ecbd6840f81372c30bab4a980e7ae9c91994a421"
+source = "git+https://github.com/tikv/rust-rocksdb.git#2096b9a161f93e437f7adee49e68cd1570aea42f"
 dependencies = [
  "bindgen 0.65.1",
  "bzip2-sys",
@@ -4150,7 +4150,7 @@ dependencies = [
 [[package]]
 name = "libtitan_sys"
 version = "0.0.1"
-source = "git+https://github.com/tikv/rust-rocksdb.git?branch=tikv-6.5#ecbd6840f81372c30bab4a980e7ae9c91994a421"
+source = "git+https://github.com/tikv/rust-rocksdb.git#2096b9a161f93e437f7adee49e68cd1570aea42f"
 dependencies = [
  "bzip2-sys",
  "cc",
@@ -5067,7 +5067,7 @@ checksum = "624a8340c38c1b80fd549087862da4ba43e08858af025b236e509b6649fc13d5"
 
 [[package]]
 name = "openssl"
-version = "0.10.70"
+version = "0.10.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bac25ee399abb46215765b1cb35bc0212377e58a061560d8b29b024fd0430e7c"
 dependencies = [
@@ -5099,9 +5099,9 @@ checksum = "77af24da69f9d9341038eba93a073b1fdaaa1b788221b00a69bce9e762cb32de"
 
 [[package]]
 name = "openssl-src"
-version = "300.4.2+3.4.1"
+version = "111.28.2+1.1.1w"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "168ce4e058f975fe43e89d9ccf78ca668601887ae736090aacc23ae353c298e2"
+checksum = "bb1830e20a48a975ca898ca8c1d036a36c3c6c5cb7dabc1c216706587857920f"
 dependencies = [
  "cc",
 ]
@@ -6678,7 +6678,7 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.3.0"
-source = "git+https://github.com/tikv/rust-rocksdb.git?branch=tikv-6.5#ecbd6840f81372c30bab4a980e7ae9c91994a421"
+source = "git+https://github.com/tikv/rust-rocksdb.git#bd07e9e598db63574cf06edaeea3c4687eadff59"
 dependencies = [
  "libc 0.2.161",
  "librocksdb_sys",

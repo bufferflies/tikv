@@ -1575,9 +1575,9 @@ trait MetaReader {
 
 #[derive(Default, Clone, Debug)]
 pub struct SchemaFileMeta {
-    schema_file_id: u64,
-    schema_file_ver: i64,
-    schema_restore_ver: u64,
+    pub schema_file_id: u64,
+    pub schema_file_ver: i64,
+    pub schema_restore_ver: u64,
 }
 
 impl SchemaFileMeta {

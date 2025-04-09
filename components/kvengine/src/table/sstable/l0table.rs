@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn test_l0_builder_basic() {
         // Test the creation of a new L0Builder instance
-        let mut builder = L0Builder::new(1, 1024, 1, ChecksumType::Crc32c, None, None);
+        let mut builder = L0Builder::new(1, 1024, 1, ChecksumType::Crc32c, None);
         assert_eq!(builder.get_fid(), 1); // Ensure the fid is set correctly
         assert!(builder.is_empty()); // Ensure the builder is empty upon creation
 
@@ -477,7 +477,7 @@ mod tests {
         assert!(!bytes.is_empty()); // Ensure the byte array is not empty
 
         // Test is_empty on a new builder
-        let mut builder2 = L0Builder::new(2, 1024, 1, ChecksumType::Crc32c, None, None);
+        let mut builder2 = L0Builder::new(2, 1024, 1, ChecksumType::Crc32c, None);
         assert!(builder2.is_empty()); // Ensure new builder is empty
 
         // Test is_empty after adding an entry

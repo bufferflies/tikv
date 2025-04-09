@@ -37,8 +37,10 @@ impl CommandExt for PessimisticRollbackReadPhase {
     gen_lock!(empty);
 }
 
-impl<S: Snapshot> ReadCommand<S> for PessimisticRollbackReadPhase {
-    fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult> {
+#[maybe_async::async_trait]
+impl<S: Snapshot + 'static> ReadCommand<S> for PessimisticRollbackReadPhase {
+    #[maybe_async]
+    async fn process_read(self, snapshot: S, statistics: &mut Statistics) -> Result<ProcessResult> {
         let tag = self.tag();
         let mut reader = SnapshotReader::new_with_ctx(TimeStamp::default(), snapshot, &self.ctx);
         let res = reader

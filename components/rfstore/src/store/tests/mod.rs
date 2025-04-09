@@ -141,6 +141,7 @@ fn new_test_raft_ctx(
     let pd_scheduler =
         pd_scheduler.unwrap_or_else(|| LazyWorker::new("test-pd-worker").scheduler());
     let gc_worker = LazyWorker::new("test-gc-worker");
+    let schema_worker = LazyWorker::new("test-schema-worker");
 
     let (peer_sender, _) = tikv_util::mpsc::unbounded();
     let (store_sender, _) = tikv_util::mpsc::unbounded();
@@ -156,6 +157,7 @@ fn new_test_raft_ctx(
         trans: Box::new(trans),
         pd_scheduler,
         gc_scheduler: gc_worker.scheduler(),
+        schema_scheduler: schema_worker.scheduler(),
         coprocessor_host: CoprocessorHost::default(),
         importer,
         destroying: HashSet::default(),

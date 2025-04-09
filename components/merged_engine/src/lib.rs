@@ -385,6 +385,7 @@ impl MergedEngine {
                 let mut batch = rfengine::WriteBatch::new();
                 origin.iterate_peer_states(peer_id, false, |k, v| {
                     update_peer_state(&mut batch, k, v, merged_raft.get_engine_id(), region_id);
+                    true
                 });
                 // merge raft logs
                 let mut entry_buf = Vec::new();
@@ -777,6 +778,7 @@ impl MergedEngine {
                             .iterate_peer_states(source.shard_id, false, |k, _| {
                                 ctx.raft_wb
                                     .set_state(source.shard_id, source.shard_id, k, &[]);
+                                true
                             });
                         ctx.raft_wb.truncate_raft_log(
                             source.shard_id,
@@ -894,6 +896,7 @@ impl MergedEngine {
         for region_id in destroyed_regions {
             self.raft.iterate_peer_states(region_id, false, |k, _| {
                 raft_wb.set_state(region_id, region_id, k, &[]);
+                true
             });
             raft_wb.truncate_raft_log(region_id, region_id, TRUNCATE_ALL_INDEX);
             self.appliers.remove(&region_id);

@@ -647,43 +647,6 @@ fn test_on_delete_prefix(
 }
 
 #[rstest]
-#[case::not_leader(Follower, false, false, callback_expect_no_error)]
-#[case::version_mismatch(Leader, true, false, callback_expect_no_error)]
-#[case::success(Leader, false, true, callback_expect_no_error)]
-fn test_on_truncate_ts(
-    #[case] role: raft::StateRole,
-    #[case] version_mismatch: bool,
-    #[case] expected_proposal: bool,
-    #[case] cb_factory: fn() -> Callback,
-) {
-    test_util::init_log_for_test();
-    let (mut fsm, mut raft_ctx, _tmp_dir) = build_test_env(TestConfig::default());
-    let mut shard_ver = fsm.peer.region().get_region_epoch().get_version();
-    if version_mismatch {
-        shard_ver += 1
-    }
-    let truncate_ts = 1234;
-
-    // Set the peer's raft role
-    fsm.peer.raft_group.raft.state = role;
-
-    // Record the propose count before
-    let old_propose_count = raft_ctx.raft_metrics.propose.all.get();
-
-    // Call on_truncate_ts
-    let mut handler = PeerMsgHandler::new(&mut fsm, &mut raft_ctx);
-    handler.on_truncate_ts(truncate_ts, shard_ver, cb_factory());
-
-    // Check if a new proposal was made
-    let proposed = raft_ctx.raft_metrics.propose.all.get() > old_propose_count;
-    assert_eq!(
-        proposed, expected_proposal,
-        "role={:?}, version_mismatch={} => expected_proposal={}, but got {}",
-        role, version_mismatch, expected_proposal, proposed
-    );
-}
-
-#[rstest]
 #[case::not_leader(Follower, true, false, callback_expect_no_error)]
 #[case::leader_major_compact_true(Leader, true, true, callback_expect_no_error)]
 #[case::leader_major_compact_false(Leader, false, true, callback_expect_no_error)]
@@ -733,9 +696,9 @@ fn test_on_update_schema_file(
     let schema_restore_ver = 100;
     {
         let mut shard_meta = kvengine::ShardMeta::default();
-        shard_meta.schema_restore_ver = schema_restore_ver;
-        shard_meta.schema_file_ver = schema_file_ver;
-        shard_meta.schema_file_id = 99;
+        shard_meta.schema.schema_restore_ver = schema_restore_ver;
+        shard_meta.schema.schema_file_ver = schema_file_ver;
+        shard_meta.schema.schema_file_id = 99;
         shard_meta.range.outer_start = bytes::Bytes::from(b"k00000".to_vec());
         shard_meta.range.outer_end = bytes::Bytes::from(b"k99999".to_vec());
         assert!(shard_meta.initial_flushed());
