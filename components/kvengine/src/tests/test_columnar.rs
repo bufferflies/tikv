@@ -38,8 +38,7 @@ use crate::{
         keyspace_prefix, new_test_engine_opt, prepare_table_region, try_wait, Splitter, TestEngine,
         DEF_BLOCK_SIZE, KEYSPACE_ID,
     },
-    DeletePrefixes, IdVer, LevelHandler, SnapAccess, TruncateTs, DEL_PREFIXES_KEY, EXTRA_CF,
-    LOCK_CF, WRITE_CF,
+    DeletePrefixes, IdVer, LevelHandler, SnapAccess, DEL_PREFIXES_KEY, EXTRA_CF, LOCK_CF, WRITE_CF,
 };
 
 #[test]
@@ -857,7 +856,7 @@ fn test_columnar_truncate_ts() {
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
-    shard.pending_ops.write().unwrap().truncate_ts = Some(TruncateTs::from(200));
+    shard.pending_ops.write().unwrap().truncate_ts = Some(200);
     *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::TruncateTs);
     engine.trigger_compact(id_ver);
     info!("trigger columnar truncate ts compaction {}", shard.tag());

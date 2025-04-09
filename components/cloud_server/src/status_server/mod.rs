@@ -1422,35 +1422,6 @@ impl StatusServer {
         })
     }
 
-    fn check_truncate_ts_req(
-        rfengine: &rfengine::RfEngine,
-        config: &TruncateTsConfig,
-    ) -> Result<()> {
-        let mut store_ident = StoreIdent::default();
-        let data = rfengine
-            .get_state(0, rfengine::STORE_IDENT_KEY)
-            .unwrap_or_default();
-        store_ident.merge_from_bytes(data.chunk()).unwrap();
-        if store_ident.cluster_id != config.cluster_id {
-            return Err(box_err!(
-                "Cluster id mismatch, got {:?}, expect {:?}",
-                config.cluster_id,
-                store_ident.cluster_id
-            ));
-        }
-        if config.ts == 0 {
-            return Err(box_err!("Invalid truncate ts {:?}", config.ts));
-        }
-        if config.range.is_some() {
-            let range = config.range.as_ref().unwrap();
-            // For default keyspace, the range is [b"", b"0000"]
-            if range.1.is_empty() {
-                return Err(box_err!("Unsupported range {:?}", range));
-            }
-        }
-        Ok(())
-    }
-
     fn get_covered_shards_by_range(
         range: Option<(Vec<u8>, Vec<u8>)>,
         engine: &kvengine::Engine,
@@ -1482,76 +1453,6 @@ impl StatusServer {
             ));
         }
         Ok(ret)
-    }
-
-    async fn truncate_ts(
-        req: Request<Body>,
-        rfengine: rfengine::RfEngine,
-        engine: kvengine::Engine,
-        router: RaftRouter,
-    ) -> hyper::Result<Response<Body>> {
-        let body = hyper::body::to_bytes(req.into_body()).await?;
-        let config: serde_json::Result<TruncateTsConfig> = serde_json::from_slice(&body);
-        if config.is_err() {
-            return Ok(make_response(StatusCode::BAD_REQUEST, "Bad request body"));
-        }
-        let config = config.unwrap();
-        let cluster_id = config.cluster_id;
-        let truncate_ts = config.ts;
-        if let Err(e) = Self::check_truncate_ts_req(&rfengine, &config) {
-            error!("Invalid cluster id or truncate ts, {:?}", e);
-            return Ok(make_response(StatusCode::BAD_REQUEST, e.to_string()));
-        }
-        let all_shards = Self::get_covered_shards_by_range(config.range, &engine);
-        if all_shards.is_err() {
-            let msg = all_shards.err().unwrap().to_string();
-            error!("Some shards are partial covered {}", msg);
-            return Ok(make_response(StatusCode::BAD_REQUEST, msg));
-        }
-        let all_shards = all_shards.unwrap();
-        let mut region_futures = vec![];
-        let mut shards_stat = vec![];
-        info!(
-            "Begin truncate to ts {:?} for cluster {:?}, shard cnt {}",
-            truncate_ts,
-            cluster_id,
-            all_shards.len()
-        );
-        for shard in all_shards {
-            let max_ts = shard.get_max_ts();
-            // if shard max_ts is smaller than truncate_ts, no need to send request.
-            if max_ts <= truncate_ts {
-                continue;
-            }
-            let (cb, fu) = paired_future_callback();
-            let callback = Callback::write(Box::new(move |_| {
-                cb(());
-            }));
-            region_futures.push(fu);
-            router.send_casual_msg(
-                shard.id,
-                CasualMessage::TruncateTs {
-                    ts: truncate_ts,
-                    shard_ver: shard.ver,
-                    callback,
-                },
-            );
-            shards_stat.push(kvengine::ShardTruncateTsStats {
-                id: shard.id,
-                ver: shard.ver,
-                cur_max_ts: max_ts,
-                truncate_ts,
-            });
-        }
-        let _ = futures::future::join_all(region_futures).await;
-        let encode_res = serde_json::to_string_pretty(&shards_stat);
-        Ok(match encode_res {
-            Ok(json) => Response::builder()
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json))
-                .unwrap(),
-            Err(_) => make_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
-        })
     }
 
     async fn get_restore_shard_request(
@@ -2113,10 +2014,6 @@ impl StatusServer {
                                 )
                                 .await
                             }
-                            (Method::POST, path) if path.starts_with("/truncate-ts") => {
-                                Self::truncate_ts(req, rfengine, engine, router).await
-                            }
-
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
                                 Self::restore_shard(req, router, engine).await
                             }

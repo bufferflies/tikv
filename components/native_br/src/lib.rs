@@ -13,6 +13,5 @@ pub mod metrics;
 pub mod restore;
 pub mod restore_keyspace;
 mod tiflash;
-pub mod truncate_ts;
 
 pub use error::Result;

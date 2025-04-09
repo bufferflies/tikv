@@ -20,7 +20,7 @@ use kvenginepb::{self as pb, TxnFileRef};
 use rand::Rng;
 use schema::schema::StorageClass;
 use slog_global::*;
-use tikv_util::{box_err, box_try, codec::number::U64_SIZE};
+use tikv_util::{box_err, box_try};
 
 use crate::{
     context::{IaCtx, PrepareType, SnapCtx},
@@ -46,7 +46,7 @@ use crate::{
 #[derive(Clone)]
 pub(crate) struct ShardPendingOperations {
     pub(crate) del_prefixes: Arc<DeletePrefixes>,
-    pub(crate) truncate_ts: Option<TruncateTs>,
+    pub(crate) truncate_ts: Option<u64>,
     pub(crate) trim_over_bound: bool,
     pub(crate) manual_major_compaction: bool,
     pub(crate) storage_class: StorageClass,
@@ -136,7 +136,6 @@ pub const TXN_FILE_REF: &str = "_txn_file_ref";
 // Following properties are maintained by ShardMeta, and should be skipped
 // during flush.
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
-pub const TRUNCATE_TS_KEY: &str = "_truncate_ts";
 pub const ENCRYPTION_KEY: &str = "_encryption";
 pub const STORAGE_CLASS_KEY: &str = "_storage_class";
 pub const INNER_KEY_OFFSET_UPDATE_SEQ_KEY: &str = "_iko_upd_seq";
@@ -242,12 +241,6 @@ impl Shard {
                 let mut del_prefixes = DeletePrefixes::unmarshal(&val, shard.keyspace_id);
                 del_prefixes.schedule_at = shard.gen_rand_schedule_del_range_time();
                 pending_ops.del_prefixes = Arc::new(del_prefixes);
-            }
-            if let Some(val) = get_shard_property(TRUNCATE_TS_KEY, props) {
-                // when load shard from Meta, the value maybe empty.
-                if !val.is_empty() {
-                    pending_ops.truncate_ts = Some(TruncateTs::unmarshal(&val));
-                }
             }
             if let Some(val) = get_shard_property(TRIM_OVER_BOUND, props) {
                 if !val.is_empty() {
@@ -616,23 +609,6 @@ impl Shard {
         pending_ops.del_prefixes = Arc::new(del_prefixes);
     }
 
-    pub(crate) fn set_truncate_ts(&self, val: &[u8]) -> bool {
-        let mut pending_ops = self.pending_ops.write().unwrap();
-        let truncate_ts = TruncateTs::unmarshal(val);
-        if let Some(curr_truncate_ts) = pending_ops.truncate_ts {
-            if curr_truncate_ts <= truncate_ts {
-                warn!("ignore another PiTR before the current one has completed"; "current truncated_ts" => ?curr_truncate_ts, "incoming truncated_ts" => ?truncate_ts, "shard" => ?self.tag());
-                return false;
-            } else {
-                warn!("overwrite truncate_ts";"current truncated_ts" => ?curr_truncate_ts, "incoming truncated_ts" => ?truncate_ts, "shard" => ?self.tag());
-                pending_ops.truncate_ts = Some(truncate_ts);
-            }
-        } else {
-            pending_ops.truncate_ts = Some(truncate_ts);
-        }
-        true
-    }
-
     pub(crate) fn set_trim_over_bound(&self, val: &[u8]) -> bool {
         let mut pending_ops = self.pending_ops.write().unwrap();
         if !val.is_empty() {
@@ -747,14 +723,6 @@ impl Shard {
         match key {
             DEL_PREFIXES_KEY => {
                 self.set_del_prefixes(val);
-            }
-            TRUNCATE_TS_KEY => {
-                let mut pending_ops = self.pending_ops.write().unwrap();
-                if !val.is_empty() {
-                    pending_ops.truncate_ts = Some(TruncateTs::unmarshal(val));
-                } else {
-                    pending_ops.truncate_ts = None;
-                }
             }
             TRIM_OVER_BOUND => {
                 let mut pending_ops = self.pending_ops.write().unwrap();
@@ -910,11 +878,11 @@ impl Shard {
         })
     }
 
-    fn ready_to_truncate_ts(truncate_ts: &Option<TruncateTs>, shard_data: &ShardData) -> bool {
+    fn ready_to_truncate_ts(truncate_ts: &Option<u64>, shard_data: &ShardData) -> bool {
         truncate_ts.is_some()
         // No memtable contains data with version > truncate_ts.
         && !shard_data.mem_tbls.iter().any(|mem_tbl| {
-            mem_tbl.data_max_ts() > truncate_ts.unwrap().inner()
+            mem_tbl.data_max_ts() > truncate_ts.unwrap()
         })
     }
 
@@ -1369,7 +1337,7 @@ impl Shard {
         self.pending_ops.read().unwrap().del_prefixes.clone()
     }
 
-    pub fn get_truncate_ts(&self) -> Option<TruncateTs> {
+    pub fn get_truncate_ts(&self) -> Option<u64> {
         self.pending_ops.read().unwrap().truncate_ts
     }
 
@@ -2907,39 +2875,6 @@ pub fn merge_del_prefixes_if_needed(
     Some(first_prefixes.marshal())
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[repr(transparent)]
-pub struct TruncateTs(u64);
-
-impl TruncateTs {
-    pub fn marshal(&self) -> [u8; 8] {
-        self.0.to_le_bytes()
-    }
-
-    pub fn unmarshal(mut data: &[u8]) -> Self {
-        assert_eq!(data.len(), U64_SIZE);
-        Self(data.get_u64_le())
-    }
-
-    #[inline]
-    pub fn inner(&self) -> u64 {
-        self.0
-    }
-}
-
-impl From<u64> for TruncateTs {
-    fn from(ts: u64) -> Self {
-        Self(ts)
-    }
-}
-
-pub(crate) fn need_update_truncate_ts(cur: Option<TruncateTs>, new: TruncateTs) -> bool {
-    if cur.is_none() {
-        return true;
-    }
-    new <= cur.unwrap()
-}
-
 #[derive(Clone, Default, PartialEq)]
 pub struct ShardRange {
     pub outer_start: Bytes,
@@ -3281,17 +3216,6 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_ts() {
-        let ts = 437598164238729283;
-        let truncate_ts = TruncateTs(ts);
-        assert_eq!(
-            TruncateTs::unmarshal(truncate_ts.marshal().as_slice()),
-            truncate_ts
-        );
-        assert_eq!(truncate_ts.inner(), ts);
-    }
-
-    #[test]
     fn test_range_keyspace_id() {
         let mut range = ShardRange::new(&[b'x', 0, 0, 1], &[b'x', 0, 0, 2]);
         assert_eq!(range.keyspace_id, 1);
@@ -3323,11 +3247,7 @@ mod tests {
             &'static str, // property_key
             bool,         // need_initial_flush
             bool,         // need_flush
-        )> = vec![
-            (TERM_KEY, false, true),
-            (TXN_FILE_REF, true, true),
-            (TRUNCATE_TS_KEY, false, false),
-        ];
+        )> = vec![(TERM_KEY, false, true), (TXN_FILE_REF, true, true)];
 
         for (property_key, need_initial_flush, need_flush) in cases {
             assert_eq!(

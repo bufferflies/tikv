@@ -457,12 +457,6 @@ pub enum CasualMessage {
         prefix: Vec<u8>,
         callback: Callback,
     },
-    /// Truncate all data larger than ts.
-    TruncateTs {
-        ts: u64,
-        shard_ver: u64,
-        callback: Callback,
-    },
     /// IngestFiles from load_data worker.
     IngestFiles {
         cs: kvenginepb::ChangeSet,
@@ -504,9 +498,6 @@ impl fmt::Debug for CasualMessage {
             }
             CasualMessage::DeletePrefix { prefix, .. } => {
                 write!(fmt, "delete prefix {:?}", prefix)
-            }
-            CasualMessage::TruncateTs { ts, shard_ver, .. } => {
-                write!(fmt, "truncate ts {:?}, shard ver {:?}", ts, shard_ver)
             }
             CasualMessage::IngestFiles { cs, .. } => {
                 write!(fmt, "ingest files {:?}", cs)

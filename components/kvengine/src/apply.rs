@@ -767,14 +767,7 @@ impl EngineCore {
         let mut del_files = HashMap::new();
         let mut builder = ShardDataBuilder::new(data.clone());
         self.get_tables_from_table_change(&mut builder, &data, cs, tc, &mut del_files);
-        assert_eq!(cs.get_property_key(), TRUNCATE_TS_KEY);
         shard.set_data(builder.build());
-        let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
-        // if applied truncate_ts is smaller than truncate ts in shard, remove it.
-        let old_truncated_ts = shard.get_truncate_ts();
-        if need_update_truncate_ts(old_truncated_ts, truncated_ts) {
-            shard.set_property(TRUNCATE_TS_KEY, b"");
-        }
         self.remove_dfs_files(shard, del_files);
     }
 

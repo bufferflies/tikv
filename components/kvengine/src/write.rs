@@ -249,17 +249,6 @@ impl Engine {
                         );
                     }
                 }
-                TRUNCATE_TS_KEY => {
-                    // TODO: handle duplicated property.
-                    if shard.set_truncate_ts(v.chunk()) {
-                        wb.set_switch_mem_table();
-                        if mem_tbl.data_max_ts() > shard.get_truncate_ts().unwrap().inner() {
-                            wb.set_switch_mem_table();
-                        }
-                        need_refresh_shard_states = true;
-                        shard.properties.set(k.as_str(), v.chunk());
-                    }
-                }
                 TRIM_OVER_BOUND => {
                     // TODO: handle duplicated property.
                     shard.set_trim_over_bound(v.chunk());

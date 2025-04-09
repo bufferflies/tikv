@@ -325,24 +325,6 @@ impl ShardMeta {
                         .merge_prefix(prefix)
                         .marshal(),
                 );
-            } else if cs.get_property_key() == TRUNCATE_TS_KEY {
-                let truncate_ts = TruncateTs::unmarshal(cs.get_property_value());
-                match self.get_property(TRUNCATE_TS_KEY) {
-                    Some(v) => {
-                        let cur_truncate_ts = if v.is_empty() {
-                            None
-                        } else {
-                            Some(TruncateTs::unmarshal(v.chunk()))
-                        };
-                        if need_update_truncate_ts(cur_truncate_ts, truncate_ts) {
-                            self.properties
-                                .set(cs.get_property_key(), cs.get_property_value());
-                        }
-                    }
-                    None => self
-                        .properties
-                        .set(cs.get_property_key(), cs.get_property_value()),
-                };
             } else if cs.get_property_key() == STORAGE_CLASS_KEY {
                 let sc = StorageClass::unmarshal(Some(cs.get_property_value()));
                 // If the storage class of the cs is unspecified, do not set the storage class
@@ -827,27 +809,6 @@ impl ShardMeta {
         // During keyspace restoration, truncate_ts will be triggered. We also need
         // manipulate the unconverted_l0s.
         self.apply_table_change_to_unconverted_l0s(cs.get_truncate_ts());
-
-        // ChangeSet of TruncateTs contains the corresponding ts which should be cleaned
-        // up.
-        assert_eq!(cs.get_property_key(), TRUNCATE_TS_KEY);
-        if self.get_property(TRUNCATE_TS_KEY).is_some() {
-            let truncated_ts = TruncateTs::unmarshal(cs.get_property_value());
-            let v = self.get_property(TRUNCATE_TS_KEY).unwrap();
-            let cur_truncate_ts = if v.is_empty() {
-                None
-            } else {
-                Some(TruncateTs::unmarshal(v.chunk()))
-            };
-            // if applied truncate_ts is smaller than truncate ts in Meta, remove it.
-            if need_update_truncate_ts(cur_truncate_ts, truncated_ts) {
-                self.set_property(TRUNCATE_TS_KEY, b"");
-            }
-            info!(
-                "Request change truncate ts in meta from {:?} to {:?}",
-                cur_truncate_ts, truncated_ts
-            );
-        }
     }
 
     fn apply_trim_over_bound(&mut self, cs: &pb::ChangeSet) {
@@ -1855,7 +1816,6 @@ mod tests {
                         // truncate_ts
                         let mut cs = pb::ChangeSet::default();
                         cs.set_truncate_ts(table_change.clone());
-                        cs.set_property_key(TRUNCATE_TS_KEY.to_string());
                         cs
                     },
                     {

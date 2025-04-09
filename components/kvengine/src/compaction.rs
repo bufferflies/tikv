@@ -849,7 +849,7 @@ impl Engine {
     pub async fn truncate_with_ts(
         &self,
         shard: &Shard,
-        truncate_ts: TruncateTs,
+        truncate_ts: u64,
     ) -> Result<Option<pb::ChangeSet>> {
         let data = shard.get_data();
         // TODO: record min_ts to directly delete a SSTable.
@@ -857,13 +857,13 @@ impl Engine {
         let mut overlaps = vec![];
         let mut col_overlaps = vec![];
         for t in &data.l0_tbls {
-            if truncate_ts.inner() < t.max_ts() {
+            if truncate_ts < t.max_ts() {
                 overlaps.push((t.id(), 0, -1));
             }
         }
         data.for_each_level(|cf, lh| {
             for t in lh.tables.iter() {
-                if truncate_ts.inner() < t.max_ts {
+                if truncate_ts < t.max_ts {
                     overlaps.push((t.id(), lh.level as u32, cf as i32));
                 }
             }
@@ -872,7 +872,7 @@ impl Engine {
 
         data.for_each_columnar_level(|cl| {
             for t in cl.files.iter() {
-                if truncate_ts.inner() < t.get_max_version() {
+                if truncate_ts < t.get_max_version() {
                     col_overlaps.push((t.id(), cl.level as u32));
                 }
             }
@@ -880,7 +880,7 @@ impl Engine {
         });
 
         info!(
-            "start truncate ts for {}, truncate_ts: {:?}, overlaps: {}, columnar overlaps: {}",
+            "start truncate ts for {}, truncate_ts: {}, overlaps: {}, columnar overlaps: {}",
             shard.tag(),
             truncate_ts,
             overlaps.len(),
@@ -899,7 +899,7 @@ impl Engine {
                 .alloc_id_async(overlaps.len() + col_overlaps.len())
                 .await
                 .unwrap();
-            let in_place_compaction = InPlaceCompaction::TruncateTs(truncate_ts.inner());
+            let in_place_compaction = InPlaceCompaction::TruncateTs(truncate_ts);
             let in_place_compaction_ctx = InPlaceCompactionCtx {
                 file_ids: overlaps,
                 col_file_ids: col_overlaps,
@@ -913,8 +913,6 @@ impl Engine {
         };
         cs.set_shard_id(shard.id);
         cs.set_shard_ver(shard.ver);
-        cs.set_property_key(TRUNCATE_TS_KEY.to_string());
-        cs.set_property_value(truncate_ts.marshal().to_vec());
         Ok(Some(cs))
     }
 

@@ -2032,7 +2032,7 @@ impl BackupCluster {
             .expect("Could not find shard with meta");
         let keyspace_id = self.keyspace_id;
         let mut res_cs = kvengine
-            .truncate_with_ts(&shard, self.truncate_ts.into())
+            .truncate_with_ts(&shard, self.truncate_ts)
             .await?
             .unwrap();
         if res_cs.has_truncate_ts() && !ShardMeta::is_empty_table_change(res_cs.get_truncate_ts()) {

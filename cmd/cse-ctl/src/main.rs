@@ -18,7 +18,6 @@ mod restore;
 mod sst;
 mod stats;
 mod test;
-mod truncate_ts;
 mod txn_file;
 mod txn_log;
 mod unsafe_recover;
@@ -44,7 +43,6 @@ use crate::{
     sst::{execute_scan_bad_table, execute_show_sst, ScanBadTableFileArgs, ShowSstArgs},
     stats::{execute_stats, StatsArgs},
     test::{execute_test, TestArgs},
-    truncate_ts::{execute_truncate_ts, TruncateTsArgs},
     txn_file::{execute_show_txn_chunk, ShowTxnChunkArgs},
     txn_log::{execute_show_txn_log, ShowTxnLogArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
@@ -73,9 +71,6 @@ fn main() {
         }
         Stats(stats_arg) => {
             execute_stats(stats_arg);
-        }
-        TruncateTs(args) => {
-            execute_truncate_ts(args);
         }
         ResolveLock(arg) => {
             execute_resolve_lock(arg);
@@ -160,8 +155,6 @@ pub enum Commands {
     Archive(ArchiveArgs),
     /// Stats s3 objects.
     Stats(StatsArgs),
-    /// Truncate newer data than given ts
-    TruncateTs(TruncateTsArgs),
     /// Resolve lock
     ResolveLock(ResolveLockArgs),
     /// CheckTable check data consistency on each table.

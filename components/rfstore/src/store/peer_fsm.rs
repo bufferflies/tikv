@@ -17,8 +17,8 @@ use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
     table::columnar::SchemaFile, table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard,
-    TruncateTs, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE,
-    MANUAL_MAJOR_COMPACTION_ENABLE, TERM_KEY, TRUNCATE_TS_KEY,
+    DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE,
+    MANUAL_MAJOR_COMPACTION_ENABLE, TERM_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -321,11 +321,6 @@ impl<'a> PeerMsgHandler<'a> {
                 prefix,
                 callback,
             } => self.on_delete_prefix(region_version, prefix, callback),
-            CasualMessage::TruncateTs {
-                ts,
-                shard_ver,
-                callback,
-            } => self.on_truncate_ts(ts, shard_ver, callback),
             CasualMessage::IngestFiles { cs, callback } => self.on_ingest_files(cs, callback),
             CasualMessage::RestoreShard { cs, callback } => self.on_restore_shard(cs, callback),
             CasualMessage::TriggerTrimOverBound(parameter) => {
@@ -1518,29 +1513,6 @@ impl<'a> PeerMsgHandler<'a> {
         cs.set_property_key(DEL_PREFIXES_KEY.to_string());
         cs.set_property_value(prefix);
         cs.set_property_merge(true);
-        let mut custom_builder = CustomBuilder::new();
-        custom_builder.set_change_set(&cs);
-        cmd.set_custom_request(custom_builder.build());
-        self.propose_raft_command(cmd, callback, None);
-    }
-
-    fn on_truncate_ts(&mut self, truncate_ts: u64, shard_ver: u64, callback: Callback) {
-        if !self.peer.is_leader() {
-            callback.invoke_with_response(RaftCmdResponse::default());
-            return;
-        }
-        let tag = self.peer.tag();
-        let id_ver = tag.id_ver;
-        if shard_ver != id_ver.ver() {
-            warn!("{} truncate ts version not match", tag);
-            callback.invoke_with_response(RaftCmdResponse::default());
-            return;
-        }
-        let mut cmd = self.new_raft_cmd_request();
-        let mut cs = kvengine::new_change_set(id_ver.id(), id_ver.ver());
-        cs.set_property_key(TRUNCATE_TS_KEY.to_string());
-        let property_value = TruncateTs::from(truncate_ts).marshal().to_vec();
-        cs.set_property_value(property_value);
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());

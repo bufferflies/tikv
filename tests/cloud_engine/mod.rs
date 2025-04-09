@@ -35,7 +35,6 @@ mod native_backup;
 mod replica_read;
 mod storage_class;
 mod transaction;
-mod truncate_ts;
 
 pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 
