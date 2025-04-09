@@ -200,10 +200,15 @@ where
 }
 
 pub fn build(scheduler: &LoadTaskScheduler, compression_type: u8, timeout: Duration) -> Result<()> {
+    let (cb, fut) = tikv_util::future::paired_future_callback();
     scheduler
         .sender
-        .send(LoadTaskMsg::Build { compression_type })
+        .send(LoadTaskMsg::Build {
+            compression_type,
+            cb,
+        })
         .unwrap();
+    block_on(fut).unwrap();
     try_wait_finished(scheduler, timeout)
 }
 

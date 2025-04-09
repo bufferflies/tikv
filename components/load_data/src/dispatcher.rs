@@ -221,11 +221,15 @@ impl Dispatcher {
                         })
                         .unwrap();
                 }
-                LoadTaskMsg::Build { compression_type } => {
+                LoadTaskMsg::Build {
+                    compression_type,
+                    cb,
+                } => {
                     if self.scheduler.is_canceled() || self.scheduler.is_finished() {
+                        cb(());
                         continue;
                     }
-                    self.build(compression_type);
+                    self.build(compression_type, cb);
                 }
                 LoadTaskMsg::Flush {
                     writer_id,
@@ -416,7 +420,7 @@ impl Dispatcher {
         (file_metas, dup_entries, key_comm_prefix)
     }
 
-    fn build(&mut self, compression_type: u8) {
+    fn build(&mut self, compression_type: u8, cb: Box<dyn FnOnce(()) + Send>) {
         let mut checkpoint_guard = self.checkpoint_store.lock().unwrap();
         if checkpoint_guard.get_state() < LoadDataWorkerState::BuildingSst {
             if let Err(err) = checkpoint_guard.update_build_msg(compression_type) {
@@ -424,6 +428,9 @@ impl Dispatcher {
                     "{} dispatcher failed to update build msg: {:?}",
                     self.task_ctx.task_id, err
                 );
+                // drop the guard before call `scheduler.cancel`
+                drop(checkpoint_guard);
+                cb(());
                 self.scheduler.cancel(format!(
                     "{} dispatcher error: {:?}",
                     self.task_ctx.task_id, err
@@ -432,6 +439,8 @@ impl Dispatcher {
             }
         }
         drop(checkpoint_guard);
+        // make sure the task enters the building state before responding to requests
+        cb(());
 
         let start = Instant::now();
         let (file_metas, mut dup_entries0, key_comm_prefix) = self.collect_file_metas();

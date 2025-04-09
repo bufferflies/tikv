@@ -37,6 +37,7 @@ pub enum LoadTaskMsg {
     },
     Build {
         compression_type: u8,
+        cb: Box<dyn FnOnce(()) + Send>,
     },
     Flush {
         writer_id: u64,

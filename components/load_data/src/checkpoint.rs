@@ -378,7 +378,7 @@ impl LocalFileCheckpointStorage {
 
     pub fn update_first_key(&mut self, first_key: Bytes) -> Result<()> {
         self.checkpoint_ctx.first_key = first_key;
-        self.flush_checkpoint_ctx()
+        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::AddingChunks)
     }
 
     pub fn update_l0_flushed_info(
@@ -441,13 +441,12 @@ impl LocalFileCheckpointStorage {
             .get_mut(&worker_id)
             .unwrap();
         worker_ctx.ingested = true;
-        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::BuildingSst)
+        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::IngestingSst)
     }
 
     pub fn set_ingested(&mut self, duplicated_entries: Vec<DuplicateEntry>) -> Result<()> {
         self.checkpoint_ctx.duplicated_entries = duplicated_entries;
-        self.checkpoint_ctx.state = LoadDataWorkerState::IngestedSst;
-        self.flush_checkpoint_ctx()
+        self.flush_checkpoint_ctx_with_state(LoadDataWorkerState::IngestedSst)
     }
 }
 

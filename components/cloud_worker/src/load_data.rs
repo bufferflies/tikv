@@ -5,6 +5,7 @@ use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use bytes::Bytes;
 use cloud_encryption::MasterKey;
 use dashmap::{mapref::entry::Entry, DashMap};
+use futures::executor::block_on;
 use http::{header, Method, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
@@ -125,7 +126,7 @@ pub(crate) async fn handle_load_data(
                         .get("compression")
                         .map(|x| x.to_string())
                         .unwrap_or_default();
-                    manager.build(&task_id, &compression);
+                    manager.build(&task_id, &compression).await;
                     Ok(make_response(StatusCode::OK, ""))
                 }
             } else if query_pairs.get("flush").map(|x| x.as_ref()) == Some("true") {
@@ -319,10 +320,10 @@ impl LoadDataManager {
             && checkpoint_ctx.get_state() < IngestedSst
             && !checkpoint_ctx.canceled
         {
-            self.build(
+            block_on(self.build(
                 checkpoint_ctx.get_task_id().as_str(),
                 LoadDataManager::compression_num_to_str(checkpoint_ctx.clone().get_compression()),
-            );
+            ));
         }
     }
 
@@ -449,17 +450,22 @@ impl LoadDataManager {
         ""
     }
 
-    pub(crate) fn build(&self, task_id: &str, compression: &str) {
+    pub(crate) async fn build(&self, task_id: &str, compression: &str) {
         let compression_type = match compression {
             "lz4" => LZ4_COMPRESSION,
             "zstd" => ZSTD_COMPRESSION,
             _ => NO_COMPRESSION,
         };
+        let (cb, fut) = tikv_util::future::paired_future_callback();
         let scheduler = self.running_tasks.get(task_id).unwrap().clone();
         scheduler
             .sender
-            .send(LoadTaskMsg::Build { compression_type })
+            .send(LoadTaskMsg::Build {
+                compression_type,
+                cb,
+            })
             .unwrap();
+        fut.await.unwrap();
     }
 
     pub(crate) async fn flush(&self, task_id: &str, writer_id: u64) -> FlushResult {

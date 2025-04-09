@@ -219,16 +219,12 @@ impl KvPairsWorker {
                             "{} worker-{} error: {:?}",
                             self.task_ctx.task_id, self.worker_id, err
                         ));
-                        if self.l0_file_idx
-                            > self.flush_file_errs.len()
-                                + self.l0_file_metas.len()
-                                + self.unhandled_flush_files.len()
-                        {
-                            let recv_count = self.l0_file_idx
-                                - self.l0_file_metas.len()
-                                - self.flush_file_errs.len()
-                                - self.unhandled_flush_files.len();
-                            let _ = self.recv_flush_file(recv_count);
+                        let recv_count = self.l0_file_idx
+                            - self.flush_file_errs.len()
+                            - self.l0_file_metas.len()
+                            - self.unhandled_flush_files.len();
+                        if recv_count > 0 {
+                            let _ = self.recv_flush_files(recv_count);
                         }
                     }
                 }
@@ -425,10 +421,12 @@ impl KvPairsWorker {
                     + self.unhandled_flush_files.len()
                     + self.flush_file_concurrency
             {
-                self.recv_flush_file(1)?;
+                self.recv_flush_files(1)?;
+                // handle received flush files
+                self.handle_flush_files()?;
             }
         }
-        self.try_recv_flush_file()
+        self.try_recv_flush_files()
     }
 
     fn l0_file_path(&self, file_idx: usize) -> PathBuf {
@@ -439,7 +437,7 @@ impl KvPairsWorker {
         self.l1_data_dir.join(format!("l1_kv_pairs_{}", file_idx))
     }
 
-    fn try_recv_flush_file(&mut self) -> Result<()> {
+    fn try_recv_flush_files(&mut self) -> Result<()> {
         while let Ok(flush_file_result) = self.file_rx.try_recv() {
             match flush_file_result {
                 Ok(flush_file) => {
@@ -541,7 +539,7 @@ impl KvPairsWorker {
                 let result = if self.l0_file_idx < flush_file_count {
                     self.flush()
                 } else {
-                    self.try_recv_flush_file()
+                    self.try_recv_flush_files()
                 };
                 if let Err(err) = result {
                     error!(
@@ -559,16 +557,12 @@ impl KvPairsWorker {
                         error: self.scheduler.error_msg(),
                     };
                     cb(FlushStates::FlushResult { flush_result });
-                    if self.l0_file_idx
-                        > self.flush_file_errs.len()
-                            + self.l0_file_metas.len()
-                            + self.unhandled_flush_files.len()
-                    {
-                        let recv_count = self.l0_file_idx
-                            - self.flush_file_errs.len()
-                            - self.l0_file_metas.len()
-                            - self.unhandled_flush_files.len();
-                        let _ = self.recv_flush_file(recv_count);
+                    let recv_count = self.l0_file_idx
+                        - self.flush_file_errs.len()
+                        - self.l0_file_metas.len()
+                        - self.unhandled_flush_files.len();
+                    if recv_count > 0 {
+                        let _ = self.recv_flush_files(recv_count);
                     }
                     return;
                 }
@@ -611,10 +605,10 @@ impl KvPairsWorker {
             self.flush_mem_buf();
         }
 
-        self.try_recv_flush_file()
+        self.try_recv_flush_files()
     }
 
-    fn recv_flush_file(&mut self, mut recv_count: usize) -> Result<()> {
+    fn recv_flush_files(&mut self, mut recv_count: usize) -> Result<()> {
         while recv_count != 0 {
             match self.file_rx.recv().unwrap() {
                 Ok(flush_file) => {
@@ -629,7 +623,7 @@ impl KvPairsWorker {
         if !self.flush_file_errs.is_empty() {
             return Err(self.flush_file_errs.pop().unwrap());
         }
-        self.handle_flush_files()
+        Ok(())
     }
 
     fn collect_file_metas(
@@ -649,15 +643,27 @@ impl KvPairsWorker {
         }
 
         if !self.kv_pairs.is_empty() {
-            self.flush_mem_buf();
+            warn!(
+                "{} worker-{} has unflushed kv pairs: {} in memory, skip them",
+                self.task_ctx.task_id,
+                self.worker_id,
+                self.kv_pairs.len()
+            );
+            self.kv_pairs.clear();
         }
 
         if self.l0_file_metas.len() + self.flush_file_errs.len() < self.l0_file_idx {
+            warn!(
+                "{} worker-{} has unhandled l0 files: {}, skip them",
+                self.task_ctx.task_id,
+                self.worker_id,
+                self.l0_file_idx - self.l0_file_metas.len() - self.flush_file_errs.len()
+            );
             let recv_count = self.l0_file_idx
-                - self.flush_file_errs.len()
                 - self.l0_file_metas.len()
+                - self.flush_file_errs.len()
                 - self.unhandled_flush_files.len();
-            self.recv_flush_file(recv_count)?;
+            let _ = self.recv_flush_files(recv_count);
         }
 
         if skip_sort {
