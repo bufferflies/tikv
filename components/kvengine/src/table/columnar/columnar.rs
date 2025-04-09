@@ -454,6 +454,14 @@ impl MinMaxIndex {
         self.has_value_marks.push(has_value as u8);
     }
 
+    pub(crate) fn has_null_marks(&self, pack_idx: usize) -> bool {
+        self.has_null_marks[pack_idx] == 1
+    }
+
+    pub(crate) fn has_value_marks(&self, pack_idx: usize) -> bool {
+        self.has_value_marks[pack_idx] == 1
+    }
+
     pub(crate) fn parse(&mut self, mut buf: &[u8]) {
         self.min_max.reset();
         buf = self.min_max.parse(buf);
@@ -479,7 +487,7 @@ impl MinMaxIndex {
         field_type: FieldTypeTp,
         is_unsigned: bool,
     ) -> bool {
-        if self.has_value_marks[pack_idx] == 0 {
+        if !self.has_value_marks(pack_idx) {
             return false;
         }
         let min = self.min_max.get_not_null_value(pack_idx * 2);
@@ -496,8 +504,11 @@ impl MinMaxIndex {
         field_type: FieldTypeTp,
         is_unsigned: bool,
     ) -> bool {
-        if self.has_value_marks[pack_idx] == 0 {
+        if !self.has_value_marks(pack_idx) {
             return false;
+        }
+        if self.has_null_marks(pack_idx) {
+            return true;
         }
         let min = self.min_max.get_not_null_value(pack_idx * 2);
         let max = self.min_max.get_not_null_value(pack_idx * 2 + 1);
@@ -513,7 +524,7 @@ impl MinMaxIndex {
         field_type: FieldTypeTp,
         is_unsigned: bool,
     ) -> bool {
-        if self.has_value_marks[pack_idx] == 0 {
+        if !self.has_value_marks(pack_idx) {
             return false;
         }
         let min = self.min_max.get_not_null_value(pack_idx * 2);
@@ -528,7 +539,7 @@ impl MinMaxIndex {
         field_type: FieldTypeTp,
         is_unsigned: bool,
     ) -> bool {
-        if self.has_value_marks[pack_idx] == 0 {
+        if !self.has_value_marks(pack_idx) {
             return false;
         }
         let min = self.min_max.get_not_null_value(pack_idx * 2);
@@ -543,7 +554,7 @@ impl MinMaxIndex {
         field_type: FieldTypeTp,
         is_unsigned: bool,
     ) -> bool {
-        if self.has_value_marks[pack_idx] == 0 {
+        if !self.has_value_marks(pack_idx) {
             return false;
         }
         let max = self.min_max.get_not_null_value(pack_idx * 2 + 1);
@@ -558,7 +569,7 @@ impl MinMaxIndex {
         field_type: FieldTypeTp,
         is_unsigned: bool,
     ) -> bool {
-        if self.has_value_marks[pack_idx] == 0 {
+        if !self.has_value_marks(pack_idx) {
             return false;
         }
         let max = self.min_max.get_not_null_value(pack_idx * 2 + 1);
@@ -569,11 +580,11 @@ impl MinMaxIndex {
     pub(crate) fn check_in(
         &self,
         pack_idx: usize,
-        values: &Vec<Vec<u8>>,
+        values: &[Vec<u8>],
         field_type: FieldTypeTp,
         is_unsigned: bool,
     ) -> bool {
-        if self.has_value_marks[pack_idx] == 0 {
+        if !self.has_value_marks(pack_idx) {
             return false;
         }
         for value in values {
@@ -587,21 +598,40 @@ impl MinMaxIndex {
     pub(crate) fn check_not_in(
         &self,
         pack_idx: usize,
-        values: &Vec<Vec<u8>>,
+        values: &[Vec<u8>],
         field_type: FieldTypeTp,
         is_unsigned: bool,
     ) -> bool {
-        if self.has_value_marks[pack_idx] == 0 {
+        if !self.has_value_marks(pack_idx) {
             return false;
         }
-        !self.check_in(pack_idx, values, field_type, is_unsigned)
+        if self.has_null_marks(pack_idx) {
+            return true;
+        }
+        let min = self.min_max.get_not_null_value(pack_idx * 2);
+        let max = self.min_max.get_not_null_value(pack_idx * 2 + 1);
+
+        // Special case: if min and max are equal, and that value is in the list,
+        // then the pack only contains that one value.
+        if field_cmp(min, max, field_type, is_unsigned) == std::cmp::Ordering::Equal {
+            for value in values {
+                if field_cmp(min, value, field_type, is_unsigned) == std::cmp::Ordering::Equal {
+                    return false;
+                }
+            }
+        }
+
+        // For the general case, we can't be sure if the pack contains only values from
+        // the list without scanning or having more detailed statistics, so we
+        // return true to be safe.
+        true
     }
 
     pub(crate) fn check_is_null(&self, pack_idx: usize) -> bool {
-        if self.has_value_marks[pack_idx] == 0 {
+        if !self.has_value_marks(pack_idx) {
             return false;
         }
-        if self.has_null_marks[pack_idx] == 0 {
+        if !self.has_null_marks(pack_idx) {
             return false;
         }
         true

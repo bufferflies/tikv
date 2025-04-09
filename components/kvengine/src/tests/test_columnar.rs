@@ -28,7 +28,7 @@ use crate::{
                 build_table, i_to_common_handle, merge_refs, new_schema, verify_with_ref_rows,
             },
             Block, ColumnarFile, ColumnarFilterReader, ColumnarLevels, ColumnarReader,
-            ColumnarRowTableReader, SchemaFile,
+            ColumnarRowTableReader, MinMaxIndex, SchemaFile,
         },
         file::{File, InMemFile},
         sstable::{BlockCache, SsTable},
@@ -1014,6 +1014,41 @@ fn test_columnar_trim_over_bound() {
         if handle == 800 {
             assert!(block.versions.get_version(i) <= 100);
         }
+    }
+}
+
+#[test]
+fn test_min_max_index_not_in() {
+    // not-in condition_values, data, has_null, expected
+    let cases: Vec<(Vec<i64>, Vec<i64>, bool, bool)> = vec![
+        (vec![2, 3, 5], vec![1, 3, 10], false, true),
+        (vec![2, 3, 5], vec![1, 4, 6, 10], false, true),
+        (vec![2, 3, 5], vec![0, 3, 15], false, true),
+        (vec![2, 3, 5], vec![1, 1, 1], false, true),
+        (vec![2, 3, 5], vec![3, 3, 3], false, false),
+        (vec![2, 3, 5], vec![3, 3, 3], true, true),
+    ];
+    for (condition_values, data, has_null, expected) in cases {
+        let mut min_max_index = MinMaxIndex::new(1, 8, true);
+        let min = *data.iter().min().unwrap();
+        let max = *data.iter().max().unwrap();
+        min_max_index.push_value(&min.to_le_bytes());
+        min_max_index.push_value(&max.to_le_bytes());
+        let values = condition_values
+            .iter()
+            .map(|v| v.to_le_bytes().to_vec())
+            .collect::<Vec<Vec<u8>>>();
+        min_max_index.push_has_null(has_null);
+        min_max_index.push_has_value(true);
+        assert_eq!(
+            min_max_index.check_not_in(
+                0,
+                &values,
+                tidb_query_datatype::FieldTypeTp::LongLong,
+                false
+            ),
+            expected
+        );
     }
 }
 
