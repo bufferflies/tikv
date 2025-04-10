@@ -9,6 +9,4 @@ lazy_static! {
         "Counter of rfstore propose switch mem table",
     )
     .unwrap();
-    pub static ref IDLE_PEER_COUNT: IntGauge =
-        register_int_gauge!("rfstore_idle_peers_count", "The number of idle peers").unwrap();
 }

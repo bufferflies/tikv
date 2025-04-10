@@ -45,7 +45,7 @@ use tikv_util::{
     codec::bytes::encode_bytes,
     config::VersionTrack,
     debug, error, info,
-    mpsc::{Receiver, Sender},
+    mpsc::Receiver,
     store::{find_peer, is_learner},
     sys::thread::StdThreadBuildWrapper,
     warn,
@@ -171,7 +171,7 @@ impl RaftBatchSystem {
                 .insert(peer_fsm.region_id(), ReadDelegate::from_peer(peer));
         }
         let mut region_ids = Vec::with_capacity(region_peers.len());
-        let mut store_ctx = StoreContext::new(RaftContext::new(ctx.clone(), true), store_meta);
+        let mut store_ctx = StoreContext::new(RaftContext::new(ctx.clone()), store_meta);
         let mut store_fsm = self.store_fsm.take().unwrap();
         for peer in region_peers.drain(..) {
             region_ids.push(peer.peer.region_id);
@@ -583,8 +583,6 @@ pub(crate) struct RaftContext {
     pub(crate) current_time: Option<Timespec>,
     pub(crate) raft_metrics: RaftMetrics,
     pub(crate) cfg: Config,
-    pub(crate) is_main_worker: bool,
-    pub(crate) pending_idles: Vec<u64>,
 }
 
 // There is only one StoreContext owned by the main raft worker.
@@ -592,8 +590,6 @@ pub(crate) struct StoreContext {
     pub(crate) raft_ctx: RaftContext,
     pub(crate) peers: Vec<HashMap<u64, PeerStates>>,
     pub(crate) store_meta: StoreMeta,
-    pub(crate) idle_regions: HashSet<u64>,
-    pub(crate) idle_sender: Option<Sender<(u64, Box<PeerMsg>)>>,
 }
 
 pub(crate) const PEER_SEGMENTS: usize = 128;
@@ -604,8 +600,6 @@ impl StoreContext {
             raft_ctx,
             peers: vec![HashMap::new(); PEER_SEGMENTS],
             store_meta,
-            idle_regions: HashSet::new(),
-            idle_sender: None,
         }
     }
 
@@ -650,7 +644,7 @@ impl DerefMut for StoreContext {
 }
 
 impl RaftContext {
-    pub(crate) fn new(global: GlobalContext, is_main_worker: bool) -> Self {
+    pub(crate) fn new(global: GlobalContext) -> Self {
         let cfg = global.cfg.value().clone();
         Self {
             global,
@@ -661,8 +655,6 @@ impl RaftContext {
             current_time: None,
             raft_metrics: RaftMetrics::new(false),
             cfg,
-            pending_idles: vec![],
-            is_main_worker,
         }
     }
 
@@ -773,18 +765,6 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     pub(crate) fn handle_msg(&mut self, msg: StoreMsg) -> Option<u64> {
-        if let Some(region_id) = self.need_wake_up_idle(&msg) {
-            // For idle regions, we can not handle the message directly.
-            // By sending PeerMsg::StoreMsgForWakeup to the idle worker, the region
-            // will be woke up. Then in the main worker the store message will be sent
-            // again.
-            let wake_up_msg = PeerMsg::StoreMsgForWakeUp(msg);
-            let idle_sender = self.ctx.idle_sender.as_ref().unwrap();
-            idle_sender
-                .send((region_id, Box::new(wake_up_msg)))
-                .unwrap();
-            return None;
-        }
         let mut apply_region = None;
         match msg {
             StoreMsg::Tick => self.on_tick(),
@@ -846,18 +826,6 @@ impl<'a> StoreMsgHandler<'a> {
             }
         }
         apply_region
-    }
-
-    fn need_wake_up_idle(&mut self, msg: &StoreMsg) -> Option<u64> {
-        match msg {
-            StoreMsg::SnapshotReady(region_id) => Some(*region_id),
-            StoreMsg::ApplyResult { region_id, .. } => Some(*region_id),
-            StoreMsg::DependentsEmpty(region_id) => Some(*region_id),
-            StoreMsg::PrepareMerge { region_id, .. } => Some(*region_id),
-            StoreMsg::CheckMerge(region_id) => Some(*region_id),
-            _ => None,
-        }
-        .filter(|id| self.ctx.idle_regions.contains(id))
     }
 
     fn on_tick(&mut self) {

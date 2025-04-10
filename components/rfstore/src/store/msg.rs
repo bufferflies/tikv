@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Formatter, sync::Arc};
+use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc};
 
 use cloud_encryption::EncryptionKey;
 use kvengine::table::columnar::SchemaFile;
@@ -18,7 +18,7 @@ use raft_proto::eraftpb;
 use raftstore::store::util::KeysInfoFormatter;
 use tikv_util::time::Instant;
 
-use super::{IdlePeer, Peer, RaftApplyState};
+use super::{Peer, RaftApplyState};
 use crate::store::{
     ApplyMetrics, ExecResult, Proposal, RegionIdVer, RegionSnapshot, TrimOverBoundParameter,
 };
@@ -50,9 +50,6 @@ pub enum PeerMsg {
         peer_id: u64,
     },
     Persisted(PersistReady),
-    Idle(IdlePeer),
-    WakeUp(IdlePeer),
-    StoreMsgForWakeUp(StoreMsg),
 }
 
 impl PeerMsg {
@@ -153,13 +150,6 @@ pub enum StoreMsg {
     },
     CheckMerge(u64),
     Stop,
-}
-
-impl fmt::Debug for StoreMsg {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // dummy implementation for debug peer message.
-        write!(f, "StoreMsg")
-    }
 }
 
 #[derive(Debug)]

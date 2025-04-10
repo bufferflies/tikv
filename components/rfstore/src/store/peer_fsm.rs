@@ -286,15 +286,6 @@ impl<'a> PeerMsgHandler<'a> {
                 } => {
                     self.on_prepared_txn_file(entry_index, peer_id);
                 }
-                PeerMsg::WakeUp(_) => {
-                    unreachable!("wakeup idle peer should be handled in raft worker");
-                }
-                PeerMsg::Idle(_) => {
-                    unreachable!("idle peer should be handled in raft idle worker");
-                }
-                PeerMsg::StoreMsgForWakeUp(store_msg) => {
-                    self.ctx.global.router.send_store(store_msg);
-                }
             }
         }
     }
@@ -551,12 +542,6 @@ impl<'a> PeerMsgHandler<'a> {
             "peer_id" => self.fsm.peer_id(),
             "message" => %msg_debug,
         );
-        if !matches!(
-            msg.get_message().get_msg_type(),
-            MessageType::MsgHeartbeat | MessageType::MsgHeartbeatResponse
-        ) {
-            self.peer.last_active_time = tikv_util::time::Instant::now_coarse();
-        }
 
         if !self.validate_raft_msg(&msg) {
             return Ok(());
@@ -1083,7 +1068,7 @@ impl<'a> PeerMsgHandler<'a> {
             notify_req_region_removed(self.region_id(), cb);
             return;
         }
-        self.peer.last_active_time = tikv_util::time::Instant::now_coarse();
+
         match self.pre_propose_raft_command(&msg) {
             Ok(Some(resp)) => {
                 cb.invoke_with_response(resp);
