@@ -856,7 +856,10 @@ impl IdlePeer {
             peer_fsm.peer.raft_group.advance_append_async(ready);
             peer_fsm.peer.raft_group.on_persist_ready(ready_number);
             for raft_message in raft_messages {
-                ctx.global.trans.send(raft_message).unwrap();
+                if let Err(err) = ctx.global.trans.send(raft_message) {
+                    let tag = peer_fsm.peer.tag();
+                    error!("{} failed to send raft message: {:?}", tag, err);
+                }
             }
         }
     }
