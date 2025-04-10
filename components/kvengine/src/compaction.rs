@@ -4330,7 +4330,9 @@ async fn columnar_major_compact(
     } else {
         pb::TableChange::new()
     };
-    let mut clear_table_changes = if !table_ids_to_clear.is_empty() {
+    let mut clear_table_changes = if !table_ids_to_clear.is_empty()
+        && !major_compaction.old_columnar_tables.is_empty()
+    {
         columnar_major_compact_for_clear_tables(ctx, major_compaction, id_allocator, schema_file)
             .await?
     } else {

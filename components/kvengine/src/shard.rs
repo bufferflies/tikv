@@ -38,7 +38,6 @@ use crate::{
         vector_index::VectorIndexes,
         BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, TxnFile,
     },
-    table_id::get_table_id_from_data_bound,
     util::{evenly_distribute, TxnFileRefPropertyHelper},
     *,
 };
@@ -1057,7 +1056,7 @@ impl Shard {
         Vec<i64>, // table ids that need to add columnar
         Vec<i64>, // table ids that need to clear columnar
     ) {
-        if self.get_schema_file().is_none() {
+        if data.schema_file.is_none() {
             // Return empty table ids means no table need to add or clear columnar.
             return (vec![], vec![]);
         }
@@ -1069,8 +1068,8 @@ impl Shard {
             .iter()
             .cloned()
             .collect::<HashSet<_>>();
-        let tables_in_schema = self
-            .get_schema_file()
+        let tables_in_schema = data
+            .schema_file
             .as_ref()
             .map(|schema| {
                 schema
@@ -1099,7 +1098,6 @@ impl Shard {
         let (table_ids_to_add, table_ids_to_clear) =
             self.get_table_ids_need_columnar_major_compaction(data);
         if self.opt.build_columnar()
-            && data.has_files_need_major_compact()
             && (!table_ids_to_add.is_empty() || !table_ids_to_clear.is_empty())
         {
             return Some(CompactionPriority::ColumnarMajor {
@@ -2041,38 +2039,6 @@ impl ShardDataCore {
     pub fn refresh_for_limiter(&self, tag: &ShardTag) {
         let mem_table_size = self.get_mem_table_size();
         self.limiter.update_usage(tag, mem_table_size);
-    }
-
-    pub fn has_files_need_major_compact(&self) -> bool {
-        if self.schema_file.is_none() {
-            return false;
-        }
-
-        let (min_table_id, max_table_id) = get_table_id_from_data_bound(self.data_bound());
-        if !self
-            .schema_file
-            .as_ref()
-            .unwrap()
-            .overlap_columnar_table_ids(min_table_id, max_table_id)
-        {
-            return false;
-        }
-
-        let unconverted_l0s: HashSet<u64> = self
-            .col_levels
-            .unconverted_l0s
-            .iter()
-            .map(|l0| l0.id())
-            .collect();
-        self.l0_tbls
-            .iter()
-            .filter(|tbl| tbl.get_cf(WRITE_CF).is_some())
-            .any(|tbl| !unconverted_l0s.contains(&tbl.id()))
-            || self
-                .get_cf(WRITE_CF)
-                .levels
-                .iter()
-                .any(|l| !l.tables.is_empty())
     }
 
     pub fn get_unconverted_l0s(&self) -> Vec<u64> {

@@ -1100,8 +1100,10 @@ impl EngineCore {
 
             // Clear the schema to re-sync.
             clear_schema = old_data.has_too_many_unconverted_l0s();
-            warn!("{} apply columnar compaction: too many unconverted l0s, clear schema", shard.tag();
-                "schema" => ?old_data.schema_file, "schema_version" => old_data.schema_version);
+            if clear_schema {
+                warn!("{} apply columnar compaction: too many unconverted l0s, clear schema", shard.tag();
+                    "schema" => ?old_data.schema_file, "schema_version" => old_data.schema_version);
+            }
         } else {
             columnar_table_ids.extend_from_slice(col_comp.get_columnar_table_ids());
             columnar_table_ids.sort_unstable();

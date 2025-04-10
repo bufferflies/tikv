@@ -551,7 +551,7 @@ fn test_columnar_major_compaction_multiple_tables() {
     write_cf.set_level(level_handler_1);
     write_cf.set_level(level_handler_2);
 
-    let shard = engine.get_shard(1).unwrap();
+    let shard = engine.get_shard(7).unwrap();
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_cfs([write_cf, ShardCf::new(LOCK_CF), ShardCf::new(EXTRA_CF)]);
     builder.set_schema(schema_file.get_version(), Some(schema_file.clone()));
