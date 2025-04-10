@@ -41,7 +41,7 @@ use tikv_client::{BoundRange, Key, KvPair, TransactionOptions, Value};
 use tikv_util::{box_err, config::ReadableDuration, debug, error, info, warn};
 
 use crate::{
-    error::{Error, Result},
+    error::{Error, Error::SchemaError, Result},
     get_all_stores_except_tiflash,
     server::Context,
 };
@@ -571,7 +571,14 @@ impl SchemaManager {
                 "schema_restore_ver" => schema_restore_version,
                 "table_infos" => table_infos.len());
             // 3. Build the schema file and upload to S3.
-            let schemas = self.build_new_schema(local_schema_file.as_ref(), table_infos);
+            let schemas = match self.build_new_schema(local_schema_file.as_ref(), table_infos) {
+                Ok(schema) => schema,
+                Err(err) => {
+                    // TODO: report metrics and alarm.
+                    error!("{}: build new schema failed", keyspace_id; "err" => ?err);
+                    continue;
+                }
+            };
             debug!("{}: build new schema", keyspace_id; "schemas" => ?schemas, "cur_schema_ver" => ?cur_schema_version, "schema_ver" => schema_version);
             if schemas.is_none() {
                 self.meta_file
@@ -761,7 +768,7 @@ impl SchemaManager {
         &self,
         local_schema_file: Option<&SchemaFile>,
         table_infos: Vec<TableInfo>,
-    ) -> Option<Vec<Schema>> {
+    ) -> Result<Option<Vec<Schema>>> {
         // 3. Build the schema file and upload to S3.
         let mut schemas = if let Some(schema_file) = local_schema_file {
             Vec::with_capacity(table_infos.len() + schema_file.schema_count())
@@ -774,21 +781,24 @@ impl SchemaManager {
                 to_be_removed.push(ti.id);
                 continue;
             }
-            schemas.push(table_info_to_schema(&ti));
+            schemas.push(table_info_to_schema(&ti).map_err(|err| {
+                error!("convert table info to schema failed"; "err" => ?err, "table" => ?ti);
+                SchemaError(format!("{err:?}"))
+            })?);
         }
 
         if let Some(schema_file) = &local_schema_file {
             // Check if the schemas contains in schema file to avoid useless update.
             if schema_file.contains(&schemas) && !schema_file.has_overlap_ids(&to_be_removed) {
                 // The schema has no change or not relevant, skip.
-                return None;
+                return Ok(None);
             }
 
             // Merge schemas in file to build the new one.
             let base = schema_file.export_schemas();
             schemas = merge_schema_diffs(base, schemas, &to_be_removed);
         }
-        Some(schemas)
+        Ok(Some(schemas))
     }
 }
 
@@ -801,7 +811,7 @@ fn table_info_to_partition_sc(ti: &TableInfo) -> Option<Vec<(i64, StorageClass)>
     })
 }
 
-fn table_info_to_schema(ti: &TableInfo) -> Schema {
+fn table_info_to_schema(ti: &TableInfo) -> Result<Schema> {
     let mut builder = SchemaBufBuilder::new(ti.id);
     builder
         .storage_class(ti.storage_class())
@@ -819,8 +829,8 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
             }
         }
         let pk_col_ids: Vec<i64> = ti_pk_cols.iter().map(|c| c.id).collect();
-        let pk_cols = convert_column_infos_to_tipb(&ti_pk_cols, ti.pk_is_handle);
-        let mut columns = convert_column_infos_to_tipb(ti.cols.as_ref().unwrap(), ti.pk_is_handle);
+        let pk_cols = convert_column_infos_to_tipb(&ti_pk_cols, ti.pk_is_handle)?;
+        let mut columns = convert_column_infos_to_tipb(ti.cols.as_ref().unwrap(), ti.pk_is_handle)?;
         columns.retain(|c| !pk_col_ids.contains(&c.get_column_id()));
         if !ti.pk_is_handle {
             // make sure the common handle columns are ordered by offset.
@@ -846,7 +856,7 @@ fn table_info_to_schema(ti: &TableInfo) -> Schema {
         );
     }
 
-    builder.build().into()
+    Ok(builder.build().into())
 }
 
 #[derive(Default, Deserialize)]

@@ -150,7 +150,11 @@ impl Collation {
             "binary" => Ok(Collation::Binary),
             "gbk_bin" => Ok(Collation::GbkBin),
             "gbk_chinese_ci" => Ok(Collation::GbkChineseCi),
-            _ => Err(DataTypeError::UnsupportedCollation { code: 0 }),
+            "utf8mb4_0900_ai_ci" => Ok(Collation::Utf8Mb40900AiCi),
+            "utf8mb4_0900_bin" => Ok(Collation::Utf8Mb40900Bin),
+            _ => Err(DataTypeError::UnsupportedCollationName {
+                name: name.to_string(),
+            }),
         }
     }
 

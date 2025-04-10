@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::fmt;
+use std::{fmt, result::Result as StdResult};
 
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use tidb_query_datatype::{
@@ -12,6 +12,10 @@ use tidb_query_datatype::{
     expr::EvalContext,
     Collation, FieldTypeFlag, FieldTypeTp,
 };
+use tikv_util::box_try;
+
+pub type Error = Box<dyn std::error::Error + Sync + Send>;
+pub type Result<T> = StdResult<T, Error>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DbInfo {
@@ -374,7 +378,7 @@ impl StorageClass {
 impl TryFrom<&str> for StorageClass {
     type Error = String;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> StdResult<Self, Self::Error> {
         match value {
             "" => Ok(StorageClass::Unspecified),
             STORAGE_CLASS_TIER_STANDARD => Ok(StorageClass::Standard),
@@ -390,7 +394,7 @@ impl TryFrom<&str> for StorageClass {
 impl TryFrom<u8> for StorageClass {
     type Error = String;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> StdResult<Self, Self::Error> {
         // `0` is not expected to be passed in.
         match value {
             0 => Ok(StorageClass::Unspecified),
@@ -449,7 +453,7 @@ impl fmt::Display for StorageClass {
 pub fn convert_column_infos_to_tipb(
     column_infos: &[ColumnInfo],
     pk_is_handle: bool,
-) -> Vec<tipb::ColumnInfo> {
+) -> Result<Vec<tipb::ColumnInfo>> {
     let mut tipb_column_infos = Vec::with_capacity(column_infos.len());
     let mut ctx = EvalContext::default();
     for column_info in column_infos {
@@ -469,36 +473,47 @@ pub fn convert_column_infos_to_tipb(
                 .into(),
         );
         ci.set_array(column_info.field_type.array.unwrap_or_default());
-        let collation = Collation::from_name(column_info.field_type.collate.as_str()).unwrap();
+        let collation = box_try!(Collation::from_name(
+            column_info.field_type.collate.as_str()
+        ));
         ci.set_collation(collation as i32);
         let is_pk_handle = column_info.field_type.flag as u32 & FieldTypeFlag::PRIMARY_KEY.bits()
             != 0
             && pk_is_handle;
         ci.set_pk_handle(is_pk_handle);
-        let default_val = decode_default_value_to_datum(&mut ctx, column_info)
-            .map(|v| datum::encode_value(&mut EvalContext::default(), &[v]).unwrap())
-            .unwrap_or_default();
+        let default_val = box_try!(
+            box_try!(decode_default_value_to_datum(&mut ctx, column_info))
+                .map(|v| datum::encode_value(&mut EvalContext::default(), &[v]))
+                .transpose()
+        )
+        .unwrap_or_default();
         ci.set_default_val(default_val);
         tipb_column_infos.push(ci);
     }
-    tipb_column_infos
+    Ok(tipb_column_infos)
 }
 
 // Ref: SetPBColumnsDefaultValue in TiDB.
 // https://github.com/pingcap/tidb/blob/45318da24d8e4c0c6aab836d291a33f949dd18bf/pkg/table/tables/tables.go#L2303-L2329
 // If origin_default is none, return None.
-fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Option<Datum> {
+fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Result<Option<Datum>> {
     if !c.generated_expr_string.is_empty() && !c.generated_stored {
-        return Some(Datum::Null);
+        return Ok(Some(Datum::Null));
     }
 
     // return None if origin_default is none.
-    c.origin_default.as_ref()?;
+    let Some(default) = c.origin_default.as_ref() else {
+        return Ok(None);
+    };
 
-    let field_type_tp = FieldTypeTp::from_i32(c.field_type.tp).unwrap();
+    let field_type_tp = box_try!(FieldTypeTp::from_i32(c.field_type.tp).ok_or_else(|| {
+        tidb_query_datatype::codec::Error::InvalidDataType(format!(
+            "Invalid field type: {}",
+            c.field_type.tp
+        ))
+    }));
     let field_flag = c.field_type.flag;
 
-    let default = c.origin_default.as_ref().unwrap();
     let result = match field_type_tp {
         FieldTypeTp::Tiny
         | FieldTypeTp::Short
@@ -561,7 +576,7 @@ fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Optio
                 Time::parse_from_i64(
                     ctx,
                     0,
-                    TimeType::try_from(field_type_tp).unwrap(),
+                    box_try!(TimeType::try_from(field_type_tp)),
                     c.field_type.decimal as i8,
                 )
                 .map(|t| Datum::Time(t))
@@ -575,7 +590,7 @@ fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Optio
                 Time::parse(
                     ctx,
                     default.as_str(),
-                    TimeType::try_from(field_type_tp).unwrap(),
+                    box_try!(TimeType::try_from(field_type_tp)),
                     c.field_type.decimal as i8,
                     false,
                 )
@@ -604,9 +619,9 @@ fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Optio
         _ => Ok(Datum::Bytes(vec![])),
     };
     if let Ok(datum) = result {
-        Some(datum)
+        Ok(Some(datum))
     } else {
-        Some(Datum::Bytes(vec![]))
+        Ok(Some(Datum::Bytes(vec![])))
     }
 }
 
