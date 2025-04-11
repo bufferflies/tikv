@@ -865,20 +865,72 @@ impl IdlePeer {
     }
 }
 
+struct SegmentTicker {
+    segments: Vec<HashSet<u64>>,
+    tick_interval_ms: u64,
+    last_tick: Instant,
+    tick_segment_idx: usize,
+}
+
+impl SegmentTicker {
+    fn new(tick_interval_ms: u64, segment_count: usize) -> Self {
+        Self {
+            segments: vec![HashSet::default(); segment_count],
+            tick_interval_ms,
+            last_tick: Instant::now(),
+            tick_segment_idx: 0,
+        }
+    }
+
+    fn tick(&mut self) -> &[HashSet<u64>] {
+        let segment_count = self.segments.len();
+        let tick_elapsed_millis = self.last_tick.saturating_elapsed().as_millis() as u64;
+        let current_tick_seg_idx = self.tick_segment_idx;
+        let next_tick_seg_idx = min(
+            (tick_elapsed_millis * segment_count as u64 / self.tick_interval_ms) as usize,
+            segment_count,
+        );
+        if next_tick_seg_idx == segment_count {
+            self.last_tick = Instant::now();
+            self.tick_segment_idx = 0;
+        } else {
+            self.tick_segment_idx = next_tick_seg_idx;
+        }
+        &self.segments[current_tick_seg_idx..next_tick_seg_idx]
+    }
+
+    fn insert(&mut self, region_id: u64) {
+        let seg_idx = self.region_segment_idx(region_id);
+        self.segments[seg_idx].insert(region_id);
+    }
+
+    fn remove(&mut self, region_id: u64) {
+        let seg_idx = self.region_segment_idx(region_id);
+        self.segments[seg_idx].remove(&region_id);
+    }
+
+    fn region_segment_idx(&self, region_id: u64) -> usize {
+        crc32c::crc32c(&region_id.to_le_bytes()) as usize % self.segments.len()
+    }
+}
+
+const IDLE_SEGMENTS: usize = 64;
+
 pub(crate) struct RaftIdleWorker {
     ctx: RaftContext,
     rx: Receiver<(u64, Box<PeerMsg>)>,
     idle_peers: HashMap<u64, IdlePeer>,
-    last_tick: Instant,
+    ticker: SegmentTicker,
 }
 
 impl RaftIdleWorker {
     fn new(ctx: RaftContext, rx: Receiver<(u64, Box<PeerMsg>)>) -> Self {
+        let ticker = SegmentTicker::new(ctx.cfg.raft_base_tick_interval.as_millis(), IDLE_SEGMENTS);
         RaftIdleWorker {
             ctx,
             rx,
             idle_peers: HashMap::default(),
-            last_tick: Instant::now(),
+            ticker,
         }
     }
 
@@ -894,6 +946,7 @@ impl RaftIdleWorker {
                 if idle_peer.need_wake_up() {
                     let store_id = self.ctx.store_id();
                     let idle_peer = self.idle_peers.remove(region_id).unwrap();
+                    self.ticker.remove(*region_id);
                     let mut peer_fsm = idle_peer.peer_states.peer_fsm.lock().unwrap();
                     peer_fsm.peer.last_active_time = tikv_util::time::Instant::now_coarse();
                     drop(peer_fsm);
@@ -905,27 +958,30 @@ impl RaftIdleWorker {
                 }
             }
             IDLE_PEER_COUNT.set(self.idle_peers.len() as i64);
-            let tick_interval = self.ctx.cfg.raft_base_tick_interval.as_millis();
-            let elapsed = self.last_tick.saturating_elapsed().as_millis() as u64;
-            if elapsed >= tick_interval {
-                for idle_peer in self.idle_peers.values_mut() {
-                    idle_peer.messages.push(Box::new(PeerMsg::Tick));
-                    idle_peer.process(&mut self.ctx);
-                }
-                self.last_tick = Instant::now();
-            } else {
-                for region_id in update_regions.iter() {
+            for segment in self.ticker.tick() {
+                for region_id in segment {
                     if let Some(idle_peer) = self.idle_peers.get_mut(region_id) {
+                        idle_peer.messages.push(Box::new(PeerMsg::Tick));
                         idle_peer.process(&mut self.ctx);
+                        update_regions.remove(region_id);
                     }
                 }
             }
-            update_regions.clear();
+            for region_id in update_regions.drain() {
+                if let Some(idle_peer) = self.idle_peers.get_mut(&region_id) {
+                    idle_peer.process(&mut self.ctx);
+                }
+            }
+            let process_duration = loop_start.saturating_elapsed();
             if self.ctx.global.trans.need_flush() {
                 self.ctx.global.trans.flush();
             }
-            if loop_start.saturating_elapsed() > Duration::from_millis(100) {
-                info!("raft idle worker batch loop takes {:?}", loop_start);
+            let loop_duration = loop_start.saturating_elapsed();
+            if loop_duration > Duration::from_millis(100) {
+                info!(
+                    "raft idle worker batch loop takes {:?}, process {:?}",
+                    loop_duration, process_duration
+                );
             }
         }
     }
@@ -955,6 +1011,7 @@ impl RaftIdleWorker {
                 update_regions.insert(region_id);
             } else if let PeerMsg::Idle(idle_peer) = *message {
                 self.idle_peers.insert(region_id, idle_peer);
+                self.ticker.insert(region_id);
                 IDLE_PEER_COUNT.set(self.idle_peers.len() as i64);
             } else {
                 // The peer has been waked up, resend the message to main thread.
