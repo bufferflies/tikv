@@ -141,13 +141,18 @@ impl Collation {
         }
     }
 
+    /// Parse from collation name.
+    ///
+    /// Must be consistent with `from_i32`.
+    ///
+    /// Find the name from `Collactions`, https://github.com/tidbcloud/tidb-cse/blob/release-7.5-keyspace/pkg/parser/mysql/charset.go.
     pub fn from_name(name: &str) -> Result<Self, DataTypeError> {
         match name {
-            "utf8mb4_bin" => Ok(Collation::Utf8Mb4Bin),
-            "utf8mb4_general_ci" => Ok(Collation::Utf8Mb4GeneralCi),
-            "utf8mb4_unicode_ci" => Ok(Collation::Utf8Mb4UnicodeCi),
+            "utf8_general_ci" | "utf8mb4_general_ci" => Ok(Collation::Utf8Mb4GeneralCi),
+            "utf8mb4_bin" | "utf8_bin" | "ascii_bin" => Ok(Collation::Utf8Mb4Bin),
             "latin1_bin" => Ok(Collation::Latin1Bin),
             "binary" => Ok(Collation::Binary),
+            "utf8mb4_unicode_ci" | "utf8_unicode_ci" => Ok(Collation::Utf8Mb4UnicodeCi),
             "gbk_bin" => Ok(Collation::GbkBin),
             "gbk_chinese_ci" => Ok(Collation::GbkChineseCi),
             "utf8mb4_0900_ai_ci" => Ok(Collation::Utf8Mb40900AiCi),
