@@ -1,7 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 use std::{
     cell::Cell,
-    collections::HashMap,
     fmt::{self, Formatter},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -13,6 +12,7 @@ use std::{
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes};
 use chrono::{NaiveTime, Utc};
+use collections::HashMap;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;

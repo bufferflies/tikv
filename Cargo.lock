@@ -4635,6 +4635,7 @@ dependencies = [
 name = "native_br"
 version = "0.0.1"
 dependencies = [
+ "ahash 0.8.11",
  "api_version",
  "bstr",
  "byteorder",
@@ -4642,6 +4643,7 @@ dependencies = [
  "chrono",
  "cloud_encryption",
  "cloud_server",
+ "collections",
  "concurrency_manager",
  "dashmap 4.0.2",
  "engine_traits",

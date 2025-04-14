@@ -1,15 +1,11 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use bstr::ByteSlice;
 use bytes::{Buf, BufMut, Bytes};
 use chrono::NaiveDate;
+use collections::{HashMap, HashSet};
 use engine_traits::GetObjectOptions;
 use kvengine::dfs::{self, DFSConfig, Dfs, FileType, Options, S3Fs, STORAGE_CLASS_GLACIER_IR};
 use pd_client::PdClient;
@@ -1363,7 +1359,7 @@ impl ArchiveReader {
         }
         let mut meta_archive_address: Option<ArchiveAddress> = None;
         let mut store_metas: Vec<StoreMeta> = Vec::new();
-        let mut archive_addresses: HashMap<u64, ArchiveAddress> = HashMap::new();
+        let mut archive_addresses: HashMap<u64, ArchiveAddress> = HashMap::default();
         for index_key in index_keys {
             let date = parse_index_date(&index_key.clone());
             let (archive_index, _) = get_archive_index(&s3fs, date.clone())?;

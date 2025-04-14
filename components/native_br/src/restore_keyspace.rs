@@ -3,7 +3,7 @@
 use std::{
     borrow::Cow,
     cmp,
-    collections::{HashMap, HashSet},
+    collections::hash_map::Entry,
     default::Default,
     fmt, mem,
     ops::Deref,
@@ -13,14 +13,15 @@ use std::{
     time::Duration,
 };
 
+use ahash::HashMapExt;
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
 use cloud_encryption::{EncryptionKey, MasterKey};
 use cloud_server::{RestoreShardResponse, TikvServer};
+use collections::{HashMap, HashSet};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::Request;
 use hyper::Body;
-use itertools::Itertools;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
     ia::util::IaConfig,
@@ -564,6 +565,10 @@ impl BackupShard {
 
     pub fn ver(&self) -> u64 {
         self.meta.ver
+    }
+
+    pub fn id_ver(&self) -> IdVer {
+        IdVer::new(self.region_id, self.ver())
     }
 
     pub fn start(&self) -> &[u8] {
@@ -1276,14 +1281,11 @@ impl BackupCluster {
             }
         }
 
-        let mut sorted_shards_id = Self::handle_overlapping_shards(&mut leader_shards)?;
-        info!(
-            "leader shard cnt {}, sorted shards cnt {}",
-            leader_shards.len(),
-            sorted_shards_id.len()
-        );
-        self.shards = mem::take(&mut leader_shards);
-        self.sorted_shards = mem::take(&mut sorted_shards_id);
+        let (intact_shards, sorted_shards_id) =
+            Self::handle_overlapping_shards(self.tag(), leader_shards)?;
+        info!("{}: shards cnt {}", self.tag(), intact_shards.len());
+        self.shards = intact_shards;
+        self.sorted_shards = sorted_shards_id;
         debug!(
             "Keyspace {} BackupCluster.load_shards: {:?}",
             self.tag(),
@@ -1388,18 +1390,17 @@ impl BackupCluster {
         &self,
         all_shards: HashMap<u64, Vec<BackupShard>>,
     ) -> Result<(
-        HashMap<u64, BackupShard>, // leader_shards, shard_id -> BackupShard
-        bool,                      // has_new_peer
+        HashMap<IdVer, BackupShard>, // leader_shards
+        bool,                        // has_new_peer
     )> {
         let shards_cnt = all_shards.values().map(|x| x.len()).sum::<usize>() / REPLICAS;
-        // shard_peers: shard_id -> Vec<(store_id, BackupShard)>
-        let mut shard_peers: HashMap<u64, Vec<BackupShard>> = HashMap::with_capacity(shards_cnt);
+        let mut shard_peers: HashMap<IdVer, Vec<BackupShard>> = HashMap::with_capacity(shards_cnt);
 
         for shard in all_shards.into_values().flatten() {
-            shard_peers.entry(shard.region_id).or_default().push(shard);
+            shard_peers.entry(shard.id_ver()).or_default().push(shard);
         }
         let mut leader_shards = HashMap::with_capacity(shard_peers.len());
-        for (&shard_id, peers) in shard_peers.iter_mut() {
+        for (&id_ver, peers) in shard_peers.iter_mut() {
             // Since we enabled raft pre-vote, the correct leader must have the max term and
             // then max last index.
             // Also sort by store_id (descending) to get peer with smallest store id as
@@ -1430,11 +1431,12 @@ impl BackupCluster {
                 hard_state.set_commit(leader.raft_state.get_last_index());
                 leader.raft_state.set_hard_state(&hard_state);
             }
-            leader_shards.insert(shard_id, leader);
+            leader_shards.insert(id_ver, leader);
         }
 
         let mut has_new_peer = false;
-        for shard in leader_shards.values_mut() {
+        let mut ver_changed = vec![];
+        for (&id_ver, shard) in leader_shards.iter_mut() {
             // Preprocess if needed.
             if shard.raft_state.get_commit() > shard.raft_state.get_last_preprocessed_index() {
                 info!(
@@ -1448,8 +1450,18 @@ impl BackupCluster {
                 if self.preprocess_shard(rf_engine, shard)? {
                     has_new_peer = true;
                 }
+
+                if shard.ver() != id_ver.ver {
+                    ver_changed.push(id_ver);
+                }
             }
         }
+
+        for id_ver in ver_changed {
+            let shard = leader_shards.remove(&id_ver).unwrap();
+            leader_shards.insert(shard.id_ver(), shard);
+        }
+
         Ok((leader_shards, has_new_peer))
     }
 
@@ -1457,63 +1469,78 @@ impl BackupCluster {
     /// Shards overlap will happen when some followers had not finished split or
     /// merge.
     fn handle_overlapping_shards(
-        leader_shards: &mut HashMap<u64, BackupShard>,
-    ) -> Result<
-        Vec<u64>, // Vec<shard_id> sorted by BackupShard.start()
-    > {
-        let mut sorted_shards: Vec<u64> = leader_shards
-            .values()
-            .sorted_by(|a, b| a.start().cmp(b.start()))
-            .map(|x| x.region_id)
-            .collect();
-
-        if sorted_shards.len() > 1 {
-            let mut shards_to_remove: HashSet<u64> = HashSet::default();
-
-            'outer: for i in 0..sorted_shards.len() - 1 {
-                let left = leader_shards.get(&sorted_shards[i]).unwrap();
-                if shards_to_remove.contains(&left.region_id) {
-                    continue;
-                }
-
-                'inner: for j in i + 1..sorted_shards.len() {
-                    let right = leader_shards.get(&sorted_shards[j]).unwrap();
-                    if shards_to_remove.contains(&right.region_id) {
-                        continue 'inner;
-                    }
-                    if right.start() >= left.end() {
-                        continue 'outer;
-                    }
-
-                    match Ord::cmp(&left.ver(), &right.ver()) {
-                        cmp::Ordering::Equal => {
-                            return Err(box_err!(
-                                "overlapping shards should not have same version, left:{:?}, right:{:?}",
-                                left,
-                                right
-                            ));
-                        }
-                        cmp::Ordering::Less => {
-                            shards_to_remove.insert(left.region_id);
-                            continue 'outer;
-                        }
-                        cmp::Ordering::Greater => {
-                            shards_to_remove.insert(right.region_id);
-                            continue 'inner;
-                        }
-                    }
-                }
-            }
-
-            if !shards_to_remove.is_empty() {
-                for shard_id in &shards_to_remove {
-                    leader_shards.remove(shard_id);
-                }
-                sorted_shards.retain(|shard_id| !shards_to_remove.contains(shard_id));
-            }
+        tag: &str,
+        mut leader_shards: HashMap<IdVer, BackupShard>,
+    ) -> Result<(
+        HashMap<u64, BackupShard>, // intact_shards
+        Vec<u64>,                  // Vec<shard_id> sorted by BackupShard.start()
+    )> {
+        let mut shards_map: HashMap<InnerKey<'_>, Vec<&BackupShard>> = HashMap::default();
+        for shard in leader_shards.values() {
+            shards_map
+                .entry(shard.inner_start())
+                .or_default()
+                .push(shard);
+        }
+        // Increasingly sort as `find_intact_shards` will try the last shard first.
+        for shards in shards_map.values_mut() {
+            shards.sort_by(|a, b| a.ver().cmp(&b.ver()));
+        }
+        let Some(intact_shards) = Self::find_intact_shards(&shards_map) else {
+            error!("{}: shards not intact for keyspace", tag; "shards" => ?shards_map);
+            return Err(box_err!("shards not intact for keyspace"));
+        };
+        info!("{}: intact shards: {:?}", tag, intact_shards); // TODO: debug log.
+        let mut shards: HashMap<u64, BackupShard> = HashMap::default();
+        let mut sorted_shards: Vec<u64> = vec![];
+        for id_ver in intact_shards {
+            let shard = leader_shards.remove(&id_ver).unwrap();
+            shards.insert(id_ver.id, shard);
+            sorted_shards.push(id_ver.id);
         }
 
-        Ok(sorted_shards)
+        Ok((shards, sorted_shards))
+    }
+
+    // Consider as a DAG, where the start/end keys are the nodes, and the shards are
+    // the edges.
+    fn find_intact_shards(
+        shards_map: &HashMap<InnerKey<'_>, Vec<&BackupShard>>,
+    ) -> Option<Vec<IdVer>> {
+        let shards = shards_map.get(&InnerKey::default())?;
+
+        let mut stack: Vec<&BackupShard> = Vec::with_capacity(shards_map.len());
+        stack.extend(shards);
+        let mut visited: HashMap<InnerKey<'_>, &BackupShard> = HashMap::default();
+
+        while let Some(curr) = stack.pop() {
+            let next_key = curr.inner_end();
+            if next_key.deref() == GLOBAL_SHARD_END_KEY {
+                let mut edges = vec![];
+                let mut curr = curr;
+                loop {
+                    edges.push(curr.id_ver());
+                    let prev_key = curr.inner_start();
+                    if prev_key.is_empty() {
+                        break;
+                    } else {
+                        curr = *visited.get(&prev_key).unwrap()
+                    }
+                }
+
+                edges.reverse();
+                return Some(edges);
+            }
+
+            if let Entry::Vacant(e) = visited.entry(next_key) {
+                if let Some(shards) = shards_map.get(&next_key) {
+                    stack.extend(shards);
+                    e.insert(curr);
+                    continue;
+                }
+            }
+        }
+        None
     }
 
     fn preprocess_shard(
@@ -1558,7 +1585,7 @@ impl BackupCluster {
         let mut remove_dependents = Vec::new();
         let mut apply_msgs = ApplyMsgs::default();
         let raft_cfg = rfstore::store::Config::default();
-        let mut destroying = HashSet::new();
+        let mut destroying = std::collections::HashSet::default();
         let mut ctx = PreprocessContext {
             store_id: old_shard.store_id,
             kv: None,
@@ -1637,6 +1664,8 @@ impl BackupCluster {
         Ok(has_new_peer)
     }
 
+    // Not necessary as `find_intact_shards` already check the shards.
+    // TODO: remove when `find_intact_shards` is stable.
     fn verify_shards(&self) -> Result<()> {
         debug_assert!(!self.sorted_shards.is_empty());
         if self.is_full_range() {
@@ -2082,7 +2111,7 @@ impl BackupCluster {
         aligned_regions: &[AlignedRegion],
     ) -> Result<usize /* number of trimmed shards */> {
         let mut trim_shards_cnt = 0_usize;
-        let mut unique_shards = HashSet::new();
+        let mut unique_shards = HashSet::default();
         for region in aligned_regions
             .iter()
             .filter(|x| x.backup_shards_id.len() > 1)
@@ -2649,7 +2678,7 @@ impl PeerPreprocessor {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{hash_map::Entry, BTreeMap};
+    use std::collections::BTreeMap;
 
     use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 
@@ -2657,112 +2686,160 @@ mod tests {
 
     #[test]
     fn test_handle_overlapping_shards() {
+        const KEYSPACE_ID: u32 = 42;
         let make_backup_shard = |tuple: (
             u64,  // shard_id
             u64,  // ver
-            &str, // start
-            &str, // end
+            &str, // start, "00" for start of keyspace
+            &str, // end, "99" for end of keyspace
         )|
          -> BackupShard {
             let mut shard = BackupShard::default();
             shard.region_id = tuple.0;
             shard.meta.ver = tuple.1;
-            shard.meta.range = ShardRange::new(tuple.2.as_bytes(), tuple.3.as_bytes());
-            shard.meta.inner_key_off = 0;
+            let outer_start = if tuple.2 == "00" {
+                ApiV2::get_keyspace_prefix_by_id(KEYSPACE_ID)
+            } else {
+                [
+                    ApiV2::get_keyspace_prefix_by_id(KEYSPACE_ID),
+                    tuple.2.as_bytes().to_vec(),
+                ]
+                .concat()
+            };
+            let outer_end = if tuple.3 == "99" {
+                ApiV2::get_keyspace_prefix_by_id(KEYSPACE_ID + 1)
+            } else {
+                [
+                    ApiV2::get_keyspace_prefix_by_id(KEYSPACE_ID),
+                    tuple.3.as_bytes().to_vec(),
+                ]
+                .concat()
+            };
+            shard.meta.range = ShardRange::new(&outer_start, &outer_end);
+            shard.meta.inner_key_off = 4;
             shard
         };
 
-        let get_leader_shards_by_ver =
-            |leader_shards: &mut HashMap<u64, BackupShard>,
+        let add_leader_shard =
+            |leader_shards: &mut HashMap<IdVer, BackupShard>,
              _store_id: u64,
              shards: Vec<(u64, u64, &str, &str)>| {
                 for shard_tuple in shards {
                     let shard = make_backup_shard(shard_tuple);
-                    match leader_shards.entry(shard.region_id) {
-                        Entry::Occupied(mut o) => {
-                            if shard.ver() > o.get().ver() {
-                                o.insert(shard);
-                            }
-                        }
-                        Entry::Vacant(v) => {
-                            v.insert(shard);
-                        }
-                    }
+                    leader_shards.insert(shard.id_ver(), shard);
                 }
             };
 
         let cases = vec![
             (
-                vec![(1, 100, "00", "01")], // store0: Vec<(shard_id, ver, start, end)>
-                vec![(1, 100, "00", "01")], // store1
-                vec![(1, 100, "00", "01")], // store2
+                vec![(1, 100, "00", "99")], // Vec<(shard_id, ver, start, end)>
+                vec![(1, 100, "00", "99")],
+                vec![(1, 100, "00", "99")],
                 // expected: Option<Vec<(shard_id, ver, start,end)>>, None means error
-                Some(vec![(1, 100, "00", "01")]),
+                Some(vec![(1, 100, "00", "99")]),
             ),
             (
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                Some(vec![(1, 100, "00", "01"), (2, 200, "01", "02")]),
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                Some(vec![(1, 100, "00", "01"), (2, 200, "01", "99")]),
             ),
             (
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                vec![(1, 201, "00", "02")], // merge from shard 1 & 2
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                Some(vec![(1, 201, "00", "02")]),
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                vec![(1, 201, "00", "99")], // merge from shard 1 & 2
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                Some(vec![(1, 201, "00", "99")]),
             ),
             (
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                vec![(2, 201, "00", "02")], // merge from shard 1 & 2
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                Some(vec![(2, 201, "00", "02")]),
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                vec![(2, 201, "00", "99")], // merge from shard 1 & 2
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                Some(vec![(2, 201, "00", "99")]),
             ),
             (
-                vec![(1, 101, "00", "01"), (2, 101, "01", "02")], // split from shard 1
-                vec![(1, 100, "00", "02")],
-                vec![(1, 100, "00", "02")],
-                Some(vec![(1, 101, "00", "01"), (2, 101, "01", "02")]),
+                vec![(1, 101, "00", "01"), (2, 101, "01", "99")], // split from shard 1
+                vec![(1, 100, "00", "99")],
+                vec![(1, 100, "00", "99")],
+                Some(vec![(1, 101, "00", "01"), (2, 101, "01", "99")]),
             ),
             (
                 vec![(2, 100, "01", "02")],
                 vec![(1, 100, "00", "01")],
-                vec![(3, 100, "02", "03")],
+                vec![(3, 100, "02", "99")],
                 Some(vec![
                     (1, 100, "00", "01"),
                     (2, 100, "01", "02"),
-                    (3, 100, "02", "03"),
+                    (3, 100, "02", "99"),
                 ]),
             ),
             (
-                vec![(1, 100, "00", "01")],
-                vec![(2, 100, "00", "02")], // error as overlapping with same ver
-                vec![(1, 100, "00", "01")],
-                None,
+                vec![(1, 100, "00", "99")],
+                vec![(1, 100, "00", "99")],
+                vec![(1, 101, "01", "99")],
+                Some(vec![(1, 100, "00", "99")]),
+            ),
+            (
+                vec![(1, 100, "00", "99")],
+                vec![(1, 100, "00", "99")],
+                vec![(1, 101, "00", "01")],
+                Some(vec![(1, 100, "00", "99")]),
+            ),
+            (
+                vec![(1, 102, "00", "01"), (2, 102, "01", "02")],
+                vec![(1, 101, "00", "01")], // "01" is visited.
+                vec![(1, 100, "00", "99")],
+                Some(vec![(1, 100, "00", "99")]),
+            ),
+            (
+                vec![(1, 100, "00", "01"), (2, 100, "01", "99")],
+                vec![(2, 101, "01", "02"), (3, 101, "02", "03")],
+                vec![(2, 101, "01", "02"), (3, 102, "02", "04")],
+                Some(vec![(1, 100, "00", "01"), (2, 100, "01", "99")]),
             ),
             #[cfg_attr(rustfmt, rustfmt_skip)]
             (
-                vec![(1, 100, "00", "01"), (2, 100, "01", "03"), (3, 100, "03", "04"), (4, 100, "04", "06"), (7, 102, "06", "07"), (8, 102, "07", "08")],
-                vec![(1, 100, "00", "01"), (2, 101, "01", "02"), (3, 101, "02", "04"), (4, 100, "04", "05"), (5, 100, "05", "08")],
+                vec![(1, 100, "00", "01"), (2, 100, "01", "03"), (3, 100, "03", "04"), (4, 100, "04", "06"), (7, 102, "06", "07"), (8, 102, "07", "99")],
+                vec![(1, 100, "00", "01"), (2, 101, "01", "02"), (3, 101, "02", "04"), (4, 100, "04", "05"), (5, 100, "05", "99")],
                 vec![(1, 100, "00", "01"), (2, 100, "01", "03"), (3, 100, "03", "04"), (5, 101, "04", "06"), (6, 101, "06", "07")],
                 Some(vec![
-                    (1, 100, "00", "01"), (2, 101, "01", "02"), (3, 101, "02", "04"), (5, 101, "04", "06"), (7, 102, "06", "07"), (8, 102, "07", "08"),
+                    (1, 100, "00", "01"), (2, 101, "01", "02"), (3, 101, "02", "04"), (5, 101, "04", "06"), (7, 102, "06", "07"), (8, 102, "07", "99"),
                 ]),
+            ),
+            (
+                vec![(1, 100, "00", "01")],
+                vec![(2, 100, "00", "02")],
+                vec![(1, 100, "00", "01")],
+                None,
+            ),
+            (
+                vec![(1, 100, "01", "02")],
+                vec![(1, 100, "01", "02")],
+                vec![(1, 100, "01", "02")],
+                None,
+            ),
+            (
+                vec![(1, 100, "01", "99")],
+                vec![(1, 100, "01", "99")],
+                vec![(1, 100, "01", "99")],
+                None,
             ),
         ];
 
         for (case_idx, (store0, store1, store2, expected)) in cases.into_iter().enumerate() {
             let mut leader_shards = HashMap::default();
-            get_leader_shards_by_ver(&mut leader_shards, 0, store0);
-            get_leader_shards_by_ver(&mut leader_shards, 1, store1);
-            get_leader_shards_by_ver(&mut leader_shards, 2, store2);
+            add_leader_shard(&mut leader_shards, 0, store0);
+            add_leader_shard(&mut leader_shards, 1, store1);
+            add_leader_shard(&mut leader_shards, 2, store2);
 
-            let res = BackupCluster::handle_overlapping_shards(&mut leader_shards);
+            let res = BackupCluster::handle_overlapping_shards("", leader_shards);
             if let Some(expected) = expected {
                 let expected_sorted_shards: Vec<u64> = expected.iter().map(|x| x.0).collect();
                 let expected_leader_shards: HashMap<u64, BackupShard> =
                     HashMap::from_iter(expected.into_iter().map(|x| (x.0, make_backup_shard(x))));
 
-                let sorted_shards = res.unwrap();
+                let (leader_shards, sorted_shards) = res.unwrap_or_else(|err| {
+                    panic!("case: {}: {:?}", case_idx, err);
+                });
                 assert_eq!(
                     BTreeMap::from_iter(leader_shards.into_iter()),
                     BTreeMap::from_iter(expected_leader_shards.into_iter()),
