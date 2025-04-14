@@ -34,6 +34,11 @@
 SHELL := bash
 ENABLE_FEATURES ?=
 
+# For CSE, disable unused features
+ROCKSDB_SYS_PORTABLE=0
+NO_DEFAULT_TEST_ENGINES=1
+NO_CLOUD=1
+
 # Frame pointer is enabled by default. The purpose is to provide stable and
 # reliable stack backtraces (for CPU Profiling).
 #
