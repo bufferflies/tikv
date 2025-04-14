@@ -47,6 +47,7 @@ use crate::{
 };
 
 const DEFAULT_TIMEOUT: ReadableDuration = ReadableDuration::secs(5);
+const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024; // 32MB
 const KEYSPACE_REFRESH_INTERVAL: ReadableDuration = ReadableDuration::secs(30);
 const SCHEMA_REFRESH_THRESHOLD: u64 = 256 * 1024 * 1024;
 
@@ -318,7 +319,8 @@ impl SchemaManager {
         endpoints: &[String],
     ) -> Self {
         let runtime = ctx.s3fs.get_runtime();
-        let mut client_config = tikv_client::Config::default();
+        let mut client_config = tikv_client::Config::default()
+            .with_grpc_max_decoding_message_size(DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE);
         if !security_config.ca_path.is_empty()
             || !security_config.cert_path.is_empty()
             || !security_config.key_path.is_empty()
@@ -955,6 +957,8 @@ impl SchemaManagerCore {
     }
 }
 
+const SCAN_BATCH_SIZE: u32 = 4096;
+
 #[async_trait]
 impl schema::KvScanner for SchemaManager {
     async fn scan(
@@ -971,14 +975,13 @@ impl schema::KvScanner for SchemaManager {
             .txn_client
             .snapshot(start_ts, TransactionOptions::new_pessimistic());
 
-        const BATCH_SIZE: u32 = 10240;
         let mut pairs = Vec::new();
         let mut current_key = start.to_vec();
 
         loop {
             let scan_range: BoundRange = (current_key.clone()..end.to_vec()).into();
             let batch: Vec<KvPair> = snapshot
-                .scan(scan_range, BATCH_SIZE)
+                .scan(scan_range, SCAN_BATCH_SIZE)
                 .await
                 .map_err(|e| e.to_string())?
                 .collect();
@@ -993,7 +996,7 @@ impl schema::KvScanner for SchemaManager {
             for KvPair(key, val) in batch {
                 pairs.push((key.into(), val));
             }
-            if batch_len < BATCH_SIZE as usize {
+            if batch_len < SCAN_BATCH_SIZE as usize {
                 // end of scan, no need to continue
                 break;
             }
