@@ -25,7 +25,11 @@ use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
 use tikv_util::{
-    error, info, mpsc::Sender, panic_mark_dfs_worker_file_exists, time::Instant, warn,
+    error, info,
+    mpsc::{SendError, Sender},
+    panic_mark_dfs_worker_file_exists,
+    time::Instant,
+    warn,
 };
 
 use crate::{
@@ -295,9 +299,7 @@ impl RfEngineCore {
             }
         }
         if !truncated_logs.is_empty() {
-            self.task_sender
-                .send(ServiceTask::Truncates(truncated_logs))
-                .unwrap();
+            self.try_send_task(ServiceTask::Truncates(truncated_logs));
         }
         ENGINE_APPLY_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
     }
@@ -313,12 +315,10 @@ impl RfEngineCore {
         if rotated {
             self.current_epoch_id
                 .store(writer.epoch_id, Ordering::SeqCst);
-            self.task_sender
-                .send(ServiceTask::Rotate { epoch_id })
-                .unwrap();
+            self.try_send_task(ServiceTask::Rotate { epoch_id });
         }
         if self.is_async_wal_enabled() {
-            self.task_sender.send(ServiceTask::Write { wb }).unwrap();
+            self.try_send_task(ServiceTask::Write { wb });
         }
         ENGINE_PERSIST_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
         Ok(size)
@@ -433,7 +433,7 @@ impl RfEngineCore {
     pub fn stop_worker(&self, force: bool) {
         let mut handle = self.service_worker_handle.lock().unwrap();
         if let Some(h) = handle.take() {
-            self.task_sender.send(ServiceTask::Close { force }).unwrap();
+            self.try_send_task(ServiceTask::Close { force });
             h.join().unwrap();
         }
     }
@@ -636,7 +636,7 @@ impl RfEngineCore {
 
     // Upload latest wal chunk to object storage
     pub fn upload_wal_chunk(&self) {
-        self.task_sender.send(ServiceTask::Upload).unwrap();
+        self.try_send_task(ServiceTask::Upload);
     }
 
     pub fn dump_wal_chunk(
@@ -646,14 +646,12 @@ impl RfEngineCore {
         end_off: u64,
         callback: Box<dyn FnOnce(Result<(Bytes, bool /* partial content */)>) + Send>,
     ) {
-        self.task_sender
-            .send(ServiceTask::Dump {
-                epoch_id,
-                start_off,
-                end_off,
-                callback,
-            })
-            .unwrap();
+        self.try_send_task(ServiceTask::Dump {
+            epoch_id,
+            start_off,
+            end_off,
+            callback,
+        });
     }
 
     pub fn backup(&self, mut task: BackupTask) {
@@ -663,7 +661,7 @@ impl RfEngineCore {
             let writer = self.writer.lock().unwrap();
             task.file_off = writer.file_off;
         }
-        self.task_sender.send(ServiceTask::Backup(task)).unwrap();
+        self.try_send_task(ServiceTask::Backup(task));
     }
 
     pub fn get_epoch_offset(&self) -> (u32, u64) {
@@ -689,6 +687,18 @@ impl RfEngineCore {
         let mut region_state = raft_serverpb::RegionLocalState::new();
         region_state.merge_from_bytes(&region_state_val).unwrap();
         Some(region_state)
+    }
+
+    pub(crate) fn try_send_task(&self, task: ServiceTask) {
+        if let Err(SendError(task)) = self.task_sender.send(task) {
+            warn!("send service task failed: {:?}", task);
+            let err_msg = "service worker is closed".to_string();
+            match task {
+                ServiceTask::Dump { callback, .. } => callback(Err(Error::Other(err_msg))),
+                ServiceTask::Backup(task) => (task.callback)(Err(err_msg)),
+                _ => {}
+            }
+        }
     }
 }
 

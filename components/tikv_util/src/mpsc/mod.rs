@@ -14,9 +14,8 @@ use std::{
     time::Duration,
 };
 
-use crossbeam::channel::{
-    self, RecvError, RecvTimeoutError, SendError, TryRecvError, TrySendError,
-};
+pub use crossbeam::channel::SendError;
+use crossbeam::channel::{self, RecvError, RecvTimeoutError, TryRecvError, TrySendError};
 use fail::fail_point;
 
 struct State {

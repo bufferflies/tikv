@@ -32,9 +32,7 @@ impl RfEngineCore {
             (wal_offset, async_offset) = self.load_wal_file(epoch_id, true)?;
         }
         while wal_exists(self.wal_dir(), epoch_id + 1) {
-            self.task_sender
-                .send(ServiceTask::Rotate { epoch_id })
-                .unwrap();
+            self.try_send_task(ServiceTask::Rotate { epoch_id });
             epoch_id += 1;
             let (offset, _) = self.load_wal_file(epoch_id, false)?;
             wal_offset = offset;
@@ -88,7 +86,7 @@ impl RfEngineCore {
                 }
             });
             if let Some(wb) = wb {
-                self.task_sender.send(ServiceTask::Write { wb }).unwrap();
+                self.try_send_task(ServiceTask::Write { wb });
             }
         }) {
             Ok(_) => {}

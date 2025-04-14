@@ -1,7 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    fs,
+    fmt, fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
@@ -54,6 +54,20 @@ pub(crate) enum ServiceTask {
     Close {
         force: bool,
     },
+}
+
+impl fmt::Debug for ServiceTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ServiceTask::Dump { .. } => write!(f, "ServiceTask::Dump"),
+            ServiceTask::Rotate { .. } => write!(f, "ServiceTask::Rotate"),
+            ServiceTask::Write { .. } => write!(f, "ServiceTask::Write"),
+            ServiceTask::Backup(_) => write!(f, "ServiceTask::Backup"),
+            ServiceTask::Truncates(_) => write!(f, "ServiceTask::Truncates"),
+            ServiceTask::Upload => write!(f, "ServiceTask::Upload"),
+            ServiceTask::Close { force } => write!(f, "ServiceTask::Close({})", force),
+        }
+    }
 }
 
 /// Service worker maintains the async WAL files, provide read service for HTTP
