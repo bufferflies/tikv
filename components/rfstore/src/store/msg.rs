@@ -75,6 +75,27 @@ impl PeerMsg {
             _ => 0,
         }
     }
+
+    pub(crate) fn type_str(&self) -> &str {
+        match self {
+            PeerMsg::RaftMessage(_) => "RaftMessage",
+            PeerMsg::RaftCommand(_) => "RaftCommand",
+            PeerMsg::Tick => "Tick",
+            PeerMsg::Start => "Start",
+            PeerMsg::ApplyResult(_) => "ApplyResult",
+            PeerMsg::CasualMessage(_) => "CasualMessage",
+            PeerMsg::SignificantMsg(_) => "SignificantMsg",
+            PeerMsg::GenerateEngineChangeSet(_) => "GenerateEngineChangeSet",
+            PeerMsg::ApplySnapshotResult(_) => "ApplySnapshotResult",
+            PeerMsg::PrepareChangeSetResult(..) => "PrepareChangeSetResult",
+            PeerMsg::PrepareCommitMergeResult(..) => "PrepareCommitMergeResult",
+            PeerMsg::PrepareTxnFileResult { .. } => "PrepareTxnFileResult",
+            PeerMsg::Persisted(_) => "Persisted",
+            PeerMsg::Idle(_) => "Idle",
+            PeerMsg::WakeUp(_) => "WakeUp",
+            PeerMsg::StoreMsgForWakeUp(_) => "StoreMsgForWakeUp",
+        }
+    }
 }
 
 #[derive(Debug)]

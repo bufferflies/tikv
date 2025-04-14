@@ -967,7 +967,11 @@ impl<'a> StoreMsgHandler<'a> {
         );
         self.store.last_unreachable_report.insert(store_id, now);
         for (id, region) in &self.ctx.store_meta.region_map.regions {
-            if region.get_peers().iter().any(|p| p.store_id == store_id) {
+            // Skip sending unreachable to idle peers because it is expensive to wake up
+            // all the idle peers and not sending explicit unreachable doesn't break raft.
+            if !self.ctx.idle_regions.contains(id)
+                && region.get_peers().iter().any(|p| p.store_id == store_id)
+            {
                 self.ctx.global.router.report_unreachable(*id, store_id);
             }
         }

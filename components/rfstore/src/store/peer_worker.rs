@@ -814,8 +814,11 @@ impl IdlePeer {
         }
     }
 
-    fn need_wake_up(&self) -> bool {
-        self.messages.iter().any(|msg| !Self::is_heartbeat(msg))
+    fn need_wake_up(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .find(|msg| !Self::is_heartbeat(msg))
+            .map(|msg| msg.type_str().to_string())
     }
 
     fn is_heartbeat(msg: &PeerMsg) -> bool {
@@ -943,14 +946,14 @@ impl RaftIdleWorker {
             };
             for region_id in &update_regions {
                 let idle_peer = self.idle_peers.get(region_id).unwrap();
-                if idle_peer.need_wake_up() {
+                if let Some(msg_type) = idle_peer.need_wake_up() {
                     let store_id = self.ctx.store_id();
                     let idle_peer = self.idle_peers.remove(region_id).unwrap();
                     self.ticker.remove(*region_id);
                     let mut peer_fsm = idle_peer.peer_states.peer_fsm.lock().unwrap();
                     peer_fsm.peer.last_active_time = tikv_util::time::Instant::now_coarse();
                     drop(peer_fsm);
-                    info!("{}:{}: wake up", store_id, region_id);
+                    info!("{}:{}: wake up by {}", store_id, region_id, msg_type);
                     self.ctx
                         .global
                         .router
@@ -971,6 +974,11 @@ impl RaftIdleWorker {
                 if let Some(idle_peer) = self.idle_peers.get_mut(&region_id) {
                     idle_peer.process(&mut self.ctx);
                 }
+            }
+            if !self.ctx.raft_wb.is_empty() {
+                // It is possible the idle peers did raft log gc, we should persist it.
+                let wb = mem::take(&mut self.ctx.raft_wb);
+                self.ctx.global.engines.raft.write(wb).unwrap();
             }
             let process_duration = loop_start.saturating_elapsed();
             if self.ctx.global.trans.need_flush() {
