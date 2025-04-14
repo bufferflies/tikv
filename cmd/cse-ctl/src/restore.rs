@@ -269,7 +269,6 @@ fn get_restore_tikv_config_from_args(args: &RestoreTikvArgs) -> RestoreConfig {
     config.wal_target_size = args.wal_target_size;
     config.dfs.override_from_env();
     config.security.override_from_env();
-    config.skip_resolve_lock = false;
     config
 }
 
@@ -294,7 +293,6 @@ pub fn get_restore_keyspace_config_from_args(args: &RestoreKeyspaceArgs) -> Rest
     }
     config.dfs.override_from_env();
     config.security.override_from_env();
-    config.skip_resolve_lock = false;
     config
 }
 

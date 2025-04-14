@@ -1537,7 +1537,7 @@ fn test_restore_keyspace_with_failed_store(
         };
 
         let failed_node_id = if fail_on_backup {
-            Some(stop_node(&mut cluster, true, None))
+            Some(stop_node(&mut cluster, true, false, None))
         } else {
             None
         };
@@ -1578,7 +1578,8 @@ fn test_restore_keyspace_with_failed_store(
             }
             _ => None,
         };
-        stop_node(&mut cluster, true, restore_failed_node);
+        let store_tombstone = thread_rng().gen_bool(0.5);
+        stop_node(&mut cluster, true, store_tombstone, restore_failed_node);
     }
 
     // Set small timeouts to make the test faster.
@@ -1586,6 +1587,7 @@ fn test_restore_keyspace_with_failed_store(
         tolerate_err: 0,
         timeout_fetch_wal: ReadableDuration::secs(1),
         timeout_restore_snapshot: ReadableDuration::secs(3),
+        strict_tolerate: true,
         ..Default::default()
     };
 
@@ -1646,7 +1648,12 @@ fn test_restore_keyspace_with_failed_store(
 }
 
 // Stop random node when `node_id` is `None`.
-fn stop_node(cluster: &mut ServerCluster, force: bool, node_id: Option<u16>) -> u16 {
+fn stop_node(
+    cluster: &mut ServerCluster,
+    force: bool,
+    store_tombstone: bool,
+    node_id: Option<u16>,
+) -> u16 {
     let failed_node_id = node_id.unwrap_or_else(|| {
         let node_ids = cluster.get_nodes();
         let mut rng = rand::thread_rng();
@@ -1655,7 +1662,12 @@ fn stop_node(cluster: &mut ServerCluster, force: bool, node_id: Option<u16>) -> 
     let store_id = cluster.get_store_id(failed_node_id);
 
     cluster.stop_node_force(failed_node_id, force);
-    info!("node stopped"; "node_id" => failed_node_id, "store_id" => store_id);
+    if store_tombstone {
+        let mut store = cluster.get_pd_client().get_store(store_id).unwrap();
+        store.state = metapb::StoreState::Tombstone;
+        cluster.get_pd_client().put_store(store).unwrap();
+    }
+    info!("node stopped"; "node_id" => failed_node_id, "store_id" => store_id, "tombstone" => store_tombstone);
 
     failed_node_id
 }

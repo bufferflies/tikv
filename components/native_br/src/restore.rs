@@ -475,7 +475,6 @@ pub struct RestoreConfig {
     pub pd: pd_client::Config,
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
-    pub skip_resolve_lock: bool,
     pub wal_target_size: ReadableSize,
     pub new_store_id_delta: u64,
 
@@ -510,7 +509,6 @@ impl Default for RestoreConfig {
             pd: Default::default(),
             security: Default::default(),
             dfs: Default::default(),
-            skip_resolve_lock: false,
             wal_target_size: DEFAULT_WAL_TARGET_SIZE,
             new_store_id_delta: 0,
             timeout_wait_flush: DEFAULT_TIMEOUT_WAIT_FLUSH,

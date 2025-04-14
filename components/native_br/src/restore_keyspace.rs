@@ -263,15 +263,7 @@ pub fn restore_keyspace(
         cluster_backup.safe_ts,
         truncate_ts,
     );
-    info!("{} restore config", keyspace_tag;
-        "skip_resolve_lock" => config.skip_resolve_lock,
-        "wal_target_size" => ?config.wal_target_size,
-        "new_store_id_delta" => config.new_store_id_delta,
-        "timeout_wait_flush" => ?config.timeout_wait_flush,
-        "timeout_restore_snapshot" => ?config.timeout_restore_snapshot,
-        "timeout_fetch_wal" => ?config.timeout_fetch_wal,
-        "tolerate_err" => ?config.tolerate_err,
-        "max_retry" => config.max_retry);
+    info!("{} restore config: {:?}", keyspace_tag, config);
     debug!(
         "Keyspace {} get cluster backup meta: {:?}",
         keyspace_tag, cluster_backup
@@ -771,7 +763,11 @@ impl BackupCluster {
         let fetch_wal_timeout = restore_conf.timeout_fetch_wal.0;
 
         let is_error_can_tolerate = |err: &Error| -> bool {
-            if matches!(err, Error::RfengineHttpRequestError(_)) {
+            if matches!(
+                err,
+                Error::RfengineHttpRequestError(_)
+                    | Error::PdError(pd_client::Error::StoreTombstone(_))
+            ) {
                 true
             } else if !restore_conf.strict_tolerate {
                 crate::metrics::NATIVE_BR_RESTORE_ERROR

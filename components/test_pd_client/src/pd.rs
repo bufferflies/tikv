@@ -516,7 +516,13 @@ impl PdCluster {
 
     fn get_store(&self, store_id: u64) -> Result<metapb::Store> {
         match self.stores.get(&store_id) {
-            Some(s) if s.store.get_id() != 0 => Ok(s.store.clone()),
+            Some(s) if s.store.get_id() != 0 => {
+                if s.store.state != metapb::StoreState::Tombstone {
+                    Ok(s.store.clone())
+                } else {
+                    Err(Error::StoreTombstone(format!("{:?}", s.store)))
+                }
+            }
             _ => Err(box_err!("store {} not found", store_id)),
         }
     }

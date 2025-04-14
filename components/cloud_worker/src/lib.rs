@@ -781,18 +781,16 @@ impl Config {
         }
     }
     pub fn to_restore_config(&self) -> RestoreConfig {
+        let tolerate_err = usize::from(self.native_br.restore_tolerate_err);
         RestoreConfig {
             pd: self.pd.clone(),
             security: self.security.clone(),
             dfs: self.dfs.clone(),
-            // resolve_lock is to solve the Async Commit locks. Async Commit is not supported
-            // for now. TODO: Change it to false when Async Commit is enabled, and impl resolve
-            // locks in restore_keyspace.
-            skip_resolve_lock: true,
             timeout_wait_flush: self.native_br.restore_timeout_wait_flush,
             timeout_restore_snapshot: self.native_br.restore_timeout_restore_snapshot,
             timeout_fetch_wal: self.native_br.restore_timeout_fetch_wal,
             max_retry: self.native_br.restore_max_retry,
+            tolerate_err,
             ..Default::default()
         }
     }
