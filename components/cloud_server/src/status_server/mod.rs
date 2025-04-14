@@ -12,7 +12,7 @@ use std::{
     str::{self, FromStr},
     sync::Arc,
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
@@ -77,7 +77,7 @@ use tikv_util::{
     logger::set_log_level,
     metrics::{dump, dump_to},
     sys::thread::ThreadBuildWrapper,
-    time::InstantExt,
+    time::Instant,
     timer::GLOBAL_TIMER_HANDLE,
 };
 use tokio::{
@@ -129,10 +129,10 @@ struct SyncRegionByIdRequest {
 }
 
 pub struct StatusServer {
-    thread_pool: Runtime,
-    hyper_pool: Arc<Runtime>,
-    tx: Sender<()>,
-    rx: Option<Receiver<()>>,
+    thread_pool: Arc<Runtime>,
+    close_tx: Sender<()>,
+    close_rx: Option<Receiver<()>>,
+    close_handle: Option<std::thread::JoinHandle<()>>,
     addr: Option<SocketAddr>,
     cfg_controller: ConfigController,
     router: RaftRouter,
@@ -157,20 +157,13 @@ impl StatusServer {
             .after_start_wrapper(|| debug!("Status server started"))
             .before_stop_wrapper(|| debug!("stopping status server"))
             .build()?;
-        let hyper_pool = Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(status_thread_pool_size)
-            .thread_name("status-hyper")
-            .after_start_wrapper(|| debug!("Hyper server started"))
-            .before_stop_wrapper(|| debug!("stopping hyper server"))
-            .build()?;
 
-        let (tx, rx) = oneshot::channel::<()>();
+        let (close_tx, close_rx) = oneshot::channel::<()>();
         Ok(StatusServer {
-            thread_pool,
-            hyper_pool: Arc::new(hyper_pool),
-            tx,
-            rx: Some(rx),
+            thread_pool: Arc::new(thread_pool),
+            close_tx,
+            close_rx: Some(close_rx),
+            close_handle: None,
             addr: None,
             cfg_controller,
             router,
@@ -486,7 +479,8 @@ impl StatusServer {
             hyper::http::HeaderValue::from_str("application/protobuf").unwrap();
         let output_protobuf = req.headers().get("Content-Type") == Some(&prototype_content_type);
 
-        let timer = GLOBAL_TIMER_HANDLE.delay(Instant::now() + Duration::from_secs(seconds));
+        let timer =
+            GLOBAL_TIMER_HANDLE.delay(std::time::Instant::now() + Duration::from_secs(seconds));
         let end = async move {
             Compat01As03::new(timer)
                 .await
@@ -1682,8 +1676,8 @@ impl StatusServer {
     }
 
     pub fn stop(self) {
-        let _ = self.tx.send(());
-        self.thread_pool.shutdown_timeout(Duration::from_secs(3));
+        let _ = self.close_tx.send(());
+        let _ = self.close_handle.unwrap().join();
     }
 
     // Return listening address, this may only be used for outer test
@@ -1692,6 +1686,16 @@ impl StatusServer {
     #[allow(unused)]
     pub fn listening_addr(&self) -> SocketAddr {
         self.addr.unwrap()
+    }
+}
+
+#[cfg(debug_assertions)]
+impl StatusServer {
+    async fn handle_debug_sleep() -> hyper::Result<Response<Body>> {
+        info!("sleep for 5 seconds");
+        std::thread::sleep(Duration::from_secs(5));
+        info!("sleep done");
+        Ok(Response::default())
     }
 }
 
@@ -1878,7 +1882,7 @@ impl StatusServer {
             async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
-                    let start = Instant::now();
+                    let start = Instant::now_coarse();
                     let x509 = x509.clone();
                     let security_config = security_config.clone();
                     let cfg_controller = cfg_controller.clone();
@@ -1962,12 +1966,7 @@ impl StatusServer {
                                 Ok(Response::default())
                             }
                             #[cfg(debug_assertions)]
-                            (Method::GET, "/debug/sleep") => {
-                                info!("sleep for 5 seconds");
-                                std::thread::sleep(Duration::from_secs(5));
-                                info!("sleep done");
-                                Ok(Response::default())
-                            }
+                            (Method::GET, "/debug/sleep") => Self::handle_debug_sleep().await,
                             (Method::GET, path) if path.starts_with("/region") => {
                                 Self::dump_region_meta(req, router).await
                             }
@@ -1989,7 +1988,7 @@ impl StatusServer {
                                 Self::change_log_level(req).await
                             }
                             (Method::GET, path) if path.starts_with("/kvengine") => {
-                                if path.starts_with("/kvengine/snapshot/") {
+                                let res = if path.starts_with("/kvengine/snapshot/") {
                                     Self::dump_kvengine_snapshot(req, engine, router).await
                                 } else if path.starts_with("/kvengine/columnar_status") {
                                     Self::collect_columnar_status(req, engine).await
@@ -1997,31 +1996,47 @@ impl StatusServer {
                                     Self::dump_kvengine_meta(req, engine).await
                                 } else {
                                     Self::dump_kvengine_stats(req, engine).await
-                                }
+                                };
+                                STATUS_REQ_HISTOGRAM_STATIC
+                                    .kvengine
+                                    .observe(start.saturating_elapsed().as_secs_f64());
+                                res
                             }
                             (Method::GET, path) if path.starts_with("/rfengine") => {
                                 if path.starts_with("/rfengine/wal_chunk") {
-                                    Self::rfengine_wal_chunk(req, rfengine).await
+                                    let res = Self::rfengine_wal_chunk(req, rfengine).await;
+                                    STATUS_REQ_HISTOGRAM_STATIC
+                                        .rf_wal_chunk
+                                        .observe(start.saturating_elapsed().as_secs_f64());
+                                    res
                                 } else {
                                     Self::dump_rfengine_stats(req, rfengine).await
                                 }
                             }
                             (Method::POST, path) if path.starts_with("/rfengine/backup") => {
-                                Self::backup_rfengine(
-                                    req,
-                                    rfengine,
-                                    cfg_controller.get_current().dfs.clone(),
-                                )
-                                .await
+                                let dfs_conf = cfg_controller.get_current().dfs.clone();
+                                let res = Self::backup_rfengine(req, rfengine, dfs_conf).await;
+                                STATUS_REQ_HISTOGRAM_STATIC
+                                    .rf_backup
+                                    .observe(start.saturating_elapsed().as_secs_f64());
+                                res
                             }
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
-                                Self::restore_shard(req, router, engine).await
+                                let res = Self::restore_shard(req, router, engine).await;
+                                STATUS_REQ_HISTOGRAM_STATIC
+                                    .restore_shard
+                                    .observe(start.saturating_elapsed().as_secs_f64());
+                                res
                             }
                             (Method::POST, path) if path.starts_with("/kvengine/compactor") => {
                                 Self::add_remote_compactor(req, engine.comp_client.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/ingest_files") => {
-                                Self::ingest_files(req, router, engine).await
+                                let res = Self::ingest_files(req, router, engine).await;
+                                STATUS_REQ_HISTOGRAM_STATIC
+                                    .ingest_files
+                                    .observe(start.saturating_elapsed().as_secs_f64());
+                                res
                             }
                             (Method::POST, path) if path.starts_with("/unsafe_recover") => {
                                 Self::unsafe_recover(req, rfengine, engine).await
@@ -2030,7 +2045,11 @@ impl StatusServer {
                                 Self::major_compact(req, rfengine, router).await
                             }
                             (Method::POST, path) if path.starts_with("/schema_file") => {
-                                Self::handle_schema_file(req, router, engine).await
+                                let res = Self::handle_schema_file(req, router, engine).await;
+                                STATUS_REQ_HISTOGRAM_STATIC
+                                    .schema_file
+                                    .observe(start.saturating_elapsed().as_secs_f64());
+                                res
                             }
                             (Method::POST, path) if path.starts_with("/clear_columnar") => {
                                 Self::handle_clear_columnar(req, router).await
@@ -2055,23 +2074,26 @@ impl StatusServer {
             }
         }));
 
-        let rx = self.rx.take().unwrap();
-        let graceful = server
-            .with_graceful_shutdown(async move {
-                let _ = rx.await;
+        let close_rx = self.close_rx.take().unwrap();
+        let thread_pool = self.thread_pool.clone();
+        let close_handle = std::thread::spawn(move || {
+            thread_pool.block_on(async move {
+                tokio::select! {
+                    res = server => {
+                        res.expect("status server exit with error");
+                    }
+                    _ = close_rx => {}
+                }
             })
-            .map_err(|e| error!("Status server error: {:?}", e));
-        let hyper_pool = self.hyper_pool.clone();
-        std::thread::spawn(move || {
-            let _ = hyper_pool.block_on(graceful);
         });
+        self.close_handle = Some(close_handle);
     }
 
     pub fn start(&mut self, status_addr: String) -> Result<()> {
         let addr = SocketAddr::from_str(&status_addr)?;
 
         let incoming = {
-            let _enter = self.hyper_pool.enter();
+            let _enter = self.thread_pool.enter();
             AddrIncoming::bind(&addr)
         }?;
         self.addr = Some(incoming.local_addr());

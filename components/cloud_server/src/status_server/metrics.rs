@@ -5,7 +5,14 @@ use prometheus_static_metric::*;
 make_auto_flush_static_metric! {
     pub label_enum StatusReqKind {
         sync_region,
-        sync_region_by_id
+        sync_region_by_id,
+        kvengine,
+        rf_wal_chunk,
+        rf_backup,
+        truncate_ts,
+        restore_shard,
+        ingest_files,
+        schema_file,
     }
 
     pub struct StatusReqHistogram: LocalHistogram {
