@@ -1,6 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    collections::HashSet,
     convert::TryFrom,
     fmt, fs,
     io::{ErrorKind, Write},
@@ -344,20 +345,28 @@ impl File for IaFile {
 
     fn get_remote_segments(
         &self,
-        start_off: u64,
-        end_off: u64,
+        ranges: &[(u64 /* start_off */, u64 /* end_off */)],
     ) -> Result<(Vec<FileSegmentIdent>, usize /* total_segments */)> {
-        let mut segments = vec![];
+        if ranges.is_empty() {
+            return Ok((vec![], 0));
+        }
         let mut total_segments = 0;
-        let mut off = start_off;
-        while off < end_off {
-            let ident = self.align_to_segment(off, off + 1)?;
-            off = ident.end_off;
-
-            if !self.mgr.is_segment_cached(&ident) {
-                segments.push(ident);
+        let mut segments = vec![];
+        let mut ident_set = HashSet::new();
+        for &(start_off, end_off) in ranges {
+            let mut off = start_off;
+            while off < end_off {
+                let ident = self.align_to_segment(off, off + 1)?;
+                off = ident.end_off;
+                if ident_set.contains(&ident.start_off) {
+                    continue;
+                }
+                ident_set.insert(ident.start_off);
+                if !self.mgr.is_segment_cached(&ident) {
+                    segments.push(ident);
+                }
+                total_segments += 1;
             }
-            total_segments += 1;
         }
         Ok((segments, total_segments))
     }

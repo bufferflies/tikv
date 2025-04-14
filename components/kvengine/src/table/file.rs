@@ -86,8 +86,7 @@ pub trait File: Sync + Send {
     /// prefetching. Available for IA files only.
     fn get_remote_segments(
         &self,
-        _start_off: u64,
-        _end_off: u64,
+        _ranges: &[(u64 /* start_off */, u64 /* end_off */)],
     ) -> table::Result<(Vec<FileSegmentIdent>, usize /* total_segments */)> {
         Ok((vec![], 0))
     }

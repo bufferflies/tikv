@@ -6,6 +6,7 @@ use std::{
     mem,
     ops::Deref,
     sync::Arc,
+    time::Duration,
 };
 
 use aligned_vec::{avec, AVec};
@@ -14,6 +15,7 @@ use arrow_buffer::i256;
 use async_trait::async_trait;
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
+use futures::future::try_join_all;
 use tidb_query_datatype::{
     codec::{
         datum,
@@ -32,26 +34,33 @@ use tidb_query_datatype::{
     },
     FieldTypeFlag, FieldTypeTp,
 };
-use tikv_util::codec::{
-    bytes::{decode_bytes, decode_compact_bytes},
-    number::{decode_f64, decode_i64, decode_u64, decode_var_i64, decode_var_u64},
-    BytesSlice,
+use tikv_util::{
+    codec::{
+        bytes::{decode_bytes, decode_compact_bytes},
+        number::{decode_f64, decode_i64, decode_u64, decode_var_i64, decode_var_u64},
+        BytesSlice,
+    },
+    deadline::Deadline,
 };
 use tipb::ColumnInfo;
 
 use super::filter::{FilterOpResult, FilterOpResults, FilterOperator};
-use crate::table::{
-    self,
-    blobtable::blobtable::BlobTable,
-    columnar::{
+use crate::{
+    dfs::FileType,
+    ia::{manager::IaManager, types::FileSegmentIdent},
+    table::{
+        self,
+        blobtable::blobtable::BlobTable,
         columnar::{
-            decompress_pack, get_fixed_size, Block, ColumnBuffer, ColumnMeta, ColumnarFile, Schema,
-            TableMeta,
+            columnar::{
+                decompress_pack, get_fixed_size, Block, ColumnBuffer, ColumnMeta, ColumnarFile,
+                Schema, TableMeta,
+            },
+            get_primary_key,
         },
-        get_primary_key,
+        file::File,
+        search, InnerKey,
     },
-    file::File,
-    search, InnerKey,
 };
 
 pub const GLOBAL_COMMON_HANDLE_END: &[u8] = &[255];
@@ -63,6 +72,9 @@ pub trait ColumnarReader: Send {
     async fn read(&mut self, block: &mut Block, limit: usize) -> crate::table::Result<usize>;
     fn reset(&mut self) -> crate::table::Result<()> {
         Ok(())
+    }
+    fn get_remote_segments(&self) -> crate::table::Result<(Vec<FileSegmentIdent>, usize)> {
+        Ok((vec![], 0))
     }
 }
 
@@ -144,6 +156,10 @@ impl ColumnarTableReader {
             version_reader,
             columns_readers,
         }
+    }
+
+    pub fn get_file(&self) -> Arc<dyn File> {
+        self.handle_reader.pack_loader.file.clone()
     }
 }
 
@@ -272,6 +288,23 @@ impl ColumnarReader for ColumnarTableReader {
             }
         }
         Ok(total_read_row)
+    }
+
+    fn get_remote_segments(&self) -> crate::table::Result<(Vec<FileSegmentIdent>, usize)> {
+        let file = self.get_file();
+        let mut ranges = vec![];
+        // handle segment
+        let (start_off, _) = self.handle_reader.col_meta.pack_offsets.get(0);
+        ranges.push((start_off as u64, start_off as u64 + 1));
+        // version segment
+        let (start_off, _) = self.version_reader.col_meta.pack_offsets.get(0);
+        ranges.push((start_off as u64, start_off as u64 + 1));
+        // column segments
+        for col in &self.columns_readers {
+            let (start_off, _) = col.col_meta.pack_offsets.get(0);
+            ranges.push((start_off as u64, start_off as u64 + 1));
+        }
+        file.get_remote_segments(&ranges)
     }
 }
 
@@ -673,6 +706,53 @@ impl ColumnarMvccReader {
     pub fn reset(&mut self) {
         self.src.reset().unwrap();
     }
+
+    pub async fn prefetch_ia_remote_segments(
+        &mut self,
+        tag: &str,
+        ia_mgr: &IaManager,
+        keyspace_id: u32,
+        timeout: Duration,
+    ) -> crate::table::Result<Option<f64>> {
+        let (idents, total_segments) = self.src.get_remote_segments()?;
+        if idents.is_empty() {
+            // No need to prefetch, return 1.0 cache hit.
+            return Ok(Some(1.0));
+        }
+
+        let _enter = ia_mgr.enter_runtime();
+        let mut tasks = vec![];
+        let deadline = Deadline::from_now(timeout);
+        let prefetch_segments = idents.len();
+        for ident in idents {
+            let mgr = ia_mgr.clone();
+            let task = async move {
+                mgr.prefetch_segment(ident.clone(), FileType::Columnar, keyspace_id, deadline)
+                    .await
+            };
+            tasks.push(tokio::spawn(task));
+        }
+
+        match tokio::time::timeout_at(deadline.to_tokio_instant(), try_join_all(tasks)).await {
+            Ok(res) => {
+                let res = res.map_err(|err| -> crate::table::Error {
+                    crate::table::Error::Other(format!(
+                        "{} prefetch segment failed: {:?}",
+                        tag, err
+                    ))
+                })?;
+                res.into_iter().collect::<crate::table::Result<()>>()?;
+                let cache_hit = (total_segments - prefetch_segments) as f64 / total_segments as f64;
+                info!("{} prefetch ia remote segments", tag;
+                    "prefetch_segments" => prefetch_segments, "cache_hit" => cache_hit);
+                Ok(Some(cache_hit))
+            }
+            Err(_) => Err(crate::table::Error::DeadlineExceeded(format!(
+                "{} prefetch ia remote segments timeout",
+                tag
+            ))),
+        }
+    }
 }
 
 #[async_trait]
@@ -1023,6 +1103,10 @@ impl ColumnarReaderBuffer {
         self.block.handles.get_int_handle_value(self.row_idx)
     }
 
+    pub fn inner_reader(&self) -> &dyn ColumnarReader {
+        self.reader.as_ref()
+    }
+
     pub fn reset(&mut self) {
         self.row_idx = 0;
         self.block.reset();
@@ -1220,6 +1304,17 @@ impl ColumnarReader for ColumnarMergeReader {
             }
         }
         Ok(read_row)
+    }
+
+    fn get_remote_segments(&self) -> crate::table::Result<(Vec<FileSegmentIdent>, usize)> {
+        let mut col_idents = vec![];
+        let mut seg_count = 0;
+        for reader in &self.heap {
+            let (idents, count) = reader.inner_reader().get_remote_segments()?;
+            col_idents.extend(idents);
+            seg_count += count;
+        }
+        Ok((col_idents, seg_count))
     }
 }
 
@@ -1756,6 +1851,23 @@ impl ColumnarReader for ColumnarConcatReader {
             read_rows += cnt;
         }
         Ok(read_rows)
+    }
+
+    fn get_remote_segments(&self) -> crate::table::Result<(Vec<FileSegmentIdent>, usize)> {
+        let mut seg_idents = vec![];
+        let mut seg_count = 0;
+        for file in &self.files {
+            let reader = ColumnarTableReader::new(
+                file,
+                self.schema.clone(),
+                self.filter_op.clone(),
+                self.encryption_key.clone(),
+            );
+            let (idents, count) = reader.get_remote_segments()?;
+            seg_idents.extend(idents);
+            seg_count += count;
+        }
+        Ok((seg_idents, seg_count))
     }
 }
 

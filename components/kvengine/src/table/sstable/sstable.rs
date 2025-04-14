@@ -243,7 +243,7 @@ impl SsTable {
             self.data_end_offset() as u64
         };
 
-        self.file.get_remote_segments(start_off, end_off)
+        self.file.get_remote_segments(&[(start_off, end_off)])
     }
 }
 
