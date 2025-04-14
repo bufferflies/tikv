@@ -36,7 +36,7 @@ use tikv_util::{box_err, codec::bytes::decode_bytes, debug, info, time::Instant,
 use crate::{
     archive::{get_archived_wal_addresses, get_archived_wals_from_addresses, StoreMeta},
     backup::IncrementalBackupFile,
-    error::{Error, Result},
+    error::{Error, HttpRequestError, Result},
     metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
 };
 
@@ -99,24 +99,19 @@ pub async fn send_request_to_store(
     let uri_str = format!("{}", req.uri());
     let resp = tokio::time::timeout(timeout, client.request(req))
         .await
-        .map_err(|_| Error::Timeout(format!("request {uri_str} timeout"), timeout.as_secs()))?;
+        .map_err(|_| HttpRequestError::Timeout(format!("send request to {uri_str}"), timeout))?;
     if let Err(err) = resp {
         error!(
             "send request to store failed, store {}, err {:?}, uri {:?}",
             store.id, err, uri_str
         );
-        return Err(err.into());
+        return Err(HttpRequestError::Http(uri_str, err).into());
     }
     let resp = resp.unwrap();
     let status = resp.status();
     let body = tokio::time::timeout(timeout, hyper::body::to_bytes(resp.into_body()))
         .await
-        .map_err(|_| {
-            Error::Timeout(
-                format!("read response from {uri_str} timeout"),
-                timeout.as_secs(),
-            )
-        })?;
+        .map_err(|_| HttpRequestError::Timeout(format!("read response from {uri_str}"), timeout))?;
     if !status.is_success() {
         let err_msg = body
             .map(|x| x.to_str_lossy().to_string())
@@ -143,8 +138,7 @@ pub async fn send_request_to_store_with_retry<F>(
 where
     F: Fn() -> Request<Body>,
 {
-    let is_error_retryable =
-        |err: &Error| matches!(err, Error::HttpRequestError(_) | Error::Timeout(..));
+    let is_error_retryable = |err: &Error| matches!(err, Error::HttpRequestError(_));
     let mut last_err: Option<Error> = None;
     let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < timeout {

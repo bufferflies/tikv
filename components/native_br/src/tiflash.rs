@@ -13,7 +13,7 @@ use tikv_util::{box_err, retry::sleep_async, time::Instant};
 
 use crate::{
     common::{get_tiflash_storage_stores, send_request_to_store_with_retry},
-    error::{Error, Result},
+    error::{HttpRequestError, Result},
 };
 
 const WAIT_TIFLASH_REMOVE_REPLICA_INTERVAL: Duration = Duration::from_secs(1);
@@ -23,7 +23,7 @@ const GET_TIFLASH_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
-pub struct TiFlashSycnRegionResp {
+pub struct TiFlashSyncRegionResp {
     pub count: u64,
     pub regions: Vec<u64>,
 }
@@ -32,7 +32,7 @@ async fn get_tiflash_keyspace_status(
     keyspace_id: u32,
     store: Store,
     security_mgr: &SecurityManager,
-) -> Result<TiFlashSycnRegionResp> {
+) -> Result<TiFlashSyncRegionResp> {
     let uri = security_mgr.build_uri(format!(
         "{}/tiflash/sync-region/keyspace/{}",
         &store.status_address, keyspace_id
@@ -103,10 +103,11 @@ async fn wait_tiflash_replica_removed(
         }
     }
     error!("Tiflash remove replica timeout err {:?}", last_err);
-    Err(Error::Timeout(
+    Err(HttpRequestError::Timeout(
         "Wait remove tiflash replica".to_string(),
-        WAIT_TIFLASH_REMOVE_REPLICA_TIMEOUT.as_secs(),
-    ))
+        WAIT_TIFLASH_REMOVE_REPLICA_TIMEOUT,
+    )
+    .into())
 }
 
 pub async fn remove_tiflash_replia_of_keyspace(
