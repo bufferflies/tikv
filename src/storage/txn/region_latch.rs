@@ -6,8 +6,45 @@ use crossbeam::utils::CachePadded;
 use dashmap::DashMap;
 use kvengine::table::TxnFile;
 use parking_lot::{Mutex, MutexGuard};
+use tikv_util::deadline::Deadline;
 
 use crate::storage::txn::{latch::Latch, Lock};
+
+#[derive(Debug)]
+pub struct WakeupTask {
+    pub cid: u64,
+    pub deadline: Option<Deadline>,
+
+    /// When the task is not in waiting list, it can be dropped without try to
+    /// release the latch.
+    pub in_waiting_list: bool,
+}
+
+impl PartialEq for WakeupTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.cid == other.cid && self.in_waiting_list == other.in_waiting_list
+    }
+}
+
+impl Eq for WakeupTask {}
+
+impl WakeupTask {
+    pub fn new(cid: u64, deadline: Option<Deadline>) -> Self {
+        Self {
+            cid,
+            deadline,
+            in_waiting_list: true,
+        }
+    }
+
+    pub fn not_in_waiting_list(cid: u64, deadline: Option<Deadline>) -> Self {
+        Self {
+            cid,
+            deadline,
+            in_waiting_list: false,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct GlobalLatches {
@@ -29,6 +66,7 @@ impl GlobalLatches {
     }
 
     pub fn acquire(&self, lock: &mut Lock, who: u64) -> bool {
+        debug!("acquire {}", who; "lock" => ?lock);
         if !lock.count_added {
             let region_latch = self
                 .regions
@@ -42,7 +80,7 @@ impl GlobalLatches {
             if guard.conflict_with_txn_latch(lock, who) {
                 return false;
             }
-            if let Some(txn_latch) = &guard.txn_file_latch {
+            if let Some(txn_latch) = &guard.waiting_tasks.first() {
                 lock.checked_txn_cid = txn_latch.cid;
                 guard.checked_txn_cmd_count += 1;
             } else {
@@ -77,7 +115,8 @@ impl GlobalLatches {
         lock: &Lock,
         who: u64,
         _keep_latches_for_next_cmd: Option<(u64, &Lock)>,
-    ) -> Vec<u64> {
+    ) -> Vec<WakeupTask> {
+        debug!("release {}", who; "lock" => ?lock);
         let region_latch = self
             .regions
             .entry(lock.region_id)
@@ -88,14 +127,15 @@ impl GlobalLatches {
             return guard.release_txn_lock(lock, who);
         }
         let mut wakeup_list = vec![];
-        if let Some(txn_file_latch) = &guard.txn_file_latch {
+        if let Some(txn_file_latch) = &guard.waiting_tasks.first() {
             let txn_latch_cid = txn_file_latch.cid;
+            let txn_latch_deadline = txn_file_latch.deadline;
             if txn_latch_cid == lock.checked_txn_cid {
                 guard.checked_txn_cmd_count -= 1;
             } else {
                 guard.before_txn_cmd_count -= 1;
                 if guard.before_txn_cmd_count == 0 {
-                    wakeup_list.push(txn_latch_cid);
+                    wakeup_list.push(WakeupTask::new(txn_latch_cid, txn_latch_deadline));
                 }
             }
         } else {
@@ -107,9 +147,10 @@ impl GlobalLatches {
             assert_eq!(front, who);
             assert_eq!(v, key_hash);
             if let Some(wakeup) = latch.get_first_req_by_hash(ks, key_hash) {
-                wakeup_list.push(wakeup);
+                wakeup_list.push(WakeupTask::new(wakeup, None));
             }
         }
+        debug!("release {}", who; "wakeup_list" => ?wakeup_list);
         wakeup_list
     }
 
@@ -123,62 +164,95 @@ impl GlobalLatches {
 struct RegionTxnLatch {
     before_txn_cmd_count: usize,
     checked_txn_cmd_count: usize,
-    txn_file_latch: Option<TxnFileLatch>,
+    waiting_tasks: Vec<TxnFileLatch>, // The first task must be a txn file task.
 }
 
 #[derive(Debug)]
 struct TxnFileLatch {
     start_ts: u64,
-    txn_file: TxnFile,
+    txn_file: Option<TxnFile>, // `None` for normal task.
     cid: u64,
-    waiting_tasks: Vec<u64>,
+    deadline: Option<Deadline>,
+}
+
+impl TxnFileLatch {
+    fn from_lock(lock: &Lock, who: u64) -> Self {
+        Self {
+            start_ts: lock.start_ts,
+            txn_file: lock.txn_file.clone(),
+            cid: who,
+            deadline: lock.deadline,
+        }
+    }
+
+    fn deadline_exceeded(&self) -> bool {
+        self.deadline.is_some_and(|x| x.check().is_err())
+    }
 }
 
 impl RegionTxnLatch {
     fn acquire_txn_lock(&mut self, lock: &mut Lock, who: u64) -> bool {
-        if let Some(txn_file_latch) = self.txn_file_latch.as_mut() {
-            if txn_file_latch.cid == who && self.before_txn_cmd_count == 0 {
-                return true;
-            }
-            txn_file_latch.waiting_tasks.push(who);
-            return false;
+        debug!("acquire_txn_lock {}", who; "lock" => ?lock);
+        debug_assert!(lock.txn_file.is_some());
+        if !self
+            .waiting_tasks
+            .first()
+            .is_some_and(|latch| latch.cid == who)
+        {
+            self.waiting_tasks.push(TxnFileLatch::from_lock(lock, who));
         }
-        let txn_file_latch = TxnFileLatch {
-            start_ts: lock.start_ts,
-            txn_file: lock.txn_file.clone().unwrap(),
-            cid: who,
-            waiting_tasks: vec![],
-        };
-        self.txn_file_latch = Some(txn_file_latch);
-        self.before_txn_cmd_count == 0
+        let first_task = self.waiting_tasks.first().unwrap();
+        debug_assert!(first_task.txn_file.is_some());
+        first_task.cid == who && self.before_txn_cmd_count == 0
     }
 
     fn conflict_with_txn_latch(&mut self, lock: &mut Lock, who: u64) -> bool {
-        if let Some(txn_file_latch) = self.txn_file_latch.as_mut() {
-            if txn_file_latch
-                .txn_file
-                .key_hash_exists(&lock.required_hashes)
-            {
+        if let Some(txn_file_latch) = self.waiting_tasks.first() {
+            let txn_file = txn_file_latch.txn_file.as_ref().unwrap_or_else(|| {
+                panic!("not a txn latch: {:?}", txn_file_latch);
+            });
+            if txn_file.key_hash_exists(&lock.required_hashes) {
                 // If the lock conflict with the txn latch, it waits for the txn file.
-                txn_file_latch.waiting_tasks.push(who);
+                self.waiting_tasks.push(TxnFileLatch::from_lock(lock, who));
                 return true;
             }
         }
         false
     }
 
-    fn release_txn_lock(&mut self, lock: &Lock, who: u64) -> Vec<u64> {
+    fn release_txn_lock(&mut self, lock: &Lock, who: u64) -> Vec<WakeupTask> {
+        debug!("release_txn_lock: {}", who; "lock" => ?lock);
+        debug_assert_eq!(self.before_txn_cmd_count, 0);
         self.before_txn_cmd_count = self.checked_txn_cmd_count;
         self.checked_txn_cmd_count = 0;
-        let txn_file_latch = self.txn_file_latch.take().unwrap_or_else(|| {
+        let txn_file_latch = self.waiting_tasks.first().unwrap_or_else(|| {
             panic!(
                 "release_txn_lock: txn file latch not exist, region_id: {}, lock: {:?}, who: {}, self: {:?}",
                 lock.region_id, lock, who, self
             );
         });
-        assert_eq!(lock.start_ts, txn_file_latch.start_ts);
+        assert_eq!(txn_file_latch.start_ts, lock.start_ts);
         assert_eq!(txn_file_latch.cid, who);
-        txn_file_latch.waiting_tasks
+
+        let waiting_tasks = std::mem::take(&mut self.waiting_tasks);
+        let mut wakeup_list = vec![];
+        for task in waiting_tasks.into_iter().skip(1) {
+            if task.txn_file.is_some() && !task.deadline_exceeded() {
+                if self.waiting_tasks.is_empty() && self.before_txn_cmd_count == 0 {
+                    // Wake up the first txn task in waiting_tasks.
+                    wakeup_list.push(WakeupTask::new(task.cid, task.deadline));
+                }
+                self.waiting_tasks.push(task);
+            } else {
+                // Wake up all normal tasks, as they would be not conflicted with the new txn
+                // latch.
+                // Indicate not in waiting list for fast wakeup.
+                wakeup_list.push(WakeupTask::not_in_waiting_list(task.cid, task.deadline));
+            }
+        }
+
+        debug!("release_txn_lock: {}", who; "wakeup_list" => ?wakeup_list);
+        wakeup_list
     }
 }
 
@@ -206,21 +280,22 @@ mod tests {
         let key_1_str = "x001abc";
         let keyspace_1 =
             ApiV2::get_u32_keyspace_id_by_key(key_1_str.as_bytes()).unwrap_or_default();
-        let mut lock_1 = Lock::new(keyspace_1, &[Key::from_raw(key_1_str.as_bytes())]);
+        let mut lock_1 = Lock::new(keyspace_1, &[Key::from_raw(key_1_str.as_bytes())], None);
         assert!(global_latches.acquire(&mut lock_1, 1));
 
-        let mut lock_1_conflict = Lock::new(keyspace_1, &[Key::from_raw(key_1_str.as_bytes())]);
+        let mut lock_1_conflict =
+            Lock::new(keyspace_1, &[Key::from_raw(key_1_str.as_bytes())], None);
         assert!(!global_latches.acquire(&mut lock_1_conflict, 2));
 
         let wakes = global_latches.release(&lock_1, 1, None);
         assert_eq!(wakes.len(), 1);
-        assert_eq!(wakes[0], 2);
+        assert_eq!(wakes[0], WakeupTask::new(2, None));
         assert!(global_latches.acquire(&mut lock_1_conflict, 2));
 
         let key_2_str = "x002abc";
         let keyspace_2 =
             ApiV2::get_u32_keyspace_id_by_key(key_2_str.as_bytes()).unwrap_or_default();
-        let mut lock_2 = Lock::new(keyspace_2, &[Key::from_raw(key_2_str.as_bytes())]);
+        let mut lock_2 = Lock::new(keyspace_2, &[Key::from_raw(key_2_str.as_bytes())], None);
 
         // The key hash is calculated with keyspace prefix trimmed, so the hashes should
         // be equal.
@@ -251,7 +326,7 @@ mod tests {
         assert!(!global_latches.acquire(&mut txn_lock, txn_lock_cid));
 
         let wakes = global_latches.release(&normal_lock, normal_cid, None);
-        assert_eq!(wakes, vec![2]);
+        assert_eq!(wakes, vec![WakeupTask::new(2, None)]);
         assert!(global_latches.acquire(&mut txn_lock, txn_lock_cid));
 
         // non conflicting lock will not block by txn lock.
@@ -264,14 +339,25 @@ mod tests {
         let normal_conflict_cid = 4;
         assert!(!global_latches.acquire(&mut normal_lock_conflict, normal_conflict_cid));
 
+        let mut normal_lock_conflict_2 = make_normal_lock(&kb.i_to_key(160), 1004);
+        let normal_conflict_cid_2 = 5;
+        assert!(!global_latches.acquire(&mut normal_lock_conflict_2, normal_conflict_cid_2));
+
         // another txn file will be blocked by txn lock.
         let txn_file_2 = make_txn_file(300, 400, 1010, lower_bound, upper_bound, &kb);
         let mut txn_lock_2 = make_txn_lock(txn_file_2);
-        let txn_lock_2_cid = 5;
+        let txn_lock_2_cid = 6;
         assert!(!global_latches.acquire(&mut txn_lock_2, txn_lock_2_cid));
 
         let wakes = global_latches.release(&txn_lock, txn_lock_cid, None);
-        assert_eq!(wakes, vec![normal_conflict_cid, txn_lock_2_cid]);
+        // txn_lock_2_cid is not wake up as it is blocked by normal_conflict_cid
+        assert_eq!(
+            wakes,
+            vec![
+                WakeupTask::not_in_waiting_list(normal_conflict_cid, None),
+                WakeupTask::not_in_waiting_list(normal_conflict_cid_2, None),
+            ]
+        );
 
         assert!(global_latches.acquire(&mut normal_lock_conflict, normal_conflict_cid));
 
@@ -284,7 +370,7 @@ mod tests {
         assert!(!global_latches.acquire(&mut txn_lock_2, txn_lock_2_cid));
 
         let wakes = global_latches.release(&normal_lock_no_conflict, normal_no_conflict_cid, None);
-        assert_eq!(wakes, vec![txn_lock_2_cid]);
+        assert_eq!(wakes, vec![WakeupTask::new(txn_lock_2_cid, None)]);
         assert!(global_latches.acquire(&mut txn_lock_2, txn_lock_2_cid));
     }
 
@@ -323,13 +409,13 @@ mod tests {
 
     fn make_normal_lock(raw_key: &[u8], start_ts: u64) -> Lock {
         let key = Key::from_raw(raw_key);
-        let mut lock = Lock::new(KEYSPACE_ID, &[key]);
+        let mut lock = Lock::new(KEYSPACE_ID, &[key], None);
         lock.set_region_id_start_ts(1, start_ts);
         lock
     }
 
     fn make_txn_lock(txn_file: TxnFile) -> Lock {
-        let mut lock = Lock::new(KEYSPACE_ID, &[]);
+        let mut lock = Lock::new(KEYSPACE_ID, &[], None);
         lock.set_region_id_start_ts(1, txn_file.start_ts());
         lock.txn_file = Some(txn_file);
         lock

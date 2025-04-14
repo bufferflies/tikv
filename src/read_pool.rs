@@ -197,8 +197,7 @@ impl ReadPoolHandle {
                 // is close to the limit, they may all pass this check and the number of running
                 // tasks may exceed the limit.
                 if priority != CommandPri::High && running_tasks.get() as usize >= *max_tasks {
-                    // TODO: uncomment it when scheduler leak issue is fixed.
-                    // return Err(ReadPoolError::UnifiedReadPoolFull);
+                    return Err(ReadPoolError::UnifiedReadPoolFull);
                 }
                 running_tasks.inc();
                 let tracked = TrackedFuture::new(async move {

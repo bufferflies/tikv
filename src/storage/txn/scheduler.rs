@@ -84,7 +84,7 @@ use crate::{
             },
             flow_controller::{FlowControlHelper, FlowController},
             latch::Lock,
-            region_latch::GlobalLatches,
+            region_latch::{GlobalLatches, WakeupTask},
             sched_pool::{tls_collect_query, tls_collect_scan_details},
             Error, ErrorInner, ProcessResult,
         },
@@ -387,7 +387,9 @@ impl<L: LockManager> SchedulerInner<L> {
         cid: u64,
     ) -> Result<Option<Task>, (u64 /* region_id */, StorageError)> {
         let mut task_slot = self.get_task_slot(cid);
-        let tctx = task_slot.get_mut(&cid).unwrap();
+        let tctx = task_slot.get_mut(&cid).unwrap_or_else(|| {
+            panic!("cid {} not in task slot", cid);
+        });
         if self.latches.acquire(&mut tctx.lock, cid) {
             // Check deadline early.
             // TODO: implement a fast path to release without acquiring the latch.
@@ -508,8 +510,12 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             .inner
             .latches
             .release(&lock, cid, keep_latches_for_next_cmd);
-        for wcid in wakeup_list {
-            self.try_to_wake_up(wcid);
+        for w in wakeup_list {
+            if w.in_waiting_list {
+                self.try_to_wake_up(w.cid);
+            } else {
+                self.fast_fail_wake_up(w);
+            }
         }
     }
 
@@ -641,6 +647,34 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 );
             }
         }
+    }
+
+    /// Wake up the task NOT in waiting list with fast fail.
+    fn fast_fail_wake_up(&self, task: WakeupTask) {
+        debug_assert!(!task.in_waiting_list);
+        let cid = task.cid;
+        let (tag, deadline) = match task.deadline {
+            Some(deadline) => (CommandKind::unknown, deadline),
+            None => {
+                let task_slot = self.inner.get_task_slot(cid);
+                let tctx = task_slot.get(&cid).unwrap_or_else(|| {
+                    panic!("cid {} is not in the slot", cid);
+                });
+                (tctx.tag, tctx.task.as_ref().unwrap().cmd.deadline())
+            }
+        };
+
+        if let Err(e) = deadline.check() {
+            SCHED_STAGE_COUNTER_VEC
+                .get(tag)
+                .wakeup_deadline_exceeded
+                .inc();
+            debug!("fast_wake_up: deadline exceeded"; "cid" => cid);
+            self.finish_with_err_without_release_latch(cid, e);
+            return;
+        }
+
+        self.try_to_wake_up(cid);
     }
 
     fn schedule_awakened_pessimistic_locks(
@@ -778,6 +812,20 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     where
         StorageError: From<ER>,
     {
+        self.finish_with_err_opt(cid, err, true);
+    }
+
+    fn finish_with_err_without_release_latch<ER>(&self, cid: u64, err: ER)
+    where
+        StorageError: From<ER>,
+    {
+        self.finish_with_err_opt(cid, err, false);
+    }
+
+    fn finish_with_err_opt<ER>(&self, cid: u64, err: ER, release_latch: bool)
+    where
+        StorageError: From<ER>,
+    {
         let err = StorageError::from(err);
         debug!("write command finished with error"; "cid" => cid, "err" => ?err);
         #[cfg(feature = "debug-trace-txn-tasks")]
@@ -795,7 +843,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         if !tctx.woken_up_resumable_lock_requests.is_empty() {
             self.put_back_lock_wait_entries(tctx.woken_up_resumable_lock_requests);
         }
-        self.release_latches(tctx.lock, cid, None);
+
+        if release_latch {
+            self.release_latches(tctx.lock, cid, None);
+        }
     }
 
     /// Event handler for the success of read.
@@ -905,7 +956,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         keyspace_id: u32,
         entries: impl IntoIterator<Item = &'a Box<LockWaitEntry>>,
     ) -> Lock {
-        Lock::new(keyspace_id, entries.into_iter().map(|entry| &entry.key))
+        Lock::new(
+            keyspace_id,
+            entries.into_iter().map(|entry| &entry.key),
+            None,
+        )
     }
 
     /// Event handler for the request of waiting for lock
@@ -2145,7 +2200,7 @@ mod tests {
             read_pool,
         );
 
-        let mut lock = Lock::new(0, &[Key::from_raw(b"b")]);
+        let mut lock = Lock::new(0, &[Key::from_raw(b"b")], None);
         let cid = scheduler.inner.gen_id();
         assert!(scheduler.inner.latches.acquire(&mut lock, cid));
 
@@ -2194,7 +2249,7 @@ mod tests {
         block_on(f).unwrap().unwrap();
 
         // Acquire the latch, so that next command(req2) can't require all latches.
-        let mut lock = Lock::new(0, &[Key::from_raw(b"d")]);
+        let mut lock = Lock::new(0, &[Key::from_raw(b"d")], None);
         let cid = scheduler.inner.gen_id();
         assert!(scheduler.inner.latches.acquire(&mut lock, cid));
 
@@ -2389,7 +2444,7 @@ mod tests {
             read_pool,
         );
 
-        let mut lock = Lock::new(0, &[Key::from_raw(b"b")]);
+        let mut lock = Lock::new(0, &[Key::from_raw(b"b")], None);
         let cid = scheduler.inner.gen_id();
         assert!(scheduler.inner.latches.acquire(&mut lock, cid));
 

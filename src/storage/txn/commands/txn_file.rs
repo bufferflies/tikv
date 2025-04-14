@@ -923,6 +923,7 @@ impl CommandExt for TxnFileCommand {
             checked_txn_cid: 0,
             txn_file: Some(self.txn_file.clone()),
             count_added: false,
+            deadline: Some(self.deadline()),
         }
     }
 }

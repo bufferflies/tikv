@@ -45,17 +45,19 @@ impl CommandExt for FlashbackToVersion {
 
     fn gen_lock(&self) -> latch::Lock {
         match &self.state {
-            FlashbackToVersionState::RollbackLock { key_locks, .. } => {
-                latch::Lock::new(self.ctx.keyspace_id, key_locks.iter().map(|(key, _)| key))
-            }
+            FlashbackToVersionState::RollbackLock { key_locks, .. } => latch::Lock::new(
+                self.ctx.keyspace_id,
+                key_locks.iter().map(|(key, _)| key),
+                None,
+            ),
             FlashbackToVersionState::Prewrite { key_to_lock } => {
-                latch::Lock::new(self.ctx.keyspace_id, [key_to_lock])
+                latch::Lock::new(self.ctx.keyspace_id, [key_to_lock], None)
             }
             FlashbackToVersionState::FlashbackWrite { keys, .. } => {
-                latch::Lock::new(self.ctx.keyspace_id, keys.iter())
+                latch::Lock::new(self.ctx.keyspace_id, keys.iter(), None)
             }
             FlashbackToVersionState::Commit { key_to_commit } => {
-                latch::Lock::new(self.ctx.keyspace_id, [key_to_commit])
+                latch::Lock::new(self.ctx.keyspace_id, [key_to_commit], None)
             }
         }
     }

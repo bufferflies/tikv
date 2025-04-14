@@ -2169,7 +2169,8 @@ const DEFAULT_STORAGE_READPOOL_MAX_CONCURRENCY: usize = 8;
 // const DEFAULT_READPOOL_MAX_TASKS_PER_WORKER: usize = 2 * 1000;
 
 // Use double pool size as it's used for both read & write.
-const DEFAULT_READPOOL_MAX_TASKS_PER_WORKER: usize = 4 * 1000;
+// TODO: Use 4 * 1000
+const DEFAULT_READPOOL_MAX_TASKS_PER_WORKER: usize = 4 * 100000;
 
 const MIN_READPOOL_STACK_SIZE_MB: u64 = 2;
 const DEFAULT_READPOOL_STACK_SIZE_MB: u64 = 10;

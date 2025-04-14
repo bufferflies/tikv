@@ -156,6 +156,7 @@ make_auto_flush_static_metric! {
         raw_atomic_store,
         raw_checksum,
         txn_file,
+        unknown,
     }
 
     pub label_enum CommandStageKind {

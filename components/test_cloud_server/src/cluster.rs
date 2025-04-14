@@ -1207,6 +1207,7 @@ pub fn new_test_config(
     config.server.status_addr = node_status_addr(node_id);
     config.server.grpc_keepalive_time = ReadableDuration::secs(1);
     config.server.grpc_keepalive_timeout = ReadableDuration::secs(1);
+    config.readpool.unified.max_tasks_per_worker = 4000;
     config.dfs.zstd_compression_level = "3".to_string();
     config.raft_store.raft_base_tick_interval = ReadableDuration::millis(50); // Note: affect rfstore::Config::from_old.
     config.raft_store.raft_election_timeout_ticks = 10;

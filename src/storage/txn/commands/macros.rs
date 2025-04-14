@@ -164,19 +164,27 @@ macro_rules! gen_lock {
     (empty) => {
         fn gen_lock(&self) -> crate::storage::txn::latch::Lock {
             let keyspace_id = self.ctx.get_keyspace_id();
-            crate::storage::txn::latch::Lock::new::<Vec<&Key>>(keyspace_id, vec![])
+            crate::storage::txn::latch::Lock::new::<Vec<&Key>>(
+                keyspace_id,
+                vec![],
+                Some(self.deadline()),
+            )
         }
     };
     ($field:ident) => {
         fn gen_lock(&self) -> crate::storage::txn::latch::Lock {
             let keyspace_id = self.ctx.get_keyspace_id();
-            crate::storage::txn::latch::Lock::new(keyspace_id, std::iter::once(&self.$field))
+            crate::storage::txn::latch::Lock::new(
+                keyspace_id,
+                std::iter::once(&self.$field),
+                Some(self.deadline()),
+            )
         }
     };
     ($field:ident : multiple) => {
         fn gen_lock(&self) -> crate::storage::txn::latch::Lock {
             let keyspace_id = self.ctx.get_keyspace_id();
-            crate::storage::txn::latch::Lock::new(keyspace_id, &self.$field)
+            crate::storage::txn::latch::Lock::new(keyspace_id, &self.$field, Some(self.deadline()))
         }
     };
     ($field:ident : multiple $transform:tt) => {
@@ -184,7 +192,7 @@ macro_rules! gen_lock {
             #![allow(unused_parens)]
             let keyspace_id = self.ctx.get_keyspace_id();
             let keys = self.$field.iter().map($transform);
-            crate::storage::txn::latch::Lock::new(keyspace_id, keys)
+            crate::storage::txn::latch::Lock::new(keyspace_id, keys, Some(self.deadline()))
         }
     };
 }
