@@ -325,6 +325,9 @@ pub struct Config {
     #[online_config(hidden)]
     // Interval to check peers availability info.
     pub check_peers_availability_interval: ReadableDuration,
+
+    /// Discount of `kv_size` for storage class IA.
+    pub ia_kv_size_discount: f64,
 }
 
 impl Default for Config {
@@ -437,6 +440,7 @@ impl Default for Config {
             unreachable_backoff: ReadableDuration::secs(10),
             // TODO: make its value reasonable
             check_peers_availability_interval: ReadableDuration::secs(30),
+            ia_kv_size_discount: 0.5,
         }
     }
 }

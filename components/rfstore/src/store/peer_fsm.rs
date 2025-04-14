@@ -1218,11 +1218,14 @@ impl<'a> PeerMsgHandler<'a> {
             self.peer.peer_stat.approximate_size = cmp::max(estimated_size, 1);
             self.peer.peer_stat.approximate_keys = estimated_entries;
             self.peer.peer_stat.approximate_kv_size = estimated_kv_size;
+
             let region_split_size = self.ctx.cfg.region_split_size.0;
+            let ia_kv_size_discount = self.ctx.cfg.ia_kv_size_discount;
             Self::adjust_peer_stat_for_storage_class(
                 &mut self.peer.peer_stat,
                 shard.as_ref(),
                 region_split_size,
+                ia_kv_size_discount,
             );
 
             if !self.fsm.peer.is_leader() {
@@ -1288,6 +1291,7 @@ impl<'a> PeerMsgHandler<'a> {
         peer_stat: &mut PeerStat,
         shard: &Shard,
         region_split_size: u64,
+        ia_kv_size_discount: f64,
     ) {
         if shard.get_storage_class() == StorageClass::Ia {
             // Adjust region size to prevent merge when the region is on the boundary of
@@ -1298,6 +1302,9 @@ impl<'a> PeerMsgHandler<'a> {
                 peer_stat.approximate_size =
                     cmp::max(peer_stat.approximate_size, region_split_size);
             }
+
+            peer_stat.approximate_kv_size =
+                (peer_stat.approximate_kv_size as f64 * ia_kv_size_discount) as u64;
         }
     }
 
