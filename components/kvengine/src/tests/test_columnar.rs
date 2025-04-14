@@ -41,6 +41,8 @@ use crate::{
     DeletePrefixes, IdVer, LevelHandler, SnapAccess, DEL_PREFIXES_KEY, EXTRA_CF, LOCK_CF, WRITE_CF,
 };
 
+const COLUMNAR_COMPACTION_WAIT_TIME: usize = 10;
+
 #[test]
 fn test_columnar_l0_compaction() {
     ::test_util::init_log_for_test();
@@ -118,7 +120,7 @@ fn test_columnar_l0_compaction() {
             );
             shard.get_data().col_levels.levels[0].files.is_empty()
         },
-        5,
+        COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok, "columnar l0 compaction failed");
     let snap = shard.new_snap_access();
@@ -236,7 +238,7 @@ fn test_columnar_l1_compaction() {
             );
             shard.get_data().col_levels.levels[1].files.is_empty()
         },
-        5,
+        COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok, "columnar l1 compaction failed");
     let snap = shard.new_snap_access();
@@ -382,7 +384,7 @@ fn test_columnar_major_compaction() {
             );
             !shard.get_data().col_levels.levels[2].files.is_empty()
         },
-        5,
+        COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok, "columnar major compaction failed");
     let snap = shard.new_snap_access();
@@ -430,7 +432,7 @@ fn test_columnar_major_compaction() {
             );
             shard.get_data().col_levels.levels[2].files.is_empty()
         },
-        5,
+        COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok);
     assert_eq!(shard.get_columnar_snap_version(), 0);
@@ -575,7 +577,7 @@ fn test_columnar_major_compaction_multiple_tables() {
             );
             !shard.get_data().col_levels.levels[2].files.is_empty()
         },
-        5,
+        COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok, "columnar major compaction failed");
     let verify_columnar_for_table = |schema_file: &SchemaFile, snap: &SnapAccess, table_id: i64| {
@@ -665,7 +667,7 @@ fn test_columnar_major_compaction_multiple_tables() {
                 && shard.get_data().columnar_table_ids.contains(&4)
                 && shard.get_data().columnar_table_ids.contains(&5)
         },
-        5,
+        COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok, "columnar major compaction failed");
     let snap = shard.new_snap_access();
@@ -697,7 +699,7 @@ fn test_columnar_major_compaction_multiple_tables() {
             );
             shard.get_data().col_levels.levels[2].files.is_empty()
         },
-        5,
+        COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok);
     assert_eq!(shard.get_columnar_snap_version(), 0);
@@ -786,7 +788,7 @@ fn test_columnar_destroy_range() {
                 .iter()
                 .any(|l| l.files.is_empty())
         },
-        5,
+        COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok, "columnar destroy range compaction failed");
 }
@@ -866,7 +868,7 @@ fn test_columnar_truncate_ts() {
                 && shard.get_data().col_levels.levels[1].files.is_empty()
                 && shard.get_data().col_levels.levels[2].files.len() == 2
         },
-        5,
+        COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok, "columnar truncate_ts compaction failed");
     let snap = shard.new_snap_access();
@@ -974,7 +976,10 @@ fn test_columnar_trim_over_bound() {
         "trigger columnar trim over bound compaction {}",
         shard.tag()
     );
-    let ok = try_wait(|| shard.get_data().get_col_table_counts(0) == 2, 5);
+    let ok = try_wait(
+        || shard.get_data().get_col_table_counts(0) == 2,
+        COLUMNAR_COMPACTION_WAIT_TIME,
+    );
     assert!(ok, "columnar trim over bound compaction failed");
     std::thread::sleep(Duration::from_secs(2));
     let snap = shard.new_snap_access();
