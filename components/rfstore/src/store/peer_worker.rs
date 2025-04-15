@@ -251,7 +251,8 @@ impl RaftWorker {
         }
         let idle_ctx = RaftContext::new(self.ctx.global.clone(), false);
         let (idle_sender, idle_receiver) = tikv_util::mpsc::unbounded();
-        let mut idle_worker = RaftIdleWorker::new(idle_ctx, idle_receiver);
+        let mut idle_worker =
+            RaftIdleWorker::new(idle_ctx, idle_receiver, self.apply_senders.clone());
         let idle_handle = std::thread::Builder::new()
             .name("raftstore_idle".to_string())
             .spawn_wrapper(move || idle_worker.run())
@@ -834,7 +835,7 @@ impl IdlePeer {
         }
     }
 
-    fn process(&mut self, ctx: &mut RaftContext) {
+    fn process(&mut self, ctx: &mut RaftContext, apply_senders: &[Sender<Option<ApplyBatch>>]) {
         let mut peer_fsm = self.peer_states.peer_fsm.lock().unwrap();
         if peer_fsm.stopped {
             return;
@@ -864,6 +865,18 @@ impl IdlePeer {
                     error!("{} failed to send raft message: {:?}", tag, err);
                 }
             }
+        }
+        if !ctx.apply_msgs.msgs.is_empty() {
+            let peer_batch = ApplyBatch {
+                msgs: mem::take(&mut ctx.apply_msgs.msgs),
+                applier: self.peer_states.applier.clone(),
+                applying_cnt: peer_fsm.applying_cnt.clone(),
+                send_time: tikv_util::time::Instant::now(),
+            };
+            peer_batch
+                .applying_cnt
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = apply_senders[peer_fsm.apply_worker_idx].send(Some(peer_batch));
         }
     }
 }
@@ -922,16 +935,22 @@ const IDLE_SEGMENTS: usize = 64;
 pub(crate) struct RaftIdleWorker {
     ctx: RaftContext,
     rx: Receiver<(u64, Box<PeerMsg>)>,
+    apply_senders: Vec<Sender<Option<ApplyBatch>>>,
     idle_peers: HashMap<u64, IdlePeer>,
     ticker: SegmentTicker,
 }
 
 impl RaftIdleWorker {
-    fn new(ctx: RaftContext, rx: Receiver<(u64, Box<PeerMsg>)>) -> Self {
+    fn new(
+        ctx: RaftContext,
+        rx: Receiver<(u64, Box<PeerMsg>)>,
+        apply_senders: Vec<Sender<Option<ApplyBatch>>>,
+    ) -> Self {
         let ticker = SegmentTicker::new(ctx.cfg.raft_base_tick_interval.as_millis(), IDLE_SEGMENTS);
         RaftIdleWorker {
             ctx,
             rx,
+            apply_senders,
             idle_peers: HashMap::default(),
             ticker,
         }
@@ -965,14 +984,14 @@ impl RaftIdleWorker {
                 for region_id in segment {
                     if let Some(idle_peer) = self.idle_peers.get_mut(region_id) {
                         idle_peer.messages.push(Box::new(PeerMsg::Tick));
-                        idle_peer.process(&mut self.ctx);
+                        idle_peer.process(&mut self.ctx, &self.apply_senders);
                         update_regions.remove(region_id);
                     }
                 }
             }
             for region_id in update_regions.drain() {
                 if let Some(idle_peer) = self.idle_peers.get_mut(&region_id) {
-                    idle_peer.process(&mut self.ctx);
+                    idle_peer.process(&mut self.ctx, &self.apply_senders);
                 }
             }
             if !self.ctx.raft_wb.is_empty() {
