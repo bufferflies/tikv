@@ -781,6 +781,7 @@ impl TikvServer {
         node.start(
             self.raw_engines.clone(),
             Box::new(server.transport()),
+            Box::new(server.transport_idle()),
             pd_worker,
             engines.store_meta.take().unwrap(),
             self.coprocessor_host.clone().unwrap(),

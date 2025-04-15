@@ -859,7 +859,7 @@ impl IdlePeer {
             peer_fsm.peer.raft_group.advance_append_async(ready);
             peer_fsm.peer.raft_group.on_persist_ready(ready_number);
             for raft_message in raft_messages {
-                if let Err(err) = ctx.global.trans.send(raft_message) {
+                if let Err(err) = ctx.global.trans_idle.send(raft_message) {
                     let tag = peer_fsm.peer.tag();
                     error!("{} failed to send raft message: {:?}", tag, err);
                 }
@@ -981,8 +981,8 @@ impl RaftIdleWorker {
                 self.ctx.global.engines.raft.write(wb).unwrap();
             }
             let process_duration = loop_start.saturating_elapsed();
-            if self.ctx.global.trans.need_flush() {
-                self.ctx.global.trans.flush();
+            if self.ctx.global.trans_idle.need_flush() {
+                self.ctx.global.trans_idle.flush();
             }
             let loop_duration = loop_start.saturating_elapsed();
             if loop_duration > Duration::from_millis(100) {

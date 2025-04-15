@@ -138,6 +138,7 @@ pub struct Server<T: RaftStoreRouter + 'static, S: StoreAddrResolver + 'static> 
     local_addr: SocketAddr,
     // Transport.
     trans: ServerTransport<T, S>,
+    trans_idle: ServerTransport<T, S>,
     _raft_router: T,
 
     // Currently load statistics is done in the thread.
@@ -226,9 +227,11 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             raft_router.clone(),
             grpc_thread_load.clone(),
         );
-        let raft_client = RaftClient::new(conn_builder);
-
+        let raft_client = RaftClient::new(conn_builder.clone());
         let trans = ServerTransport::new(raft_client);
+
+        let raft_idle_client = RaftClient::new(conn_builder);
+        let trans_idle = ServerTransport::new(raft_idle_client);
         health_service.set_serving_status("", ServingStatus::NotServing);
 
         let svr = Server {
@@ -236,6 +239,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             builder_or_server: Some(builder),
             local_addr: addr,
             trans,
+            trans_idle,
             _raft_router: raft_router,
             stats_pool,
             grpc_thread_load,
@@ -254,6 +258,10 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
 
     pub fn transport(&self) -> ServerTransport<T, S> {
         self.trans.clone()
+    }
+
+    pub fn transport_idle(&self) -> ServerTransport<T, S> {
+        self.trans_idle.clone()
     }
 
     pub fn env(&self) -> Arc<Environment> {
