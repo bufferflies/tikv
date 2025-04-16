@@ -1474,6 +1474,12 @@ impl StatusServer {
         let shard_id = req.cs.get_shard_id();
         debug!("[{}] receive restore_shard request: {:?}", shard_id, req);
 
+        if let Err(errpb) = check_available_space(&engine) {
+            warn!("[{}] reject restore shard, low space", shard_id; "err" => ?errpb);
+            let err_msg = format!("{} restore_shard rejected by low space", shard_id);
+            return Ok(make_response(StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+        }
+
         let (cb, fut) = paired_future_callback();
         let callback = Callback::write(Box::new(move |res| {
             cb(res);
