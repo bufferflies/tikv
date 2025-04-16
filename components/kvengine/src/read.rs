@@ -844,6 +844,12 @@ impl SnapAccessCore {
         let mut count = 0;
         let mut overlapped_count = 0;
         let mut l0_ids = HashSet::new();
+        let mut range_bounds = Vec::with_capacity(outer_ranges.len());
+        for (outer_start, outer_end) in outer_ranges {
+            let inner_start = InnerKey::from_outer_key(outer_start);
+            let inner_end = InnerKey::from_outer_end_key(outer_end);
+            range_bounds.push(DataBound::new(inner_start, inner_end, false));
+        }
         for v in &self.data.l0_tbls {
             count += 1;
             if ignore_locks {
@@ -855,17 +861,7 @@ impl SnapAccessCore {
                     continue;
                 }
             }
-            let mut overlap = false;
-            for (outer_start, outer_end) in outer_ranges {
-                let inner_start = InnerKey::from_outer_key(outer_start);
-                let inner_end = InnerKey::from_outer_end_key(outer_end);
-                let bound = DataBound::new(inner_start, inner_end, false);
-                if v.has_data_in_bound(bound) {
-                    overlap = true;
-                    break;
-                }
-            }
-            if !overlap {
+            if !range_bounds.iter().any(|bound| v.overlap_bound(*bound)) {
                 continue;
             }
             overlapped_count += 1;
@@ -882,27 +878,22 @@ impl SnapAccessCore {
             if ignore_locks && cf == LOCK_CF {
                 return false;
             }
-            for v in lh.tables.iter() {
-                count += 1;
-                if v.size() == 0 {
+            let mut overlap_ids = HashSet::new();
+            for bound in &range_bounds {
+                let (left, right) = bound.get_overlap_data_sets(&lh.tables);
+                if left == right {
                     continue;
                 }
-                let mut overlap = false;
-                for (outer_start, outer_end) in outer_ranges {
-                    let inner_start = InnerKey::from_outer_key(outer_start);
-                    let inner_end = InnerKey::from_outer_end_key(outer_end);
-                    let data_bound = DataBound::new(inner_start, inner_end, false);
-                    if v.has_overlap_loose(data_bound) {
-                        overlap = true;
-                        break;
-                    }
+                for tbl in &lh.tables[left..right] {
+                    overlap_ids.insert(tbl.id());
                 }
-                if !overlap {
-                    continue;
+            }
+            for tbl in lh.tables.iter() {
+                if overlap_ids.contains(&tbl.id()) {
+                    overlapped_count += 1;
+                    snap.mut_table_creates()
+                        .push(tbl.to_table_create(cf, lh.level));
                 }
-                overlapped_count += 1;
-                snap.mut_table_creates()
-                    .push(v.to_table_create(cf, lh.level));
             }
             false
         });
