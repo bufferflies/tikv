@@ -256,9 +256,13 @@ impl RaftWorker {
             self.aux_task_senders.push(aux_task_tx);
             self.aux_res_receivers.push(aux_result_rx);
             self.sent_aux_task.push(false);
+            let props = tikv_util::thread_group::current_properties();
             let aux_handle = std::thread::Builder::new()
                 .name(format!("raftstore_{}", i + 1))
-                .spawn_wrapper(move || aux_worker.run())
+                .spawn_wrapper(move || {
+                    tikv_util::thread_group::set_properties(props);
+                    aux_worker.run()
+                })
                 .unwrap();
             self.aux_handles.push(aux_handle);
         }
@@ -266,9 +270,13 @@ impl RaftWorker {
         let (idle_sender, idle_receiver) = tikv_util::mpsc::unbounded();
         let mut idle_worker =
             RaftIdleWorker::new(idle_ctx, idle_receiver, self.apply_senders.clone());
+        let props = tikv_util::thread_group::current_properties();
         let idle_handle = std::thread::Builder::new()
             .name("raftstore_idle".to_string())
-            .spawn_wrapper(move || idle_worker.run())
+            .spawn_wrapper(move || {
+                tikv_util::thread_group::set_properties(props);
+                idle_worker.run()
+            })
             .unwrap();
         self.ctx.idle_sender = Some(idle_sender);
         self.idle_handle = Some(idle_handle);
