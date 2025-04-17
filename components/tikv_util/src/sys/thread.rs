@@ -7,6 +7,10 @@
 use std::{io, io::Result, sync::Mutex, thread};
 
 use collections::HashMap;
+use tikv_alloc::{
+    add_thread_memory_accessor, remove_thread_memory_accessor, thread_allocate_exclusive_arena,
+    thread_allocate_shared_exclusive_arena,
+};
 
 /// A cross-platform CPU statistics data structure.
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
@@ -365,6 +369,20 @@ pub fn current_thread_stat() -> io::Result<ThreadStat> {
 }
 
 pub trait StdThreadBuildWrapper {
+    /// Extends thread spawning functionality with additional control over arena
+    /// sharing.
+    ///
+    /// # Arguments
+    ///
+    /// * `share_arena` - Boolean flag indicating whether to share the memory
+    ///   arena with the new thread
+    /// * `f` - The closure to be executed in the new thread
+    fn spawn_wrapper_ext<F, T>(self, share_arena: bool, f: F) -> io::Result<thread::JoinHandle<T>>
+    where
+        F: FnOnce() -> T,
+        F: Send + 'static,
+        T: Send + 'static;
+
     fn spawn_wrapper<F, T>(self, f: F) -> io::Result<thread::JoinHandle<T>>
     where
         F: FnOnce() -> T,
@@ -380,10 +398,33 @@ pub trait ThreadBuildWrapper {
     fn before_stop_wrapper<F>(&mut self, f: F) -> &mut Self
     where
         F: Fn() + Send + Sync + 'static;
+
+    /// Register all system hooks along with a custom hook pair.
+    fn with_sys_and_custom_hooks<F1, F2>(&mut self, after_start: F1, before_end: F2) -> &mut Self
+    where
+        F1: Fn() + Send + Sync + 'static,
+        F2: Fn() + Send + Sync + 'static;
+
+    /// Register some generic hooks like memory tracing or thread lifetime
+    /// tracing.
+    fn with_sys_hooks(&mut self) -> &mut Self {
+        self.with_sys_and_custom_hooks(|| {}, || {})
+    }
 }
 
 lazy_static::lazy_static! {
     pub static ref THREAD_NAME_HASHMAP: Mutex<HashMap<Pid, String>> = Mutex::new(HashMap::default());
+    pub static ref THREAD_START_HOOKS: Mutex<Vec<Box<dyn Fn() + Sync + Send>>> = Mutex::new(Vec::new());
+}
+
+pub fn hook_thread_start(f: Box<dyn Fn() + Sync + Send>) {
+    THREAD_START_HOOKS.lock().unwrap().push(f);
+}
+
+pub(crate) fn call_thread_start_hooks() {
+    for f in THREAD_START_HOOKS.lock().unwrap().iter() {
+        f();
+    }
 }
 
 pub(crate) fn add_thread_name_to_map() {
@@ -403,29 +444,100 @@ pub(crate) fn remove_thread_name_from_map() {
 }
 
 impl StdThreadBuildWrapper for std::thread::Builder {
-    fn spawn_wrapper<F, T>(self, f: F) -> Result<std::thread::JoinHandle<T>>
+    fn spawn_wrapper_ext<F, T>(self, share_arena: bool, f: F) -> io::Result<thread::JoinHandle<T>>
     where
         F: FnOnce() -> T,
         F: Send + 'static,
         T: Send + 'static,
     {
         #[allow(clippy::disallowed_methods)]
-        self.spawn(|| {
+        self.spawn(move || {
+            call_thread_start_hooks();
+            // SAFETY: we will call `remove_thread_memory_accessor` at defer.
+            unsafe { add_thread_memory_accessor() };
+            if share_arena {
+                // Binds this thread to a shared arena.
+                thread_allocate_shared_exclusive_arena().unwrap();
+            } else {
+                thread_allocate_exclusive_arena().unwrap();
+            }
             add_thread_name_to_map();
-            let res = f();
-            remove_thread_name_from_map();
-            res
+            defer! {{
+                remove_thread_name_from_map();
+                remove_thread_memory_accessor();
+            }};
+            f()
         })
+    }
+
+    fn spawn_wrapper<F, T>(self, f: F) -> Result<std::thread::JoinHandle<T>>
+    where
+        F: FnOnce() -> T,
+        F: Send + 'static,
+        T: Send + 'static,
+    {
+        self.spawn_wrapper_ext(false, f)
     }
 }
 
+/// Creates and spawns a new thread with an automatically generated name based
+/// on the calling crate name. This is a convenience wrapper around
+/// std::thread::Builder that:
+/// - Sets the thread name to the calling crate name
+/// - Handles the thread spawning details
+#[macro_export]
+macro_rules! spawn_anonymous_thread_with {
+    ($body:expr) => {{
+        const THREAD_PREFIX: &'static str = "tmp";
+
+        let thread_name = format!(
+            "{}-{}",
+            std::env::var("CARGO_PKG_NAME").unwrap_or("unknown".into()),
+            THREAD_PREFIX
+        );
+        std::thread::Builder::new()
+            .name(thread_name.into())
+            .spawn_wrapper_ext(true, $body)
+            .unwrap()
+    }};
+}
+
 impl ThreadBuildWrapper for tokio::runtime::Builder {
+    fn with_sys_and_custom_hooks<F1, F2>(&mut self, start: F1, end: F2) -> &mut Self
+    where
+        F1: Fn() + Send + Sync + 'static,
+        F2: Fn() + Send + Sync + 'static,
+    {
+        #[allow(clippy::disallowed_methods)]
+        self.on_thread_start(move || {
+            call_thread_start_hooks();
+            // SAFETY: we will call `remove_thread_memory_accessor` at
+            // `before-stop_wrapper`.
+            // FIXME: What if the user only calls `after_start_wrapper`?
+            unsafe { add_thread_memory_accessor() };
+            thread_allocate_exclusive_arena().unwrap();
+            add_thread_name_to_map();
+            start();
+        })
+        .on_thread_stop(move || {
+            end();
+            remove_thread_name_from_map();
+            remove_thread_memory_accessor();
+        })
+    }
+
     fn after_start_wrapper<F>(&mut self, f: F) -> &mut Self
     where
         F: Fn() + Send + Sync + 'static,
     {
         #[allow(clippy::disallowed_methods)]
         self.on_thread_start(move || {
+            call_thread_start_hooks();
+            // SAFETY: we will call `remove_thread_memory_accessor` at
+            // `before-stop_wrapper`.
+            // FIXME: What if the user only calls `after_start_wrapper`?
+            unsafe { add_thread_memory_accessor() };
+            thread_allocate_exclusive_arena().unwrap();
             add_thread_name_to_map();
             f();
         })
@@ -439,17 +551,47 @@ impl ThreadBuildWrapper for tokio::runtime::Builder {
         self.on_thread_stop(move || {
             f();
             remove_thread_name_from_map();
+            remove_thread_memory_accessor();
         })
     }
 }
 
 impl ThreadBuildWrapper for futures::executor::ThreadPoolBuilder {
+    fn with_sys_and_custom_hooks<F1, F2>(&mut self, start: F1, end: F2) -> &mut Self
+    where
+        F1: Fn() + Send + Sync + 'static,
+        F2: Fn() + Send + Sync + 'static,
+    {
+        #[allow(clippy::disallowed_methods)]
+        self.after_start(move |_| {
+            call_thread_start_hooks();
+            // SAFETY: we will call `remove_thread_memory_accessor` at
+            // `before-stop_wrapper`.
+            // FIXME: What if the user only calls `after_start_wrapper`?
+            unsafe { add_thread_memory_accessor() };
+            thread_allocate_exclusive_arena().unwrap();
+            add_thread_name_to_map();
+            start();
+        })
+        .before_stop(move |_| {
+            end();
+            remove_thread_name_from_map();
+            remove_thread_memory_accessor();
+        })
+    }
+
     fn after_start_wrapper<F>(&mut self, f: F) -> &mut Self
     where
         F: Fn() + Send + Sync + 'static,
     {
         #[allow(clippy::disallowed_methods)]
         self.after_start(move |_| {
+            call_thread_start_hooks();
+            // SAFETY: we will call `remove_thread_memory_accessor` at
+            // `before-stop_wrapper`.
+            // FIXME: What if the user only calls `after_start_wrapper`?
+            unsafe { add_thread_memory_accessor() };
+            thread_allocate_exclusive_arena().unwrap();
             add_thread_name_to_map();
             f();
         })
@@ -463,6 +605,7 @@ impl ThreadBuildWrapper for futures::executor::ThreadPoolBuilder {
         self.before_stop(move |_| {
             f();
             remove_thread_name_from_map();
+            remove_thread_memory_accessor();
         })
     }
 }
@@ -581,7 +724,7 @@ mod tests {
         assert!(name.contains(thread_name));
 
         // test tokio thread builder
-        let get_name_fn = get_name;
+        let get_name_fn = get_name.clone();
         block_on(
             tokio::runtime::Builder::new_multi_thread()
                 .thread_name(thread_name)
@@ -595,5 +738,29 @@ mod tests {
 
         let name = rx.recv().unwrap();
         assert_eq!(name, thread_name);
+
+        // test tokio thread builder on sys hooks
+        let get_name_fn = get_name.clone();
+        block_on(
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_name(thread_name)
+                .with_sys_hooks()
+                .build()
+                .unwrap()
+                .spawn(async move { get_name_fn() }),
+        )
+        .unwrap();
+
+        let name = rx.recv().unwrap();
+        assert_eq!(name, thread_name);
+
+        // test anonymous std::thread
+        let closure_func = move || {
+            spawn_anonymous_thread_with!(get_name);
+        };
+        let tmp_name = format!("{}-tmp", std::env::var("CARGO_PKG_NAME").unwrap());
+        closure_func();
+        let name = rx.recv().unwrap();
+        assert_eq!(name, tmp_name);
     }
 }

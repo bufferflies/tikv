@@ -101,7 +101,9 @@ where
     R: Runnable<T> + Send + 'static,
     T: Display + Send + 'static,
 {
-    tikv_alloc::add_thread_memory_accessor();
+    unsafe {
+        tikv_alloc::add_thread_memory_accessor();
+    }
     let current_thread = thread::current();
     let name = current_thread.name().unwrap();
     let metrics_pending_task_count = WORKER_PENDING_TASK_VEC.with_label_values(&[name]);

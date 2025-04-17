@@ -110,7 +110,9 @@ impl<T: PoolTicker> Runner for YatpPoolRunner<T> {
         if let Some(f) = self.after_start.take() {
             f();
         }
-        tikv_alloc::add_thread_memory_accessor()
+        unsafe {
+            tikv_alloc::add_thread_memory_accessor();
+        }
     }
 
     fn handle(&mut self, local: &mut Local<Self::TaskCell>, mut task_cell: Self::TaskCell) -> bool {

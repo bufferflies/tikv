@@ -19,7 +19,8 @@ use tikv_util::{
     codec::bytes::encode_bytes,
     error, info,
     mpsc::{Receiver, Sender},
-    sys::SysQuota,
+    spawn_anonymous_thread_with,
+    sys::{thread::StdThreadBuildWrapper, SysQuota},
     time::Instant,
 };
 
@@ -333,7 +334,7 @@ impl Dispatcher {
                     self.scheduler.clone(),
                     self.checkpoint_store.clone(),
                 );
-                std::thread::spawn(move || {
+                spawn_anonymous_thread_with!(move || {
                     worker.run();
                 });
                 sender
@@ -550,7 +551,7 @@ impl Dispatcher {
                         self.scheduler.clone(),
                         self.checkpoint_store.clone(),
                     );
-                    std::thread::spawn(move || {
+                    spawn_anonymous_thread_with!(move || {
                         worker.run();
                     });
                     sender

@@ -20,7 +20,7 @@ use kvproto::{
 };
 use pd_client::PdClient;
 use rand::seq::SliceRandom;
-use tikv_util::{error, time::Instant, HandyRwLock};
+use tikv_util::{error, sys::thread::ThreadBuildWrapper, time::Instant, HandyRwLock};
 use tokio::runtime::Runtime;
 
 const PD_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,9 +36,10 @@ pub struct BuiltinDfs {
 impl BuiltinDfs {
     pub fn new(pd: Arc<dyn PdClient>) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .thread_name("builtin_dfs")
+            .thread_name("builtin-dfs")
             .enable_all()
             .worker_threads(2)
+            .with_sys_hooks()// TODO: add IO type
             .build()
             .unwrap();
         Self {

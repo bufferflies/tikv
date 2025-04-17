@@ -27,12 +27,14 @@ use load_data::{
     },
 };
 use pd_client::PdClient;
-use tikv_util::{debug, error, info};
+use tikv_util::{debug, error, info, sys::thread::StdThreadBuildWrapper};
 
 use crate::{
     common::{get_body, get_param, make_response},
     worker_scaler::{WorkerScaler, WorkerScalerConfig},
 };
+
+const LOAD_DATA_WORKER_NAME: &str = "load-data-worker";
 
 /// Remote load data worker API:
 ///
@@ -344,9 +346,12 @@ impl LoadDataManager {
             FINISHED_TASK_EXPIRE_SEC,
             IDLE_TASK_EXPIRE_SEC,
         );
-        std::thread::spawn(move || {
-            cleanup_worker.run();
-        });
+        std::thread::Builder::new()
+            .name("cleanup-worker".into())
+            .spawn_wrapper(move || {
+                cleanup_worker.run();
+            })
+            .unwrap();
 
         // recover tasks from checkpoint files
         let files = fs::read_dir(checkpoint_dir).unwrap();
@@ -408,9 +413,12 @@ impl LoadDataManager {
             checkpoint_ctx,
         );
         let mut scheduler = dispatcher.get_scheduler();
-        let thread_handle = std::thread::spawn(move || {
-            dispatcher.run();
-        });
+        let thread_handle = std::thread::Builder::new()
+            .name(LOAD_DATA_WORKER_NAME.into())
+            .spawn_wrapper(move || {
+                dispatcher.run();
+            })
+            .unwrap();
 
         scheduler.set_thread_handle(thread_handle);
         self.running_tasks.insert(task_id, scheduler);
@@ -431,9 +439,12 @@ impl LoadDataManager {
                     checkpoint_ctx,
                 );
                 let mut scheduler = dispatcher.get_scheduler();
-                let thread_handle = std::thread::spawn(move || {
-                    dispatcher.run();
-                });
+                let thread_handle = std::thread::Builder::new()
+                    .name(LOAD_DATA_WORKER_NAME.into())
+                    .spawn_wrapper(move || {
+                        dispatcher.run();
+                    })
+                    .unwrap();
 
                 scheduler.set_thread_handle(thread_handle);
                 entry.insert(scheduler);

@@ -76,7 +76,8 @@ use tikv_util::{
     future::paired_future_callback,
     logger::set_log_level,
     metrics::{dump, dump_to},
-    sys::thread::ThreadBuildWrapper,
+    spawn_anonymous_thread_with,
+    sys::thread::{StdThreadBuildWrapper, ThreadBuildWrapper},
     time::InstantExt,
     timer::GLOBAL_TIMER_HANDLE,
 };
@@ -1276,7 +1277,7 @@ impl StatusServer {
         let id = id_opt.unwrap();
         let (file_type, start_off, end_off) = Self::get_dfs_read_args(&req);
         let (callback, future) = paired_future_callback();
-        std::thread::spawn(move || {
+        spawn_anonymous_thread_with!(move || {
             let res = match file_type {
                 FileType::TxnChunk => {
                     debug_assert_eq!(start_off, 0);
@@ -1284,7 +1285,7 @@ impl StatusServer {
                 }
                 _ => engine.read_local_file(id, file_type, start_off, end_off),
             };
-            callback(res);
+            callback(res)
         });
         let res = future.await.unwrap();
         Ok(match res {
@@ -1311,7 +1312,7 @@ impl StatusServer {
         let (file_type, ..) = Self::get_dfs_read_args(&req);
         let data = hyper::body::to_bytes(req.into_body()).await?;
         let (callback, future) = paired_future_callback();
-        std::thread::spawn(move || {
+        spawn_anonymous_thread_with!(move || {
             let res = match file_type {
                 FileType::TxnChunk => engine.get_txn_chunk_manager().write_local_chunk(id, data),
                 _ => engine.write_local_file_if_not_exists(id, data, file_type),
@@ -2062,7 +2063,7 @@ impl StatusServer {
             })
             .map_err(|e| error!("Status server error: {:?}", e));
         let hyper_pool = self.hyper_pool.clone();
-        std::thread::spawn(move || {
+        spawn_anonymous_thread_with!(move || {
             let _ = hyper_pool.block_on(graceful);
         });
     }

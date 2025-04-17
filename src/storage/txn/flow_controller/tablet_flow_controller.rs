@@ -97,7 +97,6 @@ impl FlowInfoDispatcher {
         Builder::new()
             .name(thd_name!("flow-checker"))
             .spawn_wrapper(move || {
-                tikv_alloc::add_thread_memory_accessor();
                 let mut deadline = std::time::Instant::now();
                 let mut enabled = true;
                 loop {
@@ -210,7 +209,6 @@ impl FlowInfoDispatcher {
                         }
                     }
                 }
-                tikv_alloc::remove_thread_memory_accessor();
             })
             .unwrap()
     }

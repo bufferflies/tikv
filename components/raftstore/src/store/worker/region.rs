@@ -825,7 +825,9 @@ where
                     router: self.router.clone(),
                 };
                 self.pool.spawn(async move {
-                    tikv_alloc::add_thread_memory_accessor();
+                    unsafe {
+                        tikv_alloc::add_thread_memory_accessor();
+                    }
                     ctx.handle_gen(
                         region_id,
                         last_applied_term,

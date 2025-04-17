@@ -24,7 +24,9 @@ use file_system::IoRateLimiter;
 use fslock;
 use security::SecurityManager;
 use slog_global::info;
-use tikv_util::{box_err, mpsc, sys::thread::StdThreadBuildWrapper, HandyRwLock};
+use tikv_util::{
+    box_err, mpsc, spawn_anonymous_thread_with, sys::thread::StdThreadBuildWrapper, HandyRwLock,
+};
 use txn_chunk_manager::with_pool_size;
 
 use crate::{
@@ -203,7 +205,7 @@ impl Engine {
         }
         en.add_worker_handle(
             thread::Builder::new()
-                .name("free_mem".to_string())
+                .name("free-mem".to_string())
                 .spawn_wrapper(move || {
                     free_mem(free_rx);
                 })
@@ -265,7 +267,7 @@ impl Engine {
                     .unwrap()
             });
             let load_table_filter = load_table_filter.clone();
-            std::thread::spawn(move || {
+            spawn_anonymous_thread_with!(move || {
                 tikv_util::set_current_region(meta.id);
                 let shard = engine
                     .load_and_ingest_shard(&meta, load_table_filter)

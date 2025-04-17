@@ -84,12 +84,13 @@ where
             .worker_threads(cfg.num_threads)
             .enable_all()
             .thread_name("sst-importer")
-            .after_start_wrapper(move || {
-                tikv_util::thread_group::set_properties(props.clone());
-                tikv_alloc::add_thread_memory_accessor();
-                set_io_type(IoType::Import);
-            })
-            .before_stop_wrapper(move || tikv_alloc::remove_thread_memory_accessor())
+            .with_sys_and_custom_hooks(
+                move || {
+                    tikv_util::thread_group::set_properties(props.clone());
+                    set_io_type(IoType::Import);
+                },
+                || {},
+            )
             .build()
             .unwrap();
         importer.start_switch_mode_check(threads.handle(), engine.clone());

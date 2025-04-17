@@ -12,7 +12,7 @@ use std::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
-    thread::{self, JoinHandle},
+    thread::JoinHandle,
 };
 
 use bytes::{Buf, Bytes};
@@ -25,7 +25,8 @@ use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
 use tikv_util::{
-    error, info, mpsc::Sender, panic_mark_dfs_worker_file_exists, time::Instant, warn,
+    error, info, mpsc::Sender, panic_mark_dfs_worker_file_exists, spawn_anonymous_thread_with,
+    sys::thread::StdThreadBuildWrapper, time::Instant, warn,
 };
 
 use crate::{
@@ -266,7 +267,7 @@ impl RfEngineCore {
                 dfs_worker_healthy,
                 cfg.compact_wal_sync_concurrency,
             );
-            let join_handle = thread::spawn(move || service_worker.run());
+            let join_handle = spawn_anonymous_thread_with!(move || service_worker.run());
             let mut guard = en.service_worker_handle.lock().unwrap();
             *guard = Some(join_handle);
         }
@@ -1809,7 +1810,7 @@ mod tests {
                 ok = true;
                 break;
             }
-            thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_secs(1));
         }
 
         assert!(ok);

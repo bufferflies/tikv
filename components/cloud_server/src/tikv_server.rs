@@ -86,7 +86,9 @@ use tikv_util::{
     get_panic_region_count, mpsc,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
     sys::{
-        disk::get_disk_capacity, register_memory_usage_high_water, thread::ThreadBuildWrapper,
+        disk::get_disk_capacity,
+        register_memory_usage_high_water,
+        thread::{StdThreadBuildWrapper, ThreadBuildWrapper},
         SysQuota,
     },
     thread_group::GroupProperties,
@@ -196,10 +198,22 @@ impl TikvServer {
         );
         let cpu_cores = SysQuota::cpu_cores_quota() as usize;
         let grpc_concurrency = (cpu_cores / 3).max(1);
+        let props = tikv_util::thread_group::current_properties();
         let env = Arc::new(
             EnvBuilder::new()
                 .cq_count(grpc_concurrency)
                 .name_prefix(thd_name!(GRPC_THREAD_PREFIX))
+                .after_start(move || {
+                    tikv_util::thread_group::set_properties(props.clone());
+                    // SAFETY: we will call `remove_thread_memory_accessor` at before_stop.
+                    unsafe {
+                        tikv_alloc::add_thread_memory_accessor();
+                    };
+                    tikv_alloc::thread_allocate_exclusive_arena().unwrap();
+                })
+                .before_stop(|| {
+                    tikv_alloc::remove_thread_memory_accessor();
+                })
                 .build(),
         );
         let pd_client =
@@ -314,9 +328,12 @@ impl TikvServer {
         ));
         let mut overload_protector_worker = OverloadProtectorWorker::new(config.overload.clone());
         let overload_protector = overload_protector_worker.get_protector();
-        std::thread::spawn(move || {
-            overload_protector_worker.run();
-        });
+        std::thread::Builder::new()
+            .name("overload-protect-worker".into())
+            .spawn_wrapper(move || {
+                overload_protector_worker.run();
+            })
+            .unwrap();
         info!("created tikv server");
         TikvServer {
             config,
@@ -615,11 +632,12 @@ impl TikvServer {
             Builder::new_multi_thread()
                 .thread_name(thd_name!("debugger"))
                 .worker_threads(1)
-                .after_start_wrapper(move || {
-                    tikv_alloc::add_thread_memory_accessor();
-                    tikv_util::thread_group::set_properties(props.clone());
-                })
-                .before_stop_wrapper(tikv_alloc::remove_thread_memory_accessor)
+                .with_sys_and_custom_hooks(
+                    move || {
+                        tikv_util::thread_group::set_properties(props.clone());
+                    },
+                    || {},
+                )
                 .build()
                 .unwrap(),
         );

@@ -39,8 +39,9 @@ use schema::schema::StorageClass;
 use tikv_util::{
     box_err,
     codec::bytes::{decode_bytes, encode_bytes, encode_bytes_maybe_empty},
-    debug, error, info,
+    debug, error, info, spawn_anonymous_thread_with,
     store::{find_peer, is_learner, region_on_same_stores},
+    sys::thread::StdThreadBuildWrapper,
     time::duration_to_sec,
     trace, warn,
 };
@@ -1126,7 +1127,7 @@ impl<'a> PeerMsgHandler<'a> {
         let router = self.ctx.global.router.clone();
         let kv = self.ctx.global.engines.kv.clone();
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap().clone();
-        std::thread::spawn(move || {
+        spawn_anonymous_thread_with!(move || {
             tikv_util::set_current_region(shard_meta.id);
             match convert_sst(kv, importer, &msg, shard_meta) {
                 Ok(cs) => {

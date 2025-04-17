@@ -7,7 +7,7 @@ log-rotation-timespan = "1d"
 panic-when-unexpected-key-or-data = true
 abort-on-panic = true
 memory-usage-limit = "10GB"
-memory-usage-high-water= 0.65
+memory-usage-high-water = 0.65
 
 [log]
 level = "fatal"
@@ -18,6 +18,11 @@ filename = "foo"
 max-size = 1
 max-backups = 2
 max-days = 3
+
+[memory]
+enable-heap-profiling = false
+profiling-sample-per-bytes = "1MB"
+enable-thread-exclusive-arena = false
 
 [readpool.unified]
 min-thread-count = 5
@@ -140,9 +145,7 @@ export-priority = "high"
 other-priority = "low"
 
 [pd]
-endpoints = [
-    "example.com:443",
-]
+endpoints = ["example.com:443"]
 
 [metric]
 job = "tikv_1"
@@ -297,15 +300,7 @@ whole-key-filtering = true
 bloom-filter-bits-per-key = 123
 block-based-bloom-filter = true
 read-amp-bytes-per-bit = 0
-compression-per-level = [
-    "no",
-    "no",
-    "zstd",
-    "zstd",
-    "no",
-    "zstd",
-    "lz4",
-]
+compression-per-level = ["no", "no", "zstd", "zstd", "no", "zstd", "lz4"]
 bottommost-level-compression = "disable"
 bottommost-zstd-compression-dict-size = 1024
 bottommost-zstd-compression-sample-size = 1024
@@ -363,15 +358,7 @@ whole-key-filtering = true
 bloom-filter-bits-per-key = 123
 block-based-bloom-filter = true
 read-amp-bytes-per-bit = 0
-compression-per-level = [
-    "no",
-    "no",
-    "zstd",
-    "zstd",
-    "no",
-    "zstd",
-    "lz4",
-]
+compression-per-level = ["no", "no", "zstd", "zstd", "no", "zstd", "lz4"]
 write-buffer-size = "1MB"
 max-write-buffer-number = 12
 min-write-buffer-number-to-merge = 12
@@ -412,15 +399,7 @@ whole-key-filtering = true
 bloom-filter-bits-per-key = 123
 block-based-bloom-filter = true
 read-amp-bytes-per-bit = 0
-compression-per-level = [
-    "no",
-    "no",
-    "zstd",
-    "zstd",
-    "no",
-    "zstd",
-    "lz4",
-]
+compression-per-level = ["no", "no", "zstd", "zstd", "no", "zstd", "lz4"]
 write-buffer-size = "1MB"
 max-write-buffer-number = 12
 min-write-buffer-number-to-merge = 12
@@ -461,15 +440,7 @@ whole-key-filtering = true
 bloom-filter-bits-per-key = 123
 block-based-bloom-filter = true
 read-amp-bytes-per-bit = 0
-compression-per-level = [
-    "no",
-    "no",
-    "zstd",
-    "zstd",
-    "no",
-    "zstd",
-    "lz4",
-]
+compression-per-level = ["no", "no", "zstd", "zstd", "no", "zstd", "lz4"]
 write-buffer-size = "1MB"
 max-write-buffer-number = 12
 min-write-buffer-number-to-merge = 12
@@ -543,15 +514,7 @@ whole-key-filtering = true
 bloom-filter-bits-per-key = 123
 block-based-bloom-filter = true
 read-amp-bytes-per-bit = 0
-compression-per-level = [
-    "no",
-    "no",
-    "zstd",
-    "zstd",
-    "no",
-    "zstd",
-    "lz4",
-]
+compression-per-level = ["no", "no", "zstd", "zstd", "no", "zstd", "lz4"]
 write-buffer-size = "1MB"
 max-write-buffer-number = 12
 min-write-buffer-number-to-merge = 12
@@ -609,9 +572,7 @@ ca-path = "invalid path"
 cert-path = "invalid path"
 key-path = "invalid path"
 redact-info-log = true
-cert-allowed-cn = [
-    "example.tikv.com",
-]
+cert-allowed-cn = ["example.tikv.com"]
 
 [security.encryption]
 data-encryption-method = "aes128-ctr"
@@ -649,9 +610,9 @@ enable-compaction-filter = false
 compaction-filter-skip-version-check = true
 
 [pessimistic-txn]
-enabled = false # test backward compatibility
+enabled = false                # test backward compatibility
 wait-for-lock-timeout = "10ms"
-wake-up-delay-duration = 100 # test backward compatibility
+wake-up-delay-duration = 100   # test backward compatibility
 pipelined = false
 in-memory = false
 

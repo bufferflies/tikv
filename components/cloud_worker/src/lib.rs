@@ -55,7 +55,11 @@ use slog_global::{error, info, warn};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     quota_limiter::QuotaLimiter,
-    sys::{record_global_memory_usage, SysQuota},
+    sys::{
+        record_global_memory_usage,
+        thread::{StdThreadBuildWrapper, ThreadBuildWrapper},
+        SysQuota,
+    },
     time::Instant,
 };
 use tokio::runtime::Runtime;
@@ -109,6 +113,7 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
             .enable_all()
             .worker_threads(SysQuota::cpu_cores_quota() as usize)
             .thread_name("worker-server")
+            .with_sys_hooks()
             .build()
             .unwrap(),
     );
@@ -318,17 +323,20 @@ fn start_server(
             .unwrap()
             .to_string();
         let duration = config.update_interval.0;
-        std::thread::spawn(move || {
-            loop {
-                register_compactor_to_all_stores(
-                    pd.clone(),
-                    s3fs.clone(),
-                    remote_compact_url.clone(),
-                    security_mgr.clone(),
-                );
-                std::thread::sleep(duration);
-            }
-        });
+        std::thread::Builder::new()
+            .name("upd-remote-compact-worker".into())
+            .spawn_wrapper(move || {
+                loop {
+                    register_compactor_to_all_stores(
+                        pd.clone(),
+                        s3fs.clone(),
+                        remote_compact_url.clone(),
+                        security_mgr.clone(),
+                    );
+                    std::thread::sleep(duration);
+                }
+            })
+            .unwrap();
     }
 
     let mut cop_server_opt = None;
@@ -450,6 +458,7 @@ impl CloudWorker {
                 .enable_all()
                 .worker_threads(threads_cnt)
                 .thread_name("worker-server")
+                .with_sys_hooks()
                 .build()
                 .unwrap(),
         );
@@ -518,18 +527,21 @@ impl CloudWorker {
 }
 
 fn spawn_br_background_worker(br_manager: Arc<NativeBrManager>, path: Option<PathBuf>) {
-    std::thread::spawn(move || {
-        info!("start br background worker");
-        loop {
-            if let Some(path) = path.as_ref() {
-                update_native_br_config(br_manager.clone(), path.as_path());
+    std::thread::Builder::new()
+        .name("br-bg-worker".into())
+        .spawn_wrapper(move || {
+            info!("start br background worker");
+            loop {
+                if let Some(path) = path.as_ref() {
+                    update_native_br_config(br_manager.clone(), path.as_path());
+                }
+
+                br_manager.cleanup_expired_restores();
+
+                std::thread::sleep(BACKGROUND_WORKER_INTERVAL);
             }
-
-            br_manager.cleanup_expired_restores();
-
-            std::thread::sleep(BACKGROUND_WORKER_INTERVAL);
-        }
-    });
+        })
+        .unwrap();
 }
 
 fn update_native_br_config(br_manager: Arc<NativeBrManager>, path: &Path) {

@@ -17,7 +17,9 @@ use cloud_encryption::EncryptionKey;
 use dashmap::{mapref::entry::Entry, DashMap};
 use futures::executor::block_on;
 use regex::Regex;
-use tikv_util::{box_err, config::ReadableDuration, time::Instant};
+use tikv_util::{
+    box_err, config::ReadableDuration, sys::thread::ThreadBuildWrapper, time::Instant,
+};
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 use crate::{
@@ -104,6 +106,7 @@ pub fn with_pool_size(pool_size: usize) -> WorkerPool {
             .worker_threads(1) // for gc worker.
             .max_blocking_threads(pool_size)
             .enable_all()
+            .with_sys_hooks()
             .build()
             .unwrap(),
     )

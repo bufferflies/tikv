@@ -203,7 +203,7 @@ impl RaftBatchSystem {
         );
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()
-            .name("raft_io".to_string())
+            .name("raft-io".to_string())
             .spawn_wrapper(move || {
                 tikv_util::thread_group::set_properties(props);
                 io_worker.run();
@@ -222,7 +222,7 @@ impl RaftBatchSystem {
         );
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()
-            .name("raftstore_0".to_string())
+            .name("rfstore-0".to_string())
             .spawn_wrapper(move || {
                 tikv_util::thread_group::set_properties(props);
                 rw.run();
@@ -232,9 +232,9 @@ impl RaftBatchSystem {
 
         for (i, apply_receiver) in apply_receivers.drain(..).enumerate() {
             let thread_name = if i < apply_pool_size {
-                format!("apply_{}", i)
+                format!("apply-{}", i)
             } else {
-                format!("apply_follower_{}", i - apply_pool_size)
+                format!("apply-follower-{}", i - apply_pool_size)
             };
             let props = tikv_util::thread_group::current_properties();
             let mut aw =

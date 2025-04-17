@@ -44,7 +44,10 @@ use security::SecurityConfig;
 use slog_global::{debug, error, info, warn};
 use tempdir::TempDir;
 use tikv::{config::TikvConfig, storage::mvcc::Key};
-use tikv_util::{box_err, box_try, merge_range::MergeRanges, mpsc, time::Instant, HandyRwLock};
+use tikv_util::{
+    box_err, box_try, merge_range::MergeRanges, mpsc, sys::thread::StdThreadBuildWrapper,
+    time::Instant, HandyRwLock,
+};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -1039,9 +1042,12 @@ impl BackupCluster {
             ));
             self.meta_applier = Some(meta_applier.clone());
             self.meta_sender = Some(sender);
-            thread::spawn(move || {
-                meta_applier.run();
-            });
+            std::thread::Builder::new()
+                .name("native-br-handler".into())
+                .spawn_wrapper(move || {
+                    meta_applier.run();
+                })
+                .unwrap();
 
             self.kv_engine = Some(kv_engine);
         }

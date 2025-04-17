@@ -38,6 +38,8 @@ use tikv_util::{
     error, info,
     merge_range::MergeRanges,
     mpsc::{Receiver, Sender},
+    spawn_anonymous_thread_with,
+    sys::thread::StdThreadBuildWrapper,
     time::Instant,
     warn,
 };
@@ -811,7 +813,7 @@ impl KvPairsWorker {
         let in_mem_size = self.in_mem_size;
         self.in_mem_size = 0;
         self.l0_file_idx += 1;
-        std::thread::spawn(move || {
+        spawn_anonymous_thread_with!(move || {
             let task_id = task_ctx.task_id.clone();
             let start = Instant::now();
             match flush_l0_file_to_local(kv_pairs, task_ctx, file_path.clone(), batch_size) {
@@ -860,7 +862,7 @@ impl KvPairsWorker {
         let worker_id = self.worker_id;
 
         self.l1_file_idx += 1;
-        std::thread::spawn(move || {
+        spawn_anonymous_thread_with!(move || {
             let first_batch = &batches[0];
             let first_key_len = (&first_batch[0..]).get_u16_le();
             let first_key = first_batch[2..2 + first_key_len as usize].to_vec();

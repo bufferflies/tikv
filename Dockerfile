@@ -110,6 +110,8 @@ FROM amazonlinux:2023.5.20241001.1
 
 RUN dnf update -y && dnf install -y procps-ng
 
+# Enable profiling
+ENV MALLOC_CONF="prof:true,prof_active:false"
 COPY --from=builder /tikv-server /tikv-server
 COPY --from=builder /cse-ctl /cse-ctl
 COPY --from=builder /tikv-worker /tikv-worker

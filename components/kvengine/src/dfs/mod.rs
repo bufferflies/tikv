@@ -29,7 +29,7 @@ use metrics::*;
 use moka::future::ConcurrentCacheExt;
 pub use s3::*;
 use thiserror::Error;
-use tikv_util::time::Instant;
+use tikv_util::{sys::thread::ThreadBuildWrapper, time::Instant};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -90,6 +90,7 @@ impl InMemFs {
                 .worker_threads(1)
                 .thread_name("memory-fs")
                 .enable_all()
+                .with_sys_hooks()
                 .build()
                 .unwrap(),
         }
@@ -379,6 +380,7 @@ impl LocalFsCore {
             runtime: tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(8)
                 .enable_all()
+                .with_sys_hooks()
                 .build()
                 .unwrap(),
         }

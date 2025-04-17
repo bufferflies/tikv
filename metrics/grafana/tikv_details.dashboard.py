@@ -59,21 +59,21 @@ def Templates() -> Templating:
             template(
                 name="k8s_cluster",
                 type="query",
-                query="label_values(tikv_engine_block_cache_size_bytes, k8s_cluster)",
+                query="label_values(tikv_engine_size_bytes, k8s_cluster)",
                 data_source=DATASOURCE,
                 hide=HIDE_VARIABLE,
             ),
             template(
                 name="tidb_cluster",
                 type="query",
-                query='label_values(tikv_engine_block_cache_size_bytes{k8s_cluster ="$k8s_cluster"}, tidb_cluster)',
+                query='label_values(tikv_engine_size_bytes{k8s_cluster="$k8s_cluster"}, tidb_cluster)',
                 data_source=DATASOURCE,
                 hide=HIDE_VARIABLE,
             ),
             template(
                 name="db",
                 type="query",
-                query='label_values(tikv_engine_block_cache_size_bytes{k8s_cluster="$k8s_cluster", tidb_cluster="$tidb_cluster"}, db)',
+                query='label_values(tikv_engine_size_bytes{k8s_cluster="$k8s_cluster", tidb_cluster="$tidb_cluster"}, db)',
                 data_source=DATASOURCE,
                 hide=SHOW,
                 multi=True,
@@ -82,7 +82,7 @@ def Templates() -> Templating:
             template(
                 name="command",
                 type="query",
-                query='query_result(tikv_storage_command_total{k8s_cluster="$k8s_cluster", tidb_cluster="$tidb_cluster"} != 0)',
+                query='query_result(tikv_storage_command_total{k8s_cluster="$k8s_cluster", tidb_cluster="$tidb_cluster"}!=0)',
                 data_source=DATASOURCE,
                 hide=SHOW,
                 regex='/\\btype="([^"]+)"/',
@@ -92,7 +92,7 @@ def Templates() -> Templating:
             template(
                 name="instance",
                 type="query",
-                query='label_values(tikv_engine_size_bytes{k8s_cluster ="$k8s_cluster", tidb_cluster="$tidb_cluster"}, instance)',
+                query='label_values(tikv_engine_size_bytes{k8s_cluster="$k8s_cluster", tidb_cluster="$tidb_cluster"}, instance)',
                 data_source=DATASOURCE,
                 hide=SHOW,
                 multi=True,
@@ -1467,11 +1467,12 @@ def ThreadCPU() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_thread_cpu_seconds_total",
-                            label_selectors=['name=~"builtin_dfs.*|memory-fs.*|s3.*"'],
+                            label_selectors=[
+                                'name=~"builtin-dfs.*|memory-fs.*|s3-client.*"'
+                            ],
                             by_labels=["instance"],
                         ),
                         legend_format="{{instance}}",
-                        hide=True,
                     ),
                 ],
             ),
@@ -1487,7 +1488,6 @@ def ThreadCPU() -> RowPanel:
                             by_labels=["instance"],
                         ),
                         legend_format="{{instance}}",
-                        hide=True,
                     ),
                 ],
             ),

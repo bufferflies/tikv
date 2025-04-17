@@ -371,29 +371,26 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
     let num_cores = SysQuota::cpu_cores_quota() as usize;
     let worker_threads = num_cores.max(1);
     let unified_read_pool_name = get_unified_read_pool_name();
+    let thread_name_prefix = unified_read_pool_name.clone();
     let ticker = yatp_pool::TickerWrapper::new(ReporterTicker { reporter });
     let raftkv = Arc::new(Mutex::new(engine));
     let props = tikv_util::thread_group::current_properties();
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .thread_name_fn(|| {
+        .thread_name_fn(move || {
             static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
             let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-            format!("unified_read_pool_{}", id)
+            format!("{}-{}", thread_name_prefix, id)
         })
         .worker_threads(worker_threads)
         .after_start_wrapper(move || {
             let engine = raftkv.lock().unwrap().clone();
             set_tls_engine(engine);
             set_reporter_ticker(ticker.clone());
-            tikv_alloc::add_thread_memory_accessor();
             tikv_util::thread_group::set_properties(props.clone());
         })
-        .before_stop_wrapper(|| {
-            unsafe {
-                destroy_tls_engine::<E>();
-                destroy_reporter_ticker::<R>();
-            }
-            tikv_alloc::remove_thread_memory_accessor();
+        .before_stop_wrapper(|| unsafe {
+            destroy_tls_engine::<E>();
+            destroy_reporter_ticker::<R>();
         })
         .on_thread_park(move || unsafe {
             try_tick_reporter_ticker::<R>();

@@ -94,7 +94,7 @@ fn skip_dfs_worker_on_panic() -> bool {
     SKIP_DFS_WORKER_ON_PANIC.load(Ordering::SeqCst)
 }
 
-pub const DFS_WORKER_THREAD_NAME: &str = "dfs_worker";
+pub const DFS_WORKER_THREAD_NAME: &str = "dfs-worker";
 fn is_dfs_worker_thread(name: &str) -> bool {
     name == DFS_WORKER_THREAD_NAME
 }

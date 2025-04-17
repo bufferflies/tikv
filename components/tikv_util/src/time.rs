@@ -156,7 +156,6 @@ impl Monitor {
             .name(thd_name!("time-monitor"))
             .spawn_wrapper(move || {
                 crate::thread_group::set_properties(props);
-                tikv_alloc::add_thread_memory_accessor();
                 while rx.try_recv().is_err() {
                     let before = now();
                     thread::sleep(Duration::from_millis(DEFAULT_WAIT_MS));
@@ -172,7 +171,6 @@ impl Monitor {
                         on_jumped()
                     }
                 }
-                tikv_alloc::remove_thread_memory_accessor();
             })
             .unwrap();
 

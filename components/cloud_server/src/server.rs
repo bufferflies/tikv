@@ -45,7 +45,7 @@ use tikv::{
 use tikv_util::{
     codec::Error as CodecError,
     config::VersionTrack,
-    sys::{get_global_memory_usage, record_global_memory_usage},
+    sys::{get_global_memory_usage, record_global_memory_usage, thread::ThreadBuildWrapper},
     timer::GLOBAL_TIMER_HANDLE,
     Either,
 };
@@ -170,6 +170,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
                 RuntimeBuilder::new_multi_thread()
                     .thread_name(STATS_THREAD_PREFIX)
                     .worker_threads(cfg.value().stats_concurrency)
+                    .with_sys_hooks()
                     .build()
                     .unwrap(),
             )

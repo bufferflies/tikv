@@ -217,7 +217,7 @@ impl RaftWorker {
             self.aux_res_receivers.push(aux_result_rx);
             self.sent_aux_task.push(false);
             let aux_handle = std::thread::Builder::new()
-                .name(format!("raftstore_{}", i + 1))
+                .name(format!("raft-aux-worker-{}", i + 1))
                 .spawn_wrapper(move || aux_worker.run())
                 .unwrap();
             self.aux_handles.push(aux_handle);

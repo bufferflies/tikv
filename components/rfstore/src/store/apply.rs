@@ -47,8 +47,9 @@ use raftstore::store::{
 };
 use rand::Rng;
 use tikv_util::{
-    box_err, debug, error, info,
+    box_err, debug, error, info, spawn_anonymous_thread_with,
     store::{find_peer, find_peer_mut, remove_peer},
+    sys::thread::StdThreadBuildWrapper,
     time::{duration_to_sec, Instant},
     warn,
 };
@@ -1562,7 +1563,7 @@ impl Applier {
         let router = ctx.router.clone().unwrap();
         let is_leader = self.is_leader();
         let peer_id = self.id();
-        std::thread::spawn(move || {
+        spawn_anonymous_thread_with!(move || {
             let id = cs.shard_id;
             tikv_util::set_current_region(id);
             let res = engine.prepare_change_set(
@@ -1645,7 +1646,7 @@ impl Applier {
         let region_id = self.region_id();
         let router = ctx.router.as_ref().unwrap().clone();
         let encryption_key = self.encryption_key.clone();
-        std::thread::spawn(move || {
+        spawn_anonymous_thread_with!(move || {
             tikv_util::set_current_region(source.shard_id);
             let res =
                 engine.prepare_change_set(source, !is_leader, false, None, None, encryption_key);

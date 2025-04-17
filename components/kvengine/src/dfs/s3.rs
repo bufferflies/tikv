@@ -28,7 +28,7 @@ use rusoto_s3::{
     CopyObjectError, DeleteObjectError, GetObjectError, GetObjectTaggingError, HeadObjectError,
     ListObjectsV2Error, PutObjectError,
 };
-use tikv_util::time::Instant;
+use tikv_util::{sys::thread::ThreadBuildWrapper, time::Instant};
 use tokio::runtime::Runtime;
 
 use crate::dfs::{self, config::Config, metrics::*, Dfs, Error, FileType, Options};
@@ -173,7 +173,8 @@ impl S3FsCore {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
-            .thread_name("s3")
+            .thread_name("s3-client")
+            .with_sys_hooks()
             .build()
             .unwrap();
         if prefix.is_empty() {
