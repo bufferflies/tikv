@@ -89,6 +89,9 @@ pub struct Config {
 
     pub txn_file_worker_pool_size: Option<usize>,
 
+    /// concurrency per core for loading dfs files.
+    pub dfs_load_concurrency_per_core: usize,
+
     pub checksum_type: ChecksumType,
 
     pub block_cache_type: BlockCacheType,
@@ -121,6 +124,8 @@ impl Default for Config {
             flush_split_l0: true,
             update_inner_key_offset: false,
             txn_file_worker_pool_size: None,
+            // 8GB memory per core, 64 * 16MB files consumes 1GB at max.
+            dfs_load_concurrency_per_core: 64,
             checksum_type: ChecksumType::Crc32,
             block_cache_type: BlockCacheType::Moka,
             blob_table_build_options: Default::default(),

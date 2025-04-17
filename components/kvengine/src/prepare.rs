@@ -22,6 +22,7 @@ use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
 use schema::schema::StorageClass;
 use tikv_util::{mpsc::Receiver, time::Instant};
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::{
     apply::ChangeSet,
@@ -330,7 +331,9 @@ impl EngineCore {
             };
             let tx = result_tx.clone();
             let fm = fm.clone();
+            let dfs_load_limiter = self.dfs_load_limiter.clone();
             runtime.spawn(async move {
+                let permit = dfs_load_limiter.acquire_permit().await;
                 let res = match ia_ctx {
                     IaCtx::Disabled => fs
                         .read_file(id, opts.with_type(fm.file_type))
@@ -345,7 +348,7 @@ impl EngineCore {
                             .map(|data| (data, Some((ia_mgr, data_dir))))
                     }
                 };
-                let _ = tx.send(res.map(|(data, ia_mgr)| (id, fm, data, ia_mgr)));
+                let _ = tx.send(res.map(|(data, ia_mgr)| (id, fm, data, ia_mgr, permit)));
             });
             if msg_count < LOAD_FILE_CONCURRENCY {
                 msg_count += 1;
@@ -364,11 +367,17 @@ impl EngineCore {
         cs: &mut ChangeSet,
         use_direct_io: bool,
         result_tx: &Receiver<
-            dfs::Result<(u64, FileMeta, Bytes, Option<(IaManager, Arc<PathBuf>)>)>,
+            dfs::Result<(
+                u64,
+                FileMeta,
+                Bytes,
+                Option<(IaManager, Arc<PathBuf>)>,
+                OwnedSemaphorePermit,
+            )>,
         >,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
-        let (id, meta, data, ia_ctx) = result_tx.recv().unwrap()?;
+        let (id, meta, data, ia_ctx, _permit) = result_tx.recv().unwrap()?;
         let data_len = data.len();
         let file = if let Some((ia_mgr, data_dir)) = ia_ctx {
             let meta_file_path = table_meta_file_local_path(id, meta.file_type, data_dir.deref());
