@@ -4943,6 +4943,25 @@ def KvEngine() -> RowPanel:
     layout.row(
         [
             graph_panel(
+                title="Memory Usage",
+                description="The memory usage of Kv Engine",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_avg(
+                            "kv_engine_mem_size_bytes",
+                            label_selectors=['db="kv"'],  # only select `kv` db
+                            by_labels=["type"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
                 title="Get operations",
                 description="The count of get operations",
                 yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
