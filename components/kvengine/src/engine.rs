@@ -19,6 +19,7 @@ use std::{
 use bytes::BufMut;
 use cloud_encryption::MasterKey;
 use collections::HashSet;
+use crossbeam::channel::RecvTimeoutError;
 use dashmap::{mapref::entry::Entry, DashMap};
 use file_system::IoRateLimiter;
 use fslock;
@@ -1031,29 +1032,55 @@ pub(crate) enum FreeMemMsg {
 }
 
 fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
+    let mut tables = vec![];
+
+    let check_and_free_mem = |tables: &mut Vec<CfTable>| {
+        tables.retain(|tbl| {
+            if Arc::strong_count(&tbl.core) > 1 {
+                return true;
+            }
+            for txn_file in tbl.get_cf(WRITE_CF).get_txn_files() {
+                txn_file.expire_ttl_cache();
+            }
+            false
+        });
+    };
+
     loop {
-        let cnt = free_rx.len();
-        let mut tables = Vec::with_capacity(cnt);
-        let mut txn_files = vec![];
-        for _ in 0..cnt {
-            match free_rx.recv().unwrap() {
-                FreeMemMsg::FreeMem(tbl) => {
-                    for txn_file in tbl.get_cf(WRITE_CF).get_txn_files() {
-                        txn_files.push(txn_file);
-                    }
-                    tables.push(tbl);
-                }
-                FreeMemMsg::Stop => {
-                    drop(tables);
-                    info!("Engine free mem worker receive stop msg and stop now");
+        let msg = if tables.is_empty() {
+            // No tables to free, block until a message is received.
+            match free_rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => {
+                    info!("Engine free mem worker channel disconnected, stopping");
                     return;
                 }
             }
-        }
-        drop(tables);
-        thread::sleep(Duration::from_secs(5));
-        for txn_file in txn_files {
-            txn_file.expire_ttl_cache();
+        } else {
+            // There are tables to check, use timeout.
+            match free_rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    check_and_free_mem(&mut tables);
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    info!("Engine free mem worker channel disconnected, stopping");
+                    return;
+                }
+            }
+        };
+
+        match msg {
+            FreeMemMsg::FreeMem(tbl) => {
+                tables.push(tbl);
+                check_and_free_mem(&mut tables);
+            }
+            FreeMemMsg::Stop => {
+                drop(tables);
+                info!("Engine free mem worker receive stop msg and stop now");
+                return;
+            }
         }
     }
 }
