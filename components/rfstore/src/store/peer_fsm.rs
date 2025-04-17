@@ -57,11 +57,10 @@ use crate::{
         peer::{Peer, StaleState},
         schema::{schema_file_is_matched_with_meta, shard_is_matched_with_meta},
         util as _util, ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines,
-        MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady, RaftApplyState,
-        RaftCommand, RaftContext, SignificantMsg, SnapState, StoreMeta, StoreMsg, Ticker,
-        TrimOverBoundParameter, PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT,
-        PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK,
-        PEER_TICK_SWITCH_MEM_TABLE_CHECK,
+        MsgApplyResult, PdTask, PeerMsg, PersistReady, RaftApplyState, RaftCommand, RaftContext,
+        SignificantMsg, SnapState, StoreMeta, StoreMsg, Ticker, TrimOverBoundParameter,
+        PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC,
+        PEER_TICK_SPLIT_CHECK, PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
     MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG,
@@ -1860,29 +1859,7 @@ impl<'a> PeerMsgHandler<'a> {
             );
             return;
         }
-
-        // If peer is set `pending_remove`, no need to update persist index.
-        if !self.peer.pending_remove {
-            self.peer.raft_group.on_persist_ready(ready.ready_number);
-        }
-
-        let store = self.peer.mut_store();
-        let is_snapshot_ready = store
-            .restored_snapshot
-            .as_ref()
-            .map(|(_, number)| *number == ready.ready_number)
-            .unwrap_or_default();
-        if is_snapshot_ready {
-            let change_set = store.restored_snapshot.take().unwrap().0;
-            let reg = MsgRegistration::new(&self.peer);
-            self.ctx.apply_msgs.msgs.push(ApplyMsg::Registration(reg));
-            self.ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet {
-                cs: change_set,
-                encryption_key: self.peer.encryption_key.clone(),
-                reload_snap: None,
-                shard_use_ia: false, // reset by snapshot
-            });
-        }
+        self.fsm.peer.on_persist_ready(self.ctx, ready.ready_number);
     }
 
     pub(crate) fn on_prepared_change_set(

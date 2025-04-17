@@ -18,7 +18,7 @@ use raft_proto::eraftpb;
 use raftstore::store::util::KeysInfoFormatter;
 use tikv_util::time::Instant;
 
-use super::{IdlePeer, Peer, RaftApplyState};
+use super::{Peer, PeerInbox, RaftApplyState};
 use crate::store::{
     ApplyMetrics, ExecResult, Proposal, RegionIdVer, RegionSnapshot, TrimOverBoundParameter,
 };
@@ -50,8 +50,8 @@ pub enum PeerMsg {
         peer_id: u64,
     },
     Persisted(PersistReady),
-    Idle(IdlePeer),
-    WakeUp(IdlePeer),
+    Idle(PeerInbox),
+    WakeUp(PeerInbox),
     StoreMsgForWakeUp(StoreMsg),
 }
 

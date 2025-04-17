@@ -173,7 +173,8 @@ impl RaftBatchSystem {
                 .insert(peer_fsm.region_id(), ReadDelegate::from_peer(peer));
         }
         let mut region_ids = Vec::with_capacity(region_peers.len());
-        let mut store_ctx = StoreContext::new(RaftContext::new(ctx.clone(), true), store_meta);
+        let mut store_ctx =
+            StoreContext::new(RaftContext::new(ctx.clone(), WorkerType::Main), store_meta);
         let mut store_fsm = self.store_fsm.take().unwrap();
         for peer in region_peers.drain(..) {
             region_ids.push(peer.peer.region_id);
@@ -588,8 +589,15 @@ pub(crate) struct RaftContext {
     pub(crate) current_time: Option<Timespec>,
     pub(crate) raft_metrics: RaftMetrics,
     pub(crate) cfg: Config,
-    pub(crate) is_main_worker: bool,
+    pub(crate) worker_type: WorkerType,
     pub(crate) pending_idles: Vec<u64>,
+}
+
+#[derive(PartialEq)]
+pub(crate) enum WorkerType {
+    Main,
+    Idle,
+    Aux,
 }
 
 // There is only one StoreContext owned by the main raft worker.
@@ -655,7 +663,7 @@ impl DerefMut for StoreContext {
 }
 
 impl RaftContext {
-    pub(crate) fn new(global: GlobalContext, is_main_worker: bool) -> Self {
+    pub(crate) fn new(global: GlobalContext, worker_type: WorkerType) -> Self {
         let cfg = global.cfg.value().clone();
         Self {
             global,
@@ -667,7 +675,7 @@ impl RaftContext {
             raft_metrics: RaftMetrics::new(false),
             cfg,
             pending_idles: vec![],
-            is_main_worker,
+            worker_type,
         }
     }
 

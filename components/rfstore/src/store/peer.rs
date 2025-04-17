@@ -883,6 +883,11 @@ impl Peer {
 
     #[inline]
     pub fn send_raft_messages(&mut self, ctx: &mut RaftContext, msgs: Vec<RaftMessage>) {
+        let trans = if ctx.worker_type == WorkerType::Idle {
+            &mut ctx.global.trans_idle
+        } else {
+            &mut ctx.global.trans
+        };
         for msg in msgs {
             let msg_type = msg.get_message().get_msg_type();
             if msg_type == MessageType::MsgSnapshot {
@@ -943,7 +948,7 @@ impl Peer {
                 "msg_index" => msg.get_message().get_index(),
             );
 
-            if let Err(e) = ctx.global.trans.send(msg) {
+            if let Err(e) = trans.send(msg) {
                 // We use metrics to observe failure on production.
                 debug!(
                     "failed to send msg to other peer";
@@ -1638,6 +1643,14 @@ impl Peer {
         if !ready.snapshot().is_empty() {
             self.mut_store().on_apply_snapshot_msgs = std::mem::take(&mut persist_messages);
         }
+        if ctx.worker_type == WorkerType::Idle {
+            // avoid persist ready message to wake up idle peer.
+            self.send_raft_messages(ctx, persist_messages);
+            let ready_number = ready.number();
+            self.raft_group.advance_append_async(ready);
+            self.on_persist_ready(ctx, ready_number);
+            return;
+        }
         ctx.persist_readies.push(PersistReady {
             region_id: self.region_id,
             ready_number: ready.number(),
@@ -1646,6 +1659,31 @@ impl Peer {
             raft_messages: persist_messages,
         });
         self.raft_group.advance_append_async(ready)
+    }
+
+    pub(crate) fn on_persist_ready(&mut self, ctx: &mut RaftContext, ready_number: u64) {
+        // If peer is set `pending_remove`, no need to update persist index.
+        if !self.pending_remove {
+            self.raft_group.on_persist_ready(ready_number);
+        }
+
+        let store = self.mut_store();
+        let is_snapshot_ready = store
+            .restored_snapshot
+            .as_ref()
+            .map(|(_, number)| *number == ready_number)
+            .unwrap_or_default();
+        if is_snapshot_ready {
+            let change_set = store.restored_snapshot.take().unwrap().0;
+            let reg = MsgRegistration::new(self);
+            ctx.apply_msgs.msgs.push(ApplyMsg::Registration(reg));
+            ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet {
+                cs: change_set,
+                encryption_key: self.encryption_key.clone(),
+                reload_snap: None,
+                shard_use_ia: false, // reset by snapshot
+            });
+        }
     }
 
     pub(crate) fn handle_raft_committed_entries(
