@@ -1035,7 +1035,9 @@ impl StatusServer {
             };
             let raft_state_last_index = old_raft_state.get_last_index();
             let raft_log_last_index = rf.get_last_index(peer_id).unwrap_or(RAFT_INIT_LOG_INDEX);
-            let last_index = std::cmp::max(raft_state_last_index, raft_log_last_index);
+            let origin_last_index = std::cmp::max(raft_state_last_index, raft_log_last_index);
+            // Add a delta to last_index 3 to replicate empty snapshot to followers.
+            let last_index = origin_last_index + 3;
             info!(
                 "unsafe_recover region: {} peer: {} truncate raft log to {}",
                 region_id, peer_id, last_index
@@ -1043,7 +1045,7 @@ impl StatusServer {
             wb.truncate_raft_log(peer_id, region_id, last_index);
 
             let raft_log_term = rf
-                .get_term(peer_id, last_index)
+                .get_term(peer_id, origin_last_index)
                 .unwrap_or(RAFT_INIT_LOG_TERM);
             let old_kv_engine_meta = match rf.get_state(peer_id, KV_ENGINE_META_KEY) {
                 Some(meta) => meta,
