@@ -104,6 +104,9 @@ static MISSING_ACTIONS: &[u8] = b"Missing param actions";
 #[cfg(feature = "failpoints")]
 static FAIL_POINTS_REQUEST_PATH: &str = "/fail";
 
+const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(600);
+const SERVER_TCP_KEEPALIVE: Duration = Duration::from_secs(120);
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct LogLevelRequest {
@@ -2100,10 +2103,14 @@ impl StatusServer {
     pub fn start(&mut self, status_addr: String) -> Result<()> {
         let addr = SocketAddr::from_str(&status_addr)?;
 
-        let incoming = {
+        let mut incoming = {
             let _enter = self.thread_pool.enter();
             AddrIncoming::bind(&addr)
         }?;
+
+        incoming.set_keepalive(Some(SERVER_TCP_KEEPALIVE));
+        incoming.set_nodelay(true);
+
         self.addr = Some(incoming.local_addr());
         if !self.security_config.cert_path.is_empty()
             && !self.security_config.key_path.is_empty()
@@ -2118,10 +2125,11 @@ impl StatusServer {
             }
             let acceptor = acceptor.build();
             let tls_incoming = tls_incoming(acceptor, incoming);
-            let server = Server::builder(tls_incoming);
+            let server =
+                Server::builder(tls_incoming).http1_header_read_timeout(SERVER_READ_TIMEOUT);
             self.start_serve(server);
         } else {
-            let server = Server::builder(incoming);
+            let server = Server::builder(incoming).http1_header_read_timeout(SERVER_READ_TIMEOUT);
             self.start_serve(server);
         }
         Ok(())

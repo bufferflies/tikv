@@ -77,6 +77,9 @@ use crate::{
 const BACKGROUND_WORKER_INTERVAL: Duration = Duration::from_secs(60); //1min
 const RG_CONFIG_PATH: &str = "resource_group/controller";
 
+const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(600);
+const SERVER_TCP_KEEPALIVE: Duration = Duration::from_secs(120);
+
 struct ServerFuture {
     http_server: Box<dyn Future<Output = hyper::Result<()>> + Send + Unpin>,
     _grpc_server: Option<RemoteCopServer>,
@@ -189,11 +192,15 @@ fn start_server(
         .expect("Unable to parse zstd compression level");
     let checksum_type = config.checksum_type;
 
-    let incoming = {
+    let mut incoming = {
         let _enter = hyper_runtime.enter();
         hyper::server::conn::AddrIncoming::bind(&addr)
     }
     .unwrap();
+
+    incoming.set_keepalive(Some(SERVER_TCP_KEEPALIVE));
+    incoming.set_nodelay(true);
+
     let security_mgr = pd.get_security_mgr();
     let master_key = s3fs
         .get_runtime()

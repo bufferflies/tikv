@@ -101,12 +101,16 @@ impl Context {
 macro_rules! start_serve {
     ($ctx:expr, $acceptor:expr) => {{
         match $acceptor {
-            tikv_util::Either::Left(acceptor) => {
-                $crate::server::start($ctx, hyper::server::Server::builder(acceptor))
-            }
-            tikv_util::Either::Right(acceptor) => {
-                $crate::server::start($ctx, hyper::server::Server::builder(acceptor))
-            }
+            tikv_util::Either::Left(acceptor) => $crate::server::start(
+                $ctx,
+                hyper::server::Server::builder(acceptor)
+                    .http1_header_read_timeout(SERVER_READ_TIMEOUT),
+            ),
+            tikv_util::Either::Right(acceptor) => $crate::server::start(
+                $ctx,
+                hyper::server::Server::builder(acceptor)
+                    .http1_header_read_timeout(SERVER_READ_TIMEOUT),
+            ),
         }
     }};
 }
