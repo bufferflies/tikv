@@ -116,6 +116,9 @@ const PD_CLIENT_RETRY_COUNT: usize = 10;
 const ENV_K8S_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const K8S_MIN_DISK_CAPACITY: u64 = ReadableSize::gb(50).0;
 
+const BLACKLIST_KEYSPACE_FILE: &str = "blacklist_keyspace.json";
+const WHITELIST_KEYSPACE_FILE: &str = "whitelist_keyspace.json";
+
 /// A complete TiKV server.
 pub struct TikvServer {
     config: TikvConfig,
@@ -1302,12 +1305,54 @@ fn load_black_list(conf: &TikvConfig) -> Option<BlackList> {
     black_list_conf
         .keyspace_ids
         .extend_from_slice(&recovery_black_list);
+
+    // Load additional keyspace list from blacklist file.
+    black_list_conf
+        .keyspace_ids
+        .extend(load_keyspace_list(conf, BLACKLIST_KEYSPACE_FILE));
     black_list_conf.keyspace_ids.sort();
     black_list_conf.keyspace_ids.dedup();
+    // Load additional keyspace list from whitelist file, and remove the keyspace
+    // ids in blacklist.
+    // NOTE: The keyspace ids in whitelist has higher priority than the keyspace ids
+    // in blacklist.
+    let whitelist_keyspace_ids = load_keyspace_list(conf, WHITELIST_KEYSPACE_FILE);
+    black_list_conf
+        .keyspace_ids
+        .retain(|id| !whitelist_keyspace_ids.contains(id));
+
+    info!(
+        "load_black_list, keyspace_id count: {}, region_id count: {}, keyspace_ids: {:?} region_ids: {:?}",
+        black_list_conf.keyspace_ids.len(),
+        black_list_conf.region_ids.len(),
+        black_list_conf.keyspace_ids,
+        black_list_conf.region_ids
+    );
     Some(BlackList::new(
         black_list_conf.keyspace_ids,
         black_list_conf.region_ids,
     ))
+}
+
+fn load_keyspace_list(conf: &TikvConfig, file_name: &str) -> Vec<u32> {
+    let path = PathBuf::from(&conf.storage.data_dir).join(file_name);
+    if !path.exists() {
+        return vec![];
+    }
+    if let Ok(data) = fs::read(&path) {
+        return match serde_json::from_slice::<Vec<u32>>(&data) {
+            Ok(keyspace_ids) => keyspace_ids,
+            Err(err) => {
+                error!(
+                    "failed to load additional keyspace list file {:?} {:?}",
+                    path.display(),
+                    err
+                );
+                vec![]
+            }
+        };
+    }
+    vec![]
 }
 
 fn _get_store_regions(
