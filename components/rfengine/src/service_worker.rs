@@ -5,7 +5,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     thread::JoinHandle,
@@ -26,9 +26,18 @@ use crate::{
     dfs_worker::{Healthy, LightweightBackupConfig, ObjectStorageTask, ObjectStorageWorker},
     log_batch::RaftLogBlock,
     manifest::Manifest,
+    metrics::ENGINE_COMPACT_CACHE_WAL_SKIPPED_COUNTER,
+    write_batch::WriteBatch,
     writer::WalWriter,
     BackupTask, Error,
 };
+
+// the maximum number of WriteBatch cached in memory for compact.
+// We limit this number when background compact is slow to avoid
+// consuming too much memory.
+// TODO: maybe we should better control the memory usage based on
+// the process memory usage.
+const MAX_PENDING_COMPACT_WB_NUM: usize = 4;
 
 pub(crate) struct ObjectStorageWorkerHandle {
     task_sender: Sender<ObjectStorageTask>,
@@ -44,6 +53,8 @@ pub(crate) enum ServiceTask {
     },
     Rotate {
         epoch_id: u32,
+        // Whether to cache new WriteBatch in memory for compaction.
+        cache_wb_for_compact: bool,
     },
     Write {
         wb: crate::write_batch::WriteBatch,
@@ -61,6 +72,9 @@ pub(crate) enum ServiceTask {
 pub(crate) struct ServiceWorker {
     engine_id: Arc<AtomicU64>,
     async_wal_writer: Option<WalWriter>,
+    compact_wb: Option<WriteBatch>,
+    // number of pending WriteBatch cached for compaction.
+    pending_compact_wb_count: Arc<AtomicUsize>,
     rx: Receiver<ServiceTask>,
     compact_worker_handle: WorkerHandle,
     dfs_worker_handle: Option<ObjectStorageWorkerHandle>,
@@ -84,6 +98,7 @@ impl ServiceWorker {
             Arc::new(s3fs)
         });
         let engine_id = manifest.engine_id.clone();
+        let pending_compact_wb_count = Arc::new(AtomicUsize::default());
         let (compact_worker_tx, compact_rx) = tikv_util::mpsc::unbounded();
         let mut compact_worker = CompactWorker::new(
             dir.clone(),
@@ -94,6 +109,7 @@ impl ServiceWorker {
             s3fs.clone(),
             healthy.clone(),
             compact_wal_sync_concurrency,
+            pending_compact_wb_count.clone(),
         );
         let handle = std::thread::Builder::new()
             .name("compact-wal-worker".to_string())
@@ -128,6 +144,8 @@ impl ServiceWorker {
         ServiceWorker {
             engine_id,
             async_wal_writer,
+            compact_wb: None,
+            pending_compact_wb_count,
             dfs_worker_handle,
             rx,
             compact_worker_handle,
@@ -139,7 +157,7 @@ impl ServiceWorker {
         while let Ok(task) = self.rx.recv() {
             match task {
                 ServiceTask::Write { wb } => {
-                    self.handle_write(&wb);
+                    self.handle_write(wb);
                 }
                 ServiceTask::Dump {
                     epoch_id,
@@ -152,8 +170,11 @@ impl ServiceWorker {
                 ServiceTask::Backup(task) => {
                     self.handle_backup(task);
                 }
-                ServiceTask::Rotate { epoch_id } => {
-                    self.handle_rotate(epoch_id);
+                ServiceTask::Rotate {
+                    epoch_id,
+                    cache_wb_for_compact,
+                } => {
+                    self.handle_rotate(epoch_id, cache_wb_for_compact);
                 }
                 ServiceTask::Truncates(truncates) => drop(truncates),
                 ServiceTask::Upload => {
@@ -175,9 +196,9 @@ impl ServiceWorker {
         self.engine_id.load(Ordering::SeqCst)
     }
 
-    fn handle_write(&mut self, wb: &crate::write_batch::WriteBatch) {
+    fn handle_write(&mut self, wb: crate::write_batch::WriteBatch) {
         if let Some(wal_writer) = &mut self.async_wal_writer {
-            wal_writer.write_batch(wb).unwrap();
+            wal_writer.write_batch(&wb).unwrap();
             let file_off = wal_writer.file_off;
             let epoch_id = wal_writer.epoch_id;
             if self.is_lightweight_enabled() {
@@ -190,6 +211,9 @@ impl ServiceWorker {
                     .send(task)
                     .unwrap();
             }
+        }
+        if let Some(compact_wb) = &mut self.compact_wb {
+            compact_wb.merge_write_batch(wb);
         }
     }
 
@@ -268,7 +292,7 @@ impl ServiceWorker {
         }
     }
 
-    fn handle_rotate(&mut self, epoch_id: u32) {
+    fn handle_rotate(&mut self, epoch_id: u32, cache_wb: bool) {
         if let Some(writer) = self.async_wal_writer.as_mut() {
             debug_assert_eq!(writer.epoch_id, epoch_id);
             let file_off = writer.file_off;
@@ -283,8 +307,22 @@ impl ServiceWorker {
         }
         self.compact_worker_handle
             .task_sender
-            .send(CompactTask::Compact { epoch_id })
+            .send(CompactTask::Compact {
+                epoch_id,
+                compact_wb: self.compact_wb.take(),
+            })
             .unwrap();
+        let can_cache =
+            self.pending_compact_wb_count.load(Ordering::SeqCst) < MAX_PENDING_COMPACT_WB_NUM;
+        // init async compact write batch after the rotate.
+        if cache_wb {
+            if can_cache {
+                self.compact_wb = Some(WriteBatch::default());
+                self.pending_compact_wb_count.fetch_add(1, Ordering::SeqCst);
+            } else {
+                ENGINE_COMPACT_CACHE_WAL_SKIPPED_COUNTER.inc();
+            }
+        }
     }
 
     fn handle_close(&mut self, force: bool) {

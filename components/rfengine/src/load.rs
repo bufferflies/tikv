@@ -32,8 +32,14 @@ impl RfEngineCore {
             (wal_offset, async_offset) = self.load_wal_file(epoch_id, true)?;
         }
         while wal_exists(self.wal_dir(), epoch_id + 1) {
+            // `compact_wb` only gets set and starts collecting write batches after a WAL
+            // rotation is triggered by new foreground writes; it remains uninitialized when
+            // loading existing WALs on startup.
             self.task_sender
-                .send(ServiceTask::Rotate { epoch_id })
+                .send(ServiceTask::Rotate {
+                    epoch_id,
+                    cache_wb_for_compact: false,
+                })
                 .unwrap();
             epoch_id += 1;
             let (offset, _) = self.load_wal_file(epoch_id, false)?;

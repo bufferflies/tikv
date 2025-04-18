@@ -11,7 +11,7 @@ use std::{
     mem,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
         Arc,
     },
     thread,
@@ -82,6 +82,9 @@ pub(crate) struct CompactWorker {
 
     sync_concurrency: usize,
     files_to_sync: Vec<File>,
+    // track the number of pending compaction tasks with cached WriteBatch
+    // to control the memory usage of cached WriteBatch.
+    pending_compact_wb_count: Arc<AtomicUsize>,
 }
 
 impl CompactWorker {
@@ -94,6 +97,7 @@ impl CompactWorker {
         s3fs: Option<Arc<S3Fs>>,
         healthy: Healthy,
         sync_concurrency: usize,
+        pending_compact_wb_count: Arc<AtomicUsize>,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
         let rlog_cache = if let Some(config) = lightweight_backup_cfg {
@@ -115,6 +119,7 @@ impl CompactWorker {
             healthy,
             sync_concurrency,
             files_to_sync: vec![],
+            pending_compact_wb_count,
         }
     }
 
@@ -125,7 +130,10 @@ impl CompactWorker {
     pub(crate) fn run(&mut self) {
         while let Ok(task) = self.task_rx.recv() {
             match task {
-                CompactTask::Compact { epoch_id } => self.handle_compact(epoch_id),
+                CompactTask::Compact {
+                    epoch_id,
+                    compact_wb,
+                } => self.handle_compact(epoch_id, compact_wb),
                 CompactTask::HeavyBackup(task) => self.handle_heavy_backup(task),
                 CompactTask::Snapshot => {
                     self.handle_snapshot();
@@ -165,7 +173,7 @@ impl CompactWorker {
             if next_delay.is_err() {
                 panic!("compact epoch {} retry times exceeded", epoch_id);
             }
-            match self.compact(epoch_id) {
+            match self.compact(epoch_id, None) {
                 Ok(_) => break,
                 Err(err) => {
                     error!(
@@ -181,9 +189,10 @@ impl CompactWorker {
         }
     }
 
-    fn handle_compact(&mut self, epoch_id: u32) {
+    fn handle_compact(&mut self, epoch_id: u32, compact_wb: Option<WriteBatch>) {
         info!("handle compact {}", epoch_id);
-        if let Err(err) = self.compact(epoch_id) {
+        let has_wb = compact_wb.is_some();
+        if let Err(err) = self.compact(epoch_id, compact_wb) {
             let engine_id = self.manifest.get_engine_id();
             error!(
                 "{}: failed to compact epoch {} {:?}",
@@ -191,6 +200,9 @@ impl CompactWorker {
             );
             self.handle_compact_with_backoff(epoch_id);
             info!("handle compact {} success after retry", epoch_id);
+        }
+        if has_wb {
+            self.pending_compact_wb_count.fetch_sub(1, Ordering::SeqCst);
         }
 
         if self.manifest.should_snapshot() {
@@ -205,8 +217,44 @@ impl CompactWorker {
         self.snapshot_backup();
     }
 
-    fn compact(&mut self, epoch_id: u32) -> Result<()> {
-        let timer = Instant::now_coarse();
+    #[cfg(test)]
+    fn check_async_compact_wb(&self, epoch_id: u32, wb: &WriteBatch) {
+        let wb_disk = self.load_wal(epoch_id).unwrap();
+        assert_eq!(wb.peers.len(), wb_disk.peers.len());
+        for (id, peer_data) in &wb.peers {
+            let Some(peer_disk) = wb_disk.peers.get(id) else {
+                panic!("[epoch {}] peer {} not found in disk", epoch_id, *id);
+            };
+
+            if peer_data.meta != peer_disk.meta {
+                panic!(
+                    "[epoch {}] peer {} meta mismatch: mem: {:?}, disk: {:?}",
+                    epoch_id, *id, peer_data.meta, peer_disk.meta
+                );
+            }
+
+            if peer_data.raft_logs.len() != peer_disk.raft_logs.len() {
+                panic!(
+                    "[epoch {}] peer {} raft logs length mismatch: mem: {}, disk: {}",
+                    epoch_id,
+                    *id,
+                    peer_data.raft_logs.len(),
+                    peer_disk.raft_logs.len(),
+                );
+            }
+
+            for (log_mem, log_disk) in peer_data.raft_logs.iter().zip(&peer_disk.raft_logs) {
+                if log_mem != log_disk {
+                    panic!(
+                        "[epoch {}] peer {} raft logs mismatch: mem: {:?}, disk: {:?}",
+                        epoch_id, *id, log_mem, log_disk,
+                    );
+                }
+            }
+        }
+    }
+
+    fn load_wal(&self, epoch_id: u32) -> Result<WriteBatch> {
         let mut batch = WriteBatch::default();
         let mut it = WalIterator::new(self.dir.clone(), epoch_id);
         it.iterate_batch(|data, _| {
@@ -214,6 +262,20 @@ impl CompactWorker {
                 batch.merge_peer(region_batch);
             });
         })?;
+        Ok(batch)
+    }
+
+    fn compact(&mut self, epoch_id: u32, compact_wb: Option<WriteBatch>) -> Result<()> {
+        let timer = Instant::now_coarse();
+        let batch = if let Some(wb) = compact_wb {
+            // only verify in memory WriteBatch with disk file in test environment.
+            #[cfg(test)]
+            self.check_async_compact_wb(epoch_id, &wb);
+            wb
+        } else {
+            self.load_wal(epoch_id)?
+        };
+
         let mut change_set = rfenginepb::ChangeSet::default();
         change_set.set_epoch_id(epoch_id);
         let mut generated_files = 0;
@@ -249,7 +311,6 @@ impl CompactWorker {
         let cache_size = self.rlog_cache.cache_size();
         info!(
             "{}: compact wal", engine_id;
-            "size" => it.offset,
             "generated_files" => generated_files,
             "cached_files" => cached_files,
             "cache_size" => cache_size,
@@ -776,12 +837,15 @@ pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32) -> PathBuf {
 }
 
 pub(crate) enum CompactTask {
-    Compact { epoch_id: u32 },
+    Compact {
+        epoch_id: u32,
+        // cache write batch for compact.
+        compact_wb: Option<WriteBatch>,
+    },
     HeavyBackup(BackupTask),
     Close,
     Snapshot,
 }
-
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -1024,6 +1088,7 @@ mod tests {
             None,
             dfs_worker::Healthy::default(),
             1,
+            Arc::new(AtomicUsize::default()),
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 80, RANDOM_STR_MAX_LEN / 2)
@@ -1153,6 +1218,7 @@ mod tests {
             None,
             dfs_worker::Healthy::default(),
             1,
+            Arc::new(AtomicUsize::default()),
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 100 * 5, RANDOM_STR_MAX_LEN * 100 / 2)

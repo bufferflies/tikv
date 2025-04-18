@@ -331,12 +331,13 @@ impl RfEngineCore {
             self.current_epoch_id
                 .store(writer.epoch_id, Ordering::SeqCst);
             self.task_sender
-                .send(ServiceTask::Rotate { epoch_id })
+                .send(ServiceTask::Rotate {
+                    epoch_id,
+                    cache_wb_for_compact: true,
+                })
                 .unwrap();
         }
-        if self.is_async_wal_enabled() {
-            self.task_sender.send(ServiceTask::Write { wb }).unwrap();
-        }
+        self.task_sender.send(ServiceTask::Write { wb }).unwrap();
         ENGINE_PERSIST_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
         Ok(size)
     }
@@ -1031,7 +1032,7 @@ pub fn save_store_ident(rf: &RfEngine, store_ident: &StoreIdent) {
     rf.write(wb).unwrap();
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct PeerMeta {
     pub(crate) region_id: u64,
     pub(crate) truncated_idx: u64,

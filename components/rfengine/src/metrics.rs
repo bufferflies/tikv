@@ -72,6 +72,11 @@ lazy_static! {
         exponential_buckets(0.0005, 1.8, 26).unwrap()
     )
     .unwrap();
+    pub static ref ENGINE_COMPACT_CACHE_WAL_SKIPPED_COUNTER: IntCounter = register_int_counter!(
+        "raft_engine_compact_cached_wal_skipped_counter",
+        "Counter of rfengine WAL caching for compact was skipped",
+    )
+    .unwrap();
     pub static ref ENGINE_TOTAL_WALS_GAUGE: IntGauge = register_int_gauge!(
         "raft_engine_total_wals_count",
         "Total number of raft WAL logs"
