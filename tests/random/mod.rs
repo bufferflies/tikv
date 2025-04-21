@@ -30,16 +30,17 @@ use api_version::ApiV2;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use codec::number::NumberEncoder;
 use futures::executor::block_on;
-use http::{Request, StatusCode, Uri};
+use http::{Request, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
     table::columnar::build_schema_file,
 };
 use kvproto::metapb::Store;
+use native_br::{common::send_request_to_store_with_retry, error::Error::HttpError};
 use pd_client::PdClient;
 use rand::prelude::*;
-use security::SecurityConfig;
+use security::{GetSecurityManager, SecurityConfig, SecurityManager};
 pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 use test_cloud_server::{
     client::ClusterTxnClient,
@@ -97,7 +98,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(90);
 pub const WRITE_CONCURRENCY: usize = 4;
 pub const TXN_FILE_WRITE_CONCURRENCY: usize = 2;
 
-const REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT: Duration = Duration::from_secs(20);
+const REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT: Duration = Duration::from_secs(60);
 
 const KEYSPACE_CLEANUP_LOCKS_CONCURRENCY: usize = 4;
 const KEYSPACE_CLEANUP_LOCKS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -253,6 +254,7 @@ pub(crate) fn spawn_major_compact(
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut rng = rand::thread_rng();
+        let security_mgr = pd_client.get_security_mgr();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -273,9 +275,12 @@ pub(crate) fn spawn_major_compact(
 
                 let mut handles = Vec::with_capacity(stores.len());
                 for store in stores {
-                    handles.push(
-                        runtime.spawn(request_major_compact_on_store(store.clone(), keyspace_id)),
-                    );
+                    let security_mgr = security_mgr.clone();
+                    handles.push(runtime.spawn(request_major_compact_on_store(
+                        security_mgr,
+                        store.clone(),
+                        keyspace_id,
+                    )));
                 }
                 for handle in handles {
                     runtime.block_on(handle).unwrap().unwrap();
@@ -289,54 +294,48 @@ pub(crate) fn spawn_major_compact(
     })
 }
 
-pub(crate) async fn request_major_compact_on_store(store: Store, keyspace_id: u32) -> Result<()> {
-    let uri = Uri::from_str(&format!(
-        "http://{}/major-compact?major_compact=true&keyspace_id={}",
-        &store.status_address, keyspace_id
-    ))
-    .unwrap();
-    let client = hyper::Client::new();
-    let mut last_err: Option<Error> = None;
-    let mut retry = 0;
-    let start_time = Instant::now();
-    while start_time.saturating_elapsed() < REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT {
-        retry += 1;
-        let req = Request::post(&uri).body(Body::empty()).unwrap();
-        match client.request(req).await {
-            // Treat 404 as success.
-            Ok(resp) if (resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND) => {
-                let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-                let msg = String::from_utf8_lossy(&body);
-                info!(
-                    "request_major_compact_on_store success, keyspace {}: {}",
-                    keyspace_id,
-                    msg.as_ref()
-                );
-                return Ok(());
-            }
-            Ok(resp) => {
-                let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
-                let msg = String::from_utf8_lossy(&body);
-                // Return error only when there is bad request argument.
-                panic!(
-                    "request_major_compact_on_store failed: {}, retry {}",
-                    msg.as_ref(),
-                    retry
-                );
-            }
-            Err(err) => {
-                last_err = Some(box_err!(
-                    "request_major_compact_on_store failed: {:?}, retry {}",
-                    err,
-                    retry
-                ));
-                warn!("{:?}", last_err.as_ref().unwrap());
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
+pub(crate) async fn request_major_compact_on_store(
+    security_mgr: Arc<SecurityManager>,
+    store: Store,
+    keyspace_id: u32,
+) -> Result<()> {
+    let uri = security_mgr
+        .build_uri(format!(
+            "{}/major-compact?major_compact=true&keyspace_id={}",
+            &store.status_address, keyspace_id
+        ))
+        .unwrap();
+    let req = || Request::post(&uri).body(Body::empty()).unwrap();
+    match send_request_to_store_with_retry(
+        req,
+        &store,
+        security_mgr.as_ref(),
+        REQUEST_MAJOR_COMPACT_ON_STORE_TIMEOUT,
+    )
+    .await
+    {
+        Ok(resp) => {
+            let msg = String::from_utf8_lossy(&resp);
+            info!(
+                "{} request_major_compact_on_store success: {}",
+                keyspace_id,
+                msg.as_ref()
+            );
+            Ok(())
         }
+        Err(HttpError(status, msg)) if status == StatusCode::NOT_FOUND => {
+            info!(
+                "{} request_major_compact_on_store: region not found", keyspace_id;
+                "msg" => msg
+            );
+            Ok(())
+        }
+        Err(err) => Err(box_err!(
+            "{} request_major_compact_on_store failed: {:?}",
+            keyspace_id,
+            err
+        )),
     }
-    Err(last_err.unwrap())
 }
 
 pub(crate) fn spawn_keyspace_write(
