@@ -450,7 +450,7 @@ pub fn restore_keyspace(
     }
 
     reporter.report_step(RestoreStep::RetainSstFiles);
-    let files = cluster.get_all_shard_files(None);
+    let files = cluster.get_all_shard_files(None, None);
     match retain_sst_files(files, &s3fs) {
         Err(e) => {
             return Err(box_err!(
@@ -1356,12 +1356,37 @@ impl BackupCluster {
     }
 
     // Should be called after load_shard & collect_txn_chunks_in_wal.
-    pub fn get_all_shard_files(&self, skip_shards: Option<HashSet<u64>>) -> Vec<TableFile> {
+    pub fn get_all_shard_files(
+        &self,
+        skip_shards: Option<HashSet<u64>>,
+        skip_keyspace_ids: Option<HashSet<u32>>,
+    ) -> Vec<TableFile> {
         let mut files = vec![];
         for shard in self.shards.values() {
             if let Some(skip_shards) = &skip_shards {
                 if skip_shards.contains(&shard.region_id) {
+                    info!(
+                        "skip shard {} files {}",
+                        shard.tag(),
+                        shard.meta.all_files().len()
+                    );
                     continue;
+                }
+            }
+            if let Some(skip_keyspace_ids) = &skip_keyspace_ids {
+                if let Some(keyspace_id) = ApiV2::get_u32_keyspace_id_by_key(shard.start()) {
+                    if skip_keyspace_ids.contains(&keyspace_id) {
+                        let keyspace_end_key = ApiV2::get_keyspace_end_by_id(keyspace_id);
+                        if shard.end() <= keyspace_end_key.as_slice() {
+                            info!(
+                                "skip keyspace {} shard {} files {}",
+                                keyspace_id,
+                                shard.tag(),
+                                shard.meta.all_files().len()
+                            );
+                            continue;
+                        }
+                    }
                 }
             }
             files.extend(shard.meta.all_files().iter().map(|(&id, fm)| TableFile {
@@ -1395,7 +1420,7 @@ impl BackupCluster {
     // Should be called after load_shard and before setup_kv_engine.
     pub fn check_all_shard_files(&self) -> Result<()> {
         if let Some(archive_reader) = &self.archive_reader {
-            let files = self.get_all_shard_files(None);
+            let files = self.get_all_shard_files(None, None);
             let not_found_files = get_not_found_files(&self.dfs, files)?;
             archive_reader.restore_files(not_found_files)?;
         }

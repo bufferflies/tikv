@@ -628,6 +628,10 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         unimplemented!();
     }
 
+    fn load_keyspace(&self, _keyspace_name: String) -> Result<kvproto::keyspacepb::KeyspaceMeta> {
+        unimplemented!();
+    }
+
     fn get_buckets(&self, _region_id: u64) -> Option<BucketStat> {
         unimplemented!();
     }
