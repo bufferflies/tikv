@@ -22,6 +22,7 @@ use collections::{HashMap, HashSet};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::Request;
 use hyper::Body;
+use itertools::Itertools;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
     ia::util::IaConfig,
@@ -1281,11 +1282,26 @@ impl BackupCluster {
             }
         }
 
-        let (intact_shards, sorted_shards_id) =
-            Self::handle_overlapping_shards(self.tag(), leader_shards)?;
-        info!("{}: shards cnt {}", self.tag(), intact_shards.len());
-        self.shards = intact_shards;
-        self.sorted_shards = sorted_shards_id;
+        if is_full_range {
+            // Reserve all the leader shards for archiving.
+            let mut shards: HashMap<u64, BackupShard> = HashMap::new();
+            let sorted_shards = leader_shards
+                .values()
+                .sorted_by(|a, b| a.start().cmp(b.start()))
+                .map(|x| x.region_id)
+                .collect();
+            shards.extend(leader_shards.into_iter().map(|(k, v)| (k.id, v)));
+            self.shards = shards;
+            self.sorted_shards = sorted_shards;
+        } else {
+            // The `find_intact_shards` in the following methods can only handle the shards
+            // of a single keyspace.
+            let (intact_shards, sorted_shards_id) =
+                Self::handle_overlapping_shards(self.tag(), leader_shards)?;
+            self.shards = intact_shards;
+            self.sorted_shards = sorted_shards_id;
+        }
+        info!("{}: shards cnt {}", self.tag(), self.shards.len());
         debug!(
             "Keyspace {} BackupCluster.load_shards: {:?}",
             self.tag(),

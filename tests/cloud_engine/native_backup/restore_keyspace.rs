@@ -12,6 +12,7 @@ use api_version::ApiV2;
 use bytes::Bytes;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use cloud_worker::broadcast_schema_update_to_all_stores;
+use collections::HashSet;
 use engine_traits::ObjectStorage;
 use kvengine::{
     dfs::{DFSConfig, Dfs, FileType, Options, S3Fs},
@@ -708,7 +709,7 @@ fn test_restore_archived_keyspace_impl(
         }
 
         // Archive backup.
-        archive::archive_cluster_backup(
+        let shards_count = archive::archive_cluster_backup(
             archive_config.clone(),
             cluster.get_pd_client(),
             s3fs.clone(),
@@ -716,7 +717,19 @@ fn test_restore_archived_keyspace_impl(
             date_time.date(),
         )
         .unwrap();
-        step!("archive done on {}", date_time.date());
+        let mut shard_ids = HashSet::default();
+        for node_id in cluster.get_nodes() {
+            let kv_engine = cluster.get_kvengine(node_id);
+            for id_ver in &kv_engine.get_all_shard_id_vers() {
+                shard_ids.insert(id_ver.id);
+            }
+        }
+        assert_eq!(shards_count, shard_ids.len());
+        step!(
+            "archive shards {} done on {}",
+            shards_count,
+            date_time.date()
+        );
 
         date_time = date_time.checked_add_days(chrono::Days::new(1)).unwrap();
         pd_client.set_tso(TimeStamp::compose(date_time.timestamp_millis() as u64, 0));

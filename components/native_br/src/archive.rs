@@ -215,6 +215,7 @@ pub fn archive_with_cfg(config: ArchiveConfig) -> Result<()> {
         begin_archive_date,
         end_archive_date,
     )
+    .map(|_| ())
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -271,14 +272,21 @@ pub struct ArchiveBackup {
     pub date: NaiveDate,
     pub meta_data: Bytes,
     pub files: HashMap<u64, FileType>,
+    pub shards_count: usize,
 }
 
 impl ArchiveBackup {
-    pub fn new(date: NaiveDate, meta_data: Bytes, files: HashMap<u64, FileType>) -> Self {
+    pub fn new(
+        date: NaiveDate,
+        meta_data: Bytes,
+        files: HashMap<u64, FileType>,
+        shards_count: usize,
+    ) -> Self {
         Self {
             date,
             meta_data,
             files,
+            shards_count,
         }
     }
 }
@@ -289,7 +297,7 @@ pub fn archive_cluster_backup(
     s3fs: Arc<S3Fs>,
     begin_archive_date: NaiveDate,
     end_archive_date: NaiveDate,
-) -> Result<()> {
+) -> Result<usize> /* latest archived shards count */ {
     let cluster_id = pd_client.get_cluster_id()?;
     let mut backup_date = match get_latest_archive_date(&s3fs, &begin_archive_date) {
         Ok(latest_archive_date) => latest_archive_date
@@ -342,7 +350,8 @@ pub fn archive_cluster_backup(
         }
         backup_date += chrono::Duration::days(1);
     }
-    Ok(())
+    let shards_count = old.map(|a| a.shards_count).unwrap_or_default();
+    Ok(shards_count)
 }
 
 fn archive_backup_files(
@@ -367,7 +376,7 @@ fn archive_backup_files(
     let (meta_file_data, cluster_backup) =
         get_cluster_backup_file_and_meta(&s3fs, file_name.clone())
             .map_err(|e| Error::DfsError(e))?;
-    let files = get_cluster_backup_files(
+    let (files, shards_count) = get_cluster_backup_files_and_shards_count(
         pd_client.clone(),
         s3fs.clone(),
         cluster_id,
@@ -397,7 +406,12 @@ fn archive_backup_files(
             )));
         }
     }
-    Ok(ArchiveBackup::new(backup_date, meta_file_data, files))
+    Ok(ArchiveBackup::new(
+        backup_date,
+        meta_file_data,
+        files,
+        shards_count,
+    ))
 }
 
 fn write_archive_packages_and_index(
@@ -489,7 +503,7 @@ fn get_sorted_deleted_files(
     deleted
 }
 
-fn get_cluster_backup_files(
+fn get_cluster_backup_files_and_shards_count(
     pd_client: Arc<dyn PdClient>,
     s3fs: Arc<S3Fs>,
     cluster_id: u64,
@@ -498,7 +512,10 @@ fn get_cluster_backup_files(
     skip_shards: Option<HashSet<u64>>,
     path: PathBuf,
     security_conf: SecurityConfig,
-) -> Result<HashMap<u64, FileType>> {
+) -> Result<(
+    HashMap<u64, FileType>, // all files
+    usize,                  // shards count
+)> {
     if cluster_backup.cluster_id != cluster_id {
         return Err(Error::ArchiveError(format!(
             "cluster id not match, pd cluster id {}, meta cluster id {}",
@@ -544,7 +561,7 @@ fn get_cluster_backup_files(
         all_files.len(),
         start_time.saturating_elapsed()
     );
-    Ok(all_files)
+    Ok((all_files, shards_count))
 }
 
 /// Return full path of daily incremental backups in S3.
