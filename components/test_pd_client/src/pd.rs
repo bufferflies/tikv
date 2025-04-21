@@ -527,12 +527,14 @@ impl PdCluster {
         }
     }
 
-    fn get_all_stores(&self) -> Result<Vec<metapb::Store>> {
+    fn get_all_stores(&self, exclude_tombstone: bool) -> Result<Vec<metapb::Store>> {
         Ok(self
             .stores
             .values()
             .filter_map(|s| {
-                if s.store.get_id() != 0 {
+                if s.store.get_id() != 0
+                    && (!exclude_tombstone || s.store.state != metapb::StoreState::Tombstone)
+                {
                     Some(s.store.clone())
                 } else {
                     None
@@ -1544,9 +1546,11 @@ impl PdClient for TestPdClient {
         Ok(cluster.replication_status.clone())
     }
 
-    fn get_all_stores(&self, _exclude_tombstone: bool) -> Result<Vec<metapb::Store>> {
+    fn get_all_stores(&self, exclude_tombstone: bool) -> Result<Vec<metapb::Store>> {
         self.check_bootstrap()?;
-        self.cluster.rl().get_all_stores()
+
+        fail::fail_point!("test_pd::get_all_stores");
+        self.cluster.rl().get_all_stores(exclude_tombstone)
     }
 
     fn get_store(&self, store_id: u64) -> Result<metapb::Store> {

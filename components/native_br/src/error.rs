@@ -72,6 +72,8 @@ pub enum Error {
     MvccError(#[from] tikv::storage::mvcc::Error),
     #[error("Backup error {0}")]
     BackupError(String),
+    #[error("Backup error on stores")]
+    BackupErrorOnStores(Vec<kvproto::metapb::Store>),
     #[error("No snapshot available error {0}")]
     NoSnapshotAvailableError(String),
     #[error("WAL chunk integrity error {0}")]
