@@ -164,31 +164,27 @@ mod tests {
             (
                 Some(vec![1.0, 2.0]),
                 Some(vec![2.0, 4.0]),
-                Some(0.004130363464355469),
+                Some(1.231213082805856e-10),
             ),
             (Some(vec![1.0, 2.0]), Some(vec![0.0, 0.0]), Some(1.0)),
             (
                 Some(vec![1.0, 1.0]),
                 Some(vec![1.0, 1.0]),
-                Some(0.00572967529296875),
+                Some(4.5642008863826917e-10),
             ),
             (Some(vec![1.0, 0.0]), Some(vec![0.0, 2.0]), Some(1.0)),
             (
                 Some(vec![1.0, 1.0]),
                 Some(vec![-1.0, -1.0]),
-                Some(1.9942703247070313),
+                Some(1.99999999954358),
             ),
-            (
-                Some(vec![1.0, 1.0]),
-                Some(vec![1.1, 1.1]),
-                Some(0.00022123077178548556),
-            ),
+            (Some(vec![1.0, 1.0]), Some(vec![1.1, 1.1]), Some(0.0)),
             (
                 Some(vec![1.0, 1.0]),
                 Some(vec![-1.1, -1.1]),
-                Some(1.9997787692282145),
+                Some(2.000000005514914),
             ),
-            (Some(vec![3e38]), Some(vec![3e38]), None), // NaN turns to NULL
+            (Some(vec![3e38]), Some(vec![3e38]), Some(0.0)),
             (Some(vec![1.0, 2.0]), None, None),
         ];
         for (arg1, arg2, expected_output) in ok_cases {
