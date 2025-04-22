@@ -180,7 +180,6 @@ impl TitanCfConfig {
         let mut opts = RocksTitanDbOptions::new();
         opts.set_min_blob_size(self.min_blob_size.0);
         opts.set_blob_file_compression(self.blob_file_compression.into());
-        opts.set_blob_cache(self.blob_cache_size.0 as usize, -1, false, 0.0);
         opts.set_min_gc_batch_size(self.min_gc_batch_size.0);
         opts.set_max_gc_batch_size(self.max_gc_batch_size.0);
         opts.set_discardable_ratio(self.discardable_ratio);

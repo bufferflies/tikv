@@ -42,7 +42,7 @@ impl<T: EncryptionKeyManager> DBEncryptionKeyManager for WrappedEncryptionKeyMan
             .new_file(fname)
             .map(convert_file_encryption_info)
     }
-    fn delete_file(&self, fname: &str) -> Result<()> {
+    fn delete_file(&self, fname: &str, _: Option<&str>) -> Result<()> {
         self.manager.delete_file(fname)
     }
     fn link_file(&self, src_fname: &str, dst_fname: &str) -> Result<()> {

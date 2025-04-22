@@ -371,6 +371,7 @@ mod tests {
 
         let mut cf_opts = RocksCfOptions::default();
         cf_opts.set_target_file_size_base(MAX_OUTPUT_FILE_SIZE);
+        cf_opts.set_level_compaction_dynamic_level_bytes(false);
         cf_opts.set_sst_partitioner_factory(RocksSstPartitionerFactory(
             CompactionGuardGeneratorFactory::new(CF_DEFAULT, provider, MIN_OUTPUT_FILE_SIZE)
                 .unwrap(),

@@ -330,14 +330,6 @@ impl IngestExternalFileOptions for EngineIngestExternalFileOptions {
     fn move_files(&mut self, _f: bool) {
         panic!()
     }
-
-    fn get_write_global_seqno(&self) -> bool {
-        panic!()
-    }
-
-    fn set_write_global_seqno(&mut self, _f: bool) {
-        panic!()
-    }
 }
 
 impl FlowControlFactorsExt for Engine {
