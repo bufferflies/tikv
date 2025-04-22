@@ -20,7 +20,7 @@ use cloud_encryption::{EncryptionKey, MasterKey};
 use cloud_server::{RestoreShardResponse, TikvServer};
 use collections::{HashMap, HashSet};
 use file_system::{IoRateLimitMode, IoRateLimiter};
-use http::Request;
+use http::{header, Request};
 use hyper::Body;
 use itertools::Itertools;
 use kvengine::{
@@ -46,7 +46,10 @@ use security::SecurityConfig;
 use slog_global::{debug, error, info, warn};
 use tempdir::TempDir;
 use tikv::{config::TikvConfig, storage::mvcc::Key};
-use tikv_util::{box_err, box_try, merge_range::MergeRanges, mpsc, time::Instant, HandyRwLock};
+use tikv_util::{
+    backoff::ExponentialBackoff, box_err, box_try, http::CONTENT_TYPE_PROTOBUF,
+    merge_range::MergeRanges, mpsc, time::Instant, HandyRwLock,
+};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -337,6 +340,11 @@ pub fn restore_keyspace(
 
     let mut success_ranges = MergeRanges::default();
     let mut retry = 0;
+    let mut bo = ExponentialBackoff::new(
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+        config.max_retry,
+    );
     // TODO: split regions for inplace restore.
     let mut need_split_regions = !inplace_restore;
     let mut last_error = None;
@@ -429,12 +437,13 @@ pub fn restore_keyspace(
         let snapshots = cluster.generate_snapshots(target_shards);
         let snapshots_count = snapshots.len();
         let ret = restore_snapshots(
-            target_keyspace_id,
+            &keyspace_tag,
             runtime,
             pd_client.clone(),
             snapshots,
             &mut success_ranges,
             config.timeout_restore_snapshot.0,
+            &mut bo,
         )?;
         restore_bytes += ret.restore_bytes;
         step!(
@@ -445,6 +454,7 @@ pub fn restore_keyspace(
         if success_ranges.covered(&target_keyspace_start, &target_keyspace_end) {
             break;
         } else {
+            last_error = Some(Error::RestoreSnapshot);
             step!("Keyspace {keyspace_tag} restore retry {retry}");
         }
     }
@@ -2525,12 +2535,13 @@ fn verify_regions_boundary(start_key: &[u8], end_key: &[u8], regions: &[RawRegio
 }
 
 fn restore_snapshots(
-    keyspace_id: u32,
+    tag: &str,
     runtime: &Runtime,
     pd_client: Arc<dyn PdClient>,
     snapshots: Vec<pb::ChangeSet>,
     success_ranges: &mut MergeRanges,
     timeout: Duration,
+    bo: &mut ExponentialBackoff,
 ) -> Result<RestoredSnapshots> {
     let mut handles = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
@@ -2548,6 +2559,7 @@ fn restore_snapshots(
         )
     };
 
+    let mut disk_full_regions = vec![];
     let mut restored = RestoredSnapshots::default();
     for (h, start, end) in handles {
         match runtime.block_on(h).unwrap() {
@@ -2556,21 +2568,35 @@ fn restore_snapshots(
                 restored.count += 1;
                 restored.restore_bytes += resp.restore_bytes;
             }
+            Err(Error::StoreDiskFull(_, shard_id)) => {
+                disk_full_regions.push(shard_id);
+            }
             Err(e) if is_error_retryable(&e) => {
-                info!(
-                    "Keyspace {} request_restore_snapshot error: {:?}, retry in next loop",
-                    keyspace_id, e
-                );
+                info!("{} request_restore_snapshot error: {:?}, retry", tag, e);
             }
             Err(e) => {
-                error!(
-                    "Keyspace {} request_restore_snapshot error: {:?}",
-                    keyspace_id, e
-                );
+                error!("{} request_restore_snapshot error: {:?}", tag, e);
                 return Err(e);
             }
         }
     }
+
+    if !disk_full_regions.is_empty() {
+        warn!("{} request_restore_snapshot error: disk full", tag;
+            "regions" => ?disk_full_regions);
+        match bo.next_delay() {
+            Ok(delay) => thread::sleep(delay),
+            Err(_) => {
+                return Err(RetryLimitExceeded(Box::new(Error::RestoreSnapshot)));
+            }
+        }
+
+        if let Err(err) = pd_client.scatter_regions_by_id(disk_full_regions.clone()) {
+            warn!("{} scatter regions failed", tag;
+                "regions" => ?disk_full_regions, "err" => ?err);
+        }
+    }
+
     Ok(restored)
 }
 
@@ -2611,6 +2637,7 @@ async fn request_restore_snapshot(
         let security_mgr = pd_client.get_security_mgr();
         let uri = security_mgr.build_uri(format!("{}/restore-shard", &store.status_address))?;
         let req = Request::post(uri)
+            .header(header::ACCEPT, CONTENT_TYPE_PROTOBUF)
             .body(Body::from(post_data.clone()))
             .unwrap();
         match send_request_to_store(req, &store, security_mgr.as_ref(), timeout / 2).await {
@@ -2618,6 +2645,31 @@ async fn request_restore_snapshot(
                 let resp: RestoreShardResponse = serde_json::from_slice(&resp).unwrap();
                 debug!("{} request_restore_snapshot succeed", tag);
                 return Ok(resp);
+            }
+            Err(Error::HttpPbError(status, mut err)) => {
+                warn!("{} request_restore_snapshot failed: {:?}", tag, err);
+                let sleep_dur = if err.has_disk_full() {
+                    return Err(Error::StoreDiskFull(
+                        err.take_disk_full().take_store_id(),
+                        cs.shard_id,
+                    ));
+                } else if err.has_epoch_not_match() {
+                    return Err(Error::RegionVerNotMatch {
+                        expected: shard_ver,
+                        actual: err
+                            .get_epoch_not_match()
+                            .get_current_regions()
+                            .first()
+                            .map_or(0, |r| r.get_region_epoch().get_version()),
+                    });
+                } else if err.has_not_leader() && err.get_not_leader().has_leader() {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_millis(500)
+                };
+                tokio::time::sleep(sleep_dur).await;
+                last_err = Some(Err(Error::HttpPbError(status, err)));
+                continue 'retry;
             }
             Err(e) => {
                 let err_msg = format!(

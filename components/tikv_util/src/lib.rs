@@ -48,6 +48,7 @@ pub mod macros;
 pub mod backoff;
 pub mod callback;
 pub mod deadline;
+pub mod http;
 pub mod keybuilder;
 pub mod logger;
 pub mod lru;

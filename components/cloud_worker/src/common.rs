@@ -59,15 +59,6 @@ where
         .unwrap()
 }
 
-pub(crate) const CONTENT_TYPE_PROTOBUF: &str = "application/protobuf";
-
-pub(crate) fn is_accept_protobuf(headers: &hyper::HeaderMap) -> bool {
-    headers
-        .get_all(header::ACCEPT)
-        .iter()
-        .any(|v| v == CONTENT_TYPE_PROTOBUF)
-}
-
 pub struct RunningController(Arc<AtomicBool>);
 
 impl Default for RunningController {

@@ -41,14 +41,7 @@ fn test_backup_on_scaling_up() {
     let get_all_stores_fp = "test_pd::get_all_stores";
 
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("t_");
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_config.prefix.clone(),
-        dfs_config.s3_endpoint.clone(),
-        dfs_config.s3_key_id.clone(),
-        dfs_config.s3_secret_key.clone(),
-        dfs_config.s3_region.clone(),
-        dfs_config.s3_bucket.clone(),
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
     let reporter = Arc::new(DummyStepReporter::default());
     let runtime = Runtime::new().unwrap();
 
@@ -205,6 +198,100 @@ fn test_backup_on_scaling_up() {
     }
 
     fail::remove(get_all_stores_fp);
+    cluster.stop();
+    oss.shutdown();
+}
+
+#[test]
+fn test_restore_on_disk_full() {
+    test_util::init_log_for_test();
+    const KEYSPACE_ID: u32 = 1;
+    const DATA_LEN: usize = 10;
+    const VALUE_SIZE: usize = 64;
+
+    let low_space_fp = "engine_is_low_space";
+
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("t_");
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
+    let reporter = Arc::new(DummyStepReporter::default());
+    let runtime = Runtime::new().unwrap();
+
+    let nodes = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(nodes.clone(), |_, conf: &mut TikvConfig| {
+        conf.dfs = dfs_config.clone();
+        conf.rfengine.lightweight_backup = true;
+        conf.enable_inner_key_offset = true;
+    });
+    cluster.wait_region_replicated(&[], 3);
+    let pd_client = cluster.get_pd_client();
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+
+    let i_to_key = i_to_keyspace_key(KEYSPACE_ID);
+    client.put_kv(0..DATA_LEN, &i_to_key, random_value::<VALUE_SIZE>);
+    client.verify_data_with_ref_store();
+    let origin_ref_store = client.dump_ref_store();
+
+    let backup_config = backup::BackupConfig {
+        dfs: dfs_config.clone(),
+        skip_keyspace_meta: true,
+        ..Default::default()
+    };
+
+    // Perform backup.
+    let backup_name = generate_backup_name();
+    let pd_client = pd_client.clone();
+    let backup_ts = client.get_ts().into_inner();
+    backup::backup_cluster_with_ts(
+        backup_config,
+        backup::BackupType::Lightweight,
+        backup_name.clone(),
+        pd_client.as_ref(),
+        backup_ts,
+        None,
+    )
+    .expect("backup");
+
+    // Put another data.
+    client.put_kv(
+        DATA_LEN / 4..DATA_LEN / 2,
+        &i_to_key,
+        random_value::<VALUE_SIZE>,
+    );
+    client.verify_data_with_ref_store();
+
+    fail::cfg(low_space_fp, "return").unwrap();
+
+    thread::scope(|s| {
+        let pd_client = cluster.get_pd_client();
+        let h = s.spawn(move || {
+            restore_keyspace::restore_keyspace(
+                KEYSPACE_ID,
+                KEYSPACE_ID,
+                &backup_name,
+                None,
+                s3fs.clone(),
+                RestoreConfig::default(),
+                pd_client,
+                &runtime,
+                None,
+                reporter,
+            )
+        });
+
+        thread::sleep(Duration::from_secs(3));
+        fail::cfg(low_space_fp, "off").unwrap();
+
+        let res = h.join().unwrap().expect("restore");
+        info!("restore keyspace result: {:?}", res);
+    });
+    let (existed, deleted) = client
+        .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
+        .unwrap();
+    assert_eq!(existed, DATA_LEN);
+    assert_eq!(deleted, 0);
+
+    fail::remove(low_space_fp);
     cluster.stop();
     oss.shutdown();
 }

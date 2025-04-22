@@ -52,14 +52,20 @@ pub enum Error {
     RegionVerNotMatch { expected: u64, actual: u64 },
     #[error("Region {0} not found or no leader")]
     RegionNotFoundOrNoLeader(u64 /* region id */),
+    #[error("TiKV store disk full {0:?}")]
+    StoreDiskFull(Vec<u64> /* stores id */, u64 /* region id */),
     #[error(transparent)]
     HttpRequestError(#[from] HttpRequestError),
     #[error("HTTP error {0}:{1}")]
     HttpError(http::StatusCode, String),
+    #[error("HTTP error {0}:{1:?}")]
+    HttpPbError(http::StatusCode, kvproto::errorpb::Error),
     #[error("Retry limit exceeded, last error {0}")]
     RetryLimitExceeded(Box<Error>),
     #[error("Restore other keyspace from/to default keyspace")]
     RestoreWithDefaultKeyspace,
+    #[error("Restore snapshot error")]
+    RestoreSnapshot,
     #[error("Backup for keyspace {0} is empty")]
     BackupEmptyForKeyspace(u32 /* keyspace id */),
     #[error("Reach concurrency limit {0}")]
