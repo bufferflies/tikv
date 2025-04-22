@@ -370,6 +370,10 @@ impl File for IaFile {
         }
         Ok((segments, total_segments))
     }
+
+    fn get_segment_ident(&self, offset: u64) -> Result<FileSegmentIdent> {
+        align_to_segment(self.id, &self.segment_offsets, offset, offset + 1)
+    }
 }
 
 struct SegmentOffsetsBuilder {

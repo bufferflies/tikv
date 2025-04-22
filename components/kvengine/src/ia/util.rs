@@ -271,7 +271,7 @@ impl LocalStore for LocalMemoryStore {
     }
 }
 
-const IA_SEGMENT_SIZE_DEF: i64 = (1 << 20) * 2; // 2MiB
+const IA_SEGMENT_SIZE_DEF: i64 = 1 << 20; // 1MiB
 const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(60);
 const IA_DFS_CONCURRENCY_DEF: usize = 512;
 const IA_DFS_KEYSPACE_CONCURRENCY_DEF: usize = 192;

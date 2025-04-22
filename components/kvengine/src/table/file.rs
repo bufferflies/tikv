@@ -90,6 +90,12 @@ pub trait File: Sync + Send {
     ) -> table::Result<(Vec<FileSegmentIdent>, usize /* total_segments */)> {
         Ok((vec![], 0))
     }
+
+    /// `get_segment_ident` returns the segment ident of the file. Used for
+    /// getting the segment ident of the file. Available for IA files only.
+    fn get_segment_ident(&self, _offset: u64) -> table::Result<FileSegmentIdent> {
+        unimplemented!()
+    }
 }
 
 pub enum MmapData {

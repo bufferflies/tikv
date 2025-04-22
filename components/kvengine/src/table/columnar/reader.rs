@@ -64,6 +64,7 @@ use crate::{
 };
 
 pub const GLOBAL_COMMON_HANDLE_END: &[u8] = &[255];
+const PACK_CACHE_THRESHOLD: usize = 256 * 1024; // 256KB
 
 #[async_trait]
 pub trait ColumnarReader: Send {
@@ -332,7 +333,7 @@ impl ColumnarColumnReader {
         encryption_ver: u32,
         packs_filter: Option<Arc<FilterOpResults>>,
     ) -> ColumnarColumnReader {
-        let pack_loader = PackLoader::new(file, encryption_key, encryption_ver);
+        let pack_loader = PackLoader::new(file, col_meta.clone(), encryption_key, encryption_ver);
         let pack_buffer = ColumnBuffer::new_from_col_info(&col_meta.col_info);
         let default_val = if is_default_val {
             parse_default_val(&col_meta.col_info)
@@ -501,6 +502,10 @@ impl ColumnarColumnReader {
 
 struct PackLoader {
     file: Arc<dyn File>,
+    col_meta: Arc<ColumnMeta>,
+    segment_ident: FileSegmentIdent,
+    segment_content: Vec<u8>,
+    segment_content_offset: u32,
     compressed_buf: Vec<u8>,
     uncompressed_buf: AVec<u8>,
     encryption_key: Option<EncryptionKey>,
@@ -510,16 +515,82 @@ struct PackLoader {
 impl PackLoader {
     pub fn new(
         file: Arc<dyn File>,
+        col_meta: Arc<ColumnMeta>,
         encryption_key: Option<EncryptionKey>,
         encryption_ver: u32,
     ) -> PackLoader {
         PackLoader {
             file,
+            col_meta,
+            segment_ident: FileSegmentIdent::new(0, 0, 0),
+            segment_content: vec![],
+            segment_content_offset: 0,
             encryption_key,
             encryption_ver,
             compressed_buf: vec![],
             uncompressed_buf: avec![],
         }
+    }
+
+    async fn read_from_segment_cache(
+        &mut self,
+        buf: Option<&mut [u8]>, // None means read to compressed_buf
+        pack_offset: u32,
+    ) -> crate::table::Result<()> {
+        let segment_ident = self.file.get_segment_ident(pack_offset as u64)?;
+        let data_len = if let Some(buf) = &buf {
+            buf.len()
+        } else {
+            self.compressed_buf.len()
+        };
+
+        // For large packs (>256KB), don't use cache, read directly
+        if data_len > PACK_CACHE_THRESHOLD {
+            // Read directly from file for large packs
+            if let Some(buf) = buf {
+                self.file.read_at_async(buf, pack_offset as u64).await?;
+            } else {
+                self.compressed_buf.resize(data_len, 0);
+                self.file
+                    .read_at_async(&mut self.compressed_buf, pack_offset as u64)
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        // For smaller packs, check if it's in our current cache
+        let is_in_current_segment = segment_ident == self.segment_ident
+            && pack_offset >= self.segment_content_offset
+            && (pack_offset as usize + data_len)
+                <= (self.segment_content_offset as usize + self.segment_content.len());
+
+        if !is_in_current_segment {
+            let (pack_end_offset, _) = self.col_meta.pack_offsets.end_offset();
+            let read_size = std::cmp::min(
+                PACK_CACHE_THRESHOLD,
+                (pack_end_offset - pack_offset) as usize,
+            );
+            self.segment_content.resize(read_size, 0);
+            self.file
+                .read_at_async(&mut self.segment_content, pack_offset as u64)
+                .await?;
+            self.segment_content_offset = pack_offset;
+            self.segment_ident = segment_ident;
+        }
+
+        let start_off = pack_offset - self.segment_content_offset;
+        // Copy content from segment_content to buf
+        if let Some(buf) = buf {
+            buf.copy_from_slice(
+                &self.segment_content[start_off as usize..start_off as usize + data_len],
+            );
+        } else {
+            self.compressed_buf.copy_from_slice(
+                &self.segment_content[start_off as usize..start_off as usize + data_len],
+            );
+        }
+
+        Ok(())
     }
 
     pub async fn load_pack(
@@ -530,14 +601,14 @@ impl PackLoader {
         decryption_buf: &mut Vec<u8>,
     ) -> crate::table::Result<()> {
         let length = (pack_end_offset - pack_offset) as usize;
-        if let Some(encryption_key) = &self.encryption_key {
+        if let Some(encryption_key) = self.encryption_key.clone() {
             decryption_buf.resize(length, 0);
             if self.file.is_sync() {
                 // InMemFile should always be sync.
                 self.file.read_at(decryption_buf, pack_offset as u64)?;
             } else {
-                self.file
-                    .read_at_async(decryption_buf, pack_offset as u64)
+                // Try to read from segment cache, if not found, load it.
+                self.read_from_segment_cache(Some(decryption_buf), pack_offset)
                     .await?;
             }
             self.compressed_buf.clear();
@@ -555,9 +626,8 @@ impl PackLoader {
                 self.file
                     .read_at(&mut self.compressed_buf, pack_offset as u64)?;
             } else {
-                self.file
-                    .read_at_async(&mut self.compressed_buf, pack_offset as u64)
-                    .await?;
+                // Try to read from segment cache, if not found, load it.
+                self.read_from_segment_cache(None, pack_offset).await?;
             }
         }
         decompress_pack(&self.compressed_buf, &mut self.uncompressed_buf);
