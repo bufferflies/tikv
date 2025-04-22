@@ -155,6 +155,7 @@ impl<E: Engine> Endpoint<E> {
         remote_worker_url: String,
         remote_cop_url: String,
         remote_cop_min_blocks_size: usize,
+        remote_cop_num_ranges: usize,
     ) {
         let pool = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -168,6 +169,7 @@ impl<E: Engine> Endpoint<E> {
             remote_worker_url,
             remote_cop_url,
             remote_cop_min_blocks_size,
+            remote_cop_num_ranges,
             self.security_mgr.clone(),
             pool.handle().clone(),
         );

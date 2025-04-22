@@ -75,6 +75,10 @@ pub struct Config {
     /// remote worker.
     pub remote_coprocessor_min_blocks_size: usize,
 
+    /// Always send to remote coprocessor if the number of ranges reach this
+    /// value.
+    pub remote_coprocessor_num_ranges: usize,
+
     /// If enabled, flush large L0 file will split into multiple files.
     pub flush_split_l0: bool,
     /// If enabled, major compaction will update inner key offset from 0 to 4.
@@ -121,6 +125,7 @@ impl Default for Config {
             remote_worker_addr: "".to_string(),
             remote_coprocessor_addr: "".to_string(),
             remote_coprocessor_min_blocks_size: 32 * 1024 * 1024,
+            remote_coprocessor_num_ranges: 2048,
             flush_split_l0: true,
             update_inner_key_offset: false,
             txn_file_worker_pool_size: None,
