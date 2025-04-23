@@ -112,7 +112,6 @@ zstd-sys = "2.0.9"
 git = "https://github.com/tikv/rust-rocksdb.git"
 package = "rocksdb"
 features = ["encryption"]
-branch = "tikv-6.5"
 
 [dev-dependencies]
 anyhow = "1.0.26"

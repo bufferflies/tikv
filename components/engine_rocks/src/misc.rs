@@ -5,7 +5,7 @@ use engine_traits::{
     Range, Result, SstWriter, SstWriterBuilder, StatisticsReporter, WriteBatch, WriteBatchExt,
     ALL_CFS,
 };
-use rocksdb::Range as RocksRange;
+use rocksdb::{FlushOptions, Range as RocksRange};
 use tikv_util::{box_try, keybuilder::KeyBuilder};
 
 use crate::{
@@ -155,12 +155,18 @@ impl MiscExt for RocksEngine {
                 handles.push(util::get_cf_handle(self.as_inner(), cf)?);
             }
         }
-        self.as_inner().flush_cfs(&handles, wait).map_err(r2e)
+        let mut fopts = FlushOptions::default();
+        fopts.set_wait(wait);
+        fopts.set_allow_write_stall(true);
+        self.as_inner().flush_cfs(&handles, &fopts).map_err(r2e)
     }
 
     fn flush_cf(&self, cf: &str, wait: bool) -> Result<()> {
         let handle = util::get_cf_handle(self.as_inner(), cf)?;
-        self.as_inner().flush_cf(handle, wait).map_err(r2e)
+        let mut fopts = FlushOptions::default();
+        fopts.set_wait(wait);
+        fopts.set_allow_write_stall(true);
+        self.as_inner().flush_cf(handle, &fopts).map_err(r2e)
     }
 
     fn get_sst_key_ranges(&self, _cf: &str, _level: usize) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
@@ -313,11 +319,6 @@ impl MiscExt for RocksEngine {
         }
 
         if let Some(v) = self.as_inner().get_property_value(ROCKSDB_DB_STATS_KEY) {
-            s.extend_from_slice(v.as_bytes());
-        }
-
-        // more stats if enable_statistics is true.
-        if let Some(v) = self.as_inner().get_statistics() {
             s.extend_from_slice(v.as_bytes());
         }
 
@@ -598,6 +599,7 @@ mod tests {
             .unwrap_or_else(|err| panic!("{:?}", err));
         // Create prefix bloom filter for memtable.
         cf_opts.set_memtable_prefix_bloom_size_ratio(0.1_f64);
+        cf_opts.set_level_compaction_dynamic_level_bytes(false);
         let cf = "default";
         let db = new_engine_opt(path_str, opts, vec![(cf, cf_opts)]).unwrap();
         let mut wb = db.write_batch();

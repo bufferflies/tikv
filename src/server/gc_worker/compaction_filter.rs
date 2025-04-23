@@ -14,9 +14,8 @@ use std::{
 
 use engine_rocks::{
     raw::{
-        new_compaction_filter_raw, CompactionFilter, CompactionFilterContext,
-        CompactionFilterDecision, CompactionFilterFactory, CompactionFilterValueType,
-        DBCompactionFilter,
+        CompactionFilter, CompactionFilterContext, CompactionFilterDecision,
+        CompactionFilterFactory, CompactionFilterValueType,
     },
     RocksEngine, RocksMvccProperties, RocksWriteBatchVec,
 };
@@ -200,21 +199,23 @@ impl CompactionFilterInitializer<RocksEngine> for RocksEngine {
 pub struct WriteCompactionFilterFactory;
 
 impl CompactionFilterFactory for WriteCompactionFilterFactory {
+    type Filter = WriteCompactionFilter;
+
     fn create_compaction_filter(
         &self,
         context: &CompactionFilterContext,
-    ) -> *mut DBCompactionFilter {
+    ) -> Option<(CString, Self::Filter)> {
         let gc_context_option = GC_CONTEXT.lock().unwrap();
         let gc_context = match *gc_context_option {
             Some(ref ctx) => ctx,
-            None => return std::ptr::null_mut(),
+            None => return None,
         };
 
         let safe_point = gc_context.safe_point.load(Ordering::Relaxed);
         if safe_point == 0 {
             // Safe point has not been initialized yet.
             debug!("skip gc in compaction filter because of no safe point");
-            return std::ptr::null_mut();
+            return None;
         }
 
         let (enable, skip_vcheck, ratio_threshold) = {
@@ -239,12 +240,12 @@ impl CompactionFilterFactory for WriteCompactionFilterFactory {
 
         if db.is_stalled_or_stopped() {
             debug!("skip gc in compaction filter because the DB is stalled");
-            return std::ptr::null_mut();
+            return None;
         }
 
         if !do_check_allowed(enable, skip_vcheck, &gc_context.feature_gate) {
             debug!("skip gc in compaction filter because it's not allowed");
-            return std::ptr::null_mut();
+            return None;
         }
         drop(gc_context_option);
         GC_COMPACTION_FILTER_PERFORM
@@ -255,12 +256,12 @@ impl CompactionFilterFactory for WriteCompactionFilterFactory {
             GC_COMPACTION_FILTER_SKIP
                 .with_label_values(&[STAT_TXN_KEYMODE])
                 .inc();
-            return std::ptr::null_mut();
+            return None;
         }
 
         debug!(
             "gc in compaction filter"; "safe_point" => safe_point,
-            "files" => ?context.file_numbers(),
+            "files" => ?context.input_table_properties().iter().map(|(k, _)| k).collect::<Vec<_>>(),
             "bottommost" => context.is_bottommost_level(),
             "manual" => context.is_manual_compaction(),
         );
@@ -273,11 +274,11 @@ impl CompactionFilterFactory for WriteCompactionFilterFactory {
             (store_id, region_info_provider),
         );
         let name = CString::new("write_compaction_filter").unwrap();
-        unsafe { new_compaction_filter_raw(name, filter) }
+        Some((name, filter))
     }
 }
 
-struct WriteCompactionFilter {
+pub struct WriteCompactionFilter {
     safe_point: u64,
     engine: RocksEngine,
     is_bottommost_level: bool,
@@ -402,7 +403,6 @@ impl WriteCompactionFilter {
         &mut self,
         _start_level: usize,
         key: &[u8],
-        _sequence: u64,
         value: &[u8],
         value_type: CompactionFilterValueType,
     ) -> Result<CompactionFilterDecision, String> {
@@ -624,7 +624,6 @@ impl CompactionFilter for WriteCompactionFilter {
         &mut self,
         level: usize,
         key: &[u8],
-        sequence: u64,
         value: &[u8],
         value_type: CompactionFilterValueType,
     ) -> CompactionFilterDecision {
@@ -633,7 +632,7 @@ impl CompactionFilter for WriteCompactionFilter {
             return CompactionFilterDecision::Keep;
         }
 
-        match self.do_filter(level, key, sequence, value, value_type) {
+        match self.do_filter(level, key, value, value_type) {
             Ok(decision) => decision,
             Err(e) => {
                 warn!("compaction filter meet error: {}", e);
@@ -711,9 +710,9 @@ pub fn check_need_gc(
     };
 
     let (mut sum_props, mut needs_gc) = (MvccProperties::new(), 0);
-    for i in 0..context.file_numbers().len() {
-        let table_props = context.table_properties(i);
-        let user_props = table_props.user_collected_properties();
+    let table_props = context.input_table_properties();
+    for (_, table_prop) in table_props {
+        let user_props = table_prop.user_collected_properties();
         if let Ok(props) = RocksMvccProperties::decode(user_props) {
             sum_props.add(&props);
             let (sst_needs_gc, skip_more_checks) = check_props(&props);
@@ -722,13 +721,13 @@ pub fn check_need_gc(
             }
             if skip_more_checks {
                 // It's the bottommost level or ratio_threshold is less than 1.
-                needs_gc = context.file_numbers().len();
+                needs_gc = table_props.len();
                 break;
             }
         }
     }
 
-    (needs_gc >= ((context.file_numbers().len() + 1) / 2)) || check_props(&sum_props).0
+    (needs_gc >= ((table_props.len() + 1) / 2)) || check_props(&sum_props).0
 }
 
 #[allow(dead_code)] // Some interfaces are not used with different compile options.

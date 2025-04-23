@@ -11,7 +11,7 @@ use slog_global::warn;
 
 use crate::{
     cf_options::RocksCfOptions, db_options::RocksDbOptions, engine::RocksEngine, r2e,
-    rocks_metrics_defs::*,
+    rocks_metrics_defs::*, RocksStatistics,
 };
 
 pub fn new_temp_engine(path: &tempfile::TempDir) -> Engines<RocksEngine, RocksEngine> {
@@ -28,7 +28,7 @@ pub fn new_default_engine(path: &str) -> Result<RocksEngine> {
 
 pub fn new_engine(path: &str, cfs: &[&str]) -> Result<RocksEngine> {
     let mut db_opts = RocksDbOptions::default();
-    db_opts.enable_statistics(true);
+    db_opts.set_statistics(&RocksStatistics::new_titan());
     let cf_opts = cfs.iter().map(|name| (*name, Default::default())).collect();
     new_engine_opt(path, db_opts, cf_opts)
 }
@@ -366,43 +366,52 @@ mod tests {
         // create db when db not exist
         let mut cfs_opts = vec![(CF_DEFAULT, RocksCfOptions::default())];
         let mut opts = RocksCfOptions::default();
-        opts.set_level_compaction_dynamic_level_bytes(true);
-        cfs_opts.push(("cf_dynamic_level_bytes", opts.clone()));
+        opts.set_level_compaction_dynamic_level_bytes(false);
+        cfs_opts.push(("cf_dynamic_level_bytes_disabled", opts.clone()));
         let db = new_engine_opt(path_str, RocksDbOptions::default(), cfs_opts).unwrap();
-        column_families_must_eq(path_str, vec![CF_DEFAULT, "cf_dynamic_level_bytes"]);
+        column_families_must_eq(
+            path_str,
+            vec![CF_DEFAULT, "cf_dynamic_level_bytes_disabled"],
+        );
         check_dynamic_level_bytes(&db);
         drop(db);
 
         // add cf1.
         let cfs_opts = vec![
             (CF_DEFAULT, opts.clone()),
-            ("cf_dynamic_level_bytes", opts.clone()),
+            ("cf_dynamic_level_bytes_disabled", opts.clone()),
             ("cf1", opts.clone()),
         ];
         let db = new_engine_opt(path_str, RocksDbOptions::default(), cfs_opts).unwrap();
-        column_families_must_eq(path_str, vec![CF_DEFAULT, "cf_dynamic_level_bytes", "cf1"]);
+        column_families_must_eq(
+            path_str,
+            vec![CF_DEFAULT, "cf_dynamic_level_bytes_disabled", "cf1"],
+        );
         check_dynamic_level_bytes(&db);
-        for cf in &[CF_DEFAULT, "cf_dynamic_level_bytes", "cf1"] {
+        for cf in &[CF_DEFAULT, "cf_dynamic_level_bytes_disabled", "cf1"] {
             db.put_cf(cf, b"k", b"v").unwrap();
         }
         drop(db);
 
         // change order should not cause data corruption.
         let cfs_opts = vec![
-            ("cf_dynamic_level_bytes", opts.clone()),
+            ("cf_dynamic_level_bytes_disabled", opts.clone()),
             ("cf1", opts.clone()),
             (CF_DEFAULT, opts),
         ];
         let db = new_engine_opt(path_str, RocksDbOptions::default(), cfs_opts).unwrap();
-        column_families_must_eq(path_str, vec![CF_DEFAULT, "cf_dynamic_level_bytes", "cf1"]);
+        column_families_must_eq(
+            path_str,
+            vec![CF_DEFAULT, "cf_dynamic_level_bytes_disabled", "cf1"],
+        );
         check_dynamic_level_bytes(&db);
-        for cf in &[CF_DEFAULT, "cf_dynamic_level_bytes", "cf1"] {
+        for cf in &[CF_DEFAULT, "cf_dynamic_level_bytes_disabled", "cf1"] {
             assert_eq!(db.get_value_cf(cf, b"k").unwrap().unwrap(), b"v");
         }
         drop(db);
 
         // drop cf1.
-        let cfs = vec![CF_DEFAULT, "cf_dynamic_level_bytes"];
+        let cfs = vec![CF_DEFAULT, "cf_dynamic_level_bytes_disabled"];
         let db = new_engine(path_str, &cfs).unwrap();
         column_families_must_eq(path_str, cfs);
         check_dynamic_level_bytes(&db);
@@ -430,8 +439,10 @@ mod tests {
 
     fn check_dynamic_level_bytes(db: &RocksEngine) {
         let tmp_cf_opts = db.get_options_cf(CF_DEFAULT).unwrap();
-        assert!(!tmp_cf_opts.get_level_compaction_dynamic_level_bytes());
-        let tmp_cf_opts = db.get_options_cf("cf_dynamic_level_bytes").unwrap();
         assert!(tmp_cf_opts.get_level_compaction_dynamic_level_bytes());
+        let tmp_cf_opts = db
+            .get_options_cf("cf_dynamic_level_bytes_disabled")
+            .unwrap();
+        assert!(!tmp_cf_opts.get_level_compaction_dynamic_level_bytes());
     }
 }

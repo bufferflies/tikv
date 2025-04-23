@@ -180,7 +180,6 @@ impl TitanCfConfig {
         let mut opts = RocksTitanDbOptions::new();
         opts.set_min_blob_size(self.min_blob_size.0);
         opts.set_blob_file_compression(self.blob_file_compression.into());
-        opts.set_blob_cache(self.blob_cache_size.0 as usize, -1, false, 0.0);
         opts.set_min_gc_batch_size(self.min_gc_batch_size.0);
         opts.set_max_gc_batch_size(self.max_gc_batch_size.0);
         opts.set_discardable_ratio(self.discardable_ratio);
@@ -1148,29 +1147,29 @@ impl DbConfig {
         opts.set_max_manifest_file_size(self.max_manifest_file_size.0);
         opts.create_if_missing(self.create_if_missing);
         opts.set_max_open_files(self.max_open_files);
-        opts.enable_statistics(self.enable_statistics);
+        // opts.enable_statistics(self.enable_statistics);
         opts.set_stats_dump_period_sec(self.stats_dump_period.as_secs() as usize);
         opts.set_compaction_readahead_size(self.compaction_readahead_size.0);
         opts.set_max_log_file_size(self.info_log_max_size.0);
         opts.set_log_file_time_to_roll(self.info_log_roll_time.as_secs());
         opts.set_keep_log_file_num(self.info_log_keep_log_file_num);
-        if self.rate_bytes_per_sec.0 > 0 {
-            if self.rate_limiter_auto_tuned {
-                opts.set_writeampbasedratelimiter_with_auto_tuned(
-                    self.rate_bytes_per_sec.0 as i64,
-                    (self.rate_limiter_refill_period.as_millis() * 1000) as i64,
-                    self.rate_limiter_mode,
-                    self.rate_limiter_auto_tuned,
-                );
-            } else {
-                opts.set_ratelimiter_with_auto_tuned(
-                    self.rate_bytes_per_sec.0 as i64,
-                    (self.rate_limiter_refill_period.as_millis() * 1000) as i64,
-                    self.rate_limiter_mode,
-                    self.rate_limiter_auto_tuned,
-                );
-            }
-        }
+        // if self.rate_bytes_per_sec.0 > 0 {
+        //     if self.rate_limiter_auto_tuned {
+        //         opts.set_writeampbasedratelimiter_with_auto_tuned(
+        //             self.rate_bytes_per_sec.0 as i64,
+        //             (self.rate_limiter_refill_period.as_millis() * 1000) as i64,
+        //             self.rate_limiter_mode,
+        //             self.rate_limiter_auto_tuned,
+        //         );
+        //     } else {
+        //         opts.set_ratelimiter_with_auto_tuned(
+        //             self.rate_bytes_per_sec.0 as i64,
+        //             (self.rate_limiter_refill_period.as_millis() * 1000) as i64,
+        //             self.rate_limiter_mode,
+        //             self.rate_limiter_auto_tuned,
+        //         );
+        //     }
+        // }
 
         opts.set_bytes_per_sync(self.bytes_per_sync.0);
         opts.set_wal_bytes_per_sync(self.wal_bytes_per_sync.0);
@@ -1457,7 +1456,7 @@ impl RaftDbConfig {
         opts.set_max_manifest_file_size(self.max_manifest_file_size.0);
         opts.create_if_missing(self.create_if_missing);
         opts.set_max_open_files(self.max_open_files);
-        opts.enable_statistics(self.enable_statistics);
+        // opts.enable_statistics(self.enable_statistics);
         opts.set_stats_dump_period_sec(self.stats_dump_period.as_secs() as usize);
         opts.set_compaction_readahead_size(self.compaction_readahead_size.0);
         opts.set_max_log_file_size(self.info_log_max_size.0);

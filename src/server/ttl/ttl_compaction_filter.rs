@@ -5,9 +5,8 @@ use std::{ffi::CString, marker::PhantomData};
 use api_version::{KeyMode, KvFormat, RawValue};
 use engine_rocks::{
     raw::{
-        new_compaction_filter_raw, CompactionFilter, CompactionFilterContext,
-        CompactionFilterDecision, CompactionFilterFactory, CompactionFilterValueType,
-        DBCompactionFilter,
+        CompactionFilter, CompactionFilterContext, CompactionFilterDecision,
+        CompactionFilterFactory, CompactionFilterValueType,
     },
     RocksTtlProperties,
 };
@@ -21,16 +20,17 @@ pub struct TtlCompactionFilterFactory<F: KvFormat> {
 }
 
 impl<F: KvFormat> CompactionFilterFactory for TtlCompactionFilterFactory<F> {
+    type Filter = TtlCompactionFilter<F>;
+
     fn create_compaction_filter(
         &self,
         context: &CompactionFilterContext,
-    ) -> *mut DBCompactionFilter {
+    ) -> Option<(CString, Self::Filter)> {
         let current = ttl_current_ts();
 
         let mut min_expire_ts = u64::MAX;
-        for i in 0..context.file_numbers().len() {
-            let table_props = context.table_properties(i);
-            let user_props = table_props.user_collected_properties();
+        for (_, table_prop) in context.input_table_properties() {
+            let user_props = table_prop.user_collected_properties();
             if let Ok(props) = RocksTtlProperties::decode(user_props) {
                 if props.min_expire_ts != 0 {
                     min_expire_ts = std::cmp::min(min_expire_ts, props.min_expire_ts);
@@ -38,7 +38,7 @@ impl<F: KvFormat> CompactionFilterFactory for TtlCompactionFilterFactory<F> {
             }
         }
         if min_expire_ts > current {
-            return std::ptr::null_mut();
+            return None;
         }
 
         let name = CString::new("ttl_compaction_filter").unwrap();
@@ -46,11 +46,11 @@ impl<F: KvFormat> CompactionFilterFactory for TtlCompactionFilterFactory<F> {
             ts: current,
             _phantom: PhantomData,
         };
-        unsafe { new_compaction_filter_raw(name, filter) }
+        Some((name, filter))
     }
 }
 
-struct TtlCompactionFilter<F: KvFormat> {
+pub struct TtlCompactionFilter<F: KvFormat> {
     ts: u64,
     _phantom: PhantomData<F>,
 }
@@ -60,7 +60,6 @@ impl<F: KvFormat> CompactionFilter for TtlCompactionFilter<F> {
         &mut self,
         _level: usize,
         key: &[u8],
-        _sequence: u64,
         value: &[u8],
         value_type: CompactionFilterValueType,
     ) -> CompactionFilterDecision {
