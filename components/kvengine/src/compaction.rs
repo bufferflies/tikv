@@ -34,12 +34,16 @@ use tidb_query_datatype::{
     },
     VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC,
 };
-use tikv_util::{box_err, retry::sleep_async, sys::thread::ThreadBuildWrapper, time::Instant};
+use tikv_util::{
+    backoff::ExponentialBackoff, box_err, memory::MemoryLimiter, retry::sleep_async,
+    sys::thread::ThreadBuildWrapper, time::Instant,
+};
 use tokio::sync::mpsc;
 
 use crate::{
     dfs,
     dfs::FileType,
+    metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
     table::{
         blobtable::{
             blobtable::BlobTable,
@@ -62,7 +66,7 @@ use crate::{
     },
     Error::{
         CompactionNotRetryable, FallbackLocalCompactorDisabled, IncompatibleRemoteCompactor,
-        RemoteCompaction, TableError,
+        RemoteCompaction, RemoteCompactorIsBusy, TableError,
     },
     Iterator, EXTRA_CF, LOCK_CF, WRITE_CF, *,
 };
@@ -251,47 +255,49 @@ impl CompactionClient {
         if remote_compactor.remote_url.is_empty() {
             local_compact(&ctx).await
         } else {
-            let mut retry_cnt = 0;
+            let tag = ShardTag::from_comp_req(req.as_ref());
+            let mut bo =
+                ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(10), 5);
             loop {
                 match self.remote_compact(req, &remote_compactor.remote_url).await {
                     result @ Ok(_) => break result,
                     Err(e @ IncompatibleRemoteCompactor { .. }) => {
                         if self.allow_fallback_local {
-                            warn!("fall back to local compactor due to error: {:?}", e);
+                            warn!("{} fall back to local compact: {:?}", tag, e);
                             break local_compact(&ctx).await;
                         } else {
-                            warn!(
-                                "remote compactor is incompatible and local compaction is not allowed"
-                            );
+                            warn!("{} remote compactor is incompatible: {:?}", tag, e);
                             break Err(FallbackLocalCompactorDisabled);
                         }
                     }
                     Err(e) => {
-                        retry_cnt += 1;
-                        let tag = ShardTag::from_comp_req(req);
                         error!(
-                            "shard {}, req {:?}, remote compaction failed {:?}, retrying {} remote compactor {}",
-                            tag, req, e, retry_cnt, remote_compactor.remote_url
+                            "{} remote compaction failed: {:?}", tag, e;
+                            "req" => ?req,
+                            "retry" => bo.current_attempts(),
+                            "remote_compactor" => &remote_compactor.remote_url,
                         );
 
-                        if !remote_compactor.permanent && retry_cnt >= 3 {
-                            retry_cnt = 0;
-                            self.delete_remote_compactor(&remote_compactor);
-                            remote_compactor = self.get_remote_compactor();
+                        let delay = bo.next_delay();
+                        if delay.is_ok() {
+                            if matches!(e, RemoteCompactorIsBusy(_)) {
+                                remote_compactor = self.get_remote_compactor();
+                            } else if !remote_compactor.permanent && bo.current_attempts() % 3 == 0
+                            {
+                                self.delete_remote_compactor(&remote_compactor);
+                                remote_compactor = self.get_remote_compactor();
+                            }
                         }
-                        if remote_compactor.remote_url.is_empty()
-                            || (remote_compactor.permanent && retry_cnt >= 5)
-                        {
+
+                        if delay.is_err() || remote_compactor.remote_url.is_empty() {
                             if self.allow_fallback_local {
                                 break local_compact(&ctx).await;
                             } else {
-                                warn!(
-                                    "no remote compactor available and local compaction is not allowed"
-                                );
+                                warn!("{} no remote compactor available", tag);
                                 break Err(FallbackLocalCompactorDisabled);
                             }
                         }
-                        sleep_async(Duration::from_secs(1)).await;
+                        sleep_async(delay.unwrap()).await;
                     }
                 }
             }
@@ -324,6 +330,8 @@ impl CompactionClient {
                     url: remote_url.to_string(),
                     msg: err_msg,
                 })
+            } else if status == StatusCode::SERVICE_UNAVAILABLE {
+                Err(RemoteCompactorIsBusy(err_msg))
             } else {
                 Err(RemoteCompaction(err_msg))
             };
@@ -366,6 +374,9 @@ pub struct CompactionRequest {
 
     pub safe_ts: u64,
     pub exported_encryption_key: Vec<u8>,
+
+    /// The size in bytes of input tables used as source of compaction.
+    pub input_size: u64,
 }
 
 impl CompactionRequest {
@@ -598,7 +609,9 @@ impl Engine {
             Some(CompactionPriority::L1Plus { cf, level, .. }) => {
                 self.trigger_l1_plus_compaction(&shard, cf, level).await
             }
-            Some(CompactionPriority::Major { .. }) => self.trigger_major_compaction(&shard).await,
+            Some(CompactionPriority::Major { is_manual, .. }) => {
+                self.trigger_major_compaction(&shard, is_manual).await
+            }
             Some(CompactionPriority::DestroyRange) => self.destroy_range(&shard).await.transpose(),
             Some(CompactionPriority::TruncateTs) => self.truncate_ts(&shard).await.transpose(),
             Some(CompactionPriority::TrimOverBound) => {
@@ -710,6 +723,7 @@ impl Engine {
             compactor_version: self.opts.compaction_request_version,
             safe_ts: self.get_keyspace_gc_safepoint_v2(range.keyspace_id),
             exported_encryption_key,
+            input_size: 0,
         }
     }
 
@@ -728,6 +742,7 @@ impl Engine {
         // Tables that partially covered by delete-prefixes.
         let mut overlaps = vec![];
         let mut col_overlaps = vec![];
+        let mut total_size = 0;
         for t in &data.l0_tbls {
             if del_prefixes.cover_range(t.smallest(), t.biggest()) {
                 let mut delete = pb::TableDelete::default();
@@ -740,6 +755,7 @@ impl Engine {
                 .any(|bound| t.has_data_in_bound(bound))
             {
                 overlaps.push((t.id(), 0, -1));
+                total_size += t.size();
             }
         }
         for cf in 0..NUM_CFS {
@@ -757,6 +773,7 @@ impl Engine {
                         .await
                     {
                         overlaps.push((t.id(), lh.level as u32, cf as i32));
+                        total_size += t.size();
                     }
                 }
             }
@@ -787,19 +804,19 @@ impl Engine {
                     }
                 }) {
                     col_overlaps.push((t.id(), cl.level as u32));
+                    total_size += t.size();
                 }
             }
             false
         });
 
         info!(
-            "start destroying range for {}, {:?}, destroyed: {}, columnar destroyed: {}, overlaps: {}, columnar overlaps: {}",
-            shard.tag(),
-            del_prefixes,
-            deletes.len(),
-            columnar_deletes.len(),
-            overlaps.len(),
-            col_overlaps.len(),
+            "{} start destroying range: {:?}", shard.tag(), del_prefixes;
+            "destroyed" => deletes.len(),
+            "columnar_destroyed" => columnar_deletes.len(),
+            "overlaps" => overlaps.len(),
+            "columnar_overlaps" => col_overlaps.len(),
+            "input_size" => total_size,
         );
 
         let mut cs = if overlaps.is_empty() && col_overlaps.is_empty() {
@@ -824,6 +841,7 @@ impl Engine {
                 schema_file_id: shard.get_schema_file().map(|f| f.get_file_id()),
                 spec: in_place_compaction_type,
             };
+            req.input_size = total_size;
             req.compaction_tp = CompactionType::InPlaceWithColumnar(in_place_compaction);
             let mut cs = self.comp_client.compact(req).await?;
             let dr = cs.mut_destroy_range();
@@ -856,15 +874,18 @@ impl Engine {
 
         let mut overlaps = vec![];
         let mut col_overlaps = vec![];
+        let mut total_size = 0;
         for t in &data.l0_tbls {
             if truncate_ts < t.max_ts() {
                 overlaps.push((t.id(), 0, -1));
+                total_size += t.size();
             }
         }
         data.for_each_level(|cf, lh| {
             for t in lh.tables.iter() {
                 if truncate_ts < t.max_ts {
                     overlaps.push((t.id(), lh.level as u32, cf as i32));
+                    total_size += t.size();
                 }
             }
             false
@@ -874,17 +895,18 @@ impl Engine {
             for t in cl.files.iter() {
                 if truncate_ts < t.get_max_version() {
                     col_overlaps.push((t.id(), cl.level as u32));
+                    total_size += t.size();
                 }
             }
             false
         });
 
         info!(
-            "start truncate ts for {}, truncate_ts: {}, overlaps: {}, columnar overlaps: {}",
-            shard.tag(),
-            truncate_ts,
-            overlaps.len(),
-            col_overlaps.len(),
+            "{} start truncate ts", shard.tag();
+            "truncate_ts" => truncate_ts,
+            "overlaps" => overlaps.len(),
+            "col_overlaps" => col_overlaps.len(),
+            "input_size" => total_size,
         );
 
         let mut cs = if overlaps.is_empty() && col_overlaps.is_empty() {
@@ -908,6 +930,7 @@ impl Engine {
                 schema_file_id: shard.get_schema_file().map(|f| f.get_file_id()),
                 spec: in_place_compaction,
             };
+            req.input_size = total_size;
             req.compaction_tp = CompactionType::InPlaceWithColumnar(in_place_compaction_ctx);
             self.comp_client.compact(req).await?
         };
@@ -933,36 +956,33 @@ impl Engine {
         // Tables that are partially over bound.
         let mut overlaps = vec![];
         let mut col_overlaps = vec![];
+        let mut total_size = 0;
         let shard_bound = shard.data_bound();
         for t in &data.l0_tbls {
             let table_bound = t.data_bound();
             if !shard_bound.overlap_bound(table_bound) {
-                // -----smallest-----biggest-----[start----------end)
-                // [start----------end)-----smallest-----biggest-----
                 let mut delete = pb::TableDelete::default();
                 delete.set_id(t.id());
                 delete.set_level(0);
                 delete.set_cf(-1);
                 deletes.push(delete);
             } else if !shard_bound.contains_bound(table_bound) {
-                // -----smallest-----[start----------end)-----biggest-----
                 overlaps.push((t.id(), 0, -1));
+                total_size += t.size();
             }
         }
         data.for_each_level(|cf, lh| {
             for t in lh.tables.iter() {
                 let table_bound = t.data_bound();
                 if !shard_bound.overlap_bound(table_bound) {
-                    // -----smallest-----biggest-----[start----------end)
-                    // [start----------end)-----smallest-----biggest-----
                     let mut delete = pb::TableDelete::default();
                     delete.set_id(t.id());
                     delete.set_level(lh.level as u32);
                     delete.set_cf(cf as i32);
                     deletes.push(delete);
                 } else if !shard_bound.contains_bound(table_bound) {
-                    // -----smallest-----[start----------end)-----biggest-----
                     overlaps.push((t.id(), lh.level as u32, cf as i32));
+                    total_size += t.size();
                 }
             }
             false
@@ -979,20 +999,20 @@ impl Engine {
                     delete.set_level(cl.level as u32);
                     columnar_deletes.push(delete);
                 } else if !shard_bound.contains_bound(table_bound) {
-                    // -----smallest-----[start----------end)-----biggest-----
                     col_overlaps.push((t.id(), cl.level as u32));
+                    total_size += t.size();
                 }
             }
             false
         });
 
         info!(
-            "start trim_over_bound for {}, destroyed: {}, columnar destroyed: {}, overlaps: {}, columnar overlaps: {}",
-            shard.tag(),
-            deletes.len(),
-            columnar_deletes.len(),
-            overlaps.len(),
-            col_overlaps.len(),
+            "{} start trim_over_bound", shard.tag();
+            "destroyed" => deletes.len(),
+            "col_destroyed" => columnar_deletes.len(),
+            "overlaps" => overlaps.len(),
+            "col_overlaps" => col_overlaps.len(),
+            "input_size" => total_size,
         );
 
         let mut cs = if overlaps.is_empty() && col_overlaps.is_empty() {
@@ -1016,6 +1036,7 @@ impl Engine {
                 schema_file_id: shard.get_schema_file().map(|f| f.get_file_id()),
                 spec: InPlaceCompaction::TrimOverBound,
             };
+            req.input_size = total_size;
             req.compaction_tp = CompactionType::InPlaceWithColumnar(inplace_compaction);
             let mut cs = self.comp_client.compact(req).await?;
             let tc = cs.mut_trim_over_bound();
@@ -1040,6 +1061,7 @@ impl Engine {
         // Tables that are partially over bound.
         let mut over_bounds = vec![];
         let mut col_over_bounds = vec![];
+        let mut total_size = 0;
         for (&id, f) in &meta.files {
             let shard_bound = meta.range.data_bound();
             let file_bound = f.data_bound();
@@ -1062,17 +1084,22 @@ impl Engine {
                 } else {
                     over_bounds.push((id, f.level as u32, f.cf as i32));
                 }
+                total_size += if f.is_l0_sst_with_size() {
+                    f.l0_size
+                } else {
+                    debug_assert!(f.table_meta_off > 0, "f: {:?}", f);
+                    f.table_meta_off
+                } as u64;
             }
         }
 
         debug!(
-            "start trim_over_bound_by_meta for {}:{}, destroyed: {}, columnar destroyed: {}, overlaps: {}, columnar overlaps: {}",
-            meta.id,
-            meta.ver,
-            deletes.len(),
-            columnar_deletes.len(),
-            over_bounds.len(),
-            col_over_bounds.len()
+            "{}:{} start trim_over_bound_by_meta", meta.id, meta.ver;
+            "destroyed" => deletes.len(),
+            "col_destroyed" => columnar_deletes.len(),
+            "overlaps" => over_bounds.len(),
+            "col_overlaps" => col_over_bounds.len(),
+            "input_size" => total_size,
         );
 
         let mut res_cs = if over_bounds.is_empty() && col_over_bounds.is_empty() {
@@ -1100,6 +1127,7 @@ impl Engine {
                 schema_file_id: Some(meta.schema.file_id()),
                 spec: InPlaceCompaction::TrimOverBound,
             };
+            req.input_size = total_size;
             req.compaction_tp = CompactionType::InPlaceWithColumnar(in_place_compaction_ctx);
             let mut cs = self.comp_client.compact(req).await?;
             let tc = cs.mut_trim_over_bound();
@@ -1247,8 +1275,9 @@ impl Engine {
             sst_config,
             bt_config,
         };
+        req.input_size = total_size;
         req.compaction_tp = CompactionType::L0(l0_compaction);
-        info!("start compact L0 for {}", tag);
+        info!("{} start compact L0", tag; "input_size" => total_size);
         Some(self.comp_client.compact(req).await)
     }
 
@@ -1471,12 +1500,13 @@ impl Engine {
             lower_level: lower_level_table_ids,
             sst_config,
         };
+        req.input_size = upper_size + lower_size;
         req.compaction_tp = CompactionType::L1Plus(l1_plus);
         info!(
-            "start compact L{} CF{} for {}, num_ids: {}, input_size: {}",
+            "{} start compact L{} CF{}, num_ids: {}, input_size: {}",
+            tag,
             level,
             cf,
-            tag,
             req.file_ids.len(),
             upper_size + lower_size,
         );
@@ -1486,6 +1516,7 @@ impl Engine {
     pub(crate) async fn trigger_major_compaction(
         &self,
         shard: &Shard,
+        is_manual: bool,
     ) -> Option<Result<pb::ChangeSet>> {
         if self.opts.compaction_request_version < MAJOR_COMPACTION_MIN_REQUEST_VERSION {
             return Some(Err(CompactionNotRetryable(format!(
@@ -1495,7 +1526,7 @@ impl Engine {
         }
         let data = shard.get_data();
         // We checked the unconverted_l0s in `refresh_compaction_priority`, but new l0s
-        // may be added after the check. The comapct is running in the background, so we
+        // may be added after the check. The compact is running in the background, so we
         // need to check it again.
         if data.has_unconverted_l0s() {
             info!(
@@ -1523,6 +1554,28 @@ impl Engine {
         }
         total_size += data.l0_tbls.iter().map(|t| t.size()).sum::<u64>();
         total_size += data.blob_tbl_map.values().map(|t| t.size()).sum::<u64>();
+
+        let update_inner_key_offset =
+            self.opts.update_inner_key_offset && data.prepend_keyspace_id().is_some();
+        total_size += update_inner_key_offset as u64;
+
+        if total_size == 0 {
+            info!(
+                "{} trigger_major_compaction skipped, no tables to compact", shard.tag();
+                "is_manual" => is_manual,
+            );
+            if is_manual {
+                // Return empty change set to remove the manual compaction property.
+                let mut cs = pb::ChangeSet::new();
+                cs.set_shard_id(shard.id);
+                cs.set_shard_ver(shard.ver);
+                cs.set_major_compaction(pb::MajorCompaction::new());
+                return Some(Ok(cs));
+            } else {
+                return None;
+            }
+        }
+
         let sst_config = self.opts.table_builder_options;
         let bt_config = self.get_blob_table_build_options_or_none(shard);
         let estimated_num_files = total_size as usize
@@ -1544,15 +1597,14 @@ impl Engine {
             sst_config,
             bt_config,
         };
+        req.input_size = total_size;
         req.compaction_tp = CompactionType::Major(major_compaction);
         info!(
-            "start major compact for {}, num_ids: {}, input_size: {}",
+            "{} start major compact, num_ids: {}, input_size: {}",
             shard.tag(),
             req.file_ids.len(),
             total_size,
         );
-        let update_inner_key_offset =
-            self.opts.update_inner_key_offset && data.prepend_keyspace_id().is_some();
         Some(self.comp_client.compact(req).await.map(|mut cs| {
             let major_compaction = cs.mut_major_compaction();
             major_compaction.set_update_inner_key_offset(update_inner_key_offset);
@@ -1585,8 +1637,9 @@ impl Engine {
             columnar_config: self.opts.columnar_build_options,
             target_level: 2, // Set target level to 2 for clear columnar to reset l2_snap_version.
         };
+        req.input_size = 1; // To help for detect that all `input_size` are set.
         req.compaction_tp = CompactionType::ColumnarMajor(columnar_major_compaction);
-        info!("start remove columnar for {}", tag);
+        info!("{} start remove columnar", tag);
         Some(self.comp_client.compact(req).await)
     }
 
@@ -1604,9 +1657,11 @@ impl Engine {
         let mut req = self.new_compact_request_with_shard(shard);
         let mut source_row_tables = vec![];
         let mut snap_version = 0;
+        let mut total_size = 0;
         for l0 in &data.col_levels.unconverted_l0s {
             source_row_tables.push((0, l0.id()));
             snap_version = snap_version.max(l0.version());
+            total_size += l0.size();
         }
         let num_l0s = source_row_tables.len();
         let columnar_compaction = ColumnarCompaction {
@@ -1618,12 +1673,13 @@ impl Engine {
             schema_file_id: schema_file.get_file_id(),
             columnar_config: self.opts.columnar_build_options,
         };
+        req.input_size = total_size;
         req.compaction_tp = CompactionType::Columnar(columnar_compaction);
         self.set_alloc_ids_for_request(&mut req, num_l0s, num_l0s)
             .await;
         info!(
-            "start covert L0 to columnar for {}, num_l0s {}",
-            tag, num_l0s
+            "{} start covert L0 to columnar, num_l0s {}, total size {}",
+            tag, num_l0s, total_size
         );
         Some(self.comp_client.compact(req).await)
     }
@@ -1760,9 +1816,10 @@ impl Engine {
             snap_version,
             target_level,
         };
+        req.input_size = total_size;
         req.compaction_tp = CompactionType::ColumnarMajor(major_compaction);
         info!(
-            "start columnar major compact for columnar {}, num_ids: {}, input_size: {}",
+            "{} start columnar major compact, num_ids: {}, input_size: {}",
             shard.tag(),
             req.file_ids.len(),
             total_size,
@@ -1825,8 +1882,9 @@ impl Engine {
             schema_file_id,
             columnar_config,
         };
+        req.input_size = total_size;
         req.compaction_tp = CompactionType::Columnar(col_compaction);
-        info!("start columnar compact L0 for {}", tag);
+        info!("{} start columnar compact L0", tag; "total_size" => total_size);
         Some(self.comp_client.compact(req).await)
     }
 
@@ -1912,11 +1970,12 @@ impl Engine {
             schema_file_id,
             columnar_config,
         };
+        req.input_size = total_size;
         req.compaction_tp = CompactionType::Columnar(columnar_compaction);
         info!(
-            "start compact columnar L{} for {}, num_ids: {}, input_size: {}",
-            level,
+            "{} start compact columnar L{}, num_ids: {}, input_size: {}",
             tag,
+            level,
             req.file_ids.len(),
             total_size,
         );
@@ -1932,7 +1991,6 @@ impl Engine {
         rebuild: bool,
     ) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
-        info!("{} trigger vector index update", tag);
         let data = shard.get_data();
         let snap_version = shard.get_columnar_snap_version();
         let schema_file = data.schema_file.as_ref()?;
@@ -1956,15 +2014,19 @@ impl Engine {
                 0
             };
         let mut col_file_ids = vec![];
+        let mut total_size = 0;
         for col_lvl in &data.col_levels.levels {
             for col_file in &col_lvl.files {
                 let l0_version = col_file.get_l0_version().unwrap_or(1);
                 if col_file.has_table(table_id) && l0_version > old_idx_ver {
-                    col_file_ids.push((col_file.get_file().id(), col_lvl.level as u32));
+                    let f = col_file.get_file();
+                    col_file_ids.push((f.id(), col_lvl.level as u32));
+                    total_size += f.size();
                 }
             }
         }
         let mut req = self.new_compact_request_with_shard(shard);
+        req.input_size = total_size;
         req.compaction_tp = CompactionType::VectorIndex(VectorIndexUpdate {
             table_id,
             index_id,
@@ -1974,6 +2036,7 @@ impl Engine {
             col_file_ids,
             remove_file_ids,
         });
+        info!("{} trigger vector index update", tag; "total_size" => total_size);
         Some(self.comp_client.compact(req).await)
     }
 
@@ -1994,6 +2057,7 @@ pub(crate) enum CompactionPriority {
     },
     Major {
         score: f64,
+        is_manual: bool,
     },
     DestroyRange,
     TruncateTs,
@@ -2024,7 +2088,7 @@ impl CompactionPriority {
         match self {
             CompactionPriority::L0 { score } => *score,
             CompactionPriority::L1Plus { score, .. } => *score,
-            CompactionPriority::Major { score } => *score,
+            CompactionPriority::Major { score, .. } => *score,
             CompactionPriority::DestroyRange => f64::MAX,
             CompactionPriority::TruncateTs => f64::MAX,
             CompactionPriority::TrimOverBound => f64::MAX,
@@ -2286,6 +2350,7 @@ pub async fn handle_remote_compaction(
     checksum_type: ChecksumType,
     id_allocator: Arc<dyn IdAllocator>,
     master_key: MasterKey,
+    memory_limiter: MemoryLimiter,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let req_body = hyper::body::to_bytes(req.into_body()).await?;
     let result = serde_json::from_slice(req_body.chunk());
@@ -2309,6 +2374,28 @@ pub async fn handle_remote_compaction(
             .body(err_str.into())
             .unwrap());
     }
+
+    debug_assert!(
+        comp_req.input_size > 0,
+        "input_size not set: {:?}",
+        comp_req
+    );
+    let request_size = comp_req.input_size * 2; // The memory usage is 2x input size for both reading and writing.
+    let mem_limiter_guard = match memory_limiter.acquire(request_size) {
+        Ok(guard) => guard,
+        Err(exceeded_size) => {
+            ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.inc();
+            warn!("{} memory limit exceeded", comp_req.get_tag();
+                "request_size" => request_size, "exceeded" => exceeded_size,
+                "limiter" => ?memory_limiter);
+            let body = hyper::Body::from("memory limit exceeded");
+            return Ok(hyper::Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(body)
+                .unwrap());
+        }
+    };
+
     let encryption_key = if comp_req.exported_encryption_key.is_empty() {
         None
     } else {
@@ -2330,6 +2417,7 @@ pub async fn handle_remote_compaction(
     };
     let task = thread_pool.spawn(tikv_util::init_task_local(async move {
         tikv_util::set_current_region(ctx.req.shard_id);
+        let _guard = mem_limiter_guard;
         local_compact(&ctx).await
     }));
     match task.await {
@@ -2344,7 +2432,10 @@ pub async fn handle_remote_compaction(
             let err_str = format!("{:?}", err);
             error!("compaction failed {}", err_str);
             let body = hyper::Body::from(err_str);
-            Ok(hyper::Response::builder().status(500).body(body).unwrap())
+            Ok(hyper::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(body)
+                .unwrap())
         }
     }
 }

@@ -1,6 +1,12 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::mem;
+use std::{
+    fmt, mem,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use kvproto::{
     encryptionpb::EncryptionMeta,
@@ -63,5 +69,114 @@ impl HeapSize for RaftCmdRequest {
             + self.requests.capacity() * mem::size_of::<raft_cmdpb::Request>()
             + mem::size_of_val(&self.admin_request)
             + mem::size_of_val(&self.status_request)
+    }
+}
+
+#[derive(Clone)]
+pub struct MemoryLimiter {
+    cap: u64,
+    used: Arc<AtomicU64>,
+    metric: Option<prometheus::IntGauge>,
+}
+
+impl fmt::Debug for MemoryLimiter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemoryLimiter")
+            .field("cap", &self.cap)
+            .field("used", &self.used())
+            .finish()
+    }
+}
+
+impl MemoryLimiter {
+    pub fn new(cap: u64, metric: Option<prometheus::IntGauge>) -> Self {
+        Self {
+            cap,
+            used: Default::default(),
+            metric,
+        }
+    }
+
+    pub fn acquire(&self, request: u64) -> Result<MemoryLimiterGuard, u64 /* exceeded size */> {
+        if request > self.cap {
+            return Err(request - self.cap);
+        }
+
+        if request > 0 {
+            let after = self.used.fetch_add(request, Ordering::AcqRel) + request;
+            if after > self.cap {
+                self.release(request, false);
+                return Err(after - self.cap);
+            }
+            self.set_metric(after);
+        }
+        Ok(MemoryLimiterGuard {
+            limiter: self.clone(),
+            request,
+        })
+    }
+
+    fn release(&self, request: u64, set_metric: bool) {
+        if request > 0 {
+            let after = self
+                .used
+                .fetch_sub(request, Ordering::AcqRel)
+                .saturating_sub(request);
+            if set_metric {
+                self.set_metric(after);
+            }
+        }
+    }
+
+    fn set_metric(&self, current: u64) {
+        if let Some(ref metric) = self.metric {
+            metric.set(current as i64);
+        }
+    }
+
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+}
+
+pub struct MemoryLimiterGuard {
+    limiter: MemoryLimiter,
+    request: u64,
+}
+
+impl Drop for MemoryLimiterGuard {
+    fn drop(&mut self) {
+        self.limiter.release(self.request, true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_limiter() {
+        let cap = 1024;
+        let limiter = MemoryLimiter::new(cap, None);
+        assert_eq!(limiter.used(), 0);
+        assert_eq!(limiter.cap, cap);
+
+        let guard = limiter.acquire(512).unwrap();
+        assert_eq!(limiter.used(), 512);
+        let guard1 = limiter.acquire(512).unwrap();
+        assert_eq!(limiter.used(), cap);
+
+        assert!(matches!(limiter.acquire(1), Err(1)));
+
+        drop(guard);
+        assert_eq!(limiter.used(), 512);
+        drop(guard1);
+        assert_eq!(limiter.used(), 0);
+
+        {
+            let _guard = limiter.acquire(0).unwrap();
+            assert_eq!(limiter.used(), 0);
+        }
+        assert_eq!(limiter.used(), 0);
     }
 }

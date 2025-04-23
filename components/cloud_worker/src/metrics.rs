@@ -93,4 +93,9 @@ lazy_static! {
         &["task_id"],
     )
     .unwrap();
+
+    pub static ref WORKER_MEMORY_LIMITER_CURRENT_USED: IntGauge = register_int_gauge!(
+        "tikv_worker_memory_limiter_current_used",
+        "Current used memory reported by worker memory limiter",
+    ).unwrap();
 }

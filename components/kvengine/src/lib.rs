@@ -30,7 +30,7 @@ pub mod flush;
 pub mod ia;
 pub mod limiter;
 pub mod meta;
-mod metrics;
+pub mod metrics;
 pub mod mvcc;
 pub mod options;
 pub mod prepare;

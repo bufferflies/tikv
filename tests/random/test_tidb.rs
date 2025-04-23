@@ -10,7 +10,10 @@ use std::{
 
 use anyhow::Context;
 use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
-use kvengine::{dfs::DFSConfig, ia::util::IaConfig, table::sstable::BlockCacheType};
+use kvengine::{
+    dfs::DFSConfig, ia::util::IaConfig, metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
+    table::sstable::BlockCacheType,
+};
 use pd_client::{
     pd_control,
     pd_control::{OpKind, PdControl, PdScheduleConfig},
@@ -46,6 +49,7 @@ use crate::{
 
 pub(crate) type Result<T> = anyhow::Result<T>;
 
+const KV_TARGET_FILE_SIZE: ReadableSize = ReadableSize::kb(32);
 pub(crate) const REGION_SIZE: ReadableSize = ReadableSize::mb(1);
 // TiDB has records with 200kb+ size (see "mysql.stats_history"), so set bucket
 // size to 256kb.
@@ -273,6 +277,7 @@ fn prepare_cluster(
     cluster.start_tikv_workers(
         tikv_worker_nodes,
         TikvWorkerOptions {
+            kv_target_file_size: KV_TARGET_FILE_SIZE,
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
             cop_block_cache_type: switches.block_cache_type,
             ..Default::default()
@@ -315,6 +320,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
     move |_node_id: u16, conf: &mut TikvConfig| {
         let mut rng = thread_rng();
         conf.dfs = dfs_config.clone();
+        conf.dfs.allow_fallback_local = false;
         conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
 
@@ -330,7 +336,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(500);
 
         conf.rocksdb.writecf.block_size = ReadableSize::kb(2);
-        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(32);
+        conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
 
         conf.rfengine.target_file_size = ReadableSize::mb(8);
         conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
@@ -950,35 +956,39 @@ impl Switches {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct WorkloadStats {
-    pub total_keyspace_count: usize,
-    pub total_node_restart: usize,
-    pub total_tpcc_txns: usize,
-    pub total_jepsen_bank: usize,
-    pub total_jepsen_bank_retry: usize,
-    pub total_unique_workload: usize,
-    pub total_unique_conflict: usize,
-    pub total_async_shards: usize,
+    pub keyspace_count: usize,
+    pub node_restart: usize,
+    pub tpcc_txns: usize,
+    pub jepsen_bank: usize,
+    pub jepsen_bank_retry: usize,
+    pub unique_workload: usize,
+    pub unique_conflict: usize,
+    pub async_shards: usize,
+    pub remote_compact_exceed_memory_limit: u64,
 }
 
 impl WorkloadStats {
     pub fn collect() -> Self {
-        let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
-        let total_node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
-        let total_tpcc_txns = TPCC_COUNTER.load(Ordering::SeqCst);
-        let total_jepsen_bank = JEPSEN_BANK_TXN_COUNTER.load(Ordering::SeqCst);
-        let total_jepsen_bank_retry = JEPSEN_BANK_TXN_RETRY_COUNTER.load(Ordering::SeqCst);
-        let total_unique_workload = UNIQUE_WORKLOAD_TXN_COUNTER.load(Ordering::SeqCst);
-        let total_unique_conflict = UNIQUE_WORKLOAD_CONFLICT_COUNTER.load(Ordering::SeqCst);
-        let total_async_shards = ASYNC_SHARD_COUNTER.load(Ordering::SeqCst);
+        let keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
+        let node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
+        let tpcc_txns = TPCC_COUNTER.load(Ordering::SeqCst);
+        let jepsen_bank = JEPSEN_BANK_TXN_COUNTER.load(Ordering::SeqCst);
+        let jepsen_bank_retry = JEPSEN_BANK_TXN_RETRY_COUNTER.load(Ordering::SeqCst);
+        let unique_workload = UNIQUE_WORKLOAD_TXN_COUNTER.load(Ordering::SeqCst);
+        let unique_conflict = UNIQUE_WORKLOAD_CONFLICT_COUNTER.load(Ordering::SeqCst);
+        let async_shards = ASYNC_SHARD_COUNTER.load(Ordering::SeqCst);
+        let remote_compact_exceed_memory_limit =
+            ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.get();
         Self {
-            total_keyspace_count,
-            total_node_restart,
-            total_tpcc_txns,
-            total_jepsen_bank,
-            total_jepsen_bank_retry,
-            total_unique_workload,
-            total_unique_conflict,
-            total_async_shards,
+            keyspace_count,
+            node_restart,
+            tpcc_txns,
+            jepsen_bank,
+            jepsen_bank_retry,
+            unique_workload,
+            unique_conflict,
+            async_shards,
+            remote_compact_exceed_memory_limit,
         }
     }
 }
