@@ -1,7 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    cmp,
     cmp::Ordering as CmpOrdering,
     collections::HashMap,
     fmt::{self, Display, Formatter},
@@ -759,10 +758,9 @@ impl PdRunner {
             + store_info.rf_engine.get_engine_stats().disk_size;
         stats.set_used_size(used_size);
 
-        let mut available = capacity.checked_sub(used_size).unwrap_or_default();
-        // We only care about rocksdb SST file size, so we should check disk available
-        // here.
-        available = cmp::min(available, disk_stats.available_space());
+        // Note: `available + used_size` may be larger than `capacity`, when some
+        // regions are sharing the same table files.
+        let available = disk_stats.available_space();
         store_info.kv_engine.set_available_space(available);
 
         if available == 0 {

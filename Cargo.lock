@@ -1465,6 +1465,7 @@ dependencies = [
  "dashmap 4.0.2",
  "file_system",
  "flate2",
+ "fs2",
  "futures 0.3.28",
  "grpcio",
  "hex 0.4.3",
@@ -2826,7 +2827,7 @@ dependencies = [
 [[package]]
 name = "fs2"
 version = "0.4.3"
-source = "git+https://github.com/tabokie/fs2-rs?branch=tikv#cd503764a19a99d74c1ab424dd13d6bcd093fcae"
+source = "git+https://github.com/tikv/fs2-rs?branch=tikv#cd503764a19a99d74c1ab424dd13d6bcd093fcae"
 dependencies = [
  "libc 0.2.161",
  "winapi 0.3.9",
@@ -9143,6 +9144,7 @@ dependencies = [
  "derive_more",
  "error_code",
  "fail 0.5.0",
+ "fs2",
  "futures 0.3.28",
  "futures-util",
  "gag",

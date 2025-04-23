@@ -85,10 +85,7 @@ use tikv_util::{
     config::{ensure_dir_exist, ReadableDuration, ReadableSize, VersionTrack},
     get_panic_region_count, mpsc,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
-    sys::{
-        disk::get_disk_capacity, register_memory_usage_high_water, thread::ThreadBuildWrapper,
-        SysQuota,
-    },
+    sys::{register_memory_usage_high_water, thread::ThreadBuildWrapper, SysQuota},
     thread_group::GroupProperties,
     time::{Duration, Instant, Monitor},
     worker::{Builder as WorkerBuilder, LazyWorker, Worker},
@@ -1202,8 +1199,11 @@ impl TikvServer {
             return;
         }
         let data_path = PathBuf::from(data_dir);
-        match get_disk_capacity(&data_path) {
-            Ok(cap) => {
+        match fs2::statvfs(&data_path) {
+            Ok(stats) => {
+                let cap = stats.total_space();
+                info!("capacity of data dir: {}, available: {}", cap, stats.available_space();
+                    "path" => data_path.display());
                 if cap < K8S_MIN_DISK_CAPACITY {
                     fatal!(
                         "insufficient disk space for k8s deploy, at least {} bytes required, but got {} bytes",

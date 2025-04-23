@@ -20,6 +20,7 @@ crc32fast = "1.4.0"
 dashmap = "4.0"
 file_system = { path = "../../components/file_system" }
 flate2 = { version = "1.0", default-features = false, features = ["zlib"] }
+fs2 = "0.4"
 futures = "0.3"
 grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
 hex = "0.4"

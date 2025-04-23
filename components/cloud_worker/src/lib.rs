@@ -225,6 +225,16 @@ fn start_server(
 
     if !config.data_dir.is_empty() {
         fs::create_dir_all(&config.data_dir).unwrap();
+
+        match fs2::statvfs(PathBuf::from(&config.data_dir)) {
+            Ok(stats) => {
+                info!("capacity for data dir: {}, available: {}", stats.total_space(), stats.available_space();
+                    "path" => &config.data_dir);
+            }
+            Err(err) => {
+                warn!("get disk capacity failed: {:?}", err; "path" => &config.data_dir);
+            }
+        }
     }
 
     let load_data_config = init_load_data_config(&config, &pd, &thread_pool);

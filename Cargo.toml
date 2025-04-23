@@ -204,7 +204,7 @@ rusoto_s3 = { git = "https://github.com/tikv/rusoto", branch = "cse" }
 rusoto_sts = { git = "https://github.com/tikv/rusoto", branch = "cse" }
 
 # remove this when https://github.com/danburkert/fs2-rs/pull/42 is merged.
-fs2 = { git = "https://github.com/tabokie/fs2-rs", branch = "tikv" }
+fs2 = { git = "https://github.com/tikv/fs2-rs", branch = "tikv" }
 
 # Remove this when a new version is release. We need to solve rust-lang/cmake-rs#143.
 cmake = { git = "https://github.com/rust-lang/cmake-rs" }

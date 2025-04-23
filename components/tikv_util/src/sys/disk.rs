@@ -83,28 +83,6 @@ pub fn get_disk_status(_store_id: u64) -> DiskUsage {
     }
 }
 
-pub fn get_disk_capacity(dir: &Path) -> io::Result<u64> {
-    use nix::NixPath;
-    use sysinfo::{DiskExt, RefreshKind, System, SystemExt};
-
-    lazy_static::lazy_static! {
-        static ref SYS_INFO: System = System::new_with_specifics(RefreshKind::new().with_disks_list());
-    }
-
-    // find the mounted disk of the data dir.
-    let mut data_disk = None;
-    let mut mount_point_len = 0;
-    for disk in SYS_INFO.disks() {
-        let mp = disk.mount_point();
-        if dir.starts_with(mp) && mp.len() > mount_point_len {
-            data_disk = Some(disk);
-            mount_point_len = mp.len();
-        }
-    }
-    data_disk.map(|disk| disk.total_space()).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Unable to find disk for dir: {dir:?}"),
-        )
-    })
+pub fn get_disk_capacity(dir: impl AsRef<Path>) -> io::Result<u64> {
+    fs2::total_space(dir)
 }
