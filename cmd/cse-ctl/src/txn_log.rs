@@ -26,11 +26,15 @@ pub struct ShowTxnLogArgs {
     #[clap(long)]
     pub backup_name: String,
     #[clap(long)]
-    pub start_ts: u64,
+    pub start_ts: Option<u64>,
     #[clap(long)]
-    pub commit_ts: u64,
+    pub commit_ts: Option<u64>,
     #[clap(long)]
     pub data_dir: String,
+    #[clap(long)]
+    pub key_prefix: Option<String>,
+    #[clap(long)]
+    pub store_id: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -41,8 +45,6 @@ pub struct ShowTxnLogConfig {
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
     pub data_dir: String,
-    pub backup_name: String,
-    pub timestamp: u64,
 }
 
 impl ShowTxnLogConfig {
@@ -55,12 +57,6 @@ impl ShowTxnLogConfig {
         // override from args and ENV
         if !args.pd.is_empty() {
             config.pd.endpoints = args.pd.split(',').map(|x| x.to_owned()).collect();
-        }
-        if !args.backup_name.is_empty() {
-            config.backup_name = args.backup_name.clone();
-        }
-        if args.start_ts != 0 {
-            config.timestamp = args.start_ts;
         }
         config.dfs.override_from_env();
         config.security.override_from_env();
@@ -82,10 +78,31 @@ pub(crate) fn execute_show_txn_log(args: ShowTxnLogArgs) {
         config.dfs.s3_region,
         config.dfs.s3_bucket,
     ));
-    let cluster_backup = get_cluster_backup_meta(&s3fs, args.backup_name.clone());
+    let mut cluster_backup = get_cluster_backup_meta(&s3fs, args.backup_name.clone());
     let restore_conf = RestoreConfig {
         security: config.security.clone(),
         ..Default::default()
+    };
+    if let Some(store_id) = args.store_id {
+        let mut stores = cluster_backup.take_stores().into_vec();
+        stores.retain(|store| store.get_store_id() == store_id);
+        cluster_backup.set_stores(stores.into());
+    }
+    let filter: Box<dyn LogFilter> = if let Some(key_prefix) = args.key_prefix {
+        if let Ok(key_prefix) = hex::decode(key_prefix) {
+            Box::new(KeyRangeFilter {
+                key_prefix: key_prefix.to_vec(),
+            })
+        } else {
+            panic!("key_prefix must be hex encoded");
+        }
+    } else if let Some(start_ts) = args.start_ts {
+        Box::new(TxnFilter {
+            start_ts,
+            commit_ts: args.commit_ts.unwrap_or_default(),
+        })
+    } else {
+        panic!("key_prefix or start_ts must be specified");
     };
     let cluster = BackupCluster::new(
         &cluster_backup,
@@ -123,12 +140,7 @@ pub(crate) fn execute_show_txn_log(args: ShowTxnLogArgs) {
                     &mut entries,
                 )
                 .unwrap();
-            txn_logs.extend_from_slice(&parse_txn_log(
-                &peer_tag,
-                args.start_ts,
-                args.commit_ts,
-                &entries,
-            ));
+            txn_logs.extend_from_slice(&parse_txn_log(&peer_tag, filter.as_ref(), &entries));
         }
     }
     for log in txn_logs {
@@ -136,7 +148,32 @@ pub(crate) fn execute_show_txn_log(args: ShowTxnLogArgs) {
     }
 }
 
-fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]) -> Vec<String> {
+trait LogFilter {
+    fn filter(&self, key: &[u8], ts: u64) -> bool;
+}
+
+struct TxnFilter {
+    start_ts: u64,
+    commit_ts: u64,
+}
+
+impl LogFilter for TxnFilter {
+    fn filter(&self, _key: &[u8], ts: u64) -> bool {
+        ts == self.start_ts || ts == self.commit_ts
+    }
+}
+
+struct KeyRangeFilter {
+    key_prefix: Vec<u8>,
+}
+
+impl LogFilter for KeyRangeFilter {
+    fn filter(&self, key: &[u8], _ts: u64) -> bool {
+        key.starts_with(&self.key_prefix)
+    }
+}
+
+fn parse_txn_log(tag: &PeerTag, filter: &dyn LogFilter, entries: &[Entry]) -> Vec<String> {
     let mut txn_logs = vec![];
     for e in entries {
         if e.data.is_empty() || e.entry_type != EntryType::EntryNormal {
@@ -149,7 +186,7 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                 rlog::TYPE_PREWRITE => cl.iterate_lock(|k, v| {
                     let mut lock = Lock::parse(v).unwrap();
                     lock.short_value.take();
-                    if lock.ts.into_inner() == start_ts {
+                    if filter.filter(k, lock.ts.into_inner()) {
                         txn_logs.push(format!(
                             "{} prewrite log_idx:{} key:{} lock:{:?}",
                             tag,
@@ -161,7 +198,7 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                 }),
                 rlog::TYPE_PESSIMISTIC_LOCK => cl.iterate_lock(|k, v| {
                     let lock = Lock::parse(v).unwrap();
-                    if lock.ts.into_inner() == start_ts {
+                    if filter.filter(k, lock.ts.into_inner()) {
                         txn_logs.push(format!(
                             "{} pessimistic_lock log_idx:{} key:{} lock:{:?}",
                             tag,
@@ -172,46 +209,50 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                     }
                 }),
                 rlog::TYPE_COMMIT => cl.iterate_commit(|k, cm_ts| {
-                    if cm_ts == commit_ts {
+                    if filter.filter(k, cm_ts) {
                         txn_logs.push(format!(
-                            "{} commit log_idx:{} key:{}",
+                            "{} commit log_idx:{} key:{} ts:{}",
                             tag,
                             e.index,
-                            log_wrappers::hex_encode_upper(k)
+                            log_wrappers::hex_encode_upper(k),
+                            cm_ts
                         ));
                     }
                 }),
                 rlog::TYPE_ROLLBACK => cl.iterate_rollback(|k, st_ts, del_lock| {
-                    if st_ts == start_ts {
+                    if filter.filter(k, st_ts) {
                         txn_logs.push(format!(
-                            "{} rollback log_idx:{} key:{} del_lock:{}",
+                            "{} rollback log_idx:{} key:{} del_lock:{} ts:{}",
                             tag,
                             e.index,
                             log_wrappers::hex_encode_upper(k),
-                            del_lock
+                            del_lock,
+                            st_ts
                         ));
                     }
                 }),
                 rlog::TYPE_RESOLVE_LOCK => {
                     cl.iterate_resolve_lock(|tp, k, ts, del_lock| match tp {
                         rlog::TYPE_COMMIT => {
-                            if ts == commit_ts {
+                            if filter.filter(k, ts) {
                                 txn_logs.push(format!(
-                                    "{} resolve_lock commit log_idx:{} key:{} _del_lock:{}",
+                                    "{} resolve_lock commit log_idx:{} key:{} _del_lock:{}, ts:{}",
                                     tag,
                                     e.index,
                                     log_wrappers::hex_encode_upper(k),
-                                    del_lock
+                                    del_lock,
+                                    ts
                                 ));
                             }
                         }
                         rlog::TYPE_ROLLBACK => {
-                            if ts == start_ts {
+                            if filter.filter(k, ts) {
                                 txn_logs.push(format!(
-                                    "{} resolve_lock rollback log_idx:{} key:{}",
+                                    "{} resolve_lock rollback log_idx:{} key:{}, ts:{}",
                                     tag,
                                     e.index,
                                     log_wrappers::hex_encode_upper(k),
+                                    ts
                                 ));
                             }
                         }
@@ -220,7 +261,7 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                 }
                 rlog::TYPE_TXN_FILE_REF => {
                     let txn_file_ref = cl.get_txn_file_ref().unwrap();
-                    if txn_file_ref.start_ts == start_ts {
+                    if filter.filter(&[], txn_file_ref.start_ts) {
                         txn_logs.push(format!(
                             "{} txn_file_ref log_idx:{} txn_file_ref:{:?}",
                             tag, e.index, txn_file_ref
