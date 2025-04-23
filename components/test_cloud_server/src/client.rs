@@ -1836,6 +1836,71 @@ impl ClusterClient {
     pub fn txn_file_helper(&self) -> Option<Arc<TxnFileHelper>> {
         self.txn_file_helper.clone()
     }
+
+    pub fn kv_get_mvcc_by_key(&mut self, key: &[u8]) -> Result<Option<kvrpcpb::MvccInfo>> {
+        let start_time = Instant::now();
+        let timeout = Duration::from_secs(15);
+        let mut tag = ShardTag::default();
+        let mut store_id_errors = vec![];
+
+        while start_time.saturating_elapsed() < timeout {
+            let region_id = self.get_region_id(key);
+            let ctx = self.new_rpc_ctx_opt(region_id, key, &RequestOptions::default());
+            if ctx.is_none() {
+                continue;
+            }
+
+            let ctx = ctx.unwrap();
+            tag = Self::tag_from_ctx(&ctx);
+            let store_id = ctx.get_peer().get_store_id();
+            let client = self.get_kv_client(store_id);
+
+            let mut req = kvrpcpb::MvccGetByKeyRequest::default();
+            req.set_context(ctx.clone());
+            req.set_key(key.to_vec());
+
+            let result = client.mvcc_get_by_key(&req);
+            if result.is_err() {
+                store_id_errors.push((store_id, format!("{:?}", result.unwrap_err())));
+                sleep(Duration::from_millis(100));
+                self.update_cache_by_id(region_id, None);
+                continue;
+            }
+
+            let mut resp = result.unwrap();
+            if resp.has_region_error() {
+                let region_err = resp.get_region_error();
+                store_id_errors.push((store_id, format!("{:?}", region_err)));
+                if self.handle_retryable_error(&tag, region_err) {
+                    continue;
+                }
+                if self.handle_region_epoch_not_match_or_not_found(region_err) {
+                    continue;
+                }
+
+                if region_err
+                    .get_message()
+                    .contains("peer is applying snapshot")
+                {
+                    continue;
+                }
+                return Err(box_err!("{} unexpected error {:?}", tag, region_err));
+            }
+
+            if !resp.has_info() {
+                return Ok(None);
+            }
+
+            return Ok(Some(resp.take_info()));
+        }
+
+        Err(box_err!(
+            "{} failed to get mvcc info for key {}, errors {:?}",
+            tag,
+            log_wrappers::hex_encode_upper(key),
+            store_id_errors
+        ))
+    }
 }
 
 const MIN_TXN_KEY: &[u8] = &[TXN_KEY_PREFIX];

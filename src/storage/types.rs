@@ -75,6 +75,7 @@ impl MvccInfo {
             lock_info.set_start_ts(lock.ts.into_inner());
             lock_info.set_primary(lock.primary);
             lock_info.set_short_value(lock.short_value.unwrap_or_default());
+            lock_info.set_ttl(lock.ttl);
             if !lock.last_change_ts.is_zero() {
                 lock_info.set_last_change_ts(lock.last_change_ts.into_inner());
                 lock_info.set_versions_to_last_change(lock.versions_to_last_change);

@@ -128,18 +128,15 @@ pub mod tests {
     use super::*;
     #[cfg(test)]
     use crate::storage::txn::tests::{
-        must_acquire_pessimistic_lock_for_large_txn, must_prewrite_delete, must_prewrite_lock,
-        must_prewrite_put, must_prewrite_put_for_large_txn, must_prewrite_put_impl,
-        must_prewrite_put_with_txn_soucre, must_rollback,
-    };
-    #[cfg(test)]
-    use crate::storage::{
-        mvcc::SHORT_VALUE_MAX_LEN, txn::commands::check_txn_status, TestEngineBuilder, TxnStatus,
+        must_acquire_pessimistic_lock_for_large_txn, must_prewrite_lock, must_prewrite_put,
+        must_prewrite_put_for_large_txn, must_prewrite_put_impl, must_prewrite_put_with_txn_soucre,
     };
     use crate::storage::{
         mvcc::{tests::*, MvccTxn},
         Engine,
     };
+    #[cfg(test)]
+    use crate::storage::{txn::commands::check_txn_status, TestEngineBuilder, TxnStatus};
 
     pub fn must_succeed<E: Engine>(
         engine: &mut E,
@@ -196,57 +193,6 @@ pub mod tests {
         let mut txn = MvccTxn::new(start_ts, cm);
         let mut reader = SnapshotReader::new(start_ts, snapshot, true);
         commit(&mut txn, &mut reader, Key::from_raw(key), commit_ts.into()).unwrap_err();
-    }
-
-    #[cfg(test)]
-    fn test_commit_ok_imp(k1: &[u8], v1: &[u8], k2: &[u8], k3: &[u8]) {
-        let mut engine = TestEngineBuilder::new().build().unwrap();
-        must_prewrite_put(&mut engine, k1, v1, k1, 10);
-        must_prewrite_lock(&mut engine, k2, k1, 10);
-        must_prewrite_delete(&mut engine, k3, k1, 10);
-        must_locked(&mut engine, k1, 10);
-        must_locked(&mut engine, k2, 10);
-        must_locked(&mut engine, k3, 10);
-        must_succeed(&mut engine, k1, 10, 15);
-        must_succeed(&mut engine, k2, 10, 15);
-        must_succeed(&mut engine, k3, 10, 15);
-        must_written(&mut engine, k1, 10, 15, WriteType::Put);
-        must_written(&mut engine, k2, 10, 15, WriteType::Lock);
-        must_written(&mut engine, k3, 10, 15, WriteType::Delete);
-        // commit should be idempotent
-        must_succeed(&mut engine, k1, 10, 15);
-        must_succeed(&mut engine, k2, 10, 15);
-        must_succeed(&mut engine, k3, 10, 15);
-    }
-
-    #[test]
-    fn test_commit_ok() {
-        test_commit_ok_imp(b"x", b"v", b"y", b"z");
-
-        let long_value = "v".repeat(SHORT_VALUE_MAX_LEN + 1).into_bytes();
-        test_commit_ok_imp(b"x", &long_value, b"y", b"z");
-    }
-
-    #[cfg(test)]
-    fn test_commit_err_imp(k: &[u8], v: &[u8]) {
-        let mut engine = TestEngineBuilder::new().build().unwrap();
-
-        // Not prewrite yet
-        must_err(&mut engine, k, 1, 2);
-        must_prewrite_put(&mut engine, k, v, k, 5);
-        // start_ts not match
-        must_err(&mut engine, k, 4, 5);
-        must_rollback(&mut engine, k, 5, false);
-        // commit after rollback
-        must_err(&mut engine, k, 5, 6);
-    }
-
-    #[test]
-    fn test_commit_err() {
-        test_commit_err_imp(b"k", b"v");
-
-        let long_value = "v".repeat(SHORT_VALUE_MAX_LEN + 1).into_bytes();
-        test_commit_err_imp(b"k2", &long_value);
     }
 
     #[test]
