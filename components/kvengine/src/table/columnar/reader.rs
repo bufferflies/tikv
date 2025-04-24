@@ -252,8 +252,10 @@ impl ColumnarReader for ColumnarTableReader {
                 }
                 total_read_row += read_row;
             } else {
-                let (handle_read_row, handle_is_skipped, _) =
-                    self.handle_reader.read(&mut block.handles, limit).await?;
+                let (handle_read_row, handle_is_skipped, _) = self
+                    .handle_reader
+                    .read(&mut block.handles, read_row)
+                    .await?;
                 assert_eq!(
                     read_row,
                     handle_read_row,
@@ -269,7 +271,7 @@ impl ColumnarReader for ColumnarTableReader {
                 assert!(!handle_is_skipped);
                 for (i, col) in self.columns_readers.iter_mut().enumerate() {
                     let (col_read_row, col_is_skipped, _) =
-                        col.read(&mut block.columns[i], limit).await?;
+                        col.read(&mut block.columns[i], read_row).await?;
                     assert_eq!(
                         read_row,
                         col_read_row,
@@ -1992,7 +1994,7 @@ pub mod tests {
                 },
                 columnar::ColumnarFile,
                 reader::{ColumnarMvccReader, ColumnarReader, ColumnarTableReader},
-                SchemaBuf,
+                SchemaBuf, SchemaBufBuilder,
             },
             file::{File, InMemFile},
             memtable::{CfTable, WriteBatch},
@@ -2573,6 +2575,42 @@ pub mod tests {
             block_on(mvcc_reader.read_block(&mut block, 500)).unwrap();
             let merged_refs = merge_refs(vec![ref_row], 0, Some(110), None, None);
             verify_with_ref_rows(&block, &merged_refs);
+        }
+    }
+
+    #[test]
+    fn test_read_column_default_value() {
+        init_log_for_test();
+        let schema = new_schema(1, false);
+        let (file, ref_row) = build_table(1, &schema, 0, 100, 100);
+
+        let mut schema_buf_builder = SchemaBufBuilder::new(1);
+        let mut columns = schema.columns.clone();
+        let mut column_info = ColumnInfo::new();
+        column_info.set_tp(FieldTypeTp::Int24 as i32);
+        let default_val = [vec![UINT_FLAG], 666_u64.to_be_bytes().to_vec()].concat();
+        column_info.set_default_val(default_val);
+        column_info.set_column_id(100);
+        columns.push(column_info);
+        schema_buf_builder.columns(
+            schema.handle_column.clone(),
+            schema.version_column.clone(),
+            columns,
+            schema.pk_col_ids.clone(),
+            schema.vector_indexes.clone(),
+        );
+        let new_schema = Schema::new(schema_buf_builder.build());
+        // Add a new column with default value to read.
+        let mut mvcc_reader = new_mvcc_reader(&new_schema, &[file], 110, None);
+        block_on(mvcc_reader.set_unbounded_handle_range()).unwrap();
+        let mut block = Block::new(&new_schema);
+        block_on(mvcc_reader.read_block(&mut block, 500)).unwrap();
+        let merged_refs = merge_refs(vec![ref_row], 0, Some(110), None, None);
+        verify_with_ref_rows(&block, &merged_refs);
+        let column = block.get_column(100);
+        assert_eq!(column.length(), block.handles.length());
+        for i in 0..block.handles.length() {
+            assert_eq!(column.get_value(i).unwrap(), 666_u64.to_le_bytes());
         }
     }
 
