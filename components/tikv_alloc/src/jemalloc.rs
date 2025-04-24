@@ -27,10 +27,10 @@ lazy_static! {
         Mutex::new(HashMap::new());
 
     // thread id -> (thread name, arena index)
-    static ref THREAD_ARENA_MAP: Mutex<HashMap<ThreadId, (String, usize)>> = Mutex::new(HashMap::new());
+    static ref THREAD_ARENA_MAP: Mutex<HashMap<ThreadId, (String, u32)>> = Mutex::new(HashMap::new());
 
     // thread_prefix -> arena index
-    static ref SHARED_THREAD_ARENA_MAP: Mutex<HashMap<String, usize>> = Mutex::new(HashMap::new());
+    static ref SHARED_THREAD_ARENA_MAP: Mutex<HashMap<String, u32>> = Mutex::new(HashMap::new());
 }
 
 /// The struct for tracing the statistic of another thread.
@@ -385,7 +385,7 @@ mod profiling {
                         .name()
                         .unwrap_or("unknown")
                         .to_string(),
-                    index as usize,
+                    index,
                 ),
             );
         }
@@ -410,7 +410,7 @@ mod profiling {
                 (false, *idx)
             } else {
                 // Create new arena if the shared prefix is new
-                let index = tikv_jemalloc_ctl::raw::read(ARENAS_CREATE).map_err(|e| {
+                let index: u32 = tikv_jemalloc_ctl::raw::read(ARENAS_CREATE).map_err(|e| {
                     ProfError::JemallocError(format!("failed to create arena: {}", e))
                 })?;
                 if let Err(e) = tikv_jemalloc_ctl::raw::write(THREAD_ARENA, index) {
@@ -453,7 +453,7 @@ mod profiling {
         Ok(())
     }
 
-    pub fn fetch_arena_stats(index: usize) -> (u64, u64, u64) {
+    pub fn fetch_arena_stats(index: u32) -> (u64, u64, u64) {
         let resident = unsafe {
             tikv_jemalloc_ctl::raw::read(format!("stats.arenas.{}.resident\0", index).as_bytes())
                 .unwrap_or(0)
@@ -652,7 +652,7 @@ mod profiling {
     pub fn set_thread_exclusive_arena(_enable: bool) {
         // Do nothing
     }
-    pub fn fetch_arena_stats(_index: usize) -> (u64, u64, u64) {
+    pub fn fetch_arena_stats(_index: u32) -> (u64, u64, u64) {
         (0, 0, 0)
     }
 }
