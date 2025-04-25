@@ -39,6 +39,11 @@ pub enum Error {
     ChannelDrop,
     #[error("tso server not found")]
     TsoServerNotFound,
+    #[error("split regions not finished ({finished_percent}%)")]
+    SplitRegionsNotFinished {
+        regions_id: Vec<u64>,
+        finished_percent: u64,
+    },
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -59,6 +64,10 @@ impl Error {
             | Error::ClusterBootstrapped(_)
             | Error::Incompatible
             | Error::UnsafeServiceGcSafePoint { .. } => false,
+            e @ Error::SplitRegionsNotFinished { .. } => {
+                debug_assert!(false, "unreachable: {:?}", e);
+                false
+            }
         }
     }
 }
@@ -78,6 +87,7 @@ impl ErrorCodeExt for Error {
             Error::UnsafeServiceGcSafePoint { .. } => error_code::pd::STALE_SERVICE_GC_SAFE_POINT,
             Error::ChannelDrop => error_code::pd::CHANNEL_DROP,
             Error::TsoServerNotFound => error_code::pd::TSO_SERVER_NOT_FOUND,
+            Error::SplitRegionsNotFinished { .. } => error_code::pd::SPLIT_REGIONS_NOT_FINISHED,
             Error::Other(_) => error_code::pd::UNKNOWN,
         }
     }
