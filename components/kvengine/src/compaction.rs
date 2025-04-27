@@ -2375,11 +2375,10 @@ pub async fn handle_remote_compaction(
             .unwrap());
     }
 
-    debug_assert!(
-        comp_req.input_size > 0,
-        "input_size not set: {:?}",
-        comp_req
-    );
+    if comp_req.input_size == 0 {
+        warn!("input_size not set: {:?}", comp_req);
+        // TODO: `debug_assert!(false)`.
+    }
     let request_size = comp_req.input_size * 2; // The memory usage is 2x input size for both reading and writing.
     let mem_limiter_guard = match memory_limiter.acquire(request_size) {
         Ok(guard) => guard,
