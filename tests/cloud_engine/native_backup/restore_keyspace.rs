@@ -23,13 +23,8 @@ use kvengine::{
 };
 use kvproto::metapb;
 use native_br::{
-    archive, backup,
-    common::now,
-    metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
-    restore::RestoreConfig,
-    restore_keyspace,
-    restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
-    step,
+    archive, backup, common::now, metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
+    restore::RestoreConfig, restore_keyspace, step,
 };
 use pd_client::PdClient;
 use rand::prelude::*;
@@ -57,7 +52,8 @@ use tokio::runtime::Runtime;
 use txn_types::TimeStamp;
 
 use crate::{
-    alloc_node_id_vec, new_security_config, request_major_compaction, wait_for_keyspace_stats,
+    alloc_node_id_vec, native_backup::DummyStepReporter, new_security_config,
+    request_major_compaction, wait_for_keyspace_stats,
 };
 
 const BASIC_DATA_COUNT: usize = 10;
@@ -1798,11 +1794,4 @@ fn check_learners(
 fn generate_backup_name() -> String {
     static BACKUP_ID: AtomicUsize = AtomicUsize::new(0);
     format!("{:04}", BACKUP_ID.fetch_add(1, Ordering::Relaxed))
-}
-
-#[derive(Default)]
-struct DummyStepReporter {}
-
-impl ReportRestoreStepTrait for DummyStepReporter {
-    fn report_step(&self, _step: RestoreStep) {}
 }

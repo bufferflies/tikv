@@ -54,9 +54,7 @@ const TIKV_WORKERS_COUNT: usize = 2;
 
 const RESTORE_CONCURRENCY: usize = 2;
 const LOAD_DATA_CONCURRENCY: usize = 2;
-// `INSTANT_BACKUP_INTERVAL` is more than 1 second as the incremental backup
-// file name has a precision of 1 second.
-const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
+const PERIODIC_BACKUP_INTERVAL: Duration = Duration::from_secs(3);
 
 const KV_TARGET_FILE_SIZE: ReadableSize = ReadableSize::kb(16);
 const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
@@ -101,8 +99,7 @@ fn test_random_all() {
         Arc::new(backup_worker::BackupWorker::new(
             backup_config.clone(),
             pd_client.clone(),
-            INSTANT_BACKUP_INTERVAL,
-            100,
+            PERIODIC_BACKUP_INTERVAL,
         ))
     };
     let load_data_config = {

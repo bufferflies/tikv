@@ -250,6 +250,7 @@ fn start_server(
         config.worker_scaler.clone(),
         load_data_config,
     ));
+
     let br_manager = Arc::new(NativeBrManager::new(
         thread_pool.clone(),
         pd.clone(),
@@ -258,6 +259,7 @@ fn start_server(
         config.clone(),
     ));
     spawn_br_background_worker(br_manager.clone(), config_file_path);
+
     let txn_chunk_handler = Arc::new(TxnChunkHandler::new(config.txn_chunk_target_block_entries));
 
     let worker_limiter = WorkerLimiter::new(config.worker_limiter.clone());

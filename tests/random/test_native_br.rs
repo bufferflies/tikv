@@ -88,11 +88,9 @@ pub(crate) fn spawn_backup(
             // 3. As the keyspace of backup determines the keyspace to restore, we pick the
             //    random keyspace uniformly, to generate the scenario that some big
             //    keyspaces are never restored.
-            let (keyspace_id, do_lightweight_backup) = {
+            let keyspace_id = {
                 let mut rng = rand::thread_rng();
-                let keyspace_id = keyspace_manager.get_uniform_random_keyspace(&mut rng);
-                let do_lightweight_backup = rng.gen_ratio(4, 5);
-                (keyspace_id, do_lightweight_backup)
+                keyspace_manager.get_uniform_random_keyspace(&mut rng)
             };
 
             let lock = keyspace_manager.get_keyspace_lock(keyspace_id);
@@ -106,12 +104,7 @@ pub(crate) fn spawn_backup(
             // See https://github.com/tidbcloud/cloud-storage-engine/issues/1094.
             let shared_guard = guard.downgrade();
 
-            if do_lightweight_backup {
-                info!("spawn lightweight backup");
-            } else {
-                info!("spawn incremental backup");
-            }
-            let backup_file = match backup_worker.instant_backup(do_lightweight_backup).await {
+            let backup_file = match backup_worker.instant_backup().await {
                 Ok(backup_file) => backup_file,
                 Err(err) if is_backup_error_retryable(&err) => {
                     warn!("backup failed, retry: {:?}", err);
@@ -129,8 +122,8 @@ pub(crate) fn spawn_backup(
             let backup_meta =
                 get_cluster_backup_meta_async(&s3fs, backup_file.name().to_string()).await;
             info!(
-                "instant backup success, keyspace {}, lightweight {}, file {:?}, backup_meta {:?}",
-                keyspace_id, do_lightweight_backup, backup_file, backup_meta,
+                "instant backup success, keyspace {}, file {:?}, backup_meta {:?}",
+                keyspace_id, backup_file, backup_meta,
             );
 
             BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);

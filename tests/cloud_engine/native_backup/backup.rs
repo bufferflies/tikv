@@ -3,18 +3,34 @@
 use std::{
     iter::FromIterator,
     path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
 };
 
-use kvengine::dfs::DFSConfig;
-use native_br::{backup, restore};
-use rand::Rng;
+use api_version::ApiV2;
+use chrono::Utc;
+use kvengine::dfs::{DFSConfig, S3Fs};
+use native_br::{
+    backup, backup_worker, common::get_all_incremental_backups, restore, restore::RestoreConfig,
+    restore_keyspace,
+};
+use rand::prelude::*;
 use security::SecurityConfig;
-use test_cloud_server::{client, oss::ObjectStorageService, ServerClusterBuilder};
+use test_cloud_server::{
+    alloc_node_id_vec, client,
+    client::RequestOptions,
+    oss::{prepare_dfs, ObjectStorageService},
+    try_wait_result, ServerCluster, ServerClusterBuilder,
+};
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::{config::ReadableSize, info};
+use tokio::runtime::Runtime;
 
-use crate::alloc_node_id;
+use crate::{
+    alloc_node_id,
+    native_backup::{random_value, DummyStepReporter},
+};
 
 const CLUSTER_ID: u64 = 10000;
 const NODES_SIZE: usize = 3;
@@ -212,10 +228,108 @@ fn test_native_lightweight_backup() {
     oss.shutdown();
 }
 
+#[test]
+fn test_periodic_backup() {
+    test_util::init_log_for_test();
+    const KEYSPACE_ID: u32 = 1;
+    const DATA_LEN: usize = 10;
+    const VALUE_SIZE: usize = 64;
+
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("t_");
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
+    let reporter = Arc::new(DummyStepReporter::default());
+    let runtime = Runtime::new().unwrap();
+
+    let nodes = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(nodes.clone(), |_, conf: &mut TikvConfig| {
+        conf.dfs = dfs_config.clone();
+        conf.rfengine.lightweight_backup = true;
+        conf.enable_inner_key_offset = true;
+    });
+    cluster.wait_region_replicated(&[], 3);
+    let pd_client = cluster.get_pd_client();
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+
+    let gen_key = i_to_keyspace_key(KEYSPACE_ID);
+    client.put_kv(0..DATA_LEN, &gen_key, random_value::<VALUE_SIZE>);
+    client.verify_data_with_ref_store();
+    let origin_ref_store = client.dump_ref_store();
+
+    let backup_config = backup::BackupConfig {
+        dfs: dfs_config.clone(),
+        skip_keyspace_meta: true,
+        ..Default::default()
+    };
+    let backup_worker =
+        backup_worker::BackupWorker::new(backup_config, pd_client.clone(), Duration::from_secs(2));
+
+    let now = Utc::now().date_naive();
+    let files = try_wait_result(
+        || match runtime.block_on(get_all_incremental_backups(
+            s3fs.as_ref(),
+            &now,
+            None,
+            usize::MAX,
+        )) {
+            Ok((files, _)) if files.len() >= 3 => Ok(files),
+            Ok(_) => Err("not enough files".to_string()),
+            Err(e) => Err(format!("failed: {}", e)),
+        },
+        20,
+    )
+    .unwrap();
+    info!("backup files: {:?}", &files);
+
+    // Put another data.
+    client.put_kv(
+        DATA_LEN / 4..DATA_LEN / 2,
+        &gen_key,
+        random_value::<VALUE_SIZE>,
+    );
+    client.verify_data_with_ref_store();
+
+    let backup_file = files.choose(&mut thread_rng()).unwrap();
+
+    let pd_client = cluster.get_pd_client();
+    let res = restore_keyspace::restore_keyspace(
+        KEYSPACE_ID,
+        KEYSPACE_ID,
+        backup_file.name(),
+        None,
+        s3fs.clone(),
+        RestoreConfig::default(),
+        pd_client,
+        &runtime,
+        None,
+        reporter,
+    )
+    .unwrap();
+
+    info!("restore keyspace result: {:?}", res);
+    let (existed, deleted) = client
+        .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
+        .unwrap();
+    assert_eq!(existed, DATA_LEN);
+    assert_eq!(deleted, 0);
+
+    backup_worker.stop();
+    cluster.stop();
+    oss.shutdown();
+}
+
 fn i_to_key(i: usize) -> Vec<u8> {
     format!("xkey_{:08}", i).into_bytes()
 }
 
 fn i_to_val(i: usize) -> Vec<u8> {
     format!("val_{:08}", i).into_bytes().repeat(100)
+}
+
+fn i_to_keyspace_key(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
+    move |i: usize| -> Vec<u8> {
+        let mut key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
+        key.extend(format!("tkey_{:08}", i).into_bytes());
+        key
+    }
 }

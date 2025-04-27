@@ -41,7 +41,6 @@ pub(crate) const MAX_RESTORE_CONCURRENCY: usize = 128;
 const MAX_BACKUP_COUNT_PER_PAGE: usize = 1000; // Same with dfs list.
 const JSON_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f"; // e.g. 2006-01-02 15:04:05.000
 const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
-const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const BACKUPS_API_PATH: &str = "/api/v1/backups";
 pub(crate) const RESTORE_KEYSPACE_API_PATH: &str = "/api/v1/restore_keyspace/";
 
@@ -706,13 +705,10 @@ impl BrContext {
         // Otherwise the data from previous backup to now will be lost, and can not be
         // restored by PiTR.
         progress_reporter.report_step(RestoreStep::InstantBackup);
-        let lightweight = config.native_br.enable_lightweight_backup;
-        let instant_backup =
-            self.runtime
-                .block_on(self.backup_worker.instant_backup_with_retry(
-                    lightweight,
-                    config.native_br.instant_backup_timeout.0,
-                ))?;
+        let instant_backup = self.runtime.block_on(
+            self.backup_worker
+                .instant_backup_with_retry(config.native_br.instant_backup_timeout.0),
+        )?;
 
         let get_truncate_ts =
             |utc_time: Option<DateTime<Utc>>, restore_type: RestoreType| -> Option<u64> {
@@ -837,8 +833,6 @@ impl Drop for BrContext {
 pub struct NativeBrConfig {
     /// The time-to-live when restore task has been in final state.
     restore_task_ttl: ReadableDuration,
-    /// Enable lightweight instant backup during restore.
-    enable_lightweight_backup: bool,
 
     /// The timeout for waiting the flush of mem-tables.
     pub restore_timeout_wait_flush: ReadableDuration,
@@ -853,6 +847,8 @@ pub struct NativeBrConfig {
 
     /// The timeout for instant backup.
     pub instant_backup_timeout: ReadableDuration,
+    /// Interval for periodic backup. `0s` to disable periodic backup.
+    pub backup_interval: ReadableDuration,
 
     /// Whether to tolerate unavailability of no more than one store when
     /// backup.
@@ -866,13 +862,13 @@ impl Default for NativeBrConfig {
     fn default() -> Self {
         Self {
             restore_task_ttl: ReadableDuration::minutes(60),
-            enable_lightweight_backup: false,
             restore_timeout_wait_flush: restore::DEFAULT_TIMEOUT_WAIT_FLUSH,
             restore_timeout_restore_snapshot: restore::DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
             restore_timeout_fetch_wal: restore::DEFAULT_TIMEOUT_FETCH_WAL,
             restore_max_retry: restore::DEFAULT_RESTORE_MAX_RETRY,
             restore_coarse_split_regions_factor: 64,
             instant_backup_timeout: backup_worker::DEFAULT_TIMEOUT_INSTANT_BACKUP,
+            backup_interval: ReadableDuration::ZERO,
             backup_tolerate_err: false,
             restore_tolerate_err: false,
         }
@@ -896,8 +892,7 @@ impl NativeBrManager {
         let backup_worker = BackupWorker::new(
             backup_config,
             pd_client.clone(),
-            INSTANT_BACKUP_INTERVAL,
-            MAX_RESTORE_CONCURRENCY,
+            config.native_br.backup_interval.0,
         );
         Self {
             context: Arc::new(BrContext {
