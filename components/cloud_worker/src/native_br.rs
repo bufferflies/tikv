@@ -849,6 +849,7 @@ pub struct NativeBrConfig {
     /// The maximum number of retries for the process from split regions to
     /// restore snapshots.
     pub restore_max_retry: usize,
+    pub restore_coarse_split_regions_factor: usize,
 
     /// The timeout for instant backup.
     pub instant_backup_timeout: ReadableDuration,
@@ -870,6 +871,7 @@ impl Default for NativeBrConfig {
             restore_timeout_restore_snapshot: restore::DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
             restore_timeout_fetch_wal: restore::DEFAULT_TIMEOUT_FETCH_WAL,
             restore_max_retry: restore::DEFAULT_RESTORE_MAX_RETRY,
+            restore_coarse_split_regions_factor: 64,
             instant_backup_timeout: backup_worker::DEFAULT_TIMEOUT_INSTANT_BACKUP,
             backup_tolerate_err: false,
             restore_tolerate_err: false,

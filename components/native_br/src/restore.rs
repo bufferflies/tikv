@@ -501,6 +501,9 @@ pub struct RestoreConfig {
     pub timeout_pd_control: ReadableDuration,
     /// Concurrency on number of TiKV stores when perform restoration.
     pub store_concurrency: usize,
+    /// Coarse split regions when the target region cover more than the factor *
+    /// number of regions in backup.
+    pub coarse_split_regions_factor: usize,
 }
 
 impl Default for RestoreConfig {
@@ -520,6 +523,7 @@ impl Default for RestoreConfig {
             tolerate_err: 0,
             strict_tolerate: false,
             store_concurrency: RESTORE_RFENGINE_CONCURRENCY,
+            coarse_split_regions_factor: 64, // It's about 32 GiB when region size is 500 MiB.
         }
     }
 }

@@ -48,7 +48,7 @@ use tempdir::TempDir;
 use tikv::{config::TikvConfig, storage::mvcc::Key};
 use tikv_util::{
     backoff::ExponentialBackoff, box_err, box_try, http::CONTENT_TYPE_PROTOBUF,
-    merge_range::MergeRanges, mpsc, time::Instant, HandyRwLock,
+    merge_range::MergeRanges, mpsc, retry::try_wait_result_async, time::Instant, HandyRwLock,
 };
 use tokio::runtime::Runtime;
 
@@ -79,6 +79,9 @@ const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_
 const REPLICAS: usize = 3; // Number of replicas for each region.
 
 const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
+
+const SPLIT_REGIONS_BATCH_SIZE: usize = 256;
+const SPLIT_REGIONS_TIMEOUT_PER_KEY: Duration = Duration::from_millis(100);
 
 pub const RESTORE_RFENGINE_CONCURRENCY: usize = 3;
 
@@ -336,8 +339,11 @@ pub fn restore_keyspace(
         cluster.truncate_ts
     );
 
-    let inner_split_keys = cluster.get_region_split_keys(&target_keyspace_start);
+    // Pre-split & scatter target keyspace regions.
+    reporter.report_step(RestoreStep::SplitRegions);
+    cluster.pre_split_and_scatter_regions(&config, runtime)?;
 
+    // Restore snapshot.
     let mut success_ranges = MergeRanges::default();
     let mut retry = 0;
     let mut bo = ExponentialBackoff::new(
@@ -345,8 +351,6 @@ pub fn restore_keyspace(
         Duration::from_secs(10),
         config.max_retry,
     );
-    // TODO: split regions for inplace restore.
-    let mut need_split_regions = !inplace_restore;
     let mut last_error = None;
     let mut restore_bytes = 0;
     loop {
@@ -369,38 +373,6 @@ pub fn restore_keyspace(
             }
         };
 
-        if need_split_regions {
-            reporter.report_step(RestoreStep::SplitRegions);
-
-            // Try split target keyspace regions according to backup keyspace regions if
-            // needed.
-            // No need check keyspace split in retry.
-            split_target_keyspace(
-                &inner_split_keys,
-                &target_regions,
-                &keyspace_tag,
-                pd_client.clone(),
-                config.timeout_split_regions.0,
-                runtime,
-            )?;
-            need_split_regions = false;
-
-            // Update target regions after split.
-            target_regions = match runtime.block_on(get_target_regions(
-                pd_client.as_ref(),
-                &target_keyspace_start,
-                &target_keyspace_end,
-            )) {
-                Ok(regions) => regions,
-                Err(err) => {
-                    warn!("get target regions failed: {:?}, retry again", err);
-                    last_error = Some(err);
-                    thread::sleep(Duration::from_millis(200));
-                    continue;
-                }
-            };
-        }
-
         let target_regions_total_cnt = target_regions.len();
         if !success_ranges.is_empty() {
             target_regions.retain(|r| !success_ranges.covered(&r.raw_start, &r.raw_end));
@@ -414,8 +386,9 @@ pub fn restore_keyspace(
 
         // Align target regions.
         reporter.report_step(RestoreStep::AlignRegions);
-        let (aligned_regions, trimmed_shards_cnt) =
-            cluster.align_target_regions(target_regions, runtime)?;
+        let aligned_regions = cluster.align_target_regions(target_regions);
+        let trimmed_shards_cnt =
+            runtime.block_on(cluster.trim_over_bound_shards(&aligned_regions))?;
         step!(
             "Keyspace {} align {} backup shards to {} target regions and trim {} over bound shards",
             keyspace_tag,
@@ -492,41 +465,6 @@ fn check_backup_meta_ts(meta: &ClusterBackupMeta, truncate_ts: u64) -> Result<()
             meta.backup_ts,
         ));
     }
-    Ok(())
-}
-
-fn split_target_keyspace(
-    split_keys: &[Vec<u8>],
-    target_regions: &[RawRegion],
-    keyspace_tag: &str,
-    pd_client: Arc<dyn PdClient>,
-    timeout: Duration,
-    runtime: &Runtime,
-) -> Result<()> {
-    if split_keys.is_empty() {
-        return Ok(());
-    }
-
-    // Filter out the already splitted keys.
-    let mut split_keys = split_keys.to_vec();
-    split_keys.retain(|key| {
-        target_regions
-            .iter()
-            .all(|region| key.as_slice() != region.get_start_key())
-    });
-    step!(
-        "Keyspace {} split target regions, split keys count {}",
-        keyspace_tag,
-        split_keys.len(),
-    );
-    let enc_split_keys = split_keys
-        .iter()
-        .map(|key| Key::from_raw(key.as_slice()).into_encoded())
-        .collect::<Vec<_>>();
-    if !enc_split_keys.is_empty() {
-        runtime.block_on(pd_client.split_regions_with_retry(enc_split_keys, timeout))?;
-    }
-
     Ok(())
 }
 
@@ -1941,43 +1879,104 @@ impl BackupCluster {
         aligned_regions
     }
 
-    fn align_target_regions(
-        &mut self,
-        target_regions: Vec<RawRegion>,
-        runtime: &Runtime,
-    ) -> Result<(
-        Vec<AlignedRegion>,
-        usize, // number of trimmed shards
-    )> {
-        let aligned_regions =
-            Self::align_target_regions_impl(&self.sorted_shards, &self.shards, target_regions);
-        let trimmed_shards_cnt = runtime.block_on(self.trim_over_bound_shards(&aligned_regions))?;
-        Ok((aligned_regions, trimmed_shards_cnt))
+    fn align_target_regions(&self, sorted_target_regions: Vec<RawRegion>) -> Vec<AlignedRegion> {
+        Self::align_target_regions_impl(&self.sorted_shards, &self.shards, sorted_target_regions)
     }
 
-    pub fn get_region_split_keys(&self, keyspace_prefix: &[u8]) -> Vec<Vec<u8>> {
+    fn pre_split_and_scatter_regions(
+        &self,
+        config: &RestoreConfig,
+        runtime: &Runtime,
+    ) -> Result<()> {
+        let (target_keyspace_start, target_keyspace_end) =
+            ApiV2::get_keyspace_range_by_id(self.target_keyspace_id);
+        let target_regions = runtime.block_on(get_target_regions_with_retry(
+            self.pd_client.as_ref(),
+            &target_keyspace_start,
+            &target_keyspace_end,
+            config.timeout_restore_snapshot.0,
+        ))?;
+        let aligned_regions = self.align_target_regions(target_regions);
+
+        let mut coarse_split_keys =
+            Vec::with_capacity(self.sorted_shards.len() / config.coarse_split_regions_factor);
         let mut split_keys = Vec::with_capacity(self.sorted_shards.len() - 1);
-        for shard_id in &self.sorted_shards {
-            let shard = self.get_shard(*shard_id).unwrap();
-            debug!(
-                "get_region_split_keys, shard_id: {} start key {:?} end key {:?}",
-                shard_id,
-                shard.start().to_vec(),
-                shard.end().to_vec()
-            );
-            let mut split_key = keyspace_prefix.to_vec();
-            let inner_start = shard.inner_start();
+        for r in aligned_regions {
+            for (idx, &shard_id) in r.backup_shards_id.iter().enumerate().skip(1) {
+                let shard = self.get_shard(shard_id).unwrap();
+                let split_key =
+                    [target_keyspace_start.clone(), shard.inner_start().to_vec()].concat();
 
-            // Skip the keyspace boundary key.
-            if inner_start.is_empty() {
-                continue;
+                if idx % config.coarse_split_regions_factor == 0 {
+                    coarse_split_keys.push(split_key);
+                } else {
+                    split_keys.push(split_key);
+                }
             }
-            split_key.extend_from_slice(inner_start.deref());
-
-            split_keys.push(split_key);
         }
 
-        split_keys
+        self.split_regions_for_keys(
+            coarse_split_keys,
+            split_keys,
+            config.timeout_split_regions.0,
+            runtime,
+        )
+    }
+
+    fn split_regions_for_keys(
+        &self,
+        coarse_split_keys: Vec<Vec<u8>>,
+        split_keys: Vec<Vec<u8>>,
+        timeout: Duration,
+        runtime: &Runtime,
+    ) -> Result<()> {
+        if !coarse_split_keys.is_empty() {
+            debug!("{} coarse split regions", self.tag(); "keys" => ?coarse_split_keys);
+            self.split_regions_with_retry(coarse_split_keys, true, timeout, runtime)?;
+        }
+        if !split_keys.is_empty() {
+            debug!("{} split regions", self.tag(); "keys" => ?split_keys);
+            self.split_regions_with_retry(split_keys, false, timeout, runtime)?;
+        }
+        Ok(())
+    }
+
+    fn split_regions_with_retry(
+        &self,
+        raw_keys: Vec<Vec<u8>>,
+        scatter: bool,
+        timeout: Duration,
+        runtime: &Runtime,
+    ) -> Result<()> {
+        for batch in raw_keys.chunks(SPLIT_REGIONS_BATCH_SIZE) {
+            let encoded_keys = batch
+                .iter()
+                .map(|key| Key::from_raw(key).into_encoded())
+                .collect::<Vec<_>>();
+            let timeout = cmp::max(
+                SPLIT_REGIONS_TIMEOUT_PER_KEY * encoded_keys.len() as u32,
+                timeout,
+            );
+            step!(
+                "Keyspace {} split regions for {} keys",
+                self.tag(),
+                encoded_keys.len()
+            );
+            let regions = runtime
+                .block_on(
+                    self.pd_client
+                        .split_regions_with_retry(encoded_keys, timeout),
+                )
+                .map_err(|e| Error::SpitRegionsError(e))?;
+            if scatter {
+                step!("Keyspace {} scatter {} regions", self.tag(), regions.len());
+                if let Err(err) = self.pd_client.scatter_regions_by_id(regions) {
+                    warn!("{} scatter regions failed: {:?}", self.tag(), err);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn update_schema_file_restore_version(&self, schema_file_id: u64) -> Result<u64> {
@@ -2498,6 +2497,20 @@ async fn get_target_regions(
 
     verify_regions_boundary(start_key, end_key, &regions)?;
     Ok(regions)
+}
+
+async fn get_target_regions_with_retry(
+    pd_client: &dyn PdClient,
+    start_key: &[u8],
+    end_key: &[u8],
+    timeout: Duration,
+) -> Result<Vec<RawRegion>> {
+    try_wait_result_async(
+        || Box::pin(get_target_regions(pd_client, start_key, end_key)),
+        timeout,
+        || Duration::from_millis(500),
+    )
+    .await
 }
 
 fn verify_regions_boundary(start_key: &[u8], end_key: &[u8], regions: &[RawRegion]) -> Result<()> {

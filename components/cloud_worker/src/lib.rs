@@ -820,6 +820,7 @@ impl Config {
             timeout_fetch_wal: self.native_br.restore_timeout_fetch_wal,
             max_retry: self.native_br.restore_max_retry,
             tolerate_err,
+            coarse_split_regions_factor: self.native_br.restore_coarse_split_regions_factor,
             ..Default::default()
         }
     }
