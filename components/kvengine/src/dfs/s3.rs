@@ -108,7 +108,7 @@ pub struct S3FsCore {
     region: Region,
     bucket: String,
     prefix: String,
-    runtime: tokio::runtime::Runtime,
+    runtime: Option<tokio::runtime::Runtime>,
     virtual_host: bool,
 }
 
@@ -201,7 +201,7 @@ impl S3FsCore {
             region,
             bucket,
             prefix,
-            runtime,
+            runtime: Some(runtime),
             virtual_host,
         }
     }
@@ -884,6 +884,14 @@ impl S3FsCore {
     }
 }
 
+impl Drop for S3FsCore {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 impl ObjectStorage for S3Fs {
     fn put_objects(&self, objects: Vec<(String, Bytes)>) -> Result<(), String> {
         let put_object = |key: String, data: Bytes| {
@@ -1059,7 +1067,7 @@ impl Dfs for S3Fs {
     }
 
     fn get_runtime(&self) -> &Runtime {
-        &self.runtime
+        self.runtime.as_ref().unwrap()
     }
 }
 
@@ -1267,7 +1275,7 @@ mod tests {
                 }
             }
         };
-        s3fs.runtime.spawn(f);
+        s3fs.get_runtime().spawn(f);
         assert!(rx.recv().unwrap());
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
@@ -1288,7 +1296,7 @@ mod tests {
                 }
             }
         };
-        s3fs.runtime.spawn(f);
+        s3fs.get_runtime().spawn(f);
         assert!(rx.recv().unwrap());
         let data = std::fs::read(&local_file).unwrap();
         assert_eq!(&data, &file_data);
@@ -1303,7 +1311,7 @@ mod tests {
             fs.remove(321, None, Options::default()).await;
             tx.send(true).unwrap();
         };
-        s3fs.runtime.spawn(f);
+        s3fs.get_runtime().spawn(f);
         assert!(rx.recv().unwrap());
         let _ = fs::remove_file(local_file);
     }
@@ -1332,7 +1340,7 @@ mod tests {
                 }
             }
         };
-        s3fs.runtime.spawn(f);
+        s3fs.get_runtime().spawn(f);
         assert!(rx.recv().unwrap());
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
@@ -1352,7 +1360,7 @@ mod tests {
                 }
             }
         };
-        s3fs.runtime.spawn(f);
+        s3fs.get_runtime().spawn(f);
         assert!(rx.recv().unwrap());
         let data = std::fs::read(&local_file).unwrap();
         assert_eq!(&data, &file_data);
@@ -1367,7 +1375,7 @@ mod tests {
             fs.remove(1234, None, opts).await;
             tx.send(true).unwrap();
         };
-        s3fs.runtime.spawn(f);
+        s3fs.get_runtime().spawn(f);
         assert!(rx.recv().unwrap());
         let _ = fs::remove_file(local_file);
     }
