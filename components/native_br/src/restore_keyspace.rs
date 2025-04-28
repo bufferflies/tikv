@@ -5,7 +5,7 @@ use std::{
     cmp,
     collections::hash_map::Entry,
     default::Default,
-    fmt, mem,
+    fmt, mem, ops,
     ops::Deref,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
@@ -345,20 +345,14 @@ pub fn restore_keyspace(
 
     // Restore snapshot.
     let mut success_ranges = MergeRanges::default();
-    let mut retry = 0;
-    let mut bo = ExponentialBackoff::new(
+    let mut bo = Backoff::new(ExponentialBackoff::new(
         Duration::from_secs(1),
         Duration::from_secs(10),
         config.max_retry,
-    );
-    let mut last_error = None;
+    ));
     let mut restore_bytes = 0;
+    // NOTE: must call `bo::on_error` before every "continue".
     loop {
-        if retry > config.max_retry {
-            return Err(RetryLimitExceeded(Box::new(last_error.unwrap())));
-        }
-        retry += 1;
-
         let mut target_regions = match runtime.block_on(get_target_regions(
             pd_client.as_ref() as &dyn PdClient,
             &target_keyspace_start,
@@ -366,9 +360,8 @@ pub fn restore_keyspace(
         )) {
             Ok(regions) => regions,
             Err(err) => {
-                warn!("get target regions failed: {:?}, retry again", err);
-                last_error = Some(err);
-                thread::sleep(Duration::from_millis(200));
+                warn!("get target regions failed: {:?}, retry", err);
+                bo.on_error(err)?;
                 continue;
             }
         };
@@ -426,10 +419,12 @@ pub fn restore_keyspace(
 
         if success_ranges.covered(&target_keyspace_start, &target_keyspace_end) {
             break;
-        } else {
-            last_error = Some(Error::RestoreSnapshot);
-            step!("Keyspace {keyspace_tag} restore retry {retry}");
         }
+        bo.on_error(Error::RestoreSnapshot)?;
+        step!(
+            "Keyspace {keyspace_tag} restore retry {}",
+            bo.current_attempts()
+        );
     }
 
     reporter.report_step(RestoreStep::RetainSstFiles);
@@ -2554,15 +2549,16 @@ fn restore_snapshots(
     snapshots: Vec<pb::ChangeSet>,
     success_ranges: &mut MergeRanges,
     timeout: Duration,
-    bo: &mut ExponentialBackoff,
+    bo: &mut Backoff,
 ) -> Result<RestoredSnapshots> {
     let mut handles = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
         let pd_client = pd_client.clone();
+        let shard_id = snap.shard_id;
         let start = snap.get_restore_shard().get_outer_start().to_vec();
         let end = snap.get_restore_shard().get_outer_end().to_vec();
         let task = async move { request_restore_snapshot(pd_client, &snap, timeout).await };
-        handles.push((runtime.spawn(task), start, end));
+        handles.push((shard_id, runtime.spawn(task), start, end));
     }
 
     let is_error_retryable = |err: &Error| {
@@ -2573,16 +2569,18 @@ fn restore_snapshots(
     };
 
     let mut disk_full_regions = vec![];
+    let mut disk_full_stores: HashSet<u64> = HashSet::default();
     let mut restored = RestoredSnapshots::default();
-    for (h, start, end) in handles {
+    for (shard_id, h, start, end) in handles {
         match runtime.block_on(h).unwrap() {
             Ok(resp) => {
                 success_ranges.insert(start, end);
                 restored.count += 1;
                 restored.restore_bytes += resp.restore_bytes;
             }
-            Err(Error::StoreDiskFull(_, shard_id)) => {
+            Err(Error::StoreDiskFull(stores_id)) => {
                 disk_full_regions.push(shard_id);
+                disk_full_stores.extend(stores_id);
             }
             Err(e) if is_error_retryable(&e) => {
                 info!("{} request_restore_snapshot error: {:?}, retry", tag, e);
@@ -2595,14 +2593,10 @@ fn restore_snapshots(
     }
 
     if !disk_full_regions.is_empty() {
+        let stores = Vec::from_iter(disk_full_stores);
         warn!("{} request_restore_snapshot error: disk full", tag;
-            "regions" => ?disk_full_regions);
-        match bo.next_delay() {
-            Ok(delay) => thread::sleep(delay),
-            Err(_) => {
-                return Err(RetryLimitExceeded(Box::new(Error::RestoreSnapshot)));
-            }
-        }
+            "regions" => ?disk_full_regions, "stores" => ?stores);
+        bo.on_error(Error::StoreDiskFull(stores))?;
 
         if let Err(err) = pd_client.scatter_regions_by_id(disk_full_regions.clone()) {
             warn!("{} scatter regions failed", tag;
@@ -2662,10 +2656,7 @@ async fn request_restore_snapshot(
             Err(Error::HttpPbError(status, mut err)) => {
                 warn!("{} request_restore_snapshot failed: {:?}", tag, err);
                 let sleep_dur = if err.has_disk_full() {
-                    return Err(Error::StoreDiskFull(
-                        err.take_disk_full().take_store_id(),
-                        cs.shard_id,
-                    ));
+                    return Err(Error::StoreDiskFull(err.take_disk_full().take_store_id()));
                 } else if err.has_epoch_not_match() {
                     return Err(Error::RegionVerNotMatch {
                         expected: shard_ver,
@@ -2778,6 +2769,40 @@ impl PeerPreprocessor {
             pending_merge_state: &mut self.pending_merge_state,
             learner_skip_idx: &mut self.learner_skip_idx,
             encryption_key: &mut self.encryption_key,
+        }
+    }
+}
+
+struct Backoff {
+    inner: ExponentialBackoff,
+}
+
+impl ops::Deref for Backoff {
+    type Target = ExponentialBackoff;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl ops::DerefMut for Backoff {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Backoff {
+    fn new(bo: ExponentialBackoff) -> Self {
+        Self { inner: bo }
+    }
+
+    fn on_error(&mut self, err: Error) -> Result<usize /* current_attempts */> {
+        match self.next_delay() {
+            Ok(delay) => {
+                thread::sleep(delay);
+                Ok(self.current_attempts())
+            }
+            Err(_) => Err(RetryLimitExceeded(Box::new(err))),
         }
     }
 }

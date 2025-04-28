@@ -55,7 +55,7 @@ pub enum Error {
     #[error("Region {0} not found or no leader")]
     RegionNotFoundOrNoLeader(u64 /* region id */),
     #[error("TiKV store disk full {0:?}")]
-    StoreDiskFull(Vec<u64> /* stores id */, u64 /* region id */),
+    StoreDiskFull(Vec<u64> /* stores id */),
     #[error(transparent)]
     HttpRequestError(#[from] HttpRequestError),
     #[error("HTTP error {0}:{1}")]

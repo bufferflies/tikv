@@ -2018,6 +2018,7 @@ impl<'a> StoreMsgHandler<'a> {
         );
 
         if is_leader {
+            let tag = peer_fsm.peer.tag();
             peer_fsm.peer.heartbeat_pd(self.ctx);
             info!(
                 "{} store_fsm::on_restore_shard_result: notify pd, peer_id: {}",
