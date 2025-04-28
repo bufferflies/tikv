@@ -71,12 +71,12 @@ fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
     // Transfer leader of region0 to another store.
     if do_leader_transfer {
         let region_id0 = client.get_region_id(&i_to_key(0));
-        let (region0, leader0) = block_on(client.pd_client.get_region_leader_by_id(region_id0))
+        let (region0, leader0) = block_on(client.pd_client().get_region_leader_by_id(region_id0))
             .unwrap()
             .unwrap();
 
         let region_id300 = client.get_region_id(&i_to_key(300));
-        let (_, leader300) = block_on(client.pd_client.get_region_leader_by_id(region_id300))
+        let (_, leader300) = block_on(client.pd_client().get_region_leader_by_id(region_id300))
             .unwrap()
             .unwrap();
 
@@ -87,10 +87,10 @@ fn test_trim_over_bound_impl(split_key_idx: usize, do_leader_transfer: bool) {
                 .find(|x| x.store_id != leader300.store_id)
                 .unwrap();
             client
-                .pd_client
+                .pd_client()
                 .transfer_leader(region0.id, target.clone(), vec![]);
             client
-                .pd_client
+                .pd_client()
                 .region_leader_must_be(region0.id, target.clone());
         }
     }

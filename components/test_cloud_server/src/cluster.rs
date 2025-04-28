@@ -228,7 +228,12 @@ impl ServerCluster {
         let store_id = server.get_store_id();
         if let std::collections::hash_map::Entry::Vacant(e) = self.channels.entry(store_id) {
             let addr = node_addr(node_id);
-            let channel = ChannelBuilder::new(self.env.clone()).connect(&addr);
+            let channel = ChannelBuilder::new(self.env.clone())
+                .keepalive_time(Duration::from_secs(1))
+                .keepalive_timeout(Duration::from_secs(1))
+                .max_reconnect_backoff(Duration::from_secs(1))
+                .initial_reconnect_backoff(Duration::from_secs(1))
+                .connect(&addr);
             e.insert(channel);
         }
         self.servers.insert(node_id, server);
@@ -547,6 +552,7 @@ impl ServerCluster {
             .txn_file_max_chunk_size
             .and_then(|size| self.new_txn_client_helper(size));
         ClusterClient {
+            opts: options,
             pd_client: self.pd_client.clone(),
             channels: self.channels.clone(),
             region_ranges: Default::default(),
@@ -1468,16 +1474,16 @@ where
     false
 }
 
-pub async fn try_wait_result_async<F, E>(mut f: F, seconds: usize) -> std::result::Result<(), E>
+pub async fn try_wait_result_async<T, F, E>(mut f: F, seconds: usize) -> std::result::Result<T, E>
 where
-    F: FnMut() -> futures::future::BoxFuture<'static, std::result::Result<(), E>>,
+    F: FnMut() -> futures::future::BoxFuture<'static, std::result::Result<T, E>>,
 {
     let begin = Instant::now_coarse();
     let timeout = Duration::from_secs(seconds as u64);
     let mut last_err: Option<E> = None;
     while begin.saturating_elapsed() < timeout {
         match f().await {
-            Ok(()) => return Ok(()),
+            Ok(t) => return Ok(t),
             Err(err) => {
                 last_err = Some(err);
                 tokio::time::sleep(Duration::from_millis(100)).await;

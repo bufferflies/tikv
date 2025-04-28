@@ -15,6 +15,7 @@ use test_cloud_server::{
         MutateOptions, TxnMutations, TxnWriteMethod,
     },
     keyspace::{make_row_key, CreateKeyspaceOptions},
+    try_wait_result_async,
     util::Mutation,
     MajorCompactionTarget, ServerClusterBuilder, ServerClusterExt, TryWaiter,
 };
@@ -443,6 +444,7 @@ fn test_resolve_pessimistic_lock(#[case] enable_ia: bool, #[case] use_cleanup: b
     let keys = key_ids.iter().map(|&k| gen_key(k)).collect::<Vec<_>>();
 
     let mut client = cluster.new_client();
+    client.set_req_timeout(Duration::from_secs(15));
 
     let task = async {
         let txn_client = cluster.new_txn_client().await;
@@ -470,9 +472,21 @@ fn test_resolve_pessimistic_lock(#[case] enable_ia: bool, #[case] use_cleanup: b
         assert_matches!(err, ClientError::KeyErrors(errs) if errs.iter().all(|e| e.has_locked()));
 
         if use_cleanup {
-            let mut tx1 = txn_client.begin_pessimistic().await.unwrap();
-            tx1.lock_keys(keys).await.unwrap();
-            tx1.rollback().await.unwrap();
+            // Retry as `lock_keys` would timeout before TTL expired.
+            try_wait_result_async(
+                || {
+                    let txn_client = txn_client.clone();
+                    let keys = keys.clone();
+                    Box::pin(async move {
+                        let mut tx1 = txn_client.begin_pessimistic().await.unwrap();
+                        tx1.lock_keys(keys).await?;
+                        tx1.rollback().await
+                    })
+                },
+                20, // TTL 20s
+            )
+            .await
+            .unwrap();
 
             tx.rollback().await.unwrap();
         } else {

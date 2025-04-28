@@ -152,6 +152,7 @@ impl DerefMut for RefStore {
 pub struct ClusterClientOptions {
     pub with_lock_resolver: bool,
     pub txn_file_max_chunk_size: Option<usize>,
+    pub req_timeout: Duration,
 }
 
 impl Default for ClusterClientOptions {
@@ -159,13 +160,15 @@ impl Default for ClusterClientOptions {
         Self {
             with_lock_resolver: true,
             txn_file_max_chunk_size: None,
+            req_timeout: Duration::from_secs(30),
         }
     }
 }
 
 pub struct ClusterClient {
-    pub pd_client: Arc<dyn test_pd_client::PdClientExt>,
-    pub channels: HashMap<u64, Channel>,
+    pub(crate) opts: ClusterClientOptions,
+    pub(crate) pd_client: Arc<dyn test_pd_client::PdClientExt>,
+    pub(crate) channels: HashMap<u64, Channel>,
     /// region_raw_end_key -> region_id
     pub(crate) region_ranges: BTreeMap<Vec<u8>, RegionIdVer>,
     /// region_id -> region
@@ -245,6 +248,7 @@ impl Clone for ClusterClient {
         // Do not copy region cache to reduce memory usage.
         let make_clone = || -> Self {
             Self {
+                opts: self.opts.clone(),
                 pd_client: self.pd_client.clone(),
                 channels: self.channels.clone(),
                 region_ranges: Default::default(),
@@ -268,8 +272,8 @@ impl Clone for ClusterClient {
 }
 
 impl ClusterClient {
-    pub fn pd_client(&self) -> Arc<dyn PdClient> {
-        self.pd_client.clone() as Arc<dyn PdClient>
+    pub fn pd_client(&self) -> &Arc<dyn test_pd_client::PdClientExt> {
+        &self.pd_client
     }
 
     pub fn get_ts(&self) -> TimeStamp {
@@ -512,8 +516,7 @@ impl ClusterClient {
         let region_id = id_ver.id();
         let mut errors: Vec<(ShardTag, Error)> = vec![];
         let start_time = Instant::now();
-        let timeout = Duration::from_secs(15);
-        while start_time.saturating_elapsed() < timeout {
+        while start_time.saturating_elapsed() < self.opts.req_timeout {
             let ctx = self
                 .new_rpc_ctx(region_id, &pk)
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
@@ -658,8 +661,7 @@ impl ClusterClient {
         let region_id = id_ver.id();
         let mut errors: Vec<(ShardTag, Error)> = vec![];
         let start_time = Instant::now();
-        let timeout = Duration::from_secs(15);
-        while start_time.saturating_elapsed() < timeout {
+        while start_time.saturating_elapsed() < self.opts.req_timeout {
             let ctx = self
                 .new_rpc_ctx(region_id, &muts.primary())
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
@@ -730,8 +732,7 @@ impl ClusterClient {
         let region_id = id_ver.id();
         let mut errors: Vec<(ShardTag, Error)> = vec![];
         let start_time = Instant::now();
-        let timeout = Duration::from_secs(15);
-        while start_time.saturating_elapsed() < timeout {
+        while start_time.saturating_elapsed() < self.opts.req_timeout {
             let ctx = self
                 .new_rpc_ctx(region_id, &muts.primary())
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
@@ -790,10 +791,9 @@ impl ClusterClient {
         is_txn_file: bool,
     ) -> Result<kvrpcpb::CheckTxnStatusResponse> {
         let stat_time = Instant::now();
-        let timeout = Duration::from_secs(5);
         let mut last_err: Option<Error> = None;
         let mut tag = ShardTag::default();
-        while stat_time.saturating_elapsed() < timeout {
+        while stat_time.saturating_elapsed() < self.opts.req_timeout {
             let region_id = self.get_region_id(primary_key);
             let ctx = self.new_rpc_ctx(region_id, primary_key).unwrap();
             tag = Self::tag_from_ctx(&ctx);
@@ -856,7 +856,6 @@ impl ClusterClient {
         clean_regions: &mut HashSet<RegionIdVer>,
     ) -> Result<()> {
         let stat_time = Instant::now();
-        let timeout = Duration::from_secs(15);
         let mut last_err: Option<Error> = None;
         let mut tag = ShardTag::default();
 
@@ -868,7 +867,7 @@ impl ClusterClient {
         req.set_keys(vec![key.clone()].into());
         req.set_is_txn_file(is_txn_file);
 
-        while stat_time.saturating_elapsed() < timeout {
+        while stat_time.saturating_elapsed() < self.opts.req_timeout {
             let region = self.get_region_by_key(&key);
             if clean_regions.contains(&region.id_ver()) {
                 return Ok(());
@@ -1066,6 +1065,12 @@ impl ClusterClient {
         self.regions.clear();
     }
 
+    fn invalidate_region_cache(&mut self, region_id: u64) {
+        if let Some(region) = self.regions.remove(&region_id) {
+            self.region_ranges.remove(&region.raw_end);
+        }
+    }
+
     fn update_cache_by_id(&mut self, region_id: u64, opt_region: Option<RawRegion>) {
         let region: RawRegion = if let Some(region) = opt_region {
             region
@@ -1076,6 +1081,7 @@ impl ClusterClient {
             region.update_leader(&leader);
             region
         } else {
+            self.invalidate_region_cache(region_id);
             return;
         };
 
@@ -1199,9 +1205,7 @@ impl ClusterClient {
         }
         if region_err.has_region_not_found() {
             let region_id = region_err.get_region_not_found().get_region_id();
-            if let Some(region) = self.regions.remove(&region_id) {
-                self.region_ranges.remove(&region.raw_end);
-            }
+            self.invalidate_region_cache(region_id);
             return true;
         }
         false
@@ -1586,7 +1590,6 @@ impl ClusterClient {
     ) -> Result<(Vec<u8>, Vec<u8>, Context)> {
         assert!(ranges.len() == 1);
         let start_time = Instant::now();
-        let timeout = Duration::from_secs(15);
         let mut region_id = 0;
         let mut store_id_errors = vec![];
 
@@ -1608,7 +1611,7 @@ impl ClusterClient {
         req.set_start_ts(start_ts);
         req.mut_context().set_isolation_level(IsolationLevel::Si);
 
-        while start_time.saturating_elapsed() < timeout {
+        while start_time.saturating_elapsed() < self.opts.req_timeout {
             let ctx = self.new_rpc_ctx(region_id, req.get_ranges()[0].get_start());
 
             if ctx.is_none() {
@@ -1679,10 +1682,9 @@ impl ClusterClient {
         options: &RequestOptions,
     ) -> Result<(Option<Vec<u8>>, Context)> {
         let start_time = Instant::now();
-        let timeout = Duration::from_secs(15);
         let mut tag = ShardTag::default();
         let mut store_id_errors = vec![];
-        while start_time.saturating_elapsed() < timeout {
+        while start_time.saturating_elapsed() < self.opts.req_timeout {
             let region_id = self.get_region_id(key);
             let ctx = self.new_rpc_ctx_opt(region_id, key, options);
             if ctx.is_none() {
@@ -1833,6 +1835,10 @@ impl ClusterClient {
         self.async_commit = true;
     }
 
+    pub fn set_req_timeout(&mut self, timeout: Duration) {
+        self.opts.req_timeout = timeout;
+    }
+
     pub fn txn_file_helper(&self) -> Option<Arc<TxnFileHelper>> {
         self.txn_file_helper.clone()
     }
@@ -1853,6 +1859,7 @@ impl tikv_client::codec::Codec for ApiV2NoPrefixCodec {
 type TxnClient = tikv_client::TransactionClient<ApiV2NoPrefixCodec>;
 
 /// ClusterTxnClient provides transaction operations.
+#[derive(Clone)]
 pub struct ClusterTxnClient {
     pub inner: TxnClient,
 

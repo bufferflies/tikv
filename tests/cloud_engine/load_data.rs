@@ -138,7 +138,7 @@ fn test_load_data() {
             i_to_val,
         );
     }
-    let stores = client.pd_client.get_all_stores(true).unwrap();
+    let stores = client.pd_client().get_all_stores(true).unwrap();
     for store in &stores {
         let query = format!("major_compact=true&keyspace_id={}", KEYSPACE_ID);
         load_data_ctx

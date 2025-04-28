@@ -337,7 +337,7 @@ fn test_restore_keyspace_impl(
     // Shuffle regions.
     if let (Some(shuffle_regions), 0) = (shuffle_regions, loop_idx) {
         let keyspace_prefix = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
-        let region_count = client.pd_client.get_regions_number();
+        let region_count = client.pd_client().get_regions_number();
         let mut i = 0;
         while i < shuffle_regions {
             let split_key = rng.gen::<usize>() % data_count;
@@ -349,7 +349,7 @@ fn test_restore_keyspace_impl(
         }
 
         cluster.wait_pd_region_min_count(region_count + shuffle_regions);
-        let split_region_count = client.pd_client.get_regions_number();
+        let split_region_count = client.pd_client().get_regions_number();
 
         for _ in 0..(shuffle_regions / 2) {
             let source_key = rng.gen::<usize>() % data_count;
@@ -362,7 +362,7 @@ fn test_restore_keyspace_impl(
             }
         }
 
-        let merge_region_count = client.pd_client.get_regions_number();
+        let merge_region_count = client.pd_client().get_regions_number();
         step!(
             "shuffle regions done, regions {} -> {} -> {}",
             region_count,
@@ -1348,7 +1348,7 @@ fn test_restore_keyspace_with_schema() {
     let schema_version = 100;
     let schema_file_data = build_schema_file(KEYSPACE_ID, schema_version, schemas.clone(), 0);
     let broadcast_schema_update = |schema_file_data: Vec<u8>| {
-        let file_id = client.pd_client.alloc_id().unwrap();
+        let file_id = client.pd_client().alloc_id().unwrap();
         runtime
             .block_on(s3fs.create(
                 file_id,
@@ -1356,7 +1356,7 @@ fn test_restore_keyspace_with_schema() {
                 Options::default().with_type(FileType::Schema),
             ))
             .unwrap();
-        let stores = client.pd_client.get_all_stores(true).unwrap();
+        let stores = client.pd_client().get_all_stores(true).unwrap();
         let security_mgr = Arc::new(SecurityManager::new(&Default::default()).unwrap());
         runtime
             .block_on(broadcast_schema_update_to_all_stores(
