@@ -163,14 +163,7 @@ pub fn execute_show_archive(args: ShowArchiveArgs) {
         config = toml::from_slice(&data).unwrap();
     }
     config.dfs.override_from_env();
-    let s3fs = Arc::new(S3Fs::new(
-        config.dfs.prefix.clone(),
-        config.dfs.s3_endpoint,
-        config.dfs.s3_key_id,
-        config.dfs.s3_secret_key,
-        config.dfs.s3_region,
-        config.dfs.s3_bucket,
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(config.dfs));
     let date = NaiveDate::parse_from_str(&args.date, INCREMENTAL_BACKUP_FOLDER_FORMAT).unwrap();
     let reader = ArchiveReader::new(s3fs, &date).unwrap();
     if let Some(id) = args.file_id {

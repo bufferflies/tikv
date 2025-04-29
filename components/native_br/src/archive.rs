@@ -184,14 +184,7 @@ pub const ARCHIVE_INDEX_FORMAT_V2: u32 = 2;
 pub fn archive_with_cfg(config: ArchiveConfig) -> Result<()> {
     let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_conf = config.dfs.clone();
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_conf.prefix,
-        dfs_conf.s3_endpoint,
-        dfs_conf.s3_key_id,
-        dfs_conf.s3_secret_key,
-        dfs_conf.s3_region,
-        dfs_conf.s3_bucket,
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_conf));
     let expiration_date = NaiveDate::parse_from_str(
         config.expiration_date.as_str(),
         INCREMENTAL_BACKUP_FOLDER_FORMAT,
@@ -1655,6 +1648,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use kvengine::dfs::DFSConnOptions;
     use protobuf::Message;
     use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
     use test_cloud_server::oss::ObjectStorageService;
@@ -1684,6 +1678,7 @@ mod tests {
             "admin".to_string(),
             "local".to_string(),
             "bkt".to_string(),
+            DFSConnOptions::default(),
         ));
         let get_file_id = |i: u64| i;
         let get_file_data =
@@ -1820,6 +1815,7 @@ mod tests {
             "admin".to_string(),
             "local".to_string(),
             "bkt".to_string(),
+            DFSConnOptions::default(),
         ));
         let first_date = chrono::Utc::now().date_naive() - chrono::Duration::days(NUM_DATES as i64);
         let get_date = |j: u64| first_date + chrono::Duration::days(j as i64);
@@ -1953,6 +1949,7 @@ mod tests {
             "admin".to_string(),
             "local".to_string(),
             "bkt".to_string(),
+            DFSConnOptions::default(),
         ));
         let first_date = chrono::Utc::now().date_naive() - chrono::Duration::days(NUM_INDEXES);
         let get_date = |i: i64| first_date + chrono::Duration::days(i);

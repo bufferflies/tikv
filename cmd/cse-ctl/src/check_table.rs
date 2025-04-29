@@ -127,14 +127,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
     let config = CheckTableConfig::from_args(&args);
     let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_cfg = config.dfs.clone();
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_cfg.prefix,
-        dfs_cfg.s3_endpoint,
-        dfs_cfg.s3_key_id,
-        dfs_cfg.s3_secret_key,
-        dfs_cfg.s3_region,
-        dfs_cfg.s3_bucket,
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_cfg));
     let master_key = s3fs
         .get_runtime()
         .block_on(config.security.new_master_key());

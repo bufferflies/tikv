@@ -272,14 +272,7 @@ pub fn backup_cluster_with_ts(
         .unwrap();
 
     let dfs_conf = config.dfs.clone();
-    let s3fs = S3Fs::new(
-        dfs_conf.prefix,
-        dfs_conf.s3_endpoint,
-        dfs_conf.s3_key_id,
-        dfs_conf.s3_secret_key,
-        dfs_conf.s3_region,
-        dfs_conf.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(dfs_conf);
     let mut cluster_backup_meta = match backup_type {
         BackupType::Full => ClusterBackupMeta::new(),
         BackupType::Incremental => {
@@ -802,7 +795,7 @@ impl IncrementalBackupFile {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, NaiveDateTime, Utc};
-    use kvengine::dfs::Dfs;
+    use kvengine::dfs::{DFSConnOptions, Dfs};
     use kvproto::metapb::Store;
     use rfenginepb::{ChangeSet, ClusterBackupMeta, StoreBackupMeta, WalChunk};
     use test_cloud_server::oss::ObjectStorageService;
@@ -956,6 +949,7 @@ mod tests {
             "admin".to_string(),
             "local".to_string(),
             "bkt".to_string(),
+            DFSConnOptions::default(),
         );
         let pd_client = TestPdClient::new(1, false);
 

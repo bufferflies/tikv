@@ -125,14 +125,7 @@ fn test_random_all() {
     backup::update_service_safe_point(pd_client.as_ref(), ts.into_inner()).unwrap();
 
     let dfs_conf = dfs_config.clone();
-    let s3fs = S3Fs::new(
-        dfs_conf.prefix,
-        dfs_conf.s3_endpoint,
-        dfs_conf.s3_key_id,
-        dfs_conf.s3_secret_key,
-        dfs_conf.s3_region,
-        dfs_conf.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(dfs_conf);
 
     // Start workloads & schedulers.
     let mut handles = vec![

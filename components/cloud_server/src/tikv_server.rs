@@ -221,14 +221,7 @@ impl TikvServer {
         } else if dfs_conf.s3_endpoint == "memory" {
             Arc::new(kvengine::dfs::InMemFs::new())
         } else {
-            Arc::new(kvengine::dfs::S3Fs::new(
-                dfs_conf.prefix.clone(),
-                dfs_conf.s3_endpoint.clone(),
-                dfs_conf.s3_key_id.clone(),
-                dfs_conf.s3_secret_key.clone(),
-                dfs_conf.s3_region.clone(),
-                dfs_conf.s3_bucket.clone(),
-            ))
+            Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_conf.clone()))
         };
 
         (security_mgr, env, pd_client, dfs)

@@ -77,14 +77,7 @@ pub(crate) fn execute_stats(arg: StatsArgs) {
     let config = StatsConfig::from_args(&arg);
 
     let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
-    let s3fs = S3Fs::new(
-        config.dfs.prefix,
-        config.dfs.s3_endpoint,
-        config.dfs.s3_key_id,
-        config.dfs.s3_secret_key,
-        config.dfs.s3_region,
-        config.dfs.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(config.dfs);
 
     let mut stats_worker = StatsWorker::new(pd_client, s3fs, arg.concurrency);
 

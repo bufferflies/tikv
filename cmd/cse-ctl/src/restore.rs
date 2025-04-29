@@ -201,14 +201,7 @@ fn execute_restore_keyspace_impl(
 ) -> native_br::Result<RestoredKeyspace> {
     let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_config = config.dfs.clone();
-    let s3fs = S3Fs::new(
-        dfs_config.prefix,
-        dfs_config.s3_endpoint,
-        dfs_config.s3_key_id,
-        dfs_config.s3_secret_key,
-        dfs_config.s3_region,
-        dfs_config.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(dfs_config);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
         .enable_all()
@@ -317,14 +310,7 @@ fn show_restore_keyspace_info(
     let pd_ctl = PdControl::new(config.pd.clone(), security_mgr).unwrap();
 
     let dfs_config = config.dfs.clone();
-    let s3fs = S3Fs::new(
-        dfs_config.prefix,
-        dfs_config.s3_endpoint,
-        dfs_config.s3_key_id,
-        dfs_config.s3_secret_key,
-        dfs_config.s3_region,
-        dfs_config.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(dfs_config);
     let rt = s3fs.get_runtime();
 
     println!("Restore Keyspace");

@@ -162,14 +162,7 @@ fn start_server(
     running_ctl: &RunningController,
 ) -> ServerFuture {
     let dfs_config = config.dfs.clone();
-    let s3fs = Arc::new(kvengine::dfs::S3Fs::new(
-        dfs_config.prefix,
-        dfs_config.s3_endpoint,
-        dfs_config.s3_key_id,
-        dfs_config.s3_secret_key,
-        dfs_config.s3_region,
-        dfs_config.s3_bucket,
-    ));
+    let s3fs = Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_config));
 
     // CacheFs is only used for remote coprocessor.
     let cache_fs = {

@@ -129,14 +129,7 @@ pub fn execute_show_backup(args: ShowBackupArgs) {
     }
     config.dfs.override_from_env();
 
-    let s3fs = S3Fs::new(
-        config.dfs.prefix.clone(),
-        config.dfs.s3_endpoint,
-        config.dfs.s3_key_id,
-        config.dfs.s3_secret_key,
-        config.dfs.s3_region,
-        config.dfs.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(config.dfs.clone());
 
     let cluster_backup = native_br::restore::get_cluster_backup_meta(&s3fs, args.name.clone());
 
@@ -241,14 +234,7 @@ pub fn execute_show_backup_list(args: ShowBackupListArgs) {
     }
     config.dfs.override_from_env();
 
-    let s3fs = S3Fs::new(
-        config.dfs.prefix.clone(),
-        config.dfs.s3_endpoint,
-        config.dfs.s3_key_id,
-        config.dfs.s3_secret_key,
-        config.dfs.s3_region,
-        config.dfs.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(config.dfs);
     let rt = s3fs.get_runtime();
 
     let start = if args.start.is_empty() {

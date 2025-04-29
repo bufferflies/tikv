@@ -69,15 +69,7 @@ pub fn execute_show_txn_chunk(args: ShowTxnChunkArgs) {
 }
 
 fn get_txn_chunk_data_from_dfs(id: u64, config: ShowTxnChunkConfig) -> bytes::Bytes {
-    let s3fs = S3Fs::new(
-        config.dfs.prefix,
-        config.dfs.s3_endpoint,
-        config.dfs.s3_key_id,
-        config.dfs.s3_secret_key,
-        config.dfs.s3_region,
-        config.dfs.s3_bucket,
-    );
-
+    let s3fs = S3Fs::new_from_config(config.dfs);
     let runtime = s3fs.get_runtime();
     let opts = dfs::Options::default().with_type(dfs::FileType::TxnChunk);
     runtime

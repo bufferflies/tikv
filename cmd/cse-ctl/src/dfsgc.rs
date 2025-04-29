@@ -119,14 +119,7 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
 
     let start_after = arg.start.unwrap_or_default();
     let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
-    let s3fs = S3Fs::new(
-        config.dfs.prefix,
-        config.dfs.s3_endpoint,
-        config.dfs.s3_key_id,
-        config.dfs.s3_secret_key,
-        config.dfs.s3_region,
-        config.dfs.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(config.dfs);
     let start_time_safe_interval =
         chrono::Duration::from_std(Duration::from(arg.start_time_safe_interval)).unwrap();
     let progress_file_path = PathBuf::from(format!("{}/{}", &config.data_dir, "dfsgc.progress"));

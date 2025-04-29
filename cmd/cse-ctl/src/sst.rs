@@ -51,15 +51,7 @@ pub(crate) fn get_file_data_from_local(local: &Path) -> bytes::Bytes {
 }
 
 fn get_file_data_from_dfs(id: u64, config: ShowSstConfig) -> bytes::Bytes {
-    let s3fs = S3Fs::new(
-        config.dfs.prefix,
-        config.dfs.s3_endpoint,
-        config.dfs.s3_key_id,
-        config.dfs.s3_secret_key,
-        config.dfs.s3_region,
-        config.dfs.s3_bucket,
-    );
-
+    let s3fs = S3Fs::new_from_config(config.dfs);
     let runtime = s3fs.get_runtime();
     runtime
         .block_on(s3fs.read_file(id, Options::default().with_type(FileType::Sst)))

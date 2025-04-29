@@ -23,7 +23,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-pub use config::Config as DFSConfig;
+pub use config::{Config as DFSConfig, ConnOptions as DFSConnOptions};
 use file_system;
 use metrics::*;
 use moka::future::ConcurrentCacheExt;

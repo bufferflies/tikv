@@ -5,7 +5,6 @@ use std::{
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
     sync::Arc,
-    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -31,13 +30,12 @@ use rusoto_s3::{
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 
-use crate::dfs::{self, config::Config, metrics::*, Dfs, Error, FileType, Options};
-
-const MAX_RETRY_COUNT: u32 = 9;
-const RETRY_SLEEP_MS: u64 = 500;
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(300);
-const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
+use crate::dfs::{
+    self,
+    config::{Config, ConnOptions},
+    metrics::*,
+    Dfs, Error, FileType, Options,
+};
 
 pub const STORAGE_CLASS_DEFAULT: &str = STORAGE_CLASS_INTELLIGENT_TIERING;
 pub const STORAGE_CLASS_INTELLIGENT_TIERING: &str = "INTELLIGENT_TIERING";
@@ -62,9 +60,10 @@ impl S3Fs {
         secret_key: String,
         region: String,
         bucket: String,
+        options: ConnOptions,
     ) -> Self {
         let core = Arc::new(S3FsCore::new(
-            endpoint, key_id, secret_key, region, bucket, prefix,
+            endpoint, key_id, secret_key, region, bucket, prefix, options,
         ));
         Self { core }
     }
@@ -77,6 +76,7 @@ impl S3Fs {
             conf.s3_secret_key,
             conf.s3_region,
             conf.s3_bucket,
+            conf.conn_options,
         )
     }
 
@@ -89,6 +89,7 @@ impl S3Fs {
                 "local".to_string(),
                 bucket,
                 prefix,
+                ConnOptions::default(),
             )),
         }
     }
@@ -110,6 +111,7 @@ pub struct S3FsCore {
     prefix: String,
     runtime: Option<tokio::runtime::Runtime>,
     virtual_host: bool,
+    opts: ConnOptions,
 }
 
 impl S3FsCore {
@@ -120,6 +122,7 @@ impl S3FsCore {
         region: String,
         bucket: String,
         prefix: String,
+        options: ConnOptions,
     ) -> Self {
         let mut config = rusoto_core::HttpConfig::new();
         config.read_buf_size(256 * 1024);
@@ -128,7 +131,7 @@ impl S3FsCore {
         let static_provider =
             rusoto_credential::StaticProvider::new(key_id.clone(), secret_key, None, None);
         let mut http_connector = hyper::client::connect::HttpConnector::new();
-        http_connector.set_connect_timeout(Some(CONNECTION_TIMEOUT));
+        http_connector.set_connect_timeout(Some(options.conn_timeout.0));
         let s3c = if use_tls {
             let https_connector = HttpsConnector::new_with_connector(http_connector);
             let http_client = HttpClient::from_connector_with_config(https_connector, config);
@@ -160,7 +163,7 @@ impl S3FsCore {
         } else {
             endpoint
         };
-        Self::new_with_s3_client(s3c, endpoint, region, bucket, prefix)
+        Self::new_with_s3_client(s3c, endpoint, region, bucket, prefix, options)
     }
 
     pub fn new_with_s3_client(
@@ -169,6 +172,7 @@ impl S3FsCore {
         region: String,
         bucket: String,
         mut prefix: String,
+        options: ConnOptions,
     ) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -203,6 +207,7 @@ impl S3FsCore {
             prefix,
             runtime: Some(runtime),
             virtual_host,
+            opts: options,
         }
     }
 
@@ -303,15 +308,15 @@ impl S3FsCore {
     }
 
     async fn sleep_for_retry(&self, retry_cnt: &mut u32, file_name: &str) -> bool {
-        if *retry_cnt < MAX_RETRY_COUNT {
+        if *retry_cnt < self.opts.max_retry_count {
             *retry_cnt += 1;
-            let retry_sleep = 2u64.pow(*retry_cnt) * RETRY_SLEEP_MS;
-            tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+            let retry_sleep = 2u32.pow(*retry_cnt) * self.opts.retry_sleep_interval.0;
+            tokio::time::sleep(retry_sleep).await;
             true
         } else {
             error!(
                 "read file {}, reach max retry count {}",
-                file_name, MAX_RETRY_COUNT
+                file_name, self.opts.max_retry_count
             );
             false
         }
@@ -373,15 +378,15 @@ impl S3FsCore {
             let err = result.unwrap_err();
             if self.is_err_not_found(&err) {
                 return Ok((vec![], false, None));
-            } else if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+            } else if self.is_err_retryable(&err) && retry_cnt < self.opts.max_retry_count {
                 retry_cnt += 1;
-                let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                let retry_sleep = 2u32.pow(retry_cnt) * self.opts.retry_sleep_interval.0;
+                tokio::time::sleep(retry_sleep).await;
                 continue;
             }
             error!(
                 "failed to list files start after {}, reach max retry count {}, err {:?}",
-                start_after, MAX_RETRY_COUNT, err,
+                start_after, self.opts.max_retry_count, err,
             );
             return Err(err.into());
         }
@@ -424,15 +429,15 @@ impl S3FsCore {
             let err = result.unwrap_err();
             if self.is_err_not_found(&err) {
                 return Ok(vec![]);
-            } else if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+            } else if self.is_err_retryable(&err) && retry_cnt < self.opts.max_retry_count {
                 retry_cnt += 1;
-                let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                let retry_sleep = 2u32.pow(retry_cnt) * self.opts.retry_sleep_interval.0;
+                tokio::time::sleep(retry_sleep).await;
                 continue;
             }
             error!(
                 "failed to list folders prefix {}, reach max retry count {}, err {:?}",
-                prefix, MAX_RETRY_COUNT, err,
+                prefix, self.opts.max_retry_count, err,
             );
             return Err(err.into());
         }
@@ -464,19 +469,19 @@ impl S3FsCore {
                     file_key, err
                 )));
             }
-            if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+            if self.is_err_retryable(&err) && retry_cnt < self.opts.max_retry_count {
                 retry_cnt += 1;
-                let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                let retry_sleep = 2u32.pow(retry_cnt) * self.opts.retry_sleep_interval.0;
                 warn!(
-                    "Get file {} tagging fail {:?}, retry_cnt {}, retry after {}ms",
+                    "Get file {} tagging fail {:?}, retry_cnt {}, retry after {:?}",
                     file_key, err, retry_cnt, retry_sleep
                 );
-                tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                tokio::time::sleep(retry_sleep).await;
                 continue;
             }
             return Err(dfs::Error::S3(format!(
                 "Get file {} tagging, reach max retry count {}, err {:?}",
-                file_key, MAX_RETRY_COUNT, err,
+                file_key, self.opts.max_retry_count, err,
             )));
         }
     }
@@ -537,7 +542,7 @@ impl S3FsCore {
         req.set_hostname(Some(self.hostname.clone()));
         let mut resp = self
             .s3c
-            .sign_and_dispatch_timeout(req, DISPATCH_TIMEOUT)
+            .sign_and_dispatch_timeout(req, self.opts.dispatch_timeout.0)
             .await?;
         if !resp.status.is_success() {
             let buffered = resp.buffer().await.map_err(RusotoError::HttpDispatch)?;
@@ -553,7 +558,7 @@ impl S3FsCore {
             .map(|value| value.parse::<usize>().unwrap())
             .unwrap_or_default();
         let mut buf = Vec::with_capacity(cap);
-        while let Some(res) = tokio::time::timeout(READ_BODY_TIMEOUT, resp.body.next())
+        while let Some(res) = tokio::time::timeout(self.opts.read_body_timeout.0, resp.body.next())
             .await
             .map_err(|e| HttpDispatchError::new(format!("read body timeout {:?}", e)))?
         {
@@ -730,13 +735,13 @@ impl S3FsCore {
             }
             let err = result.unwrap_err();
             if self.is_err_retryable(&err) {
-                if retry_cnt < MAX_RETRY_COUNT {
+                if retry_cnt < self.opts.max_retry_count {
                     KVENGINE_DFS_RETRY_COUNTER_VEC
                         .with_label_values(&["write"])
                         .inc();
                     retry_cnt += 1;
-                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                    let retry_sleep = 2u32.pow(retry_cnt) * self.opts.retry_sleep_interval.0;
+                    tokio::time::sleep(retry_sleep).await;
                     warn!("retry create file {}, error {:?}", &file_name, &err);
                     continue;
                 } else {
@@ -744,7 +749,7 @@ impl S3FsCore {
                         "create file {}, takes {:?}, reach max retry count {}",
                         &file_name,
                         start_time.saturating_elapsed(),
-                        MAX_RETRY_COUNT
+                        self.opts.max_retry_count
                     );
                 }
             }
@@ -773,15 +778,15 @@ impl S3FsCore {
             }
             let err = result.unwrap_err();
             if self.is_err_retryable(&err) {
-                if retry_cnt < MAX_RETRY_COUNT {
+                if retry_cnt < self.opts.max_retry_count {
                     KVENGINE_DFS_RETRY_COUNTER_VEC
                         .with_label_values(&["delete"])
                         .inc();
                     retry_cnt += 1;
-                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
-                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                    let retry_sleep = 2u32.pow(retry_cnt) * self.opts.retry_sleep_interval.0;
+                    tokio::time::sleep(retry_sleep).await;
                     warn!(
-                        "retry delete file {}, error {:?}, retry cnt {}, retry after {}ms",
+                        "retry delete file {}, error {:?}, retry cnt {}, retry after {:?}",
                         &file_name, &err, retry_cnt, retry_sleep
                     );
                     continue;
@@ -790,7 +795,7 @@ impl S3FsCore {
                         "delete file {}, takes {:?}, reach max retry count {}",
                         &file_name,
                         start_time.saturating_elapsed(),
-                        MAX_RETRY_COUNT
+                        self.opts.max_retry_count
                     );
                 }
             }
@@ -836,19 +841,19 @@ impl S3FsCore {
                 }
             }
             if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
-                if retry_cnt < MAX_RETRY_COUNT {
+                if retry_cnt < self.opts.max_retry_count {
                     retry_cnt += 1;
-                    let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
+                    let retry_sleep = 2u32.pow(retry_cnt) * self.opts.retry_sleep_interval.0;
                     warn!(
-                        "retry copy file {}, retry count {}, retry after {}ms, err {:?}",
+                        "retry copy file {}, retry count {}, retry after {:?}, err {:?}",
                         target_key, retry_cnt, retry_sleep, err,
                     );
-                    tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
+                    tokio::time::sleep(retry_sleep).await;
                     continue;
                 } else {
                     let err_msg = format!(
                         "failed to copy file {} from {}, reach max retry count {}, err {:?}",
-                        target_key, source_key, MAX_RETRY_COUNT, err,
+                        target_key, source_key, self.opts.max_retry_count, err,
                     );
                     error!("{}", err_msg);
                     return Err(dfs::Error::S3(err_msg));

@@ -66,14 +66,7 @@ pub fn restore_tikv(
 ) {
     let tag = format!("restore_tikv:{store_id}");
     let dfs_conf = config.dfs.clone();
-    let s3fs = S3Fs::new(
-        dfs_conf.prefix,
-        dfs_conf.s3_endpoint,
-        dfs_conf.s3_key_id,
-        dfs_conf.s3_secret_key,
-        dfs_conf.s3_region,
-        dfs_conf.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(dfs_conf);
     let cluster_backup = get_cluster_backup_meta(&s3fs, name);
     let s3fs_clone = s3fs.clone();
     // Get the alloc_id in the cluster latest backup meta.
@@ -303,14 +296,7 @@ fn setup_raft_engine(
 
 pub fn restore_pd(config: RestoreConfig, name: String) {
     let dfs_conf = config.dfs.clone();
-    let s3fs = S3Fs::new(
-        dfs_conf.prefix,
-        dfs_conf.s3_endpoint,
-        dfs_conf.s3_key_id,
-        dfs_conf.s3_secret_key,
-        dfs_conf.s3_region,
-        dfs_conf.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(dfs_conf);
     let cluster_backup = get_cluster_backup_meta(&s3fs, name);
     // Get the alloc_id in the cluster latest backup meta.
     let latest_cluster_backup = s3fs

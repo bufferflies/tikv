@@ -46,14 +46,7 @@ pub(crate) fn spawn_load_data(
                 .build()
                 .unwrap(),
         );
-        let dfs = Arc::new(kvengine::dfs::S3Fs::new(
-            dfs_conf.prefix,
-            dfs_conf.s3_endpoint,
-            dfs_conf.s3_key_id,
-            dfs_conf.s3_secret_key,
-            dfs_conf.s3_region,
-            dfs_conf.s3_bucket,
-        ));
+        let dfs = Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_conf));
         let master_key = runtime.block_on(security_config.new_master_key());
 
         let start_time = Instant::now();

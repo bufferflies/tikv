@@ -46,14 +46,7 @@ pub(crate) fn do_restore_keyspace(
     reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> native_br::Result<restore_keyspace::RestoredKeyspace> {
     let dfs_config = config.dfs.clone();
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_config.prefix,
-        dfs_config.s3_endpoint,
-        dfs_config.s3_key_id,
-        dfs_config.s3_secret_key,
-        dfs_config.s3_region,
-        dfs_config.s3_bucket,
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config));
     restore_keyspace::restore_keyspace(
         keyspace,
         target_keyspace,

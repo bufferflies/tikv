@@ -244,14 +244,7 @@ fn test_restore_keyspace_impl(
         skip_keyspace_meta: true,
         ..Default::default()
     };
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_config.prefix.clone(),
-        dfs_config.s3_endpoint.clone(),
-        dfs_config.s3_key_id.clone(),
-        dfs_config.s3_secret_key.clone(),
-        dfs_config.s3_region.clone(),
-        dfs_config.s3_bucket.clone(),
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
     let reporter = Arc::new(DummyStepReporter::default());
 
     // Import data.
@@ -620,14 +613,7 @@ fn test_restore_archived_keyspace_impl(
         skip_keyspace_meta: true,
         ..Default::default()
     };
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_config.prefix.clone(),
-        dfs_config.s3_endpoint.clone(),
-        dfs_config.s3_key_id.clone(),
-        dfs_config.s3_secret_key.clone(),
-        dfs_config.s3_region.clone(),
-        dfs_config.s3_bucket.clone(),
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
     let reporter = Arc::new(DummyStepReporter::default());
 
     let pd_client = cluster.get_pd_client();
@@ -916,14 +902,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
 
     test_util::init_log_for_test();
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_config.prefix.clone(),
-        dfs_config.s3_endpoint.clone(),
-        dfs_config.s3_key_id.clone(),
-        dfs_config.s3_secret_key.clone(),
-        dfs_config.s3_region.clone(),
-        dfs_config.s3_bucket.clone(),
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
     let reporter = Arc::new(DummyStepReporter::default());
     let runtime = Runtime::new().unwrap();
     let _enter = runtime.enter();
@@ -1110,14 +1089,7 @@ fn test_restore_keyspace_with_no_chunk() {
 
     test_util::init_log_for_test();
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_config.prefix.clone(),
-        dfs_config.s3_endpoint.clone(),
-        dfs_config.s3_key_id.clone(),
-        dfs_config.s3_secret_key.clone(),
-        dfs_config.s3_region.clone(),
-        dfs_config.s3_bucket.clone(),
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
     let reporter = Arc::new(DummyStepReporter::default());
     let runtime = Runtime::new().unwrap();
 
@@ -1301,14 +1273,7 @@ fn test_restore_keyspace_with_schema() {
 
     test_util::init_log_for_test();
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_config.prefix.clone(),
-        dfs_config.s3_endpoint.clone(),
-        dfs_config.s3_key_id.clone(),
-        dfs_config.s3_secret_key.clone(),
-        dfs_config.s3_region.clone(),
-        dfs_config.s3_bucket.clone(),
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
     let reporter = Arc::new(DummyStepReporter::default());
     let runtime = Runtime::new().unwrap();
 
@@ -1503,14 +1468,7 @@ fn test_restore_keyspace_with_failed_store(
     const KEYSPACE_ID: u32 = 1;
 
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_config.prefix.clone(),
-        dfs_config.s3_endpoint.clone(),
-        dfs_config.s3_key_id.clone(),
-        dfs_config.s3_secret_key.clone(),
-        dfs_config.s3_region.clone(),
-        dfs_config.s3_bucket.clone(),
-    ));
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
     let reporter = Arc::new(DummyStepReporter::default());
     let runtime = Runtime::new().unwrap();
 

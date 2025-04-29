@@ -725,7 +725,7 @@ mod tests {
     use bytes::Bytes;
     use kvengine::{
         dfs,
-        dfs::{Dfs, FileType, Options, S3Fs},
+        dfs::{DFSConnOptions, Dfs, FileType, Options, S3Fs},
     };
     use rand::prelude::*;
 
@@ -759,6 +759,7 @@ mod tests {
             "admin".to_string(),
             "local".to_string(),
             "cse_test".to_string(),
+            DFSConnOptions::default(),
         );
 
         let runtime = s3fs.get_runtime();
@@ -862,6 +863,7 @@ mod tests {
             "admin".to_string(),
             "local".to_string(),
             "cse_test".to_string(),
+            DFSConnOptions::default(),
         );
         let runtime = s3fs.get_runtime();
 
@@ -926,6 +928,7 @@ mod tests {
             "admin".to_string(),
             "local".to_string(),
             "cse_test".to_string(),
+            DFSConnOptions::default(),
         );
 
         let runtime = s3fs.get_runtime();
@@ -977,6 +980,7 @@ mod tests {
             "admin".to_string(),
             "local".to_string(),
             "bkt".to_string(),
+            DFSConnOptions::default(),
         );
 
         let prefix = s3fs.get_prefix();
@@ -1114,6 +1118,7 @@ mod tests {
             "admin".to_string(),
             "local".to_string(),
             "cse_test".to_string(),
+            DFSConnOptions::default(),
         );
 
         let mut data = vec![0u8; OBJECT_SIZE];

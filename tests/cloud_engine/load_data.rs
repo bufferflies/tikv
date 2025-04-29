@@ -102,14 +102,7 @@ fn test_load_data() {
         checksum_type: ChecksumType::Crc32,
     };
 
-    let dfs = Arc::new(kvengine::dfs::S3Fs::new(
-        dfs_conf.prefix,
-        dfs_conf.s3_endpoint,
-        dfs_conf.s3_key_id,
-        dfs_conf.s3_secret_key,
-        dfs_conf.s3_region,
-        dfs_conf.s3_bucket,
-    ));
+    let dfs = Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_conf));
     let master_key = cluster.get_kvengine(node_ids[0]).get_master_key();
     let load_data_dir = base_dir.path().join("load_data");
     fs::create_dir_all(&load_data_dir).unwrap();
@@ -265,14 +258,7 @@ fn test_load_data_overlap() {
         rg_config: None,
         checksum_type: ChecksumType::Crc32,
     };
-    let dfs = Arc::new(kvengine::dfs::S3Fs::new(
-        dfs_conf.prefix,
-        dfs_conf.s3_endpoint,
-        dfs_conf.s3_key_id,
-        dfs_conf.s3_secret_key,
-        dfs_conf.s3_region,
-        dfs_conf.s3_bucket,
-    ));
+    let dfs = Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_conf));
     let master_key = cluster.get_kvengine(node_ids[0]).get_master_key();
 
     let do_load_data = || -> LoadDataResult<RefStore> {

@@ -1388,14 +1388,7 @@ impl StatusServer {
             ));
         }
 
-        let s3fs = kvengine::dfs::S3Fs::new(
-            dfs_conf.prefix,
-            dfs_conf.s3_endpoint,
-            dfs_conf.s3_key_id,
-            dfs_conf.s3_secret_key,
-            dfs_conf.s3_region,
-            dfs_conf.s3_bucket,
-        );
+        let s3fs = kvengine::dfs::S3Fs::new_from_config(dfs_conf);
         let (callback, future) = paired_future_callback();
         let task = rfengine::BackupTask::new(Box::new(s3fs), callback, backup_config);
         engine.backup(task);
