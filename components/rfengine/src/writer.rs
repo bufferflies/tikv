@@ -23,6 +23,7 @@ use crate::{write_batch::PeerBatch, *};
 
 // WAL file will be rotated and overwritten on every `EPOCH_ROTATE_LEN` epoches.
 pub(crate) const EPOCH_ROTATE_LEN: u32 = 4;
+pub(crate) const EPOCH_SNAPSHOT_LEN: u32 = 8;
 
 pub const BATCH_HEADER_SIZE: usize = 4 /* epoch_id */ + 4 /* checksum */ + 4 /* batch_len */;
 pub(crate) const INITIAL_BUF_SIZE: usize = 8 * 1024 * 1024;
