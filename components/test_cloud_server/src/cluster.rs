@@ -78,6 +78,9 @@ pub const IA_FREQ_UPDATE_INTERVAL_DEF: Duration = Duration::from_secs(3);
 pub const IA_MEM_CAP_DEF: u64 = 1 << 20; // 1 MiB
 pub const IA_DISK_CAP_DEF: u64 = 10 << 20; // 10 MiB
 
+pub const TIKV_WORKER_MEMORY_UPPER_THRESHOLD_DEF: AbsoluteOrPercentSize =
+    AbsoluteOrPercentSize::Percent(20.0);
+
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 pub struct ServerCluster {
@@ -805,6 +808,13 @@ impl ServerCluster {
             std::fs::create_dir_all(&data_dir)
                 .unwrap_or_else(|e| panic!("create dir {:?} failed: {:?}", data_dir, e));
 
+            let memory_upper_threshold = if idx & 1 == 0 {
+                AbsoluteOrPercentSize::Percent(20.0)
+            } else {
+                // Small threshold to cover the process of handling memory limit exceeded.
+                (opts.kv_target_file_size.0 * 32).into()
+            };
+
             let tikv_worker_conf = cloud_worker::Config {
                 addr: tikv_worker_addr(idx),
                 cop_addr: "".to_string(),
@@ -834,6 +844,7 @@ impl ServerCluster {
                     interval: ReadableDuration::secs(10),
                     ia: IaGcConfig::new_for_test(),
                 },
+                memory_upper_threshold,
                 ..Default::default()
             };
 
@@ -1294,6 +1305,7 @@ fn process_offset() -> u16 {
 
 pub struct TikvWorkerOptions {
     pub threads_cnt: usize,
+    pub kv_target_file_size: ReadableSize,
     pub cop_block_cache_size: ReadableSize,
     pub cop_block_cache_type: BlockCacheType,
     pub register: bool,
@@ -1307,6 +1319,7 @@ impl Default for TikvWorkerOptions {
     fn default() -> Self {
         Self {
             threads_cnt: 2,
+            kv_target_file_size: ReadableSize::kb(16),
             cop_block_cache_size: ReadableSize::mb(8),
             cop_block_cache_type: BlockCacheType::Quick,
             register: true,

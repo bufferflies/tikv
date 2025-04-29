@@ -39,6 +39,7 @@ use tikv::{
 use tikv_util::{
     deadline::Deadline,
     error, info,
+    memory::MemoryLimiter,
     metrics::{dump, dump_to},
     quota_limiter::QuotaLimiter,
     time::Instant,
@@ -71,6 +72,7 @@ pub(crate) struct Context {
     pub block_cache: BlockCache,
     pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
     pub worker_limiter: WorkerLimiter,
+    pub memory_limiter: MemoryLimiter,
     pub txn_chunk_manager: TxnChunkManager,
     pub ia_ctx: IaCtx,
     pub read_columnar: bool,
@@ -144,6 +146,7 @@ where
                                 ctx.checksum_type,
                                 allocator,
                                 ctx.master_key.clone(),
+                                ctx.memory_limiter.clone(),
                             )
                             .await;
 

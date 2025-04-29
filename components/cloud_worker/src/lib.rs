@@ -43,6 +43,7 @@ use kvengine::{
 use kvproto::metapb::Store;
 #[cfg(feature = "testexport")]
 pub use metrics::REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM;
+use metrics::WORKER_MEMORY_LIMITER_CURRENT_USED;
 use pd_client::PdClient;
 use prometheus::labels;
 use replication_worker::{ReplicationWorker, ReplicationWorkerConfig};
@@ -53,7 +54,8 @@ use security::{SecurityConfig, SecurityManager};
 pub use server::get_cop_req_tag;
 use slog_global::{error, info, warn};
 use tikv_util::{
-    config::{ReadableDuration, ReadableSize},
+    config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
+    memory::MemoryLimiter,
     quota_limiter::QuotaLimiter,
     sys::{
         record_global_memory_usage,
@@ -248,6 +250,12 @@ fn start_server(
 
     let worker_limiter = WorkerLimiter::new(config.worker_limiter.clone());
 
+    let memory_upper_threshold = config.memory_upper_threshold.as_memory_size();
+    let memory_limiter = MemoryLimiter::new(
+        memory_upper_threshold,
+        Some(WORKER_MEMORY_LIMITER_CURRENT_USED.clone()),
+    );
+
     let ia_ctx =
         create_ia_ctx(&config, &s3fs, thread_pool.handle()).expect("create IA context failed");
 
@@ -293,6 +301,7 @@ fn start_server(
         txn_chunk_handler,
         master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),
+        memory_limiter,
         block_cache,
         schema_files: Some(Arc::new(DashMap::new())),
         worker_limiter,
@@ -720,6 +729,8 @@ pub struct Config {
     /// Enable columnar reader. Default is false.
     pub read_columnar: bool,
 
+    pub memory_upper_threshold: AbsoluteOrPercentSize,
+
     // Embedded configurations must be placed at the end of the struct.
     // Otherwise, it will fail to serialize to toml.
     pub pd: pd_client::Config,
@@ -774,6 +785,7 @@ impl Default for Config {
             push_metrics_addr: String::default(),
             push_metrics_interval: ReadableDuration::secs(30),
             read_columnar: false,
+            memory_upper_threshold: AbsoluteOrPercentSize::Percent(80.0),
             local_gc: LocalGcConfig::default(),
             replication_worker: ReplicationWorkerConfig::default(),
         }

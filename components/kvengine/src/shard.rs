@@ -905,8 +905,10 @@ impl Shard {
         } else if pending_ops.manual_major_compaction && !data.has_unconverted_l0s() {
             // Set major compaction priority to 2.0 to make it less likely to be picked up
             // when there are other shards waiting to be compacted.
-            *self.compaction_priority.write().unwrap() =
-                Some(CompactionPriority::Major { score: 2.0 });
+            *self.compaction_priority.write().unwrap() = Some(CompactionPriority::Major {
+                score: 2.0,
+                is_manual: true,
+            });
             return;
         }
         if !data.blob_tbl_map.is_empty() {
@@ -936,7 +938,10 @@ impl Shard {
             if blob_table_utilization < self.opt.blob_table_gc_ratio && !data.has_unconverted_l0s()
             {
                 let mut lock = self.compaction_priority.write().unwrap();
-                *lock = Some(CompactionPriority::Major { score: f64::MAX });
+                *lock = Some(CompactionPriority::Major {
+                    score: f64::MAX,
+                    is_manual: false,
+                });
                 return;
             }
         }
@@ -1271,7 +1276,10 @@ impl Shard {
             info!("{} trigger major compaction for tombstones", self.tag();
                 "tombs" => tombs, "write_entries" => write_entries, "ratio" => tombs_ratio,
                 "max_ts" => lv2plus_max_ts, "safe_ts" => safe_ts);
-            *priority = Some(CompactionPriority::Major { score: tombs_ratio });
+            *priority = Some(CompactionPriority::Major {
+                score: tombs_ratio,
+                is_manual: false,
+            });
             return true;
         }
 

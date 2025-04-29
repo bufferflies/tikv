@@ -45,12 +45,16 @@ pub enum Error {
     CheckMerge(String),
     #[error("incompatible remote compactor {}:{}", .url, .msg)]
     IncompatibleRemoteCompactor { url: String, msg: String },
+    #[error("remote compactor is busy: {0}")]
+    RemoteCompactorIsBusy(String),
     #[error("fallback to local compactor disabled")]
     FallbackLocalCompactorDisabled,
     #[error("not retryable compaction error {0}")]
     CompactionNotRetryable(String),
     #[error("remote read error {0}")]
     RemoteRead(String),
+    #[error("memory limit exceeded for {0} bytes")]
+    MemoryLimitExceeded(u64 /* exceeded size */),
     #[error("Other error {0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }

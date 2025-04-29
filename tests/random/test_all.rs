@@ -11,6 +11,7 @@ use futures::executor::block_on;
 use kvengine::{
     dfs::{self, DFSConfig, FileType, S3Fs},
     ia::util::IaConfig,
+    metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
     table::{columnar::build_schema_file, ChecksumType},
 };
 use kvproto::pdpb::CheckPolicy;
@@ -57,6 +58,7 @@ const LOAD_DATA_CONCURRENCY: usize = 2;
 // file name has a precision of 1 second.
 const INSTANT_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
 
+const KV_TARGET_FILE_SIZE: ReadableSize = ReadableSize::kb(16);
 const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
 
 const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(4); // Small size to make eviction more frequent.
@@ -322,6 +324,7 @@ fn prepare_cluster(
 
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
+        conf.dfs.allow_fallback_local = false;
         conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
 
@@ -334,7 +337,7 @@ fn prepare_cluster(
 
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(96);
-        conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(16);
+        conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
 
         conf.rfengine.target_file_size = ReadableSize::mb(8);
         conf.rfengine.batch_compression_threshold =
@@ -368,6 +371,7 @@ fn prepare_cluster(
     cluster.start_tikv_workers(
         alloc_node_id_vec(TIKV_WORKERS_COUNT),
         TikvWorkerOptions {
+            kv_target_file_size: KV_TARGET_FILE_SIZE,
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
             ..Default::default()
         },
@@ -539,61 +543,64 @@ impl Switches {
 #[allow(dead_code)]
 #[derive(Debug)]
 struct WorkloadStats {
-    total_write_count: usize,
-    total_txn_file_write_count: usize,
-    total_keyspace_count: usize,
-    total_table_count: usize,
-    total_drop_table_count: usize,
-    total_merge_count: usize,
-    total_move_count: usize,
-    total_transfer_count: usize,
-    total_node_restart: usize,
-    total_backup_count: usize,
-    total_backup_tolerated_err_count: usize,
-    total_restore_count: usize,
-    total_restore_tolerated_err_count: usize,
-    total_load_data_count: usize,
-    total_manual_major_compact: usize,
-    total_gc_resolved_locks: usize,
+    write_count: usize,
+    txn_file_write_count: usize,
+    keyspace_count: usize,
+    table_count: usize,
+    drop_table_count: usize,
+    merge_count: usize,
+    move_count: usize,
+    transfer_count: usize,
+    node_restart: usize,
+    backup_count: usize,
+    backup_tolerated_err_count: usize,
+    restore_count: usize,
+    restore_tolerated_err_count: usize,
+    load_data_count: usize,
+    manual_major_compact: usize,
+    gc_resolved_locks: usize,
+    remote_compact_exceed_memory_limit: u64,
 }
 
 impl WorkloadStats {
     fn collect() -> Self {
-        let total_write_count = WRITE_COUNTER.load(Ordering::SeqCst);
-        let total_txn_file_write_count = TXN_FILE_WRITE_COUNTER.load(Ordering::SeqCst);
-        let total_keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
-        let total_table_count = TABLE_COUNTER.load(Ordering::SeqCst);
-        let total_drop_table_count = DROP_TABLE_COUNTER.load(Ordering::SeqCst);
-        let total_merge_count = MERGE_COUNTER.load(Ordering::SeqCst);
-        let total_move_count = MOVE_COUNTER.load(Ordering::SeqCst);
-        let total_transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
-        let total_node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
-        let total_backup_count = BACKUP_COUNTER.load(Ordering::SeqCst);
-        let total_backup_tolerated_err_count = BACKUP_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
-        let total_restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
-        let total_restore_tolerated_err_count =
-            RESTORE_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
-        let total_load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
-        let total_manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
-        let total_gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
+        let write_count = WRITE_COUNTER.load(Ordering::SeqCst);
+        let txn_file_write_count = TXN_FILE_WRITE_COUNTER.load(Ordering::SeqCst);
+        let keyspace_count = KEYSPACE_COUNTER.load(Ordering::SeqCst);
+        let table_count = TABLE_COUNTER.load(Ordering::SeqCst);
+        let drop_table_count = DROP_TABLE_COUNTER.load(Ordering::SeqCst);
+        let merge_count = MERGE_COUNTER.load(Ordering::SeqCst);
+        let move_count = MOVE_COUNTER.load(Ordering::SeqCst);
+        let transfer_count = TRANSFER_COUNTER.load(Ordering::SeqCst);
+        let node_restart = NODE_RESTART_COUNTER.load(Ordering::SeqCst);
+        let backup_count = BACKUP_COUNTER.load(Ordering::SeqCst);
+        let backup_tolerated_err_count = BACKUP_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
+        let restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
+        let restore_tolerated_err_count = RESTORE_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
+        let load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
+        let manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
+        let gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
+        let remote_compact_exceed_memory_limit =
+            ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.get();
 
         Self {
-            total_write_count,
-            total_txn_file_write_count,
-            total_keyspace_count,
-            total_table_count,
-            total_drop_table_count,
-            total_merge_count,
-            total_move_count,
-            total_transfer_count,
-            total_node_restart,
-            total_backup_count,
-            total_backup_tolerated_err_count,
-            total_restore_count,
-            total_restore_tolerated_err_count,
-            total_load_data_count,
-            total_manual_major_compact,
-            total_gc_resolved_locks,
+            write_count,
+            txn_file_write_count,
+            keyspace_count,
+            table_count,
+            drop_table_count,
+            merge_count,
+            move_count,
+            transfer_count,
+            node_restart,
+            backup_count,
+            backup_tolerated_err_count,
+            restore_count,
+            restore_tolerated_err_count,
+            load_data_count,
+            manual_major_compact,
+            gc_resolved_locks,
+            remote_compact_exceed_memory_limit,
         }
     }
 }
