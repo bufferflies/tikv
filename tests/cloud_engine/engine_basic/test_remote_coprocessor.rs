@@ -2400,6 +2400,7 @@ impl<'a> DagTest<'a> {
             None,
             cluster.get_dfs().unwrap(),
             block_cache.clone(),
+            None,
             with_pool_size(2),
             TxnChunkManagerConfig {
                 gc_interval: ReadableDuration::secs(1),
@@ -2680,6 +2681,7 @@ impl<'a> DagTest<'a> {
             let ia_mgr = IaManager::new(
                 opts,
                 Arc::new(self.ctx.s3fs.clone()),
+                None,
                 self.ctx.rt.handle().clone().into(),
             )
             .unwrap();

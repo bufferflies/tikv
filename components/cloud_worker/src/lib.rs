@@ -282,6 +282,7 @@ fn start_server(
         None,
         s3fs.clone(),
         block_cache.clone(),
+        None,
         thread_pool.handle().clone().into(),
         config.txn_chunk_manager,
     );
@@ -431,7 +432,7 @@ fn create_ia_ctx(
             .map_err(|err| format!("build IA options failed: {err:?}"))?;
         opts.dynamic_capacity = false; // Always disable dynamic capacity.
 
-        let ia_mgr = IaManager::new(opts, Arc::new(s3fs.clone()), runtime.clone().into())
+        let ia_mgr = IaManager::new(opts, Arc::new(s3fs.clone()), None, runtime.clone().into())
             .map_err(|err| format!("create IA manager failed: {err:?}"))?;
 
         let meta_path = ia_path.join("meta");

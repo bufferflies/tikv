@@ -26,7 +26,7 @@ use crate::{
     error::IoContext,
     table,
     table::{
-        file::{InMemFile, LocalFile},
+        file::{FdCache, InMemFile, LocalFile},
         sstable::BlockCache,
         txn_file::TxnChunk,
         TxnCtx, TxnFile, TxnFileId,
@@ -47,6 +47,7 @@ impl TxnChunkManager {
         local_path: Option<PathBuf>,
         dfs: Arc<dyn Dfs>,
         cache: BlockCache,
+        fd_cache: Option<FdCache>,
         worker_pool: WorkerPool,
         config: TxnChunkManagerConfig,
     ) -> Self {
@@ -63,6 +64,7 @@ impl TxnChunkManager {
                 dfs,
                 txn_chunks,
                 cache,
+                fd_cache,
                 worker_pool,
             }),
         };
@@ -117,6 +119,8 @@ pub struct TxnChunkManagerCore {
     dfs: Arc<dyn Dfs>,
     txn_chunks: Arc<DashMap<u64, TxnChunkEntry>>,
     cache: BlockCache,
+    // fd_cache is None in tikv-worker
+    fd_cache: Option<FdCache>,
     worker_pool: WorkerPool,
 }
 
@@ -335,7 +339,7 @@ impl TxnChunkManagerCore {
         path: PathBuf,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<TxnChunk> {
-        let file = LocalFile::open(txn_chunk_id, path.as_path(), false)?;
+        let file = LocalFile::open(txn_chunk_id, path, self.fd_cache.clone(), false)?;
         let txn_chunk = TxnChunk::new(Arc::new(file), self.cache.clone(), encryption_key)?;
         Ok(txn_chunk)
     }
@@ -396,6 +400,9 @@ impl TxnChunkManagerCore {
 
     fn remove_chunk_file(&self, txn_chunk_id: u64) -> Result<()> {
         if let Some(path) = self.local_file_path(txn_chunk_id) {
+            if let Some(cache) = self.fd_cache.as_ref() {
+                cache.remove(txn_chunk_id)
+            }
             let res = fs::remove_file(&path);
             match &res {
                 Ok(()) => info!("remove chunk file"; "id" => txn_chunk_id, "path" => ?path),
@@ -616,6 +623,7 @@ mod tests {
             local_path.clone(),
             dfs.clone(),
             cache.clone(),
+            None,
             with_pool_size(2),
             TxnChunkManagerConfig::default(),
         );
@@ -645,6 +653,7 @@ mod tests {
             local_path.clone(),
             dfs,
             cache,
+            None,
             with_pool_size(2),
             TxnChunkManagerConfig::default(),
         );
@@ -669,6 +678,7 @@ mod tests {
             Some(local_path.to_path_buf()),
             dfs,
             cache,
+            None,
             with_pool_size(2),
             TxnChunkManagerConfig::default(),
         );

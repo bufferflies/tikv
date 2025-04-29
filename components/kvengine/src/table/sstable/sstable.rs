@@ -390,14 +390,9 @@ impl SsTableCore {
     }
 
     pub fn expire_cache(&self, level: usize) {
-        self.file.expire_open_file();
         self.filter.expire(FILTER_TTL_LEVELS[level]);
         self.idx.expire(IDX_TTL_LEVELS[level]);
         self.old_idx.expire(IDX_TTL_LEVELS[level]);
-    }
-
-    pub fn has_open_file(&self) -> bool {
-        self.file.is_open()
     }
 
     #[maybe_async::both]

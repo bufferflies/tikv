@@ -1026,7 +1026,7 @@ mod tests {
         let data = builder.build().unwrap();
         let temp_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
         fs::write(&temp_path, data).unwrap();
-        let local_file = LocalFile::open(1, &temp_path, false).unwrap();
+        let local_file = LocalFile::open(1, temp_path.to_path_buf(), None, false).unwrap();
         VectorIndexFile::new(Arc::new(local_file)).unwrap()
     }
 

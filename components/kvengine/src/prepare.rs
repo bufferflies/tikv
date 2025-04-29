@@ -36,7 +36,7 @@ use crate::{
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
         columnar::SchemaFile,
-        file::{InMemFile, LocalFile},
+        file::{FdCache, InMemFile, LocalFile},
         BoundedDataSet,
     },
     EngineCore, *,
@@ -297,9 +297,11 @@ impl EngineCore {
                     IaCtx::Enabled(ia_mgr, data_dir) => {
                         let meta_file_path =
                             table_meta_file_local_path(id, fm.file_type, data_dir.deref());
-                        if let Ok(table_meta_file) =
-                            self.open_local_file_with_file_path(id, meta_file_path)
-                        {
+                        if let Ok(table_meta_file) = self.open_local_file_with_file_path(
+                            id,
+                            ia_mgr.get_meta_fd_cache(),
+                            meta_file_path,
+                        ) {
                             if let Ok(ia_file) =
                                 IaFile::open(id, fm.file_type, Arc::new(table_meta_file), ia_mgr)
                             {
@@ -382,7 +384,11 @@ impl EngineCore {
         let file = if let Some((ia_mgr, data_dir)) = ia_ctx {
             let meta_file_path = table_meta_file_local_path(id, meta.file_type, data_dir.deref());
             self.write_local_file_with_file_path(id, data, use_direct_io, meta_file_path.clone())?;
-            let meta_file = self.open_local_file_with_file_path(id, meta_file_path)?;
+            let meta_file = self.open_local_file_with_file_path(
+                id,
+                ia_mgr.get_meta_fd_cache(),
+                meta_file_path,
+            )?;
             let table_meta_file = Arc::new(meta_file);
             Arc::new(IaFile::open(id, meta.file_type, table_meta_file, ia_mgr)?) as _
         } else {
@@ -592,14 +598,20 @@ impl EngineCore {
 
     fn open_local_file(&self, id: u64, file_type: FileType) -> Result<LocalFile> {
         let path = self.local_file_path(id, file_type);
-        self.open_local_file_with_file_path(id, path)
+        self.open_local_file_with_file_path(id, Some(self.fd_cache.clone()), path)
     }
 
-    fn open_local_file_with_file_path(&self, id: u64, file_path: PathBuf) -> Result<LocalFile> {
+    fn open_local_file_with_file_path(
+        &self,
+        id: u64,
+        fd_cache: Option<FdCache>,
+        file_path: PathBuf,
+    ) -> Result<LocalFile> {
         let _guard = self.lock_file(id);
         Ok(LocalFile::open(
             id,
-            file_path.as_path(),
+            file_path,
+            fd_cache,
             self.loaded.load(Relaxed),
         )?)
     }

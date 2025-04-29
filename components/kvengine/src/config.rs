@@ -29,6 +29,8 @@ pub const DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB: u64 = 512;
 pub const DEFAULT_MAX_REGION_SPEED_LIMIT_MB_PER_SEC: u64 = 50;
 pub const DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC: u64 = 1;
 
+pub const DEFAULT_FD_CACHE_CAPCITY: usize = 200000;
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -96,6 +98,9 @@ pub struct Config {
     /// concurrency per core for loading dfs files.
     pub dfs_load_concurrency_per_core: usize,
 
+    /// the capacity of open fd cache.
+    pub fd_cache_capacity: usize,
+
     pub checksum_type: ChecksumType,
 
     pub block_cache_type: BlockCacheType,
@@ -131,6 +136,7 @@ impl Default for Config {
             txn_file_worker_pool_size: None,
             // 8GB memory per core, 64 * 16MB files consumes 1GB at max.
             dfs_load_concurrency_per_core: 64,
+            fd_cache_capacity: DEFAULT_FD_CACHE_CAPCITY,
             checksum_type: ChecksumType::Crc32,
             block_cache_type: BlockCacheType::Moka,
             blob_table_build_options: Default::default(),

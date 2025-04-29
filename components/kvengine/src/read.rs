@@ -2043,7 +2043,7 @@ mod tests {
 
             let kb = KeyBuilder::new(KEYSPACE_ID, "t_");
             let dfs: Arc<dyn crate::dfs::Dfs> = Arc::new(InMemFs::new());
-            let txn_chunk_manager = TxnChunkManager::new(None, dfs.clone(), BlockCache::None, with_pool_size(2), TxnChunkManagerConfig::default());
+            let txn_chunk_manager = TxnChunkManager::new(None, dfs.clone(), BlockCache::None, None, with_pool_size(2), TxnChunkManagerConfig::default());
 
             let master_key = MasterKey::new(&[1u8; 32]);
             let enc_key = enable_enc.then(||master_key.generate_encryption_key());

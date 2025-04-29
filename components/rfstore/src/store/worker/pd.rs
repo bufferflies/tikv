@@ -817,7 +817,7 @@ impl PdRunner {
             &kv_all_shard_stats,
             store_info.kv_engine.opts.max_mem_table_size,
         );
-        let kv_engine_stats = kvengine::Engine::get_engine_stats(kv_all_shard_stats);
+        let kv_engine_stats = store_info.kv_engine.get_engine_stats(kv_all_shard_stats);
 
         store_info
             .kv_engine

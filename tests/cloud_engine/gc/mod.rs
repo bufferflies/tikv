@@ -4,8 +4,8 @@ use std::{collections::HashMap, fs, time::Duration};
 
 use collections::HashSet;
 use kvengine::{
-    new_columnar_filename, new_schema_filename, new_tmp_filename, new_vector_index_filename,
-    table::sstable::new_filename, ShardStats,
+    new_schema_filename, new_tmp_filename, new_vector_index_filename, table::sstable::new_filename,
+    ShardStats,
 };
 use kvproto::raft_cmdpb::{RaftCmdRequest, RaftRequestHeader};
 use rfstore::store::rlog::*;
@@ -32,9 +32,6 @@ fn test_local_file_gc() {
     fs::write(&new_file_path, "abc").unwrap();
     let new_tmp_file_path = kv.opts.local_dir.join(new_tmp_filename(new_file_id, 1));
     fs::write(&new_tmp_file_path, "def").unwrap();
-    let new_file_id = client.get_ts().into_inner();
-    let new_columnar_file_path = kv.opts.local_dir.join(new_columnar_filename(new_file_id));
-    fs::write(&new_columnar_file_path, "ghi").unwrap();
     let new_file_id = client.get_ts().into_inner();
     let new_schema_file_path = kv.opts.local_dir.join(new_schema_filename(new_file_id));
     fs::write(&new_schema_file_path, "jkl").unwrap();
@@ -73,7 +70,6 @@ fn test_local_file_gc() {
     }
     assert!(!new_file_path.exists());
     assert!(!new_tmp_file_path.exists());
-    assert!(!new_columnar_file_path.exists());
     assert!(!new_schema_file_path.exists());
     assert!(!new_vector_index_file_path.exists());
     cluster.stop();

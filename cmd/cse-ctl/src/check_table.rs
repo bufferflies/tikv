@@ -142,6 +142,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         None,
         s3fs.clone(),
         BlockCache::None,
+        None,
         with_pool_size(TXN_CHUNK_WORKER_POOL_SIZE),
         TxnChunkManagerConfig::default(),
     );

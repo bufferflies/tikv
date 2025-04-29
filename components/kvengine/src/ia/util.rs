@@ -16,7 +16,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use dashmap::DashMap;
-use quick_cache::sync::Cache;
+use quick_cache::sync::{Cache, GuardResult};
 use tikv_util::config::{AbsoluteOrPercentSize, ReadableDuration};
 
 use crate::{
@@ -100,16 +100,17 @@ impl LocalFileStore {
     }
 
     fn open_file(&self, file_id: u64, key: &str) -> Result<Option<Arc<std::fs::File>>> {
-        let f = if let Some(f) = self.fd_cache.get(key) {
-            debug!("FileDataStore.open_file cache hit"; "file_id" => file_id, "key" => key);
-            f.clone()
-        } else {
-            let path = self.dir.join(key);
-            debug!("FileDataStore.open_file cache miss"; "file_id" => file_id, "key" => key, "path" => ?path);
-            let f = try_open!(path).table_ctx(file_id, format!("open.{key}"))?;
-            let arc_f = Arc::new(f);
-            self.fd_cache.insert(key.to_owned(), arc_f.clone());
-            arc_f
+        let f = match self.fd_cache.get_value_or_guard(key, None) {
+            GuardResult::Value(file) => file,
+            GuardResult::Guard(placeholder) => {
+                let path = self.dir.join(key);
+                debug!("FileDataStore.open_file cache miss"; "file_id" => file_id, "key" => key, "path" => ?path);
+                let f = try_open!(path).table_ctx(file_id, format!("open.{key}"))?;
+                let arc_f = Arc::new(f);
+                let _ = placeholder.insert(arc_f.clone());
+                arc_f
+            }
+            GuardResult::Timeout => unreachable!(),
         };
         Ok(Some(f))
     }

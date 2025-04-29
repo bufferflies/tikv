@@ -13,11 +13,9 @@ use std::{
 
 use bytes::Bytes;
 use memmap2::Mmap;
+use quick_cache::sync::GuardResult;
 
 use crate::{error::IoContext, ia::types::FileSegmentIdent, table::table};
-
-// 30 minutes idle file would be closed.
-const FILE_TTL: u64 = 30 * 60;
 
 #[async_trait::async_trait]
 pub trait File: Sync + Send {
@@ -71,15 +69,6 @@ pub trait File: Sync + Send {
         self.read_at(buf, offset)
     }
 
-    /// `expire_open_file` closes the file if it's idle for a long time.
-    ///
-    /// It will be reopened and cached on next read.
-    fn expire_open_file(&self) {}
-
-    fn is_open(&self) -> bool {
-        false
-    }
-
     fn mmap(&self) -> table::Result<MmapData>;
 
     /// `get_remote_segments` returns the remote segments of the file. Used for
@@ -118,42 +107,58 @@ pub struct LocalFile {
     id: u64,
     size: u64,
     path: PathBuf,
-    fd: TtlCache<std::fs::File>,
     mmap: Mutex<Option<Arc<Mmap>>>,
+    fd_cache: FdCache,
 }
 
 impl LocalFile {
-    pub fn open(id: u64, path: &Path, set_mtime: bool) -> table::Result<LocalFile> {
+    pub fn open(
+        id: u64,
+        path: PathBuf,
+        fd_cache_opt: Option<FdCache>,
+        set_mtime: bool,
+    ) -> table::Result<LocalFile> {
+        let fd_cache = match fd_cache_opt {
+            None => {
+                let fd =
+                    std::fs::File::open(path.as_path()).table_ctx(id, "local.open.open_file")?;
+                let fd_cache = FdCache::new(1);
+                fd_cache.insert(id, Arc::new(fd));
+                fd_cache
+            }
+            Some(fd_cache) => fd_cache,
+        };
         if set_mtime {
-            filetime::set_file_mtime(path, filetime::FileTime::now())
+            filetime::set_file_mtime(path.as_path(), filetime::FileTime::now())
                 .table_ctx(id, "local.open.set_file_mtime")?;
         }
-        let meta = std::fs::metadata(path).table_ctx(id, "local.open.metadata")?;
+        let meta = std::fs::metadata(path.as_path()).table_ctx(id, "local.open.metadata")?;
         let local_file = LocalFile {
             id,
             size: meta.size(),
-            path: path.to_path_buf(),
-            fd: TtlCache::default(),
+            path,
             mmap: Mutex::new(None),
+            fd_cache,
         };
         Ok(local_file)
     }
 
     pub fn from_file(id: u64, path: PathBuf, file: Arc<std::fs::File>) -> table::Result<LocalFile> {
         let meta = std::fs::metadata(&path).table_ctx(id, "local.from_file.metadata")?;
+        let fd_cache = FdCache::new(1);
+        fd_cache.insert(id, file);
         let local_file = LocalFile {
             id,
             size: meta.size(),
             path,
-            fd: TtlCache::new(file),
             mmap: Mutex::new(None),
+            fd_cache,
         };
         Ok(local_file)
     }
 
     fn get_file(&self) -> table::Result<Arc<std::fs::File>> {
-        self.fd
-            .get(|| std::fs::File::open(self.path.as_path()).table_ctx(self.id, "local.get_file"))
+        self.fd_cache.get(self.id, self.path.as_path())
     }
 }
 
@@ -183,14 +188,6 @@ impl File for LocalFile {
         fd.read_at(buf, offset)
             .table_ctx(self.id(), "local.read_at")?;
         Ok(())
-    }
-
-    fn expire_open_file(&self) {
-        self.fd.expire(FILE_TTL)
-    }
-
-    fn is_open(&self) -> bool {
-        self.fd.is_loaded()
     }
 
     fn mmap(&self) -> table::Result<MmapData> {
@@ -355,6 +352,44 @@ impl<T> TtlCache<T> {
 
     pub fn is_loaded(&self) -> bool {
         self.access_ns.load(Relaxed) > 0
+    }
+}
+
+#[derive(Clone)]
+pub struct FdCache {
+    cache: Arc<quick_cache::sync::Cache<u64, Arc<std::fs::File>>>,
+}
+
+impl FdCache {
+    pub fn new(capacity: usize) -> Self {
+        let cache = quick_cache::sync::Cache::new(capacity);
+        Self {
+            cache: Arc::new(cache),
+        }
+    }
+
+    pub fn get(&self, file_id: u64, path: &Path) -> table::Result<Arc<std::fs::File>> {
+        match self.cache.get_value_or_guard(&file_id, None) {
+            GuardResult::Value(v) => Ok(v.clone()),
+            GuardResult::Guard(holder) => {
+                let file = Arc::new(std::fs::File::open(path).table_ctx(file_id, "FdCache::get")?);
+                let _ = holder.insert(file.clone());
+                Ok(file)
+            }
+            GuardResult::Timeout => unreachable!(),
+        }
+    }
+
+    pub fn insert(&self, file_id: u64, file: Arc<std::fs::File>) {
+        self.cache.insert(file_id, file);
+    }
+
+    pub fn remove(&self, file_id: u64) {
+        self.cache.remove(&file_id);
+    }
+
+    pub fn size(&self) -> usize {
+        self.cache.len()
     }
 }
 

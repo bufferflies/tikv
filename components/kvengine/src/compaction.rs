@@ -2234,7 +2234,7 @@ fn load_table_files_from_local(
             FileType::Blob => new_blob_filename(id),
         };
         let file_path = local_dir.join(file_name);
-        match LocalFile::open(id, file_path.as_path(), false) {
+        match LocalFile::open(id, file_path, None, false) {
             Ok(f) => files_loaded.push(Arc::new(f)),
             Err(e) => {
                 files_failed.push(id);

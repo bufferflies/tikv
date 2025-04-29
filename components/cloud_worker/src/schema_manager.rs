@@ -899,7 +899,7 @@ impl SchemaManagerCore {
             });
         let meta_file_path = config.dir.join(META_FILE_NAME);
         let meta_file = if meta_file_path.exists() {
-            MetaFile::open(LocalFile::open(0, meta_file_path.as_path(), false).unwrap()).unwrap()
+            MetaFile::open(LocalFile::open(0, meta_file_path, None, false).unwrap()).unwrap()
         } else {
             MetaFile::new()
         };
@@ -1146,7 +1146,8 @@ fn read_schema_file_from_local<P: AsRef<Path>>(
     };
 
     let file_path = dir.join(format!("{:016x}.schema", file_id));
-    let local_file = Arc::new(LocalFile::open(file_id, file_path.as_path(), false)?);
+    let fd = Arc::new(fs::File::open(file_path.as_path())?);
+    let local_file = Arc::new(LocalFile::from_file(file_id, file_path, fd)?);
     let file = SchemaFile::open(local_file)?;
     Ok(Some(file))
 }
@@ -1347,7 +1348,7 @@ mod tests {
         let data = meta.write();
         write_meta_file_to_local(&dir, Bytes::from(data)).unwrap();
         let meta_file_path = dir.as_ref().join(META_FILE_NAME);
-        let meta_file = LocalFile::open(0, &meta_file_path, false).unwrap();
+        let meta_file = LocalFile::open(0, meta_file_path, None, false).unwrap();
         let read_meta = MetaFile::open(meta_file).unwrap();
         for i in 1..100 {
             let (file_id, schema_version) = read_meta.get_latest_file(i).unwrap();

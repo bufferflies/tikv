@@ -21,7 +21,6 @@ use kvproto::import_sstpb::SwitchMode;
 use sst_importer::SstImporter;
 use tikv_util::{error, info, warn, worker::Runnable};
 
-const COLUMNAR_FILE_SUFFIX: &str = ".col";
 const SCHEMA_FILE_SUFFIX: &str = ".schema";
 const VECTOR_INDEX_FILE_SUFFIX: &str = ".vec";
 
@@ -175,7 +174,12 @@ impl GcRunner {
                 continue;
             }
             if path.is_dir() && path.file_name() == Some(OsStr::new("ia")) {
-                self.remove_kv_garbage_ia_files(path, async_sst_file_ids, blacklist_file_ids)?;
+                self.remove_kv_garbage_ia_files(
+                    path,
+                    async_sst_file_ids,
+                    col_file_ids,
+                    blacklist_file_ids,
+                )?;
                 continue;
             }
 
@@ -198,20 +202,8 @@ impl GcRunner {
                     }
                     let meta = fs::metadata(&path).table_ctx(id, "gc.sst.metadata")?;
                     if self.is_old_file(meta) {
+                        self.kv.remove_fd_cache(id);
                         Self::remove_file(store_id, &path).table_ctx(id, "gc.sst.remove_file")?;
-                    }
-                }
-            } else if path_str.ends_with(COLUMNAR_FILE_SUFFIX) {
-                let id = Self::parse_file_id(&path, COLUMNAR_FILE_SUFFIX.len())?;
-                if !col_file_ids.contains(&id) {
-                    let _guard = self.kv.lock_file(id);
-                    if blacklist_file_ids.contains(&id) {
-                        continue;
-                    }
-
-                    let meta = fs::metadata(&path).table_ctx(id, "gc.col.metadata")?;
-                    if self.is_old_file(meta) {
-                        Self::remove_file(store_id, &path).table_ctx(id, "gc.col.remove_file")?;
                     }
                 }
             } else if path_str.ends_with(SCHEMA_FILE_SUFFIX) {
@@ -223,6 +215,7 @@ impl GcRunner {
                     }
                     let meta = fs::metadata(&path).table_ctx(id, "gc.schema.metadata")?;
                     if self.is_old_file(meta) {
+                        self.kv.remove_fd_cache(id);
                         Self::remove_file(store_id, &path)
                             .table_ctx(id, "gc.schema.remove_file")?;
                     }
@@ -236,6 +229,7 @@ impl GcRunner {
                     }
                     let meta = fs::metadata(&path).table_ctx(id, "gc.vec.metadata")?;
                     if self.is_old_file(meta) {
+                        self.kv.remove_fd_cache(id);
                         Self::remove_file(store_id, &path).table_ctx(id, "gc.vec.remove_file")?;
                     }
                 }
@@ -323,6 +317,7 @@ impl GcRunner {
         &mut self,
         _: PathBuf,
         async_sst_file_ids: &HashSet<u64>,
+        col_file_ids: &HashSet<u64>,
         blacklist_file_ids: &HashSet<u64>,
     ) -> kvengine::Result<()> {
         let Some(ia_gc_runner) = self.ia_gc_runner.as_mut() else {
@@ -330,7 +325,9 @@ impl GcRunner {
         };
 
         let ignore = |file_id| {
-            async_sst_file_ids.contains(&file_id) || blacklist_file_ids.contains(&file_id)
+            async_sst_file_ids.contains(&file_id)
+                || col_file_ids.contains(&file_id)
+                || blacklist_file_ids.contains(&file_id)
         };
         ia_gc_runner.run(ignore);
         Ok(())

@@ -504,10 +504,13 @@ impl IaFile {
         use crate::table::file::LocalFile;
 
         // mtime is set during prepare.
-        let table_meta_file =
-            LocalFile::open(id, &table_meta_file_local_path(id, ftype, data_dir), false).map_err(
-                |err| Error::IaMgr(format!("{} open: open meta file failed: {:?}", id, err)),
-            )?;
+        let table_meta_file = LocalFile::open(
+            id,
+            table_meta_file_local_path(id, ftype, data_dir),
+            None,
+            false,
+        )
+        .map_err(|err| Error::IaMgr(format!("{} open: open meta file failed: {:?}", id, err)))?;
         Self::open(id, ftype, Arc::new(table_meta_file), mgr)
     }
 

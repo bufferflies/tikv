@@ -112,7 +112,7 @@ fn test_shard_stats() {
         }
 
         // Verify `Engine::get_engine_stats` interface.
-        let engine_stats = kvengine::Engine::get_engine_stats(all_shard_stats);
+        let engine_stats = engine.get_engine_stats(all_shard_stats);
         assert_eq!(
             engine_stats.kv_size, kv_size,
             "engine.kv_size wrong, engine:{:?}",

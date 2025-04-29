@@ -88,7 +88,7 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
         .await
         .unwrap();
 
-        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.into()).unwrap();
+        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), None, rt.into()).unwrap();
         let dfs_opts = dfs::Options::default().with_shard(1, 1);
         let table_meta_data = IaFile::prepare_table_meta(
             file_id,
@@ -168,8 +168,13 @@ fn test_init() {
         let file_type = FileType::Sst;
 
         {
-            let mgr =
-                IaManager::new(options.clone(), Arc::new(s3fs.clone()), rt.clone().into()).unwrap();
+            let mgr = IaManager::new(
+                options.clone(),
+                Arc::new(s3fs.clone()),
+                None,
+                rt.clone().into(),
+            )
+            .unwrap();
 
             let mut files = Vec::with_capacity(10);
             for i in 1..10 {
@@ -215,7 +220,7 @@ fn test_init() {
         }
 
         {
-            let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.into()).unwrap();
+            let mgr = IaManager::new(options, Arc::new(s3fs.clone()), None, rt.into()).unwrap();
 
             let mut segments_ident = mgr.get_local_segments().await;
             segments_ident.sort_by(|(m_ident, ..), (n_ident, ..)| m_ident.cmp(n_ident));
@@ -289,7 +294,7 @@ fn test_abnormal_local_file() {
             .freq_update_interval(FREQ_UPDATE_INTERVAL)
             .build()
             .unwrap();
-        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.into()).unwrap();
+        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), None, rt.into()).unwrap();
 
         {
             let dfs_opts = dfs::Options::default().with_shard(1, 1);
@@ -391,7 +396,7 @@ fn test_local_gc() {
         let file_type = FileType::Sst;
         let file_count = 10;
 
-        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.clone().into()).unwrap();
+        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), None, rt.clone().into()).unwrap();
 
         let mut files = Vec::with_capacity(file_count);
         for i in 1..=file_count {
@@ -480,7 +485,8 @@ fn test_local_gc() {
                 .capacity(ia_cap)
                 .build()
                 .unwrap();
-            let mgr = IaManager::new(options, Arc::new(s3fs.clone()), rt.clone().into()).unwrap();
+            let mgr =
+                IaManager::new(options, Arc::new(s3fs.clone()), None, rt.clone().into()).unwrap();
 
             let config = IaGcConfig {
                 segment_interval: ReadableDuration::ZERO,

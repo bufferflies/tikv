@@ -36,6 +36,7 @@ use crate::{
     meta::ShardMeta,
     table::{
         columnar::SchemaFile,
+        file::FdCache,
         memtable::CfTable,
         sstable::{BlockCache, MAGIC_NUMBER},
         BoundedDataSet, DataBound, InnerKey, ZSTD_COMPRESSION,
@@ -109,6 +110,8 @@ impl Engine {
             max_capacity as u64,
             opts.table_builder_options.block_size,
         );
+        let fd_cache = FdCache::new(config.fd_cache_capacity);
+        let meta_fd_cache = FdCache::new(config.fd_cache_capacity);
         let (flush_tx, flush_rx) = mpsc::unbounded();
         let (compact_tx, compact_rx) = mpsc::unbounded();
         let (free_tx, free_rx) = mpsc::unbounded();
@@ -121,10 +124,11 @@ impl Engine {
             Some(opts.local_dir.join("txn")),
             fs.clone(),
             cache.clone(),
+            Some(fd_cache.clone()),
             with_pool_size(opts.txn_file_worker_pool_size),
             TxnChunkManagerConfig::default(),
         );
-        let ia_ctx = create_ia_ctx(opts.clone(), fs.clone());
+        let ia_ctx = create_ia_ctx(opts.clone(), fs.clone(), meta_fd_cache.clone());
         let (metas, files_in_blacklist) =
             tikv_util::init_task_local_sync(|| EngineCore::read_meta(meta_iter))?;
         let dfs_load_limiter = DfsLoadLimiter::new(&config);
@@ -137,6 +141,7 @@ impl Engine {
             compact_tx,
             fs: fs.clone(),
             cache,
+            fd_cache,
             comp_client: CompactionClient::new(
                 fs.clone(),
                 opts.remote_compactor_addr.clone(),
@@ -313,6 +318,7 @@ pub struct EngineCore {
     pub(crate) compact_tx: mpsc::Sender<CompactMsg>,
     pub(crate) fs: Arc<dyn dfs::Dfs>,
     pub(crate) cache: BlockCache,
+    pub(crate) fd_cache: FdCache,
     pub comp_client: CompactionClient,
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
     pub(crate) managed_safe_ts: AtomicU64,
@@ -925,6 +931,10 @@ impl EngineCore {
         self.available_space_bytes.store(bytes, Ordering::Relaxed);
     }
 
+    pub fn remove_fd_cache(&self, file_id: u64) {
+        self.fd_cache.remove(file_id);
+    }
+
     fn add_worker_handle(&self, handle: thread::JoinHandle<()>) {
         self.worker_handles.lock().unwrap().push(handle);
     }
@@ -1054,7 +1064,7 @@ fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
     }
 }
 
-fn create_ia_ctx(opts: Arc<Options>, fs: Arc<dyn dfs::Dfs>) -> IaCtx {
+fn create_ia_ctx(opts: Arc<Options>, fs: Arc<dyn dfs::Dfs>, meta_fd_cache: FdCache) -> IaCtx {
     if !opts.ia.mem_cap.is_zero() && !opts.ia.disk_cap.is_zero() {
         let ia_path = opts.local_dir.join("ia");
         let segment_path = ia_path.join("segment");
@@ -1066,7 +1076,7 @@ fn create_ia_ctx(opts: Arc<Options>, fs: Arc<dyn dfs::Dfs>) -> IaCtx {
             .thread_name("ia")
             .build()
             .unwrap();
-        let ia_mgr = IaManager::new(opts, fs, runtime.into()).unwrap();
+        let ia_mgr = IaManager::new(opts, fs, Some(meta_fd_cache), runtime.into()).unwrap();
         let meta_path = ia_path.join("meta");
         std::fs::create_dir_all(&meta_path).unwrap();
         IaCtx::Enabled(ia_mgr, Arc::new(meta_path))

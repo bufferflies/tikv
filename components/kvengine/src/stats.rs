@@ -120,9 +120,10 @@ impl super::Engine {
         self.shards.get(&region_id).map(|shard| shard.get_stats())
     }
 
-    pub fn get_engine_stats(mut shard_stats: Vec<ShardStats>) -> EngineStats {
+    pub fn get_engine_stats(&self, mut shard_stats: Vec<ShardStats>) -> EngineStats {
         let mut engine_stats = EngineStats::new();
         engine_stats.num_shards = shard_stats.len();
+        engine_stats.open_files = self.fd_cache.size() as i64;
         engine_stats.columnar_levels = vec![ColumnarLevelStats::default(); COLUMNAR_LEVELS];
         for shard in &shard_stats {
             if shard.active {
@@ -164,7 +165,6 @@ impl super::Engine {
             engine_stats.old_entries += shard.old_entries;
             engine_stats.tombs += shard.tombs;
             engine_stats.kv_size += shard.kv_size;
-            engine_stats.open_files += shard.open_files;
             for cf in 0..NUM_CFS {
                 let shard_cf_stat = &shard.cfs[cf];
                 for (i, level_stat) in shard_cf_stat.levels.iter().enumerate() {
@@ -287,7 +287,6 @@ pub struct ShardStats {
     pub old_entries: usize,
     pub tombs: usize,
     pub kv_size: u64,
-    pub open_files: i64,
     pub keyspace_prefix_tables: u32,
     pub base_version: u64,
     pub meta_sequence: u64,
@@ -511,7 +510,6 @@ impl super::Shard {
         let mut old_entries = 0;
         let mut tombs = 0; // for WRITE_CF only
         let mut kv_size = 0; // for WRITE_CF only
-        let mut open_files = 0;
         let data = self.get_data();
         let mem_table_count = data.mem_tbls.len();
         let mut mem_table_size = 0;
@@ -564,9 +562,6 @@ impl super::Shard {
                         tombs += cf_tbl.tombs as usize;
                         kv_size += cf_tbl.kv_size;
                         cf_tbl.expire_cache(0);
-                        if cf_tbl.has_open_file() {
-                            open_files += 1;
-                        }
                     }
                     if cf_tbl.keyspace_id.is_some() && !l0_keyspace_prefix_tables_counted {
                         keyspace_prefix_tables += 1;
@@ -594,9 +589,6 @@ impl super::Shard {
                 level_stats.num_tables = l.tables.len();
                 for t in l.tables.as_slice() {
                     t.expire_cache(l.level);
-                    if t.has_open_file() {
-                        open_files += 1;
-                    }
                     if t.keyspace_id.is_some() {
                         keyspace_prefix_tables += 1;
                     }
@@ -712,7 +704,6 @@ impl super::Shard {
             old_entries,
             tombs,
             kv_size,
-            open_files,
             keyspace_prefix_tables,
             partial_l0s,
             shared_blob_tables,

@@ -36,7 +36,7 @@ use crate::{
         ENGINE_IA_MAIN_QUEUE_CAPACITY, ENGINE_IA_READ_SEGMENT_CACHE_MISS,
         ENGINE_IA_READ_SEGMENT_DURATION_HISTOGRAM, ENGINE_IA_SMALL_QUEUE_CAPACITY,
     },
-    table::{Error, Result},
+    table::{file::FdCache, Error, Result},
     try_some,
     util::WorkerPool,
 };
@@ -176,7 +176,12 @@ impl ops::Deref for IaManager {
 }
 
 impl IaManager {
-    pub fn new(opts: IaManagerOptions, fs: Arc<dyn dfs::Dfs>, runtime: WorkerPool) -> Result<Self> {
+    pub fn new(
+        opts: IaManagerOptions,
+        fs: Arc<dyn dfs::Dfs>,
+        meta_fd_cache: Option<FdCache>,
+        runtime: WorkerPool,
+    ) -> Result<Self> {
         assert!(
             opts.small_queue.path.is_none(),
             "small queue must be in memory"
@@ -208,6 +213,7 @@ impl IaManager {
             fs,
             runtime,
             main_store,
+            meta_fd_cache,
             loading_segments: Default::default(),
             segments,
             table_metas: Default::default(),
@@ -230,6 +236,7 @@ pub struct IaManagerCore {
     fs: Arc<dyn dfs::Dfs>,
     runtime: WorkerPool,
     main_store: Arc<dyn LocalStore>,
+    meta_fd_cache: Option<FdCache>,
 
     loading_segments: GuardMap<FileSegmentIdent, ()>,
     segments: Arc<LocalSegmentMap>,
@@ -253,6 +260,10 @@ impl IaManagerCore {
 
     pub fn get_dfs(&self) -> &dyn Dfs {
         self.fs.deref()
+    }
+
+    pub fn get_meta_fd_cache(&self) -> Option<FdCache> {
+        self.meta_fd_cache.clone()
     }
 
     pub(crate) fn segment_size(&self) -> i64 {
@@ -540,6 +551,9 @@ impl IaManagerCore {
 
     pub fn remove_table_meta(&self, file_id: u64) {
         self.table_metas.remove(&file_id);
+        if let Some(cache) = self.meta_fd_cache.as_ref() {
+            cache.remove(file_id)
+        }
     }
 
     pub fn notify_total_data_size(&self, total_data_size: u64) {

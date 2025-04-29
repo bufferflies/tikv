@@ -737,7 +737,7 @@ impl StatusServer {
             res = serde_json::to_string_pretty(&remote_urls);
         } else {
             let all_shard_stats = engine.get_all_shard_stats();
-            let engine_stats = kvengine::Engine::get_engine_stats(all_shard_stats);
+            let engine_stats = engine.get_engine_stats(all_shard_stats);
             res = serde_json::to_string_pretty(&engine_stats);
         }
         Ok(match res {
