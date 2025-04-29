@@ -40,7 +40,7 @@ use crate::dfs::{
 const MAX_RETRY_COUNT: u32 = 9;
 const RETRY_SLEEP_MS: u64 = 500;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(300);
 const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const STORAGE_CLASS_DEFAULT: &str = STORAGE_CLASS_INTELLIGENT_TIERING;

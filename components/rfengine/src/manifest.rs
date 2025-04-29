@@ -20,7 +20,7 @@ use protobuf::Message;
 use tikv_util::{error, info, warn};
 
 use crate::{
-    metrics::RFENGINE_RLOG_GC_SIZE, raft_log_file_name, writer::EPOCH_ROTATE_LEN, PeerMeta,
+    metrics::RFENGINE_RLOG_GC_SIZE, raft_log_file_name, writer::EPOCH_SNAPSHOT_LEN, PeerMeta,
     TRUNCATE_ALL_INDEX,
 };
 
@@ -308,12 +308,12 @@ impl Manifest {
     ///
     /// We only do snapshot every EPOCH_ROTATE_LEN(4) epochs.
     pub(crate) fn should_snapshot(&self) -> bool {
-        self.epoch_id % EPOCH_ROTATE_LEN == 0
+        self.epoch_id % EPOCH_SNAPSHOT_LEN == 0
     }
 
     /// The epoch of next snapshot.
     pub(crate) fn next_snapshot_epoch(epoch_id: u32) -> u32 {
-        (epoch_id + EPOCH_ROTATE_LEN) / EPOCH_ROTATE_LEN * EPOCH_ROTATE_LEN
+        (epoch_id + EPOCH_SNAPSHOT_LEN) / EPOCH_SNAPSHOT_LEN * EPOCH_SNAPSHOT_LEN
     }
 }
 
@@ -439,10 +439,13 @@ mod tests {
     use super::*;
     #[test]
     fn test_next_snapshot_epoch() {
-        assert_eq!(Manifest::next_snapshot_epoch(0), 4);
-        assert_eq!(Manifest::next_snapshot_epoch(1), 4);
-        assert_eq!(Manifest::next_snapshot_epoch(3), 4);
+        assert_eq!(Manifest::next_snapshot_epoch(0), 8);
+        assert_eq!(Manifest::next_snapshot_epoch(1), 8);
+        assert_eq!(Manifest::next_snapshot_epoch(3), 8);
         assert_eq!(Manifest::next_snapshot_epoch(4), 8);
+        assert_eq!(Manifest::next_snapshot_epoch(7), 8);
+        assert_eq!(Manifest::next_snapshot_epoch(8), 16);
+        assert_eq!(Manifest::next_snapshot_epoch(9), 16);
     }
 
     #[test]
