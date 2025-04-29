@@ -48,7 +48,7 @@ fn test_commit_ok() {
     ];
 
     client
-        .kv_prewrite(
+        .kv_prewrite_with_retry(
             primary_key.to_vec().into(),
             None, // Let client figure out secondaries
             TxnMutations::from_normal(mutations.clone()),
@@ -145,7 +145,7 @@ fn test_commit_err() {
         op: kvrpcpb::Op::Put,
     }];
     client
-        .kv_prewrite(
+        .kv_prewrite_with_retry(
             primary_key.to_vec().into(),
             None,
             TxnMutations::from_normal(prewrite_muts.clone()),

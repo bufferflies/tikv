@@ -59,7 +59,7 @@ fn test_get_put(#[case] enable_ia: bool, #[case] write_method: TxnWriteMethod) {
     ))
     .unwrap();
     client
-        .kv_prewrite(key.clone(), None, txn_muts.clone(), start_ts)
+        .kv_prewrite_with_retry(key.clone(), None, txn_muts.clone(), start_ts)
         .unwrap();
     let commit_ts = client.get_ts();
 
@@ -214,7 +214,7 @@ fn test_write_conflict(#[case] enable_ia: bool, #[case] write_method: TxnWriteMe
     .unwrap();
     let start_ts = client.get_ts();
     client
-        .kv_prewrite(key.clone(), None, txn_muts.clone(), start_ts)
+        .kv_prewrite_with_retry(key.clone(), None, txn_muts.clone(), start_ts)
         .unwrap();
     let commit_ts = client.get_ts();
     client
@@ -223,7 +223,7 @@ fn test_write_conflict(#[case] enable_ia: bool, #[case] write_method: TxnWriteMe
 
     // Another write:
     let err = client
-        .kv_prewrite(key.clone(), None, txn_muts.clone(), ts0)
+        .kv_prewrite_with_retry(key.clone(), None, txn_muts.clone(), ts0)
         .unwrap_err();
     assert_matches!(err, ClientError::WriteConflict { .. });
 
@@ -331,7 +331,7 @@ fn test_insert(#[case] enable_ia: bool, #[case] write_method: TxnWriteMethod) {
         ))
         .unwrap();
         let err = client
-            .kv_prewrite(key.clone(), None, txn_muts, client.get_ts())
+            .kv_prewrite_with_retry(key.clone(), None, txn_muts, client.get_ts())
             .unwrap_err();
         assert_matches!(err, ClientError::AlreadyExist { .. });
     }
@@ -349,7 +349,7 @@ fn test_insert(#[case] enable_ia: bool, #[case] write_method: TxnWriteMethod) {
         .unwrap();
         let start_ts = client.get_ts();
         client
-            .kv_prewrite(key.clone(), None, txn_muts.clone(), start_ts)
+            .kv_prewrite_with_retry(key.clone(), None, txn_muts.clone(), start_ts)
             .unwrap();
         client
             .kv_commit(txn_muts.clone(), start_ts, client.get_ts())

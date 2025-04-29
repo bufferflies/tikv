@@ -323,7 +323,7 @@ fn test_cloud_store_reset_range() {
     let start_ts = block_on(cluster.get_pd_client().get_tso()).unwrap();
     let txn_muts = TxnMutations::from_normal(mutations);
     client
-        .kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts)
+        .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts, start_ts)
         .expect("kv_prewrite");
 
     let snap = engine.get_snap_access(region_id).unwrap();

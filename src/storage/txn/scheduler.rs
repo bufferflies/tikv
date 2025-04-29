@@ -858,6 +858,19 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 Err(e) => {
                     if !Self::is_undetermined_error(&e) {
                         do_wake_up = false;
+                    } else {
+                        fail_point!("undermined_write_error_invoke_callback", |_| {
+                            cb.execute(ProcessResult::Failed {
+                                err: StorageError::from(e.maybe_clone().unwrap()),
+                            })
+                        });
+                        // TODO: Return the undetermined error to the client instead of panic,
+                        //       and the user connection in the client should terminate.
+                        panic!(
+                            "undetermined error: {:?} cid={}, tag={}, process
+                        result={:?}",
+                            e, cid, tag, &pr
+                        );
                     }
                     ProcessResult::Failed {
                         err: StorageError::from(e),
@@ -1057,10 +1070,18 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         );
     }
 
-    fn is_undetermined_error(_e: &tikv_kv::Error) -> bool {
+    fn is_undetermined_error(e: &tikv_kv::Error) -> bool {
         // TODO: If there's some cases that `engine.async_write` returns error but it's
         // still possible that the data is successfully written, return true.
-        false
+        if let tikv_kv::ErrorInner::Undetermined(err_msg) = &*(e.0) {
+            error!(
+                "undetermined error is encountered, exit the tikv-server msg={:?}",
+                err_msg
+            );
+            true
+        } else {
+            false
+        }
     }
 
     fn early_response(

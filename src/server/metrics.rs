@@ -459,6 +459,7 @@ make_auto_flush_static_metric! {
         err_raft_entry_too_large,
         err_buckets_version_not_match,
         err_leader_memory_lock_check,
+        err_undetermind,
     }
 
     pub label_enum RequestTypeKind {

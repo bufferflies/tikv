@@ -37,7 +37,7 @@ fn test_resolve_lock() {
         // prewrite but no commit.
         let txn_muts = TxnMutations::from_normal(mutations);
         client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts, start_ts)
+            .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts, start_ts)
             .expect("kv_prewrite");
 
         // prewrite should meet locks of previous prewrite.
@@ -59,7 +59,7 @@ fn test_resolve_lock() {
         let put_time = Instant::now();
         let txn_muts = TxnMutations::from_normal(mutations);
         client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .expect("kv_prewrite");
 
         let mut client1 = cluster.new_client();

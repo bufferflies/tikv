@@ -57,7 +57,8 @@ use tikv::{
 };
 use tikv_kv::{OnAppliedCb, WriteEvent};
 use tikv_util::{
-    codec::number::NumberEncoder, future::paired_must_called_future_callback, time::Instant,
+    callback::must_call, codec::number::NumberEncoder, future::paired_must_called_future_callback,
+    time::Instant,
 };
 use txn_types::{
     Key, Lock, LockType, ReqType, TimeStamp, TxnExtra, TxnExtraScheduler, WriteBatchFlags,
@@ -81,6 +82,9 @@ pub enum Error {
     #[error("{0}")]
     InvalidRequest(String),
 
+    #[error("{0}")]
+    Undetermined(String),
+
     #[error("timeout after {0:?}")]
     Timeout(Duration),
 }
@@ -95,6 +99,7 @@ fn get_status_kind_from_engine_error(e: &kv::Error) -> RequestStatusKind {
         }
         KvError(box KvErrorInner::Timeout(_)) => RequestStatusKind::err_timeout,
         KvError(box KvErrorInner::EmptyRequest) => RequestStatusKind::err_empty_request,
+        KvError(box KvErrorInner::Undetermined(_)) => RequestStatusKind::err_undetermind,
         KvError(box KvErrorInner::Other(_)) => RequestStatusKind::err_other,
     }
 }
@@ -105,6 +110,7 @@ impl From<Error> for kv::Error {
     fn from(e: Error) -> kv::Error {
         match e {
             Error::RequestFailed(e) => KvError::from(KvErrorInner::Request(*e)),
+            Error::Undetermined(e) => KvError::from(KvErrorInner::Undetermined(e)),
             Error::Server(e) => e.into(),
             e => box_err!(e),
         }
@@ -237,9 +243,11 @@ pub enum CmdRes {
 
 fn check_raft_cmd_response(resp: &mut RaftCmdResponse) -> Result<()> {
     if resp.get_header().has_error() {
-        return Err(Error::RequestFailed(Box::new(
-            resp.take_header().take_error(),
-        )));
+        let mut err = resp.take_header().take_error();
+        if err.get_message() == ASYNC_WRITE_CALLBACK_DROPPED_ERR_MSG {
+            return Err(Error::Undetermined(err.take_message()));
+        }
+        return Err(Error::RequestFailed(Box::from(err)));
     }
 
     Ok(())
@@ -296,6 +304,27 @@ fn invalid_resp_type(exp: CmdType, act: CmdType) -> Error {
         "cmd type not match, want {:?}, got {:?}!",
         exp, act
     ))
+}
+
+pub const ASYNC_WRITE_CALLBACK_DROPPED_ERR_MSG: &str = "async write on_applied callback is dropped";
+
+pub fn async_write_callback_dropped_err() -> errorpb::Error {
+    let mut err = errorpb::Error::default();
+    err.set_message(ASYNC_WRITE_CALLBACK_DROPPED_ERR_MSG.to_string());
+    err
+}
+pub fn drop_on_applied_callback() -> WriteResponse {
+    let bt = backtrace::Backtrace::new();
+    error!("async write on_applied callback is dropped"; "backtrace" => ?bt);
+    let mut write_resp = WriteResponse {
+        response: Default::default(),
+        key_errors: Default::default(),
+    };
+    write_resp
+        .response
+        .mut_header()
+        .set_error(async_write_callback_dropped_err());
+    write_resp
 }
 
 impl Display for RaftKv {
@@ -372,38 +401,55 @@ impl Engine for RaftKv {
         self.schedule_txn_extra(txn_extra);
 
         let (tx, rx) = WriteResFeed::pair();
-        let proposed_cb = if !WriteEvent::subscribed_proposed(subscribed) {
-            None
-        } else {
-            let tx = tx.clone();
-            Some(Box::new(move || tx.notify_proposed()) as store::ExtCallback)
-        };
-        let committed_cb = if !WriteEvent::subscribed_committed(subscribed) {
-            None
-        } else {
-            let tx = tx.clone();
-            Some(Box::new(move || tx.notify_committed()) as store::ExtCallback)
-        };
-        let applied_tx = tx;
-        let applied_cb = Box::new(move |resp: WriteResponse| {
-            let mut res = match on_write_result(resp) {
-                Ok(CmdRes::Resp(_)) => {
-                    fail_point!("raftkv_async_write_finish");
-                    Ok(())
-                }
-                Ok(CmdRes::Snap(_)) => Err(box_err!("unexpect snapshot, should mutate instead.")),
-                Err(e) => Err(kv::Error::from(e)),
-            };
-            if let Some(cb) = on_applied {
-                cb(&mut res);
-            }
-            applied_tx.notify(res);
-        });
-
-        let cb = StoreCallback::write_ext(applied_cb, proposed_cb, committed_cb);
         if res.is_ok() {
+            let proposed_cb = if !WriteEvent::subscribed_proposed(subscribed) {
+                None
+            } else {
+                let tx = tx.clone();
+                Some(Box::new(move || tx.notify_proposed()) as store::ExtCallback)
+            };
+            let committed_cb = if !WriteEvent::subscribed_committed(subscribed) {
+                None
+            } else {
+                let tx = tx.clone();
+                Some(Box::new(move || tx.notify_committed()) as store::ExtCallback)
+            };
+            let applied_tx = tx.clone();
+            let applied_cb = must_call(
+                Box::new(move |resp: WriteResponse| {
+                    fail_point!("applied_cb_return_undetermined_err", |_| {
+                        applied_tx.notify(Err(kv::Error::from(Error::Undetermined(
+                            ASYNC_WRITE_CALLBACK_DROPPED_ERR_MSG.to_string(),
+                        ))));
+                    });
+                    let mut res = match on_write_result(resp) {
+                        Ok(CmdRes::Resp(_)) => {
+                            fail_point!("raftkv_async_write_finish");
+                            Ok(())
+                        }
+                        Ok(CmdRes::Snap(_)) => {
+                            Err(box_err!("unexpect snapshot, should mutate instead."))
+                        }
+                        Err(e) => Err(kv::Error::from(e)),
+                    };
+                    if let Some(cb) = on_applied {
+                        cb(&mut res);
+                    }
+                    applied_tx.notify(res);
+                }),
+                drop_on_applied_callback,
+            );
+
+            let cb = StoreCallback::write_ext(applied_cb, proposed_cb, committed_cb);
+
             // TODO: do we need to support deadline?
             self.router.send_command(cmd, cb);
+        }
+        if res.is_err() {
+            // Note that `on_applied` is not called in this case. We send a message to the
+            // channel here to notify the caller that the writing ended, like
+            // how the `applied_cb` does.
+            tx.notify(res);
         }
         rx.inspect(move |ev| {
             let WriteEvent::Finished(res) = ev else {

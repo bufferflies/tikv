@@ -735,7 +735,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         let (muts0, txn_muts0) = make_insert_mutations("already_exist");
         let start_ts0 = client.get_ts();
         client
-            .kv_prewrite(txn_muts0.primary(), None, txn_muts0.clone(), start_ts0)
+            .kv_prewrite_with_retry(txn_muts0.primary(), None, txn_muts0.clone(), start_ts0)
             .unwrap();
         let commit_ts0 = client.get_ts();
         client
@@ -747,7 +747,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         let (_, txn_muts1) = make_insert_mutations("already_exist_1");
         let start_ts1 = client.get_ts();
         let err = client
-            .kv_prewrite(txn_muts1.primary(), None, txn_muts1, start_ts1)
+            .kv_prewrite_with_retry(txn_muts1.primary(), None, txn_muts1, start_ts1)
             .unwrap_err();
         assert_matches!(err, ClientError::AlreadyExist(_));
         client.verify_data_with_ref_store();
@@ -768,14 +768,14 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         let (_, txn_muts0) = make_mutations("after_rollback");
         let start_ts0 = client.get_ts();
         client
-            .kv_prewrite(txn_muts0.primary(), None, txn_muts0.clone(), start_ts0)
+            .kv_prewrite_with_retry(txn_muts0.primary(), None, txn_muts0.clone(), start_ts0)
             .unwrap();
 
         let (muts1, txn_muts1) = make_mutations("after_rollback_1");
         let start_ts1 = client.get_ts();
         // Will rollback txn0.
         client
-            .kv_prewrite(txn_muts1.primary(), None, txn_muts1.clone(), start_ts1)
+            .kv_prewrite_with_retry(txn_muts1.primary(), None, txn_muts1.clone(), start_ts1)
             .unwrap();
 
         let commit_ts0 = client.get_ts();
@@ -795,7 +795,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         let (muts0, txn_muts0) = make_mutations("write_conflict");
         let start_ts0 = client.get_ts();
         client
-            .kv_prewrite(txn_muts0.primary(), None, txn_muts0.clone(), start_ts0)
+            .kv_prewrite_with_retry(txn_muts0.primary(), None, txn_muts0.clone(), start_ts0)
             .unwrap();
 
         let commit_ts0 = client.get_ts();
@@ -818,7 +818,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         let (_, txn_muts1) = make_mutations("write_conflict_1");
         let start_ts1 = client.get_ts();
         let err = client
-            .kv_prewrite(txn_muts1.primary(), None, txn_muts1, start_ts1)
+            .kv_prewrite_with_retry(txn_muts1.primary(), None, txn_muts1, start_ts1)
             .unwrap_err();
         assert_matches!(err, ClientError::WriteConflict(_));
 
@@ -854,13 +854,13 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
             // Normal txn will write rollback record even the txn is not exist.
             // But file based txn can not do so.
             let err = client
-                .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+                .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
                 .unwrap_err();
             assert_matches!(err, ClientError::WriteConflict(_));
             start_ts = client.get_ts();
         }
         client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap();
         client.kv_rollback(txn_muts.clone(), start_ts).unwrap();
 
@@ -869,7 +869,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
 
         // Prewrite after rollback.
         let err = client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap_err();
         assert_matches!(err, ClientError::WriteConflict(_));
 
@@ -886,7 +886,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         let start_ts = client.get_ts();
         let commit_ts = client.get_ts();
         client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap();
         client
             .kv_commit(txn_muts.clone(), start_ts, commit_ts)
@@ -912,13 +912,13 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
             // Normal txn will write rollback record even the txn is not exist.
             // But file based txn can not do so.
             let err = client
-                .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+                .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
                 .unwrap_err();
             assert_matches!(err, ClientError::WriteConflict(_));
             start_ts = client.get_ts();
         }
         client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap();
         // Rollback the not committed txn.
         client
@@ -932,7 +932,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
 
         // Prewrite after rollback.
         let err = client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap_err();
         assert_matches!(err, ClientError::WriteConflict(_));
 
@@ -949,7 +949,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         let start_ts = client.get_ts();
         let commit_ts = client.get_ts();
         client
-            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap();
         client.kv_commit(txn_muts, start_ts, commit_ts).unwrap();
         // Rollback after committed.
@@ -1196,7 +1196,7 @@ fn test_commit_primary_region() {
     let (_, txn_muts) = make_mutations("value_", 0, 200);
     let start_ts = client.get_ts();
     client
-        .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+        .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
         .unwrap();
 
     // Rollback the primary region.

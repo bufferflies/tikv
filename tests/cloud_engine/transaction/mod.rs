@@ -42,7 +42,7 @@ fn test_rollback_before_prewrite() {
     let pk = mutations[0].key.clone();
     let (primary_muts, secondary_muts) = mutations.split_at(50);
     client
-        .kv_prewrite(
+        .kv_prewrite_with_retry(
             pk.clone(),
             None,
             TxnMutations::from_normal(secondary_muts.to_vec()),
@@ -60,7 +60,7 @@ fn test_rollback_before_prewrite() {
         .unwrap();
     assert!(val.is_none());
     let err = client
-        .kv_prewrite(
+        .kv_prewrite_with_retry(
             pk,
             None,
             TxnMutations::from_normal(primary_muts.to_vec()),
