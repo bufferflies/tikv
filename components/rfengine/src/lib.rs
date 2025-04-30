@@ -12,6 +12,9 @@ extern crate tikv_alloc;
 extern crate serde_derive;
 
 mod config;
+
+use std::{fmt, io};
+
 pub use config::Config as RfEngineConfig;
 
 pub mod compact_worker;
@@ -47,8 +50,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, ThisError)]
 pub enum Error {
-    #[error("IO error: {0:?}")]
-    Io(std::io::Error),
+    #[error("IO error: {0:?} (ctx:{1})")]
+    Io(std::io::Error, String),
     #[error("EOF")]
     Eof,
     #[error("parse error")]
@@ -77,7 +80,7 @@ impl From<std::io::Error> for Error {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
             return Error::Eof;
         }
-        Error::Io(e)
+        Error::Io(e, "".to_string())
     }
 }
 
@@ -90,5 +93,34 @@ impl From<ParseIntError> for Error {
 impl From<String> for Error {
     fn from(msg: String) -> Self {
         Error::Other(msg)
+    }
+}
+
+// Ref: [`anyhow::Context`](https://github.com/dtolnay/anyhow/blob/1.0.26/src/lib.rs#L543)
+pub trait IoContext<T> {
+    fn ctx<C>(self, ctx: C) -> Result<T>
+    where
+        C: fmt::Display + Send + Sync + 'static;
+
+    fn with_ctx<C, F>(self, f: F) -> Result<T>
+    where
+        C: fmt::Display + Send + Sync + 'static,
+        F: FnOnce() -> C;
+}
+
+impl<T> IoContext<T> for io::Result<T> {
+    fn ctx<C>(self, ctx: C) -> Result<T>
+    where
+        C: fmt::Display + Send + Sync + 'static,
+    {
+        self.map_err(|err| Error::Io(err, format!("{ctx}")))
+    }
+
+    fn with_ctx<C, F>(self, ctx_fn: F) -> Result<T>
+    where
+        C: fmt::Display + Send + Sync + 'static,
+        F: FnOnce() -> C,
+    {
+        self.map_err(|err| Error::Io(err, format!("{}", ctx_fn())))
     }
 }

@@ -782,6 +782,7 @@ impl BackupCluster {
                 let res = BackupCluster::setup_raft_engine(
                     &tag,
                     store_id,
+                    keyspace_id,
                     &cluster_backup_meta,
                     &store_config,
                     pd_client,
@@ -832,6 +833,7 @@ impl BackupCluster {
     fn setup_raft_engine_for_lightweight(
         tag: &str,
         store_id: u64,
+        keyspace_id: u32,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
         pd_client: Arc<dyn PdClient>,
@@ -851,6 +853,8 @@ impl BackupCluster {
             )?
         };
         rfengine::lightweight_restore(
+            store_id,
+            (!archiving).then_some(keyspace_id),
             Path::new(&conf.raft_store.raftdb_path),
             rlog_files.snap_epoch,
             rlog_files.snap_meta,
@@ -896,6 +900,7 @@ impl BackupCluster {
     pub fn setup_raft_engine(
         tag: &str,
         store_id: u64,
+        keyspace_id: u32,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
         pd_client: Arc<dyn PdClient>,
@@ -908,6 +913,7 @@ impl BackupCluster {
             Self::setup_raft_engine_for_lightweight(
                 tag,
                 store_id,
+                keyspace_id,
                 cluster_backup,
                 conf,
                 pd_client,

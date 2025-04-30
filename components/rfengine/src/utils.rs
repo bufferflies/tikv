@@ -7,7 +7,8 @@ use std::{
 
 use api_version::{ApiV2, KeyMode, KvFormat};
 use bytes::{BufMut, Bytes, BytesMut};
-use kvproto::metapb;
+use kvproto::{metapb, raft_serverpb::RegionLocalState};
+use protobuf::Message as _;
 use regex::Regex;
 use tikv_util::info;
 
@@ -252,6 +253,20 @@ pub fn wal_chunk_file_prefix(store_id: u64, epoch_id: u32) -> String {
 
 pub fn wal_chunk_file_suffix(start_off: u64, end_off: u64) -> String {
     format!("{:016x}_{:016x}.wal", start_off, end_off)
+}
+
+pub fn get_keyspace_id_from_peer(peer_meta: &rfenginepb::PeerMeta) -> Option<u32> {
+    peer_meta
+        .get_states()
+        .iter()
+        .rev() // the states are got from BTreeMap iter, so the last one is latest.
+        .find(|s| s.get_key().starts_with(REGION_META_KEY_PREFIX))
+        .map(|state| {
+            let mut local_state = RegionLocalState::default();
+            local_state.merge_from_bytes(state.get_value()).unwrap();
+            ApiV2::get_u32_keyspace_id_by_key(local_state.get_region().get_start_key())
+                .unwrap_or_default()
+        })
 }
 
 #[cfg(test)]

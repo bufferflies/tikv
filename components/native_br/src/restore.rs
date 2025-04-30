@@ -254,6 +254,8 @@ fn setup_raft_engine(
             store_id,
         )?;
         rfengine::lightweight_restore(
+            store_id,
+            None,
             Path::new(&conf.raft_store.raftdb_path),
             rlog_files.snap_epoch,
             rlog_files.snap_meta,
