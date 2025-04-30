@@ -234,6 +234,7 @@ fn main() {
     tikv::log_tikv_info("TiKV worker", build_timestamp);
 
     info!("config is {:?}", &config);
+    config.memory.init();
     cloud_worker::run_cloud_worker(config, config_file_path, pd);
     info!("TiKV worker exit");
 }

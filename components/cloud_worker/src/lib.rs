@@ -53,6 +53,7 @@ pub use schema_manager::{
 use security::{SecurityConfig, SecurityManager};
 pub use server::get_cop_req_tag;
 use slog_global::{error, info, warn};
+use tikv::config::MemoryConfig;
 use tikv_util::{
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     memory::MemoryLimiter,
@@ -749,6 +750,7 @@ pub struct Config {
 
     pub local_gc: LocalGcConfig,
     pub replication_worker: ReplicationWorkerConfig,
+    pub memory: MemoryConfig,
     // Note: Fields of simple (not structure) type can not be the last. Otherwise serializing the
     // config will meet the "ValueAfterTable" error.
     // See https://docs.rs/toml/0.5.11/toml/ser/enum.Error.html#variant.ValueAfterTable.
@@ -789,6 +791,7 @@ impl Default for Config {
             memory_upper_threshold: AbsoluteOrPercentSize::Percent(80.0),
             local_gc: LocalGcConfig::default(),
             replication_worker: ReplicationWorkerConfig::default(),
+            memory: Default::default(),
         }
     }
 }
