@@ -954,7 +954,7 @@ impl EngineCore {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Default)]
 pub struct ShardTag {
     pub engine_id: u64,
     pub id_ver: IdVer,
@@ -974,12 +974,19 @@ impl ShardTag {
 }
 
 impl Display for ShardTag {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{}:{}:{}",
             self.engine_id, self.id_ver.id, self.id_ver.ver
         )
+    }
+}
+
+impl Debug for ShardTag {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }
 
