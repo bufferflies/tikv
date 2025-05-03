@@ -152,10 +152,10 @@ fn test_split_regions() {
         .collect();
     {
         let new_regions =
-            block_on(pd_client.split_regions_with_retry(keys1.clone(), Duration::from_secs(10)))
+            block_on(pd_client.split_regions_with_retry(keys1.clone(), Duration::from_secs(30)))
                 .unwrap();
         cluster.wait_pd_region_count(keys1.len() + 1 + 1); // The `1` is 20 of keys0.
-        let mut region_keys = new_regions
+        let mut new_region_keys = new_regions
             .into_iter()
             .map(|region_id| {
                 block_on(pd_client.get_region_by_id(region_id))
@@ -164,9 +164,19 @@ fn test_split_regions() {
                     .start_key
             })
             .collect::<Vec<_>>();
-        region_keys.sort();
+        new_region_keys.sort();
         keys1.retain(|k| !keys0.contains(k));
-        assert_eq!(region_keys, keys1);
+        if new_region_keys != keys1 {
+            // There are chances that some new regions are not returned. See
+            // `split_regions_with_retry`.
+            // Just check that no more region than `keys1` are returned.
+            assert!(
+                new_region_keys.iter().all(|k| keys1.contains(k)),
+                "new_region_keys: {:?}, keys1: {:?}",
+                new_region_keys,
+                keys1
+            );
+        }
 
         let mut all_regions = block_on(pd_client.scan_regions(vec![], vec![], 100))
             .unwrap()

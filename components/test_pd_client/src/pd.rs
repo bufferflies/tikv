@@ -1816,6 +1816,7 @@ impl PdClient for TestPdClient {
         let timer = self.timer.clone();
         let start = Instant::now_coarse();
         let mut retry = 0;
+        let mut retry_dur = Duration::from_millis(100);
         Box::pin(async move {
             while !keys_set.is_empty() && retry < retry_limit {
                 retry += 1;
@@ -1829,7 +1830,11 @@ impl PdClient for TestPdClient {
                     };
                     if key.as_slice() == region.get_start_key() {
                         keys_set.remove(&key);
-                        region_ids.insert(region.get_id());
+                        if retry > 1 {
+                            // The region is already split will not be returned.
+                            // Ref: RegionSplitter.groupKeysByRegion (https://github.com/tidbcloud/pd-cse/blob/release-8.1-keyspace/pkg/schedule/splitter/region_splitter.go)
+                            region_ids.insert(region.get_id());
+                        }
                         continue;
                     }
 
@@ -1841,14 +1846,19 @@ impl PdClient for TestPdClient {
                         .push(key);
                 }
 
+                if region_map.is_empty() {
+                    debug_assert!(keys_set.is_empty());
+                    break;
+                }
                 for (region, keys) in region_map.into_values() {
                     self.split_region(region, CheckPolicy::Usekey, keys);
                 }
                 timer
-                    .delay(std::time::Instant::now() + Duration::from_millis(100))
+                    .delay(std::time::Instant::now() + retry_dur)
                     .compat()
                     .await
                     .unwrap();
+                retry_dur = (retry_dur * 2).min(Duration::from_secs(30));
             }
 
             if !keys_set.is_empty() {
