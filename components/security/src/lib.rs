@@ -157,9 +157,9 @@ impl SecurityConfig {
             master_key.resize(32, 11);
             return MasterKey::new(&master_key);
         }
-        // use a fixed master key for test.
-        let master_key = vec![1u8; 32];
-        MasterKey::new(&master_key)
+        // The master key is not properly configured, use empty key to prevent
+        // creating invalid encryption key.
+        MasterKey::new(&[])
     }
 
     pub fn override_from_env(&mut self) {

@@ -507,6 +507,14 @@ impl PdRunner {
                     }
                     Ok(cfg) => {
                         if cfg.enabled {
+                            if !master_key.is_valid() {
+                                error!(
+                                    "keyspace encryption is enabled, but master key is invalid";
+                                    "region" => tag,
+                                    "keyspace_id" => keyspace_id,
+                                );
+                                return;
+                            }
                             let encryption_key = master_key.generate_encryption_key().export();
                             info!(
                                 "keyspace generate encryption key";

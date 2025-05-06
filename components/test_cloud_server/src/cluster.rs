@@ -1207,6 +1207,7 @@ pub fn new_test_config(
     memory_capacity_ratio: f64,
 ) -> TikvConfig {
     let mut config = TikvConfig::default();
+    config.security.master_key.vendor = "test".to_string();
     config.storage.data_dir = format!("{}/{}", base_dir.to_str().unwrap(), node_id);
     config.storage.api_version = 2;
     config.storage.enable_ttl = true;

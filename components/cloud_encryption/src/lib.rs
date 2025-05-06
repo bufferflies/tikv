@@ -224,7 +224,12 @@ pub struct MasterKeyCore {
 }
 
 impl MasterKeyCore {
+    pub fn is_valid(&self) -> bool {
+        !self.master_key.is_empty()
+    }
+
     pub fn generate_encryption_key(&self) -> EncryptionKey {
+        assert!(self.is_valid());
         let mut rng = rand::thread_rng();
         let mut plain_text = vec![0u8; 64];
         rng.fill_bytes(&mut plain_text[..]);
@@ -234,6 +239,9 @@ impl MasterKeyCore {
     }
 
     pub fn decrypt_encryption_key(&self, mut exported: &[u8]) -> Result<EncryptionKey, String> {
+        if !self.is_valid() {
+            return Err("invalid empty master key".to_string());
+        }
         if exported.len() != KEY_EXPORTED_SIZE {
             return Err(format!("invalid exported key len {}", exported.len()));
         }
