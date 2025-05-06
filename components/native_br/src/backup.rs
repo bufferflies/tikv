@@ -464,7 +464,7 @@ async fn backup_store(
         .body(Body::from(json_string.clone()))
         .unwrap();
     match send_request_to_store(req, store, security_mgr, timeout).await {
-        Ok(resp) => {
+        Ok((_, resp)) => {
             let mut store_backup_meta = StoreBackupMeta::default();
             store_backup_meta.merge_from_bytes(&resp).unwrap();
             Ok(store_backup_meta)

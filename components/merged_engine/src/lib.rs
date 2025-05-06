@@ -566,24 +566,19 @@ impl MergedEngine {
         let cur_offset = if let Some(store_progress) = self.manifest.store_progresses.get(&store_id)
         {
             if store_progress.epoch != epoch_id || store_progress.offset != offset {
-                return Err(rfengine::Error::Other(format!(
-                    "{} epoch or offset mismatch, expect ({}, {}), got ({}, {}), wal_len: {}",
+                return Err(Error::StoreProgressMismatch(format!(
+                    "store {} expect ({}, {}), got ({}, {}), wal_len: {}",
                     store_id,
                     epoch_id,
                     offset,
                     store_progress.epoch,
                     store_progress.offset,
                     data.len(),
-                ))
-                .into());
+                )));
             }
             store_progress.offset
         } else {
-            return Err(rfengine::Error::Other(format!(
-                "store {} not found in store progresses",
-                store_id
-            ))
-            .into());
+            return Err(Error::StoreProgressNotFound(store_id));
         };
         let new_offset = cur_offset + data.len() as u64;
         let mut wal_iterator = WalIterator::new_from_chunks(data, epoch_id, offset);
@@ -644,6 +639,26 @@ impl MergedEngine {
         }
         self.manifest
             .update_store_progress(store_id, epoch_id, new_offset);
+        Ok(())
+    }
+
+    pub fn rotate_wal(&mut self, store_id: u64, epoch_id: u32, offset: u64) -> Result<()> {
+        if let Some(store_progress) = self.manifest.store_progresses.get_mut(&store_id) {
+            if store_progress.epoch != epoch_id || store_progress.offset != offset {
+                return Err(Error::StoreProgressMismatch(format!(
+                    "store {} expect epoch {}, offset {}, got epoch {}, offset {}",
+                    store_id, epoch_id, offset, store_progress.epoch, store_progress.offset
+                )));
+            }
+            info!(
+                "rotate store {} at epoch {}, offset {}",
+                store_id, epoch_id, offset
+            );
+            store_progress.epoch += 1;
+            store_progress.offset = 0;
+        } else {
+            return Err(Error::StoreProgressNotFound(store_id));
+        }
         Ok(())
     }
 
