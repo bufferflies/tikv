@@ -78,7 +78,6 @@ use tikv_util::{
     metrics::{dump, dump_to},
     spawn_anonymous_thread_with,
     sys::thread::{StdThreadBuildWrapper, ThreadBuildWrapper},
-    time::InstantExt,
     timer::GLOBAL_TIMER_HANDLE,
 };
 use tokio::{
@@ -90,7 +89,7 @@ use tokio_openssl::SslStream;
 use txn_types::TsSet;
 
 use crate::{
-    server::Result, status_server::metrics::STATUS_REQ_HISTOGRAM_STATIC,
+    server::Result, status_server::metrics::STATUS_REQUEST_DURATION,
     tikv_util::codec::number::NumberEncoder,
 };
 
@@ -1879,7 +1878,6 @@ impl StatusServer {
             async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
-                    let start = Instant::now();
                     let x509 = x509.clone();
                     let security_config = security_config.clone();
                     let cfg_controller = cfg_controller.clone();
@@ -1916,7 +1914,9 @@ impl StatusServer {
                             ));
                         }
 
-                        match (method, path.as_ref()) {
+                        let mut is_unknown_path = false;
+                        let start = Instant::now();
+                        let resp = match (method.clone(), path.as_ref()) {
                             (Method::GET, "/metrics") => {
                                 Self::handle_get_metrics(req, &cfg_controller)
                             }
@@ -1973,18 +1973,10 @@ impl StatusServer {
                                 Self::dump_region_meta(req, router).await
                             }
                             (Method::GET, path) if path.starts_with("/sync_region_by_id") => {
-                                let resp = Self::handle_sync_region_by_id(req, router).await?;
-                                STATUS_REQ_HISTOGRAM_STATIC
-                                    .sync_region_by_id
-                                    .observe(start.saturating_elapsed().as_secs_f64());
-                                Ok(resp)
+                                Self::handle_sync_region_by_id(req, router).await
                             }
                             (Method::GET, path) if path.starts_with("/sync_region") => {
-                                let resp = Self::handle_sync_region(req, router).await?;
-                                STATUS_REQ_HISTOGRAM_STATIC
-                                    .sync_region
-                                    .observe(start.saturating_elapsed().as_secs_f64());
-                                Ok(resp)
+                                Self::handle_sync_region(req, router).await
                             }
                             (Method::PUT, path) if path.starts_with("/log-level") => {
                                 Self::change_log_level(req).await
@@ -2049,8 +2041,21 @@ impl StatusServer {
                                 let data_dir = &cfg_controller.get_current().storage.data_dir;
                                 Self::handle_recovery(req, engine, data_dir).await
                             },
-                            _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
-                        }
+                            _ => {
+                                is_unknown_path = true;
+                                Ok(make_response(StatusCode::NOT_FOUND, "path not found"))
+                            }
+                        };
+                        // Using "unknown" for unknown paths to void creating high cardinality.
+                        let path_label = if is_unknown_path {
+                            "unknown".to_owned()
+                        } else {
+                            path
+                        };
+                        STATUS_REQUEST_DURATION
+                            .with_label_values(&[method.as_str(), &path_label])
+                            .observe(start.elapsed().as_secs_f64());
+                        resp
                     })
                 }))
             }
