@@ -612,17 +612,22 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         })
     }
 
-    // Note: Some new regions may not be returned, in case the regions are split
-    // between two retries.
+    // Returns the ids of the regions that have the key as the start key.
+    // If a key already exists as a start key, its region id will not be
+    // returned.
+    // Regions returned are not necessarily "new" regions, especially when
+    // using right derive. e.g. region 1 [10 - 20), split at 15, resulting
+    // in region 2 [10 - 15), region 1 [15 - 20). This function will return
+    // region 1.
     fn split_regions_with_retry(
         &self,
         keys: Vec<Vec<u8>>,
         timeout: Duration,
-    ) -> BoxFuture<'_, Result<Vec<u64>> /* new_regions */> {
+    ) -> BoxFuture<'_, Result<Vec<u64>> /* regions ids */> {
         use collections::HashSet;
         const RETRY_LIMIT: usize = 3;
         let request_timeout = request_timeout_for_split_regions(keys.len());
-        let mut new_regions: HashSet<u64> = HashSet::default();
+        let mut succeeded_regions: HashSet<u64> = HashSet::default();
 
         let timer = GLOBAL_TIMER_HANDLE.clone();
         let start = Instant::now_coarse();
@@ -633,22 +638,23 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
                     .split_regions_opt(keys.clone(), request_timeout, RETRY_LIMIT)
                     .await
                 {
-                    Ok((regions_id, finished_percent)) if finished_percent >= 100 => {
-                        return Ok(if new_regions.is_empty() {
-                            regions_id
+                    Ok((regions, finished_percent)) if finished_percent >= 100 => {
+                        return Ok(if succeeded_regions.is_empty() {
+                            regions
                         } else {
-                            new_regions.extend(regions_id);
-                            new_regions.into_iter().collect()
+                            succeeded_regions.extend(regions);
+                            succeeded_regions.into_iter().collect()
                         });
                     }
                     res => {
-                        let res = res.map(|(regions_id, _)| {
-                            new_regions.extend(regions_id);
+                        let res = res.map(|(regions, _)| {
+                            succeeded_regions.extend(regions);
                         });
                         if start.saturating_elapsed() >= timeout {
                             return match res {
                                 Ok(()) => {
-                                    let regions_id = new_regions.into_iter().collect::<Vec<_>>();
+                                    let regions_id =
+                                        succeeded_regions.into_iter().collect::<Vec<_>>();
                                     let finished_percent = regions_id.len() * 100 / keys.len();
                                     Err(Error::SplitRegionsNotFinished {
                                         regions_id,
