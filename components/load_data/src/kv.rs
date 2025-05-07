@@ -3,7 +3,7 @@
 use std::{
     fs::File,
     io::{ErrorKind, Read},
-    thread,
+    sync::Arc,
 };
 
 use bytes::Bytes;
@@ -11,7 +11,7 @@ use encryption::DecrypterReader;
 use rfengine::decompress_lz4;
 use serde_derive::{Deserialize, Serialize};
 use tidb_query_datatype::codec::table::{TABLE_PREFIX_KEY_LEN, TABLE_PREFIX_LEN};
-use tikv_util::mpsc::{bounded, Receiver};
+use tokio::{runtime, sync::mpsc};
 
 use crate::error::{Error, Result};
 
@@ -39,7 +39,7 @@ pub struct KvPairsReader {
     buf: Vec<u8>,
     offset: usize,
     next_offset: usize,
-    buf_rx: Receiver<Result<Vec<u8>>>,
+    buf_rx: mpsc::Receiver<Result<Vec<u8>>>,
     key_comm_prefix_len: usize,
     lower_bound_suffix: Vec<u8>,
     upper_bound_suffix: Vec<u8>,
@@ -54,16 +54,17 @@ impl KvPairsReader {
         lower_bound_suffix: Vec<u8>,
         upper_bound_suffix: Vec<u8>,
         table_prefix_offset: usize,
+        io_runtime: Arc<runtime::Runtime>,
     ) -> Self {
-        let (buf_tx, buf_rx) = bounded(0);
+        let (buf_tx, buf_rx) = mpsc::channel(1);
 
-        thread::spawn(move || {
+        io_runtime.spawn(async move {
             let mut compressed_size_buf = [0u8; 4];
             let mut compressed_buf: Vec<u8> = vec![];
             loop {
                 if let Err(err) = reader.read_exact(&mut compressed_size_buf[..]) {
                     if err.kind() != ErrorKind::UnexpectedEof {
-                        let _ = buf_tx.send(Err(Error::IoError(err)));
+                        let _ = buf_tx.send(Err(Error::IoError(err))).await;
                     }
                     return;
                 }
@@ -71,12 +72,12 @@ impl KvPairsReader {
                 let compressed_size = u32::from_le_bytes(compressed_size_buf) as usize;
                 compressed_buf.resize(compressed_size, 0);
                 if let Err(err) = reader.read_exact(&mut compressed_buf) {
-                    let _ = buf_tx.send(Err(Error::IoError(err)));
+                    let _ = buf_tx.send(Err(Error::IoError(err))).await;
                     return;
                 }
                 let buf = decompress_lz4(&compressed_buf[0..compressed_size]).unwrap();
 
-                if buf_tx.send(Ok(buf)).is_err() {
+                if buf_tx.send(Ok(buf)).await.is_err() {
                     return;
                 }
             }
@@ -148,7 +149,7 @@ impl KvPairsReader {
 
         self.offset = self.next_offset;
         if self.offset == self.buf.len() {
-            let buf = self.buf_rx.recv().unwrap();
+            let buf = self.buf_rx.blocking_recv().unwrap();
             match buf {
                 Ok(buf) => {
                     self.buf = buf;
@@ -409,6 +410,7 @@ mod tests {
             Utc::now().timestamp_millis()
         ));
 
+        let io_runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
         let mock_task_ctx = generate_mock_task_ctx();
         let (file_meta, key_comm_prefix) =
             generate_file_meta(&mock_task_ctx, kv_pairs, path.clone(), kv_pair_size);
@@ -418,6 +420,7 @@ mod tests {
             key_comm_prefix.len(),
             vec![],
             vec![],
+            io_runtime.clone(),
         )
         .pop()
         .unwrap();
@@ -478,12 +481,14 @@ mod tests {
 
             sleep(Duration::from_millis(3));
         }
+        let io_runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
         let readers = build_readers(
             &mock_task_ctx,
             file_metas,
             last_key_comm_prefix.len(),
             vec![],
             vec![],
+            io_runtime.clone(),
         );
         let mut merge_iter = MergeIterator::new(readers, "".as_bytes()).unwrap();
 

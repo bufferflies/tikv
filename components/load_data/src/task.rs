@@ -163,6 +163,7 @@ pub struct LoadTaskScheduler {
     pub states: Arc<RwLock<LoadTaskStates>>,
     pub thread_handle: Option<Arc<Mutex<std::thread::JoinHandle<()>>>>,
     pub checkpoint_store: Arc<Mutex<LocalFileCheckpointStorage>>,
+    pub io_runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl LoadTaskScheduler {

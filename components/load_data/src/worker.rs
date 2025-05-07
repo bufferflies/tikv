@@ -14,6 +14,7 @@ use std::{
 use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut, Bytes};
 use encryption::{DecrypterReader, EncrypterWriter, Iv};
+use futures::executor;
 use http::Request;
 use hyper::Body;
 use keys::next_key;
@@ -41,6 +42,7 @@ use tikv_util::{
     time::Instant,
     warn,
 };
+use tokio::runtime;
 
 use crate::{
     checkpoint::{FileMeta, LocalFileCheckpointStorage},
@@ -701,6 +703,7 @@ impl KvPairsWorker {
             self.key_comm_prefix.len(),
             vec![],
             vec![],
+            self.scheduler.io_runtime.clone(),
         );
         let mut merge_iter = MergeIterator::new(readers, &self.task_ctx.outer_key_prefix)?;
 
@@ -1273,6 +1276,7 @@ impl BuildingWorker {
             self.key_comm_prefix.len(),
             start_key,
             end_key,
+            self.scheduler.io_runtime.clone(),
         );
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut sent_count = 0;
@@ -1386,7 +1390,7 @@ impl BuildingWorker {
         let start = Instant::now();
         let count = 64;
         loop {
-            match futures::executor::block_on(self.ctx.pd.batch_get_tso(count as u32)) {
+            match executor::block_on(self.ctx.pd.batch_get_tso(count as u32)) {
                 Ok(ts) => {
                     let last = ts.into_inner();
                     let first = last - count as u64 + 1;
@@ -1783,6 +1787,7 @@ pub fn build_readers(
     key_comm_prefix_len: usize,
     lower_bound: Vec<u8>,
     upper_bound: Vec<u8>,
+    io_runtime: Arc<runtime::Runtime>,
 ) -> Vec<KvPairsReader> {
     let table_prefix_offset = KEYSPACE_PREFIX_LEN - task_ctx.inner_key_off.unwrap();
     let mut readers = Vec::with_capacity(file_metas.len());
@@ -1821,6 +1826,7 @@ pub fn build_readers(
             lower_bound_suffix,
             upper_bound_suffix,
             table_prefix_offset,
+            io_runtime.clone(),
         );
         readers.push(reader);
     }

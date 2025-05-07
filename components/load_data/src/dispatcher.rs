@@ -120,6 +120,11 @@ impl Dispatcher {
             checkpoint_store.flush_checkpoint_ctx().unwrap();
         }
         let checkpoint_store = Arc::new(Mutex::new(checkpoint_store));
+        let raw_io_runtime = tokio::runtime::Builder::new_multi_thread()
+            .thread_name("file reader")
+            .enable_all()
+            .build()
+            .unwrap();
 
         let (sender, receiver) = tikv_util::mpsc::unbounded();
         let scheduler = LoadTaskScheduler {
@@ -127,6 +132,7 @@ impl Dispatcher {
             states: Arc::new(RwLock::new(states)),
             checkpoint_store: checkpoint_store.clone(),
             thread_handle: None,
+            io_runtime: Arc::new(raw_io_runtime),
         };
 
         let total_mem = SysQuota::memory_limit_in_bytes();

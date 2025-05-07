@@ -808,6 +808,7 @@ mod tests {
             states: Arc::new(RwLock::new(LoadTaskStates::default())),
             thread_handle: Some(Arc::new(Mutex::new(thread_handle))),
             checkpoint_store: Arc::new(Mutex::new(checkpoint_store)),
+            io_runtime: Arc::new(tokio::runtime::Runtime::new().unwrap()),
         };
         let mut states = scheduler.states.write().unwrap();
         states.task_id = task_id;
