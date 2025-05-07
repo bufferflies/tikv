@@ -48,6 +48,7 @@ const K8S_LABEL_NAME: &str = "app.kubernetes.io/name";
 const K8S_LABEL_SERVICE: &str = "app.kubernetes.io/service";
 const K8S_LABEL_COMPONENT: &str = "app.kubernetes.io/component";
 const K8S_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+const K8S_NODE_SELECTOR_NODE_NAME_KEY: &str = "serverless.tidbcloud.com/node";
 
 const LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_NAME: &str = "load-data-worker";
 const LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_CPU_NUM: f64 = 48.0;
@@ -71,6 +72,9 @@ pub struct StsConfig {
     pub limit_memory: f64,
     pub storage_size_gb: usize,
     pub node_group: String,
+    // `node_selector_key` and `node_selector_value` are used to select node accurately.
+    pub node_selector_key: String,
+    pub node_selector_value: String,
     // The following fields are used to configure the load-data-worker.
     pub worker_num: usize,
 }
@@ -481,12 +485,19 @@ impl WorkerScaler {
         let pod_template_spec = pod_template.spec.as_mut().unwrap();
 
         if !sts_config.node_group.is_empty() {
-            pod_template_spec.node_selector = Some(
-                serde_json::from_value(json!({
-                    "serverless.tidbcloud.com/node": sts_config.node_group,
-                }))
-                .unwrap(),
-            );
+            let node_selector = if !sts_config.node_selector_key.is_empty()
+                && !sts_config.node_selector_value.is_empty()
+            {
+                json!({
+                    K8S_NODE_SELECTOR_NODE_NAME_KEY: sts_config.node_group,
+                    sts_config.node_selector_key: sts_config.node_selector_value,
+                })
+            } else {
+                json!({
+                    K8S_NODE_SELECTOR_NODE_NAME_KEY: sts_config.node_group,
+                })
+            };
+            pod_template_spec.node_selector = Some(serde_json::from_value(node_selector).unwrap());
             let tolerations = pod_template_spec.tolerations.as_mut().unwrap();
             tolerations.first_mut().unwrap().value = Some(sts_config.node_group);
         }
@@ -869,62 +880,45 @@ fn gen_default_sts_configs() -> HashMap<usize, StsConfig> {
         StsConfig {
             min_data_size_gb: 500,
             request_cpu: large_data_request_cpu,
-            request_memory: 0.0,
             limit_cpu: LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_CPU_NUM,
-            limit_memory: 0.0,
             node_group: LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_NAME.to_string(),
             worker_num: 16,
-            storage_size_gb: 0,
+            ..Default::default()
         },
         StsConfig {
             min_data_size_gb: 100,
             request_cpu: 14.0,
-            request_memory: 0.0,
             limit_cpu: 14.0,
-            limit_memory: 0.0,
-            node_group: "".to_string(),
             worker_num: 4,
-            storage_size_gb: 0,
+            ..Default::default()
         },
         StsConfig {
             min_data_size_gb: 50,
             request_cpu: 7.0,
-            request_memory: 0.0,
             limit_cpu: 7.0,
-            limit_memory: 0.0,
-            node_group: "".to_string(),
             worker_num: 1,
-            storage_size_gb: 0,
+            ..Default::default()
         },
         StsConfig {
             min_data_size_gb: 10,
             request_cpu: 3.5,
-            request_memory: 0.0,
             limit_cpu: 3.5,
-            limit_memory: 0.0,
-            node_group: "".to_string(),
             worker_num: 1,
-            storage_size_gb: 0,
+            ..Default::default()
         },
         StsConfig {
             min_data_size_gb: 1,
             request_cpu: 2.0,
-            request_memory: 0.0,
             limit_cpu: 2.0,
-            limit_memory: 0.0,
-            node_group: "".to_string(),
             worker_num: 1,
-            storage_size_gb: 0,
+            ..Default::default()
         },
         StsConfig {
             min_data_size_gb: 0,
             request_cpu: 1.0,
-            request_memory: 0.0,
             limit_cpu: 1.0,
-            limit_memory: 0.0,
-            node_group: "".to_string(),
             worker_num: 1,
-            storage_size_gb: 0,
+            ..Default::default()
         },
     ];
     let sts_configs_map: HashMap<_, _> = sts_configs_list
@@ -1068,34 +1062,24 @@ mod tests {
         config.sts_configs.push(StsConfig {
             min_data_size_gb: 10,
             request_cpu: 100.0,
-            request_memory: 0.0,
             limit_cpu: 100.0,
-            limit_memory: 0.0,
-            node_group: "".to_string(),
             worker_num: 1,
-            storage_size_gb: 0,
+            ..Default::default()
         });
-        // test invalid config
+        // test invalid config that doesn't set `request_cpu`
         config.sts_configs.push(StsConfig {
             min_data_size_gb: 50,
-            request_cpu: 0.0,
-            request_memory: 0.0,
             limit_cpu: 200.0,
-            limit_memory: 0.0,
-            node_group: "".to_string(),
-            worker_num: 0,
-            storage_size_gb: 0,
+            ..Default::default()
         });
         // test new config
         config.sts_configs.push(StsConfig {
             min_data_size_gb: 200,
             request_cpu: 200.0,
-            request_memory: 0.0,
             limit_cpu: 200.0,
-            limit_memory: 0.0,
             node_group: "load-data-worker".to_string(),
             worker_num: 1,
-            storage_size_gb: 0,
+            ..Default::default()
         });
 
         let mut sts_configs_map = gen_default_sts_configs();
@@ -1114,12 +1098,10 @@ mod tests {
             StsConfig {
                 min_data_size_gb: 200,
                 request_cpu: 200.0,
-                request_memory: 0.0,
                 limit_cpu: 200.0,
-                limit_memory: 0.0,
                 node_group: "load-data-worker".to_string(),
                 worker_num: 1,
-                storage_size_gb: 0,
+                ..Default::default()
             },
         );
 
