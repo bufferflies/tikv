@@ -321,7 +321,7 @@ impl CompactionClient {
         let response = self.client.as_ref().unwrap().request(req).await?;
         let status = response.status();
         info!("{} got response from remote compactor", tag;
-            "status" => ?status, "takes" => ?start_time.saturating_elapsed());
+            "status" => ?status, "takes" => ?start_time.saturating_elapsed(), "url" => ?remote_url);
         let body = hyper::body::to_bytes(response.into_body()).await?;
         if !status.is_success() {
             let err_msg = String::from_utf8_lossy(body.chunk()).to_string();

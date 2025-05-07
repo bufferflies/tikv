@@ -801,16 +801,18 @@ impl ServerCluster {
         let (_, tikv_config) = self.confs.iter().next().unwrap_or_else(|| {
             panic!("no tikv config found");
         });
+        let worker_count = worker_ids.len();
+        let last_worker_idx = worker_ids[worker_count - 1];
         for idx in worker_ids {
             let data_dir = self.tmp_dir.path().join(format!("worker-{idx}"));
             std::fs::create_dir_all(&data_dir)
                 .unwrap_or_else(|e| panic!("create dir {:?} failed: {:?}", data_dir, e));
 
-            let memory_upper_threshold = if idx & 1 == 0 {
-                AbsoluteOrPercentSize::Percent(20.0)
-            } else {
+            let memory_upper_threshold = if worker_count > 1 && idx == last_worker_idx {
                 // Small threshold to cover the process of handling memory limit exceeded.
                 (opts.kv_target_file_size.0 * 32).into()
+            } else {
+                AbsoluteOrPercentSize::Percent(20.0)
             };
 
             let tikv_worker_conf = cloud_worker::Config {

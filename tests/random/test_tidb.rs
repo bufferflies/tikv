@@ -63,7 +63,7 @@ pub(crate) const INITIAL_KEYSPACE_COUNT: usize = 1;
 pub(crate) const NODES_COUNT: usize = 4;
 const TEST_DURATION: Duration = Duration::from_secs(120); // Test for longer as TiDB bootstrap may cost 30s+.
 
-pub(crate) const TIKV_WORKERS_COUNT: usize = 2;
+pub(crate) const TIKV_WORKERS_COUNT: usize = 5;
 
 const PD_COUNT: usize = 1;
 const PD_BIN_ENV_KEY: &str = "PD_BIN";
