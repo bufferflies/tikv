@@ -3,6 +3,7 @@
 use std::{
     fs,
     io::{Read, Seek, SeekFrom},
+    os::unix::fs::FileExt,
     path::PathBuf,
     sync::{
         atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
@@ -19,7 +20,8 @@ use tikv_util::mpsc::{Receiver, Sender};
 use crate::{
     compact_worker::CompactTask, compress_lz4, decompress_lz4, get_integral_wal_chunks,
     last_wal_chunk_file_key, manifest::Manifest, metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE,
-    parse_wal_chunk_key, wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name, Error, Result,
+    parse_wal_chunk_key, wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name,
+    writer::EPOCH_ROTATE_LEN, Error, IoContext, Result,
 };
 
 #[derive(Debug)]
@@ -61,10 +63,10 @@ pub(crate) struct ObjectStorageWorker {
     engine_id: Arc<AtomicU64>,
     task_rx: Receiver<ObjectStorageTask>,
     compact_worker_tx: Sender<CompactTask>,
+    service_worker_epoch: Arc<AtomicU32>,
     buf: Vec<u8>,
     async_wal_file: Option<fs::File>,
     epoch_id: u32,
-    chunk_id: u32,
     start_off: u64, // The start offset of the current chunk.
     sync_off: u64,  // The offset of the syncing of current wal.
     s3fs: Arc<S3Fs>,
@@ -73,6 +75,14 @@ pub(crate) struct ObjectStorageWorker {
 }
 
 impl ObjectStorageWorker {
+    fn reset(&mut self, epoch_id: u32) {
+        self.epoch_id = epoch_id;
+        self.buf.clear();
+        self.async_wal_file = None;
+        self.start_off = 0;
+        self.sync_off = 0;
+    }
+
     pub(crate) fn new(
         config: LightweightBackupConfig,
         epoch_id: u32,
@@ -80,6 +90,7 @@ impl ObjectStorageWorker {
         dfs_worker_healthy: Healthy,
         task_rx: Receiver<ObjectStorageTask>,
         compact_worker_tx: Sender<CompactTask>,
+        service_worker_epoch: Arc<AtomicU32>,
     ) -> Self {
         info!("dfs worker config: {:?}", config);
         let dfs_config = config.dfs_config.clone();
@@ -92,9 +103,9 @@ impl ObjectStorageWorker {
             engine_id,
             task_rx,
             compact_worker_tx,
+            service_worker_epoch,
             buf: Vec::with_capacity(wal_chunk_target_file_size),
             async_wal_file: None,
-            chunk_id: 1,
             start_off: 0,
             sync_off: 0,
             s3fs,
@@ -111,16 +122,17 @@ impl ObjectStorageWorker {
         let mut need_snapshot = false;
         // Wait for node bootstrapped.
         info!("dfs worker wait for store bootstrapped.");
-        self.wait_for_bootstrapped();
-        info!("dfs worker start init.");
+        let store_id = self.wait_for_bootstrapped();
+        debug_assert!(store_id > 0);
+        info!("{}: dfs worker start init.", store_id);
         let mut rebuild_epoch = self.epoch_id;
         let store_id = self.get_engine_id();
         let mut last_chunk_key = None;
         loop {
             let scan_prefix = wal_chunk_file_prefix(store_id, rebuild_epoch);
             info!(
-                "rebuild last wal chunk list chunks with prefix {}",
-                scan_prefix
+                "{}: rebuild last wal chunk list chunks with prefix {}",
+                store_id, scan_prefix
             );
 
             // Chunks in an epoch should be listed in one iterate.
@@ -131,14 +143,16 @@ impl ObjectStorageWorker {
                 if let Ok((mut integral_chunks, ..)) = get_integral_wal_chunks(&chunk_keys) {
                     last_chunk_key = integral_chunks.pop();
                     if last_chunk_key.is_some() {
-                        info!("found integral wal chunks";
+                        info!("{}: found integral wal chunks", store_id;
                             "integral_chunks" => ?integral_chunks, "last_chunk" => ?last_chunk_key);
                         break;
                     }
                 }
             }
 
-            if rebuild_epoch <= 1 || self.epoch_id >= rebuild_epoch + 3 {
+            // Use `overwritten_epoch + 2` as `overwritten_epoch + 1` is the cut-off value
+            // and would be overwritten soon.
+            if rebuild_epoch <= 1 || rebuild_epoch <= self.overwritten_epoch() + 2 {
                 need_snapshot = true;
                 break;
             }
@@ -150,7 +164,10 @@ impl ObjectStorageWorker {
                 self.epoch_id = rebuild_epoch;
                 self.sync_off = 0;
                 self.start_off = 0;
-                info!("no wal chunk found, rebuild from epoch {}", rebuild_epoch);
+                info!(
+                    "{}: no wal chunk found, rebuild from epoch {}",
+                    store_id, rebuild_epoch
+                );
             }
             Some(key) => match parse_wal_chunk_key(Some(&key)) {
                 Some((epoch_id, _, file_off, _)) => {
@@ -158,8 +175,8 @@ impl ObjectStorageWorker {
                     self.start_off = file_off;
                     self.sync_off = file_off;
                     info!(
-                        "found the last wal chunk {} rebuild from epoch {} offset {}",
-                        key, epoch_id, file_off
+                        "{}: found the last wal chunk {} rebuild from epoch {} offset {}",
+                        store_id, key, epoch_id, file_off
                     );
                 }
                 None => return Err(Error::Other(format!("parse wal chunk key {} failed", key))),
@@ -169,10 +186,13 @@ impl ObjectStorageWorker {
         Ok(need_snapshot)
     }
 
-    fn wait_for_bootstrapped(&self) {
-        while self.get_engine_id() == 0 {
+    fn wait_for_bootstrapped(&self) -> u64 {
+        let mut engine_id = self.get_engine_id();
+        while engine_id == 0 {
             std::thread::sleep(std::time::Duration::from_millis(100));
+            engine_id = self.get_engine_id();
         }
+        engine_id
     }
 
     pub(crate) fn run(&mut self) {
@@ -202,6 +222,11 @@ impl ObjectStorageWorker {
                 .healthy
                 .is_healthy(task.epoch_id().unwrap_or(self.epoch_id))
             {
+                if let ObjectStorageTask::Rotate { epoch_id, .. } = task {
+                    // Reset to the new epoch. Otherwise, `handle_sync` will sync from previous
+                    // unhealthy epoch.
+                    self.reset(epoch_id + 1);
+                }
                 continue;
             }
             match task {
@@ -240,28 +265,23 @@ impl ObjectStorageWorker {
         }
     }
 
-    // Write wal chunk from `start_off` to `file_off` in a single write.
-    // rebuild all epoch async if `file_off` is 0
-    fn rebuild_wal_chunk(&mut self, mut file_off: u64) -> Result<()> {
+    // Write wal chunk from `start_off` to end of current epoch in a single write.
+    fn rebuild_wal_chunk(&mut self) -> Result<()> {
         let store_id = self.get_engine_id();
         let mut fd = fs::File::open(wal_file_name(self.config.dir.as_path(), self.epoch_id))?;
-        fd.seek(SeekFrom::Start(self.start_off))?;
-        if file_off == 0 {
-            file_off = fd.metadata()?.len();
+        if self.start_off > 0 {
+            fd.seek(SeekFrom::Start(self.start_off))?;
         }
+        let sync_len = fd
+            .read_to_end(&mut self.buf)
+            .ctx("rebuild_wal_chunk_read_wal")?;
+        self.check_overwritten_epoch("rebuild_wal_chunk")?;
 
-        let sync_len = file_off - self.start_off;
-        let buf_start = self.buf.len();
-        let buf_end = buf_start + sync_len as usize;
-        debug!(
-            "{}: rebuild_wal_chunk epoch {} from {} to {} buf_start {} buf_end {} sync_len {}",
-            store_id, self.epoch_id, self.start_off, file_off, buf_start, buf_end, sync_len
-        );
-        self.buf.resize(buf_end, 0);
-        let bytes_read = fd.read(&mut self.buf[buf_start..buf_end])?;
-        debug_assert_eq!(bytes_read, sync_len as usize);
-
-        let file_key = last_wal_chunk_file_key(store_id, self.epoch_id, self.start_off, file_off);
+        self.sync_off = self.start_off + sync_len as u64;
+        info!("{}: rebuild_wal_chunk", store_id; "epoch" => self.epoch_id,
+            "start_off" => self.start_off, "sync_off" => self.sync_off);
+        let file_key =
+            last_wal_chunk_file_key(store_id, self.epoch_id, self.start_off, self.sync_off);
         let chunk = self.take_chunk_data()?;
 
         let fs = self.s3fs.clone();
@@ -276,11 +296,6 @@ impl ObjectStorageWorker {
             drop(acquired);
         });
 
-        // Reset the offset and buf after rebuild one epoch.
-        self.start_off = 0;
-        self.sync_off = 0;
-        self.buf.clear();
-
         Ok(())
     }
 
@@ -289,17 +304,21 @@ impl ObjectStorageWorker {
     }
 
     fn handle_sync(&mut self, epoch_id: u32, file_off: u64) -> Result<()> {
+        let store_id = self.get_engine_id();
         if epoch_id != self.epoch_id {
+            // If epoch is overwritten, the WAL chunks in DFS must be incomplete.
+            // Return error to make unhealthy.
+            self.check_overwritten_epoch("handle_sync")?;
+
             // Need to rebuild all previous epoch.
             for rebuild_epoch in self.epoch_id..epoch_id {
-                self.rebuild_wal_chunk(0)?;
-                self.epoch_id = rebuild_epoch + 1;
+                self.rebuild_wal_chunk()?;
+                self.reset(rebuild_epoch + 1);
             }
         }
         debug_assert_eq!(epoch_id, self.epoch_id);
 
         let sync_len = file_off - self.sync_off;
-        let store_id = self.get_engine_id();
 
         if self.should_chunk(sync_len as usize) {
             if let Some(async_wal_file) = &self.async_wal_file {
@@ -308,8 +327,8 @@ impl ObjectStorageWorker {
                 async_wal_file.sync_data()?;
             }
             info!(
-                "{}: handle_sync put wal epoch {} chunk {}",
-                store_id, epoch_id, self.chunk_id
+                "{}: handle_sync put wal epoch {} start_off {} sync_off {}",
+                store_id, epoch_id, self.start_off, self.sync_off
             );
             self.next_chunk(false)?;
         }
@@ -325,8 +344,6 @@ impl ObjectStorageWorker {
             }
         };
 
-        async_wal_file.seek(SeekFrom::Start(self.sync_off))?;
-
         let buf_start = self.buf.len();
         let buf_end = buf_start + sync_len as usize;
         debug!(
@@ -334,26 +351,42 @@ impl ObjectStorageWorker {
             store_id, epoch_id, self.sync_off, file_off, buf_start, buf_end
         );
         self.buf.resize(buf_end, 0);
-        let bytes_read = async_wal_file.read(&mut self.buf[buf_start..buf_end])?;
-        debug_assert_eq!(bytes_read, sync_len as usize);
+        async_wal_file
+            .read_exact_at(&mut self.buf[buf_start..buf_end], self.sync_off)
+            .ctx("handle_sync_read_async_wal")?;
+        self.check_overwritten_epoch("handle_sync")?;
 
         // Update the sync offset.
         self.sync_off = file_off;
         Ok(())
     }
 
+    // The epoch <= `overwritten_epoch` is overwritten and should not read.
+    #[inline]
+    fn overwritten_epoch(&self) -> u32 {
+        self.service_worker_epoch
+            .load(Ordering::SeqCst)
+            .saturating_sub(EPOCH_ROTATE_LEN)
+    }
+
+    fn check_overwritten_epoch(&self, ctx: &str) -> Result<()> {
+        let overwritten_epoch = self.overwritten_epoch();
+        if self.epoch_id <= overwritten_epoch {
+            error!("{}: {}: epoch is overwritten", self.get_engine_id(), ctx;
+                    "dfs_worker.epoch" => self.epoch_id, "overwritten_epoch" => overwritten_epoch);
+            Err(Error::Other(format!("{ctx}: epoch is overwritten")))
+        } else {
+            Ok(())
+        }
+    }
+
     fn handle_rotate(&mut self, epoch_id: u32) -> Result<()> {
         debug!("{}: handle_rotate epoch {}", self.get_engine_id(), epoch_id);
         // Call next_chunk even self.buf is empty. This can cover the case the last
         // chunk flushed during stop with no `.last` suffix.
-        self.next_chunk(true)?;
-        self.async_wal_file = None;
-        self.epoch_id = epoch_id + 1;
-        self.start_off = 0;
-        self.sync_off = 0;
-        self.chunk_id = 1;
-
-        Ok(())
+        let res = self.next_chunk(true);
+        self.reset(epoch_id + 1);
+        res
     }
 
     pub(crate) fn should_chunk(&mut self, to_read: usize) -> bool {
@@ -366,27 +399,35 @@ impl ObjectStorageWorker {
         false
     }
 
-    // For test only.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn set_buf(&mut self, buf: Vec<u8>) {
         self.buf = buf;
+        self.sync_off = self.start_off + self.buf.len() as u64;
     }
 
     pub(crate) fn take_chunk_data(&mut self) -> Result<Vec<u8>> {
+        debug_assert_eq!(self.buf.len() as u64, self.sync_off - self.start_off);
+
         let chunk_header = ChunkHeader::new(self.compression_type());
         let buf_len = self.buf.len();
         let mut chunk = Vec::with_capacity(ChunkHeader::len() + buf_len);
         chunk_header.encode_to(&mut chunk);
         // Get slice of the buffer but keep the memory.
-        if self.need_compression() {
-            let _ = compress_lz4(&self.buf, &mut chunk).map_err(|err| {
+        let res = if self.need_compression() {
+            compress_lz4(&self.buf, &mut chunk).map(|_| chunk).map_err(|err| {
                 error!("{} take chunk data: compress_lz4 failed", self.get_engine_id(); "err" => ?err);
-                err
-            })?;
+                Error::Io(err, "compress_chunk".to_string())
+            })
         } else {
-            chunk.extend_from_slice(self.buf.as_slice());
+            chunk.extend_from_slice(&self.buf);
+            Ok(chunk)
         };
-        Ok(chunk)
+
+        // Always clear the buf. Otherwise, when error occurs, chunks of different epoch
+        // will be combined.
+        self.buf.clear();
+        self.start_off = self.sync_off;
+        res
     }
 
     fn next_chunk(&mut self, rotate: bool) -> Result<()> {
@@ -416,10 +457,6 @@ impl ObjectStorageWorker {
             }
             drop(acquired);
         });
-
-        self.start_off = self.sync_off;
-        self.chunk_id += 1;
-        self.buf.clear();
 
         Ok(())
     }
@@ -664,6 +701,7 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
         let (tx, _) = tikv_util::mpsc::unbounded();
         let dfs_config = kvengine::dfs::DFSConfig::default();
+        let overwritten_epoch = Arc::new(AtomicU32::new(0));
         let mut worker = ObjectStorageWorker::new(
             LightweightBackupConfig::new(
                 std::env::temp_dir(),
@@ -679,6 +717,7 @@ mod tests {
             Healthy::default(),
             rx,
             tx,
+            overwritten_epoch,
         );
 
         let mut origin_data = vec![];

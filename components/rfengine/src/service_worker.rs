@@ -74,6 +74,7 @@ impl fmt::Debug for ServiceTask {
 /// API, compaction and backup tasks.
 pub(crate) struct ServiceWorker {
     engine_id: Arc<AtomicU64>,
+    epoch_id: Arc<AtomicU32>,
     async_wal_writer: Option<WalWriter>,
     rx: Receiver<ServiceTask>,
     compact_worker_handle: WorkerHandle,
@@ -118,6 +119,7 @@ impl ServiceWorker {
             handle: Some(handle),
         };
 
+        let service_worker_epoch = Arc::new(AtomicU32::new(epoch_id));
         let dfs_worker_handle = if let Some(cfg) = lightweight_backup_config {
             let (dfs_worker_tx, dfs_worker_rx) = tikv_util::mpsc::unbounded();
             let mut dfs_worker = ObjectStorageWorker::new(
@@ -127,6 +129,7 @@ impl ServiceWorker {
                 healthy.clone(),
                 dfs_worker_rx,
                 compact_worker_tx,
+                service_worker_epoch.clone(),
             );
             let handle = std::thread::Builder::new()
                 .name(DFS_WORKER_THREAD_NAME.to_string())
@@ -141,6 +144,7 @@ impl ServiceWorker {
         };
         ServiceWorker {
             engine_id,
+            epoch_id: service_worker_epoch,
             async_wal_writer,
             dfs_worker_handle,
             rx,
@@ -286,6 +290,7 @@ impl ServiceWorker {
         if let Some(writer) = self.async_wal_writer.as_mut() {
             debug_assert_eq!(writer.epoch_id, epoch_id);
             let file_off = writer.file_off;
+            self.epoch_id.store(epoch_id + 1, Ordering::SeqCst);
             writer.rotate().unwrap();
             if let Some(dfs_worker_handle) = &self.dfs_worker_handle {
                 // Send rotate task to object storage worker.
