@@ -2744,6 +2744,7 @@ impl ::protobuf::reflect::ProtobufValue for KeySpaceBackupMeta {
 pub struct RaftLogMetaHeader {
     // message fields
     pub version: u64,
+    pub compression_type: u32,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -2774,6 +2775,21 @@ impl RaftLogMetaHeader {
     pub fn set_version(&mut self, v: u64) {
         self.version = v;
     }
+
+    // uint32 compression_type = 2;
+
+
+    pub fn get_compression_type(&self) -> u32 {
+        self.compression_type
+    }
+    pub fn clear_compression_type(&mut self) {
+        self.compression_type = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_compression_type(&mut self, v: u32) {
+        self.compression_type = v;
+    }
 }
 
 impl ::protobuf::Message for RaftLogMetaHeader {
@@ -2792,6 +2808,13 @@ impl ::protobuf::Message for RaftLogMetaHeader {
                     let tmp = is.read_uint64()?;
                     self.version = tmp;
                 },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.compression_type = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -2807,6 +2830,9 @@ impl ::protobuf::Message for RaftLogMetaHeader {
         if self.version != 0 {
             my_size += ::protobuf::rt::value_size(1, self.version, ::protobuf::wire_format::WireTypeVarint);
         }
+        if self.compression_type != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.compression_type, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -2815,6 +2841,9 @@ impl ::protobuf::Message for RaftLogMetaHeader {
     fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
         if self.version != 0 {
             os.write_uint64(1, self.version)?;
+        }
+        if self.compression_type != 0 {
+            os.write_uint32(2, self.compression_type)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -2863,6 +2892,11 @@ impl ::protobuf::Message for RaftLogMetaHeader {
                     |m: &RaftLogMetaHeader| { &m.version },
                     |m: &mut RaftLogMetaHeader| { &mut m.version },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "compression_type",
+                    |m: &RaftLogMetaHeader| { &m.compression_type },
+                    |m: &mut RaftLogMetaHeader| { &mut m.compression_type },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<RaftLogMetaHeader>(
                     "RaftLogMetaHeader",
                     fields,
@@ -2886,6 +2920,7 @@ impl ::protobuf::Message for RaftLogMetaHeader {
 impl ::protobuf::Clear for RaftLogMetaHeader {
     fn clear(&mut self) {
         self.version = 0;
+        self.compression_type = 0;
         self.unknown_fields.clear();
     }
 }
@@ -2896,6 +2931,7 @@ impl ::protobuf::PbPrint for RaftLogMetaHeader {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.version, "version", buf);
+        ::protobuf::PbPrint::fmt(&self.compression_type, "compression_type", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -2907,6 +2943,7 @@ impl ::std::fmt::Debug for RaftLogMetaHeader {
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
         let mut s = String::new();
         ::protobuf::PbPrint::fmt(&self.version, "version", &mut s);
+        ::protobuf::PbPrint::fmt(&self.compression_type, "compression_type", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -3187,12 +3224,13 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x05\x20\x01(\x04B\0:\0\"W\n\
     \x12KeySpaceBackupMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\rB\0\
     \x12(\n\x05files\x18\x02\x20\x03(\x0b2\x17.rfpb.RaftLogBackupFileB\0:\0\
-    \"(\n\x11RaftLogMetaHeader\x12\x11\n\x07version\x18\x01\x20\x01(\x04B\0:\
-    \0\"\xd7\x01\n\x16StoreRaftLogBackupMeta\x12)\n\x06header\x18\x01\x20\
-    \x01(\x0b2\x17.rfpb.RaftLogMetaHeaderB\0\x12D\n\traft_logs\x18\x02\x20\
-    \x03(\x0b2/.rfpb.StoreRaftLogBackupMeta.raft_logs_MapEntryB\0\x1aJ\n\x12\
-    raft_logs_MapEntry\x12\t\n\x03key\x18\x01(\r\x12%\n\x05value\x18\x02(\
-    \x0b2\x18.rfpb.KeySpaceBackupMeta:\x028\x01:\0B\0b\x06proto3\
+    \"D\n\x11RaftLogMetaHeader\x12\x11\n\x07version\x18\x01\x20\x01(\x04B\0\
+    \x12\x1a\n\x10compression_type\x18\x02\x20\x01(\rB\0:\0\"\xd7\x01\n\x16S\
+    toreRaftLogBackupMeta\x12)\n\x06header\x18\x01\x20\x01(\x0b2\x17.rfpb.Ra\
+    ftLogMetaHeaderB\0\x12D\n\traft_logs\x18\x02\x20\x03(\x0b2/.rfpb.StoreRa\
+    ftLogBackupMeta.raft_logs_MapEntryB\0\x1aJ\n\x12raft_logs_MapEntry\x12\t\
+    \n\x03key\x18\x01(\r\x12%\n\x05value\x18\x02(\x0b2\x18.rfpb.KeySpaceBack\
+    upMeta:\x028\x01:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

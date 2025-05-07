@@ -78,6 +78,7 @@ pub(crate) struct CompactWorker {
 
     // Used to cache small rlogs to reduce disk IO when taking snapshot.
     rlog_cache: RlogCache,
+    rlog_compression_type: CompressionType,
     healthy: Healthy,
 
     sync_concurrency: usize,
@@ -100,10 +101,13 @@ impl CompactWorker {
         pending_compact_wb_count: Arc<AtomicUsize>,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
-        let rlog_cache = if let Some(config) = lightweight_backup_cfg {
-            RlogCache::new(config.rlog_cache_capacity, config.rlog_cache_size_threshold)
+        let (rlog_cache, compress_type) = if let Some(config) = lightweight_backup_cfg {
+            (
+                RlogCache::new(config.rlog_cache_capacity, config.rlog_cache_size_threshold),
+                config.rlog_compression_type,
+            )
         } else {
-            RlogCache::none()
+            (RlogCache::none(), CompressionType::NoCompression)
         };
 
         Self {
@@ -116,6 +120,7 @@ impl CompactWorker {
             s3fs,
             last_snap_epoch_id: 0,
             rlog_cache,
+            rlog_compression_type: compress_type,
             healthy,
             sync_concurrency,
             files_to_sync: vec![],
@@ -584,7 +589,10 @@ impl CompactWorker {
         // Reserve 10MB for `rlog_meta`, which should be enough in most scenarios.
         let mut object = BytesMut::with_capacity(raft_log_size + 10 * 1024 * 1024);
         let mut rlog_meta = StoreRaftLogBackupMeta::default();
-        rlog_meta.mut_header().version = 1;
+        rlog_meta.mut_header().version = 2;
+        rlog_meta
+            .mut_header()
+            .set_compression_type(self.rlog_compression_type.to());
 
         // Aggregate the raft log data with keyspace id.
         let (mut total_file_cnt, mut cached_file_cnt, mut cached_file_size) = (0, 0, 0);
@@ -603,10 +611,18 @@ impl CompactWorker {
                     self.rlog_cache.add_rlog(peer_id, file, &data);
                     Cow::from(data)
                 };
+                let compressed_data = match self.rlog_compression_type {
+                    CompressionType::Lz4Compression => {
+                        let mut chunk = Vec::with_capacity(data.len());
+                        compress_lz4(&data, &mut chunk)?;
+                        Cow::Owned(chunk)
+                    }
+                    _ => Cow::Borrowed(data.as_ref()),
+                };
                 let mut backup_file = RaftLogBackupFile::default();
                 backup_file.peer_id = peer_id;
                 backup_file.start_off = object.len() as u64;
-                object.put_slice(data.as_ref());
+                object.put_slice(compressed_data.as_ref());
                 backup_file.end_off = object.len() as u64;
                 backup_file.first_index = file.first_index;
                 backup_file.last_index = file.last_index;
@@ -624,6 +640,7 @@ impl CompactWorker {
         store_meta.raft_meta_start_off = object.len() as u64;
         let meta = rlog_meta.write_to_bytes().unwrap();
         object.put_slice(&meta);
+
         Ok((object_key, object.freeze()))
     }
 
@@ -1069,9 +1086,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(false)]
-    #[case::with_cache(true)]
-    fn test_backup_raft_log_files(#[case] with_cache: bool) {
+    #[case(false, false)]
+    #[case::with_cache(true, false)]
+    #[case::with_cache_and_compress(true, true)]
+    fn test_backup_raft_log_files(#[case] with_cache: bool, #[case] with_compress: bool) {
         init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let tmp_path = tmp_dir.path();
@@ -1094,6 +1112,11 @@ mod tests {
             RlogCache::new(RANDOM_STR_MAX_LEN * 80, RANDOM_STR_MAX_LEN / 2)
         } else {
             RlogCache::none()
+        };
+        worker.rlog_compression_type = if with_compress {
+            CompressionType::Lz4Compression
+        } else {
+            CompressionType::NoCompression
         };
 
         let epoch = 990;
@@ -1134,7 +1157,6 @@ mod tests {
             cs.mut_peers().push(meta_pb);
         }
         assert!(!with_cache || cached_file_cnt > 0);
-
         let mut store_meta = StoreBackupMeta::default();
         let (key, object) = worker
             .backup_raft_log_files(&cs, &mut store_meta, false)
@@ -1145,14 +1167,26 @@ mod tests {
         let size = object.len();
         let meta_bytes = &object.chunk()[store_meta.raft_meta_start_off as usize..size];
         raft_meta.merge_from_bytes(meta_bytes).unwrap();
-        assert_eq!(raft_meta.get_header().version, 1);
+        assert_eq!(raft_meta.get_header().version, 2);
+        let header = raft_meta.get_header();
+        if with_compress {
+            assert_eq!(header.compression_type, 1);
+        } else {
+            assert_eq!(header.compression_type, 0);
+        };
+
         let mut ret_file_cnt = 0;
         for (keyspace_id, keyspace_data) in raft_meta.take_raft_logs() {
             assert_eq!(keyspace_id, keyspace_data.get_keyspace_id());
             for file in keyspace_data.get_files() {
                 let peer_id = file.peer_id;
                 assert_eq!(keyspace_id as u64, peer_id / 5);
-                let data = &object.chunk()[file.start_off as usize..file.end_off as usize];
+                let data = if with_compress {
+                    decompress_lz4(&object.chunk()[file.start_off as usize..file.end_off as usize])
+                        .unwrap()
+                } else {
+                    object.chunk()[file.start_off as usize..file.end_off as usize].to_vec()
+                };
                 let rlog_files = peer_rlog_files[&peer_id].clone();
                 let idx = ((file.first_index - 1) / 100) as usize;
                 let file_data = rlog_files[idx].clone();
@@ -1165,7 +1199,7 @@ mod tests {
                     file.last_index
                 );
                 assert_eq!(
-                    &file_data, data,
+                    &file_data, &data,
                     "peer id {}, index {}-{}",
                     peer_id, file.first_index, file.last_index
                 );
@@ -1199,9 +1233,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(false)]
-    #[case::with_cache(true)]
-    fn test_backup_and_load_raft_log_files(#[case] with_cache: bool) {
+    #[case(false, false)]
+    #[case::with_cache(true, false)]
+    #[case::with_cache_and_compress(true, true)]
+    fn test_backup_and_load_raft_log_files(#[case] with_cache: bool, #[case] with_compress: bool) {
         init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
         let tmp_path = tmp_dir.path();
@@ -1224,6 +1259,11 @@ mod tests {
             RlogCache::new(RANDOM_STR_MAX_LEN * 100 * 5, RANDOM_STR_MAX_LEN * 100 / 2)
         } else {
             RlogCache::none()
+        };
+        worker.rlog_compression_type = if with_compress {
+            CompressionType::Lz4Compression
+        } else {
+            CompressionType::NoCompression
         };
 
         let mut cs = ChangeSet::new();
@@ -1274,8 +1314,13 @@ mod tests {
         let size = object.len();
         let meta_bytes = &object.chunk()[store_meta.raft_meta_start_off as usize..size];
         raft_meta.merge_from_bytes(meta_bytes).unwrap();
-        assert_eq!(raft_meta.get_header().version, 1);
-
+        assert_eq!(raft_meta.get_header().version, 2);
+        let header = raft_meta.get_header();
+        if with_compress {
+            assert_eq!(header.compression_type, 1);
+        } else {
+            assert_eq!(header.compression_type, 0);
+        };
         // 2. restore to new dir
         let tmp_dir2 = tempfile::tempdir().unwrap();
         let tmp_path2 = tmp_dir2.path();
@@ -1287,7 +1332,12 @@ mod tests {
             for file in keyspace_data.get_files() {
                 let peer_id = file.peer_id;
                 assert_eq!(peer_id / 10, keyspace_id as u64);
-                let data = &object.chunk()[file.start_off as usize..file.end_off as usize];
+                let data = if with_compress {
+                    decompress_lz4(&object.chunk()[file.start_off as usize..file.end_off as usize])
+                        .unwrap()
+                } else {
+                    object.chunk()[file.start_off as usize..file.end_off as usize].to_vec()
+                };
                 let file_name =
                     raft_log_file_name(tmp_path2, peer_id, file.first_index, file.last_index);
                 fs::write(file_name, data).unwrap();

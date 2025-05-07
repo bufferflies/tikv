@@ -27,6 +27,9 @@ pub(crate) struct LightweightBackupConfig {
     pub(crate) dir: PathBuf,
     pub(crate) wal_chunk_target_file_size: usize,
     pub(crate) compression_type: CompressionType,
+    // for upgrade compatiblity, set rlog_compression_type to false first
+    // so we need another compress configration.
+    pub(crate) rlog_compression_type: CompressionType,
     pub(crate) dfs_config: DFSConfig,
 
     pub(crate) rlog_cache_capacity: usize,
@@ -39,6 +42,7 @@ impl LightweightBackupConfig {
         dir: PathBuf,
         wal_chunk_target_file_size: usize,
         compression_type: CompressionType,
+        rlog_compression_type: CompressionType,
         dfs_config: DFSConfig,
         rlog_cache_capacity: usize,
         rlog_cache_size_threshold: usize,
@@ -48,6 +52,7 @@ impl LightweightBackupConfig {
             dir,
             wal_chunk_target_file_size,
             compression_type,
+            rlog_compression_type,
             dfs_config,
             rlog_cache_capacity,
             rlog_cache_size_threshold,
@@ -668,6 +673,7 @@ mod tests {
                 std::env::temp_dir(),
                 1024 * 1024,
                 CompressionType::Lz4Compression,
+                CompressionType::NoCompression,
                 dfs_config,
                 1024 * 1024,
                 4096,

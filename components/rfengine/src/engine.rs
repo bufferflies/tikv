@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     fmt::{Display, Formatter},
     fs,
@@ -246,6 +247,7 @@ impl RfEngineCore {
                         dir.to_owned(),
                         cfg.wal_chunk_target_file_size.0 as usize,
                         CompressionType::Lz4Compression,
+                        CompressionType::NoCompression,
                         dfs_conf.unwrap(),
                         cfg.rlog_cache_capacity.0 as usize,
                         cfg.rlog_cache_size_threshold.0 as usize,
@@ -746,6 +748,16 @@ fn restore_all_raft_logs(
     restore_all_raft_logs_with_snap_rlog_file(store_meta, dir, rlog_data);
 }
 
+fn decompress_snap_rlog_file(compression_type: u32, content: &[u8]) -> Result<Cow<'_, [u8]>> {
+    match CompressionType::from(compression_type) {
+        CompressionType::Lz4Compression => {
+            let decompressed = decompress_lz4(content).map_err(Error::from)?;
+            Ok(Cow::Owned(decompressed))
+        }
+        CompressionType::NoCompression => Ok(Cow::Borrowed(content)),
+    }
+}
+
 fn restore_all_raft_logs_with_snap_rlog_file(
     store_meta: &StoreBackupMeta,
     dir: &Path,
@@ -754,17 +766,20 @@ fn restore_all_raft_logs_with_snap_rlog_file(
     let mut raft_meta = StoreRaftLogBackupMeta::default();
     let size = rlog_data.len();
     debug_assert!(size as u64 > store_meta.raft_meta_start_off);
+
     raft_meta
         .merge_from_bytes(&rlog_data.chunk()[store_meta.raft_meta_start_off as usize..size])
         .unwrap();
+    let compression_type = raft_meta.get_header().get_compression_type();
     for (_, keyspace_meta) in raft_meta.raft_logs {
         for file in keyspace_meta.get_files() {
             let path = raft_log_file_name(dir, file.peer_id, file.first_index, file.last_index);
-            fs::write(
-                path,
+            let content = decompress_snap_rlog_file(
+                compression_type,
                 &rlog_data.chunk()[file.start_off as usize..file.end_off as usize],
             )
             .unwrap();
+            fs::write(path, content).unwrap();
         }
     }
 }
