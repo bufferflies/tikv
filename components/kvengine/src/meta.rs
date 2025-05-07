@@ -1253,8 +1253,27 @@ impl ShardMeta {
             source.data_bound(),
             self.data_bound(),
         );
+        // Remove columnar and vector if related table is not in the merged
+        // columnar_table_ids.
+        self.retain_columnar_and_vector();
         self.parent = Some(Box::new(parent));
         self.seq = sequence;
+    }
+
+    fn retain_columnar_and_vector(&mut self) {
+        let columnar_table_ids = self.columnar_table_ids.clone();
+        self.files.retain(|_, file| {
+            if !file.is_columnar_file() && !file.is_vector_index_file() {
+                return true;
+            }
+            let data_bound = file.data_bound();
+            let (min_table_id, max_table_id) = get_table_id_from_data_bound(data_bound);
+            columnar_table_ids
+                .iter()
+                .any(|&id| id >= min_table_id && id <= max_table_id)
+        });
+        self.vector_indexes
+            .retain(|vec| columnar_table_ids.contains(&vec.table_id));
     }
 
     fn merge_vector_index(&mut self, vec_idx: &VectorIndex) {
@@ -1412,6 +1431,10 @@ impl FileMeta {
 
     pub fn is_columnar_file(&self) -> bool {
         self.file_type == FileType::Columnar
+    }
+
+    pub fn is_vector_index_file(&self) -> bool {
+        self.file_type == FileType::VectorIndex
     }
 
     pub fn can_use_ia(&self) -> bool {

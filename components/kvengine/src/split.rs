@@ -556,6 +556,11 @@ impl Engine {
                 source_data_bound,
                 old_data.data_bound(),
             );
+            retain_columnar_and_vector(
+                &columnar_table_ids,
+                &mut columnar_levels,
+                &mut vector_indexes,
+            );
             let mut builder = ShardDataBuilder::new(old_data);
             builder.set_range(new_shard.range.clone());
             if clear_target {
@@ -638,6 +643,21 @@ impl Engine {
         );
         new_shard
     }
+}
+
+fn retain_columnar_and_vector(
+    columnar_table_ids: &[i64],
+    col_levels: &mut ColumnarLevels,
+    vector_indexes: &mut VectorIndexes,
+) {
+    col_levels.retain(|col| {
+        let data_bound = col.data_bound();
+        let (min_table_id, max_table_id) = get_table_id_from_data_bound(data_bound);
+        columnar_table_ids
+            .iter()
+            .any(|&id| id >= min_table_id && id <= max_table_id)
+    });
+    vector_indexes.retain(|idx| columnar_table_ids.contains(&idx.table_id));
 }
 
 pub fn get_split_shard_index(split_keys: &[Vec<u8>], key: &[u8]) -> usize {

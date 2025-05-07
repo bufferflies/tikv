@@ -113,6 +113,10 @@ impl VectorIndexes {
             index.sort();
         }
     }
+
+    pub fn retain(&mut self, f: impl Fn(&VectorIndex) -> bool) {
+        self.indexes.retain(f);
+    }
 }
 
 #[derive(Clone)]
