@@ -47,7 +47,7 @@ jobs:
             hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-arm64
   build-amd64:
     name: Build AMD64 Image
-    runs-on: amd64
+    runs-on: [amd64, cd]
     timeout-minutes: 120
     outputs:
       image: tikv-cse:${{ github.sha }}-amd64
@@ -74,7 +74,7 @@ jobs:
             hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-amd64
   multi-arch:
     name: Create Multi-Architecture Image
-    runs-on: amd64
+    runs-on: [amd64, cd]
     needs: ["build-arm64", "build-amd64"]
     env:
       IMAGE_TAG: ${{ inputs.daily_run_image_tag || 'v7.5.0' }}

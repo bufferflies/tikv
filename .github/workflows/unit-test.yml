@@ -12,7 +12,7 @@ concurrency:
 jobs:
   dev:
     name: Run unit tests
-    runs-on: amd64
+    runs-on: [amd64, ci]
     env:
       RUSTFLAGS: -Dwarnings
       FAIL_POINT: "1"
