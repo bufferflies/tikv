@@ -1,7 +1,15 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    borrow::Cow, future::Future, iter::FromIterator, marker::PhantomData, sync::Arc, time::Duration,
+    borrow::Cow,
+    future::Future,
+    iter::FromIterator,
+    marker::PhantomData,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use ::tracker::{
@@ -30,7 +38,7 @@ use tikv_alloc::trace::MemoryTraceGuard;
 use tikv_kv::SnapshotExt;
 use tikv_util::{
     codec::bytes::encode_bytes, deadline::set_deadline_exceeded_busy_error,
-    quota_limiter::QuotaLimiter, time::Instant,
+    quota_limiter::QuotaLimiter, sys::SysQuota, time::Instant,
 };
 use tipb::{AnalyzeReq, AnalyzeType, ChecksumRequest, ChecksumScanOn, DagRequest, ExecType};
 use tokio::sync::Semaphore;
@@ -157,11 +165,16 @@ impl<E: Engine> Endpoint<E> {
         remote_cop_min_blocks_size: usize,
         remote_cop_num_ranges: usize,
     ) {
+        let worker_threads = (SysQuota::cpu_cores_quota() as usize / 4).max(2);
         let pool = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
+                .worker_threads(worker_threads)
                 .enable_all()
-                .thread_name("remote_coprocessor")
+                .thread_name_fn(|| {
+                    static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+                    let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+                    format!("remote_coprocessor_{}", id)
+                })
                 .build()
                 .unwrap(),
         );
