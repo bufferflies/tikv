@@ -83,6 +83,9 @@ message KeySpaceBackupMeta {
 
 message RaftLogMetaHeader {
     uint64 version = 1;
+    // 0 -> No compression
+    // 1 -> LZ4 compression
+    uint32 compression_type = 2;
 }
 
 message StoreRaftLogBackupMeta {
