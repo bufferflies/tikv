@@ -26,8 +26,8 @@ use tikv_util::{config::ReadableDuration, info, time::Instant, warn};
 use tokio::runtime::Runtime;
 
 use crate::{
-    create_new_keyspace, BACKUP_COUNTER, BACKUP_TOLERATED_ERR_COUNTER, RESTORE_COUNTER,
-    RESTORE_TOLERATED_ERR_COUNTER,
+    create_new_keyspace, BACKUP_COUNTER, BACKUP_TOLERATED_ERR_COUNTER, BROKEN_BACKUP_COUNTER,
+    RESTORE_COUNTER, RESTORE_TOLERATED_ERR_COUNTER,
 };
 
 const FETCH_WAL_TIMEOUT: ReadableDuration = ReadableDuration::secs(30);
@@ -145,7 +145,9 @@ fn is_backup_error_retryable(err: &Error) -> bool {
     match err {
         Error::MetaNotFound(_)
         | Error::HttpRequestError(_)
-        | Error::IncrementalBackupToleratedError(_) => true,
+        | Error::IncrementalBackupToleratedError(_)
+        | Error::RfengineDfsWorkerUnhealthy(_) => true,
+        Error::BackupErrorOnStores(errs, _) => errs.iter().all(|e| is_backup_error_retryable(e)),
         Error::SharedError(err) => is_backup_error_retryable(err.inner()),
         _ => false,
     }
@@ -175,6 +177,7 @@ pub(crate) fn spawn_restore_keyspace(
     restore_config: RestoreConfig,
     keyspace_manager: KeyspaceManager,
     s3fs: &S3Fs,
+    enable_oss_chaos: bool,
     timeout: Duration,
 ) -> JoinHandle<()> {
     let s3fs = s3fs.clone();
@@ -268,6 +271,16 @@ pub(crate) fn spawn_restore_keyspace(
                     Err(Error::BackupEmptyForKeyspace(_)) => {
                         // Empty backup will happen on newly created keyspace. Retry.
                         warn!("{} backup is empty, retry", tag);
+                        continue 'next_restore;
+                    }
+                    Err(Error::WalChunkIntegrityError(msg)) => {
+                        // TODO: retry on next backup.
+                        warn!(
+                            "{} backup is broken: WAL chunk integrity error ({}), retry",
+                            tag, msg
+                        );
+                        assert!(enable_oss_chaos);
+                        BROKEN_BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
                         continue 'next_restore;
                     }
                     Err(Error::RfengineHttpRequestError(err)) => {

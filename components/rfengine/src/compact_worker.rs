@@ -128,18 +128,20 @@ impl CompactWorker {
                 CompactTask::Snapshot => {
                     self.handle_snapshot();
                 }
-                CompactTask::Close => {
-                    self.handle_close();
+                CompactTask::Close { force } => {
+                    self.handle_close(force);
                     return;
                 }
             }
         }
     }
 
-    fn handle_close(&mut self) {
+    fn handle_close(&mut self, force: bool) {
         // Close and join snapshot task thread.
         if let Some(snap_handle) = self.snap_task_handle.take() {
-            let _ = snap_handle.join().unwrap();
+            if !force {
+                let _ = snap_handle.join().unwrap();
+            }
         }
     }
 
@@ -406,7 +408,7 @@ impl CompactWorker {
             Err(e) => {
                 return backup_callback(
                     task,
-                    Err(format!("backup wal failed {:?}", e)),
+                    Err(Error::Backup(format!("backup wal failed {:?}", e))),
                     "full_fail",
                     ob_start_time,
                 );
@@ -418,7 +420,7 @@ impl CompactWorker {
             Err(e) => {
                 return backup_callback(
                     task,
-                    Err(format!("backup raft log failed {:?}", e)),
+                    Err(Error::Backup(format!("backup raft log failed {:?}", e))),
                     "full_fail",
                     ob_start_time,
                 );
@@ -436,7 +438,7 @@ impl CompactWorker {
         // compaction.
         thread::spawn(move || {
             if let Err(err) = task.object_storage.put_objects(objects) {
-                return backup_callback(task, Err(err), "full_fail", ob_start_time);
+                return backup_callback(task, Err(Error::Backup(err)), "full_fail", ob_start_time);
             }
             backup_callback(task, Ok(backup_meta), "full_success", ob_start_time);
         });
@@ -615,7 +617,7 @@ impl CompactWorker {
                 "WAL offset invalid, current {}, given start {}",
                 task.file_off, task.config.start_offset
             );
-            return backup_callback(task, Err(msg), "incr_fail", ob_start_time);
+            return backup_callback(task, Err(Error::Backup(msg)), "incr_fail", ob_start_time);
         }
         info!(
             "Engine {} start incremental backup task, epoch {}",
@@ -634,7 +636,7 @@ impl CompactWorker {
             Err(e) => {
                 return backup_callback(
                     task,
-                    Err(format!("Backup WAL failed {:?}", e)),
+                    Err(Error::Backup(format!("Backup WAL failed {:?}", e))),
                     "incr_fail",
                     ob_start_time,
                 );
@@ -650,7 +652,7 @@ impl CompactWorker {
         // compaction.
         thread::spawn(move || {
             if let Err(err) = task.object_storage.put_objects(objects) {
-                return backup_callback(task, Err(err), "incr_fail", ob_start_time);
+                return backup_callback(task, Err(Error::Backup(err)), "incr_fail", ob_start_time);
             }
             backup_callback(task, Ok(backup_meta), "incr_success", ob_start_time);
         });
@@ -766,7 +768,7 @@ pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32) -> PathBuf {
 pub(crate) enum CompactTask {
     Compact { epoch_id: u32 },
     HeavyBackup(BackupTask),
-    Close,
+    Close { force: bool },
     Snapshot,
 }
 
@@ -800,7 +802,7 @@ impl Display for BackupConfig {
 
 pub struct BackupTask {
     pub object_storage: Box<dyn ObjectStorage>,
-    pub callback: Box<dyn FnOnce(std::result::Result<StoreBackupMeta, String>) + Send>,
+    pub callback: Box<dyn FnOnce(Result<StoreBackupMeta>) + Send>,
     pub(crate) file_off: u64,
     pub(crate) config: BackupConfig,
 }
@@ -808,7 +810,7 @@ pub struct BackupTask {
 impl BackupTask {
     pub fn new(
         object_storage: Box<dyn ObjectStorage>,
-        callback: Box<dyn FnOnce(std::result::Result<StoreBackupMeta, String>) + Send>,
+        callback: Box<dyn FnOnce(Result<StoreBackupMeta>) + Send>,
         config: BackupConfig,
     ) -> Self {
         Self {
@@ -826,7 +828,7 @@ impl BackupTask {
 
 pub(crate) fn backup_callback(
     task: BackupTask,
-    ret: std::result::Result<StoreBackupMeta, String>,
+    ret: Result<StoreBackupMeta>,
     label: &str,
     ob_start_time: Instant,
 ) {

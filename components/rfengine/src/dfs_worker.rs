@@ -621,6 +621,11 @@ impl Healthy {
         self.0.fetch_max(next_snapshot_epoch, Ordering::Release);
         warn!("dfs worker unhealthy"; "ctx" => ctx,
             "current_epoch" => current_epoch, "next_snapshot" => next_snapshot_epoch);
+
+        #[cfg(feature = "testexport")]
+        {
+            crate::metrics::RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER.inc();
+        }
     }
 
     pub(crate) fn is_healthy(&self, current_epoch: u32) -> bool {

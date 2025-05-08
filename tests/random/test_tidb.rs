@@ -168,7 +168,7 @@ fn test_random_with_tidb() {
     let start_time = Instant::now();
     while start_time.saturating_elapsed() < TEST_DURATION {
         // Restart nodes.
-        random_node_restart(&mut cluster, |_, _| {});
+        random_node_restart(&mut cluster, |_, _| {}, false);
     }
 
     // Finish.

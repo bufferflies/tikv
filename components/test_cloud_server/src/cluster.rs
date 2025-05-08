@@ -19,7 +19,7 @@ use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
 use hyper::{http, Body, Request};
 use kvengine::{
     dfs,
-    dfs::{Dfs, FileType},
+    dfs::{DFSConnOptions, Dfs, FileType},
     ia::{gc::IaGcConfig, util::IaConfig},
     table::{columnar::build_schema_file, sstable::BlockCacheType},
     txn_chunk_manager::TxnChunkManagerConfig,
@@ -815,13 +815,19 @@ impl ServerCluster {
                 AbsoluteOrPercentSize::Percent(20.0)
             };
 
+            // Timeouts of `tikv_config.dfs.conn_options` is small to cover DFS worker
+            // unhealthy. Reset to normal values for tikv workers.
+            // TODO: Use small timeouts for tikv workers to cover scene of slow DFS as well.
+            let mut dfs = tikv_config.dfs.clone();
+            dfs.conn_options = DFSConnOptions::default();
+
             let tikv_worker_conf = cloud_worker::Config {
                 addr: tikv_worker_addr(idx),
                 cop_addr: "".to_string(),
                 pd: pd_client::Config::new(self.pd_endpoints().to_vec()),
                 update_interval: TIKV_WORKER_UPDATE_INTERVAL,
                 security: tikv_config.security.clone(),
-                dfs: tikv_config.dfs.clone(),
+                dfs,
                 register: opts.register,
                 txn_chunk_manager: TxnChunkManagerConfig {
                     gc_interval: TXN_CHUNK_MGR_GC_INTERVAL,

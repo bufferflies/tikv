@@ -112,3 +112,13 @@ lazy_static! {
         "Status of healthy dfs worker",
     ).unwrap();
 }
+
+#[cfg(feature = "testexport")]
+lazy_static! {
+    pub static ref RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER: IntCounter =
+        register_int_counter!(
+            "raft_engine_dfs_worker_become_unhealthy_counter",
+            "Counter of rfengine DFS worker become unhealthy",
+        )
+        .unwrap();
+}

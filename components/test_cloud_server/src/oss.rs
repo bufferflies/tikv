@@ -15,10 +15,10 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context};
-use bytes::Buf;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use engine_traits::ListObjectContent;
+use file_system::{IoOp, IoRateLimitMode, IoRateLimiter, IoType};
 use futures::{future::ok, StreamExt, TryStreamExt};
 use glob::glob;
 use hyper::{
@@ -46,11 +46,16 @@ type Result<T> = std::result::Result<T, anyhow::Error>;
 type HttpResult = std::result::Result<Response<Body>, hyper::Error>;
 type DelayRules = Arc<DashMap<String /* path keyword */, u64 /* delay ms */>>;
 
+const READ_IO_TYPE: IoType = IoType::ForegroundRead;
+const WRITE_IO_TYPE: IoType = IoType::ForegroundWrite;
+
 struct ServiceContext {
     store_path: PathBuf,
     tagging: Mutex<HashMap<String, Tagging>>, // file path -> Tagging
     delay_ms: Arc<AtomicU32>,
     put_delay_rules: DelayRules,
+    read_limiter: Arc<IoRateLimiter>,
+    write_limiter: Arc<IoRateLimiter>,
 }
 
 impl ServiceContext {
@@ -110,6 +115,8 @@ pub struct ObjectStorageService {
     runtime: Runtime,
     delay_ms: Arc<AtomicU32>,
     put_delay_rules: DelayRules,
+    read_limiter: Arc<IoRateLimiter>,
+    write_limiter: Arc<IoRateLimiter>,
 }
 
 impl ObjectStorageService {
@@ -129,6 +136,8 @@ impl ObjectStorageService {
             runtime,
             delay_ms: Default::default(),
             put_delay_rules: Default::default(),
+            read_limiter: Arc::new(IoRateLimiter::new(IoRateLimitMode::AllIo, true, true)),
+            write_limiter: Arc::new(IoRateLimiter::new(IoRateLimitMode::AllIo, true, true)),
         }
     }
 
@@ -144,6 +153,38 @@ impl ObjectStorageService {
     pub fn set_put_delay(&self, keyword: &str, delay: Duration) {
         self.put_delay_rules
             .insert(keyword.to_string(), delay.as_millis() as u64);
+    }
+
+    // Set rate as `0` to disable rate limit.
+    pub fn set_max_read_bytes_per_sec(&self, rate: usize) {
+        self.read_limiter.set_io_rate_limit(rate);
+    }
+
+    // Set rate as `0` to disable rate limit.
+    pub fn set_max_write_bytes_per_sec(&self, rate: usize) {
+        self.write_limiter.set_io_rate_limit(rate);
+    }
+
+    pub fn read_limiter(&self) -> Arc<IoRateLimiter> {
+        self.read_limiter.clone()
+    }
+
+    pub fn write_limiter(&self) -> Arc<IoRateLimiter> {
+        self.write_limiter.clone()
+    }
+
+    pub fn read_bytes_stats(&self) -> usize {
+        self.read_limiter
+            .statistics()
+            .unwrap()
+            .fetch(READ_IO_TYPE, IoOp::Read)
+    }
+
+    pub fn written_bytes_stats(&self) -> usize {
+        self.write_limiter
+            .statistics()
+            .unwrap()
+            .fetch(WRITE_IO_TYPE, IoOp::Write)
     }
 
     fn make_file_path(store_path: &Path, uri: &str) -> PathBuf {
@@ -185,7 +226,18 @@ impl ObjectStorageService {
         );
 
         while let Some(chunk) = body.next().await {
-            file.write_all(chunk?.chunk()).await?;
+            let chunk = chunk?;
+            let mut remains = chunk.len();
+            let mut pos = 0;
+            while remains > 0 {
+                let allowed = ctx
+                    .write_limiter
+                    .async_request(WRITE_IO_TYPE, IoOp::Write, remains)
+                    .await;
+                file.write_all(&chunk.slice(pos..pos + allowed)).await?;
+                pos += allowed;
+                remains -= allowed;
+            }
         }
         file.sync_all().await?;
         let len = file.metadata().await?.len();
@@ -294,13 +346,8 @@ impl ObjectStorageService {
                 end
             );
 
-            let (body, content_range) = match (start, end) {
-                (None, None) => {
-                    let mut buf = Vec::with_capacity(file_len as usize);
-                    let read_len = file.read_to_end(&mut buf).await.context("read_to_end")?;
-                    assert_eq!(read_len, file_len as usize);
-                    (Body::from(buf), None)
-                }
+            let (start, end, content_range) = match (start, end) {
+                (None, None) => (0, file_len, None),
                 (start, end) => {
                     let (start, end) = match (start, end) {
                         (Some(s), Some(e)) => (s, cmp::min(e, file_len)),
@@ -310,32 +357,43 @@ impl ObjectStorageService {
                     };
 
                     if start >= end {
-                        // Note: S3 accept "start >= end" and return the whole object. We are more
-                        // strict here.
+                        // Note: S3 accept "start >= end" and return the whole object. We are
+                        // stricter here.
                         return Ok(Self::bad_request(format!(
                             "invalid range: [{}, {})",
                             start, end
                         )));
                     }
 
-                    file.seek(SeekFrom::Start(start)).await.context("seek")?;
-                    let read_total = end - start;
-                    let mut buf = vec![0; read_total as usize];
-                    file.read_exact(buf.as_mut_slice())
-                        .await
-                        .context("read_exact")?;
-
                     // Ref: https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4, Content-Range.
                     let range_resp = format!("bytes {start}-{end}/{file_len}");
-
-                    (Body::from(buf), Some(range_resp))
+                    (start, end, Some(range_resp))
                 }
             };
+
+            if start > 0 {
+                file.seek(SeekFrom::Start(start)).await.context("seek")?;
+            }
+            let mut remains = (end - start) as usize;
+            let mut pos = 0;
+            let mut buf = vec![0; remains];
+            while remains > 0 {
+                let allowed = ctx
+                    .read_limiter
+                    .async_request(READ_IO_TYPE, IoOp::Read, remains)
+                    .await;
+                file.read_exact(&mut buf[pos..pos + allowed])
+                    .await
+                    .context("read_exact")?;
+                pos += allowed;
+                remains -= allowed;
+            }
+
             let mut resp = Response::builder();
             if let Some(content_range) = content_range {
                 resp = resp.header("Content-Range", content_range);
             }
-            resp.status(StatusCode::OK).body(body).unwrap()
+            resp.status(StatusCode::OK).body(Body::from(buf)).unwrap()
         } else {
             info!("handle_get_object: path not found: {}", parts.uri.path());
             Self::not_found()
@@ -624,6 +682,8 @@ impl ObjectStorageService {
             tagging: Default::default(),
             delay_ms: self.delay_ms.clone(),
             put_delay_rules: self.put_delay_rules.clone(),
+            read_limiter: self.read_limiter.clone(),
+            write_limiter: self.write_limiter.clone(),
         });
         let make_svc = make_service_fn(move |_conn| {
             let ctx = ctx.clone();
@@ -723,6 +783,7 @@ pub fn prepare_dfs(prefix: &str) -> (TempDir, ObjectStorageService, DFSConfig) {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use futures::future::join_all;
     use kvengine::{
         dfs,
         dfs::{DFSConnOptions, Dfs, FileType, Options, S3Fs},
@@ -752,6 +813,9 @@ mod tests {
         let mut oss = ObjectStorageService::new(base_dir.path());
         oss.start_server();
 
+        oss.set_max_write_bytes_per_sec(TEST_DATA_SIZE * TEST_COUNT / 2);
+        oss.set_max_read_bytes_per_sec(TEST_DATA_SIZE * TEST_COUNT / 2);
+
         let s3fs = S3Fs::new(
             "oss_test".to_string(),
             format!("http://127.0.0.1:{}", oss.port()),
@@ -764,10 +828,16 @@ mod tests {
 
         let runtime = s3fs.get_runtime();
         let mut rng = rand::thread_rng();
+        let mut file_ids = collections::HashSet::default();
         let mut handles = Vec::with_capacity(TEST_COUNT);
         for idx in 0..TEST_COUNT {
             let options = Options::default();
-            let file_id = rng.gen::<u32>() as u64;
+            let file_id = loop {
+                let file_id = rng.gen::<u32>() as u64;
+                if file_ids.insert(file_id) {
+                    break file_id;
+                }
+            };
             let write_data = {
                 let mut buf = [0u8; TEST_DATA_SIZE];
                 rng.fill(&mut buf);
@@ -1110,6 +1180,8 @@ mod tests {
 
         let mut oss = ObjectStorageService::new(base_dir.path());
         oss.start_server();
+        oss.set_max_read_bytes_per_sec(48 * 1024);
+        oss.set_max_write_bytes_per_sec(16 * 1024);
 
         let s3fs = S3Fs::new(
             "oss_test".to_string(),
@@ -1127,8 +1199,8 @@ mod tests {
         let data_len = data.len();
         assert_eq!(data_len, OBJECT_SIZE);
 
-        let runtime = s3fs.get_runtime();
-        runtime.block_on(async {
+        let runtime = s3fs.get_runtime().handle().clone();
+        s3fs.get_runtime().block_on(async {
             s3fs.create(1, data.clone(), Options::default())
                 .await
                 .unwrap();
@@ -1143,16 +1215,33 @@ mod tests {
                 (None, Some(data_len as u64 + 1), data.clone()),
             ];
 
+            let mut handles = Vec::with_capacity(cases.len());
             for (start_off, end_off, expected) in cases {
-                let opts = engine_traits::GetObjectOptions { start_off, end_off };
-                let (read_data, complete_length) = s3fs
-                    .get_object_ext(s3fs.file_key(1, FileType::Sst), "1".to_string(), opts, true)
-                    .await
-                    .unwrap();
-                assert_eq!(read_data, expected);
-                assert_eq!(complete_length.unwrap(), data_len as u64);
+                let s3fs = s3fs.clone();
+                let h = runtime.spawn(async move {
+                    let opts = engine_traits::GetObjectOptions { start_off, end_off };
+                    let (read_data, complete_length) = s3fs
+                        .get_object_ext(
+                            s3fs.file_key(1, FileType::Sst),
+                            "1".to_string(),
+                            opts,
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(read_data, expected);
+                    assert_eq!(complete_length.unwrap(), data_len as u64);
+                });
+                handles.push(h);
             }
+            join_all(handles).await.into_iter().for_each(|h| h.unwrap());
         });
+
+        info!(
+            "stats: read {}, written {}",
+            oss.read_bytes_stats(),
+            oss.written_bytes_stats()
+        );
 
         drop(s3fs);
         oss.graceful_shutdown();

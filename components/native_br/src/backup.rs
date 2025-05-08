@@ -347,7 +347,7 @@ pub fn backup_cluster_with_ts(
                 if next_delay.is_err() {
                     return Err(err);
                 }
-                if let Error::BackupErrorOnStores(missing_stores) = err {
+                if let Error::BackupErrorOnStores(_, missing_stores) = err {
                     stores = missing_stores;
                 }
                 std::thread::sleep(next_delay.unwrap());
@@ -412,6 +412,7 @@ async fn backup_stores(
     }
 
     let mut error_stores = vec![];
+    let mut errors = vec![];
     while let Some(res) = tasks.join_next().await {
         let (store, res) =
             res.map_err(|e| Error::BackupError(format!("backup stores: join task failed: {e:?}")))?;
@@ -422,6 +423,7 @@ async fn backup_stores(
             Err(err) => {
                 warn!("backup store failed"; "store" => store.id, "err" => ?err);
                 error_stores.push(store);
+                errors.push(err);
             }
         }
     }
@@ -440,11 +442,12 @@ async fn backup_stores(
     } else {
         let store_ids = error_stores.iter().map(|s| s.id).collect::<Vec<_>>();
         if error_stores.len() <= config.tolerate_err {
-            info!("backup stores: tolerated error: {}", error_stores.len(); "error_stores" => ?store_ids);
+            info!("backup stores: tolerated error: {}", error_stores.len();
+                "error_stores" => ?store_ids, "errors" => ?errors);
             Ok(error_stores.len())
         } else {
-            warn!("backup stores: not intact"; "error_stores" => ?store_ids);
-            Err(Error::BackupErrorOnStores(error_stores))
+            warn!("backup stores: not intact"; "error_stores" => ?store_ids, "errors" => ?errors);
+            Err(Error::BackupErrorOnStores(errors, error_stores))
         }
     }
 }
@@ -468,6 +471,11 @@ async fn backup_store(
             let mut store_backup_meta = StoreBackupMeta::default();
             store_backup_meta.merge_from_bytes(&resp).unwrap();
             Ok(store_backup_meta)
+        }
+        Err(Error::HttpError(_, err_msg))
+            if err_msg.contains(rfengine::RFENGINE_DFS_WORKER_UNHEALTHY_ERR_MSG) =>
+        {
+            Err(Error::RfengineDfsWorkerUnhealthy(err_msg))
         }
         Err(e) => Err(e),
     }

@@ -322,7 +322,7 @@ impl ServiceWorker {
         }
         self.compact_worker_handle
             .task_sender
-            .send(CompactTask::Close)
+            .send(CompactTask::Close { force })
             .unwrap();
         let join_handle = self.compact_worker_handle.handle.take().unwrap();
         join_handle.join().unwrap();
@@ -346,7 +346,7 @@ impl ServiceWorker {
         if self.async_wal_writer.is_none() {
             return backup_callback(
                 task,
-                Err("async wal writer is not set".to_string()),
+                Err(Error::Backup("async wal writer is not set".to_string())),
                 "light_fail",
                 Instant::now(),
             );
@@ -356,7 +356,10 @@ impl ServiceWorker {
         if !self.dfs_worker_healthy.is_healthy(async_writer.epoch_id) {
             return backup_callback(
                 task,
-                Err("dfs worker unhealthy".to_string()),
+                Err(Error::DfsWorkerUnhealthy {
+                    store_id: self.get_engine_id(),
+                    epoch_id: async_writer.epoch_id,
+                }),
                 "light_fail",
                 Instant::now(),
             );

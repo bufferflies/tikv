@@ -103,10 +103,7 @@ pub async fn send_request_to_store(
         .await
         .map_err(|_| HttpRequestError::Timeout(format!("send request to {uri_str}"), timeout))?;
     if let Err(err) = resp {
-        error!(
-            "send request to store failed, store {}, err {:?}, uri {:?}",
-            store.id, err, uri_str
-        );
+        error!("send request to store failed"; "store" => store.id, "err" => ?err, "uri" => ?uri_str);
         return Err(HttpRequestError::Http(uri_str, err).into());
     }
     let resp = resp.unwrap();
@@ -119,10 +116,8 @@ pub async fn send_request_to_store(
         let body = body.unwrap_or_default();
         if !is_pb_resp {
             let err_msg = body.to_str_lossy().to_string();
-            error!(
-                "send request to store failed, store {}, status {:?}, err {}, uri {:?}",
-                store.id, status, err_msg, uri_str
-            );
+            error!("send request to store failed"; "store" => store.id, "uri" => ?uri_str,
+                "err" => &err_msg, "status" => ?status);
             return Err(Error::HttpError(status, err_msg));
         } else {
             let mut err = kvproto::errorpb::Error::default();
@@ -130,10 +125,8 @@ pub async fn send_request_to_store(
                 debug_assert!(false, "body: {:?}: {:?}", body, e);
                 box_err!("invalid errorpb::Error: {:?}", e)
             })?;
-            error!(
-                "send request to store failed, store {}, status {:?}, err {:?}, uri {:?}",
-                store.id, status, err, uri_str
-            );
+            error!("send request to store failed"; "store" => store.id, "uri" => ?uri_str,
+                "err" => ?err, "status" => ?status);
             return Err(Error::HttpPbError(status, err));
         }
     }

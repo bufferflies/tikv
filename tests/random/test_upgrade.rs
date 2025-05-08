@@ -117,7 +117,7 @@ fn test_random_upgrade() {
     // After upgrade.
     let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < upgrade_switches.test_dur_after_upgrade.0 {
-        random_node_restart(&mut cluster.borrow_mut(), |_, _| {});
+        random_node_restart(&mut cluster.borrow_mut(), |_, _| {}, false);
     }
     info!("after upgrade: finished"; "stats" => ?WorkloadStats::collect());
 

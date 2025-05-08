@@ -22,6 +22,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, RwLock,
     },
+    thread,
     thread::{sleep, JoinHandle},
     time::Duration,
 };
@@ -45,6 +46,7 @@ pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 use test_cloud_server::{
     client::ClusterTxnClient,
     keyspace::{ClusterKeyspaceClient, CreateKeyspaceOptions, KeyspaceManager},
+    oss::ObjectStorageService,
     scheduler::Scheduler,
     tidb::TidbCluster,
     try_wait_result,
@@ -76,6 +78,7 @@ lazy_static::lazy_static! {
     pub static ref BACKUP_TOLERATED_ERR_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref RESTORE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref RESTORE_TOLERATED_ERR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref BROKEN_BACKUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref LOAD_DATA_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref KEYSPACE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -410,6 +413,36 @@ pub(crate) fn spawn_keyspace_write(
     })
 }
 
+pub(crate) fn spawn_oss_chaos(
+    oss: &ObjectStorageService,
+    interval: Duration,
+    timeout: Duration,
+) -> JoinHandle<()> {
+    let write_limiter = oss.write_limiter();
+    let origin_rate = write_limiter.get_io_rate_limit();
+    let rates = [
+        origin_rate / 10,
+        origin_rate / 4,
+        origin_rate / 2,
+        origin_rate,
+        origin_rate * 2,
+    ];
+    std::thread::spawn(move || {
+        let mut rng = thread_rng();
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < timeout {
+            let interval_secs = (1..=interval.as_secs()).choose(&mut rng).unwrap();
+            thread::sleep(Duration::from_secs(interval_secs));
+
+            let rate = *rates.choose(&mut rng).unwrap();
+            write_limiter.set_io_rate_limit(rate);
+            info!("spawn_oss_chao: set write rate {} bytes/sec", rate);
+        }
+
+        write_limiter.set_io_rate_limit(origin_rate);
+    })
+}
+
 pub fn spawn_create_keyspace(
     pd_client: Arc<TestPdClient>,
     keyspace_manager: KeyspaceManager,
@@ -546,8 +579,11 @@ async fn must_split_region_for_keyspace(
     );
 }
 
-pub(crate) fn random_node_restart<F>(cluster: &mut ServerCluster, update_conf: F)
-where
+pub(crate) fn random_node_restart<F>(
+    cluster: &mut ServerCluster,
+    update_conf: F,
+    always_force_stop: bool,
+) where
     F: Fn(u16, &mut TikvConfig),
 {
     let mut rng = rand::thread_rng();
@@ -559,7 +595,7 @@ where
     let nodes = cluster.get_nodes();
     let node_id = *nodes.choose(&mut rng).unwrap();
     let sleep_sec = rng.gen_range(0..3);
-    let force_stop = rng.gen();
+    let force_stop = always_force_stop || rng.gen();
     cluster.restart_node(
         node_id,
         Duration::from_secs(sleep_sec),

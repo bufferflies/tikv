@@ -25,7 +25,10 @@ pub mod load;
 mod log_batch;
 pub mod manifest;
 mod metrics;
-pub use metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE; // For test purpose.
+#[cfg(feature = "testexport")]
+pub use metrics::{
+    RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER, RFENGINE_DFS_WORKER_HEALTHY_GAUGE,
+};
 pub mod service_worker;
 pub mod traits;
 pub mod utils;
@@ -47,6 +50,8 @@ pub use write_batch::WriteBatch;
 pub use writer::*;
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub const RFENGINE_DFS_WORKER_UNHEALTHY_ERR_MSG: &str = "DFS worker unhealthy";
 
 #[derive(Debug, ThisError)]
 pub enum Error {
@@ -71,6 +76,11 @@ pub enum Error {
     SnapshotOversize(u64),
     #[error("Memory limit exceed, request {request}, available {available}")]
     MemoryLimitExceed { request: usize, available: i64 },
+    // Should contain `RFENGINE_DFS_WORKER_UNHEALTHY_ERR_MSG`.
+    #[error("DFS worker unhealthy, store_id {store_id}, epoch_id {epoch_id}")]
+    DfsWorkerUnhealthy { store_id: u64, epoch_id: u32 },
+    #[error("Backup error: {0}")]
+    Backup(String),
     #[error("Other error: {0}")]
     Other(String),
 }

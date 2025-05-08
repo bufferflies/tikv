@@ -308,7 +308,11 @@ impl PriorityBasedIoRateLimiter {
 
     /// Dynamically changes the total IO flow threshold.
     fn set_bytes_per_sec(&self, bytes_per_sec: usize) {
-        let now = (bytes_per_sec as f64 * DEFAULT_REFILL_PERIOD.as_secs_f64()) as usize;
+        let now = if bytes_per_sec > 0 {
+            (bytes_per_sec as f64 * DEFAULT_REFILL_PERIOD.as_secs_f64()).max(1.0) as usize
+        } else {
+            0
+        };
         let before = self.bytes_per_epoch[IoPriority::High as usize].swap(now, Ordering::Relaxed);
         RATE_LIMITER_MAX_BYTES_PER_SEC
             .high
@@ -323,6 +327,11 @@ impl PriorityBasedIoRateLimiter {
             self.bytes_per_epoch[IoPriority::Low as usize].store(now, Ordering::Relaxed);
             RATE_LIMITER_MAX_BYTES_PER_SEC.low.set(bytes_per_sec as i64);
         }
+    }
+
+    fn get_bytes_per_sec(&self) -> usize {
+        self.bytes_per_epoch[IoPriority::High as usize].load(Ordering::Relaxed)
+            * DEFAULT_REFILLS_PER_SEC
     }
 
     fn set_low_priority_io_adjustor(&self, adjustor: Option<Arc<dyn IoBudgetAdjustor>>) {
@@ -475,6 +484,10 @@ impl IoRateLimiter {
 
     pub fn set_io_rate_limit(&self, rate: usize) {
         self.throughput_limiter.set_bytes_per_sec(rate);
+    }
+
+    pub fn get_io_rate_limit(&self) -> usize {
+        self.throughput_limiter.get_bytes_per_sec()
     }
 
     pub fn set_io_priority(&self, io_type: IoType, io_priority: IoPriority) {
@@ -670,6 +683,17 @@ mod tests {
         approximate_eq!(
             stats.fetch(IoType::ForegroundWrite, IoOp::Write) as f64,
             bytes_per_sec as f64 * (t3 - t2).as_secs_f64()
+        );
+
+        // Rate of `1` will be rounded up to `100`.
+        limiter.set_io_rate_limit(1);
+        assert_eq!(limiter.get_io_rate_limit(), 100);
+        stats.reset();
+        std::thread::sleep(Duration::from_secs(1));
+        let t4 = Instant::now();
+        approximate_eq!(
+            stats.fetch(IoType::ForegroundWrite, IoOp::Write) as f64,
+            100.0 * (t4 - t3).as_secs_f64()
         );
     }
 

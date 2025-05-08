@@ -80,8 +80,8 @@ pub enum Error {
     MvccError(#[from] tikv::storage::mvcc::Error),
     #[error("Backup error {0}")]
     BackupError(String),
-    #[error("Backup error on stores")]
-    BackupErrorOnStores(Vec<kvproto::metapb::Store>),
+    #[error("Backup error on stores {0:?}")]
+    BackupErrorOnStores(Vec<Error>, Vec<kvproto::metapb::Store>),
     #[error("No snapshot available error {0}")]
     NoSnapshotAvailableError(String),
     #[error("WAL chunk integrity error {0}")]
@@ -94,6 +94,8 @@ pub enum Error {
     RfengineHttpRequestError(HttpRequestError),
     #[error("Fetch RfEngine WAL chunk service error {0}")]
     RfengineHttpSvrError(String),
+    #[error("RfEngine DFS worker unhealthy {0}")]
+    RfengineDfsWorkerUnhealthy(String),
     #[error("Fetch RfEngine WAL chunk error due to epoch {epoch_id} overwritten")]
     RfengineWalEpochOverwritten { epoch_id: u32 },
 }

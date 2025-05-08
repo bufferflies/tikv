@@ -695,7 +695,7 @@ impl RfEngineCore {
             let err_msg = "service worker is closed".to_string();
             match task {
                 ServiceTask::Dump { callback, .. } => callback(Err(Error::Other(err_msg))),
-                ServiceTask::Backup(task) => (task.callback)(Err(err_msg)),
+                ServiceTask::Backup(task) => (task.callback)(Err(Error::Backup(err_msg))),
                 _ => {}
             }
         }

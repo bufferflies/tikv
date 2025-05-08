@@ -122,6 +122,10 @@ while [[ $# -gt 0 ]]; do
 		RUN_ARGS+=("--async-commit-ratio" "$2")
 		shift
 		;;
+	--oss-chaos-ratio)
+		RUN_ARGS+=("--oss-chaos-ratio" "$2")
+		shift
+		;;
 	--upgrade-test-duration)
 		RUN_ARGS+=("--upgrade-test-duration" "$2")
 		shift

@@ -9,7 +9,7 @@ use api_version::ApiV2;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use futures::executor::block_on;
 use kvengine::{
-    dfs::{self, DFSConfig, FileType, S3Fs},
+    dfs::{self, DFSConfig, DFSConnOptions, FileType, S3Fs},
     ia::util::IaConfig,
     metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
     table::{columnar::build_schema_file, ChecksumType},
@@ -19,10 +19,14 @@ use load_data::task::LoadDataConfig;
 use native_br::{backup, backup_worker, restore::RestoreConfig};
 use pd_client::PdClient;
 use rand::prelude::*;
+use rfengine::RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER;
 use schema::schema::StorageClass;
 use security::SecurityConfig;
 use test_cloud_server::{
-    client::ClusterClientOptions, keyspace::make_row_key, oss::prepare_dfs, tidb::TidbCluster,
+    client::ClusterClientOptions,
+    keyspace::make_row_key,
+    oss::{prepare_dfs, ObjectStorageService},
+    tidb::TidbCluster,
     ServerCluster, ServerClusterBuilder, TikvWorkerOptions, IA_DISK_CAP_DEF,
     IA_FREQ_UPDATE_INTERVAL_DEF, IA_MEM_CAP_DEF,
 };
@@ -61,6 +65,8 @@ const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
 
 const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(4); // Small size to make eviction more frequent.
 
+const OSS_CHAOS_INTERVAL: Duration = Duration::from_secs(10);
+
 #[test]
 fn test_random_all() {
     init_logger();
@@ -77,14 +83,15 @@ fn test_random_all() {
     info!("switches: {:?}", switches);
 
     // Prepare.
-    let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
+    let (_temp_dir, oss, dfs_config) = prepare_dfs("oss_");
     let security_conf = new_security_config();
     let mut cluster = prepare_cluster(
-        &dfs_config,
+        dfs_config.clone(),
         &security_conf,
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
         &switches,
+        &oss,
     );
     let pd_client = cluster.get_pd_client();
     let keyspace_manager = cluster.keyspace_manager().clone();
@@ -146,7 +153,8 @@ fn test_random_all() {
     let restore_config = RestoreConfig {
         dfs: dfs_config.clone(),
         security: security_conf.clone(),
-        timeout_wait_flush: ReadableDuration::secs(30),
+        timeout_wait_flush: ReadableDuration::minutes(3), /* Flush is slow when OSS has low rate
+                                                           * limit. */
         timeout_restore_snapshot: ReadableDuration::secs(30),
         timeout_fetch_wal: ReadableDuration::secs(10),
         tolerate_err: 1,
@@ -161,6 +169,7 @@ fn test_random_all() {
             restore_config.clone(),
             keyspace_manager.clone(),
             &s3fs,
+            switches.enable_oss_chaos,
             TIMEOUT,
         ));
     }
@@ -226,11 +235,17 @@ fn test_random_all() {
         ));
     }
 
+    if switches.enable_oss_chaos {
+        handles.push(spawn_oss_chaos(&oss, OSS_CHAOS_INTERVAL, TIMEOUT))
+    }
+
     // Main loop.
     let start_time = Instant::now();
     while start_time.saturating_elapsed() < TIMEOUT {
         // Restart nodes.
-        random_node_restart(&mut cluster, |_, _| {});
+        // Always force stop when OSS chaos is enabled. Otherwise, it would take too
+        // long to stop compact worker.
+        random_node_restart(&mut cluster, |_, _| {}, switches.enable_oss_chaos);
     }
 
     // Finish.
@@ -284,15 +299,15 @@ fn test_random_all() {
 }
 
 fn prepare_cluster(
-    dfs_config: &DFSConfig,
+    mut dfs_config: DFSConfig,
     security_conf: &SecurityConfig,
     nodes_count: usize,
     initial_keyspace_count: usize,
     switches: &Switches,
+    oss: &ObjectStorageService,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
-    let dfs_config = Arc::new(dfs_config.clone());
     let cpu_cores = SysQuota::cpu_cores_quota() as usize;
 
     let big_region_size_keyspaces = (0..initial_keyspace_count as u32)
@@ -308,12 +323,51 @@ fn prepare_cluster(
             ..Default::default()
         })
         .collect::<Vec<_>>();
-    info!("prepare_cluster"; "per_keyspace_configs" => ?per_keyspace_configs);
 
+    let mut dfs_max_retry_count = 9;
+    let mut dfs_dispatch_timeout = ReadableDuration::secs(15);
+    let mut rfengine_target_file_size = ReadableSize::mb(8);
+    let mut dfs_worker_memory_limit = ReadableSize::mb(32);
+    if switches.enable_oss_chaos {
+        match rng.gen_range(0..=3) {
+            0 => {
+                // To cover the scene of DFS worker exceed memory limit & get compacted WAL.
+                rfengine_target_file_size = ReadableSize::kb(512);
+                dfs_worker_memory_limit = ReadableSize::kb(512);
+            }
+            1 => {
+                // To cover the scene of DFS put object failure.
+                dfs_max_retry_count = 2;
+                dfs_dispatch_timeout = ReadableDuration::secs(3);
+            }
+            _ => {}
+        }
+    }
+
+    // TODO: use same `conn_options` for other workloads to cover scene of slow DFS.
+    dfs_config.conn_options = DFSConnOptions {
+        max_retry_count: dfs_max_retry_count,
+        retry_sleep_interval: ReadableDuration::millis(100),
+        dispatch_timeout: dfs_dispatch_timeout,
+        read_body_timeout: ReadableDuration::secs(15),
+        ..Default::default()
+    };
+    // 10MB/s (Prod env: 10GB/s, 16MB/sst -> 640 sst/s)
+    oss.set_max_read_bytes_per_sec(KV_TARGET_FILE_SIZE.0 as usize * 640);
+    // 1MB/s (Prod env: 1GB/s)
+    oss.set_max_write_bytes_per_sec(KV_TARGET_FILE_SIZE.0 as usize * 64);
+
+    info!("prepare_cluster";
+        "per_keyspace_configs" => ?per_keyspace_configs,
+        "dfs_conn_opts" => ?dfs_config.conn_options,
+        "rfengine_target_file_size" => ?rfengine_target_file_size,
+        "dfs_worker_memory_limit" => ?dfs_worker_memory_limit,
+    );
+
+    let dfs = dfs_config.clone();
     let enable_ia = switches.ia_table_ratio > 0.0;
-
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
-        conf.dfs = (*dfs_config).clone();
+        conf.dfs = dfs.clone();
         conf.dfs.allow_fallback_local = false;
         conf.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
@@ -329,12 +383,12 @@ fn prepare_cluster(
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(96);
         conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
 
-        conf.rfengine.target_file_size = ReadableSize::mb(8);
+        conf.rfengine.target_file_size = rfengine_target_file_size;
         conf.rfengine.batch_compression_threshold =
             ReadableSize::kb(rand::thread_rng().gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
-        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
-        conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
+        conf.rfengine.wal_chunk_target_file_size = rfengine_target_file_size / 8;
+        conf.rfengine.dfs_worker_memory_limit = dfs_worker_memory_limit.into();
 
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
@@ -520,13 +574,19 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
 #[derive(Debug)]
 pub(crate) struct Switches {
     pub ia_table_ratio: f64,
+    pub enable_oss_chaos: bool,
 }
 
 impl Switches {
     pub fn from_env() -> Self {
+        let mut rng = thread_rng();
         let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.2);
+        let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
 
-        Self { ia_table_ratio }
+        Self {
+            ia_table_ratio,
+            enable_oss_chaos,
+        }
     }
 }
 
@@ -546,10 +606,12 @@ struct WorkloadStats {
     backup_tolerated_err_count: usize,
     restore_count: usize,
     restore_tolerated_err_count: usize,
+    broken_backup_count: usize,
     load_data_count: usize,
     manual_major_compact: usize,
     gc_resolved_locks: usize,
     remote_compact_exceed_memory_limit: u64,
+    rfengine_dfs_worker_unhealthy: u64,
 }
 
 impl WorkloadStats {
@@ -567,11 +629,13 @@ impl WorkloadStats {
         let backup_tolerated_err_count = BACKUP_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
         let restore_count = RESTORE_COUNTER.load(Ordering::SeqCst);
         let restore_tolerated_err_count = RESTORE_TOLERATED_ERR_COUNTER.load(Ordering::SeqCst);
+        let broken_backup_count = BROKEN_BACKUP_COUNTER.load(Ordering::SeqCst);
         let load_data_count = LOAD_DATA_COUNTER.load(Ordering::SeqCst);
         let manual_major_compact = MANUAL_MAJOR_COMPACT_COUNTER.load(Ordering::SeqCst);
         let gc_resolved_locks = GC_ADVANCE_SAFE_POINT_COUNTER.load(Ordering::SeqCst);
         let remote_compact_exceed_memory_limit =
             ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.get();
+        let rfengine_dfs_worker_unhealthy = RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER.get();
 
         Self {
             write_count,
@@ -587,10 +651,12 @@ impl WorkloadStats {
             backup_tolerated_err_count,
             restore_count,
             restore_tolerated_err_count,
+            broken_backup_count,
             load_data_count,
             manual_major_compact,
             gc_resolved_locks,
             remote_compact_exceed_memory_limit,
+            rfengine_dfs_worker_unhealthy,
         }
     }
 }

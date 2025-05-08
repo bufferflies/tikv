@@ -47,7 +47,8 @@ impl Scheduler {
         if self.is_region_changed(region) {
             return false;
         }
-        self.move_peer(region.id, target_store_id).is_some()
+        self.move_peer(region.id, target_store_id, Duration::from_secs(30))
+            .is_some()
     }
 
     fn is_region_changed(&self, region: &Region) -> bool {
@@ -82,7 +83,8 @@ impl Scheduler {
         stats.ver == region_ver
     }
 
-    fn move_peer(&self, region_id: u64, store_id: u64) -> Option<()> {
+    fn move_peer(&self, region_id: u64, store_id: u64, timeout: Duration) -> Option<()> {
+        let timeout_secs = timeout.as_secs() as usize;
         let peer_id = self.pd.alloc_id().unwrap();
 
         // Add learner.
@@ -98,11 +100,12 @@ impl Scheduler {
                     add_learner();
                 }
                 // Wait until the learner complete restore snapshots, or the raft group will
-                // lost majority if leader down at this point.
+                // lose majority if leader down at this point.
                 let region_ver = region.get_region_epoch().get_version();
                 block_on(self.check_region_stats_exists(store_id, region_id, region_ver))
             },
-            30,
+            timeout_secs * 2, /* Need more time to wait for store restart (required by
+                               * `check_region_stats_exists`). */
             || {
                 format!(
                     "failed to add learner, region id {}, store id {}, peer id {}, region {:?}",
@@ -131,7 +134,7 @@ impl Scheduler {
                     .iter()
                     .any(|peer| peer.id == peer_id && peer.role == PeerRole::Voter)
             },
-            30,
+            timeout_secs,
             || {
                 format!(
                     "failed to promote learner, region id {}, store id {}, peer id {}, region {:?}",
@@ -158,7 +161,7 @@ impl Scheduler {
                 to_remove = target.clone();
                 to_remove.id != old_leader.id
             },
-            20,
+            timeout_secs,
             || format!("failed to get target peer, region id {}", region_id),
         )?;
 
@@ -187,7 +190,7 @@ impl Scheduler {
                 }
                 region.get_peers().len() == 3
             },
-            30,
+            timeout_secs,
             || {
                 format!(
                     "failed to remove peer id {} region id {} leader id {}",
@@ -302,7 +305,7 @@ impl Scheduler {
         let target_stores: Vec<u64> = target.get_peers().iter().map(|p| p.store_id).collect();
         for target_store_id in &target_stores {
             if !source_stores.contains(target_store_id) {
-                self.move_peer(source.id, *target_store_id);
+                self.move_peer(source.id, *target_store_id, Duration::from_secs(30));
                 break;
             }
         }
