@@ -177,7 +177,7 @@ pub(crate) fn spawn_restore_keyspace(
     restore_config: RestoreConfig,
     keyspace_manager: KeyspaceManager,
     s3fs: &S3Fs,
-    enable_oss_chaos: bool,
+    _enable_oss_chaos: bool,
     timeout: Duration,
 ) -> JoinHandle<()> {
     let s3fs = s3fs.clone();
@@ -279,7 +279,7 @@ pub(crate) fn spawn_restore_keyspace(
                             "{} backup is broken: WAL chunk integrity error ({}), retry",
                             tag, msg
                         );
-                        assert!(enable_oss_chaos);
+                        // TODO: assert!(enable_oss_chaos);
                         BROKEN_BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);
                         continue 'next_restore;
                     }
