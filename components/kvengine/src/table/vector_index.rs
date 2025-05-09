@@ -27,6 +27,7 @@ use crate::{
 
 const MAGIC_NUMBER: u32 = 0x19504cf0;
 const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION_V2: u32 = 2; // Add mvcc delete info.
 const CONNECTIVITY: usize = 16;
 const EXPANSION_ADD: usize = 128;
 const EXPANSION_SEARCH: usize = 64;
@@ -146,11 +147,30 @@ impl VectorIndex {
         self.files[0].snap_version()
     }
 
-    pub fn search(&self, target: &[f32], count: usize, start_ts: u64) -> Result<Vec<VectorItem>> {
+    pub fn search(
+        &self,
+        target: &[f32],
+        count: usize,
+        start_ts: u64,
+        start_handle: Option<&[u8]>,
+        end_handle: Option<&[u8]>,
+        is_common_handle: bool,
+    ) -> Result<Vec<VectorItem>> {
         let mut results = vec![];
         let mut handles_dedup = HashSet::new();
         for file in &self.files {
-            let items = file.search(target, count, start_ts)?;
+            let (items, deleted_handles) = file.search(
+                target,
+                count,
+                start_ts,
+                start_handle,
+                end_handle,
+                is_common_handle,
+            )?;
+            // Add the deleted handles to the dedup set to avoid read the same handle in
+            // next VectorIndexFile.
+            handles_dedup.extend(deleted_handles);
+
             for item in items {
                 if handles_dedup.contains(&item.handle) {
                     continue;
@@ -158,6 +178,16 @@ impl VectorIndex {
                 handles_dedup.insert(item.handle.clone());
                 results.push(item);
             }
+        }
+        if is_common_handle {
+            results.sort_by(|a, b| a.handle.cmp(&b.handle));
+        } else {
+            results.sort_by(|a, b| {
+                a.handle
+                    .as_slice()
+                    .get_i64_le()
+                    .cmp(&b.handle.as_slice().get_i64_le())
+            })
         }
         Ok(results)
     }
@@ -177,7 +207,10 @@ impl VectorIndex {
 }
 
 // index file format:
+// V1(DEPRECATED):
 //   index | versions | handles | props | footer
+// V2:
+//   index | versions | handles | nulls | props | footer
 #[derive(Debug)]
 #[repr(C)]
 pub struct VectorIndexFileFooter {
@@ -192,7 +225,7 @@ impl Default for VectorIndexFileFooter {
         VectorIndexFileFooter {
             index_size: 0,
             props_size: 0,
-            format_ver: FORMAT_VERSION,
+            format_ver: FORMAT_VERSION_V2,
             magic_number: MAGIC_NUMBER,
         }
     }
@@ -217,6 +250,14 @@ impl VectorIndexFileFooter {
 
     fn size() -> usize {
         std::mem::size_of::<VectorIndexFileFooter>()
+    }
+
+    fn valid_version(&self) -> bool {
+        self.format_ver == FORMAT_VERSION || self.format_ver == FORMAT_VERSION_V2
+    }
+
+    fn format_version(&self) -> u32 {
+        self.format_ver
     }
 }
 
@@ -286,6 +327,8 @@ pub struct VectorIndexFileCore {
     handles_end: usize,
     versions_start: usize,
     versions_end: usize,
+    nulls_start: usize,
+    nulls_end: usize,
     index: usearch::Index,
     file_data: MmapData,
 }
@@ -300,7 +343,7 @@ impl VectorIndexFile {
         if footer.magic_number != MAGIC_NUMBER {
             return Err(Error::InvalidMagicNumber);
         }
-        if footer.format_ver != FORMAT_VERSION {
+        if !footer.valid_version() {
             return Err(Other(format!(
                 "unsupported format version: {}",
                 footer.format_ver
@@ -367,6 +410,12 @@ impl VectorIndexFile {
         } else {
             handles_end = handles_start + index.size() * 8;
         };
+        let mut nulls_start = 0;
+        let mut nulls_end = 0;
+        if footer.format_version() == FORMAT_VERSION_V2 {
+            nulls_start = handles_end;
+            nulls_end = nulls_start + index.size();
+        }
         Ok(VectorIndexFile {
             core: Arc::new(VectorIndexFileCore {
                 file,
@@ -379,6 +428,8 @@ impl VectorIndexFile {
                 is_common_handle,
                 versions_start,
                 versions_end,
+                nulls_start,
+                nulls_end,
                 handles_start,
                 handles_end,
                 index,
@@ -399,6 +450,19 @@ impl VectorIndexFile {
         &self.file_data[self.handles_start..self.handles_end]
     }
 
+    pub(crate) fn has_nulls(&self) -> bool {
+        self.nulls_start != 0 && self.nulls_end != 0
+    }
+
+    fn is_null(&self, key: usize) -> bool {
+        // For index file v1 format, there is no nulls, ignore this check.
+        // TODO: Remove this check after all the index files are migrated to v2 format.
+        if !self.has_nulls() {
+            return false;
+        }
+        self.file_data[self.nulls_start + key] == 1
+    }
+
     fn get_handle(&self, key: u64) -> &[u8] {
         let handles = self.get_handles_data();
         if self.is_common_handle {
@@ -412,13 +476,24 @@ impl VectorIndexFile {
         }
     }
 
-    pub fn search(&self, target: &[f32], count: usize, start_ts: u64) -> Result<Vec<VectorItem>> {
+    pub fn search(
+        &self,
+        target: &[f32],
+        count: usize,
+        start_ts: u64,
+        start_handle: Option<&[u8]>,
+        end_handle: Option<&[u8]>,
+        is_common_handle: bool,
+    ) -> Result<(Vec<VectorItem>, Vec<Vec<u8>>)> {
         let versions = self.get_versions();
         let mut results = vec![];
+        thread_local! {
+            static DELETED_HANDLES: std::cell::RefCell<Vec<Vec<u8>>> = std::cell::RefCell::new(Vec::new());
+        }
         let matches = self
             .index
             .filtered_search(target, count, |key| {
-                let handle = self.get_handle(key);
+                let mut handle = self.get_handle(key);
                 let version = versions[key as usize];
                 if version > start_ts {
                     return false;
@@ -429,9 +504,36 @@ impl VectorIndexFile {
                     if prev_handle == handle {
                         let prev_version = versions[prev_key as usize];
                         debug_assert!(prev_version > version);
-                        if prev_version > start_ts {
+                        // If there is a newer version need to be read, skip the older version.
+                        if prev_version <= start_ts {
                             return false;
                         }
+                    }
+                }
+                // This is the latest version to read, if it is mvcc deleted, skip it.
+                if self.is_null(key as usize) {
+                    // Return the deleted keys for deduplication.
+                    DELETED_HANDLES.with_borrow_mut(|deleted_handles| {
+                        deleted_handles.push(handle.to_vec());
+                    });
+                    return false;
+                }
+
+                // Filter the handle if the start_handle and end_handle are provided.
+                if is_common_handle {
+                    if let Some(start_handle) = start_handle {
+                        if handle < start_handle || end_handle.map_or(false, |e| handle >= e) {
+                            return false;
+                        }
+                    }
+                } else if let Some(mut start_handle) = start_handle {
+                    let start_int_handle = start_handle.get_i64_le();
+                    let end_int_handle = end_handle.map(|mut h| h.get_i64_le());
+                    let int_handle = handle.get_i64_le();
+                    if int_handle < start_int_handle
+                        || end_int_handle.map_or(false, |e| int_handle >= e)
+                    {
+                        return false;
                     }
                 }
                 true
@@ -452,7 +554,9 @@ impl VectorIndexFile {
             };
             results.push(item);
         }
-        Ok(results)
+        let deleted_handles =
+            DELETED_HANDLES.with_borrow_mut(|deleted_handles| std::mem::take(deleted_handles));
+        Ok((results, deleted_handles))
     }
 
     pub fn to_vector_index_file_pb(&self) -> kvenginepb::VectorIndexFile {
@@ -536,34 +640,14 @@ impl VectorItemsReader {
         start_handle: Option<&[u8]>,
         end_handle: Option<&[u8]>,
     ) -> Result<Vec<VectorItem>> {
-        // TODO: The items read from vector index may be mvcc deleted. Valid items may
-        // be less than top_k.
-        let mut items = vector_index.search(target, top_k, read_ts)?;
-        if schema.is_common_handle() {
-            if let Some(start_handle) = start_handle {
-                let end_handle = end_handle.unwrap();
-                items.retain(|item| {
-                    item.handle.as_slice() >= start_handle && item.handle.as_slice() < end_handle
-                });
-            }
-            items.sort_by(|a, b| a.handle.cmp(&b.handle));
-        } else {
-            if let Some(mut start_handle) = start_handle {
-                let start_int_handle = start_handle.get_i64_le();
-                let end_int_handle = end_handle.map(|mut h| h.get_i64_le());
-                items.retain(|item| {
-                    let item_handle = item.handle.as_slice().get_i64_le();
-                    item_handle >= start_int_handle
-                        && end_int_handle.map_or(true, |end| item_handle < end)
-                });
-            }
-            items.sort_by(|a, b| {
-                a.handle
-                    .as_slice()
-                    .get_i64_le()
-                    .cmp(&b.handle.as_slice().get_i64_le())
-            })
-        }
+        let items = vector_index.search(
+            target,
+            top_k,
+            read_ts,
+            start_handle,
+            end_handle,
+            schema.is_common_handle(),
+        )?;
         Ok(items)
     }
 
@@ -692,7 +776,8 @@ pub struct VectorIndexBuilder {
     index: usearch::Index,
     int_handles: Vec<i64>,
     common_handles: Vec<Vec<u8>>,
-    versions: Vec<i64>,
+    versions: Vec<u64>,
+    nulls: Vec<u8>,
     footer: VectorIndexFileFooter,
     is_common_handle: bool,
     metric_repr: i32,
@@ -701,6 +786,7 @@ pub struct VectorIndexBuilder {
     index_id: i32,
     col_id: i32,
     num_rows: u64,
+    dimension: usize,
     smallest_int_handle: Option<i64>,
     biggest_int_handle: i64,
     smallest_common_handle: Vec<u8>,
@@ -734,6 +820,7 @@ impl VectorIndexBuilder {
             int_handles: vec![],
             common_handles: vec![],
             versions: vec![],
+            nulls: vec![],
             footer: header,
             snap_version,
             table_id,
@@ -742,6 +829,7 @@ impl VectorIndexBuilder {
             is_common_handle,
             metric_repr: opts.metric.repr,
             num_rows: 0,
+            dimension,
             smallest_int_handle: None,
             biggest_int_handle: i64::MIN,
             smallest_common_handle: vec![],
@@ -776,16 +864,30 @@ impl VectorIndexBuilder {
                 }
             }
             if let Some(vec_val) = vec_val {
-                let vec_f32: &[f32] = bytemuck::cast_slice(&vec_val[4..]);
-                self.index
-                    .add(self.num_rows, vec_f32)
-                    .map_err(|e| Other(e.to_string()))?;
                 let version = block.versions.get_version(i);
-                self.versions.push(version as i64);
+                let is_deleted = block.versions.is_null(i);
+                if is_deleted {
+                    let zeros = vec![0f32; self.dimension];
+                    self.index
+                        .add(self.num_rows, &zeros)
+                        .map_err(|e| Other(e.to_string()))?;
+                    self.push_version(version, true);
+                } else {
+                    let vec_f32: &[f32] = bytemuck::cast_slice(&vec_val[4..]);
+                    self.index
+                        .add(self.num_rows, vec_f32)
+                        .map_err(|e| Other(e.to_string()))?;
+                    self.push_version(version, false);
+                }
                 self.num_rows += 1;
             }
         }
         Ok(())
+    }
+
+    fn push_version(&mut self, version: u64, is_deleted: bool) {
+        self.versions.push(version);
+        self.nulls.push(is_deleted as u8);
     }
 
     fn update_int_handle(&mut self, handle: i64) {
@@ -868,6 +970,7 @@ impl VectorIndexBuilder {
         } else {
             buf.extend_from_slice(bytemuck::cast_slice(&self.int_handles));
         }
+        buf.extend_from_slice(&self.nulls);
         buf.extend_from_slice(&props_buf);
         buf.extend_from_slice(&footer_data);
         Ok(buf)
@@ -894,7 +997,7 @@ fn new_index_opts() -> IndexOptions {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::{convert::TryInto, fs, sync::Arc};
 
     use bstr::ByteSlice;
     use schema::schema::StorageClass;
@@ -961,8 +1064,15 @@ mod tests {
                     assert_eq!(vec_idx.get_handle(key), &(100 + key as i64).to_le_bytes());
                 }
             }
-            let items = vec_idx
-                .search(&[50.0f32, 150.0f32, 250.0f32], 3, u64::MAX)
+            let (items, _) = vec_idx
+                .search(
+                    &[50.0f32, 150.0f32, 250.0f32],
+                    3,
+                    u64::MAX,
+                    None,
+                    None,
+                    common_handle,
+                )
                 .unwrap();
             assert_eq!(items.len(), 3);
             assert_eq!(items[0].value, vec![50.0f32, 150.0f32, 250.0f32]);
@@ -979,6 +1089,49 @@ mod tests {
         common_handle: bool,
         start: i64,
         end: i64,
+        snap_version: u64,
+    ) -> VectorIndexFile {
+        build_vector_index_file_with_deleted(common_handle, start, end, 0, 0, snap_version)
+    }
+
+    #[test]
+    fn test_vector_index_deduplication() {
+        // Create multiple vector index files with duplicate handles
+        let mut vector_index = VectorIndex::new(1, 1, 1);
+        vector_index
+            .files
+            .push(build_vector_index_file(false, 100, 200, 1));
+        vector_index
+            .files
+            .push(build_vector_index_file(false, 150, 200, 2));
+        vector_index
+            .files
+            .push(build_vector_index_file(false, 151, 200, 3));
+        vector_index.sort();
+
+        // Perform a search
+        let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
+        let mut items = vector_index
+            .search(&query_vector, 3, u64::MAX, None, None, false)
+            .unwrap();
+
+        // each file returns 3， total is 9, remains 5 after deduplicate.
+        assert_eq!(items.len(), 5);
+        items.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        assert_eq!(items[0].value, vec![50.0f32, 150.0f32, 250.0f32]);
+        assert_eq!(items[0].version, 2);
+        assert_eq!(items[1].value, vec![51.0f32, 151.0f32, 251.0f32]);
+        assert_eq!(items[1].version, 3);
+        assert_eq!(items[2].value, vec![49.0f32, 149.0f32, 249.0f32]);
+        assert_eq!(items[2].version, 1);
+    }
+
+    fn build_vector_index_file_with_deleted(
+        common_handle: bool,
+        start: i64,
+        end: i64,
+        del_start: i64,
+        del_end: i64,
         snap_version: u64,
     ) -> VectorIndexFile {
         let mut builder =
@@ -1007,18 +1160,29 @@ mod tests {
         let schema = Schema::new(schema_buf);
         let mut block = Block::new(&schema);
         for i in start..end {
+            if i >= del_start && i < del_end {
+                if common_handle {
+                    block.handles.push_value(&i_to_common_handle(i));
+                } else {
+                    block.handles.push_value(&i.to_le_bytes());
+                }
+                block.versions.push_version(snap_version + 1, true);
+            }
             if common_handle {
                 block.handles.push_value(&i_to_common_handle(i));
             } else {
                 block.handles.push_value(&i.to_le_bytes());
             }
-            block.versions.push_value(&snap_version.to_le_bytes());
+            block.versions.push_version(snap_version, false);
         }
         let vec_col_buf = &mut block.columns[0];
         for i in start..end {
-            let mut vec_f32_val = vec![];
-            for _ in 0..TEST_DIMENSION {
-                vec_f32_val.push(i as f32);
+            if i >= del_start && i < del_end {
+                let vec_f32_val = vec![0f32; TEST_DIMENSION];
+                let vec_f32 = VectorFloat32::copy_from_f32(&vec_f32_val);
+                let mut buf = vec![];
+                buf.write_vector_float32(vec_f32.as_ref()).unwrap();
+                vec_col_buf.push_value(&buf);
             }
             let vec_f32 =
                 VectorFloat32::copy_from_f32(&[(i - 100) as f32, i as f32, (i + 100) as f32]);
@@ -1035,32 +1199,58 @@ mod tests {
     }
 
     #[test]
-    fn test_vector_index_deduplication() {
-        // Create multiple vector index files with duplicate handles
-        let mut vector_index = VectorIndex::new(1, 1, 1);
-        vector_index
-            .files
-            .push(build_vector_index_file(false, 100, 200, 1));
-        vector_index
-            .files
-            .push(build_vector_index_file(false, 150, 200, 2));
-        vector_index
-            .files
-            .push(build_vector_index_file(false, 151, 200, 3));
-        vector_index.sort();
+    fn test_vector_index_mvcc_delete() {
+        ::test_util::init_log_for_test();
+        {
+            // Test one vector index file with mvcc delete.
+            let mut vector_index = VectorIndex::new(1, 1, 1);
+            vector_index
+                .files
+                .push(build_vector_index_file_with_deleted(
+                    false, 100, 200, 150, 160, 1,
+                ));
+            vector_index.sort();
 
-        // Perform a search
-        let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
-        let mut items = vector_index.search(&query_vector, 3, u64::MAX).unwrap();
+            let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
+            let items = vector_index
+                .search(&query_vector, 100, u64::MAX, None, None, false)
+                .unwrap();
 
-        // each file returns 3， total is 9, remains 5 after deduplicate.
-        assert_eq!(items.len(), 5);
-        items.sort_by(|a, b| a.distance.total_cmp(&b.distance));
-        assert_eq!(items[0].value, vec![50.0f32, 150.0f32, 250.0f32]);
-        assert_eq!(items[0].version, 2);
-        assert_eq!(items[1].value, vec![51.0f32, 151.0f32, 251.0f32]);
-        assert_eq!(items[1].version, 3);
-        assert_eq!(items[2].value, vec![49.0f32, 149.0f32, 249.0f32]);
-        assert_eq!(items[2].version, 1);
+            for item in items {
+                let handle = item.handle;
+                let int_handle = i64::from_le_bytes(handle.try_into().unwrap());
+                assert!(!(150..160).contains(&int_handle));
+            }
+        }
+
+        {
+            // Test multiple vector index files with mvcc delete.
+            let mut vector_index = VectorIndex::new(1, 1, 1);
+            vector_index
+                .files
+                .push(build_vector_index_file(false, 100, 200, 1));
+            vector_index
+                .files
+                .push(build_vector_index_file(false, 150, 200, 2));
+            vector_index
+                .files
+                .push(build_vector_index_file(false, 151, 200, 3));
+            vector_index
+                .files
+                .push(build_vector_index_file_with_deleted(
+                    false, 140, 160, 150, 170, 4,
+                ));
+            vector_index.sort();
+
+            let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
+            let items = vector_index
+                .search(&query_vector, 100, u64::MAX, None, None, false)
+                .unwrap();
+            for item in items {
+                let handle = item.handle;
+                let int_handle = i64::from_le_bytes(handle.try_into().unwrap());
+                assert!(!(150..160).contains(&int_handle));
+            }
+        }
     }
 }
