@@ -77,11 +77,15 @@ impl GetObjectOptions {
         // For example:
         // The first 10 bytes: Range: bytes=0-9
         // The last 10 bytes: Range: bytes=-10
-        format!(
-            "{}-{}",
-            self.start_off.map_or(String::new(), |s| format!("{}", s)),
-            self.end_off.map_or(String::new(), |e| format!("{}", e - 1))
-        )
+        if self.start_off.is_none() && self.end_off.is_some() {
+            format!("-{}", self.end_off.unwrap())
+        } else {
+            format!(
+                "{}-{}",
+                self.start_off.map_or(String::new(), |s| format!("{}", s)),
+                self.end_off.map_or(String::new(), |e| format!("{}", e - 1))
+            )
+        }
     }
 }
 
