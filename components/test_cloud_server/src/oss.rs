@@ -229,7 +229,10 @@ impl ObjectStorageService {
         let start = start_str.parse::<u64>().ok();
         let end_str = matches.get(2).unwrap().as_str();
         // Convert to exclusive end.
-        let end = end_str.parse::<u64>().map(|x| x + 1).ok();
+        let end = end_str
+            .parse::<u64>()
+            .map(|x| if start.is_some() { x + 1 } else { x })
+            .ok();
         Ok((start, end))
     }
 

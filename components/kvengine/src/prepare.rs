@@ -37,7 +37,7 @@ use crate::{
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
         columnar::SchemaFile,
-        file::{InMemFile, LocalFile},
+        file::{File, InMemFile, LocalFile},
         BoundedDataSet,
     },
     EngineCore, *,
@@ -317,9 +317,29 @@ impl EngineCore {
                     IaCtx::Enabled(ia_mgr, data_dir) => {
                         let meta_file_path =
                             table_meta_file_local_path(id, fm.file_type, data_dir.deref());
-                        if let Ok(table_meta_file) =
-                            self.open_local_file_with_file_path(id, meta_file_path)
+                        let mut table_meta_file =
+                            self.open_local_file_with_file_path(id, meta_file_path.clone());
+                        if table_meta_file.is_err()
+                            && let Ok(local_file) = self.open_local_file(id, fm.file_type)
                         {
+                            let table_meta_off = fm.table_meta_off as u64;
+                            assert!(table_meta_off > 0);
+                            // Read table meta from local sst file.
+                            if let Ok(data) = local_file.read(
+                                table_meta_off,
+                                local_file.size() as usize - table_meta_off as usize,
+                            ) {
+                                self.write_local_file_with_file_path(
+                                    id,
+                                    data,
+                                    use_direct_io,
+                                    meta_file_path.clone(),
+                                )?;
+                                table_meta_file =
+                                    self.open_local_file_with_file_path(id, meta_file_path);
+                            };
+                        }
+                        if let Ok(table_meta_file) = table_meta_file {
                             if let Ok(ia_file) =
                                 IaFile::open(id, fm.file_type, Arc::new(table_meta_file), ia_mgr)
                             {
@@ -362,9 +382,9 @@ impl EngineCore {
                         .await
                         .map(|data| (data, None)),
                     IaCtx::Enabled(ia_mgr, data_dir) => {
-                        let opts = opts
-                            .with_type(fm.file_type)
-                            .with_start_off(fm.table_meta_off as u64);
+                        let table_meta_off = fm.table_meta_off as u64;
+                        assert!(table_meta_off > 0);
+                        let opts = opts.with_type(fm.file_type).with_start_off(table_meta_off);
                         fs.read_file(id, opts)
                             .await
                             .map(|data| (data, Some((ia_mgr, data_dir))))
