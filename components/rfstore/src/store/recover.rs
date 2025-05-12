@@ -45,14 +45,20 @@ pub const BLACK_LIST_FILE: &str = "black_list_file";
 #[derive(Clone)]
 pub struct BlackList {
     keyspace_ids: HashSet<u32>,
+    table_ids: HashSet<(u32, i64)>,
     region_ids: HashSet<u64>,
 }
 
 impl BlackList {
-    pub fn new(mut keyspace_ids: Vec<u32>, mut region_ids: Vec<u64>) -> Self {
+    pub fn new(
+        mut keyspace_ids: Vec<u32>,
+        mut table_ids: Vec<(u32, i64)>,
+        mut region_ids: Vec<u64>,
+    ) -> Self {
         BLACKLIST_REGION_GAUGE.add(region_ids.len() as i64);
         Self {
             keyspace_ids: HashSet::from_iter(keyspace_ids.drain(..)),
+            table_ids: HashSet::from_iter(table_ids.drain(..)),
             region_ids: HashSet::from_iter(region_ids.drain(..)),
         }
     }
@@ -60,6 +66,12 @@ impl BlackList {
     pub(crate) fn check_blocked(&mut self, region_id: u64, start: &[u8]) -> bool {
         if let Some(keyspace_id) = ApiV2::get_u32_keyspace_id_by_key(start) {
             if self.keyspace_ids.contains(&keyspace_id) {
+                BLACKLIST_REGION_GAUGE.inc();
+                self.region_ids.insert(region_id);
+            }
+        }
+        if let Some((keyspace_id, table_id)) = ApiV2::get_keyspace_table_id(start) {
+            if self.is_table_blocked(keyspace_id, table_id) {
                 BLACKLIST_REGION_GAUGE.inc();
                 self.region_ids.insert(region_id);
             }
@@ -75,9 +87,21 @@ impl BlackList {
         self.keyspace_ids.contains(&keyspace_id)
     }
 
+    pub(crate) fn is_table_blocked(&self, keyspace_id: u32, table_id: i64) -> bool {
+        self.table_ids.contains(&(keyspace_id, table_id))
+    }
+
     pub fn add_regions(&mut self, region_ids: Vec<u64>) {
         BLACKLIST_REGION_GAUGE.add(region_ids.len() as i64);
         self.region_ids.extend(region_ids);
+    }
+
+    pub fn add_tables(&mut self, table_ids: Vec<(u32, i64)>) {
+        self.table_ids.extend(table_ids);
+    }
+
+    pub fn add_keyspaces(&mut self, keyspace_ids: Vec<u32>) {
+        self.keyspace_ids.extend(keyspace_ids);
     }
 }
 

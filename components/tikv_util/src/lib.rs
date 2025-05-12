@@ -217,6 +217,7 @@ pub fn create_panic_region_file<P: AsRef<Path>>(data_dir: P, region_id: u64) {
 pub fn get_panic_region_count<P: AsRef<Path>>(file_path: P) -> u64 {
     let data = fs::read(file_path).unwrap_or_default();
     let str = String::from_utf8_lossy(&data);
+    let str = str.trim_end_matches('\n');
     str.parse::<u64>().unwrap_or_default()
 }
 

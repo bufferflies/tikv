@@ -1140,6 +1140,13 @@ impl<'a> StoreMsgHandler<'a> {
                     return;
                 }
             }
+            if let Some((keyspace_id, table_id)) = ApiV2::get_keyspace_table_id(msg.get_start_key())
+            {
+                if black_list.is_table_blocked(keyspace_id, table_id) {
+                    debug!("table {} blocked by black list", table_id);
+                    return;
+                }
+            }
         }
         let region_epoch = msg.get_region_epoch();
         let tag = PeerTag::new(

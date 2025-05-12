@@ -1,7 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use bytes::Buf;
-use codec::byte::MemComparableByteCodec;
+use codec::{byte::MemComparableByteCodec, number::NumberDecoder};
 use engine_traits::Result;
 use tikv_util::codec::{
     bytes as codecBytes,
@@ -341,6 +341,17 @@ impl ApiV2 {
         key.len() >= KEYSPACE_PREFIX_LEN && key[0] == TXN_KEY_PREFIX
     }
 
+    pub fn get_keyspace_table_id(key: &[u8]) -> Option<(u32, i64)> {
+        let keyspace_id = Self::get_u32_keyspace_id_by_key(key)?;
+        let mut buf = &key[KEYSPACE_PREFIX_LEN..];
+        if buf.is_empty() || buf[0] != b't' {
+            return None;
+        }
+        buf = &buf[1..];
+        let table_id = buf.read_i64().ok()?;
+        Some((keyspace_id, table_id))
+    }
+
     pub const ENCODED_LOGICAL_DELETE: [u8; 1] = [ValueMeta::DELETE_FLAG.bits];
 }
 
@@ -662,6 +673,29 @@ mod tests {
                 "case {}",
                 i
             );
+        }
+    }
+
+    #[test]
+    fn test_get_keyspace_table_id() {
+        let test_cases = vec![
+            ("78000001748000000000000075", Some((1, 117))),
+            (
+                "780000017480000000000000755F720FFFFFFFFFFFFFFF",
+                Some((1, 117)),
+            ),
+            ("78000001", None),
+            ("748000000000000078", None),
+            ("000001748000000000000079", None),
+            (
+                "7800000188800000FF00000000755F720FFFFFFFFFFFFFFFFF00FE",
+                None,
+            ),
+        ];
+
+        for (key, expected) in test_cases {
+            let key_bytes = hex::decode(key).unwrap();
+            assert_eq!(ApiV2::get_keyspace_table_id(&key_bytes), expected);
         }
     }
 }

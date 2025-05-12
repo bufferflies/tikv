@@ -31,6 +31,13 @@ pub const DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC: u64 = 1;
 
 pub const DEFAULT_FD_CACHE_CAPCITY: usize = 200000;
 
+// If the number of panic regions of a table exceeds this threshold, the table
+// will be auto blacklisted.
+pub const DEFAULT_TABLE_AUTO_BLACKLIST_THRESHOLD: u64 = 3;
+// If the number of blacklisted tables of a keyspace exceeds this threshold,
+// the keyspace will be auto blacklisted.
+pub const DEFAULT_KEYSPACE_AUTO_BLACKLIST_THRESHOLD: u64 = 4;
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -101,6 +108,12 @@ pub struct Config {
     /// the capacity of open fd cache.
     pub fd_cache_capacity: usize,
 
+    /// The panic regions threshold of the table to auto blacklist.
+    pub table_auto_blacklist_threshold: u64,
+
+    /// The panic tables threshold of the keyspace to auto blacklist.
+    pub keyspace_auto_blacklist_threshold: u64,
+
     pub checksum_type: ChecksumType,
 
     pub block_cache_type: BlockCacheType,
@@ -127,6 +140,8 @@ impl Default for Config {
             compaction_request_version: DEFAULT_COMPACTION_REQUEST_VERSION,
             compaction_tombs_ratio: DEFAULT_COMPACTION_TOMBS_RATIO,
             compaction_tombs_count: DEFAULT_COMPACTION_TOMBS_COUNT,
+            table_auto_blacklist_threshold: DEFAULT_TABLE_AUTO_BLACKLIST_THRESHOLD,
+            keyspace_auto_blacklist_threshold: DEFAULT_KEYSPACE_AUTO_BLACKLIST_THRESHOLD,
             remote_worker_addr: "".to_string(),
             remote_coprocessor_addr: "".to_string(),
             remote_coprocessor_min_blocks_size: 32 * 1024 * 1024,

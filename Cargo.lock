@@ -141,6 +141,7 @@ dependencies = [
  "bytes",
  "codec",
  "engine_traits",
+ "hex 0.4.3",
  "kvproto",
  "match-template",
  "panic_hook",

@@ -20,4 +20,5 @@ tikv_util = { workspace = true }
 txn_types = { workspace = true }
 
 [dev-dependencies]
+hex = "0.4"
 panic_hook = { workspace = true }

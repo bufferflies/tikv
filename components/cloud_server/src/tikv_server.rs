@@ -13,9 +13,11 @@
 
 use std::{
     cell::RefCell,
+    collections::HashMap,
     env, fmt,
     fs::{self, File},
     net::SocketAddr,
+    ops::AddAssign,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{atomic::AtomicU64, Arc, Once},
@@ -54,7 +56,7 @@ use raftstore::{
     },
     RegionInfoAccessor,
 };
-use rfengine::{RfEngine, STORE_IDENT_KEY};
+use rfengine::{RfEngine, KV_ENGINE_META_KEY, STORE_IDENT_KEY};
 use rfstore::{
     store::{
         BlackList, Engines, LocalReader, MetaChangeListener, PdIdAllocator, RaftBatchSystem,
@@ -1143,19 +1145,33 @@ impl TikvServer {
     ) -> Engines {
         Self::check_disk_capacity_on_k8s(&conf.storage.data_dir);
         let panic_regions = Self::load_panic_regions(&conf.storage.data_dir);
+        let panic_region_ids = panic_regions.iter().map(|(id, _)| *id).collect::<Vec<_>>();
         let black_list_regions = panic_regions
             .into_iter()
             .filter(|(_, count)| *count > 1)
             .map(|(id, _)| id)
-            .collect();
+            .collect::<Vec<_>>();
         let rf_engine = Self::init_raft_engine(conf).unwrap();
+        let (black_list_tables, black_list_keyspaces) = Self::escalate_blacklist_level(
+            &rf_engine,
+            &panic_region_ids,
+            conf.kvengine.table_auto_blacklist_threshold,
+            conf.kvengine.keyspace_auto_blacklist_threshold,
+        );
+        warn!(
+            "auto blacklisted table_ids: {:?}, keyspace_ids: {:?}, by black_list_regons: {:?}",
+            black_list_tables, black_list_keyspaces, black_list_regions
+        );
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
         let mut meta_iter = recoverer.clone();
         if let Some(mut black_list) = load_black_list(conf) {
             black_list.add_regions(black_list_regions);
+            black_list.add_tables(black_list_tables);
+            black_list.add_keyspaces(black_list_keyspaces);
             meta_iter.set_black_list(black_list);
         } else if !black_list_regions.is_empty() {
-            let black_list = BlackList::new(vec![], black_list_regions);
+            let black_list =
+                BlackList::new(black_list_keyspaces, black_list_tables, black_list_regions);
             meta_iter.set_black_list(black_list);
         }
         // TODO: This feature is risky when multiple stores are shut down improperly
@@ -1230,6 +1246,60 @@ impl TikvServer {
         panic_regions
     }
 
+    fn escalate_blacklist_level(
+        rf_engine: &RfEngine,
+        panic_regions: &[u64],
+        table_auto_blacklist_threshold: u64,
+        keyspace_auto_blacklist_threshold: u64,
+    ) -> (
+        Vec<(u32, i64)>, // blacklisted table ids
+        Vec<u32>,        // blacklisted keyspace ids
+    ) {
+        let region_to_peers = rf_engine.get_region_peer_map();
+        // table_ids blacklisted count by region.
+        let mut table_ids = HashMap::new();
+        for region_id in panic_regions {
+            if let Some(peer_id) = region_to_peers.get(region_id) {
+                if let Some(val) = rf_engine.get_state(*peer_id, KV_ENGINE_META_KEY) {
+                    let mut cs = kvenginepb::ChangeSet::new();
+                    if let Err(e) = cs.merge_from_bytes(&val) {
+                        error!(
+                            "failed to merge change set for region_id: {} err: {}",
+                            region_id, e
+                        );
+                    }
+                    if !cs.has_snapshot() {
+                        continue;
+                    }
+                    if let Some((keyspace_id, table_id)) = api_version::ApiV2::get_keyspace_table_id(
+                        cs.get_snapshot().get_outer_start(),
+                    ) {
+                        table_ids
+                            .entry((keyspace_id, table_id))
+                            .or_insert(0)
+                            .add_assign(1);
+                    }
+                }
+            }
+        }
+        // keyspace_ids blacklisted count by table.
+        let mut keyspace_ids = HashMap::new();
+        let blacklisted_table_ids = table_ids
+            .iter()
+            .filter(|(_, &count)| count >= table_auto_blacklist_threshold)
+            .map(|((keyspace_id, table_id), _)| (*keyspace_id, *table_id))
+            .collect::<Vec<_>>();
+        for (keyspace_id, _) in &blacklisted_table_ids {
+            keyspace_ids.entry(*keyspace_id).or_insert(0).add_assign(1);
+        }
+        let blacklisted_keyspace_ids = keyspace_ids
+            .iter()
+            .filter(|(_, &count)| count >= keyspace_auto_blacklist_threshold)
+            .map(|(keyspace_id, _)| *keyspace_id)
+            .collect::<Vec<_>>();
+        (blacklisted_table_ids, blacklisted_keyspace_ids)
+    }
+
     fn init_flow_control(config: &TikvConfig) -> (FlowController, Arc<StoreLimiter>) {
         let soft_limit = config
             .storage
@@ -1274,6 +1344,7 @@ impl TikvServer {
 #[serde(default)]
 struct BlackListConfig {
     keyspace_ids: Vec<u32>,
+    table_ids: Vec<(u32 /* keyspace_id */, i64 /* table_id */)>,
     region_ids: Vec<u64>,
 }
 
@@ -1324,6 +1395,7 @@ fn load_black_list(conf: &TikvConfig) -> Option<BlackList> {
     );
     Some(BlackList::new(
         black_list_conf.keyspace_ids,
+        black_list_conf.table_ids,
         black_list_conf.region_ids,
     ))
 }
