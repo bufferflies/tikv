@@ -38,6 +38,7 @@ use crate::{
     table::{
         columnar::SchemaFile,
         file::{File, InMemFile, LocalFile},
+        sstable::SsTable,
         BoundedDataSet,
     },
     EngineCore, *,
@@ -237,6 +238,7 @@ impl EngineCore {
             "shard_use_ia" => shard_use_ia,
         );
         self.load_tables_by_ids(
+            tag,
             cs.shard_id,
             cs.shard_ver,
             &ids,
@@ -293,6 +295,7 @@ impl EngineCore {
 
     fn load_tables_by_ids(
         &self,
+        tag: ShardTag,
         shard_id: u64,
         shard_ver: u64,
         ids: &HashMap<u64, FileMeta>,
@@ -323,12 +326,15 @@ impl EngineCore {
                             && let Ok(local_file) = self.open_local_file(id, fm.file_type)
                         {
                             let table_meta_off = fm.table_meta_off as u64;
-                            assert!(table_meta_off > 0);
                             // Read table meta from local sst file.
-                            if let Ok(data) = local_file.read(
-                                table_meta_off,
-                                local_file.size() as usize - table_meta_off as usize,
-                            ) {
+                            if let Ok(data) = local_file
+                                .read(
+                                    table_meta_off,
+                                    local_file.size() as usize - table_meta_off as usize,
+                                )
+                                .map_err(Into::into)
+                                .and_then(|data| validate_table_meta_off(tag, id, fm, data))
+                            {
                                 self.write_local_file_with_file_path(
                                     id,
                                     data,
@@ -380,13 +386,16 @@ impl EngineCore {
                     IaCtx::Disabled => fs
                         .read_file(id, opts.with_type(fm.file_type))
                         .await
+                        .map_err(Into::into)
                         .map(|data| (data, None)),
                     IaCtx::Enabled(ia_mgr, data_dir) => {
-                        let table_meta_off = fm.table_meta_off as u64;
-                        assert!(table_meta_off > 0);
-                        let opts = opts.with_type(fm.file_type).with_start_off(table_meta_off);
+                        let opts = opts
+                            .with_type(fm.file_type)
+                            .with_start_off(fm.table_meta_off as u64);
                         fs.read_file(id, opts)
                             .await
+                            .map_err(Into::into)
+                            .and_then(|data| validate_table_meta_off(tag, id, &fm, data))
                             .map(|data| (data, Some((ia_mgr, data_dir))))
                     }
                 };
@@ -410,7 +419,7 @@ impl EngineCore {
         cs: &mut ChangeSet,
         use_direct_io: bool,
         result_tx: &Receiver<
-            dfs::Result<(
+            Result<(
                 u64,
                 FileMeta,
                 Bytes,
@@ -447,6 +456,7 @@ impl EngineCore {
         use_direct_io: bool,
     ) -> Result<()> {
         let shard = self.shards.get(&shard_id).unwrap();
+        let tag = shard.tag();
         let mut cs = ChangeSet::new(kvenginepb::ChangeSet::default());
         let data = shard.get_data();
         let mut builder = ShardDataBuilder::new(data.clone());
@@ -457,9 +467,10 @@ impl EngineCore {
             .filter(|&(_, tbl)| shard.overlap_bound(tbl.data_bound()))
             .map(|(id, tbl)| (*id, tbl.clone()))
             .collect();
-        info!("{} load_unloaded_tables: {:?}", shard.tag(), load_tables);
+        info!("{} load_unloaded_tables: {:?}", tag, load_tables);
 
         self.load_tables_by_ids(
+            tag,
             shard_id,
             shard_ver,
             &load_tables,
@@ -752,4 +763,28 @@ pub fn collect_snap_lock_txn_file_refs(snap: &kvenginepb::Snapshot) -> Vec<TxnFi
         }
     }
     vec![]
+}
+
+// For safety. Table meta offset should have been fixed. See
+// `ShardMeta::fix_table_meta_offset`.
+fn validate_table_meta_off(tag: ShardTag, id: u64, fm: &FileMeta, data: Bytes) -> Result<Bytes> {
+    debug_assert!(fm.can_use_ia(), "{}: {}: {:?}", tag, id, fm);
+    if fm.table_meta_off > 0 {
+        return Ok(data);
+    }
+
+    warn!("{} validate_table_meta_off: table meta offset is 0", tag; "id" => id, "fm" => ?fm);
+    match fm.file_type {
+        FileType::Sst => SsTable::get_meta_data(&data).map_err(|err| {
+            error!("{} validate_table_meta_off: get meta data failed", tag;
+                "err" => ?err, "id" => id, "fm" => ?fm);
+            Error::TableError(err)
+        }),
+        FileType::Columnar => {
+            // Columnar must have meta offset.
+            debug_assert!(false);
+            Ok(data)
+        }
+        _ => Ok(data),
+    }
 }

@@ -366,7 +366,7 @@ impl Builder {
 
         BuildResult {
             id: self.sst_fid,
-            meta_offset: footer.index_offset,
+            meta_offset: footer.meta_offset(),
             smallest: self.smallest.clone(),
             biggest: self.biggest.clone(),
         }
@@ -488,6 +488,11 @@ impl Footer {
 
     pub fn properties_len(&self, table_size: usize) -> usize {
         table_size - self.properties_offset as usize - FOOTER_SIZE
+    }
+
+    // Index is the first meta section after data sections.
+    pub fn meta_offset(&self) -> u32 {
+        self.index_offset
     }
 
     pub fn unmarshal(&mut self, mut data: &[u8]) {

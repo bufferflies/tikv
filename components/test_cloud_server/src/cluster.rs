@@ -1380,6 +1380,23 @@ fn update_config_by_total_mem(
         ReadableSize((hard_store_mem_limit * REGION_MEM_LIMIT_RATIO) as u64);
 }
 
+pub trait TikvConfigExt {
+    fn disable_ia(&mut self);
+    fn enable_ia(&mut self);
+}
+
+impl TikvConfigExt for TikvConfig {
+    fn disable_ia(&mut self) {
+        self.kvengine.ia.mem_cap = 0.into();
+        self.kvengine.ia.disk_cap = 0.into();
+    }
+
+    fn enable_ia(&mut self) {
+        self.kvengine.ia.mem_cap = IA_MEM_CAP_DEF.into();
+        self.kvengine.ia.disk_cap = IA_DISK_CAP_DEF.into();
+    }
+}
+
 // Keep away from 20xxx ports to work around https://github.com/tidbcloud/cloud-storage-engine/issues/658.
 // TODO: Remove this work around.
 fn node_addr(node_id: u16) -> String {
@@ -1445,6 +1462,13 @@ impl Default for TikvWorkerOptions {
             backup_skip_keyspace_meta: true,
             restore_timeout_pd_control: Duration::from_secs(10),
         }
+    }
+}
+
+impl TikvWorkerOptions {
+    pub fn disable_ia(&mut self) {
+        self.ia_mem_cap = 0;
+        self.ia_disk_cap = 0;
     }
 }
 

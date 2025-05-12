@@ -147,6 +147,44 @@ impl ShardMeta {
         }
     }
 
+    pub fn fix_table_meta_offset(&mut self, kv: &Engine) {
+        let tag = self.tag();
+        let mut to_fix_files: HashMap<&u64, &mut FileMeta> = self
+            .files
+            .iter_mut()
+            .filter(|(_, fm)| {
+                // Columnar files must have `table_meta_off` > 0.
+                fm.is_sst_file() && fm.can_use_ia() && fm.table_meta_off == 0
+            })
+            .collect();
+        if to_fix_files.is_empty() {
+            return;
+        }
+
+        info!("{} fix_table_meta_offset", tag; "files" => ?to_fix_files);
+        match kv.get_shard_with_ver(self.id, self.ver) {
+            Ok(shard) => {
+                let data = shard.get_data();
+                data.for_each_level(|_cf, lh| {
+                    for t in lh.tables.iter() {
+                        if let Some(fm) = to_fix_files.remove(&t.id()) {
+                            fm.table_meta_off = t.meta_offset();
+                        }
+                    }
+                    to_fix_files.is_empty()
+                });
+                if !to_fix_files.is_empty() {
+                    warn!("{} fix_table_meta_offset: failed to fix table meta offset", tag;
+                        "files" => ?to_fix_files);
+                }
+            }
+            Err(err) => {
+                warn!("{} fix_table_meta_offset: failed to get shard", tag;
+                    "err" => ?err, "files" => ?to_fix_files);
+            }
+        }
+    }
+
     pub fn tag(&self) -> ShardTag {
         ShardTag::new(self.engine_id, IdVer::new(self.id, self.ver))
     }

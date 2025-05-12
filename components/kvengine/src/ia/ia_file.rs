@@ -95,7 +95,7 @@ impl IaFile {
 
         let meta_size = table_meta_file.size();
         let segment_size = mgr.segment_size();
-        let table_meta_off = footer.index_offset as u64;
+        let table_meta_off = footer.meta_offset() as u64;
         let mut f = Self {
             id,
             size: table_meta_off + meta_size,
