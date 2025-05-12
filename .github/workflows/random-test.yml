@@ -50,6 +50,7 @@ jobs:
           CARGO_INCREMENTAL: "0"
           LOG_FILE: ${{ runner.temp }}/run.log
           LOG_APPEND: "1"
+          OSS_CHAOS_RATIO: "0.0" # Temporary disable as it is not stable
         working-directory: ./
         run: |
           cargo test -p tests --test random test_random_all

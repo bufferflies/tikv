@@ -354,8 +354,9 @@ fn prepare_cluster(
     };
     // 10MB/s (Prod env: 10GB/s, 16MB/sst -> 640 sst/s)
     oss.set_max_read_bytes_per_sec(KV_TARGET_FILE_SIZE.0 as usize * 640);
-    // 1MB/s (Prod env: 1GB/s)
-    oss.set_max_write_bytes_per_sec(KV_TARGET_FILE_SIZE.0 as usize * 64);
+    // 10MB/s (Prod env: 1GB/s)
+    // TODO: adjust rate for oss chaos.
+    oss.set_max_write_bytes_per_sec(KV_TARGET_FILE_SIZE.0 as usize * 640);
 
     info!("prepare_cluster";
         "per_keyspace_configs" => ?per_keyspace_configs,
