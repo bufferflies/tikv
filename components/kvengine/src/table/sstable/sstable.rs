@@ -245,6 +245,26 @@ impl SsTable {
 
         self.file.get_remote_segments(&[(start_off, end_off)])
     }
+
+    pub fn get_meta_data(file_data: &[u8]) -> Result<Bytes> {
+        let data_len = file_data.len();
+        let footer_size = SsTable::footer_size();
+        if data_len < footer_size {
+            error!("get_meta_data: invalid fie size"; "data_len" => data_len);
+            return Err(Error::InvalidFileSize);
+        }
+        let footer_data = &file_data[data_len - footer_size..];
+
+        let mut footer = Footer::default();
+        footer.unmarshal(footer_data);
+
+        let meta_off = footer.meta_offset() as usize;
+        if data_len < meta_off {
+            error!("get_meta_data: invalid meta offset"; "data_len" => data_len, "footer" => ?footer);
+            return Err(Error::InvalidFileSize);
+        }
+        Ok(Bytes::copy_from_slice(&file_data[meta_off..]))
+    }
 }
 
 impl BoundedDataSet for SsTable {
@@ -605,7 +625,7 @@ impl SsTableCore {
     /// The offset of first table meta (index).
     #[inline]
     pub fn meta_offset(&self) -> u32 {
-        self.index_offset()
+        self.start_off as u32 + self.footer.meta_offset()
     }
 
     pub fn index_offset(&self) -> u32 {
@@ -1684,5 +1704,27 @@ mod tests {
                 lower, upper, upper_inclusive, async_expected
             );
         }
+    }
+
+    #[test]
+    fn test_get_meta_data() {
+        let mut sst_builder = new_table_builder_for_test(100);
+        for (k, v) in generate_key_values("k", 10) {
+            let value_buf = Value::encode_buf(0u8, &[0], 0, v.as_bytes());
+            let value = &mut Value::decode(value_buf.as_slice());
+            sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), value, None);
+        }
+
+        let mut buf = Vec::with_capacity(sst_builder.estimated_size());
+        sst_builder.finish(0, &mut buf);
+        let buf = Bytes::from(buf);
+        let sst_file = file::InMemFile::new(100, buf.clone());
+        let sst = SsTable::new(Arc::new(sst_file), new_test_cache(), None).unwrap();
+
+        let meta_data = SsTable::get_meta_data(&buf).unwrap();
+        assert_eq!(meta_data.as_ref(), &buf[sst.meta_offset() as usize..]);
+
+        SsTable::get_meta_data(&[]).unwrap_err();
+        SsTable::get_meta_data(&[0xff; SsTable::footer_size()]).unwrap_err();
     }
 }

@@ -245,6 +245,7 @@ impl PeerStorage {
                 engines.raft.add_dependent(parent.id, meta.id);
             }
             meta.recover_txn_file_locks_from_kv(&engines.kv);
+            meta.fix_table_meta_offset(&engines.kv);
             shard_meta = Some(meta);
         }
         let last_term = init_last_term(&engines, peer_id, &region, raft_state)?;

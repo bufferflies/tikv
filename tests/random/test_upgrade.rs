@@ -17,12 +17,12 @@ use test_cloud_server::{
     oss::prepare_dfs,
     tidb::*,
     tikv_bin::{TikvServers, TikvWorkers},
-    ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
+    ServerCluster, ServerClusterBuilder, TikvConfigExt, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
 use tikv_util::{config::ReadableDuration, info, time::Instant};
 
-use crate::{test_tidb::*, *};
+use crate::{test_storage_class::*, test_tidb::*, *};
 
 const TIKV_STORE_RESTART_INTERVAL: Duration = Duration::from_secs(10); // Interval between restarting TiKV stores.
 const TEST_DURATION_BEFORE_UPGRADE: Duration = Duration::from_secs(60);
@@ -67,6 +67,7 @@ fn test_random_upgrade() {
         NODES_COUNT,
         INITIAL_KEYSPACE_COUNT,
         &switches,
+        &upgrade_switches,
         &tc,
     );
     let pd_client = cluster.get_pd_client_ext();
@@ -78,10 +79,11 @@ fn test_random_upgrade() {
     prepare_workloads(&tc, &keyspace_manager, &switches, &runtime);
     let tables = block_on(collect_tables(&tc, &keyspace_manager, &switches));
     let running = Running::new_start();
-    let async_handles = start_workloads(
+    let mut async_handles = start_workloads(
         &tc,
         &keyspace_manager,
         &switches,
+        upgrade_switches.disable_ia_for_old_version,
         &runtime,
         &tables,
         running.clone(),
@@ -108,11 +110,29 @@ fn test_random_upgrade() {
     switch_servers_version(
         Servers::TikvServers(&tikv_servers),
         Servers::ServerCluster(&cluster),
-        |_, _| {},
+        |_, conf| {
+            if upgrade_switches.disable_ia_for_old_version {
+                conf.enable_ia();
+            }
+        },
         &server_configs,
         pd_ctl.as_ref(),
         &upgrade_switches,
     );
+
+    if upgrade_switches.disable_ia_for_old_version
+        && switches.ia_table_ratio > 0.0
+        && !tables.is_empty()
+    {
+        async_handles.push(runtime.spawn(spawn_alter_storage_class(
+            tc.clone(),
+            keyspace_manager.clone(),
+            tables.to_vec(),
+            switches.ia_table_ratio,
+            Duration::from_secs(10),
+            running.clone(),
+        )));
+    }
 
     // After upgrade.
     let start_time = Instant::now_coarse();
@@ -130,7 +150,11 @@ fn test_random_upgrade() {
     switch_servers_version(
         Servers::ServerCluster(&cluster),
         Servers::TikvServers(&tikv_servers),
-        |_, _| {},
+        |_, conf| {
+            if upgrade_switches.disable_ia_for_old_version {
+                conf.disable_ia();
+            }
+        },
         &server_configs,
         pd_ctl.as_ref(),
         &upgrade_switches,
@@ -152,7 +176,11 @@ fn test_random_upgrade() {
     switch_servers_version(
         Servers::TikvServers(&tikv_servers),
         Servers::ServerCluster(&cluster),
-        |_, _| {},
+        |_, conf| {
+            if upgrade_switches.disable_ia_for_old_version {
+                conf.enable_ia();
+            }
+        },
         &server_configs,
         pd_ctl.as_ref(),
         &upgrade_switches,
@@ -242,13 +270,19 @@ fn prepare_cluster(
     nodes_count: usize,
     initial_keyspace_count: usize,
     switches: &Switches,
+    upgrade_switches: &UpgradeTestSwitches,
     tc: &TidbCluster,
 ) -> (ServerCluster, TikvServers, TikvWorkers) {
     let mut rng = thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
     let tikv_worker_nodes = alloc_node_id_vec(TIKV_WORKERS_COUNT);
-    let update_conf_fn =
-        generate_update_conf_fn(dfs_config, security_conf, &tikv_worker_nodes, switches);
+    let update_conf_fn = generate_update_conf_fn(
+        dfs_config,
+        security_conf,
+        &tikv_worker_nodes,
+        switches,
+        upgrade_switches.disable_ia_for_old_version,
+    );
     let pd_wrapper =
         PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
     let mut cluster = ServerClusterBuilder::new(vec![], |_, _| {})
@@ -276,14 +310,17 @@ fn prepare_cluster(
     }
 
     // Start tikv-workers.
-    cluster.generate_tikv_worker_configs(
-        tikv_worker_nodes.clone(),
-        TikvWorkerOptions {
-            cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
-            cop_block_cache_type: switches.block_cache_type,
-            ..Default::default()
-        },
-    );
+    let mut tikv_worker_opts = TikvWorkerOptions {
+        cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
+        cop_block_cache_type: switches.block_cache_type,
+        ..Default::default()
+    };
+    if upgrade_switches.disable_ia_for_old_version {
+        // `tikv-version` of old version will generate remote cop requests with
+        // `meta_offset == 0`. So need to disable IA for remote cop as well.
+        tikv_worker_opts.disable_ia();
+    }
+    cluster.generate_tikv_worker_configs(tikv_worker_nodes.clone(), tikv_worker_opts);
     let tikv_workers = prepare_tikv_workers(
         "tikv_workers".to_string(),
         TIKV_WORKER_BIN_ENV_KEY,
@@ -555,6 +592,7 @@ struct UpgradeTestSwitches {
     test_dur_after_upgrade: ReadableDuration,
     test_dur_after_downgrade: ReadableDuration,
     graceful_restart: bool,
+    disable_ia_for_old_version: bool,
 }
 
 impl UpgradeTestSwitches {
@@ -575,12 +613,14 @@ impl UpgradeTestSwitches {
         );
 
         let graceful_restart = rng.gen_ratio(1, 5);
+        let disable_ia_for_old_version = env_switch_opt("DISABLE_IA_FOR_OLD_VERSION", 0);
 
         Self {
             test_dur_before_upgrade,
             test_dur_after_upgrade,
             test_dur_after_downgrade,
             graceful_restart,
+            disable_ia_for_old_version,
         }
     }
 }

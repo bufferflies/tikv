@@ -130,6 +130,9 @@ while [[ $# -gt 0 ]]; do
 		RUN_ARGS+=("--upgrade-test-duration" "$2")
 		shift
 		;;
+	--disable-ia-for-old-version)
+		RUN_ARGS+=("--disable-ia-for-old-version")
+		;;
 	--help)
 		show_help
 		exit 0

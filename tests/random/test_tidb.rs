@@ -24,8 +24,8 @@ use security::SecurityConfig;
 use sqlx::{ConnectOptions, Executor, Row as _};
 use test_cloud_server::{
     oss::prepare_dfs, table::TableMeta, tidb::*, tikv_worker_cop_url, try_wait_async,
-    ServerCluster, ServerClusterBuilder, TikvWorkerOptions, IA_DISK_CAP_DEF,
-    IA_FREQ_UPDATE_INTERVAL_DEF, IA_MEM_CAP_DEF,
+    ServerCluster, ServerClusterBuilder, TikvConfigExt, TikvWorkerOptions,
+    IA_FREQ_UPDATE_INTERVAL_DEF,
 };
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
@@ -159,6 +159,7 @@ fn test_random_with_tidb() {
         &tc,
         &keyspace_manager,
         &switches,
+        false,
         &runtime,
         &tables,
         running.clone(),
@@ -267,8 +268,13 @@ fn prepare_cluster(
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
     let tikv_worker_nodes = alloc_node_id_vec(TIKV_WORKERS_COUNT);
-    let update_conf_fn =
-        generate_update_conf_fn(dfs_config, security_conf, &tikv_worker_nodes, switches);
+    let update_conf_fn = generate_update_conf_fn(
+        dfs_config,
+        security_conf,
+        &tikv_worker_nodes,
+        switches,
+        false,
+    );
     let pd = PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
     let mut cluster = ServerClusterBuilder::new(nodes, update_conf_fn)
         .pd(pd)
@@ -314,6 +320,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
     security_conf: &'a SecurityConfig,
     tikv_worker_nodes: &'a [u16],
     switches: &'a Switches,
+    disable_ia: bool,
 ) -> impl Fn(u16, &mut TikvConfig) + 'a {
     let cpu_cores = SysQuota::cpu_cores_quota() as usize;
 
@@ -358,12 +365,15 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.kvengine.vector_index_build_options.rebuild_file_count = 2;
 
         conf.kvengine.ia = IaConfig {
-            mem_cap: IA_MEM_CAP_DEF.into(),
-            disk_cap: IA_DISK_CAP_DEF.into(),
             segment_size: conf.rocksdb.writecf.block_size.0 as i64 * 4,
             freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
             ..Default::default()
         };
+        if disable_ia {
+            conf.disable_ia();
+        } else {
+            conf.enable_ia();
+        }
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
@@ -602,6 +612,7 @@ pub(crate) fn start_workloads(
     tc: &TidbCluster,
     keyspace_manager: &KeyspaceManager,
     switches: &Switches,
+    disable_ia: bool,
     runtime: &Runtime,
     tables: &[Arc<TableMeta>],
     running: Running,
@@ -647,7 +658,7 @@ pub(crate) fn start_workloads(
             running.clone(),
         )));
     }
-    if switches.ia_table_ratio > 0.0 && !tables.is_empty() {
+    if !disable_ia && switches.ia_table_ratio > 0.0 && !tables.is_empty() {
         async_handles.push(runtime.spawn(spawn_alter_storage_class(
             tc.clone(),
             keyspace_manager.clone(),
