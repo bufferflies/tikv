@@ -352,12 +352,8 @@ mod profiling {
         ENABLE_THREAD_EXCLUSIVE_ARENA.store(enable, Ordering::Relaxed);
     }
 
-    /// Set exclusive arena for the current thread to avoid contention.
-    pub fn thread_allocate_exclusive_arena() -> ProfResult<()> {
-        if !ENABLE_THREAD_EXCLUSIVE_ARENA.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
+    /// Allocate arena with the arena index returns.
+    fn allocate_exclusive_arena() -> ProfResult<u32> {
         unsafe {
             let mut index: u32 = tikv_jemalloc_ctl::raw::read(THREAD_ARENA).map_err(|e| {
                 ProfError::JemallocError(format!("failed to get thread's arena: {}", e))
@@ -378,17 +374,27 @@ mod profiling {
                     )));
                 }
             }
-            super::THREAD_ARENA_MAP.lock().unwrap().insert(
-                std::thread::current().id(),
-                (
-                    std::thread::current()
-                        .name()
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    index,
-                ),
-            );
+            Ok(index)
         }
+    }
+
+    /// Set exclusive arena for the current thread to avoid contention.
+    pub fn thread_allocate_exclusive_arena() -> ProfResult<()> {
+        if !ENABLE_THREAD_EXCLUSIVE_ARENA.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let index = allocate_exclusive_arena()?;
+        super::THREAD_ARENA_MAP.lock().unwrap().insert(
+            std::thread::current().id(),
+            (
+                std::thread::current()
+                    .name()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                index,
+            ),
+        );
         Ok(())
     }
 
@@ -399,45 +405,23 @@ mod profiling {
             return Ok(());
         }
 
-        unsafe {
-            let shared_prefix = std::thread::current()
-                .name()
-                .unwrap_or("unknown")
-                .to_string();
-            let mut shared_thread_arena_map = super::SHARED_THREAD_ARENA_MAP.lock().unwrap();
-            let (new_arena, index) = if let Some(idx) = shared_thread_arena_map.get(&shared_prefix)
-            {
-                (false, *idx)
-            } else {
-                // Create new arena if the shared prefix is new
-                let index: u32 = tikv_jemalloc_ctl::raw::read(ARENAS_CREATE).map_err(|e| {
-                    ProfError::JemallocError(format!("failed to create arena: {}", e))
-                })?;
-                if let Err(e) = tikv_jemalloc_ctl::raw::write(THREAD_ARENA, index) {
-                    return Err(ProfError::JemallocError(format!(
-                        "failed to set thread's arena: {}",
-                        e
-                    )));
-                }
-                shared_thread_arena_map.insert(shared_prefix.clone(), index);
-                (true, index)
-            };
-            if let Err(e) = tikv_jemalloc_ctl::raw::write(THREAD_ARENA, index) {
-                return Err(ProfError::JemallocError(format!(
-                    "failed to set thread's arena: {}",
-                    e
-                )));
-            }
-            if new_arena {
-                // This thread is the first thread belonging to this thread prefix, regarding
-                // this thread as the leader of this prefix. And adds it to the arena map with
-                // its thread id.
-                super::THREAD_ARENA_MAP
-                    .lock()
-                    .unwrap()
-                    .insert(std::thread::current().id(), (shared_prefix, index));
-            }
-        }
+        let shared_prefix = std::thread::current()
+            .name()
+            .unwrap_or("unknown")
+            .to_string();
+        let mut shared_thread_arena_map = super::SHARED_THREAD_ARENA_MAP.lock().unwrap();
+        if shared_thread_arena_map.get(&shared_prefix).is_none() {
+            // Create new arena if the shared prefix is new
+            let index = allocate_exclusive_arena()?;
+            shared_thread_arena_map.insert(shared_prefix.clone(), index);
+            // This thread is the first thread belonging to this thread prefix, regarding
+            // this thread as the leader of this prefix. And adds it to the arena map with
+            // its thread id.
+            super::THREAD_ARENA_MAP
+                .lock()
+                .unwrap()
+                .insert(std::thread::current().id(), (shared_prefix, index));
+        };
         Ok(())
     }
 
