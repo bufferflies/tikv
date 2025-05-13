@@ -88,6 +88,7 @@ impl GcRunner {
             }
             IaCtx::Disabled => None,
         };
+        info!("{} start gc runner", kv.get_engine_id(); "timeout" => ?timeout);
         Self {
             kv,
             ia_gc_runner,

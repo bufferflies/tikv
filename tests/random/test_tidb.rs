@@ -341,6 +341,8 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(500);
         conf.raft_store.pd_heartbeat_tick_interval = ReadableDuration::secs(5);
         conf.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(500);
+        conf.raft_store.local_file_gc_timeout = ReadableDuration::secs(60);
+        conf.raft_store.local_file_gc_tick_interval = ReadableDuration::secs(10);
 
         conf.rocksdb.writecf.block_size = ReadableSize::kb(2);
         conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
