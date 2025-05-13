@@ -4,7 +4,7 @@
 // release build.
 #![cfg(all(debug_assertions, feature = "debug-trace-txn-tasks"))]
 
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, io::Write as _};
 
 use crossbeam::queue::ArrayQueue;
 use error_code::{ErrorCode, ErrorCodeExt};
@@ -56,10 +56,12 @@ pub fn dump_txn_tasks() {
         task_errors.insert(cid, code);
     }
 
-    info!("dump txn tasks"; "count" => TXN_TASKS.len());
+    let stderr = std::io::stderr();
+    let _ = writeln!(stderr.lock(), "dump txn tasks"; "count" => TXN_TASKS.len());
     while let Some(mut task) = TXN_TASKS.pop() {
         let cid = task.cid;
         task.err = task_errors.remove(&cid);
-        info!("txn task: {:?}", task);
+        let _ = writeln!(stderr.lock(), "txn task: {:?}", task);
     }
+    let _ = stderr.lock().flush();
 }

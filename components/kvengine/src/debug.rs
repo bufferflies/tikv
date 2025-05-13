@@ -4,7 +4,7 @@
 // release build.
 #![cfg(all(debug_assertions, feature = "debug-trace-mem-table"))]
 
-use std::{fmt, sync::Arc};
+use std::{fmt, io::Write, sync::Arc};
 
 use crossbeam::queue::ArrayQueue;
 use dashmap::DashMap;
@@ -195,10 +195,21 @@ pub(crate) fn trace_switch_mem_table(shard: &Shard, mem_tbl: &memtable::CfTable,
 
 pub(crate) fn dump_mem_table_actions(region_id: u64) {
     let actions = TRACER.drain_mem_table_actions(region_id);
-    info!("mem table actions: region {}: {:?}", region_id, actions);
+
+    let stderr = std::io::stderr();
+    let _ = writeln!(
+        stderr.lock(),
+        "mem table actions: region {}: {:?}",
+        region_id,
+        actions
+    );
+    let _ = stderr.lock().flush();
 }
 
 pub(crate) fn dump_raft_logs(region_id: u64) {
     let raft_logs = TRACER.drain_raft_logs(region_id, None);
-    info!("raft logs: {}: {:?}", region_id, raft_logs);
+
+    let stderr = std::io::stderr();
+    let _ = writeln!(stderr.lock(), "raft logs: {}: {:?}", region_id, raft_logs);
+    let _ = stderr.lock().flush();
 }

@@ -1,6 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    io::Write as _,
     sync::{atomic::Ordering, Arc, RwLock},
     time::Duration,
 };
@@ -288,14 +289,18 @@ fn test_random_all() {
     // Statistics.
     let stats = WorkloadStats::collect();
     let region_number = pd_client.get_regions_number();
-    println!(
+    let stdout = std::io::stdout();
+    writeln!(
+        stdout.lock(),
         "TEST SUCCEED: elapsed {:?},{:?}, region {}, verified_records {}, {:?}",
         prepare_time.saturating_elapsed(),
         start_time.saturating_elapsed(),
         region_number,
         verified_records_count,
         stats,
-    );
+    )
+    .unwrap();
+    stdout.lock().flush().unwrap();
 }
 
 fn prepare_cluster(

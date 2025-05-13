@@ -2,6 +2,7 @@
 
 use std::{
     convert::TryInto,
+    io::Write as _,
     ops::Div,
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
@@ -198,14 +199,17 @@ fn test_random_with_tidb() {
 
     // Statistics.
     let stats = WorkloadStats::collect();
-
-    println!(
+    let stdout = std::io::stdout();
+    writeln!(
+        stdout.lock(),
         "TEST SUCCEED: elapsed {:?},{:?}, region_number {}, {:?}",
         prepare_time.saturating_elapsed(),
         start_time.saturating_elapsed(),
         region_number,
         stats
-    );
+    )
+    .unwrap();
+    stdout.lock().flush().unwrap();
 }
 
 pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {

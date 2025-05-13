@@ -3,6 +3,7 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
+    io::Write as _,
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
     time::Duration,
@@ -217,14 +218,17 @@ fn test_random_upgrade() {
 
     // Statistics.
     let stats = WorkloadStats::collect();
-
-    println!(
+    let stdout = std::io::stdout();
+    writeln!(
+        stdout.lock(),
         "TEST SUCCEED: elapsed {:?},{:?}, region_number {}, {:?}",
         prepare_time.saturating_elapsed(),
         start_time.saturating_elapsed(),
         region_number,
         stats
-    );
+    )
+    .unwrap();
+    stdout.lock().flush().unwrap();
 }
 
 fn prepare_tikv_servers(
