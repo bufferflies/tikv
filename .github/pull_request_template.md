@@ -13,7 +13,10 @@ Problem Summary:
   - Unit test
   - Integration test
   - Random test
+  - Upgrade test
   - Manual test (add detailed scripts or steps below)
   - No code
 - [ ] Do not break backward compatibility
+- [ ] Do not break compatibility during upgrade process *(write upgrade notes if not checked)*
+  - Upgrade Notes
 - [ ] Do not have performance regression
