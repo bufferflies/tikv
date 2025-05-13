@@ -4,7 +4,9 @@ use std::{
     cmp,
     collections::HashMap,
     convert::Infallible,
-    io::SeekFrom,
+    fs,
+    fs::File,
+    io::{Read, Seek, SeekFrom, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -32,19 +34,14 @@ use rand::Rng;
 use regex::Regex;
 use tempfile::TempDir;
 use tikv_util::{debug, error, info, time::Instant};
-use tokio::{
-    fs,
-    fs::File,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    runtime::Runtime,
-    sync::oneshot,
-    task::JoinHandle,
-};
+use tokio::{runtime::Runtime, sync::oneshot, task::JoinHandle};
 use url::form_urlencoded;
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
 type HttpResult = std::result::Result<Response<Body>, hyper::Error>;
 type DelayRules = Arc<DashMap<String /* path keyword */, u64 /* delay ms */>>;
+
+const OSS_SERVER_THREADS: usize = 64; // It's large as we are using sync io.
 
 const READ_IO_TYPE: IoType = IoType::ForegroundRead;
 const WRITE_IO_TYPE: IoType = IoType::ForegroundWrite;
@@ -122,7 +119,7 @@ pub struct ObjectStorageService {
 impl ObjectStorageService {
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
+            .worker_threads(OSS_SERVER_THREADS)
             .enable_all()
             .thread_name("oss")
             .build()
@@ -195,6 +192,7 @@ impl ObjectStorageService {
         ctx: Arc<ServiceContext>,
         req: Request<Body>,
     ) -> Result<Response<Body>> {
+        let start_time = Instant::now_coarse();
         let (parts, mut body) = req.into_parts();
         let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
         let parent = file_path
@@ -216,8 +214,8 @@ impl ObjectStorageService {
         ctx.do_delay().await;
         ctx.do_put_delay(parts.uri.path()).await;
 
-        fs::create_dir_all(parent).await?;
-        let mut file = File::create(&tmp_file_path).await?;
+        fs::create_dir_all(parent).context("create_dir")?;
+        let mut file = File::create(&tmp_file_path).context("create")?;
         debug!(
             "handle_put_object: ready to save object, store_path: {:?}, file_path: {}, tmp_file_path: {}",
             ctx.store_path,
@@ -225,33 +223,33 @@ impl ObjectStorageService {
             tmp_file_path.to_str().unwrap()
         );
 
+        let mut total_len = 0;
         while let Some(chunk) = body.next().await {
             let chunk = chunk?;
             let mut remains = chunk.len();
+            total_len += remains;
             let mut pos = 0;
             while remains > 0 {
                 let allowed = ctx
                     .write_limiter
                     .async_request(WRITE_IO_TYPE, IoOp::Write, remains)
                     .await;
-                file.write_all(&chunk.slice(pos..pos + allowed)).await?;
+                file.write_all(&chunk.slice(pos..pos + allowed))
+                    .context("write_all")?;
                 pos += allowed;
                 remains -= allowed;
             }
         }
-        file.sync_all().await?;
-        let len = file.metadata().await?.len();
         drop(file);
-        fs::rename(&tmp_file_path, &file_path).await?;
-        // sync_dir, see `file_system::sync_dir`
-        File::open(parent).await?.sync_all().await?;
+        fs::rename(&tmp_file_path, &file_path).context("rename")?;
 
         info!(
-            "handle_put_object: object save succeed, local file: {}, len: {}",
+            "handle_put_object: object save succeed, local file: {}, len: {}, takes: {:?}",
             file_path.to_str().unwrap(),
-            len
+            total_len,
+            start_time.saturating_elapsed()
         );
-        let resp = Response::new(Body::from(format!("file length {}", len)));
+        let resp = Response::new(Body::from(format!("file length {}", total_len)));
         Ok(resp)
     }
 
@@ -298,7 +296,7 @@ impl ObjectStorageService {
             "handle_head_object: file_path {}",
             file_path.to_str().unwrap()
         );
-        let res = match fs::metadata(file_path.to_str().unwrap()).await {
+        let res = match fs::metadata(file_path.to_str().unwrap()) {
             Ok(_) => Response::new(Body::empty()),
             Err(_) => {
                 info!("handle_get_object: path not found: {}", parts.uri.path());
@@ -318,7 +316,7 @@ impl ObjectStorageService {
             "handle_delete_object: file_path {}",
             file_path.to_str().unwrap()
         );
-        let res = match fs::remove_file(file_path.to_str().unwrap()).await {
+        let res = match fs::remove_file(file_path.to_str().unwrap()) {
             Ok(_) => Response::new(Body::empty()),
             Err(_) => {
                 info!("handle_get_object: path not found: {}", parts.uri.path());
@@ -332,23 +330,16 @@ impl ObjectStorageService {
         ctx: Arc<ServiceContext>,
         req: Request<Body>,
     ) -> Result<Response<Body>> {
+        let start_time = Instant::now_coarse();
         let (parts, _) = req.into_parts();
         let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
         let Ok((start, end)) = Self::parse_get_object_req_range(&parts.headers) else {
             return Ok(Self::bad_request("bad range".to_string()));
         };
-        let res = if let Ok(mut file) = File::open(&file_path).await {
+        let res = if let Ok(mut file) = File::open(&file_path) {
             ctx.do_delay().await;
 
-            let file_len = file.metadata().await.context("metadata")?.len();
-            info!(
-                "handle_get_object: file_path {}, len {}, range [{:?}, {:?})",
-                file_path.to_str().unwrap(),
-                file_len,
-                start,
-                end
-            );
-
+            let file_len = file.metadata().context("metadata")?.len();
             let (start, end, content_range) = match (start, end) {
                 (None, None) => (0, file_len, None),
                 (start, end) => {
@@ -375,7 +366,7 @@ impl ObjectStorageService {
             };
 
             if start > 0 {
-                file.seek(SeekFrom::Start(start)).await.context("seek")?;
+                file.seek(SeekFrom::Start(start)).context("seek")?;
             }
             let mut remains = (end - start) as usize;
             let mut pos = 0;
@@ -386,11 +377,19 @@ impl ObjectStorageService {
                     .async_request(READ_IO_TYPE, IoOp::Read, remains)
                     .await;
                 file.read_exact(&mut buf[pos..pos + allowed])
-                    .await
                     .context("read_exact")?;
                 pos += allowed;
                 remains -= allowed;
             }
+
+            info!(
+                "handle_get_object: file_path {}, len {}, range [{:?}, {:?}), takes {:?}",
+                file_path.to_str().unwrap(),
+                file_len,
+                start,
+                end,
+                start_time.saturating_elapsed()
+            );
 
             let mut resp = Response::builder();
             if let Some(content_range) = content_range {
