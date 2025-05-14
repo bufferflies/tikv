@@ -3,7 +3,10 @@
 use std::time::Duration;
 
 use online_config::OnlineConfig;
-use raftstore::coprocessor;
+use raftstore::{
+    coprocessor,
+    coprocessor::config::{SPLIT_KEYS_PER_MB, SPLIT_SIZE_MB},
+};
 use serde::{Deserialize, Serialize};
 use tikv_util::config::{ReadableDuration, ReadableSize};
 use time::Duration as TimeDuration;
@@ -111,6 +114,10 @@ pub struct Config {
     pub schema_worker_count: usize,
 }
 
+// WARNING:
+// These default values will be replaced by raftstore::Config through the
+// `from_old` method at tikv-server startup. DO NOT rely on these default
+// values.
 impl Default for Config {
     fn default() -> Config {
         Config {
@@ -136,8 +143,8 @@ impl Default for Config {
             raft_log_gc_size_limit: Some(ReadableSize::mb(32)),
             split_region_check_tick_interval: ReadableDuration::secs(3),
             switch_mem_table_check_tick_interval: ReadableDuration::minutes(1),
-            region_split_size: ReadableSize::mb(256),
-            region_split_keys: 2_560_000,
+            region_split_size: ReadableSize::mb(SPLIT_SIZE_MB),
+            region_split_keys: SPLIT_SIZE_MB * SPLIT_KEYS_PER_MB,
             enable_region_bucket: false,
             region_bucket_size: ReadableSize::mb(96),
             pd_heartbeat_tick_interval: ReadableDuration::minutes(1),
