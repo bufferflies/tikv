@@ -225,7 +225,8 @@ impl Default for VectorIndexFileFooter {
         VectorIndexFileFooter {
             index_size: 0,
             props_size: 0,
-            format_ver: FORMAT_VERSION_V2,
+            // TODO: change to FORMAT_VERSION_V2 after all tikv-servers updated.
+            format_ver: FORMAT_VERSION,
             magic_number: MAGIC_NUMBER,
         }
     }
@@ -1198,7 +1199,8 @@ mod tests {
         VectorIndexFile::new(Arc::new(local_file)).unwrap()
     }
 
-    #[test]
+    // TODO: uncomment this test after update to v2 format.
+    #[allow(dead_code)]
     fn test_vector_index_mvcc_delete() {
         ::test_util::init_log_for_test();
         {
