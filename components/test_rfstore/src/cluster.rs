@@ -1553,7 +1553,22 @@ impl<T: Simulator> Cluster<T> {
     }
 
     pub fn must_try_merge(&mut self, source: u64, target: u64) {
-        let resp = self.try_merge(source, target);
+        // initialized with a dummy value to pass compiling check.
+        let mut resp = RaftCmdResponse::default();
+        for _i in 0..100 {
+            resp = self.try_merge(source, target);
+            if is_error_response(&resp) {
+                let err_msg = resp.get_header().get_error().get_message();
+                // check if it is retryable error due to slow apply.
+                if err_msg.contains("log gap too large, skip merge")
+                    || err_msg.contains("check merge source not initial flushed")
+                {
+                    sleep_ms(50);
+                    continue;
+                }
+            }
+            break;
+        }
         if is_error_response(&resp) {
             panic!(
                 "{} failed to try merge to {}, resp {:?}",
