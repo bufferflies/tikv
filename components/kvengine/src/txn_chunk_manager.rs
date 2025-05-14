@@ -100,7 +100,7 @@ impl Default for TxnChunkManagerConfig {
 }
 
 pub fn with_pool_size(pool_size: usize) -> WorkerPool {
-    WorkerPool::Pool(
+    WorkerPool::from(
         tokio::runtime::Builder::new_multi_thread()
             .thread_name("txn-chunk-worker")
             .worker_threads(1) // for gc worker.

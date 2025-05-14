@@ -411,14 +411,22 @@ impl TxnFileLocks {
 
 #[derive(Debug)]
 pub enum WorkerPool {
-    Pool(tokio::runtime::Runtime),
+    Pool(Option<tokio::runtime::Runtime>),
     Handle(tokio::runtime::Handle),
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        if let Self::Pool(pool) = self {
+            pool.take().unwrap().shutdown_background();
+        }
+    }
 }
 
 impl WorkerPool {
     pub fn handle(&self) -> WorkerPoolHandle {
         match self {
-            Self::Pool(pool) => WorkerPoolHandle::new(pool.handle().clone()),
+            Self::Pool(pool) => WorkerPoolHandle::new(pool.as_ref().unwrap().handle().clone()),
             Self::Handle(handle) => WorkerPoolHandle::new(handle.clone()),
         }
     }
@@ -430,14 +438,14 @@ impl WorkerPool {
     {
         let future = tikv_util::init_task_local(future);
         match self {
-            Self::Pool(pool) => pool.spawn(future),
+            Self::Pool(pool) => pool.as_ref().unwrap().spawn(future),
             Self::Handle(handle) => handle.spawn(future),
         }
     }
 
     pub fn enter(&self) -> tokio::runtime::EnterGuard<'_> {
         match self {
-            Self::Pool(pool) => pool.enter(),
+            Self::Pool(pool) => pool.as_ref().unwrap().enter(),
             Self::Handle(handle) => handle.enter(),
         }
     }
@@ -451,7 +459,7 @@ impl From<tokio::runtime::Handle> for WorkerPool {
 
 impl From<tokio::runtime::Runtime> for WorkerPool {
     fn from(runtime: tokio::runtime::Runtime) -> Self {
-        Self::Pool(runtime)
+        Self::Pool(Some(runtime))
     }
 }
 
