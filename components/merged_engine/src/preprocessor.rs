@@ -1,10 +1,12 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
+use bytes::Buf;
 use cloud_encryption::{EncryptionKey, MasterKey};
-use kvengine::{ShardMeta, ENCRYPTION_KEY};
+use kvengine::{ShardMeta, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY};
 use kvproto::{metapb, raft_serverpb::MergeState};
 use raft_proto::eraftpb::HardState;
 use rfstore::store::{state::RaftState, PreprocessRef, RAFT_INIT_LOG_TERM};
+use tikv_util::codec::bytes::encode_bytes;
 
 pub(crate) struct Preprocessor {
     preprocessed_index: u64,
@@ -44,6 +46,10 @@ impl Preprocessor {
         peer.set_id(shard_meta.id);
         peer.set_store_id(store_id);
         region.set_peers(vec![peer.clone()].into());
+        region.set_start_key(encode_bytes(&shard_meta.range.outer_start));
+        if shard_meta.range.outer_end.chunk() != GLOBAL_SHARD_END_KEY {
+            region.set_end_key(encode_bytes(&shard_meta.range.outer_end));
+        }
         let raft_index = shard_meta.seq;
         let mut raft_state = RaftState::default();
         let mut raft_hard_state = HardState::default();

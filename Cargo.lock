@@ -6359,9 +6359,11 @@ name = "replication_worker"
 version = "0.1.0"
 dependencies = [
  "api_version",
+ "async-trait",
  "bytes",
  "cdc",
  "chrono",
+ "dashmap 5.1.0",
  "futures 0.3.28",
  "grpcio",
  "grpcio-health",
@@ -6370,6 +6372,7 @@ dependencies = [
  "kvproto",
  "merged_engine",
  "native_br",
+ "nix 0.24.3",
  "pd_client",
  "resolved_ts",
  "rfengine",
@@ -6383,6 +6386,7 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
+ "thiserror",
  "tidb_query_datatype",
  "tikv",
  "tikv_kv",

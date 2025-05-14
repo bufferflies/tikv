@@ -2,18 +2,26 @@
 
 mod apply_observer;
 mod config;
+mod error;
+mod provisioned;
 mod scheduler;
 mod worker;
 
+use std::{collections::HashMap, sync::Arc};
+
 pub use apply_observer::{CdcApplyObserver, RegionEvents};
+use async_trait::async_trait;
+use bytes::Bytes;
 use cdc::MemoryQuota;
+pub use error::{Error, Result};
 use kvproto::{cdcpb_grpc::ChangeData, raft_cmdpb::AdminRequest, tikvpb_grpc::Tikv};
 use merged_engine::MergedEngineConfig;
-pub use scheduler::{handle_cdc_request, ReplicationScheduler};
+use pd_client::PdClient;
+pub use provisioned::LocalProvider;
+use resolved_ts::Resolver;
+pub use scheduler::*;
 use serde_derive::{Deserialize, Serialize};
 pub use worker::ReplicationWorker;
-
-use crate::scheduler::ChangefeedRequest;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
@@ -22,13 +30,6 @@ pub struct ReplicationWorkerConfig {
     pub enabled: bool,
 
     pub grpc_addr: String,
-    // used for local mode.
-    pub pd_bin_path: String,
-    pub cdc_bin_path: String,
-    pub base_port: u16,
-
-    // used for test.
-    pub tidb_bin_path: String,
 
     // used for k8s mode.
     pub pd_sts_name: String,
@@ -39,9 +40,6 @@ pub struct ReplicationWorkerConfig {
 
 impl ReplicationWorkerConfig {
     pub fn override_from_env(&mut self) {
-        Self::env_or_default("PD_BIN", &mut self.pd_bin_path);
-        Self::env_or_default("CDC_BIN", &mut self.cdc_bin_path);
-        Self::env_or_default("TIDB_BIN", &mut self.tidb_bin_path);
         Self::env_or_default("PD_STS_NAME", &mut self.pd_sts_name);
         Self::env_or_default("CDC_STS_NAME", &mut self.cdc_sts_name);
     }
@@ -53,7 +51,52 @@ impl ReplicationWorkerConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct KeyspaceStates {
+    pub(crate) feeds: HashMap<String, ChangefeedRequest>,
+    pub(crate) pd_url: String,
+    pub(crate) cdc_addr: String,
+
+    // used in k8s.
+    pub(crate) pd_sts_name: String,
+    pub(crate) cdc_sts_name: String,
+}
+
+impl KeyspaceStates {
+    pub(crate) fn marshal(&self) -> Bytes {
+        serde_json::to_vec(self).unwrap().into()
+    }
+}
+
+#[async_trait]
+pub trait KeyspaceService: Send {
+    fn keyspace_id(&self) -> u32;
+
+    async fn start(&mut self) -> Result<()>;
+
+    async fn destroy(&mut self) -> Result<()>;
+
+    fn get_states(&self) -> &KeyspaceStates;
+
+    fn get_states_mut(&mut self) -> &mut KeyspaceStates;
+
+    fn get_pd_client(&self) -> Arc<dyn PdClient>;
+
+    fn get_resolver(&mut self) -> &mut Resolver;
+}
+
 pub enum CdcMsg {
+    AddKeyspace {
+        keyspace_id: u32,
+        pd_url: String,
+        cdc_addr: String,
+        cb: Box<dyn FnOnce(Result<()>) + Send>,
+    },
+    AddKeyspaceResult {
+        keyspace_id: u32,
+        result: Result<Box<dyn KeyspaceService>>,
+        cb: Box<dyn FnOnce(Result<()>) + Send>,
+    },
     NewTask {
         keyspace_id: u32,
         request: ChangefeedRequest,
@@ -70,6 +113,13 @@ pub enum CdcMsg {
     RemoveTask {
         keyspace_id: u32,
         change_feed_id: String,
+    },
+    RemoveKeyspace {
+        keyspace_id: u32,
+        cb: Box<dyn FnOnce(Result<()>) + Send>,
+    },
+    GetKeyspaces {
+        cb: Box<dyn FnOnce(Vec<u32>) + Send>,
     },
     Stop,
 }

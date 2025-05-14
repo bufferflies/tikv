@@ -3,6 +3,7 @@
 use chrono::Utc;
 use hyper::{Body, Method, Request, Response, Result, StatusCode};
 use serde::{Deserialize, Serialize};
+use tikv_util::{future::paired_future_callback, info};
 
 use crate::{config::ReplicaConfig, CdcMsg};
 
@@ -42,13 +43,14 @@ struct ChangefeedItem {
     error: Option<ErrorInfo>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ChangefeedRequest {
-    changefeed_id: Option<String>,
-    replica_config: Option<ReplicaConfig>,
-    sink_uri: String,
-    start_ts: Option<u64>,
-    target_ts: Option<u64>,
+    pub changefeed_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replica_config: Option<ReplicaConfig>,
+    pub sink_uri: String,
+    pub start_ts: Option<u64>,
+    pub target_ts: Option<u64>,
 }
 
 // Keep Serialize for response types
@@ -110,6 +112,10 @@ impl ReplicationScheduler {
     }
 
     pub async fn handle_http_request(&self, req: Request<Body>) -> Result<Response<Body>> {
+        if *req.method() == Method::GET && req.uri().path() == "/cdc/keyspace" {
+            return Ok(self.handle_get_keyspaces().await);
+        }
+
         let keyspace_id = {
             if let Some(keyspace_str) = extract_param(req.uri(), "keyspace_id") {
                 match keyspace_str.parse::<u32>() {
@@ -141,7 +147,11 @@ impl ReplicationScheduler {
                 let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
                 self.handle_create_changefeed(keyspace_id, &body_bytes)
             }
-
+            (&Method::POST, "/cdc/keyspace") => {
+                let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
+                self.handle_add_keyspace(keyspace_id, &body_bytes).await
+            }
+            (&Method::DELETE, "/cdc/keyspace") => self.handle_remove_keyspace(keyspace_id).await,
             (&Method::DELETE, path) if path.starts_with("/cdc/api/v2/changefeeds/") => {
                 Self::handle_delete_changefeed(keyspace_id, path)
             }
@@ -308,6 +318,83 @@ impl ReplicationScheduler {
             ),
         }
     }
+
+    async fn handle_add_keyspace(&self, keyspace_id: u32, body_bytes: &[u8]) -> Response<Body> {
+        info!("handle add keyspace");
+        match serde_json::from_slice::<ProvisionedKeyspace>(body_bytes) {
+            Ok(provisioned) => {
+                info!("provisioned keyspace {:?}", provisioned);
+                let (cb, fut) = paired_future_callback();
+                self.schedule(CdcMsg::AddKeyspace {
+                    keyspace_id,
+                    pd_url: provisioned.pd_url,
+                    cdc_addr: provisioned.cdc_addr,
+                    cb,
+                });
+                let res = fut.await.unwrap();
+                if let Err(err) = res {
+                    return Self::error_response(
+                        StatusCode::BAD_REQUEST,
+                        &err.to_string(),
+                        "CDC:ErrAddKeyspace",
+                    );
+                }
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::empty())
+                    .unwrap()
+            }
+            Err(e) => Self::error_response(
+                StatusCode::BAD_REQUEST,
+                &e.to_string(),
+                "CDC:ErrInvalidRequestBody",
+            ),
+        }
+    }
+
+    async fn handle_remove_keyspace(&self, keyspace_id: u32) -> Response<Body> {
+        info!("handle remove keyspace");
+        let (cb, fut) = paired_future_callback();
+        self.schedule(CdcMsg::RemoveKeyspace { keyspace_id, cb });
+        let res = fut.await.unwrap();
+        if let Err(err) = res {
+            return Self::error_response(
+                StatusCode::BAD_REQUEST,
+                &err.to_string(),
+                "CDC:ErrRemoveKeyspace",
+            );
+        }
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn handle_get_keyspaces(&self) -> Response<Body> {
+        info!("handle get keyspaces");
+        let (cb, fut) = paired_future_callback();
+        self.schedule(CdcMsg::GetKeyspaces { cb });
+        let res = fut.await.unwrap();
+        let keyspaces_resp = KeyspacesResp { keyspace_ids: res };
+        let res_str = serde_json::to_string(&keyspaces_resp).unwrap();
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(res_str.into())
+            .unwrap()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct ProvisionedKeyspace {
+    pub pd_url: String,
+    pub cdc_addr: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct KeyspacesResp {
+    pub keyspace_ids: Vec<u32>,
 }
 
 fn extract_param<'a>(uri: &'a hyper::Uri, key: &str) -> Option<&'a str> {

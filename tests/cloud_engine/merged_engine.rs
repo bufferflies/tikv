@@ -1,8 +1,9 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use api_version::ApiV2;
+use bytes::Bytes;
 use futures::executor::block_on;
 use kvengine::{dfs::S3Fs, table::BIT_DELETE, WRITE_CF};
 use kvproto::metapb;
@@ -90,8 +91,14 @@ fn test_merged_engine_once() {
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
     };
     let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
-    merged_engine.load_keyspaces(vec![keyspace_id]).unwrap();
+    let recover_handle = merged_engine.recover_handler.clone();
     let merged_kv = merged_engine.get_kv();
+    let mut keyspaces = HashMap::default();
+    keyspaces.insert(keyspace_id, Bytes::new());
+    MergedEngine::load_shards(&ctx, &merged_kv, recover_handle, &keyspaces).unwrap();
+    merged_engine
+        .set_keyspace_states(keyspace_id, vec![0].into())
+        .unwrap();
     let all_shards = merged_kv.get_all_shard_id_vers();
     assert_eq!(all_shards.len(), 2);
     let mut ref_store = kv_engine_to_ref_store(&merged_kv);
