@@ -955,6 +955,10 @@ impl ShardMeta {
                 meta.data_sequence = initial_seq;
                 meta.seq = initial_seq;
             }
+            if is_whole_keyspace_range(&meta.range.outer_start, &meta.range.outer_end) {
+                new_shards.push(meta);
+                continue;
+            }
             let (min_table_id, max_table_id) = get_table_id_from_data_bound(meta.data_bound());
             let columnar_table_ids: Vec<_> = old
                 .columnar_table_ids
@@ -973,6 +977,9 @@ impl ShardMeta {
             new_shards.push(meta);
         }
         for new_shard in &mut new_shards {
+            if is_whole_keyspace_range(&new_shard.range.outer_start, &new_shard.range.outer_end) {
+                continue;
+            }
             let new_shard_bound = new_shard.range.data_bound();
             for (fid, fm) in &old.files {
                 if new_shard_bound.overlap_bound(fm.data_bound()) {
