@@ -137,17 +137,18 @@ pub async fn wait_tiflash_or_columnar_replicas_available(
         let (available, progress) = query_tiflash_or_columnar_progress(pool, db, tb)
             .await
             .unwrap();
+        info!("{} wait TiFlash/Columnar replicas", tag; "db" => db, "tb" => tb,
+            "available" => available, "progress" => progress);
         if available {
-            info!("{} TiFlash replicas available", tag; "db" => db, "tb" => tb, "progress" => progress);
             return;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let (available, progress) = query_tiflash_or_columnar_progress(pool, db, tb)
         .await
         .unwrap();
     panic!(
-        "{} TiFlash replicas not available, db {}, tb {}, available {}, progress {}",
+        "{} TiFlash/Columnar replicas not available, db {}, tb {}, available {}, progress {}",
         tag, db, tb, available, progress,
     );
 }

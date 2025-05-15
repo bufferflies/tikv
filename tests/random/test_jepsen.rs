@@ -30,7 +30,7 @@ pub(crate) const ACCOUNTS_TABLE_NAME: &str = "accounts";
 const BANK_ACCOUNTS: usize = 10;
 const BANK_TXN_FILE_RATIO: f64 = 0.5;
 
-const TIFLASH_REPLICAS_AVAILABLE_TIMEOUT: Duration = Duration::from_secs(30);
+const TIFLASH_REPLICAS_AVAILABLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) async fn prepare_jepsen_bank(
     tc: TidbCluster,

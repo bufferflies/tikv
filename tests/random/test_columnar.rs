@@ -34,7 +34,7 @@ const COLUMNAR_TABLE_NAME: &str = "columnar_table";
 const EMBEDDED_DOC_TABLE_NAME: &str = "embedded_documents";
 const WORKLOAD_CONCURRENCY: usize = 1;
 const VECTOR_DIMENSION: u32 = 3;
-const COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT: Duration = Duration::from_secs(30);
+const COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) async fn prepare_columnar(
     tc: TidbCluster,
