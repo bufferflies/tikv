@@ -1106,7 +1106,7 @@ fn new_sst_table_for_columnar(
         // lifecycle.
         saved_vals.push(val.clone());
         let val = table::Value::new_with_meta_version(0, version, 0, &val);
-        builder.add(key.as_ref(), &val, None);
+        builder.add(key.as_ref(), &val, None).unwrap();
     }
     let mut data_buf = Vec::new();
     builder.finish(0, &mut data_buf);

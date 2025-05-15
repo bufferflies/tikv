@@ -670,7 +670,7 @@ impl EngineCore {
             let id = fids.pop().unwrap();
             builder.reset(id);
             while iter.valid() {
-                builder.add(iter.key(), &iter.value(), None);
+                builder.add(iter.key(), &iter.value(), None)?;
                 iter.next();
                 if builder.estimated_size() > max_table_size || !iter.valid() {
                     info!("builder estimated_size {}", builder.estimated_size());

@@ -2697,7 +2697,7 @@ async fn compact_destroy_range(
                             break;
                         }
                         if !del_prefixes.cover_prefix(key) {
-                            builder.add(cf, key, &iter.value(), None);
+                            builder.add(cf, key, &iter.value(), None)?;
                         }
                         iter.next_all_version();
                     }
@@ -2727,7 +2727,7 @@ async fn compact_destroy_range(
                     break;
                 }
                 if !del_prefixes.cover_prefix(key) {
-                    builder.add(key, &iter.value(), None);
+                    builder.add(key, &iter.value(), None)?;
                 }
                 iter.next_all_version();
             }
@@ -2968,7 +2968,7 @@ async fn compact_truncate_ts(
                         // Keep data in LOCK_CF. Locks would be resolved by TiDB.
                         // TODO: handle async commit
                         if cf == LOCK_CF || value.version <= truncate_ts {
-                            builder.add(cf, key, &value, None);
+                            builder.add(cf, key, &value, None)?;
                         }
                         iter.next_all_version();
                     }
@@ -2998,7 +2998,7 @@ async fn compact_truncate_ts(
                 // Keep data in LOCK_CF. Locks would be resolved by TiDB.
                 // TODO: handle async commit
                 if cf as usize == LOCK_CF || value.version <= truncate_ts {
-                    builder.add(key, &value, None);
+                    builder.add(key, &value, None)?;
                 }
                 iter.next_all_version();
             }
@@ -3222,7 +3222,7 @@ async fn compact_trim_over_bound(
                         if key >= req.inner_end() {
                             break;
                         }
-                        builder.add(cf, key, &iter.value(), None);
+                        builder.add(cf, key, &iter.value(), None)?;
                         iter.next_all_version();
                     }
                 }
@@ -3250,7 +3250,7 @@ async fn compact_trim_over_bound(
                 if key >= req.inner_end() {
                     break;
                 }
-                builder.add(key, &iter.value(), None);
+                builder.add(key, &iter.value(), None)?;
                 iter.next_all_version();
             }
             if builder.is_empty() {
@@ -3683,7 +3683,11 @@ async fn compact_for_cf(
                     let um = UserMeta::from_slice(user_meta);
                     if cf == WRITE_CF && um.commit_ts < safe_ts && val.is_value_empty() {
                         if keep_latest_obsolete_tombstone {
-                            sst_builder.add(key, &table::Value::new_tombstone(val.version), None);
+                            sst_builder.add(
+                                key,
+                                &table::Value::new_tombstone(val.version),
+                                None,
+                            )?;
                         }
                         iter.next_all_version();
                         continue;
@@ -3699,7 +3703,7 @@ async fn compact_for_cf(
             let mut need_recompress_blob = false;
             if val.is_blob_ref() {
                 if blob_tables.is_empty() {
-                    sst_builder.add(key, &val, None);
+                    sst_builder.add(key, &val, None)?;
                 } else {
                     // If it is a blob link, we need to deref it and may need to decompress it as
                     // well.
@@ -3750,22 +3754,22 @@ async fn compact_for_cf(
                             Some(blob_ref.original_len),
                             need_re_encrypt,
                         );
-                        sst_builder.add(key, &val, Some(new_blob_ref));
+                        sst_builder.add(key, &val, Some(new_blob_ref))?;
                     } else {
                         val.fill_in_blob(blob_or_compressed_blob);
-                        sst_builder.add(key, &val, None);
+                        sst_builder.add(key, &val, None)?;
                     }
                 }
             } else if val.value_len() >= bt_config.min_blob_size as usize {
                 let blob_ref = bt_builder.add(key, &val);
                 val.set_blob_ref();
-                sst_builder.add(key, &val, Some(blob_ref));
+                sst_builder.add(key, &val, Some(blob_ref))?;
             } else {
-                sst_builder.add(key, &val, None);
+                sst_builder.add(key, &val, None)?;
             }
         } else {
             // If we are not building blob tables, we can write to the SST blindly.
-            sst_builder.add(key, &val, None);
+            sst_builder.add(key, &val, None)?;
         }
         iter.next_all_version();
     }

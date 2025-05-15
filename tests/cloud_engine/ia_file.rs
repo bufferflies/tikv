@@ -552,7 +552,9 @@ fn make_sstable(
         rng.fill_bytes(val.as_mut_slice());
         let value_buf = Value::encode_buf(0u8, &[0], ver, &val);
         let value = Value::decode(&value_buf);
-        builder.add(InnerKey::from_inner_buf(&key), &value, None);
+        builder
+            .add(InnerKey::from_inner_buf(&key), &value, None)
+            .unwrap();
 
         if multi_ver && rng.gen_ratio(1, 4) {
             ver -= 1;

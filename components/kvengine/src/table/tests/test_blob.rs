@@ -58,7 +58,9 @@ pub(crate) fn build_blob_test_table_with_kvs(kvs: &Vec<(String, String)>) -> (Ss
         let value_buf = Value::encode_buf(meta, &[0], 0, v.as_bytes());
         let mut v = Value::decode(value_buf.as_slice());
         let blob_ref = test_store_value_in_blob_table(&mut blob_builder, k, &mut v);
-        sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), &v, Some(blob_ref));
+        sst_builder
+            .add(InnerKey::from_inner_buf(k.as_bytes()), &v, Some(blob_ref))
+            .unwrap();
     }
 
     let mut buf = Vec::with_capacity(sst_builder.estimated_size());

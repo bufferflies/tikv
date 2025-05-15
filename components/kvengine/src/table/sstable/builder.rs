@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{convert::TryFrom, mem, ops::Deref};
+use std::{cmp::Ordering, convert::TryFrom, mem, ops::Deref};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut};
@@ -10,9 +10,10 @@ use xorf::BinaryFuse8;
 
 use super::super::table::Value;
 use crate::table::{
-    blobtable::BlobRef, ChecksumType, InnerKey, BIT_HAS_OLD_VERSION, LZ4_COMPRESSION,
-    NO_COMPRESSION, VALUE_VERSION_LEN, ZSTD_COMPRESSION,
+    blobtable::BlobRef, ChecksumType, Error, InnerKey, Result, BIT_HAS_OLD_VERSION,
+    LZ4_COMPRESSION, NO_COMPRESSION, VALUE_VERSION_LEN, ZSTD_COMPRESSION,
 };
+
 pub const PROP_KEY_SMALLEST: &str = "smallest";
 pub const PROP_KEY_BIGGEST: &str = "biggest";
 pub const PROP_KEY_MAX_TS: &str = "max_ts";
@@ -209,50 +210,67 @@ impl Builder {
         buf.put_slice(val);
     }
 
-    pub fn add(&mut self, inner_key: InnerKey<'_>, val: &Value, blob_ref: Option<BlobRef>) {
+    // Keys must be added in increasing order; otherwise, an out-of-order error will
+    // be returned.
+    pub fn add(
+        &mut self,
+        inner_key: InnerKey<'_>,
+        val: &Value,
+        blob_ref: Option<BlobRef>,
+    ) -> Result<()> {
         let key = inner_key.deref();
-        if self.block_builder.same_last_key(key) {
-            self.block_builder
-                .set_last_entry_old_ver_if_zero(val.version);
-            self.old_builder.add_entry(key, *val, blob_ref);
-            if let Some(blob_ref) = blob_ref {
-                self.total_blob_size += blob_ref.len as u64;
-            } else if val.is_blob_ref() {
-                self.total_blob_size += val.get_blob_ref().len as u64;
-            }
-            self.old_entries += 1;
-        } else {
-            // Only try to finish block when the key is different than last.
-            if self.block_builder.need_finish_block(self.block_size) {
+        match self.block_builder.last_key_order(key) {
+            Some(Ordering::Equal) => {
                 self.block_builder
-                    .finish_block(self.sst_fid, self.checksum_type);
+                    .set_last_entry_old_ver_if_zero(val.version);
+                self.old_builder.add_entry(key, *val, blob_ref);
+                if let Some(blob_ref) = blob_ref {
+                    self.total_blob_size += blob_ref.len as u64;
+                } else if val.is_blob_ref() {
+                    self.total_blob_size += val.get_blob_ref().len as u64;
+                }
+                self.old_entries += 1;
             }
-            if self.old_builder.need_finish_block(self.block_size) {
-                self.old_builder
-                    .finish_block(self.sst_fid, self.checksum_type);
+            Some(Ordering::Greater) => {
+                return Err(Error::OutOfOrder(
+                    self.block_builder.block.tmp_keys.get_last().to_vec(),
+                    key.to_vec(),
+                ));
             }
-            self.kv_size += (key.len() + val.user_meta_len()) as u64;
-            if let Some(blob_ref) = blob_ref {
-                self.total_blob_size += blob_ref.len as u64;
-                self.kv_size += blob_ref.original_len as u64;
-            } else if val.is_blob_ref() {
-                self.total_blob_size += val.get_blob_ref().len as u64;
-                self.kv_size += val.get_blob_ref().original_len as u64;
-            } else {
-                self.kv_size += val.value_len() as u64;
-            }
-            self.block_builder.add_entry(key, *val, blob_ref);
-            self.key_hashes.push(farmhash::fingerprint64(key));
-            if self.smallest.is_empty() {
-                self.smallest.extend_from_slice(key);
-            }
-            if self.max_ts < val.version {
-                self.max_ts = val.version;
+            _ => {
+                // Only try to finish block when the key is different than last.
+                if self.block_builder.need_finish_block(self.block_size) {
+                    self.block_builder
+                        .finish_block(self.sst_fid, self.checksum_type);
+                }
+                if self.old_builder.need_finish_block(self.block_size) {
+                    self.old_builder
+                        .finish_block(self.sst_fid, self.checksum_type);
+                }
+                self.kv_size += (key.len() + val.user_meta_len()) as u64;
+                if let Some(blob_ref) = blob_ref {
+                    self.total_blob_size += blob_ref.len as u64;
+                    self.kv_size += blob_ref.original_len as u64;
+                } else if val.is_blob_ref() {
+                    self.total_blob_size += val.get_blob_ref().len as u64;
+                    self.kv_size += val.get_blob_ref().original_len as u64;
+                } else {
+                    self.kv_size += val.value_len() as u64;
+                }
+                self.block_builder.add_entry(key, *val, blob_ref);
+                self.key_hashes.push(farmhash::fingerprint64(key));
+                if self.smallest.is_empty() {
+                    self.smallest.extend_from_slice(key);
+                }
+                if self.max_ts < val.version {
+                    self.max_ts = val.version;
+                }
             }
         }
         if val.value_len() == 0 {
             self.tombs += 1;
         }
+        Ok(())
     }
 
     pub fn estimated_size(&self) -> usize {
@@ -610,12 +628,12 @@ impl BlockBuilder {
         &self.buf
     }
 
-    fn same_last_key(&self, key: &[u8]) -> bool {
+    fn last_key_order(&self, key: &[u8]) -> Option<Ordering> {
         if self.block.tmp_keys.length() > 0 {
             let last = self.block.tmp_keys.get_last();
-            return last.eq(key);
+            return Some(last.cmp(key));
         }
-        false
+        None
     }
 
     fn set_last_entry_old_ver_if_zero(&mut self, ver: u64) {
@@ -1321,13 +1339,13 @@ mod tests {
         let value = create_test_value(100, b"test_value");
 
         let mut builder_with_data = builder;
-        builder_with_data.add(key, &value, None);
+        builder_with_data.add(key, &value, None).unwrap();
 
         assert!(!builder_with_data.is_empty()); // Should be false after adding an entry
     }
 
     #[test]
-    fn test_builder_get_smallest() {
+    fn test_builder_smallest_and_biggest() {
         let mut builder = Builder::new(
             123,                  // sst_fid
             4096,                 // block_size
@@ -1338,56 +1356,32 @@ mod tests {
         );
 
         // Insert multiple keys
-        builder.smallest = b"smallest_key".to_vec();
-        builder.add(
-            InnerKey::from_inner_buf(b"key1"),
-            &create_test_value(100, b"value1"),
-            None,
-        );
-        builder.add(
-            InnerKey::from_inner_buf(b"key2"),
-            &create_test_value(100, b"value2"),
-            None,
-        );
-        builder.add(
-            InnerKey::from_inner_buf(b"smallest_key"),
-            &create_test_value(100, b"value3"),
-            None,
-        );
+        builder
+            .add(
+                InnerKey::from_inner_buf(b"key1"),
+                &create_test_value(100, b"value1"),
+                None,
+            )
+            .unwrap();
+        builder
+            .add(
+                InnerKey::from_inner_buf(b"key2"),
+                &create_test_value(100, b"value2"),
+                None,
+            )
+            .unwrap();
+        builder
+            .add(
+                InnerKey::from_inner_buf(b"key3"),
+                &create_test_value(100, b"value3"),
+                None,
+            )
+            .unwrap();
+        let mut buf = Vec::new();
+        let result = builder.finish(0, &mut buf);
 
-        assert_eq!(builder.get_smallest(), b"smallest_key"); // Should return the smallest key
-    }
-
-    #[test]
-    fn test_builder_get_biggest() {
-        let mut builder = Builder::new(
-            123,                  // sst_fid
-            4096,                 // block_size
-            LZ4_COMPRESSION,      // compression_tp
-            3,                    // compression_lvl
-            ChecksumType::Crc32c, // checksum_type
-            None,                 // encryption_key
-        );
-
-        // Insert multiple keys
-        builder.biggest = b"biggest_key".to_vec();
-        builder.add(
-            InnerKey::from_inner_buf(b"key1"),
-            &create_test_value(100, b"value1"),
-            None,
-        );
-        builder.add(
-            InnerKey::from_inner_buf(b"key2"),
-            &create_test_value(100, b"value2"),
-            None,
-        );
-        builder.add(
-            InnerKey::from_inner_buf(b"biggest_key"),
-            &create_test_value(100, b"value3"),
-            None,
-        );
-
-        assert_eq!(builder.get_biggest(), b"biggest_key"); // Should return the biggest key
+        assert_eq!(result.smallest, b"key1");
+        assert_eq!(result.biggest, b"key3");
     }
 
     #[test]
@@ -1399,7 +1393,7 @@ mod tests {
             let raw_key = format!("key{}", i).into_bytes();
             let key = InnerKey::from_inner_buf(&raw_key);
             let value = create_test_value(100, format!("value{}", i).as_bytes());
-            builder.add(key, &value, None);
+            builder.add(key, &value, None).unwrap();
         }
 
         let size = builder.estimated_size();
@@ -1415,7 +1409,7 @@ mod tests {
             let raw_key = format!("key{}", i).into_bytes();
             let key = InnerKey::from_inner_buf(&raw_key);
             let value = create_test_value(100, format!("value{}", i).as_bytes());
-            builder.add(key, &value, None);
+            builder.add(key, &value, None).unwrap();
         }
 
         let mut buf = Vec::new();
@@ -1423,6 +1417,21 @@ mod tests {
 
         assert_eq!(result.id, 123);
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_builder_add_out_of_order() {
+        let mut builder = create_test_builder();
+
+        let raw_key = b"test_key_1".to_vec();
+        let key = InnerKey::from_inner_buf(&raw_key);
+        let value = create_test_value(100, b"test_value");
+
+        builder.add(key, &value, None).unwrap();
+
+        let out_of_order_key = b"test_key_0".to_vec();
+        let out_of_order_key = InnerKey::from_inner_buf(&out_of_order_key);
+        assert!(builder.add(out_of_order_key, &value, None).is_err());
     }
 
     #[test]
@@ -1436,7 +1445,7 @@ mod tests {
 
         let blob_ref = create_blob_ref(42, 100);
 
-        builder.add(key, &value, Some(blob_ref));
+        builder.add(key, &value, Some(blob_ref)).unwrap();
 
         // Should have successfully added entry with blob reference
         assert!(!builder.block_builder.block.tmp_keys.buf.is_empty());
@@ -1462,7 +1471,7 @@ mod tests {
         let key = InnerKey::from_inner_buf(&raw_key);
         let value = create_test_value(100, b"test_value");
 
-        builder.add(key, &value, None);
+        builder.add(key, &value, None).unwrap();
 
         // Should have successfully added entry
         assert!(!builder.block_builder.block.tmp_keys.buf.is_empty());

@@ -1458,7 +1458,14 @@ impl BuildingWorker {
 
                 // The key is already trimmed prefix, so we can use `from_inner_buf` here.
                 let inner_key = InnerKey::from_inner_buf(key);
-                builder.add(inner_key, &Value::decode(&val_buf), None);
+                if let Err(e) = builder.add(inner_key, &Value::decode(&val_buf), None) {
+                    info!(
+                        "{} worker-{} failed to build sst file {}, error: {:?}",
+                        task_id, worker_id, file_id, e
+                    );
+                    sender.send(Err(Error::Other(Box::new(e)))).unwrap();
+                    return;
+                }
                 entries += 1;
             }
             batch.clear();

@@ -168,7 +168,7 @@ impl Engine {
             }
             flush.set_properties(filtered_props);
         }
-        let results = self.build_l0_tables(m, &task).await;
+        let results = self.build_l0_tables(m, &task).await?;
         if results.is_empty() {
             return Ok(cs);
         }
@@ -315,7 +315,7 @@ impl Engine {
         let (tx, mut rx) = unbounded_channel();
         let mut send_cnt = 0;
         for m in &flush.mem_tbls {
-            let results = self.build_l0_tables(m, &task).await;
+            let results = self.build_l0_tables(m, &task).await?;
             for (l0_create, data) in results {
                 self.persist_table(l0_create, data, tx.clone(), task.id_ver);
                 send_cnt += 1;
@@ -348,7 +348,7 @@ impl Engine {
         &self,
         m: &CfTable,
         task: &FlushTask,
-    ) -> Vec<(L0Create, Bytes)> {
+    ) -> Result<Vec<(L0Create, Bytes)>> {
         let start = task.inner_start();
         let end = task.inner_end();
         let opts = &self.opts.table_builder_options;
@@ -409,7 +409,7 @@ impl Engine {
                     write_cf_builder.reset(next_fid);
                 }
                 let v = it.value();
-                write_cf_builder.add(key, &v, None);
+                write_cf_builder.add(key, &v, None)?;
                 it.next_all_version();
             }
             if !write_cf_builder.is_empty() {
@@ -443,7 +443,7 @@ impl Engine {
                     // versions.
                 } else {
                     let v = it.value();
-                    l0_builder.add(cf, key, &v, None);
+                    l0_builder.add(cf, key, &v, None)?;
                     if rc {
                         prev_key.truncate(0);
                         prev_key.extend_from_slice(key.deref());
@@ -459,7 +459,7 @@ impl Engine {
             let tag = ShardTag::new(self.get_engine_id(), task.id_ver);
             info!("{} flush split to {} files", tag, l0s.len());
         }
-        l0s
+        Ok(l0s)
     }
 
     fn finish_builder_for_l0(builder: &mut Builder) -> (L0Create, Bytes) {

@@ -387,9 +387,10 @@ impl L0Builder {
         key: InnerKey<'_>,
         val: &Value,
         external_link: Option<BlobRef>,
-    ) {
-        self.builders[cf].add(key, val, external_link);
+    ) -> Result<()> {
+        self.builders[cf].add(key, val, external_link)?;
         self.count += 1;
+        Ok(())
     }
 
     pub fn finish(&mut self) -> (L0Create, Bytes) {
@@ -466,7 +467,7 @@ mod tests {
         // Test adding a key-value pair to the L0Builder
         let key = InnerKey::from_inner_buf(b"test_key");
         let value = Value::new_with_version(b"test_value", 1);
-        builder.add(0, key, &value, None);
+        builder.add(0, key, &value, None).unwrap();
         assert!(!builder.is_empty()); // Ensure the builder is not empty after adding an entry
 
         // Test finishing the L0Builder and creating an L0Table
@@ -483,7 +484,7 @@ mod tests {
         // Test is_empty after adding an entry
         let key = InnerKey::from_inner_buf(b"test_key2");
         let value = Value::new_with_version(b"test_value2", 1);
-        builder2.add(0, key, &value, None);
+        builder2.add(0, key, &value, None).unwrap();
         assert!(!builder2.is_empty()); // Ensure the builder is not empty after adding an entry
     }
 

@@ -1453,7 +1453,7 @@ async fn new_table(
             saved_vals.push(val.clone());
             table::Value::new_with_meta_version(0, version, 0, &val)
         };
-        builder.add(key.as_ref(), &val, None);
+        builder.add(key.as_ref(), &val, None).unwrap();
     }
     let mut data_buf = Vec::new();
     builder.finish(0, &mut data_buf);
@@ -1502,11 +1502,11 @@ fn new_l0table_file(
             let key = engine.key_builder.i_to_inner_key(i);
             if del[cf] {
                 let val = table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[]);
-                builder.add(cf, key.as_ref(), &val, None);
+                builder.add(cf, key.as_ref(), &val, None).unwrap();
             } else {
                 let val_buf = key.as_ref().repeat(2);
                 let val = table::Value::new_with_meta_version(0, version, 0, &val_buf);
-                builder.add(cf, key.as_ref(), &val, None);
+                builder.add(cf, key.as_ref(), &val, None).unwrap();
             }
         }
     }

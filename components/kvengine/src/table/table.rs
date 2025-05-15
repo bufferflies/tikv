@@ -540,6 +540,8 @@ pub enum Error {
     IaMgr(String),
     #[error("Deadline is exceeded: {0}")]
     DeadlineExceeded(String),
+    #[error("out of order, previous: {:?}, current: {:?}", .0, .1)]
+    OutOfOrder(Vec<u8>, Vec<u8>),
     #[error("{0}")]
     Other(String),
 }

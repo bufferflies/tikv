@@ -1129,7 +1129,9 @@ pub(crate) mod test_util {
         for (k, v) in kvs {
             let value_buf = Value::encode_buf(meta, &[0], 0, v.as_bytes());
             let value = &mut Value::decode(value_buf.as_slice());
-            sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), value, None);
+            sst_builder
+                .add(InnerKey::from_inner_buf(k.as_bytes()), value, None)
+                .unwrap();
         }
 
         let mut buf = Vec::with_capacity(sst_builder.estimated_size());
@@ -1185,22 +1187,26 @@ pub(crate) mod test_util {
         let meta = 0u8;
         for (k, v) in kvs {
             let val_buf = Value::encode_buf(meta, &[0], 9, v.as_bytes());
-            sst_builder.add(
-                InnerKey::from_inner_buf(k.as_bytes()),
-                &Value::decode(val_buf.as_slice()),
-                None,
-            );
+            sst_builder
+                .add(
+                    InnerKey::from_inner_buf(k.as_bytes()),
+                    &Value::decode(val_buf.as_slice()),
+                    None,
+                )
+                .unwrap();
             let mut r = rand::thread_rng();
             for i in (1..=8).rev() {
                 // A lower probability than 1/8 to generate more entries with no old version.
                 if r.gen_ratio(1, 10) {
                     let val_str = format!("{}_{}", v, i);
                     let val_buf = Value::encode_buf(meta, &[0], i, val_str.as_bytes());
-                    sst_builder.add(
-                        InnerKey::from_inner_buf(k.as_bytes()),
-                        &Value::decode(val_buf.as_slice()),
-                        None,
-                    );
+                    sst_builder
+                        .add(
+                            InnerKey::from_inner_buf(k.as_bytes()),
+                            &Value::decode(val_buf.as_slice()),
+                            None,
+                        )
+                        .unwrap();
                     all_cnt += 1;
                 }
             }
