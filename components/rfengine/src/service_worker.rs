@@ -15,10 +15,10 @@ use bytes::Bytes;
 use rfenginepb::StoreBackupMeta;
 use slog_global::{error, info};
 use tikv_util::{
-    mpsc::{Receiver, Sender},
+    mpsc::{Receiver, SendError, Sender},
     sys::thread::StdThreadBuildWrapper,
     time::Instant,
-    DFS_WORKER_THREAD_NAME,
+    warn, DFS_WORKER_THREAD_NAME,
 };
 
 use crate::{
@@ -33,6 +33,14 @@ use crate::{
 pub(crate) struct ObjectStorageWorkerHandle {
     task_sender: Sender<ObjectStorageTask>,
     handle: JoinHandle<()>,
+}
+
+impl ObjectStorageWorkerHandle {
+    fn try_send(&self, task: ObjectStorageTask) {
+        if let Err(SendError(t)) = self.task_sender.send(task) {
+            warn!("send task failed"; "task" => ?t);
+        }
+    }
 }
 
 pub(crate) enum ServiceTask {
@@ -201,12 +209,7 @@ impl ServiceWorker {
             if self.is_lightweight_enabled() {
                 // Send write task to object storage worker.
                 let task = crate::dfs_worker::ObjectStorageTask::Sync { epoch_id, file_off };
-                self.dfs_worker_handle
-                    .as_ref()
-                    .unwrap()
-                    .task_sender
-                    .send(task)
-                    .unwrap();
+                self.dfs_worker_handle.as_ref().unwrap().try_send(task);
             }
         }
     }
@@ -280,9 +283,7 @@ impl ServiceWorker {
             self.dfs_worker_handle
                 .as_ref()
                 .unwrap()
-                .task_sender
-                .send(ObjectStorageTask::Flush)
-                .unwrap();
+                .try_send(ObjectStorageTask::Flush);
         }
     }
 
@@ -294,36 +295,25 @@ impl ServiceWorker {
             writer.rotate().unwrap();
             if let Some(dfs_worker_handle) = &self.dfs_worker_handle {
                 // Send rotate task to object storage worker.
-                dfs_worker_handle
-                    .task_sender
-                    .send(ObjectStorageTask::Rotate { epoch_id, file_off })
-                    .unwrap();
+                dfs_worker_handle.try_send(ObjectStorageTask::Rotate { epoch_id, file_off });
             }
         }
         self.compact_worker_handle
-            .task_sender
-            .send(CompactTask::Compact { epoch_id })
-            .unwrap();
+            .try_send(CompactTask::Compact { epoch_id });
     }
 
     fn handle_close(&mut self, force: bool) {
         // Close and join object storage thread.
-        if let Some(ObjectStorageWorkerHandle {
-            task_sender,
-            handle,
-        }) = self.dfs_worker_handle.take()
-        {
+        if let Some(dfs_worker_handle) = self.dfs_worker_handle.take() {
             // If force close, we skip flushing wal chunk and close task thread.
             if !force {
-                task_sender.send(ObjectStorageTask::Flush).unwrap();
+                dfs_worker_handle.try_send(ObjectStorageTask::Flush);
             }
-            task_sender.send(ObjectStorageTask::Close).unwrap();
-            handle.join().unwrap();
+            dfs_worker_handle.try_send(ObjectStorageTask::Close);
+            dfs_worker_handle.handle.join().unwrap();
         }
         self.compact_worker_handle
-            .task_sender
-            .send(CompactTask::Close { force })
-            .unwrap();
+            .try_send(CompactTask::Close { force });
         let join_handle = self.compact_worker_handle.handle.take().unwrap();
         join_handle.join().unwrap();
     }
@@ -336,9 +326,7 @@ impl ServiceWorker {
             self.lightweight_backup(task);
         } else {
             self.compact_worker_handle
-                .task_sender
-                .send(CompactTask::HeavyBackup(task))
-                .unwrap();
+                .try_send(CompactTask::HeavyBackup(task));
         }
     }
 

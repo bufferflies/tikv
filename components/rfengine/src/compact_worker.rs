@@ -31,7 +31,7 @@ use rfenginepb::{
 use slog_global::*;
 use tikv_util::{
     backoff,
-    mpsc::{Receiver, Sender},
+    mpsc::{Receiver, SendError, Sender},
     sys::thread::StdThreadBuildWrapper,
     time::Instant,
     DFS_WORKER_THREAD_NAME,
@@ -55,6 +55,14 @@ const COMPACT_RETRY_TIMES: usize = 30;
 pub(crate) struct WorkerHandle {
     pub(crate) task_sender: Sender<CompactTask>,
     pub(crate) handle: Option<JoinHandle<()>>,
+}
+
+impl WorkerHandle {
+    pub(crate) fn try_send(&self, task: CompactTask) {
+        if let Err(SendError(t)) = self.task_sender.send(task) {
+            warn!("failed to send task {:?}", t);
+        }
+    }
 }
 
 pub(crate) struct CompactWorker {
@@ -782,6 +790,7 @@ pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32) -> PathBuf {
     dir.join(format!("{}.wal", idx))
 }
 
+#[derive(Debug)]
 pub(crate) enum CompactTask {
     Compact { epoch_id: u32 },
     HeavyBackup(BackupTask),
@@ -822,6 +831,15 @@ pub struct BackupTask {
     pub callback: Box<dyn FnOnce(Result<StoreBackupMeta>) + Send>,
     pub(crate) file_off: u64,
     pub(crate) config: BackupConfig,
+}
+
+impl fmt::Debug for BackupTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BackupTask")
+            .field("file_off", &self.file_off)
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 impl BackupTask {

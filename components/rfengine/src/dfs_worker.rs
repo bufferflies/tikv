@@ -587,6 +587,7 @@ impl ChunkHeader {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum ObjectStorageTask {
     Sync { epoch_id: u32, file_off: u64 }, // Sync the `epoch_id` wal file to `file_off`.
     Rotate { epoch_id: u32, file_off: u64 }, // Rotate to next epoch.
