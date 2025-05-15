@@ -2200,29 +2200,34 @@ impl<'a> PeerMsgHandler<'a> {
             // It's possible that the shard mem-table is empty but the data sequence is
             // smaller. All the entries between persisted_log_idx and last_idx are no kv
             // entries, there is no chance to trigger flush, the data sequence fall behind.
-            if let Some(shard) = self.ctx.global.engines.kv.get_shard(self.region_id()) {
-                let shard_write_sequence = shard.get_write_sequence();
-                if shard.data_all_persisted() && shard_write_sequence > persisted_log_idx {
-                    // Advance the data sequence to the shard write sequence.
-                    //
-                    // The leader change empty entry doesn't update the shard write sequence.
-                    // So there can be many empty entries that can not be GCed.
-
-                    // Update data sequence to shard write sequence instead of last index because
-                    // we don't want to pay the cost to rewrite shard meta on each leader change.
+            let Some(shard) = self.ctx.global.engines.kv.get_shard(self.region_id()) else {
+                return;
+            };
+            if shard.data_all_persisted() {
+                // All raft logs are applied and mem-table is empty, we can safely truncate to
+                // 'to_truncate_idx'. But we don't want to pay the cost of
+                // rewriting shard meta on each leader change. So we tolerate
+                // config.raft_log_gc_no_kv_count to reduce the frequency of shard meta
+                // rewriting.
+                let truncate_no_kv_logs =
+                    persisted_log_idx + self.ctx.cfg.raft_log_gc_no_kv_count < to_truncate_idx;
+                // change set raft logs are less frequent, we can always truncate it.
+                let truncate_change_set_logs = shard.get_write_sequence() > persisted_log_idx;
+                if truncate_no_kv_logs || truncate_change_set_logs {
+                    // Advance the data sequence to to_truncate_idx.
                     let store = self.peer.mut_store();
-                    let term = store.term(shard_write_sequence).unwrap();
+                    let term = store.term(to_truncate_idx).unwrap();
                     // workaround for borrow checker.
                     let mut shard_meta = store.shard_meta.take().unwrap();
-                    shard_meta.data_sequence = shard_write_sequence;
+                    shard_meta.data_sequence = to_truncate_idx;
                     shard_meta.set_property(TERM_KEY, &term.to_le_bytes());
                     write_engine_meta(&mut self.ctx.raft_wb, peer_id, &shard_meta);
                     self.peer.mut_store().shard_meta = Some(shard_meta);
-                    persisted_log_idx = shard_write_sequence;
+                    persisted_log_idx = to_truncate_idx;
                     info!(
                         "{} shard meta advanced data sequence to {}",
                         self.peer.tag(),
-                        shard_write_sequence
+                        to_truncate_idx,
                     );
                 }
             }

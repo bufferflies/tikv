@@ -199,7 +199,7 @@ impl Scheduler {
 
     pub fn transfer_random_leader(&self) -> bool {
         let regions = self.pd.get_all_regions();
-        if regions.len() < 3 {
+        if regions.is_empty() {
             return false;
         }
         let region_idx = rand::thread_rng().gen_range(0..regions.len());
