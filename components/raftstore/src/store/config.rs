@@ -328,6 +328,9 @@ pub struct Config {
 
     /// Discount of `kv_size` for storage class IA.
     pub ia_kv_size_discount: f64,
+    /// When mem-table is empty and applied to last index,
+    /// if no kv raft log entries exceeds this value, gc will be triggered.
+    pub raft_log_gc_no_kv_count: u64,
 }
 
 impl Default for Config {
@@ -349,6 +352,7 @@ impl Default for Config {
             raft_log_gc_threshold: 50,
             raft_log_gc_count_limit: None,
             raft_log_gc_size_limit: Some(ReadableSize::mb(32)),
+            raft_log_gc_no_kv_count: 4,
             raft_log_reserve_max_ticks: 6,
             raft_engine_purge_interval: ReadableDuration::secs(10),
             raft_entry_cache_life_time: ReadableDuration::secs(30),

@@ -68,6 +68,10 @@ pub struct Config {
     // gc will be forced trigger.
     pub raft_log_gc_size_limit: Option<ReadableSize>,
 
+    /// When mem-table is empty and applied to last index,
+    /// if no kv raft log entries exceeds this value, gc will be triggered.
+    pub raft_log_gc_no_kv_count: u64,
+
     // Interval (ms) to check region whether need to be split or not.
     pub split_region_check_tick_interval: ReadableDuration,
 
@@ -138,6 +142,7 @@ impl Default for Config {
             allow_remove_leader: false,
             raft_log_gc_tick_interval: ReadableDuration::secs(3),
             raft_log_gc_size_limit: Some(ReadableSize::mb(32)),
+            raft_log_gc_no_kv_count: 4,
             split_region_check_tick_interval: ReadableDuration::secs(3),
             switch_mem_table_check_tick_interval: ReadableDuration::minutes(1),
             region_split_size: ReadableSize::mb(256),
@@ -216,6 +221,7 @@ impl Config {
         if old.raft_log_gc_size_limit.is_some() {
             cfg.raft_log_gc_size_limit = old.raft_log_gc_size_limit;
         }
+        cfg.raft_log_gc_no_kv_count = old.raft_log_gc_no_kv_count;
 
         cfg.region_split_size = old_cop.region_split_size;
         if let Some(split_keys) = old_cop.region_split_keys {

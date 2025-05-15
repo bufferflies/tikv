@@ -1233,6 +1233,7 @@ pub fn new_test_config(
     config.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(450);
     config.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);
     config.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(100);
+    config.raft_store.raft_log_gc_no_kv_count = 1;
     config.raft_store.pd_heartbeat_tick_interval = ReadableDuration::millis(100);
     config.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(100);
     config.raft_store.max_peer_down_duration = ReadableDuration::secs(4);
@@ -1787,7 +1788,7 @@ impl RegionShardStats {
             let Some(&truncated_index) = self.truncated_index.get(store_id) else {
                 continue;
             };
-            if truncated_index != shard_stat.write_sequence {
+            if truncated_index < shard_stat.write_sequence {
                 bail!(
                     "{}:{}: empty mem-table shard not truncated, expect: {}, got: {}",
                     store_id,

@@ -8,10 +8,13 @@ use kvengine::{
     ShardStats,
 };
 use kvproto::raft_cmdpb::{RaftCmdRequest, RaftRequestHeader};
+use pd_client::PdClient;
+use rand::Rng;
 use rfstore::store::rlog::*;
 use test_cloud_server::{must_wait, ServerCluster};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
+    info,
     time::Instant,
 };
 
@@ -269,6 +272,65 @@ fn test_raft_log_gc() {
                 .truncated_idx;
             format!("{:?} {:?}", leader_truncate_idx, curr_truncated_idxes[0])
         },
+    );
+    cluster.stop();
+}
+
+#[test]
+fn test_raft_log_gc_no_kv_logs() {
+    test_util::init_log_for_test();
+    let node_ids = (0..3).map(|_| alloc_node_id()).collect::<Vec<_>>();
+    let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf| {
+        conf.raft_store.raft_log_gc_no_kv_count = 1;
+    });
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+    client.put_kv(0..100, gen_key, gen_val);
+    let region = client.get_region_by_key(&[]);
+    let pd_client = cluster.get_pd_client();
+    pd_client.disable_default_operator();
+    let remove_peer = region.peers[2].clone();
+    pd_client.remove_peer(region.id, remove_peer.clone());
+    must_wait(
+        || pd_client.get_region(&[]).unwrap().peers.len() == 2,
+        10,
+        || "add peer failed".to_string(),
+    );
+    let mut new_peer = remove_peer.clone();
+    new_peer.id = pd_client.alloc_id().unwrap();
+    pd_client.add_peer(region.id, new_peer.clone());
+    must_wait(
+        || pd_client.get_region(&[]).unwrap().peers.len() == 3,
+        10,
+        || "remove peer failed".to_string(),
+    );
+    let scheduler = cluster.new_scheduler();
+    let mut counter = 0;
+    let transfer_count = rand::thread_rng().gen_range(0usize..5);
+    while counter < transfer_count {
+        if scheduler.transfer_random_leader() {
+            counter += 1;
+        }
+    }
+    let no_kv_count = cluster
+        .get_node_config(node_ids[0])
+        .raft_store
+        .raft_log_gc_no_kv_count;
+    must_wait(
+        || {
+            let rfengine = cluster.get_rfengine(node_ids[0]);
+            let region_peers = rfengine.get_region_peer_map();
+            let peer_id = region_peers.get(&region.id).cloned().unwrap();
+            let truncated_idx = rfengine.get_truncated_index(peer_id).unwrap();
+            let last_idx = rfengine.get_last_index(peer_id).unwrap_or(truncated_idx);
+            info!(
+                "truncated_idx: {:?} last_idx: {:?}",
+                truncated_idx, last_idx
+            );
+            truncated_idx + no_kv_count >= last_idx
+        },
+        10,
+        || "truncate failed".to_string(),
     );
     cluster.stop();
 }
