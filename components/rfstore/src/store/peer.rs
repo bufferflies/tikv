@@ -1458,10 +1458,11 @@ impl Peer {
             bucket_meta.version = self.bucket_version;
             bucket_meta.incr_version(self.term());
             info!(
-                "{} update buckets version {}, keys {}",
+                "{} update buckets version {}, keys {}, estimated_size {}",
                 self.tag(),
                 bucket_meta.version,
-                bucket_meta.keys.len()
+                bucket_meta.keys.len(),
+                estimated_size
             );
             let stats = new_bucket_write_stats(&bucket_meta);
             let bucket_stat = BucketStat::new(Arc::new(bucket_meta), stats);

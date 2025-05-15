@@ -1657,6 +1657,11 @@ impl ClusterDataStats {
             if shard_level_size == 0 {
                 continue;
             }
+            // If the entries is too small, the bucket count is not accurate. The region
+            // only contains a few large keys.
+            if region_shard_stats.entries < 10 {
+                continue;
+            }
 
             let region_pd_version = region.get_region_epoch().get_version();
             let region_shard_version = region_shard_stats.ver;
