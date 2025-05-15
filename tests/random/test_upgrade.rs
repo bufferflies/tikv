@@ -283,6 +283,7 @@ fn prepare_cluster(
     let update_conf_fn = generate_update_conf_fn(
         dfs_config,
         security_conf,
+        nodes_count,
         &tikv_worker_nodes,
         switches,
         upgrade_switches.disable_ia_for_old_version,

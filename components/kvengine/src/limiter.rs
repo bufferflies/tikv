@@ -242,6 +242,8 @@ pub(crate) struct DfsLoadLimiter {
     semaphore: Arc<Semaphore>,
 }
 
+pub(crate) type DfsLoadLimiterPermit = OwnedSemaphorePermit;
+
 impl DfsLoadLimiter {
     pub(crate) fn new(cfg: &KvEngineConfig) -> DfsLoadLimiter {
         let num_cores = tikv_util::sys::SysQuota::cpu_cores_quota();
@@ -250,10 +252,14 @@ impl DfsLoadLimiter {
         Self { semaphore }
     }
 
-    pub(crate) async fn acquire_permit(&self) -> OwnedSemaphorePermit {
+    pub(crate) async fn acquire_permit(&self) -> DfsLoadLimiterPermit {
         let global_semaphore = self.semaphore.clone();
         // We never close the semaphore, so it is safe to unwrap.
         global_semaphore.acquire_owned().await.unwrap()
+    }
+
+    pub(crate) fn available_permits(&self) -> usize {
+        self.semaphore.available_permits()
     }
 }
 

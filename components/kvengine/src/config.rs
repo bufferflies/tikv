@@ -102,8 +102,10 @@ pub struct Config {
 
     pub txn_file_worker_pool_size: Option<usize>,
 
-    /// concurrency per core for loading dfs files.
+    /// Concurrency per core for loading dfs files.
     pub dfs_load_concurrency_per_core: usize,
+    /// Concurrency per request (e.g. prepare change set) for loading dfs files.
+    pub dfs_load_concurrency_per_request: usize,
 
     /// the capacity of open fd cache.
     pub fd_cache_capacity: usize,
@@ -151,6 +153,7 @@ impl Default for Config {
             txn_file_worker_pool_size: None,
             // 8GB memory per core, 64 * 16MB files consumes 1GB at max.
             dfs_load_concurrency_per_core: 64,
+            dfs_load_concurrency_per_request: 16,
             fd_cache_capacity: DEFAULT_FD_CACHE_CAPCITY,
             checksum_type: ChecksumType::Crc32,
             block_cache_type: BlockCacheType::Moka,

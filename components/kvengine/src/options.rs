@@ -33,13 +33,13 @@ use crate::{
 // customizing it for your own needs.
 pub struct Options {
     pub local_dir: PathBuf,
-    // base_size is th maximum L1 size before trigger a compaction.
-    // The L2 size is 10x of the base size, L3 size is 100x of the base size.
+    /// Base_size is th maximum L1 size before trigger a compaction.
+    /// The L2 size is 10x of the base size, L3 size is 100x of the base size.
     pub base_size: u64,
 
     pub max_block_cache_size: i64,
 
-    // Number of compaction workers to run concurrently.
+    /// Number of compaction workers to run concurrently.
     pub num_compactors: usize,
 
     pub table_builder_options: sstable::TableBuilderOptions,
@@ -55,6 +55,9 @@ pub struct Options {
     pub recovery_concurrency: usize,
 
     pub preparation_concurrency: usize,
+
+    /// Concurrency per request (e.g. prepare change set) for loading dfs files.
+    pub dfs_load_concurrency_per_request: usize,
 
     pub max_mem_table_size: u64,
 
@@ -73,10 +76,10 @@ pub struct Options {
     /// Indicate kvengine is used for restore or not.
     pub for_restore: bool,
 
-    // Start try to get gc safe point from gc v2 cache.
+    /// Start try to get gc safe point from gc v2 cache.
     pub enable_safe_point_v2: bool,
 
-    // Block keyspace gc safe point back to gc v1.
+    /// Block keyspace gc safe point back to gc v1.
     pub disable_safe_point_fallback_v1: bool,
 
     pub compaction_request_version: u32,
@@ -119,6 +122,7 @@ impl Default for Options {
             remote_compactor_addr: Default::default(),
             recovery_concurrency: Default::default(),
             preparation_concurrency: Default::default(),
+            dfs_load_concurrency_per_request: 16,
             max_mem_table_size: 96 << 20,
             allow_fallback_local: true,
             blob_table_gc_ratio: 0.5,

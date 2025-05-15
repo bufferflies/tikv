@@ -7,7 +7,7 @@ use std::{
     iter::Iterator,
     ops::Deref,
     os::unix::fs::{FileExt, MetadataExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
         Arc,
@@ -22,17 +22,14 @@ use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
 use schema::schema::StorageClass;
 use tikv_util::{mpsc::Receiver, time::Instant};
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::{
     apply::ChangeSet,
     context::IaCtx,
     dfs::FileType,
     error::IoContext,
-    ia::{
-        ia_file::{table_meta_file_local_path, IaFile},
-        manager::IaManager,
-    },
+    ia::ia_file::{table_meta_file_local_path, IaFile},
+    limiter::DfsLoadLimiterPermit,
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
         columnar::SchemaFile,
@@ -42,8 +39,6 @@ use crate::{
     },
     EngineCore, *,
 };
-
-pub const LOAD_FILE_CONCURRENCY: usize = 8;
 
 impl EngineCore {
     pub fn prepare_change_set(
@@ -285,107 +280,53 @@ impl EngineCore {
         shard_use_ia: bool,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
+        let start_time = Instant::now_coarse();
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(ids.len());
-        let runtime = self.fs.get_runtime();
+        let runtime = self.fs.get_runtime().handle();
         let opts = dfs::Options::default().with_shard(shard_id, shard_ver);
+        let available_permits = self.dfs_load_limiter.available_permits();
+        let mut join_set = tokio::task::JoinSet::new();
         let mut msg_count = 0;
         for (&id, fm) in ids {
             let fs = self.fs.clone();
             let use_ia_file = self.ia_ctx.is_enabled() && fm.use_ia(shard_use_ia);
-            let ia_ctx = if use_ia_file {
-                match self.ia_ctx.clone() {
-                    IaCtx::Disabled => {
-                        unreachable!() // Checked before. It won't happen.
-                    }
-                    IaCtx::Enabled(ia_mgr, data_dir) => {
-                        let meta_file_path =
-                            table_meta_file_local_path(id, fm.file_type, data_dir.deref());
-                        let mut table_meta_file = self.open_local_file_with_file_path(
-                            id,
-                            ia_mgr.get_meta_fd_cache(),
-                            meta_file_path.clone(),
-                        );
-                        if table_meta_file.is_err()
-                            && let Ok(local_file) = self.open_local_file(id, fm.file_type)
-                        {
-                            let table_meta_off = fm.table_meta_off as u64;
-                            // Read table meta from local sst file.
-                            if let Ok(data) = local_file
-                                .read(
-                                    table_meta_off,
-                                    local_file.size() as usize - table_meta_off as usize,
-                                )
-                                .map_err(Into::into)
-                                .and_then(|data| validate_table_meta_off(tag, id, fm, data))
-                            {
-                                self.write_local_file_with_file_path(
-                                    id,
-                                    data,
-                                    use_direct_io,
-                                    meta_file_path.clone(),
-                                )?;
-                                table_meta_file = self.open_local_file_with_file_path(
-                                    id,
-                                    ia_mgr.get_meta_fd_cache(),
-                                    meta_file_path,
-                                );
-                            };
-                        }
-                        if let Ok(table_meta_file) = table_meta_file {
-                            if let Ok(ia_file) =
-                                IaFile::open(id, fm.file_type, Arc::new(table_meta_file), ia_mgr)
-                            {
-                                cs.add_file(
-                                    id,
-                                    Arc::new(ia_file),
-                                    fm,
-                                    self.cache.clone(),
-                                    encryption_key.clone(),
-                                )?;
-                                continue;
-                            }
-                        };
-                    }
-                };
-                self.ia_ctx.clone()
+
+            // Try open local file first.
+            let file = if !use_ia_file {
+                self.open_local_file(id, fm.file_type)
+                    .ok()
+                    .map(|f| Arc::new(f) as _)
             } else {
-                if let Ok(local_file) = self.open_local_file(id, fm.file_type) {
-                    cs.add_file(
-                        id,
-                        Arc::new(local_file),
-                        fm,
-                        self.cache.clone(),
-                        encryption_key.clone(),
-                    )?;
-                    continue;
-                }
-                IaCtx::Disabled
+                self.try_open_local_meta_file(tag, id, fm, use_direct_io)?
             };
+            if let Some(file) = file {
+                cs.add_file(id, file, fm, self.cache.clone(), encryption_key.clone())?;
+                continue;
+            }
+
+            // Load from remote.
             let tx = result_tx.clone();
             let fm = fm.clone();
             let dfs_load_limiter = self.dfs_load_limiter.clone();
-            runtime.spawn(async move {
-                let permit = dfs_load_limiter.acquire_permit().await;
-                let res = match ia_ctx {
-                    IaCtx::Disabled => fs
-                        .read_file(id, opts.with_type(fm.file_type))
-                        .await
-                        .map_err(Into::into)
-                        .map(|data| (data, None)),
-                    IaCtx::Enabled(ia_mgr, data_dir) => {
-                        let opts = opts
-                            .with_type(fm.file_type)
-                            .with_start_off(fm.table_meta_off as u64);
-                        fs.read_file(id, opts)
-                            .await
-                            .map_err(Into::into)
-                            .and_then(|data| validate_table_meta_off(tag, id, &fm, data))
-                            .map(|data| (data, Some((ia_mgr, data_dir))))
-                    }
-                };
-                let _ = tx.send(res.map(|(data, ia_mgr)| (id, fm, data, ia_mgr, permit)));
-            });
-            if msg_count < LOAD_FILE_CONCURRENCY {
+            join_set.spawn_on(
+                async move {
+                    let permit = dfs_load_limiter.acquire_permit().await;
+                    let res = if !use_ia_file {
+                        Self::load_remote_table(id, &fm, opts, fs.as_ref()).await
+                    } else {
+                        Self::load_remote_table_meta(tag, id, &fm, opts, fs.as_ref()).await
+                    };
+                    let _ = tx.send(res.map(|data| LoadRemoteResult {
+                        id,
+                        fm,
+                        data,
+                        use_ia_file,
+                        permit,
+                    }));
+                },
+                runtime,
+            );
+            if msg_count < self.opts.dfs_load_concurrency_per_request {
                 msg_count += 1;
             } else {
                 self.recv_file_data(cs, use_direct_io, &result_rx, encryption_key.clone())?;
@@ -394,6 +335,8 @@ impl EngineCore {
         for _ in 0..msg_count {
             self.recv_file_data(cs, use_direct_io, &result_rx, encryption_key.clone())?;
         }
+        info!("{} load tables by ids", tag; "ids" => ids.len(),
+            "takes" => ?start_time.saturating_elapsed(), "available_permits" => available_permits);
         Ok(())
     }
 
@@ -401,38 +344,22 @@ impl EngineCore {
         &self,
         cs: &mut ChangeSet,
         use_direct_io: bool,
-        result_tx: &Receiver<
-            Result<(
-                u64,
-                FileMeta,
-                Bytes,
-                Option<(IaManager, Arc<PathBuf>)>,
-                OwnedSemaphorePermit,
-            )>,
-        >,
+        result_tx: &Receiver<Result<LoadRemoteResult>>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
-        let (id, meta, data, ia_ctx, _permit) = result_tx.recv().unwrap()?;
-        let data_len = data.len();
-        let file = if let Some((ia_mgr, data_dir)) = ia_ctx {
-            let meta_file_path = table_meta_file_local_path(id, meta.file_type, data_dir.deref());
-            self.write_local_file_with_file_path(id, data, use_direct_io, meta_file_path.clone())?;
-            let meta_file = self.open_local_file_with_file_path(
-                id,
-                ia_mgr.get_meta_fd_cache(),
-                meta_file_path,
-            )?;
-            let table_meta_file = Arc::new(meta_file);
-            Arc::new(IaFile::open(id, meta.file_type, table_meta_file, ia_mgr)?) as _
+        let LoadRemoteResult {
+            id,
+            fm,
+            data,
+            use_ia_file,
+            permit,
+        } = result_tx.recv().unwrap()?;
+        let file = if !use_ia_file {
+            self.save_and_open_table(id, &fm, data, permit, use_direct_io)?
         } else {
-            self.write_local_file(id, data, use_direct_io, meta.file_type)?;
-            let file = self.open_local_file(id, meta.file_type)?;
-            Arc::new(file) as _
+            self.save_and_open_ia_file(id, &fm, data, permit, use_direct_io)?
         };
-        cs.add_file(id, file, &meta, self.cache.clone(), encryption_key)?;
-        ENGINE_LEVEL_WRITE_VEC
-            .with_label_values(&[&meta.get_level().to_string()])
-            .inc_by(data_len as u64);
+        cs.add_file(file.id(), file, &fm, self.cache.clone(), encryption_key)?;
         Ok(())
     }
 
@@ -543,7 +470,7 @@ impl EngineCore {
         file_type: FileType,
     ) -> Result<()> {
         let local_file_name = self.local_file_path(id, file_type);
-        self.write_local_file_with_file_path(id, data, use_direct_io, local_file_name)
+        self.write_local_file_with_file_path(id, data, use_direct_io, &local_file_name)
     }
 
     fn write_local_file_with_file_path(
@@ -551,7 +478,7 @@ impl EngineCore {
         id: u64,
         data: Bytes,
         use_direct_io: bool,
-        file_path: PathBuf,
+        file_path: &Path,
     ) -> Result<()> {
         let start = Instant::now();
         let tmp_file_name = self.tmp_file_path(id);
@@ -579,7 +506,8 @@ impl EngineCore {
         }
         std::fs::rename(tmp_file_name, file_path).table_ctx(id, "write_local_file.rename")?;
         info!(
-            "write local file {} size: {} takes {:?}",
+            "{}: write local file {} size: {} takes {:?}",
+            self.get_engine_id(),
             id,
             data.len(),
             start.saturating_elapsed()
@@ -649,6 +577,131 @@ impl EngineCore {
             fd_cache,
             self.loaded.load(Relaxed),
         )?)
+    }
+
+    fn try_open_local_meta_file(
+        &self,
+        tag: ShardTag,
+        id: u64,
+        fm: &FileMeta,
+        use_direct_io: bool,
+    ) -> Result<Option<Arc<dyn File>>> {
+        let IaCtx::Enabled(ia_mgr, data_dir) = self.ia_ctx.clone() else {
+            return Ok(None);
+        };
+
+        let meta_file_path = table_meta_file_local_path(id, fm.file_type, data_dir.deref());
+        let mut table_meta_file = self.open_local_file_with_file_path(
+            id,
+            ia_mgr.get_meta_fd_cache(),
+            meta_file_path.clone(),
+        );
+        if table_meta_file.is_err()
+            && let Ok(local_file) = self.open_local_file(id, fm.file_type)
+        {
+            let table_meta_off = fm.table_meta_off as u64;
+            // Read table meta from local sst file.
+            if let Ok(data) = local_file
+                .read(
+                    table_meta_off,
+                    local_file.size() as usize - table_meta_off as usize,
+                )
+                .map_err(Into::into)
+                .and_then(|data| validate_table_meta_off(tag, id, fm, data))
+            {
+                self.write_local_file_with_file_path(id, data, use_direct_io, &meta_file_path)?;
+                table_meta_file = self.open_local_file_with_file_path(
+                    id,
+                    ia_mgr.get_meta_fd_cache(),
+                    meta_file_path,
+                );
+            };
+        }
+        if let Ok(table_meta_file) = table_meta_file {
+            if let Ok(ia_file) = IaFile::open(id, fm.file_type, Arc::new(table_meta_file), ia_mgr) {
+                return Ok(Some(Arc::new(ia_file)));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn load_remote_table(
+        id: u64,
+        fm: &FileMeta,
+        opts: dfs::Options,
+        fs: &dyn dfs::Dfs,
+    ) -> Result<Bytes> {
+        fs.read_file(id, opts.with_type(fm.file_type))
+            .await
+            .map_err(Into::into)
+    }
+
+    fn save_and_open_table(
+        &self,
+        id: u64,
+        fm: &FileMeta,
+        data: Bytes,
+        permit: DfsLoadLimiterPermit,
+        use_direct_io: bool,
+    ) -> Result<Arc<dyn File>> {
+        let data_len = data.len();
+        self.write_local_file(id, data, use_direct_io, fm.file_type)?;
+        drop(permit);
+
+        ENGINE_LEVEL_WRITE_VEC
+            .with_label_values(&[&fm.get_level().to_string()])
+            .inc_by(data_len as u64);
+
+        let file = self.open_local_file(id, fm.file_type)?;
+        Ok(Arc::new(file))
+    }
+
+    async fn load_remote_table_meta(
+        tag: ShardTag,
+        id: u64,
+        fm: &FileMeta,
+        opts: dfs::Options,
+        fs: &dyn dfs::Dfs,
+    ) -> Result<Bytes> {
+        let opts = opts
+            .with_type(fm.file_type)
+            .with_start_off(fm.table_meta_off as u64);
+        fs.read_file(id, opts)
+            .await
+            .map_err(Into::into)
+            .and_then(|data| validate_table_meta_off(tag, id, fm, data))
+    }
+
+    fn save_and_open_ia_file(
+        &self,
+        id: u64,
+        fm: &FileMeta,
+        table_meta_data: Bytes,
+        permit: DfsLoadLimiterPermit,
+        use_direct_io: bool,
+    ) -> Result<Arc<dyn File>> {
+        let IaCtx::Enabled(ia_mgr, data_dir) = &self.ia_ctx else {
+            unreachable!("ia_ctx should be enabled");
+        };
+
+        let data_len = table_meta_data.len();
+        let meta_file_path = table_meta_file_local_path(id, fm.file_type, data_dir.deref());
+        self.write_local_file_with_file_path(id, table_meta_data, use_direct_io, &meta_file_path)?;
+        drop(permit);
+
+        ENGINE_LEVEL_WRITE_VEC
+            .with_label_values(&[&fm.get_level().to_string()])
+            .inc_by(data_len as u64);
+
+        let meta_file =
+            self.open_local_file_with_file_path(id, ia_mgr.get_meta_fd_cache(), meta_file_path)?;
+        let table_meta_file = Arc::new(meta_file);
+        Ok(Arc::new(IaFile::open(
+            id,
+            fm.file_type,
+            table_meta_file,
+            ia_mgr.clone(),
+        )?))
     }
 
     pub async fn load_schema_file(&self, id: u64) -> Result<SchemaFile> {
@@ -765,4 +818,12 @@ fn validate_table_meta_off(tag: ShardTag, id: u64, fm: &FileMeta, data: Bytes) -
         }
         _ => Ok(data),
     }
+}
+
+struct LoadRemoteResult {
+    id: u64,
+    fm: FileMeta,
+    data: Bytes,
+    use_ia_file: bool,
+    permit: DfsLoadLimiterPermit,
 }

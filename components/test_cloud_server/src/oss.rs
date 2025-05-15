@@ -10,7 +10,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU16, AtomicU32, Ordering},
+        atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -30,7 +30,6 @@ use hyper::{
     Body, HeaderMap, Method, Request, Response, Server, StatusCode,
 };
 use kvengine::dfs::{CommonPrefix, DFSConfig, ListObjects, Tagging, STORAGE_CLASS_DEFAULT};
-use rand::Rng;
 use regex::Regex;
 use tempfile::TempDir;
 use tikv_util::{debug, error, info, time::Instant};
@@ -192,6 +191,10 @@ impl ObjectStorageService {
         ctx: Arc<ServiceContext>,
         req: Request<Body>,
     ) -> Result<Response<Body>> {
+        lazy_static::lazy_static! {
+            static ref TMP_ID: AtomicU64 = AtomicU64::new(0);
+        }
+
         let start_time = Instant::now_coarse();
         let (parts, mut body) = req.into_parts();
         let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
@@ -207,7 +210,7 @@ impl ObjectStorageService {
             parent.to_path_buf().join(format!(
                 "{}.{}.tmp",
                 file_name,
-                rand::thread_rng().gen::<u16>()
+                TMP_ID.fetch_add(1, Ordering::Relaxed)
             ))
         };
 

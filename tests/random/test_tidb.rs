@@ -120,6 +120,8 @@ pub(crate) const RESTART_TSO_SVC_ENV_KEY: &str = "RESTART_TSO_SVC";
 
 pub(crate) const MEMORY_CAPACITY_RATIO: f64 = 0.8; // Reserve 20% memory for PD, TiDB, and TiFlash.
 
+const DFS_LOAD_MEMORY_USAGE: u64 = 256 * 1024 * 1024; // 256MB
+
 #[test]
 fn test_random_with_tidb() {
     init_logger();
@@ -275,6 +277,7 @@ fn prepare_cluster(
     let update_conf_fn = generate_update_conf_fn(
         dfs_config,
         security_conf,
+        nodes_count,
         &tikv_worker_nodes,
         switches,
         false,
@@ -322,11 +325,16 @@ fn prepare_cluster(
 pub(crate) fn generate_update_conf_fn<'a>(
     dfs_config: &'a DFSConfig,
     security_conf: &'a SecurityConfig,
+    tikv_server_nodes_count: usize,
     tikv_worker_nodes: &'a [u16],
     switches: &'a Switches,
     disable_ia: bool,
 ) -> impl Fn(u16, &mut TikvConfig) + 'a {
-    let cpu_cores = SysQuota::cpu_cores_quota() as usize;
+    let cpu_cores = SysQuota::cpu_cores_quota() as u64;
+    // It's 512 for 4 cores & 4 nodes.
+    let dfs_load_concurrency_per_core =
+        DFS_LOAD_MEMORY_USAGE / cpu_cores / tikv_server_nodes_count as u64 / KV_TARGET_FILE_SIZE.0;
+    let dfs_load_concurrency_per_request = dfs_load_concurrency_per_core / 8; // 64
 
     move |_node_id: u16, conf: &mut TikvConfig| {
         let mut rng = thread_rng();
@@ -369,6 +377,8 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.kvengine.columnar_table_build_options.pack_max_size = 32 * 128;
         conf.kvengine.vector_index_build_options.delta_size = 128;
         conf.kvengine.vector_index_build_options.rebuild_file_count = 2;
+        conf.kvengine.dfs_load_concurrency_per_core = dfs_load_concurrency_per_core as usize;
+        conf.kvengine.dfs_load_concurrency_per_request = dfs_load_concurrency_per_request as usize;
 
         conf.kvengine.ia = IaConfig {
             segment_size: conf.rocksdb.writecf.block_size.0 as i64 * 4,
@@ -382,7 +392,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         }
 
         conf.storage.flow_control.enable = true;
-        conf.storage.scheduler_worker_pool_size = cpu_cores;
+        conf.storage.scheduler_worker_pool_size = cpu_cores as usize;
         conf.gc.enable_safe_point_v2 = true;
 
         if switches.remote_cop_min_block_size > 0 {
