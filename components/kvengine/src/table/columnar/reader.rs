@@ -1752,9 +1752,7 @@ impl ColumnarRowTableReader {
 }
 
 pub fn is_unsigned(col_info: &ColumnInfo) -> bool {
-    FieldTypeFlag::from_bits(col_info.get_flag() as u32)
-        .map(|f| f.contains(FieldTypeFlag::UNSIGNED))
-        .unwrap_or(false)
+    FieldTypeFlag::from_bits_truncate(col_info.get_flag() as u32).contains(FieldTypeFlag::UNSIGNED)
 }
 
 #[async_trait]
