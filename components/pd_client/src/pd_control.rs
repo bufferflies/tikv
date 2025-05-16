@@ -87,6 +87,15 @@ impl PdControl {
     }
 
     pub async fn get_keyspace_by_name(&self, keyspace_name: &str) -> Result<KeyspaceMeta> {
+        fail::fail_point!("pd_ctl::mock_get_keyspace_by_name", |_| {
+            let id: u32 = keyspace_name.strip_prefix("ks").unwrap().parse().unwrap();
+            Ok(KeyspaceMeta {
+                id,
+                name: keyspace_name.to_string(),
+                ..Default::default()
+            })
+        });
+
         let query = format!("{PD_KEYSPACE_PATH}/{}", keyspace_name);
         self.client.get(query).await
     }
@@ -96,6 +105,8 @@ impl PdControl {
     }
 
     pub async fn get_tiflash_placement_rule_group(&self) -> Result<Option<RuleGroup>> {
+        fail::fail_point!("pd_ctl::mock_no_tiflash_placement_rule_group", |_| Ok(None));
+
         let path = format!("{PD_PLACEMENT_RULE_GROUP_PATH}/{TIFLASH_GROUP}");
         self.client.get(path).await
     }

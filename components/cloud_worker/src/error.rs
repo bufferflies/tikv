@@ -17,7 +17,9 @@ pub enum Error {
     #[error("http error {0}")]
     HttpError(#[from] http::Error),
     #[error("io error {0}")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
+    #[error("io error {0}")]
+    IoError(#[from] tikv_util::errors::IoError),
     #[error("native backup/restore error {0}")]
     NativeBackupRestoreError(#[from] native_br::error::Error),
     #[error("restore keyspace task conflict with id {0}")]

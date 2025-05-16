@@ -12,7 +12,7 @@ use std::{
 use anyhow::bail;
 use bstr::ByteSlice;
 use cloud_server::TikvServer;
-use cloud_worker::{local_gc::LocalGcConfig, CloudWorker};
+use cloud_worker::{local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker};
 use dashmap::DashMap;
 use futures::{executor::block_on, future::try_join_all};
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
@@ -838,6 +838,13 @@ impl ServerCluster {
                 cop_block_cache_type: opts.cop_block_cache_type,
                 cop_block_size: tikv_config.rocksdb.writecf.block_size,
                 data_dir: data_dir.to_string_lossy().into_owned(),
+                native_br: NativeBrConfig {
+                    backup_interval: ReadableDuration(opts.backup_interval),
+                    #[cfg(feature = "testexport")]
+                    backup_skip_keyspace_meta: opts.backup_skip_keyspace_meta,
+                    restore_timeout_pd_control: ReadableDuration(opts.restore_timeout_pd_control),
+                    ..Default::default()
+                },
                 ia: IaConfig {
                     segment_size: opts.ia_segment_size,
                     freq_update_interval: ReadableDuration(opts.ia_freq_update_interval),
@@ -1321,16 +1328,24 @@ pub fn tikv_worker_cop_url(idx: u16) -> String {
     format!("http://{}/coprocessor", tikv_worker_addr(idx))
 }
 
+#[derive(Clone)]
 pub struct TikvWorkerOptions {
     pub threads_cnt: usize,
     pub kv_target_file_size: ReadableSize,
     pub cop_block_cache_size: ReadableSize,
     pub cop_block_cache_type: BlockCacheType,
+
     pub register: bool,
+
     pub ia_segment_size: i64,
     pub ia_freq_update_interval: Duration,
     pub ia_mem_cap: u64,
     pub ia_disk_cap: u64,
+
+    pub backup_interval: Duration,
+    pub backup_skip_keyspace_meta: bool,
+
+    pub restore_timeout_pd_control: Duration,
 }
 
 impl Default for TikvWorkerOptions {
@@ -1345,6 +1360,9 @@ impl Default for TikvWorkerOptions {
             ia_freq_update_interval: IA_FREQ_UPDATE_INTERVAL_DEF,
             ia_mem_cap: IA_MEM_CAP_DEF,
             ia_disk_cap: IA_DISK_CAP_DEF,
+            backup_interval: Duration::ZERO,
+            backup_skip_keyspace_meta: false,
+            restore_timeout_pd_control: Duration::from_secs(10),
         }
     }
 }
@@ -1414,6 +1432,22 @@ impl TryWaiter {
             sleep(self.interval)
         }
         false
+    }
+
+    pub fn try_wait_result<T, E, F>(&self, mut f: F) -> Result<T, E>
+    where
+        F: FnMut() -> Result<T, E>,
+    {
+        let begin = Instant::now_coarse();
+        let mut last_err: Option<E> = None;
+        while begin.saturating_elapsed() < self.timeout {
+            match f() {
+                Ok(t) => return Ok(t),
+                Err(e) => last_err = Some(e),
+            }
+            sleep(self.interval)
+        }
+        Err(last_err.unwrap())
     }
 
     pub fn must_wait<F, FnMsg>(&self, f: F, fail_msg: FnMsg)
@@ -1520,23 +1554,11 @@ where
     Err(last_err.unwrap())
 }
 
-pub fn try_wait_result<F, T, E>(mut f: F, seconds: usize) -> std::result::Result<T, E>
+pub fn try_wait_result<F, T, E>(f: F, seconds: usize) -> std::result::Result<T, E>
 where
     F: FnMut() -> std::result::Result<T, E>,
 {
-    let begin = Instant::now_coarse();
-    let timeout = Duration::from_secs(seconds as u64);
-    let mut last_err = None;
-    while begin.saturating_elapsed() < timeout {
-        match f() {
-            Ok(t) => return Ok(t),
-            Err(err) => {
-                last_err = Some(err);
-                sleep(Duration::from_millis(100));
-            }
-        }
-    }
-    Err(last_err.unwrap())
+    TryWaiter::timeout(seconds).try_wait_result(f)
 }
 
 #[derive(Default, Debug)]

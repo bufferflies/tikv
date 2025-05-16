@@ -8,6 +8,7 @@ publish = false
 
 [features]
 pprof-fp = ["tikv/pprof-fp"]
+testexport = []
 
 [dependencies]
 ahash = "0.8.11"

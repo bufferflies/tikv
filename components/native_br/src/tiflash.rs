@@ -110,7 +110,7 @@ async fn wait_tiflash_replica_removed(
     .into())
 }
 
-pub async fn remove_tiflash_replia_of_keyspace(
+pub async fn remove_tiflash_replica_of_keyspace(
     keyspace_id: u32,
     pd_control: &PdControl,
     pd_client: Arc<dyn PdClient>,

@@ -70,7 +70,7 @@ use crate::{
     lock::LockResolver,
     restore::RestoreConfig,
     step,
-    tiflash::remove_tiflash_replia_of_keyspace,
+    tiflash::remove_tiflash_replica_of_keyspace,
 };
 
 const WORKING_PATH_PREFIX: &str = "keyspace-restore";
@@ -139,7 +139,7 @@ pub fn restore_keyspace_with_cfg(
     keyspace_name: &str,
     target_keyspace_name: &str,
     backup_name: &str,
-    working_path: Option<&str>,
+    working_path: Option<PathBuf>,
     s3fs: Arc<S3Fs>,
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
@@ -166,7 +166,7 @@ pub fn restore_keyspace_with_cfg(
         target_id
     } else {
         reporter.report_step(RestoreStep::RemoveTiFlashReplicas);
-        if let Err(e) = runtime.block_on(remove_tiflash_replia_of_keyspace(
+        if let Err(e) = runtime.block_on(remove_tiflash_replica_of_keyspace(
             keyspace_id,
             &pd_control,
             pd_client.clone(),
@@ -196,7 +196,7 @@ pub fn restore_keyspace(
     keyspace_id: u32,
     target_keyspace_id: u32,
     backup_name: &str,
-    working_path: Option<&str>,
+    working_path: Option<PathBuf>,
     s3fs: Arc<S3Fs>,
     config: RestoreConfig,
     pd_client: Arc<dyn PdClient>,
@@ -218,12 +218,14 @@ pub fn restore_keyspace(
         return Err(Error::RestoreWithDefaultKeyspace);
     }
 
-    let working_dir = match working_path {
-        Some(p) => TempDir::new_in(p, WORKING_PATH_PREFIX),
-        None => TempDir::new(WORKING_PATH_PREFIX),
-    }
-    .unwrap();
-    let working_path = working_dir.path().to_path_buf();
+    let (working_path, _guard) = match working_path {
+        Some(path) => (path, None),
+        None => {
+            let temp_dir = box_try!(TempDir::new(WORKING_PATH_PREFIX));
+            let path = temp_dir.path().to_path_buf();
+            (path, Some(temp_dir))
+        }
+    };
 
     let (keyspace_start, keyspace_end) = ApiV2::get_keyspace_range_by_id(keyspace_id);
     let (target_keyspace_start, target_keyspace_end) =
@@ -728,36 +730,24 @@ impl BackupCluster {
             }
         };
         let mut raft_engines: HashMap<u64, RfEngine> = Default::default();
+        let mut errors = vec![];
         let mut cluster_tolerated_err = 0;
         let mut recv_restore_rfengine =
-            |result_rx: &mpsc::Receiver<Result<(u64, TikvConfig, RfEngine)>>| -> Result<()> {
+            |result_rx: &mpsc::Receiver<Result<(u64, TikvConfig, RfEngine)>>| {
                 // We can tolerate one store failure for lightweight restoration during fetch
                 // latest wal chunk from store.
                 match result_rx.recv().unwrap() {
-                    Err(err) if is_error_can_tolerate(&err) => {
-                        if tolerate_err == 0 {
-                            return Err(err);
-                        }
-                        warn!(
-                            "Keyspace {} setup raft engine failed, tolerate it: {:?}",
-                            cluster.tag(),
-                            err
-                        );
-                        tolerate_err -= 1;
-                        cluster_tolerated_err += 1;
-                    }
-                    Err(err) => return Err(err),
+                    Err(err) => errors.push(err),
                     Ok((store_id, store_config, rf_engine)) => {
                         store_configs.insert(store_id, store_config);
                         raft_engines.insert(store_id, rf_engine);
-                        tikv_util::info!(
+                        info!(
                             "Keyspace {} setup raft engine for store {} done",
                             cluster.tag(),
                             store_id
                         );
                     }
                 }
-                Ok(())
             };
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(cluster_meta.stores.len());
         let mut msg_count = 0;
@@ -803,12 +793,31 @@ impl BackupCluster {
             if msg_count < restore_conf.store_concurrency {
                 msg_count += 1;
             } else {
-                recv_restore_rfengine(&result_rx)?;
+                // Do NOT return on error to avoid thread leaky.
+                recv_restore_rfengine(&result_rx);
             }
         }
         for _ in 0..msg_count {
-            recv_restore_rfengine(&result_rx)?;
+            recv_restore_rfengine(&result_rx);
         }
+
+        for err in errors {
+            if is_error_can_tolerate(&err) {
+                if tolerate_err == 0 {
+                    return Err(err);
+                }
+                warn!(
+                    "Keyspace {} setup raft engine failed, tolerate it: {:?}",
+                    cluster.tag(),
+                    err
+                );
+                tolerate_err -= 1;
+                cluster_tolerated_err += 1;
+            } else {
+                return Err(err);
+            }
+        }
+
         cluster.raft_engines = raft_engines;
         cluster.store_configs = store_configs;
         cluster.tolerated_err = cluster_tolerated_err;

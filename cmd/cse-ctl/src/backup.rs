@@ -46,8 +46,6 @@ pub struct BackupArgs {
     /// Path of file that contains X509 key in PEM format
     #[clap(long, default_value = "")]
     pub key: PathBuf,
-    #[clap(long)]
-    pub skip_keyspace_meta: bool,
     /// The tolerate num of stores' backup failure.
     #[clap(long, default_value_t = 0)]
     pub tolerate_err: usize,
@@ -92,7 +90,6 @@ fn get_backup_config_from_args(args: &BackupArgs) -> BackupConfig {
     if args.key.exists() {
         config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
-    config.skip_keyspace_meta = args.skip_keyspace_meta;
     if args.tolerate_err > 0 {
         config.tolerate_err = args.tolerate_err;
     }

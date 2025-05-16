@@ -4,6 +4,7 @@ use std::{
     borrow::Cow,
     cmp::min,
     collections::HashMap,
+    fmt,
     fmt::{Display, Formatter},
     fs,
     fs::File,

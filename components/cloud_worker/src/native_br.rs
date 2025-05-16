@@ -3,13 +3,19 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
+    fmt, fs,
+    io::Write,
     ops::Deref,
-    sync::{Arc, Mutex, RwLock},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, RwLock,
+    },
     thread,
     time::Duration,
 };
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use http::{Method, StatusCode};
 use hyper::{Body, Response};
 use kvengine::dfs::S3Fs;
@@ -26,7 +32,10 @@ use native_br::{
 use pd_client::PdClient;
 use serde::Deserialize;
 use tikv::storage::mvcc::TimeStamp;
-use tikv_util::{config::ReadableDuration, debug, error, info, time::Instant, HandyRwLock};
+use tikv_util::{
+    config::ReadableDuration, debug, error, errors::Context as _, info, time::Instant, warn,
+    HandyRwLock,
+};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -43,6 +52,8 @@ const JSON_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f"; // e.g. 2006-01-02 15:04
 const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
 pub(crate) const BACKUPS_API_PATH: &str = "/api/v1/backups";
 pub(crate) const RESTORE_KEYSPACE_API_PATH: &str = "/api/v1/restore_keyspace/";
+
+const RESTORE_TASK_WORKING_PATH_PREFIX: &str = "r";
 
 /// Backup and restore keyspace API:
 ///
@@ -432,10 +443,10 @@ enum RestoreSource {
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-struct BackupItem {
-    id: u64,
-    name: String,
-    time: String,
+pub struct BackupItem {
+    pub id: u64,
+    pub name: String,
+    pub time: String,
 }
 
 impl From<IncrementalBackupFile> for BackupItem {
@@ -450,29 +461,29 @@ impl From<IncrementalBackupFile> for BackupItem {
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-struct ListBackupResponse {
-    items: Vec<BackupItem>,
-    has_more: bool,
+pub struct ListBackupResponse {
+    pub items: Vec<BackupItem>,
+    pub has_more: bool,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-struct RestoreProgress {
-    step: String,
-    progress: i32,
+pub struct RestoreProgress {
+    pub step: String,
+    pub progress: i32,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
-struct RestoreProgressResponse {
-    status: RestoreState,
-    error: String,
-    duration: i64, // in seconds
-    id: u64,
-    keyspace: String,
-    restore_type: RestoreType,
-    restore_bytes: u64,
-    progress: RestoreProgress,
+pub struct RestoreProgressResponse {
+    pub status: RestoreState,
+    pub error: String,
+    pub duration: i64, // in seconds
+    pub id: u64,
+    pub keyspace: String,
+    pub restore_type: RestoreType,
+    pub restore_bytes: u64,
+    pub progress: RestoreProgress,
 }
 
 impl RestoreProgressResponse {
@@ -503,7 +514,7 @@ struct RestoreConflictResponse {
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq, PartialOrd)]
-enum RestoreState {
+pub enum RestoreState {
     #[default]
     Pending,
     Init,
@@ -524,7 +535,7 @@ impl RestoreState {
 }
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq)]
-enum RestoreType {
+pub enum RestoreType {
     #[default]
     Normal,
     Pitr,
@@ -549,6 +560,51 @@ impl RestoreTask {
                 .signed_duration_since(self.end.unwrap())
                 .num_seconds()
                 >= ttl.as_secs() as i64
+    }
+
+    fn get_meta(&self) -> RestoreTaskMeta {
+        RestoreTaskMeta {
+            keyspace_name: self.keyspace_name.clone(),
+            restore_type: self.restore_type,
+            start: self.start.timestamp(),
+        }
+    }
+
+    fn from_meta(meta: RestoreTaskMeta) -> Self {
+        let start = meta.start();
+        Self {
+            state: RestoreState::Error, // Consider as being interrupted by node restart.
+            keyspace_name: meta.keyspace_name,
+            error: "interrupted".to_string(),
+            start,
+            end: Some(Utc::now()),
+            restore_type: meta.restore_type,
+            restore_bytes: 0,
+            progress_reporter: Arc::new(RestoreProgressReporter::new(0, RestoreStep::Init)),
+        }
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct RestoreTaskMeta {
+    keyspace_name: String,
+    restore_type: RestoreType,
+    start: i64, // DateTime<Utc>::timestamp().
+}
+
+impl fmt::Debug for RestoreTaskMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RestoreTaskMeta")
+            .field("keyspace_name", &self.keyspace_name)
+            .field("restore_type", &self.restore_type)
+            .field("start", &self.start())
+            .finish()
+    }
+}
+
+impl RestoreTaskMeta {
+    fn start(&self) -> DateTime<Utc> {
+        Utc.timestamp_opt(self.start, 0).unwrap()
     }
 }
 
@@ -613,7 +669,7 @@ type KeyspacesMap = HashMap<String /* keyspace */, u64 /* restore_id */>;
 
 pub(crate) struct BrContext {
     pub pd_client: Arc<dyn PdClient>,
-    pub working_path: Option<String>,
+    pub data_dir: PathBuf,
     pub s3fs: Arc<S3Fs>,
     pub runtime: Arc<Runtime>,
     pub restore_tasks: RwLock<TasksMap>,
@@ -632,40 +688,41 @@ impl BrContext {
         err: Option<Error>,
         restore_bytes: u64,
     ) -> Result<bool> {
-        let new_task = |tasks: &mut TasksMap| -> Result<()> {
+        let new_task = |tasks: &mut TasksMap| -> Result<RestoreTaskMeta> {
             let mut keyspaces = self.keyspace_tasks.write().unwrap();
             if let Some(&restore_id) = keyspaces.get(keyspace_name) {
                 return Err(Error::RestoreKeyspaceTaskConflict(restore_id));
             }
             keyspaces.insert(keyspace_name.to_owned(), restore_id);
-            tasks.insert(
-                restore_id,
-                RestoreTask {
-                    state: RestoreState::Init,
-                    keyspace_name: keyspace_name.to_string(),
-                    error: String::new(),
-                    start: Utc::now(),
-                    end: None,
-                    restore_type,
-                    restore_bytes,
-                    progress_reporter: Arc::new(RestoreProgressReporter::new(
-                        restore_id,
-                        RestoreStep::Init,
-                    )),
-                },
-            );
-            Ok(())
+            let task = RestoreTask {
+                state: RestoreState::Init,
+                keyspace_name: keyspace_name.to_string(),
+                error: String::new(),
+                start: Utc::now(),
+                end: None,
+                restore_type,
+                restore_bytes,
+                progress_reporter: Arc::new(RestoreProgressReporter::new(
+                    restore_id,
+                    RestoreStep::Init,
+                )),
+            };
+            let task_meta = task.get_meta();
+            tasks.insert(restore_id, task);
+            Ok(task_meta)
         };
 
         let mut tasks = self.restore_tasks.write().unwrap();
         match tasks.get_mut(&restore_id) {
             None => {
                 debug_assert_eq!(new_state, RestoreState::Init);
-                new_task(&mut tasks)?;
+                let meta = new_task(&mut tasks)?;
+                self.persist_task_meta(restore_id, &meta)?;
             }
             Some(task) if task.state.is_retry(&new_state) => {
                 check_task(task, keyspace_name)?;
-                new_task(&mut tasks)?;
+                let meta = new_task(&mut tasks)?;
+                self.persist_task_meta(restore_id, &meta)?;
             }
             Some(task) => {
                 check_task(task, keyspace_name)?;
@@ -695,6 +752,7 @@ impl BrContext {
     fn restore_keyspace_core(
         &self,
         config: Config,
+        working_path: PathBuf,
         keyspace_name: &str,
         target_keyspace_name: &str,
         restore_source: RestoreSource,
@@ -738,7 +796,7 @@ impl BrContext {
             keyspace_name,
             target_keyspace_name,
             backup_file.name(),
-            self.working_path.as_deref(),
+            Some(working_path),
             self.s3fs.clone(),
             self.pd_client.clone(),
             &self.runtime,
@@ -768,8 +826,10 @@ impl BrContext {
         )?;
         let progress_reporter = self.get_progress_reporter(restore_id).unwrap();
 
+        let working_path = self.working_path(restore_id);
         let res = match self.restore_keyspace_core(
             config,
+            working_path,
             &keyspace_name,
             &target_keyspace_name,
             restore_source,
@@ -784,14 +844,16 @@ impl BrContext {
                     .with_label_values(&["restore_keyspace"])
                     .observe(ob_start_time.saturating_elapsed_secs());
                 progress_reporter.report_step(RestoreStep::Finalize);
-                self.change_restore_state(
+                let res = self.change_restore_state(
                     restore_id,
                     &target_keyspace_name,
                     restore_type,
                     RestoreState::Succeed,
                     None,
                     ret.restore_bytes,
-                )
+                );
+                self.remove_working_path(restore_id);
+                res
             }
             Err(err) => {
                 error!(
@@ -819,6 +881,80 @@ impl BrContext {
         }
         Ok(())
     }
+
+    fn working_path(&self, restore_id: u64) -> PathBuf {
+        self.data_dir
+            .join(format!("{RESTORE_TASK_WORKING_PATH_PREFIX}{restore_id}"))
+    }
+
+    fn remove_working_path(&self, restore_id: u64) {
+        let working_path = self.working_path(restore_id);
+        if let Err(e) = fs::remove_dir_all(&working_path) {
+            warn!("fail to remove working path: {:?}", e; "path" => working_path.display());
+        }
+    }
+
+    fn persist_task_meta(&self, restore_id: u64, meta: &RestoreTaskMeta) -> Result<()> {
+        static TMP_ID: AtomicU64 = AtomicU64::new(0);
+
+        let working_path = self.working_path(restore_id);
+        fs::create_dir_all(&working_path).ctx("create_working_path")?;
+        let tmp_path = working_path.join(format!(
+            "meta.json.{}",
+            TMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut tmp = fs::File::create(&tmp_path).ctx("create_tmp")?;
+        tmp.write_all(&serde_json::to_vec(&meta)?)
+            .ctx("write_meta")?;
+        tmp.sync_data().ctx("sync")?;
+        drop(tmp);
+
+        let meta_file = working_path.join("meta.json");
+        fs::rename(tmp_path, meta_file).ctx("rename")?;
+        Ok(())
+    }
+
+    fn read_task_meta(&self, restore_id: u64) -> Result<RestoreTaskMeta> {
+        let working_path = self.working_path(restore_id);
+        let meta_file = working_path.join("meta.json");
+        if !meta_file.exists() {
+            return Err(Error::CheckError(format!(
+                "Meta file not found: {}",
+                meta_file.display()
+            )));
+        }
+        let meta = fs::read(&meta_file).ctx("read_meta")?;
+        let meta = serde_json::from_slice::<RestoreTaskMeta>(&meta)?;
+        Ok(meta)
+    }
+
+    fn init(&mut self) -> Result<()> {
+        let entries = fs::read_dir(&self.data_dir).ctx("read_dir")?;
+        for entry in entries {
+            let entry = entry.ctx("entry")?;
+            let path = entry.path();
+            if path.is_dir() && path.file_name().is_some() {
+                let name = path.file_name().unwrap().to_string_lossy();
+                let name = name.as_ref();
+                if let Some(restore_id) = name
+                    .strip_prefix(RESTORE_TASK_WORKING_PATH_PREFIX)
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    match self.read_task_meta(restore_id) {
+                        Ok(meta) => {
+                            info!("restore task: {:?}", meta);
+                            let task = RestoreTask::from_meta(meta);
+                            self.restore_tasks.wl().insert(restore_id, task);
+                        }
+                        Err(err) => {
+                            warn!("fail to read task meta: {:?}", err; "restore_id" => restore_id);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for BrContext {
@@ -832,7 +968,7 @@ impl Drop for BrContext {
 #[serde(rename_all = "kebab-case")]
 pub struct NativeBrConfig {
     /// The time-to-live when restore task has been in final state.
-    restore_task_ttl: ReadableDuration,
+    pub restore_task_ttl: ReadableDuration,
 
     /// The timeout for waiting the flush of mem-tables.
     pub restore_timeout_wait_flush: ReadableDuration,
@@ -840,6 +976,7 @@ pub struct NativeBrConfig {
     pub restore_timeout_restore_snapshot: ReadableDuration,
     /// The timeout for fetching the latest wal chunk from store.
     pub restore_timeout_fetch_wal: ReadableDuration,
+    pub restore_timeout_pd_control: ReadableDuration,
     /// The maximum number of retries for the process from split regions to
     /// restore snapshots.
     pub restore_max_retry: usize,
@@ -849,6 +986,8 @@ pub struct NativeBrConfig {
     pub instant_backup_timeout: ReadableDuration,
     /// Interval for periodic backup. `0s` to disable periodic backup.
     pub backup_interval: ReadableDuration,
+    #[cfg(feature = "testexport")]
+    pub backup_skip_keyspace_meta: bool,
 
     /// Whether to tolerate unavailability of no more than one store when
     /// backup.
@@ -865,10 +1004,13 @@ impl Default for NativeBrConfig {
             restore_timeout_wait_flush: restore::DEFAULT_TIMEOUT_WAIT_FLUSH,
             restore_timeout_restore_snapshot: restore::DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
             restore_timeout_fetch_wal: restore::DEFAULT_TIMEOUT_FETCH_WAL,
+            restore_timeout_pd_control: restore::DEFAULT_TIMEOUT_PD_CONTROL,
             restore_max_retry: restore::DEFAULT_RESTORE_MAX_RETRY,
             restore_coarse_split_regions_factor: 64,
             instant_backup_timeout: backup_worker::DEFAULT_TIMEOUT_INSTANT_BACKUP,
             backup_interval: ReadableDuration::ZERO,
+            #[cfg(feature = "testexport")]
+            backup_skip_keyspace_meta: false,
             backup_tolerate_err: false,
             restore_tolerate_err: false,
         }
@@ -885,7 +1027,7 @@ impl NativeBrManager {
         runtime: Arc<Runtime>,
         pd_client: Arc<dyn PdClient>,
         s3fs: Arc<S3Fs>,
-        working_path: Option<String>,
+        data_dir: PathBuf,
         config: Config,
     ) -> Self {
         let backup_config = config.to_backup_config();
@@ -894,16 +1036,20 @@ impl NativeBrManager {
             pd_client.clone(),
             config.native_br.backup_interval.0,
         );
+        let mut context = BrContext {
+            pd_client,
+            s3fs,
+            data_dir,
+            runtime,
+            restore_tasks: Default::default(),
+            keyspace_tasks: Default::default(),
+            backup_worker,
+        };
+        if let Err(err) = context.init() {
+            warn!("BR context init failed: {:?}", err);
+        }
         Self {
-            context: Arc::new(BrContext {
-                pd_client,
-                s3fs,
-                working_path,
-                runtime,
-                restore_tasks: Default::default(),
-                keyspace_tasks: Default::default(),
-                backup_worker,
-            }),
+            context: Arc::new(context),
             config: RwLock::new(config),
         }
     }
@@ -1020,6 +1166,7 @@ impl NativeBrManager {
             check_task(task, keyspace_name)?;
             if task.state.is_final() {
                 tasks.remove(&restore_id);
+                self.context.remove_working_path(restore_id);
                 Ok(Some(true))
             } else {
                 Ok(Some(false))
@@ -1067,6 +1214,101 @@ fn check_task(task: &RestoreTask, keyspace_name: &str) -> Result<()> {
     }
 }
 
+#[cfg(any(test, feature = "testexport"))]
+pub mod test_utils {
+    use std::sync::Arc;
+
+    use chrono::{DateTime, Utc};
+    use security::{HttpResult, RestfulClient, SecurityManager};
+    use tikv_util::box_try;
+
+    use crate::native_br::{
+        BackupItem, ListBackupResponse, RestoreProgressResponse, JSON_TIME_FORMAT,
+    };
+
+    #[derive(Default, Serialize, Deserialize, Debug)]
+    #[serde(default)]
+    struct DummyRequest {}
+
+    pub struct NativeBrSvcClient {
+        cluster_id: u64,
+        inner: RestfulClient,
+    }
+
+    impl NativeBrSvcClient {
+        pub fn new(
+            cluster_id: u64,
+            endpoints: Vec<String>,
+            security_mgr: Arc<SecurityManager>,
+        ) -> HttpResult<Self> {
+            Ok(Self {
+                cluster_id,
+                inner: box_try!(RestfulClient::new("native_br_cli", endpoints, security_mgr)),
+            })
+        }
+
+        pub async fn list_backups(
+            &self,
+            last_backup_time: &DateTime<Utc>,
+        ) -> HttpResult<ListBackupResponse> {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("cluster_id", self.cluster_id.to_string()),
+                    (
+                        "last_backup_time",
+                        last_backup_time.format(JSON_TIME_FORMAT).to_string(),
+                    ),
+                ])
+                .finish();
+            Ok(box_try!(
+                self.inner.get(format!("api/v1/backups?{query}")).await
+            ))
+        }
+
+        pub async fn restore_keyspace(
+            &self,
+            restore_id: u64,
+            keyspace: String,
+            backup: &BackupItem,
+        ) -> HttpResult<RestoreProgressResponse> {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("cluster_id", self.cluster_id.to_string()),
+                    ("keyspace", keyspace),
+                    ("backup_id", backup.id.to_string()),
+                    ("backup_name", backup.name.clone()),
+                ])
+                .finish();
+            Ok(box_try!(
+                self.inner
+                    .put(
+                        format!("api/v1/restore_keyspace/{restore_id}?{query}"),
+                        &DummyRequest {}
+                    )
+                    .await
+            ))
+        }
+
+        pub async fn get_restore_progress(
+            &self,
+            restore_id: u64,
+            keyspace: String,
+        ) -> HttpResult<RestoreProgressResponse> {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("cluster_id", self.cluster_id.to_string()),
+                    ("keyspace", keyspace),
+                ])
+                .finish();
+            Ok(box_try!(
+                self.inner
+                    .get(format!("api/v1/restore_keyspace/{restore_id}?{query}"))
+                    .await
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -1081,7 +1323,7 @@ mod tests {
 
     #[test]
     fn test_restore_task_state() {
-        let br_manager = new_test_br_manager("2s");
+        let (br_manager, _temp_dir) = new_test_br_manager("2s");
 
         // TODO: test for illegal state transition.
         let states_cases = vec![
@@ -1129,7 +1371,7 @@ mod tests {
         assert_eq!(br_manager.get_all_restore_task().len(), 3);
     }
 
-    fn new_test_br_manager(restore_task_ttl: &str) -> NativeBrManager {
+    fn new_test_br_manager(restore_task_ttl: &str) -> (NativeBrManager, tempfile::TempDir) {
         let thread_pool = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -1141,19 +1383,23 @@ mod tests {
 
         let file_data = "abcdefgh".to_string().into_bytes();
         let s3fs = Arc::new(new_test_s3fs(&file_data));
+        let temp_dir = tempfile::tempdir().unwrap();
 
-        NativeBrManager::new(
-            thread_pool,
-            Arc::new(MockPdClient {}),
-            s3fs,
-            None,
-            Config {
-                native_br: NativeBrConfig {
-                    restore_task_ttl: ReadableDuration::from_str(restore_task_ttl).unwrap(),
+        (
+            NativeBrManager::new(
+                thread_pool,
+                Arc::new(MockPdClient {}),
+                s3fs,
+                temp_dir.path().to_path_buf(),
+                Config {
+                    native_br: NativeBrConfig {
+                        restore_task_ttl: ReadableDuration::from_str(restore_task_ttl).unwrap(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
-                ..Default::default()
-            },
+            ),
+            temp_dir,
         )
     }
 

@@ -9,7 +9,10 @@ use std::{
     time::Duration,
 };
 
+use chrono::Utc;
+use cloud_worker::native_br::{test_utils::NativeBrSvcClient, BackupItem, RestoreState};
 use collections::HashMap;
+use futures::executor::block_on;
 use kvengine::dfs::S3Fs;
 use kvproto::{
     metapb,
@@ -22,9 +25,12 @@ use native_br::{
     restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
 };
 use pd_client::PdClient;
+use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
-    alloc_node_id_vec, client::RequestOptions, oss::prepare_dfs, ServerCluster,
+    alloc_node_id, alloc_node_id_vec, client::RequestOptions, oss::prepare_dfs, ServerCluster,
+    ServerClusterBuilder, TikvWorkerOptions, TryWaiter,
 };
+use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
 use tikv_util::info;
 use tokio::runtime::Runtime;
@@ -292,6 +298,137 @@ fn test_restore_on_disk_full() {
     assert_eq!(deleted, 0);
 
     fail::remove(low_space_fp);
+    cluster.stop();
+    oss.shutdown();
+}
+
+#[test]
+fn test_native_br_service() {
+    test_util::init_log_for_test();
+    const KEYSPACE_ID: u32 = 1;
+    const DATA_LEN: usize = 100;
+    const VALUE_SIZE: usize = 64;
+
+    let mock_get_keyspace_fp = "pd_ctl::mock_get_keyspace_by_name";
+    let mock_no_tiflash = "pd_ctl::mock_no_tiflash_placement_rule_group";
+
+    let runtime = Runtime::new().unwrap();
+    let _enter = runtime.enter();
+
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("t_");
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
+    let mut cluster = ServerClusterBuilder::new(alloc_node_id_vec(3), |_, conf| {
+        conf.dfs = dfs_config.clone();
+        conf.rfengine.lightweight_backup = true;
+        conf.enable_inner_key_offset = true;
+    })
+    .pd(pd_wrapper)
+    .build();
+    let tikv_worker_id = alloc_node_id();
+    let tikv_worker_opts = TikvWorkerOptions {
+        backup_interval: Duration::from_millis(1010),
+        backup_skip_keyspace_meta: true,
+        restore_timeout_pd_control: Duration::from_secs(3),
+        ..Default::default()
+    };
+    cluster.start_tikv_workers(vec![tikv_worker_id], tikv_worker_opts.clone());
+    cluster.wait_region_replicated(&[], 3);
+
+    let pd_client = cluster.get_pd_client();
+    let cluster_id = pd_client.get_cluster_id().unwrap();
+
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+
+    let i_to_key = i_to_keyspace_key(KEYSPACE_ID);
+    client.put_kv(0..DATA_LEN, &i_to_key, random_value::<VALUE_SIZE>);
+    client.verify_data_with_ref_store();
+
+    let datetime0 = Utc::now();
+    let ref_store0 = client.dump_ref_store();
+
+    let security_mgr = Arc::new(SecurityManager::default());
+    let br_cli =
+        NativeBrSvcClient::new(cluster_id, cluster.tikv_worker_endpoints(), security_mgr).unwrap();
+    let backup = TryWaiter::timeout(10)
+        .interval(1)
+        .try_wait_result(|| {
+            let mut backups = block_on(br_cli.list_backups(&datetime0)).unwrap();
+            backups
+                .items
+                .pop()
+                .ok_or(Err::<BackupItem, String>("no backup found".to_string()))
+        })
+        .unwrap();
+    info!("backup: {:?}", backup);
+
+    // More data.
+    client.put_kv(
+        DATA_LEN / 3..DATA_LEN * 2 / 3,
+        &i_to_key,
+        random_value::<VALUE_SIZE>,
+    );
+    client.verify_data_with_ref_store();
+
+    // Restore.
+    let keyspace_name = format!("ks{KEYSPACE_ID}");
+    let progress = block_on(br_cli.restore_keyspace(1, keyspace_name.clone(), &backup)).unwrap();
+    info!("create restore: {:?}", progress);
+
+    // Must fail due to get keyspace name error.
+    TryWaiter::timeout(30).interval(1).must_wait(
+        || {
+            let progress = block_on(br_cli.get_restore_progress(1, keyspace_name.clone())).unwrap();
+            info!("restore progress: {:?}", progress);
+            progress.status == RestoreState::Error
+        },
+        || "restore not error".to_string(),
+    );
+
+    // Mock PD control & retry.
+    fail::cfg(mock_get_keyspace_fp, "return").unwrap();
+    fail::cfg(mock_no_tiflash, "return").unwrap();
+
+    // Restore tikv worker.
+    cluster.stop_tikv_workers();
+    cluster.start_tikv_workers(vec![tikv_worker_id], tikv_worker_opts.clone());
+
+    // Check task persistence.
+    let progress = block_on(br_cli.get_restore_progress(1, keyspace_name.clone())).unwrap();
+    info!("restore progress (after restart): {:?}", progress);
+    assert_eq!(progress.status, RestoreState::Error);
+    assert_eq!(progress.error, "interrupted");
+
+    // Retry restore.
+    let progress = block_on(br_cli.restore_keyspace(1, keyspace_name.clone(), &backup)).unwrap();
+    info!("retry restore: {:?}", progress);
+
+    // Wait succeed.
+    TryWaiter::timeout(30).interval(1).must_wait(
+        || {
+            let progress = block_on(br_cli.get_restore_progress(1, keyspace_name.clone())).unwrap();
+            info!("restore progress: {:?}", progress);
+            assert_ne!(
+                progress.status,
+                RestoreState::Error,
+                "progress: {:?}",
+                progress
+            );
+            progress.status == RestoreState::Succeed
+        },
+        || "restore not succeed".to_string(),
+    );
+
+    // Verify data.
+    let (existed, deleted) = client
+        .verify_data_with_given_ref_store(&ref_store0, None, &RequestOptions::default())
+        .unwrap();
+    assert_eq!(existed, DATA_LEN);
+    assert_eq!(deleted, 0);
+
+    fail::remove(mock_get_keyspace_fp);
+    fail::remove(mock_no_tiflash);
+
     cluster.stop();
     oss.shutdown();
 }

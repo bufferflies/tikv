@@ -26,7 +26,9 @@ use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfenginepb::{ClusterBackupMeta, KeySpaceBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
 use tikv_util::{
-    error, info,
+    error,
+    errors::Context as _,
+    info,
     mpsc::{SendError, Sender},
     panic_mark_dfs_worker_file_exists,
     time::Instant,

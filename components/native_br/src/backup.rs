@@ -315,11 +315,7 @@ pub fn backup_cluster_with_ts(
     cluster_backup_meta.set_cluster_id(cluster_id);
     cluster_backup_meta.set_is_lightweight(backup_type == BackupType::Lightweight);
 
-    if !config.skip_keyspace_meta {
-        runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
-    } else {
-        info!("skip backup keyspace meta");
-    }
+    runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
 
     let start_time = Instant::now_coarse();
     let mut bo = backoff::ExponentialBackoff::new(
@@ -619,6 +615,12 @@ async fn backup_pd_keyspace_meta(
     config: &BackupConfig,
     cluster_backup_meta: &mut ClusterBackupMeta,
 ) -> Result<()> {
+    #[cfg(feature = "testexport")]
+    if config.skip_keyspace_meta {
+        warn!("skip backup keyspace meta");
+        return Ok(());
+    }
+
     info!("start backup PD keyspace meta"; "backup_meta" => %cluster_backup_meta);
     let cluster_id = cluster_backup_meta.cluster_id;
 
@@ -697,8 +699,9 @@ pub struct BackupConfig {
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
     pub tolerate_err: usize,
-    pub skip_keyspace_meta: bool,
     pub timeout: ReadableDuration,
+    #[cfg(feature = "testexport")]
+    pub skip_keyspace_meta: bool,
 }
 
 impl Default for BackupConfig {
@@ -708,8 +711,9 @@ impl Default for BackupConfig {
             security: SecurityConfig::default(),
             dfs: DFSConfig::default(),
             tolerate_err: 0,
-            skip_keyspace_meta: false,
             timeout: ReadableDuration::secs(30),
+            #[cfg(feature = "testexport")]
+            skip_keyspace_meta: false,
         }
     }
 }

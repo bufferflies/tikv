@@ -4,7 +4,7 @@ use std::{fs, os::unix::fs::FileExt, path::Path, sync::atomic::Ordering};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes};
-use tikv_util::{info, warn};
+use tikv_util::{errors::Context as _, info, warn};
 
 use crate::{log_batch::RaftLogOp, manifest::Manifest, service_worker::ServiceTask, *};
 

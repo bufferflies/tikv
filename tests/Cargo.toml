@@ -78,6 +78,9 @@ testexport = [
     "schema/testexport",
     "rfstore/testexport",
     "rfengine/testexport",
+    "native_br/testexport",
+    "cloud_worker/testexport",
+    "test_cloud_server/testexport",
 ]
 profiling = ["profiler/profiling"]
 
