@@ -355,6 +355,7 @@ pub struct ShardStatsLite {
     pub total_size: u64,
     pub schema_version: i64,
     pub schema_restore_version: u64,
+    pub write_sequence: u64,
     pub storage_class: StorageClass,
     pub columnar_tables: usize,
 }
@@ -370,6 +371,7 @@ impl From<ShardStats> for ShardStatsLite {
             total_size: s.total_size,
             schema_version: s.schema_version,
             schema_restore_version: s.schema_restore_version,
+            write_sequence: s.write_sequence,
             storage_class: s.storage_class,
             columnar_tables: s.columnar_tables,
         }

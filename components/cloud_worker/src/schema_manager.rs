@@ -49,10 +49,10 @@ use crate::{
 const DEFAULT_TIMEOUT: ReadableDuration = ReadableDuration::secs(5);
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024; // 32MB
 const KEYSPACE_REFRESH_INTERVAL: ReadableDuration = ReadableDuration::secs(30);
-const SCHEMA_REFRESH_THRESHOLD: u64 = 256 * 1024 * 1024;
 
 const META_FILE_MAGIC: u32 = 0x5E9EDFF4;
 const META_FILE_FORMAT_VER: u16 = 1;
+const META_FILE_FORMAT_VER_V2: u16 = 2;
 const META_FILE_NAME: &str = "schemas.meta";
 
 const TIKV_STORE_LABEL_TIER_KEY: &str = "serverless.tidbcloud.com/tier";
@@ -75,7 +75,8 @@ struct MetaFile {
 
 struct MetaFileCore {
     files: DashMap<u32 /* keyspace_id */, Vec<(u64 /* file_id */, i64 /* schema_version */)>>,
-    checked_version: DashMap<u32 /* keyspace_id */, i64 /* schema_version */>,
+    checked_versions: DashMap<u32 /* keyspace_id */, i64 /* schema_version */>,
+    write_sequences: DashMap<u32 /* keyspace_id */, u64 /* write_sequence */>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -93,7 +94,7 @@ impl MetaFileFooter {
             checksum: 0,
             checksum_type: ChecksumType::Crc32.value(),
             compression_type: NO_COMPRESSION,
-            format_version: META_FILE_FORMAT_VER,
+            format_version: META_FILE_FORMAT_VER_V2,
             magic: META_FILE_MAGIC,
         }
     }
@@ -106,6 +107,13 @@ impl MetaFileFooter {
             format_version: buf.get_u16_le(),
             magic: buf.get_u32_le(),
         }
+    }
+
+    fn is_valid_version(&self) -> bool {
+        matches!(
+            self.format_version,
+            META_FILE_FORMAT_VER_V2 | META_FILE_FORMAT_VER
+        )
     }
 
     fn write_to(&self, data: &mut Vec<u8>) {
@@ -121,7 +129,8 @@ impl MetaFile {
     fn new() -> Self {
         let core = MetaFileCore {
             files: DashMap::default(),
-            checked_version: DashMap::default(),
+            checked_versions: DashMap::default(),
+            write_sequences: DashMap::default(),
         };
         Self {
             core: Arc::new(core),
@@ -139,6 +148,11 @@ impl MetaFile {
         let mut data = &file_data[..footer_offset];
         if footer.magic != META_FILE_MAGIC {
             return Err(crate::error::Error::FileCorrupted);
+        }
+        if !footer.is_valid_version() {
+            return Err(crate::error::Error::CheckError(
+                "invalid meta file version".to_string(),
+            ));
         }
         let checksum_type = ChecksumType::from(footer.checksum_type);
         let got_checksum = checksum_type.checksum(data);
@@ -159,15 +173,28 @@ impl MetaFile {
             files.insert(keyspace_id, keyspace_files);
         }
         let checked_count = data.get_u64_le();
-        let checked_version = DashMap::with_capacity(checked_count as usize);
+        let checked_versions = DashMap::with_capacity(checked_count as usize);
         for _ in 0..checked_count {
             let keyspace_id = data.get_u32_le();
             let version = data.get_i64_le();
-            checked_version.insert(keyspace_id, version);
+            checked_versions.insert(keyspace_id, version);
         }
+        let write_sequences = if footer.format_version == META_FILE_FORMAT_VER_V2 {
+            let seq_count = data.get_u64_le();
+            let write_sequences = DashMap::with_capacity(seq_count as usize);
+            for _ in 0..seq_count {
+                let keyspace_id = data.get_u32_le();
+                let seq = data.get_u64_le();
+                write_sequences.insert(keyspace_id, seq);
+            }
+            write_sequences
+        } else {
+            DashMap::default()
+        };
         let core = MetaFileCore {
             files,
-            checked_version,
+            checked_versions,
+            write_sequences,
         };
         Ok(MetaFile {
             core: Arc::new(core),
@@ -188,13 +215,21 @@ impl MetaFile {
                 data.put_i64_le(*schema_version);
             }
         }
-        let checked_count = self.core.checked_version.len();
+        let checked_count = self.core.checked_versions.len();
         data.put_u64_le(checked_count as u64);
-        for kv in self.core.checked_version.iter() {
+        for kv in self.core.checked_versions.iter() {
             let keyspace_id = kv.key();
             let ver = kv.value();
             data.put_u32_le(*keyspace_id);
             data.put_i64_le(*ver);
+        }
+        let write_sequence_count = self.core.write_sequences.len();
+        data.put_u64_le(write_sequence_count as u64);
+        for kv in self.core.write_sequences.iter() {
+            let keyspace_id = kv.key();
+            let seq = kv.value();
+            data.put_u32_le(*keyspace_id);
+            data.put_u64_le(*seq);
         }
         let mut footer = MetaFileFooter::new();
         let checksum_type = ChecksumType::Crc32;
@@ -216,12 +251,24 @@ impl MetaFile {
     }
 
     fn add_checked_version(&self, keyspace_id: u32, version: i64) {
-        self.core.checked_version.insert(keyspace_id, version);
+        self.core.checked_versions.insert(keyspace_id, version);
     }
 
     fn get_checked_version(&self, keyspace_id: u32) -> Option<i64> {
         self.core
-            .checked_version
+            .checked_versions
+            .get(&keyspace_id)
+            .as_deref()
+            .cloned()
+    }
+
+    fn add_write_sequence(&self, keyspace_id: u32, seq: u64) {
+        self.core.write_sequences.insert(keyspace_id, seq);
+    }
+
+    fn get_write_sequence(&self, keyspace_id: u32) -> Option<u64> {
+        self.core
+            .write_sequences
             .get(&keyspace_id)
             .as_deref()
             .cloned()
@@ -241,7 +288,8 @@ impl MetaFile {
 
     fn remove_keyspace(&self, keyspace_id: u32) -> Option<(u32, Vec<(u64, i64)>)> {
         // The schema file will be removed by gc.
-        self.core.checked_version.remove(&keyspace_id);
+        self.core.checked_versions.remove(&keyspace_id);
+        self.core.write_sequences.remove(&keyspace_id);
         self.core.files.remove(&keyspace_id)
     }
 }
@@ -252,7 +300,6 @@ impl MetaFile {
 pub struct SchemaManagerConfig {
     pub dir: PathBuf,
     pub keyspace_refresh_interval: ReadableDuration,
-    pub schema_refresh_threshold: u64,
     pub http_timeout: ReadableDuration,
     pub enabled: bool,
     // `whitelist_file` is a json file contains a list of keyspace_id.
@@ -266,7 +313,6 @@ impl Default for SchemaManagerConfig {
         Self {
             dir: tempfile::tempdir().unwrap().into_path(),
             keyspace_refresh_interval: KEYSPACE_REFRESH_INTERVAL,
-            schema_refresh_threshold: SCHEMA_REFRESH_THRESHOLD,
             http_timeout: DEFAULT_TIMEOUT,
             enabled: false,
             whitelist_file: PathBuf::new(), // Empty means no whitelist filtering.
@@ -279,7 +325,6 @@ impl SchemaManagerConfig {
     pub fn new(
         dir: PathBuf,
         keyspace_refresh_interval: ReadableDuration,
-        schema_refresh_threshold: u64,
         http_timeout: ReadableDuration,
         enabled: bool,
         whitelist_file: PathBuf,
@@ -288,7 +333,6 @@ impl SchemaManagerConfig {
         Self {
             dir,
             keyspace_refresh_interval,
-            schema_refresh_threshold,
             http_timeout,
             enabled,
             whitelist_file,
@@ -426,14 +470,37 @@ impl SchemaManager {
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let runtime = self.ctx.s3fs.get_runtime();
         let mut spawn_task_count = 0;
-        for (&keyspace_id, keyspace_shard_stats) in keyspace_stats.iter().filter(|(_, v)| {
-            v.iter().map(|s| s.total_size).sum::<u64>() > self.config.schema_refresh_threshold
-        }) {
+        for (&keyspace_id, keyspace_shard_stats) in keyspace_stats {
             // Skip the default keyspace. The tikv-client not support the default keyspace
             // with ApiV2NoPrefixCodec.
             if !self.in_whitelist(keyspace_id) || keyspace_id == DEFAULT_KEYSPACE_ID {
                 continue;
             }
+            // If the keyspace has only one shard, we check the write sequence if changed.
+            // If the write sequence is not changed, we skip the refresh. This is useful to
+            // avoid large number of infrequent small keyspaces to check schema metadata
+            // from TiKV.
+            let update_write_sequence = if keyspace_shard_stats.len() == 1 {
+                let seq = self.meta_file.get_write_sequence(keyspace_id);
+                let shard_stats = keyspace_shard_stats.first().unwrap();
+                if seq.is_some_and(|seq| seq == shard_stats.write_sequence) {
+                    debug!(
+                        "{}: write sequence is not changed, skip",
+                        keyspace_id;
+                        "seq" => ?seq, "shard_stats" => ?shard_stats
+                    );
+                    continue;
+                }
+                Some(shard_stats.write_sequence)
+            } else {
+                None
+            };
+            debug!(
+                "{}: update write sequence: {}",
+                keyspace_id,
+                update_write_sequence.is_some()
+            );
+
             // 1. Try to read schema file from local.
             let local_schema_file =
                 match read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id) {
@@ -521,6 +588,10 @@ impl SchemaManager {
                     self.meta_file
                         .add_checked_version(keyspace_id, schema_version);
                 }
+                if let Some(write_sequence) = update_write_sequence {
+                    self.meta_file
+                        .add_write_sequence(keyspace_id, write_sequence);
+                }
                 continue;
             }
             info!(
@@ -559,6 +630,10 @@ impl SchemaManager {
                     "schema_version" => schema_version, "tables" => ?table_infos, "old_sc_tables" => ?old_storage_class_tables);
                 self.meta_file
                     .add_checked_version(keyspace_id, schema_version);
+                if let Some(write_sequence) = update_write_sequence {
+                    self.meta_file
+                        .add_write_sequence(keyspace_id, write_sequence);
+                }
                 continue;
             }
 
@@ -585,6 +660,10 @@ impl SchemaManager {
             if schemas.is_none() {
                 self.meta_file
                     .add_checked_version(keyspace_id, schema_version);
+                if let Some(write_sequence) = update_write_sequence {
+                    self.meta_file
+                        .add_write_sequence(keyspace_id, write_sequence);
+                }
                 continue;
             }
 
@@ -662,6 +741,10 @@ impl SchemaManager {
                 .add_file(keyspace_id, file_id, schema_version);
             self.meta_file
                 .add_checked_version(keyspace_id, schema_version);
+            // Note: we don't update the write sequence here in case of
+            // broadcast some stores failure. We can retry check the store
+            // status to broadcast again for small keyspaces. The write sequence
+            // will be updated if schema up to date.
         }
         // Save meta_file.
         let meta = self.meta_file.write();

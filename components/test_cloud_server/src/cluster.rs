@@ -919,7 +919,6 @@ impl ServerCluster {
             dfs: tikv_config.dfs.clone(),
             schema_manager: cloud_worker::SchemaManagerConfig {
                 dir,
-                schema_refresh_threshold: 1,
                 enabled: true,
                 keyspace_refresh_interval: ReadableDuration::secs(3),
                 http_timeout: ReadableDuration::secs(3),
