@@ -456,13 +456,14 @@ pub(crate) fn start_components(
         let tc = tc.clone();
         let columnar_switch_on = switches.columnar_switch_on;
         let dfs_config = dfs_config.clone();
-        runtime.spawn_blocking(move || {
+        runtime.spawn(async move {
             tc.start_tiflash(
                 TIFLASH_SERVER_COUNT as u16,
                 &dfs_config,
                 TIFLASH_HEALTHY_TIMEOUT,
                 columnar_switch_on,
-            );
+            )
+            .await
         })
     };
     let (start_tidb, start_tiflash) =

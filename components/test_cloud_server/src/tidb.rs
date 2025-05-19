@@ -629,7 +629,7 @@ impl TidbClusterCore {
         info!("start TiDB success"; "takes" => ?start_time.saturating_elapsed());
     }
 
-    pub fn start_tiflash(
+    pub async fn start_tiflash(
         &self,
         count: u16,
         dfs: &DFSConfig,
@@ -638,7 +638,7 @@ impl TidbClusterCore {
     ) {
         let start_time = Instant::now_coarse();
         if tiflash_compute_mode {
-            self.tiflash.start_minio();
+            self.tiflash.start_minio().await;
         }
         let pd_endpoints = self.pd.endpoints();
         for idx in 0..count {
@@ -656,7 +656,7 @@ impl TidbClusterCore {
                 .start(count, dfs.clone(), &pd_endpoints, TiFlashRole::Compute);
         }
 
-        block_on(self.tiflash.must_all_healthy(timeout));
+        self.tiflash.must_all_healthy(timeout).await;
         // Note: TiFlash compute node may not register self to pd.
         self.wait_tiflash_up(count, timeout);
         info!("start TiFlash success"; "takes" => ?start_time.saturating_elapsed());

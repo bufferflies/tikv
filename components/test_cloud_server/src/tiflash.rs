@@ -15,7 +15,7 @@ use security::{RestfulClient, SecurityManager};
 use serde_derive::Serialize;
 use tikv_util::info;
 
-use crate::{must_wait, try_wait_result_async};
+use crate::try_wait_result_async;
 
 const TIFLASH_HTTP_PORT_BASE: u16 = 8123;
 const TIFLASH_TCP_PORT_BASE: u16 = 9000;
@@ -208,7 +208,7 @@ impl TiFlashServers {
     }
 
     // TiFlash use XML API to access S3.
-    pub fn start_minio(&self) {
+    pub async fn start_minio(&self) {
         let minio_data_dir = self.data_path.join("minio");
         fs::create_dir_all(&minio_data_dir).unwrap();
 
@@ -235,29 +235,45 @@ impl TiFlashServers {
             panic!("minio server failed to start");
         }
 
+        // Configure mc client, wait the minio server to be ready and retry.
+        let hyper_client = hyper::Client::builder().build(hyper::client::HttpConnector::new());
+
+        try_wait_result_async(
+            || {
+                let hyper_client = hyper_client.clone();
+                Box::pin(async move {
+                    let uri = format!("http://127.0.0.1:{}/minio/health/live", MINIO_PORT);
+                    let req = hyper::Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .body(hyper::Body::empty())
+                        .unwrap();
+                    match hyper_client.request(req).await {
+                        Ok(res) if res.status() == hyper::StatusCode::OK => Ok(()),
+                        _ => Err("failed to configure mc client".to_string()),
+                    }
+                })
+            },
+            10,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}", e));
+
         let mut minio = self.minio.lock().unwrap();
         *minio = Some(child);
 
-        // Configure mc client, wait the minio server to be ready and retry.
-        must_wait(
-            || {
-                let status = Command::new("mc")
-                    .arg("alias")
-                    .arg("set")
-                    .arg("local") // alias name
-                    .arg(format!("http://127.0.0.1:{}", MINIO_PORT))
-                    .arg("minioadmin")
-                    .arg("minioadmin")
-                    .status()
-                    .unwrap_or_else(|e| panic!("failed to configure mc: {}", e));
-                if status.success() {
-                    return true;
-                }
-                false
-            },
-            5,
-            || "failed to configure mc client".to_string(),
-        );
+        let status = Command::new("mc")
+            .arg("alias")
+            .arg("set")
+            .arg("local") // alias name
+            .arg(format!("http://127.0.0.1:{}", MINIO_PORT))
+            .arg("minioadmin")
+            .arg("minioadmin")
+            .status()
+            .unwrap_or_else(|e| panic!("failed to configure mc: {}", e));
+        if !status.success() {
+            panic!("failed to configure mc");
+        }
 
         // Create bucket if it doesn't exist
         let status = Command::new("mc")
