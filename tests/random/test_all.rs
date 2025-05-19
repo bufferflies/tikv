@@ -32,6 +32,7 @@ use test_cloud_server::{
     IA_FREQ_UPDATE_INTERVAL_DEF, IA_MEM_CAP_DEF,
 };
 use test_pd_client::{PdClientExt, PdWrapper};
+use tikv::server::config::GrpcCompressionType;
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     info,
@@ -376,6 +377,7 @@ fn prepare_cluster(
         conf.dfs = dfs.clone();
         conf.dfs.allow_fallback_local = false;
         conf.enable_inner_key_offset = true;
+        conf.server.grpc_compression_type = GrpcCompressionType::Gzip;
         conf.security = security_conf.clone();
 
         conf.coprocessor.region_split_size = ReadableSize::kb(256);

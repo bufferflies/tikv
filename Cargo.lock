@@ -2800,6 +2800,7 @@ dependencies = [
  "crc32fast",
  "libc 0.2.161",
  "libz-sys",
+ "miniz-sys",
  "miniz_oxide 0.3.7",
 ]
 
@@ -4464,6 +4465,16 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "miniz-sys"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e9e3ae51cea1576ceba0dde3d484d30e6e5b86dee0b2d412fe3a16a15c98202"
+dependencies = [
+ "cc",
+ "libc 0.2.161",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -8959,7 +8970,7 @@ dependencies = [
 [[package]]
 name = "tikv-client"
 version = "0.3.0"
-source = "git+https://github.com/tikv/client-rust.git?branch=cse#1aebfa56ad4678cf08121e264cbd623c0a7b6582"
+source = "git+https://github.com/tikv/client-rust.git?branch=cse#fa7893173b2f6d5e36131f414321f8bba394393f"
 dependencies = [
  "async-recursion 0.3.2",
  "async-trait",
@@ -9486,6 +9497,7 @@ dependencies = [
  "axum 0.6.18",
  "base64 0.21.2",
  "bytes",
+ "flate2",
  "h2",
  "http",
  "http-body",

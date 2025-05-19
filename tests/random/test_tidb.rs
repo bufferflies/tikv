@@ -29,7 +29,7 @@ use test_cloud_server::{
     IA_FREQ_UPDATE_INTERVAL_DEF,
 };
 use test_pd_client::PdWrapper;
-use tikv::config::TikvConfig;
+use tikv::{config::TikvConfig, server::config::GrpcCompressionType};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     info,
@@ -341,6 +341,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.dfs = dfs_config.clone();
         conf.dfs.allow_fallback_local = false;
         conf.enable_inner_key_offset = true;
+        conf.server.grpc_compression_type = GrpcCompressionType::Gzip;
         conf.security = security_conf.clone();
 
         conf.coprocessor.region_split_size = REGION_SIZE;
