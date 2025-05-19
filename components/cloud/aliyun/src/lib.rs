@@ -5,6 +5,7 @@ use std::{fs, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use aws::ActiveRefreshingProvider;
 use chrono::Utc;
+use cloud_encryption::MasterKeyConfig;
 use crypto::{hmac::Hmac, mac::Mac, sha1::Sha1};
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
@@ -111,36 +112,49 @@ pub fn new_credential_provider() -> Result<ActiveRefreshingProvider, Credentials
     Ok(auto_refreshing_provider)
 }
 
-pub async fn decrypt_master_key(cypher_text_blob: &str) -> Result<Vec<u8>, CredentialsError> {
+pub async fn decrypt_master_key(
+    master_key_conf: &MasterKeyConfig,
+) -> Result<Vec<u8>, CredentialsError> {
     let credential_provider = AssumeRoleWithOidcProvider::new()?;
     let cred = credential_provider.credentials().await?;
-    let resp =
-        decrypt_key_with_credential(cypher_text_blob, &cred, &credential_provider.region).await?;
+    let region = if !master_key_conf.region.is_empty() {
+        &master_key_conf.region
+    } else {
+        &credential_provider.region
+    };
+    let resp = decrypt_key_with_credential(master_key_conf, &cred, region).await?;
     base64::decode(resp.plaintext).map_err(|_| CredentialsError::new("failed to decode base64"))
 }
 
 async fn decrypt_key_with_credential(
-    cypher_text_blob: &str,
+    master_key_config: &MasterKeyConfig,
     cred: &AwsCredentials,
     region: &str,
 ) -> Result<DecryptResponse, CredentialsError> {
     let params = vec![
         ("Action", "Decrypt"),
-        ("CiphertextBlob", cypher_text_blob),
+        ("CiphertextBlob", &master_key_config.cipher_text),
         ("Version", "2016-01-20"),
     ];
+    let endpoint = if master_key_config.endpoint.is_empty() {
+        format!("https://kms.{}.aliyuncs.com", region)
+    } else {
+        master_key_config.endpoint.clone()
+    };
     let singed_query = build_signed_query("GET", &params, cred);
-    let uri = format!("https://kms.{}.aliyuncs.com/?{}", region, singed_query);
+    let uri = format!("{}/?{}", endpoint, singed_query);
     let client = hyper::Client::builder().build(hyper_tls::HttpsConnector::new());
     let request = hyper::Request::get(uri).body(hyper::Body::empty()).unwrap();
     let resp = client.request(request).await?;
-    if !resp.status().is_success() {
+    let status = resp.status();
+    let body = hyper::body::to_bytes(resp.into_body()).await?;
+    if !status.is_success() {
         return Err(CredentialsError::new(format!(
-            "failed to decrypt: {}",
-            resp.status()
+            "failed to decrypt: {}, reason: {}",
+            status,
+            String::from_utf8_lossy(&body)
         )));
     }
-    let body = hyper::body::to_bytes(resp.into_body()).await?;
     let resp: DecryptResponse = serde_json::from_slice(&body)?;
     Ok(resp)
 }

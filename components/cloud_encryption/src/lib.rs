@@ -167,6 +167,7 @@ impl MasterKeyConfig {
         Self::env_or_default("CSE_MASTER_KEY_ID", &mut self.key_id);
         Self::env_or_default("CSE_MASTER_KEY_CIPHER_TEXT", &mut self.cipher_text);
         Self::env_or_default("CSE_MASTER_KEY_VENDOR", &mut self.vendor);
+        Self::env_or_default("CSE_MASTER_KEY_ENDPOINT", &mut self.endpoint);
         Self::env_or_default("AWS_REGION", &mut self.region);
     }
 

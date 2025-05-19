@@ -91,6 +91,7 @@ dependencies = [
  "aws",
  "base64 0.13.0",
  "chrono",
+ "cloud_encryption",
  "http",
  "hyper",
  "hyper-tls",
