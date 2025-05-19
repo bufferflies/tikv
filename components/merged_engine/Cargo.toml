@@ -8,6 +8,7 @@ edition = "2021"
 api_version = { workspace = true }
 bytes = "1.2"
 cloud_encryption = { workspace = true }
+collections = { workspace = true }
 crc32fast = "1.4"
 file_system = { workspace = true }
 kvengine = { workspace = true }

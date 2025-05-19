@@ -1958,26 +1958,6 @@ impl<'a> StoreMsgHandler<'a> {
             None => return,
         };
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
-
-        if let Some(ref pending_merge_state) = peer_fsm.peer.pending_merge_state {
-            let pending_commit = pending_merge_state.get_commit();
-            // The `pending_merge_state` would be overwritten by a later prepare_merge.
-            // Check `commit` and skip `clear_merge_in_mem_data` for stale
-            // `on_rollback_merge`.
-            // See https://github.com/tidbcloud/cloud-storage-engine/issues/664.
-            if commit != 0 && pending_commit == commit {
-                peer_fsm.peer.clear_merge_in_mem_data();
-            } else {
-                info!("skip clear_merge_in_mem_data for stale on_rollback_merge";
-                    "tag" => peer_fsm.peer.tag(),
-                    "peer_id" => peer_fsm.peer_id(),
-                    "commit_index" => commit,
-                    "pending_commit" => pending_commit,
-                );
-                return;
-            }
-        }
-
         self.ctx.store_meta.set_region(
             region,
             &mut peer_fsm.peer,

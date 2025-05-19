@@ -19,6 +19,7 @@ pub(crate) struct Preprocessor {
     raft_hard_state: HardState,
     raft_state: RaftState,
     pending_merge_state: Option<MergeState>,
+    want_rollback_merge_peers: collections::HashSet<u64>,
     learner_skip_idx: u64,
     encryption_key: Option<EncryptionKey>,
 }
@@ -68,6 +69,7 @@ impl Preprocessor {
             raft_hard_state,
             raft_state,
             pending_merge_state: None,
+            want_rollback_merge_peers: collections::HashSet::default(),
             learner_skip_idx: raft_index,
             encryption_key,
         }
@@ -85,6 +87,7 @@ impl Preprocessor {
             raft_hard_state: self.raft_hard_state.clone(),
             raft_state: &mut self.raft_state,
             pending_merge_state: &mut self.pending_merge_state,
+            want_rollback_merge_peers: &mut self.want_rollback_merge_peers,
             learner_skip_idx: &mut self.learner_skip_idx,
             encryption_key: &mut self.encryption_key,
         }
