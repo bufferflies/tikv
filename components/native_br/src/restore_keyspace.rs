@@ -2375,7 +2375,7 @@ impl MetaApplier {
                 }
             };
             match msg {
-                StoreMsg::GenerateEngineChangeSet(mut cs) => {
+                StoreMsg::GenerateEngineChangeSet(mut cs, _) => {
                     let tag =
                         ShardTag::new(self.engine.get_engine_id(), IdVer::from_change_set(&cs));
                     let engine_shard = self.engine.get_shard(cs.shard_id).unwrap();

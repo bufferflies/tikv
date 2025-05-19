@@ -35,7 +35,7 @@ pub enum PeerMsg {
     /// bad things happen like some peers will be considered dead in the
     /// group.
     SignificantMsg(SignificantMsg),
-    GenerateEngineChangeSet(kvenginepb::ChangeSet),
+    GenerateEngineChangeSet(kvenginepb::ChangeSet, Callback),
     ApplySnapshotResult(kvenginepb::ChangeSet),
     PrepareChangeSetResult(
         kvengine::Result<kvengine::ChangeSet>,
@@ -85,7 +85,7 @@ impl PeerMsg {
             PeerMsg::ApplyResult(_) => "ApplyResult",
             PeerMsg::CasualMessage(_) => "CasualMessage",
             PeerMsg::SignificantMsg(_) => "SignificantMsg",
-            PeerMsg::GenerateEngineChangeSet(_) => "GenerateEngineChangeSet",
+            PeerMsg::GenerateEngineChangeSet(..) => "GenerateEngineChangeSet",
             PeerMsg::ApplySnapshotResult(_) => "ApplySnapshotResult",
             PeerMsg::PrepareChangeSetResult(..) => "PrepareChangeSetResult",
             PeerMsg::PrepareCommitMergeResult(..) => "PrepareCommitMergeResult",
@@ -143,7 +143,7 @@ pub enum StoreMsg {
     StoreUnreachable {
         store_id: u64,
     },
-    GenerateEngineChangeSet(kvenginepb::ChangeSet),
+    GenerateEngineChangeSet(kvenginepb::ChangeSet, Callback),
     RaftMessage(kvproto::raft_serverpb::RaftMessage),
     SnapshotReady(u64),
     GetRegionsInRange {

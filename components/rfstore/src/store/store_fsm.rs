@@ -803,7 +803,9 @@ impl<'a> StoreMsgHandler<'a> {
             StoreMsg::Tick => self.on_tick(),
             StoreMsg::Start { store } => self.start(store),
             StoreMsg::StoreUnreachable { store_id } => self.on_store_unreachable(store_id),
-            StoreMsg::GenerateEngineChangeSet(cs) => self.on_generate_engine_meta_change(cs),
+            StoreMsg::GenerateEngineChangeSet(cs, cb) => {
+                self.on_generate_engine_meta_change(cs, cb)
+            }
             StoreMsg::RaftMessage(msg) => {
                 tikv_util::set_current_region_thread_local(msg.region_id);
                 self.on_raft_message(msg)
@@ -1224,13 +1226,13 @@ impl<'a> StoreMsgHandler<'a> {
         }
     }
 
-    fn on_generate_engine_meta_change(&self, change_set: kvenginepb::ChangeSet) {
+    fn on_generate_engine_meta_change(&self, change_set: kvenginepb::ChangeSet, cb: Callback) {
         debug!("store on generate engine meta change {:?}", &change_set);
         // GenerateEngineMetaChange message is first sent to store handler,
         // Then send it to the router to create a raft log then propose this log,
         // replicate to followers.
         let id = change_set.get_shard_id();
-        let peer_msg = PeerMsg::GenerateEngineChangeSet(change_set);
+        let peer_msg = PeerMsg::GenerateEngineChangeSet(change_set, cb);
         // If the region is not found, there is no need to handle the engine meta
         // change, so we can ignore not found error.
         self.ctx.global.router.send(id, peer_msg);

@@ -3,6 +3,7 @@
 use std::{
     fmt,
     fmt::{Display, Formatter},
+    time::Duration,
 };
 
 use kvengine::{
@@ -169,38 +170,53 @@ impl SchemaRunner {
         storage_class: StorageClass,
         schema_version: i64,
     ) -> bool {
+        info!("{} update storage class", tag; "sc" => ?storage_class, "schema_ver" => schema_version);
         let mut cs = kvengine::new_change_set(shard.id, shard.ver);
         cs.set_property_key(STORAGE_CLASS_KEY.to_string());
         cs.set_property_value(storage_class.marshal());
-        info!("{} propose update storage class property", tag; "sc" => ?storage_class);
-        let msg = StoreMsg::GenerateEngineChangeSet(cs);
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let cb = Callback::write(Box::new(move |res| {
+            let _ = tx.send(res);
+        }));
+        let msg = StoreMsg::GenerateEngineChangeSet(cs, cb);
         if let Err(e) = self.router.store_sender.send(msg) {
-            warn!("{} failed to to send meta change message", tag; "err" => ?e, "sc" => ?storage_class);
-            false
-        } else {
-            // Wait to finish updating the storage class property.
-            let begin = Instant::now_coarse();
-            let timeout = std::time::Duration::from_secs(10);
-            loop {
-                if let Some(schema_file) = shard.get_schema_file() {
-                    if schema_version != schema_file.get_version() {
-                        // If the schema version changes, recheck.
-                        return false;
-                    }
-                }
-                let current = shard.get_storage_class();
-                if current == storage_class {
-                    return true;
-                }
-                if begin.saturating_elapsed() < timeout {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    continue;
-                }
+            warn!("{} update storage class: send failed: {:?}", tag, e);
+            return false;
+        }
+        let begin = Instant::now_coarse();
+        let timeout = Duration::from_secs(10);
+        let Ok(res) = rx.recv_timeout(timeout) else {
+            warn!("{} update storage class: wait for propose timeout", tag);
+            return false;
+        };
+        if res.response.get_header().has_error() {
+            let err = res.response.get_header().get_error();
+            warn!("{} update storage class: propose failed: {:?}", tag, err);
+            return false;
+        }
 
-                warn!("{} wait for updating storage class property timeout", tag;
-                    "current" => ?current, "expect" => ?storage_class);
-                break false;
+        // Check whether schema version & storage class is matched.
+        // Note that callback with success does not mean the schema version is updated.
+        // Changesets are applied async.
+        loop {
+            if let Some(schema_file) = shard.get_schema_file() {
+                if schema_version != schema_file.get_version() {
+                    // If the schema version changes, recheck.
+                    return false;
+                }
             }
+            let current = shard.get_storage_class();
+            if current == storage_class {
+                return true;
+            }
+            if begin.saturating_elapsed() < timeout {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            warn!("{} update storage class: wait for storage class updated timeout", tag;
+                    "current" => ?current, "expect" => ?storage_class);
+            break false;
         }
     }
 }

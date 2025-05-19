@@ -266,7 +266,9 @@ impl<'a> PeerMsgHandler<'a> {
                 PeerMsg::SignificantMsg(msg) => self.on_significant_msg(msg),
                 PeerMsg::CasualMessage(msg) => self.on_casual_msg(msg),
                 PeerMsg::Start => self.start(),
-                PeerMsg::GenerateEngineChangeSet(cs) => self.on_generate_engine_change_set(cs),
+                PeerMsg::GenerateEngineChangeSet(cs, cb) => {
+                    self.on_generate_engine_change_set(cs, cb)
+                }
                 PeerMsg::ApplySnapshotResult(cs) => {
                     self.on_apply_snapshot_result(cs);
                 }
@@ -1601,7 +1603,7 @@ impl<'a> PeerMsgHandler<'a> {
             update_schema_meta.get_file_id();
             "schema_version" => update_schema_meta.get_version(),
         );
-        self.propose_change_set(change_set);
+        self.propose_change_set(change_set, Callback::None);
     }
 
     fn check_schema(&mut self, shard: &Arc<Shard>) {
@@ -1674,7 +1676,7 @@ impl<'a> PeerMsgHandler<'a> {
         let mut change_set = kvengine::new_change_set(shard_meta.id, shard_meta.ver);
         change_set.set_clear_columnar(true);
         info!("{} propose clear_columnar", self.peer.tag());
-        self.propose_change_set(change_set);
+        self.propose_change_set(change_set, Callback::None);
     }
 
     fn on_ingest_files(&mut self, cs: kvenginepb::ChangeSet, callback: Callback) {
@@ -1761,13 +1763,13 @@ impl<'a> PeerMsgHandler<'a> {
         self.fsm.peer.heartbeat_pd(self.ctx);
     }
 
-    fn on_generate_engine_change_set(&mut self, cs: kvenginepb::ChangeSet) {
+    fn on_generate_engine_change_set(&mut self, cs: kvenginepb::ChangeSet, cb: Callback) {
         let tag = self.peer.tag();
         info!("generate meta change event {:?}", &cs; "region" => tag);
-        self.propose_change_set(cs);
+        self.propose_change_set(cs, cb);
     }
 
-    fn propose_change_set(&mut self, cs: kvenginepb::ChangeSet) {
+    fn propose_change_set(&mut self, cs: kvenginepb::ChangeSet, cb: Callback) {
         let tag = self.peer.tag();
         let mut req = self.new_raft_cmd_request();
         let mut builder = CustomBuilder::new();
@@ -1776,22 +1778,24 @@ impl<'a> PeerMsgHandler<'a> {
         req.set_custom_request(custom_req);
         let router = self.ctx.global.router.clone();
         let kv = self.ctx.global.engines.kv.clone();
-        let cb = Callback::write(Box::new(move |resp| {
+        let propose_cb = Callback::write(Box::new(move |resp| {
             if resp.response.get_header().has_error() {
                 let err_msg = resp.response.get_header().get_error().get_message();
                 warn!("{} failed to propose engine change set", tag; "err" => ?err_msg, "cs" => ?cs);
                 if err_msg.contains("raft: proposal dropped") {
                     // Proposal may dropped due to leader transfer in progress.
-                    router.send_store(StoreMsg::GenerateEngineChangeSet(cs));
+                    router.send_store(StoreMsg::GenerateEngineChangeSet(cs, cb));
                 } else {
                     // Reset the state of flush worker or compactor.
                     kv.meta_committed(&cs, true);
+                    cb.invoke_with_response(resp.response);
                 }
             } else {
                 info!("{} proposed meta change event", tag);
+                cb.invoke_with_response(resp.response);
             }
         }));
-        self.propose_raft_command(req, cb, None);
+        self.propose_raft_command(req, propose_cb, None);
     }
 
     fn new_raft_cmd_request(&self) -> RaftCmdRequest {

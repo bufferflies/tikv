@@ -531,7 +531,7 @@ impl RaftWorker {
             PeerMsg::ApplyResult(_) => {}
             PeerMsg::CasualMessage(_) => {}
             PeerMsg::SignificantMsg(_) => {}
-            PeerMsg::GenerateEngineChangeSet(_) => {}
+            PeerMsg::GenerateEngineChangeSet(..) => {}
             PeerMsg::ApplySnapshotResult(_) => {}
             PeerMsg::PrepareChangeSetResult(..) => {}
             PeerMsg::Persisted(_) => {}

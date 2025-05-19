@@ -8,7 +8,7 @@ use tikv_util::{
     mpsc::{Receiver, Sender},
 };
 
-use crate::store::{BlackList, StoreMsg};
+use crate::store::{BlackList, Callback, StoreMsg};
 
 #[derive(Clone)]
 pub struct Engines {
@@ -51,7 +51,7 @@ pub struct MetaChangeListener {
 
 impl kvengine::MetaChangeListener for MetaChangeListener {
     fn on_change_set(&self, cs: ChangeSet) {
-        let msg = StoreMsg::GenerateEngineChangeSet(cs);
+        let msg = StoreMsg::GenerateEngineChangeSet(cs, Callback::None);
         if let Err(e) = self.sender.send(msg) {
             info!(
                 "failed to to send meta change message, are we shutting down?";
