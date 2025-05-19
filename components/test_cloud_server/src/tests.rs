@@ -362,6 +362,10 @@ fn test_on_real_pd() {
         .pd(pd_wrapper)
         .build();
 
+    let mut client = cluster.new_client();
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
+
     runtime.block_on(async {
         let pd_client = cluster.get_pd_client_ext();
         info!(
