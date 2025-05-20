@@ -100,6 +100,11 @@ lazy_static! {
         exponential_buckets(1024.0 * 1024.0, 2.0, 20).unwrap()
     )
     .unwrap();
+    pub static ref ENGINE_IA_MANAGER_SEGMENTS_DISK_SIZE: IntGauge = register_int_gauge!(
+        "kv_engine_ia_manager_segments_disk_size",
+        "Total disk usage size of IA manager segments",
+    )
+    .unwrap();
     pub static ref ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE: IntGauge = register_int_gauge!(
         "kv_engine_ia_manager_segments_memory_size",
         "Total memory size of IA manager segments",

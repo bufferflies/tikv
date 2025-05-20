@@ -1243,7 +1243,7 @@ def ThreadCPU() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_thread_cpu_seconds_total",
-                            label_selectors=['name=~"(raftstore|rs)_.*"'],
+                            label_selectors=['name=~"(raftstore|rs|rfstore)_.*"'],
                         ),
                     ),
                 ],
@@ -1452,6 +1452,21 @@ def ThreadCPU() -> RowPanel:
                         ),
                         legend_format="{{instance}}-{{name}}",
                         hide=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="IA CPU",
+                description="The CPU utilization of IA threads",
+                yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_thread_cpu_seconds_total",
+                            label_selectors=['name=~"s3fifo.*"'],
+                            by_labels=["instance"],
+                        ),
+                        legend_format="{{instance}}",
                     ),
                 ],
             ),
@@ -4955,6 +4970,14 @@ def KvEngine() -> RowPanel:
                         ),
                         additional_groupby=True,
                     ),
+                    target(
+                        expr=expr_max(
+                            "kv_engine_ia_manager_segments_memory_size",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="segment",
+                        additional_groupby=True,
+                    ),
                 ],
             ),
         ]
@@ -5286,6 +5309,106 @@ def KvEngine() -> RowPanel:
                 ],
             ),
         ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="IA Segment Memory Cache",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_max(
+                            "kv_engine_ia_manager_segments_memory_size",
+                        ),
+                        legend_format="used-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_max(
+                            "kv_engine_ia_small_queue_capacity",
+                        ),
+                        legend_format="cap-{{instance}}",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="IA Segment Disk Cache",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_max(
+                            "kv_engine_ia_manager_segments_disk_size",
+                        ),
+                        legend_format="used-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_max(
+                            "kv_engine_ia_main_queue_capacity",
+                        ),
+                        legend_format="cap-{{instance}}",
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="IA Segment Cache Hit",
+                description="Count of IA segment hit",
+                targets=[
+                    target(
+                        expr=expr_operator(
+                            expr_sum_rate(
+                                "kv_engine_ia_read_segment_duration_seconds_count",
+                            ),
+                            "-",
+                            expr_sum_rate(
+                                "kv_engine_ia_read_segment_cache_miss",
+                            ),
+                        ),
+                        legend_format="count-{{instance}}",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="IA Segment Cache Hit Rate",
+                description="IA Segment hit rate",
+                yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
+                targets=[
+                    target(
+                        expr=expr_operator(
+                            "1",
+                            "-",
+                            expr_operator(
+                                expr_sum_rate(
+                                    "kv_engine_ia_read_segment_cache_miss",
+                                    by_labels=["instance"],
+                                ),
+                                "/",
+                                expr_sum_rate(
+                                    "kv_engine_ia_read_segment_duration_seconds_count",
+                                    by_labels=["instance"],
+                                ),
+                            ),
+                        ),
+                        legend_format="rate-{{instance}}",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="IA Segmenet Read Duration",
+            heatmap_description="The time taken by KvEngine to complete read a IA segment",
+            graph_title="99% IA segment read duration",
+            graph_description="The time taken by KvEngine to complete read a IA segment",
+            graph_by_labels=["instance"],
+            graph_hides=["count", "avg"],
+            yaxis_format=UNITS.SECONDS,
+            metric="kv_engine_ia_read_segment_duration_seconds",
+        )
     )
     return layout.row_panel
 

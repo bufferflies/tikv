@@ -25,6 +25,7 @@ use crate::{
         manager::SegmentDataContext,
         types::{FileSegmentData, FileSegmentIdent},
     },
+    metrics::ENGINE_IA_MANAGER_SEGMENTS_DISK_SIZE,
     table::{Error, Result},
     util::WorkerPoolHandle,
 };
@@ -317,6 +318,7 @@ impl S3Fifo {
         } else {
             warn!("insert main: skip, segment data is not cached"; "ident" => %ident);
         }
+        ENGINE_IA_MANAGER_SEGMENTS_DISK_SIZE.set(self.main_queue.total_size);
     }
 
     fn evict_main(&mut self, ident: &FileSegmentIdent) {
