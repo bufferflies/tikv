@@ -155,14 +155,7 @@ impl VectorIndex {
         let mut results = vec![];
         let mut handles_dedup = HashSet::new();
         for file in &self.files {
-            let (items, deleted_handles) = file.search(
-                target,
-                count,
-                start_ts,
-                start_handle,
-                end_handle,
-                is_common_handle,
-            )?;
+            let (items, deleted_handles) = file.search(target, count, start_ts)?;
             // Add the deleted handles to the dedup set to avoid read the same handle in
             // next VectorIndexFile.
             handles_dedup.extend(deleted_handles);
@@ -175,6 +168,32 @@ impl VectorIndex {
                 results.push(item);
             }
         }
+
+        // Filter the results by the start_handle and end_handle.
+        if let Some(start_handle) = start_handle {
+            results.retain(|item| {
+                let mut handle = item.handle.as_slice();
+                if is_common_handle {
+                    handle >= start_handle && end_handle.map_or(true, |e| handle < e)
+                } else {
+                    let mut start_handle = start_handle;
+                    let int_handle = handle.get_i64_le();
+                    let start_int_handle = start_handle.get_i64_le();
+                    let end_int_handle = end_handle.map(|mut h| h.get_i64_le());
+                    int_handle >= start_int_handle
+                        && end_int_handle.map_or(true, |e| int_handle < e)
+                }
+            });
+        }
+
+        // Select n_th by distance.
+        if count < results.len() {
+            results
+                .select_nth_unstable_by(count, |a, b| a.distance.partial_cmp(&b.distance).unwrap());
+            results.truncate(count);
+        }
+
+        // Sort by handle.
         if is_common_handle {
             results.sort_by(|a, b| a.handle.cmp(&b.handle));
         } else {
@@ -477,9 +496,6 @@ impl VectorIndexFile {
         target: &[f32],
         count: usize,
         start_ts: u64,
-        start_handle: Option<&[u8]>,
-        end_handle: Option<&[u8]>,
-        is_common_handle: bool,
     ) -> Result<(Vec<VectorItem>, Vec<Vec<u8>>)> {
         let versions = self.get_versions();
         let mut results = vec![];
@@ -489,7 +505,7 @@ impl VectorIndexFile {
         let matches = self
             .index
             .filtered_search(target, count, |key| {
-                let mut handle = self.get_handle(key);
+                let handle = self.get_handle(key);
                 let version = versions[key as usize];
                 if version > start_ts {
                     return false;
@@ -513,24 +529,6 @@ impl VectorIndexFile {
                         deleted_handles.push(handle.to_vec());
                     });
                     return false;
-                }
-
-                // Filter the handle if the start_handle and end_handle are provided.
-                if is_common_handle {
-                    if let Some(start_handle) = start_handle {
-                        if handle < start_handle || end_handle.map_or(false, |e| handle >= e) {
-                            return false;
-                        }
-                    }
-                } else if let Some(mut start_handle) = start_handle {
-                    let start_int_handle = start_handle.get_i64_le();
-                    let end_int_handle = end_handle.map(|mut h| h.get_i64_le());
-                    let int_handle = handle.get_i64_le();
-                    if int_handle < start_int_handle
-                        || end_int_handle.map_or(false, |e| int_handle >= e)
-                    {
-                        return false;
-                    }
                 }
                 true
             })
@@ -804,8 +802,12 @@ impl VectorIndexBuilder {
         let mut opts = new_index_opts();
         opts.dimensions = dimension;
         opts.metric = match metric {
-            "l2" => usearch::MetricKind::L2sq,
-            "cosine" => usearch::MetricKind::Cos,
+            tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC_VAL_L2 => {
+                usearch::MetricKind::L2sq
+            }
+            tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC_VAL_COSINE => {
+                usearch::MetricKind::Cos
+            }
             _ => usearch::MetricKind::Cos,
         };
         let mut header = VectorIndexFileFooter::default();
@@ -1061,14 +1063,7 @@ mod tests {
                 }
             }
             let (items, _) = vec_idx
-                .search(
-                    &[50.0f32, 150.0f32, 250.0f32],
-                    3,
-                    u64::MAX,
-                    None,
-                    None,
-                    common_handle,
-                )
+                .search(&[50.0f32, 150.0f32, 250.0f32], 3, u64::MAX)
                 .unwrap();
             assert_eq!(items.len(), 3);
             assert_eq!(items[0].value, vec![50.0f32, 150.0f32, 250.0f32]);
@@ -1111,8 +1106,8 @@ mod tests {
             .search(&query_vector, 3, u64::MAX, None, None, false)
             .unwrap();
 
-        // each file returns 3， total is 9, remains 5 after deduplicate.
-        assert_eq!(items.len(), 5);
+        // each file returns 3, total is 9, truncated to 3.
+        assert_eq!(items.len(), 3);
         items.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         assert_eq!(items[0].value, vec![50.0f32, 150.0f32, 250.0f32]);
         assert_eq!(items[0].version, 2);
