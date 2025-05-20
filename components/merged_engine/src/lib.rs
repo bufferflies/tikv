@@ -553,6 +553,18 @@ impl MergedEngine {
         self.manifest.store_progresses.get(&store_id).cloned()
     }
 
+    pub fn get_or_insert_store_progress(&mut self, store_id: u64) -> StoreProgress {
+        *self
+            .manifest
+            .store_progresses
+            .entry(store_id)
+            .or_insert_with(|| StoreProgress {
+                store_id,
+                epoch: 1,
+                offset: 0,
+            })
+    }
+
     pub fn get_keyspace_regions(&self, keyspace_id: u32) -> Vec<u64> {
         let mut regions = Vec::new();
         for (&region_id, progress) in &self.region_progresses {

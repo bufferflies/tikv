@@ -2,37 +2,101 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs, mem,
     net::SocketAddr,
+    ops::Deref,
     path::PathBuf,
     str::FromStr,
     sync::Arc,
     time::Duration,
 };
 
+use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
-use cdc::{Conn, ConnId};
+use cdc::{CdcEvent, Conn, ConnId};
+use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
 use grpcio_health::{create_health, HealthService, ServingStatus};
-use kvengine::dfs::{Dfs, S3Fs};
-use kvproto::{cdcpb::create_change_data, raft_cmdpb::AdminRequest, tikvpb::create_tikv};
+use hyper::{http, StatusCode, Uri};
+use kvengine::{
+    dfs::{Dfs, S3Fs},
+    table::InnerKey,
+    UserMeta, GLOBAL_SHARD_END_KEY, LOCK_CF, WRITE_CF,
+};
+use kvproto::{
+    cdcpb,
+    cdcpb::{
+        create_change_data, ChangeDataRequest, Event, EventLogType, EventRow, EventRowOpType,
+        ResolvedTs,
+    },
+    errorpb::EpochNotMatch,
+    metapb,
+    pdpb::StoreStats,
+    raft_cmdpb::AdminRequest,
+    tikvpb::create_tikv,
+};
 use merged_engine::{MergedEngine, MergedEngineContext};
-use native_br::common::get_latest_backup_meta;
-use pd_client::{PdClient, RpcClient};
+use native_br::common::{get_latest_backup_meta, send_request_to_store};
+use pd_client::{PdClient, RegionStat, RpcClient};
+use rfengine::{RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
-use security::{SecurityConfig, SecurityManager};
-use tikv_util::{error, info, thd_name};
-use txn_types::TimeStamp;
+use security::{HttpClient, SecurityConfig, SecurityManager};
+use tikv_util::{
+    codec, codec::bytes::decode_bytes, error, info, mpsc::Sender, thd_name, time::Instant, warn,
+};
+use txn_types::{LockType, TimeStamp};
 
 use crate::{
-    apply_observer::RegionEvents, provisioned::KeyspaceProvisionedService,
-    scheduler::ChangefeedRequest, CdcMsg, Error, KeyspaceService, KeyspaceStates,
-    ReplicationScheduler, ReplicationService, ReplicationWorkerConfig, Result,
+    apply_observer::{CdcApplyObserver, RegionEvents},
+    provisioned::KeyspaceProvisionedService,
+    scheduler::ChangefeedRequest,
+    CdcMsg, Error, KeyspaceService, KeyspaceStates, ReplicationScheduler, ReplicationService,
+    ReplicationWorkerConfig, Result,
 };
 
-#[allow(dead_code)]
+const MAX_INITIALIZE_SCAN_BATCH_BYTES: usize = 1024 * 1024;
+const FETCH_WAL_TIMEOUT: Duration = Duration::from_secs(30);
+const DISPATCH_CDC_TIMEOUT: Duration = Duration::from_secs(30);
+const UPDATE_STORES_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// information about a ChangeDataRequest.
+struct RequestInfo {
+    conn_id: ConnId,
+    region_version: u64,
+    start_key: Vec<u8>,
+    end_key: Vec<u8>,
+    resolved_ts: TimeStamp,
+}
+
+impl RequestInfo {
+    fn in_range(&self, key: &[u8]) -> bool {
+        key >= self.start_key.as_slice() && key < self.end_key.as_slice()
+    }
+}
+
+#[derive(Default)]
+struct RegionRequests {
+    keyspace_id: u32,
+    requests: HashMap<u64, RequestInfo>,
+}
+
+impl RegionRequests {
+    fn add(&mut self, request: &ChangeDataRequest, conn_id: ConnId) {
+        let request_id = request.get_request_id();
+        let region_version = request.get_region_epoch().get_version();
+        let (start_key, end_key) = build_request_range(request);
+        let request_info = RequestInfo {
+            conn_id,
+            region_version,
+            start_key,
+            end_key,
+            resolved_ts: TimeStamp::zero(),
+        };
+        self.requests.insert(request_id, request_info);
+    }
+}
+
 pub struct ReplicationWorker {
-    data_dir: PathBuf,
     ctx: MergedEngineContext,
     config: ReplicationWorkerConfig,
     merged_engine: MergedEngine,
@@ -40,6 +104,7 @@ pub struct ReplicationWorker {
 
     keyspaces: HashMap<u32, Box<dyn KeyspaceService>>,
     cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
+
     conns: HashMap<ConnId, Conn>,
 
     tx: tikv_util::mpsc::Sender<CdcMsg>,
@@ -47,6 +112,7 @@ pub struct ReplicationWorker {
 
     apply_ctx: ApplyContext,
 
+    region_requests: HashMap<u64, RegionRequests>,
     conn_regions: HashMap<ConnId, HashSet<u64>>,
     region_to_keyspace: HashMap<u64, u32>,
 
@@ -97,20 +163,24 @@ impl ReplicationWorker {
             cdc_addrs.insert(keyspace_id, cdc_addr);
             keyspace_services.insert(keyspace_id, task_service);
         }
-        let apply_ctx = ApplyContext::new(merged_engine.get_kv(), None);
+
+        let mut apply_ctx =
+            ApplyContext::new(merged_engine.get_kv(), Some(merged_engine.get_router()));
         let (tx, rx) = tikv_util::mpsc::unbounded();
+        let apply_observer = CdcApplyObserver::new(merged_engine.get_kv(), tx.clone());
+        apply_ctx.set_apply_observer(Box::new(apply_observer));
         let mut worker = Self {
-            data_dir,
             config,
             ctx,
             merged_engine,
             grpc_server: None,
-            keyspaces: Default::default(),
+            keyspaces: keyspace_services,
             cdc_addrs,
             conns: Default::default(),
             tx: tx.clone(),
             rx,
             apply_ctx,
+            region_requests: Default::default(),
             conn_regions: Default::default(),
             region_to_keyspace: Default::default(),
             last_update_time: backup_ts,
@@ -149,11 +219,12 @@ impl ReplicationWorker {
     }
 
     pub fn scheduler(&self) -> ReplicationScheduler {
-        ReplicationScheduler::new(self.tx.clone())
+        ReplicationScheduler::new(self.tx.clone(), self.cdc_addrs.clone())
     }
 
     pub fn run(&mut self) {
         let _enter = self.ctx.fs.get_runtime().enter();
+        info!("replication worker started");
         loop {
             let res = self.rx.recv_timeout(Duration::from_millis(100));
             match res {
@@ -172,6 +243,12 @@ impl ReplicationWorker {
             if self.stop {
                 info!("replication_worker stopped");
                 return;
+            }
+            if let Err(err) = self.send_resolved_ts() {
+                error!("send resolved ts error"; "err" => ?err);
+            }
+            if let Err(err) = self.maybe_update_merged_engine() {
+                error!("update merged engine error"; "err" => ?err);
             }
         }
     }
@@ -203,7 +280,21 @@ impl ReplicationWorker {
             CdcMsg::NewTask {
                 keyspace_id,
                 request,
-            } => self.handle_new_task(keyspace_id, request),
+                cb,
+            } => {
+                self.handle_new_task(keyspace_id, request, cb);
+            }
+            CdcMsg::RetryReportRegion { region_id } => {
+                self.handle_retry_report(region_id);
+            }
+            CdcMsg::OpenConn(conn) => self.handle_open_conn(conn),
+            CdcMsg::Register { request, conn_id } => {
+                let res = self.handle_register(request, conn_id);
+                self.handle_result(res, "register");
+            }
+            CdcMsg::Deregister(conn_id) => {
+                self.handle_deregister(conn_id);
+            }
             CdcMsg::Applied {
                 region_id,
                 region_events,
@@ -219,15 +310,423 @@ impl ReplicationWorker {
                 let res = self.handle_applied_admin(region_id, region_version, admin);
                 self.handle_result(res, "applied_admin");
             }
-            CdcMsg::RemoveTask {
-                keyspace_id,
-                change_feed_id,
-            } => {
-                info!("remove task {} {}", keyspace_id, change_feed_id);
-            }
             CdcMsg::Stop => {
                 self.stop = true;
             }
+        }
+    }
+
+    fn handle_new_task(
+        &mut self,
+        keyspace_id: u32,
+        request: ChangefeedRequest,
+        cb: Box<dyn FnOnce(Result<()>) + Send>,
+    ) {
+        info!("{} handle new task {:?}", keyspace_id, request);
+        #[allow(clippy::map_entry)]
+        if !self.keyspaces.contains_key(&keyspace_id) {
+            cb(Err(Error::OtherError("keyspace not found".into())));
+            return;
+        }
+        let task_svc = self.keyspaces.get_mut(&keyspace_id).unwrap();
+        let pd_client = task_svc.get_pd_client();
+        Self::report_store_to_pd(&pd_client, self.ctx.config.merged_store_id);
+        let keyspace_region_ids = self.merged_engine.get_keyspace_regions(keyspace_id);
+        let raft = self.merged_engine.get_raft();
+        for region_id in keyspace_region_ids {
+            Self::report_region_to_pd(&raft, &pd_client, region_id, self.tx.clone());
+        }
+        let states = task_svc.get_states_mut();
+        states
+            .feeds
+            .insert(request.changefeed_id.clone().unwrap(), request.clone());
+        self.merged_engine
+            .set_keyspace_states(keyspace_id, states.marshal())
+            .unwrap();
+        let sec_mgr = self.ctx.pd.get_security_mgr();
+        let client = sec_mgr.http_client(hyper::Client::builder()).unwrap();
+        let cdc_addr = states.cdc_addr.clone();
+        self.cdc_addrs.insert(keyspace_id, cdc_addr.clone());
+        tokio::spawn(async move {
+            let new_cdc_task_uri = sec_mgr
+                .build_uri(format!("{}/api/v2/changefeeds", &cdc_addr))
+                .unwrap();
+            let new_cdc_task_body = serde_json::to_string(&request).unwrap();
+            info!(
+                "create new cdc task {} {}",
+                new_cdc_task_uri, new_cdc_task_body
+            );
+            let res = dispatch_http_post_with_retry(
+                &client,
+                &new_cdc_task_uri,
+                &new_cdc_task_body,
+                DISPATCH_CDC_TIMEOUT,
+            )
+            .await;
+            cb(res);
+        });
+    }
+
+    fn handle_retry_report(&mut self, region_id: u64) {
+        let Some(keyspace_id) = self.try_get_keyspace_id(region_id) else {
+            return;
+        };
+        let Some(svc) = self.keyspaces.get_mut(&keyspace_id) else {
+            return;
+        };
+        let pd_client = svc.get_pd_client();
+        let raft = self.merged_engine.get_raft();
+        let sender = self.tx.clone();
+        Self::report_region_to_pd(&raft, &pd_client, region_id, sender);
+    }
+
+    fn handle_open_conn(&mut self, conn: Conn) {
+        let conn_id = conn.get_id();
+        self.conns.insert(conn_id, conn);
+    }
+
+    fn handle_register(&mut self, request: ChangeDataRequest, conn_id: ConnId) -> Result<()> {
+        let region_id = request.region_id;
+        let request_id = request.get_request_id();
+        let keyspace_id = self.get_keyspace_id(region_id);
+        let conn = self.conns.get(&conn_id).unwrap();
+        let shard_opt = self.merged_engine.get_kv().get_shard(request.region_id);
+        if shard_opt.is_none() {
+            let mut error = cdcpb::Error::new();
+            let not_found = error.mut_region_not_found();
+            not_found.set_region_id(request.region_id);
+            Self::send_error_event(conn, &request, error);
+            return Ok(());
+        }
+        let shard = shard_opt.unwrap();
+        if shard.ver != request.get_region_epoch().get_version() {
+            let mut error = cdcpb::Error::new();
+            error.set_epoch_not_match(EpochNotMatch::new());
+            Self::send_error_event(conn, &request, error);
+            return Ok(());
+        }
+        info!("cdc register {:?}, conn_id {:?}", request, conn_id);
+        let region_changes = self.region_requests.entry(region_id).or_default();
+        region_changes.keyspace_id = keyspace_id;
+        region_changes.add(&request, conn_id);
+        self.conn_regions
+            .entry(conn_id)
+            .or_default()
+            .insert(region_id);
+        let mut event_rows = vec![];
+        let snap_access = shard.new_snap_access();
+        let keyspace_prefix_len = keyspace_prefix_len(keyspace_id);
+        let task_ctx = self.keyspaces.get_mut(&keyspace_id).unwrap();
+        let resolver = task_ctx.get_resolver();
+        let mut entries_bytes = 0;
+        let do_send_rows = |event_rows: &mut Vec<EventRow>| -> cdc::Result<()> {
+            let mut new_event = Event::new();
+            new_event.set_region_id(region_id);
+            new_event.set_request_id(request_id);
+            new_event
+                .mut_entries()
+                .set_entries(mem::take(event_rows).into());
+            info!("send event {:?}", new_event);
+            conn.get_sink()
+                .unbounded_send(CdcEvent::Event(new_event), false)?;
+            Ok(())
+        };
+        let (start_key, end_key) = build_request_range_for_keyspace(keyspace_id, &request);
+        // scan locks for resolver to track.
+        let mut lock_iter = snap_access.new_iterator(LOCK_CF, false, false, None, false);
+        lock_iter.set_range(start_key.clone().into(), end_key.clone().into());
+        while lock_iter.valid() {
+            let mut event_row = EventRow::new();
+            let lock_key = lock_iter.key();
+            event_row.set_key(lock_key[keyspace_prefix_len..].to_vec());
+            let lock_val = lock_iter.val();
+            let mut lock = txn_types::Lock::parse(lock_val).unwrap();
+            match lock.lock_type {
+                LockType::Put => {
+                    event_row.set_op_type(EventRowOpType::Put);
+                }
+                LockType::Delete => event_row.set_op_type(EventRowOpType::Delete),
+                _ => {
+                    lock_iter.next();
+                    continue;
+                }
+            }
+            event_row.set_start_ts(lock.ts.into_inner());
+            resolver.track_lock(lock.ts, event_row.get_key().to_vec(), None);
+            let val = lock.short_value.take().unwrap_or_default();
+            event_row.set_value(val);
+            event_row.set_type(EventLogType::Prewrite);
+            entries_bytes += event_row.get_key().len() + event_row.get_value().len();
+            event_rows.push(event_row);
+            if entries_bytes > MAX_INITIALIZE_SCAN_BATCH_BYTES {
+                do_send_rows(&mut event_rows)?;
+                entries_bytes = 0;
+            }
+            lock_iter.next();
+        }
+        let checkpoint_ts = request.get_checkpoint_ts();
+        info!(
+            "{}:{} incremental scan checkpoint ts {} max_ts {}",
+            region_id,
+            request_id,
+            checkpoint_ts,
+            shard.get_max_ts()
+        );
+        // scan incremental write after checkpoint ts;
+        let mut write_iter = snap_access.new_delta_write_iterator(checkpoint_ts);
+        write_iter.seek(InnerKey::from_outer_key(&start_key));
+        let inner_end_key = InnerKey::from_outer_end_key(&end_key);
+        while write_iter.valid() {
+            let key = write_iter.key();
+            if key >= inner_end_key {
+                info!("delta break on {:?}", inner_end_key);
+                break;
+            }
+            let val = write_iter.value();
+            if val.is_deleted() || val.version < request.get_checkpoint_ts() {
+                write_iter.next();
+                continue;
+            }
+            let um = UserMeta::from_slice(val.user_meta());
+            let mut event_row = EventRow::new();
+            event_row.set_start_ts(um.start_ts);
+            event_row.set_commit_ts(um.commit_ts);
+            event_row.set_key(key.deref().to_vec());
+            if val.get_value().is_empty() {
+                event_row.set_op_type(EventRowOpType::Delete);
+            } else {
+                event_row.set_op_type(EventRowOpType::Put);
+            }
+            event_row.set_value(val.get_value().to_vec());
+            let mut outer_key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
+            outer_key.extend_from_slice(key.deref());
+            let old_value = snap_access.get(WRITE_CF, &outer_key, um.commit_ts - 1);
+            if !old_value.get_value().is_empty() {
+                event_row.set_old_value(old_value.get_value().to_vec());
+            }
+            event_row.set_type(EventLogType::Committed);
+            entries_bytes += event_row.get_key().len() + event_row.get_value().len();
+            info!("delta add event row {:?}", event_row);
+            event_rows.push(event_row);
+            if entries_bytes > MAX_INITIALIZE_SCAN_BATCH_BYTES {
+                do_send_rows(&mut event_rows)?;
+                entries_bytes = 0;
+            }
+            write_iter.next_all_version();
+        }
+        let mut init_row = EventRow::new();
+        init_row.set_type(EventLogType::Initialized);
+        event_rows.push(init_row);
+        do_send_rows(&mut event_rows)?;
+        Ok(())
+    }
+
+    fn send_error_event(conn: &Conn, request: &ChangeDataRequest, error: cdcpb::Error) {
+        let mut event = Event::new();
+        event.set_region_id(request.region_id);
+        event.set_request_id(request.request_id);
+        event.set_error(error);
+        conn.get_sink()
+            .unbounded_send(CdcEvent::Event(event), false)
+            .unwrap();
+    }
+
+    fn handle_deregister(&mut self, conn_id: ConnId) {
+        self.conns.remove(&conn_id);
+        if let Some(conn_regions) = self.conn_regions.remove(&conn_id) {
+            for region_id in conn_regions {
+                if let Some(region_change) = self.region_requests.get_mut(&region_id) {
+                    region_change.requests.retain(|_, v| v.conn_id != conn_id);
+                    if region_change.requests.is_empty() {
+                        self.region_requests.remove(&region_id);
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_result(&mut self, res: Result<()>, tag: &str) {
+        if let Err(err) = res {
+            error!("handle {} error {:?}", tag, err);
+        }
+    }
+
+    fn get_keyspace_id(&mut self, region_id: u64) -> u32 {
+        *self.region_to_keyspace.entry(region_id).or_insert_with(|| {
+            self.merged_engine
+                .get_region_progress(region_id)
+                .unwrap()
+                .keyspace_id
+        })
+    }
+
+    fn try_get_keyspace_id(&self, region_id: u64) -> Option<u32> {
+        self.region_to_keyspace.get(&region_id).cloned()
+    }
+
+    fn send_resolved_ts(&mut self) -> Result<()> {
+        for task in self.keyspaces.values_mut() {
+            task.get_resolver().resolve(self.last_update_time);
+        }
+        for (&region_id, region_request) in &mut self.region_requests {
+            if let Some(task_ctx) = self.keyspaces.get_mut(&region_request.keyspace_id) {
+                let ts = task_ctx.get_resolver().resolved_ts();
+                for (&request_id, req_info) in &mut region_request.requests {
+                    if req_info.resolved_ts != ts {
+                        let mut resolved_ts = ResolvedTs::default();
+                        resolved_ts.set_regions(vec![region_id]);
+                        resolved_ts.set_request_id(request_id);
+                        resolved_ts.set_ts(ts.into_inner());
+                        info!(
+                            "send resolved_ts {:?} to request {}",
+                            resolved_ts, request_id
+                        );
+                        let conn = self.conns.get(&req_info.conn_id).unwrap();
+                        conn.get_sink()
+                            .unbounded_send(CdcEvent::ResolvedTs(resolved_ts), false)
+                            .map_err(|e| cdc::Error::from(e))?;
+                        req_info.resolved_ts = ts;
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+
+    fn maybe_update_merged_engine(&mut self) -> Result<()> {
+        if TimeStamp::physical_now() - self.last_update_time.physical() < 3000 {
+            return Ok(());
+        }
+        let new_timestamp = self.update_stores_with_retry(UPDATE_STORES_TIMEOUT)?;
+        self.merged_engine.sync_merged(&mut self.apply_ctx)?;
+        self.apply_ctx.flush_observer();
+        self.last_update_time = new_timestamp;
+        Ok(())
+    }
+
+    fn update_stores_with_retry(&mut self, timeout: Duration) -> Result<TimeStamp> {
+        let mut last_err: Option<Error> = None;
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < timeout {
+            match self.update_stores() {
+                Ok(ts) => return Ok(ts),
+                Err(err) => {
+                    last_err = Some(err);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    fn update_stores(&mut self) -> Result<TimeStamp> {
+        let _enter = self.ctx.fs.get_runtime().enter();
+        let stores = native_br::common::get_all_stores_except_tiflash(self.ctx.pd.as_ref())?;
+        let ts = block_on(self.ctx.pd.get_tso())?;
+        let mut errors = vec![];
+        for store in stores {
+            let store_id = store.id;
+            if let Err(err) = self.update_store_wal(store) {
+                warn!("failed to update store {}, err {:?}", store_id, err);
+                errors.push(err);
+            }
+        }
+        if errors.len() <= 1 {
+            return Ok(ts);
+        }
+        Err(errors.pop().unwrap())
+    }
+
+    fn update_store_wal(&mut self, store: metapb::Store) -> Result<()> {
+        let security_mgr = self.ctx.pd.get_security_mgr();
+        let store_id = store.get_id();
+        let store_progress = self.merged_engine.get_or_insert_store_progress(store_id);
+        let mut epoch = store_progress.epoch;
+        let mut start_off = store_progress.offset;
+        loop {
+            let uri = security_mgr
+                .build_uri(format!(
+                    "{}/rfengine/wal_chunk?epoch_id={}&start_off={}&end_off=0",
+                    &store.status_address, epoch, start_off
+                ))
+                .unwrap();
+            let req = http::Request::get(uri.clone())
+                .body(hyper::Body::empty())
+                .unwrap();
+            let (status, data) = block_on(send_request_to_store(
+                req,
+                &store,
+                &security_mgr,
+                FETCH_WAL_TIMEOUT,
+            ))?;
+            let data_len = data.len();
+            self.merged_engine
+                .update_wal(store_id, epoch, start_off, data)?;
+            if status == StatusCode::PARTIAL_CONTENT {
+                self.merged_engine
+                    .rotate_wal(store_id, epoch, start_off + data_len as u64)?;
+                epoch += 1;
+                start_off = 0;
+                continue;
+            }
+            return Ok(());
+        }
+    }
+
+    fn report_store_to_pd(pd_client: &Arc<dyn PdClient>, store_id: u64) {
+        let mut store_stat = StoreStats::new();
+        store_stat.set_store_id(store_id);
+        store_stat.set_region_count(0);
+        store_stat.set_capacity(100 * 1024 * 1024 * 1024);
+        store_stat.set_used_size(50 * 1024 * 1024 * 1024);
+        let resp = pd_client.store_heartbeat(store_stat, None, None);
+        let new_pd_clinet = pd_client.clone();
+        tokio::spawn(async move {
+            if let Err(err) = resp.await {
+                warn!("store heartbeat failed"; "err" => ?err);
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Self::report_store_to_pd(&new_pd_clinet, store_id);
+            }
+        });
+    }
+
+    fn report_region_to_pd(
+        raft: &RfEngine,
+        pd_client: &Arc<dyn PdClient>,
+        region_id: u64,
+        sender: Sender<CdcMsg>,
+    ) {
+        if raft.get_truncated_index(region_id) == Some(TRUNCATE_ALL_INDEX) {
+            // region has been merged.
+            return;
+        }
+        let mut region_local_state = rfstore::store::load_last_peer_state(raft, region_id).unwrap();
+        let mut region = region_local_state.take_region();
+        region.set_start_key(Self::trim_keyspace_prefix(region.get_start_key()));
+        region.set_end_key(Self::trim_keyspace_prefix(region.get_end_key()));
+        info!("report region to pd event {:?}", region);
+        let leader = region.get_peers()[0].clone();
+        let mut stats = RegionStat::default();
+        stats.approximate_kv_size = 100 * 1024 * 1024;
+        stats.approximate_keys = 1000000;
+        stats.approximate_size = 100 * 1024 * 1024;
+        // TODO: retry on heartbeat failed.
+        let resp = pd_client.region_heartbeat(1, region, leader, stats, None);
+        tokio::spawn(async move {
+            if let Err(err) = resp.await {
+                warn!("region heartbeat failed"; "err" => ?err);
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let _ = sender.send(CdcMsg::RetryReportRegion { region_id });
+            }
+        });
+    }
+
+    fn trim_keyspace_prefix(mut region_key: &[u8]) -> Vec<u8> {
+        let raw_key = codec::bytes::decode_bytes(&mut region_key, false).unwrap();
+        if raw_key.len() == 4 {
+            vec![]
+        } else {
+            codec::bytes::encode_bytes(&raw_key[4..])
         }
     }
 
@@ -308,6 +807,7 @@ impl ReplicationWorker {
         let kv = self.merged_engine.get_kv();
         keyspace_regions.iter().for_each(|region_id| {
             self.region_to_keyspace.remove(region_id);
+            self.region_requests.remove(region_id);
             kv.remove_shard(*region_id);
         });
         self.merged_engine.remove_keyspace(keyspace_id);
@@ -317,24 +817,41 @@ impl ReplicationWorker {
         });
     }
 
-    fn handle_new_task(&mut self, keyspace_id: u32, request: ChangefeedRequest) {
-        // TODO: implement this
-        info!("new task {} {:?}", keyspace_id, request);
-    }
-
-    fn handle_result(&mut self, res: Result<()>, tag: &str) {
-        if let Err(err) = res {
-            error!("handle {} error {:?}", tag, err);
-        }
-    }
-
     fn handle_applied(&mut self, region_id: u64, region_events: RegionEvents) -> Result<()> {
-        // TODO: implement this
-        info!(
-            "applied {} with {} events",
-            region_id,
-            region_events.events.len()
-        );
+        if let Some(region_requests) = self.region_requests.get_mut(&region_id) {
+            for (&request_id, req_info) in &mut region_requests.requests {
+                let conn = self.conns.get(&req_info.conn_id).unwrap();
+                for event in &region_events.events {
+                    let mut event_to_send = Event::new();
+                    event_to_send.set_request_id(request_id);
+                    event_to_send.set_region_id(region_id);
+                    event_to_send.set_index(event.get_index());
+                    if event.has_entries() {
+                        let entries_to_send = event_to_send.mut_entries().mut_entries();
+                        for entry in event.get_entries().get_entries() {
+                            if req_info.in_range(entry.get_key()) {
+                                entries_to_send.push(entry.clone());
+                            }
+                        }
+                    }
+                    conn.get_sink()
+                        .unbounded_send(CdcEvent::Event(event_to_send), false)
+                        .map_err(|e| cdc::Error::from(e))?;
+                }
+            }
+            let task_ctx = self
+                .keyspaces
+                .get_mut(&region_requests.keyspace_id)
+                .unwrap();
+            let resolver = task_ctx.get_resolver();
+            for (track_key, start_ts) in region_events.tracked_locks {
+                if start_ts == 0 {
+                    resolver.untrack_lock(&track_key, None);
+                } else {
+                    resolver.track_lock(start_ts.into(), track_key, None);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -344,10 +861,110 @@ impl ReplicationWorker {
         region_version: u64,
         admin: AdminRequest,
     ) -> Result<()> {
-        // TODO: implement this
-        info!("applied admin {} {} {:?}", region_id, region_version, admin);
+        let raft = self.merged_engine.get_raft();
+        let keyspace_id = self.get_keyspace_id(region_id);
+        let task_ctx = self.keyspaces.get(&keyspace_id).unwrap();
+        let pd_client = task_ctx.get_pd_client();
+        Self::report_region_to_pd(&raft, &pd_client, region_id, self.tx.clone());
+        if admin.has_splits() {
+            let split = admin.get_splits();
+            for req in split.get_requests() {
+                Self::report_region_to_pd(
+                    &raft,
+                    &pd_client,
+                    req.get_new_region_id(),
+                    self.tx.clone(),
+                );
+            }
+        }
+        if let Some(region_requests) = self.region_requests.get_mut(&region_id) {
+            let mut requests_to_remove = vec![];
+            for (&request_id, request) in &region_requests.requests {
+                if request.region_version <= region_version {
+                    requests_to_remove.push(request_id);
+                }
+            }
+            for request_id in requests_to_remove {
+                let request = region_requests.requests.remove(&request_id).unwrap();
+                let conn = self.conns.get(&request.conn_id).unwrap();
+                let mut event = Event::new();
+                event.set_region_id(region_id);
+                event.set_request_id(request_id);
+                let mut error = cdcpb::Error::new();
+                error.set_epoch_not_match(EpochNotMatch::new());
+                event.set_error(error);
+                info!("{} send error event {:?}", region_id, event);
+                conn.get_sink()
+                    .unbounded_send(CdcEvent::Event(event), false)
+                    .map_err(|e| cdc::Error::from(e))?;
+            }
+            if region_requests.requests.is_empty() {
+                self.region_requests.remove(&region_id);
+            }
+        }
         Ok(())
     }
+}
+
+async fn dispatch_http_post_with_retry(
+    client: &HttpClient,
+    uri: &Uri,
+    body: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let mut last_err: Option<Error> = None;
+    let start_time = Instant::now_coarse();
+    while start_time.saturating_elapsed() < timeout {
+        match dispatch_http_post(client, uri, body).await {
+            Ok(_) => {
+                return Ok(());
+            }
+            Err(err) => {
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
+async fn dispatch_http_post(client: &HttpClient, uri: &Uri, body: &str) -> Result<()> {
+    let req = http::Request::builder()
+        .uri(uri)
+        .method("POST")
+        .body(body.to_string().into())
+        .unwrap();
+    let resp = client.request(req).await?;
+    if !resp.status().is_success() {
+        let body = hyper::body::to_bytes(resp.into_body()).await?;
+        let error = String::from_utf8_lossy(&body).to_string();
+        return Err(Error::OtherError(error));
+    }
+    Ok(())
+}
+
+fn build_request_range(request: &ChangeDataRequest) -> (Vec<u8>, Vec<u8>) {
+    let mut encoded_start_key = request.get_start_key();
+    let start_key = decode_bytes(&mut encoded_start_key, false).unwrap_or_default();
+    let end_key = if request.get_end_key().is_empty() {
+        GLOBAL_SHARD_END_KEY.to_vec()
+    } else {
+        let mut encoded_end_key = request.get_end_key();
+        decode_bytes(&mut encoded_end_key, false).unwrap_or_default()
+    };
+    (start_key, end_key)
+}
+
+fn build_request_range_for_keyspace(
+    keyspace_id: u32,
+    request: &ChangeDataRequest,
+) -> (Vec<u8>, Vec<u8>) {
+    let (start_key, end_ekey) = build_request_range(request);
+    let mut prepended_start_key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
+    prepended_start_key.extend_from_slice(&start_key);
+    let mut prepended_end_key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
+    prepended_end_key.extend_from_slice(&end_ekey);
+    (prepended_start_key, prepended_end_key)
 }
 
 pub(crate) async fn new_keyspace_pd_client(
@@ -360,4 +977,12 @@ pub(crate) async fn new_keyspace_pd_client(
             .await
             .unwrap(),
     )
+}
+
+fn keyspace_prefix_len(keyspace_id: u32) -> usize {
+    if keyspace_id > 0 {
+        KEYSPACE_PREFIX_LEN
+    } else {
+        0
+    }
 }

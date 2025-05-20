@@ -1,7 +1,9 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::sync::Arc;
+
 use chrono::Utc;
-use hyper::{Body, Method, Request, Response, Result, StatusCode};
+use hyper::{client::HttpConnector, Body, Method, Request, Response, Result, StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use tikv_util::{future::paired_future_callback, info};
 
@@ -10,15 +12,31 @@ use crate::{config::ReplicaConfig, CdcMsg};
 #[derive(Clone)]
 pub struct ReplicationScheduler {
     sender: tikv_util::mpsc::Sender<CdcMsg>,
+    cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
+    http_client: Arc<hyper::Client<HttpConnector>>,
 }
 
 impl ReplicationScheduler {
-    pub fn new(sender: tikv_util::mpsc::Sender<CdcMsg>) -> Self {
-        Self { sender }
+    pub fn new(
+        sender: tikv_util::mpsc::Sender<CdcMsg>,
+        cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
+    ) -> Self {
+        let http_client = Arc::new(hyper::Client::new());
+        ReplicationScheduler {
+            sender,
+            cdc_addrs,
+            http_client,
+        }
     }
 
     pub fn schedule(&self, msg: CdcMsg) {
         let _ = self.sender.send(msg);
+    }
+
+    pub fn get_cdc_addr(&self, keyspace_id: u32) -> Option<String> {
+        self.cdc_addrs
+            .get(&keyspace_id)
+            .map(|addr| addr.value().clone())
     }
 }
 
@@ -137,15 +155,11 @@ impl ReplicationScheduler {
             }
         };
         let response = match (req.method(), req.uri().path()) {
-            (&Method::GET, "/cdc/api/v2/changefeeds") => {
-                Self::handle_list_changefeeds(keyspace_id, req.uri())
-            }
-            (&Method::GET, path) if path.starts_with("/cdc/api/v2/changefeeds/") => {
-                Self::handle_get_changefeed(keyspace_id, path)
-            }
+            (&Method::GET, _) => self.forward_get_request(keyspace_id, req.uri()).await?,
             (&Method::POST, "/cdc/api/v2/changefeeds") => {
                 let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
                 self.handle_create_changefeed(keyspace_id, &body_bytes)
+                    .await
             }
             (&Method::POST, "/cdc/keyspace") => {
                 let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
@@ -155,12 +169,14 @@ impl ReplicationScheduler {
             (&Method::DELETE, path) if path.starts_with("/cdc/api/v2/changefeeds/") => {
                 Self::handle_delete_changefeed(keyspace_id, path)
             }
-
-            _ => Self::error_response(
-                StatusCode::NOT_FOUND,
-                "Route not found",
-                "CDC:ErrAPIRouteNotFound",
-            ),
+            _ => {
+                info!("Invalid request {} {}", req.method(), req.uri());
+                Self::error_response(
+                    StatusCode::NOT_FOUND,
+                    "Route not found",
+                    "CDC:ErrAPIRouteNotFound",
+                )
+            }
         };
 
         Ok(response)
@@ -182,91 +198,40 @@ impl ReplicationScheduler {
         }
     }
 
-    fn handle_list_changefeeds(_keyspace_id: u32, uri: &hyper::Uri) -> Response<Body> {
-        fn is_valid_state(state: &str) -> bool {
-            matches!(
-                state,
-                "all" | "normal" | "stopped" | "error" | "failed" | "finished"
-            )
+    async fn forward_get_request(
+        &self,
+        keyspace_id: u32,
+        uri: &hyper::Uri,
+    ) -> Result<Response<Body>> {
+        let cdc_addr = self.cdc_addrs.get(&keyspace_id).map(|r| r.value().clone());
+        if cdc_addr.is_none() {
+            return Ok(Self::error_response(
+                StatusCode::NOT_FOUND,
+                "No CDC server found for the keyspace",
+                "CDC:ErrNoCDCServer",
+            ));
         }
-
-        let state = extract_param(uri, "state");
-        if let Some(state) = state {
-            if !is_valid_state(state) {
-                return Self::error_response(
-                    StatusCode::BAD_REQUEST,
-                    "Invalid state parameter",
-                    "CDC:ErrInvalidParam",
-                );
-            }
-        }
-        // TODO: Implement actual filtering based on state
-        let response = ChangefeedListResponse {
-            total: 2,
-            items: vec![
-                ChangefeedItem {
-                    id: "test".to_string(),
-                    state: "normal".to_string(),
-                    checkpoint_tso: 439749918821711874,
-                    checkpoint_time: "2023-02-27 23:46:52.888".to_string(),
-                    error: None,
-                },
-                ChangefeedItem {
-                    id: "test2".to_string(),
-                    state: "normal".to_string(),
-                    checkpoint_tso: 439749918821711874,
-                    checkpoint_time: "2023-02-27 23:46:52.888".to_string(),
-                    error: None,
-                },
-            ],
-        };
-
-        Response::builder()
-            .status(StatusCode::OK)
-            .body(Body::from(serde_json::to_string(&response).unwrap()))
+        let new_path_query = uri
+            .path_and_query()
             .unwrap()
+            .to_string()
+            .replace("/cdc/", "/");
+        let cdc_addr = cdc_addr.unwrap();
+        let new_uri = Uri::builder()
+            .scheme(uri.scheme().cloned().unwrap())
+            .authority(cdc_addr.as_str())
+            .path_and_query(new_path_query)
+            .build()
+            .unwrap();
+        self.http_client.get(new_uri).await
     }
 
-    fn handle_get_changefeed(_keyspace_id: u32, path: &str) -> Response<Body> {
-        if let Some(changefeed_id) = path.strip_prefix("/cdc/api/v2/changefeeds/") {
-            if changefeed_id.is_empty() {
-                return Self::error_response(
-                    StatusCode::BAD_REQUEST,
-                    "Invalid changefeed ID",
-                    "CDC:ErrInvalidChangefeedID",
-                );
-            }
-            // TODO: Implement actual changefeed lookup
-            let response = ChangefeedResponse {
-                admin_job_type: 0,
-                checkpoint_time: "2023-02-27 23:46:52.888".to_string(),
-                checkpoint_ts: 439749918821711874,
-                config: ReplicaConfig::default(),
-                create_time: Utc::now().to_string(),
-                creator_version: "v8.5.1".to_string(),
-                error: None,
-                id: changefeed_id.to_string(),
-                resolved_ts: 439749918821711874,
-                sink_uri: "blackhole://".to_string(),
-                start_ts: 439749918821711874,
-                state: "normal".to_string(),
-                target_ts: 0,
-                task_status: vec![],
-            };
-            Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(serde_json::to_string(&response).unwrap()))
-                .unwrap()
-        } else {
-            Self::error_response(
-                StatusCode::BAD_REQUEST,
-                "Invalid changefeed ID",
-                "CDC:ErrInvalidChangefeedID",
-            )
-        }
-    }
-
-    fn handle_create_changefeed(&self, keyspace_id: u32, body_bytes: &[u8]) -> Response<Body> {
+    async fn handle_create_changefeed(
+        &self,
+        keyspace_id: u32,
+        body_bytes: &[u8],
+    ) -> Response<Body> {
+        info!("handle create change feed");
         match serde_json::from_slice::<ChangefeedRequest>(body_bytes) {
             Ok(request) => {
                 if request.sink_uri.is_empty() {
@@ -286,10 +251,21 @@ impl ReplicationScheduler {
                     }
                     None
                 });
-                let _ = self.sender.send(CdcMsg::NewTask {
+                let (cb, fut) = paired_future_callback();
+                self.schedule(CdcMsg::NewTask {
                     keyspace_id,
                     request: request.clone(),
+                    cb,
                 });
+                let res = fut.await.unwrap();
+                if let Err(err) = res {
+                    return Self::error_response(
+                        StatusCode::BAD_REQUEST,
+                        &err.to_string(),
+                        "CDC:ErrCreateChangefeed",
+                    );
+                }
+                // TODO: use response from CDC server.
                 let response = ChangefeedResponse {
                     admin_job_type: 0,
                     checkpoint_time: "0".to_string(),
@@ -415,7 +391,8 @@ mod tests {
         fn new_test() -> Self {
             // TODO: Add proper initialization when needed
             let (sender, _) = tikv_util::mpsc::unbounded();
-            ReplicationScheduler { sender }
+            let cdc_addrs = Arc::new(dashmap::DashMap::new());
+            ReplicationScheduler::new(sender, cdc_addrs)
         }
     }
 

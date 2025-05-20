@@ -80,7 +80,7 @@ impl KeyspaceService for KeyspaceProvisionedService {
             initial_epoch.set_version(1);
             initial_epoch.set_conf_ver(1);
             initial_region.set_region_epoch(initial_epoch);
-            pd_client.bootstrap_cluster(store, initial_region).unwrap();
+            pd_client.bootstrap_cluster(store, initial_region)?;
         }
         self.pd_client = Some(pd_client);
         Ok(())
@@ -178,10 +178,12 @@ impl LocalProvider {
     fn start_local_tidb(&self) -> Child {
         let mut cmd = Command::new(&self.tidb_bin_path);
         let keyspace_id = self.keyspace_id;
+        let data_dir = self.data_dir.join(format!("tidb-{keyspace_id}"));
         let log_file = self.data_dir.join(format!("tidb-{keyspace_id}.log"));
         cmd.arg(format!("--P={}", self.local_tidb_port()))
             .arg(format!("--log-file={}", log_file.display()))
             .arg("--store=unistore")
+            .arg(format!("--path={}", data_dir.display()))
             .arg(format!("--status={}", self.local_tidb_status_port()));
         info!("start local tidb-server"; "cmd" => ?cmd);
         cmd.spawn().unwrap()
