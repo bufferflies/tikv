@@ -1194,15 +1194,14 @@ impl Shard {
     ) -> (f64, bool) {
         // Trigger rebuild vector index file to v2 format.
         // TODO: remove this after v2 format is transitioned.
-        // Uncomment this logic when update to v2 format.
-        // if let Some(vec_idx) = data
-        //     .vector_indexes
-        //     .get(table_id, vec_idx.index_id, vec_idx.col_id)
-        // {
-        //     if vec_idx.files.iter().any(|file| !file.has_nulls()) {
-        //         return (2.0, true);
-        //     }
-        // }
+        if let Some(vec_idx) = data
+            .vector_indexes
+            .get(table_id, vec_idx.index_id, vec_idx.col_id)
+        {
+            if vec_idx.files.iter().any(|file| !file.has_nulls()) {
+                return (2.0, true);
+            }
+        }
 
         let snap_version = if let Some(vec_idx) =
             data.vector_indexes
