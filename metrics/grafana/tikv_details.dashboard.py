@@ -100,6 +100,16 @@ def Templates() -> Templating:
                 all_value=".*",
             ),
             template(
+                name="worker_instance",
+                type="query",
+                query='label_values(tikv_worker_cpu_cores_quota{k8s_cluster ="$k8s_cluster", tidb_cluster="$tidb_cluster"}, instance)',
+                data_source=DATASOURCE,
+                hide=SHOW,
+                multi=True,
+                include_all=True,
+                all_value=".*",
+            ),
+            template(
                 name="titan_db",
                 type="query",
                 query='label_values(tikv_engine_titandb_num_live_blob_file{k8s_cluster="$k8s_cluster", tidb_cluster="$tidb_cluster"}, db)',
@@ -5703,6 +5713,8 @@ def CloudWorkerService() -> RowPanel:
             graph_description="The time consumed to handle remote compaction requests",
             yaxis_format=UNITS.SECONDS,
             metric="tikv_worker_remote_compact_request_duration_seconds",
+            label_selectors=['instance=~"$worker_instance"'],
+            skip_default_instance=True,
         ),
     )
     layout.row(
@@ -5713,6 +5725,8 @@ def CloudWorkerService() -> RowPanel:
             graph_description="The time consumed to handle remote copr snapshot duration",
             yaxis_format=UNITS.SECONDS,
             metric="tikv_worker_remote_cop_snapshot_duration_seconds",
+            label_selectors=['instance=~"$worker_instance"'],
+            skip_default_instance=True,
         ),
     )
     layout.row(
@@ -5723,6 +5737,8 @@ def CloudWorkerService() -> RowPanel:
             graph_description="The time consumed to handle remote coprocessor read requests",
             yaxis_format=UNITS.SECONDS,
             metric="tikv_worker_remote_cop_request_duration_seconds",
+            label_selectors=['instance=~"$worker_instance"'],
+            skip_default_instance=True,
         ),
     )
     layout.row(
@@ -5735,7 +5751,9 @@ def CloudWorkerService() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_worker_remote_cop_dag_response_size",
+                            label_selectors=['instance=~"$worker_instance"'],
                             by_labels=[],
+                            skip_default_instance=True,
                         ),
                         legend_format="dag",
                         additional_groupby=True,
@@ -5743,7 +5761,9 @@ def CloudWorkerService() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_worker_remote_analyze_response_size",
+                            label_selectors=['instance=~"$worker_instance"'],
                             by_labels=[],
+                            skip_default_instance=True,
                         ),
                         legend_format="analyze",
                         additional_groupby=True,
@@ -5751,7 +5771,9 @@ def CloudWorkerService() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_worker_remote_checksum_response_size",
+                            label_selectors=['instance=~"$worker_instance"'],
                             by_labels=[],
+                            skip_default_instance=True,
                         ),
                         legend_format="checksum",
                         additional_groupby=True,
@@ -5766,7 +5788,9 @@ def CloudWorkerService() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_worker_remote_cop_dag_request_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
                             by_labels=[],
+                            skip_default_instance=True,
                         ),
                         legend_format="dag",
                         additional_groupby=True,
@@ -5774,7 +5798,9 @@ def CloudWorkerService() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_worker_remote_cop_dag_request_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
                             by_labels=[],
+                            skip_default_instance=True,
                         ),
                         legend_format="analyze",
                         additional_groupby=True,
@@ -5782,7 +5808,9 @@ def CloudWorkerService() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_worker_remote_cop_dag_request_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
                             by_labels=[],
+                            skip_default_instance=True,
                         ),
                         legend_format="checksum",
                         additional_groupby=True,
@@ -5803,6 +5831,7 @@ def CloudWorkerService() -> RowPanel:
                             0.99,
                             "tikv_worker_native_br_duration_seconds",
                             is_optional_quantile=True,
+                            skip_default_instance=True,
                         ),
                         legend_format="total-" + OPTIONAL_QUANTILE_INPUT,
                         additional_groupby=True,
@@ -5813,6 +5842,7 @@ def CloudWorkerService() -> RowPanel:
                             "tikv_worker_native_br_duration_seconds",
                             by_labels=["type"],
                             is_optional_quantile=True,
+                            skip_default_instance=True,
                         ),
                         legend_format="{{type}}-" + OPTIONAL_QUANTILE_INPUT,
                         additional_groupby=True,
@@ -5827,6 +5857,7 @@ def CloudWorkerService() -> RowPanel:
                         expr=expr_sum_rate(
                             "tikv_worker_native_br_counter",
                             by_labels=["type"],
+                            skip_default_instance=True,
                         ),
                         additional_groupby=True,
                     )

@@ -203,6 +203,7 @@ def expr_aggr(
     aggr_param: str = "",
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the aggregation of a metric.
@@ -221,6 +222,7 @@ def expr_aggr(
         by_labels=by_labels,
         label_selectors=label_selectors,
     )
+    expr.skip_default_instance = skip_default_instance
     return expr
 
 
@@ -228,6 +230,7 @@ def expr_sum(
     metric: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the sum of a metric.
@@ -240,7 +243,11 @@ def expr_sum(
         )) by (instance)
     """
     return expr_aggr(
-        metric, "sum", label_selectors=label_selectors, by_labels=by_labels
+        metric,
+        "sum",
+        label_selectors=label_selectors,
+        by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
 
 
@@ -248,6 +255,7 @@ def expr_avg(
     metric: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the avg of a metric.
@@ -260,7 +268,11 @@ def expr_avg(
     )) by (instance)
     """
     return expr_aggr(
-        metric, "avg", label_selectors=label_selectors, by_labels=by_labels
+        metric,
+        "avg",
+        label_selectors=label_selectors,
+        by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
 
 
@@ -268,6 +280,7 @@ def expr_max(
     metric: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the max of a metric.
@@ -280,7 +293,11 @@ def expr_max(
         )) by (instance)
     """
     return expr_aggr(
-        metric, "max", label_selectors=label_selectors, by_labels=by_labels
+        metric,
+        "max",
+        label_selectors=label_selectors,
+        by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
 
 
@@ -288,6 +305,7 @@ def expr_min(
     metric: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the min of a metric.
@@ -300,7 +318,11 @@ def expr_min(
         )) by (instance)
     """
     return expr_aggr(
-        metric, "min", label_selectors=label_selectors, by_labels=by_labels
+        metric,
+        "min",
+        label_selectors=label_selectors,
+        by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
 
 
@@ -312,6 +334,7 @@ def expr_aggr_func(
     label_selectors: list[str] = [],
     range_selector: str = "",
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the aggregation of function of a metric.
@@ -339,6 +362,7 @@ def expr_aggr_func(
         label_selectors=label_selectors,
         range_selector=range_selector,
     )
+    expr.skip_default_instance = skip_default_instance
     return expr
 
 
@@ -346,6 +370,7 @@ def expr_sum_rate(
     metric: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance=False,
 ) -> Expr:
     """
     Calculate the sum of rate of a metric.
@@ -368,6 +393,7 @@ def expr_sum_rate(
         label_selectors=label_selectors,
         range_selector="$__rate_interval",
         by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
 
 
@@ -376,6 +402,7 @@ def expr_sum_delta(
     label_selectors: list[str] = [],
     range_selector: str = "$__rate_interval",
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the sum of delta of a metric.
@@ -395,6 +422,7 @@ def expr_sum_delta(
         label_selectors=label_selectors,
         range_selector=range_selector,
         by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
 
 
@@ -403,6 +431,7 @@ def expr_sum_increase(
     label_selectors: list[str] = [],
     range_selector: str = "$__rate_interval",
     by_labels: list[str] = ["instance"],
+    skip_default_instance=False,
 ) -> Expr:
     """
     Calculate the sum of increase of a metric.
@@ -415,14 +444,16 @@ def expr_sum_increase(
         [$__rate_interval]
     )) by (instance)
     """
-    return expr_aggr_func(
+    expr = expr_aggr_func(
         metric=metric,
         aggr_op="sum",
         func="increase",
         label_selectors=label_selectors,
         range_selector=range_selector,
         by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
+    return expr
 
 
 def expr_sum_aggr_over_time(
@@ -431,6 +462,7 @@ def expr_sum_aggr_over_time(
     range_selector: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the sum of average value of all points in the specified interval of a metric.
@@ -450,6 +482,7 @@ def expr_sum_aggr_over_time(
         label_selectors=label_selectors,
         range_selector=range_selector,
         by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
 
 
@@ -457,6 +490,7 @@ def expr_max_rate(
     metric: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the max of rate of a metric.
@@ -479,6 +513,7 @@ def expr_max_rate(
         label_selectors=label_selectors,
         range_selector="$__rate_interval",
         by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
 
 
@@ -486,6 +521,7 @@ def expr_count_rate(
     metric: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Calculate the count of rate of a metric.
@@ -508,12 +544,14 @@ def expr_count_rate(
         label_selectors=label_selectors,
         range_selector="$__rate_interval",
         by_labels=by_labels,
+        skip_default_instance=skip_default_instance,
     )
 
 
 def expr_simple(
     metric: str,
     label_selectors: list[str] = [],
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Query an instant vector of a metric.
@@ -525,6 +563,7 @@ def expr_simple(
     """
     expr = Expr(metric=metric)
     expr.function("", label_selectors=label_selectors)
+    expr.skip_default_instance = skip_default_instance
     return expr
 
 
@@ -540,6 +579,7 @@ def expr_histogram_quantile(
     label_selectors: list[str] = [],
     by_labels: list[str] = [],
     is_optional_quantile=False,
+    skip_default_instance=False,
 ) -> Expr:
     """
     Query a quantile of a histogram metric.
@@ -561,12 +601,13 @@ def expr_histogram_quantile(
         metrics + "_bucket",
         label_selectors=label_selectors,
         by_labels=by_labels + ["le"],
+        skip_default_instance=skip_default_instance,
     )
     # histogram_quantile({quantile}, {sum_rate_of_buckets})
     quantile_str = f"{quantile}"
     if is_optional_quantile:
         quantile_str = OPTIONAL_QUANTILE_INPUT
-    return expr_aggr(
+    expr = expr_aggr(
         metric=sum_rate_of_buckets,
         aggr_op="histogram_quantile",
         aggr_param=quantile_str,
@@ -574,13 +615,16 @@ def expr_histogram_quantile(
         by_labels=[],
     ).extra(
         # Do not attach default label selector again.
-        default_label_selectors=[]
+        default_label_selectors=[],
     )
+    expr.skip_default_instance = skip_default_instance
+    return expr
 
 
 def expr_topk(
     k: int,
     metrics: str,
+    skip_default_instance: bool = False,
 ) -> Expr:
     """
     Query topk of a metric.
@@ -590,22 +634,25 @@ def expr_topk(
     topk(20, tikv_thread_voluntary_context_switches)
     """
     # topk({k}, {metric})
-    return expr_aggr(
+    expr = expr_aggr(
         metric=metrics,
         aggr_op="topk",
         aggr_param=f"{k}",
         label_selectors=[],
         by_labels=[],
+        skip_default_instance=skip_default_instance,
     ).extra(
         # Do not attach default label selector again.
         default_label_selectors=[]
     )
+    return expr
 
 
 def expr_histogram_avg(
     metrics: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = ["instance"],
+    skip_default_instance: bool = False,
 ) -> OpExpr:
     """
     Query the avg of a histogram metric.
@@ -632,12 +679,14 @@ def expr_histogram_avg(
             metrics + "_sum",
             label_selectors=label_selectors,
             by_labels=by_labels,
+            skip_default_instance=skip_default_instance,
         ),
         "/",
         expr_sum_rate(
             metrics + "_count",
             label_selectors=label_selectors,
             by_labels=by_labels,
+            skip_default_instance=skip_default_instance,
         ),
     )
 
@@ -983,13 +1032,17 @@ def heatmap_panel(
     color=heatmap_color(),
     decimals=1,
     data_source=DATASOURCE,
+    skip_default_instance=False,
 ) -> Panel:
     assert metric.endswith(
         "_bucket"
     ), f"'{metric}' should be a histogram metric with '_bucket' suffix"
     t = target(
         expr=expr_sum_increase(
-            metric, label_selectors=label_selectors, by_labels=["le"]
+            metric,
+            label_selectors=label_selectors,
+            by_labels=["le"],
+            skip_default_instance=skip_default_instance,
         ),
     )
     # Make sure targets are in heatmap format.
@@ -1059,6 +1112,7 @@ def graph_panel_histogram_quantiles(
     hide_avg=False,
     hide_count=False,
     additional_groupby=True,
+    skip_default_instance=False,
 ) -> Panel:
     """
     Return a graph panel that shows histogram quantiles of a metric.
@@ -1087,6 +1141,7 @@ def graph_panel_histogram_quantiles(
                     f"{metric}",
                     label_selectors=label_selectors,
                     by_labels=by_labels,
+                    skip_default_instance=skip_default_instance,
                 ),
                 legend_format=legend("99.99%", by_labels),
                 hide=hide_p9999,
@@ -1098,6 +1153,7 @@ def graph_panel_histogram_quantiles(
                     f"{metric}",
                     label_selectors=label_selectors,
                     by_labels=by_labels,
+                    skip_default_instance=skip_default_instance,
                 ),
                 legend_format=legend("99%", by_labels),
                 additional_groupby=additional_groupby,
@@ -1107,6 +1163,7 @@ def graph_panel_histogram_quantiles(
                     metric,
                     label_selectors=label_selectors,
                     by_labels=by_labels,
+                    skip_default_instance=skip_default_instance,
                 ),
                 legend_format=legend("avg", by_labels),
                 hide=hide_avg,
@@ -1117,6 +1174,7 @@ def graph_panel_histogram_quantiles(
                     f"{metric}_count",
                     label_selectors=label_selectors,
                     by_labels=by_labels,
+                    skip_default_instance=skip_default_instance,
                 ),
                 legend_format=legend("count", by_labels),
                 hide=hide_count,
@@ -1154,6 +1212,7 @@ def heatmap_panel_graph_panel_histogram_quantile_pairs(
     label_selectors=[],
     graph_by_labels=[],
     graph_hides: list[str] = ["count"],
+    skip_default_instance=False,
 ) -> list[Panel]:
     hide_count = False
     hide_avg = False
@@ -1170,6 +1229,7 @@ def heatmap_panel_graph_panel_histogram_quantile_pairs(
             yaxis=yaxis(format=yaxis_format),
             metric=f"{metric}_bucket",
             label_selectors=label_selectors,
+            skip_default_instance=skip_default_instance,
         ),
         graph_panel_histogram_quantiles(
             title=graph_title,
@@ -1180,5 +1240,6 @@ def heatmap_panel_graph_panel_histogram_quantile_pairs(
             by_labels=graph_by_labels,
             hide_count=hide_count,
             hide_avg=hide_avg,
+            skip_default_instance=skip_default_instance,
         ),
     ]
