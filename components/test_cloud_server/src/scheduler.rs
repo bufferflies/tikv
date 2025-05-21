@@ -82,7 +82,7 @@ impl Scheduler {
         stats.ver == region_ver
     }
 
-    fn move_peer(&self, region_id: u64, store_id: u64) -> Option<()> {
+    pub fn move_peer(&self, region_id: u64, store_id: u64) -> Option<()> {
         let peer_id = self.pd.alloc_id().unwrap();
 
         // Add learner.

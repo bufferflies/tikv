@@ -28,7 +28,8 @@ use kvengine::ShardTag;
 use kvproto::{
     coprocessor as coppb, errorpb, kvrpcpb,
     kvrpcpb::{
-        CommitRequest, Context, GetRequest, IsolationLevel, Op, PrewriteRequest, SplitRegionRequest,
+        CommitRequest, Context, GetRequest, IsolationLevel, Op, PessimisticLockRequest,
+        PrewriteRequest, PrewriteRequestPessimisticAction, SplitRegionRequest,
     },
     metapb,
     metapb::Peer,
@@ -269,6 +270,18 @@ impl Clone for ClusterClient {
     }
 }
 
+#[derive(Default, Copy, Clone)]
+pub struct PrewriteExt {
+    pub pessimistic_action: PrewriteRequestPessimisticAction,
+    pub for_update_ts: TimeStamp,
+}
+
+#[derive(Default, Copy, Clone)]
+pub struct PessimisticLockExt {
+    pub start_ts: TimeStamp,
+    pub for_update_ts: TimeStamp,
+}
+
 impl ClusterClient {
     pub fn pd_client(&self) -> Arc<dyn PdClient> {
         self.pd_client.clone() as Arc<dyn PdClient>
@@ -387,7 +400,7 @@ impl ClusterClient {
         gen_key: F,
         gen_val: G,
         options: MutateOptions,
-    ) -> Result<u64 /* commit_ts */>
+    ) -> Result<u64 /* commit_ts or start_ts when NoCommit */>
     where
         R: IntoIterator<Item = usize>,
         F: Fn(usize) -> Vec<u8>,
@@ -434,7 +447,7 @@ impl ClusterClient {
 
         match options.commit_action {
             CommitAction::NoCommit => {
-                return Ok(0);
+                return Ok(start_ts.into_inner());
             }
             commit_action => {
                 self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action)?;
@@ -487,12 +500,110 @@ impl ClusterClient {
         Ok(())
     }
 
-    pub fn kv_prewrite_with_retry(
+    pub fn kv_pessimistic_lock_ext(
+        &mut self,
+        pk: Bytes,
+        muts: TxnMutations,
+        mut ext: PessimisticLockExt,
+    ) -> Result<()> {
+        if ext.start_ts.is_zero() {
+            ext.start_ts = self.get_ts();
+        }
+        if ext.for_update_ts.is_zero() {
+            ext.for_update_ts = ext.start_ts;
+        }
+
+        let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
+        for (id_ver, group_muts) in groups {
+            self.kv_pessimistic_lock_single_region(id_ver, pk.clone(), group_muts, ext)?;
+        }
+        Ok(())
+    }
+
+    pub fn kv_pessimistic_lock_single_region(
+        &mut self,
+        id_ver: RegionIdVer,
+        pk: Bytes,
+        muts: TxnMutations,
+        ext: PessimisticLockExt,
+    ) -> Result<()> {
+        let region_id = id_ver.id();
+        let mut errors: Vec<(ShardTag, Error)> = vec![];
+        let start_time = Instant::now();
+        let timeout = Duration::from_secs(15);
+        let start_version = ext.start_ts;
+        let for_update_ts = ext.for_update_ts;
+
+        while start_time.saturating_elapsed() < timeout {
+            let ctx = self
+                .new_rpc_ctx(region_id, &pk)
+                .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
+            if ctx.is_none() {
+                return self.kv_pessimistic_lock_ext(pk, muts, ext);
+            }
+            let ctx = ctx.unwrap();
+            let tag = Self::tag_from_ctx(&ctx);
+            let store_id = ctx.get_peer().get_store_id();
+            let kv_client = self.get_kv_client(store_id);
+            let mut req = PessimisticLockRequest::default();
+            req.set_context(ctx);
+            muts.set_pessimistic_req(&mut req);
+            req.primary_lock = pk.to_vec();
+            req.start_version = start_version.into_inner();
+            req.lock_ttl = 3000;
+            req.for_update_ts = for_update_ts.into_inner();
+
+            debug!("{} pessimistic lock {:?}", tag, req);
+            let result = kv_client.kv_pessimistic_lock(&req);
+            if let Err(err) = result {
+                errors.push((tag, err.into()));
+                sleep(Duration::from_millis(100));
+                self.update_cache_by_id(region_id, None);
+                continue;
+            }
+            let mut resp = result.unwrap();
+            if resp.has_region_error() {
+                let region_err = resp.take_region_error();
+                if self.handle_retryable_error(&tag, &region_err) {
+                    errors.push((tag, Error::RegionError(region_err)));
+                    continue;
+                }
+                if self.handle_region_epoch_not_match_or_not_found(&region_err) {
+                    return self.kv_pessimistic_lock_ext(pk, muts, ext);
+                }
+                error!("{} unexpected error {:?}", tag, region_err);
+                return Err(Error::RegionError(region_err));
+            }
+            let mut key_errors = resp.take_errors().into_vec();
+            key_errors.retain(|key_err| {
+                if key_err.has_locked() {
+                    let locked = key_err.get_locked();
+                    if locked.get_lock_version() == start_version.into_inner() {
+                        return false;
+                    }
+                }
+                true
+            });
+            if !key_errors.is_empty() {
+                info!(
+                    "{} pessimistic lock: encounters key_errors: {:?}",
+                    tag, key_errors
+                );
+                errors.push((tag, Error::KeyErrors(key_errors.clone())));
+                self.handle_key_errors(&tag, req.start_version, false, key_errors)?;
+                continue;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn kv_prewrite_ext_with_retry(
         &mut self,
         pk: Bytes,
         secondaries: Option<&Vec<Bytes>>,
         muts: TxnMutations,
         ts: TimeStamp,
+        ext: PrewriteExt,
     ) -> Result<()> {
         // Don't use muts.primary() for pk & muts.secondaries() for secondary keys, as
         // `kv_prewrite` will recursively be invoked in `kv_prewrite_single_region`.
@@ -504,18 +615,30 @@ impl ClusterClient {
                 secondaries,
                 group_muts,
                 ts,
+                ext,
             )?;
         }
         Ok(())
     }
 
-    fn kv_prewrite_single_region_with_retry(
+    pub fn kv_prewrite_with_retry(
+        &mut self,
+        pk: Bytes,
+        secondaries: Option<&Vec<Bytes>>,
+        muts: TxnMutations,
+        ts: TimeStamp,
+    ) -> Result<()> {
+        self.kv_prewrite_ext_with_retry(pk, secondaries, muts, ts, PrewriteExt::default())
+    }
+
+    pub fn kv_prewrite_single_region_with_retry(
         &mut self,
         id_ver: RegionIdVer,
         pk: Bytes,
         secondary_keys: Option<&Vec<Bytes>>,
         muts: TxnMutations,
         ts: TimeStamp,
+        ext: PrewriteExt,
     ) -> Result<()> {
         let region_id = id_ver.id();
         let mut errors: Vec<(ShardTag, Error)> = vec![];
@@ -526,7 +649,7 @@ impl ClusterClient {
                 .new_rpc_ctx(region_id, &pk)
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
-                return self.kv_prewrite_with_retry(pk, secondary_keys, muts, ts);
+                return self.kv_prewrite_ext_with_retry(pk, secondary_keys, muts, ts, ext);
             }
             let ctx = ctx.unwrap();
             let tag = Self::tag_from_ctx(&ctx);
@@ -540,6 +663,13 @@ impl ClusterClient {
             prewrite_req.lock_ttl = 3000;
             prewrite_req.min_commit_ts = prewrite_req.start_version + 1;
             prewrite_req.use_async_commit = self.async_commit;
+            if ext.pessimistic_action != PrewriteRequestPessimisticAction::SkipPessimisticCheck {
+                prewrite_req.set_pessimistic_actions(vec![
+                    ext.pessimistic_action;
+                    prewrite_req.mutations.len()
+                ]);
+            }
+            prewrite_req.set_for_update_ts(ext.for_update_ts.into_inner());
             if let Some(secondary_keys) = secondary_keys {
                 if muts.primary() == pk {
                     prewrite_req.set_secondaries(
@@ -567,7 +697,7 @@ impl ClusterClient {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(&region_err) {
-                    return self.kv_prewrite_with_retry(pk, secondary_keys, muts, ts);
+                    return self.kv_prewrite_ext_with_retry(pk, secondary_keys, muts, ts, ext);
                 }
                 error!("{} unexpected error {:?}", tag, region_err);
                 return Err(Error::RegionError(region_err));
@@ -2572,6 +2702,21 @@ impl TxnMutations {
                     .collect::<Vec<_>>();
                 req.set_keys(keys.into());
                 req.set_is_txn_file(true);
+            }
+        }
+    }
+
+    pub fn set_pessimistic_req(&self, req: &mut kvrpcpb::PessimisticLockRequest) {
+        match self {
+            Self::Muts { muts } => {
+                let mutations = muts
+                    .iter()
+                    .map(|m| kvrpcpb::Mutation::from(m))
+                    .collect::<Vec<_>>();
+                req.set_mutations(mutations.into());
+            }
+            Self::Chunks { .. } => {
+                panic!("pessimistic locking for txn chunks isn't implemented yet")
             }
         }
     }

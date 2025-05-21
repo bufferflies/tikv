@@ -7,6 +7,7 @@ mod test_async_io;
 mod test_compaction;
 mod test_load_data;
 mod test_merge;
+mod test_native_br;
 mod test_rfengine;
 mod test_split_region;
 mod test_transaction;
@@ -31,10 +32,17 @@ fn i_to_val(i: usize) -> Vec<u8> {
     format!("val{:08}", i).into_bytes().repeat(10)
 }
 
-fn random_value_1kb(_: usize) -> Vec<u8> {
-    let mut bytes = [0u8; 1024];
+fn random_value<const N: usize>(_: usize) -> Vec<u8>
+where
+    [u8; N]: rand::Fill,
+{
+    let mut bytes = [0u8; N];
     rand::thread_rng().fill(&mut bytes);
     bytes.to_vec()
+}
+
+fn random_value_1kb(i: usize) -> Vec<u8> {
+    random_value::<1024>(i)
 }
 
 fn i_to_row_key(keyspace_prefix: &[u8], table_id: i64, i: usize) -> Vec<u8> {

@@ -218,11 +218,12 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
                 );
             });
         info!(
-            "{} resolve {} locks / {} lock_txn_files of shards {:?}",
+            "{} resolve {} locks / {} lock_txn_files of shards {:?}, resolved ts {:?}",
             cluster.tag(),
             resolved_locks.total_normal_locks_cnt,
             resolved_locks.total_lock_txn_files_cnt,
-            resolved_locks.resolved_shards
+            resolved_locks.resolved_shards,
+            resolved_locks.resolved_ts
         );
 
         let kv = cluster.get_kvengine();

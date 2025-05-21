@@ -918,6 +918,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     let reporter = Arc::new(DummyStepReporter::default());
     let runtime = Runtime::new().unwrap();
     let _enter = runtime.enter();
+    let mut resolved_ts = u64::MAX;
 
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
     let mut cluster = ServerClusterBuilder::new(
@@ -1009,18 +1010,20 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
 
         // Test rollback of txn file locks.
         if !async_commit {
-            client
-                .try_put_kv(
-                    200..300,
-                    &i_to_key,
-                    i_to_val(IMPORT_DATA_LEN),
-                    MutateOptions {
-                        commit_action: CommitAction::NoCommit,
-                        write_method: TxnWriteMethod::FileBased,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
+            resolved_ts = resolved_ts.min(
+                client
+                    .try_put_kv(
+                        200..300,
+                        &i_to_key,
+                        i_to_val(IMPORT_DATA_LEN),
+                        MutateOptions {
+                            commit_action: CommitAction::NoCommit,
+                            write_method: TxnWriteMethod::FileBased,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
+            );
         }
     }
 
@@ -1048,7 +1051,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     }
 
     // Restore keyspace.
-    restore_keyspace::restore_keyspace(
+    let restore_result = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
         &snapshot_backup_name,
@@ -1061,6 +1064,11 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
         reporter,
     )
     .unwrap();
+    if resolved_ts != u64::MAX {
+        assert_eq!(restore_result.resolved_ts, resolved_ts.into());
+    } else {
+        assert_eq!(restore_result.resolved_ts, restore_result.ts.into());
+    }
 
     // Invoke major compaction to reproduce issue by compacting the deletion of
     // primary key.

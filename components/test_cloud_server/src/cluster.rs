@@ -28,7 +28,7 @@ use kvengine::{
 use kvproto::{
     kvrpcpb::{Mutation, Op},
     metapb,
-    metapb::{PeerRole, Store},
+    metapb::{Peer, PeerRole, Store},
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
 };
 use log_wrappers::Value;
@@ -489,6 +489,38 @@ impl ServerCluster {
             "pd region count {} < min_count({})",
             region_count, min_count
         );
+    }
+
+    pub fn evict_peer(&mut self, peer_id: u64) {
+        let (peer_state, old_store_id) = self
+            .servers
+            .values()
+            .find_map(|server| {
+                let ps = server.get_raft_engine().get_peer_stats(peer_id);
+                (ps.peer_id != 0).then_some((ps, server.get_store_id()))
+            })
+            .unwrap();
+
+        let region_id = peer_state.region_id;
+        let region = block_on(self.pd_client.get_region_by_id(region_id))
+            .unwrap()
+            .unwrap();
+
+        let target_store_id = self
+            .get_stores()
+            .iter()
+            .copied()
+            .find(|id| region.peers.iter().all(|p| p.get_store_id() != *id))
+            .unwrap();
+
+        let mut new_peer = Peer::new();
+        new_peer.set_store_id(target_store_id);
+        new_peer.set_id(self.pd_client.alloc_id().unwrap());
+        self.pd_client.must_add_peer(region_id, new_peer);
+        let mut old_peer = Peer::new();
+        old_peer.set_store_id(old_store_id);
+        old_peer.set_id(peer_state.peer_id);
+        self.pd_client.must_remove_peer(region_id, old_peer);
     }
 
     pub fn remove_node_peers(&mut self, node_id: u16) {

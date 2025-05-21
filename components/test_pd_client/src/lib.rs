@@ -32,6 +32,8 @@ pub trait PdClientExt: pd_client::PdClient {
 
     fn must_remove_peer(&self, region_id: u64, peer: metapb::Peer);
 
+    fn must_add_peer(&self, region_id: u64, peer: metapb::Peer);
+
     fn must_split_region(
         &self,
         region: metapb::Region,

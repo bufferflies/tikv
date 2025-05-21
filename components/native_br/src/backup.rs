@@ -8,6 +8,7 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use fail::fail_point;
 use futures::{compat::Stream01CompatExt, executor::block_on, StreamExt};
 use http::Request;
 use hyper::Body;
@@ -417,6 +418,8 @@ async fn backup_store(
     security_mgr: Arc<SecurityManager>,
     timeout: Duration,
 ) {
+    fail_point!("native_br::backup_store");
+
     let uri = security_mgr
         .build_uri(format!("{}/rfengine/backup", &store.status_address))
         .unwrap();
@@ -434,7 +437,9 @@ async fn backup_store(
             tx.send(Ok(store_backup_meta)).unwrap()
         }
         Err(e) => tx.send(Err(e)).unwrap(),
-    }
+    };
+
+    fail_point!("native_br::backup_store::ret");
 }
 
 fn merge_store_backup_meta(

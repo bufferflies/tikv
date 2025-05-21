@@ -1,6 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cmp::Reverse,
     collections::{hash_map::Entry::Vacant, HashMap},
     default::Default,
     sync::Arc,
@@ -14,9 +15,9 @@ use tikv::storage::{
     kv::WriteData,
     mvcc::{CloudReader, Key, MvccTxn, TxnCommitRecord, WriteType},
 };
-use tikv_util::{box_err, debug, info};
+use tikv_util::{box_err, debug, info, warn};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
-use txn_types::{Lock, ReqType, TimeStamp};
+use txn_types::{Lock, LockType, ReqType, TimeStamp};
 
 use crate::{
     common::{RawRegion, RegionMetaGetter},
@@ -50,7 +51,22 @@ pub struct ResolvedLocks {
     pub total_normal_locks_cnt: usize,
     pub total_lock_txn_files_cnt: usize, // Number of lock txn files resolved.
     pub resolved_shards: Vec<u64>,       // The shards that have locks which are resolved.
+    pub resolved_ts: ResolvedTs,
 }
+
+#[derive(Default)]
+pub struct ShardResolvedLocks {
+    pub total_resolved_locks: usize,
+    pub resolved_ts: ResolvedTs,
+}
+
+impl ShardResolvedLocks {
+    fn update_resolved_ts(&mut self, lock_ts: u64) {
+        self.resolved_ts = self.resolved_ts.max(Some(Reverse(lock_ts)))
+    }
+}
+
+type ResolvedTs = Option<Reverse<u64>>;
 
 impl LockResolver {
     pub fn new(
@@ -86,24 +102,33 @@ impl LockResolver {
             total_normal_locks_cnt: 0,
             total_lock_txn_files_cnt: 0,
             resolved_shards: vec![],
+            resolved_ts: ResolvedTs::default(),
         };
-        let mut handles = Vec::with_capacity(self.shards.len());
         let shards = self.shards.clone();
+        let mut js = tokio::task::JoinSet::new();
         for shard in shards.iter() {
             let shard_id = shard.id;
             let clone = self.clone();
-            handles.push((
-                shard_id,
-                tokio::spawn(async move { clone.resolve_shard(shard_id).await }),
-            ));
+            js.spawn(async move { (shard_id, clone.resolve_shard(shard_id).await) });
         }
-        for (shard_id, handle) in handles {
-            let (normal_locks_cnt, lock_txn_files_cnt) = handle.await.unwrap()?;
-            if normal_locks_cnt > 0 || lock_txn_files_cnt > 0 {
-                resolved_locks.total_normal_locks_cnt += normal_locks_cnt;
-                resolved_locks.total_lock_txn_files_cnt += lock_txn_files_cnt;
-                resolved_locks.resolved_shards.push(shard_id);
-            }
+        while let Some(handle) = js.join_next().await {
+            let handle = handle.unwrap();
+            let shard_id = handle.0;
+            match handle.1 {
+                Ok((normal_locks_cnt, lock_txn_files_cnt, rts)) => {
+                    if normal_locks_cnt > 0 || lock_txn_files_cnt > 0 {
+                        resolved_locks.total_normal_locks_cnt += normal_locks_cnt;
+                        resolved_locks.total_lock_txn_files_cnt += lock_txn_files_cnt;
+                        resolved_locks.resolved_ts = resolved_locks.resolved_ts.max(rts);
+                        resolved_locks.resolved_shards.push(shard_id);
+                    }
+                }
+                Err(err) => {
+                    warn!("failed to resolve lock."; "err" => %err);
+                    js.shutdown().await;
+                    return Err(err);
+                }
+            };
         }
         Ok(resolved_locks)
     }
@@ -130,13 +155,14 @@ impl LockResolver {
         &self,
         shard_id: u64,
     ) -> Result<(
-        usize, // normal_locks_cnt
-        usize, // txn_file_locks_cnt
+        usize,      // normal_locks_cnt
+        usize,      // txn_file_locks_cnt
+        ResolvedTs, // max_resolved_ts
     )> {
         // Resolve txn file locks first. Otherwise, txn file locks will be met during
         // resolving normal locks.
-        let txn_file_locks_cnt = self.resolve_shard_txn_file_locks(shard_id).await?;
-        let normal_locks_cnt = self.resolve_shard_normal_locks(shard_id).await?;
+        let txn_file_locks_resolved = self.resolve_shard_txn_file_locks(shard_id).await?;
+        let normal_locks_resolved = self.resolve_shard_normal_locks(shard_id).await?;
 
         // Confirm all locks have been resolved.
         // Note: get a new SnapAccess for scan locks.
@@ -153,11 +179,18 @@ impl LockResolver {
             kv_pairs
         );
 
-        Ok((normal_locks_cnt, txn_file_locks_cnt))
+        let resolved_ts = txn_file_locks_resolved
+            .resolved_ts
+            .max(normal_locks_resolved.resolved_ts);
+        Ok((
+            normal_locks_resolved.total_resolved_locks,
+            txn_file_locks_resolved.total_resolved_locks,
+            resolved_ts,
+        ))
     }
 
-    async fn resolve_shard_normal_locks(&self, shard_id: u64) -> Result<usize /* locks_cnt */> {
-        let mut locks_cnt = 0;
+    async fn resolve_shard_normal_locks(&self, shard_id: u64) -> Result<ShardResolvedLocks> {
+        let mut resolved = ShardResolvedLocks::default();
         let mut mvcc_txn = MvccTxn::new(TimeStamp::zero(), self.cm.clone());
 
         let shard = self.en.get_shard(shard_id).unwrap();
@@ -192,11 +225,13 @@ impl LockResolver {
                 let commit_ts = self.txn_status.check_txn_status(&self.tag, &lock).await?;
                 if commit_ts > 0 {
                     Self::commit_lock(&self.tag, &mut mvcc_txn, key, &lock, commit_ts.into())?;
-                    locks_cnt += 1;
+                    resolved.total_resolved_locks += 1;
                 } else {
                     // Rollback lock.
                     Self::rollback(&self.tag, &mut mvcc_txn, key)?;
-                    locks_cnt += 1;
+                    resolved.total_resolved_locks += 1;
+                    let ts = lock.ts.into_inner();
+                    resolved.update_resolved_ts(ts);
                 }
 
                 if mvcc_txn.write_size() >= DEFAULT_TXN_BATCH_SIZE {
@@ -217,7 +252,7 @@ impl LockResolver {
             self.apply(&shard, Some(mvcc_txn), None).await?;
         }
 
-        Ok(locks_cnt)
+        Ok(resolved)
     }
 
     // Ref: tikv::storage::txn::actions::commit
@@ -322,12 +357,10 @@ impl LockResolver {
         Ok(())
     }
 
-    async fn resolve_shard_txn_file_locks(
-        &self,
-        shard_id: u64,
-    ) -> Result<usize /* lock_txn_files_cnt */> {
+    async fn resolve_shard_txn_file_locks(&self, shard_id: u64) -> Result<ShardResolvedLocks> {
         let shard = self.en.get_shard(shard_id).unwrap();
         let snap = shard.new_snap_access();
+        let mut resolved = ShardResolvedLocks::default();
 
         let lock_txn_files = snap.get_lock_txn_files();
         for lock_txn_file in lock_txn_files {
@@ -345,11 +378,14 @@ impl LockResolver {
             let txn_file_ref = if commit_ts > 0 {
                 self.commit_txn_file_lock(&snap, lock_txn_file, &lock, commit_ts.into())?
             } else {
+                let ts = lock.ts.into_inner();
+                resolved.update_resolved_ts(ts);
                 self.rollback_txn_file_lock(&snap, lock_txn_file, &lock)?
             };
             self.apply(&shard, None, Some(txn_file_ref)).await?;
         }
-        Ok(lock_txn_files.len())
+        resolved.total_resolved_locks = lock_txn_files.len();
+        Ok(resolved)
     }
 
     fn commit_txn_file_lock(
@@ -448,7 +484,7 @@ impl TxnStatus {
         let primary_key = Key::from_raw(&lock.primary);
         if let Some(pk_lock) = cloud_reader.load_lock(&primary_key).unwrap() {
             if lock.ts == pk_lock.ts {
-                return if lock.use_async_commit {
+                return if pk_lock.use_async_commit {
                     self.check_secondary_locks(&pk_lock, &mut reader_cache)
                         .await
                 } else {
@@ -513,6 +549,10 @@ impl TxnStatus {
         pk_lock: &Lock,
         reader_cache: &mut HashMap<u64, CloudReader>,
     ) -> Result<u64 /* commit_id */> {
+        if matches!(pk_lock.lock_type, LockType::Pessimistic) {
+            return Ok(0);
+        }
+
         let mut commit_ts = pk_lock.min_commit_ts;
         for key in &pk_lock.secondaries {
             let cloud_reader = self
@@ -520,7 +560,10 @@ impl TxnStatus {
                 .await?;
             let key = Key::from_raw(key);
             match cloud_reader.load_lock(&key).unwrap() {
-                Some(lock) if lock.ts == pk_lock.ts => {
+                // Here check the lock type is necessrary.
+                // Pessimistic locks may have the same `start_ts` with Put locks.
+                // Also See https://github.com/tidbcloud/cloud-storage-engine/issues/2596
+                Some(lock) if lock.ts == pk_lock.ts && lock.lock_type != LockType::Pessimistic => {
                     if commit_ts < lock.min_commit_ts {
                         commit_ts = lock.min_commit_ts;
                     }

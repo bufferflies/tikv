@@ -49,6 +49,7 @@ use tikv_util::{
     time::Instant, HandyRwLock,
 };
 use tokio::runtime::Runtime;
+use txn_types::TimeStamp;
 
 use crate::{
     archive::{
@@ -87,6 +88,7 @@ pub struct RestoredKeyspace {
     pub ts: u64,
     pub restore_bytes: u64,
     pub tolerated_err: usize,
+    pub resolved_ts: TimeStamp,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -319,13 +321,25 @@ pub fn restore_keyspace(
         cluster.get_shard_meta_getter(),
     );
     let resolved_locks = runtime.block_on(lock_resolver.resolve_locks())?;
+    let resolved_ts = resolved_locks.resolved_ts.map(|v| v.0);
     cluster.add_shards_need_flush(&resolved_locks.resolved_shards);
     step!(
-        "Keyspace {keyspace_tag} resolve {} locks / {} lock_txn_files of shards {:?}",
+        "Keyspace {keyspace_tag} resolve {} locks / {} lock_txn_files of shards {:?} min resolved ts {:?}",
         resolved_locks.total_normal_locks_cnt,
         resolved_locks.total_lock_txn_files_cnt,
-        resolved_locks.resolved_shards
+        resolved_locks.resolved_shards,
+        resolved_ts,
     );
+
+    if let Some(rts) = resolved_ts {
+        if rts < cluster.truncate_ts {
+            step!(
+                "The minimal safe resolved ts was less than truncate ts, some transactions between them may be lost: resolved ts {}, truncate_ts {}",
+                rts,
+                cluster.truncate_ts
+            );
+        }
+    }
 
     // Trigger initial flush & flush mem-table to S3
     // NOTE: `cluster.shards` is NOT available before `flush_shards` finished.
@@ -479,6 +493,7 @@ pub fn restore_keyspace(
         ts: truncate_ts,
         restore_bytes,
         tolerated_err: cluster.tolerated_err(),
+        resolved_ts: resolved_ts.unwrap_or(truncate_ts).into(),
     };
     Ok(restore_ret)
 }
