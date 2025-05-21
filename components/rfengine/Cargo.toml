@@ -18,7 +18,7 @@ error_code = { path = "../error_code", default-features = false }
 file_system = { path = "../file_system", default-features = false }
 fslock = "0.1.7"
 kvengine = { workspace = true }
-kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+kvproto = { workspace = true }
 lazy_static = "1.3"
 libc = "0.2"
 log_wrappers = { path = "../log_wrappers" }
