@@ -147,7 +147,7 @@ pub fn restore_keyspace_with_cfg(
     reporter: Arc<dyn ReportRestoreStepTrait>,
 ) -> Result<RestoredKeyspace> {
     let mut pd_control = PdControl::new(config.pd.clone(), pd_client.get_security_mgr())?;
-    pd_control.set_retry_timeout(config.timeout_pd_control.0);
+    pd_control.set_timeout(config.timeout_pd_control.0);
     let keyspace_id = {
         let keyspace = runtime.block_on(pd_control.get_keyspace_by_name(keyspace_name))?;
         assert_eq!(keyspace_name, keyspace.name);

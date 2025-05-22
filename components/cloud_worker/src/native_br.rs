@@ -767,6 +767,8 @@ impl BrContext {
             self.backup_worker
                 .instant_backup_with_retry(config.native_br.instant_backup_timeout.0),
         )?;
+        info!("restore keyspace: instant backup: {:?}", instant_backup;
+            "keyspace" => &keyspace_name, "target_keyspace" => &target_keyspace_name);
 
         let get_truncate_ts =
             |utc_time: Option<DateTime<Utc>>, restore_type: RestoreType| -> Option<u64> {

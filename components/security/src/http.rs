@@ -148,6 +148,7 @@ pub struct RestfulClient {
     security_mgr: Arc<SecurityManager>,
     endpoints: Vec<String>,
     last_endpoint_idx: Option<AtomicUsize>,
+    req_timeout: Duration,
     retry_timeout: Duration,
 }
 
@@ -161,6 +162,7 @@ impl Clone for RestfulClient {
                 .last_endpoint_idx
                 .as_ref()
                 .map(|idx| AtomicUsize::new(idx.load(Ordering::Relaxed))),
+            req_timeout: self.req_timeout,
             retry_timeout: self.retry_timeout,
         }
     }
@@ -178,12 +180,14 @@ impl RestfulClient {
             endpoints: Self::trim_schema(endpoints),
             security_mgr,
             last_endpoint_idx: endpoint_idx,
-            retry_timeout: Duration::from_secs(3),
+            req_timeout: Duration::from_secs(3),
+            retry_timeout: Duration::from_secs(6),
         })
     }
 
-    pub fn set_retry_timeout(&mut self, timeout: Duration) {
-        self.retry_timeout = timeout;
+    pub fn set_timeout(&mut self, req_timeout: Duration, retry_timeout: Duration) {
+        self.req_timeout = req_timeout;
+        self.retry_timeout = retry_timeout;
     }
 
     pub async fn request(
@@ -213,24 +217,36 @@ impl RestfulClient {
                     None => Body::empty(),
                 })
                 .unwrap();
-            let resp = client.request(req).await;
+            let resp = tokio::time::timeout(self.req_timeout, client.request(req)).await;
             match resp {
-                Err(e) => err = Some(box_err!("{tag}: return error: {}", e.to_string())),
-                Ok(resp) => {
+                Err(_elapsed) => err = Some(box_err!("{}: request timeout", tag)),
+                Ok(Err(e)) => err = Some(box_err!("{tag}: return error: {}", e.to_string())),
+                Ok(Ok(resp)) => {
                     let status = resp.status();
-                    let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+                    let body_res = tokio::time::timeout(
+                        self.req_timeout,
+                        hyper::body::to_bytes(resp.into_body()),
+                    )
+                    .await;
                     if status.is_success() {
+                        let Ok(body) = body_res else {
+                            err = Some(box_err!("{}: read body timeout", tag));
+                            continue;
+                        };
+                        let body = body.unwrap();
                         debug!("{}: success: {}", tag, body.to_str_lossy());
                         if current_ep_idx != last_ep_idx {
                             self.set_last_endpoint_idx(current_ep_idx);
                         }
                         return Ok(body);
                     } else if status.is_client_error() {
+                        let body = body_res.map(|body| body.unwrap()).unwrap_or_default();
                         return Err(box_err!(
                             "{tag}: return error: {status}: {}",
                             body.to_str_lossy()
                         ));
                     } else {
+                        let body = body_res.map(|body| body.unwrap()).unwrap_or_default();
                         err = Some(box_err!(
                             "{tag}: return error: {status}: {}",
                             body.to_str_lossy()
