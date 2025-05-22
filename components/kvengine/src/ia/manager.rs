@@ -479,7 +479,7 @@ impl IaManagerCore {
         self.read_segment(ident.clone(), ftype, None, None, &mut read_at)
             .await?;
         let handle = read_at.segment_handle.unwrap();
-        info!("get segment handle"; "ident" => ?ident, "ftype" => ?ftype, "handle" => ?handle);
+        debug!("get segment handle"; "ident" => ?ident, "ftype" => ?ftype, "handle" => ?handle);
         Ok(handle)
     }
 
