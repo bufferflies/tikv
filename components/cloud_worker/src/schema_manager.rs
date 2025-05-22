@@ -501,6 +501,11 @@ impl SchemaManager {
                 update_write_sequence.is_some()
             );
 
+            if self.check_if_keyspace_restore_in_progress(keyspace_shard_stats) {
+                info!("{}: keyspace restore in progress, skip", keyspace_id);
+                continue;
+            }
+
             // 1. Try to read schema file from local.
             let local_schema_file =
                 match read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id) {
@@ -638,9 +643,8 @@ impl SchemaManager {
             }
 
             let schema_restore_version = keyspace_shard_stats
-                .iter()
+                .first()
                 .map(|s| s.schema_restore_version)
-                .max()
                 .unwrap_or(0);
             info!("{}: sync schema: rebuild schema", keyspace_id;
                 "cur_schema_ver" => ?cur_schema_version,
@@ -763,10 +767,10 @@ impl SchemaManager {
             .map(|s| s.schema_version)
             .max()
             .unwrap_or_default();
+        // NOTE: schema_restore_version is the same for all shards.
         let stats_restore_version = keyspace_shard_stats
-            .iter()
+            .first()
             .map(|s| s.schema_restore_version)
-            .max()
             .unwrap_or_default();
         // If the schema_version in local schema file is larger than shard stats, or the
         // restore_version is inconsistent, it means the keyspace is just restored.
@@ -781,6 +785,19 @@ impl SchemaManager {
             return true;
         }
         false
+    }
+
+    fn check_if_keyspace_restore_in_progress(
+        &self,
+        keyspace_shard_stats: &[ShardStatsLite],
+    ) -> bool {
+        let first_restore_version = keyspace_shard_stats
+            .first()
+            .map(|s| s.schema_restore_version)
+            .unwrap_or(0);
+        keyspace_shard_stats
+            .iter()
+            .any(|s| s.schema_restore_version != first_restore_version)
     }
 
     // return true if sent broadcast to stores
