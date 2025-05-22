@@ -68,7 +68,7 @@ pub const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 // the following constants are used to calculate RU consumption
 pub const DEFAULT_AVG_BATCH_PROPORTION: f64 = 0.5;
 pub const REPLICA_NUMS: f64 = 3.0;
-pub const TXN_FILE_RU_DISCOUNT_RATIO: f64 = 0.125;
+pub const TXN_FILE_RU_DISCOUNT_RATIO: f64 = 0.0625;
 
 pub enum KvPairsWorkerMsg {
     AddChunk {
