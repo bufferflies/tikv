@@ -339,7 +339,10 @@ impl ServerCluster {
 
     pub fn get_snap(&self, node_id: u16, key: &[u8]) -> kvengine::SnapAccess {
         let engine = self.get_kvengine(node_id);
-        let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
+        let region = self
+            .pd_client
+            .get_region_with_retry(&encode_bytes(key), Duration::from_secs(10))
+            .unwrap();
         engine.get_snap_access(region.id).unwrap()
     }
 
@@ -354,7 +357,10 @@ impl ServerCluster {
     }
 
     pub fn get_active_shard_by_key(&self, key: &[u8]) -> Option<Arc<kvengine::Shard>> {
-        let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
+        let region = self
+            .pd_client
+            .get_region_with_retry(&encode_bytes(key), Duration::from_secs(10))
+            .unwrap();
         self.get_active_shard(region.id)
     }
 
@@ -362,7 +368,10 @@ impl ServerCluster {
     ///
     /// Return `None` when there is no active shard.
     pub fn get_active_snap(&self, key: &[u8]) -> Option<kvengine::SnapAccess> {
-        let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
+        let region = self
+            .pd_client
+            .get_region_with_retry(&encode_bytes(key), Duration::from_secs(10))
+            .unwrap();
         let snap = self.get_active_shard(region.id)?.new_snap_access();
         Some(snap)
     }

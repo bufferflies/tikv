@@ -15,6 +15,25 @@ pub async fn sleep_async(dur: Duration) {
         .unwrap();
 }
 
+pub fn try_wait_result<T, E, F, Bo>(f: F, timeout: Duration, mut backoff: Bo) -> Result<T, E>
+where
+    F: Fn() -> Result<T, E>,
+    Bo: FnMut() -> Duration,
+{
+    let start_time = Instant::now_coarse();
+    let mut last_err = None;
+    while start_time.saturating_elapsed() < timeout {
+        match f() {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(backoff());
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
 pub async fn try_wait_result_async<'a, T, E, F, Bo>(
     f: F,
     timeout: Duration,

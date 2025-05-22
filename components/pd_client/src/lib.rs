@@ -416,6 +416,22 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         unimplemented!();
     }
 
+    /// Retry to tolerate region holes during split.
+    #[cfg(feature = "testexport")]
+    fn get_region_with_retry(&self, key: &[u8], timeout: Duration) -> Result<metapb::Region> {
+        use tikv_util::{backoff::ExponentialBackoff, retry::try_wait_result};
+        let mut bo = ExponentialBackoff::new(
+            Duration::from_millis(100),
+            Duration::from_secs(1),
+            usize::MAX,
+        );
+        try_wait_result(
+            || self.get_region(key),
+            timeout,
+            || bo.next_delay().unwrap(),
+        )
+    }
+
     /// Gets Region which the key belongs to asynchronously.
     fn get_region_async<'k>(&'k self, _key: &'k [u8]) -> BoxFuture<'k, Result<metapb::Region>> {
         unimplemented!();
