@@ -33,7 +33,7 @@ use tikv_util::{
 use crate::{
     config::Config,
     log_batch::{RaftLogBlock, RaftLogs},
-    manifest::{manifest_path, persist_change_set, Manifest},
+    manifest::{manifest_path, persist_change_set, Manifest, PeerFile},
     metrics::*,
     service_worker::{ServiceTask, ServiceWorker},
     write_batch::{PeerBatch, WriteBatch},
@@ -346,6 +346,32 @@ impl RfEngineCore {
 
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
+    }
+
+    #[allow(dead_code)]
+    fn get_entry_from_rlog(
+        &self,
+        peer_id: u64,
+        target_index: u64,
+        peer_file: PeerFile,
+    ) -> Result<Entry> {
+        fetch_entries_from_rlog(
+            &self.dir,
+            peer_id,
+            peer_file.first_index,
+            peer_file.last_index,
+            target_index,
+            target_index,
+        )?
+        .into_iter()
+        .next()
+        .map(|op| op.to_entry())
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "peer {peer_id} entry {target_index} not found in {:?}",
+                peer_file
+            ))
+        })
     }
 
     pub fn get_term(&self, peer_id: u64, index: u64) -> Option<u64> {

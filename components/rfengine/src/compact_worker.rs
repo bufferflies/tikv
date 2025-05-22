@@ -7,7 +7,7 @@ use std::{
     fmt::{Display, Formatter},
     fs,
     fs::File,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufReader, Read, Seek, SeekFrom, Write},
     mem,
     path::{Path, PathBuf},
     sync::{
@@ -20,6 +20,7 @@ use std::{
 };
 
 use api_version::ApiV2;
+use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
 use kvengine::dfs::S3Fs;
@@ -848,6 +849,107 @@ impl RlogHeader {
     }
 }
 
+/// Returns raft logs within a target index range from a given rlog file.
+///
+/// - `dir`: rlog file directory
+/// - `peer_id`: rlog peer id
+/// - `file_first_idx`: rlog file first index
+/// - `file_last_idx`: rlog file last index
+/// - `start_idx`: start index of the target range (inclusive)
+/// - `end_idx`: end index of the target range (inclusive)
+pub(crate) fn fetch_entries_from_rlog(
+    dir: &Path,
+    peer_id: u64,
+    file_first_idx: u64,
+    file_last_idx: u64,
+    start_idx: u64, // inclusive
+    end_idx: u64,   // inclusive
+) -> Result<Vec<RaftLogOp>> {
+    if start_idx > end_idx {
+        return Ok(Vec::new());
+    }
+    if start_idx < file_first_idx || end_idx > file_last_idx {
+        return Err(Error::Other(format!(
+            "peer {} index range [{}, {}] out of file range [{}, {}]",
+            peer_id, start_idx, end_idx, file_first_idx, file_last_idx
+        )));
+    }
+
+    // See format in Worker::write_raft_log_file
+    let file = File::open(raft_log_file_name(
+        dir,
+        peer_id,
+        file_first_idx,
+        file_last_idx,
+    ))?;
+    let mut reader = BufReader::new(file);
+
+    // Step 1: read rlog header.
+    let mut header_buf = [0u8; RlogHeader::len()];
+    reader.read_exact(&mut header_buf)?;
+    let header = RlogHeader::decode(&header_buf)?;
+
+    // Step 2: read end offsets.
+    let mut end_offs_buf = vec![0u8; 4 * header.count as usize];
+    reader.read_exact(&mut end_offs_buf)?;
+    let end_offs: Vec<u32> = end_offs_buf
+        .chunks_exact(4)
+        .map(LittleEndian::read_u32)
+        .collect();
+    for i in 1..header.count as usize {
+        debug_assert!(
+            end_offs[i - 1] < end_offs[i],
+            "corrupted rlog file, peer {}, file range [{},{}], \
+            end offset[{}]={} > {}",
+            peer_id,
+            file_first_idx,
+            file_last_idx,
+            i - 1,
+            end_offs[i - 1],
+            end_offs[i]
+        );
+    }
+
+    // Helper function to get the start and end offsets of a log entry.
+    let entry_offsets = |log_idx: u64| -> (usize, usize) {
+        let i = (log_idx - file_first_idx) as usize;
+        (
+            if i == 0 { 0 } else { end_offs[i - 1] as usize },
+            end_offs[i] as usize,
+        )
+    };
+
+    // Step 3: read and decode the raft log entries.
+    // RaftLogFile format:
+    // RlogHeader + [end_offsets] + [RaftLogOp] + [RaftLogOp] + ...
+    let (buf_start, _) = entry_offsets(start_idx);
+    reader.seek(SeekFrom::Start(
+        (RlogHeader::len() + 4 * header.count as usize + buf_start) as u64,
+    ))?;
+
+    let mut result = Vec::with_capacity((end_idx - start_idx + 1) as usize);
+    let mut log_buf: Vec<u8> = Vec::new();
+    for log_idx in start_idx..=end_idx {
+        let (log_start, log_end) = entry_offsets(log_idx);
+        let len = log_end - log_start;
+        log_buf.resize(len, 0);
+        reader.read_exact(&mut log_buf)?;
+        let (log_bytes, checksum_bytes) = log_buf.split_at(len - 4);
+        let checksum = LittleEndian::read_u32(checksum_bytes);
+        let actual_checksum = crc32c::crc32c(log_bytes);
+        if checksum != actual_checksum {
+            return Err(Error::Other(format!(
+                "rlog checksum mismatch, peer {}, file range [{},{}], \
+                idx {}, expected {:x}, actual {:x}",
+                peer_id, file_first_idx, file_last_idx, log_idx, checksum, actual_checksum
+            )));
+        }
+        let entry = RaftLogOp::decode(log_bytes);
+        result.push(entry);
+    }
+    Ok(result)
+}
+
 pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32) -> PathBuf {
     let idx = epoch_to_idx(epoch_id);
     dir.join(format!("{}.wal", idx))
@@ -1383,5 +1485,77 @@ mod tests {
         write_keyspace_state(&mut peer_meta, 100);
         write_keyspace_state(&mut peer_meta, 200);
         assert_eq!(CompactWorker::get_keyspace_id_from_peer(1, &peer_meta), 200);
+    }
+
+    #[test]
+    fn test_fetch_entries_from_rlog() {
+        init_logger();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_path = tmp_dir.path();
+        defer!(fs::remove_dir_all(tmp_path).unwrap());
+        let (_, rx) = tikv_util::mpsc::unbounded();
+
+        let manifest = Manifest::open(tmp_path, AtomicU64::new(1).into()).unwrap();
+        let mut worker = CompactWorker::new(
+            tmp_path.to_path_buf(),
+            rx,
+            manifest,
+            AtomicU32::new(0).into(),
+            None,
+            None,
+            dfs_worker::Healthy::default(),
+            1,
+            Arc::new(AtomicUsize::default()),
+        );
+
+        let peer_id = 1001;
+        let (raft_log_file, _) = generate_rlog_files(
+            &mut worker,
+            &mut RaftLogs::default(),
+            peer_id,
+            1000, // region id
+            10,   // first_index
+            20,   // last_index
+        );
+
+        for (start_idx, end_idx, expected_len) in vec![
+            // Success cases
+            (11, 10, Ok(0)),
+            (10, 10, Ok(1)),
+            (15, 15, Ok(1)),
+            (20, 20, Ok(1)),
+            (15, 19, Ok(5)),
+            (10, 15, Ok(6)),
+            (10, 20, Ok(11)),
+            // Failure cases
+            (9, 9, Err(())),
+            (21, 21, Err(())),
+            (9, 10, Err(())),
+            (10, 21, Err(())),
+            (9, 21, Err(())),
+        ] {
+            let result = fetch_entries_from_rlog(
+                tmp_path,
+                peer_id,
+                raft_log_file.first_index,
+                raft_log_file.last_index,
+                start_idx,
+                end_idx,
+            );
+            match expected_len {
+                Ok(expected_len) => {
+                    let logs = result.expect("expected success");
+                    assert_eq!(logs.len(), expected_len);
+                    for (i, entry) in logs.iter().enumerate() {
+                        let expected_idx = start_idx + i as u64;
+                        assert_eq!(entry.index, expected_idx);
+                        assert_eq!(entry.term, expected_idx as u32);
+                    }
+                }
+                Err(_) => {
+                    result.unwrap_err();
+                }
+            }
+        }
     }
 }

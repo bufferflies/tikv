@@ -2,11 +2,10 @@
 
 use std::{fs, os::unix::fs::FileExt, path::Path, sync::atomic::Ordering};
 
-use byteorder::{ByteOrder, LittleEndian};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use tikv_util::{info, warn};
 
-use crate::{log_batch::RaftLogOp, manifest::Manifest, service_worker::ServiceTask, *};
+use crate::{manifest::Manifest, service_worker::ServiceTask, *};
 
 impl RfEngineCore {
     pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
@@ -169,43 +168,18 @@ impl RfEngineCore {
         first: u64,
         last: u64,
     ) -> Result<()> {
-        let rlog_filename = raft_log_file_name(&self.dir, peer_id, first, last);
-        let bin = fs::read(rlog_filename)?;
-        // See format in Worker::write_raft_log_file
-        let header = RlogHeader::decode(bin.as_slice())?;
-        let mut data = &bin[RlogHeader::len()..];
-        let mut end_offs = vec![];
-        for _ in 0..header.count {
-            end_offs.push(data.get_u32_le());
-        }
         let peer_data_ref = self.get_or_init_peer_data(peer_id, region_id);
         let mut peer_data = peer_data_ref.write().unwrap();
-        for i in 0..header.count as usize {
-            if first + i as u64 <= peer_data.truncated_idx {
-                continue;
-            }
-            let start_off = if i == 0 {
-                0usize
-            } else {
-                end_offs[i - 1] as usize
-            };
-            let end_off = end_offs[i] as usize;
-            let log_data = &data[start_off..end_off - 4];
-            let checksum = LittleEndian::read_u32(&data[end_off - 4..]);
-            let actual_checksum = crc32c::crc32c(log_data);
-            if checksum != actual_checksum {
-                return Err(Error::Corruption {
-                    msg: format!(
-                        "checksum mismatch: header.checksum {:x}, log_data.checksum {:x}",
-                        checksum, actual_checksum
-                    ),
-                    epoch_id: 0,
-                    offset: start_off as u64,
-                    data: log_data.to_vec(),
-                });
-            }
-            let raft_log = RaftLogOp::decode(log_data);
-            peer_data.raft_logs.append(raft_log);
+        let logs = fetch_entries_from_rlog(
+            &self.dir,
+            peer_id,
+            first,
+            last,
+            first.max(peer_data.truncated_idx + 1),
+            last,
+        )?;
+        for log in logs {
+            peer_data.raft_logs.append(log);
         }
         Ok(())
     }
@@ -223,6 +197,8 @@ pub(crate) fn is_last_wal(dir: &Path, epoch_id: u32) -> bool {
 mod tests {
 
     use std::{fs::OpenOptions, sync::atomic::Ordering, time::Duration};
+
+    use bytes::Buf;
 
     use super::{config::Config, *};
     use crate::test_util::{init_logger, make_log_data, make_state_kv, try_wait};
