@@ -124,7 +124,7 @@ impl S3FsCore {
         let mut config = rusoto_core::HttpConfig::new();
         config.read_buf_size(256 * 1024);
         let use_tls = endpoint.starts_with("https");
-        let default_provider = aws::CredentialsProvider::new().unwrap();
+        let default_provider = aws::new_credentials_provider_rusoto_wrapper();
         let static_provider =
             rusoto_credential::StaticProvider::new(key_id.clone(), secret_key, None, None);
         let mut http_connector = hyper::client::connect::HttpConnector::new();

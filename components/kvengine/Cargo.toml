@@ -74,10 +74,10 @@ quick_cache = "0.6.9"
 rand = "0.8"
 recovery = { workspace = true }
 regex = "1"
-rusoto_core = "0.46.0"
-rusoto_credential = "0.46.0"
-rusoto_mock = "0.46.0"
-rusoto_s3 = "0.46.0"
+rusoto_core = { workspace = true }
+rusoto_credential = { workspace = true }
+rusoto_mock = { workspace = true }
+rusoto_s3 = { workspace = true }
 schema = { workspace = true }
 security = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }

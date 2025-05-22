@@ -138,6 +138,7 @@ resource_metering = { workspace = true }
 rev_lines = "0.2.1"
 rfengine = { path = "components/rfengine" }
 rfstore = { path = "components/rfstore", default-features = false }
+
 seahash = "4.1.0"
 security = { workspace = true }
 semver = "0.11"
@@ -164,7 +165,7 @@ tikv_kv = { workspace = true }
 tikv_util = { workspace = true }
 time = "0.1"
 tipb = { workspace = true }
-tokio = { version = "1.17", features = ["full"] }
+tokio = "=1.25.2"
 tokio-openssl = "0.6"
 tokio-timer = { workspace = true }
 toml = "0.5"
@@ -194,14 +195,6 @@ raft = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
-
-# TODO: remove this replacement after rusoto_s3 truly supports virtual-host style (https://github.com/rusoto/rusoto/pull/1823).
-rusoto_core = { git = "https://github.com/tikv/rusoto", branch = "cse" }
-rusoto_credential = { git = "https://github.com/tikv/rusoto", branch = "cse" }
-rusoto_kms = { git = "https://github.com/tikv/rusoto", branch = "cse" }
-rusoto_mock = { git = "https://github.com/tikv/rusoto", branch = "cse" }
-rusoto_s3 = { git = "https://github.com/tikv/rusoto", branch = "cse" }
-rusoto_sts = { git = "https://github.com/tikv/rusoto", branch = "cse" }
 
 # remove this when https://github.com/danburkert/fs2-rs/pull/42 is merged.
 fs2 = { git = "https://github.com/tikv/fs2-rs", branch = "tikv" }
@@ -335,7 +328,7 @@ codec = { path = "components/codec" }
 collections = { path = "components/collections" }
 concurrency_manager = { path = "components/concurrency_manager" }
 coprocessor_plugin_api = { path = "components/coprocessor_plugin_api" }
-crc32c = "=0.6.4"
+crc32c = "=0.6.8"
 encryption = { path = "components/encryption" }
 encryption_export = { path = "components/encryption/export" }
 engine_panic = { path = "components/engine_panic" }
@@ -353,6 +346,7 @@ into_other = { path = "components/into_other" }
 keys = { path = "components/keys" }
 kvengine = { path = "components/kvengine" }
 kvenginepb = { path = "components/kvenginepb" }
+lazy_cell = "=1.3.0"
 log_wrappers = { path = "components/log_wrappers" }
 maybe-async = { git = "https://github.com/pingyu/maybe-async-rs", branch = "cse" }
 memory_trace_macros = { path = "components/memory_trace_macros" }
@@ -373,6 +367,10 @@ resource_metering = { path = "components/resource_metering" }
 rfengine = { path = "components/rfengine" }
 rfenginepb = { path = "components/rfenginepb" }
 rfstore = { path = "components/rfstore" }
+rusoto_core = { git = "https://github.com/tikv/rusoto", branch = "cse" }
+rusoto_credential = { git = "https://github.com/tikv/rusoto", branch = "cse" }
+rusoto_mock = { git = "https://github.com/tikv/rusoto", branch = "cse" }
+rusoto_s3 = { git = "https://github.com/tikv/rusoto", branch = "cse" }
 schema = { path = "components/schema" }
 security = { path = "components/security" }
 server = { path = "components/server" }

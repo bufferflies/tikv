@@ -190,8 +190,6 @@ fn create_backend_inner(
         #[cfg(feature = "cloud-azure")]
         Backend::AzureBlobStorage(config) => blob_store(AzureStorage::from_input(config.clone())?),
         Backend::CloudDynamic(dyn_backend) => match dyn_backend.provider_name.as_str() {
-            #[cfg(feature = "cloud-aws")]
-            "aws" | "s3" => blob_store(S3Storage::from_cloud_dynamic(dyn_backend)?),
             #[cfg(feature = "cloud-gcp")]
             "gcp" | "gcs" => blob_store(GcsStorage::from_cloud_dynamic(dyn_backend)?),
             #[cfg(feature = "cloud-azure")]
