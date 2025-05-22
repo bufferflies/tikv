@@ -686,21 +686,18 @@ impl SchemaManager {
             runtime.spawn(async move {
                 let data = Bytes::from(new_schema_file_data.clone());
                 let opts = dfs::Options::default().with_type(dfs::FileType::Schema);
-                if let Err(err) = dfs.create(file_id, data.clone(), opts).await {
-                    tx_clone
-                        .send((
-                            keyspace_id,
-                            file_id,
-                            schema_version,
-                            data,
-                            Err(Error::DfsError(err)),
-                        ))
-                        .unwrap();
-                } else {
-                    tx_clone
-                        .send((keyspace_id, file_id, schema_version, data, Ok(file_id)))
-                        .unwrap();
-                }
+                let res: Result<u64> = dfs
+                    .create(file_id, data.clone(), opts)
+                    .await
+                    .map(|()| file_id)
+                    .map_err(Into::into);
+                let _ = tx_clone
+                    .send((keyspace_id, file_id, schema_version, data, res))
+                    .map_err(|err| {
+                        // Should happen only when `refresh_keyspace_schema` is aborted.
+                        warn!("{} refresh keyspace schema: send failed: {:?}", keyspace_id, err;
+                            "file_id" => file_id, "schema_ver" => schema_version);
+                    });
             });
         }
 
