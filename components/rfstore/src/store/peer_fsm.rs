@@ -1611,18 +1611,19 @@ impl<'a> PeerMsgHandler<'a> {
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
         let schema_meta = &shard_meta.schema;
         let schema_file = shard.get_schema_file();
+        let schema_file_id = schema_file.as_ref().map(|x| x.get_file_id());
         debug!("{} check schema", tag;
             "schema_file_meta" => ?schema_meta,
             "meta.storage_class" => ?shard_meta.get_storage_class(),
             "shard.storage_class" => ?shard.get_storage_class(),
             "checked_schema_ver" => shard.get_checked_schema_ver(),
-            "schema_file" => ?schema_file,
+            "schema_file" => ?schema_file_id,
         );
 
         if !schema_file_is_matched_with_meta(schema_file.as_ref(), schema_meta) {
             // Wait for schema file to be updated.
             debug!("{} check schema: skip, schema file is stale", tag;
-                "schema_meta" => ?schema_meta, "schema_file" => ?schema_file);
+                "schema_meta" => ?schema_meta, "schema_file" => ?schema_file_id);
             return;
         }
         if shard_is_matched_with_meta(shard.as_ref(), shard_meta) {

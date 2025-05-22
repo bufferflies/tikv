@@ -84,9 +84,10 @@ impl SchemaRunner {
             .get_shard_with_ver(region.get_id(), region.get_region_epoch().version)
         {
             let schema_file = shard.get_schema_file();
+            let schema_file_id = schema_file.as_ref().map(|x| x.get_file_id());
             if !schema_file_is_matched_with_meta(schema_file.as_ref(), &schema_meta) {
                 debug!("{} handle storage class: skip, schema file is changed", tag;
-                    "schema_meta" => ?schema_meta, "schema_file" => ?schema_file);
+                    "schema_meta" => ?schema_meta, "schema_file" => ?schema_file_id);
                 return;
             }
             if shard_is_matched_with_schema(shard.as_ref(), &schema_meta) {

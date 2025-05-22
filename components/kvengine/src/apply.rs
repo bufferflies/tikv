@@ -145,6 +145,10 @@ impl ChangeSet {
         self.schema_file.clone()
     }
 
+    pub fn get_schema_file_id(&self) -> Option<u64> {
+        self.schema_file.as_ref().map(|x| x.get_file_id())
+    }
+
     pub fn get_schema_version(&self) -> i64 {
         if let Some(schema_file) = &self.schema_file {
             schema_file.get_version()
@@ -998,7 +1002,7 @@ impl EngineCore {
     }
 
     fn apply_update_schema_meta(&self, shard: &Shard, cs: &ChangeSet) {
-        info!("{} apply update schema meta", shard.tag(); "schema_file" => ?cs.schema_file);
+        info!("{} apply update schema meta", shard.tag(); "schema_file" => ?cs.get_schema_file_id());
         let old_data = shard.get_data();
         let mut builder = ShardDataBuilder::new(old_data);
         builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
@@ -1102,7 +1106,7 @@ impl EngineCore {
             clear_schema = old_data.has_too_many_unconverted_l0s();
             if clear_schema {
                 warn!("{} apply columnar compaction: too many unconverted l0s, clear schema", shard.tag();
-                    "schema" => ?old_data.schema_file, "schema_version" => old_data.schema_version);
+                    "schema_file" => ?old_data.schema_file_id(), "schema_version" => old_data.schema_version);
             }
         } else {
             columnar_table_ids.extend_from_slice(col_comp.get_columnar_table_ids());

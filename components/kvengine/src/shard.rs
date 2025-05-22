@@ -1646,7 +1646,7 @@ impl fmt::Debug for ShardData {
             .field("unloaded_tbls", &self.unloaded_tbls)
             .field("update_counter", &self.update_counter)
             .field("schema_version", &self.schema_version)
-            .field("schema_file", &self.schema_file)
+            .field("schema_file", &self.schema_file_id())
             .field("columnar_table_ids", &self.columnar_table_ids)
             .finish()
     }
@@ -2082,6 +2082,10 @@ impl ShardDataCore {
 
     pub fn prepend_keyspace_id(&self) -> Option<u32> {
         (self.range.keyspace_id > 0 && self.inner_key_off == 0).then_some(self.range.keyspace_id)
+    }
+
+    pub fn schema_file_id(&self) -> Option<u64> {
+        self.schema_file.as_ref().map(|x| x.get_file_id())
     }
 }
 

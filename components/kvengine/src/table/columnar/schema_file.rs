@@ -31,12 +31,11 @@ use crate::{
 pub const SCHEMA_FILE_MAGIC: u32 = 0x5353484D;
 pub const SCHEMA_FILE_FORMAT_VER: u16 = 1;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SchemaFile {
     core: Arc<SchemaFileCore>,
 }
 
-#[derive(Debug)]
 pub(crate) struct SchemaFileCore {
     file_id: u64,
     keyspace_id: u32,
