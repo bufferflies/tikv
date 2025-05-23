@@ -37,6 +37,8 @@ message PeerState {
 message RaftLogFile {
     uint64 first_index = 1;
     uint64 last_index = 2;
+    uint32 last_term = 3;
+    uint32 epoch_id = 4;
 }
 
 message StoreBackupMeta {

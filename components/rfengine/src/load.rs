@@ -1,11 +1,15 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fs, os::unix::fs::FileExt, path::Path, sync::atomic::Ordering};
+use std::{collections::VecDeque, fs, os::unix::fs::FileExt, path::Path, sync::atomic::Ordering};
 
 use bytes::Bytes;
 use tikv_util::{info, warn};
 
-use crate::{manifest::Manifest, service_worker::ServiceTask, *};
+use crate::{
+    manifest::{Manifest, PeerFile},
+    service_worker::ServiceTask,
+    *,
+};
 
 impl RfEngineCore {
     pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
@@ -191,6 +195,50 @@ pub(crate) fn wal_exists(dir: &Path, epoch_id: u32) -> bool {
 
 pub(crate) fn is_last_wal(dir: &Path, epoch_id: u32) -> bool {
     wal_exists(dir, epoch_id) && !wal_exists(dir, epoch_id + 1)
+}
+
+/// Given a list of rlog files and an offload epoch, return an iterator over
+/// rlog files that should be loaded into memory during startup.
+///
+/// The input rlog files are assumed to be sorted by epoch. Normally, only files
+/// with an epoch greater than `offload_epoch` should be loaded. For backward
+/// compatibility, files without an epoch should also be loaded, unless they
+/// appear before a file that is definitively offloadable (i.e., with `epoch_id
+/// > 0 && epoch_id <= offload_epoch`).
+#[allow(dead_code)]
+pub(crate) fn rlog_files_to_load(
+    rlog_files: &VecDeque<PeerFile>,
+    offload_epoch: u32,
+) -> impl Iterator<Item = &'_ PeerFile> {
+    // The first file to load is the one right after the last offloadable file.
+    let first_load_idx = rlog_files
+        .iter()
+        .rposition(|f| f.epoch_id > 0 && f.epoch_id <= offload_epoch)
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    rlog_files.iter().enumerate().filter_map(move |(idx, f)| {
+        if idx < first_load_idx {
+            assert!(
+                f.epoch_id <= offload_epoch,
+                "rlog file to offload has epoch {} > offload_epoch {}, idx: {}, rlog_files: {:?}",
+                f.epoch_id,
+                offload_epoch,
+                idx,
+                rlog_files,
+            );
+            None // skip, offloaded
+        } else {
+            assert!(
+                f.epoch_id == 0 || f.epoch_id > offload_epoch,
+                "rlog file to load has epoch {} <= offload_epoch {}, idx: {}, rlog_files: {:?}",
+                f.epoch_id,
+                offload_epoch,
+                idx,
+                rlog_files,
+            );
+            Some(f) // yield for loading
+        }
+    })
 }
 
 #[cfg(test)]
@@ -424,5 +472,36 @@ mod tests {
             timeout.as_secs() as usize,
         );
         assert!(ok, "check async WAL failed");
+    }
+
+    #[test]
+    fn test_rlog_files_to_load() {
+        let files = VecDeque::from(vec![
+            PeerFile::new(0, 1, 9, 0),
+            PeerFile::new(2, 10, 19, 0),
+            PeerFile::new(0, 20, 29, 0),
+            PeerFile::new(4, 30, 39, 0),
+            PeerFile::new(5, 40, 50, 0),
+        ]);
+
+        let test_cases: &[(u32, &[u64])] = &[
+            (0, &[1, 10, 20, 30, 40]),
+            (1, &[1, 10, 20, 30, 40]),
+            (2, &[20, 30, 40]),
+            (3, &[20, 30, 40]),
+            (4, &[40]),
+            (5, &[]),
+        ];
+
+        for &(offload_epoch, expected_first_indexes) in test_cases {
+            let actual_first_indexes: Vec<u64> = rlog_files_to_load(&files, offload_epoch)
+                .map(|f| f.first_index)
+                .collect();
+            assert_eq!(
+                actual_first_indexes, expected_first_indexes,
+                "offload_epoch {}: unexpected start indices",
+                offload_epoch
+            );
+        }
     }
 }

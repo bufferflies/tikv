@@ -90,13 +90,17 @@ impl PeerMetaFiles {
 pub struct PeerFile {
     pub first_index: u64,
     pub last_index: u64,
+    pub last_term: u32,
+    pub epoch_id: u32,
 }
 
 impl PeerFile {
-    pub fn new(first_index: u64, last_index: u64) -> Self {
+    pub fn new(epoch_id: u32, first_index: u64, last_index: u64, last_term: u32) -> Self {
         Self {
+            epoch_id,
             first_index,
             last_index,
+            last_term,
         }
     }
 }
@@ -106,6 +110,8 @@ impl From<&rfenginepb::RaftLogFile> for PeerFile {
         Self {
             first_index: file.first_index,
             last_index: file.last_index,
+            last_term: file.last_term,
+            epoch_id: file.epoch_id,
         }
     }
 }
@@ -244,6 +250,8 @@ impl Manifest {
                 let mut raft_log_file = rfenginepb::RaftLogFile::default();
                 raft_log_file.set_first_index(file.first_index);
                 raft_log_file.set_last_index(file.last_index);
+                raft_log_file.set_last_term(file.last_term);
+                raft_log_file.set_epoch_id(file.epoch_id);
                 meta_pb.mut_files().push(raft_log_file);
             }
             cs.mut_peers().push(meta_pb);
@@ -440,19 +448,23 @@ mod tests {
     #[test]
     fn test_get_rlog_by_entry_index() {
         let files = VecDeque::from(vec![
-            PeerFile::new(1, 5),    // discarded due to gap
-            PeerFile::new(8, 9),    // actual mapped range: 8–9
-            PeerFile::new(10, 100), // actual mapped range: 10–29
-            PeerFile::new(30, 90),  // actual mapped range: 30–49
-            PeerFile::new(50, 70),  // actual mapped range: 50–70
+            PeerFile::new(1, 1, 5, 0),    // discarded due to gap
+            PeerFile::new(2, 8, 9, 0),    // actual mapped range: 8–9
+            PeerFile::new(3, 10, 100, 0), // actual mapped range: 10–29
+            PeerFile::new(4, 30, 90, 0),  // actual mapped range: 30–49
+            PeerFile::new(5, 50, 70, 0),  // actual mapped range: 50–70
         ]);
 
         let mapping = range_to_rlog_mapping(&files);
         assert_eq!(mapping.len(), 4);
         assert_eq!(mapping[0].0, EntryRange::new(8, 9));
+        assert_eq!(mapping[0].1.epoch_id, 2);
         assert_eq!(mapping[1].0, EntryRange::new(10, 29));
+        assert_eq!(mapping[1].1.epoch_id, 3);
         assert_eq!(mapping[2].0, EntryRange::new(30, 49));
+        assert_eq!(mapping[2].1.epoch_id, 4);
         assert_eq!(mapping[3].0, EntryRange::new(50, 70));
+        assert_eq!(mapping[3].1.epoch_id, 5);
 
         for (range, file) in mapping.iter() {
             for i in range.start..=range.end {
@@ -470,21 +482,16 @@ mod tests {
     #[test]
     fn test_generate_rlog_read_plan() {
         let files = VecDeque::from(vec![
-            PeerFile::new(1, 5),    // discarded due to gap
-            PeerFile::new(10, 100), // 10–29
-            PeerFile::new(30, 90),  // 30–49
-            PeerFile::new(50, 70),  // 50–70
+            PeerFile::new(1, 1, 5, 0),    // discarded due to gap
+            PeerFile::new(2, 10, 100, 0), // 10–29
+            PeerFile::new(3, 30, 90, 0),  // 30–49
+            PeerFile::new(4, 50, 70, 0),  // 50–70
         ]);
 
         for (desc, low, high, expected) in [
-            ("first range", 12, 15, Some(vec![(12, 14, files[1])])),
-            ("last range", 69, 71, Some(vec![(69, 70, files[3])])),
-            (
-                "two files",
-                28,
-                32,
-                Some(vec![(28, 29, files[1]), (30, 31, files[2])]),
-            ),
+            ("first range", 12, 15, Some(vec![(12, 14, 2)])),
+            ("last range", 69, 71, Some(vec![(69, 70, 4)])),
+            ("two files", 28, 32, Some(vec![(28, 29, 2), (30, 31, 3)])),
             ("gap before start", 2, 5, None),
             ("gap at beginning", 1, 11, None),
             ("end out of range", 69, 75, None),
@@ -492,11 +499,7 @@ mod tests {
                 "full span",
                 10,
                 71,
-                Some(vec![
-                    (10, 29, files[1]),
-                    (30, 49, files[2]),
-                    (50, 70, files[3]),
-                ]),
+                Some(vec![(10, 29, 2), (30, 49, 3), (50, 70, 4)]),
             ),
         ] {
             let result = generate_rlog_read_plan(&files, low, high);
@@ -505,7 +508,7 @@ mod tests {
                     let actual: Vec<_> = result
                         .unwrap()
                         .iter()
-                        .map(|(r, pf)| (r.start, r.end, *pf))
+                        .map(|(r, pf)| (r.start, r.end, pf.epoch_id))
                         .collect();
                     assert_eq!(actual, ranges, "{}", desc);
                 }

@@ -2,7 +2,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::{Display, Formatter},
     fs,
     fs::{create_dir_all, File, OpenOptions},
@@ -756,6 +756,78 @@ impl RfEngineCore {
         region_state.merge_from_bytes(&region_state_val).unwrap();
         Some(region_state)
     }
+}
+
+/// Calculates the epoch up to which raft logs can be offloaded.
+///
+/// Keeps `in_mem_rlog_epoch_count` most recent epochs in memory. Also,
+/// offloaded epoch must not exceed `compacted_epoch`.
+///
+/// Returns:
+/// - 0 if offloading is disabled (`in_mem_rlog_epoch_count == 0`)
+/// - otherwise, `min(current_epoch - N, compacted_epoch)`
+#[allow(dead_code)]
+pub(crate) fn calc_offload_epoch(
+    in_mem_rlog_epoch_count: u32,
+    current_epoch: &AtomicU32,
+    compacted_epoch: &AtomicU32,
+) -> u32 {
+    if in_mem_rlog_epoch_count == 0 {
+        return 0;
+    }
+
+    let current_epoch = current_epoch.load(Ordering::SeqCst);
+    let compacted_epoch = compacted_epoch.load(Ordering::SeqCst);
+    current_epoch
+        .saturating_sub(in_mem_rlog_epoch_count)
+        .min(compacted_epoch)
+}
+
+/// Finds the largest index eligible for offloading, given a target
+/// `offload_epoch`.
+///
+/// Scans rlog files from newest to oldest and returns the last index of the
+/// first file that satisfies:
+/// 1. Has a valid epoch and `epoch_id <= offload_epoch`.
+/// 2. Its last term matches the term of the corresponding in-memory entry. If
+/// the terms don't match, the in-memory entry is newer and must not be
+/// offloaded.
+///
+/// Returns:
+/// - Some(index) if offloading can proceed up to that index
+/// - None if nothing is eligible
+#[allow(dead_code)]
+pub(crate) fn find_offload_index(
+    rlog_files: &VecDeque<PeerFile>,
+    raft_logs: &RaftLogs,
+    offload_epoch: u32,
+) -> Option<u64> {
+    if offload_epoch == 0 || raft_logs.first_index() == 0 {
+        return None;
+    }
+
+    for f in rlog_files.iter().rev() {
+        if f.epoch_id == 0 || f.epoch_id > offload_epoch {
+            continue;
+        }
+
+        match raft_logs.get(f.last_index) {
+            Some(entry) if entry.term == f.last_term as u64 => return Some(f.last_index),
+            Some(_) => continue, // term mismatch - skip
+            None => {
+                if f.last_index > raft_logs.last_index() {
+                    // In-memory entries with lower index have overwritten this
+                    // rlog file. Skip it.
+                    continue;
+                } else {
+                    // Entries in this rlog file are not in memory (i.e. already
+                    // offloaded). No need to check older files.
+                    return None;
+                }
+            }
+        }
+    }
+    None
 }
 
 fn restore_all_raft_logs(
@@ -1953,5 +2025,84 @@ mod tests {
 
         let state = engine.load_region_state(peer_id, region_epoch);
         assert!(state.is_some(), "the region state should not be None");
+    }
+
+    #[test]
+    fn test_calc_offload_epoch() {
+        let current_epoch = Arc::new(AtomicU32::new(10)); // unchanged
+        let compacted_epoch = Arc::new(AtomicU32::new(0));
+        for (count, compacted, expected) in [
+            (0, 10, 0),
+            (0, 9, 0),
+            (5, 4, 4),
+            (5, 5, 5),
+            (5, 6, 5),
+            (10, 5, 0),
+            (10, 10, 0),
+            (20, 10, 0),
+        ] {
+            compacted_epoch.store(compacted, Ordering::SeqCst);
+            let offload_epoch = calc_offload_epoch(count, &current_epoch, &compacted_epoch);
+            assert_eq!(
+                offload_epoch, expected,
+                "current_epoch=10, compacted={}, in_mem_rlog_epoch_count={}, expected offload_epoch={}, got {}",
+                compacted, count, expected, offload_epoch,
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_offload_index() {
+        let mut logs = RaftLogs::default();
+        let index_and_terms = vec![
+            (20, 5),
+            (21, 5),
+            (22, 5),
+            (23, 7),
+            (24, 7),
+            (25, 7),
+            (26, 9),
+            (27, 9),
+            (28, 9),
+        ];
+        for (index, term) in index_and_terms {
+            let mut e = Entry::default();
+            e.index = index;
+            e.term = term;
+            logs.append(RaftLogOp::new(&e));
+        }
+
+        let files = VecDeque::from(vec![
+            PeerFile::new(1, 15, 19, 4), // offloaded
+            PeerFile::new(2, 20, 21, 5), // term matched
+            PeerFile::new(0, 22, 22, 5), // rlog epoch == 0 (skipped)
+            PeerFile::new(4, 23, 25, 6), // term mismatch
+            PeerFile::new(5, 23, 24, 7), // term matched
+            PeerFile::new(0, 25, 25, 7), // rlog epoch == 0 (skipped)
+            PeerFile::new(7, 26, 30, 8), // term mismatch
+            PeerFile::new(8, 26, 27, 9), // term matched
+        ]);
+
+        assert_eq!(find_offload_index(&files, &logs, 0), None);
+        assert_eq!(find_offload_index(&files, &logs, 1), None);
+        assert_eq!(find_offload_index(&files, &logs, 2), Some(21));
+        assert_eq!(find_offload_index(&files, &logs, 3), Some(21));
+        assert_eq!(find_offload_index(&files, &logs, 4), Some(21));
+        assert_eq!(find_offload_index(&files, &logs, 5), Some(24));
+        assert_eq!(find_offload_index(&files, &logs, 6), Some(24));
+        assert_eq!(find_offload_index(&files, &logs, 7), Some(24));
+        assert_eq!(find_offload_index(&files, &logs, 8), Some(27));
+
+        // Edge cases: empty raft log or empty rlog files
+        for offload_epoch in 0..=10 {
+            assert_eq!(
+                find_offload_index(&VecDeque::new(), &logs, offload_epoch),
+                None
+            );
+            assert_eq!(
+                find_offload_index(&files, &RaftLogs::default(), offload_epoch),
+                None
+            );
+        }
     }
 }

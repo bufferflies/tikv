@@ -299,7 +299,7 @@ impl CompactWorker {
             }
             peer_batch.truncate(peer_batch.truncated_idx);
             if !peer_batch.raft_logs.is_empty() {
-                let (file, is_cached) = self.write_raft_log_file(peer_batch)?;
+                let (file, is_cached) = self.write_raft_log_file(peer_batch, epoch_id)?;
                 peer_meta_pb.mut_files().push(file);
                 generated_files += 1;
                 cached_files += is_cached as usize;
@@ -333,9 +333,11 @@ impl CompactWorker {
     fn write_raft_log_file(
         &mut self,
         peer_batch: PeerBatch,
+        epoch_id: u32,
     ) -> Result<(rfenginepb::RaftLogFile, bool /* is_cached */)> {
         let first = peer_batch.raft_logs.front().unwrap().index;
         let last = peer_batch.raft_logs.back().unwrap().index;
+        let last_term = peer_batch.raft_logs.back().unwrap().term;
         let filename = raft_log_file_name(self.dir.as_path(), peer_batch.peer_id, first, last);
         self.buf.truncate(0);
         let header = RlogHeader::new(peer_batch.raft_logs.len() as u32);
@@ -359,6 +361,8 @@ impl CompactWorker {
         let mut file = rfenginepb::RaftLogFile::default();
         file.first_index = first;
         file.last_index = last;
+        file.last_term = last_term;
+        file.epoch_id = epoch_id;
 
         let is_cached = self
             .rlog_cache
@@ -1331,7 +1335,11 @@ mod tests {
             peer_batch.append_raft_log(op.clone());
             raft_logs.append(op);
         }
-        worker.write_raft_log_file(peer_batch).unwrap()
+        let rlog_epoch = 3;
+        let (file, is_cached) = worker.write_raft_log_file(peer_batch, rlog_epoch).unwrap();
+        assert!(file.last_term == last_index as u32);
+        assert!(file.epoch_id == rlog_epoch);
+        (file, is_cached)
     }
 
     #[rstest::rstest]
