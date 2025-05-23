@@ -262,6 +262,13 @@ pub fn extract_region_error_from_error(e: &Error) -> Option<errorpb::Error> {
             err.set_max_timestamp_not_synced(Default::default());
             Some(err)
         }
+        Error(box ErrorInner::Kv(KvError(box KvErrorInner::Undetermined(message)))) => {
+            let mut err = errorpb::Error::default();
+            err.undetermined_result
+                .set_default()
+                .set_message(message.clone());
+            Some(err)
+        }
         Error(box ErrorInner::SchedTooBusy) => {
             let mut err = errorpb::Error::default();
             let mut server_is_busy_err = errorpb::ServerIsBusy::default();

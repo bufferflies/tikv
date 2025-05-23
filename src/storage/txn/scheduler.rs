@@ -859,16 +859,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     if !Self::is_undetermined_error(&e) {
                         do_wake_up = false;
                     } else {
-                        fail_point!("undermined_write_error_invoke_callback", |_| {
-                            cb.execute(ProcessResult::Failed {
-                                err: StorageError::from(e.maybe_clone().unwrap()),
-                            })
-                        });
-                        // TODO: Return the undetermined error to the client instead of panic,
-                        //       and the user connection in the client should terminate.
-                        panic!(
-                            "undetermined error: {:?} cid={}, tag={}, process
-                        result={:?}",
+                        warn!(
+                            "undetermined error: {:?} cid={}, tag={}, process result={:?}",
                             e, cid, tag, &pr
                         );
                     }

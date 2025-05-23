@@ -1,7 +1,15 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::assert_matches::assert_matches;
+
+use cloud_server::ASYNC_WRITE_CALLBACK_DROPPED_ERR_MSG;
 use kvproto::kvrpcpb::Op;
-use test_cloud_server::{alloc_node_id_vec, client::TxnMutations, util::Mutation, ServerCluster};
+use test_cloud_server::{
+    alloc_node_id_vec,
+    client::{Error as ClientError, TxnMutations},
+    util::Mutation,
+    ServerCluster,
+};
 
 use crate::cases::i_to_key;
 
@@ -22,7 +30,6 @@ fn test_undetermined_write_err() {
     let mutations = vec![mutation];
 
     fail::cfg("applied_cb_return_undetermined_err", "return()").unwrap();
-    fail::cfg("undermined_write_error_invoke_callback", "return()").unwrap();
     let err = client
         .kv_prewrite_with_retry(
             primary_key.to_vec().into(),
@@ -31,9 +38,15 @@ fn test_undetermined_write_err() {
             start_ts,
         )
         .unwrap_err();
-    assert!(err.to_string().contains("Undetermined"));
+    assert_matches!(err, ClientError::RegionError(ref region_err) if {
+        assert!(region_err.has_undetermined_result());
+        assert_eq!(
+            region_err.get_undetermined_result().get_message(),
+            ASYNC_WRITE_CALLBACK_DROPPED_ERR_MSG,
+        );
+        true
+    });
     fail::remove("applied_cb_return_undetermined_err");
-    fail::remove("undermined_write_error_invoke_callback");
 }
 
 #[test]
