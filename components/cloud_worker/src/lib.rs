@@ -5,7 +5,7 @@ mod error;
 mod load_data;
 pub mod local_gc;
 mod metrics;
-mod native_br;
+pub mod native_br; // pub for tests.
 mod remote_cop;
 mod schema_manager;
 mod server;
@@ -238,14 +238,21 @@ fn start_server(
         config.worker_scaler.clone(),
         load_data_config,
     ));
+
+    let native_br_data_dir = PathBuf::from(&config.data_dir).join("native_br");
+    if let Err(e) = fs::create_dir_all(&native_br_data_dir) {
+        // Avoid panic on disk full.
+        warn!("create data dir failed: {:?}", e; "path" => native_br_data_dir.display());
+    }
     let br_manager = Arc::new(NativeBrManager::new(
         thread_pool.clone(),
         pd.clone(),
         s3fs.clone(),
-        Some(config.data_dir.clone()),
+        native_br_data_dir,
         config.clone(),
     ));
     spawn_br_background_worker(br_manager.clone(), config_file_path);
+
     let txn_chunk_handler = Arc::new(TxnChunkHandler::new(config.txn_chunk_target_block_entries));
 
     let worker_limiter = WorkerLimiter::new(config.worker_limiter.clone());
@@ -800,23 +807,24 @@ impl Config {
             security: self.security.clone(),
             dfs: self.dfs.clone(),
             tolerate_err,
-            skip_keyspace_meta: false,
             timeout: self.native_br.instant_backup_timeout / 2,
+            #[cfg(feature = "testexport")]
+            skip_keyspace_meta: self.native_br.backup_skip_keyspace_meta,
         }
     }
     pub fn to_restore_config(&self) -> RestoreConfig {
+        let tolerate_err = usize::from(self.native_br.restore_tolerate_err);
         RestoreConfig {
             pd: self.pd.clone(),
             security: self.security.clone(),
             dfs: self.dfs.clone(),
-            // resolve_lock is to solve the Async Commit locks. Async Commit is not supported
-            // for now. TODO: Change it to false when Async Commit is enabled, and impl resolve
-            // locks in restore_keyspace.
-            skip_resolve_lock: true,
             timeout_wait_flush: self.native_br.restore_timeout_wait_flush,
             timeout_restore_snapshot: self.native_br.restore_timeout_restore_snapshot,
             timeout_fetch_wal: self.native_br.restore_timeout_fetch_wal,
+            timeout_pd_control: self.native_br.restore_timeout_pd_control,
             max_retry: self.native_br.restore_max_retry,
+            tolerate_err,
+            coarse_split_regions_factor: self.native_br.restore_coarse_split_regions_factor,
             ..Default::default()
         }
     }

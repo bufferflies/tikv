@@ -654,14 +654,14 @@ fn is_keyspace_end_key(end_key: &[u8]) -> bool {
     end_key.len() == KEYSPACE_PREFIX_LEN && ApiV2::is_txn_key(end_key)
 }
 
-#[derive(Clone, Copy, PartialOrd, PartialEq, Ord, Eq)]
+#[derive(Clone, Copy, PartialOrd, PartialEq, Ord, Eq, Hash, Default)]
 pub struct InnerKey<'a> {
     key: &'a [u8],
 }
 
 impl Debug for InnerKey<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", log_wrappers::hex_encode_upper(self.key))
+        write!(f, "{}", &LogValue::key(self.key))
     }
 }
 

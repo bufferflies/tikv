@@ -24,10 +24,10 @@ use kvengine::dfs::DFSConfig;
 use kvproto::raft_serverpb::{self, StoreIdent};
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
-use rfenginepb::{ClusterBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
+use rfenginepb::{ClusterBackupMeta, KeySpaceBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
 use tikv_util::{
-    error, info, mpsc::Sender, panic_mark_dfs_worker_file_exists, spawn_anonymous_thread_with,
-    sys::thread::StdThreadBuildWrapper, time::Instant, warn,
+    error, errors::Context as _, info, mpsc::Sender, panic_mark_dfs_worker_file_exists,
+    spawn_anonymous_thread_with, sys::thread::StdThreadBuildWrapper, time::Instant, warn,
 };
 
 use crate::{
@@ -835,7 +835,7 @@ fn restore_all_raft_logs(
     store_meta: &StoreBackupMeta,
     dir: &Path,
     snapshot_rlog: Option<String>,
-) {
+) -> Result<()> {
     let store_id = store_meta.store_id;
     let raft_file_key = snapshot_rlog
         .unwrap_or_else(|| store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id));
@@ -843,7 +843,7 @@ fn restore_all_raft_logs(
         .get_objects(vec![(raft_file_key, GetObjectOptions::default())])
         .unwrap();
     let (_, rlog_data) = raft_file.first().unwrap();
-    restore_all_raft_logs_with_snap_rlog_file(store_meta, dir, rlog_data);
+    restore_all_raft_logs_with_snap_rlog_file(None, store_meta, dir, rlog_data)
 }
 
 fn decompress_snap_rlog_file(compression_type: u32, content: &[u8]) -> Result<Cow<'_, [u8]>> {
@@ -857,10 +857,11 @@ fn decompress_snap_rlog_file(compression_type: u32, content: &[u8]) -> Result<Co
 }
 
 fn restore_all_raft_logs_with_snap_rlog_file(
+    keyspace_id: Option<u32>,
     store_meta: &StoreBackupMeta,
     dir: &Path,
     rlog_data: &Bytes,
-) {
+) -> Result<()> {
     let mut raft_meta = StoreRaftLogBackupMeta::default();
     let size = rlog_data.len();
     debug_assert!(size as u64 > store_meta.raft_meta_start_off);
@@ -868,8 +869,9 @@ fn restore_all_raft_logs_with_snap_rlog_file(
     raft_meta
         .merge_from_bytes(&rlog_data.chunk()[store_meta.raft_meta_start_off as usize..size])
         .unwrap();
+
     let compression_type = raft_meta.get_header().get_compression_type();
-    for (_, keyspace_meta) in raft_meta.raft_logs {
+    let handle_keyspace = |keyspace_meta: &KeySpaceBackupMeta| -> Result<()> {
         for file in keyspace_meta.get_files() {
             let path = raft_log_file_name(dir, file.peer_id, file.first_index, file.last_index);
             let content = decompress_snap_rlog_file(
@@ -877,9 +879,21 @@ fn restore_all_raft_logs_with_snap_rlog_file(
                 &rlog_data.chunk()[file.start_off as usize..file.end_off as usize],
             )
             .unwrap();
-            fs::write(path, content).unwrap();
+            fs::write(&path, &content).with_ctx(|| format!("write rlog {}", path.display()))?;
+        }
+        Ok(())
+    };
+
+    if let Some(keyspace_id) = keyspace_id {
+        if let Some(keyspace_meta) = raft_meta.raft_logs.get(&keyspace_id) {
+            handle_keyspace(keyspace_meta)?;
+        }
+    } else {
+        for (_, keyspace_meta) in raft_meta.raft_logs {
+            handle_keyspace(&keyspace_meta)?;
         }
     }
+    Ok(())
 }
 
 fn restore_keyspace_raft_logs(
@@ -983,31 +997,57 @@ pub fn find_latest_snapshot(
 // `cluster_backup.backup_ts` and replay all WAL chunk files from snapshot epoch
 // to epoch of the backup.
 pub fn lightweight_restore(
+    store_id: u64,
+    keyspace_id: Option<u32>,
     dir: &Path,
     snap_epoch: u32,
     snap_meta: Bytes,
     snap_rlog: Bytes,
 ) -> Result<u32> {
-    init_wal_files(dir, None).unwrap();
+    let start_time = Instant::now_coarse();
+
+    init_wal_files(dir, None)?;
 
     let mut snap_store_meta = StoreBackupMeta::default();
     if snap_epoch > 0 {
         snap_store_meta.merge_from_bytes(snap_meta.chunk()).unwrap();
         assert_eq!(snap_epoch, snap_store_meta.get_manifest().epoch_id);
-        restore_all_raft_logs_with_snap_rlog_file(&snap_store_meta, dir, &snap_rlog);
+        restore_all_raft_logs_with_snap_rlog_file(keyspace_id, &snap_store_meta, dir, &snap_rlog)?;
     }
+    let dur_restore_rlogs = start_time.saturating_elapsed();
 
-    info!("manifest file path: {:?}", manifest_path(dir));
+    info!("{} manifest file path: {:?}", store_id, manifest_path(dir); "keyspace" => ?keyspace_id);
     let manifest_file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(manifest_path(dir))
-        .unwrap();
+        .ctx("open manifest")?;
+    if let Some(keyspace_id) = keyspace_id {
+        let before = snap_store_meta.get_manifest().peers.len();
+        filter_manifest_peers_for_keyspace(snap_store_meta.mut_manifest(), keyspace_id);
+        let after = snap_store_meta.get_manifest().peers.len();
+        info!("{} filter manifest peers: {} -> {}", store_id, before, after; "keyspace" => keyspace_id);
+    }
+    persist_change_set(&manifest_file, 0, snap_store_meta.get_manifest())
+        .ctx("persist change set")?;
+    let dur_persist_manifest = start_time.saturating_elapsed() - dur_restore_rlogs;
 
-    persist_change_set(&manifest_file, 0, snap_store_meta.get_manifest()).unwrap();
-
+    info!("{} restore rfengine", store_id;
+        "restore_rlogs" => ?dur_restore_rlogs, "persist_manifest" => ?dur_persist_manifest);
     Ok(snap_store_meta.get_manifest().epoch_id)
+}
+
+fn filter_manifest_peers_for_keyspace(cs: &mut rfenginepb::ChangeSet, keyspace_id: u32) {
+    let peers = cs.take_peers();
+    peers
+        .into_iter()
+        .filter(|peer| {
+            peer.region_id == 0
+                || peer.peer_id == 0
+                || get_keyspace_id_from_peer(peer).is_some_and(|x| x == keyspace_id)
+        })
+        .for_each(|peer| cs.mut_peers().push(peer));
 }
 
 // If keyspace is none, restore all keyspaces, else, only restore given one.
@@ -1052,7 +1092,7 @@ pub fn restore(
         Some(keyspace_id) => {
             restore_keyspace_raft_logs(&object_storage, store_meta, dir, keyspace_id, None)
         }
-        None => restore_all_raft_logs(&object_storage, store_meta, dir, None),
+        None => restore_all_raft_logs(&object_storage, store_meta, dir, None).unwrap(),
     }
     let manifest_file = OpenOptions::new()
         .create(true)

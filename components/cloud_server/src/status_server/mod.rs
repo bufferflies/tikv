@@ -38,7 +38,7 @@ use hyper::{
 };
 use kvengine::{
     dfs::{DFSConfig, FileType},
-    Shard, ShardStats, GLOBAL_SHARD_END_KEY,
+    IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY,
 };
 use kvproto::{coprocessor::DelegateResponse, raft_serverpb::StoreIdent};
 use online_config::OnlineConfig;
@@ -74,6 +74,7 @@ use tikv_util::{
     codec::bytes::decode_bytes,
     config::ReadableSize,
     future::paired_future_callback,
+    http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
     logger::set_log_level,
     metrics::{dump, dump_to},
     spawn_anonymous_thread_with,
@@ -798,11 +799,11 @@ impl StatusServer {
         engine: kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let cs = Self::get_change_set_request(req).await?;
-        let shard_id = cs.get_shard_id();
-        info!("[{}] receive ingest_files request: {:?}", shard_id, cs);
+        let tag = tag_from_cs(&engine, &cs);
+        info!("[{}] receive ingest_files request: {:?}", tag, cs);
 
         if let Err(errpb) = check_available_space(&engine) {
-            warn!("[{}] reject ingest files, low space", shard_id);
+            warn!("[{}] reject ingest files, low space", tag);
             return Ok(make_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 errpb.write_to_bytes().unwrap(),
@@ -821,7 +822,7 @@ impl StatusServer {
         let res = match fut.await {
             Ok(res) => res,
             Err(e) => {
-                let err_msg = format!("{} ingest_files channel error: {:?}", shard_id, e);
+                let err_msg = format!("{} ingest_files channel error: {:?}", tag, e);
                 error!("{}", err_msg);
                 // Return "not leader" to let callers retry.
                 let mut errpb = kvproto::errorpb::Error::default();
@@ -836,7 +837,7 @@ impl StatusServer {
         if res.response.get_header().has_error() {
             error!(
                 "{} ingest_files error: {:?}",
-                shard_id,
+                tag,
                 res.response.get_header().get_error()
             );
             let err_data = res
@@ -1476,9 +1477,20 @@ impl StatusServer {
         router: RaftRouter,
         engine: kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
+        let accept_pb = req.headers().is_accept_protobuf();
         let req = Self::get_restore_shard_request(req).await?;
+        let tag = tag_from_cs(&engine, &req.cs);
         let shard_id = req.cs.get_shard_id();
-        debug!("[{}] receive restore_shard request: {:?}", shard_id, req);
+        debug!("[{}] receive restore_shard request: {:?}", tag, req);
+
+        if let Err(errpb) = check_available_space(&engine) {
+            warn!("[{}] reject restore shard, low space", tag; "err" => ?errpb);
+            return Ok(make_errpb_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &errpb,
+                accept_pb,
+            ));
+        }
 
         let (cb, fut) = paired_future_callback();
         let callback = Callback::write(Box::new(move |res| {
@@ -1503,16 +1515,13 @@ impl StatusServer {
         if res.response.get_header().has_error() {
             error!(
                 "{} restore_shard error: {:?}",
-                shard_id,
+                tag,
                 res.response.get_header().get_error()
             );
-            Ok(make_response(
+            Ok(make_errpb_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                res.response
-                    .get_header()
-                    .get_error()
-                    .get_message()
-                    .to_string(),
+                res.response.get_header().get_error(),
+                accept_pb,
             ))
         } else {
             let stat = engine.get_shard_stat(shard_id);
@@ -2341,6 +2350,22 @@ where
         .unwrap()
 }
 
+fn make_errpb_response(
+    status_code: StatusCode,
+    errpb: &kvproto::errorpb::Error,
+    accept_pb: bool,
+) -> Response<Body> {
+    if !accept_pb {
+        make_response(status_code, errpb.get_message().to_string())
+    } else {
+        Response::builder()
+            .status(status_code)
+            .header(CONTENT_TYPE, CONTENT_TYPE_PROTOBUF)
+            .body(errpb.write_to_bytes().unwrap().into())
+            .unwrap()
+    }
+}
+
 fn check_available_space(
     engine: &kvengine::Engine,
 ) -> std::result::Result<(), kvproto::errorpb::Error> {
@@ -2381,4 +2406,11 @@ pub struct TruncateTsConfig {
     pub cluster_id: u64,
     pub ts: u64,
     pub range: Option<(Vec<u8>, Vec<u8>)>, // None means apply to all keyspaces.
+}
+
+fn tag_from_cs(engine: &kvengine::Engine, cs: &kvenginepb::ChangeSet) -> ShardTag {
+    ShardTag::new(
+        engine.get_engine_id(),
+        IdVer::new(cs.shard_id, cs.shard_ver),
+    )
 }

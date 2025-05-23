@@ -12,6 +12,7 @@ extern crate tikv_alloc;
 extern crate serde_derive;
 
 mod config;
+
 pub use config::Config as RfEngineConfig;
 
 pub mod compact_worker;
@@ -38,6 +39,7 @@ use iterator::*;
 pub use log_batch::RaftLogOp;
 use metrics::*;
 use thiserror::Error as ThisError;
+use tikv_util::errors::IoError;
 pub use traits::*;
 pub use utils::*;
 pub use write_batch::WriteBatch;
@@ -47,8 +49,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, ThisError)]
 pub enum Error {
-    #[error("IO error: {0:?}")]
-    Io(std::io::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] IoError),
     #[error("EOF")]
     Eof,
     #[error("parse error")]
@@ -77,7 +79,7 @@ impl From<std::io::Error> for Error {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
             return Error::Eof;
         }
-        Error::Io(e)
+        Error::Io(IoError::new(e, "".to_string()))
     }
 }
 

@@ -38,7 +38,9 @@ use tikv::{
 };
 use tikv_util::{
     deadline::Deadline,
-    error, info,
+    error,
+    http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
+    info,
     memory::MemoryLimiter,
     metrics::{dump, dump_to},
     quota_limiter::QuotaLimiter,
@@ -47,7 +49,6 @@ use tikv_util::{
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
-    common::{is_accept_protobuf, CONTENT_TYPE_PROTOBUF},
     load_data::{self, LoadDataManager},
     metrics::*,
     native_br::{self, NativeBrManager},
@@ -279,7 +280,7 @@ async fn handle_remote_coprocessor(
     ctx: Arc<Context>,
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let accept_pb = is_accept_protobuf(req.headers());
+    let accept_pb = req.headers().is_accept_protobuf();
     let req_body = hyper::body::to_bytes(req.into_body()).await?;
     let decode_res = decode_remote_cop_request(req_body.chunk());
     if let Err(err) = decode_res {

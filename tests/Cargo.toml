@@ -82,6 +82,9 @@ testexport = [
     "kvengine/testexport",
     "schema/testexport",
     "rfstore/testexport",
+    "native_br/testexport",
+    "cloud_worker/testexport",
+    "test_cloud_server/testexport",
 ]
 profiling = ["profiler/profiling"]
 

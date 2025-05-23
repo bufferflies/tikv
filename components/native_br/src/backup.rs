@@ -2,8 +2,7 @@
 
 use std::{
     path::Path,
-    sync::{mpsc::SyncSender, Arc},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
@@ -22,14 +21,15 @@ use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, info, warn};
 use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
-    config::ReadableDuration, retry::try_wait_result_async, timer::GLOBAL_TIMER_HANDLE,
+    backoff, config::ReadableDuration, retry::try_wait_result_async, time::Instant,
+    timer::GLOBAL_TIMER_HANDLE,
 };
 
 use crate::{
     common::{
         create_pd_client, generate_etcd_connect_opt, get_all_stores_except_tiflash,
-        get_latest_backup_meta, send_request_to_store_with_retry,
-        INCREMENTAL_BACKUP_FILE_NAME_FORMAT, INCREMENTAL_BACKUP_FOLDER_FORMAT,
+        get_latest_backup_meta, send_request_to_store, INCREMENTAL_BACKUP_FILE_NAME_FORMAT,
+        INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, SharedError},
 };
@@ -67,7 +67,7 @@ const BACKUP_MAX_TOLERATED_ERROR: usize = 1;
 pub type Result<T> = std::result::Result<T, Error>;
 pub type SharedResult<T> = std::result::Result<T, SharedError>;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum BackupType {
     Full,
     Incremental,
@@ -110,7 +110,7 @@ pub fn execute_incremental_backup(
 
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let gap = interval.as_secs() - duration.as_secs() % interval.as_secs();
-    let start_time = Instant::now()
+    let start_time = StdInstant::now()
         .checked_add(Duration::from_secs(gap))
         .unwrap();
     let mut interval = GLOBAL_TIMER_HANDLE.interval(start_time, interval).compat();
@@ -178,7 +178,7 @@ pub fn execute_lightweight_backup(
     // Cron lightweight backup.
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let gap = interval.as_secs() - duration.as_secs() % interval.as_secs();
-    let start_time = Instant::now()
+    let start_time = StdInstant::now()
         .checked_add(Duration::from_secs(gap))
         .unwrap();
     let mut interval = GLOBAL_TIMER_HANDLE.interval(start_time, interval).compat();
@@ -262,11 +262,12 @@ pub fn backup_cluster_with_ts(
     backup_ts: u64,
     last_backup_meta: Option<ClusterBackupMeta>,
 ) -> Result<(String, ClusterBackupMeta)> {
-    let stores = get_all_stores_except_tiflash(pd_client as &dyn PdClient)?;
+    let mut stores = get_all_stores_except_tiflash(pd_client)?;
     let cluster_id = pd_client.get_cluster_id()?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(8)
+        .thread_name("backup-cluster")
+        .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
@@ -322,66 +323,42 @@ pub fn backup_cluster_with_ts(
     cluster_backup_meta.set_cluster_id(cluster_id);
     cluster_backup_meta.set_is_lightweight(backup_type == BackupType::Lightweight);
 
-    if !config.skip_keyspace_meta {
-        runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
-    } else {
-        info!("skip backup keyspace meta");
-    }
+    runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
 
-    let num_stores = stores.len();
-    let security_mgr = pd_client.get_security_mgr();
-    let (tx, rx) = std::sync::mpsc::sync_channel(num_stores);
-    for store in stores {
-        let rf_config = get_backup_config(
-            &cluster_backup_meta,
-            cluster_id,
-            store.id,
-            backup_type.clone(),
-        );
-        if let Some(rf_config) = rf_config {
-            runtime.spawn(backup_store(
-                rf_config,
-                store,
-                tx.clone(),
-                security_mgr.clone(),
-                config.timeout.0,
-            ));
-        } else {
-            // Treat tolerated error in incremental backup as error, to make sure that
-            // the `config.tolerate_err` will not be violated.
-            info!("incremental backup: last_backup.tolerated_err > 0"; "store_id" => store.id, "backup" => ?cluster_backup_meta);
-            tx.send(Err(Error::IncrementalBackupToleratedError(store.id)))
-                .unwrap();
-        }
-    }
-
-    let mut errs = vec![];
-    for _ in 0..num_stores {
-        match rx.recv().unwrap() {
-            Ok(store_backup_meta) => {
-                merge_store_backup_meta(&mut cluster_backup_meta, store_backup_meta);
+    let start_time = Instant::now_coarse();
+    let mut bo = backoff::ExponentialBackoff::new(
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+        usize::MAX,
+    );
+    let tolerated_errs = loop {
+        match runtime.block_on(backup_stores(
+            &config,
+            backup_type,
+            pd_client,
+            stores.clone(),
+            config.timeout.0 / 2,
+            &mut cluster_backup_meta,
+        )) {
+            Ok(tolerated_errs) => {
+                break tolerated_errs;
             }
             Err(err) => {
-                errs.push(err);
+                if start_time.saturating_elapsed() > config.timeout.0 {
+                    return Err(err);
+                }
+                let next_delay = bo.next_delay();
+                if next_delay.is_err() {
+                    return Err(err);
+                }
+                if let Error::BackupErrorOnStores(missing_stores) = err {
+                    stores = missing_stores;
+                }
+                std::thread::sleep(next_delay.unwrap());
             }
         }
-    }
-    if !errs.is_empty() {
-        error!(
-            "backup errors {:?}, tolerance {}",
-            errs, config.tolerate_err
-        );
-        // Errors return first to help caller to decide whether to retry.
-        let errors_return_first =
-            |e: &Error| matches!(e, Error::IncrementalBackupToleratedError(_));
-        if errs.len() > config.tolerate_err {
-            if let Some(idx) = errs.iter().position(errors_return_first) {
-                return Err(errs.swap_remove(idx));
-            } else {
-                return Err(errs.pop().unwrap());
-            }
-        }
-    }
+    };
+
     let alloc_id = pd_client.alloc_id()?;
     let safe_ts = runtime.block_on(pd_client.get_gc_safe_point())?;
     if safe_ts > backup_ts {
@@ -389,9 +366,7 @@ pub fn backup_cluster_with_ts(
     }
     cluster_backup_meta.set_alloc_id(alloc_id);
     cluster_backup_meta.set_safe_ts(safe_ts);
-    cluster_backup_meta.set_tolerated_err(errs.len() as u32);
-    let stores = get_all_stores_except_tiflash(pd_client)?;
-    check_backup_meta_consistency(&cluster_backup_meta, &stores)?;
+    cluster_backup_meta.set_tolerated_err(tolerated_errs as u32);
 
     let backup_key = backup_file_full_path(s3fs.get_prefix(), name, Some(backup_ts));
     let backup_data = Bytes::from(cluster_backup_meta.write_to_bytes().unwrap());
@@ -411,35 +386,98 @@ pub fn backup_cluster_with_ts(
     Ok((backup_key, cluster_backup_meta))
 }
 
+async fn backup_stores(
+    config: &BackupConfig,
+    backup_type: BackupType,
+    pd_client: &dyn PdClient,
+    stores: Vec<Store>,
+    timeout: Duration,
+    cluster_backup_meta: &mut ClusterBackupMeta,
+) -> Result<usize /* tolerated_errs */> {
+    let mut tasks = tokio::task::JoinSet::new();
+    let cluster_id = cluster_backup_meta.cluster_id;
+    debug_assert!(cluster_id > 0);
+    for store in stores {
+        let rf_config = get_backup_config(cluster_backup_meta, cluster_id, store.id, backup_type);
+        if let Some(rf_config) = rf_config {
+            let security_mgr = pd_client.get_security_mgr();
+            let task = async move {
+                let res = backup_store(rf_config, &store, &security_mgr, timeout).await;
+                (store, res)
+            };
+            tasks.spawn(task);
+        } else {
+            // Treat tolerated error in incremental backup as error, to make sure that
+            // the `config.tolerate_err` will not be violated.
+            // TODO: remove incremental backup.
+            info!("incremental backup: last_backup.tolerated_err > 0"; "store_id" => store.id, "backup" => ?cluster_backup_meta);
+            return Err(Error::IncrementalBackupToleratedError(store.id));
+        }
+    }
+
+    let mut error_stores = vec![];
+    while let Some(res) = tasks.join_next().await {
+        let (store, res) =
+            res.map_err(|e| Error::BackupError(format!("backup stores: join task failed: {e:?}")))?;
+        match res {
+            Ok(store_backup_meta) => {
+                merge_store_backup_meta(cluster_backup_meta, store_backup_meta);
+            }
+            Err(err) => {
+                warn!("backup store failed"; "store" => store.id, "err" => ?err);
+                error_stores.push(store);
+            }
+        }
+    }
+
+    let stores = get_all_stores_except_tiflash(pd_client)?;
+    if let Err(missing_stores) = check_backup_meta_intact(cluster_backup_meta, stores) {
+        for store in missing_stores {
+            if !error_stores.iter().any(|s| s.id == store.id) {
+                error_stores.push(store);
+            }
+        }
+    }
+
+    if error_stores.is_empty() {
+        Ok(0)
+    } else {
+        let store_ids = error_stores.iter().map(|s| s.id).collect::<Vec<_>>();
+        if error_stores.len() <= config.tolerate_err {
+            info!("backup stores: tolerated error: {}", error_stores.len(); "error_stores" => ?store_ids);
+            Ok(error_stores.len())
+        } else {
+            warn!("backup stores: not intact"; "error_stores" => ?store_ids);
+            Err(Error::BackupErrorOnStores(error_stores))
+        }
+    }
+}
+
 async fn backup_store(
     config: rfengine::BackupConfig,
-    store: Store,
-    tx: SyncSender<Result<StoreBackupMeta>>,
-    security_mgr: Arc<SecurityManager>,
+    store: &Store,
+    security_mgr: &SecurityManager,
     timeout: Duration,
-) {
+) -> Result<StoreBackupMeta> {
     fail_point!("native_br::backup_store");
-
     let uri = security_mgr
         .build_uri(format!("{}/rfengine/backup", &store.status_address))
         .unwrap();
-    info!("Start backup with config {}", config);
+    info!("Start backup store with config {}", config);
     let json_string = serde_json::to_string(&config).unwrap();
-    let req = || {
-        Request::post(uri.clone())
-            .body(Body::from(json_string.clone()))
-            .unwrap()
-    };
-    match send_request_to_store_with_retry(req, &store, security_mgr.as_ref(), timeout).await {
+    let req = Request::post(uri.clone())
+        .body(Body::from(json_string.clone()))
+        .unwrap();
+    let res = match send_request_to_store(req, store, security_mgr, timeout).await {
         Ok(resp) => {
             let mut store_backup_meta = StoreBackupMeta::default();
             store_backup_meta.merge_from_bytes(&resp).unwrap();
-            tx.send(Ok(store_backup_meta)).unwrap()
+            Ok(store_backup_meta)
         }
-        Err(e) => tx.send(Err(e)).unwrap(),
+        Err(e) => Err(e),
     };
-
     fail_point!("native_br::backup_store::ret");
+    res
 }
 
 fn merge_store_backup_meta(
@@ -541,6 +579,26 @@ fn check_backup_meta_consistency(backup_meta: &ClusterBackupMeta, stores: &[Stor
     }
 }
 
+fn check_backup_meta_intact(
+    backup_meta: &ClusterBackupMeta,
+    stores: Vec<Store>,
+) -> std::result::Result<(), Vec<Store> /* missing_stores */> {
+    let missing_stores = stores
+        .into_iter()
+        .filter(|s| {
+            !backup_meta
+                .stores
+                .iter()
+                .any(|s_meta| s_meta.store_id == s.id)
+        })
+        .collect::<Vec<_>>();
+    if missing_stores.is_empty() {
+        Ok(())
+    } else {
+        Err(missing_stores)
+    }
+}
+
 pub fn need_full_backup(err: &Error) -> bool {
     matches!(err, Error::TopoChanged(_) | Error::MetaNotFound(_))
 }
@@ -560,6 +618,12 @@ async fn backup_pd_keyspace_meta(
     config: &BackupConfig,
     cluster_backup_meta: &mut ClusterBackupMeta,
 ) -> Result<()> {
+    #[cfg(feature = "testexport")]
+    if config.skip_keyspace_meta {
+        warn!("skip backup keyspace meta");
+        return Ok(());
+    }
+
     info!("start backup PD keyspace meta"; "backup_meta" => %cluster_backup_meta);
     let cluster_id = cluster_backup_meta.cluster_id;
 
@@ -638,8 +702,9 @@ pub struct BackupConfig {
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
     pub tolerate_err: usize,
-    pub skip_keyspace_meta: bool,
     pub timeout: ReadableDuration,
+    #[cfg(feature = "testexport")]
+    pub skip_keyspace_meta: bool,
 }
 
 impl Default for BackupConfig {
@@ -649,8 +714,9 @@ impl Default for BackupConfig {
             security: SecurityConfig::default(),
             dfs: DFSConfig::default(),
             tolerate_err: 0,
-            skip_keyspace_meta: false,
             timeout: ReadableDuration::secs(30),
+            #[cfg(feature = "testexport")]
+            skip_keyspace_meta: false,
         }
     }
 }

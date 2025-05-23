@@ -9,8 +9,10 @@ publish = false
 [features]
 pprof-fp = ["tikv/pprof-fp"]
 failpoints = ["fail/failpoints", "tikv/failpoints"]
+testexport = []
 
 [dependencies]
+ahash = "0.8.11"
 api_version = { workspace = true }
 bstr = "0.2"
 byteorder = "1.2"
@@ -19,6 +21,7 @@ cfg-if = "1"
 chrono = "0.4"
 cloud_encryption = { workspace = true }
 cloud_server = { workspace = true }
+collections = { workspace = true }
 concurrency_manager = { workspace = true }
 dashmap = "4.0"
 engine_traits = { workspace = true }

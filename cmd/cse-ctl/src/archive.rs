@@ -65,6 +65,9 @@ pub struct ArchiveArgs {
     /// Skip abnormal shards, use `,` to separate multiple shard ids
     #[clap(long)]
     pub skip_abnormal_shards: Option<String>,
+    /// Skip keyspace names, use `,` to separate multiple keyspace names
+    #[clap(long)]
+    pub skip_keyspace_names: Option<String>,
     #[clap(long)]
     pub dry_run: bool,
     /// The timeout for fetching WAL chunks.
@@ -101,6 +104,15 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
             .map(|x| u64::from_str(x).unwrap())
             .collect()
     });
+    config.skip_keyspace_names = args
+        .skip_keyspace_names
+        .as_ref()
+        .map(|skip_keyspace_names_str| {
+            skip_keyspace_names_str
+                .split(',')
+                .map(|x| x.to_string())
+                .collect()
+        });
     config.max_archive_file_size = args.max_archive_file_size;
     config.start_archive_duration = Duration::from(args.start_archive_duration);
     config.expiration_date = args.expiration_date.clone();

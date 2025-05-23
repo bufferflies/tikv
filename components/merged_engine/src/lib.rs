@@ -465,6 +465,8 @@ impl MergedEngine {
             store_id,
         )?;
         rfengine::lightweight_restore(
+            store_id,
+            None,
             Path::new(&store_config.raft_store.raftdb_path),
             rlog_files.snap_epoch,
             rlog_files.snap_meta,

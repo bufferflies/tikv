@@ -40,10 +40,10 @@ pub enum Error {
     PitrTsError(u64, u64, u64),
     #[error("PD error {0}")]
     PdError(pd_client::Error),
+    #[error("Split regions error {0}")]
+    SpitRegionsError(pd_client::Error),
     #[error("Etcd error {0}")]
     EtcdError(etcd_client::Error),
-    #[error("{0} timeout {0}s")]
-    Timeout(String, u64),
     #[error("TiKV error {0}")]
     TikvError(tikv_client::Error),
     #[error("KvEngine error {0}")]
@@ -54,14 +54,20 @@ pub enum Error {
     RegionVerNotMatch { expected: u64, actual: u64 },
     #[error("Region {0} not found or no leader")]
     RegionNotFoundOrNoLeader(u64 /* region id */),
-    #[error("HTTP request error {0}")]
-    HttpRequestError(#[from] hyper::Error),
+    #[error("TiKV store disk full {0:?}")]
+    StoreDiskFull(Vec<u64> /* stores id */),
+    #[error(transparent)]
+    HttpRequestError(#[from] HttpRequestError),
     #[error("HTTP error {0}:{1}")]
     HttpError(http::StatusCode, String),
+    #[error("HTTP error {0}:{1:?}")]
+    HttpPbError(http::StatusCode, kvproto::errorpb::Error),
     #[error("Retry limit exceeded, last error {0}")]
     RetryLimitExceeded(Box<Error>),
     #[error("Restore other keyspace from/to default keyspace")]
     RestoreWithDefaultKeyspace,
+    #[error("Restore snapshot error")]
+    RestoreSnapshot,
     #[error("Backup for keyspace {0} is empty")]
     BackupEmptyForKeyspace(u32 /* keyspace id */),
     #[error("Reach concurrency limit {0}")]
@@ -74,6 +80,8 @@ pub enum Error {
     MvccError(#[from] tikv::storage::mvcc::Error),
     #[error("Backup error {0}")]
     BackupError(String),
+    #[error("Backup error on stores")]
+    BackupErrorOnStores(Vec<kvproto::metapb::Store>),
     #[error("No snapshot available error {0}")]
     NoSnapshotAvailableError(String),
     #[error("WAL chunk integrity error {0}")]
@@ -83,11 +91,19 @@ pub enum Error {
     #[error("Incremental backup tolerated error for store {0}")]
     IncrementalBackupToleratedError(u64 /* store id */),
     #[error("Fetch RfEngine WAL chunk HTTP request error {0}")]
-    RfengineHttpRequestError(hyper::Error),
+    RfengineHttpRequestError(HttpRequestError),
     #[error("Fetch RfEngine WAL chunk service error {0}")]
     RfengineHttpSvrError(String),
     #[error("Fetch RfEngine WAL chunk error due to epoch {epoch_id} overwritten")]
     RfengineWalEpochOverwritten { epoch_id: u32 },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum HttpRequestError {
+    #[error("{0} timeout({1:?})")]
+    Timeout(String /* message */, std::time::Duration),
+    #[error("HTTP request error {0}: {1}")]
+    Http(String /* uri */, hyper::Error),
 }
 
 impl From<dfs::Error> for Error {

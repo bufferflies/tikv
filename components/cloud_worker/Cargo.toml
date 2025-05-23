@@ -5,7 +5,7 @@ edition = "2018"
 publish = false
 
 [features]
-testexport = []
+testexport = ["native_br/testexport"]
 
 [dependencies]
 api_version = { path = "../../components/api_version" }

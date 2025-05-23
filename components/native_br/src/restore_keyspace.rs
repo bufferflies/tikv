@@ -3,9 +3,9 @@
 use std::{
     borrow::Cow,
     cmp,
-    collections::{HashMap, HashSet},
+    collections::hash_map::Entry,
     default::Default,
-    fmt, mem,
+    fmt, mem, ops,
     ops::Deref,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
@@ -13,14 +13,15 @@ use std::{
     time::Duration,
 };
 
+use ahash::HashMapExt;
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
 use cloud_encryption::{EncryptionKey, MasterKey};
 use cloud_server::{RestoreShardResponse, TikvServer};
+use collections::{HashMap, HashSet};
 use file_system::{IoRateLimitMode, IoRateLimiter};
-use http::Request;
+use http::{header, Request};
 use hyper::Body;
-use itertools::Itertools;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
     ia::util::IaConfig,
@@ -45,8 +46,9 @@ use slog_global::{debug, error, info, warn};
 use tempdir::TempDir;
 use tikv::{config::TikvConfig, storage::mvcc::Key};
 use tikv_util::{
-    box_err, box_try, merge_range::MergeRanges, mpsc, sys::thread::StdThreadBuildWrapper,
-    time::Instant, HandyRwLock,
+    backoff::ExponentialBackoff, box_err, box_try, http::CONTENT_TYPE_PROTOBUF,
+    merge_range::MergeRanges, mpsc, retry::try_wait_result_async,
+    sys::thread::StdThreadBuildWrapper, time::Instant, HandyRwLock,
 };
 use tokio::runtime::Runtime;
 use txn_types::TimeStamp;
@@ -69,7 +71,7 @@ use crate::{
     lock::LockResolver,
     restore::RestoreConfig,
     step,
-    tiflash::remove_tiflash_replia_of_keyspace,
+    tiflash::remove_tiflash_replica_of_keyspace,
 };
 
 const WORKING_PATH_PREFIX: &str = "keyspace-restore";
@@ -78,6 +80,9 @@ const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_
 const REPLICAS: usize = 3; // Number of replicas for each region.
 
 const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
+
+const SPLIT_REGIONS_BATCH_SIZE: usize = 256;
+const SPLIT_REGIONS_TIMEOUT_PER_KEY: Duration = Duration::from_millis(100);
 
 pub const RESTORE_RFENGINE_CONCURRENCY: usize = 3;
 
@@ -136,7 +141,7 @@ pub fn restore_keyspace_with_cfg(
     keyspace_name: &str,
     target_keyspace_name: &str,
     backup_name: &str,
-    working_path: Option<&str>,
+    working_path: Option<PathBuf>,
     s3fs: Arc<S3Fs>,
     pd_client: Arc<dyn PdClient>,
     runtime: &Runtime,
@@ -163,7 +168,7 @@ pub fn restore_keyspace_with_cfg(
         target_id
     } else {
         reporter.report_step(RestoreStep::RemoveTiFlashReplicas);
-        if let Err(e) = runtime.block_on(remove_tiflash_replia_of_keyspace(
+        if let Err(e) = runtime.block_on(remove_tiflash_replica_of_keyspace(
             keyspace_id,
             &pd_control,
             pd_client.clone(),
@@ -193,7 +198,7 @@ pub fn restore_keyspace(
     keyspace_id: u32,
     target_keyspace_id: u32,
     backup_name: &str,
-    working_path: Option<&str>,
+    working_path: Option<PathBuf>,
     s3fs: Arc<S3Fs>,
     config: RestoreConfig,
     pd_client: Arc<dyn PdClient>,
@@ -215,12 +220,14 @@ pub fn restore_keyspace(
         return Err(Error::RestoreWithDefaultKeyspace);
     }
 
-    let working_dir = match working_path {
-        Some(p) => TempDir::new_in(p, WORKING_PATH_PREFIX),
-        None => TempDir::new(WORKING_PATH_PREFIX),
-    }
-    .unwrap();
-    let working_path = working_dir.path().to_path_buf();
+    let (working_path, _guard) = match working_path {
+        Some(path) => (path, None),
+        None => {
+            let temp_dir = box_try!(TempDir::new(WORKING_PATH_PREFIX));
+            let path = temp_dir.path().to_path_buf();
+            (path, Some(temp_dir))
+        }
+    };
 
     let (keyspace_start, keyspace_end) = ApiV2::get_keyspace_range_by_id(keyspace_id);
     let (target_keyspace_start, target_keyspace_end) =
@@ -268,15 +275,7 @@ pub fn restore_keyspace(
         cluster_backup.safe_ts,
         truncate_ts,
     );
-    info!("{} restore config", keyspace_tag;
-        "skip_resolve_lock" => config.skip_resolve_lock,
-        "wal_target_size" => ?config.wal_target_size,
-        "new_store_id_delta" => config.new_store_id_delta,
-        "timeout_wait_flush" => ?config.timeout_wait_flush,
-        "timeout_restore_snapshot" => ?config.timeout_restore_snapshot,
-        "timeout_fetch_wal" => ?config.timeout_fetch_wal,
-        "tolerate_err" => ?config.tolerate_err,
-        "max_retry" => config.max_retry);
+    info!("{} restore config: {:?}", keyspace_tag, config);
     debug!(
         "Keyspace {} get cluster backup meta: {:?}",
         keyspace_tag, cluster_backup
@@ -356,20 +355,20 @@ pub fn restore_keyspace(
         cluster.truncate_ts
     );
 
-    let inner_split_keys = cluster.get_region_split_keys(&target_keyspace_start);
+    // Pre-split & scatter target keyspace regions.
+    reporter.report_step(RestoreStep::SplitRegions);
+    cluster.pre_split_and_scatter_regions(&config, runtime)?;
 
+    // Restore snapshot.
     let mut success_ranges = MergeRanges::default();
-    let mut retry = 0;
-    // TODO: split regions for inplace restore.
-    let mut need_split_regions = !inplace_restore;
-    let mut last_error = None;
+    let mut bo = Backoff::new(ExponentialBackoff::new(
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+        config.max_retry,
+    ));
     let mut restore_bytes = 0;
+    // NOTE: must call `bo::on_error` before every "continue".
     loop {
-        if retry > config.max_retry {
-            return Err(RetryLimitExceeded(Box::new(last_error.unwrap())));
-        }
-        retry += 1;
-
         let mut target_regions = match runtime.block_on(get_target_regions(
             pd_client.as_ref() as &dyn PdClient,
             &target_keyspace_start,
@@ -377,44 +376,11 @@ pub fn restore_keyspace(
         )) {
             Ok(regions) => regions,
             Err(err) => {
-                warn!("get target regions failed: {:?}, retry again", err);
-                last_error = Some(err);
-                thread::sleep(Duration::from_millis(200));
+                warn!("get target regions failed: {:?}, retry", err);
+                bo.on_error(err)?;
                 continue;
             }
         };
-
-        if need_split_regions {
-            reporter.report_step(RestoreStep::SplitRegions);
-
-            // Try split target keyspace regions according to backup keyspace regions if
-            // needed.
-            // No need check keyspace split in retry.
-            split_target_keyspace(
-                &inner_split_keys,
-                &target_regions,
-                &keyspace_tag,
-                pd_client.clone(),
-                config.timeout_split_regions.0,
-                runtime,
-            )?;
-            need_split_regions = false;
-
-            // Update target regions after split.
-            target_regions = match runtime.block_on(get_target_regions(
-                pd_client.as_ref(),
-                &target_keyspace_start,
-                &target_keyspace_end,
-            )) {
-                Ok(regions) => regions,
-                Err(err) => {
-                    warn!("get target regions failed: {:?}, retry again", err);
-                    last_error = Some(err);
-                    thread::sleep(Duration::from_millis(200));
-                    continue;
-                }
-            };
-        }
 
         let target_regions_total_cnt = target_regions.len();
         if !success_ranges.is_empty() {
@@ -429,8 +395,9 @@ pub fn restore_keyspace(
 
         // Align target regions.
         reporter.report_step(RestoreStep::AlignRegions);
-        let (aligned_regions, trimmed_shards_cnt) =
-            cluster.align_target_regions(target_regions, runtime)?;
+        let aligned_regions = cluster.align_target_regions(target_regions);
+        let trimmed_shards_cnt =
+            runtime.block_on(cluster.trim_over_bound_shards(&aligned_regions))?;
         step!(
             "Keyspace {} align {} backup shards to {} target regions and trim {} over bound shards",
             keyspace_tag,
@@ -452,12 +419,13 @@ pub fn restore_keyspace(
         let snapshots = cluster.generate_snapshots(target_shards);
         let snapshots_count = snapshots.len();
         let ret = restore_snapshots(
-            target_keyspace_id,
+            &keyspace_tag,
             runtime,
             pd_client.clone(),
             snapshots,
             &mut success_ranges,
             config.timeout_restore_snapshot.0,
+            &mut bo,
         )?;
         restore_bytes += ret.restore_bytes;
         step!(
@@ -467,13 +435,16 @@ pub fn restore_keyspace(
 
         if success_ranges.covered(&target_keyspace_start, &target_keyspace_end) {
             break;
-        } else {
-            step!("Keyspace {keyspace_tag} restore retry {retry}");
         }
+        bo.on_error(Error::RestoreSnapshot)?;
+        step!(
+            "Keyspace {keyspace_tag} restore retry {}",
+            bo.current_attempts()
+        );
     }
 
     reporter.report_step(RestoreStep::RetainSstFiles);
-    let files = cluster.get_all_shard_files(None);
+    let files = cluster.get_all_shard_files(None, None);
     match retain_sst_files(files, &s3fs) {
         Err(e) => {
             return Err(box_err!(
@@ -506,41 +477,6 @@ fn check_backup_meta_ts(meta: &ClusterBackupMeta, truncate_ts: u64) -> Result<()
             meta.backup_ts,
         ));
     }
-    Ok(())
-}
-
-fn split_target_keyspace(
-    split_keys: &[Vec<u8>],
-    target_regions: &[RawRegion],
-    keyspace_tag: &str,
-    pd_client: Arc<dyn PdClient>,
-    timeout: Duration,
-    runtime: &Runtime,
-) -> Result<()> {
-    if split_keys.is_empty() {
-        return Ok(());
-    }
-
-    // Filter out the already splitted keys.
-    let mut split_keys = split_keys.to_vec();
-    split_keys.retain(|key| {
-        target_regions
-            .iter()
-            .all(|region| key.as_slice() != region.get_start_key())
-    });
-    step!(
-        "Keyspace {} split target regions, split keys count {}",
-        keyspace_tag,
-        split_keys.len(),
-    );
-    let enc_split_keys = split_keys
-        .iter()
-        .map(|key| Key::from_raw(key.as_slice()).into_encoded())
-        .collect::<Vec<_>>();
-    if !enc_split_keys.is_empty() {
-        runtime.block_on(pd_client.split_regions_with_retry(enc_split_keys, timeout))?;
-    }
-
     Ok(())
 }
 
@@ -590,6 +526,10 @@ impl BackupShard {
 
     pub fn ver(&self) -> u64 {
         self.meta.ver
+    }
+
+    pub fn id_ver(&self) -> IdVer {
+        IdVer::new(self.region_id, self.ver())
     }
 
     pub fn start(&self) -> &[u8] {
@@ -789,7 +729,11 @@ impl BackupCluster {
         let fetch_wal_timeout = restore_conf.timeout_fetch_wal.0;
 
         let is_error_can_tolerate = |err: &Error| -> bool {
-            if matches!(err, Error::RfengineHttpRequestError(_)) {
+            if matches!(
+                err,
+                Error::RfengineHttpRequestError(_)
+                    | Error::PdError(pd_client::Error::StoreTombstone(_))
+            ) {
                 true
             } else if !restore_conf.strict_tolerate {
                 crate::metrics::NATIVE_BR_RESTORE_ERROR
@@ -801,36 +745,24 @@ impl BackupCluster {
             }
         };
         let mut raft_engines: HashMap<u64, RfEngine> = Default::default();
+        let mut errors = vec![];
         let mut cluster_tolerated_err = 0;
         let mut recv_restore_rfengine =
-            |result_rx: &mpsc::Receiver<Result<(u64, TikvConfig, RfEngine)>>| -> Result<()> {
+            |result_rx: &mpsc::Receiver<Result<(u64, TikvConfig, RfEngine)>>| {
                 // We can tolerate one store failure for lightweight restoration during fetch
                 // latest wal chunk from store.
                 match result_rx.recv().unwrap() {
-                    Err(err) if is_error_can_tolerate(&err) => {
-                        if tolerate_err == 0 {
-                            return Err(err);
-                        }
-                        warn!(
-                            "Keyspace {} setup raft engine failed, tolerate it: {:?}",
-                            cluster.tag(),
-                            err
-                        );
-                        tolerate_err -= 1;
-                        cluster_tolerated_err += 1;
-                    }
-                    Err(err) => return Err(err),
+                    Err(err) => errors.push(err),
                     Ok((store_id, store_config, rf_engine)) => {
                         store_configs.insert(store_id, store_config);
                         raft_engines.insert(store_id, rf_engine);
-                        tikv_util::info!(
+                        info!(
                             "Keyspace {} setup raft engine for store {} done",
                             cluster.tag(),
                             store_id
                         );
                     }
                 }
-                Ok(())
             };
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(cluster_meta.stores.len());
         let mut msg_count = 0;
@@ -855,6 +787,7 @@ impl BackupCluster {
                 let res = BackupCluster::setup_raft_engine(
                     &tag,
                     store_id,
+                    keyspace_id,
                     &cluster_backup_meta,
                     &store_config,
                     pd_client,
@@ -875,12 +808,31 @@ impl BackupCluster {
             if msg_count < restore_conf.store_concurrency {
                 msg_count += 1;
             } else {
-                recv_restore_rfengine(&result_rx)?;
+                // Do NOT return on error to avoid thread leaky.
+                recv_restore_rfengine(&result_rx);
             }
         }
         for _ in 0..msg_count {
-            recv_restore_rfengine(&result_rx)?;
+            recv_restore_rfengine(&result_rx);
         }
+
+        for err in errors {
+            if is_error_can_tolerate(&err) {
+                if tolerate_err == 0 {
+                    return Err(err);
+                }
+                warn!(
+                    "Keyspace {} setup raft engine failed, tolerate it: {:?}",
+                    cluster.tag(),
+                    err
+                );
+                tolerate_err -= 1;
+                cluster_tolerated_err += 1;
+            } else {
+                return Err(err);
+            }
+        }
+
         cluster.raft_engines = raft_engines;
         cluster.store_configs = store_configs;
         cluster.tolerated_err = cluster_tolerated_err;
@@ -905,6 +857,7 @@ impl BackupCluster {
     fn setup_raft_engine_for_lightweight(
         tag: &str,
         store_id: u64,
+        keyspace_id: u32,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
         pd_client: Arc<dyn PdClient>,
@@ -924,6 +877,8 @@ impl BackupCluster {
             )?
         };
         rfengine::lightweight_restore(
+            store_id,
+            (!archiving).then_some(keyspace_id),
             Path::new(&conf.raft_store.raftdb_path),
             rlog_files.snap_epoch,
             rlog_files.snap_meta,
@@ -969,6 +924,7 @@ impl BackupCluster {
     pub fn setup_raft_engine(
         tag: &str,
         store_id: u64,
+        keyspace_id: u32,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
         pd_client: Arc<dyn PdClient>,
@@ -981,6 +937,7 @@ impl BackupCluster {
             Self::setup_raft_engine_for_lightweight(
                 tag,
                 store_id,
+                keyspace_id,
                 cluster_backup,
                 conf,
                 pd_client,
@@ -1302,14 +1259,11 @@ impl BackupCluster {
             }
         }
 
-        let mut sorted_shards_id = Self::handle_overlapping_shards(&mut leader_shards)?;
-        info!(
-            "leader shard cnt {}, sorted shards cnt {}",
-            leader_shards.len(),
-            sorted_shards_id.len()
-        );
-        self.shards = mem::take(&mut leader_shards);
-        self.sorted_shards = mem::take(&mut sorted_shards_id);
+        let (intact_shards, sorted_shards_id) =
+            Self::handle_overlapping_shards(self.tag(), leader_shards)?;
+        info!("{}: shards cnt {}", self.tag(), intact_shards.len());
+        self.shards = intact_shards;
+        self.sorted_shards = sorted_shards_id;
         debug!(
             "Keyspace {} BackupCluster.load_shards: {:?}",
             self.tag(),
@@ -1364,12 +1318,37 @@ impl BackupCluster {
     }
 
     // Should be called after load_shard & collect_txn_chunks_in_wal.
-    pub fn get_all_shard_files(&self, skip_shards: Option<HashSet<u64>>) -> Vec<TableFile> {
+    pub fn get_all_shard_files(
+        &self,
+        skip_shards: Option<HashSet<u64>>,
+        skip_keyspace_ids: Option<HashSet<u32>>,
+    ) -> Vec<TableFile> {
         let mut files = vec![];
         for shard in self.shards.values() {
             if let Some(skip_shards) = &skip_shards {
                 if skip_shards.contains(&shard.region_id) {
+                    info!(
+                        "skip shard {} files {}",
+                        shard.tag(),
+                        shard.meta.all_files().len()
+                    );
                     continue;
+                }
+            }
+            if let Some(skip_keyspace_ids) = &skip_keyspace_ids {
+                if let Some(keyspace_id) = ApiV2::get_u32_keyspace_id_by_key(shard.start()) {
+                    if skip_keyspace_ids.contains(&keyspace_id) {
+                        let keyspace_end_key = ApiV2::get_keyspace_end_by_id(keyspace_id);
+                        if shard.end() <= keyspace_end_key.as_slice() {
+                            info!(
+                                "skip keyspace {} shard {} files {}",
+                                keyspace_id,
+                                shard.tag(),
+                                shard.meta.all_files().len()
+                            );
+                            continue;
+                        }
+                    }
                 }
             }
             files.extend(shard.meta.all_files().iter().map(|(&id, fm)| TableFile {
@@ -1403,7 +1382,7 @@ impl BackupCluster {
     // Should be called after load_shard and before setup_kv_engine.
     pub fn check_all_shard_files(&self) -> Result<()> {
         if let Some(archive_reader) = &self.archive_reader {
-            let files = self.get_all_shard_files(None);
+            let files = self.get_all_shard_files(None, None);
             let not_found_files = get_not_found_files(&self.dfs, files)?;
             archive_reader.restore_files(not_found_files)?;
         }
@@ -1414,18 +1393,17 @@ impl BackupCluster {
         &self,
         all_shards: HashMap<u64, Vec<BackupShard>>,
     ) -> Result<(
-        HashMap<u64, BackupShard>, // leader_shards, shard_id -> BackupShard
-        bool,                      // has_new_peer
+        HashMap<IdVer, BackupShard>, // leader_shards
+        bool,                        // has_new_peer
     )> {
         let shards_cnt = all_shards.values().map(|x| x.len()).sum::<usize>() / REPLICAS;
-        // shard_peers: shard_id -> Vec<(store_id, BackupShard)>
-        let mut shard_peers: HashMap<u64, Vec<BackupShard>> = HashMap::with_capacity(shards_cnt);
+        let mut shard_peers: HashMap<IdVer, Vec<BackupShard>> = HashMap::with_capacity(shards_cnt);
 
         for shard in all_shards.into_values().flatten() {
-            shard_peers.entry(shard.region_id).or_default().push(shard);
+            shard_peers.entry(shard.id_ver()).or_default().push(shard);
         }
         let mut leader_shards = HashMap::with_capacity(shard_peers.len());
-        for (&shard_id, peers) in shard_peers.iter_mut() {
+        for (&id_ver, peers) in shard_peers.iter_mut() {
             // Since we enabled raft pre-vote, the correct leader must have the max term and
             // then max last index.
             // Also sort by store_id (descending) to get peer with smallest store id as
@@ -1456,11 +1434,12 @@ impl BackupCluster {
                 hard_state.set_commit(leader.raft_state.get_last_index());
                 leader.raft_state.set_hard_state(&hard_state);
             }
-            leader_shards.insert(shard_id, leader);
+            leader_shards.insert(id_ver, leader);
         }
 
         let mut has_new_peer = false;
-        for shard in leader_shards.values_mut() {
+        let mut ver_changed = vec![];
+        for (&id_ver, shard) in leader_shards.iter_mut() {
             // Preprocess if needed.
             if shard.raft_state.get_commit() > shard.raft_state.get_last_preprocessed_index() {
                 info!(
@@ -1474,8 +1453,18 @@ impl BackupCluster {
                 if self.preprocess_shard(rf_engine, shard)? {
                     has_new_peer = true;
                 }
+
+                if shard.ver() != id_ver.ver {
+                    ver_changed.push(id_ver);
+                }
             }
         }
+
+        for id_ver in ver_changed {
+            let shard = leader_shards.remove(&id_ver).unwrap();
+            leader_shards.insert(shard.id_ver(), shard);
+        }
+
         Ok((leader_shards, has_new_peer))
     }
 
@@ -1483,63 +1472,78 @@ impl BackupCluster {
     /// Shards overlap will happen when some followers had not finished split or
     /// merge.
     fn handle_overlapping_shards(
-        leader_shards: &mut HashMap<u64, BackupShard>,
-    ) -> Result<
-        Vec<u64>, // Vec<shard_id> sorted by BackupShard.start()
-    > {
-        let mut sorted_shards: Vec<u64> = leader_shards
-            .values()
-            .sorted_by(|a, b| a.start().cmp(b.start()))
-            .map(|x| x.region_id)
-            .collect();
-
-        if sorted_shards.len() > 1 {
-            let mut shards_to_remove: HashSet<u64> = HashSet::default();
-
-            'outer: for i in 0..sorted_shards.len() - 1 {
-                let left = leader_shards.get(&sorted_shards[i]).unwrap();
-                if shards_to_remove.contains(&left.region_id) {
-                    continue;
-                }
-
-                'inner: for j in i + 1..sorted_shards.len() {
-                    let right = leader_shards.get(&sorted_shards[j]).unwrap();
-                    if shards_to_remove.contains(&right.region_id) {
-                        continue 'inner;
-                    }
-                    if right.start() >= left.end() {
-                        continue 'outer;
-                    }
-
-                    match Ord::cmp(&left.ver(), &right.ver()) {
-                        cmp::Ordering::Equal => {
-                            return Err(box_err!(
-                                "overlapping shards should not have same version, left:{:?}, right:{:?}",
-                                left,
-                                right
-                            ));
-                        }
-                        cmp::Ordering::Less => {
-                            shards_to_remove.insert(left.region_id);
-                            continue 'outer;
-                        }
-                        cmp::Ordering::Greater => {
-                            shards_to_remove.insert(right.region_id);
-                            continue 'inner;
-                        }
-                    }
-                }
-            }
-
-            if !shards_to_remove.is_empty() {
-                for shard_id in &shards_to_remove {
-                    leader_shards.remove(shard_id);
-                }
-                sorted_shards.retain(|shard_id| !shards_to_remove.contains(shard_id));
-            }
+        tag: &str,
+        mut leader_shards: HashMap<IdVer, BackupShard>,
+    ) -> Result<(
+        HashMap<u64, BackupShard>, // intact_shards
+        Vec<u64>,                  // Vec<shard_id> sorted by BackupShard.start()
+    )> {
+        let mut shards_map: HashMap<InnerKey<'_>, Vec<&BackupShard>> = HashMap::default();
+        for shard in leader_shards.values() {
+            shards_map
+                .entry(shard.inner_start())
+                .or_default()
+                .push(shard);
+        }
+        // Increasingly sort as `find_intact_shards` will try the last shard first.
+        for shards in shards_map.values_mut() {
+            shards.sort_by(|a, b| a.ver().cmp(&b.ver()));
+        }
+        let Some(intact_shards) = Self::find_intact_shards(&shards_map) else {
+            error!("{}: shards not intact for keyspace", tag; "shards" => ?shards_map);
+            return Err(box_err!("shards not intact for keyspace"));
+        };
+        info!("{}: intact shards: {:?}", tag, intact_shards); // TODO: debug log.
+        let mut shards: HashMap<u64, BackupShard> = HashMap::default();
+        let mut sorted_shards: Vec<u64> = vec![];
+        for id_ver in intact_shards {
+            let shard = leader_shards.remove(&id_ver).unwrap();
+            shards.insert(id_ver.id, shard);
+            sorted_shards.push(id_ver.id);
         }
 
-        Ok(sorted_shards)
+        Ok((shards, sorted_shards))
+    }
+
+    // Consider as a DAG, where the start/end keys are the nodes, and the shards are
+    // the edges.
+    fn find_intact_shards(
+        shards_map: &HashMap<InnerKey<'_>, Vec<&BackupShard>>,
+    ) -> Option<Vec<IdVer>> {
+        let shards = shards_map.get(&InnerKey::default())?;
+
+        let mut stack: Vec<&BackupShard> = Vec::with_capacity(shards_map.len());
+        stack.extend(shards);
+        let mut visited: HashMap<InnerKey<'_>, &BackupShard> = HashMap::default();
+
+        while let Some(curr) = stack.pop() {
+            let next_key = curr.inner_end();
+            if next_key.deref() == GLOBAL_SHARD_END_KEY {
+                let mut edges = vec![];
+                let mut curr = curr;
+                loop {
+                    edges.push(curr.id_ver());
+                    let prev_key = curr.inner_start();
+                    if prev_key.is_empty() {
+                        break;
+                    } else {
+                        curr = *visited.get(&prev_key).unwrap()
+                    }
+                }
+
+                edges.reverse();
+                return Some(edges);
+            }
+
+            if let Entry::Vacant(e) = visited.entry(next_key) {
+                if let Some(shards) = shards_map.get(&next_key) {
+                    stack.extend(shards);
+                    e.insert(curr);
+                    continue;
+                }
+            }
+        }
+        None
     }
 
     fn preprocess_shard(
@@ -1584,7 +1588,7 @@ impl BackupCluster {
         let mut remove_dependents = Vec::new();
         let mut apply_msgs = ApplyMsgs::default();
         let raft_cfg = rfstore::store::Config::default();
-        let mut destroying = HashSet::new();
+        let mut destroying = std::collections::HashSet::default();
         let mut ctx = PreprocessContext {
             store_id: old_shard.store_id,
             kv: None,
@@ -1663,6 +1667,8 @@ impl BackupCluster {
         Ok(has_new_peer)
     }
 
+    // Not necessary as `find_intact_shards` already check the shards.
+    // TODO: remove when `find_intact_shards` is stable.
     fn verify_shards(&self) -> Result<()> {
         debug_assert!(!self.sorted_shards.is_empty());
         if self.is_full_range() {
@@ -1887,43 +1893,104 @@ impl BackupCluster {
         aligned_regions
     }
 
-    fn align_target_regions(
-        &mut self,
-        target_regions: Vec<RawRegion>,
-        runtime: &Runtime,
-    ) -> Result<(
-        Vec<AlignedRegion>,
-        usize, // number of trimmed shards
-    )> {
-        let aligned_regions =
-            Self::align_target_regions_impl(&self.sorted_shards, &self.shards, target_regions);
-        let trimmed_shards_cnt = runtime.block_on(self.trim_over_bound_shards(&aligned_regions))?;
-        Ok((aligned_regions, trimmed_shards_cnt))
+    fn align_target_regions(&self, sorted_target_regions: Vec<RawRegion>) -> Vec<AlignedRegion> {
+        Self::align_target_regions_impl(&self.sorted_shards, &self.shards, sorted_target_regions)
     }
 
-    pub fn get_region_split_keys(&self, keyspace_prefix: &[u8]) -> Vec<Vec<u8>> {
+    fn pre_split_and_scatter_regions(
+        &self,
+        config: &RestoreConfig,
+        runtime: &Runtime,
+    ) -> Result<()> {
+        let (target_keyspace_start, target_keyspace_end) =
+            ApiV2::get_keyspace_range_by_id(self.target_keyspace_id);
+        let target_regions = runtime.block_on(get_target_regions_with_retry(
+            self.pd_client.as_ref(),
+            &target_keyspace_start,
+            &target_keyspace_end,
+            config.timeout_restore_snapshot.0,
+        ))?;
+        let aligned_regions = self.align_target_regions(target_regions);
+
+        let mut coarse_split_keys =
+            Vec::with_capacity(self.sorted_shards.len() / config.coarse_split_regions_factor);
         let mut split_keys = Vec::with_capacity(self.sorted_shards.len() - 1);
-        for shard_id in &self.sorted_shards {
-            let shard = self.get_shard(*shard_id).unwrap();
-            debug!(
-                "get_region_split_keys, shard_id: {} start key {:?} end key {:?}",
-                shard_id,
-                shard.start().to_vec(),
-                shard.end().to_vec()
-            );
-            let mut split_key = keyspace_prefix.to_vec();
-            let inner_start = shard.inner_start();
+        for r in aligned_regions {
+            for (idx, &shard_id) in r.backup_shards_id.iter().enumerate().skip(1) {
+                let shard = self.get_shard(shard_id).unwrap();
+                let split_key =
+                    [target_keyspace_start.clone(), shard.inner_start().to_vec()].concat();
 
-            // Skip the keyspace boundary key.
-            if inner_start.is_empty() {
-                continue;
+                if idx % config.coarse_split_regions_factor == 0 {
+                    coarse_split_keys.push(split_key);
+                } else {
+                    split_keys.push(split_key);
+                }
             }
-            split_key.extend_from_slice(inner_start.deref());
-
-            split_keys.push(split_key);
         }
 
-        split_keys
+        self.split_regions_for_keys(
+            coarse_split_keys,
+            split_keys,
+            config.timeout_split_regions.0,
+            runtime,
+        )
+    }
+
+    fn split_regions_for_keys(
+        &self,
+        coarse_split_keys: Vec<Vec<u8>>,
+        split_keys: Vec<Vec<u8>>,
+        timeout: Duration,
+        runtime: &Runtime,
+    ) -> Result<()> {
+        if !coarse_split_keys.is_empty() {
+            debug!("{} coarse split regions", self.tag(); "keys" => ?coarse_split_keys);
+            self.split_regions_with_retry(coarse_split_keys, true, timeout, runtime)?;
+        }
+        if !split_keys.is_empty() {
+            debug!("{} split regions", self.tag(); "keys" => ?split_keys);
+            self.split_regions_with_retry(split_keys, false, timeout, runtime)?;
+        }
+        Ok(())
+    }
+
+    fn split_regions_with_retry(
+        &self,
+        raw_keys: Vec<Vec<u8>>,
+        scatter: bool,
+        timeout: Duration,
+        runtime: &Runtime,
+    ) -> Result<()> {
+        for batch in raw_keys.chunks(SPLIT_REGIONS_BATCH_SIZE) {
+            let encoded_keys = batch
+                .iter()
+                .map(|key| Key::from_raw(key).into_encoded())
+                .collect::<Vec<_>>();
+            let timeout = cmp::max(
+                SPLIT_REGIONS_TIMEOUT_PER_KEY * encoded_keys.len() as u32,
+                timeout,
+            );
+            step!(
+                "Keyspace {} split regions for {} keys",
+                self.tag(),
+                encoded_keys.len()
+            );
+            let regions = runtime
+                .block_on(
+                    self.pd_client
+                        .split_regions_with_retry(encoded_keys, timeout),
+                )
+                .map_err(|e| Error::SpitRegionsError(e))?;
+            if scatter {
+                step!("Keyspace {} scatter {} regions", self.tag(), regions.len());
+                if let Err(err) = self.pd_client.scatter_regions_by_id(regions) {
+                    warn!("{} scatter regions failed: {:?}", self.tag(), err);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn update_schema_file_restore_version(&self, schema_file_id: u64) -> Result<u64> {
@@ -2108,7 +2175,7 @@ impl BackupCluster {
         aligned_regions: &[AlignedRegion],
     ) -> Result<usize /* number of trimmed shards */> {
         let mut trim_shards_cnt = 0_usize;
-        let mut unique_shards = HashSet::new();
+        let mut unique_shards = HashSet::default();
         for region in aligned_regions
             .iter()
             .filter(|x| x.backup_shards_id.len() > 1)
@@ -2446,6 +2513,20 @@ async fn get_target_regions(
     Ok(regions)
 }
 
+async fn get_target_regions_with_retry(
+    pd_client: &dyn PdClient,
+    start_key: &[u8],
+    end_key: &[u8],
+    timeout: Duration,
+) -> Result<Vec<RawRegion>> {
+    try_wait_result_async(
+        || Box::pin(get_target_regions(pd_client, start_key, end_key)),
+        timeout,
+        || Duration::from_millis(500),
+    )
+    .await
+}
+
 fn verify_regions_boundary(start_key: &[u8], end_key: &[u8], regions: &[RawRegion]) -> Result<()> {
     if regions.is_empty() {
         return Err(box_err!("no region"));
@@ -2481,20 +2562,22 @@ fn verify_regions_boundary(start_key: &[u8], end_key: &[u8], regions: &[RawRegio
 }
 
 fn restore_snapshots(
-    keyspace_id: u32,
+    tag: &str,
     runtime: &Runtime,
     pd_client: Arc<dyn PdClient>,
     snapshots: Vec<pb::ChangeSet>,
     success_ranges: &mut MergeRanges,
     timeout: Duration,
+    bo: &mut Backoff,
 ) -> Result<RestoredSnapshots> {
     let mut handles = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
         let pd_client = pd_client.clone();
+        let shard_id = snap.shard_id;
         let start = snap.get_restore_shard().get_outer_start().to_vec();
         let end = snap.get_restore_shard().get_outer_end().to_vec();
         let task = async move { request_restore_snapshot(pd_client, &snap, timeout).await };
-        handles.push((runtime.spawn(task), start, end));
+        handles.push((shard_id, runtime.spawn(task), start, end));
     }
 
     let is_error_retryable = |err: &Error| {
@@ -2504,29 +2587,42 @@ fn restore_snapshots(
         )
     };
 
+    let mut disk_full_regions = vec![];
+    let mut disk_full_stores: HashSet<u64> = HashSet::default();
     let mut restored = RestoredSnapshots::default();
-    for (h, start, end) in handles {
+    for (shard_id, h, start, end) in handles {
         match runtime.block_on(h).unwrap() {
             Ok(resp) => {
                 success_ranges.insert(start, end);
                 restored.count += 1;
                 restored.restore_bytes += resp.restore_bytes;
             }
+            Err(Error::StoreDiskFull(stores_id)) => {
+                disk_full_regions.push(shard_id);
+                disk_full_stores.extend(stores_id);
+            }
             Err(e) if is_error_retryable(&e) => {
-                info!(
-                    "Keyspace {} request_restore_snapshot error: {:?}, retry in next loop",
-                    keyspace_id, e
-                );
+                info!("{} request_restore_snapshot error: {:?}, retry", tag, e);
             }
             Err(e) => {
-                error!(
-                    "Keyspace {} request_restore_snapshot error: {:?}",
-                    keyspace_id, e
-                );
+                error!("{} request_restore_snapshot error: {:?}", tag, e);
                 return Err(e);
             }
         }
     }
+
+    if !disk_full_regions.is_empty() {
+        let stores = Vec::from_iter(disk_full_stores);
+        warn!("{} request_restore_snapshot error: disk full", tag;
+            "regions" => ?disk_full_regions, "stores" => ?stores);
+        bo.on_error(Error::StoreDiskFull(stores))?;
+
+        if let Err(err) = pd_client.scatter_regions_by_id(disk_full_regions.clone()) {
+            warn!("{} scatter regions failed", tag;
+                "regions" => ?disk_full_regions, "err" => ?err);
+        }
+    }
+
     Ok(restored)
 }
 
@@ -2567,6 +2663,7 @@ async fn request_restore_snapshot(
         let security_mgr = pd_client.get_security_mgr();
         let uri = security_mgr.build_uri(format!("{}/restore-shard", &store.status_address))?;
         let req = Request::post(uri)
+            .header(header::ACCEPT, CONTENT_TYPE_PROTOBUF)
             .body(Body::from(post_data.clone()))
             .unwrap();
         match send_request_to_store(req, &store, security_mgr.as_ref(), timeout / 2).await {
@@ -2574,6 +2671,28 @@ async fn request_restore_snapshot(
                 let resp: RestoreShardResponse = serde_json::from_slice(&resp).unwrap();
                 debug!("{} request_restore_snapshot succeed", tag);
                 return Ok(resp);
+            }
+            Err(Error::HttpPbError(status, mut err)) => {
+                warn!("{} request_restore_snapshot failed: {:?}", tag, err);
+                let sleep_dur = if err.has_disk_full() {
+                    return Err(Error::StoreDiskFull(err.take_disk_full().take_store_id()));
+                } else if err.has_epoch_not_match() {
+                    return Err(Error::RegionVerNotMatch {
+                        expected: shard_ver,
+                        actual: err
+                            .get_epoch_not_match()
+                            .get_current_regions()
+                            .first()
+                            .map_or(0, |r| r.get_region_epoch().get_version()),
+                    });
+                } else if err.has_not_leader() && err.get_not_leader().has_leader() {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_millis(500)
+                };
+                tokio::time::sleep(sleep_dur).await;
+                last_err = Some(Err(Error::HttpPbError(status, err)));
+                continue 'retry;
             }
             Err(e) => {
                 let err_msg = format!(
@@ -2673,9 +2792,43 @@ impl PeerPreprocessor {
     }
 }
 
+struct Backoff {
+    inner: ExponentialBackoff,
+}
+
+impl ops::Deref for Backoff {
+    type Target = ExponentialBackoff;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl ops::DerefMut for Backoff {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Backoff {
+    fn new(bo: ExponentialBackoff) -> Self {
+        Self { inner: bo }
+    }
+
+    fn on_error(&mut self, err: Error) -> Result<usize /* current_attempts */> {
+        match self.next_delay() {
+            Ok(delay) => {
+                thread::sleep(delay);
+                Ok(self.current_attempts())
+            }
+            Err(_) => Err(RetryLimitExceeded(Box::new(err))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::{hash_map::Entry, BTreeMap};
+    use std::collections::BTreeMap;
 
     use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 
@@ -2683,112 +2836,160 @@ mod tests {
 
     #[test]
     fn test_handle_overlapping_shards() {
+        const KEYSPACE_ID: u32 = 42;
         let make_backup_shard = |tuple: (
             u64,  // shard_id
             u64,  // ver
-            &str, // start
-            &str, // end
+            &str, // start, "00" for start of keyspace
+            &str, // end, "99" for end of keyspace
         )|
          -> BackupShard {
             let mut shard = BackupShard::default();
             shard.region_id = tuple.0;
             shard.meta.ver = tuple.1;
-            shard.meta.range = ShardRange::new(tuple.2.as_bytes(), tuple.3.as_bytes());
-            shard.meta.inner_key_off = 0;
+            let outer_start = if tuple.2 == "00" {
+                ApiV2::get_keyspace_prefix_by_id(KEYSPACE_ID)
+            } else {
+                [
+                    ApiV2::get_keyspace_prefix_by_id(KEYSPACE_ID),
+                    tuple.2.as_bytes().to_vec(),
+                ]
+                .concat()
+            };
+            let outer_end = if tuple.3 == "99" {
+                ApiV2::get_keyspace_prefix_by_id(KEYSPACE_ID + 1)
+            } else {
+                [
+                    ApiV2::get_keyspace_prefix_by_id(KEYSPACE_ID),
+                    tuple.3.as_bytes().to_vec(),
+                ]
+                .concat()
+            };
+            shard.meta.range = ShardRange::new(&outer_start, &outer_end);
+            shard.meta.inner_key_off = 4;
             shard
         };
 
-        let get_leader_shards_by_ver =
-            |leader_shards: &mut HashMap<u64, BackupShard>,
+        let add_leader_shard =
+            |leader_shards: &mut HashMap<IdVer, BackupShard>,
              _store_id: u64,
              shards: Vec<(u64, u64, &str, &str)>| {
                 for shard_tuple in shards {
                     let shard = make_backup_shard(shard_tuple);
-                    match leader_shards.entry(shard.region_id) {
-                        Entry::Occupied(mut o) => {
-                            if shard.ver() > o.get().ver() {
-                                o.insert(shard);
-                            }
-                        }
-                        Entry::Vacant(v) => {
-                            v.insert(shard);
-                        }
-                    }
+                    leader_shards.insert(shard.id_ver(), shard);
                 }
             };
 
         let cases = vec![
             (
-                vec![(1, 100, "00", "01")], // store0: Vec<(shard_id, ver, start, end)>
-                vec![(1, 100, "00", "01")], // store1
-                vec![(1, 100, "00", "01")], // store2
+                vec![(1, 100, "00", "99")], // Vec<(shard_id, ver, start, end)>
+                vec![(1, 100, "00", "99")],
+                vec![(1, 100, "00", "99")],
                 // expected: Option<Vec<(shard_id, ver, start,end)>>, None means error
-                Some(vec![(1, 100, "00", "01")]),
+                Some(vec![(1, 100, "00", "99")]),
             ),
             (
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                Some(vec![(1, 100, "00", "01"), (2, 200, "01", "02")]),
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                Some(vec![(1, 100, "00", "01"), (2, 200, "01", "99")]),
             ),
             (
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                vec![(1, 201, "00", "02")], // merge from shard 1 & 2
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                Some(vec![(1, 201, "00", "02")]),
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                vec![(1, 201, "00", "99")], // merge from shard 1 & 2
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                Some(vec![(1, 201, "00", "99")]),
             ),
             (
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                vec![(2, 201, "00", "02")], // merge from shard 1 & 2
-                vec![(1, 100, "00", "01"), (2, 200, "01", "02")],
-                Some(vec![(2, 201, "00", "02")]),
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                vec![(2, 201, "00", "99")], // merge from shard 1 & 2
+                vec![(1, 100, "00", "01"), (2, 200, "01", "99")],
+                Some(vec![(2, 201, "00", "99")]),
             ),
             (
-                vec![(1, 101, "00", "01"), (2, 101, "01", "02")], // split from shard 1
-                vec![(1, 100, "00", "02")],
-                vec![(1, 100, "00", "02")],
-                Some(vec![(1, 101, "00", "01"), (2, 101, "01", "02")]),
+                vec![(1, 101, "00", "01"), (2, 101, "01", "99")], // split from shard 1
+                vec![(1, 100, "00", "99")],
+                vec![(1, 100, "00", "99")],
+                Some(vec![(1, 101, "00", "01"), (2, 101, "01", "99")]),
             ),
             (
                 vec![(2, 100, "01", "02")],
                 vec![(1, 100, "00", "01")],
-                vec![(3, 100, "02", "03")],
+                vec![(3, 100, "02", "99")],
                 Some(vec![
                     (1, 100, "00", "01"),
                     (2, 100, "01", "02"),
-                    (3, 100, "02", "03"),
+                    (3, 100, "02", "99"),
                 ]),
             ),
             (
-                vec![(1, 100, "00", "01")],
-                vec![(2, 100, "00", "02")], // error as overlapping with same ver
-                vec![(1, 100, "00", "01")],
-                None,
+                vec![(1, 100, "00", "99")],
+                vec![(1, 100, "00", "99")],
+                vec![(1, 101, "01", "99")],
+                Some(vec![(1, 100, "00", "99")]),
+            ),
+            (
+                vec![(1, 100, "00", "99")],
+                vec![(1, 100, "00", "99")],
+                vec![(1, 101, "00", "01")],
+                Some(vec![(1, 100, "00", "99")]),
+            ),
+            (
+                vec![(1, 102, "00", "01"), (2, 102, "01", "02")],
+                vec![(1, 101, "00", "01")], // "01" is visited.
+                vec![(1, 100, "00", "99")],
+                Some(vec![(1, 100, "00", "99")]),
+            ),
+            (
+                vec![(1, 100, "00", "01"), (2, 100, "01", "99")],
+                vec![(2, 101, "01", "02"), (3, 101, "02", "03")],
+                vec![(2, 101, "01", "02"), (3, 102, "02", "04")],
+                Some(vec![(1, 100, "00", "01"), (2, 100, "01", "99")]),
             ),
             #[cfg_attr(rustfmt, rustfmt_skip)]
             (
-                vec![(1, 100, "00", "01"), (2, 100, "01", "03"), (3, 100, "03", "04"), (4, 100, "04", "06"), (7, 102, "06", "07"), (8, 102, "07", "08")],
-                vec![(1, 100, "00", "01"), (2, 101, "01", "02"), (3, 101, "02", "04"), (4, 100, "04", "05"), (5, 100, "05", "08")],
+                vec![(1, 100, "00", "01"), (2, 100, "01", "03"), (3, 100, "03", "04"), (4, 100, "04", "06"), (7, 102, "06", "07"), (8, 102, "07", "99")],
+                vec![(1, 100, "00", "01"), (2, 101, "01", "02"), (3, 101, "02", "04"), (4, 100, "04", "05"), (5, 100, "05", "99")],
                 vec![(1, 100, "00", "01"), (2, 100, "01", "03"), (3, 100, "03", "04"), (5, 101, "04", "06"), (6, 101, "06", "07")],
                 Some(vec![
-                    (1, 100, "00", "01"), (2, 101, "01", "02"), (3, 101, "02", "04"), (5, 101, "04", "06"), (7, 102, "06", "07"), (8, 102, "07", "08"),
+                    (1, 100, "00", "01"), (2, 101, "01", "02"), (3, 101, "02", "04"), (5, 101, "04", "06"), (7, 102, "06", "07"), (8, 102, "07", "99"),
                 ]),
+            ),
+            (
+                vec![(1, 100, "00", "01")],
+                vec![(2, 100, "00", "02")],
+                vec![(1, 100, "00", "01")],
+                None,
+            ),
+            (
+                vec![(1, 100, "01", "02")],
+                vec![(1, 100, "01", "02")],
+                vec![(1, 100, "01", "02")],
+                None,
+            ),
+            (
+                vec![(1, 100, "01", "99")],
+                vec![(1, 100, "01", "99")],
+                vec![(1, 100, "01", "99")],
+                None,
             ),
         ];
 
         for (case_idx, (store0, store1, store2, expected)) in cases.into_iter().enumerate() {
             let mut leader_shards = HashMap::default();
-            get_leader_shards_by_ver(&mut leader_shards, 0, store0);
-            get_leader_shards_by_ver(&mut leader_shards, 1, store1);
-            get_leader_shards_by_ver(&mut leader_shards, 2, store2);
+            add_leader_shard(&mut leader_shards, 0, store0);
+            add_leader_shard(&mut leader_shards, 1, store1);
+            add_leader_shard(&mut leader_shards, 2, store2);
 
-            let res = BackupCluster::handle_overlapping_shards(&mut leader_shards);
+            let res = BackupCluster::handle_overlapping_shards("", leader_shards);
             if let Some(expected) = expected {
                 let expected_sorted_shards: Vec<u64> = expected.iter().map(|x| x.0).collect();
                 let expected_leader_shards: HashMap<u64, BackupShard> =
                     HashMap::from_iter(expected.into_iter().map(|x| (x.0, make_backup_shard(x))));
 
-                let sorted_shards = res.unwrap();
+                let (leader_shards, sorted_shards) = res.unwrap_or_else(|err| {
+                    panic!("case: {}: {:?}", case_idx, err);
+                });
                 assert_eq!(
                     BTreeMap::from_iter(leader_shards.into_iter()),
                     BTreeMap::from_iter(expected_leader_shards.into_iter()),

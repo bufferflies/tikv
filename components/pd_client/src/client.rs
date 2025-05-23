@@ -1438,6 +1438,21 @@ impl PdClient for RpcClient {
         Ok(KeyspaceEncryptionConfig::default())
     }
 
+    fn load_keyspace(&self, keyspace_name: String) -> Result<kvproto::keyspacepb::KeyspaceMeta> {
+        let _timer = PD_REQUEST_HISTOGRAM_VEC
+            .with_label_values(&["load_keyspace"])
+            .start_coarse_timer();
+        let mut req = keyspacepb::LoadKeyspaceRequest::default();
+        req.set_header(self.header());
+        req.set_name(keyspace_name);
+        let mut resp = sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, option| {
+            let keyspace_client = KeyspaceClient::new(client.client.channel().clone());
+            keyspace_client.load_keyspace_opt(&req, option)
+        })?;
+        check_resp_header(resp.get_header())?;
+        Ok(resp.take_keyspace())
+    }
+
     /// Get buckets stat by region_id.
     ///
     /// Note: `BucketStat.meta.sizes` is empty.

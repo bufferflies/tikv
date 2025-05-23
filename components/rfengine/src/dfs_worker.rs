@@ -14,7 +14,10 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
 use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
 use slog_global::*;
-use tikv_util::mpsc::{Receiver, Sender};
+use tikv_util::{
+    errors::IoError,
+    mpsc::{Receiver, Sender},
+};
 
 use crate::{
     compact_worker::CompactTask, compress_lz4, decompress_lz4, get_integral_wal_chunks,
@@ -386,7 +389,7 @@ impl ObjectStorageWorker {
         if self.need_compression() {
             let _ = compress_lz4(&self.buf, &mut chunk).map_err(|err| {
                 error!("{} take chunk data: compress_lz4 failed", self.get_engine_id(); "err" => ?err);
-                err
+                Error::Io(IoError::new(err, "compress_chunk".to_string()))
             })?;
         } else {
             chunk.extend_from_slice(self.buf.as_slice());

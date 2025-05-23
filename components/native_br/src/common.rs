@@ -1,7 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 use std::{
     cell::Cell,
-    collections::HashMap,
     fmt::{self, Formatter},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -13,6 +12,7 @@ use std::{
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes};
 use chrono::{NaiveTime, Utc};
+use collections::HashMap;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
@@ -31,12 +31,14 @@ use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::store::state::RaftState;
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, warn};
-use tikv_util::{box_err, codec::bytes::decode_bytes, debug, info, time::Instant, Either};
+use tikv_util::{
+    box_err, codec::bytes::decode_bytes, debug, http::HeaderExt, info, time::Instant, Either,
+};
 
 use crate::{
     archive::{get_archived_wal_addresses, get_archived_wals_from_addresses, StoreMeta},
     backup::IncrementalBackupFile,
-    error::{Error, Result},
+    error::{Error, HttpRequestError, Result},
     metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
 };
 
@@ -99,37 +101,51 @@ pub async fn send_request_to_store(
     let uri_str = format!("{}", req.uri());
     let resp = tokio::time::timeout(timeout, client.request(req))
         .await
-        .map_err(|_| Error::Timeout(format!("request {uri_str} timeout"), timeout.as_secs()))?;
+        .map_err(|_| HttpRequestError::Timeout(format!("send request to {uri_str}"), timeout))?;
     if let Err(err) = resp {
         error!(
             "send request to store failed, store {}, err {:?}, uri {:?}",
             store.id, err, uri_str
         );
-        return Err(err.into());
+        return Err(HttpRequestError::Http(uri_str, err).into());
     }
     let resp = resp.unwrap();
+    let is_pb_resp = resp.headers().is_content_type_protobuf();
     let status = resp.status();
     let body = tokio::time::timeout(timeout, hyper::body::to_bytes(resp.into_body()))
         .await
-        .map_err(|_| {
-            Error::Timeout(
-                format!("read response from {uri_str} timeout"),
-                timeout.as_secs(),
-            )
-        })?;
+        .map_err(|_| HttpRequestError::Timeout(format!("read response from {uri_str}"), timeout))?;
     if !status.is_success() {
-        let err_msg = body
-            .map(|x| x.to_str_lossy().to_string())
-            .unwrap_or_default();
-        error!(
-            "send request to store failed, store {}, status {:?}, err {}, uri {:?}",
-            store.id, status, err_msg, uri_str
-        );
-        return Err(Error::HttpError(status, err_msg));
+        let body = body.unwrap_or_default();
+        if !is_pb_resp {
+            let err_msg = body.to_str_lossy().to_string();
+            error!(
+                "send request to store failed, store {}, status {:?}, err {}, uri {:?}",
+                store.id, status, err_msg, uri_str
+            );
+            return Err(Error::HttpError(status, err_msg));
+        } else {
+            let mut err = kvproto::errorpb::Error::default();
+            err.merge_from_bytes(body.as_ref()).map_err(|e| -> Error {
+                debug_assert!(false, "body: {:?}: {:?}", body, e);
+                box_err!("invalid errorpb::Error: {:?}", e)
+            })?;
+            error!(
+                "send request to store failed, store {}, status {:?}, err {:?}, uri {:?}",
+                store.id, status, err, uri_str
+            );
+            return Err(Error::HttpPbError(status, err));
+        }
     }
     match body {
         Ok(body) => Ok(body),
-        Err(e) => Err(box_err!("{:?} {:?}", store, e)),
+        Err(err) => {
+            error!(
+                "convert response failed, store {}, err {:?}, uri {:?}",
+                store.id, err, uri_str,
+            );
+            Err(HttpRequestError::Http(uri_str, err).into())
+        }
     }
 }
 
@@ -143,8 +159,7 @@ pub async fn send_request_to_store_with_retry<F>(
 where
     F: Fn() -> Request<Body>,
 {
-    let is_error_retryable =
-        |err: &Error| matches!(err, Error::HttpRequestError(_) | Error::Timeout(..));
+    let is_error_retryable = |err: &Error| matches!(err, Error::HttpRequestError(_));
     let mut last_err: Option<Error> = None;
     let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < timeout {

@@ -1,15 +1,11 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use bstr::ByteSlice;
 use bytes::{Buf, BufMut, Bytes};
 use chrono::NaiveDate;
+use collections::{HashMap, HashSet};
 use engine_traits::GetObjectOptions;
 use kvengine::dfs::{self, DFSConfig, Dfs, FileType, Options, S3Fs, STORAGE_CLASS_GLACIER_IR};
 use pd_client::PdClient;
@@ -236,6 +232,7 @@ pub struct ArchiveConfig {
     pub store_concurrency: usize,
     pub skip_no_meta_days: usize,
     pub skip_shards: Option<HashSet<u64>>,
+    pub skip_keyspace_names: Option<HashSet<String>>,
     pub dry_run: bool,
     pub fetch_wal_timeout: Duration,
 }
@@ -256,6 +253,7 @@ impl ArchiveConfig {
             store_concurrency: RESTORE_RFENGINE_CONCURRENCY,
             skip_no_meta_days: 0,
             skip_shards: None,
+            skip_keyspace_names: None,
             dry_run: true,
             fetch_wal_timeout: Duration::from_secs(600), // 10 minutes
         }
@@ -295,6 +293,47 @@ pub fn archive_cluster_backup(
     end_archive_date: NaiveDate,
 ) -> Result<()> {
     let cluster_id = pd_client.get_cluster_id()?;
+
+    let skip_keyspace_ids = if let Some(skip_keyspace_names) = &config.skip_keyspace_names {
+        let mut skip_keyspace_ids: HashSet<u32> = HashSet::default();
+        for keyspace_name in skip_keyspace_names.iter() {
+            match pd_client.load_keyspace(keyspace_name.clone()) {
+                Err(e) if pd_client::grpc_error_is_unimplemented(&e) => {
+                    warn!(
+                        "load_keyspace is unimplemented";
+                        "err" => ?e,
+                    );
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        "get keyspace meta failed";
+                        "keyspace_name" => keyspace_name,
+                        "err" => ?e,
+                    );
+                    return Err(Error::PdError(e));
+                }
+                Ok(keyspace_meta) => {
+                    if keyspace_meta.id > 0 {
+                        info!(
+                            "get keyspace id by name";
+                            "keyspace_name" => keyspace_name,
+                            "keyspace_id" => keyspace_meta.id,
+                        );
+                        skip_keyspace_ids.insert(keyspace_meta.id);
+                    }
+                }
+            }
+        }
+        if !skip_keyspace_ids.is_empty() {
+            Some(skip_keyspace_ids)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let mut backup_date = match get_latest_archive_date(&s3fs, &begin_archive_date) {
         Ok(latest_archive_date) => latest_archive_date
             .checked_add_days(chrono::Days::new(1))
@@ -332,6 +371,7 @@ pub fn archive_cluster_backup(
             cluster_id,
             path.clone(),
             backup_date,
+            skip_keyspace_ids.clone(),
             old,
         )?;
         old = Some(new);
@@ -356,6 +396,7 @@ fn archive_backup_files(
     cluster_id: u64,
     path: PathBuf,
     backup_date: NaiveDate,
+    skip_keyspace_ids: Option<HashSet<u32>>,
     old: Option<ArchiveBackup>,
 ) -> Result<ArchiveBackup> {
     let runtime = s3fs.get_runtime();
@@ -378,6 +419,7 @@ fn archive_backup_files(
         file_name,
         cluster_backup,
         config.skip_shards.clone(),
+        skip_keyspace_ids,
         path,
         config.security.clone(),
     )?;
@@ -500,6 +542,7 @@ fn get_cluster_backup_files(
     backup_name: String,
     cluster_backup: ClusterBackupMeta,
     skip_shards: Option<HashSet<u64>>,
+    skip_keyspace_ids: Option<HashSet<u32>>,
     path: PathBuf,
     security_conf: SecurityConfig,
 ) -> Result<HashMap<u64, FileType>> {
@@ -535,7 +578,7 @@ fn get_cluster_backup_files(
     )?;
     let all_files = HashMap::from_iter(
         cluster
-            .get_all_shard_files(skip_shards)
+            .get_all_shard_files(skip_shards, skip_keyspace_ids)
             .into_iter()
             .map(|f| (f.id, f.ftype)),
     );
@@ -1363,7 +1406,7 @@ impl ArchiveReader {
         }
         let mut meta_archive_address: Option<ArchiveAddress> = None;
         let mut store_metas: Vec<StoreMeta> = Vec::new();
-        let mut archive_addresses: HashMap<u64, ArchiveAddress> = HashMap::new();
+        let mut archive_addresses: HashMap<u64, ArchiveAddress> = HashMap::default();
         for index_key in index_keys {
             let date = parse_index_date(&index_key.clone());
             let (archive_index, _) = get_archive_index(&s3fs, date.clone())?;

@@ -20,7 +20,7 @@ use pd_client::{
 };
 use security::SecurityManager;
 use slog_global::{error, info};
-use tikv_util::config::ReadableSize;
+use tikv_util::{box_try, config::ReadableSize};
 
 use crate::{
     backup::show_backup_summary,
@@ -112,6 +112,8 @@ pub struct RestoreKeyspaceArgs {
     #[clap(long)]
     pub truncate_ts: Option<u64>,
     /// The local working path for temporary files during restore.
+    ///
+    /// Use current path if not specified.
     #[clap(long)]
     pub working_path: Option<String>,
     /// PD endpoints, use `,` to separate multiple PDs.
@@ -199,6 +201,15 @@ fn execute_restore_keyspace_impl(
     args: &RestoreKeyspaceArgs,
     config: restore::RestoreConfig,
 ) -> native_br::Result<RestoredKeyspace> {
+    let working_path = match &args.working_path {
+        Some(p) => {
+            let path = PathBuf::from(p);
+            box_try!(std::fs::create_dir_all(&path));
+            path
+        }
+        None => box_try!(std::env::current_dir()),
+    };
+
     let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_config = config.dfs.clone();
     let s3fs = S3Fs::new(
@@ -225,7 +236,7 @@ fn execute_restore_keyspace_impl(
         &args.keyspace_name,
         target_keyspace_name,
         &args.name,
-        args.working_path.as_deref(),
+        Some(working_path),
         Arc::new(s3fs),
         pd_client,
         &runtime,
@@ -269,7 +280,6 @@ fn get_restore_tikv_config_from_args(args: &RestoreTikvArgs) -> RestoreConfig {
     config.wal_target_size = args.wal_target_size;
     config.dfs.override_from_env();
     config.security.override_from_env();
-    config.skip_resolve_lock = false;
     config
 }
 
@@ -294,7 +304,6 @@ pub fn get_restore_keyspace_config_from_args(args: &RestoreKeyspaceArgs) -> Rest
     }
     config.dfs.override_from_env();
     config.security.override_from_env();
-    config.skip_resolve_lock = false;
     config
 }
 

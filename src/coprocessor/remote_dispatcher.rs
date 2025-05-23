@@ -12,7 +12,12 @@ use security::SecurityManager;
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::MemoryTraceGuard;
 use tikv_kv::Statistics;
-use tikv_util::{backoff::ExponentialBackoff, deadline::Deadline, retry::sleep_async};
+use tikv_util::{
+    backoff::ExponentialBackoff,
+    deadline::Deadline,
+    http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
+    retry::sleep_async,
+};
 use tipb::DagRequest;
 use txn_types::{TimeStamp, TsSet};
 
@@ -33,8 +38,6 @@ pub const REMOTE_COP_FORMAT_V1: u32 = 1;
 const RETRY_MAX_ATTEMPTS: usize = 10;
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
-
-const CONTENT_TYPE_PROTOBUF: &str = "application/protobuf";
 
 #[derive(Default, Debug)]
 pub struct RemoteRequest {
@@ -66,10 +69,7 @@ pub async fn remote_request(
                     .request(req)
                     .await
                     .map_err(|e| Error::RemoteNetwork(e.to_string()))?;
-                let headers = response.headers();
-                let is_pb_resp = headers
-                    .get(header::CONTENT_TYPE)
-                    .is_some_and(|x| x == CONTENT_TYPE_PROTOBUF);
+                let is_pb_resp = response.headers().is_content_type_protobuf();
                 let success = response.status().is_success();
                 let body = hyper::body::to_bytes(response.into_body())
                     .await

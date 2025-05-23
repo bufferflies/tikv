@@ -262,9 +262,30 @@ impl RestfulClient {
         Req: serde::ser::Serialize,
         Resp: std::fmt::Debug + for<'a> serde::de::Deserialize<'a>,
     {
+        self.post_or_put(Method::POST, path, data).await
+    }
+
+    pub async fn put<Req, Resp>(&self, path: impl AsRef<str>, data: &Req) -> Result<Resp>
+    where
+        Req: serde::ser::Serialize,
+        Resp: std::fmt::Debug + for<'a> serde::de::Deserialize<'a>,
+    {
+        self.post_or_put(Method::PUT, path, data).await
+    }
+
+    async fn post_or_put<Req, Resp>(
+        &self,
+        method: Method,
+        path: impl AsRef<str>,
+        data: &Req,
+    ) -> Result<Resp>
+    where
+        Req: serde::ser::Serialize,
+        Resp: std::fmt::Debug + for<'a> serde::de::Deserialize<'a>,
+    {
         let path = path.as_ref();
         let body_data = Bytes::from(serde_json::to_vec(data)?);
-        match self.request(path, Method::POST, Some(body_data)).await {
+        match self.request(path, method, Some(body_data)).await {
             Ok(resp) => {
                 let t: Resp = serde_json::from_slice(&resp)?;
                 debug!("{}: post", self.tag; "path" => path, "resp" => ?t);

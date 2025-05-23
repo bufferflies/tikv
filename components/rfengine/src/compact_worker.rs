@@ -19,12 +19,10 @@ use std::{
     time::Duration,
 };
 
-use api_version::ApiV2;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
 use kvengine::dfs::S3Fs;
-use kvproto::raft_serverpb::RegionLocalState;
 use protobuf::Message;
 use quick_cache::unsync::Cache as QuickCache;
 use rfenginepb::{
@@ -516,18 +514,8 @@ impl CompactWorker {
     }
 
     fn get_keyspace_id_from_peer(store_id: u64, peer_meta: &rfenginepb::PeerMeta) -> u32 {
-        match peer_meta
-            .get_states()
-            .iter()
-            .rev() // the states are got from BTreeMap iter, so the last one is latest.
-            .find(|s| s.get_key().starts_with(REGION_META_KEY_PREFIX))
-        {
-            Some(state) => {
-                let mut local_state = RegionLocalState::default();
-                local_state.merge_from_bytes(state.get_value()).unwrap();
-                ApiV2::get_u32_keyspace_id_by_key(local_state.get_region().get_start_key())
-                    .unwrap_or_default()
-            }
+        match utils::get_keyspace_id_from_peer(peer_meta) {
+            Some(keyspace_id) => keyspace_id,
             None => {
                 if peer_meta.peer_id != 0 || peer_meta.region_id != 0 {
                     warn!(

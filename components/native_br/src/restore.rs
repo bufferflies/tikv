@@ -261,6 +261,8 @@ fn setup_raft_engine(
             store_id,
         )?;
         rfengine::lightweight_restore(
+            store_id,
+            None,
             Path::new(&conf.raft_store.raftdb_path),
             rlog_files.snap_epoch,
             rlog_files.snap_meta,
@@ -475,7 +477,6 @@ pub struct RestoreConfig {
     pub pd: pd_client::Config,
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
-    pub skip_resolve_lock: bool,
     pub wal_target_size: ReadableSize,
     pub new_store_id_delta: u64,
 
@@ -502,6 +503,9 @@ pub struct RestoreConfig {
     pub timeout_pd_control: ReadableDuration,
     /// Concurrency on number of TiKV stores when perform restoration.
     pub store_concurrency: usize,
+    /// Coarse split regions when the target region cover more than the factor *
+    /// number of regions in backup.
+    pub coarse_split_regions_factor: usize,
 }
 
 impl Default for RestoreConfig {
@@ -510,7 +514,6 @@ impl Default for RestoreConfig {
             pd: Default::default(),
             security: Default::default(),
             dfs: Default::default(),
-            skip_resolve_lock: false,
             wal_target_size: DEFAULT_WAL_TARGET_SIZE,
             new_store_id_delta: 0,
             timeout_wait_flush: DEFAULT_TIMEOUT_WAIT_FLUSH,
@@ -522,6 +525,7 @@ impl Default for RestoreConfig {
             tolerate_err: 0,
             strict_tolerate: false,
             store_concurrency: RESTORE_RFENGINE_CONCURRENCY,
+            coarse_split_regions_factor: 64, // It's about 32 GiB when region size is 500 MiB.
         }
     }
 }
