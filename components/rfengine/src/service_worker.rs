@@ -12,6 +12,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use kvengine::dfs::S3Fs;
 use rfenginepb::StoreBackupMeta;
 use slog_global::{error, info};
 use tikv_util::{
@@ -98,14 +99,10 @@ impl ServiceWorker {
         rx: Receiver<ServiceTask>,
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
-        lightweight_backup_config: Option<LightweightBackupConfig>,
+        lightweight_backup: Option<(LightweightBackupConfig, Arc<S3Fs>)>,
         healthy: Healthy,
         compact_wal_sync_concurrency: usize,
     ) -> Self {
-        let s3fs = lightweight_backup_config.as_ref().map(|cfg| {
-            let s3fs = kvengine::dfs::S3Fs::new_from_config(cfg.dfs_config.clone());
-            Arc::new(s3fs)
-        });
         let engine_id = manifest.engine_id.clone();
         let (compact_worker_tx, compact_rx) = tikv_util::mpsc::unbounded();
         let mut compact_worker = CompactWorker::new(
@@ -113,8 +110,7 @@ impl ServiceWorker {
             compact_rx,
             manifest,
             compacted_epoch.clone(),
-            lightweight_backup_config.as_ref(),
-            s3fs.clone(),
+            lightweight_backup.as_ref(),
             healthy.clone(),
             compact_wal_sync_concurrency,
         );
@@ -128,10 +124,11 @@ impl ServiceWorker {
         };
 
         let service_worker_epoch = Arc::new(AtomicU32::new(epoch_id));
-        let dfs_worker_handle = if let Some(cfg) = lightweight_backup_config {
+        let dfs_worker_handle = if let Some((cfg, s3fs)) = lightweight_backup {
             let (dfs_worker_tx, dfs_worker_rx) = tikv_util::mpsc::unbounded();
             let mut dfs_worker = ObjectStorageWorker::new(
                 cfg,
+                s3fs,
                 epoch_id,
                 engine_id.clone(),
                 healthy.clone(),

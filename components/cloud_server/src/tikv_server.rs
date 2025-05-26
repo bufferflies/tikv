@@ -992,23 +992,23 @@ impl TikvServer {
 }
 
 impl TikvServer {
-    // This method is also used by cse-ctl for cluster restore.
-    pub fn init_raft_engine(conf: &TikvConfig) -> rfengine::Result<RfEngine> {
+    // This method is also used for restore.
+    // NOTE: Pass `Some(dfs)` for usage of TiKV servers ONLY. Otherwise, it would
+    // corrupt the WAL chunks in DFS.
+    pub fn init_raft_engine(
+        conf: &TikvConfig,
+        dfs: Option<Arc<dyn Dfs>>,
+    ) -> rfengine::Result<RfEngine> {
         let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
         let data_dir = Path::new(&conf.storage.data_dir);
-        RfEngine::open(
-            raft_db_path,
-            &conf.rfengine,
-            Some(data_dir),
-            Some(conf.dfs.clone()),
-        )
+        RfEngine::open(raft_db_path, &conf.rfengine, Some(data_dir), dfs)
     }
 
     pub fn kv_engine_path(conf: &TikvConfig) -> PathBuf {
         PathBuf::from(conf.storage.data_dir.clone()).join(Path::new("db"))
     }
 
-    // This method is also used by cse-ctl for cluster restore.
+    // This method is also used for restore.
     pub fn init_kv_engine(
         pd: Arc<dyn PdClient>,
         conf: &TikvConfig,
@@ -1153,7 +1153,7 @@ impl TikvServer {
             .filter(|(_, count)| *count > 1)
             .map(|(id, _)| id)
             .collect::<Vec<_>>();
-        let rf_engine = Self::init_raft_engine(conf).unwrap();
+        let rf_engine = Self::init_raft_engine(conf, Some(dfs.clone())).unwrap();
         let (black_list_tables, black_list_keyspaces) = Self::escalate_blacklist_level(
             &rf_engine,
             &panic_region_ids,

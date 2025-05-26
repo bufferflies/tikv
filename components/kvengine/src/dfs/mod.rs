@@ -65,6 +65,11 @@ pub trait Dfs: Any + Sync + Send {
 
     /// get_runtime gets the tokio runtime for the DFS.
     fn get_runtime(&self) -> &tokio::runtime::Runtime;
+
+    /// get_s3fs returns the S3Fs if the DFS is backed by S3.
+    fn get_s3fs(self: Arc<Self>) -> Option<Arc<S3Fs>> {
+        None
+    }
 }
 
 const REMOVE_DELAY: Duration = Duration::from_secs(90);

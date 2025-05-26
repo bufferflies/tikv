@@ -274,7 +274,7 @@ fn setup_raft_engine(
         None
     };
 
-    let rf_engine = TikvServer::init_raft_engine(conf)?;
+    let rf_engine = TikvServer::init_raft_engine(conf, None)?;
     rf_engine.set_engine_id(store_id);
 
     if lightweight {

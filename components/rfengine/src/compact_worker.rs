@@ -98,19 +98,19 @@ impl CompactWorker {
         task_rx: Receiver<CompactTask>,
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
-        lightweight_backup_cfg: Option<&LightweightBackupConfig>,
-        s3fs: Option<Arc<S3Fs>>,
+        lightweight_backup: Option<&(LightweightBackupConfig, Arc<S3Fs>)>,
         healthy: Healthy,
         sync_concurrency: usize,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
-        let (rlog_cache, compress_type) = if let Some(config) = lightweight_backup_cfg {
+        let (rlog_cache, compress_type, s3fs) = if let Some((config, s3fs)) = lightweight_backup {
             (
                 RlogCache::new(config.rlog_cache_capacity, config.rlog_cache_size_threshold),
                 config.rlog_compression_type,
+                Some(s3fs.clone()),
             )
         } else {
-            (RlogCache::none(), CompressionType::NoCompression)
+            (RlogCache::none(), CompressionType::NoCompression, None)
         };
 
         Self {
@@ -1048,7 +1048,6 @@ mod tests {
             manifest,
             AtomicU32::new(0).into(),
             None,
-            None,
             dfs_worker::Healthy::default(),
             1,
         );
@@ -1193,7 +1192,6 @@ mod tests {
             rx,
             manifest,
             AtomicU32::new(0).into(),
-            None,
             None,
             dfs_worker::Healthy::default(),
             1,

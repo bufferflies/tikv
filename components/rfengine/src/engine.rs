@@ -20,7 +20,7 @@ use bytes::{Buf, Bytes};
 use dashmap::mapref::one::Ref;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::open_direct_file;
-use kvengine::dfs::DFSConfig;
+use kvengine::dfs::{Dfs, S3Fs};
 use kvproto::raft_serverpb::{self, StoreIdent};
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
@@ -110,13 +110,15 @@ impl Deref for RfEngine {
 }
 
 impl RfEngine {
+    // NOTE: Pass `Some(dfs)` for usage of TiKV servers ONLY. Otherwise, it would
+    // corrupt the WAL chunks in DFS.
     pub fn open(
         dir: &Path,
         cfg: &Config,
         data_dir: Option<&Path>, // for check panic mark file exists
-        dfs_conf: Option<DFSConfig>,
+        dfs: Option<Arc<dyn Dfs>>,
     ) -> Result<Self> {
-        let core = RfEngineCore::open(dir, cfg, data_dir, dfs_conf)?;
+        let core = RfEngineCore::open(dir, cfg, data_dir, dfs)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -156,7 +158,7 @@ impl RfEngineCore {
         dir: &Path,
         cfg: &Config,
         data_dir: Option<&Path>,
-        dfs_conf: Option<DFSConfig>,
+        dfs: Option<Arc<dyn Dfs>>,
     ) -> Result<Self> {
         let wal_size = cfg.target_file_size.0 as usize;
         let compression_threshold = cfg.batch_compression_threshold.0 as usize;
@@ -220,10 +222,16 @@ impl RfEngineCore {
                 None
             };
 
-            let lightweight_backup_config: Option<LightweightBackupConfig> = if cfg
+            let lightweight_backup_args: Option<(LightweightBackupConfig, Arc<S3Fs>)> = if cfg
                 .lightweight_backup
+                && dfs.is_some()
             {
-                if data_dir.is_some() && panic_mark_dfs_worker_file_exists(data_dir.unwrap()) {
+                let s3fs = dfs.unwrap().get_s3fs();
+                if s3fs.is_none() {
+                    warn!("lightweight backup is enabled, but dfs is not configured for S3");
+                    None
+                } else if data_dir.is_some() && panic_mark_dfs_worker_file_exists(data_dir.unwrap())
+                {
                     // If panic_mark_dfs_worker_file exists, skip init dfs worker thread and mark
                     // dfs worker unhealthy.
                     dfs_worker_healthy.set_unhealthy(u32::MAX, "open");
@@ -232,16 +240,16 @@ impl RfEngineCore {
                     );
                     None
                 } else {
-                    Some(LightweightBackupConfig::new(
+                    let cfg = LightweightBackupConfig::new(
                         dir.to_owned(),
                         cfg.wal_chunk_target_file_size.0 as usize,
                         CompressionType::Lz4Compression,
                         CompressionType::Lz4Compression,
-                        dfs_conf.unwrap(),
                         cfg.rlog_cache_capacity.0 as usize,
                         cfg.rlog_cache_size_threshold.0 as usize,
                         cfg.dfs_worker_memory_limit.as_memory_size() as usize,
-                    ))
+                    );
+                    Some((cfg, s3fs.unwrap()))
                 }
             } else {
                 None
@@ -254,7 +262,7 @@ impl RfEngineCore {
                 service_rx,
                 manifest,
                 compacted_epoch.clone(),
-                lightweight_backup_config,
+                lightweight_backup_args,
                 dfs_worker_healthy,
                 cfg.compact_wal_sync_concurrency,
             );

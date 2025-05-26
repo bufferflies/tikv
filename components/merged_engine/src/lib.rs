@@ -480,12 +480,7 @@ impl MergedEngine {
         )?;
         let raft_db_path = Path::new(&store_config.raft_store.raftdb_path);
         let data_dir = Path::new(&store_config.storage.data_dir);
-        let rf_engine = RfEngine::open(
-            raft_db_path,
-            &store_config.rfengine,
-            Some(data_dir),
-            Some(store_config.dfs.clone()),
-        )?;
+        let rf_engine = RfEngine::open(raft_db_path, &store_config.rfengine, Some(data_dir), None)?;
         let ctx = ReplayWalLogsContext {
             pd_client: ctx.pd.clone(),
             dfs: ctx.fs.clone(),

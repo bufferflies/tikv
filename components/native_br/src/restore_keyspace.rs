@@ -871,7 +871,7 @@ impl BackupCluster {
         )
         .map_err(|x| Error::RfEngine(x))?;
 
-        let rf_engine = TikvServer::init_raft_engine(conf)?;
+        let rf_engine = TikvServer::init_raft_engine(conf, None)?;
 
         // When archiving, the dfs should have complete wal chunks.
         let complete_wal_chunks = archiving;
@@ -902,7 +902,7 @@ impl BackupCluster {
             Path::new(&conf.raft_store.raftdb_path),
             None, // TODO: pass `Some(keyspace_id)` in.
         );
-        let rf_engine = TikvServer::init_raft_engine(conf)?;
+        let rf_engine = TikvServer::init_raft_engine(conf, None)?;
         Ok(rf_engine)
     }
 

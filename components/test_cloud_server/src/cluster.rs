@@ -207,15 +207,15 @@ impl ServerCluster {
         self.confs.insert(node_id, config.clone());
 
         std::fs::create_dir_all(&config.storage.data_dir).unwrap();
-        let dfs = self
-            .dfs
-            .get_or_insert_with(|| Self::prepare_dfs(&config, pd_client.clone()));
+        // Use new DFS instance for each node to be the same as production env.
+        let dfs = Self::prepare_dfs(&config, pd_client.clone());
+        let _ = self.dfs.get_or_insert_with(|| dfs.clone());
         let mut server = TikvServer::setup(
             config,
             self.security_mgr.clone(),
             self.env.clone(),
             pd_client,
-            dfs.clone(),
+            dfs,
         );
         server.run();
         let store_id = server.get_store_id();

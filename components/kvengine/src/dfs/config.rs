@@ -85,7 +85,7 @@ impl Config {
 const MAX_RETRY_COUNT: u32 = 9;
 const RETRY_SLEEP_INTERVAL: Duration = Duration::from_millis(500);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(300);
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]

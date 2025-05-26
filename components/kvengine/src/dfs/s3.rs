@@ -1074,6 +1074,10 @@ impl Dfs for S3Fs {
     fn get_runtime(&self) -> &Runtime {
         self.runtime.as_ref().unwrap()
     }
+
+    fn get_s3fs(self: Arc<Self>) -> Option<Arc<Self>> {
+        Some(self)
+    }
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]

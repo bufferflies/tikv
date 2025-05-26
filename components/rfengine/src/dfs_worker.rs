@@ -13,7 +13,7 @@ use std::{
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
-use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
+use kvengine::dfs::{Dfs, S3Fs};
 use slog_global::*;
 use tikv_util::{
     errors::{Context as _, IoError},
@@ -35,7 +35,6 @@ pub(crate) struct LightweightBackupConfig {
     // for upgrade compatibility, set rlog_compression_type to false first
     // so we need another compress configuration.
     pub(crate) rlog_compression_type: CompressionType,
-    pub(crate) dfs_config: DFSConfig,
 
     pub(crate) rlog_cache_capacity: usize,
     pub(crate) rlog_cache_size_threshold: usize,
@@ -48,7 +47,6 @@ impl LightweightBackupConfig {
         wal_chunk_target_file_size: usize,
         compression_type: CompressionType,
         rlog_compression_type: CompressionType,
-        dfs_config: DFSConfig,
         rlog_cache_capacity: usize,
         rlog_cache_size_threshold: usize,
         memory_limit: usize,
@@ -58,7 +56,6 @@ impl LightweightBackupConfig {
             wal_chunk_target_file_size,
             compression_type,
             rlog_compression_type,
-            dfs_config,
             rlog_cache_capacity,
             rlog_cache_size_threshold,
             memory_limit,
@@ -93,6 +90,7 @@ impl ObjectStorageWorker {
 
     pub(crate) fn new(
         config: LightweightBackupConfig,
+        s3fs: Arc<S3Fs>,
         epoch_id: u32,
         engine_id: Arc<AtomicU64>,
         dfs_worker_healthy: Healthy,
@@ -101,9 +99,7 @@ impl ObjectStorageWorker {
         service_worker_epoch: Arc<AtomicU32>,
     ) -> Self {
         info!("dfs worker config: {:?}", config);
-        let dfs_config = config.dfs_config.clone();
         let wal_chunk_target_file_size = config.wal_chunk_target_file_size;
-        let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
         let memory_limiter = MemoryLimiter::new(config.memory_limit);
         Self {
             config,
@@ -697,6 +693,7 @@ impl Drop for MemoryLimiterGuard {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use kvengine::dfs::DFSConfig;
     use rand::Rng;
 
     use super::*;
@@ -714,7 +711,7 @@ mod tests {
     fn test_wal_chunk_integrity() {
         let (_, rx) = tikv_util::mpsc::unbounded();
         let (tx, _) = tikv_util::mpsc::unbounded();
-        let dfs_config = kvengine::dfs::DFSConfig::default();
+        let s3fs = Arc::new(S3Fs::new_from_config(DFSConfig::default()));
         let overwritten_epoch = Arc::new(AtomicU32::new(0));
         let mut worker = ObjectStorageWorker::new(
             LightweightBackupConfig::new(
@@ -722,11 +719,11 @@ mod tests {
                 1024 * 1024,
                 CompressionType::Lz4Compression,
                 CompressionType::Lz4Compression,
-                dfs_config,
                 1024 * 1024,
                 4096,
                 1 << 20,
             ),
+            s3fs,
             1,
             Arc::new(AtomicU64::new(1)),
             Healthy::default(),
