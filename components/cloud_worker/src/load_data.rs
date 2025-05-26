@@ -91,7 +91,9 @@ pub(crate) async fn handle_load_data(
                 .body(json.into())
                 .unwrap());
         }
-        return Ok(make_response(StatusCode::BAD_REQUEST, "task_id is missing"));
+        if *req.method() != Method::DELETE {
+            return Ok(make_response(StatusCode::BAD_REQUEST, "task_id is missing"));
+        }
     }
     match *req.method() {
         Method::GET => {
@@ -257,6 +259,23 @@ pub(crate) async fn handle_load_data(
                 .unwrap())
         }
         Method::DELETE => {
+            let task_id_prefix =
+                get_param::<String>(&query_pairs, "task_id_prefix").unwrap_or_default();
+            // Handle bulk delete by task_id_prefix
+            if !task_id_prefix.is_empty() {
+                manager
+                    .delete_by_task_id_prefix(task_id_prefix.as_str())
+                    .await;
+                return Ok(make_response(StatusCode::OK, ""));
+            }
+
+            // For single task deletion, validate task_id
+            if task_id.is_empty() {
+                return Ok(make_response(
+                    StatusCode::BAD_REQUEST,
+                    "task_id is required",
+                ));
+            }
             if !manager.has_task(&task_id) {
                 Ok(make_response(StatusCode::NOT_FOUND, ""))
             } else {
@@ -521,6 +540,22 @@ impl LoadDataManager {
     pub(crate) fn delete(&self, task_id: &str) {
         if let Some(scheduler) = self.running_tasks.get(task_id) {
             scheduler.cancel("deleted".to_string());
+        }
+    }
+
+    pub(crate) async fn delete_by_task_id_prefix(&self, task_id_prefix: &str) {
+        info!("Deleting tasks with prefix: {}", task_id_prefix);
+        self.running_tasks
+            .iter()
+            .filter(|entry| entry.key().starts_with(task_id_prefix))
+            .for_each(|entry| {
+                info!("{} task is being cleaned up", entry.key());
+                entry.value().cancel("deleted".to_string());
+            });
+
+        // clean up task in scaler
+        if let Some(scaler) = &self.worker_scaler {
+            scaler.delete_by_task_id_prefix(task_id_prefix).await;
         }
     }
 }

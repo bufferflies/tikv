@@ -722,11 +722,7 @@ impl WorkerScaler {
         // immediately, this way we can ensure that the pod can survive for
         // `CLEAN_UP_WORKER_TICK_INTERVAL` after completion.
         if worker_pod.canceled {
-            info!("clean up task {}", task_id);
-            self.delete_sts(task_id).await;
-            self.delete_svc(task_id).await;
-            self.delete_pvc(task_id).await;
-            self.pods_map.remove(task_id);
+            self.clean_up_task(task_id).await;
             return;
         }
         let worker_addr = self.get_worker_addr(&worker_pod);
@@ -745,6 +741,27 @@ impl WorkerScaler {
 
         let mut worker_pod = locked_worker_pod.write().await;
         worker_pod.update_task_states(tasks, now_timestamp, self.config.expire_seconds);
+    }
+
+    async fn clean_up_task(&self, task_id: &str) {
+        info!("{} task is being cleaned up in scaler", task_id);
+        self.delete_sts(task_id).await;
+        self.delete_svc(task_id).await;
+        self.delete_pvc(task_id).await;
+        self.pods_map.remove(task_id);
+    }
+
+    pub(crate) async fn delete_by_task_id_prefix(&self, task_id_prefix: &str) {
+        let task_ids: Vec<String> = self
+            .pods_map
+            .iter()
+            .filter(|entry| entry.key().starts_with(task_id_prefix))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for task_id in task_ids {
+            self.clean_up_task(&task_id).await;
+        }
     }
 
     pub(crate) fn get_worker_addr(&self, worker_pod: &WorkerPod) -> Option<String> {
