@@ -2215,6 +2215,11 @@ impl PdClientExt for TestPdClient {
         };
         self.schedule_operator(from, op);
     }
+
+    fn must_add_peer(&self, region_id: u64, peer: metapb::Peer) {
+        self.add_peer(region_id, peer.clone());
+        self.must_have_peer(region_id, peer);
+    }
 }
 
 #[cfg(test)]

@@ -14,9 +14,9 @@ use tikv::storage::{
     kv::WriteData,
     mvcc::{CloudReader, Key, MvccTxn, TxnCommitRecord, WriteType},
 };
-use tikv_util::{box_err, debug, info};
+use tikv_util::{box_err, debug, info, warn};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
-use txn_types::{Lock, ReqType, TimeStamp};
+use txn_types::{Lock, LockType, ReqType, TimeStamp};
 
 use crate::{
     common::{RawRegion, RegionMetaGetter},
@@ -87,23 +87,30 @@ impl LockResolver {
             total_lock_txn_files_cnt: 0,
             resolved_shards: vec![],
         };
-        let mut handles = Vec::with_capacity(self.shards.len());
         let shards = self.shards.clone();
+        let mut js = tokio::task::JoinSet::new();
         for shard in shards.iter() {
             let shard_id = shard.id;
             let clone = self.clone();
-            handles.push((
-                shard_id,
-                tokio::spawn(async move { clone.resolve_shard(shard_id).await }),
-            ));
+            js.spawn(async move { (shard_id, clone.resolve_shard(shard_id).await) });
         }
-        for (shard_id, handle) in handles {
-            let (normal_locks_cnt, lock_txn_files_cnt) = handle.await.unwrap()?;
-            if normal_locks_cnt > 0 || lock_txn_files_cnt > 0 {
-                resolved_locks.total_normal_locks_cnt += normal_locks_cnt;
-                resolved_locks.total_lock_txn_files_cnt += lock_txn_files_cnt;
-                resolved_locks.resolved_shards.push(shard_id);
-            }
+        while let Some(handle) = js.join_next().await {
+            let handle = handle.unwrap();
+            let (shard_id, res) = handle;
+            match res {
+                Ok((normal_locks_cnt, lock_txn_files_cnt)) => {
+                    if normal_locks_cnt > 0 || lock_txn_files_cnt > 0 {
+                        resolved_locks.total_normal_locks_cnt += normal_locks_cnt;
+                        resolved_locks.total_lock_txn_files_cnt += lock_txn_files_cnt;
+                        resolved_locks.resolved_shards.push(shard_id);
+                    }
+                }
+                Err(err) => {
+                    warn!("failed to resolve lock."; "err" => %err);
+                    js.shutdown().await;
+                    return Err(err);
+                }
+            };
         }
         Ok(resolved_locks)
     }
@@ -448,7 +455,7 @@ impl TxnStatus {
         let primary_key = Key::from_raw(&lock.primary);
         if let Some(pk_lock) = cloud_reader.load_lock(&primary_key).unwrap() {
             if lock.ts == pk_lock.ts {
-                return if lock.use_async_commit {
+                return if pk_lock.use_async_commit {
                     self.check_secondary_locks(&pk_lock, &mut reader_cache)
                         .await
                 } else {
@@ -513,6 +520,10 @@ impl TxnStatus {
         pk_lock: &Lock,
         reader_cache: &mut HashMap<u64, CloudReader>,
     ) -> Result<u64 /* commit_id */> {
+        if matches!(pk_lock.lock_type, LockType::Pessimistic) {
+            return Ok(0);
+        }
+
         let mut commit_ts = pk_lock.min_commit_ts;
         for key in &pk_lock.secondaries {
             let cloud_reader = self
@@ -520,7 +531,10 @@ impl TxnStatus {
                 .await?;
             let key = Key::from_raw(key);
             match cloud_reader.load_lock(&key).unwrap() {
-                Some(lock) if lock.ts == pk_lock.ts => {
+                // Here check the lock type is necessary.
+                // Pessimistic locks may have the same `start_ts` with Put locks.
+                // Also See https://github.com/tidbcloud/cloud-storage-engine/issues/2596
+                Some(lock) if lock.ts == pk_lock.ts && lock.lock_type != LockType::Pessimistic => {
                     if commit_ts < lock.min_commit_ts {
                         commit_ts = lock.min_commit_ts;
                     }

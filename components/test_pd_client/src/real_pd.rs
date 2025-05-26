@@ -82,6 +82,10 @@ impl PdClientExt for pd_client::RpcClient {
     fn try_merge_region(&self, _from: u64, _target: u64) {
         unimplemented!()
     }
+
+    fn must_add_peer(&self, _region_id: u64, _peer: metapb::Peer) {
+        unimplemented!()
+    }
 }
 
 /// Wrap for `TestPdClient` as well as the test PD server to provide RPC

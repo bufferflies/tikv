@@ -4672,6 +4672,7 @@ dependencies = [
  "dashmap 4.0.2",
  "engine_traits",
  "etcd-client",
+ "fail 0.5.0",
  "file_system",
  "futures 0.3.28",
  "grpcio",
