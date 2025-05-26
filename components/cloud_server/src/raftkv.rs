@@ -1512,6 +1512,7 @@ mod tests {
                             true,
                             resolving_pessimistic_lock,
                             false,
+                            true,
                             Context::default(),
                         ),
                         expect_ok_callback(tx.clone(), 1),

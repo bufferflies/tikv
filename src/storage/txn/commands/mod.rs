@@ -332,6 +332,7 @@ impl From<CheckTxnStatusRequest> for TypedCommand<TxnStatus> {
             req.get_force_sync_commit(),
             req.get_resolving_pessimistic_lock(),
             req.get_is_txn_file(),
+            req.get_verify_is_primary(),
             req.take_context(),
         )
     }

@@ -274,6 +274,7 @@ impl LockResolver {
             false,
             resolving_pessimistic_lock,
             is_txn_file,
+            true,
         )?;
         if resp.has_error() {
             let mut key_err = resp.take_error();

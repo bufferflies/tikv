@@ -970,6 +970,7 @@ impl ClusterClient {
         force_sync_commit: bool,
         resolving_pessimistic_lock: bool,
         is_txn_file: bool,
+        verify_is_primary: bool,
     ) -> Result<kvrpcpb::CheckTxnStatusResponse> {
         let stat_time = Instant::now();
         let timeout = Duration::from_secs(5);
@@ -990,6 +991,7 @@ impl ClusterClient {
             req.set_force_sync_commit(force_sync_commit);
             req.set_resolving_pessimistic_lock(resolving_pessimistic_lock);
             req.set_is_txn_file(is_txn_file);
+            req.set_verify_is_primary(verify_is_primary);
             // TODO: req.set_verify_is_primary
             let result = client.kv_check_txn_status(&req);
             if result.is_err() {
@@ -2082,6 +2084,311 @@ impl ClusterClient {
             log_wrappers::hex_encode_upper(key),
             store_id_errors
         ))
+    }
+
+    pub fn kv_pessimistic_lock(
+        &mut self,
+        primary_key: Vec<u8>,
+        keys: Vec<Vec<u8>>,
+        start_ts: impl Into<TimeStamp>,
+        for_update_ts: impl Into<TimeStamp>,
+        return_values: bool,
+    ) -> Result<kvrpcpb::PessimisticLockResponse> {
+        let start_ts = start_ts.into();
+        let for_update_ts = for_update_ts.into();
+
+        // Group keys by region
+        let mut region_keys: HashMap<u64, Vec<Vec<u8>>> = HashMap::new();
+        for key in keys {
+            let region_id = self.get_region_id(&key);
+            region_keys.entry(region_id).or_default().push(key);
+        }
+
+        let mut final_response = kvrpcpb::PessimisticLockResponse::default();
+
+        // Lock keys region by region
+        for (region_id, keys) in region_keys {
+            let ctx = match self.new_rpc_ctx(region_id, &primary_key) {
+                Some(ctx) => ctx,
+                None => return Err(Error::RpcContext(region_id)),
+            };
+
+            let store_id = ctx.get_peer().get_store_id();
+            let kv_client = self.get_kv_client(store_id);
+
+            let mut req = kvrpcpb::PessimisticLockRequest::default();
+            req.set_context(ctx);
+            req.set_primary_lock(primary_key.clone());
+            req.set_start_version(start_ts.into_inner());
+            req.set_for_update_ts(for_update_ts.into_inner());
+            req.set_is_first_lock(false);
+            req.set_wait_timeout(1000);
+            req.set_return_values(return_values);
+            req.set_lock_ttl(3000);
+            req.set_mutations(
+                keys.into_iter()
+                    .map(|k| {
+                        let mut mutation = kvrpcpb::Mutation::default();
+                        mutation.set_op(kvrpcpb::Op::PessimisticLock);
+                        mutation.set_key(k);
+                        mutation
+                    })
+                    .collect(),
+            );
+
+            match kv_client.kv_pessimistic_lock(&req) {
+                Ok(mut resp) => {
+                    if resp.has_region_error() {
+                        return Err(Error::RegionError(resp.take_region_error()));
+                    }
+
+                    // Merge results
+                    if !resp.get_errors().is_empty() {
+                        final_response.set_errors(resp.take_errors());
+                        return Ok(final_response);
+                    }
+
+                    let taken_values = resp.take_values();
+                    if !taken_values.is_empty() {
+                        final_response.set_values(taken_values);
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(final_response)
+    }
+
+    /// Pessimistically prewrite mutations.
+    ///
+    /// This method handles grouping mutations by region and retrying on errors.
+    pub fn kv_pessimistic_prewrite_with_retry(
+        &mut self,
+        pk: Bytes,
+        muts: TxnMutations, // Contains all mutations (primary + secondaries)
+        start_ts: TimeStamp,
+        for_update_ts: TimeStamp,
+        lock_ttl: u64,
+        txn_size: u64,
+        skip_constraint_check: bool,
+    ) -> Result<()> {
+        let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
+        // Check if there are any groups, return error if empty
+        if groups.is_empty() {
+            return Err(Error::Other(box_err!(
+                "No regions found for pessimistic prewrite"
+            )));
+        }
+        for (id_ver, group_muts) in groups {
+            self.kv_pessimistic_prewrite_single_region_with_retry(
+                id_ver,
+                pk.clone(),
+                group_muts, // TxnMutations for a single region
+                start_ts,
+                for_update_ts,
+                lock_ttl,
+                txn_size,
+                skip_constraint_check,
+                // Pass the original full mutations for potential top-level retry from epoch
+                // mismatch
+                &muts,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn kv_pessimistic_prewrite_single_region_with_retry(
+        &mut self,
+        id_ver: RegionIdVer,
+        pk: Bytes,
+        regional_muts: TxnMutations, // TxnMutations for this specific region
+        start_ts: TimeStamp,
+        for_update_ts: TimeStamp,
+        lock_ttl: u64,
+        txn_size: u64,
+        skip_constraint_check: bool,
+        // Original full TxnMutations for retrying the whole operation if region epoch changes.
+        original_full_muts: &TxnMutations,
+    ) -> Result<()> {
+        let region_id = id_ver.id();
+        let mut errors: Vec<(ShardTag, Error)> = vec![];
+        let start_time = Instant::now();
+        // TODO: Make timeout configurable
+        let timeout = Duration::from_secs(15);
+
+        while start_time.saturating_elapsed() < timeout {
+            let ctx = match self.new_rpc_ctx(region_id, &pk) {
+                Some(c) if c.get_region_epoch().get_version() == id_ver.ver() => c,
+                _ => {
+                    // Region epoch likely changed, or region not found with this id_ver.
+                    // Retry the whole operation with original_full_muts, which will re-group.
+                    info!(
+                        "pk: {} region epoch mismatch or context error for region_id {}, ver {}. Retrying full pessimistic prewrite.",
+                        Value::key(&pk),
+                        region_id,
+                        id_ver.ver()
+                    );
+                    return self.kv_pessimistic_prewrite_with_retry(
+                        pk,
+                        original_full_muts.clone(),
+                        start_ts,
+                        for_update_ts,
+                        lock_ttl,
+                        txn_size,
+                        skip_constraint_check,
+                    );
+                }
+            };
+
+            let tag = Self::tag_from_ctx(&ctx);
+            let store_id = ctx.get_peer().get_store_id();
+            let kv_client = self.get_kv_client(store_id);
+
+            let mut prewrite_req = PrewriteRequest::default();
+            prewrite_req.set_context(ctx.clone()); // Clone ctx as it's used later for tag as well
+
+            // Ensure mutations are not empty
+            match &regional_muts {
+                TxnMutations::Muts { muts: util_muts } => {
+                    // Check if mutations are empty
+                    if util_muts.is_empty() {
+                        warn!(
+                            "tag: {} pessimistic prewrite: empty mutations for region {}",
+                            tag, region_id
+                        );
+                        return Err(Error::Other(box_err!(
+                            "Cannot perform pessimistic prewrite with empty mutations for region {}",
+                            region_id
+                        )));
+                    }
+
+                    let kv_mutations = util_muts
+                        .iter()
+                        .map(|m| {
+                            let mut mutation = kvrpcpb::Mutation::default();
+                            mutation.set_op(m.op);
+                            mutation.set_key(m.key.to_vec());
+                            mutation.set_value(m.value.to_vec());
+                            mutation
+                        })
+                        .collect::<Vec<_>>();
+
+                    // Double check that converted mutations are not empty
+                    if kv_mutations.is_empty() {
+                        return Err(Error::Other(box_err!(
+                            "Cannot perform pessimistic prewrite with empty kvrpc_mutations for region {}",
+                            region_id
+                        )));
+                    }
+
+                    prewrite_req.set_mutations(kv_mutations.into());
+                    prewrite_req.set_pessimistic_actions(vec![
+                            kvrpcpb::PrewriteRequestPessimisticAction::DoPessimisticCheck;
+                            util_muts.len()
+                        ]);
+                }
+                TxnMutations::Chunks { chunks, .. } => {
+                    // Check if chunks are empty
+                    if chunks.is_empty() {
+                        warn!(
+                            "tag: {} pessimistic prewrite: empty chunks for region {}",
+                            tag, region_id
+                        );
+                        return Err(Error::Other(box_err!(
+                            "Cannot perform pessimistic prewrite with empty chunks for region {}",
+                            region_id
+                        )));
+                    }
+
+                    let chunk_ids = chunks.iter().map(|c| c.chunk_id).collect::<Vec<_>>();
+                    prewrite_req.set_txn_file_chunks(chunk_ids);
+                    warn!(
+                        "tag: {} pessimistic prewrite for TxnFileChunks relies on TiKV server-side inference or other flags beyond is_pessimistic_lock per mutation.",
+                        tag
+                    );
+                }
+            }
+
+            prewrite_req.set_primary_lock(pk.to_vec());
+            prewrite_req.set_start_version(start_ts.into_inner());
+            prewrite_req.set_lock_ttl(lock_ttl);
+            prewrite_req.set_for_update_ts(for_update_ts.into_inner());
+            prewrite_req.set_txn_size(txn_size);
+            prewrite_req.set_skip_constraint_check(skip_constraint_check);
+            prewrite_req.set_min_commit_ts(prewrite_req.start_version + 1);
+            prewrite_req.set_use_async_commit(false); // Pessimistic prewrites are typically synchronous
+
+            debug!("tag: {} pessimistic prewrite req: {:?}", tag, prewrite_req);
+            let result = kv_client.kv_prewrite(&prewrite_req);
+
+            if let Err(err) = result {
+                let e: Error = err.into();
+                errors.push((tag, e));
+                sleep(Duration::from_millis(100));
+                self.update_cache_by_id(region_id, None);
+                continue;
+            }
+            let mut resp = result.unwrap();
+
+            if resp.has_region_error() {
+                let region_err = resp.take_region_error();
+                errors.push((tag, Error::RegionError(region_err.clone())));
+                if self.handle_retryable_error(&tag, &region_err) {
+                    continue;
+                }
+                if self.handle_region_epoch_not_match_or_not_found(&region_err) {
+                    info!(
+                        "pk: {} region epoch changed for region_id {}. Retrying full pessimistic prewrite. Error: {:?}",
+                        Value::key(&pk),
+                        region_id,
+                        region_err
+                    );
+                    return self.kv_pessimistic_prewrite_with_retry(
+                        pk,
+                        original_full_muts.clone(),
+                        start_ts,
+                        for_update_ts,
+                        lock_ttl,
+                        txn_size,
+                        skip_constraint_check,
+                    );
+                }
+                error!(
+                    "tag: {} pessimistic prewrite unexpected region error {:?}",
+                    tag, region_err
+                );
+                return Err(Error::RegionError(region_err));
+            }
+
+            let key_errors = resp.take_errors();
+            if !key_errors.is_empty() {
+                info!(
+                    "tag: {} pessimistic prewrite: encounters key_errors: {:?}",
+                    tag, key_errors
+                );
+                let key_errors_vec = key_errors.into_vec();
+                errors.push((tag, Error::KeyErrors(key_errors_vec.clone())));
+                self.handle_key_errors(&tag, start_ts.into_inner(), true, key_errors_vec)?;
+                continue;
+            }
+            return Ok(());
+        }
+
+        let final_err = errors.pop().map(|(_, e)| e).unwrap_or_else(|| {
+            Error::Other(box_err!(
+                "pessimistic prewrite for region {} timed out after multiple retries for primary key {}",
+                region_id,
+                Value::key(&pk)
+            ))
+        });
+        error!(
+            "pk: {} pessimistic prewrite failed for region {}: {:?}",
+            Value::key(&pk),
+            region_id,
+            final_err
+        );
+        Err(final_err)
     }
 }
 
