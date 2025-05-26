@@ -8,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::Uri;
+use http::{StatusCode, Uri};
 use hyper::client::HttpConnector;
 use kvengine::{
     dfs,
@@ -258,6 +258,51 @@ impl BuiltinDfs {
 
 #[async_trait]
 impl dfs::Dfs for BuiltinDfs {
+    async fn exists(&self, file_id: u64, opts: Options) -> dfs::Result<bool> {
+        let mut stores = self.get_stores(&opts).await?;
+        stores.shuffle(&mut rand::thread_rng());
+        let mut errors = Vec::new();
+
+        for store_id in stores {
+            let store_addr = self.get_store_addr(store_id).await?;
+            let uri = Uri::try_from(format!(
+                "http://{}/dfs/{}?file_type={}&check_exists_only=true",
+                store_addr, file_id, opts.file_type
+            ))
+            .unwrap();
+
+            match self.http_client.get(uri).await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        // File exists on this store.
+                        return Ok(true);
+                    } else if status != StatusCode::NOT_FOUND {
+                        let err_msg = hyper::body::to_bytes(resp.into_body())
+                            .await
+                            .map(|b| String::from_utf8_lossy(&b).to_string())?;
+                        errors.push(dfs::Error::Other(format!(
+                            "check file existence failed: {}:{}",
+                            status, err_msg,
+                        )));
+                    }
+                }
+                Err(e) => {
+                    errors.push(dfs::Error::Other(format!(
+                        "check file existence failed: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(false)
+        } else {
+            return Err(errors.pop().unwrap());
+        }
+    }
+
     async fn read_file(&self, file_id: u64, opts: Options) -> dfs::Result<Bytes> {
         self.read_file_inner(file_id, opts).await
     }

@@ -1242,10 +1242,12 @@ impl StatusServer {
         FileType,
         u64,         // start_off
         Option<u64>, // end_off
+        bool,        // check_exists_only
     ) {
         let mut file_type: Option<FileType> = None;
         let mut start_off: Option<u64> = None;
         let mut end_off: Option<u64> = None;
+        let mut check_exists_only: Option<bool> = None;
         if let Some(query) = req.uri().query() {
             let query_pairs: HashMap<_, _> =
                 url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -1258,11 +1260,15 @@ impl StatusServer {
             end_off = query_pairs
                 .get("end_off")
                 .and_then(|s| s.parse::<u64>().ok());
+            check_exists_only = query_pairs
+                .get("check_exists_only")
+                .and_then(|s| s.parse::<bool>().ok());
         }
         (
             file_type.unwrap_or(FileType::Sst),
             start_off.unwrap_or_default(),
             end_off,
+            check_exists_only.unwrap_or(false),
         )
     }
 
@@ -1275,7 +1281,35 @@ impl StatusServer {
             return Ok(make_response(StatusCode::BAD_REQUEST, "invalid file id"));
         }
         let id = id_opt.unwrap();
-        let (file_type, start_off, end_off) = Self::get_dfs_read_args(&req);
+        let (file_type, start_off, end_off, check_exists_only) = Self::get_dfs_read_args(&req);
+
+        if check_exists_only {
+            let (callback, future) = paired_future_callback();
+            spawn_anonymous_thread_with!(move || {
+                let res = match file_type {
+                    FileType::TxnChunk => engine
+                        .get_txn_chunk_manager()
+                        .read_local_chunk(id)
+                        .map(|_| ()),
+                    _ => engine.open_local_file(id, file_type).map(|_| ()),
+                };
+                callback(res)
+            });
+            let res = future.await.unwrap();
+            return Ok(match res {
+                Ok(_) => make_response(StatusCode::OK, ""),
+                Err(kvengine::Error::Io { err, .. })
+                    if err.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    make_response(StatusCode::NOT_FOUND, "")
+                }
+                Err(_) => make_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Error checking file existence",
+                ),
+            });
+        }
+
         let (callback, future) = paired_future_callback();
         spawn_anonymous_thread_with!(move || {
             let res = match file_type {

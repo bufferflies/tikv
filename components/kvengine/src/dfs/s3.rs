@@ -985,6 +985,12 @@ impl ObjectStorage for S3Fs {
 
 #[async_trait]
 impl Dfs for S3Fs {
+    async fn exists(&self, file_id: u64, opts: Options) -> crate::dfs::Result<bool> {
+        let file_key = self.file_key(file_id, opts.file_type);
+        let file_name = format!("{}.{}", file_id, opts.file_type.suffix());
+        self.exist(file_key, file_name).await
+    }
+
     async fn read_file(&self, file_id: u64, opts: Options) -> crate::dfs::Result<Bytes> {
         let filename = if let Some(end_off) = opts.end_off {
             format!("{}-{}-{}.seg", file_id, opts.start_off, end_off)
@@ -1203,25 +1209,90 @@ fn parse_content_range<S: AsRef<str>>(content_range: Option<S>) -> Option<u64> {
 
 #[cfg(any(test, feature = "testexport"))]
 pub mod test_util {
-    use std::str;
+    use std::sync::{Arc, Mutex};
 
-    use rusoto_mock::{
-        MockCredentialsProvider, MockRequestDispatcher, MultipleMockRequestDispatcher,
-    };
+    use rusoto_core::signature::SignedRequest;
+    use rusoto_mock::{MockCredentialsProvider, MockRequestDispatcher};
 
     use crate::dfs::S3Fs;
 
+    struct State {
+        created: bool,
+        file_data: Vec<u8>,
+    }
+
+    #[derive(Clone)]
+    struct S3TestDispatcher {
+        state: Arc<Mutex<State>>,
+    }
+
+    impl rusoto_core::request::DispatchSignedRequest for S3TestDispatcher {
+        fn dispatch(
+            &self,
+            request: SignedRequest,
+            _timeout: Option<std::time::Duration>,
+        ) -> rusoto_core::request::DispatchSignedRequestFuture {
+            let method = request.method.clone();
+            let state = self.state.clone();
+            Box::pin(async move {
+                match method.as_str() {
+                    "HEAD" => {
+                        let created = {
+                            let state = state.lock().unwrap();
+                            state.created
+                        };
+                        if created {
+                            MockRequestDispatcher::with_status(200)
+                                .dispatch(request, _timeout)
+                                .await
+                        } else {
+                            MockRequestDispatcher::with_status(404)
+                                .dispatch(request, _timeout)
+                                .await
+                        }
+                    }
+                    "PUT" => {
+                        {
+                            let mut state = state.lock().unwrap();
+                            state.created = true;
+                        }
+                        MockRequestDispatcher::with_status(200)
+                            .dispatch(request, _timeout)
+                            .await
+                    }
+                    "GET" => {
+                        let (created, file_data) = {
+                            let state = state.lock().unwrap();
+                            (state.created, state.file_data.clone())
+                        };
+                        if created {
+                            MockRequestDispatcher::with_status(200)
+                                .with_body(std::str::from_utf8(&file_data).unwrap())
+                                .dispatch(request, _timeout)
+                                .await
+                        } else {
+                            MockRequestDispatcher::with_status(404)
+                                .dispatch(request, _timeout)
+                                .await
+                        }
+                    }
+                    _ => {
+                        MockRequestDispatcher::with_status(200)
+                            .dispatch(request, _timeout)
+                            .await
+                    }
+                }
+            })
+        }
+    }
+
     pub fn new_test_s3fs(file_data: &[u8]) -> S3Fs {
-        let s3c = rusoto_core::Client::new_with(
-            MockCredentialsProvider,
-            MultipleMockRequestDispatcher::new(vec![
-                MockRequestDispatcher::with_status(200),
-                MockRequestDispatcher::with_status(200)
-                    .with_body(str::from_utf8(file_data).unwrap()),
-                MockRequestDispatcher::with_status(200),
-                MockRequestDispatcher::with_status(200),
-            ]),
-        );
+        let state = Arc::new(Mutex::new(State {
+            created: false,
+            file_data: file_data.to_vec(),
+        }));
+        let dispatcher = S3TestDispatcher { state };
+        let s3c = rusoto_core::Client::new_with(MockCredentialsProvider, dispatcher);
         S3Fs::new_for_test(s3c, "shard-db".into(), "prefix".into())
     }
 }
@@ -1249,13 +1320,32 @@ mod tests {
         let local_dir = tempfile::tempdir().unwrap();
         let file_data = "abcdefgh".to_string().into_bytes();
         let s3fs = new_test_s3fs(&file_data);
-        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let file_id = 321u64;
+        let opts = Options::default();
+
+        // Test exists before create
+        let fs = s3fs.clone();
+        let (tx_exists_before, rx_exists_before) = tikv_util::mpsc::bounded(1);
+        let f_exists_before = async move {
+            match fs.exists(file_id, opts).await {
+                Ok(exists) => {
+                    tx_exists_before.send(exists).unwrap();
+                }
+                Err(err) => {
+                    println!("exists before create error {:?}", err);
+                    tx_exists_before.send(true).unwrap(); // Fail test on error
+                }
+            }
+        };
+        s3fs.runtime.spawn(f_exists_before);
+        assert!(!rx_exists_before.recv().unwrap());
 
         let fs = s3fs.clone();
-        let file_data2 = file_data.clone();
-        let f = async move {
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let file_data_clone_create = file_data.clone();
+        let f_create = async move {
             match fs
-                .create(321, bytes::Bytes::from(file_data2), Options::default())
+                .create(file_id, bytes::Bytes::from(file_data_clone_create), opts)
                 .await
             {
                 Ok(_) => {
@@ -1268,15 +1358,33 @@ mod tests {
                 }
             }
         };
-        s3fs.runtime.spawn(f);
+        s3fs.runtime.spawn(f_create);
         assert!(rx.recv().unwrap());
+
+        // Test exists after create
+        let fs = s3fs.clone();
+        let (tx_exists_after, rx_exists_after) = tikv_util::mpsc::bounded(1);
+        let f_exists_after = async move {
+            match fs.exists(file_id, opts).await {
+                Ok(exists) => {
+                    tx_exists_after.send(exists).unwrap();
+                }
+                Err(err) => {
+                    println!("exists after create error {:?}", err);
+                    tx_exists_after.send(false).unwrap(); // Fail test on error
+                }
+            }
+        };
+        s3fs.runtime.spawn(f_exists_after);
+        assert!(rx_exists_after.recv().unwrap());
+
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
-        let local_file = new_filename(321, local_dir.path());
+        let local_file = new_filename(file_id, local_dir.path());
         let move_local_file = local_file.clone();
         let f = async move {
             let opts = Options::default();
-            match fs.read_file(321, opts).await {
+            match fs.read_file(file_id, opts).await {
                 Ok(data) => {
                     let mut file = std::fs::File::create(&move_local_file).unwrap();
                     file.write_all(data.chunk()).unwrap();
@@ -1293,7 +1401,7 @@ mod tests {
         assert!(rx.recv().unwrap());
         let data = std::fs::read(&local_file).unwrap();
         assert_eq!(&data, &file_data);
-        let file = LocalFile::open(321, &local_file, false).unwrap();
+        let file = LocalFile::open(file_id, &local_file, false).unwrap();
         assert_eq!(file.size(), 8u64);
         assert_eq!(file.id(), 321u64);
         let data = file.read(0, 8).unwrap();
@@ -1301,7 +1409,7 @@ mod tests {
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let f = async move {
-            fs.remove(321, None, Options::default()).await;
+            fs.remove(file_id, None, Options::default()).await;
             tx.send(true).unwrap();
         };
         s3fs.runtime.spawn(f);

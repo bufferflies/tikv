@@ -45,6 +45,9 @@ use crate::{
 // DFS represents a distributed file system.
 #[async_trait]
 pub trait Dfs: Any + Sync + Send {
+    /// exists checks if the file exists in the DFS.
+    async fn exists(&self, file_id: u64, opts: Options) -> Result<bool>;
+
     /// read_file reads the whole file to memory.
     /// It can be used by remote compaction server that doesn't have local disk.
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes>;
@@ -99,6 +102,10 @@ impl InMemFs {
 
 #[async_trait]
 impl Dfs for InMemFs {
+    async fn exists(&self, file_id: u64, _opts: Options) -> Result<bool> {
+        Ok(self.files.contains_key(&file_id) && !self.pending_remove.contains_key(&file_id))
+    }
+
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         if let Some(file) = self.files.get(&file_id).as_deref() {
             if let Some(end_off) = opts.end_off {
@@ -268,6 +275,13 @@ impl CacheFs {
 
 #[async_trait]
 impl Dfs for CacheFs {
+    async fn exists(&self, file_id: u64, opts: Options) -> Result<bool> {
+        if self.cache.contains_key(&file_id) {
+            return Ok(true);
+        }
+        self.s3_fs.exists(file_id, opts).await
+    }
+
     /// Note: `CacheFs` will cache the whole object, even if `read_file` just
     /// read part of it.
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
@@ -389,6 +403,11 @@ impl LocalFsCore {
 
 #[async_trait]
 impl Dfs for LocalFs {
+    async fn exists(&self, file_id: u64, opts: Options) -> Result<bool> {
+        let local_file_name = self.local_file_path(file_id, opts.file_type);
+        Ok(local_file_name.exists())
+    }
+
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         let local_file_name = self.local_file_path(file_id, opts.file_type);
         let mut fd = std::fs::File::open(local_file_name).dfs_ctx(file_id, "open")?;
@@ -552,17 +571,31 @@ mod tests {
         let local_dir = tempfile::tempdir().unwrap();
         let file_data = "abcdefgh".to_string().into_bytes();
         let localfs = LocalFs::new(local_dir.path());
-        let (tx, rx) = tikv_util::mpsc::bounded(1);
         let file_id = 321u64;
+        let opts = Options::default();
+
+        // Test exists before create
         let fs = localfs.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let f_exists_before = async move {
+            match fs.exists(file_id, opts).await {
+                Ok(exists) => {
+                    tx.send(exists).unwrap();
+                }
+                Err(_) => {
+                    tx.send(true).unwrap();
+                }
+            }
+        };
+        localfs.runtime.spawn(f_exists_before);
+        assert!(!rx.recv().unwrap());
+
+        let fs = localfs.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
         let file_data_clone = file_data.clone();
         let f = async move {
             match fs
-                .create(
-                    file_id,
-                    bytes::Bytes::from(file_data_clone),
-                    Options::default(),
-                )
+                .create(file_id, bytes::Bytes::from(file_data_clone), opts)
                 .await
             {
                 Ok(_) => {
@@ -577,13 +610,30 @@ mod tests {
         };
         localfs.runtime.spawn(f);
         assert!(rx.recv().unwrap());
+
+        // Test exists after create
         let fs = localfs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
-        let f = async move {
-            let opts = Options::default();
+        let f_exists_after = async move {
+            match fs.exists(file_id, opts).await {
+                Ok(exists) => {
+                    tx.send(exists).unwrap();
+                }
+                Err(_) => {
+                    tx.send(false).unwrap();
+                }
+            }
+        };
+        localfs.runtime.spawn(f_exists_after);
+        assert!(rx.recv().unwrap());
+
+        let fs = localfs.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let file_data_clone_read = file_data.clone(); // Clone for assertion
+        let f_read = async move {
             match fs.read_file(file_id, opts).await {
                 Ok(data) => {
-                    assert_eq!(&data, &file_data);
+                    assert_eq!(&data, &file_data_clone_read);
                     tx.send(true).unwrap();
                     println!("prefetch ok");
                 }
@@ -593,20 +643,38 @@ mod tests {
                 }
             }
         };
-        localfs.runtime.spawn(f);
+        localfs.runtime.spawn(f_read);
         assert!(rx.recv().unwrap());
+
         let local_file = localfs.local_sst_file_path(file_id);
         let fd = std::fs::File::open(&local_file).unwrap();
         let meta = fd.metadata().unwrap();
-        assert_eq!(meta.size(), 8u64);
+        assert_eq!(meta.size(), file_data.len() as u64);
+
         let fs = localfs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
-        let f = async move {
-            fs.remove(file_id, None, Options::default()).await;
+        let f_remove = async move {
+            fs.remove(file_id, None, opts).await;
             tx.send(true).unwrap();
         };
-        localfs.runtime.spawn(f);
+        localfs.runtime.spawn(f_remove);
         assert!(rx.recv().unwrap());
         std::fs::File::open(&local_file).unwrap_err();
+
+        // Test exists after remove
+        let fs = localfs.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let f_exists_after_remove = async move {
+            match fs.exists(file_id, opts).await {
+                Ok(exists) => {
+                    tx.send(exists).unwrap();
+                }
+                Err(_) => {
+                    tx.send(true).unwrap();
+                }
+            }
+        };
+        localfs.runtime.spawn(f_exists_after_remove);
+        assert!(!rx.recv().unwrap());
     }
 }

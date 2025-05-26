@@ -28,6 +28,10 @@ impl Default for TempDirFs {
 
 #[async_trait]
 impl Dfs for TempDirFs {
+    async fn exists(&self, file_id: u64, opts: Options) -> Result<bool> {
+        self.fs.exists(file_id, opts).await
+    }
+
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         self.fs.read_file(file_id, opts).await
     }

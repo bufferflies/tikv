@@ -581,7 +581,7 @@ impl EngineCore {
         }
     }
 
-    fn open_local_file(&self, id: u64, file_type: FileType) -> Result<LocalFile> {
+    pub fn open_local_file(&self, id: u64, file_type: FileType) -> Result<LocalFile> {
         let path = self.local_file_path(id, file_type);
         self.open_local_file_with_file_path(id, path)
     }
