@@ -1080,6 +1080,7 @@ impl BackupCluster {
     }
 
     fn collect_keyspace_shards(
+        tag: &str,
         store_id: u64,
         rf: &RfEngine,
         keyspace_start: &[u8],
@@ -1087,6 +1088,7 @@ impl BackupCluster {
     ) -> Result<Vec<BackupShard>> {
         let region_peers = rf.get_region_peer_map();
         let mut prefix_shards = vec![];
+        let mut no_meta_peers = vec![];
         for (region_id, peer_id) in region_peers {
             if region_id == 0 {
                 continue;
@@ -1094,10 +1096,13 @@ impl BackupCluster {
             let meta = match load_rf_engine_meta(rf, peer_id) {
                 Some(meta) => meta,
                 None => {
-                    warn!(
+                    debug!(
                         "region {} peer {} has no rf_engine meta",
                         region_id, peer_id
                     );
+                    if no_meta_peers.len() < 5 {
+                        no_meta_peers.push((region_id, peer_id));
+                    }
                     continue;
                 }
             };
@@ -1109,6 +1114,12 @@ impl BackupCluster {
                 debug!("{} collect_keyspace_shards", shard.tag(); "inner_key_off" => shard.inner_key_off());
                 prefix_shards.push(shard);
             }
+        }
+        if !no_meta_peers.is_empty() {
+            warn!(
+                "{} collect_keyspace_shards: peers has no meta: {:?}",
+                tag, no_meta_peers
+            );
         }
         Ok(prefix_shards)
     }
@@ -1194,6 +1205,7 @@ impl BackupCluster {
     }
 
     fn load_shards(&mut self) -> Result<()> {
+        let tag = self.tag();
         // Will need to retry when `get_leader_shards_and_preprocess` produce new shards
         // after preprocess.
         let mut leader_shards = HashMap::new();
@@ -1206,6 +1218,7 @@ impl BackupCluster {
                     Self::collect_full_shards(store_id, rf_engine)?
                 } else {
                     Self::collect_keyspace_shards(
+                        tag,
                         store_id,
                         rf_engine,
                         &self.keyspace_start,
