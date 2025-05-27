@@ -9124,6 +9124,7 @@ pub struct VectorIndexFile {
     pub snap_version: u64,
     pub smallest: ::std::vec::Vec<u8>,
     pub biggest: ::std::vec::Vec<u8>,
+    pub meta_offset: u32,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -9221,6 +9222,21 @@ impl VectorIndexFile {
     pub fn take_biggest(&mut self) -> ::std::vec::Vec<u8> {
         ::std::mem::replace(&mut self.biggest, ::std::vec::Vec::new())
     }
+
+    // uint32 meta_offset = 5;
+
+
+    pub fn get_meta_offset(&self) -> u32 {
+        self.meta_offset
+    }
+    pub fn clear_meta_offset(&mut self) {
+        self.meta_offset = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_meta_offset(&mut self, v: u32) {
+        self.meta_offset = v;
+    }
 }
 
 impl ::protobuf::Message for VectorIndexFile {
@@ -9252,6 +9268,13 @@ impl ::protobuf::Message for VectorIndexFile {
                 4 => {
                     ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.biggest)?;
                 },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.meta_offset = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -9276,6 +9299,9 @@ impl ::protobuf::Message for VectorIndexFile {
         if !self.biggest.is_empty() {
             my_size += ::protobuf::rt::bytes_size(4, &self.biggest);
         }
+        if self.meta_offset != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.meta_offset, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -9293,6 +9319,9 @@ impl ::protobuf::Message for VectorIndexFile {
         }
         if !self.biggest.is_empty() {
             os.write_bytes(4, &self.biggest)?;
+        }
+        if self.meta_offset != 0 {
+            os.write_uint32(5, self.meta_offset)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -9356,6 +9385,11 @@ impl ::protobuf::Message for VectorIndexFile {
                     |m: &VectorIndexFile| { &m.biggest },
                     |m: &mut VectorIndexFile| { &mut m.biggest },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "meta_offset",
+                    |m: &VectorIndexFile| { &m.meta_offset },
+                    |m: &mut VectorIndexFile| { &mut m.meta_offset },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<VectorIndexFile>(
                     "VectorIndexFile",
                     fields,
@@ -9382,6 +9416,7 @@ impl ::protobuf::Clear for VectorIndexFile {
         self.snap_version = 0;
         self.smallest.clear();
         self.biggest.clear();
+        self.meta_offset = 0;
         self.unknown_fields.clear();
     }
 }
@@ -9395,6 +9430,7 @@ impl ::protobuf::PbPrint for VectorIndexFile {
         ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", buf);
         ::protobuf::PbPrint::fmt(&self.smallest, "smallest", buf);
         ::protobuf::PbPrint::fmt(&self.biggest, "biggest", buf);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -9409,6 +9445,7 @@ impl ::std::fmt::Debug for VectorIndexFile {
         ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", &mut s);
         ::protobuf::PbPrint::fmt(&self.smallest, "smallest", &mut s);
         ::protobuf::PbPrint::fmt(&self.biggest, "biggest", &mut s);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -9872,14 +9909,15 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"u\n\x0bVectorIndex\x12\
     \x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\
     \x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05f\
-    iles\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"`\n\x0fVe\
+    iles\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"w\n\x0fVe\
     ctorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\x0csnap_\
     version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\
-    \x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0:\0\"z\n\x0eVectorIn\
-    dexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\
-    \x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\
-    \x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\
-    \x20\x03(\x0cB\0:\0B\0b\x06proto3\
+    \x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_o\
+    ffset\x18\x05\x20\x01(\rB\0:\0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index\
+    _id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x02\x20\x01(\x03B\0\
+    \x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\x13\n\tspec_keys\x18\
+    \x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\x20\x03(\x0cB\0:\0B\
+    \0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

@@ -35,6 +35,7 @@ use crate::{
         columnar::SchemaFile,
         file::{FdCache, File, InMemFile, LocalFile},
         sstable::SsTable,
+        vector_index::VectorIndexFile,
         BoundedDataSet,
     },
     EngineCore, *,
@@ -816,6 +817,11 @@ fn validate_table_meta_off(tag: ShardTag, id: u64, fm: &FileMeta, data: Bytes) -
             debug_assert!(false);
             Ok(data)
         }
+        FileType::VectorIndex => VectorIndexFile::get_meta_data(&data).map_err(|err| {
+            error!("{} validate_table_meta_off: vector index must have meta offset", tag;
+                "id" => id, "fm" => ?fm);
+            Error::TableError(err)
+        }),
         _ => Ok(data),
     }
 }

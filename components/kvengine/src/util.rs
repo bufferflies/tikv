@@ -89,12 +89,14 @@ pub fn new_vector_index_file_pb(
     snap_version: u64,
     smallest: Vec<u8>,
     biggest: Vec<u8>,
+    offset: u32,
 ) -> kvenginepb::VectorIndexFile {
     let mut vec_idx_file = kvenginepb::VectorIndexFile::new();
     vec_idx_file.set_id(id);
     vec_idx_file.set_snap_version(snap_version);
     vec_idx_file.set_smallest(smallest);
     vec_idx_file.set_biggest(biggest);
+    vec_idx_file.set_meta_offset(offset);
     vec_idx_file
 }
 

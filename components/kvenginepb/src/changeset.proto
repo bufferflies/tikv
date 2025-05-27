@@ -245,6 +245,7 @@ message VectorIndexFile {
   bytes smallest = 3;
   // biggest handle of the file.
   bytes biggest = 4;
+  uint32 meta_offset = 5;
 }
 
 message VectorIndexDef {

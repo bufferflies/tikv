@@ -1486,6 +1486,7 @@ impl FileMeta {
         match self.file_type {
             FileType::Sst if (self.cf as usize == WRITE_CF && self.level > 0) => true,
             FileType::Columnar => true,
+            FileType::VectorIndex => true,
             _ => false,
         }
     }
@@ -1494,6 +1495,7 @@ impl FileMeta {
         match self.file_type {
             FileType::Sst => shard_use_ia && (self.cf as usize == WRITE_CF && self.level > 0),
             FileType::Columnar => true,
+            FileType::VectorIndex => true,
             _ => false,
         }
     }
@@ -1558,7 +1560,7 @@ impl FileMeta {
             vec_idx_file.get_smallest(),
             vec_idx_file.get_biggest(),
             0,
-            0,
+            vec_idx_file.get_meta_offset(),
         )
     }
 

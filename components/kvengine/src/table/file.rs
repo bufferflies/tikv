@@ -71,6 +71,10 @@ pub trait File: Sync + Send {
 
     fn mmap(&self) -> table::Result<MmapData>;
 
+    async fn mmap_async(&self) -> table::Result<MmapData> {
+        unimplemented!()
+    }
+
     /// `get_remote_segments` returns the remote segments of the file. Used for
     /// prefetching. Available for IA files only.
     fn get_remote_segments(
@@ -90,6 +94,12 @@ pub trait File: Sync + Send {
 pub enum MmapData {
     Local(Arc<Mmap>),
     InMem(Bytes),
+}
+
+impl Default for MmapData {
+    fn default() -> Self {
+        MmapData::InMem(Bytes::new())
+    }
 }
 
 impl Deref for MmapData {
@@ -122,7 +132,7 @@ impl LocalFile {
             None => {
                 let fd =
                     std::fs::File::open(path.as_path()).table_ctx(id, "local.open.open_file")?;
-                let fd_cache = FdCache::new(1);
+                let fd_cache = FdCache::new(2);
                 fd_cache.insert(id, Arc::new(fd));
                 fd_cache
             }
@@ -145,7 +155,7 @@ impl LocalFile {
 
     pub fn from_file(id: u64, path: PathBuf, file: Arc<std::fs::File>) -> table::Result<LocalFile> {
         let meta = std::fs::metadata(&path).table_ctx(id, "local.from_file.metadata")?;
-        let fd_cache = FdCache::new(1);
+        let fd_cache = FdCache::new(2);
         fd_cache.insert(id, file);
         let local_file = LocalFile {
             id,
@@ -191,13 +201,13 @@ impl File for LocalFile {
     }
 
     fn mmap(&self) -> table::Result<MmapData> {
-        let mut gurad = self.mmap.lock().unwrap();
-        if gurad.is_none() {
+        let mut guard = self.mmap.lock().unwrap();
+        if guard.is_none() {
             let fd = self.get_file()?;
             let mmap = unsafe { Mmap::map(&fd).table_ctx(self.id(), "local.mmap")? };
-            *gurad = Some(Arc::new(mmap));
+            *guard = Some(Arc::new(mmap));
         }
-        let mmap = gurad.as_ref().unwrap().clone();
+        let mmap = guard.as_ref().unwrap().clone();
         Ok(MmapData::Local(mmap))
     }
 }

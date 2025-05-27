@@ -1198,7 +1198,7 @@ impl Shard {
             .vector_indexes
             .get(table_id, vec_idx.index_id, vec_idx.col_id)
         {
-            if vec_idx.files.iter().any(|file| !file.has_nulls()) {
+            if vec_idx.files.iter().any(|file| file.is_legacy_format()) {
                 return (2.0, true);
             }
         }

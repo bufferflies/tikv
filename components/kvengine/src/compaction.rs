@@ -4972,6 +4972,7 @@ async fn update_vector_index(
         update_vec_idx.snap_version,
         vec_builder.smallest.clone(),
         vec_builder.biggest.clone(),
+        vec_builder.meta_offset,
     );
     ret.set_added(vec![vec_idx_file].into());
     info!("update vector index result {:?}", ret);

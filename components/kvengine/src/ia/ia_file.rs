@@ -23,12 +23,13 @@ use crate::{
         manager::{IaManager, ReadAt},
         types::{FileSegmentIdent, TABLE_META_LOCAL_FILE_SUFFIX},
     },
-    new_columnar_filename, new_sst_filename,
+    new_columnar_filename, new_sst_filename, new_vector_index_filename,
     table::{
         columnar::{ColumnarFileFooter, TableMeta, TableOffsets},
-        file::{File, MmapData},
+        file::{File, InMemFile, MmapData},
         search, sstable,
         sstable::SsTable,
+        vector_index::{VectorIndexFile, VectorIndexFileFooter},
         Error, Result,
     },
     IoContext,
@@ -67,6 +68,7 @@ impl IaFile {
         match ftype {
             FileType::Sst => Self::open_for_sst(id, ftype, table_meta_file, mgr),
             FileType::Columnar => Self::open_for_columnar(id, table_meta_file, mgr),
+            FileType::VectorIndex => Self::open_for_vector(id, table_meta_file, mgr),
             _ => Err(Error::IaMgr(format!(
                 "{id} open: file type not supported: {ftype:?}"
             ))),
@@ -184,6 +186,52 @@ impl IaFile {
         }
 
         debug!("{} ia open for columnar: {:?}", id, f);
+        Ok(f)
+    }
+
+    // table_meta_file maybe the whole vector index file if table_offset is 0.
+    fn open_for_vector(id: u64, table_meta_file: Arc<dyn File>, mgr: IaManager) -> Result<Self> {
+        let file_len = table_meta_file.size();
+        let footer_size = VectorIndexFileFooter::size();
+        let footer_data = table_meta_file.read_footer(footer_size)?;
+        let mut footer = VectorIndexFileFooter::default();
+        footer.unmarshal(&footer_data);
+        // Calculate the offset of the props data from the end of the file.
+        let meta_size = footer.props_size() + footer_size;
+        let props_data =
+            table_meta_file.read_table_meta(file_len - meta_size as u64, footer.props_size())?;
+        let meta_offset_prop = VectorIndexFile::get_meta_offset(&props_data).unwrap_or(0) as u64;
+        let (file_size, meta_offset) = if meta_offset_prop == 0 {
+            // If the meta_offset_prop is 0, it means the vector index file is built by old
+            // version, and the table_meta_file is the whole file.
+            let meta_offset = file_len - meta_size as u64;
+            (file_len, meta_offset)
+        } else {
+            (meta_offset_prop + meta_size as u64, meta_offset_prop)
+        };
+        // If the table_meta_file is the whole file, we need to truncate it from the
+        // meta_offset to the end.
+        // NOTE: If all the tikv-server & tikv-worker are upgraded to the new version,
+        // we can remove this logic.
+        let table_meta_file = if table_meta_file.size() > meta_size as u64 {
+            let truncated_meta_data = table_meta_file.read_table_meta(meta_offset, meta_size)?;
+            let truncated_meta_file: Arc<dyn File> =
+                Arc::new(InMemFile::new(id, truncated_meta_data));
+            truncated_meta_file
+        } else {
+            table_meta_file
+        };
+        let f = Self {
+            id,
+            size: file_size,
+            ftype: FileType::VectorIndex,
+            table_meta_off: meta_offset,
+            segment_offsets: vec![meta_offset],
+            table_meta_file,
+            mgr,
+        };
+
+        debug!("{} ia open for vector: {:?}", id, f);
         Ok(f)
     }
 
@@ -343,6 +391,25 @@ impl File for IaFile {
         unimplemented!()
     }
 
+    async fn mmap_async(&self) -> Result<MmapData> {
+        let file_size = self.size();
+        if file_size == 0 {
+            return Err(Error::Other("file size is 0".to_string()));
+        }
+
+        assert!(self.table_meta_off > 0);
+        let ident = FileSegmentIdent {
+            file_id: self.id(),
+            start_off: 0,
+            end_off: self.table_meta_off,
+        };
+
+        let segment_handle = self.mgr.get_segment_handle(ident, self.ftype).await?;
+
+        let file = segment_handle.into_inner();
+        file.mmap()
+    }
+
     fn get_remote_segments(
         &self,
         ranges: &[(u64 /* start_off */, u64 /* end_off */)],
@@ -481,6 +548,11 @@ pub fn table_meta_file_local_path(file_id: u64, file_type: FileType, data_dir: &
         FileType::Columnar => data_dir.join(format!(
             "{}.{}",
             new_columnar_filename(file_id).display(),
+            TABLE_META_LOCAL_FILE_SUFFIX
+        )),
+        FileType::VectorIndex => data_dir.join(format!(
+            "{}.{}",
+            new_vector_index_filename(file_id).display(),
             TABLE_META_LOCAL_FILE_SUFFIX
         )),
         _ => unimplemented!("file type not supported: {:?}", file_type),

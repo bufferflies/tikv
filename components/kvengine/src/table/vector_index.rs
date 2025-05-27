@@ -3,7 +3,7 @@
 use std::{collections::HashSet, ops::Deref, sync::Arc};
 
 use async_trait::async_trait;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::EncryptionKey;
 use tidb_query_datatype::codec::{
     mysql::{VectorFloat32Encoder, VectorFloat32Ref},
@@ -147,7 +147,7 @@ impl VectorIndex {
         self.files[0].snap_version()
     }
 
-    pub fn search(
+    pub async fn search(
         &self,
         target: &[f32],
         count: usize,
@@ -159,7 +159,7 @@ impl VectorIndex {
         let mut results = vec![];
         let mut handles_dedup = HashSet::new();
         for file in &self.files {
-            let (items, deleted_handles) = file.search(target, count, start_ts)?;
+            let (items, deleted_handles) = file.search(target, count, start_ts).await?;
             // Add the deleted handles to the dedup set to avoid read the same handle in
             // next VectorIndexFile.
             handles_dedup.extend(deleted_handles);
@@ -230,7 +230,7 @@ impl VectorIndex {
 //   index | versions | handles | props | footer
 // V2:
 //   index | versions | handles | nulls | props | footer
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct VectorIndexFileFooter {
     index_size: u32,
@@ -251,7 +251,7 @@ impl Default for VectorIndexFileFooter {
 }
 
 impl VectorIndexFileFooter {
-    fn unmarshal(&mut self, mut data: &[u8]) {
+    pub fn unmarshal(&mut self, mut data: &[u8]) {
         self.index_size = data.get_u32_le();
         self.props_size = data.get_u32_le();
         self.format_ver = data.get_u32_le();
@@ -267,8 +267,12 @@ impl VectorIndexFileFooter {
         buf
     }
 
-    fn size() -> usize {
+    pub fn size() -> usize {
         std::mem::size_of::<VectorIndexFileFooter>()
+    }
+
+    pub fn props_size(&self) -> usize {
+        self.props_size as usize
     }
 
     fn valid_version(&self) -> bool {
@@ -286,6 +290,22 @@ pub struct VectorIndexFile {
 }
 
 impl VectorIndexFile {
+    fn is_loaded(&self) -> bool {
+        self.core.index_data.get().is_some()
+    }
+
+    fn index_size(&self) -> u32 {
+        self.footer.index_size
+    }
+
+    fn index(&self) -> &usearch::Index {
+        &self.core.index_data.get().unwrap().index
+    }
+
+    fn index_data(&self) -> &IndexData {
+        self.core.index_data.get().unwrap()
+    }
+
     pub fn file_id(&self) -> u64 {
         self.core.file.id()
     }
@@ -317,6 +337,14 @@ impl VectorIndexFile {
     pub fn biggest(&self) -> InnerKey<'_> {
         InnerKey::from_inner_buf(&self.core.biggest)
     }
+
+    pub fn meta_offset(&self) -> u32 {
+        self.core.meta_offset
+    }
+
+    pub fn is_legacy_format(&self) -> bool {
+        self.footer.format_version() == FORMAT_VERSION || self.meta_offset() == 0
+    }
 }
 
 impl Deref for VectorIndexFile {
@@ -335,30 +363,38 @@ impl BoundedDataSet for VectorIndexFile {
 
 pub struct VectorIndexFileCore {
     file: Arc<dyn File>,
+    footer: VectorIndexFileFooter,
     snap_version: u64,
     table_id: i64,
     index_id: i32,
     column_id: i32,
     is_common_handle: bool,
+    meta_offset: u32,
     smallest: Vec<u8>,
     biggest: Vec<u8>,
-    handles_start: usize,
-    handles_end: usize,
-    versions_start: usize,
-    versions_end: usize,
-    nulls_start: usize,
-    nulls_end: usize,
+    metric_repr: i32,
+    index_data: tokio::sync::OnceCell<Arc<IndexData>>,
+}
+
+pub struct IndexData {
     index: usearch::Index,
     file_data: MmapData,
+    versions_start: u32,
+    versions_end: u32,
+    handles_start: u32,
+    handles_end: u32,
+    nulls_start: u32,
+    nulls_end: u32,
 }
 
 impl VectorIndexFile {
     pub fn new(file: Arc<dyn File>) -> Result<Self> {
+        let file_len = file.size();
         let mut footer = VectorIndexFileFooter::default();
-        let file_data = file.mmap()?;
-        let footer_size = std::mem::size_of::<VectorIndexFileFooter>();
-        let footer_data = &file_data[file_data.len() - footer_size..];
-        footer.unmarshal(footer_data);
+        let footer_len = VectorIndexFileFooter::size();
+        let footer_offset = file_len - footer_len as u64;
+        let footer_data = file.read_footer(footer_len)?;
+        footer.unmarshal(footer_data.chunk());
         if footer.magic_number != MAGIC_NUMBER {
             return Err(Error::InvalidMagicNumber);
         }
@@ -369,8 +405,9 @@ impl VectorIndexFile {
             )));
         }
         let prop_size = footer.props_size as usize;
-        let prop_offset = file_data.len() - footer_size - prop_size;
-        let mut prop_data_buf = &file_data[prop_offset..prop_offset + prop_size];
+        let prop_offset = footer_offset - prop_size as u64;
+        let prop_data = file.read_table_meta(prop_offset, prop_size)?;
+        let mut prop_data_buf = prop_data.chunk();
         let mut snap_version = 0;
         let mut table_id = 0;
         let mut index_id = 0;
@@ -379,6 +416,7 @@ impl VectorIndexFile {
         let mut is_common_handle = false;
         let mut smallest = vec![];
         let mut biggest = vec![];
+        let mut meta_offset = 0;
         while prop_data_buf.len() > 2 {
             let prop_key_len = prop_data_buf.get_u16_le();
             if prop_key_len == 0 {
@@ -405,11 +443,46 @@ impl VectorIndexFile {
                 metric_repr = prop_value.get_i32_le();
             } else if prop_key == PROP_SNAP_VERSION.as_bytes() {
                 snap_version = prop_value.get_u64_le();
+            } else if prop_key == PROP_META_OFFSET.as_bytes() {
+                meta_offset = prop_value.get_u32_le();
             }
         }
-        let index_data = &file_data[..footer.index_size as usize];
+        Ok(VectorIndexFile {
+            core: Arc::new(VectorIndexFileCore {
+                file,
+                footer,
+                smallest,
+                biggest,
+                snap_version,
+                table_id,
+                index_id,
+                column_id,
+                is_common_handle,
+                meta_offset,
+                metric_repr,
+                index_data: tokio::sync::OnceCell::new(),
+            }),
+        })
+    }
+
+    pub async fn load_data(&self) -> Result<()> {
+        if self.is_loaded() {
+            return Ok(());
+        }
+        self.load_data_inner().await?;
+        Ok(())
+    }
+
+    async fn load_data_inner(&self) -> Result<()> {
+        let file_data = if self.file.is_sync() {
+            self.file.mmap()?
+        } else {
+            self.file.mmap_async().await?
+        };
+
+        let index_data = &file_data[..self.index_size() as usize];
         let mut opts = new_index_opts();
-        opts.metric.repr = metric_repr;
+        opts.metric.repr = self.metric_repr;
         let index = usearch::Index::new(&opts).map_err(|e| Other(e.to_string()))?;
         unsafe {
             index
@@ -420,7 +493,7 @@ impl VectorIndexFile {
         let versions_end = versions_start + index.size() * 8;
         let mut handles_start = versions_end;
         let handles_end;
-        if is_common_handle {
+        if self.is_common_handle {
             handles_start = versions_end + (index.size() + 1) * 4;
             let handle_offsets = &file_data[versions_end..handles_start];
             let handle_data_length =
@@ -431,46 +504,55 @@ impl VectorIndexFile {
         };
         let mut nulls_start = 0;
         let mut nulls_end = 0;
-        if footer.format_version() == FORMAT_VERSION_V2 {
+        if self.footer.format_version() == FORMAT_VERSION_V2 {
             nulls_start = handles_end;
             nulls_end = nulls_start + index.size();
         }
-        Ok(VectorIndexFile {
-            core: Arc::new(VectorIndexFileCore {
-                file,
-                smallest,
-                biggest,
-                snap_version,
-                table_id,
-                index_id,
-                column_id,
-                is_common_handle,
-                versions_start,
-                versions_end,
-                nulls_start,
-                nulls_end,
-                handles_start,
-                handles_end,
+
+        self.core
+            .index_data
+            .set(Arc::new(IndexData {
                 index,
                 file_data,
-            }),
-        })
+                versions_start: versions_start as u32,
+                versions_end: versions_end as u32,
+                handles_start: handles_start as u32,
+                handles_end: handles_end as u32,
+                nulls_start: nulls_start as u32,
+                nulls_end: nulls_end as u32,
+            }))
+            .map_err(|_| Error::Other("Failed to set loaded data".to_string()))?;
+
+        Ok(())
     }
 
     fn get_versions(&self) -> &[u64] {
-        bytemuck::cast_slice(&self.file_data[self.versions_start..self.versions_end])
+        let index_data = self.index_data();
+        bytemuck::cast_slice(
+            &index_data.file_data
+                [index_data.versions_start as usize..index_data.versions_end as usize],
+        )
     }
 
     fn get_handles_offsets(&self) -> &[u32] {
-        bytemuck::cast_slice(&self.file_data[self.versions_end..self.handles_start])
+        let index_data = self.index_data();
+        bytemuck::cast_slice(
+            &index_data.file_data
+                [index_data.versions_end as usize..index_data.handles_start as usize],
+        )
     }
 
     fn get_handles_data(&self) -> &[u8] {
-        &self.file_data[self.handles_start..self.handles_end]
+        let index_data = self.index_data();
+        bytemuck::cast_slice(
+            &index_data.file_data
+                [index_data.handles_start as usize..index_data.handles_end as usize],
+        )
     }
 
     pub(crate) fn has_nulls(&self) -> bool {
-        self.nulls_start != 0 && self.nulls_end != 0
+        let index_data = self.index_data();
+        index_data.nulls_start != 0 && index_data.nulls_end != 0
     }
 
     fn is_null(&self, key: usize) -> bool {
@@ -479,7 +561,8 @@ impl VectorIndexFile {
         if !self.has_nulls() {
             return false;
         }
-        self.file_data[self.nulls_start + key] == 1
+        let index_data = self.index_data();
+        index_data.file_data[index_data.nulls_start as usize + key] == 1
     }
 
     fn get_handle(&self, key: u64) -> &[u8] {
@@ -495,19 +578,22 @@ impl VectorIndexFile {
         }
     }
 
-    pub fn search(
+    pub async fn search(
         &self,
         target: &[f32],
         count: usize,
         start_ts: u64,
     ) -> Result<(Vec<VectorItem>, Vec<Vec<u8>>)> {
+        if !self.is_loaded() {
+            self.load_data().await?;
+        }
         let versions = self.get_versions();
         let mut results = vec![];
         thread_local! {
             static DELETED_HANDLES: std::cell::RefCell<Vec<Vec<u8>>> = std::cell::RefCell::new(Vec::new());
         }
-        let matches = self
-            .index
+        let index = self.index();
+        let matches = index
             .filtered_search(target, count, |key| {
                 let handle = self.get_handle(key);
                 let version = versions[key as usize];
@@ -540,8 +626,8 @@ impl VectorIndexFile {
         for (i, &key) in matches.keys.iter().enumerate() {
             let handle = self.get_handle(key);
             let version = versions[key as usize];
-            let mut value = vec![0f32; self.index.dimensions()];
-            self.index
+            let mut value = vec![0f32; index.dimensions()];
+            index
                 .get(key, &mut value)
                 .map_err(|e| Other(e.to_string()))?;
             let item = VectorItem {
@@ -563,7 +649,46 @@ impl VectorIndexFile {
         vec_idx_file_pb.set_snap_version(self.snap_version());
         vec_idx_file_pb.set_smallest(self.smallest().to_vec());
         vec_idx_file_pb.set_biggest(self.biggest().to_vec());
+        vec_idx_file_pb.set_meta_offset(self.meta_offset());
         vec_idx_file_pb
+    }
+
+    pub fn get_meta_offset(props_data: &Bytes) -> Option<u32> {
+        let mut props_data_buf = props_data.as_ref();
+        while props_data_buf.len() > 2 {
+            let prop_key_len = props_data_buf.get_u16_le();
+            if prop_key_len == 0 {
+                break;
+            }
+            let prop_key = &props_data_buf[..prop_key_len as usize];
+            props_data_buf.advance(prop_key_len as usize);
+            let prop_val_len = props_data_buf.get_u32_le();
+            let mut prop_value = &props_data_buf[..prop_val_len as usize];
+            props_data_buf.advance(prop_val_len as usize);
+            if prop_key == PROP_META_OFFSET.as_bytes() {
+                return Some(prop_value.get_u32_le());
+            }
+        }
+        None
+    }
+
+    pub fn get_meta_data(data: &Bytes) -> Result<Bytes> {
+        let footer_size = VectorIndexFileFooter::size();
+        if data.len() < footer_size {
+            return Err(Error::InvalidFileSize);
+        }
+        let footer_data = &data[data.len() - footer_size..];
+        let mut footer = VectorIndexFileFooter::default();
+        footer.unmarshal(footer_data);
+        if footer.magic_number != MAGIC_NUMBER {
+            return Err(Error::InvalidMagicNumber);
+        }
+        if data.len() < footer.props_size() + footer_size {
+            return Err(Error::InvalidFileSize);
+        }
+        Ok(Bytes::copy_from_slice(
+            &data[data.len() - footer_size - footer.props_size()..],
+        ))
     }
 }
 
@@ -584,12 +709,18 @@ impl VectorItem {
 pub(crate) struct VectorItemsReader {
     schema: Schema,
     vector_col_idx: usize,
-    items: Vec<VectorItem>,
+    items: Option<Vec<VectorItem>>,
     idx: usize,
     // The vector item already has handle, version and vector column.
     // If we need to read other columns, we can use the inner reader to read them.
     // The inner reader's schema doesn't contains the vector column.
     inner_reader: Option<Box<dyn ColumnarReader>>,
+    vector_index: VectorIndex,
+    target: Vec<f32>,
+    top_k: usize,
+    read_ts: u64,
+    start_handle: Option<Vec<u8>>,
+    end_handle: Option<Vec<u8>>,
 }
 
 impl VectorItemsReader {
@@ -604,15 +735,6 @@ impl VectorItemsReader {
         col_levels: &ColumnarLevels,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
-        let items = Self::search_items(
-            &schema,
-            vector_index,
-            target,
-            top_k,
-            read_ts,
-            start_handle,
-            end_handle,
-        )?;
         let vector_col_idx = schema
             .columns
             .iter()
@@ -623,30 +745,16 @@ impl VectorItemsReader {
         Ok(Self {
             schema,
             vector_col_idx,
-            items,
+            items: None,
             idx: 0,
             inner_reader,
-        })
-    }
-
-    fn search_items(
-        schema: &Schema,
-        vector_index: &VectorIndex,
-        target: &[f32],
-        top_k: usize,
-        read_ts: u64,
-        start_handle: Option<&[u8]>,
-        end_handle: Option<&[u8]>,
-    ) -> Result<Vec<VectorItem>> {
-        let items = vector_index.search(
-            target,
+            vector_index: vector_index.clone(),
+            target: target.to_vec(),
             top_k,
             read_ts,
-            start_handle,
-            end_handle,
-            schema.is_common_handle(),
-        )?;
-        Ok(items)
+            start_handle: start_handle.map(|h| h.to_vec()),
+            end_handle: end_handle.map(|h| h.to_vec()),
+        })
     }
 
     fn build_inner_reader(
@@ -709,16 +817,26 @@ impl ColumnarReader for VectorItemsReader {
     }
 
     async fn seek(&mut self, mut handle: &[u8]) -> Result<()> {
+        let items = self
+            .vector_index
+            .search(
+                &self.target,
+                self.top_k,
+                self.read_ts,
+                self.start_handle.as_deref(),
+                self.end_handle.as_deref(),
+                self.schema.is_common_handle(),
+            )
+            .await?;
         self.idx = if get_fixed_size(&self.schema.handle_column) > 0 {
             let int_handle = handle.get_i64_le();
-            search(self.items.len(), |i| {
-                self.items[i].handle.as_slice().get_i64_le() >= int_handle
+            search(items.len(), |i| {
+                items[i].handle.as_slice().get_i64_le() >= int_handle
             })
         } else {
-            search(self.items.len(), |i| {
-                self.items[i].handle.as_slice() >= handle
-            })
+            search(items.len(), |i| items[i].handle.as_slice() >= handle)
         };
+        self.items = Some(items);
         Ok(())
     }
 
@@ -726,11 +844,12 @@ impl ColumnarReader for VectorItemsReader {
         let mut vector_col = block.columns.remove(self.vector_col_idx);
         let mut vec_val_buf = vec![];
         let old_idx = self.idx;
+        let items = self.items.as_ref().unwrap();
         for _ in 0..limit {
-            if self.idx >= self.items.len() {
+            if self.idx >= items.len() {
                 break;
             }
-            let item = &self.items[self.idx];
+            let item = &items[self.idx];
             let data = VectorFloat32Ref::from_f32(&item.value);
             vec_val_buf.truncate(0);
             vec_val_buf.write_vector_float32(data).unwrap();
@@ -791,6 +910,7 @@ pub struct VectorIndexBuilder {
     biggest_common_handle: Vec<u8>,
     pub(crate) smallest: Vec<u8>,
     pub(crate) biggest: Vec<u8>,
+    pub(crate) meta_offset: u32,
 }
 
 impl VectorIndexBuilder {
@@ -838,6 +958,7 @@ impl VectorIndexBuilder {
             biggest_common_handle: vec![],
             smallest: vec![],
             biggest: vec![],
+            meta_offset: 0,
         })
     }
 
@@ -907,6 +1028,10 @@ impl VectorIndexBuilder {
         self.biggest_common_handle.extend_from_slice(common_handle);
     }
 
+    fn format_version(&self) -> u32 {
+        self.footer.format_ver
+    }
+
     pub fn build(&mut self) -> Result<Vec<u8>> {
         let entry_count = self.num_rows as usize;
         let handles_size = entry_count * 8;
@@ -939,6 +1064,12 @@ impl VectorIndexBuilder {
             props_buf.put_u32_le(val.len() as u32);
             props_buf.extend_from_slice(val);
         };
+        let index_size_with_align = (index_size + 7) & !7; // align to 8 bytes
+        let mut data_size = (index_size_with_align + versions_size + handles_size) as u32;
+        if self.format_version() == FORMAT_VERSION_V2 {
+            data_size += self.nulls.len() as u32;
+        }
+        self.meta_offset = data_size;
         write_prop(PROP_SNAP_VERSION, &self.snap_version.to_le_bytes());
         write_prop(PROP_TABLE_ID, &self.table_id.to_le_bytes());
         write_prop(PROP_INDEX_ID, &self.index_id.to_le_bytes());
@@ -947,16 +1078,15 @@ impl VectorIndexBuilder {
         write_prop(PROP_METRIC_REPR, &self.metric_repr.to_le_bytes());
         write_prop(PROP_SMALLEST, &self.smallest);
         write_prop(PROP_BIGGEST, &self.biggest);
+        write_prop(PROP_META_OFFSET, &self.meta_offset.to_le_bytes());
         self.footer.props_size = props_buf.len() as u32;
         let footer_data = self.footer.marshal();
-        let mut buf = Vec::with_capacity(
-            index_size + versions_size + handles_size + props_buf.len() + footer_data.len(),
-        );
-        buf.resize(index_size, 0);
+
+        let mut buf = Vec::with_capacity(data_size as usize + props_buf.len() + footer_data.len());
+        buf.resize(index_size_with_align, 0);
         self.index
             .save_to_buffer(&mut buf)
             .map_err(|e| Other(e.to_string()))?;
-        buf.resize((buf.len() + 7) & !7, 0); // align to 8 bytes
         buf.extend_from_slice(bytemuck::cast_slice(&self.versions));
         if self.is_common_handle {
             let mut handle_offsets = Vec::with_capacity(entry_count + 1);
@@ -972,7 +1102,9 @@ impl VectorIndexBuilder {
         } else {
             buf.extend_from_slice(bytemuck::cast_slice(&self.int_handles));
         }
-        buf.extend_from_slice(&self.nulls);
+        if self.format_version() == FORMAT_VERSION_V2 {
+            buf.extend_from_slice(&self.nulls);
+        }
         buf.extend_from_slice(&props_buf);
         buf.extend_from_slice(&footer_data);
         Ok(buf)
@@ -987,6 +1119,9 @@ const PROP_INDEX_ID: &str = "idx_id";
 const PROP_COLUMN_ID: &str = "col_id";
 const PROP_IS_COMMON_HANDLE: &str = "c_h";
 const PROP_METRIC_REPR: &str = "m_r";
+// Meta offset is the offset of meta data (props and footer) of the vector index
+// file. Used for vector index file support IA read.
+pub const PROP_META_OFFSET: &str = "meta_offset";
 
 fn new_index_opts() -> IndexOptions {
     let mut opts = IndexOptions::default();
@@ -1002,6 +1137,7 @@ mod tests {
     use std::{convert::TryInto, fs, sync::Arc};
 
     use bstr::ByteSlice;
+    use futures::executor::block_on;
     use schema::schema::StorageClass;
     use tidb_query_datatype::{
         codec::{
@@ -1026,9 +1162,11 @@ mod tests {
 
     #[test]
     fn test_vector_index_file() {
+        ::test_util::init_log_for_test();
         for common_handle in [true, false] {
             let vec_idx = build_vector_index_file(common_handle, 100, 200, 1);
-            assert_eq!(vec_idx.index.size(), 100);
+            block_on(vec_idx.load_data()).unwrap();
+            assert_eq!(vec_idx.index().size(), 100);
             assert_eq!(vec_idx.table_id, 1);
             assert_eq!(vec_idx.index_id, 1);
             assert_eq!(vec_idx.column_id, 1);
@@ -1055,7 +1193,7 @@ mod tests {
             }
             for key in 0u64..100 {
                 let mut vec_val = vec![0f32; TEST_DIMENSION];
-                let cnt = vec_idx.index.get(key, &mut vec_val).unwrap();
+                let cnt = vec_idx.index().get(key, &mut vec_val).unwrap();
                 assert_eq!(cnt, 1);
                 if common_handle {
                     assert_eq!(
@@ -1066,9 +1204,8 @@ mod tests {
                     assert_eq!(vec_idx.get_handle(key), &(100 + key as i64).to_le_bytes());
                 }
             }
-            let (items, _) = vec_idx
-                .search(&[50.0f32, 150.0f32, 250.0f32], 3, u64::MAX)
-                .unwrap();
+            let (items, _) =
+                block_on(vec_idx.search(&[50.0f32, 150.0f32, 250.0f32], 3, u64::MAX)).unwrap();
             assert_eq!(items.len(), 3);
             assert_eq!(items[0].value, vec![50.0f32, 150.0f32, 250.0f32]);
             assert_eq!(items[1].value, vec![51.0f32, 151.0f32, 251.0f32]);
@@ -1106,9 +1243,8 @@ mod tests {
 
         // Perform a search
         let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
-        let mut items = vector_index
-            .search(&query_vector, 3, u64::MAX, None, None, false)
-            .unwrap();
+        let mut items =
+            block_on(vector_index.search(&query_vector, 3, u64::MAX, None, None, false)).unwrap();
 
         // each file returns 3, total is 9, truncated to 3.
         assert_eq!(items.len(), 3);
@@ -1207,9 +1343,9 @@ mod tests {
             vector_index.sort();
 
             let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
-            let items = vector_index
-                .search(&query_vector, 100, u64::MAX, None, None, false)
-                .unwrap();
+            let items =
+                block_on(vector_index.search(&query_vector, 100, u64::MAX, None, None, false))
+                    .unwrap();
 
             for item in items {
                 let handle = item.handle;
@@ -1238,9 +1374,9 @@ mod tests {
             vector_index.sort();
 
             let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
-            let items = vector_index
-                .search(&query_vector, 100, u64::MAX, None, None, false)
-                .unwrap();
+            let items =
+                block_on(vector_index.search(&query_vector, 100, u64::MAX, None, None, false))
+                    .unwrap();
             for item in items {
                 let handle = item.handle;
                 let int_handle = i64::from_le_bytes(handle.try_into().unwrap());
