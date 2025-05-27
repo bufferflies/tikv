@@ -37,11 +37,14 @@ RUN for component in $(find . -type f -name 'Cargo.toml' -exec dirname {} \; | s
 
 FROM amazonlinux:2023.5.20241001.1 as builder
 
+ARG GITHUB_TOKEN=
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+
 RUN yum clean all && yum makecache
 
 RUN yum install -y \
   make glibc-devel gcc patch \
-  perl cmake3 && \
+  perl cmake3 git && \
   yum clean all
 
 ENV LIBRARY_PATH /usr/local/lib:$LIBRARY_PATH

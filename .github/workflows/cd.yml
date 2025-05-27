@@ -41,6 +41,7 @@ jobs:
           build-args: |
             GIT_HASH=${{ github.sha }}
             GIT_BRANCH=${{ github.ref }}
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
           tags: |
             hub.pingcap.net/sunxiaoguang/serverless/tikv:${{ github.sha }}-arm64
   build-amd64:
