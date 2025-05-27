@@ -17,7 +17,7 @@ use engine_traits::{CfNamesExt, MiscExt};
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::{compat::Future01CompatExt, FutureExt};
-use kvengine::{context::IaCtx, GLOBAL_SHARD_END_KEY};
+use kvengine::{context::IaCtx, Shard, GLOBAL_SHARD_END_KEY};
 use kvproto::{
     metapb,
     metapb::Region,
@@ -34,6 +34,7 @@ use pd_client::{merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat
 use prometheus::local::LocalHistogram;
 use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::store::{util, util::ConfChangeKind, ReadStats, TxnExt, WriteStats};
+use schema::schema::StorageClass;
 use tikv_util::{
     debug, error, info,
     store::{find_peer, QueryStats},
@@ -605,10 +606,12 @@ impl PdRunner {
                 .map_or(false, |is_tiflash| *is_tiflash)
         });
 
+        let shard = self.kv.get_shard(region.get_id());
         PdRunner::set_storage_size_metric(
             &region,
             Some(region_stat.approximate_kv_size),
             has_tiflash_replicas,
+            shard,
         );
 
         let changed = self
@@ -659,6 +662,7 @@ impl PdRunner {
         region: &metapb::Region,
         kv_size: Option<u64>,
         has_tiflash_replicas: bool,
+        shard: Option<Arc<Shard>>,
     ) {
         let keyspace_id = rfengine::get_region_keyspace_id_str(region);
         let region_id = region.get_id();
@@ -674,11 +678,25 @@ impl PdRunner {
                             "used",
                             region_id_str,
                             keyspace_id_str,
+                            "standard",
                         ]);
                         let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
                             "tiflash_used",
                             region_id_str,
                             keyspace_id_str,
+                            "standard",
+                        ]);
+                        let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
+                            "used",
+                            region_id_str,
+                            keyspace_id_str,
+                            "ia",
+                        ]);
+                        let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
+                            "tiflash_used",
+                            region_id_str,
+                            keyspace_id_str,
+                            "ia",
                         ]);
                     }
                     Some(size) => {
@@ -689,6 +707,15 @@ impl PdRunner {
                             "kv_size"=>size,
                             "has_tiflash_replicas" => has_tiflash_replicas,
                         );
+                        // Get storage class from shard if present
+                        let storage_class = if let Some(shard) = &shard {
+                            match shard.get_storage_class() {
+                                StorageClass::Ia => "ia",
+                                _ => "standard",
+                            }
+                        } else {
+                            "standard"
+                        };
                         STORE_SIZE_GAUGE_VEC
                             .with_label_values(&[
                                 if has_tiflash_replicas {
@@ -698,6 +725,7 @@ impl PdRunner {
                                 },
                                 region_id_str,
                                 keyspace_id_str,
+                                storage_class,
                             ])
                             .set(size as i64);
                     }
@@ -809,13 +837,13 @@ impl PdRunner {
         self.store_stat.region_keys_read.flush();
 
         STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["capacity", "", ""])
+            .with_label_values(&["capacity", "", "", ""])
             .set(capacity as i64);
         STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["available", "", ""])
+            .with_label_values(&["available", "", "", ""])
             .set(available as i64);
         STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["all_used", "", ""])
+            .with_label_values(&["all_used", "", "", ""])
             .set(used_size as i64);
 
         let kv_all_shard_stats = store_info.kv_engine.get_all_shard_stats();

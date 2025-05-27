@@ -5420,6 +5420,26 @@ def KvEngine() -> RowPanel:
             metric="kv_engine_ia_read_segment_duration_seconds",
         )
     )
+    layout.row(
+        [
+            graph_panel(
+                title="Storage Size by Storage Class",
+                description="Storage size used by each storage class (IA and Standard)",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "tikv_store_size_bytes",
+                            label_selectors=['type="used"'],
+                            by_labels=["storage_class"],
+                        ),
+                        legend_format="{{storage_class}}",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ],
+    )
     return layout.row_panel
 
 
