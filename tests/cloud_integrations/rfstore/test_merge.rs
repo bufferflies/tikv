@@ -868,6 +868,10 @@ fn test_merge_isolated_stale_learner() {
 
     pd_client.must_merge(right.get_id(), left.get_id());
 
+    // Ensure all other peers are already flushed and ready for split.
+    cluster.must_put(b"k1", b"v11");
+    must_get_equal(&cluster.get_engine(1), left.id, b"k1", b"v11");
+
     region = pd_client.get_region(b"k1").unwrap();
     cluster.must_split(&region, split_k2.as_encoded());
 
