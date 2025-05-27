@@ -54,7 +54,7 @@ pub(crate) async fn handle_txn_chunk(
         }
         Some(keyspace_id) => keyspace_id,
     };
-    let _keyspace_permit = ctx.worker_limiter.acquire_permit(keyspace_id).await;
+    let _keyspace_permit = ctx.coprocessor_limiter.acquire_permit(keyspace_id).await;
     let keyspace_info = match ctx
         .txn_chunk_handler
         .acquire_keyspace_info(ctx.clone(), keyspace_id)

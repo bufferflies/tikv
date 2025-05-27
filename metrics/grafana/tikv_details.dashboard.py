@@ -5719,6 +5719,57 @@ def CloudWorkerService() -> RowPanel:
     )
     layout.row(
         heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Compaction Request Wait duration",
+            heatmap_description="The time consumed to wait for handling remote compaction requests",
+            graph_title="Compaction Request Wait duration",
+            graph_description="The time consumed to wait for handling remote compaction requests",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_worker_limiter_request_wait_duration_seconds",
+            label_selectors=['type="compaction"'],
+        ),
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Concurrent Compaction Requests",
+                description="Number of remote compaction requests being processed or waiting",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "tikv_worker_remote_compact_processing_requests_counter",
+                        ),
+                        additional_groupby=True,
+                        legend_format="processing",
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "tikv_worker_limiter_waiting_requests_counter",
+                            label_selectors=['type="compaction"'],
+                        ),
+                        additional_groupby=True,
+                        legend_format="waiting",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Compaction Request Failures",
+                description="The number of compaction requests that failed to acquire permit, by failure reason",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_compact_failed_requests_counter",
+                            by_labels=["type"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
             heatmap_title="Snapshot Request duration",
             heatmap_description="The time consumed to handle remote copr snapshot duration",
             graph_title="Snapshot Request duration",

@@ -2,6 +2,18 @@
 
 use lazy_static::lazy_static;
 use prometheus::*;
+use prometheus_static_metric::*;
+
+make_static_metric! {
+    pub label_enum CompactFailureType {
+        queue_full,
+        wait_timeout,
+    }
+
+    pub struct RemoteCompactFailedRequestsCounterVec: IntCounter {
+        "type" => CompactFailureType,
+    }
+}
 
 lazy_static! {
     pub static ref NATIVE_BR_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
@@ -86,6 +98,33 @@ lazy_static! {
         "Bucketed histogram of remote compaction request duration",
         exponential_buckets(0.0005, 2.0, 20).unwrap()
     ).unwrap();
+
+    pub static ref REMOTE_COMPACT_PROCESSING_REQUESTS_COUNTER: IntGauge = register_int_gauge!(
+        "tikv_worker_remote_compact_processing_requests_counter",
+        "Number of remote compaction requests being processed"
+    ).unwrap();
+
+    pub static ref WORKER_LIMITER_REQUEST_WAIT_HISTOGRAM: HistogramVec = register_histogram_vec!(
+        "tikv_worker_limiter_request_wait_duration_seconds",
+        "Bucketed histogram of worker limiter request wait duration",
+        & ["type"],
+        exponential_buckets(0.0005, 2.0, 20).unwrap()
+    ).unwrap();
+
+    pub static ref WORKER_LIMITER_WAITING_REQUESTS_COUNTER_VEC: IntGaugeVec = register_int_gauge_vec!(
+        "tikv_worker_limiter_waiting_requests_counter",
+        "The number of requests waiting for permits",
+        &["type"]
+    )
+    .unwrap();
+
+    pub static ref REMOTE_COMPACT_FAILED_REQUESTS_COUNTER_VEC: RemoteCompactFailedRequestsCounterVec = register_static_int_counter_vec!(
+        RemoteCompactFailedRequestsCounterVec,
+        "tikv_worker_remote_compact_failed_requests_counter",
+        "Number of remote compaction requests that failed to acquire permit, by failure reason",
+        &["type"]
+    )
+    .unwrap();
 
     pub static ref WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
         "tikv_worker_worker_scaler_query_failures_counter",

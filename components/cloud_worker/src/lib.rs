@@ -74,7 +74,9 @@ use crate::{
     native_br::{NativeBrConfig, NativeBrManager},
     remote_cop::RemoteCopServer,
     txn_chunk::TxnChunkHandler,
-    worker_limiter::{WorkerLimiter, WorkerLimiterConfig},
+    worker_limiter::{
+        CompactionLimiterConfig, CoprocessorLimiterConfig, WorkerLimiter, WorkerType,
+    },
     worker_scaler::{
         WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV, LOAD_DATA_WORKER_WORKER_NUM_ENV,
     },
@@ -255,7 +257,26 @@ fn start_server(
 
     let txn_chunk_handler = Arc::new(TxnChunkHandler::new(config.txn_chunk_target_block_entries));
 
-    let worker_limiter = WorkerLimiter::new(config.worker_limiter.clone());
+    // Create task limiters for remote coprocessor and remote compaction
+    let coprocessor_limiter = WorkerLimiter::new(
+        config.coprocessor_limiter.global_concurrency_factor,
+        config.coprocessor_limiter.keyspace_concurrency_factor,
+        // wait_timeout is not supported for coprocessor limiter.
+        Duration::from_secs(u64::MAX),
+        // max_queue_size is not supported for coprocessor limiter.
+        i64::MAX as u64, // Use i64::MAX to avoid overflow.
+        WorkerType::Coprocessor,
+    );
+    let compaction_limiter = WorkerLimiter::new(
+        config.compaction_limiter.global_concurrency_factor,
+        // keyspace_concurrency_factor is not supported for compaction limiter.
+        // Use a safe value that won't cause overflow when calculating the permit by multiplying
+        // number of cpu cores.
+        1_000_000.0,
+        config.compaction_limiter.wait_timeout.0,
+        config.compaction_limiter.max_queue_size as u64,
+        WorkerType::Compaction,
+    );
 
     let memory_upper_threshold = config.memory_upper_threshold.as_memory_size();
     let memory_limiter = MemoryLimiter::new(
@@ -311,7 +332,8 @@ fn start_server(
         memory_limiter,
         block_cache,
         schema_files: Some(Arc::new(DashMap::new())),
-        worker_limiter,
+        coprocessor_limiter,
+        compaction_limiter,
         txn_chunk_manager,
         ia_ctx,
         read_columnar: config.read_columnar,
@@ -708,7 +730,7 @@ async fn register_compactor_to_store(
 #[macro_use]
 extern crate serde_derive;
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
@@ -745,7 +767,8 @@ pub struct Config {
     pub dfs: DFSConfig,
     pub native_br: NativeBrConfig,
     pub worker_scaler: WorkerScalerConfig,
-    pub worker_limiter: WorkerLimiterConfig,
+    pub coprocessor_limiter: CoprocessorLimiterConfig,
+    pub compaction_limiter: CompactionLimiterConfig,
     pub schema_manager: SchemaManagerConfig,
     pub txn_chunk_manager: TxnChunkManagerConfig,
 
@@ -784,7 +807,8 @@ impl Default for Config {
             report_wru: false,
             enable_load_data_check_point: false,
             checksum_type: ChecksumType::Crc32,
-            worker_limiter: WorkerLimiterConfig::default(),
+            coprocessor_limiter: CoprocessorLimiterConfig::default(),
+            compaction_limiter: CompactionLimiterConfig::default(),
             schema_manager: SchemaManagerConfig::default(),
             txn_chunk_manager: TxnChunkManagerConfig::default(),
             txn_chunk_target_block_entries: txn_chunk::TARGET_BLOCK_ENTRIES_DEF,
@@ -830,7 +854,8 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.worker_limiter.validate()?;
+        self.coprocessor_limiter.validate()?;
+        self.compaction_limiter.validate()?;
         Ok(())
     }
 

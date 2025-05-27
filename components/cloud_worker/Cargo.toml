@@ -38,6 +38,7 @@ moka = { workspace = true }
 native_br = { path = "../../components/native_br" }
 pd_client = { path = "../../components/pd_client", default-features = false }
 prometheus = { version = "0.13", features = ["nightly"] }
+prometheus-static-metric = "0.5"
 protobuf = "2.8"
 rand = "0.8"
 replication_worker = { workspace = true }

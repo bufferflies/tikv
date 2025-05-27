@@ -22,7 +22,7 @@ use kvengine::{
     dfs::{CacheFs, S3Fs},
     table::{columnar::SchemaFile, sstable::BlockCache, ChecksumType},
     txn_chunk_manager::TxnChunkManager,
-    SnapAccess,
+    CompactionRequest, SnapAccess,
 };
 use pd_client::PdClient;
 use prometheus::TEXT_FORMAT;
@@ -38,7 +38,7 @@ use tikv::{
 };
 use tikv_util::{
     deadline::Deadline,
-    error,
+    defer, error,
     http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
     info,
     memory::MemoryLimiter,
@@ -72,7 +72,8 @@ pub(crate) struct Context {
     pub quota_limiter: Arc<QuotaLimiter>,
     pub block_cache: BlockCache,
     pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
-    pub worker_limiter: WorkerLimiter,
+    pub coprocessor_limiter: WorkerLimiter,
+    pub compaction_limiter: WorkerLimiter,
     pub memory_limiter: MemoryLimiter,
     pub txn_chunk_manager: TxnChunkManager,
     pub ia_ctx: IaCtx,
@@ -135,28 +136,7 @@ where
                             .status(200)
                             .body(hyper::Body::from("ok"))
                             .unwrap()),
-                        "/compact" => {
-                            let ob_start = Instant::now_coarse();
-
-                            let allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
-                            let resp = kvengine::handle_remote_compaction(
-                                ctx.thread_pool.clone(),
-                                ctx.s3fs.clone(),
-                                req,
-                                ctx.compression_lvl,
-                                ctx.checksum_type,
-                                allocator,
-                                ctx.master_key.clone(),
-                                ctx.memory_limiter.clone(),
-                            )
-                            .await;
-
-                            if resp.is_ok() && resp.as_ref().unwrap().status().is_success() {
-                                REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM
-                                    .observe(ob_start.saturating_elapsed().as_secs_f64());
-                            }
-                            resp
-                        }
+                        "/compact" => handle_compaction(ctx, req).await,
                         path if path.starts_with("/cdc") => {
                             replication_worker::handle_cdc_request(
                                 ctx.replication_scheduler.as_ref(),
@@ -218,6 +198,84 @@ where
             panic!("spawn and await failed: {:?}", err);
         }
     }
+}
+
+async fn handle_compaction(
+    ctx: Arc<Context>,
+    req: Request<Body>,
+) -> hyper::Result<hyper::Response<Body>> {
+    // Parse the request body to get the compaction request.
+    let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
+    let result: Result<CompactionRequest, _> = serde_json::from_slice(&body_bytes);
+    if let Err(err) = &result {
+        let err_str = err.to_string();
+        return Ok(hyper::Response::builder()
+            .status(http::StatusCode::BAD_REQUEST)
+            .body(err_str.into())
+            .unwrap());
+    }
+    let comp_req = result.unwrap();
+
+    let keyspace_id = 0; // Keyspace is not supported yet.
+    // Try to acquire a permit with timeout
+    let timeout = ctx.compaction_limiter.wait_timeout();
+    let res =
+        tokio::time::timeout(timeout, ctx.compaction_limiter.acquire_permit(keyspace_id)).await;
+
+    match res {
+        Ok(Some(_permit)) => handle_compaction_internal(ctx, comp_req).await,
+        Ok(None) => {
+            // Queue is full
+            REMOTE_COMPACT_FAILED_REQUESTS_COUNTER_VEC.queue_full.inc();
+            Ok(hyper::Response::builder()
+                .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                .body(hyper::Body::from("compaction request wait queue is full"))
+                .unwrap())
+        }
+        Err(_) => {
+            // Timeout
+            REMOTE_COMPACT_FAILED_REQUESTS_COUNTER_VEC
+                .wait_timeout
+                .inc();
+            Ok(hyper::Response::builder()
+                .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                .body(hyper::Body::from("wait permit timeout"))
+                .unwrap())
+        }
+    }
+}
+
+// Extract common compaction processing logic into a separate function
+async fn handle_compaction_internal(
+    ctx: Arc<Context>,
+    comp_req: CompactionRequest,
+) -> hyper::Result<hyper::Response<Body>> {
+    REMOTE_COMPACT_PROCESSING_REQUESTS_COUNTER.inc();
+    defer! {
+        REMOTE_COMPACT_PROCESSING_REQUESTS_COUNTER.dec()
+    }
+
+    let handle_start = Instant::now_coarse();
+    let allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
+    let resp = kvengine::handle_remote_compaction(
+        ctx.thread_pool.clone(),
+        ctx.s3fs.clone(),
+        comp_req,
+        ctx.compression_lvl,
+        ctx.checksum_type,
+        allocator,
+        ctx.master_key.clone(),
+        ctx.memory_limiter.clone(),
+    )
+    .await;
+
+    if resp.is_ok() && resp.as_ref().unwrap().status().is_success() {
+        // Record processing time histogram
+        REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM
+            .observe(handle_start.saturating_elapsed().as_secs_f64());
+    }
+
+    resp
 }
 
 async fn handle_coprocessor(
@@ -303,7 +361,8 @@ async fn handle_remote_coprocessor(
     }
     let deadline = Deadline::from_now(timeout);
 
-    let res = tokio::time::timeout(timeout, ctx.worker_limiter.acquire_permit(keyspace_id)).await;
+    let res =
+        tokio::time::timeout(timeout, ctx.coprocessor_limiter.acquire_permit(keyspace_id)).await;
     if res.is_err() {
         info!(
             "wait permit timeout";

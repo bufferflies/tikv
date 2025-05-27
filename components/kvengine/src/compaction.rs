@@ -2345,24 +2345,13 @@ async fn load_blob_tables(
 pub async fn handle_remote_compaction(
     thread_pool: tokio::runtime::Handle,
     dfs: Arc<dyn dfs::Dfs>,
-    req: hyper::Request<hyper::Body>,
+    comp_req: CompactionRequest,
     compression_lvl: i32,
     checksum_type: ChecksumType,
     id_allocator: Arc<dyn IdAllocator>,
     master_key: MasterKey,
     memory_limiter: MemoryLimiter,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let req_body = hyper::body::to_bytes(req.into_body()).await?;
-    let result = serde_json::from_slice(req_body.chunk());
-    if result.is_err() {
-        let err_str = result.unwrap_err().to_string();
-        return Ok(hyper::Response::builder()
-            .status(400)
-            .body(err_str.into())
-            .unwrap());
-    }
-    let comp_req: CompactionRequest = result.unwrap();
-
     if comp_req.compactor_version > CURRENT_COMPACTOR_VERSION {
         warn!(
             "received incompatible compactor-version({}). Upgrade tikv-worker (version:{}). Request: {:?}",

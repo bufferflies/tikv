@@ -1950,6 +1950,7 @@ dependencies = [
  "native_br",
  "pd_client",
  "prometheus",
+ "prometheus-static-metric",
  "protobuf",
  "rand 0.8.5",
  "replication_worker",
