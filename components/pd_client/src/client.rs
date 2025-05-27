@@ -47,7 +47,7 @@ use super::{
     BucketStat, Config, Error, FeatureGate, PdClient, PdFuture, RegionInfo, RegionStat, Result,
     UnixSecs, REQUEST_TIMEOUT,
 };
-use crate::BucketMeta;
+use crate::{BucketMeta, LEADER_CHANGE_RETRY};
 
 pub const CQ_COUNT: usize = 1;
 pub const CLIENT_PREFIX: &str = "pd";
@@ -445,7 +445,6 @@ impl fmt::Debug for RpcClient {
     }
 }
 
-const LEADER_CHANGE_RETRY: usize = 10;
 #[async_trait]
 impl PdClient for RpcClient {
     fn load_global_config_by_names(&self, list: Vec<String>) -> PdFuture<HashMap<String, Vec<u8>>> {
@@ -1317,18 +1316,29 @@ impl PdClient for RpcClient {
             .execute()
     }
 
-    fn split_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<Vec<u64>> {
+    fn split_regions_opt(
+        &self,
+        keys: Vec<Vec<u8>>,
+        request_timeout: Duration,
+        retry_limit: usize,
+    ) -> PdFuture<(Vec<u64>, u64 /* finished_percent */)> {
         let timer = Instant::now();
         let mut req = pdpb::SplitRegionsRequest::default();
         req.set_header(self.header());
         req.set_split_keys(keys.into());
-        req.set_retry_limit(LEADER_CHANGE_RETRY as u64);
+        req.set_retry_limit(retry_limit as u64); // PD server side retry when not all keys are split.
         let executor = move |client: &Client, req: pdpb::SplitRegionsRequest| {
             let handler = {
                 let inner = client.inner.rl();
                 inner
                     .client_stub
-                    .split_regions_async_opt(&req, call_option_inner(&inner))
+                    // split region is a time-consuming operation, so we need to set a longer timeout
+                    // or we will get timeout error and retry send same request
+                    // and this request will never succeed
+                    .split_regions_async_opt(
+                        &req,
+                        call_option_inner(&inner).timeout(request_timeout)
+                    )
                     .unwrap_or_else(|e| {
                         panic!("fail to request PD {} err {:?}", "split regions", e)
                     })
@@ -1339,12 +1349,10 @@ impl PdClient for RpcClient {
                     .with_label_values(&["split_regions"])
                     .observe(duration_to_sec(timer.saturating_elapsed()));
                 check_resp_header(resp.get_header())?;
-                Ok(resp.take_regions_id())
+                Ok((resp.take_regions_id(), resp.finished_percentage))
             }) as PdFuture<_>
         };
-        self.pd_client
-            .request(req, executor, LEADER_CHANGE_RETRY)
-            .execute()
+        self.pd_client.request(req, executor, retry_limit).execute()
     }
 
     fn split_and_scatter_regions(&self, keys: Vec<Vec<u8>>) -> PdFuture<()> {

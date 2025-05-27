@@ -572,9 +572,35 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         unimplemented!();
     }
 
-    /// tikv-worker uses this to load data.
-    fn split_regions(&self, _keys: Vec<Vec<u8>>) -> BoxFuture<'_, Result<Vec<u64>>> {
+    /// `retry_limit`: Used for both request retry & server side retry.
+    ///
+    /// Note that the PD server has backoff between retries with interval:
+    /// `min(1m, pow(retry, 2) * 100ms)`
+    fn split_regions_opt(
+        &self,
+        _keys: Vec<Vec<u8>>,
+        _request_timeout: Duration,
+        _retry_limit: usize,
+    ) -> BoxFuture<'_, Result<(Vec<u64>, u64 /* finished_percent */)>> {
         unimplemented!();
+    }
+
+    /// tikv-worker uses this to load data.
+    fn split_regions(&self, keys: Vec<Vec<u8>>) -> BoxFuture<'_, Result<Vec<u64>>> {
+        let request_timeout = request_timeout_for_split_regions(keys.len());
+        Box::pin(async move {
+            let (regions_id, finished_percent) = self
+                .split_regions_opt(keys, request_timeout, LEADER_CHANGE_RETRY)
+                .await?;
+            if finished_percent < 100 {
+                Err(Error::SplitRegionsNotFinished {
+                    regions_id: regions_id.clone(),
+                    finished_percent,
+                })
+            } else {
+                Ok(regions_id)
+            }
+        })
     }
 
     fn split_regions_with_retry(
@@ -582,16 +608,32 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         keys: Vec<Vec<u8>>,
         timeout: Duration,
     ) -> BoxFuture<'_, Result<Vec<u64>>> {
+        const RETRY_LIMIT: usize = 3;
+        let request_timeout = request_timeout_for_split_regions(keys.len());
+
         let timer = GLOBAL_TIMER_HANDLE.clone();
         let start = Instant::now_coarse();
         let mut retry_ms = SPLIT_REGIONS_INIT_RETRY_INTERVAL_MS;
         Box::pin(async move {
             loop {
-                match self.split_regions(keys.clone()).await {
-                    Ok(region_ids) => return Ok(region_ids),
-                    Err(e) => {
+                match self
+                    .split_regions_opt(keys.clone(), request_timeout, RETRY_LIMIT)
+                    .await
+                {
+                    Ok((regions_id, finished_percent)) if finished_percent >= 100 => {
+                        return Ok(regions_id);
+                    }
+                    res => {
                         if start.saturating_elapsed() >= timeout {
-                            return Err(e);
+                            return match res {
+                                Ok((regions_id, finished_percent)) => {
+                                    Err(Error::SplitRegionsNotFinished {
+                                        regions_id,
+                                        finished_percent,
+                                    })
+                                }
+                                Err(e) => Err(e),
+                            };
                         }
                         let deadline = std::time::Instant::now() + Duration::from_millis(retry_ms);
                         timer.delay(deadline).compat().await.unwrap();
@@ -641,7 +683,8 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
     }
 }
 
-const REQUEST_TIMEOUT: u64 = 2; // 2s
+pub(crate) const LEADER_CHANGE_RETRY: usize = 10;
+pub(crate) const REQUEST_TIMEOUT: u64 = 5; // 5s
 
 /// Takes the peer address (for sending raft messages) from a store.
 pub fn take_peer_address(store: &mut metapb::Store) -> String {
@@ -663,4 +706,13 @@ fn check_update_service_safe_point_resp(
         });
     }
     Ok(())
+}
+
+// It's a empirical value that split regions with 256 keys cost 10s, 39ms for
+// each.
+const SPLIT_REGIONS_REQUEST_TIMEOUT_PER_KEY: Duration = Duration::from_millis(50);
+
+fn request_timeout_for_split_regions(keys_count: usize) -> Duration {
+    (SPLIT_REGIONS_REQUEST_TIMEOUT_PER_KEY * keys_count as u32)
+        .max(Duration::from_secs(REQUEST_TIMEOUT))
 }

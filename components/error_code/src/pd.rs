@@ -16,5 +16,6 @@ define_error_codes!(
     STALE_SERVICE_GC_SAFE_POINT => ("StaleServiceGcSafePoint", "", ""),
     CHANNEL_DROP => ("ChannelDrop", "", ""),
     TSO_SERVER_NOT_FOUND => ("TsoServerNotFound", "", ""),
+    SPLIT_REGIONS_NOT_FINISHED => ("SplitRegionsNotFinished", "", ""),
     UNKNOWN => ("Unknown", "", "")
 );

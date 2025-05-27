@@ -56,8 +56,6 @@ use super::*;
 pub const INIT_EPOCH_CONF_VER: u64 = 1;
 pub const INIT_EPOCH_VER: u64 = 1;
 
-const LEADER_CHANGE_RETRY: usize = 10; // Ref: pd_client::LEADER_CHANGE_RETRY.
-
 struct Store {
     store: metapb::Store,
     region_ids: HashSet<u64>,
@@ -1806,10 +1804,17 @@ impl PdClient for TestPdClient {
         Box::pin(ok(resp))
     }
 
-    // The number of returned region_ids would be less then number of keys.
+    // The number of returned region_ids would be less than number of keys.
     // Since split_regions is not an atomic operation, a latter splitted region
-    // would has the same region id with a former one.
-    fn split_regions(&self, keys: Vec<Vec<u8>>) -> BoxFuture<'_, Result<Vec<u64>>> {
+    // would have the same region id with a former one.
+    // Ref: https://github.com/tidbcloud/pd-cse/blob/release-8.1-keyspace/pkg/schedule/splitter/region_splitter.go
+    fn split_regions_opt(
+        &self,
+        keys: Vec<Vec<u8>>,
+        _request_timeout: Duration,
+        retry_limit: usize,
+    ) -> BoxFuture<'_, Result<(Vec<u64>, u64)>> {
+        let total_keys = keys.len();
         let mut keys_set: HashSet<Vec<u8>> = HashSet::from_iter(keys);
         let mut region_ids: HashSet<u64> = HashSet::default();
 
@@ -1817,7 +1822,7 @@ impl PdClient for TestPdClient {
         let start = Instant::now_coarse();
         let mut retry = 0;
         Box::pin(async move {
-            while !keys_set.is_empty() && retry < LEADER_CHANGE_RETRY {
+            while !keys_set.is_empty() && retry < retry_limit {
                 retry += 1;
                 let mut region_map: HashMap<
                     u64, // region_id
@@ -1852,14 +1857,15 @@ impl PdClient for TestPdClient {
             }
 
             if !keys_set.is_empty() {
-                return Err(box_err!(
-                    "split_regions timeout, rest of keys: {:?}, elapsed: {:?}",
+                warn!(
+                    "split_regions not finished, rest of keys: {:?}, elapsed: {:?}",
                     keys_set,
                     start.saturating_elapsed()
-                ));
+                );
             }
 
-            Ok(region_ids.into_iter().collect())
+            let finished_percent = 100 - keys_set.len() * 100 / total_keys;
+            Ok((region_ids.into_iter().collect(), finished_percent as u64))
         })
     }
 

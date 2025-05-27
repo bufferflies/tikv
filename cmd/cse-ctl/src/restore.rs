@@ -159,7 +159,8 @@ fn execute_restore_pd(args: RestorePdArgs) {
 
 fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
     if std::env::var("LOG_FILE").is_err() {
-        std::env::set_var("LOG_FILE", "cse-ctl.log");
+        let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%z");
+        std::env::set_var("LOG_FILE", format!("cse-ctl_{}.log", timestamp));
     }
     // The logger for test is enough.
     ::test_util::init_log_for_test();
