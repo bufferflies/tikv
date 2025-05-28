@@ -410,13 +410,32 @@ mod profiling {
             .unwrap_or("unknown")
             .to_string();
         let mut shared_thread_arena_map = super::SHARED_THREAD_ARENA_MAP.lock().unwrap();
-        if shared_thread_arena_map.get(&shared_prefix).is_none() {
-            // Create new arena if the shared prefix is new
+        if let Some(index) = shared_thread_arena_map.get(&shared_prefix) {
+            // The given prefix is already allocated with a specific arena index,
+            // shares and binds it to this calling thread.
+            unsafe {
+                #[cfg(test)]
+                {
+                    let count: usize = tikv_jemalloc_ctl::raw::read(
+                        format!("stats.arenas.{}.nthreads\0", index).as_bytes(),
+                    )
+                    .unwrap_or(0);
+                    assert!(count >= 1);
+                }
+                if let Err(e) = tikv_jemalloc_ctl::raw::update(THREAD_ARENA, *index) {
+                    return Err(ProfError::JemallocError(format!(
+                        "failed to reset thread's arena with a shared index: {}",
+                        e
+                    )));
+                }
+            }
+        } else {
+            // Create new arena if the shared prefix is new. This thread is the first
+            // thread belonging to this thread prefix, regarding this thread as the
+            // leader of this prefix.
             let index = allocate_exclusive_arena()?;
             shared_thread_arena_map.insert(shared_prefix.clone(), index);
-            // This thread is the first thread belonging to this thread prefix, regarding
-            // this thread as the leader of this prefix. And adds it to the arena map with
-            // its thread id.
+            // Adds it to the arena map with its thread id.
             super::THREAD_ARENA_MAP
                 .lock()
                 .unwrap()

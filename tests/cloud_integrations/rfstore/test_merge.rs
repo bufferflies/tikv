@@ -36,6 +36,8 @@ fn test_node_merge_with_slow_learner() {
     let r1 = cluster.run_conf_change();
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.must_add_peer(r1, new_learner_peer(2, 2));
+    cluster.must_put(b"k1", b"v0");
+    must_get_equal(&cluster.get_engine(2), r1, b"k1", b"v0");
 
     // Split the region.
     let pd_client = Arc::clone(&cluster.pd_client);

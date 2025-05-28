@@ -754,13 +754,17 @@ mod tests {
         let name = rx.recv().unwrap();
         assert_eq!(name, thread_name);
 
-        // test anonymous std::thread
-        let closure_func = move || {
-            spawn_anonymous_thread_with!(get_name);
-        };
-        let tmp_name = format!("{}-tmp", std::env::var("CARGO_PKG_NAME").unwrap());
-        closure_func();
-        let name = rx.recv().unwrap();
-        assert_eq!(name, tmp_name);
+        // test anonymous std::thread using shared arena
+        tikv_alloc::set_thread_exclusive_arena(true);
+        for _ in 0..3 {
+            let get_name = get_name.clone();
+            let closure_func = move || {
+                spawn_anonymous_thread_with!(get_name);
+            };
+            let tmp_name = format!("{}-tmp", std::env::var("CARGO_PKG_NAME").unwrap());
+            closure_func();
+            let name = rx.recv().unwrap();
+            assert_eq!(name, tmp_name);
+        }
     }
 }
