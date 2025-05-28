@@ -1892,7 +1892,9 @@ mod tests {
             1,
         );
         assert!(!ok);
-        assert!(cnt >= 8);
+        // `>= 9` in theory, but use `2` to be stable.
+        // In a busy env, it may not have enough chance to retry.
+        assert!(cnt >= 2);
 
         let ok = try_wait(|| true, 1);
         assert!(ok);
