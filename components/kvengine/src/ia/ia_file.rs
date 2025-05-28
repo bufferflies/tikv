@@ -407,7 +407,7 @@ impl File for IaFile {
         let segment_handle = self.mgr.get_segment_handle(ident, self.ftype).await?;
 
         let file = segment_handle.into_inner();
-        file.mmap()
+        Ok(file.mmap()?.to_aligned())
     }
 
     fn get_remote_segments(

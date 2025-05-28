@@ -623,6 +623,7 @@ impl StatusServer {
         }
         Ok(match engine.get_shard_with_ver(shard_id, shard_ver) {
             Ok(shard) => {
+                let start = Instant::now_coarse();
                 let snap_access = shard.new_snap_access();
                 let outer_ranges = vec![(shard.outer_start.clone(), shard.outer_end.clone())];
                 let start_ts = u64::from_str(query_pairs.get("start_ts").unwrap()).unwrap();
@@ -645,9 +646,18 @@ impl StatusServer {
                     false,
                     false,
                 );
+                let mem_data_len = mem_data.len();
+                let snap_data_len = snap_data.len();
                 delegate_resp.set_mem_table_data(mem_data);
                 delegate_resp.set_snapshot(snap_data);
                 let body = delegate_resp.write_to_bytes().unwrap();
+                debug!(
+                    "dump_kvengine_snapshot time: {:?}, mem_data_size: {:?}, snap_data_size: {:?}, total_size: {:?}",
+                    start.saturating_elapsed(),
+                    mem_data_len,
+                    snap_data_len,
+                    body.len()
+                );
                 make_ok_response(body)
             }
             Err(e) => make_response(StatusCode::NOT_FOUND, e.to_string()),

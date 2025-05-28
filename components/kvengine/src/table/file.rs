@@ -11,6 +11,7 @@ use std::{
     },
 };
 
+use aligned_vec::{AVec, ConstAlign};
 use bytes::Bytes;
 use memmap2::Mmap;
 use quick_cache::sync::GuardResult;
@@ -94,6 +95,7 @@ pub trait File: Sync + Send {
 pub enum MmapData {
     Local(Arc<Mmap>),
     InMem(Bytes),
+    AlignedInMem(AVec<u8, ConstAlign<8>>),
 }
 
 impl Default for MmapData {
@@ -109,6 +111,20 @@ impl Deref for MmapData {
         match self {
             MmapData::Local(mmap) => mmap.deref(),
             MmapData::InMem(data) => data.deref(),
+            MmapData::AlignedInMem(data) => data.deref(),
+        }
+    }
+}
+
+impl MmapData {
+    pub fn to_aligned(self) -> MmapData {
+        match self {
+            MmapData::InMem(data) if data.as_ptr() as usize % 8 != 0 => {
+                let mut avec = AVec::<u8, ConstAlign<8>>::with_capacity(8, data.len());
+                avec.extend_from_slice(&data);
+                MmapData::AlignedInMem(avec)
+            }
+            data => data,
         }
     }
 }
@@ -407,7 +423,84 @@ impl FdCache {
 mod tests {
     use std::{intrinsics::black_box, ops::Deref, time::Duration};
 
-    use crate::table::file::TtlCache;
+    use aligned_vec::{AVec, ConstAlign};
+    use bytes::Bytes;
+    use rand::Rng;
+
+    use crate::table::file::{MmapData, TtlCache};
+
+    #[test]
+    fn test_mmap_data_to_aligned() {
+        // Test case 1: InMem data that is already 8-byte aligned
+        // Create an 8-byte aligned vector
+        let mut base_bytes: Bytes;
+        // Guarantee the base_bytes is 8-byte aligned
+        loop {
+            let rand_len = rand::thread_rng().gen_range(16..=128);
+            let mut base_vec = Vec::with_capacity(rand_len);
+            for i in 0..rand_len {
+                base_vec.push(i as u8);
+            }
+            base_bytes = Bytes::from(base_vec);
+            if base_bytes.as_ptr() as usize % 8 == 0 {
+                break;
+            }
+        }
+        let aligned_bytes = base_bytes.slice(0..8);
+
+        assert_eq!(aligned_bytes.as_ptr() as usize % 8, 0);
+
+        let mmap_data = MmapData::InMem(aligned_bytes);
+        let result = mmap_data.to_aligned();
+
+        // Should return the original InMem data since it's already aligned
+        match result {
+            MmapData::InMem(data) => {
+                assert_eq!(data.len(), 8);
+                assert_eq!(&data[..], &[0, 1, 2, 3, 4, 5, 6, 7]);
+            }
+            _ => panic!("Expected InMem variant for aligned data"),
+        }
+
+        // Test case 2: InMem data that is NOT 8-byte aligned
+        // Create a non-aligned byte array by using a slice that starts at an odd
+        // position
+
+        let unaligned_bytes = base_bytes.slice(1..9); // Start from index 1 to make it likely unaligned
+        assert!(unaligned_bytes.as_ptr() as usize % 8 != 0);
+
+        // Verify the data is not 8-byte aligned (this might not always be true, but
+        // we'll test the behavior)
+        let mmap_data = MmapData::InMem(unaligned_bytes.clone());
+        let result = mmap_data.to_aligned();
+
+        // If it was unaligned, it should now be AlignedInMem; if it was already
+        // aligned, it stays InMem
+        match result {
+            MmapData::AlignedInMem(data) => {
+                assert_eq!(data.len(), 8);
+                assert_eq!(&data[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+                // Verify the new data is 8-byte aligned
+                assert_eq!(data.as_ptr() as usize % 8, 0);
+            }
+            _ => panic!("Expected AlignedInMem variant"),
+        }
+
+        // Test case 3: AlignedInMem data should pass through unchanged
+        let mut avec = AVec::<u8, ConstAlign<8>>::with_capacity(8, 8);
+        avec.extend_from_slice(&[10, 20, 30, 40, 50, 60, 70, 80]);
+        let mmap_data = MmapData::AlignedInMem(avec);
+        let result = mmap_data.to_aligned();
+
+        match result {
+            MmapData::AlignedInMem(data) => {
+                assert_eq!(data.len(), 8);
+                assert_eq!(&data[..], &[10, 20, 30, 40, 50, 60, 70, 80]);
+                assert_eq!(data.as_ptr() as usize % 8, 0);
+            }
+            _ => panic!("Expected AlignedInMem variant to pass through unchanged"),
+        }
+    }
 
     #[test]
     fn test_ttl_cache() {
