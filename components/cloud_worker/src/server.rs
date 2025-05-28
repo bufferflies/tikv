@@ -55,9 +55,13 @@ use crate::{
     txn_chunk,
     txn_chunk::TxnChunkHandler,
     worker_limiter::WorkerLimiter,
+    write_sst,
+    write_sst::WriteSstManager,
 };
 
 pub(crate) struct Context {
+    pub cluster_id: u64,
+    pub block_size: usize,
     pub compression_lvl: i32,
     pub checksum_type: ChecksumType,
     pub thread_pool: tokio::runtime::Handle,
@@ -78,6 +82,7 @@ pub(crate) struct Context {
     pub txn_chunk_manager: TxnChunkManager,
     pub ia_ctx: IaCtx,
     pub read_columnar: bool,
+    pub write_sst_manager: WriteSstManager,
 }
 
 impl Context {
@@ -173,6 +178,7 @@ where
                             handle_restore_keyspace(ctx, req).await
                         }
                         "/txn_chunk" => handle_txn_chunk(ctx, req).await,
+                        "/write_sst" => handle_write_sst(ctx, req).await,
                         _ => Ok(hyper::Response::builder()
                             .status(404)
                             .body(hyper::Body::from("Not Found"))
@@ -316,6 +322,17 @@ async fn handle_txn_chunk(
     spawn_and_await(
         ctx.thread_pool.clone(),
         txn_chunk::handle_txn_chunk(ctx, req),
+    )
+    .await
+}
+
+async fn handle_write_sst(
+    ctx: Arc<Context>,
+    req: hyper::Request<hyper::Body>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    spawn_and_await(
+        ctx.thread_pool.clone(),
+        write_sst::handle_write_sst(ctx, req),
     )
     .await
 }

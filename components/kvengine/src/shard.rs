@@ -2884,7 +2884,7 @@ impl ShardRange {
         InnerKey::from_outer_end_key(&self.outer_end)
     }
 
-    pub(crate) fn keyspace_prefix(&self) -> &[u8] {
+    pub fn keyspace_prefix(&self) -> &[u8] {
         &self.outer_start[..self.keyspace_prefix_len()]
     }
 

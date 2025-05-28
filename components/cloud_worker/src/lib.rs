@@ -12,6 +12,7 @@ mod server;
 mod txn_chunk;
 mod worker_limiter;
 mod worker_scaler;
+mod write_sst;
 
 use std::{
     fs,
@@ -76,10 +77,12 @@ use crate::{
     txn_chunk::TxnChunkHandler,
     worker_limiter::{
         CompactionLimiterConfig, CoprocessorLimiterConfig, WorkerLimiter, WorkerType,
+        WriteSstLimiterConfig,
     },
     worker_scaler::{
         WorkerScaler, WorkerScalerConfig, LOAD_DATA_WORKER_ENV, LOAD_DATA_WORKER_WORKER_NUM_ENV,
     },
+    write_sst::WriteSstManager,
 };
 
 const BACKGROUND_WORKER_INTERVAL: Duration = Duration::from_secs(60); //1min
@@ -197,6 +200,7 @@ fn start_server(
         .parse()
         .expect("Unable to parse zstd compression level");
     let checksum_type = config.checksum_type;
+    let block_size = config.cop_block_size.0 as usize;
 
     let incoming = {
         let _enter = hyper_runtime.enter();
@@ -209,9 +213,9 @@ fn start_server(
         .block_on(config.security.new_master_key());
     let is_load_data_worker = std::env::var(LOAD_DATA_WORKER_ENV).is_ok();
     let mut worker_scaler_opt: Option<WorkerScaler> = None;
+    let cluster_id = pd.get_cluster_id().unwrap();
     if !is_load_data_worker && config.worker_scaler.run {
         let scaler_cfg = config.worker_scaler.clone();
-        let cluster_id = pd.get_cluster_id().unwrap();
         let worker_scaler = thread_pool
             .block_on(WorkerScaler::new(
                 &scaler_cfg,
@@ -277,6 +281,16 @@ fn start_server(
         config.compaction_limiter.max_queue_size as u64,
         WorkerType::Compaction,
     );
+    let write_sst_limiter = WorkerLimiter::new(
+        config.write_sst_limiter.global_concurrency_factor,
+        // keyspace_concurrency_factor is not supported for write sst limiter.
+        // Use a safe value that won't cause overflow when calculating the permit by multiplying
+        // number of cpu cores.
+        1_000_000.0,
+        config.write_sst_limiter.wait_timeout.0,
+        config.write_sst_limiter.max_queue_size as u64,
+        WorkerType::WriteSst,
+    );
 
     let memory_upper_threshold = config.memory_upper_threshold.as_memory_size();
     let memory_limiter = MemoryLimiter::new(
@@ -317,6 +331,8 @@ fn start_server(
         None
     };
     let ctx = Arc::new(server::Context {
+        cluster_id,
+        block_size,
         compression_lvl,
         checksum_type,
         thread_pool: thread_pool.handle().clone(),
@@ -337,6 +353,7 @@ fn start_server(
         txn_chunk_manager,
         ia_ctx,
         read_columnar: config.read_columnar,
+        write_sst_manager: WriteSstManager::new(pd.clone(), write_sst_limiter),
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
@@ -769,6 +786,7 @@ pub struct Config {
     pub worker_scaler: WorkerScalerConfig,
     pub coprocessor_limiter: CoprocessorLimiterConfig,
     pub compaction_limiter: CompactionLimiterConfig,
+    pub write_sst_limiter: WriteSstLimiterConfig,
     pub schema_manager: SchemaManagerConfig,
     pub txn_chunk_manager: TxnChunkManagerConfig,
 
@@ -809,6 +827,7 @@ impl Default for Config {
             checksum_type: ChecksumType::Crc32,
             coprocessor_limiter: CoprocessorLimiterConfig::default(),
             compaction_limiter: CompactionLimiterConfig::default(),
+            write_sst_limiter: WriteSstLimiterConfig::default(),
             schema_manager: SchemaManagerConfig::default(),
             txn_chunk_manager: TxnChunkManagerConfig::default(),
             txn_chunk_target_block_entries: txn_chunk::TARGET_BLOCK_ENTRIES_DEF,
@@ -856,6 +875,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.coprocessor_limiter.validate()?;
         self.compaction_limiter.validate()?;
+        self.write_sst_limiter.validate()?;
         Ok(())
     }
 

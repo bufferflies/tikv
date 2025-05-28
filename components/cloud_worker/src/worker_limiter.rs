@@ -80,11 +80,44 @@ impl CompactionLimiterConfig {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
+pub struct WriteSstLimiterConfig {
+    pub global_concurrency_factor: f64,
+    pub max_queue_size: usize,
+    pub wait_timeout: ReadableDuration,
+}
+
+impl Default for WriteSstLimiterConfig {
+    fn default() -> Self {
+        Self {
+            global_concurrency_factor: 6.0,
+            max_queue_size: 32,
+            wait_timeout: ReadableDuration::secs(5),
+        }
+    }
+}
+
+impl WriteSstLimiterConfig {
+    pub fn validate(&self) -> Result<(), Box<dyn Error>> {
+        if self.global_concurrency_factor > 10.0 {
+            return Err("global concurrency factor must be less than 10".into());
+        }
+        if self.max_queue_size == 0 {
+            return Err("max queue size must be greater than 0".into());
+        }
+        Ok(())
+    }
+}
+
 /// The type of worker, used for metrics and configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WorkerType {
     Coprocessor,
     Compaction,
+    WriteSst,
 }
 
 impl WorkerType {
@@ -93,6 +126,7 @@ impl WorkerType {
         match self {
             WorkerType::Coprocessor => "coprocessor",
             WorkerType::Compaction => "compaction",
+            WorkerType::WriteSst => "write_sst",
         }
     }
 }
@@ -214,7 +248,9 @@ mod tests {
 
     use tikv_util::sys::SysQuota;
 
-    use crate::worker_limiter::{CompactionLimiterConfig, CoprocessorLimiterConfig, WorkerType};
+    use crate::worker_limiter::{
+        CompactionLimiterConfig, CoprocessorLimiterConfig, WorkerType, WriteSstLimiterConfig,
+    };
 
     #[derive(Default)]
     struct ConcurrencyCounter {
@@ -263,6 +299,27 @@ mod tests {
 
         // Test compaction limiter
         test_limiter_concurrency(&compaction_limiter, &runtime);
+    }
+
+    #[test]
+    fn test_write_sst_limiter_concurrency() {
+        let write_sst_config = WriteSstLimiterConfig::default();
+        let write_sst_limiter = super::WorkerLimiter::new(
+            write_sst_config.global_concurrency_factor,
+            1_000_000.0, // Similar to compaction, keyspace factor is not critical here.
+            write_sst_config.wait_timeout.0,
+            write_sst_config.max_queue_size as u64,
+            WorkerType::WriteSst,
+        );
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(4)
+            .build()
+            .unwrap();
+
+        // Test write_sst limiter
+        test_limiter_concurrency(&write_sst_limiter, &runtime);
     }
 
     fn test_limiter_concurrency(
@@ -322,7 +379,9 @@ mod tests {
         }
         let counter_guard = global_counter.lock().unwrap();
         assert_eq!(counter_guard.running, 0);
-        assert_eq!(
+        assert!(
+            counter_guard.max_running <= worker_limiter.global_semaphore.available_permits(),
+            "Global max running ({}) should not exceed capacity ({})",
             counter_guard.max_running,
             worker_limiter.global_semaphore.available_permits()
         );

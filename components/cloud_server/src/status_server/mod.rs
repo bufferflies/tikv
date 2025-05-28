@@ -38,7 +38,8 @@ use hyper::{
 };
 use kvengine::{
     dfs::{DFSConfig, FileType},
-    IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY,
+    util::new_table_create_pb,
+    IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
 use kvproto::{coprocessor::DelegateResponse, raft_serverpb::StoreIdent};
 use online_config::OnlineConfig;
@@ -140,6 +141,20 @@ pub struct StatusServer {
     security_config: Arc<SecurityConfig>,
     kvengine: kvengine::Engine,
     rfengine: rfengine::RfEngine,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct SstMeta {
+    pub id: u64,
+    pub smallest: Vec<u8>,
+    pub biggest: Vec<u8>,
+    pub meta_offset: u32,
+    pub commit_ts: u64,
+    pub size: usize,
+    pub uncompressed_size: usize,
+    pub keys: usize,
 }
 
 impl StatusServer {
@@ -793,12 +808,11 @@ impl StatusServer {
         Ok(cs)
     }
 
-    async fn ingest_files(
-        req: Request<Body>,
+    async fn handle_ingest_request(
+        cs: kvenginepb::ChangeSet,
         router: RaftRouter,
         engine: kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
-        let cs = Self::get_change_set_request(req).await?;
         let tag = tag_from_cs(&engine, &cs);
         info!("[{}] receive ingest_files request: {:?}", tag, cs);
 
@@ -850,6 +864,127 @@ impl StatusServer {
         } else {
             Ok(make_response(StatusCode::OK, ""))
         }
+    }
+
+    async fn ingest_files(
+        req: Request<Body>,
+        router: RaftRouter,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let cs = Self::get_change_set_request(req).await?;
+        Self::handle_ingest_request(cs, router, engine).await
+    }
+
+    async fn ingest_s3(
+        req: Request<Body>,
+        router: RaftRouter,
+        engine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let query = req.uri().query().unwrap_or("");
+        let params: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+        let cluster_id = params.get("cluster_id").and_then(|v| v.parse::<u64>().ok());
+
+        let region_id = params.get("region_id").and_then(|v| v.parse::<u64>().ok());
+        let epoch_version = params
+            .get("epoch_version")
+            .and_then(|v| v.parse::<u64>().ok());
+
+        if cluster_id.is_none() || region_id.is_none() || epoch_version.is_none() {
+            let mut err = kvproto::errorpb::Error::default();
+            err.set_message("missing required parameter".to_string());
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(err.write_to_bytes().unwrap()))
+                .unwrap());
+        }
+
+        // TODO: check cluster id
+        // if cluster_id.unwrap() != store_ident.cluster_id {
+        //     let mut err = kvproto::errorpb::Error::default();
+        //     err.set_message(format!(
+        //         "cluster id mismatch, expect {}, got {}",
+        //         self.store_ident.cluster_id,
+        //         cluster_id.unwrap()
+        //     ));
+        //     let mut buf = Vec::new();
+        //     err.encode(&mut buf).unwrap();
+        //     return Ok(Response::builder()
+        //         .status(StatusCode::BAD_REQUEST)
+        //         .body(Body::from(buf))
+        //         .unwrap());
+        // }
+
+        let body = match hyper::body::to_bytes(req.into_body()).await {
+            Ok(body) => body,
+            Err(e) => {
+                let mut err = kvproto::errorpb::Error::default();
+                err.set_message(format!("failed to read request body: {}", e));
+                return Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(err.write_to_bytes().unwrap()))
+                    .unwrap());
+            }
+        };
+
+        // Assuming SstMeta is a struct that can be deserialized from JSON.
+        let sst_meta: SstMeta = match serde_json::from_slice(&body) {
+            Ok(meta) => meta,
+            Err(e) => {
+                let mut err = kvproto::errorpb::Error::default();
+                err.set_message(format!("failed to deserialize SstMeta from body: {}", e));
+                return Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(err.write_to_bytes().unwrap()))
+                    .unwrap());
+            }
+        };
+        // Check s3 file exist
+        let file_exists = match engine
+            .core
+            .fs
+            .exists(sst_meta.id, kvengine::dfs::Options::default())
+            .await
+        {
+            Ok(exists) => exists,
+            Err(e) => {
+                let mut err = kvproto::errorpb::Error::default();
+                err.set_message(format!("failed to check s3 file existence: {}", e));
+                return Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(err.write_to_bytes().unwrap()))
+                    .unwrap());
+            }
+        };
+        if !file_exists {
+            let mut err = kvproto::errorpb::Error::default();
+            err.set_message(format!("file id {} not found in s3", sst_meta.id));
+            return Ok(Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from(err.write_to_bytes().unwrap()))
+                .unwrap());
+        }
+
+        // Construct ChangeSet
+        let mut cs = kvenginepb::ChangeSet::default();
+        cs.set_shard_id(region_id.unwrap());
+        cs.set_shard_ver(epoch_version.unwrap());
+        let ingest_files = cs.mut_ingest_files();
+        ingest_files.set_max_ts(sst_meta.commit_ts);
+
+        // Don't set INGEST_ID_KEY property to indicate that it's from load data.
+        let table_create = new_table_create_pb(
+            sst_meta.id,
+            WRITE_CF_BOTTOM_LEVEL, // TODO: get ingest level instead of
+            WRITE_CF as i32,
+            sst_meta.smallest.clone(),
+            sst_meta.biggest.clone(),
+            sst_meta.meta_offset,
+        );
+        ingest_files.mut_table_creates().push(table_create);
+
+        Self::handle_ingest_request(cs, router, engine).await
     }
 
     async fn dump_rfengine_stats(
@@ -2058,6 +2193,9 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/ingest_files") => {
                                 Self::ingest_files(req, router, engine).await
+                            }
+                            (Method::POST, path) if path.starts_with("/ingest_s3") => {
+                                Self::ingest_s3(req, router, engine).await
                             }
                             (Method::POST, path) if path.starts_with("/unsafe_recover") => {
                                 Self::unsafe_recover(req, rfengine, engine).await

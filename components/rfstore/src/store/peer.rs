@@ -15,8 +15,8 @@ use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    get_shard_property, set_shard_property, util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY,
-    STORAGE_CLASS_KEY,
+    get_shard_property, set_shard_property, table::InnerKey, util::PropertiesHelper, ShardMeta,
+    ENCRYPTION_KEY, STORAGE_CLASS_KEY,
 };
 use kvproto::{
     disk_usage::DiskUsage,
@@ -1903,6 +1903,23 @@ impl<'a> PreprocessRef<'a> {
                     existed_file_id,
                     ingest_file_id,
                 });
+            }
+
+            let encode_key = |key: &[u8]| {
+                let outer_key = shard_meta.range.to_outer_key(InnerKey::from_inner_buf(key));
+                Key::from_raw(&outer_key).into_encoded()
+            };
+            for file in cs.get_ingest_files().get_table_creates() {
+                debug!(
+                    "check ingest file";
+                    "keyspace_id" => ?shard_meta.range,
+                    "region_start_key" => ?self.region.get_start_key(),
+                    "region_end_key" => ?self.region.get_end_key(),
+                    "smallest" => ?encode_key(file.get_smallest()),
+                    "biggest" => ?encode_key(file.get_biggest()),
+                );
+                check_key_in_region(&encode_key(file.get_smallest()), self.region)?;
+                check_key_in_region(&encode_key(file.get_biggest()), self.region)?;
             }
         }
         if let Some(kv) = ctx.kv.as_ref() {

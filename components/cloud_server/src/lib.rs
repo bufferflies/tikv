@@ -26,7 +26,7 @@ pub mod signal_handler;
 pub use raftkv::*;
 mod raft_client;
 mod resolve;
-mod status_server;
+pub mod status_server;
 mod tikv_server;
 mod transport;
 

@@ -317,7 +317,7 @@ pub struct EngineCore {
     pub per_keyspace_configs: Arc<HashMap<u32, PerKeyspaceConfig>>,
     pub(crate) flush_tx: mpsc::Sender<FlushMsg>,
     pub(crate) compact_tx: mpsc::Sender<CompactMsg>,
-    pub(crate) fs: Arc<dyn dfs::Dfs>,
+    pub fs: Arc<dyn dfs::Dfs>,
     pub(crate) cache: BlockCache,
     pub comp_client: CompactionClient,
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
