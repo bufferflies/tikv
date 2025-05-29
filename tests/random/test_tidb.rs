@@ -12,7 +12,9 @@ use std::{
 use anyhow::Context;
 use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
 use kvengine::{
-    dfs::DFSConfig, ia::util::IaConfig, metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
+    dfs::DFSConfig,
+    ia::util::IaConfig,
+    metrics::{ENGINE_IA_SYNC_READ_COUNTER, ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER},
     table::sstable::BlockCacheType,
 };
 use pd_client::{
@@ -781,6 +783,7 @@ pub(crate) async fn verify_cluster(
     if switches.ia_table_ratio > 0.0 {
         check_storage_class(cluster, tables, Duration::from_secs(180));
     }
+    assert_eq!(ENGINE_IA_SYNC_READ_COUNTER.get(), 0);
 
     // Check statistics.
     // Check after verify data, to ensure that PD heartbeat have updated region

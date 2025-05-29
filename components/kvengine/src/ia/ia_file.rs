@@ -23,6 +23,7 @@ use crate::{
         manager::{IaManager, ReadAt},
         types::{FileSegmentIdent, TABLE_META_LOCAL_FILE_SUFFIX},
     },
+    metrics::ENGINE_IA_SYNC_READ_COUNTER,
     new_columnar_filename, new_sst_filename, new_vector_index_filename,
     table::{
         columnar::{ColumnarFileFooter, TableMeta, TableOffsets},
@@ -344,12 +345,29 @@ impl File for IaFile {
         false
     }
 
-    fn read(&self, _off: u64, _length: usize) -> Result<Bytes> {
-        unimplemented!()
+    fn read(&self, off: u64, length: usize) -> Result<Bytes> {
+        let (_guard, timeout): (Arc<()>, _) = self.mgr.acquire_sync_read().expect("acquire");
+
+        // Use channel to wait for async task. `block_on` will panic.
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let this = self.clone();
+        self.mgr.runtime_handle().spawn(async move {
+            let res = tokio::time::timeout(timeout, this.read_async(off, length)).await;
+            drop(_guard);
+            let _ = tx.send(res);
+        });
+        let res = rx.recv().expect("recv").expect("timeout");
+
+        ENGINE_IA_SYNC_READ_COUNTER.inc();
+        let bt = backtrace::Backtrace::new();
+        warn!("sync read IA file"; "id" => self.id(), "off" => off, "len" => length, "bt" => ?bt);
+        res
     }
 
-    fn read_at(&self, _buf: &mut [u8], _offset: u64) -> Result<()> {
-        unimplemented!()
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+        let data = self.read(offset, buf.len())?;
+        buf.copy_from_slice(&data);
+        Ok(())
     }
 
     fn read_table_meta(&self, off: u64, length: usize) -> Result<Bytes> {

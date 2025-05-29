@@ -38,7 +38,7 @@ use crate::{
     },
     table::{file::FdCache, Error, Result},
     try_some,
-    util::WorkerPool,
+    util::{WorkerPool, WorkerPoolHandle},
 };
 
 const MANIFEST_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
@@ -136,6 +136,10 @@ pub struct IaManagerOptions {
     /// Used to dynamic adjust the cache capacity when total data size of IA
     /// changed.
     pub cache_cap_to_total_data_size_ratio: f64,
+
+    pub disable_sync_read: bool,
+    pub sync_read_concurrency: usize,
+    pub sync_read_timeout: Duration,
 }
 
 impl IaManagerOptions {
@@ -223,6 +227,7 @@ impl IaManager {
             dfs_concurrency,
             dfs_keyspace_concurrency: Default::default(),
             last_persist_manifest_time: AtomicI64::new(Instant::now_coarse().second()),
+            sync_read_counter: Arc::new(()),
         });
 
         let mgr = Self { core };
@@ -251,11 +256,17 @@ pub struct IaManagerCore {
     dfs_keyspace_concurrency: Arc<DashMap<u32 /* keyspace_id */, Arc<Semaphore>>>,
 
     last_persist_manifest_time: AtomicI64,
+
+    sync_read_counter: Arc<()>,
 }
 
 impl IaManagerCore {
     pub fn enter_runtime(&self) -> tokio::runtime::EnterGuard<'_> {
         self.runtime.enter()
+    }
+
+    pub(crate) fn runtime_handle(&self) -> WorkerPoolHandle {
+        self.runtime.handle()
     }
 
     pub fn get_dfs(&self) -> &dyn Dfs {
@@ -617,6 +628,18 @@ impl IaManagerCore {
         let manifest = Manifest { main_queue_cap };
         if let Err(err) = manifest.persist_to_path(path) {
             warn!("persist manifest failed"; "err" => ?err);
+        }
+    }
+
+    pub(crate) fn acquire_sync_read(&self) -> Result<(Arc<()>, Duration)> {
+        if self.opts.disable_sync_read {
+            return Err(Error::IaMgr("sync read disabled".to_string()));
+        }
+        let guard = self.sync_read_counter.clone();
+        if Arc::strong_count(&guard) > self.opts.sync_read_concurrency + 1 {
+            Err(Error::IaMgr("sync read limit exceeded".to_string()))
+        } else {
+            Ok((guard, self.opts.sync_read_timeout))
         }
     }
 

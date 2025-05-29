@@ -96,6 +96,11 @@ lazy_static! {
         "Counter of read IA segment cache miss",
     )
     .unwrap();
+    pub static ref ENGINE_IA_SYNC_READ_COUNTER: IntCounter = register_int_counter!(
+        "kv_engine_ia_sync_read_counter",
+        "Counter of sync read IA segments",
+    )
+    .unwrap();
     pub static ref ENGINE_COLUMNAR_TOO_MANY_UNCONVERTED_L0S: IntCounter = register_int_counter!(
         "kv_engine_columnar_too_many_unconverted_l0s",
         "Counter of columnar has too many unconverted L0s",

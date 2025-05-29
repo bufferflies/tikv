@@ -17,7 +17,10 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use dashmap::DashMap;
 use quick_cache::sync::{Cache, GuardResult};
-use tikv_util::config::{AbsoluteOrPercentSize, ReadableDuration};
+use tikv_util::{
+    config::{AbsoluteOrPercentSize, ReadableDuration},
+    sys::SysQuota,
+};
 
 use crate::{
     ia::{
@@ -283,6 +286,8 @@ const IA_CACHE_CAP_TO_TOTAL_DATA_SIZE_RATIO_DEF: f64 = 0.2; // 20%
 
 const MAIN_QUEUE_CAPACITY_FACTOR: i64 = 10; // Main queue is 10x larger than small queue.
 
+const SYNC_READ_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub enum IaCapacity {
     Manual {
         small_queue: QueueOptions,
@@ -368,6 +373,10 @@ pub struct IaManagerOptionsBuilder {
     table_meta_mtime_interval: Option<Duration>,
     dynamic_capacity: bool,
     cache_cap_to_total_data_size_ratio: Option<f64>,
+
+    disable_sync_read: bool,
+    sync_read_concurrency: Option<usize>,
+    sync_read_timeout: Option<Duration>,
 }
 
 impl IaManagerOptionsBuilder {
@@ -412,6 +421,13 @@ impl IaManagerOptionsBuilder {
         self
     }
 
+    pub fn sync_read(mut self, disable: bool, concurrency: usize, timeout: Duration) -> Self {
+        self.disable_sync_read = disable;
+        self.sync_read_concurrency = Some(concurrency);
+        self.sync_read_timeout = Some(timeout);
+        self
+    }
+
     pub fn build(mut self) -> Result<IaManagerOptions> {
         let segment_size = self.segment_size.unwrap_or(IA_SEGMENT_SIZE_DEF);
         let freq_update_interval = self
@@ -440,6 +456,11 @@ impl IaManagerOptionsBuilder {
             table_meta_mtime_interval,
             dynamic_capacity: self.dynamic_capacity,
             cache_cap_to_total_data_size_ratio,
+            disable_sync_read: self.disable_sync_read,
+            sync_read_concurrency: self
+                .sync_read_concurrency
+                .unwrap_or_else(|| SysQuota::cpu_cores_quota() as usize / 2),
+            sync_read_timeout: self.sync_read_timeout.unwrap_or(SYNC_READ_TIMEOUT),
         };
         let cap = self.capacity.take().unwrap_or_default();
         cap.build_options(&mut options)?;
@@ -463,6 +484,9 @@ pub struct IaConfig {
     pub table_meta_mtime_interval: ReadableDuration,
     pub dynamic_capacity: bool,
     pub cache_cap_to_total_data_size_ratio: f64,
+
+    pub disable_sync_read: bool,
+    pub sync_read_timeout: ReadableDuration,
 }
 
 impl Default for IaConfig {
@@ -478,6 +502,8 @@ impl Default for IaConfig {
             table_meta_mtime_interval: ReadableDuration(IA_TABLE_META_MTIME_INTERVAL_DEF),
             dynamic_capacity: IA_DYNAMIC_CACHE_CAPACITY_DEF,
             cache_cap_to_total_data_size_ratio: IA_CACHE_CAP_TO_TOTAL_DATA_SIZE_RATIO_DEF,
+            disable_sync_read: false,
+            sync_read_timeout: ReadableDuration(SYNC_READ_TIMEOUT),
         }
     }
 }
@@ -485,6 +511,11 @@ impl Default for IaConfig {
 impl IaConfig {
     pub fn to_manager_options(&self, data_path: PathBuf) -> Result<IaManagerOptions> {
         let cap = IaCapacity::MemoryAndDiskCap(self.mem_cap, data_path, self.disk_cap);
+        let sync_read_concurrency = if self.disable_sync_read {
+            0
+        } else {
+            SysQuota::cpu_cores_quota() as usize / 2
+        };
         IaManagerOptionsBuilder::default()
             .capacity(cap)
             .segment_size(self.segment_size)
@@ -494,6 +525,11 @@ impl IaConfig {
             .table_meta_mtime_interval(self.table_meta_mtime_interval.0)
             .dynamic_capacity(self.dynamic_capacity)
             .cache_cap_to_total_data_size_ratio(self.cache_cap_to_total_data_size_ratio)
+            .sync_read(
+                self.disable_sync_read,
+                sync_read_concurrency,
+                self.sync_read_timeout.0,
+            )
             .build()
     }
 

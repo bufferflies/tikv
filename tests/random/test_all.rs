@@ -12,7 +12,7 @@ use futures::executor::block_on;
 use kvengine::{
     dfs::{self, DFSConfig, DFSConnOptions, FileType, S3Fs},
     ia::util::IaConfig,
-    metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
+    metrics::{ENGINE_IA_SYNC_READ_COUNTER, ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER},
     table::{columnar::build_schema_file, ChecksumType},
 };
 use kvproto::pdpb::CheckPolicy;
@@ -575,6 +575,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     check_drop_table();
 
     // TODO: check storage class property.
+    assert_eq!(ENGINE_IA_SYNC_READ_COUNTER.get(), 0);
 
     records_cnt
 }

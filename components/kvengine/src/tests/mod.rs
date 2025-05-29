@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod test_columnar;
+mod test_ia_file;
 mod test_txn_file;
 
 use std::{
