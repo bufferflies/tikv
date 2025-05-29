@@ -491,6 +491,14 @@ impl WorkerPoolHandle {
         self.handle
             .spawn_blocking(move || tikv_util::init_task_local_sync(func))
     }
+
+    pub fn block_on<F, R>(&self, future: F) -> R
+    where
+        F: Future<Output = R> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.handle.block_on(tikv_util::init_task_local(future))
+    }
 }
 
 #[cfg(any(test, feature = "testexport"))]

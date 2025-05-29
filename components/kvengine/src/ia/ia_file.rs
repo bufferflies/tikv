@@ -347,16 +347,20 @@ impl File for IaFile {
 
     fn read(&self, off: u64, length: usize) -> Result<Bytes> {
         let (_guard, timeout): (Arc<()>, _) = self.mgr.acquire_sync_read().expect("acquire");
-
-        // Use channel to wait for async task. `block_on` will panic.
-        let (tx, rx) = tikv_util::mpsc::bounded(1);
         let this = self.clone();
-        self.mgr.runtime_handle().spawn(async move {
-            let res = tokio::time::timeout(timeout, this.read_async(off, length)).await;
-            drop(_guard);
-            let _ = tx.send(res);
-        });
-        let res = rx.recv().expect("recv").expect("timeout");
+        let res = tokio::task::block_in_place(move || {
+            let task = async move {
+                let res = tokio::time::timeout(timeout, this.read_async(off, length)).await;
+                drop(_guard);
+                res
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.block_on(task)
+            } else {
+                self.mgr.runtime_handle().block_on(task)
+            }
+        })
+        .expect("timeout");
 
         ENGINE_IA_SYNC_READ_COUNTER.inc();
         let bt = backtrace::Backtrace::new();
