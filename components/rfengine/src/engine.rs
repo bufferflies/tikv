@@ -16,6 +16,7 @@ use std::{
     thread::JoinHandle,
 };
 
+use arc_swap::ArcSwap;
 use bytes::{Buf, Bytes};
 use dashmap::mapref::one::Ref;
 use engine_traits::{GetObjectOptions, ObjectStorage};
@@ -26,14 +27,17 @@ use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfenginepb::{ClusterBackupMeta, KeySpaceBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
 use tikv_util::{
-    error, errors::Context as _, info, mpsc::Sender, panic_mark_dfs_worker_file_exists,
+    defer, error, errors::Context as _, info, mpsc::Sender, panic_mark_dfs_worker_file_exists,
     spawn_anonymous_thread_with, sys::thread::StdThreadBuildWrapper, time::Instant, warn,
 };
 
 use crate::{
     config::Config,
     log_batch::{RaftLogBlock, RaftLogs},
-    manifest::{manifest_path, persist_change_set, Manifest, PeerFile},
+    manifest::{
+        generate_rlog_read_plan, manifest_path, persist_change_set, rlog_by_entry_index, Manifest,
+        PeerFile,
+    },
     metrics::*,
     service_worker::{ServiceTask, ServiceWorker},
     write_batch::{PeerBatch, WriteBatch},
@@ -159,6 +163,16 @@ pub struct RfEngineCore {
     /// Tracks the epoch ID that has been compacted.
     pub(crate) compacted_epoch: Arc<AtomicU32>,
 
+    /// Per-peer Rlog files, shared between RfEngineCore and CompactWorker.
+    /// Updated by the CompactWorker after compaction; read by RfEngineCore to
+    /// decide which raft entries to offload to disk. Uses `ArcSwap` for
+    /// lock-free reads to avoid impacting RfEngineCore's write path.
+    pub(crate) peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
+
+    /// The number of WAL files whose raft entries can be kept in memory.
+    /// Calculated from the rlog memory limit and the WAL file size.
+    pub(crate) in_mem_rlog_epoch_count: u32,
+
     _lock: fslock::LockFile, // hold lock to avoid release
 }
 
@@ -169,8 +183,17 @@ impl RfEngineCore {
         data_dir: Option<&Path>,
         dfs_conf: Option<DFSConfig>,
     ) -> Result<Self> {
-        let wal_size = cfg.target_file_size.0 as usize;
-        let compression_threshold = cfg.batch_compression_threshold.0 as usize;
+        let wal_size = cfg.target_file_size.0;
+        if wal_size == 0 {
+            return Err(Error::Other(
+                "invalid config: wal_size must be non-zero".to_owned(),
+            ));
+        }
+        let in_mem_rlog_epoch_count = (cfg.rlog_soft_memory_limit.0 + wal_size - 1) / wal_size;
+        info!(
+            "rfengine in_mem_rlog_epoch_count: {}",
+            in_mem_rlog_epoch_count
+        );
         let wal_sync_dir = (!cfg.wal_sync_dir.is_empty()).then(|| PathBuf::from(&cfg.wal_sync_dir));
         init_wal_files(dir, wal_sync_dir.as_ref())?;
 
@@ -191,15 +214,17 @@ impl RfEngineCore {
         } else {
             WriterType::Sync
         };
+        let compression_threshold = cfg.batch_compression_threshold.0 as usize;
         let writer = WalWriter::new(
             wal_dir,
-            wal_size,
+            wal_size as usize,
             compression_threshold,
             compacted_epoch.clone(),
             writer_type,
             cfg.write_throttle_duration.0,
         );
         let dfs_worker_healthy = dfs_worker::Healthy::default();
+        let peer_rlog_files = Arc::new(ArcSwap::from_pointee(manifest.peer_rlog_files()));
         let mut en = Self {
             dir: dir.to_owned(),
             wal_sync_dir,
@@ -212,6 +237,8 @@ impl RfEngineCore {
             lightweight: cfg.lightweight_backup,
             current_epoch_id: Arc::new(AtomicU32::new(0)),
             compacted_epoch: compacted_epoch.clone(),
+            peer_rlog_files: peer_rlog_files.clone(),
+            in_mem_rlog_epoch_count: in_mem_rlog_epoch_count as u32,
             _lock: lock,
         };
         let async_offset = en.load(&manifest)?;
@@ -219,7 +246,7 @@ impl RfEngineCore {
             let async_wal_writer = if en.is_async_wal_enabled() {
                 let mut async_wal_writer = WalWriter::new(
                     dir,
-                    wal_size,
+                    wal_size as usize,
                     compression_threshold,
                     compacted_epoch.clone(),
                     WriterType::Async,
@@ -268,6 +295,7 @@ impl RfEngineCore {
                 lightweight_backup_config,
                 dfs_worker_healthy,
                 cfg.compact_wal_sync_concurrency,
+                peer_rlog_files,
             );
             let join_handle = spawn_anonymous_thread_with!(move || service_worker.run());
             let mut guard = en.service_worker_handle.lock().unwrap();
@@ -302,12 +330,24 @@ impl RfEngineCore {
     pub fn apply(&self, wb: &mut WriteBatch) {
         let timer = Instant::now_coarse();
         let mut truncated_logs = vec![];
+        let peer_rlog_files = self.peer_rlog_files.load();
+        let offload_epoch = calc_offload_epoch(
+            self.in_mem_rlog_epoch_count,
+            &self.current_epoch_id,
+            &self.compacted_epoch,
+        );
         for (&peer_id, batch_data) in &wb.peers {
             let region_id = batch_data.meta.region_id;
             tikv_util::set_current_region_thread_local(region_id);
             let peer_data = self.get_or_init_peer_data(peer_id, region_id);
             let mut peer_data = peer_data.write().unwrap();
-            let truncated = peer_data.apply(batch_data);
+            let mut truncated = peer_data.apply(batch_data);
+            if let Some(offload_idx) = peer_rlog_files
+                .get(&peer_id)
+                .and_then(|r| find_offload_index(r, &peer_data.raft_logs, offload_epoch))
+            {
+                truncated.extend(peer_data.raft_logs.truncate(offload_idx));
+            }
             drop(peer_data);
             if !truncated.is_empty() {
                 truncated_logs.push(truncated);
@@ -348,7 +388,6 @@ impl RfEngineCore {
         self.peers.is_empty()
     }
 
-    #[allow(dead_code)]
     fn get_entry_from_rlog(
         &self,
         peer_id: u64,
@@ -375,9 +414,30 @@ impl RfEngineCore {
     }
 
     pub fn get_term(&self, peer_id: u64, index: u64) -> Option<u64> {
-        self.peers
+        let peer_data_ref = self.peers.get(&peer_id)?;
+        let data = peer_data_ref.read().unwrap();
+        if let Some(term_in_mem) = data.term(index) {
+            return Some(term_in_mem);
+        }
+        // Check that the index is in the expected range.
+        if index <= data.truncated_idx
+            || (data.raft_logs.last_index() != 0 && index > data.raft_logs.last_index())
+        {
+            return None;
+        }
+        // Get the term from the rlog files.
+        let file = self
+            .peer_rlog_files
+            .load()
             .get(&peer_id)
-            .and_then(|data| data.read().unwrap().term(index))
+            .and_then(|files| rlog_by_entry_index(files, index))?;
+        info!(
+            "Fetching term for peer_id {} index: {} from offloaded rlog file {:?}",
+            peer_id, index, file
+        );
+        self.get_entry_from_rlog(peer_id, index, file)
+            .ok()
+            .map(|entry| entry.term)
     }
 
     pub fn get_truncated_index(&self, peer_id: u64) -> Option<u64> {
@@ -387,10 +447,20 @@ impl RfEngineCore {
     }
 
     pub fn get_last_index(&self, peer_id: u64) -> Option<u64> {
-        self.peers
+        let peer_data_ref = self.peers.get(&peer_id)?;
+        let data = peer_data_ref.read().unwrap();
+
+        let last_index_in_mem = data.raft_logs.last_index();
+        if last_index_in_mem != 0 {
+            return Some(last_index_in_mem);
+        }
+        // Get the last index from offloaded entries.
+        self.peer_rlog_files
+            .load()
             .get(&peer_id)
-            .map(|data| data.read().unwrap().raft_logs.last_index())
-            .and_then(|index| if index != 0 { Some(index) } else { None })
+            .and_then(|rlog_files| rlog_files.back())
+            .map(|file| file.last_index)
+            .filter(|&last_index| last_index > data.truncated_idx)
     }
 
     pub fn get_state(&self, peer_id: u64, key: &[u8]) -> Option<Bytes> {
@@ -656,17 +726,34 @@ impl RfEngineCore {
         region_to_peer
     }
 
+    // This is used in test only.
+    #[cfg(test)]
     pub fn get_raft_entry(&self, peer_id: u64, index: u64) -> Option<Entry> {
-        self.peers
+        let peer_data_ref = self.peers.get(&peer_id)?;
+        let data = peer_data_ref.read().unwrap();
+        if let Some(entry) = data.get(index) {
+            return Some(entry);
+        }
+        // Check that the index is in the expected range.
+        if index <= data.truncated_idx
+            || (data.raft_logs.last_index() != 0 && index > data.raft_logs.last_index())
+        {
+            return None;
+        }
+        // Get the entry from the rlog files.
+        let file = self
+            .peer_rlog_files
+            .load()
             .get(&peer_id)
-            .and_then(|data| data.read().unwrap().get(index))
+            .and_then(|files| rlog_by_entry_index(files, index))?;
+        self.get_entry_from_rlog(peer_id, index, file).ok()
     }
 
     pub fn fetch_raft_entries_to(
         &self,
         peer_id: u64,
-        low: u64,
-        high: u64,
+        low: u64,                // inclusive
+        high: u64,               // exclusive
         max_size: Option<usize>, // size limit of fetched entries
         buf: &mut Vec<Entry>,
     ) -> engine_traits::Result<usize> /* entry count */ {
@@ -684,19 +771,99 @@ impl RfEngineCore {
         }
 
         let timer = Instant::now_coarse();
+        defer! {
+            ENGINE_FETCH_ENTRIES_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs())
+        };
         let mut total_size = 0;
-        for i in low..high {
-            let entry = peer_data
-                .get(i)
-                .ok_or(engine_traits::Error::EntriesUnavailable)?;
-            total_size += entry.compute_size() as usize;
-            buf.push(entry);
-            if max_size.map_or(false, |s| total_size >= s) {
-                // At least return one entry regardless of size limit.
-                break;
+        // Some Raft logs may have been offloaded to disk. To fetch all entries
+        // in the given range, we first check whether any part of the range
+        // falls below the first in-memory index. If so, we need to read from
+        // the offloaded log files (rlogs).
+        //
+        // Step 1: Load offloaded entries if necessary. `first_idx_in_mem == 0`
+        // is a special case where all raft entries have been offloaded.
+        let first_idx_in_mem = peer_data.raft_logs.first_index();
+        let need_read_from_disk = first_idx_in_mem == 0 || low < first_idx_in_mem;
+        if need_read_from_disk {
+            info!(
+                "peer {}: fetch_raft_entries_to entries [{},{}), first_idx_in_mem: {}",
+                peer_id, low, high, first_idx_in_mem
+            );
+            let (disk_fetch_low, disk_fetch_high) = if first_idx_in_mem == 0 {
+                (low, high)
+            } else {
+                (low, first_idx_in_mem.min(high))
+            };
+            let read_plan = generate_rlog_read_plan(
+                self.peer_rlog_files
+                    .load()
+                    .get(&peer_id)
+                    .ok_or(engine_traits::Error::EntriesUnavailable)?,
+                disk_fetch_low,
+                disk_fetch_high,
+            )?;
+            let mut expected_idx = disk_fetch_low;
+            for (range, peer_file) in read_plan {
+                info!(
+                    "peer {}: loading offloaded entries [{},{}] from file={:?}",
+                    peer_id, range.start, range.end, peer_file
+                );
+                let entries = fetch_entries_from_rlog(
+                    &self.dir,
+                    peer_id,
+                    peer_file.first_index,
+                    peer_file.last_index,
+                    range.start,
+                    range.end,
+                )
+                .map_err(|_| engine_traits::Error::EntriesUnavailable)?;
+                for entry in entries {
+                    let entry = entry.to_entry();
+                    debug_assert!(
+                        entry.index == expected_idx,
+                        "peer {}, entry.index:{}, expected_idx:{}",
+                        peer_id,
+                        entry.index,
+                        expected_idx
+                    );
+                    expected_idx += 1;
+                    total_size += entry.compute_size() as usize;
+                    buf.push(entry);
+                    if max_size.map_or(false, |s| total_size >= s) {
+                        // At least return one entry regardless of size limit.
+                        return Ok(buf.len() - old_len);
+                    }
+                }
+            }
+            // Assert that the last entry index == disk_fetch_high - 1
+            if let Some(last_entry) = buf.last() {
+                debug_assert_eq!(
+                    last_entry.index,
+                    disk_fetch_high - 1,
+                    "peer {}: last_entry.index = {}, expected {}",
+                    peer_id,
+                    last_entry.index,
+                    disk_fetch_high - 1
+                );
             }
         }
-        ENGINE_FETCH_ENTRIES_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
+
+        // Step 2: Fetch in-memory entries to results.
+        let need_read_from_mem = first_idx_in_mem != 0 && first_idx_in_mem < high;
+        if need_read_from_mem {
+            let start = low.max(first_idx_in_mem);
+            for i in start..high {
+                let entry = peer_data
+                    .get(i)
+                    .ok_or(engine_traits::Error::EntriesUnavailable)?;
+                total_size += entry.compute_size() as usize;
+                buf.push(entry);
+                if max_size.map_or(false, |s| total_size >= s) {
+                    // At least return one entry regardless of size limit.
+                    break;
+                }
+            }
+        }
         Ok(buf.len() - old_len)
     }
 
@@ -766,7 +933,6 @@ impl RfEngineCore {
 /// Returns:
 /// - 0 if offloading is disabled (`in_mem_rlog_epoch_count == 0`)
 /// - otherwise, `min(current_epoch - N, compacted_epoch)`
-#[allow(dead_code)]
 pub(crate) fn calc_offload_epoch(
     in_mem_rlog_epoch_count: u32,
     current_epoch: &AtomicU32,
@@ -796,7 +962,6 @@ pub(crate) fn calc_offload_epoch(
 /// Returns:
 /// - Some(index) if offloading can proceed up to that index
 /// - None if nothing is eligible
-#[allow(dead_code)]
 pub(crate) fn find_offload_index(
     rlog_files: &VecDeque<PeerFile>,
     raft_logs: &RaftLogs,
@@ -1367,9 +1532,11 @@ mod tests {
         time::Duration,
     };
 
+    use ::test_util::eventually;
     use engine_traits::Error as TraitError;
     use eraftpb::EntryType;
     use protobuf::Message;
+    use tikv_util::config::ReadableSize;
 
     use super::*;
     use crate::{
@@ -2144,5 +2311,194 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn test_rfengine_fetch_offloaded() {
+        init_logger();
+        const STATE_PREFIX: u8 = b'p';
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::new(8 * 1024); // WAL size
+        cfg.rlog_soft_memory_limit = ReadableSize(8 * 1024); // Offload immediately after compaction.
+
+        let engine = RfEngine::open(dir.path(), &cfg, None, None).unwrap();
+        // Record the entries and states inserted into rfengine. Will be used
+        // for comparison later.
+        let mut data_map = HashMap::new();
+        // Track the next index that should be inserted for each peer.
+        let mut next_index = [1u64; 2];
+        for peer_id in [1, 2, 1, 2] {
+            let mut wb = WriteBatch::new();
+            for i in 1..=1000 {
+                let entry_index = next_index[peer_id - 1];
+                next_index[peer_id - 1] += 1;
+
+                let peer_id = peer_id as u64;
+                let region_id = peer_id + 1000;
+                let entry =
+                    new_raft_entry(EntryType::EntryNormal, peer_id, entry_index, b"data", 0);
+                let (state_key, state_val) = (&[STATE_PREFIX, i as u8], &[i as u8]);
+                wb.append_raft_log(peer_id, region_id, &entry);
+                wb.set_state(peer_id, region_id, state_key, state_val);
+
+                let (entries, states) = data_map
+                    .entry(peer_id)
+                    .or_insert_with(|| (vec![], BTreeMap::new()));
+                entries.push(entry);
+                states.insert(state_key.to_vec(), state_val.to_vec());
+            }
+            engine.write(wb).unwrap();
+            // Wait for the compaction to finish.
+            eventually(Duration::from_millis(100), Duration::from_secs(1), || {
+                engine.current_epoch_id.load(Ordering::SeqCst)
+                    == engine.compacted_epoch.load(Ordering::SeqCst) + 1
+            });
+        }
+        assert_eq!(engine.get_last_index(1), Some(2000));
+        assert_eq!(engine.get_last_index(2), Some(2000));
+
+        // Overwrite one entry at index 500 on peer 2.
+        let mut wb = WriteBatch::new();
+        wb.append_raft_log(
+            2,
+            1002,
+            &new_raft_entry(EntryType::EntryNormal, 10_u64, 500, b"data", 0),
+        );
+        engine.write(wb).unwrap();
+        assert_eq!(engine.get_last_index(2), Some(500));
+
+        let peer_meta_1 = extract_peer_meta(&engine, 1, |raft_logs| {
+            // Entries [1,1000] are offloaded, [1001,2000] are eligible for
+            // offloading but still in memory.
+            assert_eq!(raft_logs.first_index(), 1001);
+        });
+        let peer_meta_2 = extract_peer_meta(&engine, 2, |_| {});
+        check_engine_data(&engine, &data_map);
+
+        // Restart rfengine.
+        engine.stop_worker(true);
+        let engine = RfEngine::open(dir.path(), &cfg, None, None).unwrap();
+
+        // Check rfengine again after the restart.
+        check_engine_data(&engine, &data_map);
+        assert_eq!(
+            peer_meta_1,
+            extract_peer_meta(&engine, 1, |raft_logs| {
+                // all entries are offloaded after the restart.
+                assert_eq!(raft_logs.first_index(), 0);
+            })
+        );
+        assert_eq!(peer_meta_2, extract_peer_meta(&engine, 2, |_| {}));
+    }
+
+    // Extracts and returns the peer meta after applying a custom check on its
+    // raft logs.
+    fn extract_peer_meta<F>(engine: &RfEngine, peer_id: u64, raft_logs_check: F) -> PeerMeta
+    where
+        F: FnOnce(&RaftLogs),
+    {
+        let peer_ref = engine.peers.get(&peer_id).unwrap();
+        let peer = peer_ref.read().unwrap();
+        raft_logs_check(&peer.raft_logs);
+        peer.meta.clone()
+    }
+
+    // Tests raft log fetching across in-memory and offloaded entries.
+    fn check_engine_data(
+        engine: &RfEngine,
+        data_map: &HashMap<u64, (Vec<Entry>, BTreeMap<Vec<u8>, Vec<u8>>)>,
+    ) {
+        assert_eq!(engine.get_term(1, 100), Some(1));
+        assert_eq!(engine.get_term(1, 1000), Some(1)); // offloaded entry
+        assert_eq!(engine.get_term(1, 1001), Some(1));
+        assert!(engine.get_raft_entry(1, 1000).is_some());
+        assert!(engine.get_raft_entry(1, 2000).is_some());
+
+        // Test `fetch_entries_to`.
+        let mut buf = vec![];
+
+        for (low, high) in [(100, 200), (900, 1100), (1200, 1300), (1, 2001)] {
+            assert_eq!(
+                engine
+                    .fetch_raft_entries_to(1, low, high, None, &mut buf)
+                    .unwrap(),
+                (high - low) as usize
+            );
+            assert_eq!(
+                data_map.get(&1).unwrap().0[(low - 1) as usize..(high - 1) as usize],
+                buf
+            );
+            buf.clear();
+        }
+
+        // Test fetch unavailable entries.
+        assert!(matches!(
+            engine.fetch_raft_entries_to(1, 2001, 2002, None, &mut buf),
+            Err(TraitError::EntriesUnavailable),
+        ));
+
+        // Test fetch empty logs.
+        buf.clear();
+        assert_eq!(
+            engine
+                .fetch_raft_entries_to(1, 1, 1, None, &mut buf)
+                .unwrap(),
+            0
+        );
+        assert!(buf.is_empty());
+
+        // Test `fetch_entries_to` should push logs to the buf.
+        let peer1_entries = &data_map.get(&1).unwrap().0;
+        for i in 1..=10 {
+            assert_eq!(
+                engine
+                    .fetch_raft_entries_to(1, i, i + 1, None, &mut buf)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(buf, peer1_entries[..i as usize]);
+        }
+
+        // Test `fetch_entries_to` should respect size limit.
+        let mut max_size = 0;
+        for (i, entry) in peer1_entries.iter().enumerate() {
+            if i == 10 {
+                break;
+            }
+            buf.clear();
+            max_size += entry.compute_size();
+            assert_eq!(
+                engine
+                    .fetch_raft_entries_to(1, 1, 11, Some(max_size as usize), &mut buf)
+                    .unwrap(),
+                i + 1
+            );
+            assert_eq!(buf, peer1_entries[..=i]);
+        }
+
+        // Peer 2: entries [1, 499] are offloaded, entry at index 500 is
+        // in-memory.
+        assert_eq!(engine.get_term(2, 100), Some(2));
+        assert_eq!(engine.get_term(2, 499), Some(2));
+        assert_eq!(engine.get_term(2, 500), Some(10));
+        assert_eq!(engine.get_term(2, 501), None);
+        assert!(matches!(
+            engine.fetch_raft_entries_to(2, 501, 502, None, &mut buf),
+            Err(TraitError::EntriesUnavailable),
+        ));
+
+        buf.clear();
+        assert_eq!(
+            engine
+                .fetch_raft_entries_to(2, 1, 501, None, &mut buf)
+                .unwrap(),
+            500
+        );
+
+        let last_idx = buf.len() - 1;
+        let second_last_idx = last_idx - 1;
+        assert_eq!(buf[last_idx].term, 10);
+        assert_eq!(buf[second_last_idx].term, 2);
     }
 }

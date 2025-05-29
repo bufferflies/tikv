@@ -44,7 +44,6 @@ pub(crate) struct EntryRange {
 }
 
 impl EntryRange {
-    #[allow(dead_code)]
     pub(crate) fn new(start: u64, end: u64) -> Self {
         Self { start, end }
     }
@@ -297,6 +296,13 @@ impl Manifest {
         }
     }
 
+    pub(crate) fn peer_rlog_files(&self) -> HashMap<u64, VecDeque<PeerFile>> {
+        self.peers
+            .iter()
+            .map(|(&peer_id, meta_files)| (peer_id, meta_files.files.clone()))
+            .collect()
+    }
+
     pub(crate) fn get_engine_id(&self) -> u64 {
         self.engine_id.load(Ordering::SeqCst)
     }
@@ -344,7 +350,6 @@ pub(crate) fn persist_change_set(
 /// Given a list of rlog files and a desired entry range, this function returns
 /// a sequence of `(EntryRange, PeerFile)` pairs that describe which portion of
 /// the range should be read from which file.
-#[allow(dead_code)]
 pub(crate) fn generate_rlog_read_plan(
     rlog_files: &VecDeque<PeerFile>,
     low: u64,  // inclusive
@@ -379,7 +384,6 @@ pub(crate) fn generate_rlog_read_plan(
 /// The semantics of the function are identical with `RaftLogs::append`
 /// - If a log gap is detected, all previous entries are dropped.
 /// - If an overlap occurs, newer entries overwrite the older ones.
-#[allow(dead_code)]
 pub(crate) fn range_to_rlog_mapping(files: &VecDeque<PeerFile>) -> Vec<(EntryRange, PeerFile)> {
     let mut stack: Vec<(EntryRange, PeerFile)> = Vec::new();
     for file in files.iter() {
@@ -411,7 +415,6 @@ pub(crate) fn range_to_rlog_mapping(files: &VecDeque<PeerFile>) -> Vec<(EntryRan
 ///
 /// Traverses from newest to oldest, respecting semantics that newer rlog files
 /// overwrite older ones.
-#[allow(dead_code)]
 pub(crate) fn rlog_by_entry_index(files: &VecDeque<PeerFile>, idx: u64) -> Option<PeerFile> {
     let mut next_start_index = None;
     for file in files.iter().rev() {

@@ -7135,6 +7135,7 @@ name = "rfengine"
 version = "0.0.1"
 dependencies = [
  "api_version",
+ "arc-swap 1.7.1",
  "byteorder",
  "bytes",
  "chrono",

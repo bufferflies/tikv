@@ -3,7 +3,7 @@
 use std::{
     borrow::Cow,
     cmp::min,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt::{Display, Formatter},
     fs,
     fs::File,
@@ -19,6 +19,7 @@ use std::{
     time::Duration,
 };
 
+use arc_swap::ArcSwap;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
@@ -39,7 +40,7 @@ use tikv_util::{
 };
 
 use crate::{
-    manifest::Manifest,
+    manifest::{Manifest, PeerFile},
     metrics::{RFENGINE_BACKUP_COUNTER, RFENGINE_BACKUP_DURATION_HISTOGRAM},
     write_batch::PeerBatch,
     *,
@@ -85,6 +86,9 @@ pub(crate) struct CompactWorker {
     // track the number of pending compaction tasks with cached WriteBatch
     // to control the memory usage of cached WriteBatch.
     pending_compact_wb_count: Arc<AtomicUsize>,
+
+    // Shared per-peer Rlog files; see `RfEngineCore::peer_rlog_files`.
+    peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
 }
 
 impl CompactWorker {
@@ -98,6 +102,7 @@ impl CompactWorker {
         healthy: Healthy,
         sync_concurrency: usize,
         pending_compact_wb_count: Arc<AtomicUsize>,
+        peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
         let (rlog_cache, compress_type) = if let Some(config) = lightweight_backup_cfg {
@@ -124,6 +129,7 @@ impl CompactWorker {
             sync_concurrency,
             files_to_sync: vec![],
             pending_compact_wb_count,
+            peer_rlog_files,
         }
     }
 
@@ -308,6 +314,10 @@ impl CompactWorker {
         let _ = file_system::sync_dir(self.dir.as_path());
 
         self.manifest.handle_compaction(change_set)?;
+
+        // Update the peer_rlog_files that is shared with rfengine core.
+        self.peer_rlog_files
+            .store(Arc::new(self.manifest.peer_rlog_files()));
 
         let engine_id = self.manifest.get_engine_id();
         let duration = timer.saturating_elapsed();
@@ -1201,6 +1211,7 @@ mod tests {
             dfs_worker::Healthy::default(),
             1,
             Arc::new(AtomicUsize::default()),
+            Arc::new(ArcSwap::default()),
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 80, RANDOM_STR_MAX_LEN / 2)
@@ -1352,6 +1363,7 @@ mod tests {
             dfs_worker::Healthy::default(),
             1,
             Arc::new(AtomicUsize::default()),
+            Arc::new(ArcSwap::default()),
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 100 * 5, RANDOM_STR_MAX_LEN * 100 / 2)
@@ -1502,6 +1514,7 @@ mod tests {
             dfs_worker::Healthy::default(),
             1,
             Arc::new(AtomicUsize::default()),
+            Arc::new(ArcSwap::default()),
         );
 
         let peer_id = 1001;

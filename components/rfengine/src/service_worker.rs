@@ -1,6 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    collections::{HashMap, VecDeque},
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -11,6 +12,7 @@ use std::{
     thread::JoinHandle,
 };
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use rfenginepb::StoreBackupMeta;
 use slog_global::{error, info};
@@ -25,7 +27,7 @@ use crate::{
     compact_worker::{backup_callback, wal_file_name, CompactTask, CompactWorker, WorkerHandle},
     dfs_worker::{Healthy, LightweightBackupConfig, ObjectStorageTask, ObjectStorageWorker},
     log_batch::RaftLogBlock,
-    manifest::Manifest,
+    manifest::{Manifest, PeerFile},
     metrics::ENGINE_COMPACT_CACHE_WAL_SKIPPED_COUNTER,
     write_batch::WriteBatch,
     writer::WalWriter,
@@ -92,6 +94,7 @@ impl ServiceWorker {
         lightweight_backup_config: Option<LightweightBackupConfig>,
         healthy: Healthy,
         compact_wal_sync_concurrency: usize,
+        peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
     ) -> Self {
         let s3fs = lightweight_backup_config.as_ref().map(|cfg| {
             let s3fs = kvengine::dfs::S3Fs::new_from_config(cfg.dfs_config.clone());
@@ -110,6 +113,7 @@ impl ServiceWorker {
             healthy.clone(),
             compact_wal_sync_concurrency,
             pending_compact_wb_count.clone(),
+            peer_rlog_files,
         );
         let handle = std::thread::Builder::new()
             .name("compact-wal-worker".to_string())
