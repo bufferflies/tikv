@@ -452,6 +452,7 @@ mod tests {
             TimeStamp::max(),
             None,
             PerfLevel::EnableCount,
+            None,
         );
         req_ctx.lower_bound = vec![
             116, 128, 0, 0, 0, 0, 0, 0, 184, 95, 114, 128, 0, 0, 0, 0, 0, 70, 67,
