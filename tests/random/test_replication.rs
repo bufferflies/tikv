@@ -238,6 +238,16 @@ fn test_replication_worker() {
         assert_eq!(id + 1, col_i);
     }
     assert_eq!(result.len(), 5);
+    let remove_task_url = format!(
+        "{}/api/v2/changefeeds/{changefeed_id}?keyspace_id=1",
+        worker_base_url
+    );
+    dispatch_http(&worker_client, remove_task_url, "DELETE", "".to_string()).unwrap();
+
+    // get task list doesn't have rep-task.
+    let get_task_list_rul = format!("{}/keyspace?keyspace_id=1", worker_base_url);
+    let resp = dispatch_http(&worker_client, get_task_list_rul, "GET", "".to_string()).unwrap();
+    assert!(!resp.contains(changefeed_id));
 
     // remove keyspace
     let remove_keyspace_url = format!("{worker_base_url}/keyspace?keyspace_id=1");

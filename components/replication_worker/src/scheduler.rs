@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use hyper::{client::HttpConnector, Body, Method, Request, Response, Result, StatusCode, Uri};
+use hyper::{Body, Method, Request, Response, Result, StatusCode, Uri};
+use security::HttpClient;
 use serde::{Deserialize, Serialize};
 use tikv_util::{future::paired_future_callback, info};
 
@@ -13,19 +14,26 @@ use crate::{config::ReplicaConfig, CdcMsg};
 pub struct ReplicationScheduler {
     sender: tikv_util::mpsc::Sender<CdcMsg>,
     cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
-    http_client: Arc<hyper::Client<HttpConnector>>,
+    http_client: Arc<HttpClient>,
+    scheme: String,
 }
 
 impl ReplicationScheduler {
     pub fn new(
         sender: tikv_util::mpsc::Sender<CdcMsg>,
         cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
+        http_client: Arc<HttpClient>,
     ) -> Self {
-        let http_client = Arc::new(hyper::Client::new());
+        let scheme = if matches!(http_client.as_ref(), HttpClient::Http(_)) {
+            "http".to_string()
+        } else {
+            "https".to_string()
+        };
         ReplicationScheduler {
             sender,
             cdc_addrs,
             http_client,
+            scheme,
         }
     }
 
@@ -167,7 +175,7 @@ impl ReplicationScheduler {
             }
             (&Method::DELETE, "/cdc/keyspace") => self.handle_remove_keyspace(keyspace_id).await,
             (&Method::DELETE, path) if path.starts_with("/cdc/api/v2/changefeeds/") => {
-                Self::handle_delete_changefeed(keyspace_id, path)
+                self.handle_delete_changefeed(keyspace_id, path).await?
             }
             _ => {
                 info!("Invalid request {} {}", req.method(), req.uri());
@@ -182,19 +190,54 @@ impl ReplicationScheduler {
         Ok(response)
     }
 
-    fn handle_delete_changefeed(_keyspace_id: u32, path: &str) -> Response<Body> {
-        if let Some(_change_id) = path.strip_prefix("/cdc/api/v2/changefeeds/") {
-            // TODO: Implement actual deletion logic
-            Response::builder()
+    async fn handle_delete_changefeed(
+        &self,
+        keyspace_id: u32,
+        path: &str,
+    ) -> Result<Response<Body>> {
+        if let Some(change_id) = path.strip_prefix("/cdc/api/v2/changefeeds/") {
+            let cdc_addr = self.get_cdc_addr(keyspace_id);
+            if cdc_addr.is_none() {
+                return Ok(Self::error_response(
+                    StatusCode::NOT_FOUND,
+                    "No CDC server found for the keyspace",
+                    "CDC:ErrNoCDCServer",
+                ));
+            }
+            let cdc_addr = cdc_addr.unwrap();
+            let remove_cdc_task_uri = format!(
+                "{}://{}/api/v2/changefeeds/{}",
+                &self.scheme, &cdc_addr, change_id
+            );
+
+            let req = http::Request::delete(remove_cdc_task_uri)
+                .body(hyper::Body::empty())
+                .unwrap();
+            self.http_client.request(req).await?;
+            let (cb, fut) = paired_future_callback();
+            self.schedule(CdcMsg::RemoveTask {
+                keyspace_id,
+                change_feed_id: change_id.to_string(),
+                cb,
+            });
+            let res = fut.await.unwrap();
+            if let Err(err) = res {
+                return Ok(Self::error_response(
+                    StatusCode::BAD_REQUEST,
+                    &err.to_string(),
+                    "CDC:ErrRemoveChangefeed",
+                ));
+            }
+            Ok(Response::builder()
                 .status(StatusCode::OK)
                 .body(Body::empty())
-                .unwrap()
+                .unwrap())
         } else {
-            Self::error_response(
+            Ok(Self::error_response(
                 StatusCode::BAD_REQUEST,
                 "Invalid changefeed ID",
                 "CDC:ErrInvalidChangefeedID",
-            )
+            ))
         }
     }
 
@@ -218,7 +261,7 @@ impl ReplicationScheduler {
             .replace("/cdc/", "/");
         let cdc_addr = cdc_addr.unwrap();
         let new_uri = Uri::builder()
-            .scheme(uri.scheme().cloned().unwrap())
+            .scheme(self.scheme.as_str())
             .authority(cdc_addr.as_str())
             .path_and_query(new_path_query)
             .build()
@@ -392,7 +435,11 @@ mod tests {
             // TODO: Add proper initialization when needed
             let (sender, _) = tikv_util::mpsc::unbounded();
             let cdc_addrs = Arc::new(dashmap::DashMap::new());
-            ReplicationScheduler::new(sender, cdc_addrs)
+            ReplicationScheduler::new(
+                sender,
+                cdc_addrs,
+                Arc::new(HttpClient::Http(hyper::Client::new())),
+            )
         }
     }
 

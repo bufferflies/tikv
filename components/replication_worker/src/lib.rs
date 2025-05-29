@@ -135,6 +135,11 @@ pub enum CdcMsg {
         admin: AdminRequest,
     },
     Deregister(ConnId),
+    RemoveTask {
+        keyspace_id: u32,
+        change_feed_id: String,
+        cb: Box<dyn FnOnce(Result<()>) + Send>,
+    },
     RemoveKeyspace {
         keyspace_id: u32,
         cb: Box<dyn FnOnce(Result<()>) + Send>,

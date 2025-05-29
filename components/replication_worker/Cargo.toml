@@ -14,6 +14,7 @@ dashmap = "5"
 futures = "0.3"
 grpcio = { workspace = true }
 grpcio-health = { version = "0.10", default-features = false, features = ["protobuf-codec"] }
+http = "0.2.9"
 hyper = "0.14"
 kvengine = { workspace = true }
 kvproto = { workspace = true }

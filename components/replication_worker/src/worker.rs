@@ -98,6 +98,7 @@ impl RegionRequests {
 
 pub struct ReplicationWorker {
     ctx: MergedEngineContext,
+    http_client: Arc<HttpClient>,
     config: ReplicationWorkerConfig,
     merged_engine: MergedEngine,
     grpc_server: Option<grpcio::Server>,
@@ -140,7 +141,11 @@ impl ReplicationWorker {
             config: config.merged_engine.clone(),
             master_key,
         };
-
+        let http_client = ctx
+            .pd
+            .get_security_mgr()
+            .http_client(hyper::Client::builder())
+            .unwrap();
         let cluster_id = ctx.pd.get_cluster_id().unwrap();
         let runtime = ctx.fs.get_runtime();
         let cluster_backup = runtime.block_on(get_latest_backup_meta(&ctx.fs, cluster_id))?;
@@ -172,6 +177,7 @@ impl ReplicationWorker {
         let mut worker = Self {
             config,
             ctx,
+            http_client: Arc::new(http_client),
             merged_engine,
             grpc_server: None,
             keyspaces: keyspace_services,
@@ -219,7 +225,11 @@ impl ReplicationWorker {
     }
 
     pub fn scheduler(&self) -> ReplicationScheduler {
-        ReplicationScheduler::new(self.tx.clone(), self.cdc_addrs.clone())
+        ReplicationScheduler::new(
+            self.tx.clone(),
+            self.cdc_addrs.clone(),
+            self.http_client.clone(),
+        )
     }
 
     pub fn run(&mut self) {
@@ -309,6 +319,14 @@ impl ReplicationWorker {
             } => {
                 let res = self.handle_applied_admin(region_id, region_version, admin);
                 self.handle_result(res, "applied_admin");
+            }
+            CdcMsg::RemoveTask {
+                keyspace_id,
+                change_feed_id,
+                cb,
+            } => {
+                let res = self.handle_remove_task(keyspace_id, change_feed_id);
+                cb(res);
             }
             CdcMsg::Stop => {
                 self.stop = true;
@@ -815,6 +833,22 @@ impl ReplicationWorker {
             let res = svc.destroy().await;
             cb(res);
         });
+    }
+
+    fn handle_remove_task(&mut self, keyspace_id: u32, change_feed_id: String) -> Result<()> {
+        let Some(task_ctx) = self.keyspaces.get_mut(&keyspace_id) else {
+            return Err(Error::OtherError("keyspace service not found".into()));
+        };
+        if task_ctx
+            .get_states_mut()
+            .feeds
+            .remove(&change_feed_id)
+            .is_some()
+        {
+            self.merged_engine
+                .set_keyspace_states(keyspace_id, task_ctx.get_states().marshal())?
+        };
+        Ok(())
     }
 
     fn handle_applied(&mut self, region_id: u64, region_events: RegionEvents) -> Result<()> {

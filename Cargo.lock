@@ -6381,6 +6381,7 @@ dependencies = [
  "futures 0.3.28",
  "grpcio",
  "grpcio-health",
+ "http",
  "hyper",
  "kvengine",
  "kvproto",
