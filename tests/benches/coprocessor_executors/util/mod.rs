@@ -49,7 +49,6 @@ pub fn build_dag_handler<TargetTxnStore: TxnStore + 'static>(
         tikv_util::deadline::Deadline::from_now(std::time::Duration::from_secs(10)),
         64,
         false,
-        false,
         None,
         Arc::new(QuotaLimiter::default()),
     )

@@ -64,7 +64,6 @@ pub struct ScanExecutorOptions<S, I> {
     pub is_backward: bool,
     pub is_key_only: bool,
     pub accept_point_range: bool,
-    pub is_scanned_range_aware: bool,
 }
 
 impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
@@ -76,7 +75,6 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
             is_backward,
             is_key_only,
             accept_point_range,
-            is_scanned_range_aware,
         }: ScanExecutorOptions<S, I>,
         columnar_scanner: Option<ColumnarScanner>,
     ) -> Result<Self> {
@@ -94,7 +92,6 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
                     .collect(),
                 scan_backward_in_range: is_backward,
                 is_key_only,
-                is_scanned_range_aware,
             }),
             columnar_scanner,
             is_ended: false,

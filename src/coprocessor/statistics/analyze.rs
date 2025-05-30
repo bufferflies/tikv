@@ -268,7 +268,6 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
                         .collect(),
                     scan_backward_in_range: false,
                     is_key_only: true,
-                    is_scanned_range_aware: false,
                 });
                 let res = AnalyzeContext::<_, F>::handle_index(
                     req,
@@ -434,7 +433,6 @@ impl<S: Snapshot, F: KvFormat> RowSampleBuilder<S, F> {
             Arc::new(EvalConfig::default()),
             table_scan,
             ranges,
-            false, // Streaming mode is not supported in Analyze request, always false here
             snap,
         )?;
         Ok(Self {
@@ -938,7 +936,6 @@ impl<S: Snapshot, F: KvFormat> SampleBuilder<S, F> {
             Arc::new(EvalConfig::default()),
             table_scan,
             ranges,
-            false, // Streaming mode is not supported in Analyze request, always false here
             snap,
         )?;
         Ok(Self {

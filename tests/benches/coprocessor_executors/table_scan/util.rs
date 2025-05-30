@@ -44,7 +44,6 @@ impl<T: TxnStore + 'static> scan_bencher::ScanExecutorBuilder for BatchTableScan
             black_box(Arc::new(EvalConfig::default())),
             black_box(table_scan),
             black_box(ranges.to_vec()),
-            black_box(false),
             None,
         )
         .unwrap();

@@ -31,10 +31,10 @@ pub struct RangesScanner<T, F> {
     // The following fields are only used for calculating scanned range. Scanned range is only
     // useful in streaming mode, where the client need to know the underlying physical data range
     // of each response slice, so that partial retry can be non-overlapping.
-    is_scanned_range_aware: bool,
     current_range: IntervalRange,
     working_range_begin_key: Vec<u8>,
     working_range_end_key: Vec<u8>,
+
     _phantom: PhantomData<F>,
     rescheduler: RescheduleChecker,
 }
@@ -72,7 +72,6 @@ pub struct RangesScannerOptions<T> {
     pub ranges: Vec<Range>,
     pub scan_backward_in_range: bool, // TODO: This can be const generics
     pub is_key_only: bool,            // TODO: This can be const generics
-    pub is_scanned_range_aware: bool, // TODO: This can be const generics
 }
 
 pub struct IndexedKvPair {
@@ -188,7 +187,6 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
             ranges,
             scan_backward_in_range,
             is_key_only,
-            is_scanned_range_aware,
         }: RangesScannerOptions<T>,
     ) -> RangesScanner<T, F> {
         let ranges_len = ranges.len();
@@ -199,7 +197,6 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
             scan_backward_in_range,
             is_key_only,
             scanned_rows_per_range: Vec::with_capacity(ranges_len),
-            is_scanned_range_aware,
             current_range: IntervalRange {
                 lower_inclusive: Vec::with_capacity(KEY_BUFFER_CAPACITY),
                 upper_exclusive: Vec::with_capacity(KEY_BUFFER_CAPACITY),
@@ -220,7 +217,7 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
 
     /// Fetches next row.
     /// Note: `update_scanned_range` can control whether update the scanned
-    /// range when `is_scanned_range_aware` is true.
+    /// range.
     pub async fn next_opt(
         &mut self,
         update_scanned_range: bool,
@@ -230,17 +227,13 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
             let range = self.ranges_iter.next();
             let some_row = match range {
                 IterStatus::NewRange(Range::Point(r)) => {
-                    if self.is_scanned_range_aware {
-                        self.update_scanned_range_from_new_point(&r);
-                    }
+                    self.update_scanned_range_from_new_point(&r);
                     self.ranges_iter.notify_drained();
                     self.scanned_rows_per_range.push(0);
                     get!(self.storage, (self.is_key_only, r))?
                 }
                 IterStatus::NewRange(Range::Interval(r)) => {
-                    if self.is_scanned_range_aware {
-                        self.update_scanned_range_from_new_range(&r);
-                    }
+                    self.update_scanned_range_from_new_range(&r);
                     self.scanned_rows_per_range.push(0);
                     begin_scan!(
                         self.storage,
@@ -253,13 +246,11 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
                     scan_next!(self.storage)?
                 }
                 IterStatus::Drained => {
-                    if self.is_scanned_range_aware {
-                        self.update_working_range_end_key();
-                    }
+                    self.update_working_range_end_key();
                     return Ok(None); // drained
                 }
             };
-            if self.is_scanned_range_aware && update_scanned_range {
+            if update_scanned_range {
                 self.update_scanned_range_from_scanned_row(&some_row);
             }
             if let Some(row) = some_row {
@@ -293,8 +284,6 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
 
     /// Returns scanned range since last call.
     pub fn take_scanned_range(&mut self) -> IntervalRange {
-        assert!(self.is_scanned_range_aware);
-
         let mut range = IntervalRange::default();
         if !self.scan_backward_in_range {
             std::mem::swap(
@@ -325,8 +314,6 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
     }
 
     fn update_scanned_range_from_new_point(&mut self, point: &PointRange) {
-        assert!(self.is_scanned_range_aware);
-
         // Only update current_range for the first and the last range.
         if self.current_range.lower_inclusive.is_empty() || self.ranges_iter.is_drained() {
             self.current_range.lower_inclusive.clear();
@@ -343,8 +330,6 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
     }
 
     fn update_scanned_range_from_new_range(&mut self, range: &IntervalRange) {
-        assert!(self.is_scanned_range_aware);
-
         // Only update current_range for the first and the last range.
         if self.current_range.lower_inclusive.is_empty() || self.ranges_iter.is_drained() {
             self.current_range.lower_inclusive.clear();
@@ -360,8 +345,6 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
     }
 
     fn update_working_range_begin_key(&mut self) {
-        assert!(self.is_scanned_range_aware);
-
         if self.working_range_begin_key.is_empty() {
             if !self.scan_backward_in_range {
                 self.working_range_begin_key
@@ -374,8 +357,6 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
     }
 
     fn update_working_range_end_key(&mut self) {
-        assert!(self.is_scanned_range_aware);
-
         self.working_range_end_key.clear();
         if !self.scan_backward_in_range {
             self.working_range_end_key
@@ -387,8 +368,6 @@ impl<T: Storage, F: KvFormat> RangesScanner<T, F> {
     }
 
     fn update_scanned_range_from_scanned_row(&mut self, some_row: &Option<OwnedKvPair>) {
-        assert!(self.is_scanned_range_aware);
-
         if let Some((key, _)) = some_row {
             self.working_range_end_key.clear();
             self.working_range_end_key.extend(key);
@@ -434,7 +413,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: false,
         });
         assert_eq!(
             block_on(scanner.next()).unwrap().unwrap(),
@@ -470,7 +448,6 @@ mod tests {
             ranges,
             scan_backward_in_range: true,
             is_key_only: false,
-            is_scanned_range_aware: false,
         });
         assert_eq!(
             block_on(scanner.next()).unwrap().unwrap(),
@@ -501,7 +478,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: true,
-            is_scanned_range_aware: false,
         });
         assert_eq!(
             block_on(scanner.next()).unwrap().unwrap(),
@@ -541,7 +517,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: false,
         });
         let mut scanned_rows_per_range = Vec::new();
 
@@ -596,7 +571,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         let r = scanner.take_scanned_range();
@@ -616,7 +590,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         assert_eq!(block_on(scanner.next()).unwrap(), None);
@@ -632,7 +605,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         assert_eq!(block_on(scanner.next()).unwrap(), None);
@@ -648,7 +620,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         assert_eq!(&block_on(scanner.next()).unwrap().unwrap().key(), b"foo");
@@ -686,7 +657,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         assert_eq!(&block_on(scanner.next()).unwrap().unwrap().key(), b"foo");
@@ -731,7 +701,6 @@ mod tests {
             ranges,
             scan_backward_in_range: true,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         let r = scanner.take_scanned_range();
@@ -751,7 +720,6 @@ mod tests {
             ranges,
             scan_backward_in_range: true,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         assert_eq!(block_on(scanner.next()).unwrap(), None);
@@ -767,7 +735,6 @@ mod tests {
             ranges,
             scan_backward_in_range: true,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         assert_eq!(block_on(scanner.next()).unwrap(), None);
@@ -783,7 +750,6 @@ mod tests {
             ranges,
             scan_backward_in_range: true,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         assert_eq!(&block_on(scanner.next()).unwrap().unwrap().key(), b"foo_3");
@@ -819,7 +785,6 @@ mod tests {
             ranges,
             scan_backward_in_range: true,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         assert_eq!(&block_on(scanner.next()).unwrap().unwrap().key(), b"bar_2");
@@ -858,7 +823,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         // Only lower_inclusive is updated.
@@ -910,7 +874,6 @@ mod tests {
             ranges,
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         // Only lower_inclusive is updated.
@@ -965,7 +928,6 @@ mod tests {
             ranges,
             scan_backward_in_range: true,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         // Only lower_inclusive is updated.
@@ -1015,7 +977,6 @@ mod tests {
             ranges,
             scan_backward_in_range: true,
             is_key_only: false,
-            is_scanned_range_aware: true,
         });
 
         // Lower_inclusive is updated. Upper_exclusive is not update.
