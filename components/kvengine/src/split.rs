@@ -213,6 +213,7 @@ impl Engine {
             self.refresh_shard_states(&shard);
             let id = shard.id;
             if id != old_shard.id {
+                self.insert_keyspace_shard(shard.keyspace_id, id);
                 match self.shards.entry(id) {
                     Entry::Occupied(_) => {
                         // The shard already exists, it must be created by ingest, and it maybe
@@ -376,7 +377,7 @@ impl Engine {
         // parent for later initial flush.
         new_shard.parent_id = old_shard.id;
         info!("{} shard prepared merge", new_shard.tag());
-        self.shards.insert(new_shard.id, Arc::new(new_shard));
+        self.insert_shard(Arc::new(new_shard));
         Ok(())
     }
 
@@ -388,7 +389,7 @@ impl Engine {
         // initial_flushed to true.
         new_shard.initial_flushed.store(true, Ordering::Release);
         info!("{} shard rollback merge", new_shard.tag());
-        self.shards.insert(new_shard.id, Arc::new(new_shard));
+        self.insert_shard(Arc::new(new_shard));
     }
 
     pub fn commit_merge(
@@ -613,7 +614,7 @@ impl Engine {
             all_col_files,
         );
         self.refresh_shard_states(&new_shard);
-        self.shards.insert(shard_id, Arc::new(new_shard));
+        self.insert_shard(Arc::new(new_shard));
         Ok(())
     }
 

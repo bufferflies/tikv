@@ -1395,6 +1395,41 @@ impl Shard {
         data.schema_file.is_some() && data.columnar_table_ids.contains(&table_id)
     }
 
+    pub fn vector_index_ready(&self, table_id: i64, index_id: i64) -> bool {
+        let data = self.get_data();
+        let Some(schema_file) = data.schema_file.as_ref() else {
+            return false;
+        };
+        let Some(schema) = schema_file.get_table(table_id) else {
+            return false;
+        };
+        let col_id = schema
+            .vector_indexes
+            .iter()
+            .find(|idx| idx.index_id == index_id)
+            .map(|idx| idx.col_id);
+        let Some(col_id) = col_id else {
+            return false;
+        };
+        if data
+            .vector_indexes
+            .get(table_id, index_id, col_id)
+            .is_some()
+        {
+            return true;
+        }
+        if data.columnar_table_ids.contains(&table_id)
+            && !data
+                .col_levels
+                .levels
+                .iter()
+                .any(|cl| cl.files.iter().any(|f| f.has_table(table_id)))
+        {
+            return true;
+        }
+        false
+    }
+
     pub fn has_unconverted_l0s(&self) -> bool {
         self.get_data().has_unconverted_l0s()
     }

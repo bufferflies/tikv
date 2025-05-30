@@ -135,6 +135,7 @@ impl Engine {
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
             shards: DashMap::new(),
+            keyspace_shards: DashMap::new(),
             opts: opts.clone(),
             per_keyspace_configs,
             flush_tx,
@@ -233,15 +234,15 @@ impl Engine {
 
                     // Ingest the parent shard before recovery, as recoverer depends on the shard
                     // existing in kvengine.
-                    let normal_shard = self.shards.insert(parent.id, parent_shard.clone());
+                    let normal_shard = self.insert_shard(parent_shard.clone());
                     recoverer.recover(self, &parent_shard, parent)?;
                     parents.insert(IdVer::new(parent.id, parent.ver), parent_shard);
                     // Do not keep the parent in the engine as we only use the parent's mem-table
                     // for children.
                     if let Some(normal_shard) = normal_shard {
-                        self.shards.insert(parent.id, normal_shard);
+                        self.insert_shard(normal_shard);
                     } else {
-                        self.shards.remove(&parent.id);
+                        self.remove_shard(parent.id);
                     }
                 }
             }
@@ -312,6 +313,7 @@ impl Engine {
 pub struct EngineCore {
     pub(crate) engine_id: AtomicU64,
     pub(crate) shards: DashMap<u64, Arc<Shard>>,
+    pub(crate) keyspace_shards: DashMap<u32 /* keyspace id */, HashSet<u64 /* shard id */>>,
     pub opts: Arc<Options>,
     pub per_keyspace_configs: Arc<HashMap<u32, PerKeyspaceConfig>>,
     pub(crate) flush_tx: mpsc::Sender<FlushMsg>,
@@ -467,6 +469,7 @@ impl EngineCore {
         let shard = self.new_shard_from_change_set(cs);
         shard.set_active(active);
         self.refresh_shard_states(&shard);
+        self.insert_keyspace_shard(shard.keyspace_id, shard.id);
         match self.shards.entry(shard.id) {
             Entry::Occupied(entry) => {
                 let old = entry.get();
@@ -528,10 +531,41 @@ impl EngineCore {
 
     pub fn remove_shard(&self, shard_id: u64) -> bool {
         let x = self.shards.remove(&shard_id);
-        if let Some((_, _ptr)) = x {
+        if let Some((_, shard)) = x {
+            let keyspace_id = shard.keyspace_id;
+            let shards_entry = self.keyspace_shards.entry(keyspace_id);
+            if let Entry::Occupied(mut entry) = shards_entry {
+                let keyspace_shards = entry.get_mut();
+                keyspace_shards.remove(&shard_id);
+                if keyspace_shards.is_empty() {
+                    entry.remove();
+                }
+            }
             return true;
         }
         false
+    }
+
+    pub fn insert_shard(&self, shard: Arc<Shard>) -> Option<Arc<Shard>> {
+        let shard_id = shard.id;
+        let keyspace_id = shard.keyspace_id;
+        self.insert_keyspace_shard(keyspace_id, shard_id);
+        self.shards.insert(shard_id, shard)
+    }
+
+    // `insert_keyspace_shard` is used by `insert_shard` and using entry to insert
+    // shard in `split` and `ingest`.
+    pub fn insert_keyspace_shard(&self, keyspace_id: u32, shard_id: u64) {
+        self.keyspace_shards
+            .entry(keyspace_id)
+            .or_insert_with(HashSet::default)
+            .insert(shard_id);
+    }
+
+    pub fn get_keyspace_shards(&self, keyspace_id: u32) -> Option<Vec<u64>> {
+        self.keyspace_shards
+            .get(&keyspace_id)
+            .map(|x| x.iter().cloned().collect())
     }
 
     pub fn get_files_in_blacklist(&self) -> Arc<HashSet<u64>> {

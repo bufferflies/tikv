@@ -996,7 +996,7 @@ impl EngineCore {
                 new_inner_key_off
             );
         }
-        self.shards.insert(new_shard.id, Arc::new(new_shard));
+        self.insert_shard(Arc::new(new_shard));
 
         Ok(())
     }

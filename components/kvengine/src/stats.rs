@@ -76,6 +76,8 @@ impl EngineStats {
 pub struct ColumnarStatusResp {
     // Schema file already installed region count.
     pub ready: u64,
+    // Vector index ready region count.
+    pub vector_index_ready: u64,
     // Total region count.
     pub total: u64,
 }
@@ -224,29 +226,52 @@ impl super::Engine {
         prefix.write_bytes(b"_r").unwrap();
     }
 
-    pub fn collect_columnar_status(&self, keyspace_id: u32, table_id: i64) -> ColumnarStatusResp {
+    pub fn collect_columnar_status(
+        &self,
+        keyspace_id: u32,
+        table_id: i64,
+        index_id: Option<i64>, // used for vector index
+    ) -> ColumnarStatusResp {
         let mut ready = 0;
+        let mut vector_index_ready = 0;
         let mut total = 0;
         let prefix = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
         let mut table_lower_key = prefix.clone();
         Self::append_table_record_prefix(&mut table_lower_key, table_id);
         let table_upper_key = keys::next_key(&table_lower_key);
-        self.get_all_shard_id_vers().into_iter().for_each(|id_ver| {
-            if let Some(shard) = self.get_shard(id_ver.id) {
-                let table_bound = DataBound::new(
-                    InnerKey::from_outer_key(&table_lower_key),
-                    InnerKey::from_outer_end_key(&table_upper_key),
-                    false,
-                );
-                if shard.get_data().keyspace_id == keyspace_id && shard.overlap_bound(table_bound) {
+        let table_bound = DataBound::new(
+            InnerKey::from_outer_key(&table_lower_key),
+            InnerKey::from_outer_end_key(&table_upper_key),
+            false,
+        );
+        let keyspace_shard_ids = self.get_keyspace_shards(keyspace_id);
+        if keyspace_shard_ids.is_none() {
+            return ColumnarStatusResp {
+                ready: 0,
+                vector_index_ready: 0,
+                total: 0,
+            };
+        }
+        keyspace_shard_ids.unwrap().iter().for_each(|shard_id| {
+            if let Some(shard) = self.get_shard(*shard_id) {
+                if shard.overlap_bound(table_bound) {
                     if shard.has_columnar_table(table_id) {
                         ready += 1;
+                    }
+                    if let Some(index_id) = index_id {
+                        if shard.vector_index_ready(table_id, index_id) {
+                            vector_index_ready += 1;
+                        }
                     }
                     total += 1;
                 }
             }
         });
-        ColumnarStatusResp { ready, total }
+        ColumnarStatusResp {
+            ready,
+            vector_index_ready,
+            total,
+        }
     }
 }
 
