@@ -1214,6 +1214,19 @@ impl Shard {
         } else {
             0
         };
+        if !self.need_build_vector_index(data, table_id, vec_idx, snap_version) {
+            return (0.0, false);
+        }
+        (1.1, snap_version == 0)
+    }
+
+    fn need_build_vector_index(
+        &self,
+        data: &ShardData,
+        table_id: i64,
+        vec_idx: &VectorIndexDef,
+        snap_version: u64,
+    ) -> bool {
         let mut total_row_count = 0usize;
         for col_level in &data.col_levels.levels {
             if col_level.level == 2 && snap_version > 0 {
@@ -1233,11 +1246,8 @@ impl Shard {
             }
         }
         let total_size = total_row_count * vec_idx.dimension * 4;
-        if total_size < self.opt.vector_index_build_options.delta_size {
-            // We don't need to build vector index for small number of vectors.
-            return (0.0, false);
-        }
-        (1.1, snap_version == 0)
+        // We don't need to build vector index for small number of vectors.
+        total_size >= self.opt.vector_index_build_options.delta_size
     }
 
     pub(crate) fn get_compaction_priority(&self) -> Option<CompactionPriority> {
@@ -1403,27 +1413,24 @@ impl Shard {
         let Some(schema) = schema_file.get_table(table_id) else {
             return false;
         };
-        let col_id = schema
+        let vec_idx_def = schema
             .vector_indexes
             .iter()
-            .find(|idx| idx.index_id == index_id)
-            .map(|idx| idx.col_id);
-        let Some(col_id) = col_id else {
+            .find(|idx| idx.index_id == index_id);
+        let Some(vec_idx_def) = vec_idx_def else {
             return false;
         };
-        if data
+        let vec_idx = data
             .vector_indexes
-            .get(table_id, index_id, col_id)
-            .is_some()
-        {
+            .get(table_id, index_id, vec_idx_def.col_id);
+        if vec_idx.is_some() {
             return true;
         }
+        // If the table already applied the columnar major compaction, but no
+        // columnar files contains the table or the columnar data is too small to
+        // build vector index, treat it as ready.
         if data.columnar_table_ids.contains(&table_id)
-            && !data
-                .col_levels
-                .levels
-                .iter()
-                .any(|cl| cl.files.iter().any(|f| f.has_table(table_id)))
+            && !self.need_build_vector_index(&data, table_id, vec_idx_def, 0)
         {
             return true;
         }
