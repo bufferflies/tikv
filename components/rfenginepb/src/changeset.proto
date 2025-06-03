@@ -47,6 +47,13 @@ message StoreBackupMeta {
     // for lightweight backup, wal_chunks filed will be deleted in future
     uint32 epoch = 5;
     uint64 offset = 6;
+
+    // The estimated size each keyspace used.
+    map<uint32, BackupSize> keyspace_size = 7;
+}
+
+message BackupSize {
+    uint64 size = 1;
 }
 
 message WalChunk {

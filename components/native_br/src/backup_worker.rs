@@ -151,6 +151,7 @@ impl BackupRunner {
             NATIVE_BR_BACKUP_ERROR.inc();
             err
         })?;
+        info!("backup succeeded"; "path" => ?backup_path, "meta" => %backup_meta);
         self.last_backup_time = Instant::now();
         if self.periodic_backup_enabled() {
             self.last_backup_meta = Some(backup_meta);
