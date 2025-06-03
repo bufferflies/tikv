@@ -512,6 +512,12 @@ impl EngineCore {
         None
     }
 
+    /// Iterate over shards.
+    pub fn shards(&self) -> impl Iterator<Item = Arc<Shard>> + '_ {
+        let ids = self.get_all_shard_id_vers();
+        ids.into_iter().filter_map(move |iv| self.get_shard(iv.id))
+    }
+
     pub fn get_shard_with_ver(&self, shard_id: u64, shard_ver: u64) -> Result<Arc<Shard>> {
         let shard = self.get_shard(shard_id).ok_or(Error::ShardNotFound)?;
         if shard.ver != shard_ver {

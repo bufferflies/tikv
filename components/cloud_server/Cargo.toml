@@ -88,6 +88,7 @@ resolved_ts = { path = "../resolved_ts", default-features = false }
 resource_metering = { path = "../resource_metering" }
 rev_lines = "0.2.1"
 rfengine = { path = "../rfengine", default-features = false }
+rfenginepb = { workspace = true }
 rfstore = { path = "../rfstore", default-features = false }
 seahash = "4.1.0"
 security = { path = "../security", default-features = false }

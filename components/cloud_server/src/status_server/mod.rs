@@ -1523,6 +1523,7 @@ impl StatusServer {
     async fn backup_rfengine(
         req: Request<Body>,
         engine: rfengine::RfEngine,
+        kvengine: kvengine::Engine,
         dfs_conf: DFSConfig,
     ) -> hyper::Result<Response<Body>> {
         let body = hyper::body::to_bytes(req.into_body()).await?;
@@ -1571,8 +1572,9 @@ impl StatusServer {
         engine.backup(task);
         Ok(match future.await {
             Ok(resp) => match resp {
-                Ok(meta) => {
+                Ok(mut meta) => {
                     info!("{}: backup finished", meta.store_id);
+                    estimate_backup_size_by(&kvengine, meta.mut_keyspace_size());
                     Response::builder()
                         .body(Body::from(meta.write_to_bytes().unwrap()))
                         .unwrap()
@@ -2181,6 +2183,7 @@ impl StatusServer {
                                 Self::backup_rfengine(
                                     req,
                                     rfengine,
+                                    engine,
                                     cfg_controller.get_current().dfs.clone(),
                                 )
                                 .await
@@ -2578,6 +2581,16 @@ pub struct TruncateTsConfig {
     pub cluster_id: u64,
     pub ts: u64,
     pub range: Option<(Vec<u8>, Vec<u8>)>, // None means apply to all keyspaces.
+}
+
+fn estimate_backup_size_by(
+    engine: &kvengine::Engine,
+    result: &mut std::collections::HashMap<u32, rfenginepb::BackupSize>,
+) {
+    for shard in engine.shards() {
+        let size = result.entry(shard.keyspace_id).or_default();
+        size.size += shard.get_estimated_size();
+    }
 }
 
 fn tag_from_cs(engine: &kvengine::Engine, cs: &kvenginepb::ChangeSet) -> ShardTag {

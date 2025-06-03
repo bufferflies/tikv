@@ -8,7 +8,6 @@ use std::{
 use anyhow::Context;
 use collections::HashSet;
 use kvengine::IdVer;
-use log_wrappers::hex_encode_upper;
 use rand::prelude::*;
 use schema::schema::StorageClass;
 use sqlx::Executor;
@@ -136,8 +135,8 @@ pub(crate) fn check_storage_class(
                     "table" => ?table,
                     "expect_sc" => ?expect_sc,
                     "expect_sync" => expect_sync,
-                    "start_key" => hex_encode_upper(&key),
-                    "end_key" => hex_encode_upper(&end_key),
+                    "start_key" => log_wrappers::Value::key(&key),
+                    "end_key" => log_wrappers::Value::key(&end_key),
                 );
 
                 let mut next_key: Option<Vec<u8>> = None;

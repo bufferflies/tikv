@@ -1882,6 +1882,7 @@ dependencies = [
  "resource_metering",
  "rev_lines",
  "rfengine",
+ "rfenginepb",
  "rfstore",
  "seahash",
  "security",

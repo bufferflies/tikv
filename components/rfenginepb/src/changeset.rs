@@ -1132,6 +1132,7 @@ pub struct StoreBackupMeta {
     pub raft_meta_start_off: u64,
     pub epoch: u32,
     pub offset: u64,
+    pub keyspace_size: ::std::collections::HashMap<u32, BackupSize>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1265,6 +1266,31 @@ impl StoreBackupMeta {
     pub fn set_offset(&mut self, v: u64) {
         self.offset = v;
     }
+
+    // repeated .rfpb.StoreBackupMeta.keyspace_size_MapEntry keyspace_size = 7;
+
+
+    pub fn get_keyspace_size(&self) -> &::std::collections::HashMap<u32, BackupSize> {
+        &self.keyspace_size
+    }
+    pub fn clear_keyspace_size(&mut self) {
+        self.keyspace_size.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keyspace_size(&mut self, v: ::std::collections::HashMap<u32, BackupSize>) {
+        self.keyspace_size = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_keyspace_size(&mut self) -> &mut ::std::collections::HashMap<u32, BackupSize> {
+        &mut self.keyspace_size
+    }
+
+    // Take field
+    pub fn take_keyspace_size(&mut self) -> ::std::collections::HashMap<u32, BackupSize> {
+        ::std::mem::replace(&mut self.keyspace_size, ::std::collections::HashMap::new())
+    }
 }
 
 impl ::protobuf::Message for StoreBackupMeta {
@@ -1320,6 +1346,9 @@ impl ::protobuf::Message for StoreBackupMeta {
                     let tmp = is.read_uint64()?;
                     self.offset = tmp;
                 },
+                7 => {
+                    ::protobuf::rt::read_map_into::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<BackupSize>>(wire_type, is, &mut self.keyspace_size)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1352,6 +1381,7 @@ impl ::protobuf::Message for StoreBackupMeta {
         if self.offset != 0 {
             my_size += ::protobuf::rt::value_size(6, self.offset, ::protobuf::wire_format::WireTypeVarint);
         }
+        my_size += ::protobuf::rt::compute_map_size::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<BackupSize>>(7, &self.keyspace_size);
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1380,6 +1410,7 @@ impl ::protobuf::Message for StoreBackupMeta {
         if self.offset != 0 {
             os.write_uint64(6, self.offset)?;
         }
+        ::protobuf::rt::write_map_with_cached_sizes::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<BackupSize>>(7, &self.keyspace_size, os)?;
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -1452,6 +1483,11 @@ impl ::protobuf::Message for StoreBackupMeta {
                     |m: &StoreBackupMeta| { &m.offset },
                     |m: &mut StoreBackupMeta| { &mut m.offset },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_map_accessor::<_, ::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<BackupSize>>(
+                    "keyspace_size",
+                    |m: &StoreBackupMeta| { &m.keyspace_size },
+                    |m: &mut StoreBackupMeta| { &mut m.keyspace_size },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<StoreBackupMeta>(
                     "StoreBackupMeta",
                     fields,
@@ -1480,6 +1516,7 @@ impl ::protobuf::Clear for StoreBackupMeta {
         self.raft_meta_start_off = 0;
         self.epoch = 0;
         self.offset = 0;
+        self.keyspace_size.clear();
         self.unknown_fields.clear();
     }
 }
@@ -1495,6 +1532,7 @@ impl ::protobuf::PbPrint for StoreBackupMeta {
         ::protobuf::PbPrint::fmt(&self.raft_meta_start_off, "raft_meta_start_off", buf);
         ::protobuf::PbPrint::fmt(&self.epoch, "epoch", buf);
         ::protobuf::PbPrint::fmt(&self.offset, "offset", buf);
+        ::protobuf::PbPrint::fmt(&self.keyspace_size, "keyspace_size", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1511,11 +1549,189 @@ impl ::std::fmt::Debug for StoreBackupMeta {
         ::protobuf::PbPrint::fmt(&self.raft_meta_start_off, "raft_meta_start_off", &mut s);
         ::protobuf::PbPrint::fmt(&self.epoch, "epoch", &mut s);
         ::protobuf::PbPrint::fmt(&self.offset, "offset", &mut s);
+        ::protobuf::PbPrint::fmt(&self.keyspace_size, "keyspace_size", &mut s);
         write!(f, "{}", s)
     }
 }
 
 impl ::protobuf::reflect::ProtobufValue for StoreBackupMeta {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct BackupSize {
+    // message fields
+    pub size: u64,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a BackupSize {
+    fn default() -> &'a BackupSize {
+        <BackupSize as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl BackupSize {
+    pub fn new() -> BackupSize {
+        ::std::default::Default::default()
+    }
+
+    // uint64 size = 1;
+
+
+    pub fn get_size(&self) -> u64 {
+        self.size
+    }
+    pub fn clear_size(&mut self) {
+        self.size = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_size(&mut self, v: u64) {
+        self.size = v;
+    }
+}
+
+impl ::protobuf::Message for BackupSize {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.size = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.size != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.size, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.size != 0 {
+            os.write_uint64(1, self.size)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> BackupSize {
+        BackupSize::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "size",
+                    |m: &BackupSize| { &m.size },
+                    |m: &mut BackupSize| { &mut m.size },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<BackupSize>(
+                    "BackupSize",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static BackupSize {
+        static mut instance: ::protobuf::lazy::Lazy<BackupSize> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const BackupSize,
+        };
+        unsafe {
+            instance.get(BackupSize::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for BackupSize {
+    fn clear(&mut self) {
+        self.size = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for BackupSize {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.size, "size", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for BackupSize {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.size, "size", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for BackupSize {
     fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
@@ -3277,15 +3493,19 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x0cB\0\x12\x0f\n\x05value\x18\x02\x20\x01(\x0cB\0:\0\"e\n\x0bRaftLogFil\
     e\x12\x15\n\x0bfirst_index\x18\x01\x20\x01(\x04B\0\x12\x14\n\nlast_index\
     \x18\x02\x20\x01(\x04B\0\x12\x13\n\tlast_term\x18\x03\x20\x01(\rB\0\x12\
-    \x12\n\x08epoch_id\x18\x04\x20\x01(\rB\0:\0\"\xb4\x01\n\x0fStoreBackupMe\
+    \x12\n\x08epoch_id\x18\x04\x20\x01(\rB\0:\0\"\xc3\x02\n\x0fStoreBackupMe\
     ta\x12\x12\n\x08store_id\x18\x01\x20\x01(\x04B\0\x12#\n\x08manifest\x18\
     \x02\x20\x01(\x0b2\x0f.rfpb.ChangeSetB\0\x12$\n\nwal_chunks\x18\x03\x20\
     \x03(\x0b2\x0e.rfpb.WalChunkB\0\x12\x1d\n\x13raft_meta_start_off\x18\x04\
     \x20\x01(\x04B\0\x12\x0f\n\x05epoch\x18\x05\x20\x01(\rB\0\x12\x10\n\x06o\
-    ffset\x18\x06\x20\x01(\x04B\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\
-    \x01\x20\x01(\rB\0\x12\x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\
-    \n\x07end_off\x18\x03\x20\x01(\x04B\0:\0\"\xdb\x02\n\x11ClusterBackupMet\
-    a\x12'\n\x06stores\x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\
+    ffset\x18\x06\x20\x01(\x04B\0\x12E\n\rkeyspace_size\x18\x07\x20\x03(\x0b\
+    2,.rfpb.StoreBackupMeta.keyspace_size_MapEntryB\0\x1aF\n\x16keyspace_siz\
+    e_MapEntry\x12\t\n\x03key\x18\x01(\r\x12\x1d\n\x05value\x18\x02(\x0b2\
+    \x10.rfpb.BackupSize:\x028\x01:\0\"\x1e\n\nBackupSize\x12\x0e\n\x04size\
+    \x18\x01\x20\x01(\x04B\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\
+    \x20\x01(\rB\0\x12\x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\
+    \x07end_off\x18\x03\x20\x01(\x04B\0:\0\"\xdb\x02\n\x11ClusterBackupMeta\
+    \x12'\n\x06stores\x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\
     \x14\n\ncluster_id\x18\x02\x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\
     \x20\x01(\x04B\0\x12\x12\n\x08alloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\
     \x07safe_ts\x18\x05\x20\x01(\x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\
