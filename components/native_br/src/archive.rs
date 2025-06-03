@@ -1293,7 +1293,15 @@ impl ArchiveWriter {
     fn append_table_files(&mut self, files: Vec<TableFile>) -> Result<()> {
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(files.len());
         let mut msg_count = 0;
+        let mut vec_files = Vec::new();
         for f in files {
+            // The vec files are usually large, about several hundred MB. It is not
+            // necessary to concurrently request these vec files, but concurrently
+            // requesting other small files is still normal.
+            if f.ftype == FileType::VectorIndex {
+                vec_files.push(f);
+                continue;
+            }
             let s3fs = self.s3fs.clone();
             let tx = result_tx.clone();
             self.s3fs.get_runtime().spawn(async move {
@@ -1310,6 +1318,13 @@ impl ArchiveWriter {
         }
         for _ in 0..msg_count {
             self.recv_table_file_data(&result_rx)?;
+        }
+        for f in vec_files {
+            let file_data = self.s3fs.get_runtime().block_on(
+                self.s3fs
+                    .read_file(f.id, Options::default().with_type(f.ftype)),
+            )?;
+            self.append_table_file(f, file_data);
         }
         Ok(())
     }
