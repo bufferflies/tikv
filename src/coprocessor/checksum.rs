@@ -82,7 +82,6 @@ impl<S: Snapshot> ChecksumContext<S> {
                 .collect(),
             scan_backward_in_range: false,
             is_key_only: false,
-            is_scanned_range_aware: false,
         });
         Ok(Self {
             req,

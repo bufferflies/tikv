@@ -46,7 +46,6 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
         config: Arc<EvalConfig>,
         mut table_scan: TableScan,
         key_ranges: Vec<KeyRange>,
-        is_scanned_range_aware: bool,
         snap: Option<SnapAccess>,
     ) -> Result<Self> {
         let columnar_scanner = match build_columnar_scanner(
@@ -122,7 +121,6 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
                 is_backward,
                 is_key_only,
                 accept_point_range: no_common_handle,
-                is_scanned_range_aware,
             },
             columnar_scanner,
         )?;
@@ -736,7 +734,6 @@ mod tests {
             Arc::new(EvalConfig::default()),
             table_scan,
             ranges,
-            false,
             None,
         )
         .unwrap();
@@ -818,7 +815,6 @@ mod tests {
             Arc::new(EvalConfig::default()),
             table_scan,
             vec![helper.whole_table_range()],
-            false,
             None,
         )
         .unwrap()
@@ -960,7 +956,6 @@ mod tests {
                     key_range_point[1].clone(),
                     key_range_point[corrupted_row_index].clone(),
                 ],
-                false,
                 None,
             )
             .unwrap();
@@ -1066,7 +1061,6 @@ mod tests {
                     key_range_point[1].clone(),
                     key_range_point[2].clone(),
                 ],
-                false,
                 None,
             )
             .unwrap();
@@ -1113,7 +1107,6 @@ mod tests {
                     key_range_point[1].clone(),
                     key_range_point[2].clone(),
                 ],
-                false,
                 None,
             )
             .unwrap();
@@ -1154,7 +1147,6 @@ mod tests {
                     key_range_point[1].clone(),
                     key_range_point[2].clone(),
                 ],
-                false,
                 None,
             )
             .unwrap();
@@ -1192,7 +1184,6 @@ mod tests {
                 Arc::new(EvalConfig::default()),
                 table_scan,
                 vec![key_range_point[1].clone(), key_range_point[2].clone()],
-                false,
                 None,
             )
             .unwrap();
@@ -1212,7 +1203,6 @@ mod tests {
                 Arc::new(EvalConfig::default()),
                 table_scan,
                 vec![key_range_point[2].clone(), key_range_point[0].clone()],
-                false,
                 None,
             )
             .unwrap();
@@ -1245,7 +1235,6 @@ mod tests {
                 Arc::new(EvalConfig::default()),
                 table_scan,
                 vec![key_range_point[1].clone()],
-                false,
                 None,
             )
             .unwrap();
@@ -1294,7 +1283,6 @@ mod tests {
             Arc::new(EvalConfig::default()),
             table_scan,
             vec![key_range],
-            false,
             None,
         )
         .unwrap();
@@ -1402,7 +1390,6 @@ mod tests {
             Arc::new(EvalConfig::default()),
             table_scan,
             vec![key_range],
-            false,
             None,
         )
         .unwrap();
@@ -1582,7 +1569,6 @@ mod tests {
             Arc::new(EvalConfig::default()),
             table_scan,
             vec![key_range],
-            false,
             None,
         )
         .unwrap();

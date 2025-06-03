@@ -85,7 +85,6 @@ fn reversed_checksum_crc64_xor<E: Engine>(store: &Store<E>, range: KeyRange) -> 
         ranges: vec![Range::from_pb_range(range, false)],
         scan_backward_in_range: true,
         is_key_only: false,
-        is_scanned_range_aware: false,
     });
 
     let mut checksum = 0;

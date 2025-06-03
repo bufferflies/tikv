@@ -181,7 +181,6 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
     storage: S,
     ranges: Vec<KeyRange>,
     config: Arc<EvalConfig>,
-    is_scanned_range_aware: bool,
     snap: Option<kvengine::SnapAccess>,
 ) -> Result<Box<dyn BatchExecutor<StorageStats = S::Statistics>>> {
     let mut executor_descriptors = executor_descriptors.into_iter();
@@ -207,7 +206,6 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
                     config.clone(),
                     table_scan,
                     ranges,
-                    is_scanned_range_aware,
                     snap,
                 )?
                 .collect_summary(summary_slot_index),
@@ -228,7 +226,6 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
                     primary_column_ids_len,
                     descriptor.get_desc(),
                     descriptor.get_unique(),
-                    is_scanned_range_aware,
                 )?
                 .collect_summary(summary_slot_index),
             )
@@ -422,7 +419,6 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         storage: S,
         deadline: Deadline,
         stream_row_limit: usize,
-        is_streaming: bool,
         paging_size: Option<u64>,
         quota_limiter: Arc<QuotaLimiter>,
         snap: Option<kvengine::SnapAccess>,
@@ -438,9 +434,6 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
             storage,
             ranges,
             config.clone(),
-            is_streaming || paging_size.is_some(), /* For streaming and paging request,
-                                                    * executors will continue scan from range
-                                                    * end where last scan is finished */
             snap,
         )?;
 
