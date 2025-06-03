@@ -164,7 +164,7 @@ endif
 # Almost all the rules in this Makefile are PHONY
 # Declaring a rule as PHONY could improve correctness
 # But probably instead just improves performance by a little bit
-.PHONY: audit clippy format pre-format pre-clippy pre-audit unset-override pre-test
+.PHONY: audit check-protobuf clippy format pre-format pre-clippy pre-audit unset-override pre-test
 .PHONY: all build clean dev check-udeps doc error-code fuzz run test
 .PHONY: docker docker-tag docker-tag-with-git-hash docker-tag-with-git-tag
 .PHONY: ctl dist_artifacts dist_tarballs x-build-dist
@@ -334,6 +334,15 @@ test_with_nextest:
 unset-override:
 	@# unset first in case of any previous overrides
 	@if rustup override list | grep `pwd` > /dev/null; then rustup override unset; fi
+
+check-protobuf:
+	@cargo build -p kvenginepb
+	@cargo build -p rfenginepb
+	@if ! git diff --quiet; then \
+		echo "Error: There are uncommitted protobuf changes"; \
+		git --no-pager diff; \
+		exit 1; \
+	fi
 
 pre-format: unset-override
 	@rustup component add rustfmt

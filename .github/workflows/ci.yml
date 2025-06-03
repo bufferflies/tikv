@@ -48,6 +48,10 @@ jobs:
           [source.aliyun]
           registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
           EOF
+      - name: Check protobuf
+        working-directory: ./
+        run: |
+          make check-protobuf
       - name: Check format
         working-directory: ./
         run: |
