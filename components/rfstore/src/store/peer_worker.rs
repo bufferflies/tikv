@@ -854,7 +854,7 @@ impl SegmentTicker {
     }
 }
 
-const IDLE_SEGMENTS: usize = 64;
+const IDLE_SEGMENTS: usize = 128;
 
 pub(crate) struct RaftIdleWorker {
     ctx: RaftContext,
@@ -870,7 +870,13 @@ impl RaftIdleWorker {
         rx: Receiver<(u64, Box<PeerMsg>)>,
         apply_senders: Vec<Sender<Option<ApplyBatch>>>,
     ) -> Self {
-        let ticker = SegmentTicker::new(ctx.cfg.raft_base_tick_interval.as_millis(), IDLE_SEGMENTS);
+        let mut idle_tick_interval = ctx.cfg.raft_base_tick_interval.as_millis();
+        if ctx.cfg.idle_worker_tick_slow {
+            // Slow down the idle ticker by double the base tick interval to reduce the
+            // heartbeat overhead.
+            idle_tick_interval *= 2;
+        }
+        let ticker = SegmentTicker::new(idle_tick_interval, IDLE_SEGMENTS);
         RaftIdleWorker {
             ctx,
             rx,

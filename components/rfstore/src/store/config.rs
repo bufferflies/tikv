@@ -117,6 +117,8 @@ pub struct Config {
     pub peer_idle_duration: ReadableDuration,
 
     pub ia_kv_size_discount: f64,
+
+    pub idle_worker_tick_slow: bool,
 }
 
 impl Default for Config {
@@ -172,6 +174,7 @@ impl Default for Config {
             schema_worker_count: 1,
             peer_idle_duration: ReadableDuration::secs(180),
             ia_kv_size_discount: 0.5,
+            idle_worker_tick_slow: true,
         }
     }
 }
@@ -241,6 +244,8 @@ impl Config {
         cfg.schema_worker_count = (num_cpus / 16).max(1);
 
         cfg.ia_kv_size_discount = old.ia_kv_size_discount;
+
+        cfg.idle_worker_tick_slow = old.idle_worker_tick_slow;
 
         if cfg!(debug_assertions) && cfg.raft_base_tick_interval.as_millis() < 100 {
             // It is a test config, adjust the fields not included in the old.

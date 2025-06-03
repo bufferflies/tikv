@@ -46,7 +46,7 @@ use tikv_util::{
 };
 use txn_types::{Key, WriteBatchFlags};
 
-use super::{write_engine_meta, PeerStat, RequestInspector, SchemaTask};
+use super::{write_engine_meta, PeerStat, RequestInspector, SchemaTask, WorkerType};
 use crate::{
     store::{
         cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
@@ -447,6 +447,14 @@ impl<'a> PeerMsgHandler<'a> {
         let raft_election_timeout_ticks = self.ctx.cfg.raft_election_timeout_ticks;
         peer.retry_pending_reads(raft_election_timeout_ticks);
         peer.raft_group.tick();
+        if self.ctx.cfg.idle_worker_tick_slow
+            && self.ctx.worker_type == WorkerType::Idle
+            && !peer.is_leader()
+        {
+            // We increase the tick interval by 2 for Idle worker but want the election
+            // timeout to be the same. So we tick the follower raft group again.
+            peer.raft_group.tick();
+        }
         peer.mut_store().flush_cache_metrics();
         if peer.need_campaign {
             let _ = peer.raft_group.campaign();

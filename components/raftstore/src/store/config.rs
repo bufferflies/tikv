@@ -331,6 +331,8 @@ pub struct Config {
     /// When mem-table is empty and applied to last index,
     /// if no kv raft log entries exceeds this value, gc will be triggered.
     pub raft_log_gc_no_kv_count: u64,
+    /// Whether to tick slower in idle worker.
+    pub idle_worker_tick_slow: bool,
 }
 
 impl Default for Config {
@@ -445,6 +447,7 @@ impl Default for Config {
             // TODO: make its value reasonable
             check_peers_availability_interval: ReadableDuration::secs(30),
             ia_kv_size_discount: 0.5,
+            idle_worker_tick_slow: true,
         }
     }
 }
