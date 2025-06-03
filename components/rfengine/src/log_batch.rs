@@ -78,7 +78,7 @@ impl RaftLogOp {
 
 // VecDeque is a ringbuffer which leaves one space empty, so that the capacity
 // is (n + 1).next_power_of_two() - 1 which means 256 corresponds to 511.
-const RAFT_LOG_BLOCK_CAP: usize = 255;
+pub(crate) const RAFT_LOG_BLOCK_CAP: usize = 255;
 
 /// `RaftLogBlock` contains fixed count raft logs.
 /// It's the building block of `RaftLogs`. Caller should make sure index is in
@@ -169,6 +169,10 @@ pub(crate) struct RaftLogs {
 }
 
 impl RaftLogs {
+    pub(crate) fn len(&self) -> usize {
+        self.blocks.iter().fold(0, |acc, b| acc + b.logs.len())
+    }
+
     pub(crate) fn size(&self) -> usize {
         self.blocks.iter().fold(0, |acc, b| acc + b.size)
     }
@@ -261,6 +265,17 @@ impl RaftLogs {
         Some(self.blocks[block_idx].get(index).to_entry())
     }
 
+    /// Returns the index that truncating to the given index can limit the
+    /// memory usage to size.
+    ///
+    /// For example, given a size limit of 400 and the following blocks:
+    /// [
+    ///     {size=100, last_index=10},
+    ///     {size=200, last_index=30},
+    ///     {size=300, last_index=60}
+    /// ]
+    /// The function will return 30, meaning that truncating logs with index <=
+    /// 30 will reduce memory usage below 400.
     pub(crate) fn index_to_truncate_to_size(&self, mut size: usize) -> u64 {
         self.blocks
             .iter()

@@ -26991,15 +26991,15 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "avg((\n    raft_engine_total_entries_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\"}\n    \n)) by ($additional_groupby) ",
+              "expr": "avg((\n    raft_engine_total_entries_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\"}\n    \n)) by (type, $additional_groupby) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "entries {{$additional_groupby}}",
+              "legendFormat": "{{type}} entries {{$additional_groupby}}",
               "metric": "",
-              "query": "avg((\n    raft_engine_total_entries_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\"}\n    \n)) by ($additional_groupby) ",
+              "query": "avg((\n    raft_engine_total_entries_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\"}\n    \n)) by (type, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""

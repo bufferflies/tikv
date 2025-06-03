@@ -13,6 +13,13 @@ make_static_metric! {
             disk,
         },
     }
+
+    pub struct EntriesCountIntGaugeVec: IntGauge {
+         "type" => {
+             memory,
+             offloaded,
+         },
+     }
 }
 
 pub fn flush_engine_properties(_engine: &RfEngine, _name: &str) {}
@@ -25,10 +32,12 @@ lazy_static! {
         &["type"],
     )
     .unwrap();
-    pub static ref ENGINE_ENTRIES_COUNT: IntGauge = register_int_gauge!(
-        "raft_engine_total_entries_count",
-        "Total number of raft entries"
-    )
+    pub static ref ENGINE_ENTRIES_COUNT: EntriesCountIntGaugeVec = register_static_int_gauge_vec!(
+         EntriesCountIntGaugeVec,
+         "raft_engine_total_entries_count",
+         "Total number of raft entries",
+         &["type"],
+     )
     .unwrap();
     pub static ref ENGINE_PERSIST_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_persist_duration_seconds",

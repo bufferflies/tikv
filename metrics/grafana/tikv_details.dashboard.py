@@ -5470,9 +5470,9 @@ def RaftEngine() -> RowPanel:
                     target(
                         expr=expr_avg(
                             "raft_engine_total_entries_count",
-                            by_labels=[],
+                            by_labels=["type"],
                         ),
-                        legend_format="entries",
+                        legend_format="{{type}} entries",
                         additional_groupby=True,
                     ),
                 ],

@@ -46,6 +46,7 @@ use crate::{
 
 pub const TRUNCATE_ALL_INDEX: u64 = u64::MAX;
 pub const MAX_EPOCH_BACKWARD: u32 = 100;
+const RAFT_INIT_LOG_INDEX: u64 = 5;
 
 /// `RfEngine` is a persistent storage engine for multi-raft logs.
 /// It stores part of raft logs and states(key/value pair) in memory and
@@ -189,7 +190,7 @@ impl RfEngineCore {
                 "invalid config: wal_size must be non-zero".to_owned(),
             ));
         }
-        let in_mem_rlog_epoch_count = (cfg.rlog_soft_memory_limit.0 + wal_size - 1) / wal_size;
+        let in_mem_rlog_epoch_count = cfg.rlog_soft_memory_limit.0.div_ceil(wal_size);
         info!(
             "rfengine in_mem_rlog_epoch_count: {}",
             in_mem_rlog_epoch_count
@@ -623,6 +624,7 @@ impl RfEngineCore {
     pub fn get_engine_stats(&self) -> EngineStats {
         let mut total_mem_size = 0;
         let mut total_mem_entries = 0;
+        let mut total_offloaded_entries = 0;
         let mut peers_stats = self
             .peers
             .iter()
@@ -630,6 +632,7 @@ impl RfEngineCore {
                 let peer_stats = data.read().unwrap().get_stats();
                 total_mem_size += peer_stats.size;
                 total_mem_entries += peer_stats.num_logs;
+                total_offloaded_entries += peer_stats.num_logs_offloaded;
                 peer_stats
             })
             .collect::<Vec<PeerStats>>();
@@ -651,7 +654,10 @@ impl RfEngineCore {
         // Flush metrics.
         ENGINE_RESOUCE_USAGE.memory.set(total_mem_size as i64);
         ENGINE_RESOUCE_USAGE.disk.set(disk_size as i64); // TODO: move it to CSE.store_size
-        ENGINE_ENTRIES_COUNT.set(total_mem_entries as i64);
+        ENGINE_ENTRIES_COUNT.memory.set(total_mem_entries as i64);
+        ENGINE_ENTRIES_COUNT
+            .offloaded
+            .set(total_offloaded_entries as i64);
         ENGINE_TOTAL_WALS_GAUGE.set(num_files as i64);
 
         EngineStats {
@@ -672,26 +678,13 @@ impl RfEngineCore {
             .unwrap_or_default()
     }
 
-    /// Returns the index that truncating to the given index can limit the
-    /// memory usage to size.
-    ///
-    /// For example, given a size limit of 400 and the following blocks:
-    /// [
-    ///     {size=100, last_index=10},
-    ///     {size=200, last_index=30},
-    ///     {size=300, last_index=60}
-    /// ]
-    /// The function will return 30, meaning that truncating logs with index <=
-    /// 30 will reduce memory usage below 400.
-    pub fn index_to_truncate_to_size(&self, peer_id: u64, size: usize) -> u64 {
+    /// Returns the log index up to which logs should be truncated for the given
+    /// peer so that its total log usage (including in-memory and offloaded
+    /// entries) is reduced below the specified size limit.
+    pub fn index_to_truncate_to_size(&self, peer_id: u64, size_limit: usize) -> u64 {
         self.peers
             .get(&peer_id)
-            .map(|data| {
-                data.read()
-                    .unwrap()
-                    .raft_logs
-                    .index_to_truncate_to_size(size)
-            })
+            .map(|data| data.read().unwrap().index_to_truncate_to_size(size_limit))
             .unwrap_or_default()
     }
 
@@ -1466,16 +1459,66 @@ impl PeerData {
         } else {
             0
         };
+        let num_logs_offloaded = self.get_num_logs_offloaded() as usize;
         PeerStats {
             peer_id: self.peer_id,
             region_id: self.meta.region_id,
             size,
             num_logs,
+            num_logs_offloaded,
             num_states: self.meta.states.len(),
             first_idx,
             last_idx,
             truncated_idx: self.meta.truncated_idx,
         }
+    }
+
+    // Returns the number of raft log entries that have been offloaded.
+    //
+    // Caveat: if all raft logs have been offloaded (which can only happen if
+    // TiKV restarts and the peer has no new writes), the returned value will be
+    // 0, which is inaccurate.
+    fn get_num_logs_offloaded(&self) -> u64 {
+        self.raft_logs.first_index().saturating_sub(
+            self.meta
+                .truncated_idx
+                .max(RAFT_INIT_LOG_INDEX)
+                .saturating_add(1),
+        )
+    }
+
+    /// Returns the index such that truncating logs up to this index will reduce
+    /// its total raft log usage (including in-memory and offloaded entries) to
+    /// below the specified size limit.
+    fn index_to_truncate_to_size(&self, size_limit: usize) -> u64 {
+        let in_mem_bytes = self.raft_logs.size();
+        // If in‑memory logs alone exceed the limit, no need to check offloaded
+        // entries.
+        if in_mem_bytes >= size_limit {
+            return self.raft_logs.index_to_truncate_to_size(size_limit);
+        }
+
+        // Check if we need to truncate the offloaded raft logs. We estimate the
+        // offloaded raft log size based on the average raft entry size in
+        // memory.
+        let in_mem_cnt = self.raft_logs.len();
+        let offloaded_cnt = self.get_num_logs_offloaded();
+        if in_mem_cnt == 0 || offloaded_cnt == 0 || in_mem_bytes == 0 {
+            return 0;
+        }
+        let avg_entry_size = in_mem_bytes.div_ceil(in_mem_cnt);
+        let offloaded_cnt_allowed = (size_limit - in_mem_bytes) / avg_entry_size;
+        let to_truncate = offloaded_cnt.saturating_sub(offloaded_cnt_allowed as u64);
+        if to_truncate == 0 {
+            return 0;
+        }
+
+        info!(
+            "peer {}: truncating offloaded entries, \
+            in_mem_bytes {}, in_mem_cnt {}, offloaded_cnt {}, to_truncate {}",
+            self.peer_id, in_mem_bytes, in_mem_cnt, offloaded_cnt, to_truncate
+        );
+        self.meta.truncated_idx.max(RAFT_INIT_LOG_INDEX) + to_truncate
     }
 }
 
@@ -1499,6 +1542,7 @@ pub struct PeerStats {
     pub region_id: u64,
     pub size: usize,
     pub num_logs: usize,
+    pub num_logs_offloaded: usize,
     pub num_states: usize,
     pub first_idx: u64,
     pub last_idx: u64,
@@ -1540,7 +1584,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        log_batch::RaftLogOp,
+        log_batch::{RaftLogOp, RAFT_LOG_BLOCK_CAP},
         test_util::{init_logger, make_log_data, make_region_state, make_state_kv, new_raft_entry},
     };
 
@@ -1701,6 +1745,7 @@ mod tests {
                 region_id: 2,
                 size: 20,
                 num_logs: 5,
+                num_logs_offloaded: 0,
                 num_states: 0,
                 first_idx: 1,
                 last_idx: 5,
@@ -1729,6 +1774,7 @@ mod tests {
                 region_id: 2,
                 size: 0,
                 num_logs: 0,
+                num_logs_offloaded: 0,
                 num_states: 2,
                 first_idx: 0,
                 last_idx: 0,
@@ -2500,5 +2546,41 @@ mod tests {
         let second_last_idx = last_idx - 1;
         assert_eq!(buf[last_idx].term, 10);
         assert_eq!(buf[second_last_idx].term, 2);
+    }
+
+    #[test]
+    fn test_peer_index_to_truncate_to_size() {
+        let mut peer = PeerData::default();
+        peer.peer_id = 1;
+
+        // Insert 4 blocks of logs into the peer.
+        let data = b"data";
+        let total_cnt = RAFT_LOG_BLOCK_CAP * 4;
+        let total_size = total_cnt * data.len();
+        for i in 1..=total_cnt {
+            let log = RaftLogOp::new(&new_raft_entry(
+                EntryType::EntryNormal,
+                1,
+                i as u64,
+                data,
+                0,
+            ));
+            peer.raft_logs.append(log);
+        }
+
+        fn check_truncate_idx(peer: &PeerData, total_cnt: usize, total_size: usize) {
+            let q = total_cnt as u64 / 4;
+            assert_eq!(peer.index_to_truncate_to_size(total_size + 1), 0);
+            assert_eq!(peer.index_to_truncate_to_size(total_size / 4 * 3 + 1), q);
+            assert_eq!(peer.index_to_truncate_to_size(total_size / 2 + 1), q * 2);
+            assert_eq!(peer.index_to_truncate_to_size(total_size / 4 + 1), q * 3);
+        }
+
+        for i in 0..=3 {
+            // Simulate progressive offloading by truncating more in-memory logs.
+            peer.raft_logs
+                .truncate(i as u64 * RAFT_LOG_BLOCK_CAP as u64);
+            check_truncate_idx(&peer, total_cnt, total_size);
+        }
     }
 }

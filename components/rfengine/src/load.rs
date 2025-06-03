@@ -13,11 +13,16 @@ use crate::{
 
 impl RfEngineCore {
     pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
-        let offload_epoch = if self.in_mem_rlog_epoch_count == 0 {
-            0
-        } else {
-            (manifest.epoch_id + 1).saturating_sub(self.in_mem_rlog_epoch_count)
-        };
+        let mut current_epoch = manifest.epoch_id + 1;
+        while wal_exists(self.wal_dir(), current_epoch + 1) {
+            current_epoch += 1;
+        }
+        self.current_epoch_id.store(current_epoch, Ordering::SeqCst);
+        let offload_epoch = calc_offload_epoch(
+            self.in_mem_rlog_epoch_count,
+            &self.current_epoch_id,
+            &self.compacted_epoch,
+        );
         for (&peer_id, peer_meta) in &manifest.peers {
             info!("load peer {}: {:?}", peer_id, peer_meta.files);
             let peer_ref = self.get_or_init_peer_data(peer_id, peer_meta.region_id);
@@ -40,7 +45,7 @@ impl RfEngineCore {
         if wal_exists(self.wal_dir(), epoch_id) {
             (wal_offset, async_offset) = self.load_wal_file(epoch_id, true)?;
         }
-        while wal_exists(self.wal_dir(), epoch_id + 1) {
+        while epoch_id < current_epoch {
             // `compact_wb` only gets set and starts collecting write batches after a WAL
             // rotation is triggered by new foreground writes; it remains uninitialized when
             // loading existing WALs on startup.
@@ -56,7 +61,6 @@ impl RfEngineCore {
         }
         let mut writer = self.writer.lock().unwrap();
         writer.open_file(epoch_id, wal_offset)?;
-        self.current_epoch_id.store(epoch_id, Ordering::SeqCst);
         Ok(async_offset)
     }
 
