@@ -2859,7 +2859,7 @@ async fn compact_destroy_range_for_columnar(
             if del_prefixes.cover_prefix(inner_key) {
                 continue;
             }
-            if columnar_file.has_table(table_id) {
+            if !columnar_file.has_table(table_id) {
                 continue;
             }
             let schema = schema_file.get_table(table_id).unwrap();
@@ -4315,6 +4315,9 @@ async fn columnar_major_compact_for_clear_tables(
         // the table_ids_to_clear will be deleted.
         for table_id in overlap_tables {
             let schema = schema_file.get_table(table_id).unwrap();
+            if !columnar_table.has_table(table_id) {
+                continue;
+            }
             let reader = ColumnarTableReader::new(
                 &columnar_table,
                 schema.clone(),
@@ -4929,6 +4932,8 @@ async fn update_vector_index(
     }
     let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
     for columnar_file in &columnar_files {
+        // NOTE: columnar_file must have the table, already checked in
+        // trigger_update_vector_index.
         let reader = ColumnarTableReader::new(
             columnar_file,
             vector_col_schema.clone(),
