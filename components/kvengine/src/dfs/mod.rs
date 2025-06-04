@@ -426,8 +426,10 @@ impl Dfs for LocalFs {
             reader.read_to_end(&mut buf).dfs_ctx(file_id, "read")?;
             buf
         };
-        KVENGINE_DFS_THROUGHPUT_VEC
-            .with_label_values(&["read"])
+        KVENGINE_DFS_THROUGHPUT
+            .local
+            .get
+            .get(MetricsFileType::from(opts.file_type.suffix()))
             .inc_by(buf.len() as u64);
         Ok(Bytes::from(buf))
     }
@@ -446,8 +448,10 @@ impl Dfs for LocalFs {
         }
         std::fs::rename(&tmp_file_name, local_file_name)?;
         file_system::sync_dir(&self.dir)?;
-        KVENGINE_DFS_THROUGHPUT_VEC
-            .with_label_values(&["write"])
+        KVENGINE_DFS_THROUGHPUT
+            .local
+            .put
+            .get(MetricsFileType::from(opts.file_type.suffix()))
             .inc_by(data.len() as u64);
         Ok(())
     }

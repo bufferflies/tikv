@@ -5237,45 +5237,75 @@ def KvEngine() -> RowPanel:
     layout.row(
         [
             graph_panel(
-                title="Throuputs of DFS",
+                title="DFS Throughput",
                 description="The throughput of DFS operations",
                 yaxes=yaxes(left_format=UNITS.BYTES_SEC_IEC),
                 targets=[
                     target(
                         expr=expr_sum_rate(
                             "kv_engine_dfs_throughput_bytes",
-                            by_labels=[],  # override default by instance.
+                            by_labels=["type"],
+                            # Currently, only S3 is supported.
+                            # LocalFs is unnecessary since it is only used for testing,
+                            # and other types are not supported yet.
+                            label_selectors=['dfs_type="s3"'],
                         ),
                         legend_format="{{type}}",
                         additional_groupby=True,
                     ),
                 ],
-            ),
-            graph_panel_histogram_quantiles(
-                title="DFS duration",
-                description="The duration of DFS operations in ms",
-                yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
-                metric="kv_engine_dfs_latency_ms",
-                hide_count=True,
             ),
         ]
     )
     layout.row(
         [
             graph_panel(
-                title="Read/Write Retries of DFS",
-                description="The count of DFS Read/Write retries",
+                title="DFS Request Rate",
+                description="The OPS of DFS operations",
                 yaxes=yaxes(left_format=UNITS.COUNTS_PER_SEC),
                 targets=[
                     target(
                         expr=expr_sum_rate(
-                            "kv_engine_dfs_rw_retry_count",
-                            by_labels=[],  # override default by instance.
+                            "kv_engine_dfs_request_counter",
+                            by_labels=["type"],
                         ),
                         legend_format="{{type}}",
                         additional_groupby=True,
                     ),
                 ],
+            ),
+            graph_panel(
+                title="DFS Request Retry Rate",
+                description="The OPS of DFS request retries",
+                yaxes=yaxes(left_format=UNITS.COUNTS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_dfs_retry_counter",
+                            by_labels=["type"],
+                        ),
+                        legend_format="{{type}}",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel_histogram_quantiles(
+                title="DFS Request Duration",
+                description="The duration of DFS operations in ms",
+                yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
+                metric="kv_engine_dfs_latency_seconds",
+                hide_count=True,
+            ),
+            graph_panel_histogram_quantiles(
+                title="DFS Request Duration with Retry",
+                description="The duration of DFS operations including retry times in ms",
+                yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
+                metric="kv_engine_dfs_latency_with_retry_seconds",
+                hide_count=True,
             ),
         ]
     )

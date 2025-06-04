@@ -31,7 +31,11 @@ use rusoto_s3::{
 use tikv_util::{sys::thread::ThreadBuildWrapper, time::Instant};
 use tokio::runtime::Runtime;
 
-use crate::dfs::{self, config::Config, metrics::*, Dfs, Error, FileType, Options};
+use crate::dfs::{
+    self, config::Config, Dfs, Error, FileType, MetricsFileType, Options, KVENGINE_DFS_LATENCY,
+    KVENGINE_DFS_LATENCY_WITH_RETRY, KVENGINE_DFS_REQUEST_COUNTER, KVENGINE_DFS_RETRY_COUNTER,
+    KVENGINE_DFS_THROUGHPUT,
+};
 
 const MAX_RETRY_COUNT: u32 = 9;
 const RETRY_SLEEP_MS: u64 = 500;
@@ -345,7 +349,9 @@ impl S3FsCore {
         let prefix = format!("{}/{}", self.prefix.clone(), prefix.unwrap_or_default());
         let start_after = format!("{}{}", prefix, start_after);
         let mut retry_cnt = 0;
+        let start_time_with_retry = Instant::now_coarse();
         loop {
+            let start_time = Instant::now_coarse();
             let mut req = self.new_request("GET", "");
             let mut params = Params::new();
             params.put("list-type", "2");
@@ -366,6 +372,19 @@ impl S3FsCore {
                     let next_start_after = list.is_truncated.then(|| {
                         list.contents.last().unwrap().key.as_str()[prefix.len()..].to_string()
                     });
+
+                    let duration = start_time.saturating_elapsed();
+                    KVENGINE_DFS_LATENCY
+                        .list
+                        .unknown
+                        .observe(duration.as_secs_f64());
+                    let duration_with_retry = start_time_with_retry.saturating_elapsed();
+                    KVENGINE_DFS_LATENCY_WITH_RETRY
+                        .list
+                        .unknown
+                        .observe(duration_with_retry.as_secs_f64());
+                    KVENGINE_DFS_REQUEST_COUNTER.list.unknown.inc();
+
                     return Ok((list.contents, list.is_truncated, next_start_after));
                 } else {
                     result = Err(body_res.unwrap_err().into());
@@ -375,6 +394,7 @@ impl S3FsCore {
             if self.is_err_not_found(&err) {
                 return Ok((vec![], false, None));
             } else if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+                KVENGINE_DFS_RETRY_COUNTER.list.unknown.inc();
                 retry_cnt += 1;
                 let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                 tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
@@ -396,7 +416,9 @@ impl S3FsCore {
         let prefix = format!("{}/{}", self.prefix.clone(), prefix);
         let delimiter = delimiter.unwrap_or("/");
         let mut retry_cnt = 0;
+        let start_time_with_retry = Instant::now_coarse();
         loop {
+            let start_time = Instant::now_coarse();
             let mut req = self.new_request("GET", "");
             let mut params = Params::new();
             params.put("list-type", "2");
@@ -417,6 +439,17 @@ impl S3FsCore {
                         .into_iter()
                         .map(|p| p.prefix)
                         .collect::<Vec<_>>();
+                    let duration = start_time.saturating_elapsed();
+                    KVENGINE_DFS_LATENCY
+                        .list
+                        .unknown
+                        .observe(duration.as_secs_f64());
+                    let duration_with_retry = start_time_with_retry.saturating_elapsed();
+                    KVENGINE_DFS_LATENCY_WITH_RETRY
+                        .list
+                        .unknown
+                        .observe(duration_with_retry.as_secs_f64());
+                    KVENGINE_DFS_REQUEST_COUNTER.list.unknown.inc();
                     return Ok(prefixes);
                 } else {
                     result = Err(body_res.unwrap_err().into());
@@ -426,6 +459,7 @@ impl S3FsCore {
             if self.is_err_not_found(&err) {
                 return Ok(vec![]);
             } else if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+                KVENGINE_DFS_RETRY_COUNTER.list.unknown.inc();
                 retry_cnt += 1;
                 let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                 tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
@@ -441,7 +475,10 @@ impl S3FsCore {
 
     pub async fn is_removed(&self, file_key: &str) -> Result<bool, dfs::Error> {
         let mut retry_cnt = 0;
+        let file_type = self.get_file_type_from_key(file_key);
+        let start_time_with_retry = Instant::now();
         loop {
+            let start_time = Instant::now();
             let req = self.new_tagging_request("GET", file_key);
             let mut result = self
                 .dispatch(req, GetObjectTaggingError::from_response)
@@ -453,6 +490,21 @@ impl S3FsCore {
                     let body = body_res.unwrap();
                     let body_str = body.to_str().unwrap();
                     let tagging: Tagging = quick_xml::de::from_str(body_str).unwrap();
+
+                    let duration = start_time.saturating_elapsed();
+                    KVENGINE_DFS_LATENCY
+                        .get_tagging
+                        .get(MetricsFileType::from(file_type))
+                        .observe(duration.as_secs_f64());
+                    let duration_with_retry = start_time_with_retry.saturating_elapsed();
+                    KVENGINE_DFS_LATENCY_WITH_RETRY
+                        .get_tagging
+                        .get(MetricsFileType::from(file_type))
+                        .observe(duration_with_retry.as_secs_f64());
+                    KVENGINE_DFS_REQUEST_COUNTER
+                        .get_tagging
+                        .get(MetricsFileType::from(file_type))
+                        .inc();
                     return Ok(tagging.has_deleted_tag());
                 } else {
                     result = Err(body_res.unwrap_err().into());
@@ -466,6 +518,10 @@ impl S3FsCore {
                 )));
             }
             if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
+                KVENGINE_DFS_RETRY_COUNTER
+                    .get_tagging
+                    .get(MetricsFileType::from(file_type))
+                    .inc();
                 retry_cnt += 1;
                 let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                 warn!(
@@ -484,10 +540,27 @@ impl S3FsCore {
 
     pub async fn exist(&self, key: String, file_name: String) -> Result<bool, dfs::Error> {
         let mut retry_cnt = 0;
+        let file_type = self.get_file_type_from_key(&key);
+        let start_time_with_retry = Instant::now();
         loop {
+            let start_time = Instant::now();
             let req = self.new_request("HEAD", &key);
             let result = self.dispatch(req, HeadObjectError::from_response).await;
             if result.is_ok() {
+                let duration = start_time.saturating_elapsed();
+                KVENGINE_DFS_LATENCY
+                    .head
+                    .get(MetricsFileType::from(file_type))
+                    .observe(duration.as_secs_f64());
+                let duration_with_retry = start_time_with_retry.saturating_elapsed();
+                KVENGINE_DFS_LATENCY_WITH_RETRY
+                    .head
+                    .get(MetricsFileType::from(file_type))
+                    .observe(duration_with_retry.as_secs_f64());
+                KVENGINE_DFS_REQUEST_COUNTER
+                    .head
+                    .get(MetricsFileType::from(file_type))
+                    .inc();
                 return Ok(true);
             }
             let err = result.unwrap_err();
@@ -501,8 +574,9 @@ impl S3FsCore {
             }
             if self.is_err_retryable(&err) && self.sleep_for_retry(&mut retry_cnt, &file_name).await
             {
-                KVENGINE_DFS_RETRY_COUNTER_VEC
-                    .with_label_values(&["head"])
+                KVENGINE_DFS_RETRY_COUNTER
+                    .head
+                    .get(MetricsFileType::from(file_type))
                     .inc();
                 warn!("retry head file {}, error {:?}", &file_name, &err);
                 continue;
@@ -582,8 +656,10 @@ impl S3FsCore {
         need_complete_length: bool,
     ) -> crate::dfs::Result<(Bytes, Option<u64> /* complete_length */)> {
         let mut retry_cnt = 0;
-        let start_time = Instant::now_coarse();
+        let file_type = self.get_file_type_from_key(&key);
+        let start_time_with_retry = Instant::now_coarse();
         loop {
+            let start_time = Instant::now_coarse();
             let mut req = self.new_request("GET", &key);
             if !opts.is_full_range() {
                 req.add_header("Range", &format!("bytes={}", opts.range_string()));
@@ -613,12 +689,26 @@ impl S3FsCore {
                             None
                         };
 
-                        KVENGINE_DFS_THROUGHPUT_VEC
-                            .with_label_values(&["read"])
+                        let duration = start_time.saturating_elapsed();
+                        KVENGINE_DFS_THROUGHPUT
+                            .s3
+                            .get
+                            .get(MetricsFileType::from(file_type))
                             .inc_by(data.len() as u64);
-                        KVENGINE_DFS_LATENCY_VEC
-                            .with_label_values(&["read"])
-                            .observe(start_time.saturating_elapsed().as_millis() as f64);
+                        KVENGINE_DFS_LATENCY
+                            .get
+                            .get(MetricsFileType::from(file_type))
+                            .observe(duration.as_secs_f64());
+                        let duration_with_retry = start_time_with_retry.saturating_elapsed();
+                        KVENGINE_DFS_LATENCY_WITH_RETRY
+                            .get
+                            .get(MetricsFileType::from(file_type))
+                            .observe(duration_with_retry.as_secs_f64());
+                        KVENGINE_DFS_REQUEST_COUNTER
+                            .get
+                            .get(MetricsFileType::from(file_type))
+                            .inc();
+
                         return Ok((data, complete_length));
                     }
                     Err(err) => result = Err(err.into()),
@@ -641,8 +731,9 @@ impl S3FsCore {
             }
             if self.is_err_retryable(&err) && self.sleep_for_retry(&mut retry_cnt, &file_name).await
             {
-                KVENGINE_DFS_RETRY_COUNTER_VEC
-                    .with_label_values(&["read"])
+                KVENGINE_DFS_RETRY_COUNTER
+                    .get
+                    .get(MetricsFileType::from(file_type))
                     .inc();
                 warn!("retry read file {}, error {:?}", &file_name, &err);
                 continue;
@@ -679,9 +770,11 @@ impl S3FsCore {
         );
 
         let mut retry_cnt = 0;
-        let start_time = Instant::now();
+        let start_time_with_retry = Instant::now();
         let data_len = data.len();
+        let file_type = self.get_file_type_from_key(&key);
         loop {
+            let start_time = Instant::now();
             let mut req = self.new_request("PUT", &key);
             req.add_header("Content-Length", &format!("{}", data.len()));
             if let Some(tagging) = tagging {
@@ -721,19 +814,32 @@ impl S3FsCore {
                     start_time.saturating_elapsed(),
                     retry_cnt
                 );
-                KVENGINE_DFS_THROUGHPUT_VEC
-                    .with_label_values(&["write"])
+                KVENGINE_DFS_THROUGHPUT
+                    .s3
+                    .put
+                    .get(MetricsFileType::from(file_type))
                     .inc_by(data_len as u64);
-                KVENGINE_DFS_LATENCY_VEC
-                    .with_label_values(&["write"])
-                    .observe(start_time.saturating_elapsed().as_millis() as f64);
+                KVENGINE_DFS_LATENCY
+                    .put
+                    .get(MetricsFileType::from(file_type))
+                    .observe(start_time.saturating_elapsed().as_secs_f64());
+                KVENGINE_DFS_LATENCY_WITH_RETRY
+                    .put
+                    .get(MetricsFileType::from(file_type))
+                    .observe(start_time_with_retry.saturating_elapsed().as_secs_f64());
+                KVENGINE_DFS_REQUEST_COUNTER
+                    .put
+                    .get(MetricsFileType::from(file_type))
+                    .inc();
+
                 return Ok(());
             }
             let err = result.unwrap_err();
             if self.is_err_retryable(&err) {
                 if retry_cnt < MAX_RETRY_COUNT {
-                    KVENGINE_DFS_RETRY_COUNTER_VEC
-                        .with_label_values(&["write"])
+                    KVENGINE_DFS_RETRY_COUNTER
+                        .put
+                        .get(MetricsFileType::from(file_type))
                         .inc();
                     retry_cnt += 1;
                     let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
@@ -744,7 +850,7 @@ impl S3FsCore {
                     error!(
                         "create file {}, takes {:?}, reach max retry count {}",
                         &file_name,
-                        start_time.saturating_elapsed(),
+                        start_time_with_retry.saturating_elapsed(),
                         MAX_RETRY_COUNT
                     );
                 }
@@ -756,8 +862,10 @@ impl S3FsCore {
     // Ref: https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html
     pub async fn delete_object(&self, key: String, file_name: String) -> crate::dfs::Result<()> {
         let mut retry_cnt = 0;
-        let start_time = Instant::now();
+        let file_type = self.get_file_type_from_key(&key);
+        let start_time_with_retry = Instant::now_coarse();
         loop {
+            let start_time = Instant::now_coarse();
             let req = self.new_request("DELETE", &key);
             let result = self.dispatch(req, DeleteObjectError::from_response).await;
             if result.is_ok() {
@@ -767,16 +875,29 @@ impl S3FsCore {
                     start_time.saturating_elapsed(),
                     retry_cnt
                 );
-                KVENGINE_DFS_LATENCY_VEC
-                    .with_label_values(&["delete"])
-                    .observe(start_time.saturating_elapsed().as_millis() as f64);
+
+                let duration = start_time.saturating_elapsed();
+                KVENGINE_DFS_LATENCY
+                    .delete
+                    .get(MetricsFileType::from(file_type))
+                    .observe(duration.as_secs_f64());
+                let duration_with_retry = start_time_with_retry.saturating_elapsed();
+                KVENGINE_DFS_LATENCY_WITH_RETRY
+                    .delete
+                    .get(MetricsFileType::from(file_type))
+                    .observe(duration_with_retry.as_secs_f64());
+                KVENGINE_DFS_REQUEST_COUNTER
+                    .delete
+                    .get(MetricsFileType::from(file_type))
+                    .inc();
                 return Ok(());
             }
             let err = result.unwrap_err();
             if self.is_err_retryable(&err) {
                 if retry_cnt < MAX_RETRY_COUNT {
-                    KVENGINE_DFS_RETRY_COUNTER_VEC
-                        .with_label_values(&["delete"])
+                    KVENGINE_DFS_RETRY_COUNTER
+                        .delete
+                        .get(MetricsFileType::from(file_type))
                         .inc();
                     retry_cnt += 1;
                     let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
@@ -817,8 +938,11 @@ impl S3FsCore {
         target_storage_class: Option<&str>,
     ) -> Result<(), dfs::Error> {
         let mut retry_cnt = 0;
+        let start_time_with_retry = Instant::now();
+        let file_type = self.get_file_type_from_key(target_key);
         let full_source_key = format!("{}/{}", self.bucket, source_key);
         loop {
+            let start_time = Instant::now_coarse();
             let mut req = self.new_request("PUT", target_key);
             req.add_header("x-amz-copy-source", &full_source_key);
             req.add_header("x-amz-metadata-directive", "REPLACE");
@@ -838,6 +962,10 @@ impl S3FsCore {
             }
             if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
                 if retry_cnt < MAX_RETRY_COUNT {
+                    KVENGINE_DFS_RETRY_COUNTER
+                        .copy
+                        .get(MetricsFileType::from(file_type))
+                        .inc();
                     retry_cnt += 1;
                     let retry_sleep = 2u64.pow(retry_cnt) * RETRY_SLEEP_MS;
                     warn!(
@@ -855,6 +983,21 @@ impl S3FsCore {
                     return Err(dfs::Error::S3(err_msg));
                 }
             }
+
+            let duration = start_time.saturating_elapsed();
+            KVENGINE_DFS_LATENCY
+                .copy
+                .get(MetricsFileType::from(file_type))
+                .observe(duration.as_secs_f64());
+            let duration_with_retry = start_time_with_retry.saturating_elapsed();
+            KVENGINE_DFS_LATENCY_WITH_RETRY
+                .copy
+                .get(MetricsFileType::from(file_type))
+                .observe(duration_with_retry.as_secs_f64());
+            KVENGINE_DFS_REQUEST_COUNTER
+                .copy
+                .get(MetricsFileType::from(file_type))
+                .inc();
             return Ok(());
         }
     }
@@ -881,6 +1024,25 @@ impl S3FsCore {
             STORAGE_CLASS_STANDARD_IA
         } else {
             STORAGE_CLASS_DEFAULT
+        }
+    }
+
+    // Add helper methods for getting file type and storage class
+    fn get_file_type_from_key(&self, key: &str) -> &'static str {
+        if key.ends_with(".sst") {
+            "sst"
+        } else if key.ends_with(".blob") {
+            "blob"
+        } else if key.ends_with(".txn") {
+            "txn"
+        } else if key.ends_with(".schema") {
+            "schema"
+        } else if key.ends_with(".col") {
+            "col"
+        } else if key.ends_with(".vec") {
+            "vec"
+        } else {
+            "unknown"
         }
     }
 }
