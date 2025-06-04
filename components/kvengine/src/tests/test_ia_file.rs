@@ -2,6 +2,7 @@
 
 use std::{rc::Rc, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use futures::executor::block_on;
 use test_util::init_log_for_test;
 use tikv_util::time::Instant;
@@ -13,7 +14,7 @@ use crate::{
     table::sstable::{BlockCache, SsTable},
     tests::{new_table, new_test_engine_opt},
     util::test_util::KeyBuilder,
-    Iterator,
+    FileMeta, Iterator,
 };
 
 #[rstest::rstest]
@@ -54,7 +55,16 @@ fn test_sync_read(#[case] concurrency: usize) {
         &mgr,
     ))
     .unwrap();
-    let ia_file = IaFile::open_in_path(file_id, FileType::Sst, local_path, mgr.clone()).unwrap();
+    let fm = FileMeta {
+        cf: 0,
+        level: 0,
+        file_type: FileType::Sst,
+        smallest: Bytes::new(),
+        biggest: Bytes::new(),
+        l0_size: 0,
+        table_meta_off: 0,
+    };
+    let ia_file = IaFile::open_in_path(file_id, &fm, local_path, mgr.clone()).unwrap();
     let t_async = SsTable::new(Arc::new(ia_file), BlockCache::None, None).unwrap();
 
     // Test in tokio async context.

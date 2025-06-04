@@ -495,7 +495,7 @@ impl Shard {
                     )
                     .await?;
                     let table_meta_file = Arc::new(InMemFile::new(id, data));
-                    let file = IaFile::open(id, fm.file_type, table_meta_file, ia_mgr.clone())?;
+                    let file = IaFile::open(id, fm, table_meta_file, ia_mgr.clone())?;
                     Ok(Arc::new(file) as _)
                 } else if fm.is_l0_sst_with_size() {
                     // Cache the whole file as a segment.

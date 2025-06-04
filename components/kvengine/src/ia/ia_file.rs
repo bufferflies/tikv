@@ -30,10 +30,10 @@ use crate::{
         file::{File, InMemFile, MmapData},
         search, sstable,
         sstable::SsTable,
-        vector_index::{VectorIndexFile, VectorIndexFileFooter},
+        vector_index::VectorIndexFileFooter,
         Error, Result,
     },
-    IoContext,
+    FileMeta, IoContext,
 };
 
 #[derive(Clone)]
@@ -62,26 +62,22 @@ impl fmt::Debug for IaFile {
 impl IaFile {
     pub fn open(
         id: u64,
-        ftype: FileType,
+        fm: &FileMeta,
         table_meta_file: Arc<dyn File>,
         mgr: IaManager,
     ) -> Result<Self> {
-        match ftype {
-            FileType::Sst => Self::open_for_sst(id, ftype, table_meta_file, mgr),
+        match fm.file_type {
+            FileType::Sst => Self::open_for_sst(id, table_meta_file, mgr),
             FileType::Columnar => Self::open_for_columnar(id, table_meta_file, mgr),
-            FileType::VectorIndex => Self::open_for_vector(id, table_meta_file, mgr),
+            FileType::VectorIndex => Self::open_for_vector(id, fm, table_meta_file, mgr),
             _ => Err(Error::IaMgr(format!(
-                "{id} open: file type not supported: {ftype:?}"
+                "{id} open: file type not supported: {:?}",
+                fm.file_type
             ))),
         }
     }
 
-    fn open_for_sst(
-        id: u64,
-        ftype: FileType,
-        table_meta_file: Arc<dyn File>,
-        mgr: IaManager,
-    ) -> Result<Self> {
+    fn open_for_sst(id: u64, table_meta_file: Arc<dyn File>, mgr: IaManager) -> Result<Self> {
         let footer_data = table_meta_file.read_footer(SsTable::footer_size())?;
         let mut footer = sstable::Footer::default();
         footer.unmarshal(&footer_data);
@@ -103,7 +99,7 @@ impl IaFile {
         let mut f = Self {
             id,
             size: table_meta_off + meta_size,
-            ftype,
+            ftype: FileType::Sst,
             table_meta_off,
             segment_offsets: vec![],
             table_meta_file: table_meta_file.clone(),
@@ -191,24 +187,28 @@ impl IaFile {
     }
 
     // table_meta_file maybe the whole vector index file if table_offset is 0.
-    fn open_for_vector(id: u64, table_meta_file: Arc<dyn File>, mgr: IaManager) -> Result<Self> {
+    fn open_for_vector(
+        id: u64,
+        fm: &FileMeta,
+        table_meta_file: Arc<dyn File>,
+        mgr: IaManager,
+    ) -> Result<Self> {
         let file_len = table_meta_file.size();
         let footer_size = VectorIndexFileFooter::size();
         let footer_data = table_meta_file.read_footer(footer_size)?;
         let mut footer = VectorIndexFileFooter::default();
         footer.unmarshal(&footer_data);
-        // Calculate the offset of the props data from the end of the file.
         let meta_size = footer.props_size() + footer_size;
-        let props_data =
-            table_meta_file.read_table_meta(file_len - meta_size as u64, footer.props_size())?;
-        let meta_offset_prop = VectorIndexFile::get_meta_offset(&props_data).unwrap_or(0) as u64;
-        let (file_size, meta_offset) = if meta_offset_prop == 0 {
-            // If the meta_offset_prop is 0, it means the vector index file is built by old
+        let (file_size, meta_offset) = if fm.table_meta_off == 0 {
+            // If the table_meta_off is 0, it means the vector index file is built by old
             // version, and the table_meta_file is the whole file.
             let meta_offset = file_len - meta_size as u64;
             (file_len, meta_offset)
         } else {
-            (meta_offset_prop + meta_size as u64, meta_offset_prop)
+            (
+                fm.table_meta_off as u64 + meta_size as u64,
+                fm.table_meta_off as u64,
+            )
         };
         // If the table_meta_file is the whole file, we need to truncate it from the
         // meta_offset to the end.
@@ -594,18 +594,18 @@ pub fn parse_table_meta_filename(filename: &str) -> Option<(u64 /* file_id */, F
 
 #[cfg(any(test, feature = "testexport"))]
 impl IaFile {
-    pub fn open_in_path(id: u64, ftype: FileType, data_dir: &Path, mgr: IaManager) -> Result<Self> {
+    pub fn open_in_path(id: u64, fm: &FileMeta, data_dir: &Path, mgr: IaManager) -> Result<Self> {
         use crate::table::file::LocalFile;
 
         // mtime is set during prepare.
         let table_meta_file = LocalFile::open(
             id,
-            table_meta_file_local_path(id, ftype, data_dir),
+            table_meta_file_local_path(id, fm.file_type, data_dir),
             None,
             false,
         )
         .map_err(|err| Error::IaMgr(format!("{} open: open meta file failed: {:?}", id, err)))?;
-        Self::open(id, ftype, Arc::new(table_meta_file), mgr)
+        Self::open(id, fm, Arc::new(table_meta_file), mgr)
     }
 
     pub async fn multi_read_async(&self, off: u64, length: usize) -> Result<Bytes> {

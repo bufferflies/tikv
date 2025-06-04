@@ -245,7 +245,10 @@ message VectorIndexFile {
   bytes smallest = 3;
   // biggest handle of the file.
   bytes biggest = 4;
-  uint32 meta_offset = 5;
+  uint32 meta_offset = 6;
+
+  // Deprecated field. (old meta_offset)
+  reserved 5;
 }
 
 message VectorIndexDef {

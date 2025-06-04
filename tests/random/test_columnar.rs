@@ -40,6 +40,7 @@ pub(crate) async fn prepare_columnar(
     tc: TidbCluster,
     keyspace_manager: KeyspaceManager,
     keyspace_id: u32,
+    vector_common_handle: bool,
 ) {
     let keyspace_name = keyspace_manager
         .get_keyspace_meta(keyspace_id)
@@ -63,6 +64,11 @@ pub(crate) async fn prepare_columnar(
         )
     } else {
         "".to_string()
+    };
+    let vector_primary_key = if vector_common_handle {
+        "id VARCHAR(36) NOT NULL PRIMARY KEY DEFAULT (UUID())"
+    } else {
+        "id INT AUTO_INCREMENT PRIMARY KEY"
     };
 
     let sqls = vec![
@@ -104,7 +110,7 @@ pub(crate) async fn prepare_columnar(
         format!("alter table `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` set tiflash replica 1"),
         format!(
             "create table `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` (
-            id INT AUTO_INCREMENT PRIMARY KEY,
+            {vector_primary_key},
             document TEXT,
             embedding VECTOR({VECTOR_DIMENSION}),
             VECTOR INDEX idx_embedding((VEC_COSINE_DISTANCE(embedding)))
@@ -170,6 +176,7 @@ pub(crate) async fn run_columnar_workload(
     keyspace_manager: KeyspaceManager,
     keyspace_id: u32,
     running: Running,
+    vector_common_handle: bool,
 ) {
     info!("run workload with columnar");
     let keyspace_name = keyspace_manager
@@ -198,7 +205,7 @@ pub(crate) async fn run_columnar_workload(
                     continue;
                 }
                 let mut sqls = generate_insert_sqls(10);
-                let del_sqls = generate_delete_sqls(10, max_id.load(Relaxed));
+                let del_sqls = generate_delete_sqls(10, max_id.load(Relaxed), vector_common_handle);
                 sqls.extend(del_sqls);
                 max_id.fetch_add(10, Relaxed);
                 let ok = insert_delete_random_records(&tag, &pool, &sqls)
@@ -228,7 +235,7 @@ pub(crate) async fn run_columnar_workload(
                 continue;
             }
             info!("verify_data randomly");
-            match verify_data(&pool_copy, false).await {
+            match verify_data(&pool_copy, false, vector_common_handle).await {
                 Ok(_) => {
                     info!("verify_data randomly success");
                 }
@@ -254,7 +261,7 @@ pub(crate) async fn run_columnar_workload(
 
     join_all(handles).await;
 
-    match verify_data(&pool, true).await {
+    match verify_data(&pool, true, vector_common_handle).await {
         Ok(_) => {
             info!("verify_data columnar success");
         }
@@ -371,7 +378,7 @@ fn generate_insert_sqls(max_count: usize) -> Vec<String> {
     sqls
 }
 
-fn generate_delete_sqls(count: usize, max_id: u64) -> Vec<String> {
+fn generate_delete_sqls(count: usize, max_id: u64, vector_common_handle: bool) -> Vec<String> {
     // Generate random count ids with max value max_id.
     let mut rng = rand::thread_rng();
     let ids: Vec<u64> = (1..=max_id).choose_multiple(&mut rng, count);
@@ -380,9 +387,14 @@ fn generate_delete_sqls(count: usize, max_id: u64) -> Vec<String> {
         let sql =
             format!("delete from `{COLUMNAR_DB_NAME}`.`{COLUMNAR_TABLE_NAME}` where id = {id};");
         sqls.push(sql);
-        let sql = format!(
-            "delete from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` where id = {id};"
-        );
+        let sql = if vector_common_handle {
+            let random_str = random_str(&mut rng, 3, false).to_lowercase();
+            format!(
+                "delete from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` where id like '{random_str}%';"
+            )
+        } else {
+            format!("delete from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` where id = {id};")
+        };
         sqls.push(sql);
     }
     sqls
@@ -428,7 +440,11 @@ async fn insert_delete_random_records(
     }
 }
 
-async fn verify_vector_data(pool: &Pool<MySql>, dump_rows: bool) -> Result<()> {
+async fn verify_vector_data(
+    pool: &Pool<MySql>,
+    dump_rows: bool,
+    vector_common_handle: bool,
+) -> Result<()> {
     let mut tx = pool.begin().await.context("begin")?;
     let query_engine = |use_tiflash: bool| {
         format!(
@@ -464,17 +480,27 @@ async fn verify_vector_data(pool: &Pool<MySql>, dump_rows: bool) -> Result<()> {
             .context("select from columnar engine")?;
         if dump_rows {
             for row in &all_row_result {
+                let id = if vector_common_handle {
+                    row.get::<&str, _>("id").to_string()
+                } else {
+                    row.get::<i64, _>("id").to_string()
+                };
                 info!(
                     "verify_vector_data: row1 id: {:?}, text: {:?}, distance: {:?}",
-                    row.get::<i64, _>("id"),
+                    id,
                     row.get::<&str, _>("document"),
                     row.get::<f32, _>("distance")
                 );
             }
             for row in &all_col_result {
+                let id = if vector_common_handle {
+                    row.get::<&str, _>("id").to_string()
+                } else {
+                    row.get::<i64, _>("id").to_string()
+                };
                 info!(
                     "verify_vector_data: row2 id: {:?}, text: {:?}, distance: {:?}",
-                    row.get::<i64, _>("id"),
+                    id,
                     row.get::<&str, _>("document"),
                     row.get::<f32, _>("distance")
                 );
@@ -492,12 +518,22 @@ async fn verify_vector_data(pool: &Pool<MySql>, dump_rows: bool) -> Result<()> {
         return Ok(());
     }
     for (row1, row2) in row_result.iter().zip(col_result.iter()) {
+        let id1 = if vector_common_handle {
+            row1.get::<&str, _>("id").to_string()
+        } else {
+            row1.get::<i64, _>("id").to_string()
+        };
+        let id2 = if vector_common_handle {
+            row2.get::<&str, _>("id").to_string()
+        } else {
+            row2.get::<i64, _>("id").to_string()
+        };
         info!(
             "verify_vector_data: row1 id: {:?}, text: {:?}, distance: {:?}, row2 id: {:?}, text: {:?}, distance: {:?}",
-            row1.get::<i64, _>("id"),
+            id1,
             row1.get::<&str, _>("document"),
             row1.get::<f32, _>("distance"),
-            row2.get::<i64, _>("id"),
+            id2,
             row2.get::<&str, _>("document"),
             row2.get::<f32, _>("distance")
         );
@@ -512,17 +548,27 @@ async fn verify_vector_data(pool: &Pool<MySql>, dump_rows: bool) -> Result<()> {
                     .await
                     .context("select from columnar engine")?;
                 for row in all_row_result {
+                    let id = if vector_common_handle {
+                        row.get::<&str, _>("id").to_string()
+                    } else {
+                        row.get::<i64, _>("id").to_string()
+                    };
                     info!(
                         "verify_vector_data: row1 id: {:?}, text: {:?}, distance: {:?}",
-                        row.get::<i64, _>("id"),
+                        id,
                         row.get::<&str, _>("document"),
                         row.get::<f32, _>("distance")
                     );
                 }
                 for row in all_col_result {
+                    let id = if vector_common_handle {
+                        row.get::<&str, _>("id").to_string()
+                    } else {
+                        row.get::<i64, _>("id").to_string()
+                    };
                     info!(
                         "verify_vector_data: row2 id: {:?}, text: {:?}, distance: {:?}",
-                        row.get::<i64, _>("id"),
+                        id,
                         row.get::<&str, _>("document"),
                         row.get::<f32, _>("distance")
                     );
@@ -537,7 +583,11 @@ async fn verify_vector_data(pool: &Pool<MySql>, dump_rows: bool) -> Result<()> {
     Ok(())
 }
 
-async fn verify_data(pool: &Pool<MySql>, full_scan: bool) -> Result<()> {
+async fn verify_data(
+    pool: &Pool<MySql>,
+    full_scan: bool,
+    vector_common_handle: bool,
+) -> Result<()> {
     let mut tx = pool.begin().await.context("begin")?;
     let query_engine = |use_tiflash: bool| {
         format!(
@@ -750,7 +800,7 @@ async fn verify_data(pool: &Pool<MySql>, full_scan: bool) -> Result<()> {
         compare_rows(row1, row2).unwrap();
     }
 
-    verify_vector_data(pool, false).await?;
+    verify_vector_data(pool, false, vector_common_handle).await?;
 
     Ok(())
 }

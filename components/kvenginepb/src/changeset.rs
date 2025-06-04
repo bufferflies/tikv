@@ -9223,7 +9223,7 @@ impl VectorIndexFile {
         ::std::mem::replace(&mut self.biggest, ::std::vec::Vec::new())
     }
 
-    // uint32 meta_offset = 5;
+    // uint32 meta_offset = 6;
 
 
     pub fn get_meta_offset(&self) -> u32 {
@@ -9268,7 +9268,7 @@ impl ::protobuf::Message for VectorIndexFile {
                 4 => {
                     ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.biggest)?;
                 },
-                5 => {
+                6 => {
                     if wire_type != ::protobuf::wire_format::WireTypeVarint {
                         return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
                     }
@@ -9300,7 +9300,7 @@ impl ::protobuf::Message for VectorIndexFile {
             my_size += ::protobuf::rt::bytes_size(4, &self.biggest);
         }
         if self.meta_offset != 0 {
-            my_size += ::protobuf::rt::value_size(5, self.meta_offset, ::protobuf::wire_format::WireTypeVarint);
+            my_size += ::protobuf::rt::value_size(6, self.meta_offset, ::protobuf::wire_format::WireTypeVarint);
         }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
@@ -9321,7 +9321,7 @@ impl ::protobuf::Message for VectorIndexFile {
             os.write_bytes(4, &self.biggest)?;
         }
         if self.meta_offset != 0 {
-            os.write_uint32(5, self.meta_offset)?;
+            os.write_uint32(6, self.meta_offset)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -9913,7 +9913,7 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     ctorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\x0csnap_\
     version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\
     \x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_o\
-    ffset\x18\x05\x20\x01(\rB\0:\0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index\
+    ffset\x18\x06\x20\x01(\rB\0:\0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index\
     _id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x02\x20\x01(\x03B\0\
     \x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\x13\n\tspec_keys\x18\
     \x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\x20\x03(\x0cB\0:\0B\

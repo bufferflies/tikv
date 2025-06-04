@@ -17,6 +17,7 @@ use kvengine::{
         },
     },
     table::{file::InMemFile, sstable, ChecksumType, InnerKey, Value, NO_COMPRESSION},
+    FileMeta,
 };
 use proptest::prelude::*;
 use rand::prelude::*;
@@ -39,6 +40,18 @@ prop_compose! {
         -> (u64, u64)
     {
         (start, end)
+    }
+}
+
+fn make_file_meta(file_type: FileType) -> FileMeta {
+    FileMeta {
+        cf: 0,
+        level: 0,
+        file_type,
+        smallest: Bytes::new(),
+        biggest: Bytes::new(),
+        l0_size: 0,
+        table_meta_off: 0,
     }
 }
 
@@ -101,8 +114,8 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
         .await
         .unwrap();
         let table_meta_file = InMemFile::new(file_id, table_meta_data);
-        let ia_file =
-            IaFile::open(file_id, file_type, Arc::new(table_meta_file), mgr.clone()).unwrap();
+        let fm = make_file_meta(file_type);
+        let ia_file = IaFile::open(file_id, &fm, Arc::new(table_meta_file), mgr.clone()).unwrap();
 
         let seg = ia_file.multi_read_async(0, user_data.len()).await.unwrap();
         assert_eq!(seg, user_data);
@@ -166,6 +179,7 @@ fn test_init() {
             .unwrap();
 
         let file_type = FileType::Sst;
+        let fm = make_file_meta(file_type);
 
         {
             let mgr = IaManager::new(
@@ -207,11 +221,11 @@ fn test_init() {
                 .unwrap();
             }
 
-            let ia1 = IaFile::open_in_path(1, file_type, &local_path, mgr.clone()).unwrap();
+            let ia1 = IaFile::open_in_path(1, &fm, &local_path, mgr.clone()).unwrap();
             let _ = ia1.multi_read_async(5, 10).await.unwrap();
             let _ = ia1.multi_read_async(5, 10).await.unwrap();
 
-            let ia2 = IaFile::open_in_path(2, file_type, &local_path, mgr.clone()).unwrap();
+            let ia2 = IaFile::open_in_path(2, &fm, &local_path, mgr.clone()).unwrap();
             let _ = ia2.multi_read_async(100, 64).await.unwrap();
             let _ = ia2.multi_read_async(100, 64).await.unwrap();
 
@@ -253,7 +267,7 @@ fn test_init() {
 
             // Open file to verify meta exist.
             for file_id in 1..10 {
-                let _ = IaFile::open_in_path(file_id, file_type, &local_path, mgr.clone()).unwrap();
+                let _ = IaFile::open_in_path(file_id, &fm, &local_path, mgr.clone()).unwrap();
             }
         }
     });
@@ -277,6 +291,7 @@ fn test_abnormal_local_file() {
     runtime.block_on(async move {
         let file_id = 42;
         let file_type = FileType::Sst;
+        let fm = make_file_meta(file_type);
         let (file_data, user_data, table_meta_off) =
             make_sstable(file_id, BLOCK_SIZE, 10, 7, 5, false);
         s3fs.put_object(
@@ -310,7 +325,7 @@ fn test_abnormal_local_file() {
             .unwrap();
             let table_meta_file = InMemFile::new(file_id, table_meta_data);
             let ia_file =
-                IaFile::open(file_id, file_type, Arc::new(table_meta_file), mgr.clone()).unwrap();
+                IaFile::open(file_id, &fm, Arc::new(table_meta_file), mgr.clone()).unwrap();
             let seg = ia_file.multi_read_async(0, user_data.len()).await.unwrap();
             assert_eq!(seg, user_data);
         }
@@ -337,7 +352,7 @@ fn test_abnormal_local_file() {
 
         {
             // First open file failed due to local meta not found.
-            IaFile::open_in_path(file_id, file_type, &local_path, mgr.clone()).unwrap_err();
+            IaFile::open_in_path(file_id, &fm, &local_path, mgr.clone()).unwrap_err();
             // Prepare again.
             let dfs_opts = dfs::Options::default().with_shard(1, 1);
             IaFile::prepare_table_meta(
@@ -350,8 +365,7 @@ fn test_abnormal_local_file() {
             )
             .await
             .unwrap();
-            let ia_file =
-                IaFile::open_in_path(file_id, file_type, &local_path, mgr.clone()).unwrap();
+            let ia_file = IaFile::open_in_path(file_id, &fm, &local_path, mgr.clone()).unwrap();
 
             // Read can handle local segment not found by retry to get from remote.
             let seg = ia_file.multi_read_async(0, user_data.len()).await.unwrap();
@@ -394,6 +408,7 @@ fn test_local_gc() {
             .unwrap();
 
         let file_type = FileType::Sst;
+        let fm = make_file_meta(file_type);
         let file_count = 10;
 
         let mgr = IaManager::new(options, Arc::new(s3fs.clone()), None, rt.clone().into()).unwrap();
@@ -428,11 +443,11 @@ fn test_local_gc() {
             .unwrap();
         }
 
-        let ia1 = IaFile::open_in_path(1, file_type, &meta_path, mgr.clone()).unwrap();
+        let ia1 = IaFile::open_in_path(1, &fm, &meta_path, mgr.clone()).unwrap();
         let data1_5_10 = ia1.multi_read_async(5, 10).await.unwrap();
         assert_eq!(ia1.multi_read_async(5, 10).await.unwrap(), data1_5_10);
 
-        let ia2 = IaFile::open_in_path(2, file_type, &meta_path, mgr.clone()).unwrap();
+        let ia2 = IaFile::open_in_path(2, &fm, &meta_path, mgr.clone()).unwrap();
         let data2_100_64 = ia2.multi_read_async(100, 64).await.unwrap();
         assert_eq!(ia2.multi_read_async(100, 64).await.unwrap(), data2_100_64);
 

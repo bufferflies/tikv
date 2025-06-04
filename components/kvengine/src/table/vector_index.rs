@@ -388,7 +388,7 @@ pub struct IndexData {
 }
 
 impl VectorIndexFile {
-    pub fn new(file: Arc<dyn File>) -> Result<Self> {
+    pub fn new(file: Arc<dyn File>, meta_offset: u32) -> Result<Self> {
         let file_len = file.size();
         let mut footer = VectorIndexFileFooter::default();
         let footer_len = VectorIndexFileFooter::size();
@@ -416,7 +416,6 @@ impl VectorIndexFile {
         let mut is_common_handle = false;
         let mut smallest = vec![];
         let mut biggest = vec![];
-        let mut meta_offset = 0;
         while prop_data_buf.len() > 2 {
             let prop_key_len = prop_data_buf.get_u16_le();
             if prop_key_len == 0 {
@@ -443,8 +442,6 @@ impl VectorIndexFile {
                 metric_repr = prop_value.get_i32_le();
             } else if prop_key == PROP_SNAP_VERSION.as_bytes() {
                 snap_version = prop_value.get_u64_le();
-            } else if prop_key == PROP_META_OFFSET.as_bytes() {
-                meta_offset = prop_value.get_u32_le();
             }
         }
         Ok(VectorIndexFile {
@@ -651,25 +648,6 @@ impl VectorIndexFile {
         vec_idx_file_pb.set_biggest(self.biggest().to_vec());
         vec_idx_file_pb.set_meta_offset(self.meta_offset());
         vec_idx_file_pb
-    }
-
-    pub fn get_meta_offset(props_data: &Bytes) -> Option<u32> {
-        let mut props_data_buf = props_data.as_ref();
-        while props_data_buf.len() > 2 {
-            let prop_key_len = props_data_buf.get_u16_le();
-            if prop_key_len == 0 {
-                break;
-            }
-            let prop_key = &props_data_buf[..prop_key_len as usize];
-            props_data_buf.advance(prop_key_len as usize);
-            let prop_val_len = props_data_buf.get_u32_le();
-            let mut prop_value = &props_data_buf[..prop_val_len as usize];
-            props_data_buf.advance(prop_val_len as usize);
-            if prop_key == PROP_META_OFFSET.as_bytes() {
-                return Some(prop_value.get_u32_le());
-            }
-        }
-        None
     }
 
     pub fn get_meta_data(data: &Bytes) -> Result<Bytes> {
@@ -1034,7 +1012,6 @@ impl VectorIndexBuilder {
 
     pub fn build(&mut self) -> Result<Vec<u8>> {
         let entry_count = self.num_rows as usize;
-        let handles_size = entry_count * 8;
         let versions_size = entry_count * 8;
         let index_size = self.index.serialized_length();
         self.footer.index_size = index_size as u32;
@@ -1065,6 +1042,16 @@ impl VectorIndexBuilder {
             props_buf.extend_from_slice(val);
         };
         let index_size_with_align = (index_size + 7) & !7; // align to 8 bytes
+        let handles_size = if self.is_common_handle {
+            self.common_handles
+                .iter()
+                .map(|h| h.len())
+                .sum::<usize>() /* common handle */
+                + (entry_count + 1) * 4 /* handle offsets */
+        } else {
+            entry_count * 8
+        };
+
         let mut data_size = (index_size_with_align + versions_size + handles_size) as u32;
         if self.format_version() == FORMAT_VERSION_V2 {
             data_size += self.nulls.len() as u32;
@@ -1078,7 +1065,6 @@ impl VectorIndexBuilder {
         write_prop(PROP_METRIC_REPR, &self.metric_repr.to_le_bytes());
         write_prop(PROP_SMALLEST, &self.smallest);
         write_prop(PROP_BIGGEST, &self.biggest);
-        write_prop(PROP_META_OFFSET, &self.meta_offset.to_le_bytes());
         self.footer.props_size = props_buf.len() as u32;
         let footer_data = self.footer.marshal();
 
@@ -1091,7 +1077,7 @@ impl VectorIndexBuilder {
         if self.is_common_handle {
             let mut handle_offsets = Vec::with_capacity(entry_count + 1);
             handle_offsets.push(0);
-            let total_handle_size = self.common_handles.iter().map(|h| h.len()).sum::<usize>();
+            let total_handle_size = handles_size - (entry_count + 1) * 4;
             let mut handle_data = Vec::with_capacity(total_handle_size);
             for i in 0..entry_count {
                 handle_data.extend_from_slice(&self.common_handles[i]);
@@ -1119,9 +1105,6 @@ const PROP_INDEX_ID: &str = "idx_id";
 const PROP_COLUMN_ID: &str = "col_id";
 const PROP_IS_COMMON_HANDLE: &str = "c_h";
 const PROP_METRIC_REPR: &str = "m_r";
-// Meta offset is the offset of meta data (props and footer) of the vector index
-// file. Used for vector index file support IA read.
-pub const PROP_META_OFFSET: &str = "meta_offset";
 
 fn new_index_opts() -> IndexOptions {
     let mut opts = IndexOptions::default();
@@ -1326,7 +1309,7 @@ mod tests {
         let temp_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
         fs::write(&temp_path, data).unwrap();
         let local_file = LocalFile::open(1, temp_path.to_path_buf(), None, false).unwrap();
-        VectorIndexFile::new(Arc::new(local_file)).unwrap()
+        VectorIndexFile::new(Arc::new(local_file), 0).unwrap()
     }
 
     #[test]

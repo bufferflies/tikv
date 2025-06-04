@@ -619,7 +619,7 @@ impl EngineCore {
             };
         }
         if let Ok(table_meta_file) = table_meta_file {
-            if let Ok(ia_file) = IaFile::open(id, fm.file_type, Arc::new(table_meta_file), ia_mgr) {
+            if let Ok(ia_file) = IaFile::open(id, fm, Arc::new(table_meta_file), ia_mgr) {
                 return Ok(Some(Arc::new(ia_file)));
             }
         }
@@ -699,7 +699,7 @@ impl EngineCore {
         let table_meta_file = Arc::new(meta_file);
         Ok(Arc::new(IaFile::open(
             id,
-            fm.file_type,
+            fm,
             table_meta_file,
             ia_mgr.clone(),
         )?))

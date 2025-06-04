@@ -128,7 +128,7 @@ impl ChangeSet {
                 self.schema_file = Some(SchemaFile::open(file)?);
             }
             FileType::VectorIndex => {
-                let file = VectorIndexFile::new(file)?;
+                let file = VectorIndexFile::new(file, meta.table_meta_off)?;
                 self.vec_index_files.insert(id, file);
             }
             file_type => unreachable!("unexpected file type {:?}", file_type),

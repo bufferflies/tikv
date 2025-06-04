@@ -518,6 +518,7 @@ pub(crate) fn prepare_workloads(
             tc.clone(),
             keyspace_manager.clone(),
             COLUMNAR_WORKLOAD_KEYSPACE,
+            switches.vector_common_handle,
         )));
     }
     runtime
@@ -676,6 +677,7 @@ pub(crate) fn start_workloads(
             keyspace_manager.clone(),
             COLUMNAR_WORKLOAD_KEYSPACE,
             running.clone(),
+            switches.vector_common_handle,
         )));
     }
     if !disable_ia && switches.ia_table_ratio > 0.0 && !tables.is_empty() {
@@ -940,6 +942,7 @@ pub(crate) struct Switches {
     pub restart_tso_svc: bool,
     pub async_commit_switch_on: bool,
     pub ia_table_ratio: f64,
+    pub vector_common_handle: bool,
 }
 
 impl Switches {
@@ -981,6 +984,7 @@ impl Switches {
             restart_tso_svc,
             async_commit_switch_on,
             ia_table_ratio,
+            vector_common_handle: rng.gen_bool(0.8),
         }
     }
 }
