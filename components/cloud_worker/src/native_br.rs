@@ -988,6 +988,9 @@ pub struct NativeBrConfig {
     pub instant_backup_timeout: ReadableDuration,
     /// Interval for periodic backup. `0s` to disable periodic backup.
     pub backup_interval: ReadableDuration,
+    /// Delay before perform backup. Also used as the switch for passing
+    /// `backup_ts` to rfengine during backup.
+    pub backup_delay: ReadableDuration,
     #[cfg(feature = "testexport")]
     pub backup_skip_keyspace_meta: bool,
 
@@ -1011,6 +1014,7 @@ impl Default for NativeBrConfig {
             restore_coarse_split_regions_factor: 64,
             instant_backup_timeout: backup_worker::DEFAULT_TIMEOUT_INSTANT_BACKUP,
             backup_interval: ReadableDuration::ZERO,
+            backup_delay: ReadableDuration::ZERO,
             #[cfg(feature = "testexport")]
             backup_skip_keyspace_meta: false,
             backup_tolerate_err: false,

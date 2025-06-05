@@ -215,7 +215,22 @@ pub fn update_service_safe_point(pd_client: &dyn PdClient, safepoint: u64) -> Re
         );
         return Err(Error::PdError(e));
     }
+    info!("update backup gc service safe point"; "safepoint" => safepoint);
     Ok(())
+}
+
+pub fn get_backup_ts(pd_client: &dyn PdClient) -> Result<u64> {
+    match pd_client.get_min_tso() {
+        Ok(ts) => Ok(ts.into_inner()),
+        Err(e) => {
+            if pd_client::grpc_error_is_unimplemented(&e) {
+                info!("get_min_tso is unimplemented, fall back to get_tso");
+                Ok(block_on(pd_client.get_tso())?.into_inner())
+            } else {
+                Err(e.into())
+            }
+        }
+    }
 }
 
 // return backup file key(full path) and ClusterBackupMeta
@@ -226,19 +241,7 @@ pub fn backup_cluster(
     pd_client: &dyn PdClient,
     last_backup_meta: Option<ClusterBackupMeta>,
 ) -> Result<(String, ClusterBackupMeta)> {
-    let res = pd_client.get_min_tso();
-    let backup_ts = match res {
-        Ok(ts) => Ok(ts.into_inner()),
-        Err(e) => {
-            if pd_client::grpc_error_is_unimplemented(&e) {
-                info!("get_min_tso is unimplemented, fall back to get_tso");
-                Ok(block_on(pd_client.get_tso())?.into_inner())
-            } else {
-                Err(e)
-            }
-        }
-    }?;
-
+    let backup_ts = get_backup_ts(pd_client)?;
     let ret = backup_cluster_with_ts(
         config,
         backup_type,
@@ -706,6 +709,7 @@ pub struct BackupConfig {
     pub dfs: DFSConfig,
     pub tolerate_err: usize,
     pub timeout: ReadableDuration,
+    pub backup_delay: ReadableDuration,
     #[cfg(feature = "testexport")]
     pub skip_keyspace_meta: bool,
 }
@@ -718,6 +722,7 @@ impl Default for BackupConfig {
             dfs: DFSConfig::default(),
             tolerate_err: 0,
             timeout: ReadableDuration::secs(30),
+            backup_delay: ReadableDuration::ZERO,
             #[cfg(feature = "testexport")]
             skip_keyspace_meta: false,
         }

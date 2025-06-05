@@ -241,6 +241,7 @@ fn test_restore_keyspace_impl(
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
+        backup_delay: ReadableDuration::secs(1),
         skip_keyspace_meta: true,
         ..Default::default()
     };
@@ -609,6 +610,7 @@ fn test_restore_archived_keyspace_impl(
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
+        backup_delay: ReadableDuration::secs(1),
         security: security_config.clone(),
         skip_keyspace_meta: true,
         ..Default::default()
@@ -1020,6 +1022,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config,
+            backup_delay: ReadableDuration::secs(1),
             skip_keyspace_meta: true,
             ..Default::default()
         };
@@ -1118,6 +1121,7 @@ fn test_restore_keyspace_with_no_chunk() {
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config,
+            backup_delay: ReadableDuration::secs(1),
             skip_keyspace_meta: true,
             ..Default::default()
         };
@@ -1216,6 +1220,7 @@ fn test_restore_keyspace_with_slow_dfs() {
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config.clone(),
+            backup_delay: ReadableDuration::secs(1),
             skip_keyspace_meta: true,
             ..Default::default()
         };
@@ -1359,6 +1364,7 @@ fn test_restore_keyspace_with_schema() {
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config,
+            backup_delay: ReadableDuration::secs(1),
             skip_keyspace_meta: true,
             ..Default::default()
         };
@@ -1497,6 +1503,7 @@ fn test_restore_keyspace_with_failed_store(
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config,
+            backup_delay: ReadableDuration::secs(1),
             tolerate_err: 1,
             skip_keyspace_meta: true,
             timeout: ReadableDuration::secs(3),

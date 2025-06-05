@@ -822,6 +822,7 @@ impl Config {
             dfs: self.dfs.clone(),
             tolerate_err,
             timeout: self.native_br.instant_backup_timeout / 2,
+            backup_delay: self.native_br.backup_delay,
             #[cfg(feature = "testexport")]
             skip_keyspace_meta: self.native_br.backup_skip_keyspace_meta,
         }
