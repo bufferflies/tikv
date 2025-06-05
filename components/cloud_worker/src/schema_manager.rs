@@ -9,7 +9,10 @@ use std::{
     time::Duration,
 };
 
-use api_version::{api_v2::DEFAULT_KEYSPACE_ID, ApiV2, KeyMode, KvFormat};
+use api_version::{
+    api_v2::{is_whole_keyspace_range, DEFAULT_KEYSPACE_ID, KEYSPACE_PREFIX_LEN},
+    ApiV2,
+};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use dashmap::DashMap;
@@ -399,21 +402,30 @@ impl SchemaManager {
         }
 
         for shard_stats in all_shard_stats {
-            let start_key = shard_stats.start.to_vec();
-            if ApiV2::parse_key_mode(&start_key) != KeyMode::Txn {
-                continue;
-            }
-            let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&start_key);
-            if keyspace_id.is_none() {
-                continue;
-            }
-            let keyspace_id = keyspace_id.unwrap();
-            keyspace_stats
-                .entry(keyspace_id)
-                .or_default()
-                .push(shard_stats);
+            Self::update_keyspace_stats(keyspace_stats, shard_stats)
         }
         Ok(())
+    }
+
+    fn update_keyspace_stats(
+        keyspace_stats: &mut HashMap<u32, Vec<ShardStatsLite>>,
+        shard_stats: ShardStatsLite,
+    ) {
+        let Some(keyspace_id) = ApiV2::get_u32_keyspace_id_by_key(&shard_stats.start) else {
+            return;
+        };
+        let Some(end_keyspace_id) = ApiV2::get_u32_keyspace_id_by_key(&shard_stats.end) else {
+            return;
+        };
+        if keyspace_id != end_keyspace_id
+            && !is_whole_keyspace_range(&shard_stats.start[..KEYSPACE_PREFIX_LEN], &shard_stats.end)
+        {
+            return;
+        }
+        keyspace_stats
+            .entry(keyspace_id)
+            .or_default()
+            .push(shard_stats);
     }
 
     pub(crate) async fn refresh_keyspace_schema(
@@ -1231,14 +1243,17 @@ fn stores_status_addr(stores: &[Store]) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashMap, fs};
 
     use bytes::Bytes;
-    use kvengine::table::{
-        columnar::{
-            build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
+    use kvengine::{
+        table::{
+            columnar::{
+                build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
+            },
+            file::LocalFile,
         },
-        file::LocalFile,
+        ShardStatsLite,
     };
     use schema::schema::StorageClass;
     use tikv_util::info;
@@ -1247,7 +1262,10 @@ mod tests {
         read_schema_file_from_local, write_meta_file_to_local, write_schema_file_to_local,
         META_FILE_NAME,
     };
-    use crate::schema_manager::{find_latest_schema_file, MetaFile};
+    use crate::{
+        schema_manager::{find_latest_schema_file, MetaFile},
+        SchemaManager,
+    };
 
     #[test]
     fn test_find_latest_schema_file() {
@@ -1345,5 +1363,42 @@ mod tests {
             let checked_version = read_meta.get_checked_version(i).unwrap();
             assert_eq!(checked_version, (i + i * 11) as i64);
         }
+    }
+
+    #[test]
+    fn test_update_shard_stats() {
+        let make_shard_stats = |id: u64, start: Vec<u8>, end: Vec<u8>| -> ShardStatsLite {
+            ShardStatsLite {
+                id,
+                ver: 1,
+                start: start.into(),
+                end: end.into(),
+                inner_key_off: 0,
+                total_size: 0,
+                schema_version: 1000,
+                schema_restore_version: 0,
+                storage_class: Default::default(),
+                columnar_tables: 0,
+            }
+        };
+        let mut keyspace_stats = HashMap::new();
+        let shard_stats = make_shard_stats(1, vec![120, 255, 255, 255], vec![]);
+        SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
+        assert!(keyspace_stats.is_empty());
+        let shard_stats = make_shard_stats(1, vec![120, 0, 0, 1], vec![120, 0, 0, 3]);
+        SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
+        assert!(keyspace_stats.is_empty());
+        let shard_stats = make_shard_stats(1, vec![120, 0, 0, 2], vec![120, 0, 0, 3, 4]);
+        assert!(keyspace_stats.is_empty());
+        SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
+        let shard_stats = make_shard_stats(1, vec![120, 0, 0, 1, 3], vec![120, 0, 0, 1, 4]);
+        SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
+        assert_eq!(keyspace_stats.len(), 1);
+        let shard_stats = make_shard_stats(2, vec![120, 0, 0, 2], vec![120, 0, 0, 3]);
+        SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
+        assert_eq!(keyspace_stats.len(), 2);
+        let shard_stats = make_shard_stats(3, vec![120, 0, 0, 3, 3], vec![120, 0, 0, 4]);
+        SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
+        assert_eq!(keyspace_stats.len(), 3);
     }
 }

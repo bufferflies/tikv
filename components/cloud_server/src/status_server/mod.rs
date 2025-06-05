@@ -2063,7 +2063,7 @@ impl StatusServer {
         };
 
         let (start, end) = match (hex::decode(&start), hex::decode(&end)) {
-            (Ok(start), Ok(end)) if end.is_empty() || start <= end => (start, end),
+            (Ok(start), Ok(end)) if end.is_empty() || start < end => (start, end),
             _ => {
                 return Ok(make_response(
                     StatusCode::BAD_REQUEST,

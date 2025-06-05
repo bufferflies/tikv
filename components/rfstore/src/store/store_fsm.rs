@@ -597,6 +597,13 @@ impl RegionMap {
         limit: usize,
         reverse: bool,
     ) -> Vec<&Region> {
+        if start >= end {
+            error!("scan regions failed, start key is greater than or equal to end key";
+                "start" => ?start,
+                "end" => ?end
+            );
+            return vec![];
+        }
         let mut regions = vec![];
         let mut right_bound = Unbounded;
         let encoded_end = encode_bytes(&end);
