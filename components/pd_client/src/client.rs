@@ -1085,6 +1085,40 @@ impl PdClient for RpcClient {
             .execute()
     }
 
+    fn get_all_keyspaces_gc_states(&self) -> PdFuture<txn_types::ClusterGcStates> {
+        let start_time = Instant::now();
+
+        let mut req = pdpb::GetAllKeyspacesGcStatesRequest::default();
+        req.set_header(self.header());
+
+        let executor = move |client: &Client, req: pdpb::GetAllKeyspacesGcStatesRequest| {
+            let handler = {
+                let inner = client.inner.rl();
+                inner
+                    .client_stub
+                    .get_all_keyspaces_gc_states_async_opt(&req, call_option_inner(&inner))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "fail to request PD {} err {:?}",
+                            "get_all_keyspaces_gc_states", e
+                        )
+                    })
+            };
+            Box::pin(async move {
+                let resp = handler.await?;
+                PD_REQUEST_HISTOGRAM_VEC
+                    .with_label_values(&["get_all_keyspaces_gc_states"])
+                    .observe(duration_to_sec(start_time.saturating_elapsed()));
+                check_resp_header(resp.get_header())?;
+                Ok(txn_types::ClusterGcStates::from_pb(resp, start_time))
+            }) as PdFuture<_>
+        };
+
+        self.pd_client
+            .request(req, executor, LEADER_CHANGE_RETRY)
+            .execute()
+    }
+
     fn get_store_stats_async(&self, store_id: u64) -> BoxFuture<'_, Result<pdpb::StoreStats>> {
         self.get_store_and_stats(store_id).map_ok(|x| x.1).boxed()
     }

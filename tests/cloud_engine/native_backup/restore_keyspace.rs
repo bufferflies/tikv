@@ -35,9 +35,12 @@ use test_cloud_server::{
         ClusterClientOptions, CommitAction, MutateOptions, RequestOptions, RequestPeerRole,
         TxnWriteMethod,
     },
+    keyspace::CreateKeyspaceOptions,
     must_wait,
     oss::prepare_dfs,
-    try_wait, ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
+    try_wait,
+    util::request_major_compaction,
+    ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
@@ -52,7 +55,7 @@ use txn_types::TimeStamp;
 
 use crate::{
     alloc_node_id_vec, native_backup::DummyStepReporter, new_security_config,
-    request_major_compaction, wait_for_keyspace_stats,
+    wait_for_keyspace_stats,
 };
 
 const BASIC_DATA_COUNT: usize = 10;
@@ -899,8 +902,6 @@ fn test_restore_archived_keyspace_impl(
 #[case::sync(false)]
 #[case::async_commit(true)]
 fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
-    const KEYSPACE_ID: u32 = 1;
-
     test_util::init_log_for_test();
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
     let s3fs = Arc::new(S3Fs::new(
@@ -933,6 +934,9 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     )
     .pd(pd_wrapper)
     .build();
+    let keyspace_id = runtime.block_on(
+        cluster.create_keyspace(&CreateKeyspaceOptions::default(), Duration::from_secs(10)),
+    );
     cluster.start_tikv_workers(alloc_node_id_vec(1), TikvWorkerOptions::default());
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
@@ -943,10 +947,10 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     if async_commit {
         client.set_async_commit();
     }
-    client.split_keyspace(KEYSPACE_ID);
+    client.split_keyspace(keyspace_id);
 
     // Import data
-    let i_to_key = gen_keyspace_key(KEYSPACE_ID);
+    let i_to_key = gen_keyspace_key(keyspace_id);
     client.put_kv(0..200, &i_to_key, i_to_val(BASIC_DATA_LEN));
     // Delete data without committing secondary keys, to simulate the case that if
     // we don't resolve locks during restoration, the secondary keys will be rolled
@@ -975,7 +979,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
         &runtime,
         &cluster,
         &pd_client,
-        KEYSPACE_ID,
+        keyspace_id,
         |stats| stats.cfs[WRITE_CF].levels.iter().any(|l| l.num_tables > 0),
         false,
         Duration::from_secs(10),
@@ -1048,8 +1052,8 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
 
     // Restore keyspace.
     let restore_result = restore_keyspace::restore_keyspace(
-        KEYSPACE_ID,
-        KEYSPACE_ID,
+        keyspace_id,
+        keyspace_id,
         &snapshot_backup_name,
         None,
         s3fs,
@@ -1071,13 +1075,29 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     // If restore keyspace do not resolve locks, the secondary keys of "put_kv" will
     // not be compacted, and the following `wait_for_keyspace_stats` will fail.
     let ts = client.get_ts();
-    cluster.set_gc_safe_point(ts.into_inner());
-    request_major_compaction(&runtime, &pd_client, KEYSPACE_ID);
+    runtime
+        .block_on(
+            cluster
+                .get_pd_client()
+                .advance_txn_safe_point(keyspace_id, ts),
+        )
+        .unwrap();
+    runtime
+        .block_on(
+            cluster
+                .get_pd_client()
+                .advance_gc_safe_point(keyspace_id, ts),
+        )
+        .unwrap();
+    runtime
+        .block_on(cluster.update_gc_states_immediately())
+        .unwrap();
+    request_major_compaction(&runtime, &pd_client, keyspace_id);
     wait_for_keyspace_stats(
         &runtime,
         &cluster,
         &pd_client,
-        KEYSPACE_ID,
+        keyspace_id,
         |stats| stats.cfs[WRITE_CF].levels.iter().all(|l| l.num_tables == 0),
         false,
         Duration::from_secs(10),

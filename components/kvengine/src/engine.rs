@@ -26,9 +26,11 @@ use fslock;
 use security::SecurityManager;
 use slog_global::info;
 use tikv_util::{
-    box_err, mpsc, spawn_anonymous_thread_with, sys::thread::StdThreadBuildWrapper, HandyRwLock,
+    box_err, mpsc, rolling_retriever::RollingRetriever, spawn_anonymous_thread_with,
+    sys::thread::StdThreadBuildWrapper, HandyRwLock,
 };
 use txn_chunk_manager::with_pool_size;
+use txn_types::ClusterGcStates;
 
 use crate::{
     apply::ChangeSet,
@@ -89,7 +91,6 @@ impl Engine {
         meta_change_listener: Box<dyn MetaChangeListener>,
         rate_limiter: Arc<IoRateLimiter>,
         store_limiter: Arc<StoreLimiter>,
-        ks_gc_sp_map: Option<Arc<DashMap<u32, u64>>>,
         master_key: MasterKey,
         security_mgr: Arc<SecurityManager>,
     ) -> Result<Engine> {
@@ -152,7 +153,6 @@ impl Engine {
                 opts.for_restore,
             ),
             id_allocator,
-            managed_safe_ts: AtomicU64::new(0),
             rate_limiter,
             store_limiter,
             free_tx,
@@ -160,7 +160,12 @@ impl Engine {
             file_locks,
             files_in_blacklist: Arc::new(files_in_blacklist),
             shutting_down: AtomicBool::new(false),
-            ks_safepoint_v2: ks_gc_sp_map,
+            cluster_gc_states: RollingRetriever::new_with(|| {
+                Arc::new(ClusterGcStates::new(
+                    HashMap::default(),
+                    tikv_util::time::Instant::now(),
+                ))
+            }),
             master_key,
             txn_chunk_mgr,
             ia_ctx,
@@ -321,14 +326,13 @@ pub struct EngineCore {
     pub(crate) cache: BlockCache,
     pub comp_client: CompactionClient,
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
-    pub(crate) managed_safe_ts: AtomicU64,
     pub(crate) rate_limiter: Arc<IoRateLimiter>,
     pub(crate) store_limiter: Arc<StoreLimiter>,
     pub(crate) free_tx: mpsc::Sender<FreeMemMsg>,
     pub(crate) loaded: AtomicBool,
     pub(crate) file_locks: Vec<Mutex<()>>,
     pub(crate) shutting_down: AtomicBool,
-    pub(crate) ks_safepoint_v2: Option<Arc<DashMap<u32, u64>>>,
+    pub(crate) cluster_gc_states: RollingRetriever<Arc<ClusterGcStates>>,
     pub(crate) master_key: MasterKey,
     pub(crate) txn_chunk_mgr: TxnChunkManager,
     pub(crate) ia_ctx: IaCtx,

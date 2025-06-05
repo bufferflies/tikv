@@ -16,7 +16,7 @@ use security::{GetSecurityManager, SecurityConfig, SecurityManager};
 use tikv_util::config::ReadableDuration;
 use url::Url;
 
-use crate::{PdClientExt, TestPdClient};
+use crate::{KeyspaceInfoProvider, PdClientExt, TestPdClient};
 
 const SCAN_REGION_BATCH_SIZE: usize = 256;
 
@@ -226,6 +226,17 @@ impl PdWrapper {
         match self {
             PdWrapper::Test(_) => unimplemented!("test PD does not support PD control interfaces"),
             PdWrapper::Real(c) => c.get_pd_control(),
+        }
+    }
+
+    pub fn set_keyspace_info_provider_for_mock_pd(
+        &self,
+        keyspace_info_provider: Option<Arc<dyn KeyspaceInfoProvider>>,
+    ) {
+        if let Self::Test(test_pd) = self {
+            test_pd
+                .client
+                .set_keyspace_info_provider(keyspace_info_provider)
         }
     }
 }

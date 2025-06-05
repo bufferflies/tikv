@@ -72,7 +72,6 @@ fn new_test_engines() -> (Engines, TempDir) {
         meta_change_listener,
         rate_limiter,
         store_limiter,
-        None,
         MasterKey::new(&[1u8; 32]),
         Arc::new(SecurityManager::default()),
     )

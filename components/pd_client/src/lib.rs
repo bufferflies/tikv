@@ -520,6 +520,30 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         unimplemented!();
     }
 
+    /// Tries to advance the txn safe point of the specified keyspace to the
+    /// given target. Returns `(old_txn_safe_point, new_txn_safe_point)`.
+    fn advance_txn_safe_point(
+        &self,
+        _keyspace_id: u32,
+        _target: TimeStamp,
+    ) -> PdFuture<(TimeStamp, TimeStamp)> {
+        unimplemented!();
+    }
+
+    /// Tries to advance the gc safe point of the specified keyspace to the
+    /// given target. Returns `(old_gc_safe_point, new_gc_safe_point)`.
+    fn advance_gc_safe_point(
+        &self,
+        _keyspace_id: u32,
+        _target: TimeStamp,
+    ) -> PdFuture<(TimeStamp, TimeStamp)> {
+        unimplemented!();
+    }
+
+    fn get_all_keyspaces_gc_states(&self) -> PdFuture<txn_types::ClusterGcStates> {
+        unimplemented!();
+    }
+
     /// Gets store state if it is not a tombstone store asynchronously.
     fn get_store_stats_async(&self, _store_id: u64) -> BoxFuture<'_, Result<pdpb::StoreStats>> {
         unimplemented!();

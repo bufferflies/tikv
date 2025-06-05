@@ -1,11 +1,11 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt, mem, time::Duration};
+use std::{fmt, mem, str::FromStr, time::Duration};
 
 use api_version::ApiV2;
 use bytes::Bytes;
 use codec::number::NumberEncoder;
-use hyper::{http, Body};
+use hyper::{http, Body, Request, Uri};
 use kvengine::table::columnar::{
     new_int_handle_column_info, new_version_column_info, Schema, SchemaBuf,
 };
@@ -14,8 +14,10 @@ use kvproto::{
     metapb::{Peer, RegionEpoch, Store},
 };
 use log_wrappers::Value;
+use pd_client::PdClient;
 use rfstore::store::RegionIdVer;
 use schema::schema::StorageClass;
+use test_pd_client::TestPdClient;
 use tidb_query_datatype::{codec::table::TABLE_PREFIX, Collation, FieldTypeTp};
 use tikv::storage::mvcc::Key;
 use tikv_util::{
@@ -23,6 +25,7 @@ use tikv_util::{
     time::Instant,
 };
 use tipb::ColumnInfo;
+use tokio::runtime::Runtime;
 
 pub(crate) const DEFAULT_INNER_KEY_OFFSET: usize = 4;
 
@@ -291,5 +294,38 @@ pub async fn broadcast_schema_file_request(
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+    }
+}
+
+pub async fn request_major_compact_on_store(store: &Store, query: &str, permit_not_found: bool) {
+    let uri = Uri::from_str(&format!(
+        "http://{}/major-compact?{}",
+        &store.status_address, query
+    ))
+    .unwrap();
+    let req = Request::post(uri).body(Body::empty()).unwrap();
+    let client = hyper::Client::new();
+    let resp: http::Response<Body> = client.request(req).await.unwrap();
+    let is_success = resp.status().is_success()
+        || (permit_not_found && resp.status() == http::StatusCode::NOT_FOUND);
+    assert!(
+        is_success,
+        "{:?}",
+        hyper::body::to_bytes(resp.into_body()).await.unwrap()
+    );
+    hyper::body::to_bytes(resp.into_body()).await.unwrap();
+}
+
+pub fn request_major_compaction(runtime: &Runtime, pd_client: &TestPdClient, keyspace_id: u32) {
+    let stores = pd_client.get_all_stores(true).unwrap();
+    let mut handles = Vec::with_capacity(stores.len());
+    for store in stores {
+        handles.push(runtime.spawn(async move {
+            let query = format!("major_compact=true&keyspace_id={}", keyspace_id);
+            request_major_compact_on_store(&store, query.as_str(), true).await;
+        }));
+    }
+    for handle in handles {
+        runtime.block_on(handle).unwrap();
     }
 }

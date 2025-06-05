@@ -523,7 +523,6 @@ impl MergedEngine {
             meta_change_listener,
             rate_limiter,
             store_limiter,
-            None,
             ctx.master_key.clone(),
             ctx.pd.get_security_mgr(),
         )?;

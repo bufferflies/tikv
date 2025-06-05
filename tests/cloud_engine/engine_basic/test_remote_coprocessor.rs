@@ -30,7 +30,7 @@ use tempfile::TempDir;
 use test_cloud_server::{
     client::{ClusterClient, ClusterClientOptions, TxnMutations, TxnWriteMethod},
     oss::{prepare_dfs, ObjectStorageService},
-    util::Mutation,
+    util::{request_major_compaction, Mutation},
     ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_coprocessor::{
@@ -51,7 +51,7 @@ use tikv_util::{
 };
 use tipb::{Chunk, Executor, Expr, ExprType, ScalarFuncSig};
 
-use crate::{alloc_node_id, alloc_node_id_vec, request_major_compaction, wait_for_keyspace_stats};
+use crate::{alloc_node_id, alloc_node_id_vec, wait_for_keyspace_stats};
 
 const FLAG_IGNORE_TRUNCATE: u64 = 1;
 const FLAG_TRUNCATE_AS_WARNING: u64 = 1 << 1;

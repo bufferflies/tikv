@@ -10,11 +10,11 @@ use kvproto::{
 };
 use pd_client::PdClient;
 use rfstore::store::CustomBuilder;
-use test_cloud_server::ServerCluster;
+use test_cloud_server::{util::request_major_compact_on_store, ServerCluster};
 use test_pd_client::PdClientExt;
 use tikv_util::time::Instant;
 
-use crate::{alloc_node_id, i_to_key_with_keyspace, i_to_val, request_major_compact_on_store};
+use crate::{alloc_node_id, i_to_key_with_keyspace, i_to_val};
 
 #[test]
 fn test_major_compaction() {

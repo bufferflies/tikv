@@ -132,6 +132,8 @@ impl ServerCluster {
             .prefix("cluster_")
             .tempdir()
             .unwrap();
+        let keyspace_manager = KeyspaceManager::default();
+        pd_wrapper.set_keyspace_info_provider_for_mock_pd(Some(Arc::new(keyspace_manager.clone())));
         let pd_client = pd_wrapper.client();
         let nodes_count = nodes.len();
         let mut cluster = Self {
@@ -146,7 +148,7 @@ impl ServerCluster {
             ref_store: Arc::new(Mutex::new(RefStore::default())),
             schedule_lock: Arc::new(DashMap::new()),
             confs: Default::default(),
-            keyspace_manager: Default::default(),
+            keyspace_manager,
             nodes_count,
             tikv_worker_configs: Default::default(),
             tikv_workers: Default::default(),
@@ -712,11 +714,13 @@ impl ServerCluster {
         ClusterTxnClient::new(client, self.get_pure_pd_client(), self.new_client())
     }
 
-    pub fn set_gc_safe_point(&self, ts: u64) {
-        let _ = self.get_pd_client().set_gc_safe_point(ts).unwrap();
+    pub async fn update_gc_states_immediately(&self) -> std::result::Result<(), Error> {
+        let cluster_gc_states = self.get_pd_client().get_all_keyspaces_gc_states().await?;
         for node_id in self.get_nodes() {
-            self.get_kvengine(node_id).update_managed_safe_ts(ts);
+            self.get_kvengine(node_id)
+                .update_cluster_gc_states_cache(cluster_gc_states.clone());
         }
+        Ok(())
     }
 
     pub fn flush_memtable(&self, region_id: u64) -> std::result::Result<(), Error> {

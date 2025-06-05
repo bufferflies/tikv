@@ -836,9 +836,9 @@ impl<'a> StoreMsgHandler<'a> {
         if self
             .store
             .ticker
-            .is_on_store_tick(STORE_TICK_UPDATE_SAFE_TS)
+            .is_on_store_tick(STORE_TICK_UPDATE_GC_SAFE_POINT)
         {
-            self.on_update_safe_ts();
+            self.on_update_gc_safe_point();
         }
         if self.store.ticker.is_on_store_tick(STORE_TICK_LOCAL_FILE_GC) {
             self.on_local_file_gc();
@@ -887,14 +887,21 @@ impl<'a> StoreMsgHandler<'a> {
         self.store.ticker.schedule_store(STORE_TICK_PD_HEARTBEAT);
     }
 
-    fn on_update_safe_ts(&mut self) {
-        if let Err(e) = self.ctx.global.pd_scheduler.schedule(PdTask::UpdateSafeTs) {
-            error!("update safe ts failed";
+    fn on_update_gc_safe_point(&mut self) {
+        if let Err(e) = self
+            .ctx
+            .global
+            .pd_scheduler
+            .schedule(PdTask::UpdateGcSafePoint)
+        {
+            error!("update GC safe point failed";
                 "store_id" => self.store.id,
                 "err" => ?e
             );
         }
-        self.store.ticker.schedule_store(STORE_TICK_UPDATE_SAFE_TS);
+        self.store
+            .ticker
+            .schedule_store(STORE_TICK_UPDATE_GC_SAFE_POINT);
     }
 
     fn on_local_file_gc(&mut self) {
@@ -915,7 +922,9 @@ impl<'a> StoreMsgHandler<'a> {
         self.store.start_time = Some(time::get_time());
         self.store_heartbeat_pd();
         self.store.ticker.schedule_store(STORE_TICK_PD_HEARTBEAT);
-        self.store.ticker.schedule_store(STORE_TICK_UPDATE_SAFE_TS);
+        self.store
+            .ticker
+            .schedule_store(STORE_TICK_UPDATE_GC_SAFE_POINT);
         self.store.ticker.schedule_store(STORE_TICK_LOCAL_FILE_GC);
     }
 

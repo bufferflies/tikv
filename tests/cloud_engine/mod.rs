@@ -96,29 +96,6 @@ pub(crate) fn random_value(value_len: usize) -> Vec<u8> {
     value
 }
 
-pub(crate) async fn request_major_compact_on_store(
-    store: &Store,
-    query: &str,
-    permit_not_found: bool,
-) {
-    let uri = Uri::from_str(&format!(
-        "http://{}/major-compact?{}",
-        &store.status_address, query
-    ))
-    .unwrap();
-    let req = Request::post(uri).body(Body::empty()).unwrap();
-    let client = hyper::Client::new();
-    let resp: http::Response<Body> = client.request(req).await.unwrap();
-    let is_success = resp.status().is_success()
-        || (permit_not_found && resp.status() == http::StatusCode::NOT_FOUND);
-    assert!(
-        is_success,
-        "{:?}",
-        hyper::body::to_bytes(resp.into_body()).await.unwrap()
-    );
-    hyper::body::to_bytes(resp.into_body()).await.unwrap();
-}
-
 pub(crate) fn i_to_key_with_keyspace(keyspace_id: u32) -> impl Fn(usize) -> Vec<u8> {
     move |i: usize| -> Vec<u8> {
         let mut key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
@@ -175,24 +152,6 @@ pub(crate) fn new_security_config() -> SecurityConfig {
     conf.master_key.vendor = "test".to_string();
     conf.master_key.key_id = "random".to_string();
     conf
-}
-
-pub(crate) fn request_major_compaction(
-    runtime: &Runtime,
-    pd_client: &TestPdClient,
-    keyspace_id: u32,
-) {
-    let stores = pd_client.get_all_stores(true).unwrap();
-    let mut handles = Vec::with_capacity(stores.len());
-    for store in stores {
-        handles.push(runtime.spawn(async move {
-            let query = format!("major_compact=true&keyspace_id={}", keyspace_id);
-            request_major_compact_on_store(&store, query.as_str(), true).await;
-        }));
-    }
-    for handle in handles {
-        runtime.block_on(handle).unwrap();
-    }
 }
 
 /// Wait for stats of all regions in a keyspace to be expected.

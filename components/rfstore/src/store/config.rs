@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use fail::fail_point;
 use online_config::OnlineConfig;
 use raftstore::{
     coprocessor,
@@ -85,7 +86,8 @@ pub struct Config {
 
     pub local_file_gc_tick_interval: ReadableDuration,
 
-    pub update_safe_ts_interval: ReadableDuration,
+    #[serde(alias = "update_safe_ts_interval")]
+    pub update_gc_safe_point_interval: ReadableDuration,
 
     pub consistency_check_interval: ReadableDuration,
 
@@ -151,7 +153,7 @@ impl Default for Config {
             pd_store_heartbeat_tick_interval: ReadableDuration::secs(10),
             local_file_gc_timeout: ReadableDuration::minutes(30),
             local_file_gc_tick_interval: ReadableDuration::minutes(10),
-            update_safe_ts_interval: ReadableDuration::secs(60),
+            update_gc_safe_point_interval: ReadableDuration::secs(60),
             // Disable consistency check by default as it will hurt performance.
             // We should turn on this only in our tests.
             consistency_check_interval: ReadableDuration::secs(0),
@@ -237,7 +239,7 @@ impl Config {
 
         if cfg!(debug_assertions) && cfg.raft_base_tick_interval.as_millis() < 100 {
             // It is a test config, adjust the fields not included in the old.
-            cfg.update_safe_ts_interval.0 = cfg.raft_base_tick_interval.0 * 60;
+            cfg.update_gc_safe_point_interval.0 = cfg.raft_base_tick_interval.0 * 60;
             cfg.switch_mem_table_check_tick_interval.0 = cfg.raft_base_tick_interval.0 * 60;
             if cfg.local_file_gc_timeout.0 > cfg.raft_base_tick_interval.0 * 20 * 30 {
                 cfg.local_file_gc_timeout.0 = cfg.raft_base_tick_interval.0 * 20 * 30; // 30s, see `new_test_config`.
@@ -254,6 +256,16 @@ impl Config {
         }
 
         cfg.capacity = old.capacity;
+
+        (|| {
+            fail_point!(
+                "rfstore_config_from_old_force_short_update_gc_safe_point_interval",
+                |_| {
+                    cfg.update_gc_safe_point_interval = cfg.raft_base_tick_interval;
+                }
+            )
+        })();
+
         cfg
     }
 }

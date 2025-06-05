@@ -49,7 +49,7 @@ use tikv_util::{
     Either, HandyRwLock,
 };
 use tokio_timer::timer::Handle;
-use txn_types::{TimeStamp, TSO_PHYSICAL_SHIFT_BITS};
+use txn_types::{GcState, TimeStamp, NULL_KEYSPACE_ID, TSO_PHYSICAL_SHIFT_BITS};
 
 use super::*;
 
@@ -404,6 +404,8 @@ struct PdCluster {
     gc_safe_point: u64,
     gc_service_safe_points: HashMap<String, GcServiceSafePoint>,
     min_resolved_ts: u64,
+    keyspace_info_provider: Option<Arc<dyn KeyspaceInfoProvider>>,
+    keyspace_gc_states: HashMap<u32, GcState>,
 
     replication_status: Option<ReplicationStatus>,
     region_replication_status: HashMap<u64, RegionReplicationStatus>,
@@ -445,6 +447,8 @@ impl PdCluster {
 
             gc_safe_point: 0,
             gc_service_safe_points: HashMap::default(),
+            keyspace_info_provider: None,
+            keyspace_gc_states: HashMap::default(),
             min_resolved_ts: 0,
             replication_status: None,
             region_replication_status: HashMap::default(),
@@ -866,6 +870,114 @@ impl PdCluster {
 
     fn get_gc_safe_point(&self) -> u64 {
         self.gc_safe_point
+    }
+
+    fn set_keyspace_info_provider(
+        &mut self,
+        keyspace_info_provider: Option<Arc<dyn KeyspaceInfoProvider>>,
+    ) {
+        self.keyspace_info_provider = keyspace_info_provider;
+    }
+
+    fn get_all_keyspaces(&self) -> HashMap<u32, KeyspaceInfo> {
+        match &self.keyspace_info_provider {
+            Some(p) => p.get_all_keyspaces(),
+            None => HashMap::from_iter(std::iter::once((
+                NULL_KEYSPACE_ID,
+                KeyspaceInfo {
+                    id: NULL_KEYSPACE_ID,
+                    name: "".into(),
+                    keyspace_level_gc_enabled: false,
+                    is_active: true,
+                },
+            ))),
+        }
+    }
+
+    fn get_keyspace_info(&self, keyspace_id: u32) -> Option<KeyspaceInfo> {
+        match &self.keyspace_info_provider {
+            Some(p) => p.get_keyspace_info(keyspace_id),
+            None => {
+                if keyspace_id == NULL_KEYSPACE_ID {
+                    Some(KeyspaceInfo {
+                        id: NULL_KEYSPACE_ID,
+                        name: "".into(),
+                        keyspace_level_gc_enabled: false,
+                        is_active: true,
+                    })
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn mut_gc_state(&mut self, keyspace_id: u32) -> Result<&mut GcState> {
+        if let Some(keyspace_info) = self.get_keyspace_info(keyspace_id) {
+            if !keyspace_info.is_active {
+                return Err(Error::Other(
+                    format!(
+                        "keyspace {} (\"{}\") is not in an active state",
+                        keyspace_id, keyspace_info.name
+                    )
+                    .into(),
+                ));
+            }
+        } else {
+            return Err(Error::Other(
+                format!("keyspace id {} not found", keyspace_id).into(),
+            ));
+        }
+
+        Ok(self
+            .keyspace_gc_states
+            .entry(keyspace_id)
+            .or_insert_with(|| GcState::default(keyspace_id)))
+    }
+
+    fn advance_txn_safe_point(
+        &mut self,
+        keyspace_id: u32,
+        target: TimeStamp,
+    ) -> Result<(TimeStamp, TimeStamp)> {
+        // TODO: Check GC barriers which is not yet implement here.
+        let state = self.mut_gc_state(keyspace_id)?;
+        let (old_txn_safe_point, new_txn_safe_point) = (state.txn_safe_point, target);
+        if target < state.txn_safe_point {
+            return Err(Error::Other("decreasing txn safe point".into()));
+        }
+        state.txn_safe_point = new_txn_safe_point;
+        Ok((old_txn_safe_point, new_txn_safe_point))
+    }
+
+    fn advance_gc_safe_point(
+        &mut self,
+        keyspace_id: u32,
+        target: TimeStamp,
+    ) -> Result<(TimeStamp, TimeStamp)> {
+        let state = self.mut_gc_state(keyspace_id)?;
+
+        let (old_gc_safe_point, new_gc_safe_point) = (state.gc_safe_point, target);
+        if target < old_gc_safe_point {
+            return Err(Error::Other("decreasing gc safe point".into()));
+        }
+        if target > state.txn_safe_point {
+            return Err(Error::Other("gc safe point exceeds txn safe point".into()));
+        }
+        state.gc_safe_point = target;
+        Ok((old_gc_safe_point, new_gc_safe_point))
+    }
+
+    fn get_all_keyspace_gc_states(&self) -> HashMap<u32, GcState> {
+        let keyspaces = self.get_all_keyspaces();
+        let mut keyspace_gc_states = self.keyspace_gc_states.clone();
+        keyspace_gc_states.retain(|id, _| keyspaces.get(id).map_or(false, |v| v.is_active));
+        for (id, keyspace_info) in keyspaces {
+            if keyspace_info.is_active && !keyspace_gc_states.contains_key(&id) {
+                keyspace_gc_states.insert(id, GcState::default(id));
+            }
+        }
+        keyspace_gc_states
     }
 
     fn update_gc_service_safe_point(
@@ -1503,6 +1615,15 @@ impl TestPdClient {
             });
         Box::pin(ok(region))
     }
+
+    pub(crate) fn set_keyspace_info_provider(
+        &self,
+        keyspace_info_provider: Option<Arc<dyn KeyspaceInfoProvider>>,
+    ) {
+        self.cluster
+            .wl()
+            .set_keyspace_info_provider(keyspace_info_provider);
+    }
 }
 
 impl GetSecurityManager for TestPdClient {}
@@ -1933,6 +2054,46 @@ impl PdClient for TestPdClient {
         Box::pin(ok(safe_point))
     }
 
+    fn advance_txn_safe_point(
+        &self,
+        keyspace_id: u32,
+        target: TimeStamp,
+    ) -> PdFuture<(TimeStamp, TimeStamp)> {
+        if let Err(e) = self.check_bootstrap() {
+            return Box::pin(err(e));
+        }
+        Box::pin(ready(
+            self.cluster
+                .wl()
+                .advance_txn_safe_point(keyspace_id, target),
+        ))
+    }
+
+    fn advance_gc_safe_point(
+        &self,
+        keyspace_id: u32,
+        target: TimeStamp,
+    ) -> PdFuture<(TimeStamp, TimeStamp)> {
+        if let Err(e) = self.check_bootstrap() {
+            return Box::pin(err(e));
+        }
+        Box::pin(ready(
+            self.cluster.wl().advance_gc_safe_point(keyspace_id, target),
+        ))
+    }
+
+    fn get_all_keyspaces_gc_states(&self) -> PdFuture<txn_types::ClusterGcStates> {
+        if let Err(e) = self.check_bootstrap() {
+            return Box::pin(err(e));
+        }
+        let req_start_time = Instant::now();
+        let keyspace_gc_states = self.cluster.rl().get_all_keyspace_gc_states();
+        Box::pin(ok(txn_types::ClusterGcStates::new(
+            keyspace_gc_states,
+            req_start_time,
+        )))
+    }
+
     fn get_store_stats_async(&self, store_id: u64) -> BoxFuture<'_, Result<pdpb::StoreStats>> {
         let cluster = self.cluster.rl();
         let stats = cluster.store_stats.get(&store_id);
@@ -2217,6 +2378,37 @@ impl PdClientExt for TestPdClient {
     }
 }
 
+/// The abstract keyspace info decoupled with the actual implementation of
+/// KeyspaceMeta.
+#[derive(Debug, Clone)]
+pub struct KeyspaceInfo {
+    pub id: u32,
+    pub name: String,
+    pub keyspace_level_gc_enabled: bool,
+    /// Marks whether this keyspace is in an active (enabled) state. Set to
+    /// false when the keyspace is being deleted (archived), disabled, etc.
+    pub is_active: bool,
+}
+
+/// The abstract source of keyspace information.
+pub trait KeyspaceInfoProvider: Send + Sync {
+    /// Returns a map of all keyspaces in the cluster. The implementation should
+    /// guarantee that there always exist a *null keyspace* such that:
+    ///
+    /// - id == [`NULL_KEYSPACE_ID`]
+    /// - name is empty
+    /// - keyspace_level_gc_enabled is false
+    /// - is_active is true
+    ///
+    /// It's also guaranteed that the `id` field of each [`KeyspaceInfo`] always
+    /// matches the key of the map.
+    fn get_all_keyspaces(&self) -> HashMap<u32, KeyspaceInfo>;
+
+    fn get_keyspace_info(&self, keyspace_id: u32) -> Option<KeyspaceInfo> {
+        self.get_all_keyspaces().get(&keyspace_id).cloned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2334,5 +2526,143 @@ mod tests {
             update_svc_safe_point("svc1", 41).unwrap();
             assert_eq!(get_gc_safe_point(), 32);
         }
+    }
+
+    #[tokio::test]
+    async fn test_gc_states() {
+        struct MockKeyspaceInfoProvider(HashMap<u32, KeyspaceInfo>);
+        impl KeyspaceInfoProvider for MockKeyspaceInfoProvider {
+            fn get_all_keyspaces(&self) -> HashMap<u32, KeyspaceInfo> {
+                self.0.clone()
+            }
+
+            fn get_keyspace_info(&self, keyspace_id: u32) -> Option<KeyspaceInfo> {
+                self.0.get(&keyspace_id).cloned()
+            }
+        }
+
+        let keyspaces = MockKeyspaceInfoProvider(
+            vec![
+                KeyspaceInfo {
+                    id: NULL_KEYSPACE_ID,
+                    name: "".to_string(),
+                    keyspace_level_gc_enabled: false,
+                    is_active: true,
+                },
+                KeyspaceInfo {
+                    id: 0,
+                    name: "DEFAULT".to_string(),
+                    keyspace_level_gc_enabled: false,
+                    is_active: true,
+                },
+                KeyspaceInfo {
+                    id: 1,
+                    name: "k1".to_string(),
+                    keyspace_level_gc_enabled: true,
+                    is_active: true,
+                },
+                KeyspaceInfo {
+                    id: 2,
+                    name: "k2".to_string(),
+                    keyspace_level_gc_enabled: true,
+                    is_active: false,
+                },
+            ]
+            .into_iter()
+            .map(|k| (k.id, k))
+            .collect(),
+        );
+
+        let pd_client = TestPdClient::new(1, false);
+        pd_client.set_bootstrap(true);
+        pd_client.set_keyspace_info_provider(Some(Arc::new(keyspaces)));
+
+        pd_client
+            .advance_txn_safe_point(NULL_KEYSPACE_ID, 10.into())
+            .await
+            .unwrap();
+        // GC safe point never exceeds txn safe point.
+        pd_client
+            .advance_gc_safe_point(NULL_KEYSPACE_ID, 11.into())
+            .await
+            .unwrap_err();
+        pd_client
+            .advance_gc_safe_point(NULL_KEYSPACE_ID, 8.into())
+            .await
+            .unwrap();
+
+        pd_client
+            .advance_txn_safe_point(0, 20.into())
+            .await
+            .unwrap();
+        // Txn safe point never decreases.
+        pd_client
+            .advance_txn_safe_point(0, 15.into())
+            .await
+            .unwrap_err();
+        pd_client.advance_gc_safe_point(0, 20.into()).await.unwrap();
+        // GC safe point never decreases either.
+        pd_client
+            .advance_gc_safe_point(0, 15.into())
+            .await
+            .unwrap_err();
+
+        pd_client
+            .advance_txn_safe_point(1, 30.into())
+            .await
+            .unwrap();
+        pd_client.advance_gc_safe_point(1, 30.into()).await.unwrap();
+
+        let cluster_gc_states = pd_client.get_all_keyspaces_gc_states().await.unwrap();
+        // Inactive keyspace (2) won't be collected.
+        assert_eq!(cluster_gc_states.keyspace_gc_states.len(), 3);
+        assert_eq!(
+            cluster_gc_states
+                .keyspace_gc_states
+                .get(&NULL_KEYSPACE_ID)
+                .unwrap()
+                .txn_safe_point,
+            10.into()
+        );
+        assert_eq!(
+            cluster_gc_states
+                .keyspace_gc_states
+                .get(&NULL_KEYSPACE_ID)
+                .unwrap()
+                .gc_safe_point,
+            8.into()
+        );
+        assert_eq!(
+            cluster_gc_states
+                .keyspace_gc_states
+                .get(&0)
+                .unwrap()
+                .txn_safe_point,
+            20.into()
+        );
+        assert_eq!(
+            cluster_gc_states
+                .keyspace_gc_states
+                .get(&0)
+                .unwrap()
+                .gc_safe_point,
+            20.into()
+        );
+        assert_eq!(
+            cluster_gc_states
+                .keyspace_gc_states
+                .get(&1)
+                .unwrap()
+                .txn_safe_point,
+            30.into()
+        );
+        assert_eq!(
+            cluster_gc_states
+                .keyspace_gc_states
+                .get(&1)
+                .unwrap()
+                .gc_safe_point,
+            30.into()
+        );
     }
 }

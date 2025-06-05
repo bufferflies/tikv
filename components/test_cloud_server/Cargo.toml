@@ -18,6 +18,7 @@ chrono = "0.4"
 cloud_server = { path = "../cloud_server" }
 cloud_worker = { path = "../cloud_worker", features = ["testexport"] }
 codec = { workspace = true }
+collections = { workspace = true }
 crc32c = { workspace = true }
 crc32fast = "1.4.0"
 dashmap = "4.0"
@@ -65,5 +66,6 @@ tipb = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 toml = "0.5"
+txn_types = { workspace = true }
 url = "2"
 zipf = "7.0"

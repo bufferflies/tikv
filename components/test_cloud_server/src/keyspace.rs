@@ -265,6 +265,56 @@ impl KeyspaceManagerCore {
     }
 }
 
+impl test_pd_client::KeyspaceInfoProvider for KeyspaceManager {
+    fn get_all_keyspaces(&self) -> collections::HashMap<u32, test_pd_client::KeyspaceInfo> {
+        let mut res = self
+            .core
+            .keyspaces
+            .iter()
+            .map(|item| {
+                (
+                    *item.key(),
+                    test_pd_client::KeyspaceInfo {
+                        id: item.value().keyspace_id,
+                        name: item.value().name.clone(),
+                        keyspace_level_gc_enabled: item.value().keyspace_id
+                            != txn_types::NULL_KEYSPACE_ID,
+                        is_active: true,
+                    },
+                )
+            })
+            .collect::<collections::HashMap<_, _>>();
+        res.entry(txn_types::NULL_KEYSPACE_ID)
+            .or_insert_with(|| test_pd_client::KeyspaceInfo {
+                id: txn_types::NULL_KEYSPACE_ID,
+                name: "".into(),
+                keyspace_level_gc_enabled: false,
+                is_active: true,
+            });
+        res
+    }
+
+    fn get_keyspace_info(&self, keyspace_id: u32) -> Option<test_pd_client::KeyspaceInfo> {
+        if keyspace_id == txn_types::NULL_KEYSPACE_ID {
+            return Some(test_pd_client::KeyspaceInfo {
+                id: txn_types::NULL_KEYSPACE_ID,
+                name: "".into(),
+                keyspace_level_gc_enabled: false,
+                is_active: true,
+            });
+        }
+        self.core
+            .keyspaces
+            .get(&keyspace_id)
+            .map(|v| test_pd_client::KeyspaceInfo {
+                id: v.keyspace_id,
+                name: v.name.clone(),
+                keyspace_level_gc_enabled: true,
+                is_active: true,
+            })
+    }
+}
+
 pub struct CreateKeyspaceOptions {
     pub table_count: usize,
     pub schema_enable_ratio: f64,

@@ -380,21 +380,11 @@ impl TikvServer {
         self.init_metrics_flusher(fetcher);
         self.run_server(server_config);
         self.run_status_server();
-        if self.config.gc.enable_safe_point_v2 {
-            self.run_watch_ks_gc_safepoint();
-        }
         if !self.config.server.push_metrics_addr.is_empty()
             && !self.config.server.push_metrics_interval.is_zero()
         {
             self.run_prometheus_push();
         }
-    }
-
-    fn run_watch_ks_gc_safepoint(&mut self) {
-        let pd_clone = self.pd_client.clone();
-        self.background_worker.remote().spawn(async move {
-            pd_clone.watch_gc_safepoint_v2().await;
-        });
     }
 
     fn run_prometheus_push(&mut self) {
@@ -1134,10 +1124,6 @@ impl TikvServer {
             sender: sender.clone(),
         });
 
-        let mut opt_ks_gc_sp_cache = None;
-        if conf.gc.enable_safe_point_v2 {
-            opt_ks_gc_sp_cache = Some(pd.get_keyspace_gc_safepoint_v2_cache());
-        }
         let kv_engine = kvengine::Engine::open(
             dfs,
             opts,
@@ -1148,7 +1134,6 @@ impl TikvServer {
             meta_change_listener,
             rate_limiter,
             store_limiter,
-            opt_ks_gc_sp_cache,
             master_key,
             security_mgr,
         )?;

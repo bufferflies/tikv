@@ -7,7 +7,7 @@ use std::{
     iter::Iterator as StdIterator,
     ops::{Deref, Sub},
     path::{Path, PathBuf},
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -15,6 +15,7 @@ use api_version::ApiV2;
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::{EncryptionKey, MasterKey};
+use fail::fail_point;
 use file_system::IoType;
 use futures::future::try_join_all;
 use http::StatusCode;
@@ -24,7 +25,7 @@ use kvenginepb::{self as pb, ColumnarCreate};
 use pb::{BlobCreate, TableCreate};
 use protobuf::Message;
 use security::SecurityManager;
-use slog_global::error;
+use slog_global::{error, warn};
 use table::columnar::{ColumnarFile, ColumnarTableReader, Schema};
 use tidb_query_common::util::convert_to_prefix_next;
 use tidb_query_datatype::{
@@ -39,6 +40,7 @@ use tikv_util::{
     sys::thread::ThreadBuildWrapper, time::Instant,
 };
 use tokio::sync::mpsc;
+use txn_types::{ClusterGcStates, TimeStamp};
 
 use crate::{
     dfs,
@@ -372,7 +374,10 @@ pub struct CompactionRequest {
     /// Must be set to `CURRENT_COMPACTOR_VERSION`.
     pub compactor_version: u32,
 
-    pub safe_ts: u64,
+    // TODO: Confirm if there's other components other than TiKV needs this field. If no other
+    // component need this field, then we don't need to keep the old name "safe-ts".
+    #[serde(rename = "safe-ts")]
+    pub gc_safe_point: u64,
     pub exported_encryption_key: Vec<u8>,
 
     /// The size in bytes of input tables used as source of compaction.
@@ -406,7 +411,7 @@ impl CompactionRequest {
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct MajorCompaction {
-    safe_ts: u64,
+    gc_safe_point: u64,
     l0_tables: Vec<u64>,
     // L1 plus sstables of all cfs, map from cf id to sstables that are organized by level.
     ln_tables: HashMap<usize, Vec<(usize, Vec<u64>)>>,
@@ -417,7 +422,7 @@ pub struct MajorCompaction {
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct L0Compaction {
-    safe_ts: u64,
+    gc_safe_point: u64,
     l0_tables: Vec<u64>,
     multi_cf_l1_tables: Vec<Vec<u64>>,
     sst_config: TableBuilderOptions,
@@ -428,7 +433,7 @@ pub struct L0Compaction {
 pub struct L1PlusCompaction {
     cf: isize,
     level: usize,
-    safe_ts: u64,
+    gc_safe_point: u64,
     // Whether to keep the latest tombstone before the safe ts.
     keep_latest_obsolete_tombstone: bool,
     upper_level: Vec<u64>,
@@ -439,7 +444,7 @@ pub struct L1PlusCompaction {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ColumnarCompaction {
     level: u32,
-    safe_ts: u64,
+    gc_safe_point: u64,
     snap_version: u64,
     source_row_files: Vec<(u32, u64)>,      // (level, id)
     source_columnar_files: Vec<(u32, u64)>, // (level, id)
@@ -449,7 +454,7 @@ pub struct ColumnarCompaction {
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ColumnarMajorCompaction {
-    safe_ts: u64,
+    gc_safe_point: u64,
     l0_tables: Vec<u64>,
     ln_tables: Vec<(usize /* level */, Vec<u64> /* file ids */)>,
     blob_tables: Vec<u64>,
@@ -525,71 +530,63 @@ pub enum CompactionType {
 const MAX_COMPACTION_EXPAND_SIZE: u64 = 256 * 1024 * 1024;
 
 impl Engine {
-    pub fn update_managed_safe_ts(&self, ts: u64) {
-        loop {
-            let old = load_u64(&self.managed_safe_ts);
-            if old < ts
-                && self
-                    .managed_safe_ts
-                    .compare_exchange(old, ts, Ordering::Release, Ordering::Relaxed)
-                    .is_err()
-            {
-                continue;
-            }
-            break;
-        }
-    }
-
-    pub fn get_managed_safe_ts(&self, keyspace_id: u32) -> u64 {
-        let gc_safe_point_ts = load_u64(&self.managed_safe_ts);
-        debug!(
-            "Get gc safe point v1, keyspace_id:{:?}, gc safepoint:{}",
-            keyspace_id, gc_safe_point_ts,
-        );
-        gc_safe_point_ts
-    }
-
-    pub fn get_keyspace_gc_safepoint_v2(&self, keyspace_id: u32) -> u64 {
-        match &self.ks_safepoint_v2 {
-            Some(sp_map) => {
-                if keyspace_id > 0 {
-                    // Api v2 key.
-                    let keyspace_sp_ts = sp_map.get(&keyspace_id);
-                    match keyspace_sp_ts {
-                        None => {
-                            if self.opts.disable_safe_point_fallback_v1 {
-                                debug!(
-                                    "Can not get gc safe point v2, and refuse to get gc safe point v1, keyspace_id:{}",
-                                    keyspace_id
-                                );
-                                return 0;
-                            }
-                            debug!(
-                                "Can not get gc safe point v2, get gc safe point v1, keyspace_id:{}",
-                                keyspace_id
-                            );
-                            // Api v1 key.
-                            self.get_managed_safe_ts(keyspace_id)
-                        }
-                        Some(ks2sp) => {
-                            let ks_gc_sp = *ks2sp.value();
-                            debug!(
-                                "Get gc safe point v2, keyspace_id:{}, gc safepoint:{}",
-                                keyspace_id, ks_gc_sp
-                            );
-                            ks_gc_sp
-                        }
-                    }
+    pub fn update_cluster_gc_states_cache(&self, gc_states: ClusterGcStates) {
+        // Check if there's still any keyspaces configured to use unified GC. If any,
+        // print a warning log.
+        // There are two ways to GC for a keyspace: keyspace level GC and unified GC,
+        // the latter of which is not expected to be enabled anymore for user
+        // keyspaces. But there are exceptions:
+        // * The null keyspace: it's equivalent to not enabling keyspaces. The null
+        //   keyspace is always considered using unified GC.
+        // * The default keyspace: the keyspace that exists by default in a new cluster,
+        //   which the keyspace_id == 0. For this keyspace, it may be configured using
+        //   unified GC by default, and the user might not actually use this keyspace.
+        //   Therefore, we do not log it.
+        let mut unified_gc_keyspaces = gc_states
+            .keyspace_gc_states
+            .iter()
+            .filter_map(|(&id, s)| {
+                if id != txn_types::NULL_KEYSPACE_ID
+                    && id != txn_types::DEFAULT_KEYSPACE_ID
+                    && !s.is_keyspace_level_gc
+                {
+                    Some(id)
                 } else {
-                    // Api v1 key.
-                    self.get_managed_safe_ts(keyspace_id)
+                    None
                 }
-            }
-            None => {
-                // Api v1 key.
-                self.get_managed_safe_ts(keyspace_id)
-            }
+            })
+            .peekable();
+        if unified_gc_keyspaces.peek().is_some() {
+            warn!("some keyspaces are still using unified GC"; "keyspace_ids" => ?unified_gc_keyspaces.collect::<Vec<_>>());
         }
+        self.cluster_gc_states.put(Arc::new(gc_states));
+    }
+
+    pub fn get_gc_safe_point(&self, keyspace_id: u32) -> TimeStamp {
+        let gc_states = self.cluster_gc_states.get_cloned();
+        let keyspace_gc_state = gc_states
+            .keyspace_gc_states
+            .get(&keyspace_id)
+            .and_then(|gc_state| {
+                // If keyspace level GC is not enabled for this keyspace, fallback to the null
+                // keyspace.
+                if gc_state.keyspace_id != txn_types::NULL_KEYSPACE_ID
+                    && !gc_state.is_keyspace_level_gc
+                {
+                    gc_states
+                        .keyspace_gc_states
+                        .get(&txn_types::NULL_KEYSPACE_ID)
+                } else {
+                    Some(gc_state)
+                }
+            })
+            .map(|gc_state| gc_state.gc_safe_point)
+            .unwrap_or_else(|| {
+                // Unable to get the gc state of the keyspace, which is unexpected.
+                // Do not do any GC operation in this case for safety.
+                TimeStamp::zero()
+            });
+        keyspace_gc_state
     }
 
     pub(crate) fn run_compaction(&self, compact_rx: tikv_util::mpsc::Receiver<CompactMsg>) {
@@ -721,7 +718,7 @@ impl Engine {
             file_ids: vec![],
             compaction_tp: CompactionType::Unknown,
             compactor_version: self.opts.compaction_request_version,
-            safe_ts: self.get_keyspace_gc_safepoint_v2(range.keyspace_id),
+            gc_safe_point: self.get_gc_safe_point(range.keyspace_id).into_inner(),
             exported_encryption_key,
             input_size: 0,
         }
@@ -1269,7 +1266,7 @@ impl Engine {
         )
         .await;
         let l0_compaction = L0Compaction {
-            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
+            gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             l0_tables: l0_tbls,
             multi_cf_l1_tables: multi_cfs_l1_tbls,
             sst_config,
@@ -1494,12 +1491,13 @@ impl Engine {
         let l1_plus: L1PlusCompaction = L1PlusCompaction {
             cf,
             level,
-            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
+            gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             keep_latest_obsolete_tombstone: has_overlap,
             upper_level: upper_level_table_ids,
             lower_level: lower_level_table_ids,
             sst_config,
         };
+        shard.record_max_used_gc_safe_point(l1_plus.gc_safe_point.into());
         req.input_size = upper_size + lower_size;
         req.compaction_tp = CompactionType::L1Plus(l1_plus);
         info!(
@@ -1559,7 +1557,12 @@ impl Engine {
             self.opts.update_inner_key_offset && data.prepend_keyspace_id().is_some();
         total_size += update_inner_key_offset as u64;
 
-        if total_size == 0 {
+        let no_skip = (|| {
+            fail_point!("trigger_major_compaction_no_skip_on_empty", |_| true);
+            false
+        })();
+
+        if total_size == 0 && !no_skip {
             info!(
                 "{} trigger_major_compaction skipped, no tables to compact", shard.tag();
                 "is_manual" => is_manual,
@@ -1590,13 +1593,14 @@ impl Engine {
         )
         .await;
         let major_compaction = MajorCompaction {
-            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
+            gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             l0_tables: data.l0_tbls.iter().map(|t| t.id()).collect(),
             ln_tables,
             blob_tables: data.blob_tbl_map.keys().copied().collect(),
             sst_config,
             bt_config,
         };
+        shard.record_max_used_gc_safe_point(major_compaction.gc_safe_point.into());
         req.input_size = total_size;
         req.compaction_tp = CompactionType::Major(major_compaction);
         info!(
@@ -1626,7 +1630,7 @@ impl Engine {
         });
         let mut req = self.new_compact_request_with_shard(shard);
         let columnar_major_compaction = ColumnarMajorCompaction {
-            safe_ts: 0,
+            gc_safe_point: 0,
             l0_tables: vec![],
             ln_tables: vec![],
             blob_tables: vec![],
@@ -1666,13 +1670,14 @@ impl Engine {
         let num_l0s = source_row_tables.len();
         let columnar_compaction = ColumnarCompaction {
             level: 0,
-            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
+            gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             snap_version,
             source_row_files: source_row_tables,
             source_columnar_files: vec![],
             schema_file_id: schema_file.get_file_id(),
             columnar_config: self.opts.columnar_build_options,
         };
+        shard.record_max_used_gc_safe_point(columnar_compaction.gc_safe_point.into());
         req.input_size = total_size;
         req.compaction_tp = CompactionType::Columnar(columnar_compaction);
         self.set_alloc_ids_for_request(&mut req, num_l0s, num_l0s)
@@ -1805,7 +1810,7 @@ impl Engine {
         )
         .await;
         let major_compaction = ColumnarMajorCompaction {
-            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
+            gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             l0_tables: l0_tbls.iter().map(|t| t.id()).collect(),
             ln_tables,
             blob_tables: blob_tbls.iter().map(|t| t.id()).collect(),
@@ -1816,6 +1821,7 @@ impl Engine {
             snap_version,
             target_level,
         };
+        shard.record_max_used_gc_safe_point(major_compaction.gc_safe_point.into());
         req.input_size = total_size;
         req.compaction_tp = CompactionType::ColumnarMajor(major_compaction);
         info!(
@@ -1875,13 +1881,14 @@ impl Engine {
             .await;
         let col_compaction = ColumnarCompaction {
             level: 0,
-            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
+            gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             snap_version,
             source_row_files: vec![],
             source_columnar_files: l0_tbl_ids,
             schema_file_id,
             columnar_config,
         };
+        shard.record_max_used_gc_safe_point(col_compaction.gc_safe_point.into());
         req.input_size = total_size;
         req.compaction_tp = CompactionType::Columnar(col_compaction);
         info!("{} start columnar compact L0", tag; "total_size" => total_size);
@@ -1963,13 +1970,14 @@ impl Engine {
         let schema_file_id = data.schema_file.as_ref().unwrap().get_file_id();
         let columnar_compaction = ColumnarCompaction {
             level,
-            safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
+            gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             snap_version,
             source_row_files: vec![],
             source_columnar_files: [l1_tbl_ids, l2_tbl_ids].concat(),
             schema_file_id,
             columnar_config,
         };
+        shard.record_max_used_gc_safe_point(columnar_compaction.gc_safe_point.into());
         req.input_size = total_size;
         req.compaction_tp = CompactionType::Columnar(columnar_compaction);
         info!(
@@ -2042,6 +2050,14 @@ impl Engine {
 
     pub(crate) fn handle_compact_response(&self, cs: pb::ChangeSet) {
         self.meta_change_listener.on_change_set(cs);
+    }
+
+    #[cfg(any(test, feature = "testexport"))]
+    pub fn get_max_used_gc_safe_point(&self, region_id: u64) -> TimeStamp {
+        use tikv_util::HandyRwLock;
+        self.shards
+            .get(&region_id)
+            .map_or(0.into(), |shard| *shard.value().max_used_gc_safe_point.rl())
     }
 }
 
@@ -2860,7 +2876,7 @@ async fn compact_destroy_range_for_columnar(
                 ctx.encryption_key.clone(),
             );
             let mut compact_reader =
-                ColumnarCompactReader::new(Box::new(reader), level, schema, req.safe_ts);
+                ColumnarCompactReader::new(Box::new(reader), level, schema, req.gc_safe_point);
             compact_reader.set_unbounded_handle_range().await?;
             compact_table_for_columnar(
                 ctx,
@@ -3382,7 +3398,7 @@ async fn compact_trim_over_bound_for_columnar(
                 ctx.encryption_key.clone(),
             );
             let mut compact_reader =
-                ColumnarCompactReader::new(Box::new(reader), level, schema, req.safe_ts);
+                ColumnarCompactReader::new(Box::new(reader), level, schema, req.gc_safe_point);
             if schema.is_common_handle() {
                 let start_handle = if bound_start > row_key_prefix.as_slice() {
                     decode_common_handle(bound_start).unwrap()
@@ -3550,7 +3566,7 @@ fn persist_columnar_file(
 async fn compact_for_cf(
     ctx: &CompactionCtx,
     iter: &mut Box<dyn table::Iterator>,
-    safe_ts: u64,
+    gc_safe_point: u64,
     opts: dfs::Options,
     cf: usize,
     target_lvl: u32,
@@ -3655,7 +3671,7 @@ async fn compact_for_cf(
 
         // Only consider the versions which are below the minReadTs, otherwise, we might
         // end up discarding the only valid version for a running transaction.
-        if cf == LOCK_CF || val.version <= safe_ts {
+        if cf == LOCK_CF || val.version <= gc_safe_point {
             // key is the latest readable version of this key, so we simply discard all the
             // rest of the versions.
 
@@ -3670,7 +3686,7 @@ async fn compact_for_cf(
                 let user_meta = val.user_meta();
                 if user_meta.len() == USER_META_SIZE {
                     let um = UserMeta::from_slice(user_meta);
-                    if cf == WRITE_CF && um.commit_ts < safe_ts && val.is_value_empty() {
+                    if cf == WRITE_CF && um.commit_ts < gc_safe_point && val.is_value_empty() {
                         if keep_latest_obsolete_tombstone {
                             sst_builder.add(
                                 key,
@@ -3681,7 +3697,7 @@ async fn compact_for_cf(
                         iter.next_all_version();
                         continue;
                     }
-                    if cf == EXTRA_CF && um.start_ts < safe_ts {
+                    if cf == EXTRA_CF && um.start_ts < gc_safe_point {
                         iter.next_all_version();
                         continue;
                     }
@@ -3858,7 +3874,7 @@ async fn l0_compact(
         let (sst_creates, bt_creates) = compact_for_cf(
             ctx,
             &mut iter,
-            l0_compaction.safe_ts,
+            l0_compaction.gc_safe_point,
             opts,
             cf,
             1,
@@ -3913,7 +3929,7 @@ async fn l1_plus_compact(
     let (sst_creates, _) = compact_for_cf(
         ctx,
         &mut iter,
-        l1_plus_compaction.safe_ts,
+        l1_plus_compaction.gc_safe_point,
         opts,
         l1_plus_compaction.cf as usize,
         l1_plus_compaction.level as u32 + 1,
@@ -4003,7 +4019,7 @@ async fn major_compact(
         let (sst_creates, blob_table_creates) = compact_for_cf(
             ctx,
             &mut iter,
-            major_compaction.safe_ts,
+            major_compaction.gc_safe_point,
             opts,
             cf,
             CF_LEVELS[cf] as u32,
@@ -4124,8 +4140,12 @@ async fn transform_for_columnar(
             columnar_readers.push(Box::new(reader));
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), columnar_readers);
-        let mut compact_reader =
-            ColumnarCompactReader::new(Box::new(merge_reader), target_lvl, schema, ctx.req.safe_ts);
+        let mut compact_reader = ColumnarCompactReader::new(
+            Box::new(merge_reader),
+            target_lvl,
+            schema,
+            ctx.req.gc_safe_point,
+        );
         compact_reader.set_unbounded_handle_range().await?;
         compact_table_for_columnar(
             ctx,
@@ -4315,8 +4335,12 @@ async fn columnar_major_compact_for_clear_tables(
                 None,
                 ctx.encryption_key.clone(),
             );
-            let mut compact_reader =
-                ColumnarCompactReader::new(Box::new(reader), level as u32, schema, ctx.req.safe_ts);
+            let mut compact_reader = ColumnarCompactReader::new(
+                Box::new(reader),
+                level as u32,
+                schema,
+                ctx.req.gc_safe_point,
+            );
             compact_reader.set_unbounded_handle_range().await?;
             compact_table_for_columnar(
                 ctx,
@@ -4528,7 +4552,7 @@ async fn convert_row_file_to_columnar_file(
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), columnar_readers);
         let mut compact_reader =
-            ColumnarCompactReader::new(Box::new(merge_reader), 0, schema, ctx.req.safe_ts);
+            ColumnarCompactReader::new(Box::new(merge_reader), 0, schema, ctx.req.gc_safe_point);
         compact_reader.set_unbounded_handle_range().await?;
         compact_table_for_columnar(
             ctx,
@@ -4674,7 +4698,7 @@ async fn compact_columnar_l0_files(
         }
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mut compact_reader =
-            ColumnarCompactReader::new(Box::new(merge_reader), 1, schema, ctx.req.safe_ts);
+            ColumnarCompactReader::new(Box::new(merge_reader), 1, schema, ctx.req.gc_safe_point);
         compact_reader.set_unbounded_handle_range().await?;
         compact_table_for_columnar(
             ctx,
@@ -4827,7 +4851,7 @@ async fn compact_columnar_l1_files(
         readers.push(Box::new(concat_reader));
         let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mut compact_reader =
-            ColumnarCompactReader::new(Box::new(merge_reader), 2, schema, ctx.req.safe_ts);
+            ColumnarCompactReader::new(Box::new(merge_reader), 2, schema, ctx.req.gc_safe_point);
         compact_reader.set_unbounded_handle_range().await?;
         compact_table_for_columnar(
             ctx,

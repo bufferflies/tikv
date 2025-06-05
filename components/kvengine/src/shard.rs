@@ -20,7 +20,10 @@ use kvenginepb::{self as pb, TxnFileRef};
 use rand::Rng;
 use schema::schema::StorageClass;
 use slog_global::*;
+#[cfg(any(test, feature = "testexport"))]
+use tikv_util::HandyRwLock;
 use tikv_util::{box_err, box_try};
+use txn_types::TimeStamp;
 
 use crate::{
     context::{IaCtx, PrepareType, SnapCtx},
@@ -115,6 +118,9 @@ pub struct Shard {
     pub(crate) outdated_schema_ver: AtomicI64,
 
     pub(crate) checked_schema_ver: AtomicI64,
+
+    #[cfg(any(test, feature = "testexport"))]
+    pub(crate) max_used_gc_safe_point: RwLock<TimeStamp>,
 }
 
 // Note: when add new property, consider whether to add it to following process:
@@ -233,6 +239,8 @@ impl Shard {
             encryption_key,
             outdated_schema_ver: Default::default(),
             checked_schema_ver: Default::default(),
+            #[cfg(any(test, feature = "testexport"))]
+            max_used_gc_safe_point: RwLock::new(0.into()),
         };
         {
             let mut pending_ops = shard.pending_ops.write().unwrap();
@@ -1241,7 +1249,7 @@ impl Shard {
     ///
     /// Due to high costs of major compaction, the current strategies are
     /// relatively conservative.
-    pub fn check_need_gc_tombstones(&self, safe_ts: u64) -> bool {
+    pub fn check_need_gc_tombstones(&self, gc_safe_point: u64) -> bool {
         if self.is_compacting()
             || self.get_compaction_priority().is_some()
             || self.pending_ops.read().unwrap().manual_major_compaction
@@ -1250,7 +1258,7 @@ impl Shard {
         }
 
         let lv2plus_max_ts = self.lv2plus_max_ts.load(Ordering::Relaxed);
-        if lv2plus_max_ts > safe_ts {
+        if lv2plus_max_ts > gc_safe_point {
             return false;
         }
 
@@ -1275,7 +1283,7 @@ impl Shard {
 
             info!("{} trigger major compaction for tombstones", self.tag();
                 "tombs" => tombs, "write_entries" => write_entries, "ratio" => tombs_ratio,
-                "max_ts" => lv2plus_max_ts, "safe_ts" => safe_ts);
+                "max_ts" => lv2plus_max_ts, "gc_safe_point" => gc_safe_point);
             *priority = Some(CompactionPriority::Major {
                 score: tombs_ratio,
                 is_manual: false,
@@ -1470,6 +1478,18 @@ impl Shard {
 
     pub(crate) fn set_outdated_schema_ver(&self, ver: i64) {
         self.outdated_schema_ver.store(ver, Ordering::Release);
+    }
+
+    #[inline]
+    #[allow(unused_variables)]
+    pub(crate) fn record_max_used_gc_safe_point(&self, gc_safe_point: TimeStamp) {
+        #[cfg(any(test, feature = "testexport"))]
+        {
+            let mut current = self.max_used_gc_safe_point.wl();
+            if *current < gc_safe_point {
+                *current = gc_safe_point;
+            }
+        }
     }
 }
 

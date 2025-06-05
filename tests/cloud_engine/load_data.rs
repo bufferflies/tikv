@@ -21,13 +21,14 @@ use test_cloud_server::{
         build, cleanup, init_task, put_chunks, Error as LoadDataError, Result as LoadDataResult,
     },
     oss::ObjectStorageService,
+    util::request_major_compact_on_store,
     ServerCluster,
 };
 use tidb_query_datatype::codec::table;
 use tikv::config::TikvConfig;
 use tikv_util::{codec::bytes::encode_bytes, info};
 
-use crate::{alloc_node_id_vec, request_major_compact_on_store};
+use crate::alloc_node_id_vec;
 
 const KEYSPACE_ID: u32 = 123;
 const DATA_COUNT: usize = 2000;

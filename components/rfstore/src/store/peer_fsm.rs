@@ -2570,8 +2570,8 @@ impl<'a> PeerMsgHandler<'a> {
         }
         let kv = &self.ctx.global.engines.kv;
         if let Some(shard) = kv.get_shard(self.region_id()) {
-            let safe_ts = kv.get_keyspace_gc_safepoint_v2(shard.keyspace_id);
-            if shard.check_need_gc_tombstones(safe_ts) {
+            let gc_safe_point = kv.get_gc_safe_point(shard.keyspace_id).into_inner();
+            if shard.check_need_gc_tombstones(gc_safe_point) {
                 kv.trigger_compact(shard.id_ver());
             }
         }

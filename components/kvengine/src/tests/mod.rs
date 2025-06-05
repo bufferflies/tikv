@@ -4,6 +4,7 @@ mod test_columnar;
 mod test_txn_file;
 
 use std::{
+    collections::HashMap,
     env,
     iter::Iterator,
     ops::Deref,
@@ -26,6 +27,7 @@ use rstest::rstest;
 use security::SecurityManager;
 use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
+use txn_types::{ClusterGcStates, GcState, NULL_KEYSPACE_ID};
 use util::test_util::KeyBuilder;
 
 use crate::{
@@ -113,7 +115,6 @@ fn new_test_engine_opt(
         meta_change_listener,
         rate_limiter,
         store_limiter,
-        None,
         MasterKey::new(&[1u8; 32]),
         Arc::new(SecurityManager::default()),
     )
@@ -366,7 +367,13 @@ fn test_lost_tombstone_issue() {
     let mut guard = shard.compaction_priority.write().unwrap();
     *guard = Some(pri);
     drop(guard);
-    engine.update_managed_safe_ts(104);
+    let now = Instant::now();
+    let mut cluster_gc_states = ClusterGcStates::new(HashMap::default(), now);
+    cluster_gc_states.keyspace_gc_states.insert(
+        NULL_KEYSPACE_ID,
+        GcState::new(NULL_KEYSPACE_ID, false, 104.into(), 104.into(), vec![], now),
+    );
+    engine.update_cluster_gc_states_cache(cluster_gc_states);
     engine.trigger_compact(IdVer::new(1, 1));
     thread::sleep(Duration::from_secs(1));
     check_get(50, 100, 104, &[0], &engine, false, None, 0);

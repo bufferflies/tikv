@@ -60,6 +60,7 @@ pub mod metrics;
 pub mod mpsc;
 pub mod quota_limiter;
 pub mod retry;
+pub mod rolling_retriever;
 pub mod store;
 pub mod stream;
 pub mod sys;

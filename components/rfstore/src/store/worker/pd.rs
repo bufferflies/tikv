@@ -44,7 +44,7 @@ use tikv_util::{
     warn,
     worker::{Runnable, Scheduler},
 };
-use txn_types::Key;
+use txn_types::{Key, NULL_KEYSPACE_ID};
 use yatp::Remote;
 
 use crate::{
@@ -134,7 +134,7 @@ pub enum PdTask {
         initial_status: u64,
         txn_ext: Arc<TxnExt>,
     },
-    UpdateSafeTs,
+    UpdateGcSafePoint,
     SyncRegion {
         start: Vec<u8>,
         end: Vec<u8>,
@@ -338,7 +338,7 @@ impl Display for PdTask {
                 "update the max timestamp for region {} in the concurrency manager",
                 region_id
             ),
-            PdTask::UpdateSafeTs => write!(f, "update safe ts"),
+            PdTask::UpdateGcSafePoint => write!(f, "update GC safe point"),
             PdTask::SyncRegion { start, end, .. } => {
                 write!(
                     f,
@@ -1226,18 +1226,37 @@ impl PdRunner {
         }
     }
 
-    fn handle_update_safe_ts(&mut self) {
+    fn handle_update_gc_safe_point(&mut self) {
         let pd_client = self.pd_client.clone();
         let kv = self.kv.clone();
         let f = async move {
-            match pd_client.get_gc_safe_point().await {
-                Ok(ts) => {
-                    kv.update_managed_safe_ts(ts);
-                    raftstore::store::metrics::AUTO_GC_SAFE_POINT_GAUGE.set(ts as i64);
-                    info!("update safe ts {}", ts);
+            match pd_client.get_all_keyspaces_gc_states().await {
+                Ok(cluster_gc_states) => {
+                    if let Some(gc_safe_point) = cluster_gc_states
+                        .keyspace_gc_states
+                        .get(&NULL_KEYSPACE_ID)
+                        .map(|s| s.gc_safe_point)
+                    {
+                        // Observe the GC safe point of null keyspace for behavior consistency.
+                        // Other keyspaces are omitted as it might be too verbose.
+                        raftstore::store::metrics::AUTO_GC_SAFE_POINT_GAUGE
+                            .set(gc_safe_point.into_inner() as i64);
+                    }
+                    info!(
+                        "updating gc_safe_point (keyspace, gc_safe_point)";
+                        "keyspace_gc_safe_points" => ?cluster_gc_states
+                            .keyspace_gc_states
+                            .iter()
+                            .map(|(k, v)| (*k, v.gc_safe_point))
+                            .collect::<Vec<_>>(),
+                    );
+                    kv.update_cluster_gc_states_cache(cluster_gc_states);
                 }
                 Err(err) => {
-                    warn!("failed to update safe ts {:?}", err);
+                    warn!(
+                        "failed to update gc_safe_point (null_keyspace)";
+                        "err" => ?err
+                    );
                 }
             }
         };
@@ -1518,7 +1537,7 @@ impl Runnable for PdRunner {
                 initial_status,
                 txn_ext,
             } => self.handle_update_max_timestamp(region_id, initial_status, txn_ext),
-            PdTask::UpdateSafeTs => self.handle_update_safe_ts(),
+            PdTask::UpdateGcSafePoint => self.handle_update_gc_safe_point(),
             PdTask::SyncRegion {
                 start,
                 end,

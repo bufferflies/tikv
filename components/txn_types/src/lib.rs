@@ -6,6 +6,7 @@
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;
 
+mod gc_states;
 mod lock;
 mod timestamp;
 mod types;
@@ -14,6 +15,7 @@ mod write;
 use std::io;
 
 use error_code::{self, ErrorCode, ErrorCodeExt};
+pub use gc_states::{ClusterGcStates, GcBarrier, GcState, DEFAULT_KEYSPACE_ID, NULL_KEYSPACE_ID};
 use kvproto::kvrpcpb;
 pub use lock::{Lock, LockType, PessimisticLock};
 use thiserror::Error;
