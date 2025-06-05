@@ -2,7 +2,7 @@
 
 //! Storage configuration.
 
-use std::{cmp::max, error::Error};
+use std::{borrow::ToOwned, cmp::max, convert::TryFrom, error::Error};
 
 use engine_rocks::raw::{Cache, LRUCacheOptions, MemoryAllocator};
 use file_system::{IoPriority, IoRateLimitMode, IoRateLimiter, IoType};
@@ -37,6 +37,8 @@ const DEFAULT_RESERVED_RAFT_SPACE_GB: u64 = 1;
 
 pub const SOFT_STORE_MEM_LIMIT_RATE: f64 = 0.1;
 pub const HARD_STORE_MEM_LIMIT_RATE: f64 = 0.15;
+
+const DEFAULT_ACTION_ON_INVALID_MAX_TS_UPDATE: &str = "panic";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
 #[serde(default)]
@@ -79,6 +81,8 @@ pub struct Config {
     pub block_cache: BlockCacheConfig,
     #[online_config(submodule)]
     pub io_rate_limit: IoRateLimitConfig,
+    #[online_config(submodule)]
+    pub max_ts: MaxTsConfig,
 }
 
 impl Default for Config {
@@ -103,6 +107,7 @@ impl Default for Config {
             block_cache: BlockCacheConfig::default(),
             io_rate_limit: IoRateLimitConfig::default(),
             background_error_recovery_window: ReadableDuration::hours(1),
+            max_ts: MaxTsConfig::default(),
         }
     }
 }
@@ -145,6 +150,8 @@ impl Config {
         }
         self.flow_control.validate()?;
         self.io_rate_limit.validate()?;
+
+        self.max_ts.validate()?;
 
         Ok(())
     }
@@ -446,6 +453,54 @@ impl IoRateLimitConfig {
                 "storage.io-rate-limit.mode other than write-only is not supported.".into(),
             );
         }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct MaxTsConfig {
+    /// Maximum max_ts deviation allowed from PD TSO
+    pub max_drift: ReadableDuration,
+    /// How often to refresh the max_ts limit from PD
+    #[online_config(skip)]
+    pub cache_sync_interval: ReadableDuration,
+    pub action_on_invalid_update: String,
+}
+
+impl Default for MaxTsConfig {
+    fn default() -> Self {
+        Self {
+            max_drift: ReadableDuration::secs(60),
+            cache_sync_interval: ReadableDuration::secs(15),
+            action_on_invalid_update: DEFAULT_ACTION_ON_INVALID_MAX_TS_UPDATE.to_owned(),
+        }
+    }
+}
+
+impl MaxTsConfig {
+    fn validate(&mut self) -> Result<(), Box<dyn Error>> {
+        if self.max_drift <= self.cache_sync_interval {
+            let msg = format!(
+                "storage.max-ts.max-drift {:?} is smaller than or equal to storage.max-ts.cache-sync-interval {:?}",
+                self.max_drift, self.cache_sync_interval,
+            );
+            error!("{}", msg);
+            return Err(msg.into());
+        }
+
+        if let Err(e) = concurrency_manager::ActionOnInvalidMaxTs::try_from(
+            self.action_on_invalid_update.as_str(),
+        ) {
+            error!(
+                "storage.max-ts.action-on-invalid-update is set to an invalid value {}, \
+                change to action panic",
+                self.action_on_invalid_update,
+            );
+            return Err(e.into());
+        }
+
         Ok(())
     }
 }

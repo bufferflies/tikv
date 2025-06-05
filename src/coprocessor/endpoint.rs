@@ -180,7 +180,7 @@ impl<E: Engine> Endpoint<E> {
     ) -> Result<()> {
         let start_ts = req_ctx.txn_start_ts;
         if !req_ctx.context.get_stale_read() {
-            concurrency_manager.update_max_ts(start_ts);
+            concurrency_manager.update_max_ts(start_ts, || format!("coprocessor-{}", start_ts))?;
         }
         if need_check_locks(req_ctx.context.get_isolation_level()) {
             let begin_instant = Instant::now();
@@ -1266,6 +1266,12 @@ macro_rules! make_error_response_common {
                 $tag = "remote_network";
                 $resp.set_other_error($e.to_string());
             }
+            Error::InvalidMaxTsUpdate(e) => {
+                $tag = "invalid_max_ts_update";
+                let mut err = errorpb::Error::default();
+                err.set_message(e.to_string());
+                $resp.set_region_error(err);
+            }
             Error::Other(_) => {
                 $tag = "other";
                 warn!("unexpected other error encountered processing coprocessor task";
@@ -1337,6 +1343,10 @@ fn make_error_delegate_response(e: Error) -> coppb::DelegateResponse {
         }
         Error::Other(_) => {
             tag = "other";
+            resp.set_other_error(e.to_string());
+        }
+        Error::InvalidMaxTsUpdate(_) => {
+            tag = "invalid_max_ts_update";
             resp.set_other_error(e.to_string());
         }
     };

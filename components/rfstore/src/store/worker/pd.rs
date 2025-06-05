@@ -1175,7 +1175,11 @@ impl PdRunner {
             while txn_ext.max_ts_sync_status.load(Ordering::SeqCst) == initial_status {
                 match pd_client.get_tso().await {
                     Ok(ts) => {
-                        concurrency_manager.update_max_ts(ts);
+                        if let Err(e) =
+                            concurrency_manager.update_max_ts(ts, "pd_runner_update_max_ts")
+                        {
+                            error!("failed to update max timestamp for region {}: {:?}", tag, e);
+                        }
                         // Set the least significant bit to 1 to mark it as synced.
                         success = txn_ext
                             .max_ts_sync_status

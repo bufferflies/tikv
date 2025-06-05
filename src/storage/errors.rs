@@ -262,6 +262,20 @@ pub fn extract_region_error_from_error(e: &Error) -> Option<errorpb::Error> {
             err.set_max_timestamp_not_synced(Default::default());
             Some(err)
         }
+        Error(box ErrorInner::Txn(TxnError(box TxnErrorInner::InvalidMaxTsUpdate(
+            invalid_max_ts_update,
+        )))) => {
+            let mut err = errorpb::Error::default();
+            err.set_message(invalid_max_ts_update.to_string());
+            Some(err)
+        }
+        Error(box ErrorInner::Txn(TxnError(box TxnErrorInner::Mvcc(MvccError(
+            box MvccErrorInner::InvalidMaxTsUpdate(invalid_max_ts_update),
+        ))))) => {
+            let mut err = errorpb::Error::default();
+            err.set_message(invalid_max_ts_update.to_string());
+            Some(err)
+        }
         Error(box ErrorInner::Kv(KvError(box KvErrorInner::Undetermined(message)))) => {
             let mut err = errorpb::Error::default();
             err.undetermined_result

@@ -33,6 +33,9 @@ pub enum Error {
     RemoteNetwork(String),
 
     #[error("{0}")]
+    InvalidMaxTsUpdate(#[from] concurrency_manager::InvalidMaxTsUpdate),
+
+    #[error("{0}")]
     Other(String),
 }
 
@@ -137,6 +140,7 @@ impl ErrorCodeExt for Error {
             Error::MaxPendingTasksExceeded => error_code::coprocessor::MAX_PENDING_TASKS_EXCEEDED,
             Error::OverloadProtection(_) => error_code::coprocessor::OVERLOAD_PROTECTION,
             Error::RemoteNetwork(_) => error_code::coprocessor::REMOTE_NETWORK,
+            Error::InvalidMaxTsUpdate(_) => error_code::coprocessor::INVALID_MAX_TS_UPDATE,
             Error::Other(_) => error_code::UNKNOWN,
         }
     }

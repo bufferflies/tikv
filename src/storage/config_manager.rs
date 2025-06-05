@@ -4,6 +4,7 @@
 
 use std::{convert::TryInto, sync::Arc};
 
+use concurrency_manager::ConcurrencyManager;
 use engine_traits::{KvEngine, TabletFactory, CF_DEFAULT};
 use file_system::{get_io_rate_limiter, IoPriority, IoType};
 use online_config::{ConfigChange, ConfigManager, ConfigValue, Result as CfgResult};
@@ -25,6 +26,7 @@ pub struct StorageConfigManger<E: Engine, K: KvEngine, L: LockManager> {
     ttl_checker_scheduler: Scheduler<TtlCheckerTask>,
     flow_controller: Arc<FlowController>,
     _scheduler: TxnScheduler<E, L>,
+    concurrency_manager: ConcurrencyManager,
 }
 
 unsafe impl<E: Engine, K: KvEngine, L: LockManager> Send for StorageConfigManger<E, K, L> {}
@@ -37,6 +39,7 @@ impl<E: Engine, K: KvEngine, L: LockManager> StorageConfigManger<E, K, L> {
         ttl_checker_scheduler: Scheduler<TtlCheckerTask>,
         flow_controller: Arc<FlowController>,
         scheduler: TxnScheduler<E, L>,
+        concurrency_manager: ConcurrencyManager,
     ) -> Self {
         StorageConfigManger {
             tablet_factory,
@@ -44,6 +47,7 @@ impl<E: Engine, K: KvEngine, L: LockManager> StorageConfigManger<E, K, L> {
             ttl_checker_scheduler,
             flow_controller,
             _scheduler: scheduler,
+            concurrency_manager,
         }
     }
 }
@@ -103,6 +107,19 @@ impl<EK: Engine, K: KvEngine, L: LockManager> ConfigManager for StorageConfigMan
                 }
             }
         }
+        if let Some(ConfigValue::Module(mut max_ts)) = change.remove("max_ts") {
+            if let Some(v) = max_ts.remove("action_on_invalid_update") {
+                let str_v: String = v.into();
+                let action: concurrency_manager::ActionOnInvalidMaxTs = str_v.try_into()?;
+                self.concurrency_manager
+                    .set_action_on_invalid_max_ts_update(action);
+            }
+            if let Some(v) = max_ts.remove("max_drift") {
+                let dur_v: ReadableDuration = v.into();
+                self.concurrency_manager.set_max_ts_drift_allowance(dur_v.0);
+            }
+        }
+
         Ok(())
     }
 }

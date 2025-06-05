@@ -149,6 +149,8 @@ pub enum ErrorInner {
         start_ts: {start_ts}, region_id: {region_id}"
     )]
     MaxTimestampNotSynced { region_id: u64, start_ts: TimeStamp },
+    #[error("{0}")]
+    InvalidMaxTsUpdate(#[from] concurrency_manager::InvalidMaxTsUpdate),
 }
 
 impl ErrorInner {
@@ -182,6 +184,9 @@ impl ErrorInner {
                 region_id,
                 start_ts,
             }),
+            ErrorInner::InvalidMaxTsUpdate(ref e) => {
+                Some(ErrorInner::InvalidMaxTsUpdate(e.clone()))
+            }
             ErrorInner::Other(_) | ErrorInner::ProtoBuf(_) | ErrorInner::Io(_) => None,
         }
     }
@@ -232,6 +237,7 @@ impl ErrorCodeExt for Error {
             ErrorInner::MaxTimestampNotSynced { .. } => {
                 error_code::storage::MAX_TIMESTAMP_NOT_SYNCED
             }
+            ErrorInner::InvalidMaxTsUpdate { .. } => error_code::storage::INVALID_MAX_TS_UPDATE,
         }
     }
 }

@@ -33,6 +33,7 @@ use tikv::{
     },
     storage::config::{
         BlockCacheConfig, Config as StorageConfig, FlowControlConfig, IoRateLimitConfig,
+        MaxTsConfig,
     },
 };
 use tikv_util::config::{AbsoluteOrPercentSize, LogFormat, ReadableDuration, ReadableSize};
@@ -724,6 +725,11 @@ fn test_serde_custom_tikv_config() {
         },
         background_error_recovery_window: ReadableDuration::hours(1),
         low_space_threshold: AbsoluteOrPercentSize::Percent(10.),
+        max_ts: MaxTsConfig {
+            max_drift: ReadableDuration::secs(333),
+            cache_sync_interval: ReadableDuration::secs(44),
+            action_on_invalid_update: "error".to_owned(),
+        },
     };
     value.coprocessor = CopConfig {
         split_region_on_table: false,

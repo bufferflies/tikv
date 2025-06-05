@@ -613,7 +613,12 @@ impl ReadIndexObserver for ReplicaReadLockChecker {
             let begin_instant = Instant::now();
 
             let start_ts = request.get_start_ts().into();
-            self.concurrency_manager.update_max_ts(start_ts);
+            if let Err(e) = self
+                .concurrency_manager
+                .update_max_ts(start_ts, "read_index_observer")
+            {
+                error!("failed to update max ts: {:?}", e);
+            }
             for range in request.mut_key_ranges().iter_mut() {
                 let key_bound = |key: Vec<u8>| {
                     if key.is_empty() {

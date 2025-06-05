@@ -108,6 +108,11 @@ enable-ttl = true
 ttl-check-poll-interval = "0s"
 low-space-threshold = "10%"
 
+[storage.max-ts]
+max-drift = "333s"
+cache-sync-interval = "44s"
+action-on-invalid-update = "error"
+
 [storage.block-cache]
 shared = true
 capacity = "40GB"
