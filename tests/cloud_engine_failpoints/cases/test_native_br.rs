@@ -31,7 +31,7 @@ use pd_client::PdClient;
 use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
     alloc_node_id, alloc_node_id_vec,
-    client::{PessimisticLockExt, PrewriteExt, RequestOptions, TxnMutations},
+    client::{RequestOptions, TxnMutations},
     oss::prepare_dfs,
     util::Mutation,
     ServerCluster, ServerClusterBuilder, TikvWorkerOptions, TryWaiter,
@@ -508,16 +508,13 @@ fn test_backup_pessimistic_lock() {
 
     let start_ts = client.get_ts();
     client
-        .kv_pessimistic_lock_ext(
-            Bytes::copy_from_slice(&pk),
-            TxnMutations::from_normal(vec![
-                pessimistic_lock(pk.clone()),
-                pessimistic_lock(sk.clone()),
-            ]),
-            PessimisticLockExt {
-                start_ts,
-                for_update_ts: start_ts,
-            },
+        .kv_pessimistic_lock(
+            pk.clone().into(),
+            vec![pk.clone().into(), sk.clone().into()],
+            start_ts,
+            20000,
+            start_ts,
+            None,
         )
         .unwrap();
     let origin_ref_store = client.dump_ref_store();
@@ -559,16 +556,14 @@ fn test_backup_pessimistic_lock() {
         let txn = TxnMutations::from_normal(muts.clone());
         let _ = rx_finish.blocking_recv();
         client
-            .kv_prewrite_ext_with_retry(
+            .kv_prewrite_with_retry_opt(
                 Bytes::copy_from_slice(&pk),
                 Some(&vec![Bytes::copy_from_slice(&sk)]),
                 txn.clone(),
                 start_ts,
-                PrewriteExt {
-                    pessimistic_action:
-                        kvproto::kvrpcpb::PrewriteRequestPessimisticAction::DoPessimisticCheck,
-                    for_update_ts: start_ts,
-                },
+                false,
+                3000,
+                start_ts,
             )
             .unwrap();
         tx.send(()).unwrap();
@@ -628,13 +623,6 @@ fn put(k: Vec<u8>, v: Vec<u8>) -> Mutation {
     m.set_op(Op::Put);
     m.set_key(k);
     m.set_value(v);
-    m
-}
-
-fn pessimistic_lock(k: Vec<u8>) -> Mutation {
-    let mut m = Mutation::default();
-    m.set_op(Op::PessimisticLock);
-    m.set_key(k);
     m
 }
 

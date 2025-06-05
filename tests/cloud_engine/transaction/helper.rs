@@ -1,7 +1,7 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use kvproto::kvrpcpb;
-use test_cloud_server::client::ClusterClient;
+use kvproto::kvrpcpb::{self, Op};
+use test_cloud_server::{client::ClusterClient, util::Mutation};
 use txn_types::{LockType, TimeStamp, WriteType};
 
 // Helper to get MVCC info for a key
@@ -125,4 +125,21 @@ pub fn must_written_with_properties(
         key
     );
     mvcc_write.clone()
+}
+
+// Helper to create a Put mutation
+pub fn new_put_mutation(key: Vec<u8>, value: Vec<u8>) -> Mutation {
+    Mutation {
+        key: key.into(),
+        value: value.into(),
+        op: Op::Put,
+    }
+}
+
+pub fn new_pessimistic_lock_mutation(key: Vec<u8>) -> Mutation {
+    Mutation {
+        key: key.into(),
+        value: vec![].into(),
+        op: Op::PessimisticLock,
+    }
 }
