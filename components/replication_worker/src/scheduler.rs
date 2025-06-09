@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use http::{HeaderMap, HeaderValue};
 use hyper::{Body, Method, Request, Response, Result, StatusCode, Uri};
 use security::HttpClient;
 use serde::{Deserialize, Serialize};
@@ -162,23 +163,33 @@ impl ReplicationScheduler {
                 ));
             }
         };
-        let response = match (req.method(), req.uri().path()) {
-            (&Method::GET, _) => self.forward_get_request(keyspace_id, req.uri()).await?,
+
+        let (parts, body) = req.into_parts();
+        let method = &parts.method;
+        let uri = &parts.uri;
+        let path = uri.path();
+        let headers = parts.headers;
+
+        let response = match (method, path) {
             (&Method::POST, "/cdc/api/v2/changefeeds") => {
-                let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
+                let body_bytes = hyper::body::to_bytes(body).await?;
                 self.handle_create_changefeed(keyspace_id, &body_bytes)
                     .await
             }
             (&Method::POST, "/cdc/keyspace") => {
-                let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
+                let body_bytes = hyper::body::to_bytes(body).await?;
                 self.handle_add_keyspace(keyspace_id, &body_bytes).await
             }
             (&Method::DELETE, "/cdc/keyspace") => self.handle_remove_keyspace(keyspace_id).await,
             (&Method::DELETE, path) if path.starts_with("/cdc/api/v2/changefeeds/") => {
                 self.handle_delete_changefeed(keyspace_id, path).await?
             }
+            (method, path) if path.starts_with("/cdc/") => {
+                self.forward_request_to_cdc(keyspace_id, method, uri, headers, body)
+                    .await?
+            }
             _ => {
-                info!("Invalid request {} {}", req.method(), req.uri());
+                info!("Invalid request {} {}", method, uri);
                 Self::error_response(
                     StatusCode::NOT_FOUND,
                     "Route not found",
@@ -241,10 +252,13 @@ impl ReplicationScheduler {
         }
     }
 
-    async fn forward_get_request(
+    async fn forward_request_to_cdc(
         &self,
         keyspace_id: u32,
-        uri: &hyper::Uri,
+        method: &Method,
+        uri: &Uri,
+        headers: HeaderMap<HeaderValue>,
+        body: Body,
     ) -> Result<Response<Body>> {
         let cdc_addr = self.cdc_addrs.get(&keyspace_id).map(|r| r.value().clone());
         if cdc_addr.is_none() {
@@ -266,7 +280,16 @@ impl ReplicationScheduler {
             .path_and_query(new_path_query)
             .build()
             .unwrap();
-        self.http_client.get(new_uri).await
+
+        let mut req_builder = Request::builder().method(method).uri(new_uri);
+
+        for (key, value) in headers.iter() {
+            req_builder = req_builder.header(key, value);
+        }
+
+        let req = req_builder.body(body).unwrap();
+
+        self.http_client.request(req).await
     }
 
     async fn handle_create_changefeed(

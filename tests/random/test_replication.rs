@@ -176,6 +176,23 @@ fn test_replication_worker() {
         thread::sleep(Duration::from_millis(500));
     }
 
+    // pause the changefeed
+    let pause_task_url =
+        format!("{worker_base_url}/api/v2/changefeeds/{changefeed_id}/pause?keyspace_id=1");
+    dispatch_http(&worker_client, pause_task_url, "POST", "".to_string()).unwrap();
+
+    // resume the changefeed
+    let resume_task_url =
+        format!("{worker_base_url}/api/v2/changefeeds/{changefeed_id}/resume?keyspace_id=1");
+    dispatch_http(
+        &worker_client,
+        resume_task_url,
+        "POST",
+        // r#"{"overwrite_checkpoint_ts": 0}"#.to_string(),
+        r#"{}"#.to_string(),
+    )
+    .unwrap();
+
     let pd_client = cluster.get_pure_pd_client();
     let row_key_5 = encode_pd_table_key(table_id, 5);
     let origin_region_id = pd_client.get_region(&row_key_5).unwrap().id;
