@@ -19,6 +19,7 @@ use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
 use async_stream::stream;
 use bytes::{Buf, BufMut, BytesMut};
 use collections::HashMap;
+use concurrency_manager::ConcurrencyManager;
 use flate2::{write::GzEncoder, Compression};
 use futures::{
     compat::Compat01As03,
@@ -108,6 +109,8 @@ static FAIL_POINTS_REQUEST_PATH: &str = "/fail";
 const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(600);
 const SERVER_TCP_KEEPALIVE: Duration = Duration::from_secs(120);
 
+const BACKUP_TS_WAIT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct LogLevelRequest {
@@ -143,6 +146,7 @@ pub struct StatusServer {
     security_config: Arc<SecurityConfig>,
     kvengine: kvengine::Engine,
     rfengine: rfengine::RfEngine,
+    concurrency_manager: ConcurrencyManager,
 }
 
 impl StatusServer {
@@ -153,6 +157,7 @@ impl StatusServer {
         router: RaftRouter,
         kvengine: kvengine::Engine,
         rfengine: rfengine::RfEngine,
+        concurrency_manager: ConcurrencyManager,
     ) -> Result<Self> {
         let thread_pool = Builder::new_multi_thread()
             .enable_all()
@@ -174,6 +179,7 @@ impl StatusServer {
             security_config,
             kvengine,
             rfengine,
+            concurrency_manager,
         })
     }
 
@@ -1372,6 +1378,7 @@ impl StatusServer {
         req: Request<Body>,
         engine: rfengine::RfEngine,
         kvengine: kvengine::Engine,
+        concurrency_manager: ConcurrencyManager,
         dfs_conf: DFSConfig,
     ) -> hyper::Result<Response<Body>> {
         let body = hyper::body::to_bytes(req.into_body()).await?;
@@ -1407,6 +1414,25 @@ impl StatusServer {
             ));
         }
 
+        let (wait_backup_ts_ok, wait_backup_ts_dur) =
+            if let Some(backup_ts) = backup_config.backup_ts {
+                concurrency_manager.update_max_ts(backup_ts.into());
+
+                concurrency_manager.replace_backup_ts(backup_ts.into());
+                let start_time = Instant::now_coarse();
+                let ok = concurrency_manager
+                    .wait_old_backup_ts_released(
+                        backup_ts.into(),
+                        backup_config.backup_ts_wait_timeout(),
+                        backup_config.backup_ts_ttl(),
+                        BACKUP_TS_WAIT_RETRY_INTERVAL,
+                    )
+                    .await;
+                (ok, Some(start_time.saturating_elapsed()))
+            } else {
+                (true, None)
+            };
+
         let s3fs = kvengine::dfs::S3Fs::new_from_config(dfs_conf);
         let (callback, future) = paired_future_callback();
         let task = rfengine::BackupTask::new(Box::new(s3fs), callback, backup_config);
@@ -1414,8 +1440,9 @@ impl StatusServer {
         Ok(match future.await {
             Ok(resp) => match resp {
                 Ok(mut meta) => {
-                    info!("{}: backup finished", meta.store_id);
+                    info!("{}: backup finished", meta.store_id; "wait_backup_ts" => ?wait_backup_ts_dur);
                     estimate_backup_size_by(&kvengine, meta.mut_keyspace_size());
+                    meta.set_has_missing_commit_record(!wait_backup_ts_ok);
                     Response::builder()
                         .body(Body::from(meta.write_to_bytes().unwrap()))
                         .unwrap()
@@ -1898,6 +1925,7 @@ impl StatusServer {
         let router = self.router.clone();
         let engine = self.kvengine.clone();
         let rfengine = self.rfengine.clone();
+        let concurrency_manager = self.concurrency_manager.clone();
         // Start to serve.
         let server = builder.serve(make_service_fn(move |conn: &C| {
             let x509 = conn.get_x509();
@@ -1906,6 +1934,7 @@ impl StatusServer {
             let router = router.clone();
             let engine = engine.clone();
             let rfengine = rfengine.clone();
+            let concurrency_manager = concurrency_manager.clone();
             async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
@@ -1916,6 +1945,7 @@ impl StatusServer {
                     let router = router.clone();
                     let engine = engine.clone();
                     let rfengine = rfengine.clone();
+                    let concurrency_manager = concurrency_manager.clone();
                     tikv_util::init_task_local(async move {
                         let path = req.uri().path().to_owned();
                         let method = req.method().to_owned();
@@ -2042,7 +2072,7 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/rfengine/backup") => {
                                 let dfs_conf = cfg_controller.get_current().dfs.clone();
-                                let res = Self::backup_rfengine(req, rfengine, engine, dfs_conf).await;
+                                let res = Self::backup_rfengine(req, rfengine, engine, concurrency_manager, dfs_conf).await;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .rf_backup
                                     .observe(start.saturating_elapsed().as_secs_f64());

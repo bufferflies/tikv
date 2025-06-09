@@ -405,6 +405,8 @@ txn_types = { path = "components/txn_types" }
 # External libs
 grpcio = { version = "0.10.4", default-features = false, features = ["openssl-vendored", "protobuf-codec", "nightly"] }
 grpcio-health = { version = "0.10.4", default-features = false, features = ["protobuf-codec"] }
+slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 tipb = { git = "https://github.com/pingcap/tipb.git" }
 tikv-client = { version = "0.3.0", git = "https://github.com/tikv/client-rust.git", branch = "cse", default-features = false }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }

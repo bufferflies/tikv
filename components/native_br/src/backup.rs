@@ -32,6 +32,7 @@ use crate::{
         INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, SharedError},
+    metrics::NATIVE_BR_BACKUP_MISSING_COMMIT_RECORD,
 };
 
 const MAX_BATCH_GET_CNT: i64 = 1024;
@@ -63,6 +64,9 @@ const BACKUP_SERVICE_SAFEPOINT_TTL: Duration = Duration::from_secs(12 * 60 * 60)
 
 // Backup must not have more than 1 tolerated error of store.
 const BACKUP_MAX_TOLERATED_ERROR: usize = 1;
+
+pub const BACKUP_TS_WAIT_TIMEOUT_DEFAULT: ReadableDuration = ReadableDuration::secs(30);
+pub const BACKUP_TS_TTL_DEFAULT: ReadableDuration = ReadableDuration::secs(60);
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type SharedResult<T> = std::result::Result<T, SharedError>;
@@ -331,6 +335,7 @@ pub fn backup_cluster_with_ts(
         match runtime.block_on(backup_stores(
             &config,
             backup_type,
+            backup_ts,
             pd_client,
             stores.clone(),
             config.timeout.0 / 2,
@@ -369,6 +374,18 @@ pub fn backup_cluster_with_ts(
     runtime
         .block_on(s3fs.put_object(backup_key.clone(), backup_data, backup_key.clone()))
         .unwrap();
+
+    let stores_has_missing_commit_record = cluster_backup_meta
+        .get_stores()
+        .iter()
+        .filter_map(|s| s.has_missing_commit_record.then_some(s.store_id))
+        .collect::<Vec<_>>();
+    if !stores_has_missing_commit_record.is_empty() {
+        NATIVE_BR_BACKUP_MISSING_COMMIT_RECORD.inc();
+        warn!("backup cluster: has missing commit record";
+            "backup" => &backup_key, "stores" => ?stores_has_missing_commit_record);
+    }
+
     info!(
         "cluster backup cluster_id:{}, backup_ts:{}, alloc_id:{}, safe_ts:{}, num_stores:{}, tolerance_errors:{}, path:{}",
         cluster_backup_meta.cluster_id,
@@ -385,6 +402,7 @@ pub fn backup_cluster_with_ts(
 async fn backup_stores(
     config: &BackupConfig,
     backup_type: BackupType,
+    backup_ts: u64,
     pd_client: &dyn PdClient,
     stores: Vec<Store>,
     timeout: Duration,
@@ -394,7 +412,14 @@ async fn backup_stores(
     let cluster_id = cluster_backup_meta.cluster_id;
     debug_assert!(cluster_id > 0);
     for store in stores {
-        let rf_config = get_backup_config(cluster_backup_meta, cluster_id, store.id, backup_type);
+        let rf_config = get_rf_backup_config(
+            cluster_backup_meta,
+            cluster_id,
+            store.id,
+            backup_type,
+            backup_ts,
+            config,
+        );
         if let Some(rf_config) = rf_config {
             let security_mgr = pd_client.get_security_mgr();
             let task = async move {
@@ -463,7 +488,7 @@ async fn backup_store(
     let uri = security_mgr
         .build_uri(format!("{}/rfengine/backup", &store.status_address))
         .unwrap();
-    info!("Start backup store with config {}", config);
+    info!("Start backup store with config {:?}", config);
     let json_string = serde_json::to_string(&config).unwrap();
     let req = Request::post(uri.clone())
         .body(Body::from(json_string.clone()))
@@ -520,14 +545,17 @@ fn merge_store_backup_meta(
     }
 }
 
-fn get_backup_config(
+fn get_rf_backup_config(
     backup_meta: &ClusterBackupMeta,
     cluster_id: u64,
     store_id: u64,
     backup_type: BackupType,
+    backup_ts: u64,
+    cfg: &BackupConfig,
 ) -> Option<rfengine::BackupConfig> {
     let incremental = backup_type == BackupType::Incremental;
     let lightweight = backup_type == BackupType::Lightweight;
+    let backup_ts_opt = (!cfg.backup_delay.is_zero()).then_some(backup_ts);
     let mut config = rfengine::BackupConfig {
         cluster_id,
         store_id,
@@ -535,6 +563,9 @@ fn get_backup_config(
         wal_epoch: 0,
         start_offset: 0,
         lightweight,
+        backup_ts: backup_ts_opt,
+        backup_ts_wait_secs: Some(cfg.backup_ts_wait_timeout.0.as_secs()),
+        backup_ts_ttl_secs: Some(cfg.backup_ts_ttl.0.as_secs()),
     };
     if incremental {
         // store id existence is checked in check_backup_meta_consistency
@@ -710,6 +741,8 @@ pub struct BackupConfig {
     pub tolerate_err: usize,
     pub timeout: ReadableDuration,
     pub backup_delay: ReadableDuration,
+    pub backup_ts_wait_timeout: ReadableDuration,
+    pub backup_ts_ttl: ReadableDuration,
     #[cfg(feature = "testexport")]
     pub skip_keyspace_meta: bool,
 }
@@ -723,6 +756,8 @@ impl Default for BackupConfig {
             tolerate_err: 0,
             timeout: ReadableDuration::secs(30),
             backup_delay: ReadableDuration::ZERO,
+            backup_ts_wait_timeout: BACKUP_TS_WAIT_TIMEOUT_DEFAULT,
+            backup_ts_ttl: BACKUP_TS_TTL_DEFAULT,
             #[cfg(feature = "testexport")]
             skip_keyspace_meta: false,
         }

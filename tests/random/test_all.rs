@@ -100,6 +100,7 @@ fn test_random_all() {
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
+        backup_delay: ReadableDuration::secs(1),
         tolerate_err: 1,
         skip_keyspace_meta: true,
         ..Default::default()
@@ -415,6 +416,7 @@ fn prepare_cluster(
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
+        conf.storage.check_backup_ts = true;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
     let mut cluster = ServerClusterBuilder::new(nodes, update_conf_fn)

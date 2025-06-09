@@ -17,12 +17,16 @@ mod lock_table;
 
 use std::{
     mem::MaybeUninit,
+    ops::DerefMut,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
+use parking_lot::{Mutex, RwLock};
+use tikv_util::{retry::sleep_async, time::Instant, warn};
 use txn_types::{Key, Lock, TimeStamp};
 
 pub use self::{
@@ -36,14 +40,25 @@ pub use self::{
 pub struct ConcurrencyManager {
     max_ts: Arc<AtomicU64>,
     lock_table: LockTable,
+
+    need_check_backup_ts: bool,
+    latest_backup_ts: Arc<RwLock<TrackedBackupTs>>,
+    old_backup_ts_set: TrackedBackupTsSet,
 }
 
 impl ConcurrencyManager {
-    pub fn new(latest_ts: TimeStamp) -> Self {
+    pub fn new_opt(latest_ts: TimeStamp, need_check_backup_ts: bool) -> Self {
         ConcurrencyManager {
             max_ts: Arc::new(AtomicU64::new(latest_ts.into_inner())),
             lock_table: LockTable::default(),
+            need_check_backup_ts,
+            latest_backup_ts: Arc::new(RwLock::new(TrackedBackupTs::new(latest_ts))),
+            old_backup_ts_set: TrackedBackupTsSet::default(),
         }
+    }
+
+    pub fn new(latest_ts: TimeStamp) -> Self {
+        Self::new_opt(latest_ts, false)
     }
 
     pub fn max_ts(&self) -> TimeStamp {
@@ -124,6 +139,126 @@ impl ConcurrencyManager {
         });
         min_lock_ts
     }
+
+    pub fn get_latest_backup_ts(&self) -> Option<TrackedBackupTs> {
+        if self.need_check_backup_ts {
+            Some(self.latest_backup_ts.read().clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn replace_backup_ts(&self, backup_ts: TimeStamp) -> bool /* replaced */ {
+        // Hold the write lock when insert into `backup_ts_set`.
+        // Otherwise, a concurrent request will miss to wait for the old backup_ts.
+        // Be caution for deadlock. There is another lock in
+        // `TrackedBackupTsSet::insert()`.
+        let mut curr = self.latest_backup_ts.write();
+        if curr.get() < backup_ts {
+            let old = std::mem::replace(curr.deref_mut(), TrackedBackupTs::new(backup_ts));
+            self.old_backup_ts_set.insert(old);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn wait_old_backup_ts_released(
+        &self,
+        current_backup_ts: TimeStamp,
+        wait_timeout: Duration,
+        ttl: Duration,
+        retry_interval: Duration,
+    ) -> bool /* ok */ {
+        self.old_backup_ts_set
+            .wait_released(current_backup_ts, wait_timeout, ttl, retry_interval)
+            .await
+    }
+}
+
+/// The backup timestamp using reference counting to track the transactions
+/// which has checked `commit_ts` with it but not applied yet.
+#[derive(Clone)]
+pub struct TrackedBackupTs(Arc<AtomicU64>);
+
+impl TrackedBackupTs {
+    pub fn new(ts: TimeStamp) -> Self {
+        TrackedBackupTs(Arc::new(AtomicU64::new(ts.into_inner())))
+    }
+
+    pub fn get(&self) -> TimeStamp {
+        TimeStamp::new(self.0.load(Ordering::SeqCst))
+    }
+
+    pub fn external_ref_count(&self) -> usize {
+        Arc::strong_count(&self.0).saturating_sub(1)
+    }
+
+    pub fn elapsed_secs(&self, current_ts: TimeStamp) -> u64 {
+        current_ts.physical().saturating_sub(self.get().physical()) / 1000
+    }
+}
+
+#[derive(Clone, Default)]
+struct TrackedBackupTsSet {
+    inner: Arc<Mutex<Vec<TrackedBackupTs>>>,
+}
+
+impl TrackedBackupTsSet {
+    fn insert(&self, backup_ts: TrackedBackupTs) {
+        self.inner.lock().push(backup_ts);
+    }
+
+    /// Return false when timeout.
+    async fn wait_released(
+        &self,
+        current_backup_ts: TimeStamp,
+        wait_timeout: Duration,
+        ttl: Duration,
+        retry_interval: Duration,
+    ) -> bool /* ok */ {
+        let ttl_secs = ttl.as_secs();
+
+        let mut no_dropped = true;
+        let start_time = Instant::now_coarse();
+        loop {
+            {
+                let mut set = self.inner.lock();
+
+                // Transactions tracked on larger `backup_ts` must have larger `commit_ts` as
+                // well.
+                let Some(pos) = set.iter().position(|x| x.get() < current_backup_ts) else {
+                    return no_dropped;
+                };
+
+                let ref_count = set[pos].external_ref_count();
+                if ref_count == 0 {
+                    set.remove(pos);
+                } else if set[pos].elapsed_secs(current_backup_ts) >= ttl_secs {
+                    warn!(
+                        "backup_ts is dropped: {}: ref count: {}",
+                        set[pos].get(),
+                        ref_count
+                    );
+                    set.remove(pos);
+                    no_dropped = false;
+                } else if start_time.saturating_elapsed() > wait_timeout {
+                    warn!(
+                        "backup_ts: wait_released timeout: {}: ref count: {}",
+                        set[pos].get(),
+                        ref_count
+                    );
+                    return false; // timeout
+                }
+
+                if set.is_empty() {
+                    return no_dropped;
+                }
+            }
+
+            sleep_async(retry_interval).await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -196,5 +331,91 @@ mod tests {
             }
             assert_eq!(concurrency_manager.global_min_lock_ts(), Some(20.into()));
         }
+    }
+
+    #[test]
+    fn test_tracked_backup_ts() {
+        let cm = ConcurrencyManager::new_opt(10.into(), true);
+        assert!(!cm.replace_backup_ts(1.into()));
+        assert!(cm.replace_backup_ts(20.into()));
+    }
+
+    #[tokio::test]
+    async fn test_tracked_backup_ts_set() {
+        let retry_interval = Duration::from_millis(100);
+        let dur100ms = Duration::from_millis(100);
+        let dur500ms = Duration::from_millis(500);
+        let dur1s = Duration::from_secs(1);
+
+        let set = TrackedBackupTsSet::default();
+
+        let ts10 = TrackedBackupTs::new(make_ts(10));
+        set.insert(ts10.clone());
+
+        assert!(
+            set.wait_released(make_ts(1), dur500ms, Duration::MAX, retry_interval)
+                .await
+        );
+
+        let ts20 = make_ts(20);
+        assert!(
+            !set.wait_released(ts20, dur500ms, Duration::MAX, retry_interval)
+                .await
+        );
+        drop(ts10);
+        assert!(
+            set.wait_released(ts20, dur500ms, Duration::MAX, retry_interval)
+                .await
+        );
+
+        let bts20 = TrackedBackupTs::new(ts20);
+        set.insert(bts20.clone());
+        let ts30 = make_ts(30);
+        assert!(
+            !set.wait_released(ts30, dur500ms, Duration::MAX, retry_interval)
+                .await
+        );
+        // TTL not expire.
+        assert!(
+            !set.wait_released(ts30, dur500ms, Duration::from_secs(11), retry_interval)
+                .await
+        );
+        // TTL expired.
+        assert!(
+            !set.wait_released(ts30, Duration::MAX, Duration::from_secs(10), retry_interval)
+                .await
+        );
+        // Should be dropped.
+        assert!(
+            set.wait_released(ts30, Duration::MAX, Duration::MAX, retry_interval)
+                .await
+        );
+        assert_eq!(Arc::strong_count(&bts20.0), 1);
+
+        // Test parallel.
+        let bts30 = TrackedBackupTs::new(ts30);
+        set.insert(bts30.clone());
+        let ts50 = make_ts(50);
+        assert!(
+            !set.wait_released(ts50, dur500ms, Duration::MAX, retry_interval)
+                .await
+        );
+        let mut js = tokio::task::JoinSet::new();
+        for _ in 0..5 {
+            let set = set.clone();
+            js.spawn(async move {
+                set.wait_released(ts50, dur1s, Duration::MAX, retry_interval)
+                    .await
+            });
+        }
+        tokio::time::sleep(dur100ms).await;
+        drop(bts30);
+        while let Some(res) = js.join_next().await {
+            assert!(res.unwrap());
+        }
+    }
+
+    fn make_ts(secs: u64) -> TimeStamp {
+        TimeStamp::compose(secs * 1000, 0)
     }
 }

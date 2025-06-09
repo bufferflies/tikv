@@ -20,6 +20,7 @@ use http::{Method, StatusCode};
 use hyper::{Body, Response};
 use kvengine::dfs::S3Fs;
 use native_br::{
+    backup,
     backup::IncrementalBackupFile,
     backup_worker,
     backup_worker::BackupWorker,
@@ -991,6 +992,8 @@ pub struct NativeBrConfig {
     /// Delay before perform backup. Also used as the switch for passing
     /// `backup_ts` to rfengine during backup.
     pub backup_delay: ReadableDuration,
+    pub backup_ts_wait_timeout: ReadableDuration,
+    pub backup_ts_ttl: ReadableDuration,
     #[cfg(feature = "testexport")]
     pub backup_skip_keyspace_meta: bool,
 
@@ -1015,6 +1018,8 @@ impl Default for NativeBrConfig {
             instant_backup_timeout: backup_worker::DEFAULT_TIMEOUT_INSTANT_BACKUP,
             backup_interval: ReadableDuration::ZERO,
             backup_delay: ReadableDuration::ZERO,
+            backup_ts_wait_timeout: backup::BACKUP_TS_WAIT_TIMEOUT_DEFAULT,
+            backup_ts_ttl: backup::BACKUP_TS_TTL_DEFAULT,
             #[cfg(feature = "testexport")]
             backup_skip_keyspace_meta: false,
             backup_tolerate_err: false,

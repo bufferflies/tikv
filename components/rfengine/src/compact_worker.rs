@@ -4,9 +4,7 @@ use std::{
     borrow::Cow,
     cmp::min,
     collections::HashMap,
-    fmt,
-    fmt::{Display, Formatter},
-    fs,
+    fmt, fs,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     mem,
@@ -810,19 +808,28 @@ pub struct BackupConfig {
     pub wal_epoch: u32,
     pub start_offset: u64,
     pub lightweight: bool,
+    pub backup_ts: Option<u64>,
+    pub backup_ts_wait_secs: Option<u64>,
+    pub backup_ts_ttl_secs: Option<u64>,
 }
 
-impl Display for BackupConfig {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "cluster_id {}, store_id {}, incremental {}, lightweight {} wal_epoch {}, start_offset {} ",
-            self.cluster_id,
-            self.store_id,
-            self.incremental,
-            self.lightweight,
-            self.wal_epoch,
-            self.start_offset,
+// Ref `BACKUP_TS_WAIT_TIMEOUT_DEFAULT` & `BACKUP_TS_TTL_DEFAULT` in
+// `native_br`.
+const BACKUP_TS_WAIT_SECS_DEFAULT: u64 = 30;
+const BACKUP_TS_TTL_SECS_DEFAULT: u64 = 60;
+
+impl BackupConfig {
+    pub fn backup_ts_wait_timeout(&self) -> Duration {
+        Duration::from_secs(
+            self.backup_ts_wait_secs
+                .unwrap_or(BACKUP_TS_WAIT_SECS_DEFAULT),
+        )
+    }
+
+    pub fn backup_ts_ttl(&self) -> Duration {
+        Duration::from_secs(
+            self.backup_ts_ttl_secs
+                .unwrap_or(BACKUP_TS_TTL_SECS_DEFAULT),
         )
     }
 }

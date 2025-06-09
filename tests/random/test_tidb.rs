@@ -17,6 +17,7 @@ use kvengine::{
     metrics::{ENGINE_IA_SYNC_READ_COUNTER, ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER},
     table::sstable::BlockCacheType,
 };
+use native_br::metrics::NATIVE_BR_BACKUP_SUCCESS;
 use pd_client::{
     pd_control,
     pd_control::{OpKind, PdControl, PdScheduleConfig},
@@ -295,6 +296,9 @@ fn prepare_cluster(
             kv_target_file_size: KV_TARGET_FILE_SIZE,
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
             cop_block_cache_type: switches.block_cache_type,
+            backup_interval: Duration::from_secs(5),
+            backup_delay: Duration::from_secs(3),
+            backup_skip_keyspace_meta: false,
             ..Default::default()
         },
     );
@@ -1001,6 +1005,7 @@ pub(crate) struct WorkloadStats {
     pub unique_conflict: usize,
     pub async_shards: usize,
     pub remote_compact_exceed_memory_limit: u64,
+    pub backup_count: u64,
 }
 
 impl WorkloadStats {
@@ -1015,6 +1020,7 @@ impl WorkloadStats {
         let async_shards = ASYNC_SHARD_COUNTER.load(Ordering::SeqCst);
         let remote_compact_exceed_memory_limit =
             ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.get();
+        let backup_count = NATIVE_BR_BACKUP_SUCCESS.get();
         Self {
             keyspace_count,
             node_restart,
@@ -1025,6 +1031,7 @@ impl WorkloadStats {
             unique_conflict,
             async_shards,
             remote_compact_exceed_memory_limit,
+            backup_count,
         }
     }
 }

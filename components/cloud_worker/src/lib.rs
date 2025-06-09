@@ -823,6 +823,8 @@ impl Config {
             tolerate_err,
             timeout: self.native_br.instant_backup_timeout / 2,
             backup_delay: self.native_br.backup_delay,
+            backup_ts_wait_timeout: self.native_br.backup_ts_wait_timeout,
+            backup_ts_ttl: self.native_br.backup_ts_ttl,
             #[cfg(feature = "testexport")]
             skip_keyspace_meta: self.native_br.backup_skip_keyspace_meta,
         }

@@ -843,6 +843,7 @@ impl ServerCluster {
             panic!("no tikv config found");
         });
         let worker_count = worker_ids.len();
+        let first_worker_idx = worker_ids[0];
         let last_worker_idx = worker_ids[worker_count - 1];
         for idx in worker_ids {
             let data_dir = self.tmp_dir.path().join(format!("worker-{idx}"));
@@ -862,6 +863,13 @@ impl ServerCluster {
             let mut dfs = tikv_config.dfs.clone();
             dfs.conn_options = DFSConnOptions::default();
 
+            // Periodical backup can be enabled on NO more than one tikv worker.
+            let backup_interval = if idx == first_worker_idx {
+                opts.backup_interval
+            } else {
+                Duration::ZERO
+            };
+
             let tikv_worker_conf = cloud_worker::Config {
                 addr: tikv_worker_addr(idx),
                 cop_addr: "".to_string(),
@@ -880,7 +888,8 @@ impl ServerCluster {
                 cop_block_size: tikv_config.rocksdb.writecf.block_size,
                 data_dir: data_dir.to_string_lossy().into_owned(),
                 native_br: NativeBrConfig {
-                    backup_interval: ReadableDuration(opts.backup_interval),
+                    backup_interval: ReadableDuration(backup_interval),
+                    backup_delay: ReadableDuration(opts.backup_delay),
                     #[cfg(feature = "testexport")]
                     backup_skip_keyspace_meta: opts.backup_skip_keyspace_meta,
                     restore_timeout_pd_control: ReadableDuration(opts.restore_timeout_pd_control),
@@ -1268,6 +1277,7 @@ pub fn new_test_config(
     config.storage.enable_ttl = true;
     config.storage.scheduler_concurrency = 4096;
     config.storage.low_space_threshold = AbsoluteOrPercentSize::Abs(ReadableSize::mb(1));
+    config.storage.check_backup_ts = true;
     config.server.cluster_id = 1;
     config.server.addr = node_addr(node_id);
     config.server.status_addr = node_status_addr(node_id);
@@ -1383,6 +1393,7 @@ pub struct TikvWorkerOptions {
     pub ia_disk_cap: u64,
 
     pub backup_interval: Duration,
+    pub backup_delay: Duration,
     pub backup_skip_keyspace_meta: bool,
 
     pub restore_timeout_pd_control: Duration,
@@ -1401,7 +1412,8 @@ impl Default for TikvWorkerOptions {
             ia_mem_cap: IA_MEM_CAP_DEF,
             ia_disk_cap: IA_DISK_CAP_DEF,
             backup_interval: Duration::ZERO,
-            backup_skip_keyspace_meta: false,
+            backup_delay: Duration::ZERO,
+            backup_skip_keyspace_meta: true,
             restore_timeout_pd_control: Duration::from_secs(10),
         }
     }
