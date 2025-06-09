@@ -25,6 +25,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error + Sync + Send>>;
 pub struct TxnFileHelper {
     max_chunk_size: usize,
     cli: RestfulClient,
+    runtime: tokio::runtime::Handle, // For hyper in cli.
 }
 
 impl TxnFileHelper {
@@ -32,10 +33,12 @@ impl TxnFileHelper {
         max_chunk_size: usize,
         tikv_worker_endpoints: Vec<String>,
         security_mgr: Arc<SecurityManager>,
+        runtime: tokio::runtime::Handle,
     ) -> Result<Self> {
         Ok(TxnFileHelper {
             max_chunk_size,
             cli: RestfulClient::new("txn_file_helper", tikv_worker_endpoints, security_mgr)?,
+            runtime,
         })
     }
 }
@@ -107,6 +110,7 @@ impl TxnFileHelper {
 
         let path = format!("txn_chunk?keyspace_id={keyspace_id}");
         let data = buf.freeze();
+        let _enter = self.runtime.enter(); // For hyper.
         let resp = self.cli.request(path, Method::POST, Some(data)).await?;
         let resp: CreateTxnChunkResp = serde_json::from_slice(&resp)?;
         Ok(resp.chunk_id)

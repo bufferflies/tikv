@@ -10,7 +10,7 @@ use std::{
 use kvproto::kvrpcpb;
 use rfstore::store::RegionIdVer;
 use tikv::storage::mvcc::TimeStamp;
-use tikv_util::{box_err, debug, time::Instant};
+use tikv_util::{box_err, debug, time::Instant, warn};
 
 use crate::client::{ClusterClient, Error, Result};
 
@@ -55,7 +55,7 @@ impl TxnStatus {
             )
     }
 
-    pub fn use_async_commit(&self) -> bool {
+    pub fn has_async_commit_lock(&self) -> bool {
         match self.primary_lock.as_ref() {
             Some(primary_lock) => primary_lock.use_async_commit,
             None => false,
@@ -142,9 +142,10 @@ impl LockResolver {
 
         // `ttl == 0` means lock is committed or rollbacked, do resolve lock.
         let clean_regions = clean_txns.entry(lock.lock_version).or_default();
-        if status.use_async_commit() {
+        if status.has_async_commit_lock() {
             // TODO: resolve async commit lock
-            panic!("resolve async commit lock not implemented");
+            warn!("resolve async commit lock not implemented");
+            return Ok(status);
         }
         if lock.lock_type == kvrpcpb::Op::PessimisticLock {
             // TODO: resolve pessimistic lock
@@ -296,9 +297,10 @@ impl LockResolver {
             primary_lock: resp.has_lock_info().then_some(resp.take_lock_info()),
             ..Default::default()
         };
-        if status.use_async_commit() {
-            // TODO: support async commit
-            panic!("async commit not implemented");
+        if status.has_async_commit_lock() {
+            if !self.lock_is_expired(txn_id, resp.lock_ttl) {
+                status.ttl = resp.lock_ttl;
+            }
         } else if resp.lock_ttl != 0 {
             status.ttl = resp.lock_ttl
         } else {

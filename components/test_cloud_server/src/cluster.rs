@@ -988,8 +988,14 @@ impl ServerCluster {
             None
         } else {
             let endpoints = self.tikv_worker_endpoints();
-            let helper =
-                TxnFileHelper::new(max_chunk_size, endpoints, self.security_mgr.clone()).unwrap();
+            let runtime = self.dfs.as_ref().unwrap().get_runtime().handle().clone();
+            let helper = TxnFileHelper::new(
+                max_chunk_size,
+                endpoints,
+                self.security_mgr.clone(),
+                runtime,
+            )
+            .unwrap();
             Some(Arc::new(helper))
         }
     }

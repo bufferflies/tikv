@@ -836,7 +836,6 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
                 commit_ts0,
                 CommitAction::AsyncCommitSecondaryKeys(Duration::ZERO),
             )
-            .unwrap()
             .unwrap();
         // Will return the commit_ts in request other than of committed record.
         assert_eq!(dup_commit_ts, commit_ts0);

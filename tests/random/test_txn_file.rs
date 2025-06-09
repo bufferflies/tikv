@@ -115,7 +115,8 @@ pub(crate) fn spawn_txn_file_write(
                             },
                         )
                         .unwrap()
-                };
+                }
+                .into_inner();
 
                 debug!(
                     "[{}] txn file write keys {:?}",

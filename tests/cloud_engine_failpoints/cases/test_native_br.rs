@@ -550,14 +550,15 @@ fn test_backup_pessimistic_lock() {
             put(pk.clone(), random_value::<VALUE_SIZE>(0)),
             put(sk.clone(), random_value::<VALUE_SIZE>(0)),
         ];
-        let txn = TxnMutations::from_normal(muts.clone());
+        let txn_muts = TxnMutations::from_normal(muts);
         let _ = rx_finish.blocking_recv();
+        let mut txn = client.begin_transaction(Some(start_ts));
         client
             .kv_prewrite_ext(
                 Bytes::copy_from_slice(&pk),
                 Some(&vec![Bytes::copy_from_slice(&sk)]),
-                txn.clone(),
-                start_ts,
+                txn_muts,
+                &mut txn,
                 PrewriteExt {
                     pessimistic_action:
                         kvproto::kvrpcpb::PrewriteRequestPessimisticAction::DoPessimisticCheck,

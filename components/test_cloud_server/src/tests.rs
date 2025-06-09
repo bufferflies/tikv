@@ -97,6 +97,30 @@ fn it_works() {
     cluster.stop();
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case::async_commit(true)]
+fn test_client_basic(#[case] async_commit: bool) {
+    test_util::init_log_for_test();
+    let node_ids = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(node_ids.clone(), |_, _| {});
+    let stores = cluster.get_stores();
+    assert_eq!(stores.len(), 3);
+    let mut client = cluster.new_client();
+    if async_commit {
+        client.set_async_commit();
+    }
+    client.put_kv(0..100, i_to_key, i_to_val);
+    client.put_kv(100..200, i_to_key, i_to_val);
+    client.put_kv(200..300, i_to_key, i_to_val);
+    client.verify_data_with_ref_store();
+
+    client.del_kv(100..200, i_to_key);
+    client.verify_data_with_ref_store();
+
+    cluster.stop();
+}
+
 #[test]
 fn test_default_keyspace() {
     test_util::init_log_for_test();
