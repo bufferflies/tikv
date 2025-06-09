@@ -67,6 +67,12 @@ pub struct PdControl {
     client: RestfulClient,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KeyspaceMetas {
+    pub keyspaces: Vec<KeyspaceMeta>,
+    pub next_page_token: String,
+}
+
 impl PdControl {
     pub fn new(config: Config, security_mgr: Arc<SecurityManager>) -> Result<Self> {
         let client = RestfulClient::new("pd_control", config.endpoints, security_mgr)?;
@@ -267,9 +273,31 @@ impl PdControl {
             sleep_async(Duration::from_millis(500)).await;
         }
     }
+
+    /// List all keyspaces in PD.
+    pub async fn list_keyspaces(
+        &self,
+        limit: Option<usize>,
+        next_page_token: Option<String>,
+    ) -> Result<KeyspaceMetas> {
+        let query_params = {
+            let query = String::new();
+            let mut encode = url::form_urlencoded::Serializer::new(query);
+            if let Some(token) = next_page_token {
+                encode.append_pair("next_page_token", &token);
+            }
+            if let Some(l) = limit {
+                encode.append_pair("limit", &l.to_string());
+            }
+            encode.finish()
+        };
+        self.client
+            .get(format!("{PD_KEYSPACE_PATH}?{}", query_params))
+            .await
+    }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 #[serde(default)]
 pub struct KeyspaceMeta {
     pub id: u32,
@@ -613,5 +641,55 @@ mod tests {
 
         op.kind_mask = (OpKind::OpAdmin as u32) | (OpKind::OpReplica as u32);
         assert_eq!(op.kind(), vec![OpKind::OpAdmin, OpKind::OpReplica]);
+    }
+
+    #[tokio::test]
+    #[ignore = "this requires a PD server running on localhost:2379"]
+    async fn test_list_keyspaces() {
+        let ctl = PdControl::new(Default::default(), Default::default()).unwrap();
+
+        let current_keyspaces = ctl.list_keyspaces(Some(10), None).await.unwrap().keyspaces;
+        let keyspaces = if current_keyspaces.len() < 10 {
+            let keyspaces = (0..10).map(|_| {
+                ctl.create_keyspace(CreateKeyspaceParams {
+                    name: format!("ks-{}", rand::random::<u64>()),
+                    ..Default::default()
+                })
+            });
+            futures::future::try_join_all(keyspaces).await.unwrap()
+        } else {
+            current_keyspaces
+        };
+
+        let first_page = ctl.list_keyspaces(Some(5), None).await.unwrap();
+        assert!(!first_page.keyspaces.is_empty());
+        assert_eq!(first_page.keyspaces.len(), 5, "{:?}", first_page);
+        assert!(!first_page.next_page_token.is_empty());
+
+        let second_page = ctl
+            .list_keyspaces(Some(100), Some(first_page.next_page_token))
+            .await
+            .unwrap();
+        assert!(!second_page.keyspaces.is_empty());
+        assert!(second_page.keyspaces.len() > 5);
+        assert!(second_page.next_page_token.is_empty());
+        // Check that all keyspaces are listed.
+
+        let mut all_keyspaces = first_page.keyspaces;
+        all_keyspaces.extend(second_page.keyspaces);
+        assert!(
+            keyspaces
+                .iter()
+                .all(|k| { all_keyspaces.iter().any(|ks| ks.name == k.name) })
+        );
+
+        let whole_page = ctl.list_keyspaces(None, None).await.unwrap();
+        assert!(!whole_page.keyspaces.is_empty());
+        assert!(whole_page.keyspaces.len() > keyspaces.len());
+        assert!(
+            keyspaces
+                .iter()
+                .all(|k| { whole_page.keyspaces.iter().any(|ks| ks.name == k.name) })
+        );
     }
 }

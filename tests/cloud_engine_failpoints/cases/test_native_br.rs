@@ -11,7 +11,9 @@ use std::{
 
 use bytes::Bytes;
 use chrono::Utc;
-use cloud_worker::native_br::{test_utils::NativeBrSvcClient, BackupItem, RestoreState};
+use cloud_worker::native_br::{
+    test_utils::NativeBrSvcClient, v1x::Backup, BackupItem, RestoreState,
+};
 use collections::HashMap;
 use fail::cfg_callback;
 use futures::executor::block_on;
@@ -312,8 +314,8 @@ fn test_restore_on_disk_full() {
     oss.shutdown();
 }
 
-#[test]
-fn test_native_br_service() {
+#[rstest::rstest]
+fn test_native_br_service(#[values(true, false)] use_api_v1x: bool) {
     test_util::init_log_for_test();
     const KEYSPACE_ID: u32 = 1;
     const DATA_LEN: usize = 100;
@@ -360,17 +362,59 @@ fn test_native_br_service() {
     let security_mgr = Arc::new(SecurityManager::default());
     let br_cli =
         NativeBrSvcClient::new(cluster_id, cluster.tikv_worker_endpoints(), security_mgr).unwrap();
-    let backup = TryWaiter::timeout(10)
-        .interval(1)
-        .try_wait_result(|| {
-            let mut backups = block_on(br_cli.list_backups(&datetime0)).unwrap();
-            backups
-                .items
-                .pop()
-                .ok_or(Err::<BackupItem, String>("no backup found".to_string()))
-        })
-        .unwrap();
-    info!("backup: {:?}", backup);
+    let backup = if !use_api_v1x {
+        let backup = TryWaiter::timeout(10)
+            .interval(1)
+            .try_wait_result(|| {
+                let mut backups = block_on(br_cli.list_backups(&datetime0)).unwrap();
+                backups
+                    .items
+                    .pop()
+                    .ok_or(Err::<BackupItem, String>("no backup found".to_string()))
+            })
+            .unwrap();
+        info!("backup: {:?}", backup);
+        backup
+    } else {
+        let backup_x = TryWaiter::timeout(10)
+            .interval(1)
+            .try_wait_result(|| {
+                let mut backups = block_on(
+                    br_cli.list_backups_x(
+                        // add 1s to fetch the backup after written.
+                        (datetime0 + chrono::Duration::seconds(1))
+                            .format("%Y%m%d/%H%M%S")
+                            .to_string(),
+                        true,
+                        1000,
+                    ),
+                )
+                .unwrap();
+                backups
+                    .data
+                    .pop()
+                    .ok_or(Err::<Backup, String>("no backup found".to_string()))
+            })
+            .unwrap();
+        info!("backup v1x: {:?}", backup_x);
+
+        let backup = backup_x.try_to_backup_item().unwrap();
+        assert_eq!(Some(backup.id), backup_x.v1_compat_id);
+        assert!(
+            backup_x.details.as_ref().is_some_and(|v| v.backup_ts > 0),
+            "{:?}",
+            backup_x
+        );
+        assert!(
+            backup_x
+                .details
+                .as_ref()
+                .is_some_and(|v| { !v.keyspaces.is_empty() }),
+            "{:?}",
+            backup_x
+        );
+        backup
+    };
 
     // More data.
     client.put_kv(
@@ -381,14 +425,17 @@ fn test_native_br_service() {
     client.verify_data_with_ref_store();
 
     // Restore.
+    let restore_id = 1;
     let keyspace_name = format!("ks{KEYSPACE_ID}");
-    let progress = block_on(br_cli.restore_keyspace(1, keyspace_name.clone(), &backup)).unwrap();
+    let progress =
+        block_on(br_cli.restore_keyspace(restore_id, keyspace_name.clone(), &backup)).unwrap();
     info!("create restore: {:?}", progress);
 
     // Must fail due to get keyspace name error.
     TryWaiter::timeout(30).interval(1).must_wait(
         || {
-            let progress = block_on(br_cli.get_restore_progress(1, keyspace_name.clone())).unwrap();
+            let progress =
+                block_on(br_cli.get_restore_progress(restore_id, keyspace_name.clone())).unwrap();
             info!("restore progress: {:?}", progress);
             progress.status == RestoreState::Error
         },
@@ -404,19 +451,22 @@ fn test_native_br_service() {
     cluster.start_tikv_workers(vec![tikv_worker_id], tikv_worker_opts.clone());
 
     // Check task persistence.
-    let progress = block_on(br_cli.get_restore_progress(1, keyspace_name.clone())).unwrap();
+    let progress =
+        block_on(br_cli.get_restore_progress(restore_id, keyspace_name.clone())).unwrap();
     info!("restore progress (after restart): {:?}", progress);
     assert_eq!(progress.status, RestoreState::Error);
     assert_eq!(progress.error, "interrupted");
 
     // Retry restore.
-    let progress = block_on(br_cli.restore_keyspace(1, keyspace_name.clone(), &backup)).unwrap();
+    let progress =
+        block_on(br_cli.restore_keyspace(restore_id, keyspace_name.clone(), &backup)).unwrap();
     info!("retry restore: {:?}", progress);
 
     // Wait succeed.
     TryWaiter::timeout(30).interval(1).must_wait(
         || {
-            let progress = block_on(br_cli.get_restore_progress(1, keyspace_name.clone())).unwrap();
+            let progress =
+                block_on(br_cli.get_restore_progress(restore_id, keyspace_name.clone())).unwrap();
             info!("restore progress: {:?}", progress);
             assert_ne!(
                 progress.status,
@@ -493,6 +543,7 @@ fn test_backup_pessimistic_lock() {
     let pk = i_to_key(DATA_LEN);
     let sk = i_to_key(0);
 
+    cluster.remove_node_peers(nodes[1]);
     let region = client.pd_client.get_region(&enc(&pk)).unwrap();
     assert_eq!(region.peers.len(), 1, "{:?}", region);
     cluster.evict_peer(region.peers[0].id);

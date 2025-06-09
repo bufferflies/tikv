@@ -29,7 +29,7 @@ use native_br::{
         restore_keyspace_with_cfg, ReportRestoreStepTrait, RestoreStep, RestoredKeyspace,
     },
 };
-use pd_client::PdClient;
+use pd_client::{pd_control::PdControl, PdClient};
 use serde::Deserialize;
 use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
@@ -1202,6 +1202,14 @@ impl NativeBrManager {
         let (backup_files, _) = self.list_backups(ts, 1).await?;
         Ok(backup_files.first().cloned())
     }
+
+    #[allow(dead_code)]
+    pub fn get_pd_ctl(&self) -> Result<PdControl> {
+        let cfg = self.config.rl().pd.clone();
+        let sec_mgr = self.context.pd_client.get_security_mgr();
+        let pd_ctl = PdControl::new(cfg, sec_mgr)?;
+        Ok(pd_ctl)
+    }
 }
 
 fn check_task(task: &RestoreTask, keyspace_name: &str) -> Result<()> {
@@ -1211,6 +1219,412 @@ fn check_task(task: &RestoreTask, keyspace_name: &str) -> Result<()> {
         ))
     } else {
         Ok(())
+    }
+}
+
+pub mod v1x {
+    use std::{collections::HashMap, fmt::Display, marker::PhantomData, str::FromStr, sync::Arc};
+
+    use futures::{stream::FuturesUnordered, TryStreamExt};
+    use http::StatusCode;
+    use hyper::{Body, Request, Response};
+    use kvengine::dfs::S3Fs;
+    use native_br::backup::IncrementalBackupFile;
+    use pd_client::pd_control::KeyspaceMeta;
+    use protobuf::Message;
+    use rfenginepb::ClusterBackupMeta;
+    use serde::{
+        de::{value::MapDeserializer, IntoDeserializer},
+        Deserialize, Deserializer,
+    };
+    use tikv_util::{box_try, warn};
+
+    use crate::{
+        common::{make_json_response, make_response},
+        error::Error,
+        metrics::{NATIVE_BR_COUNTER_VEC, NATIVE_BR_HISTOGRAM_VEC},
+        native_br::{BackupItem, NativeBrManager},
+    };
+
+    pub(crate) const V1X_BACKUPS_API_PATH: &str = "/api/v1/x/backups";
+    pub type Result<T> = std::result::Result<T, HttpError>;
+
+    #[derive(Debug)]
+    pub struct HttpError(Response<Body>);
+
+    impl<T: Into<Error>> From<T> for HttpError {
+        fn from(err: T) -> Self {
+            let crate_err: Error = err.into();
+            match crate_err {
+                Error::CheckError(msg) => Self::error_response(StatusCode::BAD_REQUEST, msg),
+                otherwise => {
+                    Self::error_response(StatusCode::INTERNAL_SERVER_ERROR, otherwise.to_string())
+                }
+            }
+        }
+    }
+
+    impl serde::de::Error for Error {
+        fn custom<T>(msg: T) -> Self
+        where
+            T: Display,
+        {
+            Error::CheckError(msg.to_string())
+        }
+    }
+
+    impl std::error::Error for HttpError {}
+
+    impl Display for HttpError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "<ERROR HTTP/{}> (body = {:?})",
+                self.0.status(),
+                self.0.body()
+            )
+        }
+    }
+
+    impl HttpError {
+        fn error_response(status_code: StatusCode, body: impl Into<Body>) -> Self {
+            assert!(!status_code.is_success(), "{}", status_code);
+            Self(make_response(status_code, body))
+        }
+    }
+
+    /// Deserialize a type implementing `FromStr`.
+    /// Thanks https://users.rust-lang.org/t/serde-fromstr-on-a-field/99457/7
+    ///
+    /// NOTE: This isn't effective enough(requires an extra copy), maybe
+    /// replace it with `serde_with`.
+    fn de_from_str<'de, D, T: FromStr<Err = E>, E: Display>(
+        deserializer: D,
+    ) -> std::result::Result<T, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let buf = String::deserialize(deserializer)?;
+        T::from_str(&buf)
+            .map_err(|err| serde::de::Error::custom(format!("failed to parse a field: {}", err)))
+    }
+
+    struct FieldHinttedStrDe<'a, E> {
+        content: &'a str,
+        hint: &'a str,
+        phantom: PhantomData<E>,
+    }
+
+    impl<'a, E> FieldHinttedStrDe<'a, E> {
+        fn new(content: &'a str, hint: &'a str) -> Self {
+            Self {
+                content,
+                hint,
+                phantom: PhantomData,
+            }
+        }
+    }
+
+    impl<'de, E: serde::de::Error> IntoDeserializer<'de, E> for FieldHinttedStrDe<'_, E> {
+        type Deserializer = Self;
+
+        fn into_deserializer(self) -> Self::Deserializer {
+            self
+        }
+    }
+
+    impl<'de, E: serde::de::Error> Deserializer<'de> for FieldHinttedStrDe<'_, E> {
+        type Error = E;
+
+        fn deserialize_any<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'de>,
+        {
+            visitor.visit_str(self.content).map_err(|err: Self::Error| {
+                <E as serde::de::Error>::custom(format!(
+                    "during handing key {}: {}",
+                    self.hint, err
+                ))
+            })
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf
+            option unit unit_struct newtype_struct seq tuple tuple_struct map struct
+            enum identifier ignored_any
+        }
+    }
+
+    fn v1_compat_id(key: &str) -> Option<u64> {
+        IncrementalBackupFile::try_from_full_path(key).map(|file| file.id())
+    }
+
+    #[derive(Deserialize, Serialize)]
+    pub struct ListBackupRequest {
+        #[serde(default)]
+        from_prefix: String,
+        #[serde(deserialize_with = "de_from_str", default)]
+        load_details: bool,
+        #[serde(deserialize_with = "de_from_str", default = "default_max_count")]
+        max_count: u64,
+    }
+
+    fn default_max_count() -> u64 {
+        1
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct ListBackupResponse {
+        pub data: Vec<Backup>,
+        pub cluster_id: u64,
+        pub has_more: bool,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Backup {
+        pub name: String,
+        pub last_modify_time: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub details: Option<BackupDetails>,
+
+        pub v1_compat_id: Option<u64>,
+    }
+
+    impl Backup {
+        pub fn try_to_backup_item(&self) -> Option<BackupItem> {
+            IncrementalBackupFile::try_from_full_path(&format!("/backup/{}", self.name))
+                .map(From::from)
+        }
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    pub struct KeyspaceBackupInfo {
+        pub keyspace_id: u32,
+        // Skip this field when failed to fetch it.
+        // So the caller knows there are something wrong...
+        #[serde(skip_serializing_if = "String::is_empty")]
+        pub keyspace_name: String,
+        pub keyspace_state: String,
+        pub size: u64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct BackupDetails {
+        pub backup_ts: u64,
+        pub safe_ts: u64,
+        pub keyspaces: Vec<KeyspaceBackupInfo>,
+    }
+    pub(crate) async fn serve_backup(
+        br_ctx: Arc<NativeBrManager>,
+        req: Request<Body>,
+    ) -> hyper::Result<Response<Body>> {
+        let ctx = RequestContext::new(req, br_ctx);
+
+        Ok(match handle_backup(ctx).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                warn!("handle backup error: {:?}", err);
+                err.0
+            }
+        })
+    }
+
+    async fn handle_backup(ctx: RequestContext) -> Result<Response<Body>> {
+        let res = match ctx.raw_req.method() {
+            &hyper::Method::GET => handle_list_backup(ctx)
+                .await
+                .map(|v| make_json_response(StatusCode::OK, &v)),
+            _ => Err(HttpError::error_response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "",
+            )),
+        };
+        if res.is_err() {
+            NATIVE_BR_COUNTER_VEC
+                .with_label_values(&["list_backup_x_fail"])
+                .inc();
+        }
+        res
+    }
+
+    struct RequestContext {
+        br: Arc<NativeBrManager>,
+        raw_req: Request<Body>,
+        request_params: HashMap<String, String>,
+    }
+
+    impl RequestContext {
+        fn new(req: Request<Body>, br: Arc<NativeBrManager>) -> Self {
+            Self {
+                br,
+                raw_req: req,
+                request_params: Default::default(),
+            }
+        }
+
+        fn query_params<'de, T: Deserialize<'de>>(&self) -> Result<T> {
+            let query = self.raw_req.uri().query().unwrap_or("");
+            let query_pairs: HashMap<_, _> =
+                url::form_urlencoded::parse(query.as_bytes()).collect();
+
+            let it = query_pairs
+                .iter()
+                .map(|(k, v)| (k.as_ref(), FieldHinttedStrDe::new(v.as_ref(), k)))
+                .chain(
+                    self.request_params
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), FieldHinttedStrDe::new(v.as_str(), k))),
+                );
+            let de = MapDeserializer::<_, Error>::new(it);
+
+            Ok(T::deserialize(de)?)
+        }
+    }
+
+    async fn handle_list_backup(ctx: RequestContext) -> Result<ListBackupResponse> {
+        let ob_start_time = tikv_util::time::Instant::now();
+        let cluster_id = ctx.br.get_cluster_id()?;
+
+        let params: ListBackupRequest = ctx.query_params()?;
+        let backup_prefix = "backup/";
+        let (files, more, _) = ctx
+            .br
+            .context
+            .s3fs
+            .list(
+                &params.from_prefix,
+                Some(backup_prefix),
+                Some(params.max_count as _),
+            )
+            .await?;
+        let full_prefix = format!("{}/{}", ctx.br.context.s3fs.get_prefix(), backup_prefix);
+
+        let mut backups = Vec::with_capacity(files.len());
+        let max_conc = 128;
+
+        let br_ctx = ctx.br.context.as_ref();
+        let full_prefix = &full_prefix;
+        let load_details = params.load_details;
+        let keyspaces = if load_details {
+            load_keyspaces(&ctx.br).await?
+        } else {
+            Default::default()
+        };
+        let keyspaces = &keyspaces;
+        {
+            let mut st = FuturesUnordered::new();
+            for v in files {
+                st.push(async move {
+                    Result::Ok(Backup {
+                        name: v.key.strip_prefix(full_prefix).unwrap().to_string(),
+                        last_modify_time: v.last_modified,
+                        details: if load_details {
+                            Some(
+                                fetch_backup_details(br_ctx.s3fs.as_ref(), &v.key, keyspaces)
+                                    .await?,
+                            )
+                        } else {
+                            None
+                        },
+                        v1_compat_id: v1_compat_id(&v.key),
+                    })
+                });
+
+                if st.len() > max_conc {
+                    backups.push(
+                        st.try_next()
+                            .await?
+                            .expect("should be something in the stream"),
+                    )
+                }
+            }
+            while let Some(v) = st.try_next().await? {
+                backups.push(v);
+            }
+        }
+
+        backups.sort_by(|bk1, bk2| bk1.name.cmp(&bk2.name));
+
+        NATIVE_BR_HISTOGRAM_VEC
+            .with_label_values(&["list_backup_x"])
+            .observe(ob_start_time.saturating_elapsed_secs());
+
+        Ok(ListBackupResponse {
+            data: backups,
+            cluster_id,
+            has_more: more,
+        })
+    }
+
+    async fn fetch_backup_details(
+        s3fs: &S3Fs,
+        key: &str,
+        keyspaces: &HashMap<u32, KeyspaceMeta>,
+    ) -> Result<BackupDetails> {
+        let backup_meta_bytes = s3fs
+            .get_object(key.to_owned(), key.to_owned(), Default::default())
+            .await?;
+        let mut backup_meta = ClusterBackupMeta::default();
+        box_try!(backup_meta.merge_from_bytes(&backup_meta_bytes));
+
+        let mut keyspace_sizes = HashMap::<u32, KeyspaceBackupInfo>::new();
+        for store in backup_meta.get_stores().iter() {
+            for (&keyspace_id, backup_size) in store.get_keyspace_size().iter() {
+                let keyspace_meta = keyspaces.get(&keyspace_id);
+                let sz = keyspace_sizes
+                    .entry(keyspace_id)
+                    .or_insert_with(|| KeyspaceBackupInfo {
+                        keyspace_id,
+                        keyspace_name: keyspace_meta
+                            .map(|meta| meta.name.to_owned())
+                            .unwrap_or_default(),
+                        keyspace_state: keyspace_meta
+                            .map(|meta| meta.state.to_owned())
+                            .unwrap_or_else(|| "NOT_FOUND".to_owned()),
+                        size: 0,
+                    });
+                sz.size += backup_size.size;
+            }
+        }
+
+        Ok(BackupDetails {
+            backup_ts: backup_meta.backup_ts,
+            safe_ts: backup_meta.safe_ts,
+            keyspaces: keyspace_sizes.into_values().collect(),
+        })
+    }
+
+    #[cfg(not(feature = "testexport"))]
+    async fn load_keyspaces(br_ctx: &NativeBrManager) -> Result<HashMap<u32, KeyspaceMeta>> {
+        let ctl = br_ctx.get_pd_ctl()?;
+        let mut keyspaces = HashMap::default();
+        let mut next_page_token = None;
+        loop {
+            let kss = ctl.list_keyspaces(None, next_page_token).await?;
+            keyspaces.extend(kss.keyspaces.into_iter().map(|meta| (meta.id, meta)));
+            if kss.next_page_token.is_empty() {
+                return Ok(keyspaces);
+            }
+            next_page_token = Some(kss.next_page_token);
+        }
+    }
+
+    // for now the test cluster doesn't support PD's http API...
+    // use a mocked keyspace meta to make the test case happy...
+    #[cfg(feature = "testexport")]
+    async fn load_keyspaces(_br_ctx: &NativeBrManager) -> Result<HashMap<u32, KeyspaceMeta>> {
+        let meta = |id, name: &str| {
+            let mut meta = KeyspaceMeta::default();
+            meta.id = id;
+            meta.name = name.to_owned();
+            meta
+        };
+
+        Ok(vec![meta(0, "DEFAULT")]
+            .into_iter()
+            .chain((1..100).map(|id| meta(id, &format!("ks{id}"))))
+            .map(|meta| (meta.id, meta))
+            .collect::<HashMap<_, _>>())
     }
 }
 
@@ -1262,6 +1676,24 @@ pub mod test_utils {
                 .finish();
             Ok(box_try!(
                 self.inner.get(format!("api/v1/backups?{query}")).await
+            ))
+        }
+
+        pub async fn list_backups_x(
+            &self,
+            from_prefix: String,
+            load_details: bool,
+            max_count: u64,
+        ) -> HttpResult<super::v1x::ListBackupResponse> {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("from_prefix", from_prefix),
+                    ("load_details", load_details.to_string()),
+                    ("max_count", max_count.to_string()),
+                ])
+                .finish();
+            Ok(box_try!(
+                self.inner.get(format!("api/v1/x/backups?{query}")).await
             ))
         }
 

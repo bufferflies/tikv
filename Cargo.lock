@@ -5956,6 +5956,7 @@ dependencies = [
  "log",
  "log_wrappers",
  "prometheus",
+ "rand 0.8.5",
  "security",
  "semver 0.10.0",
  "serde",

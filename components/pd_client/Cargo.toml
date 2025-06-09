@@ -41,3 +41,6 @@ tokio-timer = { workspace = true }
 txn_types = { workspace = true }
 url = "2"
 yatp = { workspace = true }
+
+[dev-dependencies]
+rand = "0.8"
