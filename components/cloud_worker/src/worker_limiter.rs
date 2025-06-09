@@ -17,16 +17,16 @@ pub struct WorkerLimiterConfig {
 impl Default for WorkerLimiterConfig {
     fn default() -> Self {
         Self {
-            global_concurrency_factor: 6.0,
-            keyspace_concurrency_factor: 2.0,
+            global_concurrency_factor: 96.0,
+            keyspace_concurrency_factor: 32.0,
         }
     }
 }
 
 impl WorkerLimiterConfig {
     pub fn validate(&self) -> Result<(), Box<dyn Error>> {
-        if self.global_concurrency_factor > 10.0 {
-            return Err("global concurrency factor must be less than 10".into());
+        if self.global_concurrency_factor > 256.0 {
+            return Err("global concurrency factor must be less than 256".into());
         }
         if self.global_concurrency_factor < self.keyspace_concurrency_factor {
             return Err(
