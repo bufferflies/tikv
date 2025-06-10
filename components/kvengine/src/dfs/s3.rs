@@ -126,12 +126,14 @@ impl S3FsCore {
     ) -> Self {
         let mut config = rusoto_core::HttpConfig::new();
         config.read_buf_size(256 * 1024);
+        config.pool_idle_timeout(Some(options.pool_idle_timeout.0));
         let use_tls = endpoint.starts_with("https");
         let default_provider = aws::CredentialsProvider::new().unwrap();
         let static_provider =
             rusoto_credential::StaticProvider::new(key_id.clone(), secret_key, None, None);
         let mut http_connector = hyper::client::connect::HttpConnector::new();
         http_connector.set_connect_timeout(Some(options.conn_timeout.0));
+        http_connector.set_keepalive(Some(options.keep_alive_duration.0));
         let s3c = if use_tls {
             let https_connector = HttpsConnector::new_with_connector(http_connector);
             let http_client = HttpClient::from_connector_with_config(https_connector, config);

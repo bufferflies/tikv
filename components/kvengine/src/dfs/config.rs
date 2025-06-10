@@ -87,6 +87,8 @@ const RETRY_SLEEP_INTERVAL: Duration = Duration::from_millis(500);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
 const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -97,6 +99,8 @@ pub struct ConnOptions {
     pub conn_timeout: ReadableDuration,
     pub dispatch_timeout: ReadableDuration,
     pub read_body_timeout: ReadableDuration,
+    pub keep_alive_duration: ReadableDuration,
+    pub pool_idle_timeout: ReadableDuration,
 }
 
 impl Default for ConnOptions {
@@ -107,6 +111,8 @@ impl Default for ConnOptions {
             conn_timeout: ReadableDuration(CONNECTION_TIMEOUT),
             dispatch_timeout: ReadableDuration(DISPATCH_TIMEOUT),
             read_body_timeout: ReadableDuration(READ_BODY_TIMEOUT),
+            keep_alive_duration: ReadableDuration(KEEP_ALIVE_INTERVAL),
+            pool_idle_timeout: ReadableDuration(POOL_IDLE_TIMEOUT),
         }
     }
 }
