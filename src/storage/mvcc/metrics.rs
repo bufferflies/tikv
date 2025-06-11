@@ -36,6 +36,11 @@ make_static_metric! {
         write_not_loaded_skip
     }
 
+    pub label_enum CommitCommandKind {
+        normal,
+        txn_file,
+    }
+
     pub struct MvccConflictCounterVec: IntCounter {
         "type" => MvccConflictKind,
     }
@@ -50,6 +55,10 @@ make_static_metric! {
 
     pub struct MvccPrewriteAssertionPerfCounterVec: IntCounter {
         "type" => MvccPrewriteAssertionPerfKind,
+    }
+
+    pub struct MvccCommitRejectByBackupTsCounterVec: IntCounter {
+        "type" => CommitCommandKind,
     }
 }
 
@@ -100,6 +109,15 @@ lazy_static! {
             MvccPrewriteAssertionPerfCounterVec,
             "tikv_storage_mvcc_prewrite_assertion_perf",
             "Counter of assertion operations in transactions",
+            &["type"]
+        )
+        .unwrap()
+    };
+    pub static ref MVCC_COMMIT_REJECT_BY_BACKUP_TS_COUNTER_VEC: MvccCommitRejectByBackupTsCounterVec = {
+        register_static_int_counter_vec!(
+            MvccCommitRejectByBackupTsCounterVec,
+            "tikv_storage_mvcc_commit_reject_by_backup_ts",
+            "Counter of commit commands rejected by backup_ts",
             &["type"]
         )
         .unwrap()

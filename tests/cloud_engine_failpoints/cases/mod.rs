@@ -2,6 +2,7 @@
 
 use api_version::ApiV2;
 use rand::Rng;
+use security::SecurityConfig;
 
 mod test_compaction;
 mod test_load_data;
@@ -46,4 +47,11 @@ fn i_to_row_key(keyspace_prefix: &[u8], table_id: i64, i: usize) -> Vec<u8> {
     let mut key = keyspace_prefix.to_vec();
     key.extend(table::encode_row_key(table_id, i as i64));
     key
+}
+
+fn new_security_config() -> SecurityConfig {
+    let mut conf = SecurityConfig::default();
+    conf.master_key.vendor = "test".to_string();
+    conf.master_key.key_id = "random".to_string();
+    conf
 }

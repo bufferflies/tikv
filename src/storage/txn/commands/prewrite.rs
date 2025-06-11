@@ -702,7 +702,7 @@ impl<K: PrewriteKind> Prewriter<K> {
             // If an error (KeyIsLocked or WriteConflict) occurs before, these lock guards
             // are dropped along with `txn` automatically.
             let lock_guards = txn.take_guards();
-            let mut to_be_write = WriteData::new(txn.into_modifies(), extra);
+            let mut to_be_write = WriteData::new(txn.into_modifies(), extra, None);
             to_be_write.set_disk_full_opt(self.ctx.get_disk_full_opt());
 
             WriteResult {

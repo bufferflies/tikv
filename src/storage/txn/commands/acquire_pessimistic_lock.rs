@@ -202,7 +202,7 @@ pub(super) fn make_write_data(
             for_flashback: false,
             req_type,
         };
-        WriteData::new(modifies, extra)
+        WriteData::new(modifies, extra, None)
     } else {
         WriteData::default()
     }

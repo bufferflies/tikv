@@ -3,7 +3,7 @@
 // #[PerformanceCriticalPath]
 use std::fmt;
 
-use concurrency_manager::{ConcurrencyManager, KeyHandleGuard};
+use concurrency_manager::{ConcurrencyManager, KeyHandleGuard, TrackedBackupTs};
 use engine_traits::{CF_DEFAULT, CF_LOCK, CF_WRITE};
 use txn_types::{Key, Lock, PessimisticLock, TimeStamp, Value};
 
@@ -74,6 +74,10 @@ pub struct MvccTxn {
     // reading requests should be able to read the locks from the engine.
     // So these guards can be released after finishing writing.
     pub(crate) guards: Vec<KeyHandleGuard>,
+    // The `commit_ts` of current transaction will be checked with this `backup_ts`.
+    pub(crate) backup_ts: Option<TrackedBackupTs>,
+    // Used to indicate that the `backup_ts` has been checked (with `commit_ts`).
+    pub(crate) backup_ts_checked: bool,
 }
 
 impl MvccTxn {
@@ -87,7 +91,18 @@ impl MvccTxn {
             locks_for_1pc: Vec::new(),
             concurrency_manager,
             guards: vec![],
+            backup_ts: None,
+            backup_ts_checked: false,
         }
+    }
+
+    pub fn new_with_backup_ts(
+        start_ts: TimeStamp,
+        concurrency_manager: ConcurrencyManager,
+    ) -> MvccTxn {
+        let mut mvcc_txn = Self::new(start_ts, concurrency_manager);
+        mvcc_txn.backup_ts = mvcc_txn.concurrency_manager.get_latest_backup_ts();
+        mvcc_txn
     }
 
     pub fn into_modifies(self) -> Vec<Modify> {
@@ -208,11 +223,21 @@ impl MvccTxn {
         // self.put_lock(key.clone(), &lock);
     }
 
+    pub(crate) fn take_checked_backup_ts(&mut self) -> Option<TrackedBackupTs> {
+        if self.backup_ts_checked {
+            self.backup_ts.take()
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.write_size = 0;
         self.modifies.clear();
         self.locks_for_1pc.clear();
         self.guards.clear();
+        self.backup_ts.take();
+        self.backup_ts_checked = false;
     }
 }
 

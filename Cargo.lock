@@ -8308,6 +8308,7 @@ dependencies = [
  "crc32fast",
  "dashmap 4.0.2",
  "engine_traits",
+ "fail 0.5.0",
  "file_system",
  "futures 0.3.28",
  "glob",
@@ -9141,6 +9142,7 @@ version = "0.1.0"
 dependencies = [
  "backtrace",
  "collections",
+ "concurrency_manager",
  "engine_panic",
  "engine_rocks",
  "engine_test",

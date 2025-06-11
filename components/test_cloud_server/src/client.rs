@@ -449,6 +449,8 @@ impl ClusterClient {
             PrewriteExt::default(),
         )?;
 
+        fail::fail_point!("client::before_kv_commit");
+
         let commit_ts = match options.commit_action {
             CommitAction::NoCommit => {
                 return Ok(0.into());

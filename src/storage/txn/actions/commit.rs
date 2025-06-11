@@ -5,7 +5,10 @@ use txn_types::{Key, TimeStamp, Write, WriteType};
 
 use crate::storage::{
     mvcc::{
-        metrics::{MVCC_CONFLICT_COUNTER, MVCC_DUPLICATE_CMD_COUNTER_VEC},
+        metrics::{
+            MVCC_COMMIT_REJECT_BY_BACKUP_TS_COUNTER_VEC, MVCC_CONFLICT_COUNTER,
+            MVCC_DUPLICATE_CMD_COUNTER_VEC,
+        },
         ErrorInner, LockType, MvccTxn, ReleasedLock, Result as MvccResult, SnapshotReader,
     },
     txn::commands::{find_mvcc_infos_by_key, find_mvcc_infos_by_key_async},
@@ -25,20 +28,38 @@ pub async fn commit<S: Snapshot>(
 
     let mut lock = match reader.load_lock(&key)? {
         Some(mut lock) if lock.ts == reader.start_ts => {
+            let mut min_commit_ts = lock.min_commit_ts;
+            let mut reject_by_backup_ts = false;
+
+            if let Some(backup_ts) = txn.backup_ts.as_ref() {
+                if key.is_encoded_from(&lock.primary) {
+                    let backup_ts = backup_ts.get();
+                    if min_commit_ts < backup_ts {
+                        min_commit_ts = backup_ts;
+                        reject_by_backup_ts = true;
+                    }
+                    txn.backup_ts_checked = true;
+                }
+            }
+
             // A lock with larger min_commit_ts than current commit_ts can't be committed
-            if commit_ts < lock.min_commit_ts {
+            if commit_ts < min_commit_ts {
                 info!(
                     "trying to commit with smaller commit_ts than min_commit_ts";
                     "key" => %key,
                     "start_ts" => reader.start_ts,
                     "commit_ts" => commit_ts,
-                    "min_commit_ts" => lock.min_commit_ts,
+                    "min_commit_ts" => min_commit_ts,
+                    "reject_by_backup_ts" => reject_by_backup_ts,
                 );
+                if reject_by_backup_ts {
+                    MVCC_COMMIT_REJECT_BY_BACKUP_TS_COUNTER_VEC.normal.inc();
+                }
                 return Err(ErrorInner::CommitTsExpired {
                     start_ts: reader.start_ts,
                     commit_ts,
                     key: key.into_raw()?,
-                    min_commit_ts: lock.min_commit_ts,
+                    min_commit_ts,
                 }
                 .into());
             }

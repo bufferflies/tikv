@@ -967,7 +967,7 @@ mod tests {
         }
 
         fn set_write_data(&self, data: &WriteData) {
-            let clone = WriteData::new(data.modifies.clone(), data.extra.clone());
+            let clone = WriteData::new(data.modifies.clone(), data.extra.clone(), None);
             *self.last_write_data.lock().unwrap() = Some(clone);
         }
     }

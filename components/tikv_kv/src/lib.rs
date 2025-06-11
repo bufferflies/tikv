@@ -36,6 +36,7 @@ use std::{
 };
 
 use collections::HashMap;
+use concurrency_manager::TrackedBackupTs;
 use engine_traits::{
     CfName, IterOptions, KvEngine as LocalEngine, Mutable, MvccProperties, ReadOptions, WriteBatch,
     CF_DEFAULT, CF_LOCK,
@@ -224,21 +225,27 @@ pub struct WriteData {
     pub deadline: Option<Deadline>,
     pub disk_full_opt: DiskFullOpt,
     pub txn_file: Option<TxnFileRef>,
+    pub backup_ts_checked: Option<TrackedBackupTs>,
 }
 
 impl WriteData {
-    pub fn new(modifies: Vec<Modify>, extra: TxnExtra) -> Self {
+    pub fn new(
+        modifies: Vec<Modify>,
+        extra: TxnExtra,
+        backup_ts_checked: Option<TrackedBackupTs>,
+    ) -> Self {
         Self {
             modifies,
             extra,
             deadline: None,
             disk_full_opt: DiskFullOpt::NotAllowedOnFull,
             txn_file: None,
+            backup_ts_checked,
         }
     }
 
     pub fn from_modifies(modifies: Vec<Modify>) -> Self {
-        Self::new(modifies, TxnExtra::default())
+        Self::new(modifies, TxnExtra::default(), None)
     }
 
     pub fn size(&self) -> usize {
