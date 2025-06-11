@@ -108,7 +108,10 @@ mod tests {
 
     #[test]
     fn test_worker_limiter_concurrency() {
-        let config = WorkerLimiterConfig::default();
+        let config = WorkerLimiterConfig {
+            global_concurrency_factor: 6.0,
+            keyspace_concurrency_factor: 2.0,
+        };
         let worker_limiter = WorkerLimiter::new(config);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
