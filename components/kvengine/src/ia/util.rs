@@ -487,6 +487,7 @@ pub struct IaConfig {
 
     pub disable_sync_read: bool,
     pub sync_read_timeout: ReadableDuration,
+    pub force_ia: bool,
 }
 
 impl Default for IaConfig {
@@ -504,6 +505,7 @@ impl Default for IaConfig {
             cache_cap_to_total_data_size_ratio: IA_CACHE_CAP_TO_TOTAL_DATA_SIZE_RATIO_DEF,
             disable_sync_read: false,
             sync_read_timeout: ReadableDuration(SYNC_READ_TIMEOUT),
+            force_ia: false,
         }
     }
 }

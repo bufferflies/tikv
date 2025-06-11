@@ -18,7 +18,9 @@ use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::MasterKey;
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
-use kvengine::{dfs::S3Fs, limiter::StoreLimiter, MetaIterator, Shard, ShardMeta, TERM_KEY};
+use kvengine::{
+    dfs::S3Fs, ia::util::IaConfig, limiter::StoreLimiter, MetaIterator, Shard, ShardMeta, TERM_KEY,
+};
 use kvenginepb::ChangeSet;
 use kvproto::{
     metapb,
@@ -50,7 +52,7 @@ use security::SecurityConfig;
 use serde_derive::{Deserialize, Serialize};
 use tikv::config::TikvConfig;
 use tikv_util::{
-    config::{ReadableDuration, ReadableSize},
+    config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     info, mpsc, warn,
 };
 
@@ -76,6 +78,7 @@ pub struct MergedEngineConfig {
     pub timeout_fetch_wal: ReadableDuration,
     pub merged_store_id: u64,
     pub mem_table_size: ReadableSize,
+    pub force_ia: bool,
 }
 
 impl Default for MergedEngineConfig {
@@ -85,6 +88,7 @@ impl Default for MergedEngineConfig {
             timeout_fetch_wal: ReadableDuration::secs(30),
             merged_store_id: 1024,
             mem_table_size: ReadableSize::mb(128),
+            force_ia: true,
         }
     }
 }
@@ -509,6 +513,15 @@ impl MergedEngine {
         kv_opts.max_mem_table_size = ctx.config.mem_table_size.0;
         kv_opts.max_block_cache_size = ctx.config.block_cache_size.0 as i64;
         kv_opts.for_restore = true;
+        if ctx.config.force_ia {
+            kv_opts.ia = IaConfig {
+                mem_cap: AbsoluteOrPercentSize::Percent(10.0),
+                disk_cap: AbsoluteOrPercentSize::Percent(60.0),
+                dynamic_capacity: false,
+                force_ia: true,
+                ..Default::default()
+            };
+        }
         let kv_conf = kvengine::KvEngineConfig::default();
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));

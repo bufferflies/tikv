@@ -19,6 +19,7 @@ use futures::{future, SinkExt, TryFutureExt, TryStreamExt};
 use grpcio::{DuplexSink, RequestStream, RpcContext, RpcStatus, RpcStatusCode, UnarySink};
 use kvengine::{Shard, WRITE_CF};
 use kvproto::{
+    cdcpb,
     cdcpb::{ChangeDataEvent, ChangeDataRequest},
     cdcpb_grpc::ChangeData,
     errorpb::EpochNotMatch,
@@ -35,6 +36,7 @@ use resolved_ts::Resolver;
 pub use scheduler::*;
 use serde_derive::{Deserialize, Serialize};
 use tikv_util::{error, info, warn};
+use txn_types::TimeStamp;
 pub use worker::ReplicationWorker;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -124,6 +126,13 @@ pub enum CdcMsg {
     Register {
         request: ChangeDataRequest,
         conn_id: ConnId,
+    },
+    RegisterResult {
+        keyspace_id: u32,
+        event: cdcpb::Event,
+        tracked_locks: Vec<(Vec<u8>, TimeStamp)>,
+        conn_id: ConnId,
+        initialized: bool,
     },
     Applied {
         region_id: u64,
@@ -259,10 +268,13 @@ impl ChangeData for ReplicationService {
 }
 
 impl Tikv for ReplicationService {
-    fn kv_scan(&mut self, _ctx: RpcContext<'_>, req: ScanRequest, sink: UnarySink<ScanResponse>) {
+    fn kv_scan(&mut self, ctx: RpcContext<'_>, req: ScanRequest, sink: UnarySink<ScanResponse>) {
         if req.reverse {
             let status = RpcStatus::new(RpcStatusCode::INVALID_ARGUMENT);
-            sink.fail(status);
+            ctx.spawn(
+                sink.fail(status.clone())
+                    .unwrap_or_else(|e| error!("kv_scan failed"; "error" => ?e)),
+            );
             return;
         }
         let mut resp = ScanResponse::default();
@@ -274,7 +286,10 @@ impl Tikv for ReplicationService {
             let epoch_not_match = EpochNotMatch::default();
             region_err.set_epoch_not_match(epoch_not_match);
             resp.set_region_error(region_err);
-            sink.success(resp);
+            ctx.spawn(
+                sink.success(resp)
+                    .unwrap_or_else(|e| error!("kv_scan failed"; "error" => ?e)),
+            );
             return;
         }
         let shard = res.unwrap();
@@ -284,33 +299,42 @@ impl Tikv for ReplicationService {
             .unwrap_or_else(|| shard.outer_end.clone());
         let read_ts = Some(req.get_version());
         let snap_access = shard.new_snap_access();
-        // TODO: handle locks.
-        let mut iter = snap_access.new_iterator(WRITE_CF, false, false, read_ts, false);
-        iter.set_range(outer_start_key, outer_end_key);
-        let mut kv_pairs = vec![];
-        let keyspace_prefix_len = ApiV2::get_keyspace_prefix_by_id(shard.keyspace_id).len();
-        while iter.valid() {
-            if kv_pairs.len() == req.get_limit() as usize {
-                break;
+        let task = async move {
+            // TODO: handle locks.
+            let mut iter = snap_access
+                .new_iterator_async(WRITE_CF, false, false, read_ts, false)
+                .await;
+            iter.set_range_async(outer_start_key, outer_end_key).await;
+            let mut kv_pairs = vec![];
+            let keyspace_prefix_len = ApiV2::get_keyspace_prefix_by_id(shard.keyspace_id).len();
+            while iter.valid() {
+                if kv_pairs.len() == req.get_limit() as usize {
+                    break;
+                }
+                let mut kv_pair = kvproto::kvrpcpb::KvPair::default();
+                let key = iter.key();
+                // trim keyspace prefix.
+                kv_pair.set_key(key[keyspace_prefix_len..].to_vec());
+                let val = iter.val();
+                if val.is_empty() {
+                    iter.next_async().await;
+                    continue;
+                }
+                kv_pair.set_value(val.to_vec());
+                kv_pairs.push(kv_pair);
+                iter.next_async().await;
             }
-            let mut kv_pair = kvproto::kvrpcpb::KvPair::default();
-            let key = iter.key();
-            // trim keyspace prefix.
-            kv_pair.set_key(key[keyspace_prefix_len..].to_vec());
-            let val = iter.val();
-            if val.is_empty() {
-                iter.next();
-                continue;
-            }
-            kv_pair.set_value(val.to_vec());
-            kv_pairs.push(kv_pair);
-            iter.next();
-        }
-        resp.set_pairs(kv_pairs.into());
-        sink.success(resp);
+            resp.set_pairs(kv_pairs.into());
+            sink.success(resp)
+                .unwrap_or_else(|e| {
+                    error!("kv_scan failed"; "error" => ?e);
+                })
+                .await
+        };
+        ctx.spawn(task);
     }
 
-    fn kv_get(&mut self, _ctx: RpcContext<'_>, req: GetRequest, sink: UnarySink<GetResponse>) {
+    fn kv_get(&mut self, ctx: RpcContext<'_>, req: GetRequest, sink: UnarySink<GetResponse>) {
         let mut resp = GetResponse::default();
         let region_id = req.get_context().get_region_id();
         let region_version = req.get_context().get_region_epoch().get_version();
@@ -320,31 +344,45 @@ impl Tikv for ReplicationService {
             let epoch_not_match = EpochNotMatch::default();
             region_err.set_epoch_not_match(epoch_not_match);
             resp.set_region_error(region_err);
-            sink.success(resp);
+            ctx.spawn(
+                sink.success(resp)
+                    .unwrap_or_else(|e| error!("kv_get failed"; "error" => ?e)),
+            );
             return;
         }
         let shard = res.unwrap();
         let snap_access = shard.new_snap_access();
         let key = Self::prepend_keyspace_prefix(&shard, req.get_key()).unwrap();
-        // TODO: handle locks.
-        let item = snap_access.get(WRITE_CF, &key, req.get_version());
-        if !item.get_value().is_empty() {
-            resp.set_value(item.get_value().to_vec());
-        } else {
-            resp.set_not_found(true);
-        }
-        sink.success(resp);
+        let task = async move {
+            // TODO: handle locks.
+            let item = snap_access
+                .get_async(WRITE_CF, &key, req.get_version())
+                .await;
+            if !item.get_value().is_empty() {
+                resp.set_value(item.get_value().to_vec());
+            } else {
+                resp.set_not_found(true);
+            }
+            sink.success(resp)
+                .unwrap_or_else(|e| {
+                    error!("kv_get failed"; "error" => ?e);
+                })
+                .await
+        };
+        ctx.spawn(task);
     }
 
     fn kv_scan_lock(
         &mut self,
-        _ctx: RpcContext<'_>,
+        ctx: RpcContext<'_>,
         req: ScanLockRequest,
         sink: UnarySink<ScanLockResponse>,
     ) {
         // TODO: forward resolve lock request to upstream.
         warn!("received scan lock from CDC {:?}", req);
-        let scan_lock_resp = ScanLockResponse::new();
-        sink.success(scan_lock_resp);
+        let resp = ScanLockResponse::new();
+        ctx.spawn(sink.success(resp).unwrap_or_else(|e| {
+            error!("kv_scan_lock failed"; "error" => ?e);
+        }));
     }
 }

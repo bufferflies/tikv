@@ -82,6 +82,7 @@ fn test_merged_engine_once() {
             block_cache_size: ReadableSize::mb(1),
             timeout_fetch_wal: ReadableDuration::secs(10),
             merged_store_id: 1024,
+            force_ia: false,
             mem_table_size: cluster
                 .get_node_config(node_ids[0])
                 .rocksdb

@@ -1373,7 +1373,7 @@ impl Shard {
     }
 
     pub fn use_ia(&self) -> bool {
-        self.get_storage_class() == StorageClass::Ia
+        self.get_storage_class() == StorageClass::Ia || self.opt.ia.force_ia
     }
 
     pub fn get_storage_class(&self) -> StorageClass {

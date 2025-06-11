@@ -253,7 +253,8 @@ fn test_apply_observer() {
     let mut apply_ctx = ApplyContext::new(kvengine.clone(), None);
 
     let (tx, rx) = tikv_util::mpsc::unbounded();
-    let observer = CdcApplyObserver::new(kvengine.clone(), tx.clone());
+    let runtime = cluster.get_dfs().unwrap().get_runtime().handle().clone();
+    let observer = CdcApplyObserver::new(kvengine.clone(), tx.clone(), runtime);
     apply_ctx.set_apply_observer(Box::new(observer));
     recoverer
         .recover_with_apply_ctx(&mut apply_ctx, &shard, &shard_meta)

@@ -21,7 +21,7 @@ use hyper::{http, StatusCode, Uri};
 use kvengine::{
     dfs::{Dfs, S3Fs},
     table::InnerKey,
-    UserMeta, GLOBAL_SHARD_END_KEY, LOCK_CF, WRITE_CF,
+    SnapAccess, UserMeta, GLOBAL_SHARD_END_KEY, LOCK_CF, WRITE_CF,
 };
 use kvproto::{
     cdcpb,
@@ -42,12 +42,13 @@ use rfengine::{RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig, SecurityManager};
 use tikv_util::{
-    codec, codec::bytes::decode_bytes, error, info, mpsc::Sender, thd_name, time::Instant, warn,
+    codec, codec::bytes::decode_bytes, debug, error, info, mpsc::Sender, thd_name, time::Instant,
+    warn,
 };
 use txn_types::{LockType, TimeStamp};
 
 use crate::{
-    apply_observer::{CdcApplyObserver, RegionEvents},
+    apply_observer::{is_index_key, CdcApplyObserver, RegionEvents},
     provisioned::KeyspaceProvisionedService,
     scheduler::ChangefeedRequest,
     CdcMsg, Error, KeyspaceService, KeyspaceStates, ReplicationScheduler, ReplicationService,
@@ -66,6 +67,8 @@ struct RequestInfo {
     start_key: Vec<u8>,
     end_key: Vec<u8>,
     resolved_ts: TimeStamp,
+    initialized: bool,
+    pending_events: Vec<Event>,
 }
 
 impl RequestInfo {
@@ -91,6 +94,8 @@ impl RegionRequests {
             start_key,
             end_key,
             resolved_ts: TimeStamp::zero(),
+            initialized: false,
+            pending_events: vec![],
         };
         self.requests.insert(request_id, request_info);
     }
@@ -102,6 +107,7 @@ pub struct ReplicationWorker {
     config: ReplicationWorkerConfig,
     merged_engine: MergedEngine,
     grpc_server: Option<grpcio::Server>,
+    runtime: tokio::runtime::Runtime,
 
     keyspaces: HashMap<u32, Box<dyn KeyspaceService>>,
     cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
@@ -168,17 +174,22 @@ impl ReplicationWorker {
             cdc_addrs.insert(keyspace_id, cdc_addr);
             keyspace_services.insert(keyspace_id, task_service);
         }
-
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut apply_ctx =
             ApplyContext::new(merged_engine.get_kv(), Some(merged_engine.get_router()));
         let (tx, rx) = tikv_util::mpsc::unbounded();
-        let apply_observer = CdcApplyObserver::new(merged_engine.get_kv(), tx.clone());
+        let apply_observer =
+            CdcApplyObserver::new(merged_engine.get_kv(), tx.clone(), runtime.handle().clone());
         apply_ctx.set_apply_observer(Box::new(apply_observer));
         let mut worker = Self {
             config,
             ctx,
             http_client: Arc::new(http_client),
             merged_engine,
+            runtime,
             grpc_server: None,
             keyspaces: keyspace_services,
             cdc_addrs,
@@ -302,6 +313,22 @@ impl ReplicationWorker {
                 let res = self.handle_register(request, conn_id);
                 self.handle_result(res, "register");
             }
+            CdcMsg::RegisterResult {
+                keyspace_id,
+                event,
+                tracked_locks,
+                conn_id,
+                initialized,
+            } => {
+                let res = self.handle_register_result(
+                    keyspace_id,
+                    event,
+                    tracked_locks,
+                    conn_id,
+                    initialized,
+                );
+                self.handle_result(res, "register_result");
+            }
             CdcMsg::Deregister(conn_id) => {
                 self.handle_deregister(conn_id);
             }
@@ -405,7 +432,6 @@ impl ReplicationWorker {
 
     fn handle_register(&mut self, request: ChangeDataRequest, conn_id: ConnId) -> Result<()> {
         let region_id = request.region_id;
-        let request_id = request.get_request_id();
         let keyspace_id = self.get_keyspace_id(region_id);
         let conn = self.conns.get(&conn_id).unwrap();
         let shard_opt = self.merged_engine.get_kv().get_shard(request.region_id);
@@ -431,111 +457,56 @@ impl ReplicationWorker {
             .entry(conn_id)
             .or_default()
             .insert(region_id);
-        let mut event_rows = vec![];
         let snap_access = shard.new_snap_access();
-        let keyspace_prefix_len = keyspace_prefix_len(keyspace_id);
-        let task_ctx = self.keyspaces.get_mut(&keyspace_id).unwrap();
-        let resolver = task_ctx.get_resolver();
-        let mut entries_bytes = 0;
-        let do_send_rows = |event_rows: &mut Vec<EventRow>| -> cdc::Result<()> {
-            let mut new_event = Event::new();
-            new_event.set_region_id(region_id);
-            new_event.set_request_id(request_id);
-            new_event
-                .mut_entries()
-                .set_entries(mem::take(event_rows).into());
-            info!("send event {:?}", new_event);
-            conn.get_sink()
-                .unbounded_send(CdcEvent::Event(new_event), false)?;
-            Ok(())
+        let mut register_handler =
+            RegisterHandler::new(conn_id, &request, snap_access, self.tx.clone());
+        self.runtime
+            .spawn(async move { register_handler.handle_register().await });
+        Ok(())
+    }
+
+    fn handle_register_result(
+        &mut self,
+        keyspace_id: u32,
+        event: Event,
+        tracked_locks: Vec<(Vec<u8>, TimeStamp)>,
+        conn_id: ConnId,
+        initialized: bool,
+    ) -> Result<()> {
+        let region_id = event.get_region_id();
+        let Some(region_requests) = self.region_requests.get_mut(&region_id) else {
+            warn!("handle_register_result: region request not found"; "region_id" => region_id);
+            return Ok(());
         };
-        let (start_key, end_key) = build_request_range_for_keyspace(keyspace_id, &request);
-        // scan locks for resolver to track.
-        let mut lock_iter = snap_access.new_iterator(LOCK_CF, false, false, None, false);
-        lock_iter.set_range(start_key.clone().into(), end_key.clone().into());
-        while lock_iter.valid() {
-            let mut event_row = EventRow::new();
-            let lock_key = lock_iter.key();
-            event_row.set_key(lock_key[keyspace_prefix_len..].to_vec());
-            let lock_val = lock_iter.val();
-            let mut lock = txn_types::Lock::parse(lock_val).unwrap();
-            match lock.lock_type {
-                LockType::Put => {
-                    event_row.set_op_type(EventRowOpType::Put);
-                }
-                LockType::Delete => event_row.set_op_type(EventRowOpType::Delete),
-                _ => {
-                    lock_iter.next();
-                    continue;
-                }
-            }
-            event_row.set_start_ts(lock.ts.into_inner());
-            resolver.track_lock(lock.ts, event_row.get_key().to_vec(), None);
-            let val = lock.short_value.take().unwrap_or_default();
-            event_row.set_value(val);
-            event_row.set_type(EventLogType::Prewrite);
-            entries_bytes += event_row.get_key().len() + event_row.get_value().len();
-            event_rows.push(event_row);
-            if entries_bytes > MAX_INITIALIZE_SCAN_BATCH_BYTES {
-                do_send_rows(&mut event_rows)?;
-                entries_bytes = 0;
-            }
-            lock_iter.next();
+        let Some(request_info) = region_requests.requests.get_mut(&event.get_request_id()) else {
+            warn!("handle_register_result: request not found"; "region_id" => region_id, "request_id" => event.get_request_id());
+            return Ok(());
+        };
+        request_info.initialized = initialized;
+        let Some(task_ctx) = self.keyspaces.get_mut(&keyspace_id) else {
+            warn!("handle_register_result: keyspace not found"; "keyspace_id" => keyspace_id);
+            return Ok(());
+        };
+        let resolver = task_ctx.get_resolver();
+        for (lock_key, lock_ts) in tracked_locks {
+            resolver.track_lock(lock_ts, lock_key, None);
         }
-        let checkpoint_ts = request.get_checkpoint_ts();
-        info!(
-            "{}:{} incremental scan checkpoint ts {} max_ts {}",
-            region_id,
-            request_id,
-            checkpoint_ts,
-            shard.get_max_ts()
-        );
-        // scan incremental write after checkpoint ts;
-        let mut write_iter = snap_access.new_delta_write_iterator(checkpoint_ts);
-        write_iter.seek(InnerKey::from_outer_key(&start_key));
-        let inner_end_key = InnerKey::from_outer_end_key(&end_key);
-        while write_iter.valid() {
-            let key = write_iter.key();
-            if key >= inner_end_key {
-                info!("delta break on {:?}", inner_end_key);
-                break;
+        let Some(conn) = self.conns.get(&conn_id) else {
+            warn!("handle_register_result: conn not found"; "conn_id" => ?conn_id);
+            return Ok(());
+        };
+        debug!("send event {:?}", event);
+        let sink = conn.get_sink();
+        sink.unbounded_send(CdcEvent::Event(event), false)
+            .map_err(|e| cdc::Error::from(e))?;
+        if request_info.initialized {
+            let pending_events = mem::take(&mut request_info.pending_events);
+            for pending_event in pending_events {
+                debug!("send pending event {:?}", pending_event);
+                sink.unbounded_send(CdcEvent::Event(pending_event), false)
+                    .map_err(|e| cdc::Error::from(e))?;
             }
-            let val = write_iter.value();
-            if val.is_deleted() || val.version < request.get_checkpoint_ts() {
-                write_iter.next();
-                continue;
-            }
-            let um = UserMeta::from_slice(val.user_meta());
-            let mut event_row = EventRow::new();
-            event_row.set_start_ts(um.start_ts);
-            event_row.set_commit_ts(um.commit_ts);
-            event_row.set_key(key.deref().to_vec());
-            if val.get_value().is_empty() {
-                event_row.set_op_type(EventRowOpType::Delete);
-            } else {
-                event_row.set_op_type(EventRowOpType::Put);
-            }
-            event_row.set_value(val.get_value().to_vec());
-            let mut outer_key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
-            outer_key.extend_from_slice(key.deref());
-            let old_value = snap_access.get(WRITE_CF, &outer_key, um.commit_ts - 1);
-            if !old_value.get_value().is_empty() {
-                event_row.set_old_value(old_value.get_value().to_vec());
-            }
-            event_row.set_type(EventLogType::Committed);
-            entries_bytes += event_row.get_key().len() + event_row.get_value().len();
-            info!("delta add event row {:?}", event_row);
-            event_rows.push(event_row);
-            if entries_bytes > MAX_INITIALIZE_SCAN_BATCH_BYTES {
-                do_send_rows(&mut event_rows)?;
-                entries_bytes = 0;
-            }
-            write_iter.next_all_version();
         }
-        let mut init_row = EventRow::new();
-        init_row.set_type(EventLogType::Initialized);
-        event_rows.push(init_row);
-        do_send_rows(&mut event_rows)?;
         Ok(())
     }
 
@@ -590,7 +561,7 @@ impl ReplicationWorker {
             if let Some(task_ctx) = self.keyspaces.get_mut(&region_request.keyspace_id) {
                 let ts = task_ctx.get_resolver().resolved_ts();
                 for (&request_id, req_info) in &mut region_request.requests {
-                    if req_info.resolved_ts != ts {
+                    if req_info.resolved_ts != ts && req_info.initialized {
                         let mut resolved_ts = ResolvedTs::default();
                         resolved_ts.set_regions(vec![region_id]);
                         resolved_ts.set_request_id(request_id);
@@ -868,9 +839,13 @@ impl ReplicationWorker {
                             }
                         }
                     }
-                    conn.get_sink()
-                        .unbounded_send(CdcEvent::Event(event_to_send), false)
-                        .map_err(|e| cdc::Error::from(e))?;
+                    if req_info.initialized {
+                        conn.get_sink()
+                            .unbounded_send(CdcEvent::Event(event_to_send), false)
+                            .map_err(|e| cdc::Error::from(e))?;
+                    } else {
+                        req_info.pending_events.push(event_to_send);
+                    }
                 }
             }
             let task_ctx = self
@@ -937,6 +912,174 @@ impl ReplicationWorker {
             }
         }
         Ok(())
+    }
+}
+
+struct RegisterHandler {
+    conn_id: ConnId,
+    request_id: u64,
+    snap_access: SnapAccess,
+    sender: Sender<CdcMsg>,
+    start_key: Bytes,
+    end_key: Bytes,
+    checkpoint_ts: u64,
+    event_rows: Vec<EventRow>,
+    tracked_locks: Vec<(Vec<u8>, TimeStamp)>,
+    initialized: bool,
+}
+
+impl RegisterHandler {
+    fn new(
+        conn_id: ConnId,
+        request: &ChangeDataRequest,
+        snap_access: SnapAccess,
+        sender: Sender<CdcMsg>,
+    ) -> Self {
+        let keyspace_id = snap_access.get_keyspace_id();
+        let request_id = request.get_request_id();
+        let (start_key, end_key) = build_request_range_for_keyspace(keyspace_id, request);
+        let checkpoint_ts = request.get_checkpoint_ts();
+        Self {
+            conn_id,
+            request_id,
+            snap_access,
+            sender,
+            start_key: start_key.into(),
+            end_key: end_key.into(),
+            checkpoint_ts,
+            event_rows: vec![],
+            tracked_locks: vec![],
+            initialized: false,
+        }
+    }
+
+    async fn handle_register(&mut self) {
+        info!(
+            "cdc register {:?}, conn_id {:?}",
+            self.request_id, self.conn_id
+        );
+        let mut entries_bytes = 0;
+        let keyspace_id = self.snap_access.get_keyspace_id();
+        let mut tracked_locks = vec![];
+        // scan locks for resolver to track.
+        let mut lock_iter = self
+            .snap_access
+            .new_iterator(LOCK_CF, false, false, None, false);
+        lock_iter.set_range(self.start_key.clone(), self.end_key.clone());
+        while lock_iter.valid() {
+            let mut event_row = EventRow::new();
+            let lock_key = lock_iter.key();
+            event_row.set_key(lock_key[keyspace_prefix_len(keyspace_id)..].to_vec());
+            if is_index_key(event_row.get_key()) {
+                lock_iter.next();
+                continue;
+            }
+            let lock_val = lock_iter.val();
+            let mut lock = txn_types::Lock::parse(lock_val).unwrap();
+            match lock.lock_type {
+                LockType::Put => {
+                    event_row.set_op_type(EventRowOpType::Put);
+                }
+                LockType::Delete => event_row.set_op_type(EventRowOpType::Delete),
+                _ => {
+                    lock_iter.next();
+                    continue;
+                }
+            }
+            event_row.set_start_ts(lock.ts.into_inner());
+            tracked_locks.push((event_row.get_key().to_vec(), lock.ts));
+            self.tracked_locks
+                .push((event_row.get_key().to_vec(), lock.ts));
+            let val = lock.short_value.take().unwrap_or_default();
+            event_row.set_value(val);
+            event_row.set_type(EventLogType::Prewrite);
+            entries_bytes += event_row.get_key().len() + event_row.get_value().len();
+            self.event_rows.push(event_row);
+            if entries_bytes > MAX_INITIALIZE_SCAN_BATCH_BYTES {
+                self.send_rows();
+                entries_bytes = 0;
+            }
+            lock_iter.next();
+        }
+        let region_id = self.snap_access.get_id();
+        info!(
+            "{}:{} incremental scan checkpoint ts {}",
+            region_id, self.request_id, self.checkpoint_ts,
+        );
+        // scan incremental write after checkpoint ts;
+        let mut write_iter = self
+            .snap_access
+            .new_delta_write_iterator_async(self.checkpoint_ts)
+            .await;
+        write_iter
+            .seek_async(InnerKey::from_outer_key(&self.start_key))
+            .await;
+        let end_key = self.end_key.clone();
+        let inner_end_key = InnerKey::from_outer_end_key(&end_key);
+        while write_iter.valid() {
+            let key = write_iter.key();
+            if key >= inner_end_key {
+                break;
+            }
+            let val = write_iter.value();
+            if is_index_key(key.deref()) || val.is_deleted() || val.version < self.checkpoint_ts {
+                write_iter.next_async().await;
+                continue;
+            }
+            let um = UserMeta::from_slice(val.user_meta());
+            let mut event_row = EventRow::new();
+            event_row.set_start_ts(um.start_ts);
+            event_row.set_commit_ts(um.commit_ts);
+            event_row.set_key(key.deref().to_vec());
+            if val.get_value().is_empty() {
+                event_row.set_op_type(EventRowOpType::Delete);
+            } else {
+                event_row.set_op_type(EventRowOpType::Put);
+            }
+            event_row.set_value(val.get_value().to_vec());
+            let mut outer_key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
+            outer_key.extend_from_slice(key.deref());
+            let old_value = self
+                .snap_access
+                .get_async(WRITE_CF, &outer_key, um.commit_ts - 1)
+                .await;
+            if !old_value.get_value().is_empty() {
+                event_row.set_old_value(old_value.get_value().to_vec());
+            }
+            event_row.set_type(EventLogType::Committed);
+            entries_bytes += event_row.get_key().len() + event_row.get_value().len();
+            debug!("delta add event row {:?}", event_row);
+            self.event_rows.push(event_row);
+            if entries_bytes > MAX_INITIALIZE_SCAN_BATCH_BYTES {
+                self.send_rows();
+                entries_bytes = 0;
+            }
+            write_iter.next_all_version_async().await;
+        }
+        let mut init_row = EventRow::new();
+        init_row.set_type(EventLogType::Initialized);
+        self.event_rows.push(init_row);
+        self.initialized = true;
+        self.send_rows();
+    }
+
+    fn send_rows(&mut self) {
+        let keyspace_id = self.snap_access.get_keyspace_id();
+        let event_rows = mem::take(&mut self.event_rows);
+        let tracked_locks = mem::take(&mut self.tracked_locks);
+        let mut new_event = Event::new();
+        new_event.set_region_id(self.snap_access.get_id());
+        new_event.set_request_id(self.request_id);
+        new_event.mut_entries().set_entries(event_rows.into());
+
+        debug!("send event {:?}", new_event);
+        let _ = self.sender.send(CdcMsg::RegisterResult {
+            keyspace_id,
+            event: new_event,
+            tracked_locks,
+            conn_id: self.conn_id,
+            initialized: self.initialized,
+        });
     }
 }
 
