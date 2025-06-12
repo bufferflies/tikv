@@ -854,16 +854,21 @@ impl EngineCore {
         if !shard.is_active() {
             return;
         }
+        let shard_use_ia = shard.use_ia();
         for (id, _cover) in del_files {
-            self.set_local_file_mtime(id);
+            self.set_local_file_mtime(id, shard_use_ia);
         }
     }
 
     // On remove local file, we need to retain the file for a while as SnapAccess
     // hold the file may reopen it, update the mtime so local file gc worker
     // will delay the remove.
-    fn set_local_file_mtime(&self, file_id: u64) {
+    fn set_local_file_mtime(&self, file_id: u64, shard_use_ia: bool) {
         let path = self.local_sst_file_path(file_id);
+        if !path.exists() && shard_use_ia {
+            // Ia file may not exists.
+            return;
+        }
         if let Err(err) = filetime::set_file_mtime(path, filetime::FileTime::now()) {
             error!("failed to set local file mtime {} {:?}", file_id, err);
         }

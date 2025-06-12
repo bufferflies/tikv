@@ -79,7 +79,7 @@ impl EngineCore {
                 for bt in comp.get_blob_tables() {
                     ids.insert(bt.get_id(), FileMeta::from_blob_table(bt));
                 }
-            } else if comp.level == 0 && shard_use_ia {
+            } else if comp.level == 0 && (shard_use_ia || self.opts.ia.force_ia) {
                 for tbl in &comp.table_creates {
                     ids.insert(tbl.id, FileMeta::from_table(tbl));
                 }
