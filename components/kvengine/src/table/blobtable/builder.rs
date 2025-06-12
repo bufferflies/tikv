@@ -19,8 +19,8 @@ pub type Checksum = u32;
 pub const BLOB_FORMAT_V1: u16 = 1;
 pub const BLOB_MAGIC_NUMBER: u32 = 0xdeadbeef;
 pub const CRC32C: u8 = 1;
-pub const PROP_KEY_BIGGEST: &str = "biggest_key";
-pub const PROP_KEY_SMALLEST: &str = "smallest_key";
+pub const PROP_KEY_BIGGEST: &[u8] = b"biggest_key";
+pub const PROP_KEY_SMALLEST: &[u8] = b"smallest_key";
 
 // Blob file format:
 //
@@ -305,12 +305,12 @@ impl BlobTableBuilder {
         let mut buf = BytesMut::from(&self.buf[..]);
 
         let properties_offset = buf.len();
-        BlobTableBuilder::add_property(&mut buf, PROP_KEY_SMALLEST.as_bytes(), &self.smallest_key);
-        BlobTableBuilder::add_property(&mut buf, PROP_KEY_BIGGEST.as_bytes(), &self.biggest_key);
+        BlobTableBuilder::add_property(&mut buf, PROP_KEY_SMALLEST, &self.smallest_key);
+        BlobTableBuilder::add_property(&mut buf, PROP_KEY_BIGGEST, &self.biggest_key);
         if let Some(encryption_key) = &self.encryption_key {
             BlobTableBuilder::add_property(
                 &mut buf,
-                PROP_KEY_ENCRYPTION_VER.as_bytes(),
+                PROP_KEY_ENCRYPTION_VER,
                 &encryption_key.current_ver.to_le_bytes(),
             )
         }

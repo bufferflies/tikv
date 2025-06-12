@@ -25,10 +25,10 @@ pub const PACK_FORMAT: u16 = 1;
 pub const ENCODING_TYPE_NONE: u16 = 0;
 pub const MAX_COLUMNAR_LEVEL: usize = 2;
 
-pub const PROP_KEY_SMALLEST: &str = "smallest";
-pub const PROP_KEY_BIGGEST: &str = "biggest";
-pub const PROP_KEY_MAX_VERSION: &str = "max_ver";
-pub const PROP_KEY_SNAP_VERSION: &str = "snap_ver";
+pub const PROP_KEY_SMALLEST: &[u8] = b"smallest";
+pub const PROP_KEY_BIGGEST: &[u8] = b"biggest";
+pub const PROP_KEY_MAX_VERSION: &[u8] = b"max_ver";
+pub const PROP_KEY_SNAP_VERSION: &[u8] = b"snap_ver";
 
 pub fn new_version_column_info() -> ColumnInfo {
     let mut col_info = ColumnInfo::new();
@@ -189,32 +189,24 @@ impl ColumnarFileBuilder {
         let (smallest, biggest) = self.build_smallest_biggest();
         self.smallest = smallest;
         self.biggest = biggest;
+        add_property(&mut property_buf, PROP_KEY_SMALLEST, &self.smallest);
+        add_property(&mut property_buf, PROP_KEY_BIGGEST, &self.biggest);
         add_property(
             &mut property_buf,
-            PROP_KEY_SMALLEST.as_bytes(),
-            &self.smallest,
-        );
-        add_property(
-            &mut property_buf,
-            PROP_KEY_BIGGEST.as_bytes(),
-            &self.biggest,
-        );
-        add_property(
-            &mut property_buf,
-            PROP_KEY_MAX_VERSION.as_bytes(),
+            PROP_KEY_MAX_VERSION,
             &max_version.to_le_bytes(),
         );
         if let Some(snap_version) = self.snap_version {
             add_property(
                 &mut property_buf,
-                PROP_KEY_SNAP_VERSION.as_bytes(),
+                PROP_KEY_SNAP_VERSION,
                 &snap_version.to_le_bytes(),
             );
         }
         if let Some(encryption_key) = &self.encryption_key {
             add_property(
                 &mut property_buf,
-                PROP_KEY_ENCRYPTION_VER.as_bytes(),
+                PROP_KEY_ENCRYPTION_VER,
                 &encryption_key.current_ver.to_le_bytes(),
             );
         }
@@ -394,7 +386,7 @@ impl ColumnarTableBuilder {
         }
         add_property(
             &mut self.properties,
-            PROP_KEY_MAX_VERSION.as_bytes(),
+            PROP_KEY_MAX_VERSION,
             &self.max_version.to_le_bytes(),
         );
     }

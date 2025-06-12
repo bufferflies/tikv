@@ -341,25 +341,25 @@ impl SsTableCore {
         while !prop_slice.is_empty() {
             let (key, val, remain) = parse_prop_data(prop_slice);
             prop_slice = remain;
-            if key == PROP_KEY_SMALLEST.as_bytes() {
+            if key == PROP_KEY_SMALLEST {
                 smallest_buf = Bytes::copy_from_slice(val);
-            } else if key == PROP_KEY_BIGGEST.as_bytes() {
+            } else if key == PROP_KEY_BIGGEST {
                 biggest_buf = Bytes::copy_from_slice(val);
-            } else if key == PROP_KEY_MAX_TS.as_bytes() {
+            } else if key == PROP_KEY_MAX_TS {
                 max_ts = LittleEndian::read_u64(val);
-            } else if key == PROP_KEY_ENTRIES.as_bytes() {
+            } else if key == PROP_KEY_ENTRIES {
                 entries = LittleEndian::read_u32(val);
-            } else if key == PROP_KEY_OLD_ENTRIES.as_bytes() {
+            } else if key == PROP_KEY_OLD_ENTRIES {
                 old_entries = LittleEndian::read_u32(val);
-            } else if key == PROP_KEY_TOMBS.as_bytes() {
+            } else if key == PROP_KEY_TOMBS {
                 tombs = LittleEndian::read_u32(val);
-            } else if key == PROP_KEY_KV_SIZE.as_bytes() {
+            } else if key == PROP_KEY_KV_SIZE {
                 kv_size = Some(LittleEndian::read_u64(val));
-            } else if key == PROP_KEY_IN_USE_TOTAL_BLOB_SIZE.as_bytes() {
+            } else if key == PROP_KEY_IN_USE_TOTAL_BLOB_SIZE {
                 in_use_total_blob_size = LittleEndian::read_u64(val);
-            } else if key == PROP_KEY_ENCRYPTION_VER.as_bytes() {
+            } else if key == PROP_KEY_ENCRYPTION_VER {
                 encryption_ver = LittleEndian::read_u32(val);
-            } else if key == PROP_KEY_L0_VERSION.as_bytes() {
+            } else if key == PROP_KEY_L0_VERSION {
                 l0_version = LittleEndian::read_u64(val);
             }
         }

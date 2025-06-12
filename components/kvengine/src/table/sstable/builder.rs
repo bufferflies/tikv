@@ -13,16 +13,16 @@ use crate::table::{
     blobtable::BlobRef, ChecksumType, InnerKey, BIT_HAS_OLD_VERSION, LZ4_COMPRESSION,
     NO_COMPRESSION, VALUE_VERSION_LEN, ZSTD_COMPRESSION,
 };
-pub const PROP_KEY_SMALLEST: &str = "smallest";
-pub const PROP_KEY_BIGGEST: &str = "biggest";
-pub const PROP_KEY_MAX_TS: &str = "max_ts";
-pub const PROP_KEY_ENTRIES: &str = "entries";
-pub const PROP_KEY_OLD_ENTRIES: &str = "old_entries";
-pub const PROP_KEY_TOMBS: &str = "tombs";
-pub const PROP_KEY_KV_SIZE: &str = "kv_size";
-pub const PROP_KEY_IN_USE_TOTAL_BLOB_SIZE: &str = "in_use_total_blob_size";
-pub const PROP_KEY_ENCRYPTION_VER: &str = "encryption_ver";
-pub const PROP_KEY_L0_VERSION: &str = "l0_ver";
+pub const PROP_KEY_SMALLEST: &[u8] = b"smallest";
+pub const PROP_KEY_BIGGEST: &[u8] = b"biggest";
+pub const PROP_KEY_MAX_TS: &[u8] = b"max_ts";
+pub const PROP_KEY_ENTRIES: &[u8] = b"entries";
+pub const PROP_KEY_OLD_ENTRIES: &[u8] = b"old_entries";
+pub const PROP_KEY_TOMBS: &[u8] = b"tombs";
+pub const PROP_KEY_KV_SIZE: &[u8] = b"kv_size";
+pub const PROP_KEY_IN_USE_TOTAL_BLOB_SIZE: &[u8] = b"in_use_total_blob_size";
+pub const PROP_KEY_ENCRYPTION_VER: &[u8] = b"encryption_ver";
+pub const PROP_KEY_L0_VERSION: &[u8] = b"l0_ver";
 pub const AUX_INDEX_BINARY_FUSE8: u32 = 1;
 pub const INDEX_FORMAT_V1: u32 = 1;
 pub const BLOCK_FORMAT_V1: u32 = 1;
@@ -336,40 +336,28 @@ impl Builder {
     fn build_properties(&self, buf: &mut Vec<u8>) {
         let origin_len = buf.len();
         buf.put_u32_le(0);
-        Builder::add_property(buf, PROP_KEY_SMALLEST.as_bytes(), self.smallest.as_slice());
-        Builder::add_property(buf, PROP_KEY_BIGGEST.as_bytes(), self.biggest.as_slice());
-        Builder::add_property(buf, PROP_KEY_MAX_TS.as_bytes(), &self.max_ts.to_le_bytes());
+        Builder::add_property(buf, PROP_KEY_SMALLEST, self.smallest.as_slice());
+        Builder::add_property(buf, PROP_KEY_BIGGEST, self.biggest.as_slice());
+        Builder::add_property(buf, PROP_KEY_MAX_TS, &self.max_ts.to_le_bytes());
         let entries = self.key_hashes.len() as u32;
-        Builder::add_property(buf, PROP_KEY_ENTRIES.as_bytes(), &entries.to_le_bytes());
+        Builder::add_property(buf, PROP_KEY_ENTRIES, &entries.to_le_bytes());
+        Builder::add_property(buf, PROP_KEY_OLD_ENTRIES, &self.old_entries.to_le_bytes());
+        Builder::add_property(buf, PROP_KEY_TOMBS, &self.tombs.to_le_bytes());
+        Builder::add_property(buf, PROP_KEY_KV_SIZE, &self.kv_size.to_le_bytes());
         Builder::add_property(
             buf,
-            PROP_KEY_OLD_ENTRIES.as_bytes(),
-            &self.old_entries.to_le_bytes(),
-        );
-        Builder::add_property(buf, PROP_KEY_TOMBS.as_bytes(), &self.tombs.to_le_bytes());
-        Builder::add_property(
-            buf,
-            PROP_KEY_KV_SIZE.as_bytes(),
-            &self.kv_size.to_le_bytes(),
-        );
-        Builder::add_property(
-            buf,
-            PROP_KEY_IN_USE_TOTAL_BLOB_SIZE.as_bytes(),
+            PROP_KEY_IN_USE_TOTAL_BLOB_SIZE,
             &self.total_blob_size.to_le_bytes(),
         );
         if let Some(encryption_key) = &self.encryption_key {
             Builder::add_property(
                 buf,
-                PROP_KEY_ENCRYPTION_VER.as_bytes(),
+                PROP_KEY_ENCRYPTION_VER,
                 &encryption_key.current_ver.to_le_bytes(),
             );
         }
         if self.l0_version > 0 {
-            Builder::add_property(
-                buf,
-                PROP_KEY_L0_VERSION.as_bytes(),
-                &self.l0_version.to_le_bytes(),
-            );
+            Builder::add_property(buf, PROP_KEY_L0_VERSION, &self.l0_version.to_le_bytes());
         }
         let checksum = self.checksum_type.checksum(&buf[(origin_len + 4)..]);
         LittleEndian::write_u32(&mut buf[origin_len..], checksum);
@@ -778,5 +766,10 @@ mod tests {
         es.append_value(val, None);
         // dbg!(es.buf);
         // dbg!(es.end_offs);
+    }
+
+    #[test]
+    fn test_property_key() {
+        assert_eq!("max_ts".as_bytes(), b"max_ts");
     }
 }

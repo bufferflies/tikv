@@ -42,11 +42,11 @@ impl BlobTable {
         while !prop_slice.is_empty() {
             let (key, val, remain) = parse_prop_data(prop_slice);
             prop_slice = remain;
-            if key == PROP_KEY_SMALLEST.as_bytes() {
+            if key == PROP_KEY_SMALLEST {
                 smallest_key = Bytes::copy_from_slice(val);
-            } else if key == PROP_KEY_BIGGEST.as_bytes() {
+            } else if key == PROP_KEY_BIGGEST {
                 biggest_key = Bytes::copy_from_slice(val);
-            } else if key == PROP_KEY_ENCRYPTION_VER.as_bytes() {
+            } else if key == PROP_KEY_ENCRYPTION_VER {
                 encryption_ver = LittleEndian::read_u32(val);
             }
         }
@@ -76,11 +76,11 @@ impl BlobTable {
         while !props_data.is_empty() {
             let (key, val, remain) = parse_prop_data(props_data);
             props_data = remain;
-            if key == PROP_KEY_SMALLEST.as_bytes() {
+            if key == PROP_KEY_SMALLEST {
                 smallest_key = Bytes::copy_from_slice(val);
-            } else if key == PROP_KEY_BIGGEST.as_bytes() {
+            } else if key == PROP_KEY_BIGGEST {
                 biggest_key = Bytes::copy_from_slice(val);
-            } else if key == PROP_KEY_ENCRYPTION_VER.as_bytes() {
+            } else if key == PROP_KEY_ENCRYPTION_VER {
                 encryption_ver = LittleEndian::read_u32(val);
             }
         }

@@ -896,15 +896,15 @@ impl ColumnarFile {
         let mut prop_remain = property_buf.as_ref();
         while !prop_remain.is_empty() {
             let (key, mut val, remain) = parse_prop_data(prop_remain);
-            if key == PROP_KEY_SMALLEST.as_bytes() {
+            if key == PROP_KEY_SMALLEST {
                 smallest_key = val.to_vec();
-            } else if key == PROP_KEY_BIGGEST.as_bytes() {
+            } else if key == PROP_KEY_BIGGEST {
                 biggest_key = val.to_vec();
-            } else if key == PROP_KEY_MAX_VERSION.as_bytes() {
+            } else if key == PROP_KEY_MAX_VERSION {
                 max_version = val.get_u64_le();
-            } else if key == PROP_KEY_SNAP_VERSION.as_bytes() {
+            } else if key == PROP_KEY_SNAP_VERSION {
                 l0_version = Some(val.get_u64_le());
-            } else if key == PROP_KEY_ENCRYPTION_VER.as_bytes() {
+            } else if key == PROP_KEY_ENCRYPTION_VER {
                 encryption_ver = val.get_u32_le();
             }
             prop_remain = remain;
