@@ -37,7 +37,7 @@ use crate::{
     config::PerKeyspaceConfig,
     context::{IaCtx, PrepareType},
     ia::manager::IaManager,
-    limiter::StoreLimiter,
+    limiter::{DfsLoadLimiter, StoreLimiter},
     meta::ShardMeta,
     table::{
         columnar::SchemaFile,
@@ -131,6 +131,7 @@ impl Engine {
         let ia_ctx = create_ia_ctx(opts.clone(), fs.clone());
         let (metas, files_in_blacklist) =
             tikv_util::init_task_local_sync(|| EngineCore::read_meta(meta_iter))?;
+        let dfs_load_limiter = DfsLoadLimiter::new(&config);
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
             shards: DashMap::new(),
@@ -170,6 +171,7 @@ impl Engine {
             txn_chunk_mgr,
             ia_ctx,
             schema_files: Arc::new(DashMap::new()),
+            dfs_load_limiter,
             available_space_bytes: AtomicU64::new(0),
             worker_handles: Default::default(),
         };
@@ -338,6 +340,7 @@ pub struct EngineCore {
     pub(crate) ia_ctx: IaCtx,
     pub(crate) files_in_blacklist: Arc<HashSet<u64>>,
     pub(crate) schema_files: Arc<DashMap<u64, SchemaFile>>,
+    pub(crate) dfs_load_limiter: DfsLoadLimiter,
     available_space_bytes: AtomicU64, // Set during store heartbeat.
     worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }

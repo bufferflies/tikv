@@ -8,8 +8,9 @@ use std::{
 
 use prometheus::IntGauge;
 use tikv_util::time::{Instant, Limiter};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::{metrics::ENGINE_THROTTLE_ACTION_COUNTER, ShardTag};
+use crate::{metrics::ENGINE_THROTTLE_ACTION_COUNTER, KvEngineConfig, ShardTag};
 
 /// All members are in bytes.
 #[derive(Clone, Default, Debug)]
@@ -232,6 +233,27 @@ impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
                 * (max_speed_limit - min_speed_limit) as f64
                 + min_speed_limit as f64
         }
+    }
+}
+
+/// DfsLimiter is used to limit the memory used for dfs loading files.
+#[derive(Clone)]
+pub(crate) struct DfsLoadLimiter {
+    semaphore: Arc<Semaphore>,
+}
+
+impl DfsLoadLimiter {
+    pub(crate) fn new(cfg: &KvEngineConfig) -> DfsLoadLimiter {
+        let num_cores = tikv_util::sys::SysQuota::cpu_cores_quota();
+        let global_concurrency = (num_cores.max(1.0) as usize) * cfg.dfs_load_concurrency_per_core;
+        let semaphore = Arc::new(Semaphore::new(global_concurrency));
+        Self { semaphore }
+    }
+
+    pub(crate) async fn acquire_permit(&self) -> OwnedSemaphorePermit {
+        let global_semaphore = self.semaphore.clone();
+        // We never close the semaphore, so it is safe to unwrap.
+        global_semaphore.acquire_owned().await.unwrap()
     }
 }
 
