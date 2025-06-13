@@ -594,10 +594,22 @@ impl SchemaManager {
 
             let kv_scanner = Arc::new(self.clone());
             let kv_getter = Arc::new(self.clone());
-            let (schema_version, table_infos) =
-                schema::sync_schema(kv_getter, kv_scanner, keyspace_id, checked_version)
-                    .await
-                    .map_err(|e| Error::SchemaError(e))?;
+            let (schema_version, table_infos) = match schema::sync_schema(
+                kv_getter,
+                kv_scanner,
+                keyspace_id,
+                checked_version,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    // TODO: report metrics and alarm.
+                    error!("{}: sync schema failed, skip", keyspace_id; "err" => ?err);
+                    continue;
+                }
+            };
+
             if checked_version.is_some_and(|v| v == schema_version) {
                 debug!("{}: schema is up-to-date, skip", keyspace_id; "schema_ver" => schema_version,
                     "cur_ver" => ?cur_schema_version, "checked_ver" => ?checked_version);
