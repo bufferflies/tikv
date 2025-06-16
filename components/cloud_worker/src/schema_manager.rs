@@ -469,6 +469,12 @@ impl SchemaManager {
         {
             return;
         }
+        // Skip the empty keyspace or tombstone keyspace.
+        if is_whole_keyspace_range(&shard_stats.start, &shard_stats.end)
+            && shard_stats.total_size == 0
+        {
+            return;
+        }
         keyspace_stats
             .entry(keyspace_id)
             .or_default()
@@ -513,6 +519,15 @@ impl SchemaManager {
                 keyspace_id,
                 update_write_sequence.is_some()
             );
+
+            let keyspace_total_size = keyspace_shard_stats
+                .iter()
+                .map(|s| s.total_size)
+                .sum::<u64>();
+            if keyspace_total_size == 0 {
+                debug!("{}: keyspace total size is 0, ignore keyspace", keyspace_id);
+                continue;
+            }
 
             if self.check_if_keyspace_restore_in_progress(keyspace_shard_stats) {
                 info!("{}: keyspace restore in progress, skip", keyspace_id);
@@ -1513,6 +1528,10 @@ mod tests {
         SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
         assert_eq!(keyspace_stats.len(), 1);
         let shard_stats = make_shard_stats(2, vec![120, 0, 0, 2], vec![120, 0, 0, 3]);
+        SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
+        assert_eq!(keyspace_stats.len(), 1);
+        let mut shard_stats = make_shard_stats(2, vec![120, 0, 0, 2], vec![120, 0, 0, 3]);
+        shard_stats.total_size = 100;
         SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
         assert_eq!(keyspace_stats.len(), 2);
         let shard_stats = make_shard_stats(3, vec![120, 0, 0, 3, 3], vec![120, 0, 0, 4]);
