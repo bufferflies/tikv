@@ -29,7 +29,7 @@ use native_br::{
 use pd_client::PdClient;
 use rand::prelude::*;
 use rstest::rstest;
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
     client::{
@@ -1309,7 +1309,7 @@ fn test_restore_keyspace_with_schema() {
             vec![new_int_handle_column_info()],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         )
         .into();

@@ -12,7 +12,7 @@ use kvengine::{dfs, dfs::DFSConfig, table::ZSTD_COMPRESSION};
 use load_data::task::{LoadDataConfig, LoadDataContext};
 use pd_client::PdClient;
 use rand::{rngs::ThreadRng, Rng};
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use security::SecurityConfig;
 use test_cloud_server::{
     keyspace::{make_row_key, ClusterKeyspaceClient, KeyspaceManager},
@@ -56,7 +56,7 @@ pub(crate) fn spawn_load_data(
             let table_id = keyspace_manager
                 .get_keyspace_meta(keyspace_id)
                 .unwrap()
-                .new_table(false, false, StorageClass::default());
+                .new_table(false, false, StorageClassSpec::default());
             TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
             let success = do_load_data(

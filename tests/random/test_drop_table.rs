@@ -2,7 +2,7 @@
 
 use std::{sync::atomic::Ordering, time::Duration};
 
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use test_cloud_server::{
     client::ClusterTxnClient,
     keyspace::{make_row_key, ClusterKeyspaceClient, KeyspaceManager},
@@ -47,7 +47,7 @@ pub fn spawn_drop_table(
                 .new_table(
                     true,
                     table_meta.is_schema_enabled(),
-                    StorageClass::default(),
+                    StorageClassSpec::default(),
                 );
             TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
 

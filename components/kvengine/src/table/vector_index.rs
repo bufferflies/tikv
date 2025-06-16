@@ -1121,7 +1121,7 @@ mod tests {
 
     use bstr::ByteSlice;
     use futures::executor::block_on;
-    use schema::schema::StorageClass;
+    use schema::schema::StorageClassSpec;
     use tidb_query_datatype::{
         codec::{
             data_type::VectorFloat32,
@@ -1268,7 +1268,7 @@ mod tests {
             columns,
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         );
         let schema = Schema::new(schema_buf);

@@ -15,7 +15,7 @@ use kvproto::{
 };
 use log_wrappers::Value;
 use rfstore::store::RegionIdVer;
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use tidb_query_datatype::{codec::table::TABLE_PREFIX, Collation, FieldTypeTp};
 use tikv::storage::mvcc::Key;
 use tikv_util::{
@@ -194,7 +194,7 @@ impl pd_client::util::RegionLike for RawRegion {
 pub struct TableSchemaOptions {
     pub table_id: i64,
     pub with_columns: bool,
-    pub storage_class: StorageClass,
+    pub storage_class_spec: StorageClassSpec,
 }
 
 pub fn build_schemas(tables: &[TableSchemaOptions]) -> Vec<Schema> {
@@ -221,13 +221,13 @@ pub fn build_schemas(tables: &[TableSchemaOptions]) -> Vec<Schema> {
                 vec![c1, c2],
                 vec![],
                 vec![],
-                StorageClass::default(),
+                StorageClassSpec::default(),
                 None,
             )
         }
 
-        if opts.storage_class.is_specified() {
-            schema.set_storage_class(opts.storage_class);
+        if opts.storage_class_spec.is_specified() {
+            schema.set_storage_class_spec(opts.storage_class_spec.clone());
         }
 
         schemas.push(schema.into());

@@ -13,7 +13,7 @@ use kvengine::{
     },
 };
 use pd_client::PdClient;
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use test_cloud_server::{
     copr::{build_row_key, build_row_val},
     must_wait, ServerCluster,
@@ -254,7 +254,7 @@ fn build_vector_schema(table_id: i64) -> Schema {
         columns,
         pk_col_ids,
         vector_indexes,
-        StorageClass::default(),
+        StorageClassSpec::default(),
         None,
     )
     .into()

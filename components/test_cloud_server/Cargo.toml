@@ -36,6 +36,7 @@ libc = "0.2"
 load_data = { path = "../load_data" }
 log_wrappers = { path = "../log_wrappers" }
 nix = "0.24"
+parking_lot = "0.12"
 pd_client = { path = "../pd_client", default-features = false, features = ["testexport"] }
 protobuf = { version = "2.8", features = ["bytes"] }
 quick-xml = { version = "0.23.1", features = ["serialize"] }

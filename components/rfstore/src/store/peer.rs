@@ -2348,16 +2348,16 @@ impl<'a> PreprocessRef<'a> {
 
         // Get storage class after `new_meta.commit_merge`. As storage class would be
         // changed in there.
-        let source_sc = source_meta.get_storage_class();
-        let target_sc = new_meta.get_storage_class();
-        if source_sc != target_sc {
+        let source_sc_spec = source_meta.get_storage_class_spec();
+        let target_sc_spec = new_meta.get_storage_class_spec();
+        if source_sc_spec != target_sc_spec {
             set_shard_property(
                 STORAGE_CLASS_KEY,
                 source.mut_snapshot().mut_properties(),
-                target_sc.marshal(),
+                target_sc_spec.marshal(),
             );
             warn!("{} preprocess commit merge: storage class mismatch", self.tag();
-                "source_sc" => ?source_sc, "target_sc" => ?target_sc, "source" => ?source);
+                "source_spec" => ?source_sc_spec, "target_spec" => ?target_sc_spec, "source" => ?source);
         }
 
         let apply_msg = ApplyMsg::PrepareCommitMerge {

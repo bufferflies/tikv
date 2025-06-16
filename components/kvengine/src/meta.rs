@@ -14,7 +14,7 @@ use bytes::{Buf, Bytes};
 use kvenginepb as pb;
 use kvenginepb::{get_any_snap_from_changeset, SchemaMeta, TxnFileRef, VectorIndex};
 use protobuf::Message;
-use schema::schema::StorageClass;
+use schema::schema::{StorageClass, StorageClassSpec};
 use slog_global::*;
 use util::TxnFileRefExt as _;
 
@@ -274,6 +274,12 @@ impl ShardMeta {
         self.properties.set(key, value);
     }
 
+    pub fn set_property_opt(&mut self, key: &str, value: Option<&[u8]>) {
+        if let Some(value) = value {
+            self.set_property(key, value);
+        }
+    }
+
     pub fn set_property_bytes(&mut self, key: &str, value: Bytes) {
         self.properties.set_bytes(key, value);
     }
@@ -364,15 +370,7 @@ impl ShardMeta {
                         .marshal(),
                 );
             } else if cs.get_property_key() == STORAGE_CLASS_KEY {
-                let sc = StorageClass::unmarshal(Some(cs.get_property_value()));
-                // If the storage class of the cs is unspecified, do not set the storage class
-                // property to the shard meta.
-                if sc.is_specified() {
-                    self.properties
-                        .set(cs.get_property_key(), cs.get_property_value());
-                } else {
-                    self.properties.remove(cs.get_property_key());
-                }
+                self.apply_update_storage_class(cs);
             } else {
                 self.properties
                     .set(cs.get_property_key(), cs.get_property_value());
@@ -560,8 +558,8 @@ impl ShardMeta {
             }
         }
         if cs.get_property_key() == STORAGE_CLASS_KEY {
-            let sc = StorageClass::unmarshal(Some(&cs.property_value));
-            return self.get_storage_class() == sc;
+            let sc_spec = StorageClassSpec::unmarshal(Some(&cs.property_value));
+            return self.get_storage_class_spec() == sc_spec;
         }
         false
     }
@@ -971,9 +969,7 @@ impl ShardMeta {
             // avoid issue in unexpected corner case.
             meta.max_ts = self.max_ts;
             meta.schema = self.schema.clone();
-            if let Some(storage_class) = &old_storage_class {
-                meta.set_property(STORAGE_CLASS_KEY, storage_class);
-            }
+            meta.set_property_opt(STORAGE_CLASS_KEY, old_storage_class.as_deref());
             new_shards.push(meta);
         }
         for new_shard in &mut new_shards {
@@ -1404,11 +1400,24 @@ impl ShardMeta {
     }
 
     pub fn use_ia(&self) -> bool {
-        self.get_storage_class() == StorageClass::Ia
+        self.get_storage_class_spec() == StorageClass::Ia.into()
     }
 
-    pub fn get_storage_class(&self) -> StorageClass {
-        StorageClass::unmarshal(self.get_property(STORAGE_CLASS_KEY).as_deref())
+    pub fn get_storage_class_spec(&self) -> StorageClassSpec {
+        StorageClassSpec::unmarshal(self.get_property(STORAGE_CLASS_KEY).as_deref())
+    }
+
+    fn apply_update_storage_class(&self, cs: &pb::ChangeSet) {
+        debug_assert_eq!(cs.get_property_key(), STORAGE_CLASS_KEY);
+        let sc_spec = StorageClassSpec::unmarshal(Some(cs.get_property_value()));
+        if sc_spec.is_specified() {
+            debug!("{} set storage class spec", self.tag(); "spec" => ?sc_spec);
+            self.properties
+                .set(cs.get_property_key(), cs.get_property_value());
+        } else {
+            debug!("{} clear storage class spec", self.tag());
+            self.properties.remove(cs.get_property_key());
+        }
     }
 }
 

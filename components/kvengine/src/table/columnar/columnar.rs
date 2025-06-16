@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut};
 use collections::HashMap;
 use kvenginepb::ColumnarCreate;
 use protobuf::Message;
-use schema::schema::StorageClass;
+use schema::schema::{StorageClass, StorageClassSpec};
 use tidb_query_datatype::{FieldTypeAccessor, FieldTypeFlag, FieldTypeTp};
 use tipb::ColumnInfo;
 
@@ -30,9 +30,9 @@ pub const COLUMNAR_MAGIC: u32 = 0xc01e32ae;
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct SchemaBuf {
     pub inner: Arc<SchemaBufInner>,
-    pub partitions: Option<Vec<(i64, StorageClass)>>,
+    pub partitions: Option<Vec<(i64, StorageClassSpec)>>,
     pub table_id: i64,
-    pub property_sc: StorageClass,
+    pub sc_spec: StorageClassSpec,
     pub is_sub_partition: bool,
 }
 
@@ -52,8 +52,8 @@ impl SchemaBuf {
         columns: Vec<ColumnInfo>,
         pk_col_ids: Vec<i64>,
         vector_indexes: Vec<VectorIndexDef>,
-        property_sc: StorageClass,
-        partitions: Option<Vec<(i64, StorageClass)>>,
+        sc_spec: StorageClassSpec,
+        partitions: Option<Vec<(i64, StorageClassSpec)>>,
     ) -> Self {
         Self {
             table_id,
@@ -65,7 +65,7 @@ impl SchemaBuf {
                 vector_indexes,
             }),
             partitions,
-            property_sc,
+            sc_spec,
             is_sub_partition: false,
         }
     }
@@ -83,17 +83,17 @@ impl SchemaBuf {
             columns,
             self.pk_col_ids.clone(),
             self.vector_indexes.clone(),
-            self.property_sc,
+            self.sc_spec.clone(),
             self.partitions.clone(),
         )
     }
 
-    pub fn to_partition_schema(&self, partition_id: i64, sc: StorageClass) -> SchemaBuf {
+    pub fn to_partition_schema(&self, partition_id: i64, sc_spec: StorageClassSpec) -> SchemaBuf {
         SchemaBuf {
             table_id: partition_id,
             inner: self.inner.clone(),
             partitions: None,
-            property_sc: sc,
+            sc_spec,
             is_sub_partition: true,
         }
     }
@@ -104,7 +104,7 @@ impl SchemaBuf {
             .map(|btree| {
                 btree
                     .iter()
-                    .map(|(id, sc)| self.to_partition_schema(*id, *sc).into())
+                    .map(|(id, sc_spec)| self.to_partition_schema(*id, sc_spec.clone()).into())
                     .collect()
             })
             .unwrap_or_default()
@@ -115,14 +115,20 @@ impl SchemaBuf {
         self.is_sub_partition
     }
 
+    #[cfg(any(test, feature = "testexport"))]
     #[inline]
-    pub fn set_storage_class(&mut self, storage_class: StorageClass) {
-        self.property_sc = storage_class;
+    pub fn set_storage_class(&mut self, sc: StorageClass) {
+        self.set_storage_class_spec(sc.into());
     }
 
     #[inline]
-    pub fn get_storage_class(&self) -> StorageClass {
-        self.property_sc
+    pub fn set_storage_class_spec(&mut self, sc_spec: StorageClassSpec) {
+        self.sc_spec = sc_spec;
+    }
+
+    #[inline]
+    pub fn get_storage_class_spec(&self) -> &StorageClassSpec {
+        &self.sc_spec
     }
 
     #[inline]
@@ -152,8 +158,8 @@ pub struct SchemaBufBuilder {
     columns: Vec<ColumnInfo>,
     pk_col_ids: Vec<i64>,
     vector_indexes: Vec<VectorIndexDef>,
-    property_sc: StorageClass,
-    partitions: Option<Vec<(i64, StorageClass)>>,
+    sc_spec: StorageClassSpec,
+    partitions: Option<Vec<(i64, StorageClassSpec)>>,
 }
 
 impl SchemaBufBuilder {
@@ -164,12 +170,12 @@ impl SchemaBufBuilder {
         }
     }
 
-    pub fn storage_class(&mut self, sc: StorageClass) -> &mut Self {
-        self.property_sc = sc;
+    pub fn storage_class_spec(&mut self, sc_spec: StorageClassSpec) -> &mut Self {
+        self.sc_spec = sc_spec;
         self
     }
 
-    pub fn partitions(&mut self, partitions: Option<Vec<(i64, StorageClass)>>) -> &mut Self {
+    pub fn partitions(&mut self, partitions: Option<Vec<(i64, StorageClassSpec)>>) -> &mut Self {
         self.partitions = partitions;
         self
     }
@@ -198,7 +204,7 @@ impl SchemaBufBuilder {
             self.columns,
             self.pk_col_ids,
             self.vector_indexes,
-            self.property_sc,
+            self.sc_spec,
             self.partitions,
         )
     }

@@ -35,7 +35,6 @@ use raft::{self, eraftpb::MessageType, GetEntriesContext, Storage};
 use raft_proto::eraftpb;
 use raftstore::store::util;
 use rand::{thread_rng, Rng};
-use schema::schema::StorageClass;
 use tikv_util::{
     box_err,
     codec::bytes::{decode_bytes, encode_bytes, encode_bytes_maybe_empty},
@@ -875,7 +874,7 @@ impl<'a> PeerMsgHandler<'a> {
                 source_require_empty,
                 target_require_empty,
                 inconsistent_encryption_key,
-                inconsistent_storage_class,
+                inconsistent_storage_class_spec: inconsistent_storage_class,
             } = check_result;
 
             // If the two regions belongs to different keyspaces,
@@ -1302,7 +1301,7 @@ impl<'a> PeerMsgHandler<'a> {
         region_split_size: u64,
         ia_kv_size_discount: f64,
     ) {
-        if shard.get_storage_class() == StorageClass::Ia {
+        if shard.get_storage_class_spec().can_be_ia() {
             // Adjust region size to prevent merge when the region is on the boundary of
             // table.
             if is_table_boundary_key(shard.inner_start())
@@ -1622,8 +1621,8 @@ impl<'a> PeerMsgHandler<'a> {
         let schema_file_id = schema_file.as_ref().map(|x| x.get_file_id());
         debug!("{} check schema", tag;
             "schema_file_meta" => ?schema_meta,
-            "meta.storage_class" => ?shard_meta.get_storage_class(),
-            "shard.storage_class" => ?shard.get_storage_class(),
+            "meta.spec" => ?shard_meta.get_storage_class_spec(),
+            "shard.spec" => ?shard.get_storage_class_spec(),
             "checked_schema_ver" => shard.get_checked_schema_ver(),
             "schema_file" => ?schema_file_id,
         );

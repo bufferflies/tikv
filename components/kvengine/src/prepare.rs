@@ -20,7 +20,7 @@ use dashmap::mapref::entry::Entry;
 use file_system::{IoOp, IoType};
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
-use schema::schema::StorageClass;
+use schema::schema::{StorageClass, StorageClassSpec};
 use tikv_util::{mpsc::Receiver, time::Instant};
 
 use crate::{
@@ -172,10 +172,10 @@ impl EngineCore {
             lock_txn_file_refs.extend(collect_snap_lock_txn_file_refs(snap));
             encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
                 .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap());
-            let sc = StorageClass::unmarshal(
+            let sc = StorageClassSpec::unmarshal(
                 get_shard_property(STORAGE_CLASS_KEY, snap.get_properties()).as_deref(),
             );
-            shard_use_ia = sc == StorageClass::Ia;
+            shard_use_ia = sc == StorageClass::Ia.into();
             if snap.has_schema_meta() {
                 schema_meta = Some(snap.get_schema_meta());
             }

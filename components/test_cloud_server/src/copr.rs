@@ -5,7 +5,7 @@ use kvengine::table::columnar::{
     new_common_handle_column_info, new_int_handle_column_info, new_version_column_info, Schema,
     SchemaBuf,
 };
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use tidb_query_datatype::{
     codec::{
         data_type::VectorFloat32,
@@ -105,7 +105,7 @@ pub fn build_schema(ddl: &str) -> Schema {
         columns,
         pk_ids,
         vec![],
-        StorageClass::default(),
+        StorageClassSpec::default(),
         None,
     )
     .into()

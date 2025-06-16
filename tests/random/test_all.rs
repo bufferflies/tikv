@@ -21,7 +21,7 @@ use native_br::{backup, backup_worker, restore::RestoreConfig};
 use pd_client::PdClient;
 use rand::prelude::*;
 use rfengine::RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER;
-use schema::schema::StorageClass;
+use schema::schema::{StorageClass, StorageClassSpec};
 use security::SecurityConfig;
 use test_cloud_server::{
     client::ClusterClientOptions,
@@ -477,11 +477,11 @@ fn prepare_cluster(
         .map(|&keyspace_id| TidbCluster::keyspace_name(keyspace_id as u16))
         .collect();
     let ia_table_ratio = switches.ia_table_ratio;
-    let storage_class_fn = Box::new(move |_| {
+    let sc_spec_fn = Box::new(move |_| {
         if thread_rng().gen_bool(ia_table_ratio) {
-            StorageClass::Ia
+            StorageClass::Ia.into()
         } else {
-            StorageClass::default()
+            StorageClassSpec::default()
         }
     });
     cluster.keyspace_manager().create_keyspaces(
@@ -490,7 +490,7 @@ fn prepare_cluster(
         &CreateKeyspaceOptions {
             table_count: INITIAL_TABLE_COUNT,
             schema_enable_ratio: TABLE_SCHEMA_ENABLE_RATIO,
-            storage_class_fn,
+            storage_class_spec_fn: sc_spec_fn,
         },
         Some(&mut rng),
     );

@@ -12,7 +12,10 @@ use kvengine::{
 use kvproto::kvrpcpb;
 use pd_client::PdClient;
 use rstest::rstest;
-use schema::{generate_storage_class_schema_data_for_test, schema::StorageClass};
+use schema::{
+    generate_storage_class_schema_data_for_test,
+    schema::{StorageClass, StorageClassSpec},
+};
 use test_cloud_server::{
     client::ClusterClient,
     keyspace::CreateKeyspaceOptions,
@@ -94,7 +97,7 @@ fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
     let table_bound = DataBound::new(table_start_key.as_ref(), table_end_key.as_ref(), false);
 
     let mut schema_version = 10;
-    let mut update_schema = |client: &mut ClusterClient, storage_class: StorageClass| {
+    let mut update_schema = |client: &mut ClusterClient, sc_spec: StorageClassSpec| {
         let kv_pairs = generate_storage_class_schema_data_for_test(
             keyspace_id,
             db_id,
@@ -102,7 +105,7 @@ fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
             partition_id,
             partitions.take(),
             schema_version,
-            storage_class,
+            sc_spec,
             &mut tables,
         )
         .unwrap();
@@ -111,7 +114,7 @@ fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
     };
 
     // Init schema data
-    update_schema(&mut client, StorageClass::Unspecified);
+    update_schema(&mut client, StorageClassSpec::default());
 
     // Create WriteCF ln files
     client.put_kv(
@@ -143,14 +146,17 @@ fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
     );
 
     // Change Local files to IA
-    update_schema(&mut client, StorageClass::Ia);
+    let sc_spec_ia = StorageClassSpec::from(StorageClass::Ia);
+    update_schema(&mut client, sc_spec_ia.clone());
     let mut num_ia_files = 0usize;
     must_wait(
         || {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    if shard.get_schema_file().is_some() && shard.use_ia() {
+                    if shard.get_schema_file().is_some()
+                        && shard.storage_class_spec_equals(&sc_spec_ia)
+                    {
                         assert!(table_bound.contains_bound(shard.range.data_bound()));
                         let (_, sst_ia_file_ids) = shard.get_local_sst_files();
                         assert!(!sst_ia_file_ids.is_empty());
@@ -182,7 +188,9 @@ fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    if shard.get_schema_file().is_some() && shard.use_ia() {
+                    if shard.get_schema_file().is_some()
+                        && shard.storage_class_spec_equals(&sc_spec_ia)
+                    {
                         assert!(table_bound.contains_bound(shard.range.data_bound()));
                         let (_, sst_ia_file_ids) = shard.get_local_sst_files();
                         assert!(!sst_ia_file_ids.is_empty());
@@ -200,7 +208,7 @@ fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
     client.verify_data_with_ref_store();
 
     // Change IA files to Local files
-    update_schema(&mut client, StorageClass::Unspecified);
+    update_schema(&mut client, StorageClass::Standard.into());
     must_wait(
         || {
             let all_id_vers = kvengine.get_all_shard_id_vers();
@@ -277,7 +285,7 @@ fn test_region_split_and_merge_with_storage_class(#[case] partitioned: bool) {
     let mut partitions = partitioned.then(|| table_ids.clone());
     let mut schema_version = 10;
     let mut update_schema =
-        |client: &mut ClusterClient, storage_class: StorageClass, backend_table_id: i64| {
+        |client: &mut ClusterClient, sc_spec: StorageClassSpec, backend_table_id: i64| {
             let (table_id, partition_id) = if partitioned {
                 (65535, Some(backend_table_id))
             } else {
@@ -290,7 +298,7 @@ fn test_region_split_and_merge_with_storage_class(#[case] partitioned: bool) {
                 partition_id,
                 partitions.take(),
                 schema_version,
-                storage_class,
+                sc_spec,
                 &mut tables,
             )
             .unwrap();
@@ -309,7 +317,7 @@ fn test_region_split_and_merge_with_storage_class(#[case] partitioned: bool) {
 
     // Init schema data
     for &table_id in &table_ids {
-        update_schema(&mut client, StorageClass::Unspecified, table_id);
+        update_schema(&mut client, StorageClassSpec::default(), table_id);
     }
 
     // Write data for all tables
@@ -345,16 +353,16 @@ fn test_region_split_and_merge_with_storage_class(#[case] partitioned: bool) {
         ia_file_tables.push(table_ids[ia_table_idx]);
         ia_table_start_keys.push(&table_start_keys[ia_table_idx]);
     }
+    let sc_spec_ia = StorageClassSpec::from(StorageClass::Ia);
     for &table_id in &ia_file_tables {
-        update_schema(&mut client, StorageClass::Ia, table_id);
+        update_schema(&mut client, sc_spec_ia.clone(), table_id);
     }
     must_wait(
         || {
             let mut shard_with_ia_count = 0;
             for &id_ver in &kvengine.get_all_shard_id_vers() {
                 let shard = kvengine.get_shard(id_ver.id).unwrap();
-                if shard.get_schema_file().is_some()
-                    && shard.get_storage_class() == StorageClass::Ia
+                if shard.get_schema_file().is_some() && shard.storage_class_spec_equals(&sc_spec_ia)
                 {
                     check_ia_shard_range(shard.range.data_bound());
                     let (_, sst_ia_file_ids) = shard.get_local_sst_files();
@@ -384,7 +392,7 @@ fn test_region_split_and_merge_with_storage_class(#[case] partitioned: bool) {
             .unwrap()
             .get_id();
         let shard = kvengine.get_shard(shard_id).unwrap();
-        assert!(shard.get_schema_file().is_some() && shard.use_ia());
+        assert!(shard.get_schema_file().is_some() && shard.storage_class_spec_equals(&sc_spec_ia));
         check_ia_shard_range(shard.range.data_bound());
         let (_, sst_ia_file_ids) = shard.get_local_sst_files();
         assert!(!sst_ia_file_ids.is_empty());
@@ -421,7 +429,9 @@ fn test_region_split_and_merge_with_storage_class(#[case] partitioned: bool) {
             let mut shard_with_ia_count = 0;
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    if shard.get_schema_file().is_some() && shard.use_ia() {
+                    if shard.get_schema_file().is_some()
+                        && shard.storage_class_spec_equals(&sc_spec_ia)
+                    {
                         check_ia_shard_range(shard.range.data_bound());
                         let (_, sst_ia_file_ids) = shard.get_local_sst_files();
                         if sst_ia_file_ids.is_empty() {
@@ -452,7 +462,9 @@ fn test_region_split_and_merge_with_storage_class(#[case] partitioned: bool) {
             let mut shard_with_ia_count = 0;
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    if shard.get_schema_file().is_some() && shard.use_ia() {
+                    if shard.get_schema_file().is_some()
+                        && shard.storage_class_spec_equals(&sc_spec_ia)
+                    {
                         check_ia_shard_range(shard.range.data_bound());
                         let (_, sst_ia_file_ids) = shard.get_local_sst_files();
                         if sst_ia_file_ids.is_empty() {

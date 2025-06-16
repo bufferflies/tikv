@@ -18,7 +18,7 @@ use bytes::{Buf, Bytes};
 use collections::HashSet;
 use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use slog_global::info;
 
 use crate::{
@@ -40,9 +40,8 @@ pub struct CheckMergeResult {
 
     // source and target shards belong to same keyspace but with different encryption key.
     pub inconsistent_encryption_key: bool,
-    // source and target shards belong to same keyspace but with different specified storage
-    // class.
-    pub inconsistent_storage_class: bool,
+    // source and target shards belong to same keyspace but with different storage class spec.
+    pub inconsistent_storage_class_spec: bool,
 }
 
 impl Engine {
@@ -64,7 +63,7 @@ impl Engine {
             old_data.lock_txn_files
         );
         let old_del_prefixes = old_shard.pending_ops.read().unwrap().del_prefixes.clone();
-        let storage_class = old_shard.get_property(STORAGE_CLASS_KEY);
+        let sc_spec = old_shard.get_property(STORAGE_CLASS_KEY);
         for i in 0..=split.keys.len() {
             let (start_key, end_key) = get_splitting_start_end(
                 old_shard.outer_start.chunk(),
@@ -120,9 +119,7 @@ impl Engine {
                     new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes.marshal());
                 }
             }
-            if let Some(storage_class) = &storage_class {
-                new_shard.set_property(STORAGE_CLASS_KEY, storage_class);
-            }
+            new_shard.set_property_opt(STORAGE_CLASS_KEY, sc_spec.as_deref());
             new_shards.push(Arc::new(new_shard));
         }
         let unconverted_l0s: HashSet<u64> = old_data
@@ -273,15 +270,15 @@ impl Engine {
         if source_shard.has_txn_file_locks() {
             return Err(Error::CheckMerge("source has txn file locks".to_string()));
         }
-        let source_storage_class =
-            StorageClass::unmarshal(source_shard.get_property(STORAGE_CLASS_KEY).as_deref());
+        let source_sc_spec =
+            StorageClassSpec::unmarshal(source_shard.get_property(STORAGE_CLASS_KEY).as_deref());
 
         let target_shard = self.get_shard_with_ver(target_id, target_ver)?;
         if !target_shard.get_initial_flushed() {
             return Err(Error::CheckMerge("target not initial flushed".to_string()));
         }
-        let target_storage_class =
-            StorageClass::unmarshal(target_shard.get_property(STORAGE_CLASS_KEY).as_deref());
+        let target_sc_spec =
+            StorageClassSpec::unmarshal(target_shard.get_property(STORAGE_CLASS_KEY).as_deref());
 
         let belongs_to_same_keyspace = ApiV2::is_belongs_to_same_keyspace(
             &source_shard.outer_start,
@@ -302,23 +299,18 @@ impl Engine {
                     .as_ref()
                     .map(|k| k.cipher_text.clone());
 
-        let inconsistent_storage_class = if belongs_to_same_keyspace {
-            if !source_storage_class.is_specified() && !target_storage_class.is_specified() {
+        let inconsistent_sc_spec = if belongs_to_same_keyspace {
+            if !source_sc_spec.is_specified() && !target_sc_spec.is_specified() {
                 false
             } else {
-                let source_ia = source_storage_class == StorageClass::Ia;
-                let target_ia = target_storage_class == StorageClass::Ia;
-                if source_ia && target_ia {
-                    !keys_belong_to_same_table(
+                source_sc_spec != target_sc_spec
+                    || !keys_belong_to_same_table(
                         source_shard.inner_start(),
                         target_shard.inner_start(),
                     )
-                } else {
-                    true
-                }
             }
         } else {
-            source_storage_class.is_specified() || target_storage_class.is_specified()
+            source_sc_spec.is_specified() || target_sc_spec.is_specified()
         };
 
         let (clear_source, clear_target) =
@@ -338,7 +330,7 @@ impl Engine {
             source_require_empty,
             target_require_empty,
             inconsistent_encryption_key,
-            inconsistent_storage_class,
+            inconsistent_storage_class_spec: inconsistent_sc_spec,
         })
     }
 
@@ -470,13 +462,13 @@ impl Engine {
                 new_shard.set_property(DEL_PREFIXES_KEY, &new_del_prefixes);
             }
 
-            let source_sc = StorageClass::unmarshal(
+            let source_sc_spec = StorageClassSpec::unmarshal(
                 get_shard_property(STORAGE_CLASS_KEY, source_snap.get_properties()).as_deref(),
             );
-            let target_sc = old_shard.get_storage_class();
-            if source_sc != target_sc {
+            let target_sc_spec = old_shard.get_storage_class_spec();
+            if source_sc_spec != target_sc_spec {
                 warn!("{} commit merge: storage class mismatch", old_shard.tag();
-                    "source" => ?source, "target" => ?target_sc);
+                    "source" => ?source, "target" => ?target_sc_spec);
                 debug_assert!(false);
             }
 

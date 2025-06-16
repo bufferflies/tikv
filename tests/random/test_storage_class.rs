@@ -9,7 +9,10 @@ use anyhow::Context;
 use collections::HashSet;
 use kvengine::IdVer;
 use rand::prelude::*;
-use schema::schema::StorageClass;
+use schema::schema::{
+    StorageClass, StorageClassSpec, StorageClassTransitionInfo, STORAGE_CLASS_TIER_STANDARD,
+};
+use serde_derive::Serialize;
 use sqlx::Executor;
 use test_cloud_server::{
     keyspace::{make_row_key, KeyspaceManager},
@@ -49,20 +52,21 @@ pub(crate) async fn spawn_alter_storage_class(
             continue;
         }
 
-        let target_sc = if table.storage_class() != StorageClass::Ia {
-            StorageClass::Ia
-        } else if thread_rng().gen_bool(0.5) {
-            StorageClass::Standard
-        } else {
-            StorageClass::Unspecified
-        };
-        info!("alter storage class"; "table" => ?table, "target" => ?target_sc);
+        // TODO: Test for transitions.
+        let target_sc_spec: StorageClassSpec =
+            if table.storage_class_spec() != StorageClass::Ia.into() {
+                StorageClass::Ia.into()
+            } else {
+                // TiDB accept STANDARD, not UNSPECIFIED.
+                StorageClass::Standard.into()
+            };
+        info!("alter storage class"; "table" => ?table, "target" => ?target_sc_spec);
         retry_or_panic!(
-            alter_storage_class(&tc, &keyspace_manager, table, target_sc)
+            alter_storage_class(&tc, &keyspace_manager, table, target_sc_spec.clone())
                 .await
                 .context("alter_sc")
         );
-        if target_sc == StorageClass::Ia {
+        if target_sc_spec == StorageClass::Ia.into() {
             ALTER_TABLE_IA_COUNTER.fetch_add(1, Ordering::Relaxed);
         } else {
             ALTER_TABLE_NON_IA_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -70,29 +74,50 @@ pub(crate) async fn spawn_alter_storage_class(
     }
 }
 
+#[derive(Default, Serialize)]
+struct TidbEngineAttrStr {
+    storage_class: String,
+}
+
+#[derive(Default, Serialize)]
+struct TidbEngineAttr {
+    storage_class: TidbStorageClass,
+}
+
+#[derive(Default, Serialize)]
+struct TidbStorageClass {
+    tier: String,
+    transitions: Vec<StorageClassTransitionInfo>,
+}
+
 async fn alter_storage_class(
     tc: &TidbCluster,
     keyspace_manager: &KeyspaceManager,
     table: &TableMeta,
-    storage_class: StorageClass,
+    sc_spec: StorageClassSpec,
 ) -> Result<()> {
     let pool = connect_tidb(tc, keyspace_manager, table.keyspace_id()).await;
     let mut conn = pool.acquire().await.context("acquire")?;
-    let storage_str = match storage_class {
-        StorageClass::Unspecified => "",
-        StorageClass::Standard => r#"{"storage_class": "STANDARD"}"#,
-        StorageClass::Ia => r#"{"storage_class": "IA"}"#,
-    };
-    let expect_sc = match storage_class {
-        StorageClass::Unspecified | StorageClass::Standard => StorageClass::Standard, /* TiDB will set STANDARD as default. */
-        StorageClass::Ia => StorageClass::Ia,
+    let engine_attr_str = match sc_spec.to_tidb() {
+        (None, None) => "".to_string(),
+        (tier, None) => serde_json::to_string(&TidbEngineAttrStr {
+            storage_class: tier.unwrap_or_else(|| STORAGE_CLASS_TIER_STANDARD.to_string()),
+        })
+        .unwrap(),
+        (tier, Some(trans)) => serde_json::to_string(&TidbEngineAttr {
+            storage_class: TidbStorageClass {
+                tier: tier.unwrap_or_else(|| STORAGE_CLASS_TIER_STANDARD.to_string()),
+                transitions: trans,
+            },
+        })
+        .unwrap(),
     };
 
     let alter_table = format!(
         "ALTER TABLE `{}`.`{}` ENGINE_ATTRIBUTE = '{}'",
         table.db_name(),
         table.table_name(),
-        storage_str
+        engine_attr_str
     );
     info!("alter table: {}", &alter_table);
     conn.execute(alter_table.as_str())
@@ -103,8 +128,8 @@ async fn alter_storage_class(
         .await
         .context("query_schema")?;
     assert_eq!(table.id(), schema.id);
-    assert_eq!(expect_sc, schema.storage_class);
-    table.set_storage_class(storage_class);
+    assert_eq!(sc_spec, schema.storage_class_spec);
+    table.set_storage_class_spec(sc_spec);
     Ok(())
 }
 
@@ -122,7 +147,13 @@ pub(crate) fn check_storage_class(
     while start_time.saturating_elapsed() < timeout {
         last_errs.clear();
         for table in tables {
-            let expect_sc = match table.storage_class() {
+            // Get the final target storage class.
+            // All transitions should have `transit_after` less than test duration to make
+            // result determined.
+            let expect_sc = match table
+                .storage_class_spec()
+                .target_storage_class(Duration::MAX)
+            {
                 StorageClass::Unspecified | StorageClass::Standard => StorageClass::Unspecified, /* CSE will convert STANDARD to UNSPECIFIED. */
                 StorageClass::Ia => StorageClass::Ia,
             };
@@ -155,7 +186,7 @@ pub(crate) fn check_storage_class(
                         }
 
                         let snap = shard.new_snap_access();
-                        let ok = expect_sc == shard.get_storage_class();
+                        let ok = expect_sc == table.storage_class_spec().target_storage_class(Duration::MAX);
                         let check_sync = || {
                             if expect_sync {
                                 snap.is_sync()
@@ -166,7 +197,8 @@ pub(crate) fn check_storage_class(
                         let ok = ok && check_sync();
                         info!("{} check storage class: ok: {}", id_ver, ok;
                             "table" => ?table, "snap" => ?snap.display(),
-                            "expect_sc" => ?expect_sc, "sc" => ?shard.get_storage_class(),
+                            "expect_sc" => ?expect_sc, "sc_spec" => ?table.storage_class_spec(),
+                            "target_sc" => ?table.storage_class_spec().target_storage_class(Duration::MAX),
                             "expect_sync" => expect_sync, "sync" => snap.is_sync(), "write_cf_level_n_is_empty" => snap.write_cf_level_n_is_empty(),
                         );
                         if ok {

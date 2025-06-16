@@ -7,7 +7,7 @@ use futures::{executor::block_on, future::try_join_all};
 use kvengine::ia::util::IaConfig;
 use kvproto::kvrpcpb;
 use rstest::rstest;
-use schema::schema::StorageClass;
+use schema::schema::{StorageClass, StorageClassSpec};
 use test_cloud_server::{
     alloc_node_id_vec,
     client::{
@@ -540,11 +540,11 @@ fn prepare_cluster(
 
     let ks_opts = CreateKeyspaceOptions {
         table_count: 1,
-        storage_class_fn: Box::new(move |_| {
+        storage_class_spec_fn: Box::new(move |_| {
             if enable_ia {
-                StorageClass::Ia
+                StorageClass::Ia.into()
             } else {
-                StorageClass::default()
+                StorageClassSpec::default()
             }
         }),
         ..Default::default()

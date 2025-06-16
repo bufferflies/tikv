@@ -11,7 +11,7 @@ use std::{
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use kvenginepb as pb;
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 
 use crate::{
     context::PrepareType,
@@ -359,9 +359,8 @@ impl EngineCore {
             self.apply_update_schema_meta(&shard, cs);
         } else if cs.get_clear_columnar() {
             self.apply_clear_columnar(&shard);
-        }
-        if !cs.get_property_key().is_empty() && cs.get_property_key() == STORAGE_CLASS_KEY {
-            self.apply_update_storage_class(&shard, cs)
+        } else if cs.get_property_key() == STORAGE_CLASS_KEY {
+            self.apply_update_storage_class(&shard, cs);
         }
         debug!("{} finished applying change set: {:?}", shard.tag(), cs);
 
@@ -854,7 +853,7 @@ impl EngineCore {
         if !shard.is_active() {
             return;
         }
-        let shard_use_ia = shard.use_ia();
+        let shard_use_ia = shard.get_storage_class_spec().can_be_ia();
         for (id, _cover) in del_files {
             self.set_local_file_mtime(id, shard_use_ia);
         }
@@ -1033,24 +1032,24 @@ impl EngineCore {
             builder.set_cfs(new_cfs);
             shard.set_data(builder.build());
         }
-        let sc = StorageClass::unmarshal(Some(cs.get_property_value()));
+        let sc_spec = StorageClassSpec::unmarshal(Some(cs.get_property_value()));
         // The unspecified storage class only reloads files, but does not set the
         // storage class property.
-        if !sc.is_specified() {
+        if !sc_spec.is_specified() {
             info!(
-                "shard {} del storage class property, reload files {}",
+                "{} del storage class property, reload files {}",
                 shard.tag(),
                 cs.ln_tables.len(),
             );
             shard.del_property(STORAGE_CLASS_KEY);
             let mut pending_ops = shard.pending_ops.write().unwrap();
-            pending_ops.storage_class = StorageClass::Unspecified;
+            pending_ops.storage_class_spec = StorageClassSpec::default();
         } else {
             shard.set_property(STORAGE_CLASS_KEY, cs.get_property_value());
             info!(
-                "shard {} set storage class to {:?}, reload files {}",
+                "{} set storage class spec to {:?}, reload files {}",
                 shard.tag(),
-                sc,
+                sc_spec,
                 cs.ln_tables.len(),
             );
         }

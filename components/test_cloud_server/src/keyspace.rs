@@ -21,7 +21,7 @@ use rand::{
     prelude::{IteratorRandom, SliceRandom, ThreadRng},
     Rng,
 };
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use tikv_client::TimestampExt;
 use tikv_util::info;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
@@ -268,7 +268,7 @@ impl KeyspaceManagerCore {
 pub struct CreateKeyspaceOptions {
     pub table_count: usize,
     pub schema_enable_ratio: f64,
-    pub storage_class_fn: Box<dyn Fn(i64) -> StorageClass>,
+    pub storage_class_spec_fn: Box<dyn Fn(i64) -> StorageClassSpec>,
 }
 
 impl Default for CreateKeyspaceOptions {
@@ -276,7 +276,7 @@ impl Default for CreateKeyspaceOptions {
         Self {
             table_count: 0,
             schema_enable_ratio: 0.0,
-            storage_class_fn: Box::new(|_| StorageClass::default()),
+            storage_class_spec_fn: Box::new(|_| StorageClassSpec::default()),
         }
     }
 }
@@ -355,19 +355,19 @@ impl KeyspaceMeta {
                 keyspace_id,
                 true,
                 is_schema_enabled,
-                StorageClass::default(),
+                StorageClassSpec::default(),
             );
             let table_id = table.id();
-            let storage_class = (options.storage_class_fn)(table_id);
-            table.set_storage_class(storage_class);
+            let sc_spec = (options.storage_class_spec_fn)(table_id);
+            table.set_storage_class_spec(sc_spec.clone());
             info!("keyspace manager: create table"; "keyspace" => keyspace_id, "meta" => ?table);
             tables.insert(table_id, table);
 
-            if is_schema_enabled || storage_class.is_specified() {
+            if is_schema_enabled || sc_spec.is_specified() {
                 tables_schema_opts.push(TableSchemaOptions {
                     table_id,
                     with_columns: is_schema_enabled,
-                    storage_class,
+                    storage_class_spec: sc_spec,
                 });
             }
         }
@@ -413,13 +413,13 @@ impl KeyspaceMeta {
         &self,
         is_available: bool,
         is_schema_enabled: bool,
-        storage_class: StorageClass,
+        storage_class_spec: StorageClassSpec,
     ) -> i64 {
         let table = TableMeta::new(
             self.keyspace_id,
             is_available,
             is_schema_enabled,
-            storage_class,
+            storage_class_spec,
         );
         let table_id = table.id();
         self.tables.insert(table.id(), table);

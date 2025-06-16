@@ -1383,7 +1383,7 @@ impl SnapAccessCore {
             columns,
             table_schema.pk_col_ids.clone(),
             table_schema.vector_indexes.clone(),
-            table_schema.get_storage_class(),
+            table_schema.get_storage_class_spec().clone(),
             None,
         );
         Some(Schema::new(schema_buf))

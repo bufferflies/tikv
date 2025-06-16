@@ -18,7 +18,7 @@ use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
 use kvenginepb::{self as pb, TxnFileRef};
 use rand::Rng;
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use slog_global::*;
 use tikv_util::{box_err, box_try};
 
@@ -48,7 +48,7 @@ pub(crate) struct ShardPendingOperations {
     pub(crate) truncate_ts: Option<u64>,
     pub(crate) trim_over_bound: bool,
     pub(crate) manual_major_compaction: bool,
-    pub(crate) storage_class: StorageClass,
+    pub(crate) storage_class_spec: StorageClassSpec,
 }
 
 impl ShardPendingOperations {
@@ -58,7 +58,7 @@ impl ShardPendingOperations {
             truncate_ts: None,
             trim_over_bound: false,
             manual_major_compaction: false,
-            storage_class: StorageClass::Unspecified,
+            storage_class_spec: StorageClassSpec::default(),
         }
     }
 }
@@ -252,7 +252,7 @@ impl Shard {
                 }
             }
             if let Some(val) = get_shard_property(STORAGE_CLASS_KEY, props) {
-                pending_ops.storage_class = StorageClass::unmarshal(Some(&val));
+                pending_ops.storage_class_spec = StorageClassSpec::unmarshal(Some(&val));
             }
         }
         shard
@@ -736,9 +736,15 @@ impl Shard {
             }
             STORAGE_CLASS_KEY => {
                 let mut pending_ops = self.pending_ops.write().unwrap();
-                pending_ops.storage_class = StorageClass::unmarshal(Some(val));
+                pending_ops.storage_class_spec = StorageClassSpec::unmarshal(Some(val));
             }
             _ => {}
+        }
+    }
+
+    pub fn set_property_opt(&self, key: &str, val: Option<&[u8]>) {
+        if let Some(val) = val {
+            self.set_property(key, val);
         }
     }
 
@@ -1372,12 +1378,13 @@ impl Shard {
         self.pending_ops.read().unwrap().manual_major_compaction
     }
 
-    pub fn use_ia(&self) -> bool {
-        self.get_storage_class() == StorageClass::Ia || self.opt.ia.force_ia
+    pub fn get_storage_class_spec(&self) -> StorageClassSpec {
+        self.pending_ops.read().unwrap().storage_class_spec.clone()
     }
 
-    pub fn get_storage_class(&self) -> StorageClass {
-        self.pending_ops.read().unwrap().storage_class
+    #[cfg(feature = "testexport")]
+    pub fn storage_class_spec_equals(&self, spec: &StorageClassSpec) -> bool {
+        &self.pending_ops.read().unwrap().storage_class_spec == spec
     }
 
     pub fn data_all_persisted(&self) -> bool {

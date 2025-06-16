@@ -36,7 +36,8 @@ use kvproto::metapb::Store;
 use native_br::common::send_request_to_store_with_retry;
 use rfstore::store::PdIdAllocator;
 use schema::schema::{
-    convert_column_infos_to_tipb, ColumnInfo, IndexInfo, StorageClass, TableInfo, VectorIndexInfo,
+    convert_column_infos_to_tipb, ColumnInfo, IndexInfo, StorageClassSpec, TableInfo,
+    VectorIndexInfo,
 };
 use security::{SecurityConfig, SecurityManager};
 use tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC;
@@ -638,7 +639,7 @@ impl SchemaManager {
             // If the old specified storage class becomes unspecified, the storage class is
             // removed from the schema file.
             let sc_need_update_schema = table_infos.iter().any(|ti| {
-                ti.with_storage_class()
+                ti.with_storage_class_spec()
                     || old_storage_class_tables
                         .as_ref()
                         .is_some_and(|tables| tables.contains(&ti.id))
@@ -925,11 +926,11 @@ impl SchemaManager {
     }
 }
 
-fn table_info_to_partition_sc(ti: &TableInfo) -> Option<Vec<(i64, StorageClass)>> {
+fn table_info_to_partition_sc_spec(ti: &TableInfo) -> Option<Vec<(i64, StorageClassSpec)>> {
     ti.partition.as_ref().map(|p| {
         p.definitions
             .iter()
-            .map(|d| (d.id, d.storage_class()))
+            .map(|d| (d.id, d.storage_class_spec()))
             .collect::<Vec<_>>()
     })
 }
@@ -937,8 +938,8 @@ fn table_info_to_partition_sc(ti: &TableInfo) -> Option<Vec<(i64, StorageClass)>
 fn table_info_to_schema(ti: &TableInfo) -> Result<Schema> {
     let mut builder = SchemaBufBuilder::new(ti.id);
     builder
-        .storage_class(ti.storage_class())
-        .partitions(table_info_to_partition_sc(ti));
+        .storage_class_spec(ti.storage_class_spec())
+        .partitions(table_info_to_partition_sc_spec(ti));
 
     if ti.with_columnar() {
         let ti_cols = ti.cols.as_ref().unwrap();
@@ -1378,17 +1379,10 @@ mod tests {
         },
         ShardStatsLite,
     };
-    use schema::schema::StorageClass;
+    use schema::schema::StorageClassSpec;
     use tikv_util::info;
 
-    use super::{
-        read_schema_file_from_local, write_meta_file_to_local, write_schema_file_to_local,
-        META_FILE_NAME,
-    };
-    use crate::{
-        schema_manager::{find_latest_schema_file, MetaFile},
-        SchemaManager,
-    };
+    use super::*;
 
     #[test]
     fn test_find_latest_schema_file() {
@@ -1422,7 +1416,7 @@ mod tests {
                 vec![new_int_handle_column_info()],
                 vec![],
                 vec![],
-                StorageClass::default(),
+                StorageClassSpec::default(),
                 None,
             );
             schemas.push(schema.into());
@@ -1437,7 +1431,7 @@ mod tests {
                 vec![new_int_handle_column_info()],
                 vec![],
                 vec![],
-                StorageClass::default(),
+                StorageClassSpec::default(),
                 None,
             )
             .into(),
@@ -1501,7 +1495,7 @@ mod tests {
                 schema_version: 1000,
                 schema_restore_version: 0,
                 write_sequence: 0,
-                storage_class: Default::default(),
+                storage_class_spec: Default::default(),
                 columnar_tables: 0,
             }
         };

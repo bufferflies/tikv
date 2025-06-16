@@ -1,7 +1,8 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt, result::Result as StdResult};
+use std::{fmt, result::Result as StdResult, time::Duration as StdDuration};
 
+use bytes::{Buf, BufMut};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use tidb_query_datatype::{
     codec::{
@@ -12,7 +13,11 @@ use tidb_query_datatype::{
     expr::EvalContext,
     Collation, FieldTypeFlag, FieldTypeTp,
 };
-use tikv_util::box_try;
+use tikv_util::{
+    box_err, box_try,
+    codec::number::{U32_SIZE, U64_SIZE, U8_SIZE},
+    warn,
+};
 
 pub type Error = Box<dyn std::error::Error + Sync + Send>;
 pub type Result<T> = StdResult<T, Error>;
@@ -38,6 +43,13 @@ pub struct CiStr {
     pub l: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StorageClassTransitionInfo {
+    pub tier: String,
+    pub after_days: u32,
+    pub after_seconds: u32,
+}
+
 pub const STATE_PUBLIC: SchemaState = SchemaState(5);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -59,12 +71,13 @@ pub struct TableInfo {
     pub tiflash_replica: Option<TiFlashReplica>,
     // `None`: the storage class is never set.
     pub storage_class_tier: Option<String>,
+    pub storage_class_transitions: Option<Vec<StorageClassTransitionInfo>>,
 }
 
 impl TableInfo {
     #[inline]
     pub fn with_required_changes(&self) -> bool {
-        self.with_columnar() || self.with_storage_class()
+        self.with_columnar() || self.with_storage_class_spec()
     }
 
     pub fn with_columnar(&self) -> bool {
@@ -83,28 +96,21 @@ impl TableInfo {
         false
     }
 
-    pub fn with_storage_class(&self) -> bool {
-        self.storage_class().is_specified() || self.partition_with_storage_class()
+    pub fn with_storage_class_spec(&self) -> bool {
+        self.storage_class_spec().is_specified() || self.partition_with_storage_class_spec()
     }
 
-    fn partition_with_storage_class(&self) -> bool {
+    fn partition_with_storage_class_spec(&self) -> bool {
         self.partition
             .as_ref()
-            .is_some_and(|p| p.definitions.iter().any(|d| d.with_storage_class()))
+            .is_some_and(|p| p.definitions.iter().any(|d| d.with_storage_class_spec()))
     }
 
-    pub fn storage_class(&self) -> StorageClass {
-        let mut storage_class = self
-            .storage_class_tier
-            .as_deref()
-            .and_then(|x| x.try_into().ok())
-            .unwrap_or(StorageClass::Unspecified);
-        if storage_class == StorageClass::Standard {
-            // The standard storage class is not set to schema file and shard, need to be
-            // changed to unspecified.
-            storage_class = StorageClass::Unspecified;
-        }
-        storage_class
+    pub fn storage_class_spec(&self) -> StorageClassSpec {
+        StorageClassSpec::from_tidb(
+            self.storage_class_tier.as_deref(),
+            self.storage_class_transitions.as_deref(),
+        )
     }
 }
 
@@ -240,25 +246,19 @@ pub struct PartitionDefinition {
     pub comment: Option<String>,
     // `None`: the storage class is never set.
     pub storage_class_tier: Option<String>,
+    pub storage_class_transitions: Option<Vec<StorageClassTransitionInfo>>,
 }
 
 impl PartitionDefinition {
-    pub fn with_storage_class(&self) -> bool {
-        self.storage_class().is_specified()
+    pub fn with_storage_class_spec(&self) -> bool {
+        self.storage_class_spec().is_specified()
     }
 
-    pub fn storage_class(&self) -> StorageClass {
-        let mut storage_class = self
-            .storage_class_tier
-            .as_deref()
-            .and_then(|x| x.try_into().ok())
-            .unwrap_or(StorageClass::Unspecified);
-        if storage_class == StorageClass::Standard {
-            // The standard storage class is not set to schema file and shard, need to be
-            // changed to unspecified.
-            storage_class = StorageClass::Unspecified;
-        }
-        storage_class
+    pub fn storage_class_spec(&self) -> StorageClassSpec {
+        StorageClassSpec::from_tidb(
+            self.storage_class_tier.as_deref(),
+            self.storage_class_transitions.as_deref(),
+        )
     }
 }
 
@@ -297,10 +297,12 @@ pub struct SchemaVersionResponse {
 }
 
 /// Storage class tier strings which are the same with TiDB.
-const STORAGE_CLASS_TIER_STANDARD: &str = "STANDARD";
-const STORAGE_CLASS_TIER_IA: &str = "IA";
+pub const STORAGE_CLASS_TIER_STANDARD: &str = "STANDARD";
+pub const STORAGE_CLASS_TIER_IA: &str = "IA";
 
-const STORAGE_CLASS_STR_UNSPECIFIED: &str = "UNSPECIFIED";
+pub const STORAGE_CLASS_STR_UNSPECIFIED: &str = "UNSPECIFIED";
+pub const STORAGE_CLASS_SPEC_STR_AUTO: &str = "AUTO";
+
 const STORAGE_CLASS_KEY: &str = "_storage_class";
 
 #[derive(PartialEq, Clone, Copy, Default, Serialize_repr, Deserialize_repr)]
@@ -330,14 +332,26 @@ impl StorageClass {
         }
     }
 
-    pub fn marshal(&self) -> Vec<u8> {
+    #[cfg(feature = "testexport")]
+    pub fn to_tidb(&self) -> String {
+        match self {
+            Self::Unspecified | Self::Standard => STORAGE_CLASS_TIER_STANDARD.to_string(),
+            Self::Ia => STORAGE_CLASS_TIER_IA.to_string(),
+        }
+    }
+
+    // For compatibility test.
+    #[cfg(test)]
+    fn marshal(&self) -> Vec<u8> {
         match self {
             Self::Unspecified => vec![],
             _ => vec![*self as u8],
         }
     }
 
-    pub fn unmarshal(val: Option<&[u8]>) -> Self {
+    // For compatibility test.
+    #[cfg(test)]
+    fn unmarshal(val: Option<&[u8]>) -> Self {
         match val {
             Some(val) if !val.is_empty() => {
                 debug_assert_eq!(val.len(), 1, "invalid val: {:?}", val);
@@ -355,7 +369,12 @@ impl StorageClass {
 
     /// The storage class requires to occupy a region exclusively.
     #[inline]
-    pub fn require_exclusive_region(&self) -> bool {
+    fn require_exclusive_region(&self) -> bool {
+        matches!(self, Self::Ia)
+    }
+
+    #[inline]
+    pub fn is_ia(&self) -> bool {
         matches!(self, Self::Ia)
     }
 
@@ -364,14 +383,16 @@ impl StorageClass {
         matches!(self, Self::Unspecified | Self::Standard)
     }
 
-    pub fn apply_to_schema_pb(&self, schema: &mut kvenginepb::Schema) {
-        schema.mut_keys().push(STORAGE_CLASS_KEY.to_string());
-        schema.mut_values().push(self.marshal());
-    }
-
-    pub fn apply_to_partition_pb(&self, partition: &mut kvenginepb::Partition) {
-        partition.mut_keys().push(STORAGE_CLASS_KEY.to_string());
-        partition.mut_values().push(self.marshal());
+    pub fn from_tidb_storage_class_tier(tier: Option<&str>) -> Self {
+        let mut sc = tier
+            .and_then(|x| x.try_into().map_err(|e| warn!("{:?}", e)).ok())
+            .unwrap_or(StorageClass::Unspecified);
+        if sc == StorageClass::Standard {
+            // We consider `Standard` & `Unspecified` as the same. So do the conversion for
+            // easy.
+            sc = StorageClass::Unspecified;
+        }
+        sc
     }
 }
 
@@ -408,36 +429,6 @@ impl TryFrom<u8> for StorageClass {
     }
 }
 
-impl From<&kvenginepb::Schema> for StorageClass {
-    fn from(value: &kvenginepb::Schema) -> Self {
-        let keys = value.get_keys();
-        let vals = value.get_values();
-        for i in 0..keys.len() {
-            let key = &keys[i];
-            let val = &vals[i];
-            if key == STORAGE_CLASS_KEY {
-                return StorageClass::unmarshal(Some(val.as_slice()));
-            }
-        }
-        StorageClass::Unspecified
-    }
-}
-
-impl From<&kvenginepb::Partition> for StorageClass {
-    fn from(value: &kvenginepb::Partition) -> Self {
-        let keys = value.get_keys();
-        let vals = value.get_values();
-        for i in 0..keys.len() {
-            let key = &keys[i];
-            let val = &vals[i];
-            if key == STORAGE_CLASS_KEY {
-                return StorageClass::unmarshal(Some(val.as_slice()));
-            }
-        }
-        StorageClass::Unspecified
-    }
-}
-
 impl fmt::Debug for StorageClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}({})", self.display(), *self as u8)
@@ -447,6 +438,242 @@ impl fmt::Debug for StorageClass {
 impl fmt::Display for StorageClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.display())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StorageClassTransitRule {
+    pub tier: StorageClass,
+    pub transit_after: StdDuration,
+}
+
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct StorageClassSpec {
+    pub default_tier: StorageClass,
+    pub transit_rules: Vec<StorageClassTransitRule>,
+}
+
+const STORAGE_CLASS_SPEC_FORMAT_VER: u8 = 1;
+
+impl StorageClassSpec {
+    pub fn marshal(&self) -> Vec<u8> {
+        if !self.default_tier.is_specified() && self.transit_rules.is_empty() {
+            return vec![];
+        }
+
+        // Write `default_tier` first for compatibility.
+        let marshal_len = if self.transit_rules.is_empty() {
+            U8_SIZE /* default_tier */
+        } else {
+            U8_SIZE /* default_tier */ + U8_SIZE /* ver */ + U32_SIZE /* len */
+                + self.transit_rules.len() * (U8_SIZE /* tier */ + U64_SIZE /* duration */)
+        };
+        let mut buf = Vec::with_capacity(marshal_len);
+
+        // default_tier.
+        buf.put_u8(self.default_tier as u8);
+        if self.transit_rules.is_empty() {
+            return buf;
+        }
+
+        // ver.
+        buf.put_u8(STORAGE_CLASS_SPEC_FORMAT_VER);
+
+        // transit_rules.
+        buf.put_u32_le(self.transit_rules.len() as u32);
+        for rule in &self.transit_rules {
+            buf.put_u8(rule.tier as u8);
+            buf.put_u64_le(rule.transit_after.as_secs());
+        }
+        buf
+    }
+
+    pub fn unmarshal(buf: Option<&[u8]>) -> Self {
+        Self::try_unmarshal(buf)
+            .map_err(|e| {
+                debug_assert!(false, "try unmarshal failed: {:?}, buf: {:?}", e, buf);
+                warn!("try unmarshal failed: {:?}", e; "buf" => ?buf);
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn try_unmarshal(buf: Option<&[u8]>) -> Result<Self> {
+        let Some(mut buf) = buf else {
+            return Ok(Self::default());
+        };
+        if buf.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let default_tier = StorageClass::try_from(buf.get_u8())
+            .map_err(|e| -> Error { box_err!("invalid default tier: {}", e) })?;
+        // For compatibility.
+        if !buf.has_remaining() {
+            return Ok(Self {
+                default_tier,
+                transit_rules: vec![],
+            });
+        }
+
+        let ver = buf.get_u8();
+        if ver != STORAGE_CLASS_SPEC_FORMAT_VER {
+            return Err(box_err!("invalid version: {}", ver));
+        }
+        let len = buf.get_u32_le() as usize;
+        let mut rules = Vec::with_capacity(len);
+        for _ in 0..len {
+            let tier = StorageClass::try_from(buf.get_u8())
+                .map_err(|e| -> Error { box_err!("invalid tier: {}", e) })?;
+            let transit_after = StdDuration::from_secs(buf.get_u64_le());
+            rules.push(StorageClassTransitRule {
+                tier,
+                transit_after,
+            });
+        }
+
+        Ok(Self {
+            default_tier,
+            transit_rules: rules,
+        })
+    }
+
+    fn sort(&mut self) {
+        self.transit_rules
+            .sort_by(|a, b| a.transit_after.cmp(&b.transit_after));
+    }
+
+    pub fn target_storage_class(&self, elapsed: StdDuration) -> StorageClass {
+        // `rev()`: Rules are sorted by transit_after in ascending order,
+        self.transit_rules
+            .iter()
+            .rev()
+            .find_map(|rule| (elapsed >= rule.transit_after).then_some(rule.tier))
+            .unwrap_or(self.default_tier)
+    }
+
+    pub fn is_specified(&self) -> bool {
+        self.default_tier.is_specified()
+            || self
+                .transit_rules
+                .iter()
+                .any(|rule| rule.tier.is_specified())
+    }
+
+    pub fn must_be_ia(&self) -> bool {
+        self.default_tier.is_ia() && self.transit_rules.iter().all(|rule| rule.tier.is_ia())
+    }
+
+    // Note: Include the conditions that `must_be_ia()` is true.
+    pub fn can_be_ia(&self) -> bool {
+        self.default_tier.is_ia() || self.transit_rules.iter().any(|rule| rule.tier.is_ia())
+    }
+
+    pub fn is_auto_ia(&self) -> bool {
+        self.can_be_ia() && !self.must_be_ia()
+    }
+
+    pub fn can_transit_to_other_sc(&self) -> bool {
+        self.transit_rules
+            .iter()
+            .any(|rule| rule.tier != self.default_tier)
+    }
+
+    pub fn require_exclusive_region(&self) -> bool {
+        self.default_tier.require_exclusive_region()
+            || self
+                .transit_rules
+                .iter()
+                .any(|rule| rule.tier.require_exclusive_region())
+    }
+
+    pub fn from_tidb(
+        tier: Option<&str>,
+        transitions: Option<&[StorageClassTransitionInfo]>,
+    ) -> Self {
+        let default_tier = StorageClass::from_tidb_storage_class_tier(tier);
+        let transit_rules = transitions
+            .map(|trans| {
+                trans
+                    .iter()
+                    .map(|t| StorageClassTransitRule {
+                        tier: StorageClass::from_tidb_storage_class_tier(Some(&t.tier)),
+                        transit_after: StdDuration::from_secs(
+                            t.after_days as u64 * 24 * 3600 + t.after_seconds as u64,
+                        ),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut spec = Self {
+            default_tier,
+            transit_rules,
+        };
+        spec.sort();
+        spec
+    }
+
+    #[cfg(feature = "testexport")]
+    pub fn to_tidb(&self) -> (Option<String>, Option<Vec<StorageClassTransitionInfo>>) {
+        let tier = self
+            .default_tier
+            .is_specified()
+            .then(|| self.default_tier.to_tidb());
+        let transitions = (!self.transit_rules.is_empty()).then(|| {
+            self.transit_rules
+                .iter()
+                .map(|rule| StorageClassTransitionInfo {
+                    tier: rule.tier.to_tidb(),
+                    after_days: (rule.transit_after.as_secs() / 86400) as u32,
+                    after_seconds: (rule.transit_after.as_secs() % 86400) as u32,
+                })
+                .collect()
+        });
+        (tier, transitions)
+    }
+
+    pub fn from_schema_pb(schema: &kvenginepb::Schema) -> Self {
+        let keys = schema.get_keys();
+        let vals = schema.get_values();
+        for i in 0..keys.len() {
+            let key = &keys[i];
+            let val = &vals[i];
+            if key == STORAGE_CLASS_KEY {
+                return Self::unmarshal(Some(val.as_slice()));
+            }
+        }
+        Self::default()
+    }
+
+    pub fn apply_to_schema_pb(&self, schema: &mut kvenginepb::Schema) {
+        schema.mut_keys().push(STORAGE_CLASS_KEY.to_string());
+        schema.mut_values().push(self.marshal());
+    }
+
+    pub fn from_partition_pb(partition: &kvenginepb::Partition) -> Self {
+        let keys = partition.get_keys();
+        let vals = partition.get_values();
+        for i in 0..keys.len() {
+            let key = &keys[i];
+            let val = &vals[i];
+            if key == STORAGE_CLASS_KEY {
+                return Self::unmarshal(Some(val.as_slice()));
+            }
+        }
+        Self::default()
+    }
+
+    pub fn apply_to_partition_pb(&self, partition: &mut kvenginepb::Partition) {
+        partition.mut_keys().push(STORAGE_CLASS_KEY.to_string());
+        partition.mut_values().push(self.marshal());
+    }
+}
+
+impl From<StorageClass> for StorageClassSpec {
+    fn from(tier: StorageClass) -> Self {
+        Self {
+            default_tier: tier,
+            transit_rules: vec![],
+        }
     }
 }
 
@@ -692,6 +919,47 @@ mod tests {
         for (sc, input, output) in cases {
             assert_eq!(StorageClass::unmarshal(input.as_deref()), sc);
             assert_eq!(sc.marshal(), output);
+
+            // Compatibility tests.
+            let spec = StorageClassSpec::unmarshal(input.as_deref());
+            assert_eq!(spec, StorageClassSpec::from(sc));
+            assert_eq!(StorageClass::unmarshal(Some(&spec.marshal())), sc);
         }
+    }
+
+    #[test]
+    fn test_storage_class_spec() {
+        let cases = vec![
+            StorageClassSpec::default(),
+            StorageClassSpec::from(StorageClass::Ia),
+            StorageClassSpec {
+                default_tier: StorageClass::Standard,
+                transit_rules: vec![StorageClassTransitRule {
+                    tier: StorageClass::Ia,
+                    transit_after: StdDuration::from_secs(3600),
+                }],
+            },
+            StorageClassSpec {
+                default_tier: StorageClass::Unspecified,
+                transit_rules: vec![
+                    StorageClassTransitRule {
+                        tier: StorageClass::Standard,
+                        transit_after: StdDuration::from_secs(3600),
+                    },
+                    StorageClassTransitRule {
+                        tier: StorageClass::Ia,
+                        transit_after: StdDuration::from_secs(7200),
+                    },
+                ],
+            },
+        ];
+        for spec in cases {
+            assert_eq!(StorageClassSpec::unmarshal(Some(&spec.marshal())), spec);
+        }
+
+        assert_eq!(
+            StorageClassSpec::unmarshal(None),
+            StorageClassSpec::default()
+        )
     }
 }

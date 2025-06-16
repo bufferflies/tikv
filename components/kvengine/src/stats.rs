@@ -1,11 +1,14 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp, collections::HashSet};
+use std::{cmp, collections::HashSet, convert::TryFrom};
 
 use api_version;
 use bytes::Bytes;
 use codec::{buffer::BufferWriter, number::NumberEncoder};
-use schema::schema::StorageClass;
+use schema::schema::{
+    StorageClass, StorageClassSpec, STORAGE_CLASS_SPEC_STR_AUTO, STORAGE_CLASS_TIER_IA,
+};
+use serde::Deserialize;
 
 use crate::{
     metrics::{
@@ -184,7 +187,7 @@ impl super::Engine {
             }
             engine_stats.vector_indexes.data_size += shard.vector_indexes.data_size;
             engine_stats.vector_indexes.num_files += shard.vector_indexes.num_files;
-            if matches!(shard.storage_class, StorageClass::Ia) {
+            if shard.storage_class_spec == StorageClass::Ia.into() {
                 engine_stats.ia.add_ia_shard(shard);
             }
         }
@@ -329,7 +332,11 @@ pub struct ShardStats {
     pub ready_to_destroy_range: bool,
     pub trim_over_bound: bool,
     pub manual_major_compaction: bool,
-    pub storage_class: StorageClass,
+    #[serde(
+        serialize_with = "serialize_storage_class_spec",
+        deserialize_with = "deserialize_storage_class_spec"
+    )]
+    pub storage_class_spec: StorageClassSpec,
     pub is_sync: bool,
     pub checked_schema_version: i64,
     // Txn File Stats
@@ -381,7 +388,11 @@ pub struct ShardStatsLite {
     pub schema_version: i64,
     pub schema_restore_version: u64,
     pub write_sequence: u64,
-    pub storage_class: StorageClass,
+    #[serde(
+        serialize_with = "serialize_storage_class_spec",
+        deserialize_with = "deserialize_storage_class_spec"
+    )]
+    pub storage_class_spec: StorageClassSpec,
     pub columnar_tables: usize,
 }
 
@@ -397,7 +408,7 @@ impl From<ShardStats> for ShardStatsLite {
             schema_version: s.schema_version,
             schema_restore_version: s.schema_restore_version,
             write_sequence: s.write_sequence,
-            storage_class: s.storage_class,
+            storage_class_spec: s.storage_class_spec,
             columnar_tables: s.columnar_tables,
         }
     }
@@ -405,7 +416,7 @@ impl From<ShardStats> for ShardStatsLite {
 
 impl ShardStatsLite {
     pub fn with_schema(&self) -> bool {
-        self.storage_class.is_specified() || self.columnar_tables > 0
+        self.storage_class_spec.is_specified() || self.columnar_tables > 0
     }
 }
 
@@ -743,7 +754,7 @@ impl super::Shard {
             ready_to_destroy_range: Self::ready_to_destroy_range(&pending_ops.del_prefixes, &data),
             trim_over_bound: pending_ops.trim_over_bound,
             manual_major_compaction: pending_ops.manual_major_compaction,
-            storage_class: pending_ops.storage_class,
+            storage_class_spec: pending_ops.storage_class_spec,
             is_sync: data.is_sync(),
             checked_schema_version: self.get_checked_schema_ver(),
             txn_file_locks,
@@ -772,6 +783,38 @@ where
 {
     let hex_str = log_wrappers::hex_encode_upper(bytes);
     serializer.serialize_str(&hex_str)
+}
+
+fn serialize_storage_class_spec<S>(
+    spec: &StorageClassSpec,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if spec.must_be_ia() {
+        serializer.serialize_str(STORAGE_CLASS_TIER_IA)
+    } else if spec.can_be_ia() {
+        serializer.serialize_str(STORAGE_CLASS_SPEC_STR_AUTO)
+    } else {
+        serializer.serialize_str("")
+    }
+}
+
+fn deserialize_storage_class_spec<'de, D>(deserializer: D) -> Result<StorageClassSpec, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    D::Error: serde::de::Error,
+{
+    let spec_str: String = String::deserialize(deserializer)?;
+    Ok(match spec_str.as_str() {
+        STORAGE_CLASS_SPEC_STR_AUTO => {
+            // Only used for schema manager to check schema (`ShardStats::with_schema`).
+            // So just use "IA" to represent "Auto IA".
+            StorageClass::Ia.into()
+        }
+        s => StorageClass::try_from(s).unwrap_or_default().into(),
+    })
 }
 
 #[cfg(test)]

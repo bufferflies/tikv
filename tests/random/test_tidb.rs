@@ -1,7 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    convert::TryInto,
+    convert::TryFrom,
     io::Write as _,
     ops::Div,
     path::PathBuf,
@@ -23,7 +23,7 @@ use pd_client::{
     pd_control::{OpKind, PdControl, PdScheduleConfig},
 };
 use rand::prelude::*;
-use schema::schema::StorageClass;
+use schema::schema::{StorageClass, StorageClassSpec};
 use security::SecurityConfig;
 use sqlx::{ConnectOptions, Executor, Row as _};
 use test_cloud_server::{
@@ -884,7 +884,7 @@ pub(crate) async fn connect_tidb(
 
 pub(crate) struct TidbTableSchema {
     pub id: i64,
-    pub storage_class: StorageClass,
+    pub storage_class_spec: StorageClassSpec,
 }
 
 pub(crate) async fn query_tidb_table_schema<'a, E>(
@@ -904,10 +904,12 @@ where
         .await
         .context("select_schema")?;
     let table_id: i64 = row.get("TIDB_TABLE_ID");
-    let storage_class: String = row.get("TIDB_STORAGE_CLASS");
+    let storage_class_str: String = row.get("TIDB_STORAGE_CLASS");
+    let default_tier = StorageClass::try_from(storage_class_str.as_str()).unwrap();
+    // TODO: handle transitions.
     let meta = TidbTableSchema {
         id: table_id,
-        storage_class: storage_class.as_str().try_into().unwrap(),
+        storage_class_spec: default_tier.into(),
     };
     Ok(meta)
 }
@@ -928,7 +930,7 @@ async fn query_table_meta(
         keyspace_id,
         db.to_string(),
         table.to_string(),
-        schema.storage_class,
+        schema.storage_class_spec,
     ))
 }
 

@@ -2,10 +2,11 @@
 
 use std::{
     fmt,
-    sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicI64, Ordering},
 };
 
-use schema::schema::StorageClass;
+use parking_lot::Mutex;
+use schema::schema::StorageClassSpec;
 
 static NEXT_TABLE_ID: AtomicI64 = AtomicI64::new(1);
 
@@ -25,7 +26,7 @@ pub struct TableMeta {
     is_schema_enabled: AtomicBool,
     /// `storage_class` indicates the expected storage class of table. Used to
     /// verify consistency with `Shard`.
-    storage_class: AtomicU8,
+    storage_class_spec: Mutex<StorageClassSpec>,
 }
 
 impl Clone for TableMeta {
@@ -37,7 +38,7 @@ impl Clone for TableMeta {
             table_name: self.table_name.clone(),
             is_available: AtomicBool::new(self.is_available()),
             is_schema_enabled: AtomicBool::new(self.is_schema_enabled()),
-            storage_class: AtomicU8::new(self.storage_class() as u8),
+            storage_class_spec: Mutex::new(self.storage_class_spec().clone()),
         }
     }
 }
@@ -55,7 +56,7 @@ impl fmt::Debug for TableMeta {
         }
         de.field("is_available", &self.is_available())
             .field("is_schema_enabled", &self.is_schema_enabled())
-            .field("storage_class", &self.storage_class())
+            .field("storage_class_spec", &self.storage_class_spec())
             .finish()
     }
 }
@@ -65,7 +66,7 @@ impl TableMeta {
         keyspace_id: u32,
         is_available: bool,
         is_schema_enabled: bool,
-        storage_class: StorageClass,
+        storage_class_spec: StorageClassSpec,
     ) -> Self {
         let id = NEXT_TABLE_ID.fetch_add(1, Ordering::SeqCst);
         Self {
@@ -75,7 +76,7 @@ impl TableMeta {
             table_name: String::new(),
             is_available: AtomicBool::new(is_available),
             is_schema_enabled: AtomicBool::new(is_schema_enabled),
-            storage_class: AtomicU8::new(storage_class as u8),
+            storage_class_spec: Mutex::new(storage_class_spec),
         }
     }
 
@@ -84,7 +85,7 @@ impl TableMeta {
         keyspace_id: u32,
         db_name: String,
         table_name: String,
-        storage_class: StorageClass,
+        storage_class_spec: StorageClassSpec,
     ) -> Self {
         Self {
             id: table_id,
@@ -93,7 +94,7 @@ impl TableMeta {
             table_name,
             is_available: AtomicBool::new(true),
             is_schema_enabled: AtomicBool::new(true),
-            storage_class: AtomicU8::new(storage_class as u8),
+            storage_class_spec: Mutex::new(storage_class_spec),
         }
     }
 
@@ -125,15 +126,11 @@ impl TableMeta {
         self.is_schema_enabled.load(Ordering::SeqCst)
     }
 
-    pub fn storage_class(&self) -> StorageClass {
-        self.storage_class
-            .load(Ordering::Acquire)
-            .try_into()
-            .unwrap()
+    pub fn storage_class_spec(&self) -> StorageClassSpec {
+        self.storage_class_spec.lock().clone()
     }
 
-    pub fn set_storage_class(&self, storage_class: StorageClass) {
-        self.storage_class
-            .store(storage_class as u8, Ordering::Release);
+    pub fn set_storage_class_spec(&self, spec: StorageClassSpec) {
+        *self.storage_class_spec.lock() = spec;
     }
 }

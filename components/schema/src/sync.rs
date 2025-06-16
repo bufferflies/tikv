@@ -225,12 +225,12 @@ pub trait KvGetter: Send + Sync {
     async fn batch_get(&self, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>, String>;
 }
 
-#[cfg(any(test, feature = "testexport"))]
+#[cfg(feature = "testexport")]
 pub mod test_utils {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::schema::{DbInfo, PartitionDefinition, PartitionInfo, StorageClass};
+    use crate::schema::{DbInfo, PartitionDefinition, PartitionInfo, StorageClassSpec};
 
     const TIDB_DBS: &[u8] = b"DBs";
 
@@ -243,7 +243,7 @@ pub mod test_utils {
         partition_id: Option<i64>, // The partition to be set as `storage_class`.
         partitions: Option<Vec<i64>>, // All partitions.
         schema_version: i64,
-        storage_class: StorageClass,
+        spec: StorageClassSpec,
         current: &mut Option<HashMap<i64 /* table_id */, TableInfo>>,
     ) -> Result<HashMap<Vec<u8>, Vec<u8>>, String> {
         let mut kv_pairs: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
@@ -293,23 +293,21 @@ pub mod test_utils {
             table_info.partition = Some(par_info);
         }
 
-        let target_sc = if let Some(partition_id) = partition_id {
-            &mut table_info
+        let (sc_tier, sc_trans) = spec.to_tidb();
+        if let Some(partition_id) = partition_id {
+            let part_def = table_info
                 .partition
                 .as_mut()
                 .unwrap()
                 .definitions
                 .iter_mut()
                 .find(|p| p.id == partition_id)
-                .unwrap()
-                .storage_class_tier
+                .unwrap();
+            part_def.storage_class_tier = sc_tier;
+            part_def.storage_class_transitions = sc_trans;
         } else {
-            &mut table_info.storage_class_tier
-        };
-        *target_sc = if storage_class.is_specified() {
-            Some(storage_class.display().to_string())
-        } else {
-            None
+            table_info.storage_class_tier = sc_tier;
+            table_info.storage_class_transitions = sc_trans;
         };
 
         let schema_data = serde_json::to_string(&table_info).map_err(|e| e.to_string())?;

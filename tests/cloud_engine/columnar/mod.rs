@@ -36,7 +36,7 @@ use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
 use protobuf::Message;
 use rand::Rng;
-use schema::schema::StorageClass;
+use schema::schema::{StorageClass, StorageClassSpec};
 use test_cloud_server::{
     client::{CommitAction, MutateOptions},
     keyspace::CreateKeyspaceOptions,
@@ -364,7 +364,8 @@ fn test_sst_and_columnar_with_ia() {
         .block_on(create_keyspace_and_split_tables(&mut cluster));
     let table_id = table_ids[1];
     let mut schema_buf = build_columnar_schema_buf(table_id);
-    schema_buf.set_storage_class(StorageClass::Ia);
+    let sc_spec_ia = StorageClassSpec::from(StorageClass::Ia);
+    schema_buf.set_storage_class_spec(sc_spec_ia.clone());
     let schemas: Vec<Schema> = vec![schema_buf.clone().into()];
     let schema = schemas[0].clone();
     let schema_version = 10;
@@ -388,7 +389,9 @@ fn test_sst_and_columnar_with_ia() {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    if shard.get_schema_file().is_some() && shard.use_ia() {
+                    if shard.get_schema_file().is_some()
+                        && shard.storage_class_spec_equals(&sc_spec_ia)
+                    {
                         return true;
                     }
                 }
@@ -490,7 +493,7 @@ fn test_sst_and_columnar_with_ia() {
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
                     if shard.get_schema_file().is_some()
-                        && !shard.get_storage_class().is_specified()
+                        && !shard.get_storage_class_spec().is_specified()
                     {
                         assert!(shard.get_property(STORAGE_CLASS_KEY).is_none());
                         let (_, sst_ia_file_ids) = shard.get_local_sst_files();
@@ -1167,7 +1170,7 @@ fn build_columnar_schema_buf(table_id: i64) -> SchemaBuf {
         vec![c1, c2],
         vec![],
         vec![],
-        StorageClass::default(),
+        StorageClassSpec::default(),
         None,
     )
 }

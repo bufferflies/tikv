@@ -1972,7 +1972,7 @@ pub mod tests {
     use proptest::{arbitrary::any, proptest};
     use rand::Rng;
     use rstest::rstest;
-    use schema::schema::StorageClass;
+    use schema::schema::StorageClassSpec;
     use test_util::init_log_for_test;
     use tidb_query_datatype::{
         codec::row::v2::encoder_for_test::{Column, RowEncoder},
@@ -2064,7 +2064,7 @@ pub mod tests {
             columns,
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         ))
     }

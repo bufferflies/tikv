@@ -11,7 +11,7 @@ use kvengine::{
     SchemaFileMeta, Shard, ShardMeta, STORAGE_CLASS_KEY,
 };
 use kvproto::{metapb, metapb::Region};
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use tikv_util::{
     codec::bytes::encode_bytes, debug, info, time::Instant, warn, worker::Runnable, Either,
 };
@@ -97,7 +97,8 @@ impl SchemaRunner {
             }
 
             let schema_version = schema_file.as_ref().map_or(0, |x| x.get_version());
-            let mut storage_class_property: Option<StorageClass> = None;
+            let shard_sc_spec = shard.get_storage_class_spec();
+            let mut expect_sc_spec: Option<StorageClassSpec> = None;
             if let Some(schema_file) = schema_file {
                 let overlapped = schema_file.overlap_storage_class_tables(shard.range.data_bound());
                 info!("{} handle storage class", tag; "schema_version" => schema_version, "overlapped" => ?overlapped);
@@ -105,8 +106,8 @@ impl SchemaRunner {
                     Either::Left(table_id) => {
                         // The table fully covers the region.
                         let schema = schema_file.get_table(table_id).unwrap();
-                        if shard.get_storage_class() != schema.get_storage_class() {
-                            storage_class_property = Some(schema.get_storage_class());
+                        if &shard_sc_spec != schema.get_storage_class_spec() {
+                            expect_sc_spec = Some(schema.get_storage_class_spec().clone());
                         }
                     }
                     Either::Right(table_inner_keys) => {
@@ -114,24 +115,24 @@ impl SchemaRunner {
                             // The overlapped keys of tables require exclusive region.
                             self.split_regions_for_tables(&tag, &shard, &region, &table_inner_keys);
                             return;
-                        } else if shard.get_storage_class().is_specified() {
+                        } else if shard_sc_spec.is_specified() {
                             // No table with specified storage class covers this region.
-                            storage_class_property = Some(StorageClass::Unspecified);
+                            expect_sc_spec = Some(StorageClassSpec::default());
                         }
                     }
                 }
-            } else if shard.get_storage_class().is_specified() {
-                storage_class_property = Some(StorageClass::Unspecified);
+            } else if shard_sc_spec.is_specified() {
+                expect_sc_spec = Some(StorageClassSpec::default());
             }
 
-            if let Some(storage_class) = storage_class_property {
-                if self.update_storage_class(&tag, &shard, storage_class, schema_version) {
+            if let Some(sc_spec) = expect_sc_spec {
+                if self.update_storage_class(tag, &shard, sc_spec, schema_version) {
                     shard.set_checked_schema_ver(schema_version);
-                    info!("{} update shard storage class to {:?}", tag, shard.get_storage_class(); "schema_version" => schema_version);
+                    info!("{} update shard storage class spec to {:?}", tag, shard.get_storage_class_spec(); "schema_version" => schema_version);
                 }
             } else {
                 debug!("{} handle storage class: skip, no need to update", tag;
-                    "schema_meta" => ?schema_meta, "schema_version" => schema_version, "shard.sc" => ?shard.get_storage_class());
+                    "schema_meta" => ?schema_meta, "schema_version" => schema_version, "shard.sc_spec" => ?shard_sc_spec);
                 shard.set_checked_schema_ver(schema_version);
             }
         } else {
@@ -166,15 +167,15 @@ impl SchemaRunner {
 
     fn update_storage_class(
         &self,
-        tag: &PeerTag,
+        tag: PeerTag,
         shard: &Shard,
-        storage_class: StorageClass,
+        spec: StorageClassSpec,
         schema_version: i64,
     ) -> bool {
-        info!("{} update storage class", tag; "sc" => ?storage_class, "schema_ver" => schema_version);
+        info!("{} update storage class", tag; "spec" => ?spec, "schema_ver" => schema_version);
         let mut cs = kvengine::new_change_set(shard.id, shard.ver);
         cs.set_property_key(STORAGE_CLASS_KEY.to_string());
-        cs.set_property_value(storage_class.marshal());
+        cs.set_property_value(spec.marshal());
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let cb = Callback::write(Box::new(move |res| {
             let _ = tx.send(res);
@@ -206,8 +207,8 @@ impl SchemaRunner {
                     return false;
                 }
             }
-            let current = shard.get_storage_class();
-            if current == storage_class {
+            let current = shard.get_storage_class_spec();
+            if current == spec {
                 return true;
             }
             if begin.saturating_elapsed() < timeout {
@@ -216,7 +217,7 @@ impl SchemaRunner {
             }
 
             warn!("{} update storage class: wait for storage class updated timeout", tag;
-                    "current" => ?current, "expect" => ?storage_class);
+                    "current" => ?current, "expect" => ?spec);
             break false;
         }
     }
@@ -238,7 +239,7 @@ pub(crate) fn shard_is_matched_with_meta(shard: &Shard, shard_meta: &ShardMeta) 
     if schema_meta.is_valid() {
         shard.get_checked_schema_ver() >= schema_meta.file_ver()
     } else {
-        !shard_meta.get_storage_class().is_specified()
+        !shard_meta.get_storage_class_spec().is_specified()
     }
 }
 
@@ -246,6 +247,6 @@ pub(crate) fn shard_is_matched_with_schema(shard: &Shard, schema_meta: &SchemaFi
     if schema_meta.is_valid() {
         shard.get_checked_schema_ver() >= schema_meta.file_ver()
     } else {
-        !shard.get_storage_class().is_specified()
+        !shard.get_storage_class_spec().is_specified()
     }
 }

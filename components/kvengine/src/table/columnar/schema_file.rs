@@ -10,7 +10,7 @@ use bytes::{Buf, BufMut};
 use collections::HashSet;
 use kvenginepb::SchemaMeta;
 use protobuf::Message;
-use schema::schema::StorageClass;
+use schema::schema::StorageClassSpec;
 use tidb_query_datatype::codec::table::{
     decode_table_id, INDEX_PREFIX_SEP, RECORD_PREFIX_SEP, TABLE_PREFIX, TABLE_PREFIX_KEY_LEN,
 };
@@ -122,19 +122,22 @@ impl SchemaFile {
             schema_pb.merge_from_bytes(&data[..schema_pb_len]).unwrap();
             data.advance(schema_pb_len);
             let table_id = schema_pb.get_table_id();
-            let property_sc = StorageClass::from(&schema_pb);
+            let sc_spec = StorageClassSpec::from_schema_pb(&schema_pb);
             let partitions = if !schema_pb.partitions.is_empty() {
-                let mut partition_sc = Vec::with_capacity(schema_pb.partitions.len());
+                let mut partition_sc_spec = Vec::with_capacity(schema_pb.partitions.len());
                 for partition in &schema_pb.partitions {
-                    partition_sc.push((partition.get_id(), StorageClass::from(partition)));
+                    partition_sc_spec.push((
+                        partition.get_id(),
+                        StorageClassSpec::from_partition_pb(partition),
+                    ));
                 }
-                Some(partition_sc)
+                Some(partition_sc_spec)
             } else {
                 None
             };
 
             let mut builder = SchemaBufBuilder::new(table_id);
-            builder.storage_class(property_sc);
+            builder.storage_class_spec(sc_spec);
             builder.partitions(partitions.clone());
 
             if !schema_pb.columns.is_empty() {
@@ -257,7 +260,7 @@ impl SchemaFile {
         let end_lt_index = end_key.len() >= TABLE_PREFIX_KEY_LEN
             && &end_key[TABLE_PREFIX_KEY_LEN..] < INDEX_PREFIX_SEP;
         for (&table_id, schema) in self.core.tables.iter() {
-            if schema.get_storage_class().is_specified() {
+            if schema.get_storage_class_spec().is_specified() {
                 if start_table_id == end_table_id && table_id == start_table_id {
                     return true;
                 }
@@ -341,8 +344,8 @@ impl SchemaFile {
                 continue;
             }
 
-            let sc = schema.get_storage_class();
-            if !sc.is_specified() {
+            let sc_spec = schema.get_storage_class_spec();
+            if !sc_spec.is_specified() {
                 continue;
             }
 
@@ -354,7 +357,7 @@ impl SchemaFile {
                 return Either::Left(table_id);
             }
 
-            if sc.require_exclusive_region() {
+            if sc_spec.require_exclusive_region() {
                 if range.exclusive_overlap_key(table_start_key.as_ref()) {
                     overlapped_keys.push(table_start_key);
                 }
@@ -426,11 +429,15 @@ impl SchemaFile {
             .tables
             .iter()
             .filter_map(|(&table_id, schema)| {
-                let with_storage_class = match schema.partitions.as_ref() {
-                    Some(partitions) => partitions.iter().any(|(_, sc)| sc.is_specified()),
-                    None => !schema.is_sub_partition() && schema.get_storage_class().is_specified(),
+                let with_sc_spec = match schema.partitions.as_ref() {
+                    Some(partitions) => {
+                        partitions.iter().any(|(_, sc_spec)| sc_spec.is_specified())
+                    }
+                    None => {
+                        !schema.is_sub_partition() && schema.get_storage_class_spec().is_specified()
+                    }
                 };
-                with_storage_class.then_some(table_id)
+                with_sc_spec.then_some(table_id)
             })
             .collect()
     }
@@ -470,7 +477,7 @@ pub fn build_schema_file(
     for schema in &tables {
         let mut schema_pb = kvenginepb::Schema::default();
         schema
-            .get_storage_class()
+            .get_storage_class_spec()
             .apply_to_schema_pb(&mut schema_pb);
         schema_pb.table_id = schema.table_id;
         if schema.with_columnar() {
@@ -486,10 +493,10 @@ pub fn build_schema_file(
             }
         }
         if let Some(partitions) = &schema.partitions {
-            for &(id, sc) in partitions {
+            for (id, sc_spec) in partitions {
                 let mut partition_pb = kvenginepb::Partition::default();
-                sc.apply_to_partition_pb(&mut partition_pb);
-                partition_pb.set_id(id);
+                sc_spec.apply_to_partition_pb(&mut partition_pb);
+                partition_pb.set_id(*id);
                 schema_pb.mut_partitions().push(partition_pb);
             }
         }
@@ -510,7 +517,7 @@ mod tests {
 
     use api_version::{api_v2::TIDB_META_KEY_PREFIX, ApiV2};
     use bytes::Bytes;
-    use schema::schema::StorageClass;
+    use schema::schema::{StorageClass, StorageClassSpec};
     use tidb_query_datatype::{
         codec::table::RECORD_PREFIX_SEP, Collation::Utf8Mb4GeneralCi, FieldTypeTp,
     };
@@ -548,7 +555,7 @@ mod tests {
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         ));
         let schema_2 = Schema::new(SchemaBuf::new(
@@ -558,7 +565,7 @@ mod tests {
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         ));
         let schemas = vec![schema_1, schema_2];
@@ -742,7 +749,7 @@ mod tests {
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         ));
         let mut schema_buf_2 = SchemaBuf::new(
@@ -752,7 +759,7 @@ mod tests {
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         );
         schema_buf_2.set_storage_class(StorageClass::Standard);
@@ -862,7 +869,7 @@ mod tests {
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         ));
         let schema_2 = Schema::new(SchemaBuf::new(
@@ -872,7 +879,7 @@ mod tests {
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         ));
         let schema_3 = Schema::new(SchemaBuf::new(
@@ -882,7 +889,7 @@ mod tests {
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         ));
         let schemas = vec![schema_1.clone(), schema_2.clone()];
@@ -909,13 +916,13 @@ mod tests {
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             None,
         ));
         let partitions = vec![
-            (21, StorageClass::default()),
-            (22, StorageClass::default()),
-            (23, StorageClass::default()),
+            (21, StorageClassSpec::default()),
+            (22, StorageClassSpec::default()),
+            (23, StorageClassSpec::default()),
         ];
         let schema_2 = Schema::new(SchemaBuf::new(
             20,
@@ -924,7 +931,7 @@ mod tests {
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             Some(partitions),
         ));
         let schemas = vec![schema_1, schema_2];
@@ -1039,14 +1046,14 @@ mod tests {
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
             vec![],
-            StorageClass::Ia,
+            StorageClass::Ia.into(),
             None,
         ));
 
         let partitions = vec![
-            (21, StorageClass::default()),
-            (22, StorageClass::Ia),
-            (23, StorageClass::default()),
+            (21, StorageClassSpec::default()),
+            (22, StorageClass::Ia.into()),
+            (23, StorageClassSpec::default()),
         ];
         let schema_2 = Schema::new(SchemaBuf::new(
             20,
@@ -1055,7 +1062,7 @@ mod tests {
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
             vec![],
-            StorageClass::default(),
+            StorageClassSpec::default(),
             Some(partitions),
         ));
 
