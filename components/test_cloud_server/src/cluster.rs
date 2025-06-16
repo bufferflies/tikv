@@ -12,7 +12,9 @@ use std::{
 use anyhow::bail;
 use bstr::ByteSlice;
 use cloud_server::TikvServer;
-use cloud_worker::{local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker};
+use cloud_worker::{
+    local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker, CloudWorkerLimiterConfig,
+};
 use dashmap::DashMap;
 use futures::{executor::block_on, future::try_join_all};
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
@@ -906,6 +908,12 @@ impl ServerCluster {
                 local_gc: LocalGcConfig {
                     interval: ReadableDuration::secs(10),
                     ia: IaGcConfig::new_for_test(),
+                },
+                worker_limiter: CloudWorkerLimiterConfig {
+                    // Temporary configs to fix https://github.com/tidbcloud/cloud-storage-engine/issues/2934.
+                    // TODO: remove after upgrade.
+                    global_concurrency_factor: 10.0,
+                    keyspace_concurrency_factor: 8.0,
                 },
                 memory_upper_threshold,
                 ..Default::default()
