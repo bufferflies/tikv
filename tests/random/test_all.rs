@@ -416,7 +416,7 @@ fn prepare_cluster(
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
-        conf.storage.check_backup_ts = true;
+        conf.storage.check_backup_ts = switches.txn_check_backup_ts;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
     let mut cluster = ServerClusterBuilder::new(nodes, update_conf_fn)
@@ -586,6 +586,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
 pub(crate) struct Switches {
     pub ia_table_ratio: f64,
     pub enable_oss_chaos: bool,
+    pub txn_check_backup_ts: bool,
 }
 
 impl Switches {
@@ -593,10 +594,12 @@ impl Switches {
         let mut rng = thread_rng();
         let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.2);
         let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
+        let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
 
         Self {
             ia_table_ratio,
             enable_oss_chaos,
+            txn_check_backup_ts,
         }
     }
 }

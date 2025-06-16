@@ -31,6 +31,7 @@ COLUMNAR_WORKLOAD=0
 RESTART_TSO_SVC=1
 IA_TABLE_RATIO=0.2
 ASYNC_COMMIT_RATIO=0.1
+TXN_CHECK_BACKUP_TS=0
 OSS_CHAOS_RATIO=0.2
 
 UPGRADE_TEST_DURATION="60s"
@@ -95,6 +96,9 @@ while [ $# -gt 0 ]; do
         ASYNC_COMMIT_RATIO="$2"
         shift
         ;;
+    --txn-check-backup-ts)
+        TXN_CHECK_BACKUP_TS=1
+        ;;
     --oss-chaos-ratio)
         OSS_CHAOS_RATIO="$2"
         shift
@@ -140,6 +144,7 @@ export COLUMNAR_WORKLOAD
 export RESTART_TSO_SVC
 export IA_TABLE_RATIO
 export ASYNC_COMMIT_RATIO
+export TXN_CHECK_BACKUP_TS
 export OSS_CHAOS_RATIO
 
 export TEST_DUR_BEFORE_UPGRADE="$UPGRADE_TEST_DURATION"

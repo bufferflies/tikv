@@ -400,6 +400,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores as usize;
+        conf.storage.check_backup_ts = switches.txn_check_backup_ts;
         conf.gc.enable_safe_point_v2 = true;
 
         if switches.remote_cop_min_block_size > 0 {
@@ -949,6 +950,7 @@ pub(crate) struct Switches {
     pub async_commit_switch_on: bool,
     pub ia_table_ratio: f64,
     pub vector_common_handle: bool,
+    pub txn_check_backup_ts: bool,
 }
 
 impl Switches {
@@ -975,6 +977,7 @@ impl Switches {
 
         let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
         let async_commit_switch_on = rng.gen_bool(env_param("ASYNC_COMMIT_RATIO", 0.1));
+        let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
         let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.2);
 
         Self {
@@ -991,6 +994,7 @@ impl Switches {
             async_commit_switch_on,
             ia_table_ratio,
             vector_common_handle: rng.gen_bool(0.8),
+            txn_check_backup_ts,
         }
     }
 }
