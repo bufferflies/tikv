@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod test_columnar;
+mod test_ia_auto_file;
 mod test_ia_file;
 mod test_txn_file;
 
@@ -31,6 +32,7 @@ use util::test_util::KeyBuilder;
 
 use crate::{
     dfs::InMemFs,
+    ia::manager::{IaManager, IaManagerOptions},
     limiter::StoreLimiter,
     table::{
         file::{File, InMemFile},
@@ -84,6 +86,16 @@ impl Drop for TestEngine {
 impl TestEngine {
     fn key_builder(&self) -> &KeyBuilder {
         &self.key_builder
+    }
+
+    fn new_ia_manager(&self, opts: IaManagerOptions) -> IaManager {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .thread_name("ia-mgr")
+            .enable_all()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        IaManager::new(opts, self.fs.clone(), None, runtime.into()).unwrap()
     }
 }
 
@@ -1257,7 +1269,14 @@ impl Applier {
                         self.engine.apply_change_set(
                             &self
                                 .engine
-                                .prepare_change_set(cs, false, false, None, None, None)
+                                .prepare_change_set(
+                                    cs,
+                                    false,
+                                    FilePrepareType::Local,
+                                    None,
+                                    None,
+                                    None
+                                )
                                 .unwrap()
                         ),
                         "applier apply changeset"

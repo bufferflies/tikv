@@ -20,21 +20,25 @@ use dashmap::mapref::entry::Entry;
 use file_system::{IoOp, IoType};
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
-use schema::schema::{StorageClass, StorageClassSpec};
+use schema::schema::StorageClassSpec;
 use tikv_util::{mpsc::Receiver, time::Instant};
+use txn_types::TimeStamp;
 
 use crate::{
     apply::ChangeSet,
     context::IaCtx,
     dfs::FileType,
     error::IoContext,
-    ia::ia_file::{table_meta_file_local_path, IaFile},
+    ia::{
+        ia_auto_file::IaAutoFile,
+        ia_file::{table_meta_file_local_path, IaFile},
+    },
     limiter::DfsLoadLimiterPermit,
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
         columnar::SchemaFile,
         file::{FdCache, File, InMemFile, LocalFile},
-        sstable::SsTable,
+        sstable::{SsTable, SsTableCore, SsTableProperty, PROP_KEY_MAX_TS},
         vector_index::VectorIndexFile,
         BoundedDataSet,
     },
@@ -46,9 +50,9 @@ impl EngineCore {
         &self,
         cs: kvenginepb::ChangeSet,
         use_direct_io: bool,
-        shard_use_ia: bool, // The shard_use_ia means shard's storage class is IA.
+        prepare_type: FilePrepareType,
         reload_snap: Option<kvenginepb::Snapshot>, /* The snap contains the current files that
-                             * need to be reloaded. */
+                                                    * need to be reloaded. */
         table_filter: Option<LoadTableFilterFn>,
         encryption_key: Option<EncryptionKey>, /* encryption_key will be ignored if cs is
                                                 * snapshot or restore_shard */
@@ -79,7 +83,7 @@ impl EngineCore {
                 for bt in comp.get_blob_tables() {
                     ids.insert(bt.get_id(), FileMeta::from_blob_table(bt));
                 }
-            } else if comp.level == 0 && (shard_use_ia || self.opts.ia.force_ia) {
+            } else if comp.level == 0 && (prepare_type.not_local() || self.opts.ia.force_ia) {
                 for tbl in &comp.table_creates {
                     ids.insert(tbl.id, FileMeta::from_table(tbl));
                 }
@@ -166,16 +170,13 @@ impl EngineCore {
             }
         }
         let mut encryption_key = encryption_key;
-        let mut shard_use_ia = shard_use_ia;
+        let mut prepare_type = prepare_type;
         if let Some(snap) = snap {
             self.collect_snap_ids(snap, &mut ids);
             lock_txn_file_refs.extend(collect_snap_lock_txn_file_refs(snap));
             encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
                 .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap());
-            let sc = StorageClassSpec::unmarshal(
-                get_shard_property(STORAGE_CLASS_KEY, snap.get_properties()).as_deref(),
-            );
-            shard_use_ia = sc == StorageClass::Ia.into();
+            prepare_type = FilePrepareType::from_snapshot(snap);
             if snap.has_schema_meta() {
                 schema_meta = Some(snap.get_schema_meta());
             }
@@ -217,7 +218,7 @@ impl EngineCore {
             "{} is preparing change set, loading file by ids", tag;
             "ids" => ?ids.keys(),
             "encryption_key" => ?encryption_key,
-            "shard_use_ia" => shard_use_ia,
+            "prepare_type" => ?prepare_type,
         );
         self.load_tables_by_ids(
             tag,
@@ -226,7 +227,7 @@ impl EngineCore {
             &ids,
             &mut cs,
             use_direct_io,
-            shard_use_ia,
+            prepare_type,
             encryption_key.clone(),
         )?;
 
@@ -278,28 +279,48 @@ impl EngineCore {
         ids: &HashMap<u64, FileMeta>,
         cs: &mut ChangeSet,
         use_direct_io: bool,
-        shard_use_ia: bool,
+        shard_prepare_type: FilePrepareType,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
         let start_time = Instant::now_coarse();
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(ids.len());
         let runtime = self.fs.get_runtime().handle();
         let opts = dfs::Options::default().with_shard(shard_id, shard_ver);
+        let current_ts: Option<u64> = matches!(shard_prepare_type, FilePrepareType::AutoIa(_))
+            .then(|| TimeStamp::now().into_inner());
         let available_permits = self.dfs_load_limiter.available_permits();
         let mut join_set = tokio::task::JoinSet::new();
         let mut msg_count = 0;
         for (&id, fm) in ids {
             let fs = self.fs.clone();
-            let use_ia_file =
-                self.ia_ctx.is_enabled() && fm.use_ia(shard_use_ia || self.opts.ia.force_ia);
+            let prepare_type = if self.ia_ctx.is_enabled() {
+                shard_prepare_type.convert_for_prepare_table(fm, self.opts.ia.force_ia)
+            } else {
+                FilePrepareType::Local
+            };
 
             // Try open local file first.
-            let file = if !use_ia_file {
-                self.open_local_file(id, fm.file_type)
+            let mut table_meta_file = None;
+            let file: Option<Arc<dyn File>> = match &prepare_type {
+                FilePrepareType::Local => self
+                    .open_local_file(id, fm.file_type)
                     .ok()
-                    .map(|f| Arc::new(f) as _)
-            } else {
-                self.try_open_local_meta_file(tag, id, fm, use_direct_io)?
+                    .map(|f| Arc::new(f) as _),
+                FilePrepareType::Ia => self
+                    .try_open_local_ia_file(tag, id, fm, use_direct_io)?
+                    .map(|f| Arc::new(f) as _),
+                FilePrepareType::AutoIa(spec) => {
+                    let (ia_auto_f, table_meta_f) = self.try_open_local_auto_ia_file(
+                        tag,
+                        id,
+                        fm,
+                        use_direct_io,
+                        current_ts.unwrap(),
+                        spec,
+                    )?;
+                    table_meta_file = table_meta_f;
+                    ia_auto_f.map(|f| Arc::new(f) as _)
+                }
             };
             if let Some(file) = file {
                 cs.add_file(id, file, fm, self.cache.clone(), encryption_key.clone())?;
@@ -313,16 +334,35 @@ impl EngineCore {
             join_set.spawn_on(
                 async move {
                     let permit = dfs_load_limiter.acquire_permit().await;
-                    let res = if !use_ia_file {
-                        Self::load_remote_table(id, &fm, opts, fs.as_ref()).await
-                    } else {
-                        Self::load_remote_table_meta(tag, id, &fm, opts, fs.as_ref()).await
+                    let res = match prepare_type {
+                        FilePrepareType::Local => {
+                            let res =
+                                Self::load_remote_table(id, fm.file_type, opts, fs.as_ref()).await;
+                            res.map(|local_data| PreparedFileResult::Local { local_data })
+                        }
+                        FilePrepareType::Ia => {
+                            let res =
+                                Self::load_remote_table_meta(tag, id, &fm, opts, fs.as_ref()).await;
+                            res.map(|table_meta_data| PreparedFileResult::Ia { table_meta_data })
+                        }
+                        FilePrepareType::AutoIa(spec) => {
+                            Self::load_remote_auto_ia_file(
+                                tag,
+                                id,
+                                &fm,
+                                opts,
+                                fs.as_ref(),
+                                table_meta_file,
+                                current_ts.unwrap(),
+                                spec,
+                            )
+                            .await
+                        }
                     };
-                    let _ = tx.send(res.map(|data| LoadRemoteResult {
+                    let _ = tx.send(res.map(|prepared| LoadRemoteResult {
                         id,
                         fm,
-                        data,
-                        use_ia_file,
+                        prepared,
                         permit,
                     }));
                 },
@@ -346,20 +386,25 @@ impl EngineCore {
         &self,
         cs: &mut ChangeSet,
         use_direct_io: bool,
-        result_tx: &Receiver<Result<LoadRemoteResult>>,
+        result_rx: &Receiver<Result<LoadRemoteResult>>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
         let LoadRemoteResult {
             id,
             fm,
-            data,
-            use_ia_file,
+            prepared,
             permit,
-        } = result_tx.recv().unwrap()?;
-        let file = if !use_ia_file {
-            self.save_and_open_table(id, &fm, data, permit, use_direct_io)?
-        } else {
-            self.save_and_open_ia_file(id, &fm, data, permit, use_direct_io)?
+        } = result_rx.recv().unwrap()?;
+        let file: Arc<dyn File> = match prepared {
+            PreparedFileResult::Local { local_data } => self
+                .save_and_open_table(id, &fm, local_data, permit, use_direct_io)
+                .map(|f| Arc::new(f) as _)?,
+            PreparedFileResult::Ia { table_meta_data } => self
+                .save_and_open_ia_file(id, &fm, table_meta_data, Some(permit), use_direct_io)
+                .map(|f| Arc::new(f) as _)?,
+            prepared @ PreparedFileResult::AutoIa { .. } => self
+                .save_and_open_auto_ia_file(id, &fm, prepared, permit, use_direct_io)
+                .map(|f| Arc::new(f) as _)?,
         };
         cs.add_file(file.id(), file, &fm, self.cache.clone(), encryption_key)?;
         Ok(())
@@ -392,7 +437,7 @@ impl EngineCore {
             &load_tables,
             &mut cs,
             use_direct_io,
-            false,
+            FilePrepareType::Local,
             shard.encryption_key.clone(),
         )?;
 
@@ -561,7 +606,7 @@ impl EngineCore {
         }
     }
 
-    fn open_local_file(&self, id: u64, file_type: FileType) -> Result<LocalFile> {
+    pub(crate) fn open_local_file(&self, id: u64, file_type: FileType) -> Result<LocalFile> {
         let path = self.local_file_path(id, file_type);
         self.open_local_file_with_file_path(id, Some(self.fd_cache.clone()), path)
     }
@@ -581,13 +626,13 @@ impl EngineCore {
         )?)
     }
 
-    fn try_open_local_meta_file(
+    fn try_open_local_ia_file(
         &self,
         tag: ShardTag,
         id: u64,
         fm: &FileMeta,
         use_direct_io: bool,
-    ) -> Result<Option<Arc<dyn File>>> {
+    ) -> Result<Option<IaFile>> {
         let IaCtx::Enabled(ia_mgr, data_dir) = self.ia_ctx.clone() else {
             return Ok(None);
         };
@@ -621,7 +666,7 @@ impl EngineCore {
         }
         if let Ok(table_meta_file) = table_meta_file {
             if let Ok(ia_file) = IaFile::open(id, fm, Arc::new(table_meta_file), ia_mgr) {
-                return Ok(Some(Arc::new(ia_file)));
+                return Ok(Some(ia_file));
             }
         }
         Ok(None)
@@ -629,11 +674,11 @@ impl EngineCore {
 
     async fn load_remote_table(
         id: u64,
-        fm: &FileMeta,
+        ftype: FileType,
         opts: dfs::Options,
         fs: &dyn dfs::Dfs,
     ) -> Result<Bytes> {
-        fs.read_file(id, opts.with_type(fm.file_type))
+        fs.read_file(id, opts.with_type(ftype))
             .await
             .map_err(Into::into)
     }
@@ -645,7 +690,7 @@ impl EngineCore {
         data: Bytes,
         permit: DfsLoadLimiterPermit,
         use_direct_io: bool,
-    ) -> Result<Arc<dyn File>> {
+    ) -> Result<LocalFile> {
         let data_len = data.len();
         self.write_local_file(id, data, use_direct_io, fm.file_type)?;
         drop(permit);
@@ -655,7 +700,7 @@ impl EngineCore {
             .inc_by(data_len as u64);
 
         let file = self.open_local_file(id, fm.file_type)?;
-        Ok(Arc::new(file))
+        Ok(file)
     }
 
     async fn load_remote_table_meta(
@@ -679,9 +724,9 @@ impl EngineCore {
         id: u64,
         fm: &FileMeta,
         table_meta_data: Bytes,
-        permit: DfsLoadLimiterPermit,
+        permit: Option<DfsLoadLimiterPermit>,
         use_direct_io: bool,
-    ) -> Result<Arc<dyn File>> {
+    ) -> Result<IaFile> {
         let IaCtx::Enabled(ia_mgr, data_dir) = &self.ia_ctx else {
             unreachable!("ia_ctx should be enabled");
         };
@@ -698,12 +743,119 @@ impl EngineCore {
         let meta_file =
             self.open_local_file_with_file_path(id, ia_mgr.get_meta_fd_cache(), meta_file_path)?;
         let table_meta_file = Arc::new(meta_file);
-        Ok(Arc::new(IaFile::open(
-            id,
-            fm,
+        Ok(IaFile::open(id, fm, table_meta_file, ia_mgr.clone())?)
+    }
+
+    fn try_open_local_auto_ia_file(
+        &self,
+        tag: ShardTag,
+        id: u64,
+        fm: &FileMeta,
+        use_direct_io: bool,
+        current_ts: u64,
+        spec: &StorageClassSpec,
+    ) -> Result<(
+        Option<IaAutoFile>,
+        Option<Arc<dyn File>>, // table_meta_file
+    )> {
+        debug_assert_eq!(fm.file_type, FileType::Sst);
+        let ia_file = self.try_open_local_ia_file(tag, id, fm, use_direct_io)?;
+        let Some(ia_file) = ia_file else {
+            return Ok((None, None));
+        };
+
+        let SsTableProperty::MaxTs(max_ts) = SsTableCore::extract_property_from_table_meta_file(
+            ia_file.table_meta_file().as_ref(),
+            PROP_KEY_MAX_TS,
+        )?;
+        let elapsed = TimeStamp::new(current_ts).duration_since(max_ts.into());
+        let target_sc = spec.target_storage_class(elapsed);
+        Ok(if target_sc.is_ia() {
+            let auto_ia_file = IaAutoFile::new(ia_file, None, max_ts, spec.clone());
+            (Some(auto_ia_file), None)
+        } else if let Ok(local_file) = self.open_local_file(id, fm.file_type) {
+            let auto_ia_file =
+                IaAutoFile::new(ia_file, Some(Arc::new(local_file)), max_ts, spec.clone());
+            (Some(auto_ia_file), None)
+        } else {
+            (None, Some(ia_file.table_meta_file().clone()))
+        })
+    }
+
+    async fn load_remote_auto_ia_file(
+        tag: ShardTag,
+        id: u64,
+        fm: &FileMeta,
+        opts: dfs::Options,
+        fs: &dyn dfs::Dfs,
+        table_meta_file: Option<Arc<dyn File>>,
+        current_ts: u64,
+        spec: StorageClassSpec,
+    ) -> Result<PreparedFileResult> {
+        debug_assert_eq!(fm.file_type, FileType::Sst);
+
+        let table_meta_file = if let Some(table_meta_file) = table_meta_file {
+            table_meta_file
+        } else {
+            let table_meta = Self::load_remote_table_meta(tag, id, fm, opts, fs).await?;
+            Arc::new(InMemFile::new(id, table_meta.clone()))
+        };
+
+        let SsTableProperty::MaxTs(max_ts) = SsTableCore::extract_property_from_table_meta_file(
+            table_meta_file.as_ref(),
+            PROP_KEY_MAX_TS,
+        )?;
+        let elapsed = TimeStamp::new(current_ts).duration_since(max_ts.into());
+        let target_sc = spec.target_storage_class(elapsed);
+        let table_data = if target_sc.is_ia() {
+            None
+        } else {
+            Some(Self::load_remote_table(id, fm.file_type, opts, fs).await?)
+        };
+        Ok(PreparedFileResult::AutoIa {
             table_meta_file,
-            ia_mgr.clone(),
-        )?))
+            local_data: table_data,
+            max_ts,
+            spec,
+        })
+    }
+
+    fn save_and_open_auto_ia_file(
+        &self,
+        id: u64,
+        fm: &FileMeta,
+        prepared: PreparedFileResult,
+        permit: DfsLoadLimiterPermit,
+        use_direct_io: bool,
+    ) -> Result<IaAutoFile> {
+        let PreparedFileResult::AutoIa {
+            table_meta_file,
+            local_data,
+            max_ts,
+            spec,
+        } = prepared
+        else {
+            unreachable!();
+        };
+        let ia_file = if table_meta_file.path().is_none() {
+            let table_meta_data = table_meta_file.read_all()?;
+            self.save_and_open_ia_file(id, fm, table_meta_data, None, use_direct_io)?
+        } else {
+            let IaCtx::Enabled(ia_mgr, _) = &self.ia_ctx else {
+                unreachable!("ia_ctx should be enabled");
+            };
+            IaFile::open(id, fm, table_meta_file, ia_mgr.clone())?
+        };
+
+        let local_file: Option<Arc<dyn File>> = if let Some(local_data) = local_data {
+            let local_file = self.save_and_open_table(id, fm, local_data, permit, use_direct_io)?;
+            Some(Arc::new(local_file) as _)
+        } else {
+            drop(permit);
+            None
+        };
+
+        Ok(IaAutoFile::new(ia_file, local_file, max_ts, spec))
     }
 
     pub async fn load_schema_file(&self, id: u64) -> Result<SchemaFile> {
@@ -827,10 +979,73 @@ fn validate_table_meta_off(tag: ShardTag, id: u64, fm: &FileMeta, data: Bytes) -
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub enum FilePrepareType {
+    #[default]
+    Local,
+    Ia,
+    AutoIa(StorageClassSpec),
+}
+
+impl FilePrepareType {
+    fn from_storage_class_spec(sc_spec: StorageClassSpec) -> Self {
+        if sc_spec.must_be_ia() {
+            Self::Ia
+        } else if sc_spec.can_be_ia() {
+            Self::AutoIa(sc_spec)
+        } else {
+            Self::Local
+        }
+    }
+
+    pub fn from_shard_meta(meta: &ShardMeta) -> Self {
+        Self::from_storage_class_spec(meta.get_storage_class_spec())
+    }
+
+    pub fn from_snapshot(snap: &kvenginepb::Snapshot) -> Self {
+        Self::from_storage_class_spec(StorageClassSpec::unmarshal(
+            get_shard_property(STORAGE_CLASS_KEY, snap.get_properties()).as_deref(),
+        ))
+    }
+
+    pub fn not_local(&self) -> bool {
+        !matches!(self, Self::Local)
+    }
+
+    pub fn convert_for_prepare_table(&self, fm: &FileMeta, force_ia: bool) -> Self {
+        match fm.file_type {
+            FileType::Sst if fm.can_use_ia() => {
+                if force_ia {
+                    Self::Ia
+                } else {
+                    self.clone()
+                }
+            }
+            FileType::Columnar => Self::Ia,
+            FileType::VectorIndex => Self::Ia,
+            _ => Self::Local,
+        }
+    }
+}
+
+enum PreparedFileResult {
+    Local {
+        local_data: Bytes,
+    },
+    Ia {
+        table_meta_data: Bytes,
+    },
+    AutoIa {
+        table_meta_file: Arc<dyn File>,
+        local_data: Option<Bytes>,
+        max_ts: u64,
+        spec: StorageClassSpec,
+    },
+}
+
 struct LoadRemoteResult {
     id: u64,
     fm: FileMeta,
-    data: Bytes,
-    use_ia_file: bool,
+    prepared: PreparedFileResult,
     permit: DfsLoadLimiterPermit,
 }

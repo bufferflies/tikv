@@ -2,19 +2,20 @@
 
 use std::{rc::Rc, sync::Arc, time::Duration};
 
-use bytes::Bytes;
 use futures::executor::block_on;
 use test_util::init_log_for_test;
 use tikv_util::time::Instant;
 
 use crate::{
-    dfs,
-    dfs::FileType,
     ia::{ia_file::IaFile, manager::IaManager, util::IaManagerOptionsBuilder},
-    table::sstable::{BlockCache, SsTable},
+    next, next_async,
+    table::{
+        file::InMemFile,
+        sstable::{BlockCache, SsTable},
+    },
     tests::{new_table, new_test_engine_opt},
     util::test_util::KeyBuilder,
-    FileMeta, Iterator,
+    Iterator,
 };
 
 #[rstest::rstest]
@@ -23,10 +24,7 @@ use crate::{
 fn test_sync_read(#[case] concurrency: usize) {
     init_log_for_test();
 
-    let tempdir = tempfile::tempdir().unwrap();
-    let local_path = tempdir.path();
     let file_id = 1;
-
     let (engine, _) = new_test_engine_opt(true, 1024, "");
     let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
     let t = new_table(&engine, file_id, 0, 100, 1000, false, &mut saved_vals);
@@ -44,28 +42,7 @@ fn test_sync_read(#[case] concurrency: usize) {
         .build()
         .unwrap();
     let mgr = IaManager::new(options, engine.fs.clone(), None, ia_rt.into()).unwrap();
-
-    let dfs_opts = dfs::Options::default().with_shard(1, 1);
-    block_on(IaFile::prepare_table_meta(
-        file_id,
-        FileType::Sst,
-        t.meta_offset() as u64,
-        local_path,
-        &dfs_opts,
-        &mgr,
-    ))
-    .unwrap();
-    let fm = FileMeta {
-        cf: 0,
-        level: 0,
-        file_type: FileType::Sst,
-        smallest: Bytes::new(),
-        biggest: Bytes::new(),
-        l0_size: 0,
-        table_meta_off: 0,
-    };
-    let ia_file = IaFile::open_in_path(file_id, &fm, local_path, mgr.clone()).unwrap();
-    let t_async = SsTable::new(Arc::new(ia_file), BlockCache::None, None).unwrap();
+    let t_async = convert_local_sst_to_ia(&t, mgr.clone());
 
     // Test in tokio async context.
     // Simulate unified pool.
@@ -104,11 +81,18 @@ fn test_sync_read(#[case] concurrency: usize) {
     verify_table_by_scan(&engine.key_builder, &t_async, 0, 100, 1000);
 }
 
+#[maybe_async::both]
 #[track_caller]
-fn verify_table_by_scan(kb: &KeyBuilder, t: &SsTable, begin: usize, end: usize, ver: u64) {
+pub(crate) async fn verify_table_by_scan(
+    kb: &KeyBuilder,
+    t: &SsTable,
+    begin: usize,
+    end: usize,
+    ver: u64,
+) {
     let mut i = begin;
     let mut it = t.new_iterator(false, false);
-    it.rewind();
+    it.rewind().await;
     while it.valid() {
         let key = it.key();
         assert_eq!(kb.i_to_inner_key(i).as_ref(), key);
@@ -116,8 +100,25 @@ fn verify_table_by_scan(kb: &KeyBuilder, t: &SsTable, begin: usize, end: usize, 
         assert_eq!(val.version, ver);
         assert_eq!(val.get_value(), key.repeat(2));
 
-        it.next();
+        next!(it).await;
         i += 1;
     }
     assert_eq!(i, end);
+}
+
+pub(crate) fn open_ia_file_from_sst(t: &SsTable, mgr: IaManager) -> IaFile {
+    let meta_data = t
+        .file()
+        .read(
+            t.meta_offset() as u64,
+            t.size() as usize - t.meta_offset() as usize,
+        )
+        .unwrap();
+    let meta_file = InMemFile::new(t.id(), meta_data);
+    IaFile::open_for_sst(t.id(), Arc::new(meta_file), mgr).unwrap()
+}
+
+pub(crate) fn convert_local_sst_to_ia(t: &SsTable, mgr: IaManager) -> SsTable {
+    let ia_file = open_ia_file_from_sst(t, mgr);
+    SsTable::new(Arc::new(ia_file), BlockCache::None, None).unwrap()
 }

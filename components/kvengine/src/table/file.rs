@@ -15,11 +15,12 @@ use aligned_vec::{AVec, ConstAlign};
 use bytes::Bytes;
 use memmap2::Mmap;
 use quick_cache::sync::GuardResult;
+use schema::schema::StorageClass;
 
 use crate::{error::IoContext, ia::types::FileSegmentIdent, table::table};
 
 #[async_trait::async_trait]
-pub trait File: Sync + Send {
+pub trait File: std::any::Any + Sync + Send {
     // id returns the id of the file.
     fn id(&self) -> u64;
 
@@ -42,6 +43,10 @@ pub trait File: Sync + Send {
 
     /// `read_at` reads the data to the buffer.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> table::Result<()>;
+
+    fn read_all(&self) -> table::Result<Bytes> {
+        self.read(0, self.size() as usize)
+    }
 
     /// `read_table_meta` read meta (e.g, index, filter) of tables.
     ///
@@ -90,6 +95,11 @@ pub trait File: Sync + Send {
     fn get_segment_ident(&self, _offset: u64) -> table::Result<FileSegmentIdent> {
         unimplemented!()
     }
+
+    fn storage_class(&self) -> StorageClass;
+
+    /// Cast to `Any`. Used for downcast.
+    fn as_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync>;
 }
 
 pub enum MmapData {
@@ -226,6 +236,14 @@ impl File for LocalFile {
         let mmap = guard.as_ref().unwrap().clone();
         Ok(MmapData::Local(mmap))
     }
+
+    fn storage_class(&self) -> StorageClass {
+        StorageClass::Unspecified
+    }
+
+    fn as_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -327,6 +345,14 @@ impl File for InMemFile {
 
     fn mmap(&self) -> table::Result<MmapData> {
         Ok(MmapData::InMem(self.data.clone()))
+    }
+
+    fn storage_class(&self) -> StorageClass {
+        StorageClass::Unspecified
+    }
+
+    fn as_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+        self
     }
 }
 

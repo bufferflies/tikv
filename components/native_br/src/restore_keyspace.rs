@@ -28,8 +28,8 @@ use kvengine::{
     ia::util::IaConfig,
     limiter::StoreLimiter,
     table::{BoundedDataSet, DataBound, InnerKey},
-    IdAllocator, IdVer, LoadTableFilterFn, ShardMeta, ShardRange, ShardStats, ShardTag,
-    ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
+    FilePrepareType, IdAllocator, IdVer, LoadTableFilterFn, ShardMeta, ShardRange, ShardStats,
+    ShardTag, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
@@ -2429,7 +2429,7 @@ impl MetaApplier {
                         .prepare_change_set(
                             cs,
                             false,
-                            false,
+                            FilePrepareType::Local,
                             None,
                             None,
                             self.encryption_key.clone(),

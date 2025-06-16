@@ -7,6 +7,7 @@
 #![feature(assert_matches)]
 #![feature(cell_update)]
 #![feature(let_chains)]
+#![feature(async_fn_track_caller)]
 #![allow(clippy::diverging_sub_expression)]
 #![allow(internal_features)]
 #![cfg_attr(test, feature(test))]

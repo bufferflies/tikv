@@ -6,7 +6,7 @@ use api_version::ApiV2;
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use collections::HashSet;
-use kvengine::{collect_snap_lock_txn_file_refs, Engine, Shard, ShardMeta};
+use kvengine::{collect_snap_lock_txn_file_refs, Engine, FilePrepareType, Shard, ShardMeta};
 use kvenginepb::ChangeSet;
 use kvproto::{
     metapb,
@@ -340,7 +340,7 @@ fn recover_change_set(
             let cs1 = ctx.engine.prepare_change_set(
                 std::mem::take(&mut cs),
                 false,
-                meta.use_ia(),
+                FilePrepareType::from_shard_meta(meta),
                 None,
                 None,
                 encryption_key.cloned(),

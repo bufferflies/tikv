@@ -15,8 +15,8 @@ use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    get_shard_property, set_shard_property, util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY,
-    STORAGE_CLASS_KEY,
+    get_shard_property, set_shard_property, util::PropertiesHelper, FilePrepareType, ShardMeta,
+    ENCRYPTION_KEY, STORAGE_CLASS_KEY,
 };
 use kvproto::{
     disk_usage::DiskUsage,
@@ -1682,7 +1682,7 @@ impl Peer {
                 cs: change_set,
                 encryption_key: self.encryption_key.clone(),
                 reload_snap: None,
-                shard_use_ia: false, // reset by snapshot
+                prepare_type: FilePrepareType::Local, // reset by snapshot
             });
         }
     }
@@ -1961,7 +1961,7 @@ impl<'a> PreprocessRef<'a> {
             } else {
                 None
             };
-        let shard_use_ia = shard_meta.use_ia();
+        let prepare_type = FilePrepareType::from_shard_meta(shard_meta);
         ctx.raft_wb.set_state(
             peer_id,
             region_id,
@@ -1977,7 +1977,7 @@ impl<'a> PreprocessRef<'a> {
             cs,
             encryption_key: self.encryption_key.clone(),
             reload_snap,
-            shard_use_ia,
+            prepare_type,
         });
         Ok(())
     }

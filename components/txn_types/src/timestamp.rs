@@ -84,6 +84,14 @@ impl TimeStamp {
             .unwrap()
             .as_millis() as u64
     }
+
+    pub fn now() -> Self {
+        Self::compose(Self::physical_now(), 0)
+    }
+
+    pub fn duration_since(self, other: TimeStamp) -> std::time::Duration {
+        std::time::Duration::from_millis(self.0.saturating_sub(other.0) >> TSO_PHYSICAL_SHIFT_BITS)
+    }
 }
 
 impl From<u64> for TimeStamp {
@@ -192,6 +200,8 @@ impl TsSet {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::types::Key;
 
@@ -217,6 +227,22 @@ mod tests {
         let enc = Key::from_encoded_slice(k).append_ts(ts);
         let res = Key::split_on_ts_for(enc.as_encoded()).unwrap();
         assert_eq!(res, (k.as_ref(), ts));
+    }
+
+    #[test]
+    fn test_ts_duration_since() {
+        let ts1 = TimeStamp::compose(1000, 0);
+        let ts2 = TimeStamp::compose(2000, 1);
+        let dur = ts2.duration_since(ts1);
+        assert_eq!(dur.as_millis(), 1000);
+
+        let ts3 = TimeStamp::compose(3000, 0);
+        let dur = ts3.duration_since(ts2);
+        assert_eq!(dur.as_millis(), 999);
+
+        let ts4 = TimeStamp::compose(1500, 0);
+        let dur = ts4.duration_since(ts3);
+        assert_eq!(dur, Duration::ZERO);
     }
 
     #[test]

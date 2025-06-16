@@ -19,7 +19,7 @@ use xorf::{BinaryFuse8, Filter};
 
 use super::{builder::*, iterator::TableIterator};
 use crate::{
-    ia::types::FileSegmentIdent,
+    ia::{ia_auto_file::IaAutoFile, types::FileSegmentIdent},
     next_version, next_version_async,
     table::{
         file::{File, TtlCache},
@@ -298,6 +298,10 @@ pub struct SsTableCore {
     pub keyspace_id: Option<u32>,
 }
 
+pub enum SsTableProperty {
+    MaxTs(u64),
+}
+
 impl SsTableCore {
     pub fn new(
         file: Arc<dyn File>,
@@ -387,6 +391,52 @@ impl SsTableCore {
             keyspace_id,
         };
         Ok(core)
+    }
+
+    // Support max_ts only.
+    // TODO: Support other properties.
+    pub fn extract_property_from_table_meta_file(
+        table_meta_file: &dyn File,
+        prop_key: &[u8],
+    ) -> Result<SsTableProperty> {
+        let mut footer = Footer::default();
+        let footer_data = table_meta_file.read_footer(FOOTER_SIZE)?;
+        footer.unmarshal(footer_data.chunk());
+        if !footer.is_match() {
+            return Err(table::Error::InvalidMagicNumber);
+        }
+
+        let meta_size = table_meta_file.size();
+        let table_meta_off = footer.meta_offset() as u64;
+        let table_size = table_meta_off + meta_size;
+
+        let props_data = table_meta_file.read_table_meta(
+            footer.properties_offset as u64 - table_meta_off,
+            footer.properties_len(table_size as usize),
+        )?;
+        let mut prop_slice = props_data.chunk();
+        validate_checksum_with_fix(prop_slice, &footer, table_meta_file, None)?;
+        prop_slice = &prop_slice[4..];
+        while !prop_slice.is_empty() {
+            let (key, val, remain) = parse_prop_data(prop_slice);
+            prop_slice = remain;
+            if key == prop_key {
+                let v = match key {
+                    PROP_KEY_MAX_TS => SsTableProperty::MaxTs(LittleEndian::read_u64(val)),
+                    _ => {
+                        return Err(table::Error::Other(format!(
+                            "property not supported: {:?}",
+                            key
+                        )));
+                    }
+                };
+                return Ok(v);
+            }
+        }
+        Err(table::Error::Other(format!(
+            "property not found: {:?}",
+            prop_key
+        )))
     }
 
     pub fn init_index(&self, offset: u32, length: usize) -> Result<Index> {
@@ -591,6 +641,14 @@ impl SsTableCore {
 
     pub fn id(&self) -> u64 {
         self.file.id()
+    }
+
+    pub fn file(&self) -> &Arc<dyn File> {
+        &self.file
+    }
+
+    pub fn try_get_auto_ia_file(&self) -> Option<Arc<IaAutoFile>> {
+        self.file.clone().as_any().downcast::<IaAutoFile>().ok()
     }
 
     /// The size on disk in bytes.

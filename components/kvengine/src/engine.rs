@@ -393,7 +393,7 @@ impl EngineCore {
         let change_set = self.prepare_change_set(
             meta.to_change_set(),
             false,
-            meta.use_ia(),
+            FilePrepareType::from_shard_meta(meta),
             None,
             table_filter,
             None,
@@ -415,7 +415,7 @@ impl EngineCore {
         let change_set = self.prepare_change_set(
             meta.to_change_set(),
             false,
-            meta.use_ia(),
+            FilePrepareType::from_shard_meta(meta),
             None,
             table_filter,
             None,

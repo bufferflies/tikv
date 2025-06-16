@@ -14,7 +14,7 @@ use bytes::{Buf, Bytes};
 use kvenginepb as pb;
 use kvenginepb::{get_any_snap_from_changeset, SchemaMeta, TxnFileRef, VectorIndex};
 use protobuf::Message;
-use schema::schema::{StorageClass, StorageClassSpec};
+use schema::schema::StorageClassSpec;
 use slog_global::*;
 use util::TxnFileRefExt as _;
 
@@ -1399,10 +1399,6 @@ impl ShardMeta {
         Some(snap)
     }
 
-    pub fn use_ia(&self) -> bool {
-        self.get_storage_class_spec() == StorageClass::Ia.into()
-    }
-
     pub fn get_storage_class_spec(&self) -> StorageClassSpec {
         StorageClassSpec::unmarshal(self.get_property(STORAGE_CLASS_KEY).as_deref())
     }
@@ -1494,15 +1490,6 @@ impl FileMeta {
     pub fn can_use_ia(&self) -> bool {
         match self.file_type {
             FileType::Sst if (self.cf as usize == WRITE_CF && self.level > 0) => true,
-            FileType::Columnar => true,
-            FileType::VectorIndex => true,
-            _ => false,
-        }
-    }
-
-    pub fn use_ia(&self, shard_use_ia: bool) -> bool {
-        match self.file_type {
-            FileType::Sst => shard_use_ia && (self.cf as usize == WRITE_CF && self.level > 0),
             FileType::Columnar => true,
             FileType::VectorIndex => true,
             _ => false,

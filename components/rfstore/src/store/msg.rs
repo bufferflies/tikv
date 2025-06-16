@@ -3,7 +3,7 @@
 use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Formatter, sync::Arc};
 
 use cloud_encryption::EncryptionKey;
-use kvengine::table::columnar::SchemaFile;
+use kvengine::{table::columnar::SchemaFile, FilePrepareType};
 use kvenginepb::TxnFileRef;
 use kvproto::{
     kvrpcpb::ExtraOp as TxnExtraOp,
@@ -109,7 +109,7 @@ pub(crate) enum ApplyMsg {
         encryption_key: Option<EncryptionKey>,
         reload_snap: Option<kvenginepb::Snapshot>, /* The snap contains the current files that
                                                     * need to be reloaded. */
-        shard_use_ia: bool, // The shard_use_ia means shard's storage class is IA.
+        prepare_type: FilePrepareType,
     },
     PrepareMerge,
     PrepareCommitMerge {

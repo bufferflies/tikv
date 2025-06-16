@@ -18,8 +18,8 @@ use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvengine::{
     encode_extra_txn_status_key, get_shard_property, mvcc, table::InnerKey, util::PropertiesHelper,
-    ChangeSet, Engine, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF,
-    TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
+    ChangeSet, Engine, FilePrepareType, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY, EXTRA_CF,
+    LOCK_CF, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
 };
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use kvproto::{
@@ -1542,7 +1542,7 @@ impl Applier {
         encryption_key: Option<EncryptionKey>,
         reload_snap: Option<kvenginepb::Snapshot>, /* The snap contains the current files that
                                                     * need to be reloaded. */
-        shard_use_ia: bool, // The shard_use_ia means shard's storage class is IA.
+        prepare_type: FilePrepareType,
     ) {
         if cs.has_ingest_files() {
             self.paused_apply_queue
@@ -1562,7 +1562,7 @@ impl Applier {
             let res = engine.prepare_change_set(
                 cs,
                 !is_leader,
-                shard_use_ia,
+                prepare_type,
                 reload_snap,
                 None,
                 encryption_key,
@@ -1641,8 +1641,14 @@ impl Applier {
         let encryption_key = self.encryption_key.clone();
         std::thread::spawn(move || {
             tikv_util::set_current_region(source.shard_id);
-            let res =
-                engine.prepare_change_set(source, !is_leader, false, None, None, encryption_key);
+            let res = engine.prepare_change_set(
+                source,
+                !is_leader,
+                FilePrepareType::Local, // reset by snapshot
+                None,
+                None,
+                encryption_key,
+            );
             router.send(
                 region_id,
                 PeerMsg::PrepareCommitMergeResult(res, commit_index),
@@ -1819,9 +1825,9 @@ impl Applier {
                 cs,
                 encryption_key,
                 reload_snap,
-                shard_use_ia,
+                prepare_type,
             } => {
-                self.handle_prepare_change_set(ctx, cs, encryption_key, reload_snap, shard_use_ia);
+                self.handle_prepare_change_set(ctx, cs, encryption_key, reload_snap, prepare_type);
             }
             ApplyMsg::ApplyChangeSet(cs) => {
                 self.handle_apply_change_set(ctx, cs);

@@ -428,6 +428,12 @@ impl IaManagerOptionsBuilder {
         self
     }
 
+    #[cfg(any(test, feature = "testexport"))]
+    pub fn disable_sync_read(mut self) -> Self {
+        self.disable_sync_read = true;
+        self
+    }
+
     pub fn build(mut self) -> Result<IaManagerOptions> {
         let segment_size = self.segment_size.unwrap_or(IA_SEGMENT_SIZE_DEF);
         let freq_update_interval = self

@@ -15,6 +15,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use log_wrappers::Value as LogValue;
+use schema::schema::StorageClass;
 
 use crate::{
     dfs,
@@ -77,7 +78,11 @@ impl IaFile {
         }
     }
 
-    fn open_for_sst(id: u64, table_meta_file: Arc<dyn File>, mgr: IaManager) -> Result<Self> {
+    pub(crate) fn open_for_sst(
+        id: u64,
+        table_meta_file: Arc<dyn File>,
+        mgr: IaManager,
+    ) -> Result<Self> {
         let footer_data = table_meta_file.read_footer(SsTable::footer_size())?;
         let mut footer = sstable::Footer::default();
         footer.unmarshal(&footer_data);
@@ -329,6 +334,10 @@ impl IaFile {
         fs::rename(&tmp_path, local_path).table_ctx(file_id, "rename")?;
         Ok(())
     }
+
+    pub(crate) fn table_meta_file(&self) -> &Arc<dyn File> {
+        &self.table_meta_file
+    }
 }
 
 #[async_trait]
@@ -462,6 +471,14 @@ impl File for IaFile {
 
     fn get_segment_ident(&self, offset: u64) -> Result<FileSegmentIdent> {
         align_to_segment(self.id, &self.segment_offsets, offset, offset + 1)
+    }
+
+    fn storage_class(&self) -> StorageClass {
+        StorageClass::Ia
+    }
+
+    fn as_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+        self
     }
 }
 

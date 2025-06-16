@@ -15,6 +15,7 @@
 
 mod debug;
 pub mod gc;
+pub mod ia_auto_file;
 pub mod ia_file;
 pub mod manager;
 mod queue;
