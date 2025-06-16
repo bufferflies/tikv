@@ -10,7 +10,6 @@ use std::{
     },
 };
 
-use futures::{future::ok, TryStreamExt};
 use http::{header, Response, StatusCode};
 use hyper::Body;
 
@@ -19,22 +18,6 @@ pub(crate) fn get_param<T: FromStr>(
     name: &str,
 ) -> Option<T> {
     query_pairs.get(name).and_then(|x| T::from_str(x).ok())
-}
-
-pub(crate) async fn get_body(req: hyper::Request<hyper::Body>) -> hyper::Result<Vec<u8>> {
-    let length = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .map(|x| usize::from_str(x.to_str().unwrap_or_default()).unwrap_or_default())
-        .unwrap_or_default();
-    let mut body = Vec::with_capacity(length);
-    req.into_body()
-        .try_for_each(|bytes| {
-            body.extend(bytes);
-            ok(())
-        })
-        .await?;
-    Ok(body)
 }
 
 pub(crate) fn make_response<T>(status_code: StatusCode, message: T) -> Response<Body>

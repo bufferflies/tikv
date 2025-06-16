@@ -6,7 +6,7 @@ use bytes::Bytes;
 use cloud_encryption::MasterKey;
 use dashmap::{mapref::entry::Entry, DashMap};
 use futures::executor::block_on;
-use http::{header, Method, Response, StatusCode};
+use http::{header, request::Parts, Method, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs,
@@ -30,7 +30,7 @@ use pd_client::PdClient;
 use tikv_util::{debug, error, info};
 
 use crate::{
-    common::{get_body, get_param, make_response},
+    common::{get_param, make_response},
     worker_scaler::{WorkerScaler, WorkerScalerConfig},
 };
 
@@ -63,9 +63,10 @@ use crate::{
 ///   DELETE /load_data?cluster_id=%d&task_id=%s
 pub(crate) async fn handle_load_data(
     manager: Arc<LoadDataManager>,
-    req: hyper::Request<hyper::Body>,
+    parts: Parts,
+    body: Bytes,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let query = req.uri().query().unwrap_or("");
+    let query = parts.uri.query().unwrap_or("");
     let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
     let cluster_id = get_param::<u64>(&query_pairs, "cluster_id").unwrap_or_default();
     let pd_cluster_id = manager.ctx.pd.get_cluster_id().unwrap();
@@ -83,7 +84,7 @@ pub(crate) async fn handle_load_data(
         .map(|x| x.to_string())
         .unwrap_or_default();
     if task_id.is_empty() {
-        if *req.method() == Method::GET {
+        if parts.method == Method::GET {
             let tasks = manager.list_tasks();
             let json = serde_json::to_string(&tasks).unwrap();
             return Ok(Response::builder()
@@ -91,11 +92,11 @@ pub(crate) async fn handle_load_data(
                 .body(json.into())
                 .unwrap());
         }
-        if *req.method() != Method::DELETE {
+        if parts.method != Method::DELETE {
             return Ok(make_response(StatusCode::BAD_REQUEST, "task_id is missing"));
         }
     }
-    match *req.method() {
+    match parts.method {
         Method::GET => {
             if let Some(states) = manager.get_task_states(&task_id) {
                 let json = serde_json::to_string(&states).unwrap();
@@ -247,9 +248,8 @@ pub(crate) async fn handle_load_data(
                     "writer id is missing",
                 ));
             }
-            let body = get_body(req).await?;
             let put_chunk_res = manager
-                .put_chunk(&task_id, writer_id.unwrap(), chunk_id.unwrap(), body.into())
+                .put_chunk(&task_id, writer_id.unwrap(), chunk_id.unwrap(), body)
                 .await;
 
             let json = serde_json::to_string(&put_chunk_res).unwrap();

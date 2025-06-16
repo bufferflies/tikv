@@ -3,10 +3,10 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use api_version::ApiV2;
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use dashmap::DashMap;
-use http::{header, Request, Response, StatusCode};
+use http::{header, request::Parts, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs::{self, Dfs},
@@ -18,7 +18,7 @@ use load_data::dispatcher::get_shard_meta;
 use tikv_util::{box_err, warn};
 
 use crate::{
-    common::{get_body, get_param, make_response},
+    common::{get_param, make_response},
     error::{Error, Result},
     server::Context,
 };
@@ -40,9 +40,10 @@ pub(crate) const TARGET_BLOCK_ENTRIES_DEF: usize = 4096;
 
 pub(crate) async fn handle_txn_chunk(
     ctx: Arc<Context>,
-    req: Request<Body>,
+    parts: Parts,
+    body: Bytes,
 ) -> hyper::Result<Response<Body>> {
-    let query = req.uri().query().unwrap_or("");
+    let query = parts.uri.query().unwrap_or("");
     let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
 
     let keyspace_id = match get_param::<u32>(&query_pairs, "keyspace_id") {
@@ -70,7 +71,7 @@ pub(crate) async fn handle_txn_chunk(
     };
 
     // TODO: remove this API after client-go is updated.
-    if *req.method() == http::Method::GET {
+    if parts.method == http::Method::GET {
         let resp = GetAvailabilityResp { available: true };
         let json = serde_json::to_string(&resp).unwrap();
         return Ok(Response::builder()
@@ -91,7 +92,8 @@ pub(crate) async fn handle_txn_chunk(
     create_txn_chunk(
         chunk_id,
         ctx.s3fs.clone(),
-        req,
+        parts,
+        body,
         &keyspace_info,
         ctx.txn_chunk_handler.target_block_entries,
     )
@@ -113,14 +115,14 @@ pub struct CreateTxnChunkResp {
 pub(crate) async fn create_txn_chunk(
     chunk_id: u64,
     dfs: Arc<dyn Dfs>,
-    req: Request<Body>,
+    parts: Parts,
+    body: Bytes,
     keyspace_info: &KeyspaceInfo,
     target_block_entries: usize,
 ) -> hyper::Result<Response<Body>> {
-    if *req.method() != http::Method::POST {
+    if parts.method != http::Method::POST {
         return Ok(make_response(StatusCode::BAD_REQUEST, "invalid method"));
     }
-    let body = get_body(req).await?;
     if body.len() < 4 {
         return Ok(make_response(StatusCode::BAD_REQUEST, "body is invalid"));
     }
@@ -226,7 +228,7 @@ mod tests {
     use std::{ops::Deref, sync::Arc};
 
     use bytes::{Buf, BufMut};
-    use futures::StreamExt;
+    use futures::{executor::block_on, StreamExt};
     use http::Method;
     use kvengine::{
         dfs,
@@ -266,12 +268,15 @@ mod tests {
         let keyspace_info = KeyspaceInfo {
             encryption_key: None,
         };
+        let (parts, body) = req.into_parts();
+        let body = block_on(hyper::body::to_bytes(body)).unwrap();
         let mut res = dfs
             .get_runtime()
             .block_on(create_txn_chunk(
                 chunk_id,
                 dfs.clone(),
-                req,
+                parts,
+                body,
                 &keyspace_info,
                 TARGET_BLOCK_ENTRIES_DEF,
             ))

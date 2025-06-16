@@ -2,13 +2,14 @@
 
 use std::{error::Error as StdError, future::Future, sync::Arc, time::Duration};
 
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use cloud_encryption::MasterKey;
 use cloud_server::StatusServer as CloudStatusServer;
 use dashmap::DashMap;
 use flate2::{write::GzEncoder, Compression};
 use http::{
     header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE},
+    request::Parts,
     HeaderValue, Method, Request, Response,
 };
 use hyper::{
@@ -228,7 +229,13 @@ async fn handle_coprocessor(
     ctx: Arc<Context>,
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
-    spawn_and_await(ctx.thread_pool.clone(), handle_remote_coprocessor(ctx, req)).await
+    let (parts, body) = req.into_parts();
+    let body = hyper::body::to_bytes(body).await?;
+    spawn_and_await(
+        ctx.thread_pool.clone(),
+        handle_remote_coprocessor(ctx, parts, body),
+    )
+    .await
 }
 
 async fn handle_load_data(
@@ -236,9 +243,11 @@ async fn handle_load_data(
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let load_data_manager = ctx.load_manager.clone();
+    let (parts, body) = req.into_parts();
+    let body = hyper::body::to_bytes(body).await?;
     spawn_and_await(
         ctx.thread_pool.clone(),
-        load_data::handle_load_data(load_data_manager, req),
+        load_data::handle_load_data(load_data_manager, parts, body),
     )
     .await
 }
@@ -248,9 +257,10 @@ async fn handle_restore_keyspace(
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let br_manager = ctx.br_manager.clone();
+    let (parts, _) = req.into_parts();
     spawn_and_await(
         ctx.thread_pool.clone(),
-        native_br::handle_restore_keyspace(br_manager, req),
+        native_br::handle_restore_keyspace(br_manager, parts),
     )
     .await
 }
@@ -259,9 +269,11 @@ async fn handle_txn_chunk(
     ctx: Arc<Context>,
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
+    let (parts, body) = req.into_parts();
+    let body = hyper::body::to_bytes(body).await?;
     spawn_and_await(
         ctx.thread_pool.clone(),
-        txn_chunk::handle_txn_chunk(ctx, req),
+        txn_chunk::handle_txn_chunk(ctx, parts, body),
     )
     .await
 }
@@ -282,10 +294,10 @@ const DEFAULT_COP_TIMEOUT: Duration = Duration::from_secs(20);
 
 async fn handle_remote_coprocessor(
     ctx: Arc<Context>,
-    req: hyper::Request<hyper::Body>,
+    parts: Parts,
+    req_body: Bytes,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let accept_pb = req.headers().is_accept_protobuf();
-    let req_body = hyper::body::to_bytes(req.into_body()).await?;
+    let accept_pb = parts.headers.is_accept_protobuf();
     let decode_res = decode_remote_cop_request(req_body.chunk());
     if let Err(err) = decode_res {
         let body = hyper::Body::from(format!("{:?}", err));

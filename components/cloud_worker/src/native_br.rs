@@ -16,7 +16,7 @@ use std::{
 };
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
-use http::{Method, StatusCode};
+use http::{request::Parts, Method, StatusCode};
 use hyper::{Body, Response};
 use kvengine::dfs::S3Fs;
 use native_br::{
@@ -211,9 +211,9 @@ async fn get_backup_from_query(
 
 pub(crate) async fn handle_restore_keyspace(
     manager: Arc<NativeBrManager>,
-    req: hyper::Request<hyper::Body>,
+    parts: Parts,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let query = req.uri().query().unwrap_or("");
+    let query = parts.uri.query().unwrap_or("");
     let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
 
     match get_param::<u64>(&query_pairs, "cluster_id") {
@@ -225,12 +225,12 @@ pub(crate) async fn handle_restore_keyspace(
             ));
         }
     }
-    let sub_path = req
-        .uri()
+    let sub_path = parts
+        .uri
         .path()
         .strip_prefix(RESTORE_KEYSPACE_API_PATH)
         .unwrap();
-    if sub_path.is_empty() && *req.method() == Method::GET {
+    if sub_path.is_empty() && parts.method == Method::GET {
         return handle_get_all_restore_task(&manager);
     }
 
@@ -260,7 +260,7 @@ pub(crate) async fn handle_restore_keyspace(
 
     let keyspace_tag = format!("{}->{}", source_keyspace, target_keyspace);
 
-    match *req.method() {
+    match parts.method {
         Method::GET => {
             debug!(
                 "{} request to GET restore_keyspace, restore_id {}",
