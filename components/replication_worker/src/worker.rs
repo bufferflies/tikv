@@ -49,6 +49,7 @@ use txn_types::{LockType, TimeStamp};
 
 use crate::{
     apply_observer::{is_index_key, CdcApplyObserver, RegionEvents},
+    kube::{KeyspaceKubeService, KubeApi},
     provisioned::KeyspaceProvisionedService,
     scheduler::ChangefeedRequest,
     CdcMsg, Error, KeyspaceService, KeyspaceStates, ReplicationScheduler, ReplicationService,
@@ -107,6 +108,7 @@ pub struct ReplicationWorker {
     config: ReplicationWorkerConfig,
     merged_engine: MergedEngine,
     grpc_server: Option<grpcio::Server>,
+    kube_api: Option<Arc<KubeApi>>,
     runtime: tokio::runtime::Runtime,
 
     keyspaces: HashMap<u32, Box<dyn KeyspaceService>>,
@@ -160,13 +162,36 @@ impl ReplicationWorker {
         let keyspace_ids = merged_engine.get_keyspaces();
         let mut keyspace_services = HashMap::new();
         let cdc_addrs = Arc::new(dashmap::DashMap::new());
+        let kube_api = if config.is_kube_mode() {
+            info!("init k8s api");
+            let api = runtime.block_on(KubeApi::new(
+                config.pd_sts_name.clone(),
+                config.cdc_sts_name.clone(),
+                config.namespace.clone(),
+            ))?;
+            Some(Arc::new(api))
+        } else {
+            None
+        };
         for keyspace_id in keyspace_ids {
             let states_bin = merged_engine.get_keyspace_states(keyspace_id).unwrap();
             let states: KeyspaceStates = serde_json::from_slice(&states_bin).unwrap();
             let cdc_addr = states.cdc_addr.clone();
-            let mut task_service: Box<dyn KeyspaceService> = Box::new(
-                KeyspaceProvisionedService::new(keyspace_id, &config, &ctx.security_config, states),
-            );
+            let mut task_service: Box<dyn KeyspaceService> = if states.is_provisioned() {
+                Box::new(KeyspaceProvisionedService::new(
+                    keyspace_id,
+                    &config,
+                    &ctx.security_config,
+                    states,
+                ))
+            } else {
+                Box::new(KeyspaceKubeService::new(
+                    keyspace_id,
+                    kube_api.clone().unwrap(),
+                    &config,
+                    &ctx.security_config,
+                ))
+            };
             if let Err(err) = runtime.block_on(task_service.start()) {
                 error!("keyspace {} start service error {:?}", keyspace_id, err);
                 continue;
@@ -191,6 +216,7 @@ impl ReplicationWorker {
             merged_engine,
             runtime,
             grpc_server: None,
+            kube_api,
             keyspaces: keyspace_services,
             cdc_addrs,
             conns: Default::default(),
@@ -566,7 +592,7 @@ impl ReplicationWorker {
                         resolved_ts.set_regions(vec![region_id]);
                         resolved_ts.set_request_id(request_id);
                         resolved_ts.set_ts(ts.into_inner());
-                        info!(
+                        debug!(
                             "send resolved_ts {:?} to request {}",
                             resolved_ts, request_id
                         );
@@ -669,6 +695,7 @@ impl ReplicationWorker {
         store_stat.set_capacity(100 * 1024 * 1024 * 1024);
         store_stat.set_used_size(50 * 1024 * 1024 * 1024);
         let resp = pd_client.store_heartbeat(store_stat, None, None);
+
         let new_pd_clinet = pd_client.clone();
         tokio::spawn(async move {
             if let Err(err) = resp.await {
@@ -730,7 +757,18 @@ impl ReplicationWorker {
             cb(Err(Error::OtherError("keyspace already exists".into())));
             return;
         }
-        let mut task_service: Box<dyn KeyspaceService> = {
+        let mut task_service: Box<dyn KeyspaceService> = if self.config.is_kube_mode() {
+            let kube_api = self.kube_api.clone().unwrap();
+            Box::new(KeyspaceKubeService::new(
+                keyspace_id,
+                kube_api,
+                &self.config,
+                &self.ctx.security_config,
+            ))
+        } else if pd_url.is_empty() || cdc_addr.is_empty() {
+            cb(Err(Error::OtherError("pd_url or cdc_addr is empty".into())));
+            return;
+        } else {
             let mut states = KeyspaceStates::default();
             states.pd_url = pd_url;
             states.cdc_addr = cdc_addr;

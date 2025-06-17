@@ -318,6 +318,7 @@ impl ReplicationScheduler {
                     None
                 });
                 let (cb, fut) = paired_future_callback();
+
                 self.schedule(CdcMsg::NewTask {
                     keyspace_id,
                     request: request.clone(),
@@ -363,35 +364,35 @@ impl ReplicationScheduler {
 
     async fn handle_add_keyspace(&self, keyspace_id: u32, body_bytes: &[u8]) -> Response<Body> {
         info!("handle add keyspace");
-        match serde_json::from_slice::<ProvisionedKeyspace>(body_bytes) {
-            Ok(provisioned) => {
-                info!("provisioned keyspace {:?}", provisioned);
-                let (cb, fut) = paired_future_callback();
-                self.schedule(CdcMsg::AddKeyspace {
-                    keyspace_id,
-                    pd_url: provisioned.pd_url,
-                    cdc_addr: provisioned.cdc_addr,
-                    cb,
-                });
-                let res = fut.await.unwrap();
-                if let Err(err) = res {
-                    return Self::error_response(
-                        StatusCode::BAD_REQUEST,
-                        &err.to_string(),
-                        "CDC:ErrAddKeyspace",
-                    );
-                }
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::empty())
-                    .unwrap()
-            }
-            Err(e) => Self::error_response(
+        let (cb, fut) = paired_future_callback();
+        let msg = match serde_json::from_slice::<crate::scheduler::ProvisionedKeyspace>(body_bytes)
+        {
+            Ok(provisioned) => CdcMsg::AddKeyspace {
+                keyspace_id,
+                pd_url: provisioned.pd_url,
+                cdc_addr: provisioned.cdc_addr,
+                cb,
+            },
+            Err(_err) => CdcMsg::AddKeyspace {
+                keyspace_id,
+                pd_url: "".into(),
+                cdc_addr: "".into(),
+                cb,
+            },
+        };
+        self.schedule(msg);
+        let res = fut.await.unwrap();
+        if let Err(err) = res {
+            return Self::error_response(
                 StatusCode::BAD_REQUEST,
-                &e.to_string(),
-                "CDC:ErrInvalidRequestBody",
-            ),
+                &err.to_string(),
+                "CDC:ErrAddKeyspace",
+            );
         }
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .unwrap()
     }
 
     async fn handle_remove_keyspace(&self, keyspace_id: u32) -> Response<Body> {

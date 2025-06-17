@@ -492,7 +492,7 @@ impl MergedEngine {
             cluster_backup: backup_meta,
             rf_engine: &rf_engine,
             complete_wal_chunks: false,
-            full_restore: true,
+            full_restore: false,
             fetch_wal_timeout: ctx.config.timeout_fetch_wal.0,
         };
         let tag = &format!("merged_{}", store_id);
@@ -751,6 +751,7 @@ impl MergedEngine {
             let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
             let high: u64 = progress.commit_index + 1;
             if low >= high {
+                finished_regions.insert(updated_region);
                 continue;
             }
             if self.raft.get_truncated_index(updated_region).is_none() {
@@ -910,7 +911,9 @@ impl MergedEngine {
             prepared_msgs.entry(id).or_default().push((id, peer_msg));
         }
         for (region_id, msgs) in prepared_msgs {
-            let applier = self.appliers.get_mut(&region_id).unwrap();
+            let Some(applier) = self.appliers.get_mut(&region_id) else {
+                continue;
+            };
             Self::apply_prepared_msgs(ctx, applier, msgs, apply_ctx);
         }
     }

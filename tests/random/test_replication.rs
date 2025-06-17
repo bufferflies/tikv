@@ -7,7 +7,7 @@ use cloud_worker::CloudWorker;
 use futures::executor::block_on;
 use native_br::backup;
 use pd_client::pd_control::PdScheduleConfig;
-use replication_worker::{KeyspacesResp, LocalProvider, ReplicationWorkerConfig};
+use replication_worker::{KeyspacesResp, LocalProvider};
 use security::{HttpClient, SecurityConfig};
 use sqlx::Row;
 use test_cloud_server::{
@@ -113,12 +113,10 @@ fn test_replication_worker() {
     worker_conf.security = security_conf.clone();
     worker_conf.dfs = dfs_conf.clone();
     let rep_config = &mut worker_conf.replication_worker;
+    rep_config.override_from_env();
     rep_config.enabled = true;
     rep_config.grpc_addr = "127.0.0.1:5999".to_string();
-    rep_config.merged_engine.mem_table_size = ReadableSize::kb(16);
-    let mut rep_config = ReplicationWorkerConfig::default();
-    rep_config.override_from_env();
-    rep_config.grpc_addr = "127.0.0.1:5999".to_string();
+    rep_config.advertise_addr = "127.0.0.1:5999".to_string();
     rep_config.merged_engine.mem_table_size = ReadableSize::kb(16);
 
     let pd_client = cluster.get_pure_pd_client();

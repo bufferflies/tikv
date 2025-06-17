@@ -3,6 +3,7 @@
 mod apply_observer;
 mod config;
 mod error;
+mod kube;
 mod provisioned;
 mod scheduler;
 mod worker;
@@ -26,18 +27,23 @@ use kvproto::{
     kvrpcpb::{
         GetRequest, GetResponse, ScanLockRequest, ScanLockResponse, ScanRequest, ScanResponse,
     },
+    metapb,
+    metapb::{NodeState, RegionEpoch},
     raft_cmdpb::AdminRequest,
     tikvpb_grpc::Tikv,
 };
 use merged_engine::MergedEngineConfig;
-use pd_client::PdClient;
+use pd_client::{PdClient, RpcClient};
 pub use provisioned::LocalProvider;
 use resolved_ts::Resolver;
 pub use scheduler::*;
 use serde_derive::{Deserialize, Serialize};
+use tikv::tikv_build_version;
 use tikv_util::{error, info, warn};
 use txn_types::TimeStamp;
 pub use worker::ReplicationWorker;
+
+pub(crate) const K8S_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
@@ -46,6 +52,7 @@ pub struct ReplicationWorkerConfig {
     pub enabled: bool,
 
     pub grpc_addr: String,
+    pub advertise_addr: String,
 
     // used for k8s mode.
     pub pd_sts_name: String,
@@ -66,6 +73,13 @@ impl ReplicationWorkerConfig {
             *val = v;
         }
     }
+
+    pub fn is_kube_mode(&self) -> bool {
+        !self.pd_sts_name.is_empty()
+            && !self.cdc_sts_name.is_empty()
+            && !self.namespace.is_empty()
+            && std::env::var(K8S_SERVICE_HOST).is_ok()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -82,6 +96,10 @@ pub struct KeyspaceStates {
 impl KeyspaceStates {
     pub(crate) fn marshal(&self) -> Bytes {
         serde_json::to_vec(self).unwrap().into()
+    }
+
+    pub(crate) fn is_provisioned(&self) -> bool {
+        self.pd_sts_name.is_empty()
     }
 }
 
@@ -385,4 +403,27 @@ impl Tikv for ReplicationService {
             error!("kv_scan_lock failed"; "error" => ?e);
         }));
     }
+}
+
+async fn bootstrap(pd_client: Arc<RpcClient>, store_id: u64, advertise_addr: String) -> Result<()> {
+    let bootstrapped = pd_client.is_cluster_bootstrapped()?;
+    if !bootstrapped {
+        let mut store = metapb::Store::new();
+        store.set_id(store_id);
+        store.set_node_state(NodeState::Serving);
+        store.set_address(advertise_addr);
+        store.set_version(tikv_build_version().to_string());
+        let mut initial_region = metapb::Region::new();
+        initial_region.set_id(1);
+        let mut initial_peer = metapb::Peer::new();
+        initial_peer.set_id(1);
+        initial_peer.set_store_id(store_id);
+        initial_region.set_peers(vec![initial_peer].into());
+        let mut initial_epoch = RegionEpoch::new();
+        initial_epoch.set_version(1);
+        initial_epoch.set_conf_ver(1);
+        initial_region.set_region_epoch(initial_epoch);
+        pd_client.bootstrap_cluster(store, initial_region)?;
+    }
+    Ok(())
 }

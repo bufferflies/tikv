@@ -240,10 +240,6 @@ impl ServiceWorker {
                 return;
             }
             // Dump the WAL chunk from offset start_off to end_off.
-            info!(
-                "{}: dump latest wal epoch {} start_off {} end_off {} writer epoch {}",
-                store_id, epoch_id, start_off, end_off, writer.epoch_id,
-            );
             let effective_end_off = if end_off == 0 {
                 if writer.epoch_id == epoch_id {
                     writer.file_off
@@ -256,6 +252,10 @@ impl ServiceWorker {
             } else {
                 end_off
             };
+            info!(
+                "{}: dump latest wal epoch {} start_off {} end_off {} effective_end_off {} writer epoch {}",
+                store_id, epoch_id, start_off, end_off, effective_end_off, writer.epoch_id,
+            );
             match dump_wal_chunk(&writer.dir, epoch_id, start_off, effective_end_off) {
                 Ok(chunk) => callback(Ok((chunk, partial_content))),
                 Err(err) => {

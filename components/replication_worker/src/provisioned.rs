@@ -8,10 +8,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use kvproto::{
-    metapb,
-    metapb::{NodeState, RegionEpoch},
-};
 use nix::{
     sys::signal::{kill, Signal},
     unistd::Pid,
@@ -19,12 +15,11 @@ use nix::{
 use pd_client::PdClient;
 use resolved_ts::Resolver;
 use security::SecurityConfig;
-use tikv::tikv_build_version;
 use tikv_util::info;
 
 use crate::{
-    worker::new_keyspace_pd_client, KeyspaceService, KeyspaceStates, ReplicationWorkerConfig,
-    Result,
+    bootstrap, worker::new_keyspace_pd_client, KeyspaceService, KeyspaceStates,
+    ReplicationWorkerConfig, Result,
 };
 
 pub(crate) struct KeyspaceProvisionedService {
@@ -63,25 +58,12 @@ impl KeyspaceService for KeyspaceProvisionedService {
     async fn start(&mut self) -> Result<()> {
         let pd_url = self.states.pd_url.clone();
         let pd_client = new_keyspace_pd_client(pd_url, &self.sec_conf).await;
-        let bootstrapped = pd_client.is_cluster_bootstrapped()?;
-        if !bootstrapped {
-            let mut store = metapb::Store::new();
-            store.set_id(self.conf.merged_engine.merged_store_id);
-            store.set_node_state(NodeState::Serving);
-            store.set_address(self.conf.grpc_addr.clone());
-            store.set_version(tikv_build_version().to_string());
-            let mut initial_region = metapb::Region::new();
-            initial_region.set_id(1);
-            let mut initial_peer = metapb::Peer::new();
-            initial_peer.set_id(1);
-            initial_peer.set_store_id(self.conf.merged_engine.merged_store_id);
-            initial_region.set_peers(vec![initial_peer].into());
-            let mut initial_epoch = RegionEpoch::new();
-            initial_epoch.set_version(1);
-            initial_epoch.set_conf_ver(1);
-            initial_region.set_region_epoch(initial_epoch);
-            pd_client.bootstrap_cluster(store, initial_region)?;
-        }
+        bootstrap(
+            pd_client.clone(),
+            self.conf.merged_engine.merged_store_id,
+            self.conf.advertise_addr.clone(),
+        )
+        .await?;
         self.pd_client = Some(pd_client);
         Ok(())
     }

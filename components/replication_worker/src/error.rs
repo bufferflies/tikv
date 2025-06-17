@@ -10,6 +10,8 @@ pub enum Error {
     BrError(#[from] native_br::error::Error),
     #[error("merged engine error {0}")]
     MergedEngineError(#[from] merged_engine::Error),
+    #[error("kube error {0}")]
+    KubeError(#[from] kube::Error),
     #[error("pd client error {0}")]
     PdClientError(#[from] pd_client::Error),
     #[error("hyper error {0}")]
