@@ -126,8 +126,14 @@ impl SchemaRunner {
             }
 
             if let Some(sc_spec) = expect_sc_spec {
+                let can_transit_to_other_sc = sc_spec.can_transit_to_other_sc();
                 if self.update_storage_class(tag, &shard, sc_spec, schema_version) {
                     shard.set_checked_schema_ver(schema_version);
+                    if can_transit_to_other_sc {
+                        // `update_storage_class` will reload the snap and set the files to target
+                        // storage class.
+                        shard.set_last_transit_storage_class_instant_to_now();
+                    }
                     info!("{} update shard storage class spec to {:?}", tag, shard.get_storage_class_spec(); "schema_version" => schema_version);
                 }
             } else {

@@ -288,6 +288,8 @@ const MAIN_QUEUE_CAPACITY_FACTOR: i64 = 10; // Main queue is 10x larger than sma
 
 const SYNC_READ_TIMEOUT: Duration = Duration::from_secs(3);
 
+const AUTO_IA_CHECK_INTERVAL_DEF: Duration = Duration::from_secs(60 * 60); // 1 hour
+
 pub enum IaCapacity {
     Manual {
         small_queue: QueueOptions,
@@ -494,6 +496,7 @@ pub struct IaConfig {
     pub disable_sync_read: bool,
     pub sync_read_timeout: ReadableDuration,
     pub force_ia: bool,
+    pub auto_ia_check_interval: ReadableDuration,
 }
 
 impl Default for IaConfig {
@@ -512,6 +515,7 @@ impl Default for IaConfig {
             disable_sync_read: false,
             sync_read_timeout: ReadableDuration(SYNC_READ_TIMEOUT),
             force_ia: false,
+            auto_ia_check_interval: ReadableDuration(AUTO_IA_CHECK_INTERVAL_DEF),
         }
     }
 }

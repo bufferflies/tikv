@@ -16,9 +16,10 @@ use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    table::columnar::SchemaFile, table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard,
-    DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE,
-    MANUAL_MAJOR_COMPACTION_ENABLE, TERM_KEY,
+    ia::ia_auto_file::report_transitions, table::columnar::SchemaFile,
+    table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard, DEL_PREFIXES_KEY,
+    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE,
+    TERM_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -1633,18 +1634,27 @@ impl<'a> PeerMsgHandler<'a> {
                 "schema_meta" => ?schema_meta, "schema_file" => ?schema_file_id);
             return;
         }
-        if shard_is_matched_with_meta(shard.as_ref(), shard_meta) {
-            debug!("{} check schema: skip, shard is up-to-date", tag);
-            return;
-        }
 
-        let task = SchemaTask::StorageClass {
-            region: self.region().clone(),
-            schema_meta: schema_meta.clone(),
+        if !shard_is_matched_with_meta(shard.as_ref(), shard_meta) {
+            let task = SchemaTask::StorageClass {
+                region: self.region().clone(),
+                schema_meta: schema_meta.clone(),
+            };
+            if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {
+                info!("{} check schema: schedule update sc task failed", tag; "err" => ?e, "schema_meta" => ?schema_meta);
+            }
+        } else if shard.should_try_storage_class_transition() {
+            let tables_transited_to_ia = shard.try_transit_storage_class();
+            shard.set_last_transit_storage_class_instant_to_now();
+
+            if tables_transited_to_ia > 0 {
+                report_transitions(tables_transited_to_ia);
+                info!("{} check schema: transit storage class", tag;
+                    "tables_transited_to_ia" => tables_transited_to_ia);
+            }
+        } else {
+            debug!("{} check schema: skip, shard is up-to-date", tag);
         };
-        if let Err(e) = self.ctx.global.schema_scheduler.schedule(task) {
-            info!("{} check schema: schedule task failed", tag; "err" => ?e, "schema_meta" => ?schema_meta);
-        }
     }
 
     fn on_check_leader(&mut self, shard_ver: u64, callback: Callback) {

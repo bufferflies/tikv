@@ -10,6 +10,7 @@ use txn_types::TimeStamp;
 
 use crate::{
     ia::ia_file::IaFile,
+    metrics::ENGINE_STORAGE_CLASS_TRANSITION_COUNTER,
     table::{
         file::{File, MmapData},
         Result,
@@ -156,5 +157,13 @@ impl File for IaAutoFile {
 
     fn as_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
         self
+    }
+}
+
+pub fn report_transitions(transited_to_ia: usize) {
+    if transited_to_ia > 0 {
+        ENGINE_STORAGE_CLASS_TRANSITION_COUNTER
+            .with_label_values(&["to_ia"])
+            .inc_by(transited_to_ia as u64);
     }
 }

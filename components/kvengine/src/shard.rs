@@ -10,6 +10,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering::*, *},
         Arc, RwLock,
     },
+    time::Duration,
 };
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
@@ -20,11 +21,12 @@ use kvenginepb::{self as pb, TxnFileRef};
 use rand::Rng;
 use schema::schema::StorageClassSpec;
 use slog_global::*;
-use tikv_util::{box_err, box_try};
+use tikv_util::{box_err, box_try, time::Instant};
+use txn_types::TimeStamp;
 
 use crate::{
     context::{IaCtx, PrepareType, SnapCtx},
-    ia::{ia_file::IaFile, types::FileSegmentIdent},
+    ia::{ia_auto_file::TransitResult, ia_file::IaFile, types::FileSegmentIdent},
     limiter::RegionLimiter,
     metrics::ENGINE_COLUMNAR_TOO_MANY_UNCONVERTED_L0S,
     table::{
@@ -115,6 +117,7 @@ pub struct Shard {
     pub(crate) outdated_schema_ver: AtomicI64,
 
     pub(crate) checked_schema_ver: AtomicI64,
+    pub(crate) last_transit_storage_class_instant_sec: AtomicI64,
 }
 
 // Note: when add new property, consider whether to add it to following process:
@@ -204,6 +207,7 @@ impl Shard {
         let encryption_key = get_shard_property(ENCRYPTION_KEY, props)
             .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
         let limiter = RegionLimiter::new((&opt.flow_control).into());
+        let now = Instant::now_coarse();
         let shard = Self {
             engine_id,
             id: props.shard_id,
@@ -233,6 +237,7 @@ impl Shard {
             encryption_key,
             outdated_schema_ver: Default::default(),
             checked_schema_ver: Default::default(),
+            last_transit_storage_class_instant_sec: AtomicI64::new(now.second()),
         };
         {
             let mut pending_ops = shard.pending_ops.write().unwrap();
@@ -1530,6 +1535,53 @@ impl Shard {
 
     pub(crate) fn set_outdated_schema_ver(&self, ver: i64) {
         self.outdated_schema_ver.store(ver, Ordering::Release);
+    }
+
+    pub fn set_last_transit_storage_class_instant_to_now(&self) {
+        let now = Instant::now_coarse();
+        self.last_transit_storage_class_instant_sec
+            .fetch_max(now.second(), Ordering::Relaxed);
+    }
+
+    fn last_transit_storage_class_elapsed(&self) -> Duration {
+        Instant::from_timespec_second_coarse(
+            self.last_transit_storage_class_instant_sec
+                .load(Ordering::Relaxed),
+        )
+        .saturating_elapsed()
+    }
+
+    pub fn should_try_storage_class_transition(&self) -> bool {
+        self.get_storage_class_spec().can_transit_to_other_sc()
+            && self.last_transit_storage_class_elapsed() > self.opt.ia.auto_ia_check_interval.0
+    }
+
+    pub fn try_transit_storage_class(&self) -> usize /* tables_transited_to_ia */ {
+        let spec = self.get_storage_class_spec();
+        if !spec.can_transit_to_other_sc() {
+            return 0;
+        }
+
+        let tag = self.tag();
+        let data = self.get_data();
+        let current_ts = TimeStamp::now().into_inner();
+
+        let mut transited_to_ia = 0;
+        for level in &data.cfs[WRITE_CF].levels {
+            for t in level.tables.as_ref() {
+                let Some(auto_file) = t.try_get_auto_ia_file() else {
+                    // Must be updating storage class spec.
+                    info!("{} try_transit_sc: skip, not auto IA file", tag);
+                    return transited_to_ia;
+                };
+
+                match auto_file.try_transit(current_ts) {
+                    TransitResult::NoChange => {}
+                    TransitResult::TransitedToIa => transited_to_ia += 1,
+                }
+            }
+        }
+        transited_to_ia
     }
 }
 

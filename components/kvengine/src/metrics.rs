@@ -101,6 +101,14 @@ lazy_static! {
         "Counter of sync read IA segments",
     )
     .unwrap();
+    // `type`: reserved for more storage classes in the future.
+    pub static ref ENGINE_STORAGE_CLASS_TRANSITION_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "kv_engine_sc_transition_counter",
+        "Counter of storage class transition",
+        &["type"],
+    )
+    .unwrap();
+
     pub static ref ENGINE_COLUMNAR_TOO_MANY_UNCONVERTED_L0S: IntCounter = register_int_counter!(
         "kv_engine_columnar_too_many_unconverted_l0s",
         "Counter of columnar has too many unconverted L0s",
