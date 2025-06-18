@@ -424,6 +424,10 @@ impl ServerCluster {
     }
 
     pub fn wait_region_replicated(&self, key: &[u8], replica_cnt: usize) {
+        self.wait_region_replicated_ext(key, replica_cnt, false);
+    }
+
+    pub fn wait_region_replicated_ext(&self, key: &[u8], replica_cnt: usize, accept_learner: bool) {
         let encoded_key = encode_bytes(key);
         for _ in 0..30 {
             let region_info = match self.pd_client.get_region_info(&encoded_key) {
@@ -438,12 +442,15 @@ impl ServerCluster {
             info!("wait region replicated"; "region" => ?region_info);
             let region_id = region_info.id;
             let region_ver = region_info.get_region_epoch().version;
-            let voter_count = region_info
+            let peer_count = region_info
                 .get_peers()
                 .iter()
-                .filter(|p| p.get_role() == PeerRole::Voter)
+                .filter(|p| {
+                    p.get_role() == PeerRole::Voter
+                        || (accept_learner && p.get_role() == PeerRole::Learner)
+                })
                 .count();
-            if voter_count >= replica_cnt {
+            if peer_count >= replica_cnt {
                 let all_applied_snapshot = region_info.get_peers().iter().all(|peer| {
                     match self.get_server_node_id(peer.store_id) {
                         Some(node_id) => {

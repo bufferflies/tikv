@@ -467,7 +467,7 @@ fn test_backup_pessimistic_lock() {
         conf.enable_inner_key_offset = true;
         conf.raft_store.allow_remove_leader = true;
     });
-    cluster.wait_region_replicated(&[], 1);
+    cluster.wait_region_replicated_ext(&[], 2, true);
 
     let pd_client = cluster.get_pd_client();
     let mut client = cluster.new_client();
