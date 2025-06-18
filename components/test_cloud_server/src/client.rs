@@ -417,6 +417,7 @@ impl ClusterClient {
                     op: Op::Put,
                     key,
                     value,
+                    assertion: kvrpcpb::Assertion::None,
                 });
             }
 
@@ -609,6 +610,7 @@ impl ClusterClient {
             prewrite_req.lock_ttl = ttl;
             prewrite_req.min_commit_ts = prewrite_req.start_version + 1;
             prewrite_req.use_async_commit = self.async_commit;
+            prewrite_req.assertion_level = kvrpcpb::AssertionLevel::Strict;
             if for_update_ts.into_inner() > 0 {
                 prewrite_req.set_for_update_ts(for_update_ts.into_inner());
                 prewrite_req.set_pessimistic_actions(vec![
@@ -2068,6 +2070,7 @@ impl ClusterClient {
                 op: Op::PessimisticLock,
                 key: k.clone(),
                 value: vec![].into(),
+                assertion: kvrpcpb::Assertion::None,
             })
             .collect();
 

@@ -41,6 +41,7 @@ fn test_rollback_before_prewrite() {
             key: Bytes::from(i_to_key(i)),
             value: Bytes::from(i_to_val(i)),
             op: kvrpcpb::Op::Put,
+            assertion: kvrpcpb::Assertion::None,
         });
     }
     let start_ts = client.get_ts();

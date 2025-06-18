@@ -1,5 +1,7 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
+use kvproto::kvrpcpb::{Assertion, Op};
+
 use super::util::*;
 use crate::i_to_val;
 
@@ -92,6 +94,26 @@ fn test_idempotency() {
         case!(lock!(10, 10), pessimistic_prewrite!(10, 10), lock!(10, 10); fail!()),
         case!(prewrite!(10), commit!(10, 20), commit!(10, 30), get!(20); ok!()),
         case!(lock!(10, 10), pessimistic_prewrite!(10, 10), commit!(10, 20), lock!(10, 10); fail!()),
+    ];
+    run_test_cases(cases);
+}
+
+#[test]
+fn test_assertions() {
+    let cases = vec![
+        case!(prewrite!(10).assert(Assertion::NotExist); ok!()),
+        case!(prewrite!(30).assert(Assertion::Exist); fail!()),
+        case!(prewrite!(50), commit!(50, 55), prewrite!(60).assert(Assertion::NotExist); fail!()),
+        case!(prewrite!(70), commit!(70, 75), prewrite!(80).assert(Assertion::Exist); ok!()),
+        case!(prewrite!(90), commit!(90, 95), prewrite!(100).delete(), commit!(100, 105), prewrite!(110).assert(Assertion::Exist); fail!()),
+        // deletion is treated as not exist
+        case!(prewrite!(120), commit!(120, 125), prewrite!(130).delete(), commit!(130, 135), prewrite!(140).assert(Assertion::NotExist); ok!()),
+        case!(prewrite!(150), commit!(150, 155), prewrite!(160).delete().assert(Assertion::Exist); ok!()),
+        case!(prewrite!(170).delete().assert(Assertion::NotExist); ok!()),
+        case!(prewrite!(180).delete().assert(Assertion::Exist); fail!()),
+        // None should alwyas succeed
+        case!(prewrite!(190).assert(Assertion::None); ok!()),
+        case!(prewrite!(200), commit!(200, 205), prewrite!(210).assert(Assertion::None); ok!()),
     ];
     run_test_cases(cases);
 }

@@ -35,6 +35,7 @@ pub struct Mutation {
     pub op: kvrpcpb::Op,
     pub key: Bytes,
     pub value: Bytes,
+    pub assertion: kvrpcpb::Assertion,
 }
 
 impl fmt::Debug for Mutation {
@@ -53,6 +54,7 @@ impl From<&Mutation> for kvrpcpb::Mutation {
             op: m.op,
             key: m.key.to_vec(),
             value: m.value.to_vec(),
+            assertion: m.assertion,
             ..Default::default()
         }
     }
@@ -89,6 +91,14 @@ impl Mutation {
 
     pub fn take_value(&mut self) -> Vec<u8> {
         mem::take(&mut self.value).into()
+    }
+
+    pub fn get_assertion(&self) -> kvrpcpb::Assertion {
+        self.assertion
+    }
+
+    pub fn set_assertion(&mut self, assertion: kvrpcpb::Assertion) {
+        self.assertion = assertion;
     }
 }
 

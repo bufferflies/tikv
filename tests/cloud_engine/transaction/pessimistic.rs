@@ -2,7 +2,7 @@
 
 use std::{thread, time::Duration};
 
-use kvproto::kvrpcpb::Op;
+use kvproto::kvrpcpb::{Assertion, Op};
 use test_cloud_server::{client::TxnMutations, util::Mutation, ServerCluster};
 use txn_types::{LockType, WriteType};
 
@@ -148,6 +148,7 @@ fn test_pes_acquire_lock_key_locked_wait_and_write_conflict_after_release() {
                     op: Op::PessimisticLock,
                     key: k1.clone().into(),
                     value: vec![].into(),
+                    assertion: Assertion::None,
                 }]),
                 start_ts_other,
             )

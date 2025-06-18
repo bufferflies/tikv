@@ -34,16 +34,19 @@ fn test_commit_ok() {
             key: k1.to_vec().into(),
             value: v1.to_vec().into(),
             op: kvrpcpb::Op::Put,
+            assertion: kvrpcpb::Assertion::None,
         },
         Mutation {
             key: k2.to_vec().into(),
             value: vec![].into(), // Lock has no value usually
             op: kvrpcpb::Op::Lock,
+            assertion: kvrpcpb::Assertion::None,
         },
         Mutation {
             key: k3.to_vec().into(),
             value: vec![].into(),
             op: kvrpcpb::Op::Del,
+            assertion: kvrpcpb::Assertion::None,
         },
     ];
 
@@ -120,6 +123,7 @@ fn test_commit_err() {
         key: k.to_vec().into(),
         value: vec![].into(),
         op: kvrpcpb::Op::Put,
+        assertion: kvrpcpb::Assertion::None,
     }]);
     let err = client
         .kv_commit(commit_muts_k.clone(), ts1, ts2)
@@ -143,6 +147,7 @@ fn test_commit_err() {
         key: k.to_vec().into(),
         value: v.to_vec().into(),
         op: kvrpcpb::Op::Put,
+        assertion: kvrpcpb::Assertion::None,
     }];
     client
         .kv_prewrite_with_retry(
