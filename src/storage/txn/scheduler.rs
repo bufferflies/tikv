@@ -54,6 +54,7 @@ use tikv_kv::{Modify, Snapshot, SnapshotExt, WriteData, WriteEvent};
 use tikv_util::{
     deadline::Deadline,
     quota_limiter::QuotaLimiter,
+    sys::thread::ThreadBuildWrapper,
     time::{duration_to_sec, Instant},
     timer::GLOBAL_TIMER_HANDLE,
 };
@@ -68,7 +69,10 @@ use crate::{
         config::Config,
         errors::SharedError,
         get_causal_ts, get_priority_tag, get_raw_key_guard,
-        kv::{self, with_tls_engine, Engine, Result as EngineResult, SnapContext, Statistics},
+        kv::{
+            self, destroy_tls_engine, set_tls_engine, with_tls_engine, Engine,
+            Result as EngineResult, SnapContext, Statistics,
+        },
         lock_manager::{
             self,
             lock_wait_context::{LockWaitContext, PessimisticLockKeyCallback},
@@ -262,6 +266,9 @@ struct SchedulerInner<L: LockManager> {
     // worker pool
     worker_pool: ReadPoolHandle,
 
+    // background pool, introduced for deadline check tasks
+    background_pool: Arc<tokio::runtime::Runtime>,
+
     // used to control write flow
     running_write_bytes: CachePadded<AtomicUsize>,
 
@@ -408,6 +415,18 @@ impl<L: LockManager> SchedulerInner<L> {
     fn dump_wait_for_entries(&self, cb: waiter_manager::Callback) {
         self.lock_mgr.dump_wait_for_entries(cb);
     }
+
+    /// Spawn a task in the background pool with monitoring
+    fn spawn_background<F>(&self, f: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.background_pool.spawn(async move {
+            SCHED_BACKGROUND_POOL_RUNNING_TASKS_GAUGE.inc();
+            f.await;
+            SCHED_BACKGROUND_POOL_RUNNING_TASKS_GAUGE.dec();
+        });
+    }
 }
 
 /// Scheduler which schedules the execution of `storage::Command`s.
@@ -444,6 +463,28 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         }
 
         let lock_wait_queues = LockWaitQueues::new(lock_mgr.clone());
+        let background_pool = {
+            let engine_for_background = Arc::new(std::sync::Mutex::new(engine.clone()));
+            let props = tikv_util::thread_group::current_properties();
+            Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .thread_name_fn(move || {
+                        static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+                        let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+                        format!("sched-background-{}", id)
+                    })
+                    .worker_threads(config.scheduler_background_worker_pool_size)
+                    .after_start_wrapper(move || {
+                        let engine = engine_for_background.lock().unwrap().clone();
+                        set_tls_engine(engine);
+                        tikv_util::thread_group::set_properties(props.clone());
+                    })
+                    .before_stop_wrapper(|| unsafe { destroy_tls_engine::<E>() })
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+            )
+        };
 
         let inner = Arc::new(SchedulerInner {
             task_slots,
@@ -452,6 +493,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             running_write_bytes: AtomicUsize::new(0).into(),
             sched_pending_write_threshold: config.scheduler_pending_write_threshold.0 as usize,
             worker_pool: read_pool_handle,
+            background_pool,
             lock_mgr,
             concurrency_manager,
             pipelined_pessimistic_lock: dynamic_configs.pipelined_pessimistic_lock,
@@ -570,51 +612,51 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         deadline: Deadline,
     ) {
         let sched = self.clone();
-        // Force spawn as we just re-enqueue the task here.
-        self.force_spawn(
-            async move {
-                match unsafe {
-                    with_tls_engine(|engine: &mut E| engine.precheck_write_with_ctx(&cmd_ctx))
-                } {
-                    // Precheck failed, try to return err early.
-                    Err(e) => {
-                        let cb = sched.inner.try_own_and_take_cb(cid);
-                        // The task is not processing or finished currently. It's safe
-                        // to response early here. In the future, the task will be waked up
-                        // and it will finished with DeadlineExceeded error.
-                        // As the cb is taken here, it will not be executed anymore.
-                        if let Some(cb) = cb {
-                            let pr = ProcessResult::Failed {
-                                err: StorageError::from(e),
-                            };
-                            Self::early_response(
-                                cid,
-                                cb,
-                                pr,
-                                tag,
-                                CommandStageKind::precheck_write_err,
-                            );
-                        }
-                    }
-                    Ok(()) => {
-                        SCHED_STAGE_COUNTER_VEC.get(tag).precheck_write_ok.inc();
-                        // Check deadline in background.
-                        GLOBAL_TIMER_HANDLE
-                            .delay(deadline.to_std_instant())
-                            .compat()
-                            .await
-                            .unwrap();
-                        let cb = sched.inner.try_own_and_take_cb(cid);
-                        if let Some(cb) = cb {
-                            cb.execute(ProcessResult::Failed {
-                                err: StorageErrorInner::DeadlineExceeded.into(),
-                            })
-                        }
+        // Spawn the task in the background pool
+        // There is no cancellation for deadline check tasks, they can pile up
+        // even if the tasks already finished successfully. See
+        // cloud-storage-engine#2516 for more details
+        self.inner.spawn_background(async move {
+            match unsafe {
+                with_tls_engine(|engine: &mut E| engine.precheck_write_with_ctx(&cmd_ctx))
+            } {
+                // Precheck failed, try to return err early.
+                Err(e) => {
+                    let cb = sched.inner.try_own_and_take_cb(cid);
+                    // The task is not processing or finished currently. It's safe
+                    // to response early here. In the future, the task will be waked up
+                    // and it will finished with DeadlineExceeded error.
+                    // As the cb is taken here, it will not be executed anymore.
+                    if let Some(cb) = cb {
+                        let pr = ProcessResult::Failed {
+                            err: StorageError::from(e),
+                        };
+                        Self::early_response(
+                            cid,
+                            cb,
+                            pr,
+                            tag,
+                            CommandStageKind::precheck_write_err,
+                        );
                     }
                 }
-            },
-            cid,
-        );
+                Ok(()) => {
+                    SCHED_STAGE_COUNTER_VEC.get(tag).precheck_write_ok.inc();
+                    // Check deadline in background.
+                    GLOBAL_TIMER_HANDLE
+                        .delay(deadline.to_std_instant())
+                        .compat()
+                        .await
+                        .unwrap();
+                    let cb = sched.inner.try_own_and_take_cb(cid);
+                    if let Some(cb) = cb {
+                        cb.execute(ProcessResult::Failed {
+                            err: StorageErrorInner::DeadlineExceeded.into(),
+                        })
+                    }
+                }
+            }
+        });
     }
 
     /// Tries to acquire all the necessary latches. If all the necessary latches

@@ -730,6 +730,7 @@ fn test_serde_custom_tikv_config() {
             cache_sync_interval: ReadableDuration::secs(44),
             action_on_invalid_update: "error".to_owned(),
         },
+        scheduler_background_worker_pool_size: 1,
     };
     value.coprocessor = CopConfig {
         split_region_on_table: false,
