@@ -693,11 +693,11 @@ impl SkipListCore {
     }
 
     pub fn get_newer(&self, key: &[u8], version: u64) -> Value {
-        if self.data_max_ts.load(Ordering::Acquire) < version {
+        if self.data_max_ts.load(Ordering::Acquire) <= version {
             return Value::new();
         }
         let val = self.get(key, u64::MAX);
-        if val.version >= version {
+        if val.version > version {
             return val;
         }
         Value::new()

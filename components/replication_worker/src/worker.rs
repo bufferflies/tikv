@@ -1060,7 +1060,7 @@ impl RegisterHandler {
                 break;
             }
             let val = write_iter.value();
-            if is_index_key(key.deref()) || val.is_deleted() || val.version < self.checkpoint_ts {
+            if is_index_key(key.deref()) || val.is_deleted() || val.version <= self.checkpoint_ts {
                 write_iter.next_async().await;
                 continue;
             }

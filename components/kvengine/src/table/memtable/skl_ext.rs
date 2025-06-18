@@ -173,7 +173,7 @@ impl SkipListExt {
         for txn_file in &self.txn_files {
             let (op, val) = txn_file.get_value(key, outer_owner);
             if val.is_valid() && op != OP_LOCK && op != OP_CHECK_NOT_EXIST {
-                if val.version >= version {
+                if val.version > version {
                     return val;
                 }
                 break;
@@ -325,10 +325,10 @@ mod tests {
         let mut val = skl_ext.get_newer(key.as_ref(), 102, &mut outer_key_owner);
         assert!(val.is_valid());
         assert_eq!(val.version, 103);
-        val = skl_ext.get_newer(key.as_ref(), 103, &mut outer_key_owner);
+        val = skl_ext.get_newer(key.as_ref(), 102, &mut outer_key_owner);
         assert!(val.is_valid());
         assert_eq!(val.version, 103);
-        val = skl_ext.get_newer(key.as_ref(), 104, &mut outer_key_owner);
+        val = skl_ext.get_newer(key.as_ref(), 103, &mut outer_key_owner);
         assert!(!val.is_valid());
 
         let key = kb.i_to_inner_key(20);
@@ -358,5 +358,26 @@ mod tests {
             iter.next_all_version();
         }
         assert_eq!(count, 9);
+    }
+
+    #[test]
+    fn test_get_newer_exclude_equal_ts() {
+        let skl = SkipList::new(None);
+        let kb = KeyBuilder::new(KEYSPACE_ID, "t_");
+        let key = kb.i_to_key(1);
+
+        write_skl_write_cf(&skl, vec![1], 100, 101, &kb);
+        let val = skl.get_newer(&key, 101);
+        assert!(val.is_empty());
+        let val = skl.get_newer(&key, 100);
+        assert!(val.is_valid());
+        assert_eq!(val.version, 101);
+
+        write_skl_write_cf(&skl, vec![1], 110, 110, &kb);
+        let val = skl.get_newer(&key, 110);
+        assert!(val.is_empty());
+        let val = skl.get_newer(&key, 109);
+        assert!(val.is_valid());
+        assert_eq!(val.version, 110);
     }
 }

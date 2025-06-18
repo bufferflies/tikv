@@ -2450,7 +2450,7 @@ impl LevelHandler {
         key_hash: u64,
         out_val_owner: &mut Vec<u8>,
     ) -> table::Value {
-        if self.max_ts < version {
+        if self.max_ts <= version {
             return table::Value::new();
         }
         if let Some(tbl) = self.get_table(key) {

@@ -193,13 +193,13 @@ impl SsTable {
         out_val_owner: &mut Vec<u8>,
         level: usize,
     ) -> table::Value {
-        if self.max_ts < version {
+        if self.max_ts <= version {
             return table::Value::new();
         }
         let val = self
             .get(key, u64::MAX, key_hash, out_val_owner, level)
             .await;
-        if val.version >= version {
+        if val.version > version {
             return val;
         }
         table::Value::new()

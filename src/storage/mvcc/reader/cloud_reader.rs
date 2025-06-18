@@ -263,6 +263,8 @@ impl CloudReader {
         Ok((locks, false))
     }
 
+    /// Returns an arbitrary write that is newer than `ts`, or None if no such
+    /// write exists.
     #[maybe_async::both]
     pub async fn get_newer(
         &mut self,
