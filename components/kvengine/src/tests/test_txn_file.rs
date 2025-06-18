@@ -319,7 +319,7 @@ pub(crate) fn build_txn_chunk<OpF: Fn(usize) -> u8>(
     enc_key: Option<&EncryptionKey>,
 ) {
     let kb = engine.key_builder();
-    let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned());
+    let mut chunk_builder = TxnChunkBuilder::new(id, 64, enc_key.cloned());
     for i in start..end {
         let key = kb.i_to_key(i);
         chunk_builder.add_entry(InnerKey::from_outer_key(&key), op_fn(i), &key);

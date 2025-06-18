@@ -714,7 +714,7 @@ mod tests {
     }
 
     fn make_txn_chunk(chunk_id: u64) -> Vec<u8> {
-        let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+        let mut chunk_builder = TxnChunkBuilder::new(chunk_id, 64, None);
         for i in 0..100 {
             let key = format!("{:02}/{:02}", chunk_id, i);
             chunk_builder.add_entry(

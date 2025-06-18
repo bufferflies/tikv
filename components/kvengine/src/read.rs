@@ -2216,7 +2216,7 @@ mod tests {
                     for chunk in is.chunks(3) {
                         next_txn_chunk_id += 1;
                         let mut builder =
-                            TxnChunkBuilder::new(next_txn_chunk_id, 10, enc_key.cloned());
+                            TxnChunkBuilder::new(next_txn_chunk_id, 64, enc_key.cloned());
                         for &i in chunk {
                             let key = kb.i_to_inner_key(i);
                             let val = kb.i_to_val(start_ts as usize + i);

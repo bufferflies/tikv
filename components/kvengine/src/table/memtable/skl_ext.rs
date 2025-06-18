@@ -258,7 +258,7 @@ mod tests {
     }
 
     fn build_txn_file_chunk_data(chunk_id: u64, keys: Vec<usize>, kb: &KeyBuilder) -> Bytes {
-        let mut batch_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+        let mut batch_builder = TxnChunkBuilder::new(chunk_id, 64, None);
         for i in keys {
             let key = kb.i_to_key(i);
             let val = new_val(i);

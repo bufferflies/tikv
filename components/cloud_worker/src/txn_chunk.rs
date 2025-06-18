@@ -24,7 +24,7 @@ use crate::{
 };
 
 const GET_SHARD_META_TIMEOUT: Duration = Duration::from_secs(60);
-pub(crate) const TARGET_BLOCK_ENTRIES_DEF: usize = 4096;
+pub(crate) const TARGET_BLOCK_SIZE_DEF: usize = 65536; // 64KB
 
 /// Txn Chunk API
 ///
@@ -95,7 +95,7 @@ pub(crate) async fn handle_txn_chunk(
         parts,
         body,
         &keyspace_info,
-        ctx.txn_chunk_handler.target_block_entries,
+        ctx.txn_chunk_handler.target_block_size,
     )
     .await
 }
@@ -118,7 +118,7 @@ pub(crate) async fn create_txn_chunk(
     parts: Parts,
     body: Bytes,
     keyspace_info: &KeyspaceInfo,
-    target_block_entries: usize,
+    target_block_size: usize,
 ) -> hyper::Result<Response<Body>> {
     if parts.method != http::Method::POST {
         return Ok(make_response(StatusCode::BAD_REQUEST, "invalid method"));
@@ -134,7 +134,7 @@ pub(crate) async fn create_txn_chunk(
     }
     let mut txn_chunk_builder = TxnChunkBuilder::new(
         chunk_id,
-        target_block_entries,
+        target_block_size,
         keyspace_info.encryption_key.clone(),
     );
     while !body_buf.is_empty() {
@@ -171,14 +171,14 @@ pub(crate) struct KeyspaceInfo {
 }
 
 pub(crate) struct TxnChunkHandler {
-    target_block_entries: usize,
+    target_block_size: usize,
     keyspaces: DashMap<u32 /* keyspace_id */, KeyspaceInfo>,
 }
 
 impl TxnChunkHandler {
-    pub(crate) fn new(target_block_entries: usize) -> Self {
+    pub(crate) fn new(target_block_size: usize) -> Self {
         Self {
-            target_block_entries,
+            target_block_size,
             keyspaces: DashMap::new(),
         }
     }
@@ -241,7 +241,7 @@ mod tests {
     };
 
     use crate::txn_chunk::{
-        create_txn_chunk, CreateTxnChunkResp, KeyspaceInfo, TARGET_BLOCK_ENTRIES_DEF,
+        create_txn_chunk, CreateTxnChunkResp, KeyspaceInfo, TARGET_BLOCK_SIZE_DEF,
     };
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
                 parts,
                 body,
                 &keyspace_info,
-                TARGET_BLOCK_ENTRIES_DEF,
+                TARGET_BLOCK_SIZE_DEF,
             ))
             .unwrap();
         assert!(res.status().is_success());

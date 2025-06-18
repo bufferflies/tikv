@@ -261,7 +261,7 @@ fn start_server(
     ));
     spawn_br_background_worker(br_manager.clone(), config_file_path);
 
-    let txn_chunk_handler = Arc::new(TxnChunkHandler::new(config.txn_chunk_target_block_entries));
+    let txn_chunk_handler = Arc::new(TxnChunkHandler::new(config.txn_chunk_target_block_size));
 
     let worker_limiter = WorkerLimiter::new(config.worker_limiter.clone());
 
@@ -742,7 +742,7 @@ pub struct Config {
     pub enable_load_data_check_point: bool,
     pub checksum_type: ChecksumType,
 
-    pub txn_chunk_target_block_entries: usize,
+    pub txn_chunk_target_block_size: usize,
 
     pub push_metrics_addr: String,
     pub push_metrics_interval: ReadableDuration,
@@ -802,7 +802,7 @@ impl Default for Config {
             worker_limiter: WorkerLimiterConfig::default(),
             schema_manager: SchemaManagerConfig::default(),
             txn_chunk_manager: TxnChunkManagerConfig::default(),
-            txn_chunk_target_block_entries: txn_chunk::TARGET_BLOCK_ENTRIES_DEF,
+            txn_chunk_target_block_size: txn_chunk::TARGET_BLOCK_SIZE_DEF,
             ia: IaConfig::default(),
             push_metrics_addr: String::default(),
             push_metrics_interval: ReadableDuration::secs(30),

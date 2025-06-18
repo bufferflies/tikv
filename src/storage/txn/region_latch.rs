@@ -396,7 +396,7 @@ mod tests {
     }
 
     fn make_txn_chunk(start: usize, end: usize, chunk_id: u64, kb: &KeyBuilder) -> TxnChunk {
-        let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+        let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 64, None);
         for i in start..end {
             let key = kb.i_to_key(i);
             txn_chunk_builder.add_entry(InnerKey::from_outer_key(&key), OP_PUT, &key);

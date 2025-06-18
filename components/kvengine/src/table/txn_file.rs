@@ -6,7 +6,7 @@ use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::EncryptionKey;
 use itertools::Itertools;
 use log_wrappers::Value as LogValue;
-use tikv_util::codec::number::NumberEncoder;
+use tikv_util::codec::number::{NumberEncoder, U8_SIZE};
 
 use crate::{
     table,
@@ -1395,7 +1395,7 @@ pub struct TxnChunkBuilder {
     block_keys: EntrySlice,
     block_offsets: Vec<u32>,
     idx_buf: Vec<u8>,
-    target_block_entries: usize,
+    target_block_size: usize,
     biggest_key: Vec<u8>,
     hash_idx_builder: HashIndexBuilder,
     insert_count: u32,
@@ -1408,12 +1408,12 @@ pub struct TxnChunkBuilder {
 impl TxnChunkBuilder {
     pub fn new(
         chunk_id: u64,
-        target_block_entries: usize,
+        target_block_size: usize,
         encryption_key: Option<EncryptionKey>,
     ) -> Self {
         Self {
             chunk_id,
-            target_block_entries,
+            target_block_size,
             checksum_type: ChecksumType::Crc32,
             encryption_key,
             ..Default::default()
@@ -1429,10 +1429,13 @@ impl TxnChunkBuilder {
         let key_idx = self.block.tmp_keys.length() as u16;
         self.hash_idx_builder
             .add_key_hash(key_hash, KeyAddr::new(block_idx, key_idx));
+        let entry_size = U8_SIZE /* op */ + key.len() + val.len();
         self.block.tmp_ops.push(op);
         self.block.tmp_keys.append(key);
         self.block.tmp_vals.append(val);
-        if self.block.tmp_keys.length() == self.target_block_entries {
+        self.block.kv_size += entry_size;
+        self.block.update_common_prefix_len();
+        if self.block.block_size() >= self.target_block_size {
             self.finish_block();
         }
     }
@@ -1478,7 +1481,7 @@ impl TxnChunkBuilder {
     fn finish_block(&mut self) {
         self.block_keys.append(self.block.tmp_keys.get_entry(0));
         self.block_offsets.push(self.data_buf.len() as u32);
-        let common_prefix_len = self.block.common_prefix_len();
+        let common_prefix_len = self.block.common_prefix_len;
         let num_entries = self.block.tmp_keys.length();
         let block_offset = self.data_buf.len();
         self.data_buf.put_u32_le(num_entries as u32);
@@ -1609,6 +1612,8 @@ struct TxnChunkBlockBuffer {
     tmp_keys: EntrySlice,
     tmp_ops: Vec<u8>,
     tmp_vals: EntrySlice,
+    kv_size: usize,
+    common_prefix_len: usize,
 }
 
 impl TxnChunkBlockBuffer {
@@ -1616,16 +1621,22 @@ impl TxnChunkBlockBuffer {
         self.tmp_keys.length()
     }
 
-    fn common_prefix_len(&self) -> usize {
+    fn update_common_prefix_len(&mut self) {
         let first_key = self.tmp_keys.get_entry(0);
         let last_key = self.tmp_keys.get_last();
-        key_diff_idx(first_key, last_key)
+        self.common_prefix_len = key_diff_idx(first_key, last_key);
+    }
+
+    fn block_size(&self) -> usize {
+        self.kv_size - self.length() * self.common_prefix_len
     }
 
     fn reset(&mut self) {
         self.tmp_keys.reset();
         self.tmp_ops.truncate(0);
         self.tmp_vals.reset();
+        self.kv_size = 0;
+        self.common_prefix_len = 0;
     }
 }
 
@@ -1840,6 +1851,7 @@ mod tests {
     use proptest::prelude::*;
     use rand::prelude::*;
     use rstest::rstest;
+    use tikv_util::codec::number::U16_SIZE;
     use txn_types::LockType;
 
     use crate::{
@@ -1858,6 +1870,7 @@ mod tests {
     };
 
     const KEYSPACE_ID: u32 = 42;
+    const BLOCK_SIZE_DEF: usize = 64;
 
     fn new_key_builder() -> KeyBuilder {
         KeyBuilder::new(KEYSPACE_ID, "t_batch")
@@ -1886,11 +1899,18 @@ mod tests {
             }
         };
 
-        let chunk = build_txn_chunk(0, 100, 1, get_op, enc_key.as_ref());
+        let target_block_size = *[32, 64, 128, 256].choose(&mut thread_rng()).unwrap();
+        let chunk = build_txn_chunk_ext(0, 100, 1, get_op, enc_key.as_ref(), target_block_size);
         assert_eq!(chunk.id(), 1);
         assert_eq!(chunk.get_inserts(), 25);
         assert_eq!(chunk.get_check_non_exists(), 5);
         assert!(chunk.size() > 0);
+        for pos in 0..chunk.index.num_blocks - 1 {
+            let block_size = get_block_size(&chunk, pos);
+            assert!(block_size >= target_block_size as usize);
+            assert!(block_size < 2 * target_block_size as usize);
+        }
+
         let mut hashes = vec![1];
         let hash_idx = chunk.load_hash_index().unwrap();
         assert!(!hash_idx.any_exists(&hashes));
@@ -1980,7 +2000,7 @@ mod tests {
     #[test]
     fn test_txn_chunk_merge_chunks() {
         let chunks = (0..5)
-            .map(|i| build_txn_chunk(i * 10, (i + 1) * 10, i as u64, |_| OP_PUT, None))
+            .map(|i| build_txn_chunk(i * 10, (i + 1) * 10, i as u64))
             .collect::<Vec<_>>();
 
         let id = TxnFileId::new(10, 1, 3);
@@ -2024,7 +2044,7 @@ mod tests {
     #[test]
     fn test_txn_chunk_in_range() {
         let kb = new_key_builder();
-        let chunk = build_txn_chunk(10, 100, 1, |_| OP_PUT, None);
+        let chunk = build_txn_chunk(10, 100, 1);
 
         let cases: Vec<(
             usize, // range start
@@ -2053,17 +2073,22 @@ mod tests {
         }
     }
 
-    fn build_txn_chunk<F>(
+    fn build_txn_chunk(start: usize, end: usize, id: u64) -> TxnChunk {
+        build_txn_chunk_ext(start, end, id, |_| OP_PUT, None, BLOCK_SIZE_DEF)
+    }
+
+    fn build_txn_chunk_ext<F>(
         start: usize,
         end: usize,
         id: u64,
         op_fn: F,
         enc_key: Option<&EncryptionKey>,
+        target_block_size: usize,
     ) -> TxnChunk
     where
         F: Fn(usize) -> u8,
     {
-        let mut chunk_builder = TxnChunkBuilder::new(id, 10, enc_key.cloned());
+        let mut chunk_builder = TxnChunkBuilder::new(id, target_block_size, enc_key.cloned());
         let kb = new_key_builder();
         for i in (start..end).step_by(2) {
             let key = kb.i_to_key(i);
@@ -2096,11 +2121,11 @@ mod tests {
                 OP_PUT
             }
         };
-        let chunk_1 = build_txn_chunk(50, 100, 1, op_fn, enc_key);
-        let chunk_2 = build_txn_chunk(100, 150, 2, op_fn, enc_key);
-        let chunk_3 = build_txn_chunk(150, 200, 3, op_fn, enc_key);
-        let chunk_4 = build_txn_chunk(200, 250, 4, op_fn, enc_key);
-        let chunk_5 = build_txn_chunk(250, 300, 5, op_fn, enc_key);
+        let chunk_1 = build_txn_chunk_ext(50, 100, 1, op_fn, enc_key, BLOCK_SIZE_DEF);
+        let chunk_2 = build_txn_chunk_ext(100, 150, 2, op_fn, enc_key, BLOCK_SIZE_DEF);
+        let chunk_3 = build_txn_chunk_ext(150, 200, 3, op_fn, enc_key, BLOCK_SIZE_DEF);
+        let chunk_4 = build_txn_chunk_ext(200, 250, 4, op_fn, enc_key, BLOCK_SIZE_DEF);
+        let chunk_5 = build_txn_chunk_ext(250, 300, 5, op_fn, enc_key, BLOCK_SIZE_DEF);
         let id = TxnFileId::new(10, 1, 3);
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
@@ -2307,9 +2332,9 @@ mod tests {
     #[test]
     fn test_txn_file_in_ranges() {
         let kb = new_key_builder();
-        let chunk_1 = build_txn_chunk(50, 100, 1, |_| OP_PUT, None);
-        let chunk_2 = build_txn_chunk(100, 150, 2, |_| OP_PUT, None);
-        let chunk_5 = build_txn_chunk(250, 300, 5, |_| OP_PUT, None);
+        let chunk_1 = build_txn_chunk(50, 100, 1);
+        let chunk_2 = build_txn_chunk(100, 150, 2);
+        let chunk_5 = build_txn_chunk(250, 300, 5);
         let id = TxnFileId::new(10, 1, 3);
         let lower_bound = InnerKey::from_inner_buf(b"");
         let upper_bound = InnerKey::from_inner_buf(GLOBAL_SHARD_END_KEY);
@@ -2351,22 +2376,22 @@ mod tests {
     #[test]
     fn test_txn_file_size() {
         let kb = new_key_builder();
-        let chunk_1 = build_txn_chunk(50, 100, 1, |_| OP_PUT, None);
-        let chunk_2 = build_txn_chunk(100, 150, 2, |_| OP_PUT, None);
-        let chunk_5 = build_txn_chunk(250, 300, 5, |_| OP_PUT, None);
+        let chunk_1 = build_txn_chunk_ext(50, 100, 1, |_| OP_PUT, None, 32);
+        let chunk_2 = build_txn_chunk_ext(100, 150, 2, |_| OP_PUT, None, 32);
+        let chunk_5 = build_txn_chunk_ext(250, 300, 5, |_| OP_PUT, None, 32);
         let id = TxnFileId::new(10, 1, 3);
         let cases: Vec<(
             (usize /* start */, usize /* end */), // range
             usize,                                // txn file size
         )> = vec![
-            ((50, 301), 2457),
-            ((75, 301), 2184),
-            ((75, 281), 1911),
-            ((100, 281), 1380),
-            ((100, 170), 828),
-            ((100, 149), 828),
-            ((119, 121), 552),
-            ((120, 121), 276),
+            ((50, 301), 2660),
+            ((75, 301), 2470),
+            ((75, 281), 2090),
+            ((100, 281), 1448),
+            ((100, 170), 905),
+            ((100, 149), 905),
+            ((119, 121), 181),
+            ((120, 121), 181),
             ((160, 170), 0),
         ];
         let chunks = vec![chunk_1, chunk_2, chunk_5];
@@ -2417,7 +2442,7 @@ mod tests {
                 };
                 let get_op = |i| ops[i - next_chunk];
 
-                let chunk = build_txn_chunk(next_chunk, next_chunk + chunk_size, next_chunk as u64, get_op, enc_key.as_ref());
+                let chunk = build_txn_chunk_ext(next_chunk, next_chunk + chunk_size, next_chunk as u64, get_op, enc_key.as_ref(), BLOCK_SIZE_DEF);
                 chunks.push(chunk);
                 chunk_ref.put_batch(next_chunk, next_chunk + chunk_size, get_op);
                 next_chunk += chunk_size;
@@ -2565,7 +2590,7 @@ mod tests {
     #[test]
     fn test_txn_file_has_over_bound_data() {
         let kb = new_key_builder();
-        let chunk = build_txn_chunk(0, 50, 1, |_| OP_PUT, None);
+        let chunk = build_txn_chunk(0, 50, 1);
         let id = TxnFileId::new(10, 1, 3);
         let txn_ctx = TxnCtx::new(
             UserMeta::new(3, 5).to_array().to_vec().into(),
@@ -2753,5 +2778,14 @@ mod tests {
         assert_eq!(x1.get(20), true);
         assert_eq!(x1.get(40), false);
         assert_eq!(x1.get(59), false);
+    }
+
+    fn get_block_size(chunk: &TxnChunk, block_pos: usize) -> usize {
+        assert!(block_pos < chunk.index.num_blocks);
+        let mut iter = TxnChunkIterator::new(chunk.clone(), false);
+        iter.block_pos = block_pos;
+        iter.load_block();
+        iter.block_iter.set_idx(0);
+        iter.block_iter.block_data.len() - iter.block_iter.num_keys * U16_SIZE /* key_len */
     }
 }

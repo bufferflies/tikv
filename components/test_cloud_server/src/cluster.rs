@@ -71,7 +71,7 @@ const TIKV_WORKER_UPDATE_INTERVAL: ReadableDuration = ReadableDuration::secs(10)
 
 const TXN_CHUNK_MGR_GC_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 const TXN_CHUNK_MGR_GC_TTL: ReadableDuration = ReadableDuration::secs(10);
-const TXN_CHUNK_TARGET_BLOCK_ENTRIES: usize = 64;
+const TXN_CHUNK_TARGET_BLOCK_SIZE: usize = 8092;
 
 const BLOCK_SIZE_DEF: u64 = 4096;
 
@@ -891,7 +891,7 @@ impl ServerCluster {
                     gc_interval: TXN_CHUNK_MGR_GC_INTERVAL,
                     gc_ttl: TXN_CHUNK_MGR_GC_TTL,
                 },
-                txn_chunk_target_block_entries: TXN_CHUNK_TARGET_BLOCK_ENTRIES,
+                txn_chunk_target_block_size: TXN_CHUNK_TARGET_BLOCK_SIZE,
                 cop_block_cache_size: opts.cop_block_cache_size,
                 cop_block_cache_type: opts.cop_block_cache_type,
                 cop_block_size: tikv_config.rocksdb.writecf.block_size,

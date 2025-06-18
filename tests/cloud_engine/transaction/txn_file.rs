@@ -1256,7 +1256,7 @@ where
 fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) -> Vec<u64> {
     let mut chunk_ids = vec![];
     let mut chunk_id = start_ts + 1;
-    let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+    let mut txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 64, None);
     for i in start..end {
         let key = i_to_tidb_key(i);
         let val = i_to_val(i);
@@ -1264,7 +1264,7 @@ fn build_txn_files(dfs: &Arc<dyn Dfs>, start_ts: u64, start: usize, end: usize) 
         if (i + 1) % 100 == 0 {
             let mut data_buf = vec![];
             txn_chunk_builder.finish(&mut data_buf);
-            txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 10, None);
+            txn_chunk_builder = TxnChunkBuilder::new(chunk_id, 64, None);
             let opts = dfs::Options::default().with_type(FileType::TxnChunk);
             dfs.get_runtime()
                 .block_on(dfs.create(chunk_id, Bytes::from(data_buf), opts))
