@@ -354,7 +354,17 @@ impl ShardStats {
         self.mem_table_size == 0 && self.mem_table_count == 1
     }
 
-    #[cfg(any(test, feature = "testexport"))]
+    pub fn for_each_cf_level(&self, mut f: impl FnMut((usize, &LevelStats))) {
+        for (cf, cf_stats) in self.cfs.iter().enumerate() {
+            cf_stats.levels.iter().for_each(|lv| {
+                f((cf, lv));
+            });
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testexport"))]
+impl ShardStats {
     pub fn is_major_compacted(&self) -> bool {
         let bottom_most_level = self.cfs[WRITE_CF].levels.last().unwrap();
         self.mem_table_size == 0
@@ -364,12 +374,11 @@ impl ShardStats {
             && bottom_most_level.num_tables != 0
     }
 
-    pub fn for_each_cf_level(&self, mut f: impl FnMut((usize, &LevelStats))) {
-        for (cf, cf_stats) in self.cfs.iter().enumerate() {
-            cf_stats.levels.iter().for_each(|lv| {
-                f((cf, lv));
-            });
-        }
+    pub fn write_cf_level_n_is_empty(&self) -> bool {
+        self.cfs[WRITE_CF]
+            .levels
+            .iter()
+            .all(|lv| lv.num_tables == 0)
     }
 }
 

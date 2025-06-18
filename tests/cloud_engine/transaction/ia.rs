@@ -584,7 +584,7 @@ fn prepare_cluster(
                     return false;
                 };
                 let stats = shard.get_stats();
-                let compacted = stats.is_major_compacted();
+                let compacted = !stats.write_cf_level_n_is_empty();
                 if !compacted && last_retry_time.saturating_elapsed() >= Duration::from_secs(5) {
                     info!("retry major compaction, stats {:?}", stats);
                     cluster.request_major_compaction(
