@@ -16,9 +16,11 @@ use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    table::columnar::SchemaFile, table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard,
-    DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE,
-    MANUAL_MAJOR_COMPACTION_ENABLE, TERM_KEY,
+    table::{columnar::SchemaFile, DataBound, InnerKey},
+    table_id::is_table_boundary_key,
+    CheckMergeResult, IdVer, Shard, DEL_PREFIXES_KEY, MANUAL_MAJOR_COMPACTION,
+    MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE, TERM_KEY,
+    WRITE_CF_BOTTOM_LEVEL,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -1678,7 +1680,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.propose_change_set(change_set);
     }
 
-    pub(crate) fn on_ingest_files(&mut self, cs: kvenginepb::ChangeSet, callback: Callback) {
+    pub(crate) fn on_ingest_files(&mut self, mut cs: kvenginepb::ChangeSet, callback: Callback) {
         if !self.peer.is_leader() {
             let mut resp = RaftCmdResponse::default();
             let header = resp.mut_header();
@@ -1713,7 +1715,31 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
 
-        // Note: overlap is checked in preprocess stage.
+        let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
+        let ingest_files = cs.mut_ingest_files();
+        // Adjust the ingest level to make sure there is no overlap with existing files.
+        for table_create in ingest_files.mut_table_creates().iter_mut() {
+            debug_assert!(table_create.get_level() == WRITE_CF_BOTTOM_LEVEL);
+            let table_bound = DataBound::new(
+                InnerKey::from_inner_buf(table_create.get_smallest()),
+                InnerKey::from_inner_buf(table_create.get_biggest()),
+                true,
+            );
+            let ingest_level = shard_meta.get_ingest_level(table_bound);
+            if ingest_level == 0 {
+                // Level 0 has a different format, so we can't ingest to level 0.
+                // TODO: maybe compact level 0 files to a bottom level.
+                let mut resp = RaftCmdResponse::default();
+                resp.mut_header().mut_error().set_message(format!(
+                    "ingest files {} overlap with existing files, can't ingest to level 0",
+                    table_create.get_id()
+                ));
+                callback.invoke_with_response(resp);
+                return;
+            } else {
+                table_create.set_level(ingest_level);
+            }
+        }
 
         let mut cmd = self.new_raft_cmd_request();
         let mut custom_builder = CustomBuilder::new();

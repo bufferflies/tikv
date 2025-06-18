@@ -583,19 +583,17 @@ impl ShardMeta {
         u64, // ingest file id
     )> {
         let ingest_tables = ingest_files.get_table_creates();
-        // Ingest tables should be sorted, but we still check here for safety.
-        let is_sorted =
-            ingest_tables.is_sorted_by(|x, y| x.lower_bound().partial_cmp(&y.lower_bound()));
 
-        // Ingest files of load data will be in bottom level of WRITE_CF only.
-        for (&existed_file_id, existed_file) in self.files.iter().filter(|(_, f)| {
-            f.get_cf() == WRITE_CF as i32 && f.get_level() == WRITE_CF_BOTTOM_LEVEL
-        }) {
-            if let Some(i) = existed_file
-                .data_bound()
-                .find_overlap(ingest_tables, is_sorted)
-            {
-                return Some((existed_file_id, ingest_tables[i].id));
+        for ingest_file in ingest_tables {
+            for (existed_file_id, existed_file) in self.files.iter().filter(|(_, file)| {
+                file.get_cf() == WRITE_CF as i32 && file.get_level() == ingest_file.get_level()
+            }) {
+                if existed_file
+                    .data_bound()
+                    .overlap_bound(ingest_file.data_bound())
+                {
+                    return Some((*existed_file_id, ingest_file.id));
+                }
             }
         }
         None
@@ -1115,31 +1113,26 @@ impl ShardMeta {
         blob_files
     }
 
-    // the ingest level never skip to lower level if upper level file exists, this
-    // may not be optimal but prevent compaction generate conflicting files.
-    // It find the top most existing file's level as ingest level, if there is
-    // overlap with existing files, it will use the one level upper.
-    pub(crate) fn get_ingest_level(&self, table_bound: DataBound<'_>) -> u32 {
-        // find the top most level as ingest level.
-        let mut ingest_level = self
-            .files
-            .values()
-            .filter(|f| f.file_type == FileType::Sst)
-            .map(|f| f.level)
-            .min()
-            .unwrap_or(3);
-        if ingest_level == 0 {
-            return 0;
+    // Find the appropriate ingest level by checking from top level (0) down to
+    // bottom level. Top-down approach: find the first level with overlap and
+    // ingest at the previous level
+    pub fn get_ingest_level(&self, table_bound: DataBound<'_>) -> u32 {
+        // Check each level from 0 to bottom level to find the first level with overlap
+        for level in 0..=WRITE_CF_BOTTOM_LEVEL as u8 {
+            let has_overlap = self
+                .files
+                .values()
+                .filter(|f| f.file_type == FileType::Sst && f.level == level)
+                .any(|file| table_bound.overlap_bound(file.data_bound()));
+
+            if has_overlap {
+                // Found first level with overlap, ingest at the previous level
+                return level.saturating_sub(1) as u32;
+            }
         }
-        let overlap = self
-            .files
-            .values()
-            .filter(|f| f.level == ingest_level && f.cf == 0)
-            .any(|file| table_bound.overlap_bound(file.data_bound()));
-        if overlap {
-            ingest_level -= 1;
-        }
-        ingest_level as u32
+
+        // No overlap found at any level, ingest at the bottom level
+        WRITE_CF_BOTTOM_LEVEL
     }
 
     pub(crate) fn data_version(&self) -> u64 {
@@ -1671,6 +1664,7 @@ mod tests {
 
     #[test]
     fn test_ingest_level() {
+        // Test basic single-level scenarios
         for level in 0..=3 {
             let mut cs = new_change_set(1, 1);
             let snap = cs.mut_snapshot();
@@ -1701,13 +1695,78 @@ mod tests {
                 );
             };
             let overlap_level = level.saturating_sub(1);
-            assert_get_ingest_level("0000", "0999", level);
+            assert_get_ingest_level("0000", "0999", 3);
             assert_get_ingest_level("1000", "1500", overlap_level);
             assert_get_ingest_level("1000", "2000", overlap_level);
             assert_get_ingest_level("1500", "2000", overlap_level);
             assert_get_ingest_level("1500", "2999", overlap_level);
             assert_get_ingest_level("2000", "2999", overlap_level);
-            assert_get_ingest_level("2500", "2999", level);
+            assert_get_ingest_level("2500", "2999", 3);
+        }
+
+        // Test multiple-level overlap scenarios
+        {
+            let mut cs = new_change_set(1, 1);
+            let snap = cs.mut_snapshot();
+            snap.set_outer_end(GLOBAL_SHARD_END_KEY.to_vec());
+            snap.set_max_ts(100);
+
+            let mut id = 0;
+            let mut make_table = |level: u32, smallest: &str, biggest: &str| {
+                id += 1;
+                let mut tbl = pb::TableCreate::new();
+                tbl.id = id;
+                tbl.level = level;
+                tbl.smallest = smallest.as_bytes().to_vec();
+                tbl.biggest = biggest.as_bytes().to_vec();
+                tbl
+            };
+
+            let tables = snap.mut_table_creates();
+            // Add files at different levels that will create overlaps
+            tables.push(make_table(3, "1000", "2000")); // Level 3: 1000-2000
+            tables.push(make_table(2, "1500", "2500")); // Level 2: 1500-2500 (overlaps with level 3)
+            tables.push(make_table(1, "3000", "4000")); // Level 1: 3000-4000 (no overlap)
+
+            let meta = ShardMeta::new(1, &cs);
+
+            let assert_get_ingest_level = |smallest: &str, biggest: &str, expected_level| {
+                let actual_level = meta.get_ingest_level(DataBound::new(
+                    InnerKey::from_inner_buf(smallest.as_bytes()),
+                    InnerKey::from_inner_buf(biggest.as_bytes()),
+                    true,
+                ));
+                assert_eq!(
+                    actual_level, expected_level,
+                    "Failed for range {}-{}: expected level {}, got level {}",
+                    smallest, biggest, expected_level, actual_level
+                );
+            };
+
+            // Test case 1: New file overlaps with level 2
+            // Range 1200-1800 overlaps with level 2 (1500-2500)
+            // Algorithm finds overlap at level 2, returns level 1
+            assert_get_ingest_level("1200", "1800", 1);
+
+            // Test case 2: New file overlaps with level 2
+            // Range 1600-2400 overlaps with level 2 (1500-2500)
+            // Algorithm finds overlap at level 2, returns level 1
+            assert_get_ingest_level("1600", "2400", 1);
+
+            // Test case 3: New file overlaps with level 3 but not level 2
+            // Range 0900-1200 overlaps with level 3 (1000-2000) but not level 2 (1500-2500)
+            // Algorithm finds overlap at level 3, returns level 2
+            assert_get_ingest_level("0900", "1200", 2);
+
+            // Test case 4: No overlap with any existing files
+            // Range 5000-6000 doesn't overlap with any existing files
+            // Should go to bottom level (3)
+            assert_get_ingest_level("5000", "6000", 3);
+
+            // Test case 5: File that overlaps with level 1 (the topmost level)
+            // Range 2800-3200 overlaps with level 1 (3000-4000)
+            // Algorithm finds overlap at level 1, returns level 0
+            assert_get_ingest_level("2800", "3200", 0);
         }
     }
 
@@ -2001,6 +2060,7 @@ mod tests {
                     .mut_table_creates()
                     .push(kvenginepb::TableCreate {
                         id: id as u64,
+                        level: WRITE_CF_BOTTOM_LEVEL,
                         smallest,
                         biggest,
                         ..Default::default()
@@ -2014,7 +2074,15 @@ mod tests {
                 let (smallest, biggest) = make_smallest_biggest(t);
                 meta.files.insert(
                     id as u64,
-                    FileMeta::new(WRITE_CF as i32, 3, FileType::Sst, &smallest, &biggest, 0, 0),
+                    FileMeta::new(
+                        WRITE_CF as i32,
+                        WRITE_CF_BOTTOM_LEVEL,
+                        FileType::Sst,
+                        &smallest,
+                        &biggest,
+                        0,
+                        0,
+                    ),
                 );
             }
             meta

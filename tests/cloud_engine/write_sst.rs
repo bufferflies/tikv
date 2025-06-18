@@ -95,11 +95,7 @@ fn test_write_sst() {
         .unwrap();
 
     let resp = runtime.block_on(http_client.request(req)).unwrap();
-    assert!(
-        resp.status() == StatusCode::OK,
-        "write_sst request failed: {:?}",
-        resp.status()
-    );
+    assert_eq!(resp.status(), StatusCode::OK,);
 
     // Read response body into bytes for JSON parsing
     let bytes = runtime
@@ -138,25 +134,94 @@ fn test_write_sst() {
         .unwrap();
 
     let ingest_resp = runtime.block_on(http_client.request(ingest_req)).unwrap();
-    assert!(
-        ingest_resp.status().is_success(),
-        "ingest_s3 request failed: {:?}",
-        ingest_resp.body()
-    );
+    assert_eq!(ingest_resp.status(), StatusCode::OK);
 
     // Verify data in TiKV
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(200));
     for (key, expected_val) in &kvs {
         let (val, _) = tikv_client.must_get_key(key, tikv_util::time::Instant::now());
-        assert_eq!(
-            val,
-            *expected_val,
-            "Value mismatch for key {:?} after ingestion",
-            String::from_utf8_lossy(key)
-        );
+        assert_eq!(val, *expected_val,);
     }
 
-    // --- Extra case: Ingest SST with non-overlapping range should fail
+    // Case: a new SST overlaps with existing data.
+    // Generate KVs for an overlapping SST. If DATA_SIZE is 50, this will be keys
+    // [25, 75).
+    let overlap_kvs: Vec<_> = (DATA_SIZE / 2..DATA_SIZE + DATA_SIZE / 2)
+        .map(|i| (i_to_tidb_key(i), i_to_val(i)))
+        .collect();
+
+    // Encode data for the overlapping SST
+    let mut overlap_body_buf = BytesMut::new();
+    for (key, val) in &overlap_kvs {
+        overlap_body_buf.put_u16_le(key.len() as u16);
+        overlap_body_buf.put_slice(key);
+        overlap_body_buf.put_u32_le(val.len() as u32);
+        overlap_body_buf.put_slice(val);
+    }
+    let overlap_body_bytes = overlap_body_buf.freeze();
+
+    // Send PUT /write_sst request for the overlapping SST
+    let overlap_commit_ts = runtime.block_on(pd_client.get_tso()).unwrap().into_inner();
+    let overlap_write_url = format!(
+        "http://{}/write_sst?cluster_id={}&commit_ts={}",
+        cluster.tikv_worker_endpoints()[0],
+        cluster_id,
+        overlap_commit_ts
+    );
+
+    let overlap_req = Request::builder()
+        .method(Method::PUT)
+        .uri(&overlap_write_url)
+        .header("Content-Type", "application/octet-stream")
+        .body(Body::from(overlap_body_bytes.clone()))
+        .unwrap();
+
+    let overlap_resp = runtime.block_on(http_client.request(overlap_req)).unwrap();
+    assert_eq!(overlap_resp.status(), StatusCode::OK,);
+
+    // Parse SstMeta from the overlapping SST response
+    let overlap_bytes_resp = runtime
+        .block_on(hyper::body::to_bytes(overlap_resp.into_body()))
+        .unwrap();
+    let overlap_resp_body: JsonValue = serde_json::from_slice(&overlap_bytes_resp).unwrap();
+    let overlap_sst_meta_json = overlap_resp_body.get("sst_meta").unwrap();
+    let overlap_sst_meta: SstMeta = serde_json::from_value(overlap_sst_meta_json.clone()).unwrap();
+
+    // Send /ingest_s3 request for the overlapping SST to the same TiKV node and
+    // region
+    let ingest_overlap_url = format!(
+        "http://{}/ingest_s3?cluster_id={}&region_id={}&epoch_version={}",
+        status_addr,
+        cluster_id,
+        region_id,
+        epoch.get_version()
+    );
+    let overlap_req_body = json!(overlap_sst_meta).to_string();
+
+    let ingest_overlap_req = Request::builder()
+        .method(Method::POST)
+        .uri(&ingest_overlap_url)
+        .header("Content-Type", "application/json")
+        .body(Body::from(overlap_req_body))
+        .unwrap();
+
+    let ingest_overlap_resp = runtime
+        .block_on(http_client.request(ingest_overlap_req))
+        .unwrap();
+    assert_eq!(ingest_overlap_resp.status(), StatusCode::OK);
+
+    // Verify data in TiKV after overlapping ingest
+    std::thread::sleep(Duration::from_millis(200));
+    for (key, expected_val) in &kvs {
+        let (val, _) = tikv_client.must_get_key(key, tikv_util::time::Instant::now());
+        assert_eq!(val, *expected_val);
+    }
+    for (key, expected_val) in &overlap_kvs {
+        let (val, _) = tikv_client.must_get_key(key, tikv_util::time::Instant::now());
+        assert_eq!(val, *expected_val);
+    }
+
+    // Case: Ingest SST with non-overlapping range should fail
     // Generate New Data [DATA_SIZE, DATA_SIZE * 2)
     let new_kvs: Vec<_> = (DATA_SIZE..DATA_SIZE * 2)
         .map(|i| (i_to_tidb_key(i), i_to_val(i)))
@@ -175,11 +240,7 @@ fn test_write_sst() {
 
     let left_region = pd_client.get_region(&key_in_left).unwrap();
     let right_region = pd_client.get_region(&key_in_right).unwrap();
-    assert_ne!(
-        left_region.get_id(),
-        right_region.get_id(),
-        "Split should result in two different regions"
-    );
+    assert_ne!(left_region.get_id(), right_region.get_id(),);
 
     let left_region_id = left_region.get_id();
     let left_epoch = left_region.get_region_epoch().clone();
@@ -211,11 +272,7 @@ fn test_write_sst() {
         .unwrap();
 
     let new_resp = runtime.block_on(http_client.request(new_req)).unwrap();
-    assert!(
-        new_resp.status() == StatusCode::OK,
-        "New write_sst request failed: {:?}",
-        new_resp.status()
-    );
+    assert_eq!(new_resp.status(), StatusCode::OK,);
 
     // Parse SstMeta from new response
     let new_bytes = runtime
@@ -248,11 +305,7 @@ fn test_write_sst() {
     let status = ingest_resp.status();
     // Expect failure because the SST range [key(DATA_SIZE), key(DATA_SIZE*2-1)]
     // does not overlap with the left region range [start_key, key(DATA_SIZE))
-    assert!(
-        !status.is_success(),
-        "Ingest_s3 request to left region succeeded unexpectedly: {:?}",
-        status
-    );
+    assert_ne!(status, StatusCode::OK,);
 
     // Cleanup
     cluster.stop();

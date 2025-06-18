@@ -5352,6 +5352,31 @@ def KvEngine() -> RowPanel:
     )
     layout.row(
         [
+            heatmap_panel(
+                title="Ingest Level Distribution",
+                description="The distribution of ingestion levels (0-3) in the storage engine",
+                metric="kv_engine_ingest_level_bucket",
+                yaxis=yaxis(format=UNITS.SHORT),
+            ),
+            graph_panel(
+                title="Ingest Level Rate",
+                description="The rate of ingestion operations by level",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_ingest_level_count",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="total ingestion rate",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
             graph_panel(
                 title="IA Segment Memory Cache",
                 yaxes=yaxes(left_format=UNITS.BYTES_IEC),

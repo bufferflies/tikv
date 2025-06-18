@@ -17,6 +17,7 @@ use crate::{
     context::PrepareType,
     dfs::FileType,
     meta::is_move_down,
+    metrics::ENGINE_INGEST_LEVEL_HISTOGRAM,
     table::{
         blobtable::blobtable::BlobTable,
         columnar::{ColumnarFile, ColumnarLevels, SchemaFile},
@@ -897,6 +898,7 @@ impl EngineCore {
         for l0_create in ingest_files.get_l0_creates() {
             let l0_table = cs.l0_tables.get(&l0_create.get_id()).unwrap().clone();
             new_l0s.push(l0_table);
+            ENGINE_INGEST_LEVEL_HISTOGRAM.observe(0.0)
         }
         new_l0s.sort_unstable_by(|a, b| b.version().cmp(&a.version()));
         let mut scf_builder = ShardCfBuilder::new(0);
@@ -908,6 +910,7 @@ impl EngineCore {
         for tbl_create in ingest_files.get_table_creates() {
             let table = cs.ln_tables.get(&tbl_create.get_id()).unwrap().clone();
             scf_builder.add_table(table, tbl_create.level as usize);
+            ENGINE_INGEST_LEVEL_HISTOGRAM.observe(tbl_create.level as f64);
         }
         let new_cf = scf_builder.build();
         let mut new_cfs = old_data.cfs.clone();

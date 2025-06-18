@@ -141,6 +141,12 @@ lazy_static! {
         "kv_engine_remote_compact_exceed_memory_limit_counter",
         "Total number of remote compaction requests that exceed memory limit",
     ).unwrap();
+
+    pub static ref ENGINE_INGEST_LEVEL_HISTOGRAM: Histogram = register_histogram!(
+        "kv_engine_ingest_level",
+        "Histogram of levels where tables are ingested",
+        vec![0.0, 1.0, 2.0, 3.0]
+    ).unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {
