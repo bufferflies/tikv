@@ -36,7 +36,7 @@ impl Display for GcTask {
 #[derive(Default)]
 pub struct CollectFileIds {
     pub sst_file_ids: HashSet<u64>,
-    pub async_sst_file_ids: HashSet<u64>,
+    pub ia_file_ids: HashSet<u64>,
     pub blacklist_file_ids: Arc<HashSet<u64>>,
     pub txn_chunk_ids: HashSet<u64>,
     pub col_file_ids: HashSet<u64>,
@@ -117,9 +117,9 @@ impl GcRunner {
         collect_file_ids.blacklist_file_ids = self.kv.get_files_in_blacklist();
         for &id_ver in &shard_id_vers {
             let shard = self.kv.get_shard_with_ver(id_ver.id, id_ver.ver).ok()?;
-            let (sst_files, async_sst_files) = shard.get_local_sst_files();
+            let (sst_files, ia_files) = shard.get_local_sst_files();
             collect_file_ids.sst_file_ids.extend(sst_files);
-            collect_file_ids.async_sst_file_ids.extend(async_sst_files);
+            collect_file_ids.ia_file_ids.extend(ia_files);
             collect_file_ids
                 .txn_chunk_ids
                 .extend(shard.get_txn_chunks());
@@ -157,7 +157,7 @@ impl GcRunner {
     fn remove_garbage_files(&mut self, collect_file_ids: &CollectFileIds) -> kvengine::Result<()> {
         let CollectFileIds {
             sst_file_ids,
-            async_sst_file_ids,
+            ia_file_ids,
             blacklist_file_ids,
             txn_chunk_ids,
             col_file_ids,
@@ -177,7 +177,7 @@ impl GcRunner {
             if path.is_dir() && path.file_name() == Some(OsStr::new("ia")) {
                 self.remove_kv_garbage_ia_files(
                     path,
-                    async_sst_file_ids,
+                    ia_file_ids,
                     col_file_ids,
                     blacklist_file_ids,
                 )?;
@@ -317,7 +317,7 @@ impl GcRunner {
     fn remove_kv_garbage_ia_files(
         &mut self,
         _: PathBuf,
-        async_sst_file_ids: &HashSet<u64>,
+        ia_file_ids: &HashSet<u64>,
         col_file_ids: &HashSet<u64>,
         blacklist_file_ids: &HashSet<u64>,
     ) -> kvengine::Result<()> {
@@ -326,7 +326,7 @@ impl GcRunner {
         };
 
         let ignore = |file_id| {
-            async_sst_file_ids.contains(&file_id)
+            ia_file_ids.contains(&file_id)
                 || col_file_ids.contains(&file_id)
                 || blacklist_file_ids.contains(&file_id)
         };

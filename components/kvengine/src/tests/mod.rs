@@ -3,6 +3,7 @@
 mod test_columnar;
 mod test_ia_auto_file;
 mod test_ia_file;
+mod test_storage_class;
 mod test_txn_file;
 
 use std::{

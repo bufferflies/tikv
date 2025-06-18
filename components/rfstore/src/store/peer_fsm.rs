@@ -46,7 +46,7 @@ use tikv_util::{
 };
 use txn_types::{Key, WriteBatchFlags};
 
-use super::{write_engine_meta, PeerStat, RequestInspector, SchemaTask, WorkerType};
+use super::{write_engine_meta, RequestInspector, SchemaTask, WorkerType};
 use crate::{
     store::{
         cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
@@ -1228,14 +1228,7 @@ impl<'a> PeerMsgHandler<'a> {
             self.peer.peer_stat.approximate_keys = estimated_entries;
             self.peer.peer_stat.approximate_kv_size = estimated_kv_size;
 
-            let region_split_size = self.ctx.cfg.region_split_size.0;
-            let ia_kv_size_discount = self.ctx.cfg.ia_kv_size_discount;
-            Self::adjust_peer_stat_for_storage_class(
-                &mut self.peer.peer_stat,
-                shard.as_ref(),
-                region_split_size,
-                ia_kv_size_discount,
-            );
+            self.adjust_peer_stat_for_storage_class(shard.as_ref());
 
             if !self.fsm.peer.is_leader() {
                 return false;
@@ -1296,13 +1289,12 @@ impl<'a> PeerMsgHandler<'a> {
         false
     }
 
-    fn adjust_peer_stat_for_storage_class(
-        peer_stat: &mut PeerStat,
-        shard: &Shard,
-        region_split_size: u64,
-        ia_kv_size_discount: f64,
-    ) {
+    fn adjust_peer_stat_for_storage_class(&mut self, shard: &Shard) {
         if shard.get_storage_class_spec().can_be_ia() {
+            let region_split_size = self.ctx.cfg.region_split_size.0;
+            let ia_kv_size_discount = self.ctx.cfg.ia_kv_size_discount;
+            let peer_stat = &mut self.peer.peer_stat;
+
             // Adjust region size to prevent merge when the region is on the boundary of
             // table.
             if is_table_boundary_key(shard.inner_start())
@@ -1312,9 +1304,21 @@ impl<'a> PeerMsgHandler<'a> {
                     cmp::max(peer_stat.approximate_size, region_split_size);
             }
 
-            peer_stat.approximate_kv_size =
-                (peer_stat.approximate_kv_size as f64 * ia_kv_size_discount) as u64;
+            peer_stat.approximate_kv_size = Self::calc_kv_size_for_storage_class(
+                peer_stat.approximate_kv_size,
+                shard.get_estimated_ia_kv_size(),
+                ia_kv_size_discount,
+            );
         }
+    }
+
+    fn calc_kv_size_for_storage_class(
+        estimated_kv_size: u64,
+        estimated_ia_kv_size: u64,
+        ia_kv_size_discount: f64,
+    ) -> u64 {
+        estimated_kv_size.saturating_sub(estimated_ia_kv_size)
+            + (estimated_ia_kv_size as f64 * ia_kv_size_discount) as u64
     }
 
     fn schedule_ask_split(&mut self, split_keys: Vec<Vec<u8>>) {
@@ -2675,5 +2679,33 @@ impl std::fmt::Display for MsgDebug<'_> {
             msg.reject,
             msg.get_entries().len(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeerMsgHandler;
+
+    #[test]
+    fn test_calc_kv_size_for_storage_class() {
+        let ia_kv_size_discount = 0.5;
+
+        let cases = vec![
+            (0, 0, 0),
+            (100, 0, 100),
+            (100, 50, 75),
+            (100, 100, 50),
+            (100, 200, 100),
+        ];
+        for (estimated_kv_size, estimated_ia_kv_size, expect) in cases {
+            assert_eq!(
+                PeerMsgHandler::calc_kv_size_for_storage_class(
+                    estimated_kv_size,
+                    estimated_ia_kv_size,
+                    ia_kv_size_discount
+                ),
+                expect,
+            );
+        }
     }
 }

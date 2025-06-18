@@ -96,6 +96,7 @@ pub trait File: std::any::Any + Sync + Send {
         unimplemented!()
     }
 
+    /// Note: the result is NOT strongly consistent.
     fn storage_class(&self) -> StorageClass;
 
     /// Cast to `Any`. Used for downcast.

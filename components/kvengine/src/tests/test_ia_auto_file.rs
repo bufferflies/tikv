@@ -28,6 +28,7 @@ fn test_ia_auto_file() {
     let (engine, _) = new_test_engine_opt(true, 1024, "");
     let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
     let t = new_table(&engine, file_id, 0, 100, 1000, false, &mut saved_vals);
+    assert_eq!(t.is_storage_class_ia(), false);
     // `disable_sync_read()` to check that `IaAutoFile::local_file` is available.
     let mgr = engine.new_ia_manager(
         IaManagerOptionsBuilder::default()
@@ -54,6 +55,7 @@ fn test_ia_auto_file() {
     };
     let ts10 = TimeStamp::compose(10 * 1000, 0);
     let sst_auto = convert_local_sst_to_auto(&t, sc_spec, Some(ts10.into_inner()), mgr.clone());
+    assert_eq!(sst_auto.is_storage_class_ia(), false);
     verify_table_by_scan(&engine.key_builder, &sst_auto, 0, 100, 1000);
 
     // Downcast.
@@ -63,10 +65,12 @@ fn test_ia_auto_file() {
     let ts12 = TimeStamp::compose(12 * 1000, 0);
     let res = ia_auto_f.try_transit(ts12.into_inner());
     assert_eq!(res, TransitResult::NoChange);
+    assert_eq!(sst_auto.is_storage_class_ia(), false);
 
     let ts13 = TimeStamp::compose(13 * 1000, 0);
     let res = ia_auto_f.try_transit(ts13.into_inner());
     assert_eq!(res, TransitResult::TransitedToIa);
+    assert_eq!(sst_auto.is_storage_class_ia(), true);
     // verify_table_by_scan() will panic for "IaMgr(sync read disabled)".
     block_on(verify_table_by_scan_async(
         &engine.key_builder,
@@ -80,6 +84,7 @@ fn test_ia_auto_file() {
     let ts16 = TimeStamp::compose(16 * 1000, 0);
     let res = ia_auto_f.try_transit(ts16.into_inner());
     assert_eq!(res, TransitResult::NoChange);
+    assert_eq!(sst_auto.is_storage_class_ia(), true);
     block_on(verify_table_by_scan_async(
         &engine.key_builder,
         &sst_auto,

@@ -15,9 +15,8 @@ use crate::{
         ENGINE_OPEN_FILES, ENGINE_REGION_HUGE_L0_TABLE_BYTES_HISTOGRAM,
         ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM,
     },
-    shard::ShardData,
     table::{BoundedDataSet, DataBound, InnerKey},
-    IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
+    IdVer, LevelHandler, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
 };
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -187,9 +186,7 @@ impl super::Engine {
             }
             engine_stats.vector_indexes.data_size += shard.vector_indexes.data_size;
             engine_stats.vector_indexes.num_files += shard.vector_indexes.num_files;
-            if shard.storage_class_spec == StorageClass::Ia.into() {
-                engine_stats.ia.add_ia_shard(shard);
-            }
+            engine_stats.ia.merge(&shard.ia);
         }
         ENGINE_OPEN_FILES.set(engine_stats.open_files);
         shard_stats.sort_by(|a, b| {
@@ -314,6 +311,7 @@ pub struct ShardStats {
     pub entries: usize,
     pub old_entries: usize,
     pub tombs: usize,
+    /// Total kv size including all storage classes.
     pub kv_size: u64,
     pub keyspace_prefix_tables: u32,
     pub base_version: u64,
@@ -337,6 +335,7 @@ pub struct ShardStats {
         deserialize_with = "deserialize_storage_class_spec"
     )]
     pub storage_class_spec: StorageClassSpec,
+    pub ia: StorageClassStats,
     pub is_sync: bool,
     pub checked_schema_version: i64,
     // Txn File Stats
@@ -427,6 +426,13 @@ pub struct CfStats {
     pub levels: Vec<LevelStats>,
 }
 
+#[cfg(test)]
+impl CfStats {
+    pub(crate) fn data_size(&self) -> u64 {
+        self.levels.iter().map(|l| l.data_size).sum()
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -449,7 +455,8 @@ pub struct LevelStatsLite {
     pub blob_size: u64,
     pub entries: u64,
     // The followings are for WRITE_CF only.
-    pub kv_size: u64,
+    pub kv_size: u64, // Total kv size including all storage classes.
+    pub ia_kv_size: u64,
     // The followings are for WRITE_CF & level 2+ only.
     pub lv2plus_max_ts: u64,
     pub lv2plus_tombs: u64,
@@ -467,6 +474,7 @@ impl LevelStatsLite {
         self.entries += other.entries;
         if cf == WRITE_CF {
             self.kv_size += other.kv_size;
+            self.ia_kv_size += other.ia_kv_size;
             self.lv2plus_max_ts = cmp::max(self.lv2plus_max_ts, other.lv2plus_max_ts);
             self.lv2plus_tombs += other.lv2plus_tombs;
             self.lv2plus_entries_write_cf += other.lv2plus_entries_write_cf;
@@ -496,7 +504,7 @@ pub struct LevelStats {
     pub columnar_size: u64,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct StorageClassStats {
@@ -511,18 +519,11 @@ pub struct StorageClassStats {
 }
 
 impl StorageClassStats {
-    pub fn add_ia_shard(&mut self, shard: &ShardStats) {
-        self.num_shards += 1;
-        if !shard.is_sync {
-            // Conversion to async would be later than storage class.
-            shard.for_each_cf_level(|(cf, lv)| {
-                if ShardData::can_use_ia(cf, lv.level) {
-                    self.num_tables += lv.num_tables;
-                    self.data_size += lv.data_size;
-                    self.kv_size += lv.kv_size;
-                }
-            })
-        }
+    pub fn merge(&mut self, other: &Self) {
+        self.num_shards += other.num_shards;
+        self.num_tables += other.num_tables;
+        self.data_size += other.data_size;
+        self.kv_size += other.kv_size;
     }
 }
 
@@ -569,6 +570,8 @@ impl super::Shard {
         let blob_table_count = data.blob_tbl_map.len();
         // FIXME: Calculate the total size of blob files.
         let mut blob_table_size = 0;
+        let mut ia_stats = StorageClassStats::default();
+        let pending_ops = self.pending_ops.read().unwrap().clone();
         let shard_bound = self.data_bound();
         for v in data.blob_tbl_map.values() {
             if shard_bound.contains_bound(v.data_bound()) {
@@ -590,26 +593,38 @@ impl super::Shard {
             let mut l0_keyspace_prefix_tables_counted = false;
             for cf in 0..NUM_CFS {
                 if let Some(cf_tbl) = l0_tbl.get_cf(cf) {
-                    tbl_index_size += cf_tbl.index_size();
-                    tbl_filter_size += cf_tbl.filter_size();
-                    in_mem_tbl_filter_size += cf_tbl.in_mem_filter_size();
                     max_ts = max_ts_by_cf(max_ts, cf, cf_tbl.max_ts);
-                    entries += cf_tbl.entries as usize;
-                    old_entries += cf_tbl.old_entries as usize;
-                    if cf == WRITE_CF {
-                        tombs += cf_tbl.tombs as usize;
-                        kv_size += cf_tbl.kv_size;
-                        cf_tbl.expire_cache(0);
-                    }
                     if cf_tbl.keyspace_id.is_some() && !l0_keyspace_prefix_tables_counted {
                         keyspace_prefix_tables += 1;
                         l0_keyspace_prefix_tables_counted = true;
                     }
-                    in_use_blob_size += cf_tbl.total_blob_size();
+                    if cf == WRITE_CF {
+                        cf_tbl.expire_cache(0);
+                    }
 
                     if shard_bound.contains_bound(cf_tbl.data_bound()) {
+                        tbl_index_size += cf_tbl.index_size();
+                        tbl_filter_size += cf_tbl.filter_size();
+                        in_mem_tbl_filter_size += cf_tbl.in_mem_filter_size();
+                        entries += cf_tbl.entries as usize;
+                        old_entries += cf_tbl.old_entries as usize;
+                        if cf == WRITE_CF {
+                            tombs += cf_tbl.tombs as usize;
+                            kv_size += cf_tbl.kv_size;
+                        }
+                        in_use_blob_size += cf_tbl.total_blob_size();
                         l0_cf_table_size[cf] += cf_tbl.size();
                     } else {
+                        tbl_index_size += cf_tbl.index_size() / 2;
+                        tbl_filter_size += cf_tbl.filter_size() / 2;
+                        in_mem_tbl_filter_size += cf_tbl.in_mem_filter_size() / 2;
+                        entries += cf_tbl.entries as usize / 2;
+                        old_entries += cf_tbl.old_entries as usize / 2;
+                        if cf == WRITE_CF {
+                            tombs += cf_tbl.tombs as usize / 2;
+                            kv_size += cf_tbl.kv_size / 2;
+                        }
+                        in_use_blob_size += cf_tbl.total_blob_size() / 2;
                         l0_cf_table_size[cf] += cf_tbl.size() / 2;
                     }
                 }
@@ -646,15 +661,17 @@ impl super::Shard {
                     } else {
                         level_stats.data_size += t.size() / 2;
                         level_stats.index_size += t.index_size() / 2;
+                        level_stats.in_mem_index_size += t.in_mem_index_size() / 2;
                         level_stats.filter_size += t.filter_size() / 2;
+                        level_stats.in_mem_filter_size += t.in_mem_filter_size() / 2;
                         level_stats.entries += t.entries as usize / 2;
                         level_stats.old_entries += t.old_entries as usize / 2;
                         if cf == WRITE_CF {
                             level_stats.tombs += t.tombs as usize / 2;
                             level_stats.kv_size += t.kv_size / 2;
                         }
-                        partial_tbls += 1;
                         level_stats.in_use_blob_size += t.total_blob_size() / 2;
+                        partial_tbls += 1;
                     }
                     level_stats.max_ts = max_ts_by_cf(level_stats.max_ts, cf, t.max_ts);
                 }
@@ -669,6 +686,15 @@ impl super::Shard {
                 tombs += level_stats.tombs;
                 kv_size += level_stats.kv_size;
                 in_use_blob_size += level_stats.in_use_blob_size;
+                if cf == WRITE_CF {
+                    let level_ia_stats = self.calc_storage_class_stats_for_level(
+                        &pending_ops.storage_class_spec,
+                        l,
+                        shard_bound,
+                        &level_stats,
+                    );
+                    ia_stats.merge(&level_ia_stats);
+                }
                 cf_stat.levels.push(level_stats);
             }
             cfs.push(cf_stat);
@@ -687,7 +713,6 @@ impl super::Shard {
         let compaction_cf = priority.as_ref().map_or(0, |x| x.cf());
         let compaction_level = priority.as_ref().map_or(0, |x| x.level());
         let compaction_score = priority.as_ref().map_or(0f64, |x| x.score());
-        let pending_ops = self.pending_ops.read().unwrap().clone();
         let txn_file_locks = data.lock_txn_files.len();
         let schema_version = data.schema_version;
         let schema_restore_version = data
@@ -708,6 +733,8 @@ impl super::Shard {
                 vector_indexes.data_size += f.file_size();
             }
         }
+        let sc_spec = pending_ops.storage_class_spec;
+        ia_stats.num_shards = sc_spec.is_specified() as usize;
         ShardStats {
             id: self.id,
             ver: self.ver,
@@ -754,7 +781,8 @@ impl super::Shard {
             ready_to_destroy_range: Self::ready_to_destroy_range(&pending_ops.del_prefixes, &data),
             trim_over_bound: pending_ops.trim_over_bound,
             manual_major_compaction: pending_ops.manual_major_compaction,
-            storage_class_spec: pending_ops.storage_class_spec,
+            storage_class_spec: sc_spec,
+            ia: ia_stats,
             is_sync: data.is_sync(),
             checked_schema_version: self.get_checked_schema_ver(),
             txn_file_locks,
@@ -763,6 +791,40 @@ impl super::Shard {
             columnar_tables,
             columnar_levels,
             vector_indexes,
+        }
+    }
+
+    fn calc_storage_class_stats_for_level(
+        &self,
+        sc_spec: &StorageClassSpec,
+        level: &LevelHandler,
+        shard_bound: DataBound<'_>,
+        level_stats: &LevelStats,
+    ) -> StorageClassStats {
+        if sc_spec.must_be_ia() {
+            StorageClassStats {
+                num_tables: level_stats.num_tables,
+                data_size: level_stats.data_size,
+                kv_size: level_stats.kv_size,
+                ..Default::default()
+            }
+        } else if sc_spec.can_be_ia() {
+            let mut ia_stats = StorageClassStats::default();
+            for t in level.tables.as_slice() {
+                if t.is_storage_class_ia() {
+                    ia_stats.num_tables += 1;
+                    if shard_bound.contains_bound(t.data_bound()) {
+                        ia_stats.data_size += t.size();
+                        ia_stats.kv_size += t.kv_size;
+                    } else {
+                        ia_stats.data_size += t.size() / 2;
+                        ia_stats.kv_size += t.kv_size / 2;
+                    }
+                }
+            }
+            ia_stats
+        } else {
+            StorageClassStats::default()
         }
     }
 }
@@ -843,6 +905,7 @@ mod tests {
             data_size: 10000,
             blob_size: 20000,
             kv_size: 8000,
+            ia_kv_size: 800,
             entries: 2000,
             lv2plus_max_ts: 50,
             lv2plus_tombs: 1000,
@@ -861,6 +924,7 @@ mod tests {
                 data_size: 20000,
                 blob_size: 40000,
                 kv_size: 16000,
+                ia_kv_size: 1600,
                 entries: 4000,
                 lv2plus_max_ts: 60,
                 lv2plus_tombs: 2000,
@@ -878,7 +942,8 @@ mod tests {
             LevelStatsLite {
                 data_size: 30000,
                 blob_size: 60000,
-                kv_size: 16000, // unchanged
+                kv_size: 16000,   // unchanged
+                ia_kv_size: 1600, // unchanged
                 entries: 6000,
                 lv2plus_max_ts: 60,
                 lv2plus_tombs: 2000,            // unchanged
@@ -895,7 +960,8 @@ mod tests {
             LevelStatsLite {
                 data_size: 40000,
                 blob_size: 80000,
-                kv_size: 16000, // unchanged
+                kv_size: 16000,   // unchanged
+                ia_kv_size: 1600, // unchanged
                 entries: 8000,
                 lv2plus_max_ts: 60,             // unchanged
                 lv2plus_tombs: 2000,            // unchanged
@@ -914,6 +980,7 @@ mod tests {
                 data_size: 40000,               // unchanged
                 blob_size: 80000,               // unchanged
                 kv_size: 16000,                 // unchanged
+                ia_kv_size: 1600,               // unchanged
                 entries: 8000,                  // unchanged
                 lv2plus_max_ts: 60,             // unchanged
                 lv2plus_tombs: 2000,            // unchanged

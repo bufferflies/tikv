@@ -88,6 +88,7 @@ pub struct Shard {
     pub(crate) estimated_entries: AtomicU64,
     pub(crate) max_ts: AtomicU64,
     pub(crate) estimated_kv_size: AtomicU64,
+    pub(crate) estimated_ia_kv_size: AtomicU64,
 
     pub(crate) sst_max_ts: AtomicU64, // the max_ts of sst files (mem-tables excluded)
 
@@ -226,6 +227,7 @@ impl Shard {
             estimated_entries: Default::default(),
             max_ts: Default::default(),
             estimated_kv_size: Default::default(),
+            estimated_ia_kv_size: Default::default(),
             sst_max_ts: Default::default(),
             lv2plus_max_ts: Default::default(),
             lv2plus_tombs: Default::default(),
@@ -553,10 +555,11 @@ impl Shard {
 
     fn refresh_estimated_size_and_entries(&self) {
         let data = self.get_data();
+        let sc_spec = self.get_storage_class_spec();
 
         let mut lv_stats = data.get_l0_stats();
         data.for_each_level(|cf, l| {
-            lv_stats.add(&data.get_level_stats(cf, l), cf);
+            lv_stats.add(&data.get_level_stats(cf, l, &sc_spec), cf);
             false
         });
 
@@ -576,6 +579,7 @@ impl Shard {
             std::cmp::max(lv_stats.max_ts, data.get_mem_table_max_ts()),
         );
         store_u64(&self.estimated_kv_size, lv_stats.kv_size);
+        store_u64(&self.estimated_ia_kv_size, lv_stats.ia_kv_size);
 
         store_u64(&self.lv2plus_max_ts, lv_stats.lv2plus_max_ts);
         store_u64(&self.lv2plus_tombs, lv_stats.lv2plus_tombs);
@@ -777,10 +781,14 @@ impl Shard {
         data.get_all_sst_files()
     }
 
-    // return STANDARD ids, IA ids
-    pub fn get_local_sst_files(&self) -> (Vec<u64>, Vec<u64>) {
+    pub fn get_local_sst_files(
+        &self,
+    ) -> (
+        Vec<u64>, // local_files
+        Vec<u64>, // ia_files
+    ) {
         let data = self.get_data();
-        data.get_local_sst_files()
+        data.get_local_sst_files(true)
     }
 
     pub fn get_txn_chunks(&self) -> Vec<u64> {
@@ -870,6 +878,10 @@ impl Shard {
 
     pub fn get_estimated_kv_size(&self) -> u64 {
         self.estimated_kv_size.load(Ordering::Relaxed)
+    }
+
+    pub fn get_estimated_ia_kv_size(&self) -> u64 {
+        self.estimated_ia_kv_size.load(Ordering::Relaxed)
     }
 
     pub fn get_initial_flushed(&self) -> bool {
@@ -985,7 +997,9 @@ impl Shard {
         for cf in 0..NUM_CFS {
             let scf = data.get_cf(cf);
             for lh in &scf.levels[..scf.levels.len() - 1] {
-                let lvl_stats = data.get_level_stats(cf, lh);
+                // Use `StorageClassSpec::default()`.
+                // The `sc_spec` just affect `ia_kv_size` which is not used here.
+                let lvl_stats = data.get_level_stats(cf, lh, &StorageClassSpec::default());
                 let lvl_score = lvl_stats.data_size as f64
                     / ((self.opt.base_size as f64) * 10f64.powf((lh.level - 1) as f64));
                 if score < lvl_score {
@@ -1880,50 +1894,50 @@ impl ShardDataCore {
     }
 
     pub(crate) fn get_all_sst_files(&self) -> Vec<u64> {
-        let (mut files, async_files) = self.get_local_sst_files();
-        files.extend(async_files);
-        files.sort_unstable();
+        let (files, ia_files) = self.get_local_sst_files(false);
+        debug_assert!(ia_files.is_empty());
         files
     }
 
-    // return STANDARD ids, IA ids
-    pub(crate) fn get_local_sst_files(&self) -> (Vec<u64> /* files */, Vec<u64> /* async_files */) {
-        let mut files = Vec::new();
-        let mut async_files = Vec::new();
+    // Set `distinguish_ia` to true when need to distinguish local & ia files.
+    // Note: `local_files` & `ia_files` may have duplicated ids.
+    pub(crate) fn get_local_sst_files(
+        &self,
+        distinguish_ia: bool,
+    ) -> (
+        Vec<u64>, // local_files
+        Vec<u64>, // ia_files
+    ) {
+        let mut local_files = Vec::new();
+        let mut ia_files = Vec::new();
+
         for l0 in &self.l0_tbls {
-            files.push(l0.id());
+            local_files.push(l0.id());
         }
         for blob_tbl_id in self.blob_tbl_map.keys() {
-            files.push(*blob_tbl_id);
+            local_files.push(*blob_tbl_id);
         }
-        let mut is_sync: Option<bool> = None;
+
+        let shard_is_sync = self.is_sync();
         self.for_each_level(|cf, lh| {
-            if !ShardData::can_use_ia(cf, lh.level) {
-                for tbl in lh.tables.iter() {
-                    files.push(tbl.id())
-                }
-            } else {
-                for tbl in lh.tables.iter() {
-                    let is_sync = *is_sync.get_or_insert(tbl.is_sync());
-                    if is_sync {
-                        files.push(tbl.id());
-                    } else {
-                        async_files.push(tbl.id())
+            let cf_is_sync = shard_is_sync || !ShardData::can_use_ia(cf, lh.level);
+            for tbl in lh.tables.iter() {
+                debug_assert_eq!(tbl.is_sync(), cf_is_sync, "{}", tbl.id());
+                if !distinguish_ia || tbl.is_sync() {
+                    local_files.push(tbl.id())
+                } else {
+                    ia_files.push(tbl.id());
+                    if !tbl.is_storage_class_ia() {
+                        // Async tables with storage class not IA, must have local file.
+                        local_files.push(tbl.id());
                     }
-                    debug_assert_eq!(
-                        is_sync,
-                        tbl.is_sync(),
-                        "files {:?}, async_files {:?}",
-                        files,
-                        async_files
-                    );
                 }
             }
             false
         });
-        files.sort_unstable();
-        async_files.sort_unstable();
-        (files, async_files)
+        local_files.sort_unstable();
+        ia_files.sort_unstable();
+        (local_files, ia_files)
     }
 
     pub(crate) fn get_txn_chunks(&self) -> Vec<u64> {
@@ -2061,7 +2075,12 @@ impl ShardDataCore {
         stats
     }
 
-    pub(crate) fn get_level_stats(&self, cf: usize, level: &LevelHandler) -> LevelStatsLite {
+    pub(crate) fn get_level_stats(
+        &self,
+        cf: usize,
+        level: &LevelHandler,
+        sc_spec: &StorageClassSpec,
+    ) -> LevelStatsLite {
         let mut stats = LevelStatsLite::default();
         level.tables.iter().enumerate().for_each(|(i, tbl)| {
             if self.is_over_bound_table(level, i, tbl) {
@@ -2091,7 +2110,35 @@ impl ShardDataCore {
             }
             stats.max_ts = cmp::max(stats.max_ts, tbl.max_ts);
         });
+        if cf == WRITE_CF {
+            stats.ia_kv_size = self.calc_storage_class_stats_for_level(level, sc_spec, &stats);
+        }
         stats
+    }
+
+    fn calc_storage_class_stats_for_level(
+        &self,
+        level: &LevelHandler,
+        sc_spec: &StorageClassSpec,
+        stats: &LevelStatsLite,
+    ) -> u64 {
+        if sc_spec.must_be_ia() {
+            stats.kv_size
+        } else if sc_spec.can_be_ia() {
+            let mut ia_kv_size = 0;
+            level.tables.iter().enumerate().for_each(|(i, tbl)| {
+                if tbl.is_storage_class_ia() {
+                    if self.is_over_bound_table(level, i, tbl) {
+                        ia_kv_size += tbl.kv_size / 2;
+                    } else {
+                        ia_kv_size += tbl.kv_size;
+                    }
+                }
+            });
+            ia_kv_size
+        } else {
+            0
+        }
     }
 
     pub(crate) fn get_columnar_level_stats(&self, level: usize) -> LevelStatsLite {

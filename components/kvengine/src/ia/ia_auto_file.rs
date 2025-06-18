@@ -1,6 +1,9 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,6 +25,7 @@ pub struct IaAutoFile {
     pub(crate) local_file: Mutex<Option<Arc<dyn File>>>,
     max_ts: u64,
     spec: StorageClassSpec,
+    has_local_file: AtomicBool,
 }
 
 impl IaAutoFile {
@@ -31,11 +35,13 @@ impl IaAutoFile {
         max_ts: u64,
         spec: StorageClassSpec,
     ) -> Self {
+        let has_local_file = local_file.is_some();
         Self {
             ia_file,
             local_file: Mutex::new(local_file),
             max_ts,
             spec,
+            has_local_file: AtomicBool::new(has_local_file),
         }
     }
 
@@ -44,11 +50,12 @@ impl IaAutoFile {
     }
 
     pub(crate) fn has_local_file(&self) -> bool {
-        self.local_file.lock().is_some()
+        self.has_local_file.load(Ordering::SeqCst)
     }
 
     pub(crate) fn transit_to_ia(&self) -> TransitResult {
         if self.local_file.lock().take().is_some() {
+            self.has_local_file.store(false, Ordering::SeqCst);
             info!("{} transit to IA", self.id());
             TransitResult::TransitedToIa
         } else {
@@ -148,7 +155,7 @@ impl File for IaAutoFile {
     }
 
     fn storage_class(&self) -> StorageClass {
-        if self.local_file().is_some() {
+        if self.has_local_file() {
             StorageClass::Unspecified
         } else {
             StorageClass::Ia

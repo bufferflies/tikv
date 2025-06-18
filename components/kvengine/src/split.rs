@@ -638,6 +638,10 @@ impl Engine {
             old_shard.get_estimated_kv_size(),
         );
         store_u64(
+            &new_shard.estimated_ia_kv_size,
+            old_shard.get_estimated_ia_kv_size(),
+        );
+        store_u64(
             &new_shard.snap_version,
             new_shard.get_base_version() + sequence,
         );

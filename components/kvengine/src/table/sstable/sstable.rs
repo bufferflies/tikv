@@ -15,6 +15,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use kvenginepb::TableCreate;
 use moka::sync::SegmentedCache;
+use schema::schema::StorageClass;
 use xorf::{BinaryFuse8, Filter};
 
 use super::{builder::*, iterator::TableIterator};
@@ -649,6 +650,11 @@ impl SsTableCore {
 
     pub fn try_get_auto_ia_file(&self) -> Option<Arc<IaAutoFile>> {
         self.file.clone().as_any().downcast::<IaAutoFile>().ok()
+    }
+
+    #[inline]
+    pub(crate) fn is_storage_class_ia(&self) -> bool {
+        self.file.storage_class() == StorageClass::Ia
     }
 
     /// The size on disk in bytes.
