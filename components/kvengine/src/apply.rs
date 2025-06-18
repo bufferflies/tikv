@@ -22,7 +22,7 @@ use crate::{
         columnar::{ColumnarFile, ColumnarLevels, SchemaFile},
         file::File,
         sstable::{BlockCache, L0Table, SsTable},
-        vector_index::{VectorIndexFile, VectorIndexes},
+        vector_index::{VectorIndexCache, VectorIndexFile, VectorIndexes},
         BoundedDataSet, TxnFile,
     },
     *,
@@ -105,6 +105,7 @@ impl ChangeSet {
         file: Arc<dyn File>,
         meta: &FileMeta,
         cache: BlockCache,
+        vector_index_cache: Option<VectorIndexCache>, // For vector index file.
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
         match meta.file_type {
@@ -128,7 +129,7 @@ impl ChangeSet {
                 self.schema_file = Some(SchemaFile::open(file)?);
             }
             FileType::VectorIndex => {
-                let file = VectorIndexFile::new(file, meta.table_meta_off)?;
+                let file = VectorIndexFile::new(file, meta.table_meta_off, vector_index_cache)?;
                 self.vec_index_files.insert(id, file);
             }
             file_type => unreachable!("unexpected file type {:?}", file_type),

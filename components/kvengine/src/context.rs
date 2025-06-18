@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use crate::{
     dfs,
     ia::manager::IaManager,
-    table::{columnar::SchemaFile, sstable::BlockCache},
+    table::{columnar::SchemaFile, sstable::BlockCache, vector_index::VectorIndexCache},
     txn_chunk_manager::TxnChunkManager,
 };
 
@@ -17,6 +17,7 @@ pub struct SnapCtx {
     pub dfs: Arc<dyn dfs::Dfs>,
     pub master_key: MasterKey,
     pub block_cache: BlockCache,
+    pub vector_index_cache: Option<VectorIndexCache>,
     pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
     pub txn_chunk_manager: TxnChunkManager,
     pub ia_ctx: IaCtx,

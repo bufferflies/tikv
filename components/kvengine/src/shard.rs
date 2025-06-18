@@ -417,6 +417,7 @@ impl Shard {
                         file,
                         &fm,
                         ctx.block_cache.clone(),
+                        ctx.vector_index_cache.clone(),
                         encryption_key.clone(),
                     )?;
                     if fm.is_schema_file() {

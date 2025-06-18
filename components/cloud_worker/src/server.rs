@@ -92,6 +92,7 @@ impl Context {
             dfs,
             master_key: self.master_key.clone(),
             block_cache: self.block_cache.clone(),
+            vector_index_cache: None,
             schema_files: self.schema_files.clone(),
             txn_chunk_manager: self.txn_chunk_manager.clone(),
             ia_ctx: self.ia_ctx.clone(),

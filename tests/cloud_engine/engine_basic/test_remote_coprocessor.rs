@@ -2411,6 +2411,7 @@ impl<'a> DagTest<'a> {
             dfs: cluster.get_dfs().unwrap(),
             master_key,
             block_cache,
+            vector_index_cache: None,
             schema_files: None,
             txn_chunk_manager,
             ia_ctx: IaCtx::Disabled,

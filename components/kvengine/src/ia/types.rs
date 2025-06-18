@@ -83,6 +83,13 @@ impl fmt::Debug for FileSegmentIdent {
 }
 
 #[derive(Clone)]
+pub enum FileSegmentPosition {
+    InMem,
+    InStore,
+    NotExist,
+}
+
+#[derive(Clone)]
 pub enum FileSegmentData {
     InMem(Bytes),
     InStore,

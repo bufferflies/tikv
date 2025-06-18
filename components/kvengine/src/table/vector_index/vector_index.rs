@@ -12,6 +12,7 @@ use tidb_query_datatype::codec::{
 use usearch::IndexOptions;
 
 use crate::{
+    ia::types::FileSegmentIdent,
     table,
     table::{
         columnar::{
@@ -19,7 +20,9 @@ use crate::{
             ColumnarReader, ColumnarTableReader, Schema,
         },
         file::{File, MmapData},
-        search, BoundedDataSet, DataBound, Error,
+        search,
+        vector_index::VectorIndexCache,
+        BoundedDataSet, DataBound, Error,
         Error::Other,
         InnerKey, Result,
     },
@@ -33,7 +36,6 @@ const EXPANSION_ADD: usize = 128;
 const EXPANSION_SEARCH: usize = 64;
 
 const QUANTIZATION: usearch::ScalarKind = usearch::ScalarKind::F32;
-
 #[derive(Default, Clone)]
 pub struct VectorIndexes {
     indexes: Vec<VectorIndex>,
@@ -374,11 +376,12 @@ pub struct VectorIndexFileCore {
     biggest: Vec<u8>,
     metric_repr: i32,
     index_data: tokio::sync::OnceCell<Arc<IndexData>>,
+    vector_index_cache: Option<VectorIndexCache>,
 }
 
 pub struct IndexData {
-    index: usearch::Index,
     file_data: MmapData,
+    index: usearch::Index,
     versions_start: u32,
     versions_end: u32,
     handles_start: u32,
@@ -387,8 +390,26 @@ pub struct IndexData {
     nulls_end: u32,
 }
 
+impl IndexData {
+    pub fn index_size(&self) -> usize {
+        self.index.size()
+    }
+
+    pub fn is_in_mem(&self) -> bool {
+        match self.file_data {
+            MmapData::Local(_) => false,
+            MmapData::InMem(_) => true,
+            MmapData::AlignedInMem(_) => true,
+        }
+    }
+}
+
 impl VectorIndexFile {
-    pub fn new(file: Arc<dyn File>, meta_offset: u32) -> Result<Self> {
+    pub fn new(
+        file: Arc<dyn File>,
+        meta_offset: u32,
+        vector_index_cache: Option<VectorIndexCache>,
+    ) -> Result<Self> {
         let file_len = file.size();
         let mut footer = VectorIndexFileFooter::default();
         let footer_len = VectorIndexFileFooter::size();
@@ -458,6 +479,7 @@ impl VectorIndexFile {
                 meta_offset,
                 metric_repr,
                 index_data: tokio::sync::OnceCell::new(),
+                vector_index_cache,
             }),
         })
     }
@@ -471,6 +493,14 @@ impl VectorIndexFile {
     }
 
     async fn load_data_inner(&self) -> Result<()> {
+        if let Some(vector_index_cache) = &self.core.vector_index_cache {
+            if let Some(index_data) = vector_index_cache.get(self.file_id()) {
+                self.core.index_data.set(index_data.clone()).map_err(|_| {
+                    Error::Other("Failed to set vector index loaded data to cache".to_string())
+                })?;
+                return Ok(());
+            }
+        }
         let file_data = if self.file.is_sync() {
             self.file.mmap()?
         } else {
@@ -506,19 +536,29 @@ impl VectorIndexFile {
             nulls_end = nulls_start + index.size();
         }
 
+        let index_data = Arc::new(IndexData {
+            index,
+            file_data,
+            versions_start: versions_start as u32,
+            versions_end: versions_end as u32,
+            handles_start: handles_start as u32,
+            handles_end: handles_end as u32,
+            nulls_start: nulls_start as u32,
+            nulls_end: nulls_end as u32,
+        });
+
         self.core
             .index_data
-            .set(Arc::new(IndexData {
-                index,
-                file_data,
-                versions_start: versions_start as u32,
-                versions_end: versions_end as u32,
-                handles_start: handles_start as u32,
-                handles_end: handles_end as u32,
-                nulls_start: nulls_start as u32,
-                nulls_end: nulls_end as u32,
-            }))
+            .set(index_data.clone())
             .map_err(|_| Error::Other("Failed to set loaded data".to_string()))?;
+        if let Some(vector_index_cache) = &self.core.vector_index_cache {
+            let ident = FileSegmentIdent {
+                file_id: self.file_id(),
+                start_off: 0,
+                end_off: self.meta_offset() as u64,
+            };
+            vector_index_cache.insert(self.file_id(), index_data, ident);
+        }
 
         Ok(())
     }
@@ -1309,7 +1349,7 @@ mod tests {
         let temp_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
         fs::write(&temp_path, data).unwrap();
         let local_file = LocalFile::open(1, temp_path.to_path_buf(), None, false).unwrap();
-        VectorIndexFile::new(Arc::new(local_file), 0).unwrap()
+        VectorIndexFile::new(Arc::new(local_file), 0, None).unwrap()
     }
 
     #[test]

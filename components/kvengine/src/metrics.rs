@@ -119,6 +119,14 @@ lazy_static! {
         "kv_engine_remote_compact_exceed_memory_limit_counter",
         "Total number of remote compaction requests that exceed memory limit",
     ).unwrap();
+    pub static ref ENGINE_VECTOR_INDEX_CACHE_HIT: IntCounter = register_int_counter!(
+        "kv_engine_vector_index_cache_hit",
+        "Total number of vector index cache hit",
+    ).unwrap();
+    pub static ref ENGINE_VECTOR_INDEX_CACHE_MISS: IntCounter = register_int_counter!(
+        "kv_engine_vector_index_cache_miss",
+        "Total number of vector index cache miss",
+    ).unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {

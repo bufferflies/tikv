@@ -486,4 +486,5 @@ test-cloud-engine: pre-test
 test-cloud-engine-integration: pre-test
 	cargo nextest run -P ci -p tests \
 		--test cloud_engine --test cloud_engine_failpoints \
-		--test-threads=4
+		--test-threads=4 \
+		--features jemalloc

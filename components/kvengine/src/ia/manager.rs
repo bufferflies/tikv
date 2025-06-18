@@ -27,8 +27,8 @@ use crate::{
     ia::{
         queue::S3FifoHandle,
         types::{
-            FileSegmentData, FileSegmentIdent, GuardMap, LocalSegmentMap, SegmentHandle,
-            TableMetaInfo, FILE_SEGMENT_DATA_IN_MEMORY,
+            FileSegmentData, FileSegmentIdent, FileSegmentPosition, GuardMap, LocalSegmentMap,
+            SegmentHandle, TableMetaInfo, FILE_SEGMENT_DATA_IN_MEMORY,
         },
         util::{new_local_store, LocalStore},
     },
@@ -459,6 +459,14 @@ impl IaManagerCore {
     // true.
     pub fn is_segment_cached(&self, ident: &FileSegmentIdent) -> bool {
         self.segments.get_segment(ident).is_some()
+    }
+
+    pub fn segment_cached_position(&self, ident: &FileSegmentIdent) -> FileSegmentPosition {
+        match self.segments.get_segment(ident) {
+            Some(FileSegmentData::InMem(_)) => FileSegmentPosition::InMem,
+            Some(FileSegmentData::InStore) => FileSegmentPosition::InStore,
+            None => FileSegmentPosition::NotExist,
+        }
     }
 
     pub async fn prefetch_segment(

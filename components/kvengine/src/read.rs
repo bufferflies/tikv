@@ -2100,6 +2100,7 @@ mod tests {
                 dfs,
                 master_key,
                 block_cache: BlockCache::None,
+                vector_index_cache: None,
                 schema_files: None,
                 txn_chunk_manager,
                 ia_ctx: IaCtx::Disabled,

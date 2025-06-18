@@ -323,7 +323,14 @@ impl EngineCore {
                 }
             };
             if let Some(file) = file {
-                cs.add_file(id, file, fm, self.cache.clone(), encryption_key.clone())?;
+                cs.add_file(
+                    id,
+                    file,
+                    fm,
+                    self.cache.clone(),
+                    None,
+                    encryption_key.clone(),
+                )?;
                 continue;
             }
 
@@ -406,7 +413,14 @@ impl EngineCore {
                 .save_and_open_auto_ia_file(id, &fm, prepared, permit, use_direct_io)
                 .map(|f| Arc::new(f) as _)?,
         };
-        cs.add_file(file.id(), file, &fm, self.cache.clone(), encryption_key)?;
+        cs.add_file(
+            file.id(),
+            file,
+            &fm,
+            self.cache.clone(),
+            None,
+            encryption_key,
+        )?;
         Ok(())
     }
 
