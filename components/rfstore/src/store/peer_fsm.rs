@@ -1230,13 +1230,16 @@ impl<'a> PeerMsgHandler<'a> {
 
             self.adjust_peer_stat_for_storage_class(shard.as_ref());
 
-            if !self.fsm.peer.is_leader() {
-                return false;
-            }
             if !shard.get_initial_flushed() {
                 return false;
             }
-            self.check_schema(&shard);
+
+            let is_leader = self.fsm.peer.is_leader();
+            self.check_schema(&shard, is_leader);
+
+            if !is_leader {
+                return false;
+            }
             // When Lightning or BR is importing data to TiKV, their ingest-request may fail
             // because of region-epoch not matched. So we hope TiKV do not check
             // region size and split region during importing.
@@ -1618,7 +1621,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.propose_change_set(change_set, Callback::None);
     }
 
-    fn check_schema(&mut self, shard: &Arc<Shard>) {
+    fn check_schema(&mut self, shard: &Arc<Shard>, is_leader: bool) {
         let tag = self.peer.tag();
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
         let schema_meta = &shard_meta.schema;
@@ -1639,7 +1642,7 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
 
-        if !shard_is_matched_with_meta(shard.as_ref(), shard_meta) {
+        if is_leader && !shard_is_matched_with_meta(shard.as_ref(), shard_meta) {
             let task = SchemaTask::StorageClass {
                 region: self.region().clone(),
                 schema_meta: schema_meta.clone(),

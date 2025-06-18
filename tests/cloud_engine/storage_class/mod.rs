@@ -5,6 +5,7 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use bytes::Bytes;
 use kvengine::{
     self,
+    metrics::ENGINE_STORAGE_CLASS_TRANSITION_COUNTER,
     table::{sstable::BlockCacheType, BoundedDataSet, DataBound},
     table_id::encode_table_prefix_key,
     STORAGE_CLASS_KEY,
@@ -14,7 +15,7 @@ use pd_client::PdClient;
 use rstest::rstest;
 use schema::{
     generate_storage_class_schema_data_for_test,
-    schema::{StorageClass, StorageClassSpec},
+    schema::{StorageClass, StorageClassSpec, StorageClassTransitRule},
 };
 use test_cloud_server::{
     client::ClusterClient,
@@ -63,6 +64,7 @@ fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
         conf.kvengine.ia.freq_update_interval = ReadableDuration(FREQ_UPDATE_INTERVAL);
         conf.kvengine.ia.mem_cap = AbsoluteOrPercentSize::Abs(ReadableSize::kb(64));
         conf.kvengine.ia.disk_cap = AbsoluteOrPercentSize::Abs(ReadableSize::kb(1024));
+        conf.kvengine.ia.auto_ia_check_interval = ReadableDuration::secs(1);
         conf.kvengine.block_cache_type = BlockCacheType::Quick;
         conf.security = security_config.clone();
     })
@@ -229,6 +231,60 @@ fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
         || "failed to reload local file or remove storage class property".to_string(),
     );
     client.verify_data_with_ref_store();
+
+    // Change to auto IA (unspecified -> IA)
+    let transited_to_ia_origin = ENGINE_STORAGE_CLASS_TRANSITION_COUNTER
+        .with_label_values(&["to_ia"])
+        .get();
+    {
+        let sc_spec_auto = StorageClassSpec {
+            default_tier: StorageClass::Unspecified,
+            transit_rules: vec![StorageClassTransitRule {
+                tier: StorageClass::Ia,
+                transit_after: Duration::from_secs(3),
+            }],
+        };
+        update_schema(&mut client, sc_spec_auto.clone());
+        must_wait(
+            || {
+                let all_id_vers = kvengine.get_all_shard_id_vers();
+                for id_ver in all_id_vers {
+                    if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                        if shard.get_schema_file().is_some()
+                            && shard.storage_class_spec_equals(&sc_spec_auto)
+                        {
+                            assert!(table_bound.contains_bound(shard.range.data_bound()));
+                            return true;
+                        }
+                    }
+                }
+                false
+            },
+            10,
+            || "failed to update schema to auto IA".to_string(),
+        );
+        client.verify_data_with_ref_store();
+    }
+
+    // Verify unspecified -> IA.
+    {
+        client.put_kv(
+            400..500,
+            |i: usize| gen_row_key(keyspace_id, backend_table_id, i),
+            |i: usize| gen_row_val(&ctx, i),
+        );
+        must_wait(
+            || {
+                let transited_to_ia = ENGINE_STORAGE_CLASS_TRANSITION_COUNTER
+                    .with_label_values(&["to_ia"])
+                    .get();
+                transited_to_ia > transited_to_ia_origin
+            },
+            10,
+            || "wait for transited to IA timeout".to_string(),
+        );
+        client.verify_data_with_ref_store();
+    }
 
     cluster.stop();
     oss.shutdown();

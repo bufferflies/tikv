@@ -93,8 +93,9 @@ lazy_static::lazy_static! {
     pub static ref UNIQUE_WORKLOAD_CONFLICT_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref COLUMNAR_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref COLUMNAR_RETRY_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    pub static ref ALTER_TABLE_IA_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref ALTER_TABLE_NON_IA_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref ALTER_TABLE_IA_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref ALTER_TABLE_AUTO_IA_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref ASYNC_SHARD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 

@@ -469,7 +469,11 @@ impl Engine {
             if source_sc_spec != target_sc_spec {
                 warn!("{} commit merge: storage class mismatch", old_shard.tag();
                     "source" => ?source, "target" => ?target_sc_spec);
-                debug_assert!(false);
+
+                // Happen when source & target shards come from different
+                // version (during upgrade).
+                // TODO: uncomment the following assert after upgrade.
+                // debug_assert!(false);
             }
 
             // merge shard data

@@ -10,7 +10,8 @@ use collections::HashSet;
 use kvengine::IdVer;
 use rand::prelude::*;
 use schema::schema::{
-    StorageClass, StorageClassSpec, StorageClassTransitionInfo, STORAGE_CLASS_TIER_STANDARD,
+    StorageClass, StorageClassSpec, StorageClassTransitRule, StorageClassTransitionInfo,
+    STORAGE_CLASS_TIER_STANDARD,
 };
 use serde_derive::Serialize;
 use sqlx::Executor;
@@ -25,7 +26,8 @@ use tikv_util::{codec::bytes::decode_bytes, debug, error, info, time::Instant};
 use crate::{
     sql_util::retry_or_panic,
     test_tidb::{connect_tidb, query_tidb_table_schema},
-    Running, ALTER_TABLE_IA_COUNTER, ALTER_TABLE_NON_IA_COUNTER, ASYNC_SHARD_COUNTER,
+    Running, ALTER_TABLE_AUTO_IA_COUNTER, ALTER_TABLE_IA_COUNTER, ALTER_TABLE_NON_IA_COUNTER,
+    ASYNC_SHARD_COUNTER,
 };
 
 type Result<T> = anyhow::Result<T>;
@@ -45,6 +47,22 @@ pub(crate) async fn spawn_alter_storage_class(
         let table = tables.choose(&mut rng).unwrap();
         (interval, skip, table)
     };
+    let random_sc_spec = || {
+        let mut rng = thread_rng();
+        match rng.gen_range(0..=2) {
+            0 => StorageClass::Unspecified.into(),
+            1 => StorageClass::Ia.into(),
+            2 => StorageClassSpec {
+                default_tier: StorageClass::Unspecified,
+                transit_rules: vec![StorageClassTransitRule {
+                    tier: StorageClass::Ia,
+                    transit_after: Duration::from_secs(rng.gen_range(1..=10)),
+                }],
+            },
+            _ => unreachable!(),
+        }
+    };
+
     while running.get() {
         let (interval, skip, table) = random();
         tokio::time::sleep(interval).await;
@@ -52,22 +70,22 @@ pub(crate) async fn spawn_alter_storage_class(
             continue;
         }
 
-        // TODO: Test for transitions.
-        let target_sc_spec: StorageClassSpec =
-            if table.storage_class_spec() != StorageClass::Ia.into() {
-                StorageClass::Ia.into()
-            } else {
-                // TiDB accept STANDARD, not UNSPECIFIED.
-                StorageClass::Standard.into()
-            };
+        let target_sc_spec = loop {
+            let target_sc_spec = random_sc_spec();
+            if target_sc_spec != table.storage_class_spec() {
+                break target_sc_spec;
+            }
+        };
         info!("alter storage class"; "table" => ?table, "target" => ?target_sc_spec);
         retry_or_panic!(
             alter_storage_class(&tc, &keyspace_manager, table, target_sc_spec.clone())
                 .await
                 .context("alter_sc")
         );
-        if target_sc_spec == StorageClass::Ia.into() {
+        if target_sc_spec.must_be_ia() {
             ALTER_TABLE_IA_COUNTER.fetch_add(1, Ordering::Relaxed);
+        } else if target_sc_spec.can_be_ia() {
+            ALTER_TABLE_AUTO_IA_COUNTER.fetch_add(1, Ordering::Relaxed);
         } else {
             ALTER_TABLE_NON_IA_COUNTER.fetch_add(1, Ordering::Relaxed);
         }

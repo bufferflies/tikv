@@ -592,7 +592,7 @@ pub(crate) struct Switches {
 impl Switches {
     pub fn from_env() -> Self {
         let mut rng = thread_rng();
-        let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.2);
+        let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.5);
         let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
         let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
 

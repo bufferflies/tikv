@@ -325,26 +325,6 @@ impl Default for SchemaManagerConfig {
     }
 }
 
-impl SchemaManagerConfig {
-    pub fn new(
-        dir: PathBuf,
-        keyspace_refresh_interval: ReadableDuration,
-        http_timeout: ReadableDuration,
-        enabled: bool,
-        whitelist_file: PathBuf,
-        tikv_stores_tier: String,
-    ) -> Self {
-        Self {
-            dir,
-            keyspace_refresh_interval,
-            http_timeout,
-            enabled,
-            whitelist_file,
-            tikv_stores_tier,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct SchemaManager {
     core: Arc<SchemaManagerCore>,

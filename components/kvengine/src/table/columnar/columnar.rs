@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut};
 use collections::HashMap;
 use kvenginepb::ColumnarCreate;
 use protobuf::Message;
-use schema::schema::{StorageClass, StorageClassSpec};
+use schema::schema::StorageClassSpec;
 use tidb_query_datatype::{FieldTypeAccessor, FieldTypeFlag, FieldTypeTp};
 use tipb::ColumnInfo;
 
@@ -117,7 +117,7 @@ impl SchemaBuf {
 
     #[cfg(any(test, feature = "testexport"))]
     #[inline]
-    pub fn set_storage_class(&mut self, sc: StorageClass) {
+    pub fn set_storage_class(&mut self, sc: schema::schema::StorageClass) {
         self.set_storage_class_spec(sc.into());
     }
 

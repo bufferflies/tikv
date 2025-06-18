@@ -1,7 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    convert::TryFrom,
     io::Write as _,
     ops::Div,
     path::PathBuf,
@@ -14,7 +13,10 @@ use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
 use kvengine::{
     dfs::DFSConfig,
     ia::util::IaConfig,
-    metrics::{ENGINE_IA_SYNC_READ_COUNTER, ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER},
+    metrics::{
+        ENGINE_IA_SYNC_READ_COUNTER, ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
+        ENGINE_STORAGE_CLASS_TRANSITION_COUNTER,
+    },
     table::sstable::BlockCacheType,
 };
 use native_br::metrics::NATIVE_BR_BACKUP_SUCCESS;
@@ -23,8 +25,9 @@ use pd_client::{
     pd_control::{OpKind, PdControl, PdScheduleConfig},
 };
 use rand::prelude::*;
-use schema::schema::{StorageClass, StorageClassSpec};
+use schema::schema::{StorageClassSpec, StorageClassTransitionInfo};
 use security::SecurityConfig;
+use serde_derive::Deserialize;
 use sqlx::{ConnectOptions, Executor, Row as _};
 use test_cloud_server::{
     oss::prepare_dfs, table::TableMeta, tidb::*, tikv_worker_cop_url, try_wait_async,
@@ -390,6 +393,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.kvengine.ia = IaConfig {
             segment_size: conf.rocksdb.writecf.block_size.0 as i64 * 4,
             freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
+            auto_ia_check_interval: ReadableDuration::secs(3),
             ..Default::default()
         };
         if disable_ia {
@@ -888,6 +892,13 @@ pub(crate) struct TidbTableSchema {
     pub storage_class_spec: StorageClassSpec,
 }
 
+// Ref: https://github.com/tidbcloud/tidb-cse/blob/release-7.5-keyspace/pkg/parser/model/model.go, buildStorageClassString
+#[derive(Debug, Default, Deserialize)]
+struct TidbStorageClassSpec {
+    tier: String,
+    transitions: Vec<StorageClassTransitionInfo>,
+}
+
 pub(crate) async fn query_tidb_table_schema<'a, E>(
     executor: E,
     db: &str,
@@ -905,12 +916,17 @@ where
         .await
         .context("select_schema")?;
     let table_id: i64 = row.get("TIDB_TABLE_ID");
-    let storage_class_str: String = row.get("TIDB_STORAGE_CLASS");
-    let default_tier = StorageClass::try_from(storage_class_str.as_str()).unwrap();
-    // TODO: handle transitions.
+    let tidb_storage_class: String = row.get("TIDB_STORAGE_CLASS");
+    let sc_spec = if let Ok(tidb_sc_spec) =
+        serde_json::from_str::<TidbStorageClassSpec>(&tidb_storage_class)
+    {
+        StorageClassSpec::from_tidb(Some(&tidb_sc_spec.tier), Some(&tidb_sc_spec.transitions))
+    } else {
+        StorageClassSpec::from_tidb(Some(&tidb_storage_class), None)
+    };
     let meta = TidbTableSchema {
         id: table_id,
-        storage_class_spec: default_tier.into(),
+        storage_class_spec: sc_spec,
     };
     Ok(meta)
 }
@@ -978,7 +994,7 @@ impl Switches {
         let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
         let async_commit_switch_on = rng.gen_bool(env_param("ASYNC_COMMIT_RATIO", 0.1));
         let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
-        let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.2);
+        let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.5);
 
         Self {
             remote_cop_min_block_size,
@@ -1012,6 +1028,8 @@ pub(crate) struct WorkloadStats {
     pub async_shards: usize,
     pub remote_compact_exceed_memory_limit: u64,
     pub backup_count: u64,
+    pub alter_tables: (usize, usize, usize), // (NON_IA, IA, AUTO)
+    pub transited_to_ia: u64,
 }
 
 impl WorkloadStats {
@@ -1027,6 +1045,14 @@ impl WorkloadStats {
         let remote_compact_exceed_memory_limit =
             ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.get();
         let backup_count = NATIVE_BR_BACKUP_SUCCESS.get();
+        let alter_tables = (
+            ALTER_TABLE_NON_IA_COUNTER.load(Ordering::SeqCst),
+            ALTER_TABLE_IA_COUNTER.load(Ordering::SeqCst),
+            ALTER_TABLE_AUTO_IA_COUNTER.load(Ordering::SeqCst),
+        );
+        let transited_to_ia = ENGINE_STORAGE_CLASS_TRANSITION_COUNTER
+            .with_label_values(&["to_ia"])
+            .get();
         Self {
             keyspace_count,
             node_restart,
@@ -1038,6 +1064,8 @@ impl WorkloadStats {
             async_shards,
             remote_compact_exceed_memory_limit,
             backup_count,
+            alter_tables,
+            transited_to_ia,
         }
     }
 }
