@@ -26,8 +26,7 @@ fn test_write_write_conflict() {
         case!(lock!(10, 10), check_txn_status!(10, 20000, 20000), prewrite!(20000); fail!()),
         case!(lock!(10, 10), check_txn_status!(10, 20050, 20050), prewrite!(20050); ok!()),
         case!(lock!(10, 10), check_txn_status!(10, 20050, 20050), lock!(20050, 20050); ok!()),
-        // FIXME: this is problematic
-        // case!(prewrite!(10), commit!(10, 20), prewrite!(20); ok!()),
+        case!(prewrite!(10), commit!(10, 20), prewrite!(20); ok!()),
         case!(prewrite!(10), commit!(10, 20), prewrite!(25); ok!()),
         case!(prewrite!(10), commit!(10, 20), prewrite!(15); fail!()),
         // This does work, different from the above case.
@@ -43,7 +42,8 @@ fn test_write_write_conflict() {
         case!(prewrite!(10), rollback!(10), lock!(5, 5); ok!()),
         case!(prewrite!(10, expire), check_txn_status!(10, 15, 15), lock!(20, 20); ok!()),
         case!(prewrite!(10, expire), check_txn_status!(10, 15, 15), lock!(14, 20); ok!()),
-        // FIXME: review this case, is it valid? ROLLBACK record not in WRITE CF any more?
+        // ROLLBACK records are not in WRITE CF any more.
+        // This is different from classic TiKV. Rollback records don't result in write conflict.
         // case!(prewrite!(10, expire), check_txn_status!(10, 15, 15), prewrite!(5); fail!()),
         // case!(prewrite!(10, expire), check_txn_status!(10, 15, 15), lock!(5, 5); ok!()),
     ];

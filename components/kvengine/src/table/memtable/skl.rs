@@ -705,7 +705,7 @@ impl SkipListCore {
             return Value::new();
         }
         let val = self.get(key, u64::MAX);
-        if val.version >= version {
+        if val.version > version {
             return val;
         }
         Value::new()

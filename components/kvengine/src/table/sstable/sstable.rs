@@ -224,7 +224,7 @@ impl SsTable {
         let val = self
             .get(key, u64::MAX, key_hash, out_val_owner, level)
             .await;
-        if val.version >= version {
+        if val.version > version {
             return val;
         }
         table::Value::new()
