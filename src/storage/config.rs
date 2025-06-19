@@ -55,6 +55,8 @@ pub struct Config {
     #[online_config(skip)]
     pub scheduler_low_priority_worker_pool_size: Option<usize>,
     #[online_config(skip)]
+    pub scheduler_background_worker_pool_size: usize,
+    #[online_config(skip)]
     pub scheduler_pending_write_threshold: ReadableSize,
     #[online_config(skip)]
     // Reserve disk space to make tikv would have enough space to compact when disk is full.
@@ -93,6 +95,7 @@ impl Default for Config {
             scheduler_concurrency: DEFAULT_SCHED_CONCURRENCY,
             scheduler_worker_pool_size: (cpu_num / 2.).clamp(1., 8.) as usize,
             scheduler_low_priority_worker_pool_size: None,
+            scheduler_background_worker_pool_size: 1,
             scheduler_pending_write_threshold: ReadableSize::mb(DEFAULT_SCHED_PENDING_WRITE_MB),
             reserve_space: ReadableSize::gb(DEFAULT_RESERVED_SPACE_GB),
             reserve_raft_space: ReadableSize::gb(DEFAULT_RESERVED_RAFT_SPACE_GB),
@@ -148,6 +151,17 @@ impl Config {
         }
         self.flow_control.validate()?;
         self.io_rate_limit.validate()?;
+
+        if self.scheduler_background_worker_pool_size == 0
+            || self.scheduler_background_worker_pool_size > max_pool_size
+        {
+            return Err(
+                format!(
+                    "storage.scheduler_background_worker_pool_size should be greater than 0 and less than or equal to {}",
+                    max_pool_size
+                ).into()
+            );
+        }
 
         Ok(())
     }

@@ -620,4 +620,10 @@ lazy_static! {
     .unwrap();
     pub static ref SCHED_TXN_FILE_HISTOGRAM_VEC_STATIC: SchedTxnFileDurationVec =
         auto_flush_from!(SCHED_TXN_FILE_HISTOGRAM_VEC, SchedTxnFileDurationVec);
+
+    pub static ref SCHED_BACKGROUND_POOL_RUNNING_TASKS_GAUGE: IntGauge = register_int_gauge!(
+        "tikv_scheduler_background_pool_running_tasks",
+        "Number of running tasks in the scheduler background pool"
+    )
+    .unwrap();
 }

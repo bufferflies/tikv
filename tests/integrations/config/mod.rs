@@ -725,6 +725,7 @@ fn test_serde_custom_tikv_config() {
         },
         background_error_recovery_window: ReadableDuration::hours(1),
         low_space_threshold: AbsoluteOrPercentSize::Percent(10.),
+        scheduler_background_worker_pool_size: 1,
     };
     value.coprocessor = CopConfig {
         split_region_on_table: false,
