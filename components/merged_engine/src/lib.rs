@@ -851,6 +851,7 @@ impl MergedEngine {
             if merged_wb_estimated_size > RAFT_WRITE_BATCH_SIZE {
                 ctx.raft.persist(merged_wb)?;
                 merged_wb = WriteBatch::new();
+                merged_wb_estimated_size = 0;
             }
             let shard = self.kv.get_shard(updated_region);
             if shard.is_none() {
