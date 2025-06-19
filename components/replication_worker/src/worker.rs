@@ -51,7 +51,6 @@ use crate::{
     apply_observer::{is_index_key, CdcApplyObserver, RegionEvents},
     kube::{KeyspaceKubeService, KubeApi},
     provisioned::KeyspaceProvisionedService,
-    scheduler::ChangefeedRequest,
     CdcMsg, Error, KeyspaceService, KeyspaceStates, ReplicationScheduler, ReplicationService,
     ReplicationWorkerConfig, Result,
 };
@@ -326,10 +325,11 @@ impl ReplicationWorker {
             }
             CdcMsg::NewTask {
                 keyspace_id,
-                request,
+                changefeed_id,
+                body,
                 cb,
             } => {
-                self.handle_new_task(keyspace_id, request, cb);
+                self.handle_new_task(keyspace_id, changefeed_id, body, cb);
             }
             CdcMsg::RetryReportRegion { region_id } => {
                 self.handle_retry_report(region_id);
@@ -390,10 +390,12 @@ impl ReplicationWorker {
     fn handle_new_task(
         &mut self,
         keyspace_id: u32,
-        request: ChangefeedRequest,
-        cb: Box<dyn FnOnce(Result<()>) + Send>,
+        changefeed_id: String,
+        body: Bytes,
+        cb: Box<dyn FnOnce(Result<(StatusCode, Bytes)>) + Send>,
     ) {
-        info!("{} handle new task {:?}", keyspace_id, request);
+        let body_string = String::from_utf8_lossy(&body).to_string();
+        info!("{} handle new task {}", keyspace_id, body_string,);
         #[allow(clippy::map_entry)]
         if !self.keyspaces.contains_key(&keyspace_id) {
             cb(Err(Error::OtherError("keyspace not found".into())));
@@ -408,9 +410,7 @@ impl ReplicationWorker {
             Self::report_region_to_pd(&raft, &pd_client, region_id, self.tx.clone());
         }
         let states = task_svc.get_states_mut();
-        states
-            .feeds
-            .insert(request.changefeed_id.clone().unwrap(), request.clone());
+        states.feeds.insert(changefeed_id, body_string);
         self.merged_engine
             .set_keyspace_states(keyspace_id, states.marshal())
             .unwrap();
@@ -422,15 +422,11 @@ impl ReplicationWorker {
             let new_cdc_task_uri = sec_mgr
                 .build_uri(format!("{}/api/v2/changefeeds", &cdc_addr))
                 .unwrap();
-            let new_cdc_task_body = serde_json::to_string(&request).unwrap();
-            info!(
-                "create new cdc task {} {}",
-                new_cdc_task_uri, new_cdc_task_body
-            );
+            info!("create new cdc task {}", new_cdc_task_uri);
             let res = dispatch_http_post_with_retry(
                 &client,
                 &new_cdc_task_uri,
-                &new_cdc_task_body,
+                body,
                 DISPATCH_CDC_TIMEOUT,
             )
             .await;
@@ -1124,15 +1120,15 @@ impl RegisterHandler {
 async fn dispatch_http_post_with_retry(
     client: &HttpClient,
     uri: &Uri,
-    body: &str,
+    body: Bytes,
     timeout: Duration,
-) -> Result<()> {
+) -> Result<(StatusCode, Bytes)> {
     let mut last_err: Option<Error> = None;
     let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < timeout {
-        match dispatch_http_post(client, uri, body).await {
-            Ok(_) => {
-                return Ok(());
+        match dispatch_http_post(client, uri, body.clone()).await {
+            Ok(resp) => {
+                return Ok(resp);
             }
             Err(err) => {
                 last_err = Some(err);
@@ -1143,19 +1139,20 @@ async fn dispatch_http_post_with_retry(
     Err(last_err.unwrap())
 }
 
-async fn dispatch_http_post(client: &HttpClient, uri: &Uri, body: &str) -> Result<()> {
+async fn dispatch_http_post(
+    client: &HttpClient,
+    uri: &Uri,
+    req_body: Bytes,
+) -> Result<(StatusCode, Bytes)> {
     let req = http::Request::builder()
         .uri(uri)
         .method("POST")
-        .body(body.to_string().into())
+        .body(req_body.into())
         .unwrap();
     let resp = client.request(req).await?;
-    if !resp.status().is_success() {
-        let body = hyper::body::to_bytes(resp.into_body()).await?;
-        let error = String::from_utf8_lossy(&body).to_string();
-        return Err(Error::OtherError(error));
-    }
-    Ok(())
+    let status = resp.status();
+    let body = hyper::body::to_bytes(resp.into_body()).await?;
+    Ok((status, body))
 }
 
 fn build_request_range(request: &ChangeDataRequest) -> (Vec<u8>, Vec<u8>) {

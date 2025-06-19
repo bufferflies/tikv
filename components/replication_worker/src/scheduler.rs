@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use bytes::{Buf, Bytes};
 use http::{HeaderMap, HeaderValue};
 use hyper::{Body, Method, Request, Response, Result, StatusCode, Uri};
 use security::HttpClient;
 use serde::{Deserialize, Serialize};
 use tikv_util::{future::paired_future_callback, info};
 
-use crate::{config::ReplicaConfig, CdcMsg};
+use crate::CdcMsg;
 
 #[derive(Clone)]
 pub struct ReplicationScheduler {
@@ -55,48 +55,10 @@ struct ErrorResponse {
     error_code: String,
 }
 
-#[derive(Serialize)]
-struct ChangefeedListResponse {
-    total: usize,
-    items: Vec<ChangefeedItem>,
-}
-
-#[derive(Serialize)]
-struct ChangefeedItem {
-    id: String,
-    state: String,
-    checkpoint_tso: u64,
-    checkpoint_time: String,
-    error: Option<ErrorInfo>,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ChangefeedRequest {
-    pub changefeed_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub replica_config: Option<ReplicaConfig>,
+    pub changefeed_id: String,
     pub sink_uri: String,
-    pub start_ts: Option<u64>,
-    pub target_ts: Option<u64>,
-}
-
-// Keep Serialize for response types
-#[derive(Serialize)]
-struct ChangefeedResponse {
-    admin_job_type: i32,
-    checkpoint_time: String,
-    checkpoint_ts: u64,
-    config: ReplicaConfig,
-    create_time: String,
-    creator_version: String,
-    error: Option<ErrorInfo>,
-    id: String,
-    resolved_ts: u64,
-    sink_uri: String,
-    start_ts: u64,
-    state: String,
-    target_ts: u64,
-    task_status: Vec<TaskStatus>,
 }
 
 #[derive(Serialize)]
@@ -173,8 +135,7 @@ impl ReplicationScheduler {
         let response = match (method, path) {
             (&Method::POST, "/cdc/api/v2/changefeeds") => {
                 let body_bytes = hyper::body::to_bytes(body).await?;
-                self.handle_create_changefeed(keyspace_id, &body_bytes)
-                    .await
+                self.handle_create_changefeed(keyspace_id, body_bytes).await
             }
             (&Method::POST, "/cdc/keyspace") => {
                 let body_bytes = hyper::body::to_bytes(body).await?;
@@ -292,14 +253,17 @@ impl ReplicationScheduler {
         self.http_client.request(req).await
     }
 
-    async fn handle_create_changefeed(
-        &self,
-        keyspace_id: u32,
-        body_bytes: &[u8],
-    ) -> Response<Body> {
+    async fn handle_create_changefeed(&self, keyspace_id: u32, body: Bytes) -> Response<Body> {
         info!("handle create change feed");
-        match serde_json::from_slice::<ChangefeedRequest>(body_bytes) {
+        match serde_json::from_slice::<ChangefeedRequest>(body.chunk()) {
             Ok(request) => {
+                if request.changefeed_id.is_empty() {
+                    return Self::error_response(
+                        StatusCode::BAD_REQUEST,
+                        "changefeed_id is required",
+                        "CDC:ErrInvalidRequestBody",
+                    );
+                }
                 if request.sink_uri.is_empty() {
                     return Self::error_response(
                         StatusCode::BAD_REQUEST,
@@ -307,51 +271,26 @@ impl ReplicationScheduler {
                         "CDC:ErrInvalidRequestBody",
                     );
                 }
-                request.replica_config.as_ref().and_then(|config| {
-                    if let Err(msg) = config.validate() {
-                        return Some(Self::error_response(
-                            StatusCode::BAD_REQUEST,
-                            &msg,
-                            "CDC:ErrInvalidRequestBody",
-                        ));
-                    }
-                    None
-                });
                 let (cb, fut) = paired_future_callback();
 
                 self.schedule(CdcMsg::NewTask {
                     keyspace_id,
-                    request: request.clone(),
+                    changefeed_id: request.changefeed_id,
+                    body,
                     cb,
                 });
                 let res = fut.await.unwrap();
                 if let Err(err) = res {
                     return Self::error_response(
-                        StatusCode::BAD_REQUEST,
+                        StatusCode::SERVICE_UNAVAILABLE,
                         &err.to_string(),
                         "CDC:ErrCreateChangefeed",
                     );
                 }
-                // TODO: use response from CDC server.
-                let response = ChangefeedResponse {
-                    admin_job_type: 0,
-                    checkpoint_time: "0".to_string(),
-                    checkpoint_ts: 0,
-                    config: request.replica_config.unwrap_or_default(),
-                    create_time: Utc::now().to_string(),
-                    creator_version: "0.0.0".to_owned(),
-                    error: None,
-                    id: request.changefeed_id.unwrap_or_default(),
-                    resolved_ts: 0,
-                    sink_uri: request.sink_uri,
-                    start_ts: request.start_ts.unwrap_or(0),
-                    state: "normal".to_string(),
-                    target_ts: request.target_ts.unwrap_or(0),
-                    task_status: vec![],
-                };
+                let (status, body) = res.unwrap();
                 Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(serde_json::to_string(&response).unwrap()))
+                    .status(status)
+                    .body(body.into())
                     .unwrap()
             }
             Err(e) => Self::error_response(

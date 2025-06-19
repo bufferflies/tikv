@@ -1,7 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod apply_observer;
-mod config;
 mod error;
 mod kube;
 mod provisioned;
@@ -18,6 +17,7 @@ use cdc::{Conn, ConnId, MemoryQuota};
 pub use error::{Error, Result};
 use futures::{future, SinkExt, TryFutureExt, TryStreamExt};
 use grpcio::{DuplexSink, RequestStream, RpcContext, RpcStatus, RpcStatusCode, UnarySink};
+use http::StatusCode;
 use kvengine::{Shard, WRITE_CF};
 use kvproto::{
     cdcpb,
@@ -84,7 +84,7 @@ impl ReplicationWorkerConfig {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct KeyspaceStates {
-    pub(crate) feeds: HashMap<String, ChangefeedRequest>,
+    pub(crate) feeds: HashMap<String, String>,
     pub(crate) pd_url: String,
     pub(crate) cdc_addr: String,
 
@@ -134,8 +134,9 @@ pub enum CdcMsg {
     },
     NewTask {
         keyspace_id: u32,
-        request: ChangefeedRequest,
-        cb: Box<dyn FnOnce(Result<()>) + Send>,
+        changefeed_id: String,
+        body: Bytes,
+        cb: Box<dyn FnOnce(Result<(StatusCode, Bytes)>) + Send>,
     },
     RetryReportRegion {
         region_id: u64,
