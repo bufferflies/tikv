@@ -553,7 +553,7 @@ impl Shard {
         self.refresh_compaction_priority();
     }
 
-    fn refresh_estimated_size_and_entries(&self) {
+    pub fn refresh_estimated_size_and_entries(&self) {
         let data = self.get_data();
         let sc_spec = self.get_storage_class_spec();
 

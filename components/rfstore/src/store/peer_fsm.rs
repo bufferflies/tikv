@@ -1655,6 +1655,7 @@ impl<'a> PeerMsgHandler<'a> {
             shard.set_last_transit_storage_class_instant_to_now();
 
             if tables_transited_to_ia > 0 {
+                shard.refresh_estimated_size_and_entries();
                 report_transitions(tables_transited_to_ia);
                 info!("{} check schema: transit storage class", tag;
                     "tables_transited_to_ia" => tables_transited_to_ia);
