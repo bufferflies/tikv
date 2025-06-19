@@ -379,5 +379,11 @@ mod tests {
         let val = skl.get_newer(&key, 109);
         assert!(val.is_valid());
         assert_eq!(val.version, 110);
+
+        let key2 = kb.i_to_key(2);
+        let val = skl.get_newer(&key2, skl.data_max_ts());
+        assert!(val.is_empty());
+        let val = skl.get_newer(&key2, 100);
+        assert!(val.is_empty());
     }
 }

@@ -218,7 +218,7 @@ impl SsTable {
         out_val_owner: &mut Vec<u8>,
         level: usize,
     ) -> table::Value {
-        if self.max_ts < version {
+        if self.max_ts <= version {
             return table::Value::new();
         }
         let val = self
