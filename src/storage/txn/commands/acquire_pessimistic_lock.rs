@@ -185,6 +185,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for AcquirePessim
             released_locks: ReleasedLocks::new(),
             lock_guards: vec![],
             response_policy: ResponsePolicy::OnProposed,
+            known_txn_status: vec![],
         })
     }
 }

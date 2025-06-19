@@ -379,6 +379,13 @@ make_static_metric! {
             keys,
         },
     }
+
+    pub struct TxnStatusCacheSizeGauge: IntGauge {
+        "type" =>  {
+            used,
+            allocated,
+        }
+    }
 }
 
 lazy_static! {
@@ -620,6 +627,13 @@ lazy_static! {
     .unwrap();
     pub static ref SCHED_TXN_FILE_HISTOGRAM_VEC_STATIC: SchedTxnFileDurationVec =
         auto_flush_from!(SCHED_TXN_FILE_HISTOGRAM_VEC, SchedTxnFileDurationVec);
+
+    pub static ref SCHED_TXN_STATUS_CACHE_SIZE: TxnStatusCacheSizeGauge = register_static_int_gauge_vec!(
+        TxnStatusCacheSizeGauge,
+        "tikv_scheduler_txn_status_cache_size",
+        "Statistics of size and capacity of txn status cache (represented in count of entries)",
+        &["type"]
+    ).unwrap();
 
     pub static ref SCHED_BACKGROUND_POOL_RUNNING_TASKS_GAUGE: IntGauge = register_int_gauge!(
         "tikv_scheduler_background_pool_running_tasks",

@@ -725,6 +725,7 @@ fn test_serde_custom_tikv_config() {
         },
         background_error_recovery_window: ReadableDuration::hours(1),
         low_space_threshold: AbsoluteOrPercentSize::Percent(10.),
+        txn_status_cache_capacity: 1000,
         max_ts: MaxTsConfig {
             max_drift: ReadableDuration::secs(333),
             cache_sync_interval: ReadableDuration::secs(44),

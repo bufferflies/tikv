@@ -107,6 +107,7 @@ reserve-raft-space = "2GB"
 enable-ttl = true
 ttl-check-poll-interval = "0s"
 low-space-threshold = "10%"
+txn-status-cache-capacity = 1000
 
 [storage.max-ts]
 max-drift = "333s"

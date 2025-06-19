@@ -64,6 +64,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for RawAtomicStor
             released_locks: ReleasedLocks::new(),
             lock_guards: raw_ext.into_iter().map(|r| r.key_guard).collect(),
             response_policy: ResponsePolicy::OnApplied,
+            known_txn_status: vec![],
         })
     }
 }
@@ -78,7 +79,9 @@ mod tests {
 
     use super::*;
     use crate::storage::{
-        lock_manager::MockLockManager, txn::scheduler::get_raw_ext, Statistics, TestEngineBuilder,
+        lock_manager::MockLockManager,
+        txn::{scheduler::get_raw_ext, txn_status_cache::TxnStatusCache},
+        Statistics, TestEngineBuilder,
     };
 
     #[test]
@@ -117,6 +120,7 @@ mod tests {
             statistics: &mut statistic,
             async_apply_prewrite: false,
             raw_ext,
+            txn_status_cache: &TxnStatusCache::new_for_test(),
         };
         let cmd: Command = cmd.into();
         let write_result = cmd.process_write(snap, context).unwrap();

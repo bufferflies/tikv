@@ -90,6 +90,7 @@ use crate::{
             latch::Lock,
             region_latch::GlobalLatches,
             sched_pool::{tls_collect_query, tls_collect_scan_details},
+            txn_status_cache::TxnStatusCache,
             Error, ErrorInner, ProcessResult,
         },
         types::StorageCallback,
@@ -295,6 +296,8 @@ struct SchedulerInner<L: LockManager> {
 
     quota_limiter: Arc<QuotaLimiter>,
     feature_gate: FeatureGate,
+
+    txn_status_cache: TxnStatusCache,
 }
 
 #[inline]
@@ -506,6 +509,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             lock_wait_queues,
             quota_limiter,
             feature_gate,
+            txn_status_cache: TxnStatusCache::new(config.txn_status_cache_capacity),
         });
 
         slow_log!(
@@ -868,6 +872,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         lock_guards: Vec<KeyHandleGuard>,
         pipelined: bool,
         async_apply_prewrite: bool,
+        known_txn_status: Vec<(TimeStamp, TimeStamp)>,
         tag: CommandKind,
     ) {
         // TODO: Does async apply prewrite worth a special metric here?
@@ -888,6 +893,17 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         debug!("write command finished";
             "cid" => cid, "pipelined" => pipelined, "async_apply_prewrite" => async_apply_prewrite);
         drop(lock_guards);
+
+        if result.is_ok() && !known_txn_status.is_empty() {
+            // Update cache before calling the callback.
+            // Reversing the order can lead to test failures as the cache may still
+            // remain not updated after receiving signal from the callback.
+            let now = std::time::SystemTime::now();
+            for (start_ts, commit_ts) in known_txn_status {
+                self.inner.txn_status_cache.insert(start_ts, commit_ts, now);
+            }
+        }
+
         let tctx = self.inner.dequeue_task_context(cid);
 
         let mut do_wake_up = !tctx.woken_up_resumable_lock_requests.is_empty();
@@ -1252,6 +1268,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 statistics,
                 async_apply_prewrite: self.inner.enable_async_apply_prewrite,
                 raw_ext,
+                txn_status_cache: &self.inner.txn_status_cache,
             };
             let begin_instant = Instant::now();
             let res = command_process_write!(task.cmd, snapshot, context, sample)
@@ -1287,6 +1304,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             released_locks,
             lock_guards,
             response_policy,
+            known_txn_status,
         } = match deadline
             .check()
             .map_err(StorageError::from)
@@ -1357,7 +1375,16 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         }
 
         if to_be_write.modifies.is_empty() && to_be_write.txn_file.is_none() {
-            scheduler.on_write_finished(cid, pr, Ok(()), lock_guards, false, false, tag);
+            scheduler.on_write_finished(
+                cid,
+                pr,
+                Ok(()),
+                lock_guards,
+                false,
+                false,
+                known_txn_status,
+                tag,
+            );
             return;
         }
 
@@ -1378,7 +1405,16 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     engine.schedule_txn_extra(to_be_write.extra);
                 })
             }
-            scheduler.on_write_finished(cid, pr, Ok(()), lock_guards, false, false, tag);
+            scheduler.on_write_finished(
+                cid,
+                pr,
+                Ok(()),
+                lock_guards,
+                false,
+                false,
+                known_txn_status,
+                tag,
+            );
             return;
         }
 
@@ -1577,6 +1613,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         lock_guards,
                         pipelined,
                         is_async_apply_prewrite,
+                        known_txn_status,
                         tag,
                     );
                     KV_COMMAND_KEYWRITE_HISTOGRAM_VEC
@@ -1913,6 +1950,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
         SCHED_STAGE_COUNTER_VEC.get(tag).error.inc();
         callback.execute(ProcessResult::Failed { err });
+    }
+
+    #[cfg(test)]
+    pub fn get_txn_status_cache(&self) -> &TxnStatusCache {
+        &self.inner.txn_status_cache
     }
 }
 

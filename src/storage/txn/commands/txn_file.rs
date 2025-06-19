@@ -982,6 +982,8 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileComman
             released_locks: ReleasedLocks::new(),
             lock_guards: vec![],
             response_policy: ResponsePolicy::OnApplied,
+            // TODO: fix this
+            known_txn_status: vec![],
         };
         Ok(result)
     }

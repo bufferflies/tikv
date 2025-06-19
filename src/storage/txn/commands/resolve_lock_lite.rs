@@ -68,6 +68,11 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLockLi
             });
         }
 
+        let known_txn_status = if !self.commit_ts.is_zero() {
+            vec![(self.start_ts, self.commit_ts)]
+        } else {
+            vec![]
+        };
         let mut write_data = WriteData::from_modifies(txn.into_modifies());
         write_data.set_req_type(ReqType::ResolveLock);
         write_data.set_allowed_on_disk_almost_full();
@@ -80,6 +85,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLockLi
             released_locks,
             lock_guards: vec![],
             response_policy: ResponsePolicy::OnApplied,
+            known_txn_status,
         })
     }
 }

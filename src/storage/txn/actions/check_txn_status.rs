@@ -184,8 +184,10 @@ pub async fn rollback_lock(
         txn.delete_value(key.clone(), lock.ts);
     }
 
-    // Only the primary key of a pessimistic transaction needs to be protected.
-    let protected: bool = is_pessimistic_txn && key.is_encoded_from(&lock.primary);
+    // (1) The primary key of any transaction needs to be protected.
+    // (2) If the lock belongs to a pipelined-DML transaction, it must be protected.
+    //     TODO: change this when Pipelined DML is picked to cloud-storage-engine.
+    let protected: bool = key.is_encoded_from(&lock.primary);
     if let Some(write) = make_rollback(reader.start_ts, protected, overlapped_write) {
         txn.put_write(key.clone(), reader.start_ts, write.as_ref().to_bytes());
     }

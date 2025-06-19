@@ -144,6 +144,12 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
         let mut released_locks = ReleasedLocks::new();
         released_locks.push(released);
 
+        let write_result_known_txn_status = if let TxnStatus::Committed { commit_ts } = &txn_status
+        {
+            vec![(self.lock_ts, *commit_ts)]
+        } else {
+            vec![]
+        };
         let pr = ProcessResult::TxnStatus { txn_status };
         let mut write_data = WriteData::from_modifies(txn.into_modifies());
         write_data.set_req_type(ReqType::CheckTxnStatus);
@@ -157,6 +163,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
             released_locks,
             lock_guards: vec![],
             response_policy: ResponsePolicy::OnApplied,
+            known_txn_status: write_result_known_txn_status,
         })
     }
 }
@@ -164,7 +171,9 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
 #[cfg(test)]
 pub mod tests {
     use concurrency_manager::ConcurrencyManager;
-    use kvproto::kvrpcpb::{self, Context, LockInfo, PrewriteRequestPessimisticAction::*};
+    use kvproto::kvrpcpb::{
+        self, Context, LockInfo, PrewriteRequestPessimisticAction::*, WriteConflictReason,
+    };
     use tikv_util::deadline::Deadline;
     use txn_types::{Key, WriteType};
 
@@ -173,12 +182,13 @@ pub mod tests {
         kv::Engine,
         lock_manager::MockLockManager,
         mvcc,
-        mvcc::tests::*,
+        mvcc::{tests::*, ErrorInner},
         txn::{
             self,
             commands::{pessimistic_rollback, WriteCommand, WriteContext},
             scheduler::DEFAULT_EXECUTION_DURATION_LIMIT,
             tests::*,
+            txn_status_cache::TxnStatusCache,
         },
         types::TxnStatus,
         ProcessResult, TestEngineBuilder,
@@ -223,11 +233,17 @@ pub mod tests {
                     statistics: &mut Default::default(),
                     async_apply_prewrite: false,
                     raw_ext: None,
+                    txn_status_cache: &TxnStatusCache::new_for_test(),
                 },
             )
             .unwrap();
         if let ProcessResult::TxnStatus { txn_status } = result.pr {
-            assert!(status_pred(txn_status));
+            let formatted_txn_status = format!("{:?}", txn_status);
+            assert!(
+                status_pred(txn_status),
+                "txn_status returned by check_txn_status ({}) doesn't pass the check",
+                formatted_txn_status
+            );
         } else {
             unreachable!();
         }
@@ -272,6 +288,7 @@ pub mod tests {
                     statistics: &mut Default::default(),
                     async_apply_prewrite: false,
                     raw_ext: None,
+                    txn_status_cache: &TxnStatusCache::new_for_test(),
                 },
             )
             .map(|r| {
@@ -405,7 +422,7 @@ pub mod tests {
                 |s| s == TtlExpire,
             );
             must_unlocked(&mut engine, b"k1");
-            must_get_rollback_protected(&mut engine, b"k1", 1, false);
+            must_get_rollback_protected(&mut engine, b"k1", 1, true);
 
             // case 2: primary is prewritten (pessimistic)
             must_acquire_pessimistic_lock(&mut engine, b"k2", b"k2", 15, 15);
@@ -820,6 +837,7 @@ pub mod tests {
             ts(20, 0),
             WriteType::Rollback,
         );
+        must_get_rollback_protected(&mut engine, k, ts(20, 0), true);
 
         // Push the min_commit_ts of pessimistic locks.
         must_acquire_pessimistic_lock_for_large_txn(&mut engine, k, k, ts(4, 0), ts(130, 0), 200);
@@ -1216,6 +1234,63 @@ pub mod tests {
         let rollback = must_written(&mut engine, k, 10, 10, WriteType::Rollback);
         assert!(rollback.last_change_ts.is_zero());
         assert_eq!(rollback.versions_to_last_change, 0);
+    }
+
+    #[test]
+    fn test_check_txn_status_rollback_optimistic() {
+        let mut engine = TestEngineBuilder::new().build().unwrap();
+        let k = b"k1";
+        let (v1, v2) = (b"v1", b"v2");
+
+        let ts = TimeStamp::compose;
+
+        must_prewrite_put_async_commit(&mut engine, k, v1, k, &Some(vec![]), ts(1, 0), ts(1, 1));
+        must_commit(&mut engine, k, ts(1, 0), ts(2, 0));
+
+        must_prewrite_put(&mut engine, k, v2, k, ts(2, 0));
+        assert!(!must_have_write(&mut engine, k, ts(2, 0)).has_overlapped_rollback);
+
+        must_success(
+            &mut engine,
+            k,
+            ts(2, 0),
+            ts(3, 0),
+            ts(3, 0),
+            true,
+            false,
+            false,
+            |s| s == TtlExpire,
+        );
+        must_get_overlapped_rollback(
+            &mut engine,
+            k,
+            ts(2, 0),
+            ts(1, 0),
+            WriteType::Put,
+            Some(0.into()),
+        );
+
+        let e = must_prewrite_put_err(&mut engine, k, v2, k, ts(2, 0));
+        match &*e.0 {
+            ErrorInner::WriteConflict {
+                start_ts,
+                conflict_start_ts,
+                conflict_commit_ts,
+                key,
+                primary,
+                reason,
+            } => {
+                assert_eq!(*start_ts, ts(2, 0));
+                assert_eq!(*conflict_start_ts, ts(1, 0));
+                assert_eq!(*conflict_commit_ts, ts(2, 0));
+                assert_eq!(key.as_slice(), k);
+                assert_eq!(primary.as_slice(), k);
+                assert_eq!(*reason, WriteConflictReason::SelfRolledBack);
+            }
+            e => {
+                panic!("unexpected error: {:?}", e);
+            }
+        }
     }
 
     #[test]
