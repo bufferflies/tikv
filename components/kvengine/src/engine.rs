@@ -19,6 +19,7 @@ use std::{
 use bytes::BufMut;
 use cloud_encryption::MasterKey;
 use collections::HashSet;
+use crossbeam::channel::RecvTimeoutError;
 use dashmap::{mapref::entry::Entry, DashMap};
 use file_system::IoRateLimiter;
 use fslock;
@@ -34,10 +35,11 @@ use crate::{
     ia::manager::IaManager,
     limiter::{DfsLoadLimiter, StoreLimiter},
     meta::ShardMeta,
+    metrics::ENGINE_FREE_MEM_BYTES_HISTOGRAM,
     table::{
         columnar::SchemaFile,
         file::FdCache,
-        memtable::CfTable,
+        memtable::{CfTable, CfTableCore},
         sstable::{BlockCache, MAGIC_NUMBER},
         BoundedDataSet, DataBound, InnerKey, ZSTD_COMPRESSION,
     },
@@ -1076,37 +1078,77 @@ pub fn new_vector_index_filename(file_id: u64) -> PathBuf {
     PathBuf::from(format!("{:016x}.vec", file_id))
 }
 
-pub(crate) enum FreeMemMsg {
+const FREE_MEM_RECV_TIMEOUT: Duration = Duration::from_secs(5);
+
+// pub for testing.
+pub enum FreeMemMsg {
     /// Free CfTable
     FreeMem(CfTable),
     /// Stop the free mem background worker
     Stop,
 }
 
-fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
+// pub for testing.
+pub fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
+    let mut tables: collections::HashMap<*const CfTableCore, CfTable> = HashMap::default();
+
+    fn free_table(tbl: &CfTable) {
+        for txn_file in tbl.get_cf(WRITE_CF).get_txn_files() {
+            txn_file.expire_ttl_cache();
+        }
+
+        ENGINE_FREE_MEM_BYTES_HISTOGRAM.observe(tbl.skip_list_size() as f64);
+    }
+    fn check_and_free_mem(tables: &mut collections::HashMap<*const CfTableCore, CfTable>) {
+        tables.retain(|_, tbl| {
+            if Arc::strong_count(&tbl.core) == 1 {
+                free_table(tbl);
+                return false;
+            }
+            true
+        });
+    }
+
     loop {
-        let cnt = free_rx.len();
-        let mut tables = Vec::with_capacity(cnt);
-        let mut txn_files = vec![];
-        for _ in 0..cnt {
-            match free_rx.recv().unwrap() {
-                FreeMemMsg::FreeMem(tbl) => {
-                    for txn_file in tbl.get_cf(WRITE_CF).get_txn_files() {
-                        txn_files.push(txn_file);
-                    }
-                    tables.push(tbl);
-                }
-                FreeMemMsg::Stop => {
-                    drop(tables);
-                    info!("Engine free mem worker receive stop msg and stop now");
+        let msg = if tables.is_empty() {
+            // No tables to free, block until a message is received.
+            match free_rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => {
+                    info!("Engine free mem worker channel disconnected, stopping");
                     return;
                 }
             }
-        }
-        drop(tables);
-        thread::sleep(Duration::from_secs(5));
-        for txn_file in txn_files {
-            txn_file.expire_ttl_cache();
+        } else {
+            // There are tables to check, use timeout.
+            match free_rx.recv_timeout(FREE_MEM_RECV_TIMEOUT) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    check_and_free_mem(&mut tables);
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    info!("Engine free mem worker channel disconnected, stopping");
+                    return;
+                }
+            }
+        };
+
+        match msg {
+            FreeMemMsg::FreeMem(tbl) => {
+                if Arc::strong_count(&tbl.core) == 1 {
+                    free_table(&tbl);
+                } else {
+                    check_and_free_mem(&mut tables);
+                    let ptr = Arc::as_ptr(&tbl.core);
+                    tables.insert(ptr, tbl);
+                }
+            }
+            FreeMemMsg::Stop => {
+                drop(tables);
+                info!("Engine free mem worker receive stop msg and stop now");
+                return;
+            }
         }
     }
 }
@@ -1129,5 +1171,54 @@ fn create_ia_ctx(opts: Arc<Options>, fs: Arc<dyn dfs::Dfs>, meta_fd_cache: FdCac
         IaCtx::Enabled(ia_mgr, Arc::new(meta_path))
     } else {
         IaCtx::Disabled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tikv_util::time::Instant;
+
+    use super::*;
+
+    #[test]
+    fn test_free_mem() {
+        let (free_tx, free_rx) = mpsc::unbounded();
+        let handle = std::thread::spawn(move || {
+            free_mem(free_rx);
+        });
+
+        let tbl1 = CfTable::new();
+        free_tx.send(FreeMemMsg::FreeMem(tbl1)).unwrap();
+
+        // Delay drop.
+        let tbl2 = CfTable::new();
+        free_tx.send(FreeMemMsg::FreeMem(tbl2.clone())).unwrap();
+
+        // A table with 2 Arc in free mem thread can not be released, until one of them
+        // exceeds lifetime.
+        let tbl3 = CfTable::new();
+        let tbl3_clone = tbl3.clone();
+        assert_eq!(Arc::as_ptr(&tbl3.core), Arc::as_ptr(&tbl3_clone.core));
+        free_tx.send(FreeMemMsg::FreeMem(tbl3_clone)).unwrap();
+        free_tx.send(FreeMemMsg::FreeMem(tbl3)).unwrap();
+
+        std::thread::sleep(Duration::from_secs(1));
+        drop(tbl2);
+
+        let start_time = Instant::now_coarse();
+        loop {
+            let free_cnt = ENGINE_FREE_MEM_BYTES_HISTOGRAM.get_sample_count();
+            if free_cnt == 3 {
+                break;
+            }
+
+            if start_time.saturating_elapsed() > Duration::from_secs(10) {
+                panic!("timeout: free counter: {}", free_cnt);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        free_tx.send(FreeMemMsg::Stop).unwrap();
+        handle.join().unwrap();
     }
 }

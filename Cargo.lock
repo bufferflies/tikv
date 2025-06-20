@@ -3922,6 +3922,7 @@ dependencies = [
  "collections",
  "crc32c",
  "crc32fast",
+ "criterion",
  "crossbeam",
  "dashmap 4.0.2",
  "dyn-clone",

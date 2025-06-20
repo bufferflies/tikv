@@ -70,6 +70,12 @@ lazy_static! {
         exponential_buckets(1024.0 * 1024.0, 2.0, 20).unwrap()
     )
     .unwrap();
+    pub static ref ENGINE_FREE_MEM_BYTES_HISTOGRAM: Histogram = register_histogram!(
+        "kv_engine_free_mem_bytes",
+        "Histogram of free mem bytes",
+        exponential_buckets(1024.0 * 1024.0, 2.0, 20).unwrap() // 1MB ~ 1TB
+    )
+    .unwrap();
     pub static ref ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE: IntGauge = register_int_gauge!(
         "kv_engine_ia_manager_segments_memory_size",
         "Total memory size of IA manager segments",

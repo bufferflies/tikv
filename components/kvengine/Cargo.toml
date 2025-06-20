@@ -116,8 +116,15 @@ features = ["encryption"]
 
 [dev-dependencies]
 anyhow = "1.0.26"
+criterion = "0.3"
 proptest = "1.4"
 rstest = "0.18"
 tempfile = "3"
 test_util = { workspace = true }
+tikv_alloc = { workspace = true, features = ["jemalloc"] }
 zipf = "7.0"
+
+[[bench]]
+name = "free_mem"
+path = "benches/free_mem.rs"
+harness = false
