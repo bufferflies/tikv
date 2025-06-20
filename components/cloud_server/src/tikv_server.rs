@@ -56,11 +56,11 @@ use raftstore::{
     },
     RegionInfoAccessor,
 };
-use rfengine::{RfEngine, KV_ENGINE_META_KEY, STORE_IDENT_KEY};
+use rfengine::{RfEngine, STORE_IDENT_KEY};
 use rfstore::{
     store::{
-        BlackList, Engines, LocalReader, MetaChangeListener, PdIdAllocator, RaftBatchSystem,
-        StoreMeta, StoreMsg, PENDING_MSG_CAP,
+        load_raft_engine_meta, BlackList, Engines, LocalReader, MetaChangeListener, PdIdAllocator,
+        RaftBatchSystem, StoreMeta, StoreMsg, PENDING_MSG_CAP,
     },
     RaftRouter, ServerRaftStoreRouter,
 };
@@ -1264,14 +1264,7 @@ impl TikvServer {
         let mut table_ids = HashMap::new();
         for region_id in panic_regions {
             if let Some(peer_id) = region_to_peers.get(region_id) {
-                if let Some(val) = rf_engine.get_state(*peer_id, KV_ENGINE_META_KEY) {
-                    let mut cs = kvenginepb::ChangeSet::new();
-                    if let Err(e) = cs.merge_from_bytes(&val) {
-                        error!(
-                            "failed to merge change set for region_id: {} err: {}",
-                            region_id, e
-                        );
-                    }
+                if let Some(cs) = load_raft_engine_meta(rf_engine, *peer_id) {
                     if !cs.has_snapshot() {
                         continue;
                     }

@@ -19,6 +19,8 @@ pub const STORE_IDENT_KEY: &[u8] = &[3];
 pub const PREPARE_BOOTSTRAP_KEY: &[u8] = &[4];
 pub const KV_ENGINE_META_KEY: &[u8] = &[5];
 pub const RAFT_TRUNCATED_STATE_KEY: &[u8] = &[6];
+pub const KV_ENGINE_META_DIFF_KEY: &[u8] = &[7];
+pub const KV_ENGINE_META_SNAP_DIFF_KEY: &[u8] = &[8];
 
 pub fn raft_state_key(version: u64) -> Bytes {
     let mut key = BytesMut::with_capacity(5);

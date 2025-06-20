@@ -46,7 +46,7 @@ use tikv_util::{
 };
 use txn_types::{Key, WriteBatchFlags};
 
-use super::{write_engine_meta, RequestInspector, SchemaTask, WorkerType};
+use super::{RequestInspector, SchemaTask, WorkerType};
 use crate::{
     store::{
         cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
@@ -56,11 +56,12 @@ use crate::{
         notify_req_region_removed,
         peer::{Peer, StaleState},
         schema::{schema_file_is_matched_with_meta, shard_is_matched_with_meta},
-        util as _util, ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines,
-        MsgApplyResult, PdTask, PeerMsg, PersistReady, RaftApplyState, RaftCommand, RaftContext,
-        SignificantMsg, SnapState, StoreMeta, StoreMsg, Ticker, TrimOverBoundParameter,
-        PEER_TICK_CHECK_STALE_STATE, PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC,
-        PEER_TICK_SPLIT_CHECK, PEER_TICK_SWITCH_MEM_TABLE_CHECK,
+        util as _util, write_engine_meta, write_engine_meta_diff, ApplyMetrics, ApplyMsg,
+        CasualMessage, Config, CustomBuilder, Engines, MsgApplyResult, PdTask, PeerMsg,
+        PersistReady, RaftApplyState, RaftCommand, RaftContext, SignificantMsg, SnapState,
+        StoreMeta, StoreMsg, Ticker, TrimOverBoundParameter, PEER_TICK_CHECK_STALE_STATE,
+        PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK,
+        PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
     MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG,
@@ -2058,7 +2059,18 @@ impl<'a> PeerMsgHandler<'a> {
                     let mut shard_meta = store.shard_meta.take().unwrap();
                     shard_meta.data_sequence = to_truncate_idx;
                     shard_meta.set_property(TERM_KEY, &term.to_le_bytes());
-                    write_engine_meta(&mut self.ctx.raft_wb, peer_id, &shard_meta);
+                    if self.ctx.cfg.enable_kv_engine_meta_diff {
+                        write_engine_meta_diff(
+                            &self.ctx.global.engines.raft,
+                            &mut self.ctx.raft_wb,
+                            peer_id,
+                            &shard_meta,
+                            None,
+                            self.ctx.cfg.kv_engine_meta_diff_rewrite_percent,
+                        );
+                    } else {
+                        write_engine_meta(&mut self.ctx.raft_wb, peer_id, &shard_meta);
+                    }
                     self.peer.mut_store().shard_meta = Some(shard_meta);
                     persisted_log_idx = to_truncate_idx;
                     info!(

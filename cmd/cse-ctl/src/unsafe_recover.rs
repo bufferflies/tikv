@@ -16,12 +16,12 @@ use kvproto::{
 };
 use protobuf::Message;
 use rfengine::{
-    raft_state_key, region_state_key, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
-    REGION_META_KEY_BYTE, STORE_IDENT_KEY,
+    raft_state_key, region_state_key, RfEngine, WriteBatch, REGION_META_KEY_BYTE, STORE_IDENT_KEY,
 };
 use rfstore::store::{
+    load_raft_engine_meta,
     peer_storage::{collect_prefix_regions, load_region_state},
-    RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY,
+    write_engine_meta_bytes, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY,
 };
 use tikv_util::{
     codec::{bytes::decode_bytes, number::NumberEncoder},
@@ -98,11 +98,7 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
     let target_regions = if let Some(region_id) = args.region {
         let region_to_peers = rf.get_region_peer_map();
         let &peer_id = region_to_peers.get(&region_id).unwrap();
-        let v = rf
-            .get_state(peer_id, KV_ENGINE_META_KEY)
-            .expect("region not found");
-        let mut cs = kvenginepb::ChangeSet::new();
-        cs.merge_from_bytes(&v).unwrap();
+        let cs = load_raft_engine_meta(&rf, peer_id).unwrap();
         vec![(peer_id, region_id, cs.shard_ver)]
     } else if let Some(keyspace_id) = args.keyspace {
         let mut keyspace = keyspace_id.to_be_bytes();
@@ -243,7 +239,7 @@ fn create_empty_regions(rf: &RfEngine, empty_region_file: String, commit: bool) 
         let engine_meta = empty_region.to_engine_meta();
         info!("create engine meta {:?}", &engine_meta);
         let engine_meta_data = engine_meta.write_to_bytes().unwrap();
-        wb.set_state(peer_id, region_id, KV_ENGINE_META_KEY, &engine_meta_data);
+        write_engine_meta_bytes(&mut wb, peer_id, region_id, &engine_meta_data);
     }
     if commit {
         rf.write(wb).unwrap();

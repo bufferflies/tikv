@@ -39,8 +39,8 @@ use raft::eraftpb;
 use rfengine::RfEngine;
 use rfenginepb::ClusterBackupMeta;
 use rfstore::store::{
-    parse_raft_cmd, rlog, state::RaftState, ApplyMsgs, PdIdAllocator, PeerTag, PreprocessContext,
-    RegionIdVer, StoreMsg,
+    load_raft_engine_meta, parse_raft_cmd, rlog, state::RaftState, ApplyMsgs, PdIdAllocator,
+    PeerTag, PreprocessContext, RegionIdVer, StoreMsg,
 };
 use security::SecurityConfig;
 use slog_global::{debug, error, info, warn};
@@ -58,9 +58,9 @@ use crate::{
         ArchiveReader, StoreMeta,
     },
     common::{
-        collect_snapshot_meta_rlog_files, load_peer_raft_state, load_rf_engine_meta, now,
-        replay_wal_logs, retain_sst_files, send_request_to_store, RawRegion, RegionMetaGetter,
-        ReplayWalLogsContext, StorePeer, TableFile,
+        collect_snapshot_meta_rlog_files, load_peer_raft_state, now, replay_wal_logs,
+        retain_sst_files, send_request_to_store, RawRegion, RegionMetaGetter, ReplayWalLogsContext,
+        StorePeer, TableFile,
     },
     error::{
         Error,
@@ -1093,7 +1093,7 @@ impl BackupCluster {
             if region_id == 0 {
                 continue;
             }
-            let meta = match load_rf_engine_meta(rf, peer_id) {
+            let meta = match load_raft_engine_meta(rf, peer_id) {
                 Some(meta) => meta,
                 None => {
                     debug!(
@@ -1131,7 +1131,7 @@ impl BackupCluster {
             if region_id == 0 {
                 continue;
             }
-            let meta = match load_rf_engine_meta(rf, peer_id) {
+            let meta = match load_raft_engine_meta(rf, peer_id) {
                 Some(meta) => meta,
                 None => {
                     warn!(
@@ -1625,7 +1625,7 @@ impl BackupCluster {
 
         // Get new shard.
         // TODO: In-place update `old_shard`, other than get a new one from rf_engine.
-        let meta = load_rf_engine_meta(rf_engine, peer_id).unwrap();
+        let meta = load_raft_engine_meta(rf_engine, peer_id).unwrap();
         let new_shard = Self::create_backup_shard(
             rf_engine,
             old_shard.store_id,

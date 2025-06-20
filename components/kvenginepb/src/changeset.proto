@@ -43,7 +43,12 @@ message ChangeSet {
   ColumnarCompaction columnar_compaction = 24;
   UpdateVectorIndex update_vector_index = 25;
   bool clear_columnar = 26;
+  // Used for shard meta persist by diff.
+  Snapshot snapshot_diff = 27;
 }
+
+// A set of small changesets of the same peer.
+message ChangeSets { repeated ChangeSet change_sets = 1; }
 
 message Compaction {
   int32 cf = 1;

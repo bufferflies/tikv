@@ -124,6 +124,8 @@ pub(crate) const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(16); // S
 
 pub(crate) const RESTART_TSO_SVC_ENV_KEY: &str = "RESTART_TSO_SVC";
 
+pub(crate) const ENABLE_KV_ENGINE_META_DIFF_ENV_KEY: &str = "ENABLE_KV_ENGINE_META_DIFF";
+
 pub(crate) const MEMORY_CAPACITY_RATIO: f64 = 0.8; // Reserve 20% memory for PD, TiDB, and TiFlash.
 
 const DFS_LOAD_MEMORY_USAGE: u64 = 256 * 1024 * 1024; // 256MB
@@ -365,6 +367,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.raft_store.pd_store_heartbeat_tick_interval = ReadableDuration::millis(500);
         conf.raft_store.local_file_gc_timeout = ReadableDuration::secs(60);
         conf.raft_store.local_file_gc_tick_interval = ReadableDuration::secs(10);
+        conf.raft_store.enable_kv_engine_meta_diff = switches.enable_kv_engine_meta_diff;
 
         conf.rocksdb.writecf.block_size = ReadableSize::kb(2);
         conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
@@ -966,6 +969,7 @@ pub(crate) struct Switches {
     pub async_commit_switch_on: bool,
     pub ia_table_ratio: f64,
     pub vector_common_handle: bool,
+    pub enable_kv_engine_meta_diff: bool,
     pub txn_check_backup_ts: bool,
 }
 
@@ -994,6 +998,7 @@ impl Switches {
         let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
         let async_commit_switch_on = rng.gen_bool(env_param("ASYNC_COMMIT_RATIO", 0.1));
         let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
+        let enable_kv_engine_meta_diff = env_switch(ENABLE_KV_ENGINE_META_DIFF_ENV_KEY);
         let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.5);
 
         Self {
@@ -1010,6 +1015,7 @@ impl Switches {
             async_commit_switch_on,
             ia_table_ratio,
             vector_common_handle: rng.gen_bool(0.8),
+            enable_kv_engine_meta_diff,
             txn_check_backup_ts,
         }
     }

@@ -7,7 +7,8 @@ use kvproto::{
 };
 use protobuf::{Message, RepeatedField};
 use rfengine::{
-    raft_state_key, region_state_key, KV_ENGINE_META_KEY, PREPARE_BOOTSTRAP_KEY, STORE_IDENT_KEY,
+    raft_state_key, region_state_key, KV_ENGINE_META_DIFF_KEY, KV_ENGINE_META_KEY,
+    KV_ENGINE_META_SNAP_DIFF_KEY, PREPARE_BOOTSTRAP_KEY, STORE_IDENT_KEY,
 };
 use tikv_util::{box_err, store::new_peer};
 
@@ -122,6 +123,8 @@ pub fn clear_prepare_bootstrap_cluster(engines: &Engines, region: &metapb::Regio
     let raft_state_key = raft_state_key(region_ver);
     wb.set_state(peer_id, region_id, raft_state_key.chunk(), &[]);
     wb.set_state(peer_id, region_id, KV_ENGINE_META_KEY, &[]);
+    wb.set_state(peer_id, region_id, KV_ENGINE_META_DIFF_KEY, &[]);
+    wb.set_state(peer_id, region_id, KV_ENGINE_META_SNAP_DIFF_KEY, &[]);
     engines.raft.write(wb)?;
     engines.kv.remove_shard(region_id);
     Ok(())

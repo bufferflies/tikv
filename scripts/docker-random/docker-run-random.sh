@@ -136,6 +136,9 @@ while [[ $# -gt 0 ]]; do
 	--disable-ia-for-old-version)
 		RUN_ARGS+=("--disable-ia-for-old-version")
 		;;
+    --enable-kv-engine-meta-diff)
+        RUN_ARGS+=("--enable-kv-engine-meta-diff")
+        ;;
 	--help)
 		show_help
 		exit 0

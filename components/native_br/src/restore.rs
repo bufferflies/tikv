@@ -12,9 +12,9 @@ use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
 use kvproto::raft_serverpb::StoreIdent;
 use pd_client::PdClient;
 use protobuf::Message;
-use rfengine::{load_store_ident, region_state_key, RfEngine, KV_ENGINE_META_KEY, STORE_IDENT_KEY};
+use rfengine::{load_store_ident, region_state_key, RfEngine, STORE_IDENT_KEY};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
-use rfstore::store::load_region_state;
+use rfstore::store::{load_raft_engine_meta, load_region_state};
 use security::{GetSecurityManager, SecurityConfig};
 use tikv::config::TikvConfig;
 use tikv_util::{
@@ -146,9 +146,7 @@ fn update_local_region_state_store_id(
     let region_to_peers = rf.get_region_peer_map();
     for (region_id, peer_id) in region_to_peers {
         debug!("region: {} peer: {}", region_id, peer_id);
-        if let Some(val) = rf.get_state(peer_id, KV_ENGINE_META_KEY) {
-            let mut cs = kvenginepb::ChangeSet::default();
-            cs.merge_from_bytes(&val).unwrap();
+        if let Some(cs) = load_raft_engine_meta(rf, peer_id) {
             let mut region_local_state = load_region_state(rf, peer_id, cs.shard_ver).unwrap();
             let peers = region_local_state.mut_region().mut_peers();
 

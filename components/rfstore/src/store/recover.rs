@@ -17,16 +17,15 @@ use protobuf::Message;
 use raft_proto::eraftpb;
 use raftstore::store::metrics::BLACKLIST_REGION_GAUGE;
 use rfengine::{
-    load_store_ident, raft_state_key, region_state_key, WriteBatch, KV_ENGINE_META_KEY,
-    TRUNCATE_ALL_INDEX,
+    load_store_ident, raft_state_key, region_state_key, WriteBatch, TRUNCATE_ALL_INDEX,
 };
 use slog_global::info;
 use tikv_util::{debug, warn};
 
 use crate::store::{
-    is_change_set_affect_mem_table, is_property_change_set, load_raft_truncated_state,
-    load_region_state, rlog, Applier, ApplyContext, CustomRaftLog, PeerTag, RaftApplyState,
-    RaftState, RegionIdVer, TERM_KEY,
+    is_change_set_affect_mem_table, is_property_change_set, load_raft_engine_meta,
+    load_raft_truncated_state, load_region_state, rlog, Applier, ApplyContext, CustomRaftLog,
+    PeerTag, RaftApplyState, RaftState, RegionIdVer, TERM_KEY,
 };
 
 #[derive(Clone)]
@@ -384,13 +383,8 @@ impl kvengine::MetaIterator for RecoverHandler {
 
         for (region_id, peer_id) in region_to_peers {
             tikv_util::set_current_region(region_id);
-            if let Some(val) = self.rf_engine.get_state(peer_id, KV_ENGINE_META_KEY) {
-                let mut cs = kvenginepb::ChangeSet::new();
-                if let Err(e) = cs.merge_from_bytes(&val) {
-                    return Err(kvengine::Error::ErrOpen(e.to_string()));
-                }
+            if let Some(cs) = load_raft_engine_meta(&self.rf_engine, peer_id) {
                 assert_eq!(region_id, cs.shard_id);
-
                 let region_local_state = load_region_state(&self.rf_engine, peer_id, cs.shard_ver)
                     .unwrap_or_else(|| {
                         panic!(

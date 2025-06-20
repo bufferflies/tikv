@@ -183,15 +183,6 @@ pub fn generate_etcd_connect_opt(security: &SecurityConfig) -> Result<ConnectOpt
     }
 }
 
-pub fn load_rf_engine_meta(rf: &rfengine::RfEngine, peer_id: u64) -> Option<kvenginepb::ChangeSet> {
-    rf.get_state(peer_id, rfengine::KV_ENGINE_META_KEY)
-        .map(|engine_meta_val| {
-            let mut cs = kvenginepb::ChangeSet::new();
-            cs.merge_from_bytes(&engine_meta_val).unwrap();
-            cs
-        })
-}
-
 pub fn load_peer_raft_state(
     rf: &rfengine::RfEngine,
     peer_id: u64,

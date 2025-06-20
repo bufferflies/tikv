@@ -52,15 +52,14 @@ use profile::*;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use rfengine::{
-    load_store_ident, raft_state_key, Error, RfEngine, WriteBatch, KV_ENGINE_META_KEY,
-    RAFT_TRUNCATED_STATE_KEY,
+    load_store_ident, raft_state_key, Error, RfEngine, WriteBatch, RAFT_TRUNCATED_STATE_KEY,
 };
 use rfstore::{
     store::{
         peer_storage::{collect_prefix_regions, load_raft_engine_meta, load_region_state},
         state::RaftState,
-        Callback, CasualMessage, RegionSnapshot, StoreMsg, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM,
-        TERM_KEY,
+        write_engine_meta_bytes, Callback, CasualMessage, RegionSnapshot, StoreMsg,
+        RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY,
     },
     RaftRouter, RaftStoreRouter,
 };
@@ -234,7 +233,7 @@ impl StatusServer {
         props.mut_keys().push(TERM_KEY.to_string());
         props.mut_values().push(term.to_le_bytes().to_vec());
         let cs_val = cs.write_to_bytes().unwrap();
-        wb.set_state(peer_id, region_id, KV_ENGINE_META_KEY, &cs_val);
+        write_engine_meta_bytes(wb, peer_id, region_id, &cs_val);
         Ok(cs)
     }
 
@@ -1075,16 +1074,15 @@ impl StatusServer {
             let raft_log_term = rf
                 .get_term(peer_id, origin_last_index)
                 .unwrap_or(RAFT_INIT_LOG_TERM);
-            let old_kv_engine_meta = match rf.get_state(peer_id, KV_ENGINE_META_KEY) {
-                Some(meta) => meta,
-                None => {
-                    return Ok(bad_request_resp(
-                        format!("peer {} kv engine meta not exists", peer_id).as_str(),
-                    ));
-                }
+            let Some(old_cs) = load_raft_engine_meta(&rf, peer_id) else {
+                return Ok(bad_request_resp(
+                    format!(
+                        "region {} peer {} raft engine meta not exists",
+                        region_id, peer_id
+                    )
+                    .as_str(),
+                ));
             };
-            let mut old_cs = kvenginepb::ChangeSet::new();
-            old_cs.merge_from_bytes(&old_kv_engine_meta).unwrap();
             let snap = old_cs.get_snapshot();
             let inner_key_off = snap.get_inner_key_off();
             let mut properties = kvengine::Properties::new();

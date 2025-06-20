@@ -237,7 +237,6 @@ pub fn parse_raft_cmd(
         parse_data_at(data, index, tag)
     }
 }
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PeerTag {
     pub store_id: u64,

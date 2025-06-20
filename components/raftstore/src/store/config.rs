@@ -333,6 +333,12 @@ pub struct Config {
     pub raft_log_gc_no_kv_count: u64,
     /// Whether to tick slower in idle worker.
     pub idle_worker_tick_slow: bool,
+
+    /// Whether to enable kv engine meta diff.
+    pub enable_kv_engine_meta_diff: bool,
+
+    /// The percent of kv engine meta diff to rewrite. Default is 50.
+    pub kv_engine_meta_diff_rewrite_percent: usize,
 }
 
 impl Default for Config {
@@ -448,6 +454,8 @@ impl Default for Config {
             check_peers_availability_interval: ReadableDuration::secs(30),
             ia_kv_size_discount: 0.5,
             idle_worker_tick_slow: true,
+            enable_kv_engine_meta_diff: false,
+            kv_engine_meta_diff_rewrite_percent: 20,
         }
     }
 }
@@ -656,6 +664,15 @@ impl Config {
             return Err(box_err!(
                 "region-compact-tombstones-percent must between 1 and 100, current value is {}",
                 self.region_compact_tombstones_percent
+            ));
+        }
+
+        if self.kv_engine_meta_diff_rewrite_percent < 1
+            || self.kv_engine_meta_diff_rewrite_percent > 100
+        {
+            return Err(box_err!(
+                "kv-engine-meta-diff-rewrite-percent must between 1 and 100, current value is {}",
+                self.kv_engine_meta_diff_rewrite_percent
             ));
         }
 

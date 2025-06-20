@@ -365,11 +365,13 @@ fn prepare_cluster(
     // TODO: adjust rate for oss chaos.
     oss.set_max_write_bytes_per_sec(KV_TARGET_FILE_SIZE.0 as usize * 640);
 
+    let enable_kv_engine_meta_diff = rand::thread_rng().gen_bool(0.5);
     info!("prepare_cluster";
         "per_keyspace_configs" => ?per_keyspace_configs,
         "dfs_conn_opts" => ?dfs_config.conn_options,
         "rfengine_target_file_size" => ?rfengine_target_file_size,
         "dfs_worker_memory_limit" => ?dfs_worker_memory_limit,
+        "enable_kv_engine_meta_diff" => ?enable_kv_engine_meta_diff,
     );
 
     let dfs = dfs_config.clone();
@@ -387,6 +389,7 @@ fn prepare_cluster(
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
+        conf.raft_store.enable_kv_engine_meta_diff = enable_kv_engine_meta_diff;
 
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(96);

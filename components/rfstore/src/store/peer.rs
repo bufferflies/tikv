@@ -1962,12 +1962,18 @@ impl<'a> PreprocessRef<'a> {
                 None
             };
         let prepare_type = FilePrepareType::from_shard_meta(shard_meta);
-        ctx.raft_wb.set_state(
-            peer_id,
-            region_id,
-            KV_ENGINE_META_KEY,
-            &shard_meta.marshal(),
-        );
+        if ctx.cfg.enable_kv_engine_meta_diff {
+            write_engine_meta_diff(
+                ctx.raft,
+                ctx.raft_wb,
+                peer_id,
+                shard_meta,
+                Some(&cs),
+                ctx.cfg.kv_engine_meta_diff_rewrite_percent,
+            );
+        } else {
+            write_engine_meta(ctx.raft_wb, peer_id, shard_meta);
+        }
         if cs.has_initial_flush() || cs.has_snapshot() || cs.has_restore_shard() {
             if let Some(parent_id) = opt_parent_id {
                 ctx.add_remove_dependent(parent_id, self.region_id());
@@ -2185,6 +2191,7 @@ impl<'a> PreprocessRef<'a> {
             peer_state,
             merge_state,
         );
+        // NOTE: We write the whole meta here in case of corner case.
         write_engine_meta(ctx.raft_wb, self.peer_id(), new_meta);
         // The raft state key changed when region version change, we need to set it
         // here. We handle committed entries before update peer storage's raft

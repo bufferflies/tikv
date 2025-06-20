@@ -262,6 +262,8 @@ fn test_serde_custom_tikv_config() {
         check_peers_availability_interval: ReadableDuration::secs(30),
         ia_kv_size_discount: 0.5,
         idle_worker_tick_slow: true,
+        enable_kv_engine_meta_diff: false,
+        kv_engine_meta_diff_rewrite_percent: 20,
     };
     value.pd = PdConfig::new(vec!["example.com:443".to_owned()]);
     let titan_cf_config = TitanCfConfig {

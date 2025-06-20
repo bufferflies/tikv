@@ -119,6 +119,13 @@ pub struct Config {
     pub ia_kv_size_discount: f64,
 
     pub idle_worker_tick_slow: bool,
+
+    // Enable kv engine meta persist by diff. Default is false.
+    // NOTE: Not support change to disable once enabled.
+    pub enable_kv_engine_meta_diff: bool,
+
+    // The percent of kv engine meta diff to rewrite. Default is 50.
+    pub kv_engine_meta_diff_rewrite_percent: usize,
 }
 
 impl Default for Config {
@@ -175,6 +182,8 @@ impl Default for Config {
             peer_idle_duration: ReadableDuration::secs(180),
             ia_kv_size_discount: 0.5,
             idle_worker_tick_slow: true,
+            enable_kv_engine_meta_diff: false,
+            kv_engine_meta_diff_rewrite_percent: 20,
         }
     }
 }
@@ -246,6 +255,10 @@ impl Config {
         cfg.ia_kv_size_discount = old.ia_kv_size_discount;
 
         cfg.idle_worker_tick_slow = old.idle_worker_tick_slow;
+
+        cfg.enable_kv_engine_meta_diff = old.enable_kv_engine_meta_diff;
+
+        cfg.kv_engine_meta_diff_rewrite_percent = old.kv_engine_meta_diff_rewrite_percent;
 
         if cfg!(debug_assertions) && cfg.raft_base_tick_interval.as_millis() < 100 {
             // It is a test config, adjust the fields not included in the old.

@@ -227,13 +227,19 @@ impl ShardMeta {
     }
 
     fn move_down_file(&mut self, id: u64, cf: i32, level: u32, meta_offset: u32) {
-        let fm = self.files.get_mut(&id).unwrap();
+        let tag = self.tag();
+        let fm = self
+            .files
+            .get_mut(&id)
+            .unwrap_or_else(|| panic!("{} move_down_file, file {} not found", tag, id));
         assert_eq!(
             fm.get_level() + 1,
             level,
-            "fm.level {} level {}",
+            "{} fm.level {} level {} id: {}",
+            tag,
             fm.get_level(),
-            level
+            level,
+            id
         );
         if fm.cf == -1 {
             fm.cf = cf as i8;
@@ -350,6 +356,11 @@ impl ShardMeta {
         }
         if cs.get_clear_columnar() {
             self.clear_columnar();
+            return;
+        }
+        // NOTE: Used for shard meta persist by diff.
+        if cs.has_snapshot_diff() {
+            self.apply_snapshot_diff(cs);
             return;
         }
         if !cs.get_property_key().is_empty() {
@@ -1064,6 +1075,24 @@ impl ShardMeta {
         self.vector_indexes.push(vec_idx)
     }
 
+    pub fn apply_snapshot_diff(&mut self, cs: &pb::ChangeSet) {
+        self.ver = cs.get_shard_ver();
+        let snap = cs.get_snapshot_diff();
+        if snap.has_properties() {
+            let properties = std::mem::take(&mut self.properties);
+            self.properties = properties.apply_pb(snap.get_properties());
+        }
+        if snap.get_data_sequence() > 0 {
+            self.data_sequence = snap.get_data_sequence();
+        }
+        if snap.has_schema_meta() {
+            let schema_meta = snap.get_schema_meta();
+            self.schema.schema_file_id = schema_meta.get_file_id();
+            self.schema.schema_file_ver = schema_meta.get_version();
+            self.schema.schema_restore_ver = schema_meta.get_restore_version();
+        }
+    }
+
     pub fn clear_columnar(&mut self) {
         info!("{} shard_meta apply clear_columnar", self.tag());
         self.schema.clear();
@@ -1075,6 +1104,27 @@ impl ShardMeta {
                 && fm.file_type != FileType::Schema
                 && fm.file_type != FileType::VectorIndex
         });
+    }
+
+    pub fn new_snapshot_diff_pb(&self) -> pb::ChangeSet {
+        let mut cs = new_change_set(self.id, self.ver);
+        cs.set_sequence(self.seq);
+        let snap = cs.mut_snapshot_diff();
+        let props = snap.mut_properties();
+        props.shard_id = self.id;
+        if let Some(term) = self.get_property(TERM_KEY) {
+            props.keys.push(TERM_KEY.to_string());
+            props.values.push(term.to_vec());
+        }
+        snap.set_data_sequence(self.data_sequence);
+        if self.schema.has_value() {
+            let schema_meta = snap.mut_schema_meta();
+            schema_meta.set_file_id(self.schema.file_id());
+            schema_meta.set_version(self.schema.file_ver());
+            schema_meta.set_restore_version(self.schema.restore_ver());
+            schema_meta.set_keyspace_id(self.range.keyspace_id);
+        }
+        cs
     }
 
     fn new_snapshop_pb(&self) -> pb::Snapshot {
@@ -1664,6 +1714,11 @@ impl SchemaFileMeta {
     #[inline]
     pub fn restore_ver(&self) -> u64 {
         self.schema_restore_ver
+    }
+
+    #[inline]
+    pub fn has_value(&self) -> bool {
+        self.schema_file_id > 0 || self.schema_file_ver > 0 || self.schema_restore_ver > 0
     }
 
     pub fn from_snapshot(snap: &pb::Snapshot) -> Self {
