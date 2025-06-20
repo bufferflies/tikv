@@ -40,6 +40,7 @@ use kvengine::{
 use kvproto::{
     brpb::create_backup, deadlock::create_deadlock, diagnosticspb_grpc::create_diagnostics,
     import_sstpb_grpc::create_import_sst, raft_serverpb::StoreIdent,
+    resource_usage_agent::create_resource_metering_pub_sub,
 };
 use overload_protector::{OverloadProtector, OverloadProtectorWorker};
 use pd_client::{
@@ -154,6 +155,7 @@ struct Servers {
     server: Server<RaftRouter, resolve::PdStoreAddrResolver>,
     node: Node,
     importer: Arc<SstImporter>,
+    rsmeter_pubsub_service: resource_metering::PubSubService,
 }
 
 impl TikvServer {
@@ -644,9 +646,10 @@ impl TikvServer {
         let (address_change_notifier, single_target_worker) = resource_metering::init_single_target(
             self.config.resource_metering.receiver_address.clone(),
             self.env.clone(),
-            data_sink_reg_handle,
+            data_sink_reg_handle.clone(),
         );
         self.to_stop.push(single_target_worker);
+        let rsmeter_pubsub_service = resource_metering::PubSubService::new(data_sink_reg_handle);
 
         let cfg_manager = resource_metering::ConfigManager::new(
             self.config.resource_metering.clone(),
@@ -804,6 +807,7 @@ impl TikvServer {
             server,
             node,
             importer,
+            rsmeter_pubsub_service,
         });
 
         server_config
@@ -850,6 +854,16 @@ impl TikvServer {
                 &self.config.pessimistic_txn,
             )
             .unwrap_or_else(|e| fatal!("failed to start lock manager: {}", e));
+
+        if servers
+            .server
+            .register_service(create_resource_metering_pub_sub(
+                servers.rsmeter_pubsub_service.clone(),
+            ))
+            .is_some()
+        {
+            fatal!("failed to register resource metering pubsub service");
+        }
 
         // Backup service.
         let mut backup_worker = Box::new(self.background_worker.lazy_build("backup-endpoint"));
