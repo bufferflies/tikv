@@ -16,7 +16,9 @@ use std::{
 };
 
 use bytes::Bytes;
-use tikv_util::{sys::thread::StdThreadBuildWrapper, time::UnixSecs};
+use tikv_util::{
+    sys::thread::StdThreadBuildWrapper, time::UnixSecs, worker_pool::WorkerPoolHandle,
+};
 
 #[cfg(feature = "debug-trace-ia-segments")]
 use crate::ia::debug::*;
@@ -26,7 +28,6 @@ use crate::{
         types::{FileSegmentData, FileSegmentIdent},
     },
     table::{Error, Result},
-    util::WorkerPoolHandle,
 };
 
 /// A simple wrapper for `S3Fifo`.
@@ -615,9 +616,9 @@ mod benches {
     use futures::future::join_all;
     use rand::prelude::*;
     use test::black_box;
+    use tikv_util::worker_pool::WorkerPool;
 
     use super::*;
-    use crate::util::WorkerPool;
 
     #[bench]
     fn bench_s3fifo_1(b: &mut test::Bencher) {

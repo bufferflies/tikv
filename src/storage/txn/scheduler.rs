@@ -267,7 +267,7 @@ struct SchedulerInner<L: LockManager> {
     worker_pool: ReadPoolHandle,
 
     // background pool, introduced for deadline check tasks
-    background_pool: Arc<tokio::runtime::Runtime>,
+    background_pool: Arc<tikv_util::worker_pool::WorkerPool>,
 
     // used to control write flow
     running_write_bytes: CachePadded<AtomicUsize>,
@@ -468,24 +468,22 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let background_pool = {
             let engine_for_background = Arc::new(std::sync::Mutex::new(engine.clone()));
             let props = tikv_util::thread_group::current_properties();
-            Arc::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .thread_name_fn(move || {
-                        static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-                        let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-                        format!("sched-background-{}", id)
-                    })
-                    .worker_threads(config.scheduler_background_worker_pool_size)
-                    .after_start_wrapper(move || {
-                        let engine = engine_for_background.lock().unwrap().clone();
-                        set_tls_engine(engine);
-                        tikv_util::thread_group::set_properties(props.clone());
-                    })
-                    .before_stop_wrapper(|| unsafe { destroy_tls_engine::<E>() })
-                    .enable_all()
-                    .build()
-                    .unwrap(),
-            )
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_name_fn(move || {
+                    static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+                    let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+                    format!("sched-background-{}", id)
+                })
+                .worker_threads(config.scheduler_background_worker_pool_size)
+                .after_start_wrapper(move || {
+                    let engine = engine_for_background.lock().unwrap().clone();
+                    set_tls_engine(engine);
+                    tikv_util::thread_group::set_properties(props.clone());
+                })
+                .before_stop_wrapper(|| unsafe { destroy_tls_engine::<E>() })
+                .enable_all()
+                .build()
+                .unwrap()
         };
 
         let inner = Arc::new(SchedulerInner {
@@ -495,7 +493,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             running_write_bytes: AtomicUsize::new(0).into(),
             sched_pending_write_threshold: config.scheduler_pending_write_threshold.0 as usize,
             worker_pool: read_pool_handle,
-            background_pool,
+            background_pool: Arc::new(background_pool.into()),
             lock_mgr,
             concurrency_manager,
             pipelined_pessimistic_lock: dynamic_configs.pipelined_pessimistic_lock,

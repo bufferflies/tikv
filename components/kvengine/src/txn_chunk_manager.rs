@@ -17,7 +17,12 @@ use cloud_encryption::EncryptionKey;
 use dashmap::{mapref::entry::Entry, DashMap};
 use futures::executor::block_on;
 use regex::Regex;
-use tikv_util::{box_err, config::ReadableDuration, time::Instant};
+use tikv_util::{
+    box_err,
+    config::ReadableDuration,
+    time::Instant,
+    worker_pool::{WorkerPool, WorkerPoolHandle},
+};
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 use crate::{
@@ -31,7 +36,6 @@ use crate::{
         txn_file::TxnChunk,
         TxnCtx, TxnFile, TxnFileId,
     },
-    util::{WorkerPool, WorkerPoolHandle},
     Error, Result,
 };
 

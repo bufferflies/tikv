@@ -18,6 +18,7 @@ use tikv_util::{
     codec::number::{I64_SIZE, U8_SIZE},
     deadline::Deadline,
     time::Instant,
+    worker_pool::{WorkerPool, WorkerPoolHandle},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -38,7 +39,6 @@ use crate::{
     },
     table::{file::FdCache, Error, Result},
     try_some,
-    util::{WorkerPool, WorkerPoolHandle},
 };
 
 const MANIFEST_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
