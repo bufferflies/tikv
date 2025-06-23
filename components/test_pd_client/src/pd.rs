@@ -879,21 +879,28 @@ impl PdCluster {
         {
             hash_map::Entry::Occupied(mut e) => {
                 if e.get().safe_point > svc_safe_point.safe_point {
-                    return Err(box_err!(
-                        "service safe point rollback, current {:?}, new {:?}",
+                    warn!(
+                        "service safe point rollback, current {:?}, requested {:?}",
                         e.get(),
                         svc_safe_point
-                    ));
+                    );
+                    return Err(Error::UnsafeServiceGcSafePoint {
+                        requested: svc_safe_point.safe_point.into(),
+                        current_minimal: e.get().safe_point.into(),
+                    });
                 }
                 e.insert(svc_safe_point);
             }
             hash_map::Entry::Vacant(e) => {
                 if self.gc_safe_point > svc_safe_point.safe_point {
-                    return Err(box_err!(
-                        "service safe point smaller than gc safe point {}, new {:?}",
-                        self.gc_safe_point,
-                        svc_safe_point
-                    ));
+                    warn!(
+                        "service safe point smaller than gc safe point {}, requested {:?}",
+                        self.gc_safe_point, svc_safe_point
+                    );
+                    return Err(Error::UnsafeServiceGcSafePoint {
+                        requested: svc_safe_point.safe_point.into(),
+                        current_minimal: self.gc_safe_point.into(),
+                    });
                 }
                 e.insert(svc_safe_point);
             }

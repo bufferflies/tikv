@@ -7,6 +7,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use futures::executor::block_on;
 use pd_client::PdClient;
 use rfenginepb::ClusterBackupMeta;
 use tikv_util::{
@@ -24,7 +25,7 @@ use crate::{
         update_service_safe_point, BackupConfig, BackupType, IncrementalBackupFile, Result,
         SharedResult,
     },
-    error::SharedError,
+    error::{Error, SharedError},
     metrics::{NATIVE_BR_BACKUP_ERROR, NATIVE_BR_BACKUP_SUCCESS},
 };
 
@@ -66,6 +67,7 @@ impl BackupWorker {
         let mut worker = LazyWorker::new("backup-worker");
         let scheduler = worker.scheduler();
         let runner = BackupRunner::new(config, pd_client, backup_interval, scheduler.clone());
+        runner.init();
         let ok = if runner.periodic_backup_enabled() {
             worker.start_with_timer(runner)
         } else {
@@ -131,6 +133,35 @@ impl BackupRunner {
             last_backup_ts: 0,
             last_backup_meta: None,
             scheduler,
+        }
+    }
+
+    fn init(&self) {
+        if self.periodic_backup_enabled() {
+            match Self::init_service_safe_point(self.pd_client.as_ref()) {
+                Ok(safe_point) => {
+                    info!("backup worker: init service safe point: {}", safe_point);
+                }
+                Err(e) => {
+                    warn!("backup worker: init service safe point failed"; "err" => ?e);
+                }
+            }
+        }
+    }
+
+    fn init_service_safe_point(pd_client: &dyn PdClient) -> Result<u64> {
+        let gc_safe_point = block_on(pd_client.get_gc_safe_point())?;
+        match update_service_safe_point(pd_client, gc_safe_point) {
+            Ok(()) => Ok(gc_safe_point),
+            Err(Error::PdError(pd_client::Error::UnsafeServiceGcSafePoint {
+                requested,
+                current_minimal,
+            })) => {
+                debug_assert_eq!(requested, gc_safe_point.into());
+                info!("backup worker: service safe point has been set"; "current" => ?current_minimal);
+                Ok(current_minimal.into_inner())
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -261,5 +292,33 @@ impl RunnableWithTimer for BackupRunner {
             .unwrap_or_default();
         interval -= now.as_secs() % interval;
         Duration::from_secs(interval)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use test_pd_client::TestPdClient;
+
+    use super::*;
+
+    #[test]
+    fn test_init_service_safe_point() {
+        test_util::init_log_for_test();
+
+        let pd_client = TestPdClient::new(1, false);
+        pd_client.set_bootstrap(true);
+        pd_client.set_gc_safe_point(1000).unwrap();
+
+        assert_eq!(
+            BackupRunner::init_service_safe_point(&pd_client).unwrap(),
+            1000
+        );
+
+        update_service_safe_point(&pd_client, 2000).unwrap();
+        // Will try to init with 1000.
+        assert_eq!(
+            BackupRunner::init_service_safe_point(&pd_client).unwrap(),
+            2000
+        );
     }
 }
