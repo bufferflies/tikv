@@ -13,11 +13,7 @@ use std::{
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     result,
-    sync::{
-        atomic,
-        atomic::{AtomicBool, AtomicU64},
-        Arc,
-    },
+    sync::{atomic::AtomicU64, Arc},
     time::Duration,
 };
 
@@ -26,7 +22,6 @@ use bytes::Bytes;
 pub use config::{Config as DFSConfig, ConnOptions as DFSConnOptions};
 use file_system;
 use metrics::*;
-use moka::future::ConcurrentCacheExt;
 pub use s3::*;
 use thiserror::Error;
 use tikv_util::time::Instant;
@@ -212,85 +207,6 @@ impl TryFrom<&str> for FileType {
                 return Err(format!("invalid suffix: {value}"));
             }
         })
-    }
-}
-
-#[derive(Clone)]
-pub struct CacheFs {
-    cache: moka::future::Cache<u64, Bytes>,
-    s3_fs: Arc<S3Fs>,
-}
-
-impl CacheFs {
-    pub fn new(cache_size: u64, s3_fs: Arc<S3Fs>) -> Self {
-        let builder = moka::future::CacheBuilder::new(cache_size);
-        // Do not set TTL to make the memory usage stable over time.
-        let builder = builder.weigher(|_, v: &Bytes| v.len() as u32);
-        let cache = builder.build();
-        Self { cache, s3_fs }
-    }
-
-    async fn read_file_inner(&self, file_id: u64, opts: Options) -> Result<Bytes> {
-        let s3_fs = self.s3_fs.clone();
-        let cache_miss = Arc::new(AtomicBool::new(false));
-        let cache_miss_clone = cache_miss.clone();
-        let file = self
-            .cache
-            .try_get_with(file_id, async move {
-                cache_miss_clone.store(true, atomic::Ordering::Relaxed);
-                let full_range_opts = Options {
-                    file_type: opts.file_type,
-                    shard_id: opts.shard_id,
-                    shard_ver: opts.shard_ver,
-                    start_off: 0,
-                    end_off: None,
-                };
-                s3_fs.read_file(file_id, full_range_opts).await
-            })
-            .await
-            .map_err(|e| e.as_ref().clone())?;
-        if cache_miss.load(atomic::Ordering::Acquire) {
-            // In case the CacheFS exceeds its capacity, we explicitly sync it when new
-            // entry is added.
-            self.cache.sync();
-            KVENGINE_CACHEFS_REQ_COUNTER_VEC
-                .with_label_values(&["miss"])
-                .inc();
-        } else {
-            KVENGINE_CACHEFS_REQ_COUNTER_VEC
-                .with_label_values(&["hit"])
-                .inc();
-        }
-        if let Some(end_off) = opts.end_off {
-            Ok(file.slice(opts.start_off as usize..end_off as usize))
-        } else {
-            Ok(file.slice(opts.start_off as usize..))
-        }
-    }
-}
-
-#[async_trait]
-impl Dfs for CacheFs {
-    /// Note: `CacheFs` will cache the whole object, even if `read_file` just
-    /// read part of it.
-    async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
-        self.read_file_inner(file_id, opts).await
-    }
-
-    async fn create(&self, _file_id: u64, _data: Bytes, _opts: Options) -> Result<()> {
-        panic!("Do not call");
-    }
-
-    async fn remove(&self, _file_id: u64, _file_len: Option<u64>, _opts: Options) {
-        panic!("Do not call");
-    }
-
-    async fn permanently_remove(&self, _file_id: u64, _opts: Options) -> Result<()> {
-        panic!("Do not call");
-    }
-
-    fn get_runtime(&self) -> &Runtime {
-        self.s3_fs.get_runtime()
     }
 }
 

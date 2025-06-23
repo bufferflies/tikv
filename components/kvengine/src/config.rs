@@ -156,7 +156,7 @@ impl Default for Config {
             dfs_load_concurrency_per_request: 16,
             fd_cache_capacity: DEFAULT_FD_CACHE_CAPCITY,
             checksum_type: ChecksumType::Crc32,
-            block_cache_type: BlockCacheType::Moka,
+            block_cache_type: BlockCacheType::Quick,
             blob_table_build_options: Default::default(),
             per_keyspace_configs: vec![],
             ia: IaConfig {

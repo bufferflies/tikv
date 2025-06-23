@@ -893,7 +893,6 @@ impl ServerCluster {
                 },
                 txn_chunk_target_block_size: TXN_CHUNK_TARGET_BLOCK_SIZE,
                 cop_block_cache_size: opts.cop_block_cache_size,
-                cop_block_cache_type: opts.cop_block_cache_type,
                 cop_block_size: tikv_config.rocksdb.writecf.block_size,
                 data_dir: data_dir.to_string_lossy().into_owned(),
                 native_br: NativeBrConfig {
@@ -1405,8 +1404,6 @@ pub struct TikvWorkerOptions {
     pub threads_cnt: usize,
     pub kv_target_file_size: ReadableSize,
     pub cop_block_cache_size: ReadableSize,
-    pub cop_block_cache_type: BlockCacheType,
-
     pub register: bool,
 
     pub ia_segment_size: i64,
@@ -1427,7 +1424,6 @@ impl Default for TikvWorkerOptions {
             threads_cnt: 2,
             kv_target_file_size: ReadableSize::kb(16),
             cop_block_cache_size: ReadableSize::mb(8),
-            cop_block_cache_type: BlockCacheType::Quick,
             register: true,
             ia_segment_size: IA_SEGMENT_SIZE_DEF,
             ia_freq_update_interval: IA_FREQ_UPDATE_INTERVAL_DEF,

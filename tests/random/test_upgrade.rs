@@ -317,7 +317,6 @@ fn prepare_cluster(
     // Start tikv-workers.
     let mut tikv_worker_opts = TikvWorkerOptions {
         cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
-        cop_block_cache_type: switches.block_cache_type,
         ..Default::default()
     };
     if upgrade_switches.disable_ia_for_old_version {

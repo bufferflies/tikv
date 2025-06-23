@@ -167,16 +167,8 @@ fn start_server(
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_config));
 
-    // CacheFs is only used for remote coprocessor.
-    let cache_fs = {
-        Arc::new(kvengine::dfs::CacheFs::new(
-            config.cop_cache_size.0,
-            s3fs.clone(),
-        ))
-    };
-
     let block_cache = BlockCache::new(
-        config.cop_block_cache_type,
+        BlockCacheType::Quick,
         config.cop_block_cache_size.0,
         config.cop_block_size.0 as usize,
     );
@@ -313,7 +305,6 @@ fn start_server(
         checksum_type,
         thread_pool: thread_pool.handle().clone(),
         s3fs: s3fs.clone(),
-        cache_fs,
         pd: pd.clone(),
         load_manager: load_manager.clone(),
         br_manager,
@@ -733,9 +724,7 @@ pub struct Config {
     pub data_dir: String,
     pub register: bool,
     pub cop_addr: String,
-    pub cop_cache_size: ReadableSize,
     pub cop_block_cache_size: ReadableSize,
-    pub cop_block_cache_type: BlockCacheType,
     // Used to calculate block cache capacity of items. Should be the same as tikv-server.
     pub cop_block_size: ReadableSize,
     pub report_wru: bool,
@@ -779,6 +768,7 @@ impl Default for Config {
     fn default() -> Self {
         let mut pd = pd_client::Config::default();
         pd.endpoints.clear();
+        let block_cache_size = SysQuota::memory_limit_in_bytes() * 2 / 10;
         Config {
             addr: String::from("0.0.0.0:19000"),
             pd,
@@ -791,9 +781,7 @@ impl Default for Config {
             register: false,
             native_br: NativeBrConfig::default(),
             cop_addr: String::from("0.0.0.0:9500"),
-            cop_cache_size: ReadableSize::gb(1),
-            cop_block_cache_size: ReadableSize::default(),
-            cop_block_cache_type: BlockCacheType::Moka,
+            cop_block_cache_size: ReadableSize(block_cache_size),
             cop_block_size: ReadableSize::kb(32),
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,

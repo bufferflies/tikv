@@ -19,8 +19,7 @@ use hyper::{
 };
 use kvengine::{
     context::{IaCtx, PrepareType, SnapCtx},
-    dfs,
-    dfs::{CacheFs, S3Fs},
+    dfs::S3Fs,
     table::{columnar::SchemaFile, sstable::BlockCache, ChecksumType},
     txn_chunk_manager::TxnChunkManager,
     SnapAccess,
@@ -63,7 +62,6 @@ pub(crate) struct Context {
     pub checksum_type: ChecksumType,
     pub thread_pool: tokio::runtime::Handle,
     pub s3fs: Arc<S3Fs>,
-    pub cache_fs: Arc<CacheFs>,
     pub load_manager: Arc<LoadDataManager>,
     pub br_manager: Arc<NativeBrManager>,
     pub replication_scheduler: Option<ReplicationScheduler>,
@@ -81,15 +79,9 @@ pub(crate) struct Context {
 }
 
 impl Context {
-    pub(crate) fn get_snap_ctx(&self, use_cache_fs: bool) -> SnapCtx {
-        let dfs: Arc<dyn dfs::Dfs> = if use_cache_fs {
-            self.cache_fs.clone() as _
-        } else {
-            self.s3fs.clone() as _
-        };
-
+    pub(crate) fn get_snap_ctx(&self) -> SnapCtx {
         SnapCtx {
-            dfs,
+            dfs: self.s3fs.clone(),
             master_key: self.master_key.clone(),
             block_cache: self.block_cache.clone(),
             vector_index_cache: None,
@@ -333,8 +325,7 @@ async fn handle_remote_coprocessor(
 
     let req_type = cop_req.get_tp();
     let snap_start = Instant::now_coarse();
-    let use_cache_fs = matches!(req_type, REQ_TYPE_DAG);
-    let snap_ctx = ctx.get_snap_ctx(use_cache_fs);
+    let snap_ctx = ctx.get_snap_ctx();
     let snap_access_res =
         SnapAccess::construct_snapshot(&tag, &snap_ctx, mem_data, snap_data).await;
     if let Err(err) = snap_access_res.as_ref() {

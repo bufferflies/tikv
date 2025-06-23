@@ -101,7 +101,7 @@ pub async fn remote_handle_request(
     let req_body = remote_req.req_body.clone();
     let resp = remote_ctx
         .remote_request_cache
-        .try_get_with(key, async move {
+        .get_or_insert_async(&key, async move {
             let resp_body = remote_request(
                 remote_ctx,
                 &remote_ctx.remote_worker_url,
@@ -174,7 +174,7 @@ pub struct RemoteContextCore {
     pub cop_min_blocks_size: usize,
     pub cop_num_ranges: usize,
     pub runtime: tokio::runtime::Handle,
-    pub remote_request_cache: moka::future::Cache<String, Response>,
+    pub remote_request_cache: quick_cache::sync::Cache<String, Response>,
     pub client: security::HttpClient,
     lazy_remote_patterns: dashmap::DashMap<String, RemotePatternStats>,
 }
@@ -211,10 +211,8 @@ impl RemoteContext {
         let client = security_mgr
             .http_client(hyper::Client::builder().pool_max_idle_per_host(0).clone())
             .unwrap();
-        let remote_request_cache = moka::future::Cache::builder()
-            .max_capacity(REMOTE_REQUEST_CACHE_CAPACITY)
-            .time_to_live(REMOTE_REQUEST_TIMEOUT * 5)
-            .build();
+        let remote_request_cache =
+            quick_cache::sync::Cache::new(REMOTE_REQUEST_CACHE_CAPACITY as usize);
         let cop_worker_provider = Arc::new(StaticCopWorkerProvider {
             worker_url: cop_worker_url,
         });

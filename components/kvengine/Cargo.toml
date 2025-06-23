@@ -63,7 +63,6 @@ log_wrappers = { path = "../log_wrappers" }
 lz4 = "1.24"
 maybe-async = { workspace = true }
 memmap2 = "0.9"
-moka = { workspace = true }
 nix = "0.24"
 num_cpus = "1"
 parking_lot = "0.12"

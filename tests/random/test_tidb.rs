@@ -17,7 +17,6 @@ use kvengine::{
         ENGINE_IA_SYNC_READ_COUNTER, ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
         ENGINE_STORAGE_CLASS_TRANSITION_COUNTER,
     },
-    table::sstable::BlockCacheType,
 };
 use native_br::metrics::NATIVE_BR_BACKUP_SUCCESS;
 use pd_client::{
@@ -300,7 +299,6 @@ fn prepare_cluster(
         TikvWorkerOptions {
             kv_target_file_size: KV_TARGET_FILE_SIZE,
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
-            cop_block_cache_type: switches.block_cache_type,
             backup_interval: Duration::from_secs(5),
             backup_delay: Duration::from_secs(3),
             backup_skip_keyspace_meta: false,
@@ -380,7 +378,6 @@ pub(crate) fn generate_update_conf_fn<'a>(
 
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
-        conf.kvengine.block_cache_type = switches.block_cache_type;
         conf.kvengine.update_inner_key_offset = true;
 
         conf.kvengine.build_columnar = switches.columnar_switch_on;
@@ -957,7 +954,6 @@ async fn query_table_meta(
 #[derive(Debug)]
 pub(crate) struct Switches {
     pub remote_cop_min_block_size: usize,
-    pub block_cache_type: BlockCacheType,
     pub columnar_switch_on: bool,
     pub tiflash_switch_on: bool,
     pub tpc_switch_on: bool,
@@ -980,11 +976,6 @@ impl Switches {
         // Random min block size to generate more or less workloads for cop workers.
         let remote_cop_min_block_size = env_switch(USE_REMOTE_COP_ENV_KEY) as usize
             * (*REMOTE_COP_MIN_BLOCK_SIZE_OPTIONS.choose(&mut rng).unwrap());
-        let block_cache_type = if rng.gen_ratio(1, 5) {
-            BlockCacheType::Moka
-        } else {
-            BlockCacheType::Quick
-        };
         let columnar_switch_on = env_switch_opt(COLUMNAR_WORKLOAD_SWITCH_ENV_KEY, 0);
         let tiflash_switch_on = env_switch(TIFLASH_SWITCH_ENV_KEY);
         let tpc_switch_on = env_switch(TPC_WORKLOAD_SWITCH_ENV_KEY);
@@ -1003,7 +994,6 @@ impl Switches {
 
         Self {
             remote_cop_min_block_size,
-            block_cache_type,
             columnar_switch_on,
             tiflash_switch_on,
             tpc_switch_on,

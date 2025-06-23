@@ -14,8 +14,8 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use kvenginepb::TableCreate;
-use moka::sync::SegmentedCache;
 use schema::schema::StorageClass;
+use tikv_util::sys::SysQuota;
 use xorf::{BinaryFuse8, Filter};
 
 use super::{builder::*, iterator::TableIterator};
@@ -892,7 +892,7 @@ impl BlockCacheKey {
 }
 
 const BLOCK_CACHE_KEY_SIZE: usize = std::mem::size_of::<BlockCacheKey>();
-const BLOCK_CACHE_SHARDS: usize = 256;
+const BLOCK_CACHE_SHARDS_PER_CORE: usize = 64;
 
 #[inline]
 fn block_weight(_k: &BlockCacheKey, v: &Bytes) -> usize {
@@ -904,14 +904,12 @@ fn block_weight(_k: &BlockCacheKey, v: &Bytes) -> usize {
 #[serde(rename_all = "kebab-case")]
 pub enum BlockCacheType {
     #[default]
-    Moka = 0,
     Quick = 1,
     None = 2,
 }
 
 #[derive(Clone)]
 pub enum BlockCache {
-    Moka(SegmentedCache<BlockCacheKey, Bytes>),
     Quick(Arc<quick_cache::sync::Cache<BlockCacheKey, Bytes, BlockWeighter>>),
     None,
 }
@@ -921,18 +919,12 @@ impl BlockCache {
         if max_capacity == 0 {
             return BlockCache::None;
         }
-
+        let block_cache_shards =
+            (SysQuota::cpu_cores_quota() as usize).max(1) * BLOCK_CACHE_SHARDS_PER_CORE;
         match tp {
-            BlockCacheType::Moka => {
-                let cache = SegmentedCache::builder(BLOCK_CACHE_SHARDS)
-                    .weigher(|k, v| block_weight(k, v) as u32)
-                    .max_capacity(max_capacity)
-                    .build();
-                Self::Moka(cache)
-            }
             BlockCacheType::Quick => {
                 let opts = quick_cache::OptionsBuilder::new()
-                    .shards(BLOCK_CACHE_SHARDS)
+                    .shards(block_cache_shards)
                     .weight_capacity(max_capacity)
                     .estimated_items_capacity(
                         max_capacity as usize / (BLOCK_CACHE_KEY_SIZE + block_size),
@@ -953,7 +945,6 @@ impl BlockCache {
 
     pub fn get(&self, key: &BlockCacheKey) -> Option<Bytes> {
         match self {
-            Self::Moka(cache) => cache.get(key),
             Self::Quick(cache) => cache.get(key),
             Self::None => None,
         }
@@ -969,9 +960,6 @@ impl BlockCache {
             init()
         };
         match self {
-            Self::Moka(cache) => cache
-                .try_get_with(key, init)
-                .map_err(|err| err.as_ref().clone()),
             Self::Quick(cache) => cache.get_or_insert_with(&key, init),
             Self::None => init(),
         }
@@ -1003,10 +991,7 @@ impl BlockCache {
             init.await
         };
         match self {
-            Self::Moka(_) | Self::None => {
-                // Moka does not support async.
-                init.await
-            }
+            Self::None => init.await,
             Self::Quick(cache) => cache.get_or_insert_async(&key, init).await,
         }
     }
@@ -1029,7 +1014,6 @@ impl BlockCache {
 
     pub fn weighted_size(&self) -> u64 {
         match self {
-            Self::Moka(cache) => cache.weighted_size(),
             Self::Quick(cache) => cache.weight(),
             Self::None => 0,
         }
@@ -1037,7 +1021,7 @@ impl BlockCache {
 
     fn report_cache_miss(&self) {
         match self {
-            Self::Moka(_) | Self::Quick(_) => crate::metrics::ENGINE_CACHE_MISS.inc_by(1),
+            Self::Quick(_) => crate::metrics::ENGINE_CACHE_MISS.inc_by(1),
             Self::None => {}
         }
     }
