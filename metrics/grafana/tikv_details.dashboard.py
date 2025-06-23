@@ -3732,16 +3732,28 @@ def GC() -> RowPanel:
                 ],
             ),
             graph_panel(
-                title="TiKV Auto GC SafePoint",
-                description="SafePoint used for TiKV's Auto GC",
+                title="TiKV Auto GC Safe Points",
+                description="The GC safe points used for TiKV's Auto GC",
                 yaxes=yaxes(left_format=UNITS.DATE_TIME_ISO),
+                null_point_mode=NULL_AS_NULL,
                 targets=[
                     target(
                         expr=expr_max(
                             "tikv_gcworker_autogc_safe_point",
                         )
-                        .extra("/ (2^18)")
+                        .extra("/ (2^18) != 0")
                         .skip_default_instance_selector(),
+                        legend_format="{{instance}}-null_keyspace",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_max(
+                            "tikv_raftstore_keyspace_gc_safe_points",
+                            by_labels=["instance", "keyspace_id"],
+                        )
+                        .extra("/ (2^18) != 0")
+                        .skip_default_instance_selector(),
+                        legend_format="{{instance}}-keyspace-{{keyspace_id}}",
                         additional_groupby=True,
                     ),
                 ],

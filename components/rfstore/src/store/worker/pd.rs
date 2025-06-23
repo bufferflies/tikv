@@ -4,7 +4,7 @@ use std::{
     cmp,
     cmp::Ordering as CmpOrdering,
     collections::HashMap,
-    fmt::{self, Display, Formatter},
+    fmt::{self, Display, Formatter, Write},
     mem,
     sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
@@ -1236,16 +1236,31 @@ impl PdRunner {
         let f = async move {
             match pd_client.get_all_keyspaces_gc_states().await {
                 Ok(cluster_gc_states) => {
-                    if let Some(gc_safe_point) = cluster_gc_states
-                        .keyspace_gc_states
-                        .get(&NULL_KEYSPACE_ID)
-                        .map(|s| s.gc_safe_point)
-                    {
-                        // Observe the GC safe point of null keyspace for behavior consistency.
-                        // Other keyspaces are omitted as it might be too verbose.
-                        raftstore::store::metrics::AUTO_GC_SAFE_POINT_GAUGE
-                            .set(gc_safe_point.into_inner() as i64);
+                    // Update metrics.
+                    // Use a single String object to format the keyspace id to avoid repeatedly
+                    // allocating for each keyspace.
+                    // Skip updating if the GC safe point is 0, so that if some special keyspaces
+                    // (null keyspace or default keyspace) exists but never used, it won't
+                    // show up as a zero in the metrics.
+                    let mut keyspace_id_str_buffer = String::new();
+                    for (&keyspace_id, gc_state) in &cluster_gc_states.keyspace_gc_states {
+                        if keyspace_id == NULL_KEYSPACE_ID {
+                            if !gc_state.gc_safe_point.is_zero() {
+                                raftstore::store::metrics::AUTO_GC_SAFE_POINT_GAUGE
+                                    .set(gc_state.gc_safe_point.into_inner() as i64);
+                            }
+                        } else if !gc_state.gc_safe_point.is_zero() {
+                            if keyspace_id_str_buffer.capacity() < 10 {
+                                keyspace_id_str_buffer.reserve(10);
+                            }
+                            keyspace_id_str_buffer.clear();
+                            write!(&mut keyspace_id_str_buffer, "{}", keyspace_id).unwrap();
+                            raftstore::store::metrics::KEYSPACE_GC_SAFE_POINTS_GAUGE_VEC
+                                .with_label_values(&[&keyspace_id_str_buffer])
+                                .set(gc_state.gc_safe_point.into_inner() as i64);
+                        }
                     }
+
                     info!(
                         "updating gc_safe_point (keyspace, gc_safe_point)";
                         "keyspace_gc_safe_points" => ?cluster_gc_states

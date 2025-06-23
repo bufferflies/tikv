@@ -826,6 +826,13 @@ lazy_static! {
         "Total snapshot generate limit used",
     )
     .unwrap();
+
+    pub static ref KEYSPACE_GC_SAFE_POINTS_GAUGE_VEC: IntGaugeVec =
+    register_int_gauge_vec!(
+        "tikv_raftstore_keyspace_gc_safe_points",
+        "GC safe points by keyspace that has been received by TiKV",
+        &["keyspace_id"]
+    ).unwrap();
 }
 
 lazy_static! {

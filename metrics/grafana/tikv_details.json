@@ -49134,7 +49134,7 @@
           "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "SafePoint used for TiKV's Auto GC",
+          "description": "The GC safe points used for TiKV's Auto GC",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -49186,7 +49186,7 @@
           "maxDataPoints": null,
           "maxPerRow": null,
           "minSpan": null,
-          "nullPointMode": "null as zero",
+          "nullPointMode": "null",
           "options": {
             "alertThreshold": true,
             "dataLinks": []
@@ -49204,15 +49204,30 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "max((\n    tikv_gcworker_autogc_safe_point\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, $additional_groupby) / (2^18)",
+              "expr": "max((\n    tikv_gcworker_autogc_safe_point\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, $additional_groupby) / (2^18) != 0",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "{{instance}} {{$additional_groupby}}",
+              "legendFormat": "{{instance}}-null_keyspace {{$additional_groupby}}",
               "metric": "",
-              "query": "max((\n    tikv_gcworker_autogc_safe_point\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, $additional_groupby) / (2^18)",
+              "query": "max((\n    tikv_gcworker_autogc_safe_point\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, $additional_groupby) / (2^18) != 0",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "max((\n    tikv_raftstore_keyspace_gc_safe_points\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, keyspace_id, $additional_groupby) / (2^18) != 0",
+              "format": "time_series",
+              "hide": false,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "{{instance}}-keyspace-{{keyspace_id}} {{$additional_groupby}}",
+              "metric": "",
+              "query": "max((\n    tikv_raftstore_keyspace_gc_safe_points\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, keyspace_id, $additional_groupby) / (2^18) != 0",
               "refId": "",
               "step": 10,
               "target": ""
@@ -49221,7 +49236,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "TiKV Auto GC SafePoint",
+          "title": "TiKV Auto GC Safe Points",
           "tooltip": {
             "msResolution": true,
             "shared": true,
