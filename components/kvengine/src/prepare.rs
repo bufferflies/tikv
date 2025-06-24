@@ -36,8 +36,8 @@ use crate::{
     limiter::DfsLoadLimiterPermit,
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
-        columnar::SchemaFile,
         file::{FdCache, File, InMemFile, LocalFile},
+        schema_file::SchemaFile,
         sstable::{SsTable, SsTableCore, SsTableProperty, PROP_KEY_MAX_TS},
         vector_index::VectorIndexFile,
         BoundedDataSet,

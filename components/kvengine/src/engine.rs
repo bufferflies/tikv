@@ -37,9 +37,9 @@ use crate::{
     meta::ShardMeta,
     metrics::ENGINE_FREE_MEM_BYTES_HISTOGRAM,
     table::{
-        columnar::SchemaFile,
         file::FdCache,
         memtable::{CfTable, CfTableCore},
+        schema_file::SchemaFile,
         sstable::{BlockCache, MAGIC_NUMBER},
         BoundedDataSet, DataBound, InnerKey, ZSTD_COMPRESSION,
     },

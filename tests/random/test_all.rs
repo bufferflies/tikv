@@ -13,7 +13,7 @@ use kvengine::{
     dfs::{self, DFSConfig, DFSConnOptions, FileType, S3Fs},
     ia::util::IaConfig,
     metrics::{ENGINE_IA_SYNC_READ_COUNTER, ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER},
-    table::{columnar::build_schema_file, ChecksumType},
+    table::{schema_file::build_schema_file, ChecksumType},
 };
 use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;

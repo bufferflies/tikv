@@ -30,7 +30,8 @@ use tokio::runtime::Runtime;
 use crate::{
     table::{
         blobtable::blobtable::BlobTable,
-        columnar::{ColumnarFileFooter, SchemaFileFooter},
+        columnar::ColumnarFileFooter,
+        schema_file::SchemaFileFooter,
         sstable::{L0Table, SsTable},
         TxnChunk,
     },

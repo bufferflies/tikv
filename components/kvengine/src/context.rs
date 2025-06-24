@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use crate::{
     dfs,
     ia::manager::IaManager,
-    table::{columnar::SchemaFile, sstable::BlockCache, vector_index::VectorIndexCache},
+    table::{schema_file::SchemaFile, sstable::BlockCache, vector_index::VectorIndexCache},
     txn_chunk_manager::TxnChunkManager,
 };
 

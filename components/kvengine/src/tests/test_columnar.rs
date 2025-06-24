@@ -23,14 +23,14 @@ use crate::{
     table,
     table::{
         columnar::{
-            build_schema_file,
             tests::{
                 build_table, i_to_common_handle, merge_refs, new_schema, verify_with_ref_rows,
             },
             Block, ColumnarFile, ColumnarFilterReader, ColumnarLevels, ColumnarReader,
-            ColumnarRowTableReader, MinMaxIndex, SchemaFile,
+            ColumnarRowTableReader, MinMaxIndex,
         },
         file::{File, InMemFile},
+        schema_file::{build_schema_file, SchemaFile},
         sstable::{BlockCache, SsTable},
         ChecksumType,
     },

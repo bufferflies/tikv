@@ -18,9 +18,10 @@ use kvengine::{
     },
     table::{
         columnar::{
-            build_schema_file, new_int_handle_column_info, new_version_column_info, Block,
-            ColumnarFilterReader, Schema, SchemaBuf, VectorIndexDef,
+            new_int_handle_column_info, new_version_column_info, Block, ColumnarFilterReader,
+            VectorIndexDef,
         },
+        schema_file::{build_schema_file, Schema, SchemaBuf},
         sstable::BlockCache,
         vector_index::{VectorIndexCache, VectorIndexConfig},
     },

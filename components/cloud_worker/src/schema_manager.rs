@@ -22,12 +22,13 @@ use kvengine::{
     dfs,
     dfs::Dfs,
     table::{
-        columnar,
         columnar::{
             new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
-            Schema, SchemaBufBuilder, SchemaFile, VectorIndexDef,
+            VectorIndexDef,
         },
         file::{File, LocalFile},
+        schema_file,
+        schema_file::{Schema, SchemaBufBuilder, SchemaFile},
         ChecksumType, NO_COMPRESSION,
     },
     IdAllocator, ShardStatsLite,
@@ -692,7 +693,7 @@ impl SchemaManager {
             }
 
             // build schema file with the schema restore version from shard stats.
-            let new_schema_file_data = columnar::build_schema_file(
+            let new_schema_file_data = schema_file::build_schema_file(
                 keyspace_id,
                 schema_version,
                 schemas.unwrap(),
@@ -1367,10 +1368,9 @@ mod tests {
     use bytes::Bytes;
     use kvengine::{
         table::{
-            columnar::{
-                build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
-            },
+            columnar::{new_int_handle_column_info, new_version_column_info},
             file::LocalFile,
+            schema_file::{build_schema_file, SchemaBuf},
         },
         ShardStatsLite,
     };

@@ -36,7 +36,7 @@ use http::{Request, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
-    table::columnar::build_schema_file,
+    table::schema_file::build_schema_file,
 };
 use kvproto::metapb::Store;
 use native_br::{common::send_request_to_store_with_retry, error::Error::HttpError};

@@ -14,7 +14,7 @@ use dashmap::{
     mapref::{entry::Entry, one::Ref},
     DashMap,
 };
-use kvengine::table::columnar::Schema;
+use kvengine::table::schema_file::Schema;
 use kvproto::kvrpcpb::Op;
 use rand::{
     distributions::Distribution,

@@ -6,8 +6,9 @@ use api_version::ApiV2;
 use bytes::Bytes;
 use codec::number::NumberEncoder;
 use hyper::{http, Body};
-use kvengine::table::columnar::{
-    new_int_handle_column_info, new_version_column_info, Schema, SchemaBuf,
+use kvengine::table::{
+    columnar::{new_int_handle_column_info, new_version_column_info},
+    schema_file::{Schema, SchemaBuf},
 };
 use kvproto::{
     kvrpcpb, metapb,

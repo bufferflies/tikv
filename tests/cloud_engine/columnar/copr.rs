@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use api_version::ApiV2;
-use kvengine::{dfs, dfs::FileType, table::columnar::build_schema_file, GLOBAL_SHARD_END_KEY};
+use kvengine::{dfs, dfs::FileType, table::schema_file::build_schema_file, GLOBAL_SHARD_END_KEY};
 use kvproto::coprocessor::KeyRange;
 use protobuf::Message;
 use test_cloud_server::{

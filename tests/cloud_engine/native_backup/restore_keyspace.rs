@@ -16,8 +16,9 @@ use collections::HashSet;
 use engine_traits::ObjectStorage;
 use kvengine::{
     dfs::{DFSConfig, Dfs, FileType, Options, S3Fs},
-    table::columnar::{
-        build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
+    table::{
+        columnar::{new_int_handle_column_info, new_version_column_info},
+        schema_file::{build_schema_file, SchemaBuf},
     },
     WRITE_CF,
 };

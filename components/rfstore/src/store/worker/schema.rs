@@ -7,7 +7,7 @@ use std::{
 };
 
 use kvengine::{
-    table::{columnar::SchemaFile, BoundedDataSet, OwnedInnerKey},
+    table::{schema_file::SchemaFile, BoundedDataSet, OwnedInnerKey},
     SchemaFileMeta, Shard, ShardMeta, STORAGE_CLASS_KEY,
 };
 use kvproto::{metapb, metapb::Region};

@@ -25,7 +25,10 @@ use pb::{BlobCreate, TableCreate};
 use protobuf::Message;
 use security::SecurityManager;
 use slog_global::error;
-use table::columnar::{ColumnarFile, ColumnarTableReader, Schema};
+use table::{
+    columnar::{ColumnarFile, ColumnarTableReader},
+    schema_file::Schema,
+};
 use tidb_query_common::util::convert_to_prefix_next;
 use tidb_query_datatype::{
     codec::table::{
@@ -52,10 +55,11 @@ use crate::{
         columnar::{
             Block, ColumnarCompactReader, ColumnarConcatReader, ColumnarFileBuilder,
             ColumnarFilterReader, ColumnarMergeReader, ColumnarReader, ColumnarRowTableReader,
-            ColumnarTableBuildOptions, ColumnarTableBuilder, ColumnarTruncateTsReader, SchemaFile,
+            ColumnarTableBuildOptions, ColumnarTableBuilder, ColumnarTruncateTsReader,
             GLOBAL_COMMON_HANDLE_END,
         },
         file::{File, InMemFile, LocalFile},
+        schema_file::SchemaFile,
         sstable::{self, builder::TableBuilderOptions, BlockCache, L0Builder, SsTable},
         vector_index::VectorIndexBuilder,
         BoundedDataSet, ChecksumType, DataBound, InnerKey,

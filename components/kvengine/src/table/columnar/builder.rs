@@ -13,9 +13,10 @@ use tipb::ColumnInfo;
 use crate::table::{
     add_property,
     columnar::columnar::{
-        compress_pack, get_unsigned, Block, ColumnBuffer, ColumnMeta, ColumnarFileFooter, Schema,
+        compress_pack, get_unsigned, Block, ColumnBuffer, ColumnMeta, ColumnarFileFooter,
         COLUMNAR_MAGIC, HANDLE_COL_ID, VERSION_COL_ID,
     },
+    schema_file::Schema,
     sstable::PROP_KEY_ENCRYPTION_VER,
     ChecksumType, LZ4_COMPRESSION,
 };

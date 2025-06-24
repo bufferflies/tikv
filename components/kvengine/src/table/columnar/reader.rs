@@ -54,11 +54,12 @@ use crate::{
         columnar::{
             columnar::{
                 decompress_pack, get_fixed_size, Block, ColumnBuffer, ColumnMeta, ColumnarFile,
-                Schema, TableMeta,
+                TableMeta,
             },
             get_primary_key,
         },
         file::File,
+        schema_file::Schema,
         search, InnerKey,
     },
 };
@@ -1992,10 +1993,10 @@ pub mod tests {
                 },
                 columnar::ColumnarFile,
                 reader::{ColumnarMvccReader, ColumnarReader, ColumnarTableReader},
-                SchemaBuf, SchemaBufBuilder,
             },
             file::{File, InMemFile},
             memtable::{CfTable, WriteBatch},
+            schema_file::{SchemaBuf, SchemaBufBuilder},
         },
         UserMeta, WRITE_CF,
     };

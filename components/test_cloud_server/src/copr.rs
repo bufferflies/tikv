@@ -1,9 +1,11 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use api_version::ApiV2;
-use kvengine::table::columnar::{
-    new_common_handle_column_info, new_int_handle_column_info, new_version_column_info, Schema,
-    SchemaBuf,
+use kvengine::table::{
+    columnar::{
+        new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
+    },
+    schema_file::{Schema, SchemaBuf},
 };
 use schema::schema::StorageClassSpec;
 use tidb_query_datatype::{

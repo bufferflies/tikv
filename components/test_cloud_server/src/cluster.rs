@@ -23,7 +23,7 @@ use kvengine::{
     dfs,
     dfs::{DFSConnOptions, Dfs, FileType},
     ia::{gc::IaGcConfig, util::IaConfig},
-    table::{columnar::build_schema_file, sstable::BlockCacheType},
+    table::{schema_file::build_schema_file, sstable::BlockCacheType},
     txn_chunk_manager::TxnChunkManagerConfig,
     ShardStats,
 };

@@ -5,6 +5,7 @@ pub mod columnar;
 pub mod file;
 pub mod memtable;
 pub mod merge_iterator;
+pub mod schema_file;
 pub mod sstable;
 pub mod table;
 pub mod txn_file;

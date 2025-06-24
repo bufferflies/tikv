@@ -32,10 +32,10 @@ use crate::{
         blobtable::blobtable::BlobPrefetcher,
         columnar::{
             filter::TableScanCtx, ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader,
-            ColumnarReader, ColumnarRowTableReader, ColumnarTableReader, Schema, SchemaBuf,
-            SchemaFile, HANDLE_COL_ID,
+            ColumnarReader, ColumnarRowTableReader, ColumnarTableReader, HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
+        schema_file::{Schema, SchemaBuf, SchemaFile},
         sstable::SsTable,
         table,
         vector_index::VectorItemsReader,

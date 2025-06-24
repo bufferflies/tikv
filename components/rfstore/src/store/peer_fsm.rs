@@ -16,7 +16,7 @@ use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    ia::ia_auto_file::report_transitions, table::columnar::SchemaFile,
+    ia::ia_auto_file::report_transitions, table::schema_file::SchemaFile,
     table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard, DEL_PREFIXES_KEY,
     MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE,
     TERM_KEY,

@@ -32,9 +32,10 @@ use crate::{
     table::{
         self,
         blobtable::blobtable::BlobTable,
-        columnar::{ColumnarLevel, ColumnarLevels, SchemaFile, VectorIndexDef},
+        columnar::{ColumnarLevel, ColumnarLevels, VectorIndexDef},
         file::InMemFile,
         memtable::{self, CfTable},
+        schema_file::SchemaFile,
         search,
         sstable::{L0Table, SsTable},
         vector_index::VectorIndexes,

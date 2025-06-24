@@ -25,9 +25,10 @@ use kvengine::{
     table::{
         columnar,
         columnar::{
-            build_schema_file, filter::TableScanCtx, new_int_handle_column_info,
-            new_version_column_info, ColumnarFilterReader, Schema, SchemaBuf,
+            filter::TableScanCtx, new_int_handle_column_info, new_version_column_info,
+            ColumnarFilterReader,
         },
+        schema_file::{build_schema_file, Schema, SchemaBuf},
         sstable::{BlockCache, BlockCacheType},
     },
     ColumnarStatusResp, SnapAccess, STORAGE_CLASS_KEY, WRITE_CF,

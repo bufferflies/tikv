@@ -17,9 +17,10 @@ use crate::{
     table::{
         columnar::{
             get_fixed_size, Block, ColumnarConcatReader, ColumnarLevels, ColumnarMergeReader,
-            ColumnarReader, ColumnarTableReader, Schema,
+            ColumnarReader, ColumnarTableReader,
         },
         file::{File, MmapData},
+        schema_file::Schema,
         search,
         vector_index::VectorIndexCache,
         BoundedDataSet, DataBound, Error,
@@ -1175,9 +1176,10 @@ mod tests {
     use crate::table::{
         columnar::{
             new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
-            Block, Schema, SchemaBuf,
+            Block,
         },
         file::LocalFile,
+        schema_file::{Schema, SchemaBuf},
         vector_index::{VectorIndex, VectorIndexBuilder, VectorIndexFile},
     };
 

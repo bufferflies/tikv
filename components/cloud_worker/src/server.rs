@@ -20,7 +20,7 @@ use hyper::{
 use kvengine::{
     context::{IaCtx, PrepareType, SnapCtx},
     dfs::S3Fs,
-    table::{columnar::SchemaFile, sstable::BlockCache, ChecksumType},
+    table::{schema_file::SchemaFile, sstable::BlockCache, ChecksumType},
     txn_chunk_manager::TxnChunkManager,
     SnapAccess,
 };
