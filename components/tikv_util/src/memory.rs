@@ -137,6 +137,11 @@ impl MemoryLimiter {
     pub fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }
+
+    #[cfg(feature = "testexport")]
+    pub fn set_cap(&mut self, cap: u64) {
+        self.cap = cap;
+    }
 }
 
 pub struct MemoryLimiterGuard {

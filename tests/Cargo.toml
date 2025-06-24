@@ -81,6 +81,7 @@ testexport = [
     "native_br/testexport",
     "cloud_worker/testexport",
     "test_cloud_server/testexport",
+    "tikv_util/testexport",
 ]
 profiling = ["profiler/profiling"]
 

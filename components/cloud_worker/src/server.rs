@@ -10,7 +10,7 @@ use flate2::{write::GzEncoder, Compression};
 use http::{
     header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE},
     request::Parts,
-    HeaderValue, Method, Request, Response,
+    HeaderValue, Method, Request, Response, StatusCode,
 };
 use hyper::{
     server::accept::Accept,
@@ -285,6 +285,8 @@ async fn handle_sleep(_ctx: Arc<Context>) -> hyper::Result<hyper::Response<hyper
 
 const DEFAULT_COP_TIMEOUT: Duration = Duration::from_secs(20);
 
+// Return `StatusCode::SERVICE_UNAVAILABLE` to indicate that the request can be
+// retried later.
 async fn handle_remote_coprocessor(
     ctx: Arc<Context>,
     parts: Parts,
@@ -294,13 +296,19 @@ async fn handle_remote_coprocessor(
     let decode_res = decode_remote_cop_request(req_body.chunk());
     if let Err(err) = decode_res {
         let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        return Ok(hyper::Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(body)
+            .unwrap());
     }
     let (req_data, mem_data, snap_data) = decode_res.unwrap();
     let mut cop_req = kvproto::coprocessor::Request::default();
     if let Err(err) = cop_req.merge_from_bytes(req_data) {
         let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        return Ok(hyper::Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(body)
+            .unwrap());
     }
     let cop_ctx = cop_req.get_context();
     let keyspace_id = cop_ctx.keyspace_id;
@@ -319,25 +327,40 @@ async fn handle_remote_coprocessor(
             "tag" => tag,
         );
         let body = hyper::Body::from("wait permit timeout");
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        return Ok(hyper::Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(body)
+            .unwrap());
     }
     let _permit = res.unwrap();
 
     let req_type = cop_req.get_tp();
     let snap_start = Instant::now_coarse();
     let snap_ctx = ctx.get_snap_ctx();
+    let mem_limiter = ctx.memory_limiter.clone();
     let snap_access_res =
-        SnapAccess::construct_snapshot(&tag, &snap_ctx, mem_data, snap_data).await;
+        SnapAccess::construct_snapshot(&tag, &snap_ctx, mem_data, snap_data, mem_limiter).await;
     if let Err(err) = snap_access_res.as_ref() {
-        let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        let body = hyper::Body::from(format!("{:?}", &err));
+        let status_code = if matches!(err, kvengine::Error::MemoryLimitExceeded(_)) {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        return Ok(hyper::Response::builder()
+            .status(status_code)
+            .body(body)
+            .unwrap());
     }
     if handle_start.saturating_elapsed() > timeout {
         info!("construct snapshot timeout"; "tag" => tag);
         let body = hyper::Body::from("construct snapshot timeout");
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        return Ok(hyper::Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(body)
+            .unwrap());
     }
-    let snap_access = snap_access_res.unwrap();
+    let (snap_access, mem_limiter_guard) = snap_access_res.unwrap();
 
     let prefetch_start = Instant::now_coarse();
     if matches!(req_type, REQ_TYPE_DAG if ctx.ia_ctx.is_enabled()) {
@@ -358,13 +381,19 @@ async fn handle_remote_coprocessor(
             Err(err) => {
                 error!("{} prefetch failed, error {:?}", tag, err);
                 let body = hyper::Body::from("prefetch segments failed");
-                return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+                return Ok(hyper::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(body)
+                    .unwrap());
             }
         }
         if deadline.check().is_err() {
             info!("prefetch timeout"; "tag" => tag);
             let body = hyper::Body::from("prefetch segments timeout");
-            return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+            return Ok(hyper::Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(body)
+                .unwrap());
         }
     }
 
@@ -378,6 +407,7 @@ async fn handle_remote_coprocessor(
         snap,
     )
     .await;
+    drop(mem_limiter_guard);
     if let Err(err) = result {
         error!("{} remote coprocessor failed, error {:?}", tag, err);
         if accept_pb {
@@ -390,7 +420,10 @@ async fn handle_remote_coprocessor(
                 .unwrap());
         } else {
             let body = hyper::Body::from(format!("{:?}", err));
-            return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+            return Ok(hyper::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(body)
+                .unwrap());
         }
     }
 
@@ -443,7 +476,10 @@ async fn handle_remote_coprocessor(
         Err(err) => {
             error!("{} serialize response failed, error {:?}", tag, err);
             let body = hyper::Body::from(format!("{:?}", err));
-            Ok(hyper::Response::builder().status(500).body(body).unwrap())
+            Ok(hyper::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(body)
+                .unwrap())
         }
     }
 }

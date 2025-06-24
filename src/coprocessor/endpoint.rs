@@ -1303,6 +1303,10 @@ macro_rules! make_error_response_common {
                 $tag = "remote_network";
                 $resp.set_other_error($e.to_string());
             }
+            Error::RemoteServiceUnavailable(_) => {
+                $tag = "remote_service_unavailable";
+                $resp.set_other_error($e.to_string());
+            }
             Error::Other(_) => {
                 $tag = "other";
                 warn!("unexpected other error encountered processing coprocessor task";
@@ -1370,6 +1374,10 @@ fn make_error_delegate_response(e: Error) -> coppb::DelegateResponse {
         }
         Error::RemoteNetwork(_) => {
             tag = "remote_network";
+            resp.set_other_error(e.to_string());
+        }
+        Error::RemoteServiceUnavailable(_) => {
+            tag = "remote_service_unavailable";
             resp.set_other_error(e.to_string());
         }
         Error::Other(_) => {

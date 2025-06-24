@@ -42,11 +42,12 @@ use tidb_query_datatype::{
     codec::{datum, table, Datum},
     expr::EvalContext,
 };
-use tikv::coprocessor::{REQ_TYPE_ANALYZE, REQ_TYPE_CHECKSUM, REQ_TYPE_DAG};
+use tikv::coprocessor::{Error as CopError, REQ_TYPE_ANALYZE, REQ_TYPE_CHECKSUM, REQ_TYPE_DAG};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     deadline::Deadline,
     info,
+    memory::MemoryLimiter,
     quota_limiter::QuotaLimiter,
 };
 use tipb::{Chunk, Executor, Expr, ExprType, ScalarFuncSig};
@@ -1983,6 +1984,44 @@ fn test_output_counts(#[case] enable_ia: bool) {
     assert_eq!(resp.get_output_counts(), &[rows.len() as i64]);
 }
 
+#[test]
+fn test_memory_limiter() {
+    test_util::init_log_for_test();
+    let product = ProductTable::new();
+    let mut dag_test = DagTest::new(&product);
+    dag_test.insert_rows(1001);
+
+    let mut col_req = tipb::AnalyzeColumnsReq::default();
+    col_req.set_columns_info(dag_test.table.columns_info().into());
+
+    let mut analyze_req = tipb::AnalyzeReq::default();
+    analyze_req.set_tp(tipb::AnalyzeType::TypeColumn);
+    analyze_req.set_col_req(col_req);
+
+    let mut req = coppb::Request::default();
+    req.set_context(Default::default());
+    req.set_start_ts(dag_test.get_ts().into_inner());
+
+    let select_key_ranges = vec![dag_test.get_key_range(10, 20)];
+
+    req.set_ranges(select_key_ranges.clone().into());
+    req.set_tp(REQ_TYPE_ANALYZE);
+    req.set_data(analyze_req.write_to_bytes().unwrap());
+
+    let snapshot = dag_test.fetch_snapshot(dag_test.get_ts().into_inner(), select_key_ranges);
+    let quota_limiter = Arc::new(QuotaLimiter::default());
+
+    // About 160000 bytes.
+    dag_test.set_memory_limiter_cap(100000);
+    let err = dag_test
+        .execute(snapshot.clone(), quota_limiter.clone(), req.clone())
+        .unwrap_err();
+    assert!(err.to_string().contains("memory limit exceeded"));
+
+    dag_test.set_memory_limiter_cap(200000);
+    dag_test.execute(snapshot, quota_limiter, req).unwrap();
+}
+
 pub(crate) struct RowCache<'a>(&'a Table, Vec<BTreeMap<i64, Datum>>);
 
 impl<'a> RowCache<'a> {
@@ -2367,6 +2406,7 @@ pub(crate) struct DagTest<'a> {
     pub client: ClusterClient,
     pub ctx: DagTestContext,
     snap_ctx: SnapCtx,
+    mem_limiter: MemoryLimiter,
 }
 
 impl<'a> DagTest<'a> {
@@ -2418,6 +2458,7 @@ impl<'a> DagTest<'a> {
             prepare_type: PrepareType::All,
             read_columnar: true,
         };
+        let mem_limiter = MemoryLimiter::new(u64::MAX, None);
 
         Self {
             table,
@@ -2425,6 +2466,7 @@ impl<'a> DagTest<'a> {
             client,
             ctx,
             snap_ctx,
+            mem_limiter,
         }
     }
 
@@ -2606,18 +2648,19 @@ impl<'a> DagTest<'a> {
         snapshot: DagTestSnapshot,
         quota_limiter: Arc<QuotaLimiter>,
         mut req: Request,
-    ) -> Result<coppb::Response, tikv::coprocessor::Error> {
+    ) -> Result<coppb::Response, CopError> {
         req.mut_context().set_api_version(ApiVersion::V2);
         let tag = cloud_worker::get_cop_req_tag(&req);
         let f = tikv_util::init_task_local(async {
-            let snap_access = SnapAccess::construct_snapshot(
+            let (snap_access, mem_limiter_guard) = SnapAccess::construct_snapshot(
                 &tag,
                 &self.snap_ctx,
                 &snapshot.memtable_rows,
                 &snapshot.cs,
+                self.mem_limiter.clone(),
             )
             .await
-            .unwrap();
+            .map_err(|e| CopError::Other(format!("Failed to construct snapshot: {}", e)))?;
 
             if self.snap_ctx.ia_ctx.is_enabled() {
                 tikv::coprocessor::prefetch_ia_remote_segments(
@@ -2633,15 +2676,16 @@ impl<'a> DagTest<'a> {
 
             let snap = RegionSnapshot::from_snapshot(snap_access);
 
-            tikv::coprocessor::parse_request_and_handle_remote_cop::<RegionSnapshot>(
+            let res = tikv::coprocessor::parse_request_and_handle_remote_cop::<RegionSnapshot>(
                 req,
                 None,
                 std::time::Duration::new(1, 0),
                 quota_limiter,
                 snap,
             )
-            .await
-            .map(|mut data| data.consume())
+            .await;
+            drop(mem_limiter_guard);
+            res.map(|mut data| data.consume())
         });
         self.ctx.rt.block_on(f)
     }
@@ -2658,11 +2702,12 @@ impl<'a> DagTest<'a> {
                 &self.snap_ctx,
                 &snapshot.memtable_rows,
                 &snapshot.cs,
+                self.mem_limiter.clone(),
             )
             .await
             .unwrap()
         };
-        self.ctx.rt.block_on(f)
+        self.ctx.rt.block_on(f).0
     }
 
     pub fn setup_ia(&mut self, enable: bool) {
@@ -2735,6 +2780,10 @@ impl<'a> DagTest<'a> {
 
     pub fn expect_compacted(stats: &ShardStats) -> bool {
         stats.compaction_score < 1.0 && stats.cfs[WRITE_CF].levels.iter().any(|l| l.num_tables > 0)
+    }
+
+    fn set_memory_limiter_cap(&mut self, cap: u64) {
+        self.mem_limiter.set_cap(cap);
     }
 }
 

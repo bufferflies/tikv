@@ -32,6 +32,9 @@ pub enum Error {
     #[error("Remote coprocessor network error {0:?}")]
     RemoteNetwork(String),
 
+    #[error("Remote service unavailable error {0:?}")]
+    RemoteServiceUnavailable(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -137,6 +140,9 @@ impl ErrorCodeExt for Error {
             Error::MaxPendingTasksExceeded => error_code::coprocessor::MAX_PENDING_TASKS_EXCEEDED,
             Error::OverloadProtection(_) => error_code::coprocessor::OVERLOAD_PROTECTION,
             Error::RemoteNetwork(_) => error_code::coprocessor::REMOTE_NETWORK,
+            Error::RemoteServiceUnavailable(_) => {
+                error_code::coprocessor::REMOTE_SERVICE_UNAVAILABLE
+            }
             Error::Other(_) => error_code::UNKNOWN,
         }
     }

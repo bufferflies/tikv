@@ -45,6 +45,7 @@ use tidb_query_datatype::{
     FieldTypeAccessor, FieldTypeTp, VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC,
     VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC_VAL_COSINE, VECTOR_INDEX_TYPE_VECTOR32_HNSW,
 };
+use tikv_util::memory::MemoryLimiter;
 use tipb::ColumnInfo;
 use txn_types::Key;
 
@@ -244,6 +245,7 @@ fn test_build_vector_index() {
         prepare_type: PrepareType::All,
         read_columnar: true,
     };
+    let mem_limiter = MemoryLimiter::new(u64::MAX, None);
     let remote_snap = dfs
         .get_runtime()
         .block_on(SnapAccess::construct_snapshot(
@@ -251,8 +253,10 @@ fn test_build_vector_index() {
             &snap_ctx,
             delegate_resp.get_mem_table_data(),
             delegate_resp.get_snapshot(),
+            mem_limiter.clone(),
         ))
-        .unwrap();
+        .unwrap()
+        .0;
     shard_snaps.push(remote_snap);
     // Read twice to check cache hit.
     let remote_snap = dfs
@@ -262,8 +266,10 @@ fn test_build_vector_index() {
             &snap_ctx,
             delegate_resp.get_mem_table_data(),
             delegate_resp.get_snapshot(),
+            mem_limiter,
         ))
-        .unwrap();
+        .unwrap()
+        .0;
     shard_snaps.push(remote_snap);
 
     let target = vec![99f32, 100f32, 101f32];

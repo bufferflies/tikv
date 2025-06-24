@@ -118,6 +118,7 @@ impl Tikv for CopService {
         let max_handle_duration = self.cfg.max_handle_duration;
         let snap_ctx = self.ctx.get_snap_ctx();
         let quota_limiter = self.ctx.quota_limiter.clone();
+        let mem_limiter = self.ctx.memory_limiter.clone();
         let peer = Some(ctx.peer());
         let future = async move {
             let delegate_start = Instant::now_coarse();
@@ -128,11 +129,12 @@ impl Tikv for CopService {
                 .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
 
             let snap_start = Instant::now_coarse();
-            let snap_access = kvengine::SnapAccess::construct_snapshot(
+            let (snap_access, mem_limiter_guard) = kvengine::SnapAccess::construct_snapshot(
                 &tag,
                 &snap_ctx,
                 &resp.take_mem_table_data(),
                 &resp.take_snapshot(),
+                mem_limiter,
             )
             .await
             .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
@@ -147,6 +149,7 @@ impl Tikv for CopService {
                 snapshot,
             )
             .await;
+            drop(mem_limiter_guard);
 
             if let Ok(response) = &result {
                 let finish_time = Instant::now_coarse();

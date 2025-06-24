@@ -8,6 +8,7 @@ define_error_codes!(
     MAX_PENDING_TASKS_EXCEEDED => ("MaxPendingTasksExceeded", "", ""),
     OVERLOAD_PROTECTION => ("OverloadProtection", "", ""),
     REMOTE_NETWORK => ("RemoteNetwork", "", ""),
+    REMOTE_SERVICE_UNAVAILABLE => ("RemoteServiceUnavailable", "", ""),
 
     INVALID_DATA_TYPE => ("InvalidDataType", "", ""),
     ENCODING => ("Encoding", "", ""),

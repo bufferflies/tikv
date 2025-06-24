@@ -8,6 +8,7 @@ publish = false
 failpoints = ["fail/failpoints"]
 test-cgroup = []
 env-logger = ["dep:slog-envlogger"]
+testexport = []
 
 [dependencies]
 async-speed-limit = "0.4.0"
