@@ -20,7 +20,9 @@ use tidb_query_datatype::{codec::table::TABLE_PREFIX, Collation, FieldTypeTp};
 use tikv::storage::mvcc::Key;
 use tikv_util::{
     codec::bytes::{decode_bytes, encode_bytes},
+    info,
     time::Instant,
+    warn,
 };
 use tipb::ColumnInfo;
 
@@ -271,25 +273,43 @@ pub async fn broadcast_schema_file_request(
     schema_file_id: u64,
     timeout: Duration,
 ) {
+    let mut js = tokio::task::JoinSet::new();
     for store in stores {
         let status_addr = store.get_status_address();
-        let http_client = hyper::client::Client::new();
-        let start_time = Instant::now_coarse();
-        while start_time.saturating_elapsed() < timeout {
-            let request = hyper::http::Request::builder()
-                .method(http::method::Method::POST)
-                .uri(format!(
-                    "http://{}/schema_file?keyspace_id={}&file_id={}",
-                    status_addr, keyspace_id, schema_file_id
-                ))
-                .body(Body::empty())
-                .unwrap();
-            if let Ok(resp) = http_client.request(request).await {
-                if resp.status().is_success() {
-                    break;
+        let uri = format!(
+            "http://{}/schema_file?keyspace_id={}&file_id={}",
+            status_addr, keyspace_id, schema_file_id
+        );
+        let task = async move {
+            let http_client = hyper::client::Client::new();
+            let start_time = Instant::now_coarse();
+            while start_time.saturating_elapsed() < timeout {
+                let request = hyper::http::Request::builder()
+                    .method(http::method::Method::POST)
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap();
+                match http_client.request(request).await {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            info!("broadcast schema file succeed"; "uri" => &uri);
+                            return;
+                        } else {
+                            warn!("broadcast schema file failed"; "uri" => &uri, "resp" => ?resp);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("broadcast schema file failed"; "uri" => &uri, "error" => ?e);
+                    }
                 }
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+            panic!("broadcast schema file timeout, uri {}", uri);
+        };
+        js.spawn(task);
+    }
+
+    while let Some(res) = js.join_next().await {
+        res.unwrap();
     }
 }

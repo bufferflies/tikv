@@ -1160,7 +1160,7 @@ impl ServerCluster {
                 &stores,
                 keyspace_id,
                 schema_file_id,
-                Duration::from_secs(10),
+                Duration::from_secs(30),
             )
             .await;
         }
