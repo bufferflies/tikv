@@ -1,4 +1,7 @@
 use std::{
+    fs,
+    io::BufRead,
+    mem,
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
@@ -29,7 +32,10 @@ pub struct RegionCommand {
 enum Commands {
     /// Merge regions based on keyspace and target size.
     Merge(RegionMergeArgs),
+    /// Split region.
     Split(RegionSplitArgs),
+    /// Batch split region.
+    BatchSplit(RegionBatchSplitArgs),
 }
 
 pub fn execute_region_command(region_cmd: RegionCommand) {
@@ -39,6 +45,9 @@ pub fn execute_region_command(region_cmd: RegionCommand) {
         }
         Commands::Split(args) => {
             execute_region_split(args);
+        }
+        Commands::BatchSplit(args) => {
+            execute_region_batch_split(args);
         }
     }
 }
@@ -261,6 +270,93 @@ pub fn execute_region_split(args: RegionSplitArgs) {
     )
     .expect("split region");
     println!("New regions: {:?}", new_regions_id);
+}
+
+#[derive(Args)]
+pub struct RegionBatchSplitArgs {
+    /// The path of the config file.
+    #[clap(long, default_value = "")]
+    pub config: PathBuf,
+    /// PD endpoints, use `,` to separate multiple PDs
+    #[clap(
+        long,
+        default_value = "http://serverless-cluster-pd.tidb-serverless.svc:2379"
+    )]
+    pub pd: String,
+    /// Keys read from file, one key per line.
+    #[clap(long)]
+    pub keys_file: PathBuf,
+    /// Keys are encoded or not.
+    #[clap(long)]
+    pub encoded: bool,
+    /// Whether to scatter the new regions.
+    #[clap(long)]
+    pub scatter: bool,
+    /// Batch size for splitting regions.
+    #[clap(long, default_value_t = 64)]
+    pub batch_size: usize,
+    /// Split timeout.
+    #[clap(long, default_value_t = ReadableDuration::secs(30))]
+    pub timeout: ReadableDuration,
+    /// Split retry limit.
+    #[clap(long, default_value_t = 3)]
+    pub retry: usize,
+}
+
+pub fn execute_region_batch_split(args: RegionBatchSplitArgs) {
+    let config = RegionCommandConfig::from_args(&args.config, &args.pd);
+    let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
+
+    let file = fs::File::open(&args.keys_file).expect("failed to open keys file");
+    let reader = std::io::BufReader::new(file);
+
+    let mut keys = Vec::with_capacity(args.batch_size);
+
+    fn split_region(pd: &dyn PdClient, keys: Vec<Vec<u8>>, args: &RegionBatchSplitArgs) {
+        // Use `split_regions_opt` for best effort.
+        // `split_regions_with_retry` will keep retrying even the key has been split.
+        // TODO: PD should return the "have been split" keys as finished.
+        let (new_regions, finished_percent) =
+            match block_on(pd.split_regions_opt(keys, args.timeout.0, args.retry)) {
+                Ok(res) => res,
+                Err(e) => {
+                    eprintln!("Failed to split regions: {}", e);
+                    return;
+                }
+            };
+        if args.scatter && !new_regions.is_empty() {
+            if let Err(e) = pd.scatter_regions_by_id(new_regions.clone()) {
+                eprintln!("Failed to split regions: {}", e);
+                return;
+            }
+        }
+        println!(
+            "New regions: {:?}, finished percent: {}",
+            new_regions, finished_percent
+        );
+    }
+
+    for line in reader.lines() {
+        let line = line.expect("failed to read line");
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let split_key = if args.encoded {
+            Key::from_encoded(hex::decode(line).expect("hex decode"))
+        } else {
+            Key::from_raw(&hex::decode(line).expect("hex decode"))
+        };
+        keys.push(split_key.into_encoded());
+
+        if keys.len() >= args.batch_size {
+            split_region(&*pd_client, mem::take(&mut keys), &args);
+        }
+    }
+
+    if !keys.is_empty() {
+        split_region(&*pd_client, mem::take(&mut keys), &args);
+    }
 }
 
 #[cfg(test)]
