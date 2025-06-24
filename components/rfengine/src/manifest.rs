@@ -313,7 +313,7 @@ impl Manifest {
 
     /// The epoch of next snapshot.
     pub(crate) fn next_snapshot_epoch(epoch_id: u32) -> u32 {
-        (epoch_id + EPOCH_SNAPSHOT_LEN) / EPOCH_SNAPSHOT_LEN * EPOCH_SNAPSHOT_LEN
+        epoch_id.saturating_add(EPOCH_SNAPSHOT_LEN) / EPOCH_SNAPSHOT_LEN * EPOCH_SNAPSHOT_LEN
     }
 }
 
@@ -446,6 +446,7 @@ mod tests {
         assert_eq!(Manifest::next_snapshot_epoch(7), 8);
         assert_eq!(Manifest::next_snapshot_epoch(8), 16);
         assert_eq!(Manifest::next_snapshot_epoch(9), 16);
+        assert_eq!(Manifest::next_snapshot_epoch(u32::MAX), 0xffff_fff8);
     }
 
     #[test]
