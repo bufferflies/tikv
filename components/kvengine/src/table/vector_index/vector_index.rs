@@ -13,11 +13,11 @@ use usearch::IndexOptions;
 
 use crate::{
     ia::types::FileSegmentIdent,
-    table,
     table::{
+        self,
         columnar::{
-            get_fixed_size, Block, ColumnarConcatReader, ColumnarLevels, ColumnarMergeReader,
-            ColumnarReader, ColumnarTableReader,
+            get_fixed_size, Block, ColumnarConcatReader, ColumnarFile, ColumnarLevels,
+            ColumnarMergeReader, ColumnarReader, ColumnarTableReader,
         },
         file::{File, MmapData},
         schema_file::Schema,
@@ -49,6 +49,10 @@ impl VectorIndexes {
 
     pub(crate) fn get_all(&self) -> &[VectorIndex] {
         &self.indexes
+    }
+
+    pub(crate) fn get_mut_all(&mut self) -> &mut [VectorIndex] {
+        &mut self.indexes
     }
 
     pub fn add_index_file(&mut self, vec_idx_file: VectorIndexFile) {
@@ -129,6 +133,7 @@ pub struct VectorIndex {
     pub index_id: i64,
     pub col_id: i64,
     pub(crate) files: Vec<VectorIndexFile>,
+    pub(crate) extra_columnar_files: Vec<u64>,
 }
 
 impl VectorIndex {
@@ -138,6 +143,7 @@ impl VectorIndex {
             index_id,
             col_id,
             files: vec![],
+            extra_columnar_files: vec![],
         }
     }
 
@@ -148,6 +154,40 @@ impl VectorIndex {
 
     pub fn snap_version(&self) -> u64 {
         self.files[0].snap_version()
+    }
+
+    pub(crate) fn update_extra_columnar_files(&mut self, col_levels: &ColumnarLevels) {
+        self.extra_columnar_files.clear();
+        for col_level in &col_levels.levels {
+            if col_level.level == 2 {
+                continue;
+            }
+            for file in &col_level.files {
+                if !file.has_table(self.table_id) {
+                    continue;
+                }
+                if self.files.iter().any(|vec_idx_file| {
+                    vec_idx_file.snap_version() > file.get_l0_version().unwrap_or_default()
+                        && !vec_idx_file.overlap_bound(file.data_bound())
+                }) {
+                    self.extra_columnar_files.push(file.id());
+                }
+            }
+        }
+    }
+
+    pub(crate) fn contains_columnar_file(&self, col_file: &ColumnarFile) -> bool {
+        if self.extra_columnar_files.contains(&col_file.id()) {
+            return false;
+        }
+        if col_file.get_l0_version().unwrap_or_default() <= self.snap_version() {
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn need_rebuild(&self) -> bool {
+        !self.extra_columnar_files.is_empty()
     }
 
     pub async fn search(

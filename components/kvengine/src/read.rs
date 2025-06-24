@@ -929,6 +929,7 @@ impl SnapAccessCore {
             snap.set_schema_meta(schema_file.to_schema_meta());
         }
         snap.set_columnar_table_ids(self.data.columnar_table_ids.clone());
+        snap.set_columnar_l2_snap_version(self.data.col_levels.l2_snap_version);
         let vector_indexes = snap.mut_vector_indexes();
         for index in self.data.vector_indexes.get_all() {
             vector_indexes.push(index.to_vector_index_pb());
@@ -1480,6 +1481,10 @@ impl SnapAccessCore {
         if !self.read_columnar {
             return None;
         }
+        if !self.data.col_levels.levels[2].files.is_empty() {
+            // Make sure the l2_snap_version is set.
+            debug_assert!(self.data.col_levels.l2_snap_version > 0);
+        }
         let vector_index = self.data.vector_indexes.get(table_id, index_id, col_id)?;
         let vector_items_reader = VectorItemsReader::new(
             schema.clone(),
@@ -1506,8 +1511,10 @@ impl SnapAccessCore {
                 break;
             }
             for file in &columnar_level.files {
-                let snap_version = file.get_l0_version().unwrap_or_default();
-                if snap_version <= vector_index.snap_version() {
+                // NOTE: the snap_version of columnar file maybe smaller than the vector index
+                // and not generated the vector index after region merge. We should also need to
+                // read the columnar file.
+                if vector_index.contains_columnar_file(file) {
                     continue;
                 }
                 if !file.has_table(schema.table_id) {

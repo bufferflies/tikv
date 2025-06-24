@@ -301,6 +301,11 @@ impl Engine {
                         }
                         false
                     });
+                    if flush.shard_data.col_levels.l2_snap_version > 0 {
+                        initial_flush.set_columnar_l2_snap_version(
+                            flush.shard_data.col_levels.l2_snap_version,
+                        );
+                    }
 
                     initial_flush.set_columnar_table_ids(flush.columnar_table_ids.clone());
                     for vec_idx in flush.shard_data.vector_indexes.get_all() {

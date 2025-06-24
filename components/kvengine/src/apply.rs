@@ -270,6 +270,7 @@ pub(crate) fn create_snapshot_tables(
                 );
             }
         }
+        col_levels.l2_snap_version = snap.columnar_l2_snap_version;
         col_levels.sort();
         for vec_idx_pb in snap.get_vector_indexes() {
             for vec_idx_file_pb in vec_idx_pb.get_files() {

@@ -57,6 +57,7 @@ pub struct ShardMeta {
     pub columnar_table_ids: Vec<i64>,
     pub unconverted_l0s: Vec<u64>,
     pub vector_indexes: Vec<kvenginepb::VectorIndex>,
+    pub columnar_l2_snap_version: u64,
 
     /// The following are memory-based field(s).
     ///
@@ -101,6 +102,7 @@ impl ShardMeta {
             max_ts: snap.max_ts,
             columnar_table_ids: snap.columnar_table_ids.clone(),
             unconverted_l0s: snap.unconverted_l0s.clone(),
+            columnar_l2_snap_version: snap.columnar_l2_snap_version,
             txn_file_locks,
             ..Default::default()
         };
@@ -976,6 +978,7 @@ impl ShardMeta {
                 .copied()
                 .collect();
             meta.columnar_table_ids = columnar_table_ids;
+            meta.columnar_l2_snap_version = old.columnar_l2_snap_version;
             // Although `max_ts` will be updated in initial flush again, still set here to
             // avoid issue in unexpected corner case.
             meta.max_ts = self.max_ts;
@@ -1017,6 +1020,9 @@ impl ShardMeta {
     }
 
     pub fn apply_columnar_compaction(&mut self, comp: &pb::ColumnarCompaction) {
+        if comp.target_level == 2 {
+            self.columnar_l2_snap_version = comp.snap_version;
+        }
         let col_change = comp.get_columnar_change();
         for col_create in col_change.get_columnar_creates() {
             self.files.insert(
@@ -1097,6 +1103,7 @@ impl ShardMeta {
         info!("{} shard_meta apply clear_columnar", self.tag());
         self.schema.clear();
         self.columnar_table_ids.clear();
+        self.columnar_l2_snap_version = 0;
         self.unconverted_l0s.clear();
         self.vector_indexes.clear();
         self.files.retain(|_, fm| {
@@ -1137,6 +1144,7 @@ impl ShardMeta {
         snap.set_data_sequence(self.data_sequence);
         snap.set_max_ts(self.max_ts);
         snap.set_columnar_table_ids(self.columnar_table_ids.clone());
+        snap.set_columnar_l2_snap_version(self.columnar_l2_snap_version);
         self.schema.to_snapshot(&mut snap);
         snap.set_unconverted_l0s(self.unconverted_l0s.clone());
         snap.set_vector_indexes(self.vector_indexes.clone().into());
@@ -1343,6 +1351,10 @@ impl ShardMeta {
             &self.columnar_table_ids,
             source.data_bound(),
             self.data_bound(),
+        );
+        self.columnar_l2_snap_version = max(
+            self.columnar_l2_snap_version,
+            source.columnar_l2_snap_version,
         );
         // Remove columnar and vector if related table is not in the merged
         // columnar_table_ids.

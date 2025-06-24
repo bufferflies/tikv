@@ -179,6 +179,7 @@ impl Engine {
                     }
                 }
             }
+            new_col_levels.l2_snap_version = old_data.col_levels.l2_snap_version;
             let mut new_vec_indexes = VectorIndexes::default();
             for vec_index in old_data.vector_indexes.get_all() {
                 for file in &vec_index.files {
@@ -529,6 +530,10 @@ impl Engine {
                 let col = source.col_files.get(&columnar_create.id).unwrap().clone();
                 columnar_levels.add_file(columnar_create.level as usize, col);
             }
+            columnar_levels.l2_snap_version = max(
+                old_data.col_levels.l2_snap_version,
+                source_snap.columnar_l2_snap_version,
+            );
             columnar_levels.sort();
             let mut vector_indexes = old_data.vector_indexes.clone();
             for source_vec_index in source_snap.get_vector_indexes() {

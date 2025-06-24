@@ -1173,6 +1173,15 @@ impl Shard {
             let first_l1_columnar = data.col_levels.levels[1].files.first().unwrap();
             let l2_snap_after_compaction = first_l1_columnar.get_l0_version().unwrap();
             for vec_idx in data.vector_indexes.get_all() {
+                if vec_idx.need_rebuild() {
+                    return Some(CompactionPriority::UpdateVectorIndex {
+                        score: 2.0,
+                        table_id: vec_idx.table_id,
+                        index_id: vec_idx.index_id,
+                        col_id: vec_idx.col_id,
+                        rebuild: true,
+                    });
+                }
                 if vec_idx.snap_version() < l2_snap_after_compaction {
                     return Some(CompactionPriority::UpdateVectorIndex {
                         score: 2.0,
@@ -1705,6 +1714,20 @@ impl ShardDataBuilder {
             .schema
             .take()
             .unwrap_or_else(|| (self.old.schema_version, self.old.schema_file.clone()));
+        let col_levels = self
+            .columnar_levels
+            .take()
+            .unwrap_or_else(|| self.old.col_levels.clone());
+        let mut vector_indexes = self
+            .vector_indexes
+            .take()
+            .unwrap_or_else(|| self.old.vector_indexes.clone());
+        // Collect the extra columnar files to read for vector index.
+        // Note: there may have columnar files not transformed to vector index with
+        // smaller version than l2_snap_version after region merge.
+        for vec_idx in vector_indexes.get_mut_all() {
+            vec_idx.update_extra_columnar_files(&col_levels);
+        }
         ShardData::new(
             self.range.take().unwrap_or_else(|| self.old.range.clone()),
             self.inner_key_off
@@ -1730,12 +1753,8 @@ impl ShardDataBuilder {
             self.old.update_counter + 1,
             schema_version,
             schema_file,
-            self.columnar_levels
-                .take()
-                .unwrap_or_else(|| self.old.col_levels.clone()),
-            self.vector_indexes
-                .take()
-                .unwrap_or_else(|| self.old.vector_indexes.clone()),
+            col_levels,
+            vector_indexes,
             self.columnar_table_ids
                 .take()
                 .unwrap_or_else(|| self.old.columnar_table_ids.clone()),
