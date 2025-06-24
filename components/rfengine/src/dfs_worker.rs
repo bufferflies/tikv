@@ -154,9 +154,7 @@ impl ObjectStorageWorker {
                 }
             }
 
-            // Use `overwritten_epoch + 2` as `overwritten_epoch + 1` is the cut-off value
-            // and would be overwritten soon.
-            if rebuild_epoch <= 1 || rebuild_epoch <= self.overwritten_epoch() + 2 {
+            if rebuild_epoch <= 1 || rebuild_epoch <= self.near_overwritten_epoch() {
                 need_snapshot = true;
                 break;
             }
@@ -309,6 +307,16 @@ impl ObjectStorageWorker {
 
     fn handle_sync(&mut self, epoch_id: u32, file_off: u64) -> Result<()> {
         let store_id = self.get_engine_id();
+
+        if epoch_id < self.epoch_id {
+            error!("{}: handle_sync for smaller epoch id", store_id;
+                "epoch_id" => epoch_id, "file_off" => "file_off",
+                "self.epoch_id" => self.epoch_id, "start_off" => self.start_off, "sync_off" => self.sync_off,
+            );
+            debug_assert!(false);
+            return Err(Error::Other("handle_sync for smaller epoch id".to_string()));
+        }
+
         if epoch_id != self.epoch_id {
             // If epoch is overwritten, the WAL chunks in DFS must be incomplete.
             // Return error to make unhealthy.
@@ -371,6 +379,16 @@ impl ObjectStorageWorker {
         self.service_worker_epoch
             .load(Ordering::SeqCst)
             .saturating_sub(EPOCH_ROTATE_LEN)
+    }
+
+    // `service_worker_epoch - 3` (`EPOCH_ROTATE_LEN - 1` == 3) is the cut-off value
+    // and would be overwritten soon.
+    // So `service_worker_epoch - 2` is used.
+    #[inline]
+    fn near_overwritten_epoch(&self) -> u32 {
+        self.service_worker_epoch
+            .load(Ordering::SeqCst)
+            .saturating_sub(EPOCH_ROTATE_LEN - 2)
     }
 
     fn check_overwritten_epoch(&self, ctx: &str) -> Result<()> {
@@ -712,7 +730,7 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
         let (tx, _) = tikv_util::mpsc::unbounded();
         let s3fs = Arc::new(S3Fs::new_from_config(DFSConfig::default()));
-        let overwritten_epoch = Arc::new(AtomicU32::new(0));
+        let service_worker_epoch = Arc::new(AtomicU32::new(0));
         let mut worker = ObjectStorageWorker::new(
             LightweightBackupConfig::new(
                 std::env::temp_dir(),
@@ -729,7 +747,7 @@ mod tests {
             Healthy::default(),
             rx,
             tx,
-            overwritten_epoch,
+            service_worker_epoch,
         );
 
         let mut origin_data = vec![];
@@ -753,6 +771,49 @@ mod tests {
         let assembled_data = assemble_wal_chunks(chunks_data).unwrap();
         let assembled_data = assembled_data.to_vec();
         assert_eq!(origin_data, assembled_data);
+    }
+
+    #[test]
+    fn test_overwritten_epoch() {
+        let (_, rx) = tikv_util::mpsc::unbounded();
+        let (tx, _) = tikv_util::mpsc::unbounded();
+        let s3fs = Arc::new(S3Fs::new_from_config(DFSConfig::default()));
+        let service_worker_epoch = Arc::new(AtomicU32::new(0));
+        let worker = ObjectStorageWorker::new(
+            LightweightBackupConfig::new(
+                std::env::temp_dir(),
+                1024 * 1024,
+                CompressionType::Lz4Compression,
+                CompressionType::Lz4Compression,
+                1024 * 1024,
+                4096,
+                1 << 20,
+            ),
+            s3fs,
+            1,
+            Arc::new(AtomicU64::new(1)),
+            Healthy::default(),
+            rx,
+            tx,
+            service_worker_epoch.clone(),
+        );
+
+        let cases = vec![
+            (1, 0, 0),
+            (2, 0, 0),
+            (3, 0, 1),
+            (4, 0, 2),
+            (5, 1, 3),
+            (6, 2, 4),
+            (7, 3, 5),
+            (u32::MAX, 0xffff_fffb, 0xffff_fffd),
+        ];
+
+        for (service_epoch_id, overwritten_epoch, near_overwritten_epoch) in cases {
+            service_worker_epoch.store(service_epoch_id, Ordering::SeqCst);
+            assert_eq!(worker.overwritten_epoch(), overwritten_epoch);
+            assert_eq!(worker.near_overwritten_epoch(), near_overwritten_epoch);
+        }
     }
 
     fn generate_random_bytes(size: usize) -> Vec<u8> {
