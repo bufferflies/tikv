@@ -77,7 +77,6 @@ impl KeyspaceService for KeyspaceKubeService {
     async fn start(&mut self) -> Result<()> {
         let api = &self.kube_api;
         api.create_pd(&self.scheme, self.keyspace_id).await?;
-        api.create_cdc(&self.scheme, self.keyspace_id).await?;
         let pd_url = self.task_states.pd_url.clone();
         let pd_client = new_keyspace_pd_client(pd_url, &self.sec_conf).await;
         bootstrap(
@@ -87,6 +86,7 @@ impl KeyspaceService for KeyspaceKubeService {
         )
         .await?;
         self.pd_client = Some(pd_client);
+        api.create_cdc(&self.scheme, self.keyspace_id).await?;
         Ok(())
     }
 

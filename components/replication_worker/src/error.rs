@@ -16,6 +16,10 @@ pub enum Error {
     PdClientError(#[from] pd_client::Error),
     #[error("hyper error {0}")]
     HyperError(#[from] hyper::Error),
+    #[error("rfengine error {0}")]
+    RfEngineError(#[from] rfengine::Error),
+    #[error("store timeout {0}")]
+    StoreTimeout(String),
     #[error("other error {0}")]
     OtherError(String),
 }

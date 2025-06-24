@@ -420,7 +420,7 @@ pub fn replay_wal_logs_from_backup(
     // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
     // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
     for epoch_id in snap_epoch + 1..=backup_epoch {
-        let (chunks, last_chunk) = collect_wal_chunks_with_retry(
+        let (chunks, online_chunk) = collect_wal_chunks_with_retry(
             tag,
             &collect_ctx,
             epoch_id,
@@ -431,7 +431,7 @@ pub fn replay_wal_logs_from_backup(
             tag,
             ctx,
             chunks,
-            last_chunk,
+            online_chunk,
             epoch_id,
             backup_epoch,
             backup_offset,
@@ -494,7 +494,7 @@ pub fn collect_wal_chunks_with_retry(
 ) -> Result<(Vec<Bytes>, Option<Bytes>)> {
     let start_time = Instant::now_coarse();
 
-    let (chunk_keys, last_chunk) = if epoch_id == backup_epoch && !ctx.complete_wal_chunks {
+    let (chunk_keys, online_chunk) = if epoch_id == backup_epoch && !ctx.complete_wal_chunks {
         collect_wal_chunk_keys_with_online_rfengine(
             tag,
             ctx,
@@ -526,7 +526,7 @@ pub fn collect_wal_chunks_with_retry(
         ctx.fetch_wal_timeout,
         Some(start_time),
     )?;
-    Ok((chunks_data, last_chunk))
+    Ok((chunks_data, online_chunk))
 }
 
 /// `end_off`:
@@ -637,7 +637,7 @@ fn collect_wal_chunk_keys_with_online_rfengine(
     backup_epoch: u32,
     backup_offset: u64,
     start_time: Instant,
-) -> Result<(Vec<String>, Option<Bytes> /* last_chunk */)> {
+) -> Result<(Vec<String>, Option<Bytes> /* online_chunk */)> {
     // Note: the chunks of last epoch (i.e., backup_epoch) can be empty. All chunks
     // are fetched from online rfengine.
     let (chunk_keys, last_end_off) = with_retry(
@@ -675,7 +675,7 @@ fn collect_wal_chunk_keys_with_online_rfengine(
     let security_mgr = ctx.pd_client.get_security_mgr();
     let fetch = || -> Result<Either<Bytes, Vec<String>>> {
         if !rf_epoch_unavailable.get() {
-            let last_chunk = runtime.block_on(fetch_rfengine_wal_chunk(
+            let online_chunk = runtime.block_on(fetch_rfengine_wal_chunk(
                 &store,
                 backup_epoch,
                 last_end_off,
@@ -683,9 +683,9 @@ fn collect_wal_chunk_keys_with_online_rfengine(
                 security_mgr.as_ref(),
                 ctx.fetch_wal_timeout,
             ))?;
-            info!("{} fetched last wal chunk from rfengine", tag;
-                "start_off" => last_end_off, "end_off" => backup_offset, "data_len" => last_chunk.len());
-            Ok(Either::Left(last_chunk))
+            info!("{} fetched online wal chunk from rfengine", tag;
+                "start_off" => last_end_off, "end_off" => backup_offset, "data_len" => online_chunk.len());
+            Ok(Either::Left(online_chunk))
         } else {
             let (chunk_keys, last_end_off) =
                 collect_wal_chunk_keys(tag, ctx, backup_epoch, backup_offset)?;
@@ -731,7 +731,7 @@ fn collect_wal_chunk_keys_with_online_rfengine(
             ctx.fetch_wal_timeout,
             Some(start_time),
         )? {
-            Either::Left(last_chunk) => (chunk_keys, Some(last_chunk)),
+            Either::Left(online_chunk) => (chunk_keys, Some(online_chunk)),
             Either::Right(new_chunk_keys) => (new_chunk_keys, None),
         },
     )
@@ -775,7 +775,7 @@ fn replay_wal_chunks(
     tag: &str,
     ctx: &ReplayWalLogsContext<'_>,
     chunks: Vec<Bytes>,
-    last_chunk: Option<Bytes>,
+    online_chunk: Option<Bytes>,
     epoch_id: u32,
     backup_epoch: u32,
     backup_offset: u64,
@@ -792,8 +792,8 @@ fn replay_wal_chunks(
     );
 
     let end_offset = if backup_epoch == epoch_id {
-        if let Some(last_chunk) = last_chunk {
-            epoch_wal.extend(last_chunk);
+        if let Some(online_chunk) = online_chunk {
+            epoch_wal.extend(online_chunk);
             if backup_offset != epoch_wal.len() as u64 {
                 error!("{} replay wal chunks: unexpected length of epoch WAL", tag;
                     "epoch" => epoch_id, "epoch_wal" => epoch_wal.len(),
@@ -1022,9 +1022,9 @@ pub fn collect_store_wal_rlog_files(
     // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
     // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
     for epoch_id in store_rlog.snap_epoch + 1..=backup_epoch {
-        let (epoch_wals, last_chunk) =
+        let (epoch_wals, online_chunk) =
             collect_wal_chunks_with_retry(tag, &ctx, epoch_id, backup_epoch, backup_offset)?;
-        debug_assert!(last_chunk.is_none());
+        debug_assert!(online_chunk.is_none());
         wals.push((epoch_id, epoch_wals))
     }
 

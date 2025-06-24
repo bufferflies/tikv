@@ -1,6 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use bytes::{Buf, Bytes};
 use http::{HeaderMap, HeaderValue};
@@ -9,7 +9,7 @@ use security::HttpClient;
 use serde::{Deserialize, Serialize};
 use tikv_util::{future::paired_future_callback, info};
 
-use crate::CdcMsg;
+use crate::{CdcMsg, Error};
 
 #[derive(Clone)]
 pub struct ReplicationScheduler {
@@ -385,6 +385,41 @@ fn extract_param<'a>(uri: &'a hyper::Uri, key: &str) -> Option<&'a str> {
             .find(|p| p.starts_with(key))
             .map(|p| p.split('=').nth(1).unwrap_or(""))
     })
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct CdcStatus {
+    pub liveness: usize,
+}
+
+pub(crate) async fn get_cdc_status(
+    client: &HttpClient,
+    cdc_addr: &str,
+    timeout: Duration,
+) -> crate::Result<()> {
+    let scheme = if matches!(client, HttpClient::Http(_)) {
+        "http"
+    } else {
+        "https"
+    };
+    let url = format!("{}://{}/api/v2/status", scheme, cdc_addr);
+    let start = tikv_util::time::Instant::now();
+    while start.saturating_elapsed() < timeout {
+        let uri = Uri::try_from(&url).unwrap();
+        let resp = client.get(uri).await;
+        let Ok(resp) = resp else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
+        let resp_data = hyper::body::to_bytes(resp.into_body()).await?;
+        let status = serde_json::from_slice::<CdcStatus>(&resp_data)
+            .map_err(|e| Error::OtherError(format!("Failed to parse CDC status: {}", e)))?;
+        if status.liveness == 0 {
+            return Ok(());
+        }
+    }
+    Err(Error::OtherError("CDC status check timed out".to_string()))
 }
 
 #[cfg(test)]

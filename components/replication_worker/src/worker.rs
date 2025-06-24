@@ -17,7 +17,8 @@ use cdc::{CdcEvent, Conn, ConnId};
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
 use grpcio_health::{create_health, HealthService, ServingStatus};
-use hyper::{http, StatusCode, Uri};
+use http::Request;
+use hyper::{http, Body, StatusCode, Uri};
 use kvengine::{
     dfs::{Dfs, S3Fs},
     table::InnerKey,
@@ -36,9 +37,11 @@ use kvproto::{
     tikvpb::create_tikv,
 };
 use merged_engine::{MergedEngine, MergedEngineContext};
-use native_br::common::{get_latest_backup_meta, send_request_to_store};
+use native_br::common::{
+    collect_wal_chunks_with_retry, get_latest_backup_meta, CollectWalChunksContext,
+};
 use pd_client::{PdClient, RegionStat, RpcClient};
-use rfengine::{RfEngine, TRUNCATE_ALL_INDEX};
+use rfengine::{assemble_wal_chunks, RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig, SecurityManager};
 use tikv_util::{
@@ -51,7 +54,10 @@ use crate::{
     apply_observer::{is_index_key, CdcApplyObserver, RegionEvents},
     kube::{KeyspaceKubeService, KubeApi},
     provisioned::KeyspaceProvisionedService,
-    CdcMsg, Error, KeyspaceService, KeyspaceStates, ReplicationScheduler, ReplicationService,
+    scheduler::get_cdc_status,
+    CdcMsg, Error,
+    Error::StoreTimeout,
+    KeyspaceService, KeyspaceStates, ReplicationScheduler, ReplicationService,
     ReplicationWorkerConfig, Result,
 };
 
@@ -664,15 +670,25 @@ impl ReplicationWorker {
             let req = http::Request::get(uri.clone())
                 .body(hyper::Body::empty())
                 .unwrap();
-            let (status, data) = block_on(send_request_to_store(
+            let http_client = self.http_client.clone();
+            let (status, data) = block_on(Self::send_request_to_store(
                 req,
-                &store,
-                &security_mgr,
+                &http_client,
                 FETCH_WAL_TIMEOUT,
             ))?;
+            if status == StatusCode::GONE {
+                self.update_store_wal_from_s3(store.get_id(), epoch, start_off)?;
+                epoch += 1;
+                start_off = 0;
+                continue;
+            }
+            if !status.is_success() {
+                let err_str = String::from_utf8_lossy(&data);
+                return Err(Error::OtherError(err_str.to_string()));
+            }
             let data_len = data.len();
             self.merged_engine
-                .update_wal(store_id, epoch, start_off, data)?;
+                .update_wal(store_id, epoch, start_off, data.clone())?;
             if status == StatusCode::PARTIAL_CONTENT {
                 self.merged_engine
                     .rotate_wal(store_id, epoch, start_off + data_len as u64)?;
@@ -682,6 +698,53 @@ impl ReplicationWorker {
             }
             return Ok(());
         }
+    }
+
+    pub async fn send_request_to_store(
+        req: Request<Body>,
+        client: &HttpClient,
+        timeout: Duration,
+    ) -> Result<(StatusCode, Bytes)> {
+        debug_assert!(!timeout.is_zero());
+        let uri_str = format!("{}", req.uri());
+        let resp_res = tokio::time::timeout(timeout, client.request(req))
+            .await
+            .map_err(|_| StoreTimeout(format!("send request to {uri_str}")))?;
+        let resp = resp_res?;
+        let status = resp.status();
+        let body = tokio::time::timeout(timeout, hyper::body::to_bytes(resp.into_body()))
+            .await
+            .map_err(|_| StoreTimeout(format!("read response from {uri_str}")))??;
+        Ok((status, body))
+    }
+
+    fn update_store_wal_from_s3(
+        &mut self,
+        store_id: u64,
+        epoch_id: u32,
+        start_off: u64,
+    ) -> Result<()> {
+        info!("update store wal from s3";
+            "store_id" => store_id, "epoch_id" => epoch_id, "start_off" => start_off);
+        let collect_ctx = CollectWalChunksContext {
+            pd_client: self.ctx.pd.clone(),
+            dfs: self.ctx.fs.clone(),
+            store_id,
+            complete_wal_chunks: true,
+            fetch_wal_timeout: FETCH_WAL_TIMEOUT,
+        };
+        let tag = format!("{}:{}", store_id, epoch_id);
+        // there is no online chunk for this epoch.
+        let (chunks, _) =
+            collect_wal_chunks_with_retry(&tag, &collect_ctx, epoch_id, epoch_id + 1, 0)
+                .map_err(|e| Error::from(e))?;
+        let wal_data = assemble_wal_chunks(chunks)?.freeze();
+        let end_off = wal_data.len() as u64;
+        let remained_wal_data = wal_data.slice((start_off as usize)..);
+        self.merged_engine
+            .update_wal(store_id, epoch_id, start_off, remained_wal_data)?;
+        self.merged_engine.rotate_wal(store_id, epoch_id, end_off)?;
+        Ok(())
     }
 
     fn report_store_to_pd(pd_client: &Arc<dyn PdClient>, store_id: u64) {
@@ -779,10 +842,17 @@ impl ReplicationWorker {
         let merged_engine_ctx = self.merged_engine.ctx.clone();
         let kv = self.merged_engine.kv.clone();
         let recover_handler = self.merged_engine.recover_handler.clone();
+        let http_client = self.http_client.clone();
         tokio::spawn(async move {
             let res = task_service.start().await;
             if res.is_err() {
                 cb(res);
+                return;
+            }
+            let cdc_addr = task_service.get_states().cdc_addr.clone();
+            let res = get_cdc_status(&http_client, &cdc_addr, DISPATCH_CDC_TIMEOUT).await;
+            if res.is_err() {
+                cb(Err(Error::OtherError("cdc_status failed".into())));
                 return;
             }
             // When new keyspace added, loading shards takes long time, we need a dedicated

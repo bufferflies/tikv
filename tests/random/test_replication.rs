@@ -20,7 +20,7 @@ use test_pd_client::PdWrapper;
 use tidb_query_datatype::codec::table::encode_row_key;
 use tikv_util::{codec::bytes::encode_bytes, config::ReadableSize, info};
 
-use crate::alloc_node_id_vec;
+use crate::{alloc_node_id_vec, generate_random_string};
 
 #[test]
 fn test_replication_worker() {
@@ -58,7 +58,8 @@ fn test_replication_worker() {
     let mut cluster = ServerClusterBuilder::new(node_ids.clone(), |_, conf| {
         conf.dfs = dfs_conf.clone();
         conf.rfengine.lightweight_backup = true;
-        conf.rfengine.target_file_size = ReadableSize::mb(8);
+        conf.rfengine.target_file_size = ReadableSize::kb(64);
+        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(16);
     })
     .pd(pd)
     .build();
@@ -159,7 +160,7 @@ fn test_replication_worker() {
 
     let table_name = "rep_table";
     let create_table =
-        format!("create table {table_name} (id int primary key, col_i int, col_s varchar(255))");
+        format!("create table {table_name} (id int primary key, col_i int, col_s varchar(1024))");
     block_on(sqlx::query(&create_table).execute(&pool)).unwrap();
 
     let select_table_id = format!(
@@ -167,9 +168,11 @@ fn test_replication_worker() {
     );
     let row = block_on(sqlx::query(&select_table_id).fetch_one(&pool)).unwrap();
     let table_id: i64 = row.get("tidb_table_id");
+    let val_fn = generate_random_string("rep".to_string());
 
     for i in 1..=10 {
-        let sql = format!("insert into `{table_name}` values ({i}, {i}, 'test_{i}')",);
+        let val = String::from_utf8(val_fn(1000)).unwrap();
+        let sql = format!("insert into `{table_name}` values ({i}, {i}, '{val}')");
         block_on(sqlx::query(&sql).execute(&pool)).unwrap();
         thread::sleep(Duration::from_millis(500));
     }
@@ -226,7 +229,13 @@ fn test_replication_worker() {
         || "wait for region merge".into(),
     );
     worker.shutdown();
-    thread::sleep(Duration::from_secs(1));
+
+    // write some data to make the wal rotate more than 4 times.
+    let update_count = 20;
+    for _ in 0..update_count {
+        let sql = format!("update `{table_name}` set col_i = col_i + 1");
+        block_on(sqlx::query(&sql).execute(&pool)).unwrap();
+    }
 
     // restart the replication worker.
     worker = CloudWorker::new(worker_conf.clone(), None, 2, pd_client.clone());
@@ -250,7 +259,7 @@ fn test_replication_worker() {
         let id: i32 = row.get("id");
         let col_i: i32 = row.get("col_i");
         info!("id: {}, col_i: {}", id, col_i);
-        assert_eq!(id + 1, col_i);
+        assert_eq!(id + 1 + update_count, col_i);
     }
     assert_eq!(result.len(), 5);
     let remove_task_url = format!(
