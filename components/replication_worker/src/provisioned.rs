@@ -232,4 +232,14 @@ impl LocalProvider {
         }
         Ok(())
     }
+
+    pub fn restart_local_pd(&mut self) -> Result<()> {
+        if let Some(pd) = self.pd_child.take() {
+            self.kill_process(pd.id() as i32)?;
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        self.start_local_pd();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        Ok(())
+    }
 }

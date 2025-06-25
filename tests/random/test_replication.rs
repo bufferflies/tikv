@@ -1,14 +1,14 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fs, path::PathBuf, thread, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use api_version::ApiV2;
 use cloud_worker::CloudWorker;
 use futures::executor::block_on;
 use native_br::backup;
-use pd_client::pd_control::PdScheduleConfig;
+use pd_client::{pd_control::PdScheduleConfig, PdClient, RpcClient};
 use replication_worker::{KeyspacesResp, LocalProvider};
-use security::{HttpClient, SecurityConfig};
+use security::{HttpClient, SecurityConfig, SecurityManager};
 use sqlx::Row;
 use test_cloud_server::{
     must_wait,
@@ -18,7 +18,11 @@ use test_cloud_server::{
 };
 use test_pd_client::PdWrapper;
 use tidb_query_datatype::codec::table::encode_row_key;
-use tikv_util::{codec::bytes::encode_bytes, config::ReadableSize, info};
+use tikv_util::{
+    codec::bytes::encode_bytes,
+    config::{ReadableDuration, ReadableSize},
+    info,
+};
 
 use crate::{alloc_node_id_vec, generate_random_string};
 
@@ -118,6 +122,7 @@ fn test_replication_worker() {
     rep_config.enabled = true;
     rep_config.grpc_addr = "127.0.0.1:5999".to_string();
     rep_config.advertise_addr = "127.0.0.1:5999".to_string();
+    rep_config.report_region_interval = ReadableDuration::secs(3);
     rep_config.merged_engine.mem_table_size = ReadableSize::kb(16);
 
     let pd_client = cluster.get_pure_pd_client();
@@ -181,6 +186,19 @@ fn test_replication_worker() {
     let pause_task_url =
         format!("{worker_base_url}/api/v2/changefeeds/{changefeed_id}/pause?keyspace_id=1");
     dispatch_http(&worker_client, pause_task_url, "POST", "".to_string()).unwrap();
+
+    // restart the rep-pd and wait for the rep-pd region has leader.
+    local_provider.restart_local_pd().unwrap();
+    let rep_pd_cli = new_rep_pd_clent(local_provider.pd_client_url());
+    must_wait(
+        || {
+            let region = rep_pd_cli.get_region_info(&[]).unwrap();
+            info!("rep-pd region: {:?}", region);
+            region.leader.is_some()
+        },
+        10,
+        || "wait for rep-pd region leader".into(),
+    );
 
     // resume the changefeed
     let resume_task_url =
@@ -294,6 +312,11 @@ fn test_replication_worker() {
     tc.tidb.stop_all();
     cluster.stop();
     tc.pd.stop_all();
+}
+
+fn new_rep_pd_clent(pd_url: String) -> Arc<dyn PdClient> {
+    let sec_mgr = Arc::new(SecurityManager::default());
+    Arc::new(RpcClient::new(&pd_client::Config::new(vec![pd_url]), None, sec_mgr).unwrap())
 }
 
 fn dispatch_http(

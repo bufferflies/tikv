@@ -39,13 +39,13 @@ use resolved_ts::Resolver;
 pub use scheduler::*;
 use serde_derive::{Deserialize, Serialize};
 use tikv::tikv_build_version;
-use tikv_util::{error, info, warn};
+use tikv_util::{config::ReadableDuration, error, info, warn};
 use txn_types::TimeStamp;
 pub use worker::ReplicationWorker;
 
 pub(crate) const K8S_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct ReplicationWorkerConfig {
@@ -59,7 +59,23 @@ pub struct ReplicationWorkerConfig {
     pub cdc_sts_name: String,
     pub namespace: String,
 
+    pub report_region_interval: ReadableDuration,
     pub merged_engine: MergedEngineConfig,
+}
+
+impl Default for ReplicationWorkerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            grpc_addr: "".to_string(),
+            advertise_addr: "".to_string(),
+            pd_sts_name: "".to_string(),
+            cdc_sts_name: "".to_string(),
+            namespace: "".to_string(),
+            report_region_interval: ReadableDuration::secs(60),
+            merged_engine: Default::default(),
+        }
+    }
 }
 
 impl ReplicationWorkerConfig {
@@ -137,9 +153,6 @@ pub enum CdcMsg {
         changefeed_id: String,
         body: Bytes,
         cb: Box<dyn FnOnce(Result<(StatusCode, Bytes)>) + Send>,
-    },
-    RetryReportRegion {
-        region_id: u64,
     },
     OpenConn(cdc::Conn),
     Register {

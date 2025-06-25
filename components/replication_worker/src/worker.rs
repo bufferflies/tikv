@@ -22,7 +22,7 @@ use hyper::{http, Body, StatusCode, Uri};
 use kvengine::{
     dfs::{Dfs, S3Fs},
     table::InnerKey,
-    SnapAccess, UserMeta, GLOBAL_SHARD_END_KEY, LOCK_CF, WRITE_CF,
+    Engine, SnapAccess, UserMeta, GLOBAL_SHARD_END_KEY, LOCK_CF, WRITE_CF,
 };
 use kvproto::{
     cdcpb,
@@ -208,6 +208,15 @@ impl ReplicationWorker {
             .enable_all()
             .build()
             .unwrap();
+        let interval = config.report_region_interval.0;
+        for (&keyspace_id, ks_svc) in &keyspace_services {
+            let raft = merged_engine.get_raft();
+            let kv = merged_engine.get_kv();
+            let rep_pd_cli = ks_svc.get_pd_client();
+            runtime.spawn(async move {
+                Self::report_regions_loop(keyspace_id, raft, kv, rep_pd_cli, interval).await;
+            });
+        }
         let mut apply_ctx =
             ApplyContext::new(merged_engine.get_kv(), Some(merged_engine.get_router()));
         let (tx, rx) = tikv_util::mpsc::unbounded();
@@ -337,9 +346,6 @@ impl ReplicationWorker {
             } => {
                 self.handle_new_task(keyspace_id, changefeed_id, body, cb);
             }
-            CdcMsg::RetryReportRegion { region_id } => {
-                self.handle_retry_report(region_id);
-            }
             CdcMsg::OpenConn(conn) => self.handle_open_conn(conn),
             CdcMsg::Register { request, conn_id } => {
                 let res = self.handle_register(request, conn_id);
@@ -413,7 +419,7 @@ impl ReplicationWorker {
         let keyspace_region_ids = self.merged_engine.get_keyspace_regions(keyspace_id);
         let raft = self.merged_engine.get_raft();
         for region_id in keyspace_region_ids {
-            Self::report_region_to_pd(&raft, &pd_client, region_id, self.tx.clone());
+            Self::report_region_to_rep_pd(&raft, &pd_client, region_id);
         }
         let states = task_svc.get_states_mut();
         states.feeds.insert(changefeed_id, body_string);
@@ -438,19 +444,6 @@ impl ReplicationWorker {
             .await;
             cb(res);
         });
-    }
-
-    fn handle_retry_report(&mut self, region_id: u64) {
-        let Some(keyspace_id) = self.try_get_keyspace_id(region_id) else {
-            return;
-        };
-        let Some(svc) = self.keyspaces.get_mut(&keyspace_id) else {
-            return;
-        };
-        let pd_client = svc.get_pd_client();
-        let raft = self.merged_engine.get_raft();
-        let sender = self.tx.clone();
-        Self::report_region_to_pd(&raft, &pd_client, region_id, sender);
     }
 
     fn handle_open_conn(&mut self, conn: Conn) {
@@ -577,10 +570,6 @@ impl ReplicationWorker {
         })
     }
 
-    fn try_get_keyspace_id(&self, region_id: u64) -> Option<u32> {
-        self.region_to_keyspace.get(&region_id).cloned()
-    }
-
     fn send_resolved_ts(&mut self) -> Result<()> {
         for task in self.keyspaces.values_mut() {
             task.get_resolver().resolve(self.last_update_time);
@@ -619,6 +608,54 @@ impl ReplicationWorker {
         self.apply_ctx.flush_observer();
         self.last_update_time = new_timestamp;
         Ok(())
+    }
+
+    async fn report_regions_loop(
+        keyspace_id: u32,
+        raft: RfEngine,
+        kv: Engine,
+        rep_pd_cli: Arc<dyn PdClient>,
+        interval: Duration,
+    ) {
+        // run a loop to report regions in case that the rep pd is restarted and lost
+        // the region leader.
+        loop {
+            let start = Instant::now();
+            let keyspace_shards = kv.get_keyspace_shards(keyspace_id).unwrap_or_default();
+            if keyspace_shards.is_empty() {
+                // keyspace shards not found means the keyspace is removed.
+                return;
+            }
+            for region_id in keyspace_shards {
+                let Some(mut region_local_state) =
+                    rfstore::store::load_last_peer_state(&raft, region_id)
+                else {
+                    // The region may have been merged.
+                    continue;
+                };
+                let mut region = region_local_state.take_region();
+                region.set_start_key(Self::trim_keyspace_prefix(region.get_start_key()));
+                region.set_end_key(Self::trim_keyspace_prefix(region.get_end_key()));
+                let leader = region.get_peers()[0].clone();
+                let mut stats = RegionStat::default();
+                stats.approximate_kv_size = 100 * 1024 * 1024;
+                stats.approximate_keys = 1000000;
+                stats.approximate_size = 100 * 1024 * 1024;
+                let res = rep_pd_cli
+                    .region_heartbeat(1, region, leader, stats, None)
+                    .await;
+                if let Err(err) = res {
+                    if kv.get_keyspace_shards(keyspace_id).is_none() {
+                        // The keyspace has been removed.
+                        return;
+                    }
+                    warn!("failed to heartbeat region {} {:?}", region_id, err);
+                    continue;
+                }
+            }
+            let elapsed = start.saturating_elapsed();
+            tokio::time::sleep(interval.saturating_sub(elapsed)).await;
+        }
     }
 
     fn update_stores_with_retry(&mut self, timeout: Duration) -> Result<TimeStamp> {
@@ -765,12 +802,7 @@ impl ReplicationWorker {
         });
     }
 
-    fn report_region_to_pd(
-        raft: &RfEngine,
-        pd_client: &Arc<dyn PdClient>,
-        region_id: u64,
-        sender: Sender<CdcMsg>,
-    ) {
+    fn report_region_to_rep_pd(raft: &RfEngine, rep_pd_cli: &Arc<dyn PdClient>, region_id: u64) {
         if raft.get_truncated_index(region_id) == Some(TRUNCATE_ALL_INDEX) {
             // region has been merged.
             return;
@@ -785,13 +817,10 @@ impl ReplicationWorker {
         stats.approximate_kv_size = 100 * 1024 * 1024;
         stats.approximate_keys = 1000000;
         stats.approximate_size = 100 * 1024 * 1024;
-        // TODO: retry on heartbeat failed.
-        let resp = pd_client.region_heartbeat(1, region, leader, stats, None);
+        let resp = rep_pd_cli.region_heartbeat(1, region, leader, stats, None);
         tokio::spawn(async move {
             if let Err(err) = resp.await {
                 warn!("region heartbeat failed"; "err" => ?err);
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                let _ = sender.send(CdcMsg::RetryReportRegion { region_id });
             }
         });
     }
@@ -879,6 +908,20 @@ impl ReplicationWorker {
     ) -> Result<()> {
         let svc = result?;
         let states = svc.get_states().marshal();
+        let rep_pd_cli = svc.get_pd_client();
+        let raft = self.merged_engine.get_raft();
+        let kv = self.merged_engine.get_kv();
+        let interval = self.config.report_region_interval.0;
+        self.runtime.spawn(async move {
+            Self::report_regions_loop(
+                keyspace_id,
+                raft.clone(),
+                kv.clone(),
+                rep_pd_cli.clone(),
+                interval,
+            )
+            .await
+        });
         self.keyspaces.insert(keyspace_id, svc);
         self.merged_engine
             .set_keyspace_states(keyspace_id, states)?;
@@ -978,16 +1021,11 @@ impl ReplicationWorker {
         let keyspace_id = self.get_keyspace_id(region_id);
         let task_ctx = self.keyspaces.get(&keyspace_id).unwrap();
         let pd_client = task_ctx.get_pd_client();
-        Self::report_region_to_pd(&raft, &pd_client, region_id, self.tx.clone());
+        Self::report_region_to_rep_pd(&raft, &pd_client, region_id);
         if admin.has_splits() {
             let split = admin.get_splits();
             for req in split.get_requests() {
-                Self::report_region_to_pd(
-                    &raft,
-                    &pd_client,
-                    req.get_new_region_id(),
-                    self.tx.clone(),
-                );
+                Self::report_region_to_rep_pd(&raft, &pd_client, req.get_new_region_id());
             }
         }
         if let Some(region_requests) = self.region_requests.get_mut(&region_id) {
