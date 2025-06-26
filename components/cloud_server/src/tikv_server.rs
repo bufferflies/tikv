@@ -44,7 +44,8 @@ use kvproto::{
 };
 use overload_protector::{OverloadProtector, OverloadProtectorWorker};
 use pd_client::{
-    metrics::STORE_SIZE_GAUGE_VEC, pd_control::PdControl, PdClient, RpcClient, INVALID_ID,
+    keyspace::init_keyspace_manager, metrics::STORE_SIZE_GAUGE_VEC, pd_control::PdControl,
+    PdClient, RpcClient, INVALID_ID,
 };
 use prometheus::labels;
 use protobuf::Message;
@@ -336,6 +337,9 @@ impl TikvServer {
                 overload_protector_worker.run();
             })
             .unwrap();
+
+        init_keyspace_manager(pd_client.clone());
+
         info!("created tikv server");
         TikvServer {
             config,

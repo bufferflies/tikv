@@ -1495,6 +1495,27 @@ impl PdClient for RpcClient {
         Ok(resp.take_keyspace())
     }
 
+    fn get_all_keyspaces(
+        &self,
+        start_id: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<Vec<kvproto::keyspacepb::KeyspaceMeta>> {
+        let _timer = PD_REQUEST_HISTOGRAM_VEC
+            .with_label_values(&["get_all_keyspaces"])
+            .start_coarse_timer();
+        let mut req = keyspacepb::GetAllKeyspacesRequest::default();
+        req.set_header(self.header());
+        req.set_start_id(start_id.unwrap_or(0));
+        req.set_limit(limit.unwrap_or(u32::MAX));
+
+        let mut resp = sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, option| {
+            let keyspace_client = KeyspaceClient::new(client.client.channel().clone());
+            keyspace_client.get_all_keyspaces_opt(&req, option)
+        })?;
+        check_resp_header(resp.get_header())?;
+        Ok(resp.take_keyspaces().into_vec())
+    }
+
     /// Get buckets stat by region_id.
     ///
     /// Note: `BucketStat.meta.sizes` is empty.

@@ -45,7 +45,7 @@ use kvproto::metapb::Store;
 #[cfg(feature = "testexport")]
 pub use metrics::REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM;
 use metrics::WORKER_MEMORY_LIMITER_CURRENT_USED;
-use pd_client::PdClient;
+use pd_client::{keyspace::init_keyspace_manager, PdClient};
 use prometheus::labels;
 use replication_worker::{ReplicationWorker, ReplicationWorkerConfig};
 pub use schema_manager::{
@@ -177,6 +177,8 @@ fn start_server(
         dfs_config.s3_region,
         dfs_config.s3_bucket,
     ));
+
+    init_keyspace_manager(pd.clone());
 
     // CacheFs is only used for remote coprocessor.
     let cache_fs = {

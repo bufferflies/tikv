@@ -2258,6 +2258,17 @@ impl PdClient for TestPdClient {
         Ok(guard.get(&keyspace_id).cloned().unwrap_or_default())
     }
 
+    fn get_all_keyspaces(
+        &self,
+        _start_id: Option<u32>,
+        _limit: Option<u32>,
+    ) -> Result<Vec<kvproto::keyspacepb::KeyspaceMeta>> {
+        let mut keyspace_meta = kvproto::keyspacepb::KeyspaceMeta::default();
+        keyspace_meta.set_id(0);
+        keyspace_meta.set_name("DEFAULT".to_string());
+        Ok(vec![keyspace_meta.clone()])
+    }
+
     fn get_buckets(&self, region_id: u64) -> Option<BucketStat> {
         self.cluster.rl().buckets.get(&region_id).cloned()
     }

@@ -19,6 +19,7 @@ pub use util::{check_regions_boundary, grpc_error_is_unimplemented};
 
 mod config;
 pub mod errors;
+pub mod keyspace;
 pub mod pd_control;
 
 use std::{cmp::Ordering, collections::HashMap, ops::Deref, sync::Arc, time::Duration};
@@ -695,6 +696,27 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
     }
 
     fn load_keyspace(&self, _keyspace_name: String) -> Result<kvproto::keyspacepb::KeyspaceMeta> {
+        unimplemented!();
+    }
+
+    /// Get keyspaces from the keyspace manager. The name `get_all_keyspaces` is
+    /// somewhat misleading, as it does not return all keyspaces, but only a
+    /// subset of them.
+    ///
+    /// # Arguments
+    /// * `_start_id` - Optional starting keyspace ID for pagination. If None,
+    ///   starts from the beginning.
+    /// * `_limit` - Optional maximum number of keyspaces to return. If None,
+    ///   returns all keyspaces.
+    ///
+    /// NOTE: Will return the next keyspace ID if the specified ID does not
+    /// exist. Callers should verify the returned keyspace IDs match
+    /// their requirements.
+    fn get_all_keyspaces(
+        &self,
+        _start_id: Option<u32>,
+        _limit: Option<u32>,
+    ) -> Result<Vec<kvproto::keyspacepb::KeyspaceMeta>> {
         unimplemented!();
     }
 
