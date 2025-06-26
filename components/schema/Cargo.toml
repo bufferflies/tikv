@@ -10,6 +10,7 @@ testexport = []
 [dependencies]
 api_version = { workspace = true }
 async-trait = "0.1"
+base64 = "0.13"
 bytes = "1.0"
 chrono = "0.4"
 kvenginepb = { workspace = true }

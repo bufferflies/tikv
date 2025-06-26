@@ -1,13 +1,13 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt, result::Result as StdResult, time::Duration as StdDuration};
+use std::{fmt, result::Result as StdResult, sync::Arc, time::Duration as StdDuration};
 
 use bytes::{Buf, BufMut};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use tidb_query_datatype::{
     codec::{
         datum,
-        mysql::{Decimal, Duration, Time, TimeType},
+        mysql::{Decimal, Duration, Enum, Set, Time, TimeType},
         Datum,
     },
     expr::EvalContext,
@@ -15,6 +15,7 @@ use tidb_query_datatype::{
 };
 use tikv_util::{
     box_err, box_try,
+    buffer_vec::BufferVec,
     codec::number::{U32_SIZE, U64_SIZE, U8_SIZE},
     warn,
 };
@@ -728,8 +729,8 @@ fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Resul
         return Ok(Some(Datum::Null));
     }
 
-    // return None if origin_default is none.
-    let Some(default) = c.origin_default.as_ref() else {
+    // return None if default is none.
+    let Some(default) = c.default.as_ref() else {
         return Ok(None);
     };
 
@@ -779,7 +780,10 @@ fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Resul
                 ))
             })
         }
-        FieldTypeTp::Date | FieldTypeTp::DateTime | FieldTypeTp::Timestamp => {
+        FieldTypeTp::Date
+        | FieldTypeTp::DateTime
+        | FieldTypeTp::Timestamp
+        | FieldTypeTp::NewDate => {
             // TODO: handle timezone
             let x = default.to_lowercase();
             if x == "current_timestamp" || x == "current_data" {
@@ -836,14 +840,88 @@ fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Resul
             .map_err(|_| {
                 tidb_query_datatype::codec::Error::InvalidDataType("Invalid decimal".to_string())
             }),
-        FieldTypeTp::String
-        | FieldTypeTp::VarString
-        | FieldTypeTp::VarChar
-        | FieldTypeTp::TinyBlob => Ok(Datum::Bytes(default.as_bytes().to_vec())),
+        FieldTypeTp::String | FieldTypeTp::VarString | FieldTypeTp::VarChar => {
+            Ok(Datum::Bytes(default.as_bytes().to_vec()))
+        }
         FieldTypeTp::Duration => {
             parse_duration(default.as_str(), c.field_type.decimal as i8).map(|v| Datum::Dur(v))
         }
-        _ => Ok(Datum::Bytes(vec![])),
+        FieldTypeTp::Enum => {
+            let elems = c.field_type.elems.as_ref().ok_or_else(|| {
+                tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                    "Invalid enum value: {} (no enum elements defined)",
+                    default
+                ))
+            })?;
+            let value = elems
+                .iter()
+                .position(|e| e == default.as_str())
+                .map(|pos| pos + 1)
+                .ok_or_else(|| {
+                    tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                        "Invalid enum value: {} (not found in enum elements: {:?})",
+                        default, elems
+                    ))
+                })?;
+
+            Ok(Datum::Enum(Enum::new(
+                default.as_bytes().to_vec(),
+                value as u64,
+            )))
+        }
+        FieldTypeTp::Set => {
+            let default_items = default.split(',').map(|s| s.trim()).collect::<Vec<&str>>();
+            let mut buffer_vec = BufferVec::new();
+            for item in &default_items {
+                buffer_vec.push(item);
+            }
+            let elems = c.field_type.elems.as_ref().ok_or_else(|| {
+                tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                    "Invalid set value: {} (no set elements defined)",
+                    default
+                ))
+            })?;
+            let mut value_bitmap: u64 = 0;
+            for item in &default_items {
+                let offset = elems.iter().position(|e| e == item).ok_or_else(|| {
+                    tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                        "Invalid set value: '{}' (not found in set elements: {:?})",
+                        item, elems
+                    ))
+                })?;
+                value_bitmap |= 1 << offset;
+            }
+            Ok(Datum::Set(Set::new(Arc::new(buffer_vec), value_bitmap)))
+        }
+        FieldTypeTp::Null => Ok(Datum::Null),
+        FieldTypeTp::Bit => {
+            let Some(value_bit) = c.default_bit.as_ref() else {
+                return Ok(None);
+            };
+            let value = base64::decode(value_bit).map_err(|e| {
+                tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                    "Invalid bit value: {:?}",
+                    e
+                ))
+            })?;
+            assert!(value.len() <= 8);
+            // Padding the value to 8 bytes with prefix 0.
+            let mut padded_value = vec![0u8; 8];
+            padded_value[8 - value.len()..].copy_from_slice(&value);
+            Ok(Datum::U64(u64::from_be_bytes(
+                padded_value.try_into().unwrap(),
+            )))
+        }
+        FieldTypeTp::Unspecified
+        | FieldTypeTp::TiDbVectorFloat32
+        | FieldTypeTp::TinyBlob
+        | FieldTypeTp::MediumBlob
+        | FieldTypeTp::LongBlob
+        | FieldTypeTp::Blob
+        | FieldTypeTp::Json => Ok(Datum::Bytes(vec![])),
+        FieldTypeTp::Geometry => Err(tidb_query_datatype::codec::Error::InvalidDataType(
+            "unsupported field type geometry".to_string(),
+        )),
     };
     if let Ok(datum) = result {
         Ok(Some(datum))

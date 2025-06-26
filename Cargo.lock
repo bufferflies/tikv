@@ -6919,6 +6919,7 @@ version = "0.1.0"
 dependencies = [
  "api_version",
  "async-trait",
+ "base64 0.13.0",
  "bytes",
  "chrono",
  "kvenginepb",
