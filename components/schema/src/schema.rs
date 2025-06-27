@@ -7,7 +7,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use tidb_query_datatype::{
     codec::{
         datum,
-        mysql::{Decimal, Duration, Enum, Set, Time, TimeType},
+        mysql::{Decimal, Duration, Enum, Set, Time, TimeType, VectorFloat32},
         Datum,
     },
     expr::EvalContext,
@@ -912,8 +912,16 @@ fn decode_default_value_to_datum(ctx: &mut EvalContext, c: &ColumnInfo) -> Resul
                 padded_value.try_into().unwrap(),
             )))
         }
+        FieldTypeTp::TiDbVectorFloat32 => {
+            let vec_f32: Vec<f32> = serde_json::from_str(default).map_err(|_| {
+                tidb_query_datatype::codec::Error::InvalidDataType(format!(
+                    "Invalid vector float32 value: {}",
+                    default
+                ))
+            })?;
+            Ok(Datum::VectorFloat32(VectorFloat32::copy_from_f32(&vec_f32)))
+        }
         FieldTypeTp::Unspecified
-        | FieldTypeTp::TiDbVectorFloat32
         | FieldTypeTp::TinyBlob
         | FieldTypeTp::MediumBlob
         | FieldTypeTp::LongBlob
