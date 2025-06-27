@@ -863,6 +863,7 @@ async fn connect_tidb_impl(
     opts.log_statements(log::LevelFilter::Debug)
         .log_slow_statements(log::LevelFilter::Warn, Duration::from_secs(30));
     sqlx::mysql::MySqlPoolOptions::new()
+        .max_connections(100)
         .connect_with(opts)
         .await
         .unwrap()
