@@ -312,7 +312,8 @@ fn test_covert_row_to_columnar_with_ia() {
     let snap_access = shard.new_snap_access();
     let ts = client.get_ts().into_inner();
     let mut columnar_reader = snap_access
-        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts)
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts, None)
+        .unwrap()
         .unwrap();
     block_on(columnar_reader.set_int_handle_range(0, Some(190))).unwrap();
     let mut block = columnar::Block::new(&schema);
@@ -459,7 +460,8 @@ fn test_sst_and_columnar_with_ia() {
     let snap_access = shard.new_snap_access();
     let ts = client.get_ts().into_inner();
     let mut columnar_reader = snap_access
-        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts)
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts, None)
+        .unwrap()
         .unwrap();
     block_on(columnar_reader.set_int_handle_range(0, Some(190))).unwrap();
     let mut block = columnar::Block::new(&schema);
@@ -822,7 +824,8 @@ fn test_region_merge_with_columnar() {
     let snap_access = shard.new_snap_access();
     let ts = client.get_ts().into_inner();
     let mut columnar_reader = snap_access
-        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts)
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts, None)
+        .unwrap()
         .unwrap();
     block_on(columnar_reader.set_int_handle_range(0, Some(190))).unwrap();
     let mut block = columnar::Block::new(&schema);
@@ -979,7 +982,8 @@ fn test_columnar_ia_file() {
     assert!(schema_files.contains_key(&schema_file_id));
     let ts = client.get_ts().into_inner();
     let mut columnar_reader = snap_access
-        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts)
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts, None)
+        .unwrap()
         .unwrap();
     block_on(columnar_reader.set_unbounded_handle_range()).unwrap();
     let mut block = columnar::Block::new(&schema);
@@ -1085,7 +1089,8 @@ fn test_columnar_scan_with_filter() {
         .set_columns(schema.columns.clone().into());
     let scan_ctx = TableScanCtx::new(table_scan, vec![expr]);
     let mut columnar_reader = snap_access
-        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, Some(&scan_ctx), ts)
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, Some(&scan_ctx), ts, None)
+        .unwrap()
         .unwrap();
     block_on(columnar_reader.set_unbounded_handle_range()).unwrap();
     let mut block = columnar::Block::new(&schema);

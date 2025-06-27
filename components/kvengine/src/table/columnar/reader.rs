@@ -1357,6 +1357,7 @@ impl ColumnarReader for ColumnarMergeReader {
                 limit - read_row,
                 self.first_batch_end_row_idx - first.row_idx,
             );
+
             block.append(&first.block, first.row_idx, first.row_idx + remain);
             first.row_idx += remain;
             read_row += remain;

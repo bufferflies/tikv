@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::anyhow;
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2, KeyMode, KvFormat};
 use bytes::{buf::Buf, Bytes};
 use kvengine::{
@@ -17,7 +18,7 @@ use kvengine::{
 };
 use kvproto::{coprocessor::KeyRange, kvrpcpb::IsolationLevel};
 use tidb_query_common::{
-    error::{ErrorInner, EvaluateError},
+    error::{ErrorInner, EvaluateError, StorageError},
     storage::IntervalRange,
     util::convert_to_prefix_next,
     Result,
@@ -34,7 +35,7 @@ use tidb_query_datatype::{
     EvalType, FieldTypeTp,
 };
 use tikv_util::{buffer_vec::BufferVec, info};
-use tipb::TableScan;
+use tipb::{AnnQueryInfo, TableScan};
 use txn_types::{Key, Lock, TsSet};
 
 pub struct ColumnarScanner {
@@ -285,22 +286,45 @@ fn get_output_offsets(table_scan: &TableScan) -> Vec<i32> {
     output_offsets
 }
 
-pub fn build_columnar_scanner(
+// Due to the discarding of column_id in the vector index, the value assigned to
+// ann_query_info may be different in different versions of tidb. For
+// compatibility, use this function to get column_id.
+// For field changes, see: https://github.com/pingcap/tipb/pull/358
+fn get_ann_vec_col_id(ann_query: &AnnQueryInfo) -> Result<i64> {
+    // Check `has_deprecated_column_id` first, because `column` is marked as
+    // not null in TiDB side so that it will be always populated with some value.
+    if ann_query.has_deprecated_column_id() {
+        Ok(ann_query.get_deprecated_column_id())
+    } else if ann_query.has_column() {
+        Ok(ann_query.get_column().get_column_id())
+    } else {
+        Err(StorageError(anyhow!("unexpected empty vector column id in ANNQueryInfo")).into())
+    }
+}
+
+fn build_columnar_scanner_internal(
     snap: Option<&kvengine::SnapAccess>,
     key_ranges: &[KeyRange],
     table_scan: &TableScan,
     start_ts: u64,
-) -> Option<Result<ColumnarScanner>> {
-    let snap = snap?;
+    ann_query: Option<&AnnQueryInfo>,
+) -> Result<Option<ColumnarScanner>> {
+    let snap = match snap {
+        Some(s) => s,
+        None => return Ok(None),
+    };
     if key_ranges.len() != 1 {
-        return None;
+        return Ok(None);
     }
     let key_range = &key_ranges[0];
     if ApiV2::parse_key_mode(&key_range.start) != KeyMode::Txn {
-        return None;
+        return Ok(None);
     }
     let table_id = table_scan.get_table_id();
-    let schema = snap.new_schema_from_columns(table_id, table_scan.get_columns())?;
+    let schema = match snap.new_schema_from_columns(table_id, table_scan.get_columns()) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
 
     // Decimal encoding in columnar is for TiFlash only. It is not supported TiKV
     // yet.
@@ -310,15 +334,15 @@ pub fn build_columnar_scanner(
         .any(|col_info| col_info.get_tp() == FieldTypeTp::NewDecimal.to_u8().unwrap() as i32)
     {
         info!("build_columnar_scanner, decimal is not supported yet");
-        return None;
+        return Ok(None);
     }
 
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&key_range.start).unwrap();
     let start_table_key = &key_range.start[KEYSPACE_PREFIX_LEN..];
     let end_table_key = &key_range.end[KEYSPACE_PREFIX_LEN..];
     let (start_handle, end_handle) = if schema.is_common_handle() {
-        let start_handle = table::decode_common_handle(start_table_key).ok()?;
-        let end_handle = table::decode_common_handle(end_table_key).ok()?;
+        let start_handle = table::decode_common_handle(start_table_key)?;
+        let end_handle = table::decode_common_handle(end_table_key)?;
         (start_handle.to_vec(), Some(end_handle.to_vec()))
     } else {
         let start_handle = table::decode_int_handle(start_table_key).unwrap_or(i64::MIN);
@@ -341,45 +365,115 @@ pub fn build_columnar_scanner(
         Bytes::copy_from_slice(key_range.get_start()),
         Bytes::copy_from_slice(key_range.get_end()),
     );
-    if let Err(e) = check_locks(&mut lock_iter, start_ts) {
-        return Some(Err(e));
-    }
-    let reader = if table_scan.has_ann_query() {
-        let ann_query = table_scan.get_ann_query();
-        let index_id = ann_query.get_index_id();
-        let target = ann_query.get_ref_vec_f32().read_vector_float32().ok()?;
-        snap.new_vector_index_reader(
-            table_id,
-            index_id,
-            ann_query.get_column_id(),
-            target.as_ref().data(),
-            ann_query.get_top_k() as usize,
-            schema.clone(),
-            start_ts,
-            Some(&start_handle),
-            end_handle.as_deref(),
-        )
-        .or_else(|| {
-            snap.new_columnar_mvcc_reader(table_id, table_scan.get_columns(), None, start_ts)
-        })
-    } else {
+    check_locks(&mut lock_iter, start_ts)?;
+
+    if ann_query.is_none() {
+        // Not a vector search at all
         let mut executor = tipb::Executor::default();
         executor.set_tbl_scan(table_scan.clone());
         let scan_ctx = TableScanCtx::new(executor, vec![]);
-        snap.new_columnar_mvcc_reader(
-            table_id,
-            table_scan.get_columns(),
-            Some(&scan_ctx),
-            start_ts,
-        )
-    }?;
-    Some(Ok(ColumnarScanner::new(
-        reader,
-        get_output_offsets(table_scan),
-        keyspace_id,
-        key_range.start.clone(),
-        (start_handle, end_handle),
-    )))
+
+        return Ok(snap
+            .new_columnar_mvcc_reader(
+                table_id,
+                table_scan.get_columns(),
+                Some(&scan_ctx),
+                start_ts,
+                None,
+            )?
+            .map(|r| {
+                ColumnarScanner::new(
+                    r,
+                    get_output_offsets(table_scan),
+                    keyspace_id,
+                    key_range.start.clone(),
+                    (start_handle, end_handle),
+                )
+            }));
+    }
+
+    // Below is for vector search.
+    let ann_query = Arc::new(ann_query.unwrap().clone());
+    let index_id = ann_query.get_index_id();
+    let col_id = get_ann_vec_col_id(&ann_query)?;
+    let target = ann_query.get_ref_vec_f32().read_vector_float32()?;
+
+    // First try to use vector index reader.
+    if let Some(r) = snap.new_vector_index_reader(
+        table_id,
+        index_id,
+        col_id,
+        target.as_ref().data(),
+        ann_query.get_top_k() as usize,
+        schema.clone(),
+        start_ts,
+        Some(&start_handle),
+        end_handle.as_deref(),
+        Arc::clone(&ann_query),
+    )? {
+        return Ok(Some(ColumnarScanner::new(
+            r,
+            get_output_offsets(table_scan),
+            keyspace_id,
+            key_range.start.clone(),
+            (start_handle, end_handle),
+        )));
+    }
+
+    // If vector index reader is not available, use columnar MVCC reader.
+    match snap.new_columnar_mvcc_reader(
+        table_id,
+        table_scan.get_columns(),
+        None,
+        start_ts,
+        Some(Arc::clone(&ann_query)),
+    )? {
+        Some(r) => Ok(Some(ColumnarScanner::new(
+            r,
+            get_output_offsets(table_scan),
+            keyspace_id,
+            key_range.start.clone(),
+            (start_handle, end_handle),
+        ))),
+        None => Ok(None),
+    }
+}
+
+pub fn build_columnar_scanner(
+    snap: Option<&kvengine::SnapAccess>,
+    key_ranges: &[KeyRange],
+    table_scan: &TableScan,
+    start_ts: u64,
+) -> Result<Option<ColumnarScanner>> {
+    // For compatibility: deprecated_ann_query may be assigned from old TiDB
+    // version.
+    let ann_query = if table_scan.has_deprecated_ann_query() {
+        Some(table_scan.get_deprecated_ann_query())
+    } else {
+        table_scan
+            .get_used_columnar_indexes()
+            .iter()
+            .find(|idx| idx.has_ann_query_info())
+            .map(|idx| idx.get_ann_query_info())
+    };
+
+    let is_distance_proj = ann_query
+        .map(|q| q.get_enable_distance_proj())
+        .unwrap_or(false);
+
+    let scanner =
+        build_columnar_scanner_internal(snap, key_ranges, table_scan, start_ts, ann_query)?;
+
+    // under `distance proj`, an error will be returned if build columnar reader
+    // fails, since reading distance does not yet support normal read by rows.
+    if scanner.is_none() && is_distance_proj {
+        return Err(StorageError(anyhow!(
+            "failed to build columnar scanner with distance projection"
+        ))
+        .into());
+    }
+
+    Ok(scanner)
 }
 
 fn check_locks(lock_iter: &mut Iterator, read_ts: u64) -> Result<()> {

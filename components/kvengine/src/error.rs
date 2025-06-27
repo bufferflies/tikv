@@ -83,6 +83,13 @@ impl From<http::Error> for Error {
     }
 }
 
+impl From<Error> for tidb_query_common::Error {
+    fn from(val: Error) -> Self {
+        use tidb_query_common::error::{Error, StorageError};
+        Error::from(StorageError(anyhow::anyhow!(val)))
+    }
+}
+
 // Ref: [`anyhow::Context`](https://github.com/dtolnay/anyhow/blob/1.0.26/src/lib.rs#L543)
 pub trait IoContext<T> {
     fn ctx<C>(self, ctx: C) -> Result<T>

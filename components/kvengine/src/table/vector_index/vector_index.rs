@@ -9,6 +9,7 @@ use tidb_query_datatype::codec::{
     mysql::{VectorFloat32Encoder, VectorFloat32Ref},
     table::{encode_common_handle_row_key, encode_row_key},
 };
+use tipb::VectorDistanceMetric;
 use usearch::IndexOptions;
 
 use crate::{
@@ -22,7 +23,10 @@ use crate::{
         file::{File, MmapData},
         schema_file::Schema,
         search,
-        vector_index::VectorIndexCache,
+        vector_index::{
+            vector_distance_projector::{VectorDistanceProjector, VIRTUAL_DISTANCE_COLUMN_ID},
+            VectorIndexCache,
+        },
         BoundedDataSet, DataBound, Error,
         Error::Other,
         InnerKey, Result,
@@ -37,6 +41,7 @@ const EXPANSION_ADD: usize = 128;
 const EXPANSION_SEARCH: usize = 64;
 
 const QUANTIZATION: usearch::ScalarKind = usearch::ScalarKind::F32;
+
 #[derive(Default, Clone)]
 pub struct VectorIndexes {
     indexes: Vec<VectorIndex>,
@@ -198,11 +203,14 @@ impl VectorIndex {
         start_handle: Option<&[u8]>,
         end_handle: Option<&[u8]>,
         is_common_handle: bool,
+        enable_distance_proj: bool,
     ) -> Result<Vec<VectorItem>> {
         let mut results = vec![];
         let mut handles_dedup = HashSet::new();
         for file in &self.files {
-            let (items, deleted_handles) = file.search(target, count, start_ts).await?;
+            let (items, deleted_handles) = file
+                .search(target, count, start_ts, enable_distance_proj)
+                .await?;
             // Add the deleted handles to the dedup set to avoid read the same handle in
             // next VectorIndexFile.
             handles_dedup.extend(deleted_handles);
@@ -661,6 +669,7 @@ impl VectorIndexFile {
         target: &[f32],
         count: usize,
         start_ts: u64,
+        enable_distance_proj: bool,
     ) -> Result<(Vec<VectorItem>, Vec<Vec<u8>>)> {
         if !self.is_loaded() {
             self.load_data().await?;
@@ -701,21 +710,38 @@ impl VectorIndexFile {
                 true
             })
             .map_err(|e| Other(e.to_string()))?;
-        for (i, &key) in matches.keys.iter().enumerate() {
-            let handle = self.get_handle(key);
-            let version = versions[key as usize];
-            let mut value = vec![0f32; index.dimensions()];
-            index
-                .get(key, &mut value)
-                .map_err(|e| Other(e.to_string()))?;
-            let item = VectorItem {
-                handle: handle.to_vec(),
-                version,
-                distance: matches.distances[i],
-                value,
-            };
-            results.push(item);
+        if enable_distance_proj {
+            // In distance proj, TableScan expects a distance column and expects no vector
+            // column. Thus there is no need to read vector data.
+            for (i, &key) in matches.keys.iter().enumerate() {
+                let handle = self.get_handle(key);
+                let version = versions[key as usize];
+                let item = VectorItem {
+                    handle: handle.to_vec(),
+                    version,
+                    distance: matches.distances[i],
+                    value: Vec::new(),
+                };
+                results.push(item);
+            }
+        } else {
+            for (i, &key) in matches.keys.iter().enumerate() {
+                let handle = self.get_handle(key);
+                let version = versions[key as usize];
+                let mut value = vec![0f32; index.dimensions()];
+                index
+                    .get(key, &mut value)
+                    .map_err(|e| Other(e.to_string()))?;
+                let item = VectorItem {
+                    handle: handle.to_vec(),
+                    version,
+                    distance: matches.distances[i],
+                    value,
+                };
+                results.push(item);
+            }
         }
+
         let deleted_handles =
             DELETED_HANDLES.with_borrow_mut(|deleted_handles| std::mem::take(deleted_handles));
         Ok((results, deleted_handles))
@@ -767,7 +793,7 @@ impl VectorItem {
 
 pub(crate) struct VectorItemsReader {
     schema: Schema,
-    vector_col_idx: usize,
+    vector_col_idx: Option<usize>,
     items: Option<Vec<VectorItem>>,
     idx: usize,
     // The vector item already has handle, version and vector column.
@@ -780,6 +806,10 @@ pub(crate) struct VectorItemsReader {
     read_ts: u64,
     start_handle: Option<Vec<u8>>,
     end_handle: Option<Vec<u8>>,
+    metric: VectorDistanceMetric,
+    // The vector index may no need to read vector data just need distance,
+    // enable_distance_proj indicate if we need to read distance directly.
+    enable_distance_proj: bool,
 }
 
 impl VectorItemsReader {
@@ -793,14 +823,41 @@ impl VectorItemsReader {
         end_handle: Option<&[u8]>,
         col_levels: &ColumnarLevels,
         encryption_key: Option<EncryptionKey>,
+        metric: VectorDistanceMetric,
+        enable_distance_proj: bool,
     ) -> Result<Self> {
-        let vector_col_idx = schema
-            .columns
-            .iter()
-            .position(|c| c.get_column_id() == vector_index.col_id)
-            .unwrap();
-        let inner_reader =
-            Self::build_inner_reader(&schema, vector_index, col_levels, encryption_key);
+        let vector_col_idx = if !enable_distance_proj {
+            Some(
+                schema
+                    .columns
+                    .iter()
+                    .position(|c| c.get_column_id() == vector_index.col_id)
+                    .ok_or_else(|| {
+                        Error::Other(format!(
+                            "vector column {} not found in schema",
+                            vector_index.col_id
+                        ))
+                    })?,
+            )
+        } else {
+            // There is no vector column at all in distance projection mode.
+            None
+        };
+
+        if enable_distance_proj {
+            // We expect this reader to have the same schema requirements as the
+            // VectorDistanceProjector.
+            VectorDistanceProjector::validate_schema(&schema)?;
+        }
+
+        let inner_reader = Self::build_inner_reader(
+            &schema,
+            vector_index,
+            col_levels,
+            encryption_key,
+            enable_distance_proj,
+        )?;
+
         Ok(Self {
             schema,
             vector_col_idx,
@@ -813,24 +870,59 @@ impl VectorItemsReader {
             read_ts,
             start_handle: start_handle.map(|h| h.to_vec()),
             end_handle: end_handle.map(|h| h.to_vec()),
+            metric,
+            enable_distance_proj,
         })
     }
 
+    /// inner_reader reads rest of the column (i.e. all columns to read except
+    /// the vector column).
+    /// It could be possible that the inner_reader is None, which means
+    /// there is no other columns to read.
     fn build_inner_reader(
         schema: &Schema,
         vector_index: &VectorIndex,
         col_levels: &ColumnarLevels,
         encryption_key: Option<EncryptionKey>,
-    ) -> Option<Box<dyn ColumnarReader>> {
+        enable_distance_proj: bool,
+    ) -> Result<Option<Box<dyn ColumnarReader>>> {
         if schema.columns.len() == 1 {
-            assert_eq!(schema.columns[0].get_column_id(), vector_index.col_id);
-            return None;
+            if enable_distance_proj {
+                if schema.columns[0].get_column_id() != VIRTUAL_DISTANCE_COLUMN_ID {
+                    return Err(table::Error::Other(format!(
+                        "Invalid schema, expect virtual distance column, but got {}",
+                        schema.columns[0].get_column_id()
+                    )));
+                }
+            } else if schema.columns[0].get_column_id() != vector_index.col_id {
+                return Err(table::Error::Other(format!(
+                    "Invalid schema, expect vector column {}, but got {}",
+                    vector_index.col_id,
+                    schema.columns[0].get_column_id()
+                )));
+            }
+            return Ok(None);
         }
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
-        let inner_schema: Schema = schema
-            .to_schema_buf()
-            .retain_columns(|c| c.get_column_id() != vector_index.col_id)
-            .into();
+        let inner_schema: Schema = if enable_distance_proj {
+            schema
+                .to_schema_buf()
+                .retain_columns(|c| c.get_column_id() != VIRTUAL_DISTANCE_COLUMN_ID)
+                .into()
+        } else {
+            schema
+                .to_schema_buf()
+                .retain_columns(|c| c.get_column_id() != vector_index.col_id)
+                .into()
+        };
+        if inner_schema.columns.len() + 1 != schema.columns.len() {
+            return Err(table::Error::Other(format!(
+                "Invalid schema, expect {} columns, but got {}",
+                inner_schema.columns.len() + 1,
+                schema.columns.len()
+            )));
+        }
+
         for columnar_level in &col_levels.levels {
             if columnar_level.level == 2 {
                 let concat_reader = ColumnarConcatReader::new(
@@ -859,48 +951,59 @@ impl VectorItemsReader {
             }
         }
         if readers.len() == 1 {
-            Some(readers.pop().unwrap())
+            Ok(Some(readers.pop().unwrap()))
         } else {
-            Some(Box::new(ColumnarMergeReader::new(
+            Ok(Some(Box::new(ColumnarMergeReader::new(
                 inner_schema.clone(),
                 readers,
-            )))
+            ))))
         }
     }
-}
 
-#[async_trait]
-impl ColumnarReader for VectorItemsReader {
-    fn schema(&self) -> &Schema {
-        &self.schema
+    /// In distance projection, last column is the distance col. We fill it
+    /// directly from the index.
+    async fn read_in_distance_proj(&mut self, block: &mut Block, limit: usize) -> Result<usize> {
+        let dis_idx = block.columns.len() - 1;
+        let mut col = block.columns.remove(dis_idx);
+        let old_idx = self.idx;
+        let items = self.items.as_ref().unwrap();
+
+        for _ in 0..limit {
+            if self.idx >= items.len() {
+                break;
+            }
+
+            let item = &items[self.idx];
+            // Vector index produce L2 squared distance instead of L2 distance
+            let data_f64 = if self.metric == VectorDistanceMetric::L2 {
+                item.distance.sqrt() as f64
+            } else {
+                item.distance as f64
+            };
+            let data_bytes = data_f64.to_le_bytes();
+            col.push_value(&data_bytes);
+
+            if let Some(inner) = &mut self.inner_reader {
+                inner.seek(&item.handle).await?;
+                inner.read(block, 1).await?;
+            } else {
+                block.handles.push_value(&item.handle);
+                block.versions.push_version(item.version, false);
+            }
+
+            self.idx += 1;
+        }
+
+        block.columns.insert(dis_idx, col);
+        Ok(self.idx - old_idx)
     }
 
-    async fn seek(&mut self, mut handle: &[u8]) -> Result<()> {
-        let items = self
-            .vector_index
-            .search(
-                &self.target,
-                self.top_k,
-                self.read_ts,
-                self.start_handle.as_deref(),
-                self.end_handle.as_deref(),
-                self.schema.is_common_handle(),
-            )
-            .await?;
-        self.idx = if get_fixed_size(&self.schema.handle_column) > 0 {
-            let int_handle = handle.get_i64_le();
-            search(items.len(), |i| {
-                items[i].handle.as_slice().get_i64_le() >= int_handle
-            })
-        } else {
-            search(items.len(), |i| items[i].handle.as_slice() >= handle)
-        };
-        self.items = Some(items);
-        Ok(())
-    }
-
-    async fn read(&mut self, block: &mut Block, limit: usize) -> Result<usize> {
-        let mut vector_col = block.columns.remove(self.vector_col_idx);
+    async fn read_without_distance_proj(
+        &mut self,
+        block: &mut Block,
+        limit: usize,
+    ) -> Result<usize> {
+        let mut vector_col = block.columns.remove(self.vector_col_idx.unwrap());
         let mut vec_val_buf = vec![];
         let old_idx = self.idx;
         let items = self.items.as_ref().unwrap();
@@ -922,8 +1025,50 @@ impl ColumnarReader for VectorItemsReader {
             }
             self.idx += 1;
         }
-        block.columns.insert(self.vector_col_idx, vector_col);
+        block
+            .columns
+            .insert(self.vector_col_idx.unwrap(), vector_col);
         Ok(self.idx - old_idx)
+    }
+}
+
+#[async_trait]
+impl ColumnarReader for VectorItemsReader {
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    async fn seek(&mut self, mut handle: &[u8]) -> Result<()> {
+        let items = self
+            .vector_index
+            .search(
+                &self.target,
+                self.top_k,
+                self.read_ts,
+                self.start_handle.as_deref(),
+                self.end_handle.as_deref(),
+                self.schema.is_common_handle(),
+                self.enable_distance_proj,
+            )
+            .await?;
+        self.idx = if get_fixed_size(&self.schema.handle_column) > 0 {
+            let int_handle = handle.get_i64_le();
+            search(items.len(), |i| {
+                items[i].handle.as_slice().get_i64_le() >= int_handle
+            })
+        } else {
+            search(items.len(), |i| items[i].handle.as_slice() >= handle)
+        };
+        self.items = Some(items);
+        Ok(())
+    }
+
+    async fn read(&mut self, block: &mut Block, limit: usize) -> Result<usize> {
+        if self.enable_distance_proj {
+            self.read_in_distance_proj(block, limit).await
+        } else {
+            self.read_without_distance_proj(block, limit).await
+        }
     }
 }
 
@@ -1270,7 +1415,8 @@ mod tests {
                 }
             }
             let (items, _) =
-                block_on(vec_idx.search(&[50.0f32, 150.0f32, 250.0f32], 3, u64::MAX)).unwrap();
+                block_on(vec_idx.search(&[50.0f32, 150.0f32, 250.0f32], 3, u64::MAX, false))
+                    .unwrap();
             assert_eq!(items.len(), 3);
             assert_eq!(items[0].value, vec![50.0f32, 150.0f32, 250.0f32]);
             assert_eq!(items[1].value, vec![51.0f32, 151.0f32, 251.0f32]);
@@ -1309,7 +1455,8 @@ mod tests {
         // Perform a search
         let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
         let mut items =
-            block_on(vector_index.search(&query_vector, 3, u64::MAX, None, None, false)).unwrap();
+            block_on(vector_index.search(&query_vector, 3, u64::MAX, None, None, false, false))
+                .unwrap();
 
         // each file returns 3, total is 9, truncated to 3.
         assert_eq!(items.len(), 3);
@@ -1408,9 +1555,16 @@ mod tests {
             vector_index.sort();
 
             let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
-            let items =
-                block_on(vector_index.search(&query_vector, 100, u64::MAX, None, None, false))
-                    .unwrap();
+            let items = block_on(vector_index.search(
+                &query_vector,
+                100,
+                u64::MAX,
+                None,
+                None,
+                false,
+                false,
+            ))
+            .unwrap();
 
             for item in items {
                 let handle = item.handle;
@@ -1439,9 +1593,16 @@ mod tests {
             vector_index.sort();
 
             let query_vector = vec![50.0f32, 150.0f32, 250.0f32];
-            let items =
-                block_on(vector_index.search(&query_vector, 100, u64::MAX, None, None, false))
-                    .unwrap();
+            let items = block_on(vector_index.search(
+                &query_vector,
+                100,
+                u64::MAX,
+                None,
+                None,
+                false,
+                false,
+            ))
+            .unwrap();
             for item in items {
                 let handle = item.handle;
                 let int_handle = i64::from_le_bytes(handle.try_into().unwrap());

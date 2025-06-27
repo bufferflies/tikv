@@ -21,7 +21,7 @@ use tikv_util::{
     codec::number::{U32_SIZE, U64_SIZE},
     memory::{MemoryLimiter, MemoryLimiterGuard},
 };
-use tipb::ColumnInfo;
+use tipb::{AnnQueryInfo, ColumnInfo};
 use txn_types::Lock;
 
 use crate::{
@@ -39,7 +39,7 @@ use crate::{
         schema_file::{Schema, SchemaBuf, SchemaFile},
         sstable::SsTable,
         table,
-        vector_index::VectorItemsReader,
+        vector_index::{VectorDistanceProjector, VectorItemsReader},
         AsyncMergeIterator, BoundedDataSet, ConstraintChecker, DataBound, InnerKey,
         Iterator as TableIterator, SkipOpTxnFileIterator, TxnFile, TxnFileIterator,
     },
@@ -1408,33 +1408,58 @@ impl SnapAccessCore {
         Some(Schema::new(schema_buf))
     }
 
+    /// `new_columnar_mvcc_reader` will try to construct a reader in columnar
+    /// mode. If `None` is returned, normal tikv row reading will be used.
     pub fn new_columnar_mvcc_reader(
         &self,
         table_id: i64,
         columns: &[ColumnInfo],
         scan_ctx: Option<&TableScanCtx>,
         read_ts: u64,
-    ) -> Option<ColumnarMvccReader> {
-        let schema = self.new_schema_from_columns(table_id, columns)?;
+        ann_query: Option<Arc<AnnQueryInfo>>,
+    ) -> Result<Option<ColumnarMvccReader>> {
+        // If vector distance projection is enabled, a virtual distance column is
+        // included in the schema (which is what TiDB expects the storage layer to
+        // return) and there is no vector column in the schema. In this case, we
+        // will first read using a new schema with the vector column included, then
+        // return the data (what TiDB wants) with a distance column calculated from the
+        // vector column.
+        let has_vector_distance_proj = ann_query
+            .as_ref()
+            .map(|q| q.get_enable_distance_proj())
+            .unwrap_or(false);
+
+        let Some(schema) = self.new_schema_from_columns(table_id, columns) else {
+            return Ok(None);
+        };
+
         let filter_op = scan_ctx.map(|ctx| ctx.to_filter_operator());
-        let mut readers = self.collect_column_row_readers(&schema);
+
+        let schema_to_read = if has_vector_distance_proj {
+            VectorDistanceProjector::generate_inner_schema(&schema, ann_query.as_ref().unwrap())?
+        } else {
+            schema.clone()
+        };
+
+        let mut readers = self.collect_column_row_readers(&schema_to_read);
+
         for columnar_level in &self.data.col_levels.levels {
             if columnar_level.level == 2 {
                 let concat_reader = ColumnarConcatReader::new(
                     &columnar_level.files,
-                    schema.clone(),
+                    schema_to_read.clone(),
                     filter_op.clone(),
                     self.encryption_key.clone(),
                 );
                 readers.push(Box::new(concat_reader));
             } else {
                 for col_file in &columnar_level.files {
-                    if !col_file.has_table(schema.table_id) {
+                    if !col_file.has_table(schema_to_read.table_id) {
                         continue;
                     }
                     let col_reader = ColumnarTableReader::new(
                         col_file,
-                        schema.clone(),
+                        schema_to_read.clone(),
                         filter_op.clone(),
                         self.encryption_key.clone(),
                     );
@@ -1442,13 +1467,28 @@ impl SnapAccessCore {
                 }
             }
         }
-        let merged_reader = ColumnarMergeReader::new(schema.clone(), readers);
-        let mvcc_reader = ColumnarMvccReader::new(Box::new(merged_reader), &schema, read_ts);
-        Some(mvcc_reader)
+
+        let mut merged_reader: Box<dyn ColumnarReader> =
+            Box::new(ColumnarMergeReader::new(schema_to_read.clone(), readers));
+
+        // As commented above, if vector distance projection is enabled,
+        // we will wrap a VectorDistanceProjector as the outside layer
+        // to produce a distance column from the vector column.
+        if has_vector_distance_proj {
+            merged_reader = Box::new(VectorDistanceProjector::new(
+                merged_reader,
+                schema.clone(),
+                ann_query.unwrap().clone(),
+            )?);
+        }
+
+        let mvcc_reader = ColumnarMvccReader::new(merged_reader, &schema, read_ts);
+        Ok(Some(mvcc_reader))
     }
 
     fn collect_column_row_readers(&self, schema: &Schema) -> Vec<Box<dyn ColumnarReader>> {
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
+
         for mem in &self.data.mem_tbls {
             let skl = mem.get_cf(WRITE_CF);
             if !skl.is_empty() {
@@ -1495,16 +1535,23 @@ impl SnapAccessCore {
         read_ts: u64,
         start_handle: Option<&[u8]>,
         end_handle: Option<&[u8]>,
-    ) -> Option<ColumnarMvccReader> {
+        ann_query: Arc<AnnQueryInfo>,
+    ) -> Result<Option<ColumnarMvccReader>> {
         if !self.read_columnar {
-            return None;
+            return Ok(None);
         }
         if !self.data.col_levels.levels[2].files.is_empty() {
             // Make sure the l2_snap_version is set.
             debug_assert!(self.data.col_levels.l2_snap_version > 0);
         }
-        let vector_index = self.data.vector_indexes.get(table_id, index_id, col_id)?;
-        let vector_items_reader = VectorItemsReader::new(
+
+        let Some(vector_index) = self.data.vector_indexes.get(table_id, index_id, col_id) else {
+            return Ok(None);
+        };
+        let enable_distance_proj = ann_query.get_enable_distance_proj();
+        let metric = ann_query.get_distance_metric();
+
+        let vector_items_reader = match VectorItemsReader::new(
             schema.clone(),
             vector_index,
             target,
@@ -1514,15 +1561,47 @@ impl SnapAccessCore {
             end_handle,
             &self.data.col_levels,
             self.encryption_key.clone(),
-        )
-        .map_err(|e| {
-            warn!("{} failed to search vector index {:?}", self.tag, e,);
-            e
-        })
-        .ok()?;
+            metric,
+            enable_distance_proj,
+        ) {
+            Ok(reader) => reader,
+            Err(e) => {
+                warn!("{} failed to search vector index {:?}", self.tag, e);
+                return Ok(None);
+            }
+        };
+
+        // When vector search distance proj is enabled, TableScan's schema
+        // contains a VirtualDistance column at the end, and does not
+        // contain the vector column. However, when we are reading from
+        // data that vector index is not built yet, we need to read out
+        // the vector column in order to calculate the distance column
+        // that TableScan asks for.
+        let schema_with_vec = if enable_distance_proj {
+            VectorDistanceProjector::generate_inner_schema(&schema, &ann_query)?
+        } else {
+            schema.clone()
+        };
 
         info!("{} use vector index reader", self.tag);
-        let mut readers = self.collect_column_row_readers(&schema);
+
+        // For all readers except for the vector index reader, they will always read
+        // with the vector column. We wrap a distance projection transformation
+        // over these column readers so that they finally produce the expected output.
+        // For vector index reader, it produces the vector distance column directly.
+
+        let mut readers = self.collect_column_row_readers(&schema_with_vec);
+        if enable_distance_proj {
+            readers = readers
+                .into_iter()
+                .map(|r| {
+                    VectorDistanceProjector::new(r, schema.clone(), ann_query.clone())
+                        .map(|vr| Box::new(vr) as Box<dyn ColumnarReader>)
+                        .map_err(|e| Error::Other(e.into()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+        }
+
         for columnar_level in &self.data.col_levels.levels {
             if columnar_level.level == 2 {
                 // level 2 columnar files are all included in the vector index.
@@ -1540,17 +1619,28 @@ impl SnapAccessCore {
                 }
                 let col_reader = ColumnarTableReader::new(
                     file,
-                    schema.clone(),
+                    schema_with_vec.clone(),
                     None,
                     self.encryption_key.clone(),
                 );
-                readers.push(Box::new(col_reader));
+                // The same as above, in distance projection, we wrap a distance projector over
+                // the reader who reads the vector column.
+                if enable_distance_proj {
+                    let col_reader_distance = VectorDistanceProjector::new(
+                        Box::new(col_reader),
+                        schema.clone(),
+                        ann_query.clone(),
+                    )?;
+                    readers.push(Box::new(col_reader_distance));
+                } else {
+                    readers.push(Box::new(col_reader));
+                }
             }
         }
         readers.push(Box::new(vector_items_reader));
         let merged_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mvcc_reader = ColumnarMvccReader::new(Box::new(merged_reader), &schema, read_ts);
-        Some(mvcc_reader)
+        Ok(Some(mvcc_reader))
     }
 
     #[inline]

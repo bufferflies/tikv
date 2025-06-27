@@ -6,6 +6,7 @@ publish = false
 description = "A vector query engine to run TiDB pushed down executors"
 
 [dependencies]
+anyhow = "1.0"
 api_version = { path = "../api_version", default-features = false }
 async-trait = "0.1"
 bytes = "1.2.1"
@@ -32,6 +33,5 @@ txn_types = { workspace = true }
 yatp = { workspace = true }
 
 [dev-dependencies]
-anyhow = "1.0"
 tidb_query_codegen = { workspace = true }
 tipb_helper = { workspace = true }

@@ -125,7 +125,8 @@ fn test_columnar_l0_compaction() {
     assert!(ok, "columnar l0 compaction failed");
     let snap = shard.new_snap_access();
     let mut mvcc_reader = snap
-        .new_columnar_mvcc_reader(table_id, &schema.columns, None, 500)
+        .new_columnar_mvcc_reader(table_id, &schema.columns, None, 500, None)
+        .unwrap()
         .unwrap();
     block_on(mvcc_reader.set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100)))
         .unwrap();
@@ -142,7 +143,8 @@ fn test_columnar_l0_compaction() {
     verify_with_ref_rows(&block, &tbl_refs);
 
     let mut mvcc_reader2 = snap
-        .new_columnar_mvcc_reader(table_id2, &schema2.columns, None, 500)
+        .new_columnar_mvcc_reader(table_id2, &schema2.columns, None, 500, None)
+        .unwrap()
         .unwrap();
     block_on(mvcc_reader2.set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100)))
         .unwrap();
@@ -243,7 +245,8 @@ fn test_columnar_l1_compaction() {
     assert!(ok, "columnar l1 compaction failed");
     let snap = shard.new_snap_access();
     let mut mvcc_reader = snap
-        .new_columnar_mvcc_reader(table_id, &schema.columns, None, 500)
+        .new_columnar_mvcc_reader(table_id, &schema.columns, None, 500, None)
+        .unwrap()
         .unwrap();
     block_on(mvcc_reader.set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100)))
         .unwrap();
@@ -266,7 +269,8 @@ fn test_columnar_l1_compaction() {
     verify_with_ref_rows(&block, &tbl_refs);
 
     let mut mvcc_reader2 = snap
-        .new_columnar_mvcc_reader(table_id2, &schema2.columns, None, 600)
+        .new_columnar_mvcc_reader(table_id2, &schema2.columns, None, 600, None)
+        .unwrap()
         .unwrap();
     block_on(mvcc_reader2.set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100)))
         .unwrap();
@@ -389,7 +393,8 @@ fn test_columnar_major_compaction() {
     assert!(ok, "columnar major compaction failed");
     let snap = shard.new_snap_access();
     let mut mvcc_reader = snap
-        .new_columnar_mvcc_reader(table_id, &schema.columns, None, 500)
+        .new_columnar_mvcc_reader(table_id, &schema.columns, None, 500, None)
+        .unwrap()
         .unwrap();
     // Use a random end int handle
     let end_handle = thread_rng().gen_range(500..2100);
@@ -583,7 +588,8 @@ fn test_columnar_major_compaction_multiple_tables() {
     let verify_columnar_for_table = |schema_file: &SchemaFile, snap: &SnapAccess, table_id: i64| {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut mvcc_reader = snap
-            .new_columnar_mvcc_reader(table_id, &schema.columns, None, 500)
+            .new_columnar_mvcc_reader(table_id, &schema.columns, None, 500, None)
+            .unwrap()
             .unwrap();
         // Use a random end int handle
         let end_handle = thread_rng().gen_range(500..2100);
@@ -873,7 +879,8 @@ fn test_columnar_truncate_ts() {
     assert!(ok, "columnar truncate_ts compaction failed");
     let snap = shard.new_snap_access();
     let mut mvcc_reader = snap
-        .new_columnar_mvcc_reader(table_id, &schema.columns, None, u64::MAX)
+        .new_columnar_mvcc_reader(table_id, &schema.columns, None, u64::MAX, None)
+        .unwrap()
         .unwrap();
     block_on(mvcc_reader.set_int_handle_range(0, Some(3000))).unwrap();
     let mut block = Block::new(&schema);
@@ -962,7 +969,8 @@ fn test_columnar_trim_over_bound() {
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let snap = shard.new_snap_access();
     let mut mvcc_reader = snap
-        .new_columnar_mvcc_reader(table_id, &schema.columns, None, u64::MAX)
+        .new_columnar_mvcc_reader(table_id, &schema.columns, None, u64::MAX, None)
+        .unwrap()
         .unwrap();
     block_on(mvcc_reader.set_int_handle_range(0, Some(3000))).unwrap();
     let mut block = Block::new(&schema);
@@ -984,7 +992,8 @@ fn test_columnar_trim_over_bound() {
     std::thread::sleep(Duration::from_secs(2));
     let snap = shard.new_snap_access();
     let mut mvcc_reader = snap
-        .new_columnar_mvcc_reader(table_id, &schema.columns, None, u64::MAX)
+        .new_columnar_mvcc_reader(table_id, &schema.columns, None, u64::MAX, None)
+        .unwrap()
         .unwrap();
     block_on(mvcc_reader.set_int_handle_range(0, Some(3000))).unwrap();
     let mut block = Block::new(&schema);
@@ -1006,7 +1015,8 @@ fn test_columnar_trim_over_bound() {
     }
     // Check old version exists
     let mut mvcc_reader = snap
-        .new_columnar_mvcc_reader(table_id, &schema.columns, None, 300)
+        .new_columnar_mvcc_reader(table_id, &schema.columns, None, 300, None)
+        .unwrap()
         .unwrap();
     block_on(mvcc_reader.set_int_handle_range(0, Some(3000))).unwrap();
     let mut block = Block::new(&schema);

@@ -141,7 +141,7 @@ impl ToString for VectorFloat32Ref<'_> {
 // Vector distance and functions
 impl<'a> VectorFloat32Ref<'a> {
     #[inline]
-    pub fn l2_squared_distance(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
+    pub fn l2_squared_distance(self, b: VectorFloat32Ref<'_>) -> Result<f64> {
         match f32::sqeuclidean(self.data(), b.data()) {
             Some(l2_distance) => Ok(l2_distance),
             None => Err(box_err!("Vectors must be of the same length")),
@@ -149,12 +149,12 @@ impl<'a> VectorFloat32Ref<'a> {
     }
 
     #[inline]
-    pub fn l2_distance(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
+    pub fn l2_distance(self, b: VectorFloat32Ref<'_>) -> Result<f64> {
         Ok(self.l2_squared_distance(b)?.sqrt())
     }
 
     #[inline]
-    pub fn inner_product(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
+    pub fn inner_product(self, b: VectorFloat32Ref<'_>) -> Result<f64> {
         match f32::dot(self.data(), b.data()) {
             Some(inner_product) => Ok(inner_product),
             None => Err(box_err!("Vectors must be of the same length")),
@@ -162,14 +162,14 @@ impl<'a> VectorFloat32Ref<'a> {
     }
 
     #[inline]
-    pub fn cosine_distance(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
+    pub fn cosine_distance(self, b: VectorFloat32Ref<'_>) -> Result<f64> {
         match f32::cosine(self.data(), b.data()) {
             Some(cosine_similarity) => Ok(cosine_similarity),
             None => Err(box_err!("Vectors must be of the same length")),
         }
     }
 
-    pub fn l1_distance(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
+    pub fn l1_distance(self, b: VectorFloat32Ref<'_>) -> Result<f64> {
         self.check_dims(b)?;
         let mut distance: f32 = 0.0;
         for i in 0..self.len() {
@@ -235,6 +235,17 @@ impl<'a> VectorFloat32RefMisaligned<'a> {
         VectorFloat32 {
             value: aligned_data,
         }
+    }
+
+    pub fn to_aligned_ref(&'a self) -> Result<VectorFloat32Ref<'a>> {
+        let align = std::mem::align_of::<f32>();
+        let ptr = self.value.as_ptr();
+        if ptr.align_offset(align) != 0 {
+            return Err(box_err!("Data is not aligned to f32"));
+        }
+        let ref_floats: &[f32] =
+            unsafe { std::slice::from_raw_parts(ptr as *const f32, self.value.len() / 4) };
+        Ok(VectorFloat32Ref::from_f32(ref_floats))
     }
 }
 
