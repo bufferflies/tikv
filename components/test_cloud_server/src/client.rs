@@ -90,6 +90,8 @@ pub enum Error {
     KeyError(kvrpcpb::KeyError),
     #[error("Key errors {0:?}")]
     KeyErrors(Vec<kvrpcpb::KeyError>),
+    #[error("Build RPC context failure region:{0:?}")]
+    RpcContext(u64),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -733,6 +735,50 @@ impl ClusterClient {
         }
         error!("{} prewrite failed {:?}", region_id, errors);
         Err(errors.pop().unwrap().1)
+    }
+
+    pub fn kv_prewrite_single_region_without_retry(
+        &mut self,
+        pk: Bytes,
+        secondary_keys: Option<&Vec<Bytes>>,
+        muts: TxnMutations,
+        ts: TimeStamp,
+    ) -> Result<kvrpcpb::PrewriteResponse> {
+        let groups = muts.group_by_regions(self, PrimaryFilter::All)?;
+        if groups.is_empty() {
+            return Err(Error::Other(box_err!("No region found for prewrite")));
+        }
+        let region_id = groups[0].0;
+        let ctx = self
+            .new_rpc_ctx(region_id.id(), &pk)
+            .filter(|x| x.get_region_epoch().get_version() == region_id.ver());
+        if ctx.is_none() {
+            return Err(Error::RpcContext(region_id.id()));
+        }
+        let ctx = ctx.unwrap();
+        let store_id = ctx.get_peer().get_store_id();
+        let kv_client = self.get_kv_client(store_id);
+        let mut prewrite_req = PrewriteRequest::default();
+        prewrite_req.set_context(ctx);
+        muts.set_prewrite_req(&mut prewrite_req);
+        prewrite_req.primary_lock = pk.to_vec();
+        prewrite_req.start_version = ts.into_inner();
+        prewrite_req.lock_ttl = 3000;
+        prewrite_req.min_commit_ts = prewrite_req.start_version + 1;
+        prewrite_req.use_async_commit = self.async_commit;
+        if let Some(secondary_keys) = secondary_keys {
+            if muts.primary() == pk {
+                prewrite_req.set_secondaries(
+                    secondary_keys
+                        .iter()
+                        .map(|k| k.to_vec())
+                        .collect::<Vec<_>>()
+                        .into(),
+                );
+            }
+        }
+        let prewrite_resp = kv_client.kv_prewrite(&prewrite_req)?;
+        Ok(prewrite_resp)
     }
 
     // Return the actual commit_ts, which would be larger than commit_ts in request.

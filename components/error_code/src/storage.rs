@@ -41,6 +41,7 @@ define_error_codes!(
 
     ASSERTION_FAILED => ("AssertionFailed", "", ""),
     LOCK_IF_EXISTS_FAILED => ("LockIfExistsFailed", "", ""),
+    UNDETERMINED => ("Undetermined", "", ""),
 
     UNKNOWN => ("Unknown", "", "")
 );
