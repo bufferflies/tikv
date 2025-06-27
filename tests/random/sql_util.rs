@@ -25,6 +25,7 @@ const RETRYABLE_DB_ERR_MSGS: &[&str] = &[
     DEADLOCK_ERR_MSG,
     "Information schema is out of date",
     "Lock wait timeout exceeded",
+    "lock wait timeout",
     "Region epoch not match for region",
     "Region epoch not match after retries",
     "tikv aborts txn",
