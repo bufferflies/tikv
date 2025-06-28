@@ -1173,12 +1173,16 @@ impl VectorIndexBuilder {
             .unwrap();
         for i in 0..vec_column.length() {
             let vec_val = vec_column.get_value(i);
+            // NOTE: If the vector column is the new added column with NOT NULL constraint,
+            // the vector value is empty for the existing rows. It's ok to skip these rows.
+            // See `decode_row_columns` in `columnar/reader.rs` for more details.
+            let need_push = vec_val.is_some() && !vec_val.as_ref().unwrap().is_empty();
             if self.is_common_handle {
                 let common_handle = block.handles.get_not_null_value(i);
                 if i == 0 || i == vec_column.length() - 1 {
                     self.update_common_handle(common_handle);
                 }
-                if vec_val.is_some() {
+                if need_push {
                     self.common_handles.push(common_handle.to_vec());
                 }
             } else {
@@ -1186,11 +1190,13 @@ impl VectorIndexBuilder {
                 if i == 0 || i == vec_column.length() - 1 {
                     self.update_int_handle(handle);
                 }
-                if vec_val.is_some() {
+                if need_push {
                     self.int_handles.push(handle);
                 }
             }
-            if let Some(vec_val) = vec_val {
+
+            if need_push {
+                let vec_val = vec_val.as_ref().unwrap();
                 let version = block.versions.get_version(i);
                 let is_deleted = block.versions.is_null(i);
                 if is_deleted {
