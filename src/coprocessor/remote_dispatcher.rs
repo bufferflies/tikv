@@ -30,7 +30,9 @@ use crate::{
     storage::txn::check_locks,
 };
 
+// The maximum memory usage of remote request cache is 64 x 16MiB = 1GiB.
 const REMOTE_REQUEST_CACHE_CAPACITY: u64 = 64;
+const REMOTE_REQUEST_CACHE_MAX_RESPONSE_SIZE: u32 = 16 << 20; // 16 MiB
 
 pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
@@ -103,9 +105,13 @@ pub async fn remote_handle_request(
     info!("handle {} request, {}", req_type, tag);
     let key = remote_req.key.clone();
     let req_body = remote_req.req_body.clone();
-    let resp = remote_ctx
+    let resp = match remote_ctx
         .remote_request_cache
-        .get_or_insert_async(&key, async move {
+        .get_value_or_guard_async(&key)
+        .await
+    {
+        Ok(resp) => resp,
+        Err(g) => {
             let resp_body = remote_request(
                 remote_ctx,
                 &remote_ctx.remote_worker_url,
@@ -117,10 +123,12 @@ pub async fn remote_handle_request(
             let mut resp = Response::default();
             resp.merge_from_bytes(&resp_body)
                 .map_err(|err| Error::Other(format!("{tag}: decode response failed: {err:?}")))?;
-            Ok(resp)
-        })
-        .await
-        .map_err(|err: Arc<Error>| err.as_ref().clone())?;
+            if resp.compute_size() <= REMOTE_REQUEST_CACHE_MAX_RESPONSE_SIZE {
+                let _ = g.insert(resp.clone());
+            }
+            resp
+        }
+    };
 
     debug_assert!(
         !resp.has_region_error() && !resp.has_locked(),
