@@ -15,7 +15,7 @@ use crate::{
         Error, InnerKey, Value, NO_COMPRESSION,
     },
     util::new_l0_create_pb,
-    LOCK_CF, NUM_CFS, WRITE_CF,
+    NUM_CFS, WRITE_CF,
 };
 
 const L0_FOOTER_SIZE: usize = std::mem::size_of::<L0Footer>();
@@ -53,14 +53,14 @@ impl Deref for L0Table {
 }
 
 impl L0Table {
-    /// Would return `None` only when `ignore_lock` is `true`.
+    /// Would return `None` only when `write_cf_only` is `true`.
     pub fn new(
         file: Arc<dyn File>,
         cache: BlockCache,
-        ignore_lock: bool,
+        write_cf_only: bool,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Option<Self>> {
-        let core = L0TableCore::new(file, cache, ignore_lock, encryption_key)?;
+        let core = L0TableCore::new(file, cache, write_cf_only, encryption_key)?;
         Ok(core.map(|core| Self {
             core: Arc::new(core),
         }))
@@ -87,7 +87,7 @@ impl L0TableCore {
     pub fn new(
         file: Arc<dyn File>,
         cache: BlockCache,
-        ignore_lock: bool,
+        write_cf_only: bool,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Option<Self>> {
         let footer_off = file.size() - L0_FOOTER_SIZE as u64;
@@ -114,7 +114,7 @@ impl L0TableCore {
             if i + 1 < NUM_CFS {
                 end_off = cf_offs[i + 1] as u64;
             }
-            if start_off == end_off || ignore_lock && i == LOCK_CF {
+            if start_off == end_off || write_cf_only && i != WRITE_CF {
                 continue;
             }
             let tbl = sstable::SsTable::new_l0_cf(
@@ -133,9 +133,9 @@ impl L0TableCore {
         }
 
         if cfs.iter().all(|t| t.is_none()) {
-            // All CFs are empty only when `ignore_lock` is `true` and only `LOCK_CF` has
-            // data.
-            debug_assert!(ignore_lock);
+            // All CFs are empty only when `write_cf_only` is `true` and `WRITE_CF` is
+            // empty.
+            debug_assert!(write_cf_only);
             return Ok(None);
         }
 

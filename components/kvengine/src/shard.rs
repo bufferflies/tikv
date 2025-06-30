@@ -360,7 +360,7 @@ impl Shard {
         ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         mut mem_tbls: Vec<CfTable>,
-        ignore_lock: bool,
+        write_cf_only: bool,
     ) -> Result<Self> {
         let mut cs = ChangeSet::new(change_set);
         let mut ids = HashMap::new();
@@ -371,7 +371,7 @@ impl Shard {
         let encryption_key = if cs.has_snapshot() {
             let snap = cs.get_snapshot();
             ids = Self::collect_ids_from_snapshot(snap, ctx.prepare_type);
-            if !ignore_lock {
+            if !write_cf_only {
                 lock_txn_file_refs = collect_snap_lock_txn_file_refs(snap);
             }
             box_try!(
@@ -393,7 +393,9 @@ impl Shard {
                     continue;
                 }
             }
-
+            if write_cf_only && fm.get_cf() != WRITE_CF as i32 && fm.get_level() != 0 {
+                continue;
+            }
             let fs = ctx.dfs.clone();
             let tx = result_tx.clone();
             let fm = fm.clone();
@@ -470,7 +472,7 @@ impl Shard {
             &mut builder,
             cs.get_snapshot(),
             &cs,
-            ignore_lock,
+            write_cf_only,
             ctx.prepare_type,
         );
         builder.set_schema(cs.get_schema_version(), cs.get_schema_file());

@@ -114,10 +114,10 @@ impl SnapAccess {
         tag: &str,
         ctx: &SnapCtx,
         change_set: pb::ChangeSet,
-        ignore_lock: bool,
+        write_cf_only: bool,
     ) -> Result<Self> {
         let core = Arc::new(
-            SnapAccessCore::from_change_set(tag, ctx, change_set, vec![], ignore_lock).await?,
+            SnapAccessCore::from_change_set(tag, ctx, change_set, vec![], write_cf_only).await?,
         );
         Ok(Self { core })
     }
@@ -361,9 +361,9 @@ impl SnapAccessCore {
         ctx: &SnapCtx,
         change_set: pb::ChangeSet,
         mem_tbls: Vec<CfTable>,
-        ignore_lock: bool,
+        write_cf_only: bool,
     ) -> Result<Self> {
-        let shard = Shard::from_change_set(tag, ctx, change_set, mem_tbls, ignore_lock).await?;
+        let shard = Shard::from_change_set(tag, ctx, change_set, mem_tbls, write_cf_only).await?;
         Ok(Self::new(&shard))
     }
 
@@ -843,7 +843,7 @@ impl SnapAccessCore {
 
     /// NOTE: `ChangeSet.snapshot.data_sequence` is not set, as it's not able to
     /// get the accurate data sequence of ShardMeta from Shard.
-    fn to_change_set(&self, outer_ranges: &[(Bytes, Bytes)], ignore_locks: bool) -> pb::ChangeSet {
+    fn to_change_set(&self, outer_ranges: &[(Bytes, Bytes)], write_cf_only: bool) -> pb::ChangeSet {
         let mut cs = new_change_set(self.get_tag().id_ver.id, self.get_tag().id_ver.ver);
         cs.set_sequence(self.meta_seq);
 
@@ -870,7 +870,7 @@ impl SnapAccessCore {
         }
         for v in &self.data.l0_tbls {
             count += 1;
-            if ignore_locks {
+            if write_cf_only {
                 if let Some(cf) = v.get_cf(WRITE_CF) {
                     if cf.size() == 0 {
                         continue;
@@ -893,7 +893,7 @@ impl SnapAccessCore {
             snap.mut_blob_creates().push(v.to_blob_create());
         }
         self.data.for_each_level(|cf, lh| {
-            if ignore_locks && cf == LOCK_CF {
+            if write_cf_only && cf != WRITE_CF {
                 return false;
             }
             let mut overlap_ids = HashSet::new();
@@ -966,10 +966,10 @@ impl SnapAccessCore {
     pub fn marshal(
         &self,
         ranges: &[(Bytes, Bytes)],
-        ignore_locks: bool,
+        write_cf_only: bool,
         cache_key: bool,
     ) -> (String, Vec<u8>) {
-        let cs = self.to_change_set(ranges, ignore_locks);
+        let cs = self.to_change_set(ranges, write_cf_only);
         let key = if cache_key {
             let mut ranges_bytes = Vec::new();
             for (start, end) in ranges {

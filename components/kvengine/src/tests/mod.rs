@@ -1025,7 +1025,7 @@ fn test_refresh_stats() {
 }
 
 #[test]
-fn test_l0table_ignore_lock() {
+fn test_l0table_write_cf_only() {
     ::test_util::init_log_for_test();
     let (engine, _) = new_test_engine();
     let file = new_l0table_file(
@@ -1040,10 +1040,10 @@ fn test_l0table_ignore_lock() {
     let l0table = L0Table::new(file.clone(), BlockCache::None, false, None).unwrap();
     assert!(l0table.is_some());
 
-    // l0table would be none when `ignore_lock` is true and only LOCK_CF has data.
+    // l0table would be none when `write_cf_only` is true and WRITE_CF is empty.
     // See https://github.com/tidbcloud/cloud-storage-engine/issues/1026.
-    let l0table_ignore_lock = L0Table::new(file, BlockCache::None, true, None).unwrap();
-    assert!(l0table_ignore_lock.is_none());
+    let l0table_write_cf_only = L0Table::new(file, BlockCache::None, true, None).unwrap();
+    assert!(l0table_write_cf_only.is_none());
 }
 
 fn print_locks(snap: &SnapAccess, all_versions: bool, read_ts: Option<u64>) {
