@@ -980,6 +980,56 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         client.verify_data_with_ref_store();
     }
 
+    // Check txn status
+    {
+        let (muts, txn_muts) = make_mutations("check_txn_status");
+        let start_ts = client.get_ts();
+        client
+            .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
+            .unwrap();
+        let start_ts = start_ts.into_inner();
+        {
+            // primary mismatch.
+            let second_key = muts[1].key.clone();
+            let resp = client
+                .kv_check_txn_status(
+                    &second_key,
+                    start_ts,
+                    start_ts,
+                    start_ts,
+                    false,
+                    false,
+                    false,
+                    use_txn_file,
+                )
+                .unwrap();
+            assert!(resp.has_error());
+            assert!(resp.get_error().has_primary_mismatch());
+        }
+
+        {
+            let resp = client
+                .kv_check_txn_status(
+                    &txn_muts.primary(),
+                    start_ts,
+                    start_ts,
+                    start_ts,
+                    false,
+                    false,
+                    false,
+                    use_txn_file,
+                )
+                .unwrap();
+            assert!(!resp.has_error());
+            assert_eq!(resp.commit_version, 0);
+            assert_eq!(resp.get_lock_info().lock_version, start_ts);
+            assert_eq!(
+                resp.get_lock_info().get_primary_lock(),
+                txn_muts.primary().as_ref()
+            );
+        }
+    }
+
     client.verify_data_with_ref_store();
     cluster.stop();
     oss.shutdown();

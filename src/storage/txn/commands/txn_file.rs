@@ -709,6 +709,7 @@ impl TxnFileCommand {
         if let Some(lock) = reader.load_lock(&primary_key).unwrap() {
             if lock.ts == self.txn_file_ref.start_ts.into() {
                 return self.process_check_txn_status_lock_exists(
+                    primary_key,
                     lock,
                     current_ts,
                     caller_start_ts,
@@ -746,10 +747,17 @@ impl TxnFileCommand {
 
     fn process_check_txn_status_lock_exists(
         &mut self,
+        primary_key: Key,
         mut lock: txn_types::Lock,
         current_ts: TimeStamp,
         caller_start_ts: TimeStamp,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
+        if !primary_key.is_encoded_from(&lock.primary) {
+            return Err(
+                ErrorInner::PrimaryMismatch(lock.into_lock_info(primary_key.into_raw()?)).into(),
+            );
+        }
+
         let txn_status = if lock.ts.physical() + lock.ttl < current_ts.physical() {
             // rollback.
             self.set_committed_or_rolled_back(0);

@@ -43,5 +43,7 @@ define_error_codes!(
     LOCK_IF_EXISTS_FAILED => ("LockIfExistsFailed", "", ""),
     UNDETERMINED => ("Undetermined", "", ""),
 
+    PRIMARY_MISMATCH => ("PrimaryMismatch", "", ""),
+
     UNKNOWN => ("Unknown", "", "")
 );
