@@ -110,7 +110,10 @@ portable = ["tikv/portable"]
 
 debug-trace-ia-segments = ["kvengine/debug-trace-ia-segments"]
 debug-trace-mem-table = ["kvengine/debug-trace-mem-table"]
-debug-trace-txn-tasks = ["tikv/debug-trace-txn-tasks"]
+debug-trace-txn-tasks = [
+    "tikv/debug-trace-txn-tasks",
+    "test_cloud_server/debug-trace-txn-tasks",
+]
 
 [dependencies]
 api_version = { workspace = true }

@@ -6,6 +6,7 @@ edition = "2021"
 
 [features]
 testexport = []
+debug-trace-txn-tasks = ["tikv/debug-trace-txn-tasks"]
 
 [dependencies]
 anyhow = "1.0"

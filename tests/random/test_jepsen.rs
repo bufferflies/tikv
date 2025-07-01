@@ -226,6 +226,10 @@ async fn verify_bank_accounts(
             info!("verify_bank_accounts: try again"; "sum" => sum, "accounts" => ?accounts, "read_ts" => txn.start_ts());
         }
 
+        #[cfg(feature = "debug-trace-txn-tasks")]
+        {
+            tikv::storage::txn::debug::dump_txn_tasks();
+        }
         dump_accounts_history();
 
         panic!(

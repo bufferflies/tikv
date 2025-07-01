@@ -57,7 +57,7 @@ pub fn dump_txn_tasks() {
     }
 
     let stderr = std::io::stderr();
-    let _ = writeln!(stderr.lock(), "dump txn tasks"; "count" => TXN_TASKS.len());
+    let _ = writeln!(stderr.lock(), "dump txn tasks, count: {}", TXN_TASKS.len());
     while let Some(mut task) = TXN_TASKS.pop() {
         let cid = task.cid;
         task.err = task_errors.remove(&cid);

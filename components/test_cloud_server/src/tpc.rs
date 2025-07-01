@@ -171,12 +171,17 @@ impl Tpc {
 
         if output.status.success() && data_errs.is_empty() && stderr.is_empty() {
             Ok(output)
+        } else if !data_errs.is_empty() {
+            #[cfg(feature = "debug-trace-txn-tasks")]
+            {
+                tikv::storage::txn::debug::dump_txn_tasks();
+            }
+            panic!("{} tpc {} data_errs: {:?}", self.tag, cmd_name, data_errs);
         } else {
             Err(box_err!(
-                "{} tpc {} data_errs: {:?}, stderr {:?}",
+                "{} tpc {} stderr: {:?}",
                 self.tag,
                 cmd_name,
-                data_errs,
                 stderr
             ))
         }

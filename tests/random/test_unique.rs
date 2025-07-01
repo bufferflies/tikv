@@ -197,6 +197,10 @@ pub(crate) async fn run_unique_workload(
                             warn!("{} unique workload perform delete failed, retry", tag; "err" => ?err);
                         }
                         Err(err) => {
+                            #[cfg(feature = "debug-trace-txn-tasks")]
+                            {
+                                tikv::storage::txn::debug::dump_txn_tasks();
+                            }
                             panic!("{} unique workload perform delete failed: {:?}", tag, err)
                         }
                     }

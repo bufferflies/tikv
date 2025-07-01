@@ -2465,6 +2465,11 @@ impl ClusterTxnClient {
         ref_store: &RefStore,
         range: Option<(&[u8], &[u8])>,
     ) -> Result<usize> {
+        fn dump_txn_tasks() {
+            #[cfg(feature = "debug-trace-txn-tasks")]
+            tikv::storage::txn::debug::dump_txn_tasks();
+        }
+
         let start_time = Instant::now();
         let mut ref_cnt = 0;
         for (k, v) in ref_store.iter() {
@@ -2498,6 +2503,7 @@ impl ClusterTxnClient {
                     tikv_util::escape(kv.value()),
                     ref_val
                 );
+                dump_txn_tasks();
                 self.log_verify_error(key, None, u64::MAX, &err);
                 return Err(err);
             }
@@ -2513,6 +2519,7 @@ impl ClusterTxnClient {
                     tikv_util::escape(ref_val),
                     ref_val.len()
                 );
+                dump_txn_tasks();
                 self.log_verify_error(key, Some(ref_val), u64::MAX, &err);
                 return Err(err);
             }
@@ -2555,6 +2562,7 @@ impl ClusterTxnClient {
                     }
                 }
             }
+            dump_txn_tasks();
             return Err(box_err!(
                 "verify_data_by_scan: entries count not match, db: {}, ref store: {}",
                 db_cnt,
