@@ -62,6 +62,13 @@ pub fn decompress_lz4(content: &[u8]) -> std::io::Result<Vec<u8>> {
     lz4::block::decompress(content, None)
 }
 
+pub fn get_region_keyspace_id_u32(region: &metapb::Region) -> Option<u32> {
+    if is_api_v2_region(region) {
+        return ApiV2::get_u32_keyspace_id_by_key(region.start_key.as_slice());
+    }
+    None
+}
+
 pub fn get_region_keyspace_id_str(region: &metapb::Region) -> Option<String> {
     if is_api_v2_region(region) {
         let keyspace_id_str = ApiV2::get_keyspace_id_str(region.start_key.as_slice());

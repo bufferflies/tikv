@@ -30,7 +30,9 @@ use kvproto::{
     raft_serverpb::RaftMessage,
     replication_modepb::RegionReplicationStatus,
 };
-use pd_client::{merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat};
+use pd_client::{
+    keyspace::to_keyspace_name, merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat,
+};
 use prometheus::local::LocalHistogram;
 use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::store::{util, util::ConfChangeKind, ReadStats, TxnExt, WriteStats};
@@ -664,38 +666,41 @@ impl PdRunner {
         has_tiflash_replicas: bool,
         shard: Option<Arc<Shard>>,
     ) {
-        let keyspace_id = rfengine::get_region_keyspace_id_str(region);
+        let keyspace_id = rfengine::get_region_keyspace_id_u32(region);
         let region_id = region.get_id();
         let region_id_string = region_id.to_string();
         let region_id_str = region_id_string.as_str();
         match keyspace_id {
             None => {}
-            Some(keyspace_id_string) => {
-                let keyspace_id_str = keyspace_id_string.as_str();
+            Some(keyspace_id_u32) => {
+                let Some(keyspace_name) = to_keyspace_name(keyspace_id_u32) else {
+                    return;
+                };
+                let keyspace_name_str = keyspace_name.as_str();
                 match kv_size {
                     None => {
                         let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
                             "used",
                             region_id_str,
-                            keyspace_id_str,
+                            keyspace_name_str,
                             "standard",
                         ]);
                         let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
                             "tiflash_used",
                             region_id_str,
-                            keyspace_id_str,
+                            keyspace_name_str,
                             "standard",
                         ]);
                         let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
                             "used",
                             region_id_str,
-                            keyspace_id_str,
+                            keyspace_name_str,
                             "ia",
                         ]);
                         let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
                             "tiflash_used",
                             region_id_str,
-                            keyspace_id_str,
+                            keyspace_name_str,
                             "ia",
                         ]);
                     }
@@ -703,7 +708,7 @@ impl PdRunner {
                         debug!(
                             "update STORE_SIZE_GAUGE_VEC";
                             "region_id_str" => region_id_str,
-                            "keyspace_id_str" => keyspace_id_str,
+                            "keyspace_name" => keyspace_name_str,
                             "kv_size"=>size,
                             "has_tiflash_replicas" => has_tiflash_replicas,
                         );
@@ -724,7 +729,7 @@ impl PdRunner {
                                     "used"
                                 },
                                 region_id_str,
-                                keyspace_id_str,
+                                keyspace_name_str,
                                 storage_class,
                             ])
                             .set(size as i64);
