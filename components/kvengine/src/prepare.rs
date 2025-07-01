@@ -33,7 +33,7 @@ use crate::{
         ia_auto_file::IaAutoFile,
         ia_file::{table_meta_file_local_path, IaFile},
     },
-    limiter::DfsLoadLimiterPermit,
+    limiter::{DfsLoadLimiter, DfsLoadLimiterPermit},
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
         file::{FdCache, File, InMemFile, LocalFile},
@@ -337,42 +337,20 @@ impl EngineCore {
             // Load from remote.
             let tx = result_tx.clone();
             let fm = fm.clone();
-            let dfs_load_limiter = self.dfs_load_limiter.clone();
             join_set.spawn_on(
-                async move {
-                    let permit = dfs_load_limiter.acquire_permit().await;
-                    let res = match prepare_type {
-                        FilePrepareType::Local => {
-                            let res =
-                                Self::load_remote_table(id, fm.file_type, opts, fs.as_ref()).await;
-                            res.map(|local_data| PreparedFileResult::Local { local_data })
-                        }
-                        FilePrepareType::Ia => {
-                            let res =
-                                Self::load_remote_table_meta(tag, id, &fm, opts, fs.as_ref()).await;
-                            res.map(|table_meta_data| PreparedFileResult::Ia { table_meta_data })
-                        }
-                        FilePrepareType::AutoIa(spec) => {
-                            Self::load_remote_auto_ia_file(
-                                tag,
-                                id,
-                                &fm,
-                                opts,
-                                fs.as_ref(),
-                                table_meta_file,
-                                current_ts.unwrap(),
-                                spec,
-                            )
-                            .await
-                        }
-                    };
-                    let _ = tx.send(res.map(|prepared| LoadRemoteResult {
-                        id,
-                        fm,
-                        prepared,
-                        permit,
-                    }));
-                },
+                Self::load_file_from_remote(
+                    self.shutdown_token.clone(),
+                    self.dfs_load_limiter.clone(),
+                    fs,
+                    id,
+                    fm,
+                    prepare_type,
+                    opts,
+                    tag,
+                    table_meta_file,
+                    current_ts,
+                    tx,
+                ),
                 runtime,
             );
             if msg_count < self.opts.dfs_load_concurrency_per_request {
@@ -387,6 +365,63 @@ impl EngineCore {
         info!("{} load tables by ids", tag; "ids" => ids.len(),
             "takes" => ?start_time.saturating_elapsed(), "available_permits" => available_permits);
         Ok(())
+    }
+
+    async fn load_file_from_remote(
+        shutdown_token: tokio_util::sync::CancellationToken,
+        dfs_load_limiter: DfsLoadLimiter,
+        fs: Arc<dyn dfs::Dfs>,
+        id: u64,
+        fm: FileMeta,
+        prepare_type: FilePrepareType,
+        opts: dfs::Options,
+        tag: ShardTag,
+        table_meta_file: Option<Arc<dyn File>>,
+        current_ts: Option<u64>,
+        tx: tikv_util::mpsc::Sender<Result<LoadRemoteResult>>,
+    ) {
+        let task = async {
+            let permit = dfs_load_limiter.acquire_permit().await;
+            let res = match prepare_type {
+                FilePrepareType::Local => {
+                    Self::load_remote_table(id, fm.file_type, opts, fs.as_ref())
+                        .await
+                        .map(|local_data| PreparedFileResult::Local { local_data })
+                }
+                FilePrepareType::Ia => {
+                    Self::load_remote_table_meta(tag, id, &fm, opts, fs.as_ref())
+                        .await
+                        .map(|table_meta_data| PreparedFileResult::Ia { table_meta_data })
+                }
+                FilePrepareType::AutoIa(spec) => {
+                    Self::load_remote_auto_ia_file(
+                        tag,
+                        id,
+                        &fm,
+                        opts,
+                        fs.as_ref(),
+                        table_meta_file,
+                        current_ts.unwrap(),
+                        spec,
+                    )
+                    .await
+                }
+            };
+            (res, permit)
+        };
+
+        tokio::select! {
+            biased;
+            _ = shutdown_token.cancelled() => (),
+            (res, permit) = task => {
+                let _ = tx.send(res.map(|prepared| LoadRemoteResult {
+                    id,
+                    fm,
+                    prepared,
+                    permit,
+                }));
+            }
+        };
     }
 
     fn recv_file_data(

@@ -99,6 +99,7 @@ tikv_util = { path = "../tikv_util", default-features = false }
 time = "0.1"
 tipb = { workspace = true }
 tokio = { version = "1.5", features = ["full"] }
+tokio-util = "0.7"
 tracker = { path = "../tracker" }
 txn_types = { path = "../txn_types", default-features = false }
 url = "2"
