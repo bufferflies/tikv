@@ -136,6 +136,10 @@ impl CfTableCore {
         self.tbls.iter().map(|t| t.skip_list_entries()).sum()
     }
 
+    pub fn skip_list_size(&self) -> usize {
+        self.tbls.iter().map(|t| t.skl_size()).sum()
+    }
+
     pub fn set_version(&self, ver: u64) {
         self.ver.store(ver, Ordering::Release)
     }
