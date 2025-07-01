@@ -307,8 +307,8 @@ pub struct SchemaManagerConfig {
     pub keyspace_refresh_interval: ReadableDuration,
     pub http_timeout: ReadableDuration,
     pub enabled: bool,
-    // `whitelist_file` is a json file contains a list of keyspace_id.
-    pub whitelist_file: PathBuf,
+    // `blacklist_file` is a json file contains a list of keyspace_id.
+    pub blacklist_file: PathBuf,
     // The tier of TiKV stores to push schema file. Used for canary release.
     pub tikv_stores_tier: String,
 }
@@ -320,7 +320,7 @@ impl Default for SchemaManagerConfig {
             keyspace_refresh_interval: KEYSPACE_REFRESH_INTERVAL,
             http_timeout: DEFAULT_TIMEOUT,
             enabled: false,
-            whitelist_file: PathBuf::new(), // Empty means no whitelist filtering.
+            blacklist_file: PathBuf::new(), // Empty means no blacklist filtering.
             tikv_stores_tier: "".to_string(), // Empty means match all stores.
         }
     }
@@ -473,7 +473,17 @@ impl SchemaManager {
         for (&keyspace_id, keyspace_shard_stats) in keyspace_stats {
             // Skip the default keyspace. The tikv-client not support the default keyspace
             // with ApiV2NoPrefixCodec.
-            if !self.in_whitelist(keyspace_id) || keyspace_id == DEFAULT_KEYSPACE_ID {
+            if keyspace_id == DEFAULT_KEYSPACE_ID {
+                continue;
+            }
+            if self.in_blacklist(keyspace_id) {
+                // Remove the keyspace schema file and index from meta file.
+                if self.remove_keyspace_local_file(keyspace_id)? {
+                    info!(
+                        "{}: keyspace is in blacklist, remove local schema files",
+                        keyspace_id
+                    );
+                }
                 continue;
             }
             // If the keyspace has only one shard, we check the write sequence if changed.
@@ -547,17 +557,7 @@ impl SchemaManager {
                     // If the keyspace is just restored, the schema_restore_version in shard will be
                     // reset to backup_ts after restoration. In this case, we should remove the old
                     // schema file and try to rebuild it in next loop.
-                    if let Some((_, files)) = self.meta_file.remove_keyspace(keyspace_id) {
-                        let file_ids: Vec<u64> = files.iter().map(|f| f.0).collect();
-                        remove_schema_file_from_local(&self.config.dir, keyspace_id, &file_ids)
-                            .map_err(|err| -> Error {
-                                box_err!(
-                                    "{}: remove_schema_file_from_local failed {:?}",
-                                    keyspace_id,
-                                    err
-                                )
-                            })?;
-                    }
+                    self.remove_keyspace_local_file(keyspace_id)?;
                     info!(
                         "{}: keyspace is restored, remove local schema files",
                         keyspace_id
@@ -920,6 +920,23 @@ impl SchemaManager {
         }
         Ok(Some(schemas))
     }
+
+    fn remove_keyspace_local_file(&self, keyspace_id: u32) -> Result<bool> {
+        if let Some((_, files)) = self.meta_file.remove_keyspace(keyspace_id) {
+            let file_ids: Vec<u64> = files.iter().map(|f| f.0).collect();
+            remove_schema_file_from_local(&self.config.dir, keyspace_id, &file_ids).map_err(
+                |err| -> Error {
+                    box_err!(
+                        "{}: remove_schema_file_from_local failed {:?}",
+                        keyspace_id,
+                        err
+                    )
+                },
+            )?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
 }
 
 fn table_info_to_partition_sc_spec(ti: &TableInfo) -> Option<Vec<(i64, StorageClassSpec)>> {
@@ -981,7 +998,7 @@ fn table_info_to_schema(ti: &TableInfo) -> Result<Schema> {
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
-struct WhiteListKeyspace {
+struct BlacklistKeyspace {
     keyspace_ids: Vec<u32>,
 }
 
@@ -992,7 +1009,7 @@ pub struct SchemaManagerCore {
     txn_client: TxnClient,
     meta_file: MetaFile,
     id_allocator: Arc<dyn IdAllocator>,
-    whitelist_keyspaces: Option<HashSet<u32>>,
+    blacklist_keyspaces: Option<HashSet<u32>>,
 }
 
 impl SchemaManagerCore {
@@ -1002,18 +1019,18 @@ impl SchemaManagerCore {
         config: SchemaManagerConfig,
         txn_client: TxnClient,
     ) -> Self {
-        let whitelist_keyspaces: Option<HashSet<u32>> =
-            (!config.whitelist_file.as_os_str().is_empty()).then(|| {
-                let data = fs::read_to_string(&config.whitelist_file).unwrap();
-                let whitelist: WhiteListKeyspace = serde_json::from_str(&data).unwrap();
-                let whitelist_keyspaces: HashSet<u32> =
-                    whitelist.keyspace_ids.iter().cloned().collect();
+        let blacklist_keyspaces: Option<HashSet<u32>> =
+            (!config.blacklist_file.as_os_str().is_empty()).then(|| {
+                let data = fs::read_to_string(&config.blacklist_file).unwrap();
+                let blacklist: BlacklistKeyspace = serde_json::from_str(&data).unwrap();
+                let blacklist_keyspaces: HashSet<u32> =
+                    blacklist.keyspace_ids.iter().cloned().collect();
                 info!(
-                    "whitelist keyspaces count: {}, keyspaces: {:?}",
-                    whitelist_keyspaces.len(),
-                    whitelist_keyspaces
+                    "blacklist keyspaces count: {}, keyspaces: {:?}",
+                    blacklist_keyspaces.len(),
+                    blacklist_keyspaces
                 );
-                whitelist_keyspaces
+                blacklist_keyspaces
             });
         let meta_file_path = config.dir.join(META_FILE_NAME);
         let meta_file = if meta_file_path.exists() {
@@ -1029,7 +1046,7 @@ impl SchemaManagerCore {
             txn_client,
             meta_file,
             id_allocator,
-            whitelist_keyspaces,
+            blacklist_keyspaces,
         };
 
         if !mgr.config.tikv_stores_tier.is_empty() {
@@ -1043,12 +1060,12 @@ impl SchemaManagerCore {
         mgr
     }
 
-    // Return whether the keyspace_id is in the whitelist, return true if whitelist
+    // Return whether the keyspace_id is in the blacklist, return false if blacklist
     // not configured.
-    fn in_whitelist(&self, keyspace_id: u32) -> bool {
-        self.whitelist_keyspaces
+    fn in_blacklist(&self, keyspace_id: u32) -> bool {
+        self.blacklist_keyspaces
             .as_ref()
-            .map_or(true, |whitelist| whitelist.contains(&keyspace_id))
+            .map_or(false, |blacklist| blacklist.contains(&keyspace_id))
     }
 
     fn get_tikv_stores(&self) -> (Vec<Store>, Vec<Store> /* stores_not_match */) {
