@@ -594,7 +594,9 @@ impl<E: Engine> Endpoint<E> {
             Err(e) => make_error_response(e).into(),
         };
         resp.set_exec_details(exec_details);
-        resp.set_exec_details_v2(exec_details_v2);
+        if !resp.has_exec_details_v2() {
+            resp.set_exec_details_v2(exec_details_v2);
+        }
         resp.set_latest_buckets_version(buckets_version);
         Ok(resp)
     }

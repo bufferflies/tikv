@@ -7,10 +7,9 @@ use bytes::{Buf, BufMut, Bytes};
 use codec::number::NumberDecoder;
 use http::{header, StatusCode};
 use kvengine::{SnapAccess, LOCK_CF};
-use kvproto::{coprocessor::Response, kvrpcpb::ExecDetailsV2};
+use kvproto::coprocessor::Response;
 use protobuf::Message;
 use security::SecurityManager;
-use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::MemoryTraceGuard;
 use tikv_kv::Statistics;
 use tikv_util::{
@@ -351,7 +350,6 @@ pub struct RemoteDagDispatcher {
     remote_ctx: RemoteContext,
     worker_addr: String,
     tag: String,
-    exec_details: Option<ExecDetailsV2>,
     deadline: Deadline,
 }
 
@@ -374,7 +372,6 @@ impl RemoteDagDispatcher {
             remote_ctx,
             worker_addr,
             tag,
-            exec_details: None,
             deadline,
         }
     }
@@ -457,7 +454,6 @@ impl RequestHandler for RemoteDagDispatcher {
                     .get_scan_detail_v2()
                     .get_processed_versions_size();
                 COPR_REMOTE_PROCESSED_SIZE.inc_by(processed_size);
-                self.exec_details = resp.exec_details_v2.take();
                 Ok(MEMTRACE_ROOT.trace_guard(resp, memory_size))
             }
             Err(Error::Other(e)) => {
@@ -477,23 +473,6 @@ impl RequestHandler for RemoteDagDispatcher {
         &mut self,
     ) -> Result<(Option<kvproto::coprocessor::Response>, bool)> {
         unimplemented!()
-    }
-
-    fn collect_scan_statistics(&mut self, dest: &mut Statistics) {
-        if let Some(exec_details_v2) = self.exec_details.as_ref() {
-            if let Some(scan_detail_v2) = exec_details_v2.scan_detail_v2.as_ref() {
-                dest.processed_size = scan_detail_v2.processed_versions_size as usize;
-                dest.write.processed_keys = scan_detail_v2.processed_versions as usize;
-            }
-        }
-    }
-
-    fn collect_scan_summary(&mut self, dest: &mut ExecSummary) {
-        if let Some(exec_details_v2) = self.exec_details.as_ref() {
-            if let Some(time_details) = exec_details_v2.time_detail.as_ref() {
-                dest.time_processed_ns = time_details.process_wall_time_ms as usize * 1000000;
-            }
-        }
     }
 }
 
