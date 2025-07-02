@@ -2647,6 +2647,15 @@ pub mod tests {
             SkipPessimisticCheck,
         )
         .unwrap();
+        prewrite(
+            &mut txn,
+            &mut reader,
+            &optimistic_async_props(k1, 10.into(), 50.into(), 1, true),
+            Mutation::make_put(Key::from_raw(k2), b"v2".to_vec()),
+            &None,
+            SkipPessimisticCheck,
+        )
+        .unwrap();
 
         // lock.use_one_pc should be set to true when using 1pc.
         assert_eq!(txn.guards.len(), 2);
