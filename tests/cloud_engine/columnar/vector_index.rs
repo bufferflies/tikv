@@ -37,10 +37,7 @@ use test_cloud_server::{
     ServerCluster,
 };
 use tidb_query_datatype::{
-    codec::{
-        mysql::VectorFloat32Decoder,
-        table::{decode_int_handle, encode_row_key},
-    },
+    codec::table::{decode_int_handle, encode_row_key},
     expr::EvalContext,
     FieldTypeAccessor, FieldTypeTp, VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC,
     VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC_VAL_COSINE, VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC_VAL_L2,
@@ -304,30 +301,10 @@ fn test_build_vector_index() {
         let mut block = Block::new(&schema);
         let cnt = block_on(vector_reader.read_block(&mut block, 5)).unwrap();
         assert!(cnt >= 3, "cnt: {}", cnt);
-        let handle_buf = block.get_handle_buf();
-        let vec_col_buf = &block.get_columns()[0];
-        assert_eq!(handle_buf.get_int_handle_value(0), 99);
-        let vec_val = vec_col_buf
-            .get_value(0)
-            .unwrap()
-            .read_vector_float32()
-            .unwrap();
-        assert_eq!(vec_val.as_ref().data(), &[99f32, 100f32, 101f32]);
-        // row 100 is null
-        assert_eq!(handle_buf.get_int_handle_value(1), 101);
-        let vec_val = vec_col_buf
-            .get_value(1)
-            .unwrap()
-            .read_vector_float32()
-            .unwrap();
-        assert_eq!(vec_val.as_ref().data(), &[101f32, 102f32, 103f32]);
-        assert_eq!(handle_buf.get_int_handle_value(2), 102);
-        let vec_val = vec_col_buf
-            .get_value(2)
-            .unwrap()
-            .read_vector_float32()
-            .unwrap();
-        assert_eq!(vec_val.as_ref().data(), &[102f32, 103f32, 104f32]);
+        // NOTE: If the block is read from columnar file, the result is not
+        // sorted by distance. We should check the read result in case
+        // `test_read_distance_from_vector_index_and_table`.
+
         let stats = vector_index_cache.stats();
         info!(
             "stats, cache_hit: {}, cache_miss: {}",
@@ -596,17 +573,33 @@ fn test_read_distance_from_vector_index_and_table() {
         block_on(columnar_reader.set_int_handle_range(1000, Some(1500))).unwrap();
         let mut block = Block::new(&schema_dis);
         assert_eq!(block.get_columns().len(), 1);
-        let cnt = block_on(columnar_reader.read_block(&mut block, 5)).unwrap();
+        let cnt = block_on(columnar_reader.read_block(&mut block, usize::MAX)).unwrap();
         assert!(cnt >= 3, "cnt: {}", cnt);
         let handle_buf = block.get_handle_buf();
-        let vec_col_buf = &block.get_columns()[0];
-
-        assert_eq!(handle_buf.get_int_handle_value(1), 1001);
-        let vec_val = vec_col_buf.get_value(1).unwrap();
-        assert_eq!(
-            keep_decimal_points(decode_f64_vec_from_bytes(vec_val)),
-            vec![1103.9773548]
-        );
+        let dis_col_buf = &block.get_columns()[0];
+        let mut all_items: Vec<DistanceItem> = (0..cnt)
+            .filter_map(|i| {
+                dis_col_buf.get_value(i).and_then(|dis_val| {
+                    keep_decimal_points(decode_f64_vec_from_bytes(dis_val))
+                        .first()
+                        .map(|&distance| DistanceItem { distance, index: i })
+                })
+            })
+            .collect();
+        all_items.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+        let topn = all_items.into_iter().take(3).collect::<Vec<_>>();
+        let cases = [
+            (1072, 1097.0419317),
+            (1073, 1097.0423875),
+            (1071, 1097.0442105),
+        ];
+        for (i, (index, distance)) in cases.iter().enumerate() {
+            assert_eq!(
+                handle_buf.get_int_handle_value(topn[i].index),
+                *index as i64
+            );
+            assert_eq!(topn[i].distance, *distance);
+        }
     }
 
     let mut vector_reader = shard
@@ -632,38 +625,26 @@ fn test_read_distance_from_vector_index_and_table() {
     // will read 510 rows. (10 rows indexed data and 500 rows not-indexed data)
     let cnt = block_on(vector_reader.read_block(&mut block, 1500)).unwrap();
     assert!(cnt >= 3, "cnt: {}", cnt);
-    let handle_buf = block.get_handle_buf();
-    let vec_col_buf = &block.get_columns()[0];
-
-    // indexed data
-    assert_eq!(handle_buf.get_int_handle_value(0), 988);
-    let vec_val = vec_col_buf.get_value(0).unwrap();
-    assert_eq!(
-        keep_decimal_points(decode_f64_vec_from_bytes(vec_val)),
-        vec![1106.7235107]
-    );
-
-    // not indexed data
-    assert_eq!(handle_buf.get_int_handle_value(11), 1001);
-    let vec_val = vec_col_buf.get_value(11).unwrap();
-    assert_eq!(
-        keep_decimal_points(decode_f64_vec_from_bytes(vec_val)),
-        vec![1103.9773548]
-    );
-
-    assert_eq!(handle_buf.get_int_handle_value(12), 1002);
-    let vec_val = vec_col_buf.get_value(12).unwrap();
-    assert_eq!(
-        keep_decimal_points(decode_f64_vec_from_bytes(vec_val)),
-        vec![1103.7848522]
-    );
-
-    assert_eq!(handle_buf.get_int_handle_value(509), 1499);
-    let vec_val = vec_col_buf.get_value(509).unwrap();
-    assert_eq!(
-        keep_decimal_points(decode_f64_vec_from_bytes(vec_val)),
-        vec![1322.7373133]
-    );
+    let dis_col_buf = &block.get_columns()[0];
+    let mut all_items: Vec<DistanceItem> = (0..cnt)
+        .filter_map(|i| {
+            dis_col_buf.get_value(i).and_then(|dis_val| {
+                keep_decimal_points(decode_f64_vec_from_bytes(dis_val))
+                    .first()
+                    .map(|&distance| DistanceItem { distance, index: i })
+            })
+        })
+        .collect();
+    all_items.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+    for item in &all_items {
+        match item.index {
+            988 => assert_eq!(item.distance, 1106.7235107),
+            1001 => assert_eq!(item.distance, 1103.9773548),
+            1002 => assert_eq!(item.distance, 1103.7848522),
+            1499 => assert_eq!(item.distance, 1322.7373133),
+            _ => {}
+        }
+    }
 }
 
 #[test]
@@ -851,32 +832,35 @@ fn test_read_distance_from_vector_index() {
     block_on(vector_reader.set_int_handle_range(0, Some(1000))).unwrap();
     let mut block = Block::new(&schema_dis);
     assert_eq!(block.get_columns().len(), 1);
-    let cnt = block_on(vector_reader.read_block(&mut block, 5)).unwrap();
+    let cnt = block_on(vector_reader.read_block(&mut block, usize::MAX)).unwrap();
     assert!(cnt >= 3, "cnt: {}", cnt);
     let handle_buf = block.get_handle_buf();
-    let vec_col_buf = &block.get_columns()[0];
-
-    assert_eq!(handle_buf.get_int_handle_value(0), 994);
-    let vec_val = vec_col_buf.get_value(0).unwrap();
-    assert_eq!(
-        keep_decimal_points(decode_f64_vec_from_bytes(vec_val)),
-        vec![1105.3999023]
-    );
-
-    // row 100 is null
-    assert_eq!(handle_buf.get_int_handle_value(1), 996);
-    let vec_val = vec_col_buf.get_value(1).unwrap();
-    assert_eq!(
-        keep_decimal_points(decode_f64_vec_from_bytes(vec_val)),
-        vec![1104.9801025]
-    );
-
-    assert_eq!(handle_buf.get_int_handle_value(2), 997);
-    let vec_val = vec_col_buf.get_value(2).unwrap();
-    assert_eq!(
-        keep_decimal_points(decode_f64_vec_from_bytes(vec_val)),
-        vec![1104.7741699]
-    );
+    let dis_col_buf = &block.get_columns()[0];
+    let mut all_items: Vec<DistanceItem> = (0..cnt)
+        .filter_map(|i| {
+            dis_col_buf.get_value(i).and_then(|dis_val| {
+                keep_decimal_points(decode_f64_vec_from_bytes(dis_val))
+                    .first()
+                    .map(|&distance| DistanceItem { distance, index: i })
+            })
+        })
+        .collect();
+    all_items.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+    let topn = all_items.into_iter().take(5).collect::<Vec<_>>();
+    let cases = [
+        (999, 1104.3703613),
+        (998, 1104.5709228),
+        (997, 1104.7741699),
+        (996, 1104.9801025),
+        (994, 1105.3999023),
+    ];
+    for (i, (index, distance)) in cases.iter().enumerate() {
+        assert_eq!(
+            handle_buf.get_int_handle_value(topn[i].index),
+            *index as i64
+        );
+        assert_eq!(topn[i].distance, *distance);
+    }
 }
 
 // only for L2 distance
@@ -933,4 +917,26 @@ fn keep_decimal_points(vec: Vec<f64>) -> Vec<f64> {
         new_vec.push((val * 1e7).trunc() / 1e7);
     }
     new_vec
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DistanceItem {
+    distance: f64,
+    index: usize,
+}
+
+impl Eq for DistanceItem {}
+
+impl PartialOrd for DistanceItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DistanceItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.distance
+            .partial_cmp(&other.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
 }
