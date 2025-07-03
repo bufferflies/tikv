@@ -387,7 +387,8 @@ fn test_native_br_service() {
 
     // Restore.
     let keyspace_name = format!("ks{KEYSPACE_ID}");
-    let progress = block_on(br_cli.restore_keyspace(1, keyspace_name.clone(), &backup)).unwrap();
+    let progress =
+        block_on(br_cli.restore_keyspace_to_backup(1, keyspace_name.clone(), &backup)).unwrap();
     info!("create restore: {:?}", progress);
 
     // Must fail due to get keyspace name error.
@@ -414,8 +415,16 @@ fn test_native_br_service() {
     assert_eq!(progress.status, RestoreState::Error);
     assert_eq!(progress.error, "interrupted");
 
+    // Retry with incorrect restore params.
+    let err =
+        block_on(br_cli.restore_keyspace_to_point_in_time(1, keyspace_name.clone(), datetime0))
+            .unwrap_err();
+    info!("retry restore error: {:?}", err);
+    assert!(err.to_string().contains("restore params not match"));
+
     // Retry restore.
-    let progress = block_on(br_cli.restore_keyspace(1, keyspace_name.clone(), &backup)).unwrap();
+    let progress =
+        block_on(br_cli.restore_keyspace_to_backup(1, keyspace_name.clone(), &backup)).unwrap();
     info!("retry restore: {:?}", progress);
 
     // Wait succeed.

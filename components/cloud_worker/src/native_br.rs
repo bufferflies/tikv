@@ -180,7 +180,7 @@ async fn get_backup_from_query(
             if backup_name != backup.created_at().format(BACKUP_NAME_FORMAT).to_string() {
                 return Err(Error::CheckError("Backup ID & name mismatch".to_string()));
             }
-            Ok(RestoreSource::ExistFile((backup, None)))
+            Ok(RestoreSource::ExistFile(backup, None))
         }
         RestoreType::Pitr => {
             let ts = query_pairs
@@ -202,7 +202,7 @@ async fn get_backup_from_query(
                 )));
             }
             match manager.get_next_backup_after_ts(&utc_time).await? {
-                Some(f) => Ok(RestoreSource::ExistFile((f, Some(utc_time)))),
+                Some(f) => Ok(RestoreSource::ExistFile(f, Some(utc_time))),
                 None => Ok(RestoreSource::InstantBackup(utc_time)),
             }
         }
@@ -314,7 +314,7 @@ pub(crate) async fn handle_restore_keyspace(
                             progress,
                         },
                     };
-                    Ok(make_json_response(StatusCode::CREATED, &resp))
+                    Ok(make_json_response(StatusCode::OK, &resp))
                 }
                 Ok(false) => {
                     info!(
@@ -408,7 +408,7 @@ fn handle_restore_status(
     match manager.restore_status(restore_id, keyspace) {
         Ok(Some(task)) => {
             let resp = RestoreProgressResponse::from_restore_status(restore_id, task);
-            Ok(make_json_response(StatusCode::ACCEPTED, &resp))
+            Ok(make_json_response(StatusCode::OK, &resp))
         }
         Ok(None) => Ok(make_response(
             StatusCode::NOT_FOUND,
@@ -437,9 +437,10 @@ fn handle_error(err: Error) -> hyper::Result<Response<Body>> {
 #[derive(Clone, Debug)]
 enum RestoreSource {
     ExistFile(
-        (IncrementalBackupFile, Option<DateTime<Utc>>), // truncate_ts
+        IncrementalBackupFile,
+        Option<DateTime<Utc>>, // point_in_time
     ),
-    InstantBackup(DateTime<Utc> /* truncate_ts */),
+    InstantBackup(DateTime<Utc> /* point_in_time */),
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -528,11 +529,6 @@ impl RestoreState {
     fn is_final(&self) -> bool {
         *self == Self::Succeed || *self == Self::Error
     }
-
-    // Error -> Init
-    fn is_retry(&self, new_state: &Self) -> bool {
-        *self == Self::Error && *new_state == Self::Init
-    }
 }
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq)]
@@ -549,7 +545,8 @@ pub(crate) struct RestoreTask {
     error: String,
     start: DateTime<Utc>,
     end: Option<DateTime<Utc>>,
-    restore_type: RestoreType,
+    restore_type: RestoreType, // deprecated, remove after next upgrade.
+    restore_params: RestoreParams,
     restore_bytes: u64,
     progress_reporter: Arc<RestoreProgressReporter>,
 }
@@ -567,6 +564,7 @@ impl RestoreTask {
         RestoreTaskMeta {
             keyspace_name: self.keyspace_name.clone(),
             restore_type: self.restore_type,
+            restore_params: self.restore_params.clone(),
             start: self.start.timestamp(),
         }
     }
@@ -580,16 +578,19 @@ impl RestoreTask {
             start,
             end: Some(Utc::now()),
             restore_type: meta.restore_type,
+            restore_params: meta.restore_params.clone(),
             restore_bytes: 0,
             progress_reporter: Arc::new(RestoreProgressReporter::new(0, RestoreStep::Init)),
         }
     }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct RestoreTaskMeta {
     keyspace_name: String,
-    restore_type: RestoreType,
+    restore_type: RestoreType, // deprecated, remove after next upgrade.
+    restore_params: RestoreParams,
     start: i64, // DateTime<Utc>::timestamp().
 }
 
@@ -598,6 +599,7 @@ impl fmt::Debug for RestoreTaskMeta {
         f.debug_struct("RestoreTaskMeta")
             .field("keyspace_name", &self.keyspace_name)
             .field("restore_type", &self.restore_type)
+            .field("restore_params", &self.restore_params)
             .field("start", &self.start())
             .finish()
     }
@@ -606,6 +608,60 @@ impl fmt::Debug for RestoreTaskMeta {
 impl RestoreTaskMeta {
     fn start(&self) -> DateTime<Utc> {
         Utc.timestamp_opt(self.start, 0).unwrap()
+    }
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct RestoreParams {
+    /// The backup name. For "Normal" restore.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_name: Option<String>,
+
+    /// The point in time. For "PiTR".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    point_in_time: Option<i64>,
+
+    /// The name of source keyspace for restore.
+    ///
+    /// For "Branch" or restore to another cluster.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_keyspace: Option<String>,
+}
+
+impl RestoreParams {
+    fn new(
+        restore_type: &RestoreType,
+        restore_source: &RestoreSource,
+        source_keyspace: &str,
+        target_keyspace: &str,
+    ) -> Result<Self> {
+        let src_ks_opt = (source_keyspace != target_keyspace).then(|| source_keyspace.to_string());
+        match (restore_type, restore_source) {
+            (RestoreType::Normal, RestoreSource::ExistFile(backup, None)) => Ok(Self {
+                backup_name: Some(backup.name().to_string()),
+                source_keyspace: src_ks_opt,
+                ..Default::default()
+            }),
+            (RestoreType::Pitr, RestoreSource::ExistFile(_, Some(point_in_time)))
+            | (RestoreType::Pitr, RestoreSource::InstantBackup(point_in_time)) => Ok(Self {
+                point_in_time: Some(point_in_time.timestamp()),
+                source_keyspace: src_ks_opt,
+                ..Default::default()
+            }),
+            _ => {
+                let msg = format!(
+                    "illegal restore params: {:?}, {:?}",
+                    restore_type, restore_source
+                );
+                Err(Error::CheckError(msg))
+            }
+        }
+    }
+
+    #[inline]
+    fn is_none(&self) -> bool {
+        self.backup_name.is_none() && self.point_in_time.is_none()
     }
 }
 
@@ -680,53 +736,74 @@ pub(crate) struct BrContext {
 
 impl BrContext {
     // Return false if the state is falling back.
-    fn change_restore_state(
+    fn init_restore_state(
         &self,
         restore_id: u64,
         keyspace_name: &str,
         restore_type: RestoreType,
+        restore_params: RestoreParams,
+    ) -> Result<bool> {
+        let new_task =
+            |tasks: &mut TasksMap, restore_params: RestoreParams| -> Result<RestoreTaskMeta> {
+                let mut keyspaces = self.keyspace_tasks.write().unwrap();
+                if let Some(&restore_id) = keyspaces.get(keyspace_name) {
+                    return Err(Error::RestoreKeyspaceTaskConflict(restore_id));
+                }
+                keyspaces.insert(keyspace_name.to_owned(), restore_id);
+                let task = RestoreTask {
+                    state: RestoreState::Init,
+                    keyspace_name: keyspace_name.to_string(),
+                    error: String::new(),
+                    start: Utc::now(),
+                    end: None,
+                    restore_type,
+                    restore_params,
+                    restore_bytes: 0,
+                    progress_reporter: Arc::new(RestoreProgressReporter::new(
+                        restore_id,
+                        RestoreStep::Init,
+                    )),
+                };
+                let task_meta = task.get_meta();
+                tasks.insert(restore_id, task);
+                Ok(task_meta)
+            };
+
+        let mut tasks = self.restore_tasks.write().unwrap();
+        Ok(match tasks.get_mut(&restore_id) {
+            None => {
+                let meta = new_task(&mut tasks, restore_params)?;
+                self.persist_task_meta(restore_id, &meta)?;
+                true
+            }
+            Some(task) if task.state == RestoreState::Error => {
+                // Retry (Error -> Init):
+                check_task(task, keyspace_name, Some(&restore_params))?;
+                let meta = new_task(&mut tasks, restore_params)?;
+                self.persist_task_meta(restore_id, &meta)?;
+                true
+            }
+            Some(_) => false,
+        })
+    }
+
+    // Return false if the state is falling back.
+    fn change_restore_state(
+        &self,
+        restore_id: u64,
+        keyspace_name: &str,
         new_state: RestoreState,
         err: Option<Error>,
         restore_bytes: u64,
     ) -> Result<bool> {
-        let new_task = |tasks: &mut TasksMap| -> Result<RestoreTaskMeta> {
-            let mut keyspaces = self.keyspace_tasks.write().unwrap();
-            if let Some(&restore_id) = keyspaces.get(keyspace_name) {
-                return Err(Error::RestoreKeyspaceTaskConflict(restore_id));
-            }
-            keyspaces.insert(keyspace_name.to_owned(), restore_id);
-            let task = RestoreTask {
-                state: RestoreState::Init,
-                keyspace_name: keyspace_name.to_string(),
-                error: String::new(),
-                start: Utc::now(),
-                end: None,
-                restore_type,
-                restore_bytes,
-                progress_reporter: Arc::new(RestoreProgressReporter::new(
-                    restore_id,
-                    RestoreStep::Init,
-                )),
-            };
-            let task_meta = task.get_meta();
-            tasks.insert(restore_id, task);
-            Ok(task_meta)
-        };
-
         let mut tasks = self.restore_tasks.write().unwrap();
         match tasks.get_mut(&restore_id) {
             None => {
-                debug_assert_eq!(new_state, RestoreState::Init);
-                let meta = new_task(&mut tasks)?;
-                self.persist_task_meta(restore_id, &meta)?;
-            }
-            Some(task) if task.state.is_retry(&new_state) => {
-                check_task(task, keyspace_name)?;
-                let meta = new_task(&mut tasks)?;
-                self.persist_task_meta(restore_id, &meta)?;
+                debug_assert!(false);
+                return Ok(false);
             }
             Some(task) => {
-                check_task(task, keyspace_name)?;
+                check_task(task, keyspace_name, None)?;
                 if task.state >= new_state {
                     return Ok(false);
                 }
@@ -787,7 +864,7 @@ impl BrContext {
             };
 
         let (backup_file, truncate_ts) = match restore_source {
-            RestoreSource::ExistFile((f, utc_time)) => (f, get_truncate_ts(utc_time, restore_type)),
+            RestoreSource::ExistFile(f, utc_time) => (f, get_truncate_ts(utc_time, restore_type)),
             RestoreSource::InstantBackup(utc_time) => (
                 instant_backup.deref().clone(),
                 get_truncate_ts(Some(utc_time), restore_type),
@@ -822,7 +899,6 @@ impl BrContext {
         self.change_restore_state(
             restore_id,
             &target_keyspace_name,
-            restore_type,
             RestoreState::Running,
             None,
             0,
@@ -850,7 +926,6 @@ impl BrContext {
                 let res = self.change_restore_state(
                     restore_id,
                     &target_keyspace_name,
-                    restore_type,
                     RestoreState::Succeed,
                     None,
                     ret.restore_bytes,
@@ -869,7 +944,6 @@ impl BrContext {
                 self.change_restore_state(
                     restore_id,
                     &target_keyspace_name,
-                    restore_type,
                     RestoreState::Error,
                     Some(err),
                     0,
@@ -1111,13 +1185,18 @@ impl NativeBrManager {
             return Err(Error::ReachConcurrencyLimit(MAX_RESTORE_CONCURRENCY));
         }
 
-        if self.context.change_restore_state(
+        let restore_params = RestoreParams::new(
+            &restore_type,
+            &restore_source,
+            &keyspace_name,
+            &target_keyspace_name,
+        )?;
+
+        if self.context.init_restore_state(
             restore_id,
             &target_keyspace_name,
             restore_type,
-            RestoreState::Init,
-            None,
-            0,
+            restore_params,
         )? {
             let context = self.context.clone();
             let config = self.config.read().unwrap().clone();
@@ -1144,7 +1223,7 @@ impl NativeBrManager {
     fn restore_status(&self, restore_id: u64, keyspace_name: &str) -> Result<Option<RestoreTask>> {
         let tasks = self.context.restore_tasks.rl();
         if let Some(task) = tasks.get(&restore_id) {
-            check_task(task, keyspace_name)?;
+            check_task(task, keyspace_name, None)?;
             Ok(Some(task.clone()))
         } else {
             Ok(None)
@@ -1174,7 +1253,7 @@ impl NativeBrManager {
     fn delete_restore(&self, restore_id: u64, keyspace_name: &str) -> Result<Option<bool>> {
         let mut tasks = self.context.restore_tasks.wl();
         if let Some(task) = tasks.get(&restore_id) {
-            check_task(task, keyspace_name)?;
+            check_task(task, keyspace_name, None)?;
             if task.state.is_final() {
                 tasks.remove(&restore_id);
                 self.context.remove_working_path(restore_id);
@@ -1215,13 +1294,33 @@ impl NativeBrManager {
     }
 }
 
-fn check_task(task: &RestoreTask, keyspace_name: &str) -> Result<()> {
+fn check_task(
+    task: &RestoreTask,
+    keyspace_name: &str,
+    request_params: Option<&RestoreParams>,
+) -> Result<()> {
     if task.keyspace_name != keyspace_name {
-        Err(Error::CheckError(
+        return Err(Error::CheckError(
             "restore id & keyspace not match".to_string(),
-        ))
-    } else {
+        ));
+    }
+    if let Some(request_params) = request_params {
+        check_task_params(task, request_params)?;
+    }
+    Ok(())
+}
+
+fn check_task_params(task: &RestoreTask, request_params: &RestoreParams) -> Result<()> {
+    // `task.restore_params.is_none()` is true when startup from meta of old
+    // version.
+    if task.restore_params.is_none() || &task.restore_params == request_params {
         Ok(())
+    } else {
+        let msg = format!(
+            "restore params not match: task: {:?}, request: {:?}",
+            task.restore_params, request_params
+        );
+        Err(Error::CheckError(msg))
     }
 }
 
@@ -1276,7 +1375,7 @@ pub mod test_utils {
             ))
         }
 
-        pub async fn restore_keyspace(
+        pub async fn restore_keyspace_to_backup(
             &self,
             restore_id: u64,
             keyspace: String,
@@ -1288,6 +1387,32 @@ pub mod test_utils {
                     ("keyspace", keyspace),
                     ("backup_id", backup.id.to_string()),
                     ("backup_name", backup.name.clone()),
+                ])
+                .finish();
+            Ok(box_try!(
+                self.inner
+                    .put(
+                        format!("api/v1/restore_keyspace/{restore_id}?{query}"),
+                        &DummyRequest {}
+                    )
+                    .await
+            ))
+        }
+
+        pub async fn restore_keyspace_to_point_in_time(
+            &self,
+            restore_id: u64,
+            keyspace: String,
+            point_in_time: DateTime<Utc>,
+        ) -> HttpResult<RestoreProgressResponse> {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("cluster_id", self.cluster_id.to_string()),
+                    ("keyspace", keyspace),
+                    (
+                        "point_in_time",
+                        point_in_time.format(JSON_TIME_FORMAT).to_string(),
+                    ),
                 ])
                 .finish();
             Ok(box_try!(
@@ -1334,7 +1459,8 @@ mod tests {
 
     #[test]
     fn test_restore_task_state() {
-        let (br_manager, _temp_dir) = new_test_br_manager("2s");
+        let (mgr, _temp_dir) = new_test_br_manager("2s");
+        let ctx = &mgr.context;
 
         // TODO: test for illegal state transition.
         let states_cases = vec![
@@ -1345,41 +1471,165 @@ mod tests {
             vec![Init, Running, RestoreState::Error, Init],
         ];
 
+        let backup = IncrementalBackupFile::from_datetime(Utc::now());
+        let restore_params = RestoreParams {
+            backup_name: Some(backup.name().to_string()),
+            ..Default::default()
+        };
         for (restore_id, states) in states_cases.into_iter().enumerate() {
             for state in states {
-                assert!(
-                    br_manager
-                        .context
-                        .change_restore_state(
-                            restore_id as u64,
-                            &format!("ks{}", restore_id),
-                            RestoreType::Normal,
-                            state,
-                            None,
-                            0
-                        )
-                        .unwrap()
-                );
+                let res = if state == Init {
+                    ctx.init_restore_state(
+                        restore_id as u64,
+                        &format!("ks{}", restore_id),
+                        RestoreType::Normal,
+                        restore_params.clone(),
+                    )
+                } else {
+                    ctx.change_restore_state(
+                        restore_id as u64,
+                        &format!("ks{}", restore_id),
+                        state,
+                        None,
+                        0,
+                    )
+                };
+                assert!(res.unwrap());
             }
         }
 
-        assert_eq!(br_manager.get_not_final_task_count(), 3);
-        assert_eq!(br_manager.get_all_restore_task().len(), 5);
+        assert_eq!(mgr.get_not_final_task_count(), 3);
+        assert_eq!(mgr.get_all_restore_task().len(), 5);
 
         thread::sleep(Duration::from_secs(2));
-        br_manager.cleanup_expired_restores();
-        assert_eq!(br_manager.get_not_final_task_count(), 3);
-        assert_eq!(br_manager.get_all_restore_task().len(), 3);
+        mgr.cleanup_expired_restores();
+        assert_eq!(mgr.get_not_final_task_count(), 3);
+        assert_eq!(mgr.get_all_restore_task().len(), 3);
 
         assert!(
-            br_manager
-                .context
-                .change_restore_state(1, "ks1", RestoreType::Normal, Succeed, None, 0)
+            ctx.change_restore_state(1, "ks1", Succeed, None, 0)
                 .unwrap()
         );
-        br_manager.cleanup_expired_restores();
-        assert_eq!(br_manager.get_not_final_task_count(), 2);
-        assert_eq!(br_manager.get_all_restore_task().len(), 3);
+        mgr.cleanup_expired_restores();
+        assert_eq!(mgr.get_not_final_task_count(), 2);
+        assert_eq!(mgr.get_all_restore_task().len(), 3);
+
+        // Test restore_params checking.
+        // Incorrect keyspace name.
+        ctx.change_restore_state(0, "ks1", Running, None, 0)
+            .unwrap_err();
+        // Transit to running.
+        assert!(
+            ctx.change_restore_state(0, "ks0", Running, None, 0)
+                .unwrap()
+        );
+        assert!(
+            ctx.change_restore_state(0, "ks0", RestoreState::Error, None, 0)
+                .unwrap()
+        );
+        // Incorrect backup.
+        let mut params1 = restore_params.clone();
+        let backup1 =
+            IncrementalBackupFile::try_from_full_path("cse-local/backup/20230321/112233.meta")
+                .unwrap();
+        params1.backup_name = Some(backup1.name().to_string());
+        ctx.init_restore_state(0, "ks0", RestoreType::Normal, params1)
+            .unwrap_err();
+    }
+
+    #[test]
+    fn test_restore_task_meta() {
+        // Test compatibility with meta of old version (without "restore_params").
+        let mut meta = serde_json::from_str::<RestoreTaskMeta>(
+            r#"{"keyspace_name":"ks","restore_type":"Normal","start":1000}"#,
+        )
+        .unwrap();
+        assert!(meta.restore_params.is_none());
+
+        for params in [
+            RestoreParams::new(
+                &RestoreType::Normal,
+                &RestoreSource::ExistFile(IncrementalBackupFile::from_datetime(Utc::now()), None),
+                "ks0",
+                "ks1",
+            )
+            .unwrap(),
+            RestoreParams::new(
+                &RestoreType::Pitr,
+                &RestoreSource::InstantBackup(Utc::now()),
+                "ks2",
+                "ks2",
+            )
+            .unwrap(),
+        ] {
+            meta.restore_params = params;
+            assert_eq!(
+                serde_json::from_slice::<RestoreTaskMeta>(&serde_json::to_vec(&meta).unwrap())
+                    .unwrap(),
+                meta
+            );
+        }
+    }
+
+    #[test]
+    fn test_restore_params() {
+        let utc = Utc::now();
+        let backup = IncrementalBackupFile::from_datetime(utc);
+        assert_eq!(
+            RestoreParams::new(
+                &RestoreType::Normal,
+                &RestoreSource::ExistFile(backup.clone(), None),
+                "ks0",
+                "ks0",
+            )
+            .unwrap(),
+            RestoreParams {
+                backup_name: Some(backup.name().to_string()),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            RestoreParams::new(
+                &RestoreType::Pitr,
+                &RestoreSource::ExistFile(backup.clone(), Some(utc)),
+                "ks1",
+                "ks0",
+            )
+            .unwrap(),
+            RestoreParams {
+                point_in_time: Some(utc.timestamp()),
+                source_keyspace: Some("ks1".to_string()),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            RestoreParams::new(
+                &RestoreType::Pitr,
+                &RestoreSource::InstantBackup(utc),
+                "ks1",
+                "ks1",
+            )
+            .unwrap(),
+            RestoreParams {
+                point_in_time: Some(utc.timestamp()),
+                ..Default::default()
+            }
+        );
+
+        RestoreParams::new(
+            &RestoreType::Normal,
+            &RestoreSource::InstantBackup(utc),
+            "ks1",
+            "ks1",
+        )
+        .unwrap_err();
+        RestoreParams::new(
+            &RestoreType::Pitr,
+            &RestoreSource::ExistFile(backup, None),
+            "ks1",
+            "ks1",
+        )
+        .unwrap_err();
     }
 
     fn new_test_br_manager(restore_task_ttl: &str) -> (NativeBrManager, tempfile::TempDir) {
