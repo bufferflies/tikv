@@ -1184,6 +1184,7 @@ fn build_columnar_schema_buf(table_id: i64) -> SchemaBuf {
         new_version_column_info(),
         vec![c1, c2],
         vec![],
+        0,
         vec![],
         StorageClassSpec::default(),
         None,

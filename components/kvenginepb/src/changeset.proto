@@ -228,6 +228,7 @@ message Schema {
   repeated string keys = 5;
   repeated bytes values = 6;
   repeated Partition partitions = 7;
+  int64 max_col_id = 8;
 }
 
 message Partition {

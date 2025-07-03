@@ -1461,12 +1461,8 @@ impl ColumnarRowTableReader {
             .iter()
             .map(|col| parse_default_val(col))
             .collect();
-        let max_col_id = schema
-            .columns
-            .iter()
-            .map(|col| col.get_column_id())
-            .max()
-            .unwrap_or_default() as i32;
+        let max_col_id = schema.max_col_id as i32;
+
         ColumnarRowTableReader {
             schema,
             iter,
@@ -2065,6 +2061,7 @@ pub mod tests {
             version_column,
             columns,
             vec![],
+            0,
             vec![],
             StorageClassSpec::default(),
             None,
@@ -2597,6 +2594,7 @@ pub mod tests {
             schema.version_column.clone(),
             columns,
             schema.pk_col_ids.clone(),
+            100,
             schema.vector_indexes.clone(),
         );
         let new_schema = Schema::new(schema_buf_builder.build());

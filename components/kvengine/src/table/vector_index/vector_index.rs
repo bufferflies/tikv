@@ -1502,6 +1502,7 @@ mod tests {
             version_column,
             columns,
             vec![],
+            0,
             vec![],
             StorageClassSpec::default(),
             None,

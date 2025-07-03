@@ -8398,6 +8398,7 @@ pub struct Schema {
     pub keys: ::protobuf::RepeatedField<::std::string::String>,
     pub values: ::protobuf::RepeatedField<::std::vec::Vec<u8>>,
     pub partitions: ::protobuf::RepeatedField<Partition>,
+    pub max_col_id: i64,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -8578,6 +8579,21 @@ impl Schema {
     pub fn take_partitions(&mut self) -> ::protobuf::RepeatedField<Partition> {
         ::std::mem::replace(&mut self.partitions, ::protobuf::RepeatedField::new())
     }
+
+    // int64 max_col_id = 8;
+
+
+    pub fn get_max_col_id(&self) -> i64 {
+        self.max_col_id
+    }
+    pub fn clear_max_col_id(&mut self) {
+        self.max_col_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_max_col_id(&mut self, v: i64) {
+        self.max_col_id = v;
+    }
 }
 
 impl ::protobuf::Message for Schema {
@@ -8624,6 +8640,13 @@ impl ::protobuf::Message for Schema {
                 7 => {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.partitions)?;
                 },
+                8 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_int64()?;
+                    self.max_col_id = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -8659,6 +8682,9 @@ impl ::protobuf::Message for Schema {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         };
+        if self.max_col_id != 0 {
+            my_size += ::protobuf::rt::value_size(8, self.max_col_id, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -8690,6 +8716,9 @@ impl ::protobuf::Message for Schema {
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         };
+        if self.max_col_id != 0 {
+            os.write_int64(8, self.max_col_id)?;
+        }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -8767,6 +8796,11 @@ impl ::protobuf::Message for Schema {
                     |m: &Schema| { &m.partitions },
                     |m: &mut Schema| { &mut m.partitions },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeInt64>(
+                    "max_col_id",
+                    |m: &Schema| { &m.max_col_id },
+                    |m: &mut Schema| { &mut m.max_col_id },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Schema>(
                     "Schema",
                     fields,
@@ -8796,6 +8830,7 @@ impl ::protobuf::Clear for Schema {
         self.keys.clear();
         self.values.clear();
         self.partitions.clear();
+        self.max_col_id = 0;
         self.unknown_fields.clear();
     }
 }
@@ -8812,6 +8847,7 @@ impl ::protobuf::PbPrint for Schema {
         ::protobuf::PbPrint::fmt(&self.keys, "keys", buf);
         ::protobuf::PbPrint::fmt(&self.values, "values", buf);
         ::protobuf::PbPrint::fmt(&self.partitions, "partitions", buf);
+        ::protobuf::PbPrint::fmt(&self.max_col_id, "max_col_id", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -8829,6 +8865,7 @@ impl ::std::fmt::Debug for Schema {
         ::protobuf::PbPrint::fmt(&self.keys, "keys", &mut s);
         ::protobuf::PbPrint::fmt(&self.values, "values", &mut s);
         ::protobuf::PbPrint::fmt(&self.partitions, "partitions", &mut s);
+        ::protobuf::PbPrint::fmt(&self.max_col_id, "max_col_id", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -10189,25 +10226,26 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x13\n\tuser_meta\x18\x04\x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\
     \x18\x05\x20\x01(\x0cB\0\x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0\
     \x12\x1b\n\x11inner_lower_bound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\x11inn\
-    er_upper_bound\x18\x08\x20\x01(\x0cB\0:\0\"\xc8\x01\n\x06Schema\x12\x12\
+    er_upper_bound\x18\x08\x20\x01(\x0cB\0:\0\"\xde\x01\n\x06Schema\x12\x12\
     \n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x11\n\x07columns\x18\x02\x20\
     \x03(\x0cB\0\x12\x14\n\npk_col_ids\x18\x03\x20\x03(\x03B\0\x122\n\x0evec\
     tor_indexes\x18\x04\x20\x03(\x0b2\x18.enginepb.VectorIndexDefB\0\x12\x0e\
     \n\x04keys\x18\x05\x20\x03(\tB\0\x12\x10\n\x06values\x18\x06\x20\x03(\
     \x0cB\0\x12)\n\npartitions\x18\x07\x20\x03(\x0b2\x13.enginepb.PartitionB\
-    \0:\0\"=\n\tPartition\x12\x0c\n\x02id\x18\x01\x20\x01(\x03B\0\x12\x0e\n\
-    \x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\
-    \0:\0\"u\n\x0bVectorIndex\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\
-    \x12\x12\n\x08index_id\x18\x02\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\
-    \x03\x20\x01(\x03B\0\x12*\n\x05files\x18\x04\x20\x03(\x0b2\x19.enginepb.\
-    VectorIndexFileB\0:\0\"w\n\x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\
-    \x20\x01(\x04B\0\x12\x16\n\x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\
-    \x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\
-    \x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x06\x20\x01(\rB\0:\0\"z\n\
-    \x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\
-    \n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\
-    \x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_\
-    values\x18\x05\x20\x03(\x0cB\0:\0B\0b\x06proto3\
+    \0\x12\x14\n\nmax_col_id\x18\x08\x20\x01(\x03B\0:\0\"=\n\tPartition\x12\
+    \x0c\n\x02id\x18\x01\x20\x01(\x03B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\
+    \tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"u\n\x0bVectorIndex\
+    \x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\
+    \x02\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\
+    \x05files\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0:\0\"w\n\
+    \x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\
+    \x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\
+    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0\x12\x15\n\
+    \x0bmeta_offset\x18\x06\x20\x01(\rB\0:\0\"z\n\x0eVectorIndexDef\x12\x12\
+    \n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x02\x20\
+    \x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\x13\n\tspec\
+    _keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\x20\x03(\
+    \x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

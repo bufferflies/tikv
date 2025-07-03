@@ -106,6 +106,7 @@ pub fn build_schema(ddl: &str) -> Schema {
         version_column,
         columns,
         pk_ids,
+        0,
         vec![],
         StorageClassSpec::default(),
         None,

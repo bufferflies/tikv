@@ -223,6 +223,7 @@ pub fn build_schemas(tables: &[TableSchemaOptions]) -> Vec<Schema> {
                 new_version_column_info(),
                 vec![c1, c2],
                 vec![],
+                0,
                 vec![],
                 StorageClassSpec::default(),
                 None,

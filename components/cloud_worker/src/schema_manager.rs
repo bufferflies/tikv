@@ -989,6 +989,7 @@ fn table_info_to_schema(ti: &TableInfo) -> Result<Schema> {
             new_version_column_info(),
             columns,
             pk_col_ids,
+            ti.max_col_id,
             vector_indexes,
         );
     }
@@ -1427,6 +1428,7 @@ mod tests {
                 new_version_column_info(),
                 vec![new_int_handle_column_info()],
                 vec![],
+                0,
                 vec![],
                 StorageClassSpec::default(),
                 None,
@@ -1442,6 +1444,7 @@ mod tests {
                 new_version_column_info(),
                 vec![new_int_handle_column_info()],
                 vec![],
+                0,
                 vec![],
                 StorageClassSpec::default(),
                 None,

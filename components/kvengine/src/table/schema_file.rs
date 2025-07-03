@@ -165,6 +165,7 @@ impl SchemaFile {
                     new_version_column_info(),
                     columns,
                     schema_pb.pk_col_ids,
+                    schema_pb.max_col_id,
                     vector_indexes,
                 );
             }
@@ -480,6 +481,7 @@ pub fn build_schema_file(
             .get_storage_class_spec()
             .apply_to_schema_pb(&mut schema_pb);
         schema_pb.table_id = schema.table_id;
+        schema_pb.max_col_id = schema.max_col_id;
         if schema.with_columnar() {
             let mut columns = Vec::with_capacity(schema.columns.len() + 1);
             columns.extend_from_slice(&schema.columns);
@@ -587,6 +589,7 @@ impl SchemaBuf {
         version_column: ColumnInfo,
         columns: Vec<ColumnInfo>,
         pk_col_ids: Vec<i64>,
+        max_col_id: i64,
         vector_indexes: Vec<VectorIndexDef>,
         sc_spec: StorageClassSpec,
         partitions: Option<Vec<(i64, StorageClassSpec)>>,
@@ -598,6 +601,7 @@ impl SchemaBuf {
                 version_column,
                 columns,
                 pk_col_ids,
+                max_col_id,
                 vector_indexes,
             }),
             partitions,
@@ -618,6 +622,7 @@ impl SchemaBuf {
             self.version_column.clone(),
             columns,
             self.pk_col_ids.clone(),
+            self.max_col_id,
             self.vector_indexes.clone(),
             self.sc_spec.clone(),
             self.partitions.clone(),
@@ -681,6 +686,7 @@ impl SchemaBuf {
             version_column: self.version_column.clone(),
             columns,
             pk_col_ids: self.pk_col_ids.clone(),
+            max_col_id: self.max_col_id,
             vector_indexes: self.vector_indexes.clone(),
         });
     }
@@ -693,6 +699,7 @@ pub struct SchemaBufBuilder {
     version_column: Option<ColumnInfo>,
     columns: Vec<ColumnInfo>,
     pk_col_ids: Vec<i64>,
+    max_col_id: i64,
     vector_indexes: Vec<VectorIndexDef>,
     sc_spec: StorageClassSpec,
     partitions: Option<Vec<(i64, StorageClassSpec)>>,
@@ -722,8 +729,27 @@ impl SchemaBufBuilder {
         version_column: ColumnInfo,
         columns: Vec<ColumnInfo>,
         pk_col_ids: Vec<i64>,
+        max_col_id: i64,
         vector_indexes: Vec<VectorIndexDef>,
     ) -> &mut Self {
+        // For compatiable, if max_col_id is not set, try to calculate using the columns
+        // id.
+        // Note: calculate by columns id is not accurate. e.g. if the column max id is
+        // dropped, the calculated max_col_id is smaller than the real max_col_id.
+        self.max_col_id = if max_col_id > 0 {
+            debug!(
+                "table_id: {}, max_col_id from pb: {}",
+                self.table_id, max_col_id
+            );
+            max_col_id
+        } else {
+            debug!(
+                "table_id: {}, max_col_id from columns: {}",
+                self.table_id,
+                columns.iter().map(|c| c.get_column_id()).max().unwrap_or(0)
+            );
+            columns.iter().map(|c| c.get_column_id()).max().unwrap_or(0)
+        };
         self.handle_column = Some(handle_column);
         self.version_column = Some(version_column);
         self.columns = columns;
@@ -739,6 +765,7 @@ impl SchemaBufBuilder {
             self.version_column.unwrap_or_default(),
             self.columns,
             self.pk_col_ids,
+            self.max_col_id,
             self.vector_indexes,
             self.sc_spec,
             self.partitions,
@@ -753,6 +780,7 @@ pub struct SchemaBufInner {
     pub columns: Vec<ColumnInfo>,
     pub pk_col_ids: Vec<i64>,
     pub vector_indexes: Vec<VectorIndexDef>,
+    pub max_col_id: i64,
 }
 
 #[cfg(test)]
@@ -796,6 +824,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             None,
@@ -806,6 +835,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             None,
@@ -990,6 +1020,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             None,
@@ -1000,6 +1031,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             None,
@@ -1110,6 +1142,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             None,
@@ -1120,6 +1153,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             None,
@@ -1130,6 +1164,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             None,
@@ -1157,6 +1192,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             None,
@@ -1172,6 +1208,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             Some(partitions),
@@ -1287,6 +1324,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, true), new_column_info(4, false)],
             vec![],
+            4,
             vec![],
             StorageClass::Ia.into(),
             None,
@@ -1303,6 +1341,7 @@ mod tests {
             new_version_column_info(),
             vec![new_column_info(3, false), new_column_info(4, true)],
             vec![],
+            4,
             vec![],
             StorageClassSpec::default(),
             Some(partitions),

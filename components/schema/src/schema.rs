@@ -60,6 +60,7 @@ pub struct TableInfo {
     pub charset: String,
     pub collate: String,
     pub cols: Option<Vec<ColumnInfo>>,
+    pub max_col_id: i64,
     pub index_info: Option<Vec<IndexInfo>>,
     pub state: SchemaState,
     pub pk_is_handle: bool,

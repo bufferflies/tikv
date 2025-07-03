@@ -1309,6 +1309,7 @@ fn test_restore_keyspace_with_schema() {
             new_version_column_info(),
             vec![new_int_handle_column_info()],
             vec![],
+            0,
             vec![],
             StorageClassSpec::default(),
             None,
