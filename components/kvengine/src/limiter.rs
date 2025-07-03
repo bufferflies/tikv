@@ -22,61 +22,55 @@ pub struct LimiterOptions {
     pub min_speed_limit: u64,
 }
 
-pub trait LimiterLevel {
+pub trait LimiterTypeTrait {
     const TAG: &'static str;
 }
 
 #[derive(Clone)]
-pub struct StoreLevel {}
+pub struct StoreMemTable {}
 
-impl LimiterLevel for StoreLevel {
-    const TAG: &'static str = "store";
+impl LimiterTypeTrait for StoreMemTable {
+    const TAG: &'static str = "store-memtable";
 }
 
-pub type StoreLimiter = WriteRateLimiter<StoreLevel>;
+pub type StoreLimiter = WriteRateLimiter<StoreMemTable>;
 
 #[derive(Clone)]
-pub struct RegionLevel {}
+pub struct RegionMemTable {}
 
-impl LimiterLevel for RegionLevel {
-    const TAG: &'static str = "region";
+impl LimiterTypeTrait for RegionMemTable {
+    const TAG: &'static str = "region-memtable";
 }
 
-pub type RegionLimiter = WriteRateLimiter<RegionLevel>;
+#[derive(Clone)]
+pub struct RegionL0Table {}
+
+impl LimiterTypeTrait for RegionL0Table {
+    const TAG: &'static str = "region-l0table";
+}
 
 struct LimiterMetrics {
     speed_metric: IntGauge,
     last_record_time: Mutex<Instant>,
 }
 
-// `Lv` makes store & region limiters of different types and avoids misuse.
+// `Ty` makes limiters be different types and avoids misuse.
 #[derive(Clone)]
-pub struct WriteRateLimiter<Lv: LimiterLevel> {
+pub struct WriteRateLimiter<Ty: LimiterTypeTrait> {
     options: LimiterOptions,
     limiter: Arc<Limiter>,
     metrics: Option<Arc<LimiterMetrics>>,
-    _phantom: PhantomData<Lv>,
+    _phantom: PhantomData<Ty>,
 }
 
-impl WriteRateLimiter<StoreLevel> {
-    pub fn new(options: LimiterOptions, speed_metric: IntGauge) -> Self {
+impl WriteRateLimiter<StoreMemTable> {
+    pub fn new_with_metric(options: LimiterOptions, speed_metric: IntGauge) -> Self {
         Self::new_impl(options, Some(speed_metric))
     }
 }
 
-impl WriteRateLimiter<RegionLevel> {
-    pub fn new(options: LimiterOptions) -> Self {
-        Self::new_impl(options, None)
-    }
-
-    /// New from another one.
-    pub fn new_from(another: &WriteRateLimiter<RegionLevel>) -> Self {
-        Self::new_impl(another.options.clone(), None)
-    }
-}
-
 /// Implement interfaces for `storage::txn::flow_controller::FlowController`.
-impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
+impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
     pub fn should_drop(&self, _region_id: u64) -> bool {
         // TODO: early drop ?
         false
@@ -119,7 +113,16 @@ impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
     }
 }
 
-impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
+impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
+    pub fn new(options: LimiterOptions) -> Self {
+        Self::new_impl(options, None)
+    }
+
+    /// New from another one.
+    pub fn new_from(another: &WriteRateLimiter<Ty>) -> Self {
+        Self::new_impl(another.options.clone(), None)
+    }
+
     fn new_impl(options: LimiterOptions, speed_metric: Option<IntGauge>) -> Self {
         let limiter = Arc::new(
             <Limiter>::builder(f64::INFINITY)
@@ -155,12 +158,12 @@ impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
         if pre.is_infinite() && throttle.is_finite() {
             info!("{} WriteRateLimiter::start_throttle", tag; "throttle" => throttle);
             ENGINE_THROTTLE_ACTION_COUNTER
-                .with_label_values(&[Lv::TAG, "start_throttle"])
+                .with_label_values(&[Ty::TAG, "start_throttle"])
                 .inc();
         } else if pre.is_finite() && throttle.is_infinite() {
             info!("{} WriteRateLimiter::stop_throttle", tag; "pre_throttle" => pre);
             ENGINE_THROTTLE_ACTION_COUNTER
-                .with_label_values(&[Lv::TAG, "stop_throttle"])
+                .with_label_values(&[Ty::TAG, "stop_throttle"])
                 .inc();
         }
         self.update_statistics();
@@ -236,6 +239,53 @@ impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
     }
 }
 
+#[derive(Clone)]
+pub struct RegionLimiter {
+    memtable: WriteRateLimiter<RegionMemTable>,
+    l0table: WriteRateLimiter<RegionL0Table>,
+}
+
+impl RegionLimiter {
+    pub fn enabled(&self) -> bool {
+        self.memtable.options.enable || self.l0table.options.enable
+    }
+
+    pub fn consume(&self, region_id: u64, bytes: usize) -> Duration {
+        std::cmp::max(
+            self.memtable.consume(region_id, bytes),
+            self.l0table.consume(region_id, bytes),
+        )
+    }
+
+    pub fn unconsume(&self, region_id: u64, bytes: usize) {
+        self.memtable.unconsume(region_id, bytes);
+        self.l0table.unconsume(region_id, bytes);
+    }
+
+    pub fn is_unlimited(&self, region_id: u64) -> bool {
+        self.memtable.is_unlimited(region_id) && self.l0table.is_unlimited(region_id)
+    }
+
+    pub fn new(memtable_options: LimiterOptions, l0table_options: LimiterOptions) -> Self {
+        Self {
+            memtable: WriteRateLimiter::<RegionMemTable>::new(memtable_options),
+            l0table: WriteRateLimiter::<RegionL0Table>::new(l0table_options),
+        }
+    }
+
+    pub fn new_from(another: &RegionLimiter) -> Self {
+        Self {
+            memtable: WriteRateLimiter::new_from(&another.memtable),
+            l0table: WriteRateLimiter::new_from(&another.l0table),
+        }
+    }
+
+    pub fn update_usage(&self, tag: &ShardTag, memtable_usage: u64, l0table_usage: u64) {
+        self.memtable.update_usage(tag, memtable_usage);
+        self.l0table.update_usage(tag, l0table_usage);
+    }
+}
+
 /// DfsLimiter is used to limit the memory used for dfs loading files.
 #[derive(Clone)]
 pub(crate) struct DfsLoadLimiter {
@@ -284,7 +334,7 @@ mod tests {
         ];
 
         for (usage, throttle_mb) in cases {
-            let result = RegionLimiter::calculate_throttle(
+            let result = StoreLimiter::calculate_throttle(
                 usage << 20,
                 256 << 20,
                 768 << 20,
@@ -316,7 +366,7 @@ mod tests {
             (512, 512, 512, 50, 1, 1.0), // soft_limit == hard_limit
         ];
         for (usage, soft, hard, max, min, expected) in corner_cases {
-            let result = RegionLimiter::calculate_throttle(usage, soft, hard, max, min);
+            let result = StoreLimiter::calculate_throttle(usage, soft, hard, max, min);
             assert_eq!(result, expected);
         }
     }

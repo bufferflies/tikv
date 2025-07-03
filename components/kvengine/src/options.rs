@@ -18,7 +18,7 @@ use self::config::{
 };
 use crate::{
     config::{
-        DEFAULT_COMPACTION_REQUEST_VERSION, DEFAULT_COMPACTION_TOMBS_COUNT,
+        DEFAULT_BASE_SIZE, DEFAULT_COMPACTION_REQUEST_VERSION, DEFAULT_COMPACTION_TOMBS_COUNT,
         DEFAULT_COMPACTION_TOMBS_RATIO,
     },
     ia::util::IaConfig,
@@ -112,7 +112,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             local_dir: PathBuf::from("/tmp"),
-            base_size: 16 << 20,
+            base_size: DEFAULT_BASE_SIZE,
             max_block_cache_size: 0,
             num_compactors: 3,
             table_builder_options: Default::default(),
@@ -177,6 +177,8 @@ pub struct FlowControlOptions {
     pub enable: bool,
     pub soft_region_mem_limit: u64,
     pub hard_region_mem_limit: u64,
+    pub soft_region_l0table_size_limit: u64,
+    pub hard_region_l0table_size_limit: u64,
     pub max_region_speed_limit: u64,
     pub min_region_speed_limit: u64,
 }
@@ -187,20 +189,32 @@ impl Default for FlowControlOptions {
             enable: false,
             soft_region_mem_limit: DEFAULT_SOFT_REGION_MEM_USAGE_LIMIT_MB << 20,
             hard_region_mem_limit: DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB << 20,
+            soft_region_l0table_size_limit: DEFAULT_BASE_SIZE * 4,
+            hard_region_l0table_size_limit: DEFAULT_BASE_SIZE * 16,
             max_region_speed_limit: DEFAULT_MAX_REGION_SPEED_LIMIT_MB_PER_SEC << 20,
             min_region_speed_limit: DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC << 20,
         }
     }
 }
 
-impl From<&FlowControlOptions> for limiter::LimiterOptions {
-    fn from(opt: &FlowControlOptions) -> Self {
-        Self {
-            enable: opt.enable,
-            soft_limit: opt.soft_region_mem_limit,
-            hard_limit: opt.hard_region_mem_limit,
-            max_speed_limit: opt.max_region_speed_limit,
-            min_speed_limit: opt.min_region_speed_limit,
+impl FlowControlOptions {
+    pub fn region_memtable_limiter_options(&self) -> limiter::LimiterOptions {
+        limiter::LimiterOptions {
+            enable: self.enable,
+            soft_limit: self.soft_region_mem_limit,
+            hard_limit: self.hard_region_mem_limit,
+            max_speed_limit: self.max_region_speed_limit,
+            min_speed_limit: self.min_region_speed_limit,
+        }
+    }
+
+    pub fn region_l0table_limiter_options(&self) -> limiter::LimiterOptions {
+        limiter::LimiterOptions {
+            enable: self.enable,
+            soft_limit: self.soft_region_l0table_size_limit,
+            hard_limit: self.hard_region_l0table_size_limit,
+            max_speed_limit: self.max_region_speed_limit,
+            min_speed_limit: self.min_region_speed_limit,
         }
     }
 }

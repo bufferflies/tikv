@@ -120,6 +120,7 @@ l0-files-threshold = 10
 soft-store-mem-limit = "3200MB"
 soft-region-mem-limit = "128MB"
 hard-region-mem-limit = "768MB"
+hard-region-l0table-size-limit = "256MB"
 max-region-speed-limit = "60MB"
 min-region-speed-limit = "10MB"
 

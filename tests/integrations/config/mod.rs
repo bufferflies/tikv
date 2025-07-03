@@ -698,6 +698,8 @@ fn test_serde_custom_tikv_config() {
             soft_store_mem_limit: Some(ReadableSize::mb(3200)),
             hard_region_mem_limit: ReadableSize::mb(768),
             soft_region_mem_limit: ReadableSize::mb(128),
+            soft_region_l0table_size_limit: None,
+            hard_region_l0table_size_limit: Some(ReadableSize::mb(256)),
             max_region_speed_limit: ReadableSize::mb(60),
             min_region_speed_limit: ReadableSize::mb(10),
         },

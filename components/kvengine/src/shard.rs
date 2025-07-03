@@ -208,7 +208,10 @@ impl Shard {
     ) -> Self {
         let encryption_key = get_shard_property(ENCRYPTION_KEY, props)
             .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
-        let limiter = RegionLimiter::new((&opt.flow_control).into());
+        let limiter = RegionLimiter::new(
+            opt.flow_control.region_memtable_limiter_options(),
+            opt.flow_control.region_l0table_limiter_options(),
+        );
         let now = Instant::now_coarse();
         let shard = Self {
             engine_id,
@@ -1626,6 +1629,7 @@ pub(crate) struct ShardDataBuilder {
     l0_tbls: Option<Vec<L0Table>>,
     cfs: Option<[ShardCf; 3]>,
     unloaded_tbls: Option<HashMap<u64, FileMeta>>,
+    limiter: Option<RegionLimiter>,
     blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
     lock_txn_files: Option<Vec<TxnFile>>,
     schema: Option<(i64 /* schema_version */, Option<SchemaFile>)>,
@@ -1644,6 +1648,7 @@ impl ShardDataBuilder {
             l0_tbls: None,
             cfs: None,
             unloaded_tbls: None,
+            limiter: None,
             blob_tbls: None,
             lock_txn_files: None,
             schema: None,
@@ -1675,6 +1680,10 @@ impl ShardDataBuilder {
 
     pub(crate) fn set_unloaded_tbls(&mut self, unloaded_tbls: HashMap<u64, FileMeta>) {
         self.unloaded_tbls = Some(unloaded_tbls);
+    }
+
+    pub(crate) fn with_new_limiter(&mut self) {
+        self.limiter = Some(RegionLimiter::new_from(&self.old.limiter))
     }
 
     pub(crate) fn set_blob_tbls(&mut self, blob_tbls: HashMap<u64, BlobTable>) {
@@ -1751,7 +1760,9 @@ impl ShardDataBuilder {
             self.lock_txn_files
                 .take()
                 .unwrap_or_else(|| self.old.lock_txn_files.clone()),
-            self.old.limiter.clone(),
+            self.limiter
+                .take()
+                .unwrap_or_else(|| self.old.limiter.clone()),
             self.old.update_counter + 1,
             schema_version,
             schema_file,
@@ -2228,7 +2239,9 @@ impl ShardDataCore {
 
     pub fn refresh_for_limiter(&self, tag: &ShardTag) {
         let mem_table_size = self.get_mem_table_size();
-        self.limiter.update_usage(tag, mem_table_size);
+        let l0_table_size = self.get_l0_total_size();
+        self.limiter
+            .update_usage(tag, mem_table_size, l0_table_size);
     }
 
     pub fn get_unconverted_l0s(&self) -> Vec<u64> {

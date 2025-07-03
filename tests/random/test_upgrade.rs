@@ -288,6 +288,13 @@ fn prepare_cluster(
         switches,
         upgrade_switches.disable_ia_for_old_version,
     );
+    // Set `120s` for GC timeout to work around the unexpected removal of local
+    // files during long prepare.
+    // TODO: remove after next upgrade.
+    let update_conf_fn_override = |node_id: u16, conf: &mut TikvConfig| {
+        update_conf_fn(node_id, conf);
+        conf.raft_store.local_file_gc_timeout = ReadableDuration::secs(120);
+    };
     let pd_wrapper =
         PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
     let mut cluster = ServerClusterBuilder::new(vec![], |_, _| {})
@@ -307,7 +314,7 @@ fn prepare_cluster(
     for node_id in nodes {
         // Start tikv-servers one by one to work around the conflict on bootstrap
         // cluster.
-        tikv_servers.start_node(node_id, &update_conf_fn);
+        tikv_servers.start_node(node_id, update_conf_fn_override);
         block_on(tikv_servers.must_healthy(node_id, WAIT_TIKV_SERVER_HEALTHY_TIMEOUT));
     }
     for (node_id, conf) in tikv_servers.configs() {

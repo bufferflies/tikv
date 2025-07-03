@@ -77,6 +77,7 @@ impl GcRunner {
                 #[cfg(feature = "testexport")]
                 if timeout <= Duration::from_secs(60) {
                     config = IaGcConfig::new_for_test();
+                    config.meta_lifetime = tikv_util::config::ReadableDuration(timeout);
                     warn!("IA gc runner use test config: {:?}", config);
                 }
 

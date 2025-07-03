@@ -201,6 +201,7 @@ impl Engine {
             builder.set_blob_tbls(new_blob_tbl_map);
             builder.set_cfs(new_cfs);
             builder.set_unloaded_tbls(old_data.unloaded_tbls.clone());
+            builder.with_new_limiter();
             builder.set_schema(schema_version, schema_file);
             builder.set_columnar_levels(new_col_levels);
             builder.set_vector_indexes(new_vec_indexes);
