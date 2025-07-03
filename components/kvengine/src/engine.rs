@@ -471,9 +471,8 @@ impl EngineCore {
     }
 
     pub fn ingest(&self, cs: ChangeSet, active: bool) -> Result<()> {
-        let shard = self.new_shard_from_change_set(cs);
+        let shard = Arc::new(self.new_shard_from_change_set(cs));
         shard.set_active(active);
-        self.refresh_shard_states(&shard);
         self.insert_keyspace_shard(shard.keyspace_id, shard.id);
         match self.shards.entry(shard.id) {
             Entry::Occupied(entry) => {
@@ -484,7 +483,7 @@ impl EngineCore {
                 // It's possible that the new version shard has the same write_sequence and meta
                 // sequence, so we need to compare shard version first.
                 if shard.ver > old.ver || new_total_seq > old_total_seq {
-                    entry.replace_entry(Arc::new(shard));
+                    entry.replace_entry(shard.clone());
                     for mem_tbl in old_mem_tbls.drain(..) {
                         self.send_free_mem_msg(FreeMemMsg::FreeMem(mem_tbl));
                     }
@@ -501,9 +500,10 @@ impl EngineCore {
                 }
             }
             Entry::Vacant(entry) => {
-                entry.insert(Arc::new(shard));
+                entry.insert(shard.clone());
             }
         }
+        self.refresh_shard_states(&shard);
         Ok(())
     }
 
@@ -562,6 +562,12 @@ impl EngineCore {
         let keyspace_id = shard.keyspace_id;
         self.insert_keyspace_shard(keyspace_id, shard_id);
         self.shards.insert(shard_id, shard)
+    }
+
+    pub fn insert_shard_and_refresh(&self, shard: Arc<Shard>) {
+        self.insert_shard(shard.clone());
+        // Refresh after insert. Otherwise, compaction may fail to get the new shard.
+        self.refresh_shard_states(&shard);
     }
 
     // `insert_keyspace_shard` is used by `insert_shard` and using entry to insert

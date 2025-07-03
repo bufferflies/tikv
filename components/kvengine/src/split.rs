@@ -209,7 +209,6 @@ impl Engine {
             new_shard.set_data(builder.build());
         }
         for shard in new_shards.drain(..) {
-            self.refresh_shard_states(&shard);
             let id = shard.id;
             if id != old_shard.id {
                 self.insert_keyspace_shard(shard.keyspace_id, id);
@@ -226,6 +225,7 @@ impl Engine {
             } else {
                 self.shards.insert(id, shard.clone());
             }
+            self.refresh_shard_states(&shard);
             let all_files = shard.get_all_files();
             let all_col_files = shard.get_all_col_files();
             info!(
@@ -383,7 +383,7 @@ impl Engine {
         // initial_flushed to true.
         new_shard.initial_flushed.store(true, Ordering::Release);
         info!("{} shard rollback merge", new_shard.tag());
-        self.insert_shard(Arc::new(new_shard));
+        self.insert_shard_and_refresh(Arc::new(new_shard));
     }
 
     pub fn commit_merge(
@@ -615,8 +615,7 @@ impl Engine {
             all_files,
             all_col_files,
         );
-        self.refresh_shard_states(&new_shard);
-        self.insert_shard(Arc::new(new_shard));
+        self.insert_shard_and_refresh(Arc::new(new_shard));
         Ok(())
     }
 

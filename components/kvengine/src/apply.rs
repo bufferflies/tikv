@@ -1029,7 +1029,6 @@ impl EngineCore {
             self.send_free_mem_msg(FreeMemMsg::FreeMem(mem_tbl));
         }
 
-        self.refresh_shard_states(&new_shard);
         info!(
             "{} restore shard: mem_table_version {}, change {:?}",
             new_shard.tag(),
@@ -1044,7 +1043,7 @@ impl EngineCore {
                 new_inner_key_off
             );
         }
-        self.insert_shard(Arc::new(new_shard));
+        self.insert_shard_and_refresh(Arc::new(new_shard));
 
         Ok(())
     }
