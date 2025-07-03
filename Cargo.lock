@@ -1429,6 +1429,7 @@ dependencies = [
  "pd_client",
  "prometheus",
  "protobuf",
+ "quick_cache",
  "rand 0.8.5",
  "replication_worker",
  "rfenginepb",

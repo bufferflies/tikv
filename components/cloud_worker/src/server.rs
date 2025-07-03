@@ -18,7 +18,7 @@ use hyper::{
     Body,
 };
 use kvengine::{
-    context::{IaCtx, PrepareType, SnapCtx},
+    context::{IaCtx, MetaFileCacheWeighter, PrepareType, SnapCtx},
     dfs::S3Fs,
     table::{schema_file::SchemaFile, sstable::BlockCache, ChecksumType},
     txn_chunk_manager::TxnChunkManager,
@@ -76,6 +76,7 @@ pub(crate) struct Context {
     pub txn_chunk_manager: TxnChunkManager,
     pub ia_ctx: IaCtx,
     pub read_columnar: bool,
+    pub meta_file_cache: Arc<quick_cache::sync::Cache<u64, Bytes, MetaFileCacheWeighter>>,
 }
 
 impl Context {
@@ -90,6 +91,7 @@ impl Context {
             ia_ctx: self.ia_ctx.clone(),
             prepare_type: PrepareType::All,
             read_columnar: self.read_columnar,
+            meta_file_cache: self.meta_file_cache.clone(),
         }
     }
 }

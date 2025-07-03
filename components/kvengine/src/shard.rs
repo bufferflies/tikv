@@ -18,6 +18,7 @@ use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
 use dashmap::DashMap;
 use kvenginepb::{self as pb, TxnFileRef};
+use quick_cache::sync::Cache;
 use rand::Rng;
 use schema::schema::StorageClassSpec;
 use slog_global::*;
@@ -25,7 +26,7 @@ use tikv_util::{box_err, box_try, time::Instant};
 use txn_types::TimeStamp;
 
 use crate::{
-    context::{IaCtx, PrepareType, SnapCtx},
+    context::{IaCtx, MetaFileCacheWeighter, PrepareType, SnapCtx},
     ia::{ia_auto_file::TransitResult, ia_file::IaFile, types::FileSegmentIdent},
     limiter::RegionLimiter,
     metrics::ENGINE_COLUMNAR_TOO_MANY_UNCONVERTED_L0S,
@@ -408,8 +409,10 @@ impl Shard {
             } else {
                 IaCtx::Disabled
             };
+            let meta_file_cache = ctx.meta_file_cache.clone();
             runtime.spawn(async move {
-                let res = Self::prepare_file(id, &fm, fs.as_ref(), &opts, &ia_ctx).await;
+                let res =
+                    Self::prepare_file(id, &fm, fs.as_ref(), &opts, &ia_ctx, meta_file_cache).await;
                 if let Err(err) = tx.send(res.map(|file| (id, fm, file))) {
                     error!("failed to send result"; "tag" => tag, "file_id" => id, "err" => %err);
                 }
@@ -490,6 +493,7 @@ impl Shard {
         fs: &dyn dfs::Dfs,
         opts: &dfs::Options,
         ia_ctx: &IaCtx,
+        meta_file_cache: Arc<Cache<u64, Bytes, MetaFileCacheWeighter>>,
     ) -> Result<Arc<dyn table::file::File>> {
         match ia_ctx {
             IaCtx::Disabled => fs
@@ -499,15 +503,19 @@ impl Shard {
                 .map_err(|err| err.into()),
             IaCtx::Enabled(ia_mgr, data_dir) => {
                 if fm.can_use_ia() {
-                    let data = IaFile::prepare_table_meta(
-                        id,
-                        fm.file_type,
-                        fm.table_meta_off as u64,
-                        data_dir.deref(),
-                        opts,
-                        ia_mgr,
-                    )
-                    .await?;
+                    let data = meta_file_cache
+                        .get_or_insert_async(&id, async move {
+                            IaFile::prepare_table_meta(
+                                id,
+                                fm.file_type,
+                                fm.table_meta_off as u64,
+                                data_dir.deref(),
+                                opts,
+                                ia_mgr,
+                            )
+                            .await
+                        })
+                        .await?;
                     let table_meta_file = Arc::new(InMemFile::new(id, data));
                     let file = IaFile::open(id, fm, table_meta_file, ia_mgr.clone())?;
                     Ok(Arc::new(file) as _)

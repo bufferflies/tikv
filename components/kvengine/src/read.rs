@@ -1988,7 +1988,7 @@ mod tests {
 
     use crate::{
         apply::create_snapshot_tables,
-        context::{IaCtx, PrepareType, SnapCtx},
+        context::{new_meta_file_cache, IaCtx, PrepareType, SnapCtx},
         dfs::{self, Dfs, InMemFs},
         read::MEM_DATA_FORMAT_V1,
         shard::ShardDataBuilder,
@@ -2223,6 +2223,7 @@ mod tests {
                 ia_ctx: IaCtx::Disabled,
                 prepare_type: PrepareType::All,
                 read_columnar: true,
+                meta_file_cache: new_meta_file_cache(1024),
             };
             let mut snap_pb = kvenginepb::Snapshot::default();
             snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32 * enable_inner_key_off as u32);

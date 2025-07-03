@@ -39,6 +39,7 @@ native_br = { path = "../../components/native_br" }
 pd_client = { path = "../../components/pd_client", default-features = false }
 prometheus = { version = "0.13", features = ["nightly"] }
 protobuf = "2.8"
+quick_cache = "0.6.14"
 rand = "0.8"
 replication_worker = { workspace = true }
 rfenginepb = { path = "../../components/rfenginepb" }

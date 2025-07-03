@@ -16,7 +16,7 @@ use clap::Args;
 use cloud_encryption::MasterKey;
 use futures::executor::block_on;
 use kvengine::{
-    context::{IaCtx, PrepareType, SnapCtx},
+    context::{new_meta_file_cache, IaCtx, PrepareType, SnapCtx},
     dfs::{DFSConfig, Dfs, S3Fs},
     table::sstable::BlockCache,
     txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
@@ -566,6 +566,7 @@ impl BackupReader {
             ia_ctx: IaCtx::Disabled,
             prepare_type: PrepareType::All,
             read_columnar: true,
+            meta_file_cache: new_meta_file_cache(1024),
         };
         Self {
             ts,

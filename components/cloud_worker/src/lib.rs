@@ -31,7 +31,7 @@ use ::load_data::{
 use ::native_br::{backup::BackupConfig, restore::RestoreConfig};
 use dashmap::DashMap;
 use kvengine::{
-    context::IaCtx,
+    context::{new_meta_file_cache, IaCtx},
     dfs::{DFSConfig, Dfs, S3Fs},
     ia::{manager::IaManager, util::IaConfig},
     table::{
@@ -112,10 +112,12 @@ impl Future for ServerFuture {
 
 // Entry for `tikv_worker` binary.
 pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: Arc<dyn PdClient>) {
+    let worker_threads =
+        SysQuota::cpu_cores_quota() * config.thread_pool_size_factor.clamp(1.0, 8.0);
     let thread_pool = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(SysQuota::cpu_cores_quota() as usize)
+            .worker_threads(worker_threads as usize)
             .thread_name("worker-server")
             .build()
             .unwrap(),
@@ -300,6 +302,8 @@ fn start_server(
     } else {
         None
     };
+    let meta_file_cache_size = config.cop_block_cache_size.0 / 4;
+    let meta_file_cache = new_meta_file_cache(meta_file_cache_size);
     let ctx = Arc::new(server::Context {
         compression_lvl,
         checksum_type,
@@ -319,6 +323,7 @@ fn start_server(
         txn_chunk_manager,
         ia_ctx,
         read_columnar: config.read_columnar,
+        meta_file_cache,
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
@@ -727,6 +732,8 @@ pub struct Config {
     pub cop_block_cache_size: ReadableSize,
     // Used to calculate block cache capacity of items. Should be the same as tikv-server.
     pub cop_block_size: ReadableSize,
+    // The thread pool size is cpu_cores * thread_pool_size_factor,
+    pub thread_pool_size_factor: f64,
     pub report_wru: bool,
     pub enable_load_data_check_point: bool,
     pub checksum_type: ChecksumType,
@@ -783,6 +790,7 @@ impl Default for Config {
             cop_addr: String::from("0.0.0.0:9500"),
             cop_block_cache_size: ReadableSize(block_cache_size),
             cop_block_size: ReadableSize::kb(32),
+            thread_pool_size_factor: 1.0,
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,
             enable_load_data_check_point: false,

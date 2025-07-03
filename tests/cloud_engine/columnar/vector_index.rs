@@ -9,7 +9,7 @@ use api_version::ApiV2;
 use dashmap::DashMap;
 use futures::executor::block_on;
 use kvengine::{
-    context::{IaCtx, PrepareType, SnapCtx},
+    context::{new_meta_file_cache, IaCtx, PrepareType, SnapCtx},
     dfs,
     dfs::{FileType, S3Fs},
     ia::{
@@ -242,6 +242,7 @@ fn test_build_vector_index() {
         ia_ctx,
         prepare_type: PrepareType::All,
         read_columnar: true,
+        meta_file_cache: new_meta_file_cache(1024 * 1024),
     };
     let mem_limiter = MemoryLimiter::new(u64::MAX, None);
     let remote_snap = dfs

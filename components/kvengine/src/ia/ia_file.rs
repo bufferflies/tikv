@@ -275,7 +275,10 @@ impl IaFile {
         ia_mgr: &IaManager,
     ) -> Result<Bytes> {
         let local_path = table_meta_file_local_path(file_id, ftype, data_dir);
-        let table_meta_data = match fs::read(&local_path) {
+        let local_path_cloned = local_path.clone();
+        let runtime = ia_mgr.get_dfs().get_runtime();
+        let read_result = runtime.spawn_blocking(move || fs::read(local_path_cloned));
+        let table_meta_data = match read_result.await.unwrap() {
             Ok(bytes) => {
                 let should_set_mtime = ia_mgr.access_table_meta(file_id);
                 if should_set_mtime {
@@ -302,7 +305,11 @@ impl IaFile {
                     .map_err(|err| {
                         Error::IaMgr(format!("{} prepare meta: failed: {:?}", file_id, err))
                     })?;
-                if let Err(err) = Self::save_table_meta(file_id, &local_path, &bytes) {
+                let bytes_cloned = bytes.clone();
+                let save_res = runtime.spawn_blocking(move || {
+                    Self::save_table_meta(file_id, &local_path, &bytes_cloned)
+                });
+                if let Err(err) = save_res.await.unwrap() {
                     debug_assert!(false, "{} save table meta failed: {:?}", file_id, err);
                     warn!("{} prepare meta: write failed", file_id; "err" => ?err);
                 }

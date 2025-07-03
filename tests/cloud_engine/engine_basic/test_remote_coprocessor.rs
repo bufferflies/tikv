@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use codec::prelude::NumberEncoder;
 use futures::executor::block_on;
 use kvengine::{
-    context::{IaCtx, PrepareType, SnapCtx},
+    context::{new_meta_file_cache, IaCtx, PrepareType, SnapCtx},
     dfs::S3Fs,
     ia::{
         manager::IaManager,
@@ -2457,6 +2457,7 @@ impl<'a> DagTest<'a> {
             ia_ctx: IaCtx::Disabled,
             prepare_type: PrepareType::All,
             read_columnar: true,
+            meta_file_cache: new_meta_file_cache(1024 * 1024),
         };
         let mem_limiter = MemoryLimiter::new(u64::MAX, None);
 

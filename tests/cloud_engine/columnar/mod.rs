@@ -15,7 +15,7 @@ use dashmap::DashMap;
 use futures::{executor::block_on, future::ok, TryStreamExt};
 use hyper::Body;
 use kvengine::{
-    context::{IaCtx, PrepareType, SnapCtx},
+    context::{new_meta_file_cache, IaCtx, PrepareType, SnapCtx},
     dfs,
     dfs::{FileType, S3Fs},
     ia::{
@@ -644,6 +644,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         ia_ctx: IaCtx::Disabled,
         prepare_type: PrepareType::All,
         read_columnar: true,
+        meta_file_cache: new_meta_file_cache(1024 * 1024),
     };
     let mem_limiter = MemoryLimiter::new(u64::MAX, None);
     let snap_access = dfs
@@ -966,6 +967,7 @@ fn test_columnar_ia_file() {
         ia_ctx,
         prepare_type: PrepareType::All,
         read_columnar: true,
+        meta_file_cache: new_meta_file_cache(1024 * 1024),
     };
     let mem_limiter = MemoryLimiter::new(u64::MAX, None);
     let snap_access = runtime
