@@ -27,7 +27,9 @@ use txn_types::TimeStamp;
 
 use crate::{
     context::{IaCtx, MetaFileCacheWeighter, PrepareType, SnapCtx},
-    ia::{ia_auto_file::TransitResult, ia_file::IaFile, types::FileSegmentIdent},
+    ia::{
+        ia_auto_file::TransitResult, ia_file::IaFile, manager::IaManager, types::FileSegmentIdent,
+    },
     limiter::RegionLimiter,
     metrics::ENGINE_COLUMNAR_TOO_MANY_UNCONVERTED_L0S,
     table::{
@@ -386,6 +388,38 @@ impl Shard {
         } else {
             None
         };
+        if let IaCtx::Enabled(ia_mgr, _) = &ctx.ia_ctx {
+            let mut added_files = HashSet::new();
+            // For cached files, we prepare with the meta data directly to reduce latency.
+            for (id, fm) in &ids {
+                let file = if let Some(data) = ctx.meta_file_cache.get(id) {
+                    Some(Self::prepare_file_with_meta_data(*id, fm, data, ia_mgr)?)
+                } else if fm.is_l0_sst_with_size() {
+                    // Cache the whole file as a segment.
+                    let ident = FileSegmentIdent::new(*id, 0, fm.l0_size as u64);
+                    ia_mgr.is_segment_cached(&ident).then_some(
+                        ia_mgr
+                            .get_segment_handle(ident, fm.file_type)
+                            .await?
+                            .into_inner(),
+                    )
+                } else {
+                    None
+                };
+                if let Some(file) = file {
+                    cs.add_file(
+                        *id,
+                        file,
+                        fm,
+                        ctx.block_cache.clone(),
+                        ctx.vector_index_cache.clone(),
+                        encryption_key.clone(),
+                    )?;
+                    added_files.insert(*id);
+                }
+            }
+            ids.retain(|id, _| !added_files.contains(id));
+        }
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = ctx.dfs.get_runtime();
         let opts = dfs::Options::default().with_shard(cs.shard_id, cs.shard_ver);
@@ -516,9 +550,7 @@ impl Shard {
                             .await
                         })
                         .await?;
-                    let table_meta_file = Arc::new(InMemFile::new(id, data));
-                    let file = IaFile::open(id, fm, table_meta_file, ia_mgr.clone())?;
-                    Ok(Arc::new(file) as _)
+                    Self::prepare_file_with_meta_data(id, fm, data, ia_mgr)
                 } else if fm.is_l0_sst_with_size() {
                     // Cache the whole file as a segment.
                     let ident = FileSegmentIdent::new(id, 0, fm.l0_size as u64);
@@ -532,6 +564,17 @@ impl Shard {
                 }
             }
         }
+    }
+
+    fn prepare_file_with_meta_data(
+        id: u64,
+        fm: &FileMeta,
+        data: Bytes,
+        ia_mgr: &IaManager,
+    ) -> Result<Arc<dyn table::file::File>> {
+        let table_meta_file = Arc::new(InMemFile::new(id, data));
+        let file = IaFile::open(id, fm, table_meta_file, ia_mgr.clone())?;
+        Ok(Arc::new(file))
     }
 
     pub fn get_cf_total_size(&self, cf: usize) -> u64 {
