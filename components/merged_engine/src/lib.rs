@@ -926,6 +926,11 @@ impl MergedEngine {
             if progress.truncated_index > truncated_idx {
                 if let Some(preprocessor) = self.preprocessors.get_mut(&region_id) {
                     if let Some(shard_meta) = preprocessor.as_ref().shard_meta {
+                        if shard_meta.parent.is_some() {
+                            // skip truncating region with parent, the parent may need the old
+                            // raft logs on recover.
+                            continue;
+                        }
                         if shard_meta.data_sequence < progress.truncated_index {
                             shard_meta.data_sequence = progress.truncated_index;
                             write_engine_meta(raft_wb, region_id, shard_meta);
