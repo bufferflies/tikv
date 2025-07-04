@@ -2057,7 +2057,11 @@ mod tests {
             false,
             PrepareType::All,
         );
-        builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
+        builder.set_schema(
+            cs.get_schema_version(),
+            cs.get_restore_version(),
+            cs.get_schema_file(),
+        );
         shard.set_data(builder.build());
         let snap = shard.new_snap_access();
 

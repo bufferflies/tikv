@@ -168,6 +168,23 @@ impl ChangeSet {
         }
     }
 
+    pub fn get_restore_version(&self) -> u64 {
+        if let Some(schema_file) = &self.schema_file {
+            schema_file.get_restore_version()
+        } else if self.has_update_schema_meta() {
+            self.get_update_schema_meta().get_restore_version()
+        } else if let Some(snap) = kvenginepb::get_any_snap_from_changeset(&self.change_set) {
+            if snap.has_schema_meta() {
+                snap.get_schema_meta().get_restore_version()
+            } else {
+                0
+            }
+        } else {
+            debug_assert!(false, "changeset has no schema: {:?}", self);
+            0
+        }
+    }
+
     pub fn into_inner(self) -> kvenginepb::ChangeSet {
         self.change_set
     }
@@ -528,7 +545,11 @@ impl EngineCore {
         // here to ensure the schema file and col_snap_version consistency between
         // peers in some corner cases. e.g. the parent shard has inconsistency schema
         // file or col_snap_version.
-        builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
+        builder.set_schema(
+            cs.get_schema_version(),
+            cs.get_restore_version(),
+            cs.get_schema_file(),
+        );
         let new_data = builder.build();
         info!("{} apply_initial_flush", shard.tag(); "seq" => cs.sequence);
         shard.set_data(new_data);
@@ -974,6 +995,7 @@ impl EngineCore {
 
     fn apply_restore_shard(&self, old_shard: &Shard, cs: &ChangeSet) -> Result<()> {
         debug_assert!(cs.has_restore_shard());
+        debug_assert!(cs.get_restore_version() > 0);
         // TODO: skip duplicated.
 
         let snap = cs.get_restore_shard();
@@ -1002,14 +1024,12 @@ impl EngineCore {
         } else {
             PrepareType::All
         };
-        create_snapshot_tables(
-            &mut builder,
-            cs.get_restore_shard(),
-            cs,
-            self.opts.for_restore,
-            prepare_type,
+        create_snapshot_tables(&mut builder, snap, cs, self.opts.for_restore, prepare_type);
+        builder.set_schema(
+            cs.get_schema_version(),
+            cs.get_restore_version(),
+            cs.get_schema_file(),
         );
-        builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
         let new_data = builder.build();
         let new_inner_key_off = new_data.inner_key_off;
         new_shard.set_data(new_data);
@@ -1052,7 +1072,11 @@ impl EngineCore {
         info!("{} apply update schema meta", shard.tag(); "schema_file" => ?cs.get_schema_file_id());
         let old_data = shard.get_data();
         let mut builder = ShardDataBuilder::new(old_data);
-        builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
+        builder.set_schema(
+            cs.get_schema_version(),
+            cs.get_restore_version(),
+            cs.get_schema_file(),
+        );
         shard.set_data(builder.build());
     }
 

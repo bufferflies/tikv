@@ -724,11 +724,7 @@ impl super::Shard {
         let compaction_score = priority.as_ref().map_or(0f64, |x| x.score());
         let txn_file_locks = data.lock_txn_files.len();
         let schema_version = data.schema_version;
-        let schema_restore_version = data
-            .schema_file
-            .as_ref()
-            .map(|sf| sf.get_restore_version())
-            .unwrap_or_default();
+        let schema_restore_version = data.restore_version;
         let columnar_tables = data.columnar_table_ids.len();
         let mut columnar_levels = vec![ColumnarLevelStats::default(); COLUMNAR_LEVELS];
         for (i, l) in data.col_levels.levels.iter().enumerate() {

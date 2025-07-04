@@ -26,7 +26,7 @@ use kvengine::{
             new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
             VectorIndexDef,
         },
-        file::{File, InMemFile, LocalFile},
+        file::{File, LocalFile},
         schema_file,
         schema_file::{Schema, SchemaBufBuilder, SchemaFile},
         ChecksumType, NO_COMPRESSION,
@@ -520,6 +520,11 @@ impl SchemaManager {
                 continue;
             }
 
+            if self.check_if_keyspace_restore_in_progress(keyspace_shard_stats) {
+                info!("{}: keyspace restore in progress, skip", keyspace_id);
+                continue;
+            }
+
             // 1. Try to read schema file from local.
             let local_schema_file =
                 match read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id) {
@@ -658,11 +663,9 @@ impl SchemaManager {
                 continue;
             }
 
-            // If the shard has no overlap with the schema file, the restore version is 0.
             let schema_restore_version = keyspace_shard_stats
-                .iter()
+                .first()
                 .map(|s| s.schema_restore_version)
-                .max()
                 .unwrap_or(0);
             info!("{}: sync schema: rebuild schema", keyspace_id;
                 "cur_schema_ver" => ?cur_schema_version,
@@ -702,25 +705,6 @@ impl SchemaManager {
                 .map_err(|e| Error::Other(box_err!(e.to_string())))?
                 .first()
                 .unwrap();
-            let schema_raw_file = Arc::new(InMemFile::new(
-                file_id,
-                Bytes::from(new_schema_file_data.clone()),
-            ));
-            let latest_schema_file = SchemaFile::open(schema_raw_file).unwrap_or_else(|_| {
-                panic!(
-                    "{}: open latest schema file failed, file_id: {}",
-                    keyspace_id, file_id
-                )
-            });
-            // Check the restore version in overlapped shards.
-            if self.check_if_keyspace_restore_in_progress(
-                keyspace_id,
-                keyspace_shard_stats,
-                &latest_schema_file,
-            ) {
-                info!("{}: keyspace restore in progress, skip", keyspace_id);
-                continue;
-            }
             let dfs = self.ctx.s3fs.clone();
             let tx_clone = tx.clone();
             spawn_task_count += 1;
@@ -826,19 +810,13 @@ impl SchemaManager {
 
     fn check_if_keyspace_restore_in_progress(
         &self,
-        keyspace_id: u32,
         keyspace_shard_stats: &[ShardStatsLite],
-        schema_file: &SchemaFile,
     ) -> bool {
-        let overlapped_shards = keyspace_shard_stats
-            .iter()
-            .filter(|s| schema_file.overlap(&s.start, &s.end, keyspace_id))
-            .collect::<Vec<_>>();
-        let first_restore_version = overlapped_shards
+        let first_restore_version = keyspace_shard_stats
             .first()
             .map(|s| s.schema_restore_version)
             .unwrap_or(0);
-        overlapped_shards
+        keyspace_shard_stats
             .iter()
             .any(|s| s.schema_restore_version != first_restore_version)
     }

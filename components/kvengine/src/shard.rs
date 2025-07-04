@@ -515,7 +515,11 @@ impl Shard {
             write_cf_only,
             ctx.prepare_type,
         );
-        builder.set_schema(cs.get_schema_version(), cs.get_schema_file());
+        builder.set_schema(
+            cs.get_schema_version(),
+            cs.get_restore_version(),
+            cs.get_schema_file(),
+        );
         shard.id = cs.shard_id;
         shard.set_data(builder.build());
         Ok(shard)
@@ -1683,7 +1687,11 @@ pub(crate) struct ShardDataBuilder {
     limiter: Option<RegionLimiter>,
     blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
     lock_txn_files: Option<Vec<TxnFile>>,
-    schema: Option<(i64 /* schema_version */, Option<SchemaFile>)>,
+    schema: Option<(
+        i64, // schema_version
+        u64, // restore_version
+        Option<SchemaFile>,
+    )>,
     columnar_levels: Option<ColumnarLevels>,
     vector_indexes: Option<VectorIndexes>,
     columnar_table_ids: Option<Vec<i64>>,
@@ -1745,18 +1753,23 @@ impl ShardDataBuilder {
         self.lock_txn_files = Some(lock_txn_files);
     }
 
-    pub(crate) fn set_schema(&mut self, schema_version: i64, schema_file: Option<SchemaFile>) {
+    pub(crate) fn set_schema(
+        &mut self,
+        schema_version: i64,
+        restore_version: u64,
+        schema_file: Option<SchemaFile>,
+    ) {
         debug_assert!(
             schema_file
                 .as_ref()
                 .map_or(true, |x| x.get_version() == schema_version)
         );
-        self.schema = Some((schema_version, schema_file));
+        self.schema = Some((schema_version, restore_version, schema_file));
     }
 
     #[inline]
     pub(crate) fn clear_schema(&mut self) {
-        self.set_schema(0, None);
+        self.set_schema(0, 0, None);
     }
 
     pub(crate) fn set_columnar_levels(&mut self, columnar_levels: ColumnarLevels) {
@@ -1772,10 +1785,14 @@ impl ShardDataBuilder {
     }
 
     pub(crate) fn build(mut self) -> ShardData {
-        let (schema_version, schema_file) = self
-            .schema
-            .take()
-            .unwrap_or_else(|| (self.old.schema_version, self.old.schema_file.clone()));
+        let (schema_version, restore_version, schema_file) =
+            self.schema.take().unwrap_or_else(|| {
+                (
+                    self.old.schema_version,
+                    self.old.restore_version,
+                    self.old.schema_file.clone(),
+                )
+            });
         let col_levels = self
             .columnar_levels
             .take()
@@ -1816,6 +1833,7 @@ impl ShardDataBuilder {
                 .unwrap_or_else(|| self.old.limiter.clone()),
             self.old.update_counter + 1,
             schema_version,
+            restore_version,
             schema_file,
             col_levels,
             vector_indexes,
@@ -1884,6 +1902,7 @@ impl ShardData {
             limiter,
             INITIAL_UPDATE_COUNTER,
             0,
+            0,
             None,
             ColumnarLevels::new(),
             VectorIndexes::default(),
@@ -1903,6 +1922,7 @@ impl ShardData {
         limiter: RegionLimiter,
         update_counter: u64,
         schema_version: i64,
+        restore_version: u64,
         schema_file: Option<SchemaFile>,
         col_levels: ColumnarLevels,
         vector_indexes: VectorIndexes,
@@ -1923,6 +1943,7 @@ impl ShardData {
                 limiter,
                 update_counter,
                 schema_version,
+                restore_version,
                 schema_file,
                 col_levels,
                 vector_indexes,
@@ -1952,6 +1973,9 @@ pub(crate) struct ShardDataCore {
     /// `schema_version` is used to indicate the schema version even if the
     /// `schema_file` is None.
     pub(crate) schema_version: i64,
+    /// `restore_version` is used to indicate the restore version of the shard
+    /// even if the `schema_file` is None.
+    pub(crate) restore_version: u64,
     pub(crate) schema_file: Option<SchemaFile>,
     pub(crate) col_levels: ColumnarLevels,
     pub(crate) vector_indexes: VectorIndexes,

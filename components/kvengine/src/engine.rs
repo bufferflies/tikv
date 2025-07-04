@@ -464,7 +464,11 @@ impl EngineCore {
                     .block_on(self.load_schema_file(schema_file_id))
                     .unwrap()
             });
-        builder.set_schema(cs.get_schema_version(), schema_file);
+        builder.set_schema(
+            cs.get_schema_version(),
+            cs.get_restore_version(),
+            schema_file,
+        );
         builder.set_unloaded_tbls(cs.unloaded_tables);
         shard.set_data(builder.build());
         shard

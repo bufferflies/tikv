@@ -168,6 +168,7 @@ impl Engine {
                 }
             }
             let schema_version = old_data.schema_version;
+            let restore_version = old_data.restore_version;
             let schema_file = old_data.schema_file.clone();
             let mut new_col_levels = ColumnarLevels::new();
             new_col_levels.unconverted_l0s = new_unconverted_l0s;
@@ -202,7 +203,7 @@ impl Engine {
             builder.set_cfs(new_cfs);
             builder.set_unloaded_tbls(old_data.unloaded_tbls.clone());
             builder.with_new_limiter();
-            builder.set_schema(schema_version, schema_file);
+            builder.set_schema(schema_version, restore_version, schema_file);
             builder.set_columnar_levels(new_col_levels);
             builder.set_vector_indexes(new_vec_indexes);
             builder.set_columnar_table_ids(columnar_table_ids);
@@ -548,11 +549,13 @@ impl Engine {
                 }
             }
             let mut schema_version = old_data.schema_version;
+            let mut restore_version = old_data.restore_version;
             let mut schema_file = old_data.schema_file.clone();
             // If the target shard has no schema file and the source has schema file, we
             // should merge the schema file to target.
             if schema_file.is_none() && source.schema_file.is_some() {
                 schema_version = source.schema_file.as_ref().unwrap().get_version();
+                restore_version = source.schema_file.as_ref().unwrap().get_restore_version();
                 schema_file = source.schema_file.clone();
             }
             let source_data_bound = DataBound::new(
@@ -584,7 +587,7 @@ impl Engine {
             builder.set_unloaded_tbls(unloaded_tbls);
             builder.set_lock_txn_files(lock_txn_files);
             builder.set_columnar_levels(columnar_levels);
-            builder.set_schema(schema_version, schema_file);
+            builder.set_schema(schema_version, restore_version, schema_file);
             builder.set_vector_indexes(vector_indexes);
             builder.set_columnar_table_ids(columnar_table_ids);
             builder.build()

@@ -2113,6 +2113,8 @@ impl BackupCluster {
                     // Update columnar_snap_version to initial value to guarantee the new flushed
                     // l0s can be added to unconverted_l0s in target shard.
                     meta.columnar_table_ids = shard.meta.columnar_table_ids.clone();
+                } else {
+                    meta.schema.update_by_restore(0, 0, self.truncate_ts);
                 }
             }
 

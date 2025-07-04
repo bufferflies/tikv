@@ -1769,7 +1769,7 @@ impl SchemaFileMeta {
     }
 
     pub fn to_snapshot(&self, snap: &mut pb::Snapshot) {
-        if self.is_valid() {
+        if self.is_valid() || self.schema_restore_ver > 0 {
             let mut sm = SchemaMeta::new();
             sm.set_file_id(self.schema_file_id);
             sm.set_version(self.schema_file_ver);
