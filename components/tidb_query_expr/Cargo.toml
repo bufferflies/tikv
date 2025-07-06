@@ -11,7 +11,7 @@ bstr = "0.2.8"
 byteorder = "1.2"
 codec = { workspace = true }
 file_system = { workspace = true }
-flate2 = { version = "=1.0.11", default-features = false, features = ["zlib"] }
+flate2 = { version = "1.0", default-features = false, features = ["zlib"] }
 hex = "0.4"
 log_wrappers = { workspace = true }
 match-template = "0.0.1"

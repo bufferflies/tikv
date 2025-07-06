@@ -142,6 +142,7 @@ mod imp {
             let mut cpu_info = ptr::null_mut();
             let mut msg_type = 0;
             let ret = host_processor_info(
+                #[allow(deprecated)]
                 mach_host_self(),
                 PROCESSOR_CPU_LOAD_INFO as processor_flavor_t,
                 &mut num_cpus_u,
@@ -172,6 +173,7 @@ mod imp {
                 ret.nice += (*current).cpu_ticks[CPU_STATE_NICE as usize] as u64;
                 current = current.offset(1);
             }
+            #[allow(deprecated)]
             vm_deallocate(mach_task_self_, cpu_info as vm_address_t, msg_type as usize);
             Ok(ret)
         }

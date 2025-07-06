@@ -227,13 +227,19 @@ mod imp {
     /// Gets the ID of the current process.
     #[inline]
     pub fn process_id() -> Pid {
-        unsafe { mach_task_self_ }
+        #[allow(deprecated)]
+        unsafe {
+            mach_task_self_
+        }
     }
 
     /// Gets the ID of the current thread.
     #[inline]
     pub fn thread_id() -> Pid {
-        unsafe { mach_thread_self() }
+        #[allow(deprecated)]
+        unsafe {
+            mach_thread_self()
+        }
     }
 
     pub fn thread_ids<C: FromIterator<Pid>>(pid: Pid) -> io::Result<C> {
