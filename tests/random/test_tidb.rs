@@ -384,6 +384,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.kvengine
             .columnar_table_build_options
             .pack_max_row_count = 32;
+        conf.kvengine.vector_index_build_options.max_file_size = 32 * 1024;
         conf.kvengine.columnar_table_build_options.pack_max_size = 32 * 128;
         conf.kvengine.vector_index_build_options.delta_size = 128;
         conf.kvengine.vector_index_build_options.rebuild_file_count = 2;

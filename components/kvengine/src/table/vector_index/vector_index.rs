@@ -5,6 +5,7 @@ use std::{collections::HashSet, ops::Deref, sync::Arc};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::EncryptionKey;
+use itertools::Itertools;
 use tidb_query_datatype::codec::{
     mysql::{VectorFloat32Encoder, VectorFloat32Ref},
     table::{encode_common_handle_row_key, encode_row_key},
@@ -159,6 +160,14 @@ impl VectorIndex {
 
     pub fn snap_version(&self) -> u64 {
         self.files[0].snap_version()
+    }
+
+    /// The number of vector index files with different snap version.
+    /// The vector index file maybe split into multiple files if the size exceed
+    /// the max file size. We count the number of files with different snap
+    /// version.
+    pub fn files_count(&self) -> usize {
+        self.files.iter().map(|f| f.snap_version()).unique().count()
     }
 
     pub(crate) fn update_extra_columnar_files(&mut self, col_levels: &ColumnarLevels) {
@@ -1082,6 +1091,9 @@ pub struct VectorIndexBuildOptions {
     // When the file count of a vector index exceed this value, a new vector index is rebuild to
     // replace the old vector index files.
     pub rebuild_file_count: usize,
+
+    // When the vector index file size exceed this value, a new vector index file will be built.
+    pub max_file_size: usize,
 }
 
 impl Default for VectorIndexBuildOptions {
@@ -1089,6 +1101,7 @@ impl Default for VectorIndexBuildOptions {
         VectorIndexBuildOptions {
             delta_size: 16 * 1024 * 1024,
             rebuild_file_count: 4,
+            max_file_size: 2 * 1024 * 1024 * 1024, // 2GB
         }
     }
 }
@@ -1112,6 +1125,7 @@ pub struct VectorIndexBuilder {
     biggest_int_handle: i64,
     smallest_common_handle: Vec<u8>,
     biggest_common_handle: Vec<u8>,
+    handle_size: usize,
     pub(crate) smallest: Vec<u8>,
     pub(crate) biggest: Vec<u8>,
     pub(crate) meta_offset: u32,
@@ -1138,8 +1152,8 @@ impl VectorIndexBuilder {
             }
             _ => usearch::MetricKind::Cos,
         };
-        let mut header = VectorIndexFileFooter::default();
-        header.magic_number = MAGIC_NUMBER;
+        let mut footer = VectorIndexFileFooter::default();
+        footer.magic_number = MAGIC_NUMBER;
         let index = usearch::Index::new(&opts).map_err(|e| Other(e.to_string()))?;
         Ok(VectorIndexBuilder {
             index,
@@ -1147,7 +1161,7 @@ impl VectorIndexBuilder {
             common_handles: vec![],
             versions: vec![],
             nulls: vec![],
-            footer: header,
+            footer,
             snap_version,
             table_id,
             index_id: index_id as i32,
@@ -1163,6 +1177,7 @@ impl VectorIndexBuilder {
             smallest: vec![],
             biggest: vec![],
             meta_offset: 0,
+            handle_size: 0,
         })
     }
 
@@ -1184,6 +1199,7 @@ impl VectorIndexBuilder {
                 }
                 if need_push {
                     self.common_handles.push(common_handle.to_vec());
+                    self.handle_size += common_handle.len();
                 }
             } else {
                 let handle = block.handles.get_int_handle_value(i);
@@ -1192,6 +1208,7 @@ impl VectorIndexBuilder {
                 }
                 if need_push {
                     self.int_handles.push(handle);
+                    self.handle_size += 8;
                 }
             }
 
@@ -1240,6 +1257,26 @@ impl VectorIndexBuilder {
 
     fn format_version(&self) -> u32 {
         self.footer.format_ver
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.num_rows as usize
+    }
+
+    /// Estimated the size of the vector index file.
+    pub fn estimated_size(&self) -> usize {
+        let entry_count = self.num_rows as usize;
+        if entry_count == 0 {
+            return 0;
+        }
+        let versions_size = entry_count * 8;
+        // NOTE: `serialized_length` will scan all the items in the index, we should not
+        // call it too frequently.
+        let mut data_size = self.index.serialized_length() + versions_size + self.handle_size;
+        if self.format_version() == FORMAT_VERSION_V2 {
+            data_size += self.nulls.len();
+        }
+        data_size
     }
 
     pub fn build(&mut self) -> Result<Vec<u8>> {

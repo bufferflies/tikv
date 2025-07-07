@@ -33,8 +33,12 @@ const COLUMNAR_DB_NAME: &str = "columnar_db";
 const COLUMNAR_TABLE_NAME: &str = "columnar_table";
 const EMBEDDED_DOC_TABLE_NAME: &str = "embedded_documents";
 const WORKLOAD_CONCURRENCY: usize = 1;
-const VECTOR_DIMENSION: u32 = 3;
 const COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+// Generate a random vector dimension between 1 and 64.
+lazy_static::lazy_static! {
+    static ref VECTOR_DIMENSION: u32 = rand::random::<u32>() % 64 + 1;
+}
 
 pub(crate) async fn prepare_columnar(
     tc: TidbCluster,
@@ -70,6 +74,7 @@ pub(crate) async fn prepare_columnar(
     } else {
         "id INT AUTO_INCREMENT PRIMARY KEY"
     };
+    let dimension = *VECTOR_DIMENSION;
 
     let sqls = vec![
         format!("drop database if exists `{COLUMNAR_DB_NAME}`"),
@@ -112,7 +117,7 @@ pub(crate) async fn prepare_columnar(
             "create table `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` (
             {vector_primary_key},
             document TEXT,
-            embedding VECTOR({VECTOR_DIMENSION}),
+            embedding VECTOR({dimension}),
             VECTOR INDEX idx_embedding((VEC_COSINE_DISTANCE(embedding)))
             )"
         ),
@@ -355,7 +360,7 @@ fn generate_insert_sqls(max_count: usize) -> Vec<String> {
 
     for _ in 0..count {
         let document = random_str(&mut rng, 30, true);
-        let embedding: Vec<f32> = (0..VECTOR_DIMENSION)
+        let embedding: Vec<f32> = (0..*VECTOR_DIMENSION)
             .map(|_| rng.gen::<f32>() * 10.0)
             .collect();
         let embedding_str = format!(
@@ -445,16 +450,25 @@ async fn verify_vector_data(
     dump_rows: bool,
     vector_common_handle: bool,
 ) -> Result<()> {
+    let embedding: Vec<f32> = (0..*VECTOR_DIMENSION).map(|i| i as f32).collect();
+    let embedding_str = format!(
+        "[{}]",
+        embedding
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let mut tx = pool.begin().await.context("begin")?;
     let query_engine = |use_tiflash: bool| {
         format!(
-            "select {} id, document, vec_cosine_distance(embedding, '[1, 2, 3]') AS distance from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` ORDER BY distance LIMIT 3",
+            "select {} id, document, vec_cosine_distance(embedding, '{embedding_str}') AS distance from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` ORDER BY distance LIMIT 3",
             get_engine_hint(use_tiflash, EMBEDDED_DOC_TABLE_NAME)
         )
     };
     let scan_engine = |use_tiflash: bool| {
         format!(
-            "select {} id, document, vec_cosine_distance(embedding, '[1, 2, 3]') AS distance from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` ORDER BY id",
+            "select {} id, document, vec_cosine_distance(embedding, '{embedding_str}') AS distance from `{COLUMNAR_DB_NAME}`.`{EMBEDDED_DOC_TABLE_NAME}` ORDER BY id",
             get_engine_hint(use_tiflash, EMBEDDED_DOC_TABLE_NAME)
         )
     };

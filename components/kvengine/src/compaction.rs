@@ -21,7 +21,7 @@ use http::StatusCode;
 use hyper::Client;
 use itertools::{Either, Itertools};
 use kvenginepb::{self as pb, ColumnarCreate};
-use pb::{BlobCreate, TableCreate};
+use pb::{BlobCreate, TableCreate, VectorIndexFile};
 use protobuf::Message;
 use security::SecurityManager;
 use slog_global::error;
@@ -61,7 +61,7 @@ use crate::{
         file::{File, InMemFile, LocalFile},
         schema_file::SchemaFile,
         sstable::{self, builder::TableBuilderOptions, BlockCache, L0Builder, SsTable},
-        vector_index::VectorIndexBuilder,
+        vector_index::{VectorIndexBuildOptions, VectorIndexBuilder},
         BoundedDataSet, ChecksumType, DataBound, InnerKey,
     },
     table_id::{get_table_id_from_data_bound, is_bound_overlap_with_table_ids},
@@ -79,6 +79,8 @@ const MAJOR_COMPACTION_MIN_REQUEST_VERSION: u32 = 3;
 
 // Do not skip L1 tables if there are too many small L1 tables.
 const MAX_SKIP_L1_TABLES: usize = 16;
+
+const MAX_DELTA_VECTOR_SIZE_PERCENT: usize = 10; // 10% of the max_file_size
 
 static RETRY_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -494,6 +496,7 @@ pub struct VectorIndexUpdate {
     schema_file_id: u64,
     col_file_ids: Vec<(u64, u32)>,
     remove_file_ids: Vec<u64>,
+    vector_index_build_opts: VectorIndexBuildOptions,
 }
 
 impl VectorIndexUpdate {
@@ -2039,6 +2042,7 @@ impl Engine {
             schema_file_id: schema_file.get_file_id(),
             col_file_ids,
             remove_file_ids,
+            vector_index_build_opts: self.opts.vector_index_build_options,
         });
         info!("{} trigger vector index update", tag; "total_size" => total_size);
         Some(self.comp_client.compact(req).await)
@@ -4952,6 +4956,8 @@ async fn update_vector_index(
         return Ok(ret);
     }
 
+    let build_opts = update_vec_idx.vector_index_build_opts;
+    let is_common_handle = vector_col_schema.is_common_handle();
     let mut vec_builder = VectorIndexBuilder::new(
         dimension,
         metric.as_ref(),
@@ -4959,20 +4965,75 @@ async fn update_vector_index(
         update_vec_idx.table_id,
         update_vec_idx.index_id,
         update_vec_idx.col_id,
-        vector_col_schema.is_common_handle(),
+        is_common_handle,
     )?;
     let mut block = Block::new(&vector_col_schema);
     let mut merge_reader = ColumnarMergeReader::new(vector_col_schema, readers);
     merge_reader.seek(&[]).await?;
+    let mut vector_index_files = vec![];
     let mut res = merge_reader.read(&mut block, 1024).await?;
+    let mut delta_vector_size = 0;
     while res > 0 {
         vec_builder.add_block(&block, 0)?;
+        delta_vector_size += block.length() * dimension * std::mem::size_of::<f32>();
         block.reset();
+        if should_build_vector_index(&vec_builder, &build_opts, delta_vector_size) {
+            let vec_idx_file =
+                build_vector_index_file(ctx, &mut vec_builder, id_allocator, update_vec_idx, &opts)
+                    .await?;
+            vector_index_files.push(vec_idx_file);
+            delta_vector_size = 0;
+            vec_builder = VectorIndexBuilder::new(
+                dimension,
+                metric.as_ref(),
+                update_vec_idx.snap_version,
+                update_vec_idx.table_id,
+                update_vec_idx.index_id,
+                update_vec_idx.col_id,
+                is_common_handle,
+            )?;
+        }
         res = merge_reader.read(&mut block, 1024).await?;
     }
+    if vec_builder.entry_count() > 0 {
+        let vec_idx_file =
+            build_vector_index_file(ctx, &mut vec_builder, id_allocator, update_vec_idx, &opts)
+                .await?;
+        vector_index_files.push(vec_idx_file);
+    }
+    ret.set_added(vector_index_files.into());
+    info!("update vector index result {:?}", ret);
+    Ok(ret)
+}
+
+// NOTE: Call `estimated_size` to avoid expensive calculation of the vector
+// index size.
+fn should_build_vector_index(
+    builder: &VectorIndexBuilder,
+    build_opts: &VectorIndexBuildOptions,
+    delta_vector_size: usize,
+) -> bool {
+    // Split vector index feature is disabled.
+    if build_opts.max_file_size == 0 {
+        return false;
+    }
+    if delta_vector_size < build_opts.max_file_size / 100 * MAX_DELTA_VECTOR_SIZE_PERCENT {
+        return false;
+    }
+
+    builder.estimated_size() >= build_opts.max_file_size
+}
+
+async fn build_vector_index_file(
+    ctx: &CompactionCtx,
+    vec_builder: &mut VectorIndexBuilder,
+    id_allocator: &mut LocalIdAllocator,
+    update_vec_idx: &VectorIndexUpdate,
+    opts: &dfs::Options,
+) -> Result<VectorIndexFile> {
     let buf = vec_builder.build()?;
     let file_id = id_allocator.alloc_id().await;
-    // Dfs create must be called in the tokio runtime.
+    let fs = &ctx.dfs;
     let _enter = fs.get_runtime().enter();
     fs.create(file_id, buf.into(), opts.with_type(FileType::VectorIndex))
         .await?;
@@ -4983,9 +5044,7 @@ async fn update_vector_index(
         vec_builder.biggest.clone(),
         vec_builder.meta_offset,
     );
-    ret.set_added(vec![vec_idx_file].into());
-    info!("update vector index result {:?}", ret);
-    Ok(ret)
+    Ok(vec_idx_file)
 }
 
 pub(crate) enum CompactMsg {

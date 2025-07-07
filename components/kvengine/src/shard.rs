@@ -1303,7 +1303,7 @@ impl Shard {
             data.vector_indexes
                 .get(table_id, vec_idx.index_id, vec_idx.col_id)
         {
-            if vec_idx.files.len() >= self.opt.vector_index_build_options.rebuild_file_count {
+            if vec_idx.files_count() >= self.opt.vector_index_build_options.rebuild_file_count {
                 return (1.1, true);
             }
             vec_idx.files.first().unwrap().snap_version()
