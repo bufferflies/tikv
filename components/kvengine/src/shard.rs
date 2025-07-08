@@ -392,8 +392,12 @@ impl Shard {
             let mut added_files = HashSet::new();
             // For cached files, we prepare with the meta data directly to reduce latency.
             for (id, fm) in &ids {
-                let file = if let Some(data) = ctx.meta_file_cache.get(id) {
-                    Some(Self::prepare_file_with_meta_data(*id, fm, data, ia_mgr)?)
+                let file = if fm.can_use_ia() {
+                    if let Some(data) = ctx.meta_file_cache.get(id) {
+                        Some(Self::prepare_ia_file_with_meta_data(*id, fm, data, ia_mgr)?)
+                    } else {
+                        None
+                    }
                 } else if fm.is_l0_sst_with_size() {
                     // Cache the whole file as a segment.
                     let ident = FileSegmentIdent::new(*id, 0, fm.l0_size as u64);
@@ -554,7 +558,7 @@ impl Shard {
                             .await
                         })
                         .await?;
-                    Self::prepare_file_with_meta_data(id, fm, data, ia_mgr)
+                    Self::prepare_ia_file_with_meta_data(id, fm, data, ia_mgr)
                 } else if fm.is_l0_sst_with_size() {
                     // Cache the whole file as a segment.
                     let ident = FileSegmentIdent::new(id, 0, fm.l0_size as u64);
@@ -570,12 +574,13 @@ impl Shard {
         }
     }
 
-    fn prepare_file_with_meta_data(
+    fn prepare_ia_file_with_meta_data(
         id: u64,
         fm: &FileMeta,
         data: Bytes,
         ia_mgr: &IaManager,
     ) -> Result<Arc<dyn table::file::File>> {
+        debug_assert!(fm.can_use_ia(), "{}: {:?}", id, fm);
         let table_meta_file = Arc::new(InMemFile::new(id, data));
         let file = IaFile::open(id, fm, table_meta_file, ia_mgr.clone())?;
         Ok(Arc::new(file))
