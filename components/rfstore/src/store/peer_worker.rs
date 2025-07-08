@@ -91,6 +91,8 @@ impl PeerInbox {
         let start = tikv_util::time::Instant::now_coarse();
         tikv_util::set_current_region_thread_local(region_id);
         PeerMsgHandler::new(&mut peer_fsm, ctx).handle_msgs(&mut self.msgs);
+        let tick_flag = peer_fsm.ticker.tick_flag;
+        peer_fsm.ticker.tick_flag = 0;
         peer_fsm.peer.handle_raft_ready(ctx, None);
         if !ctx.apply_msgs.msgs.is_empty() {
             peer_fsm.may_change_apply_worker();
@@ -147,9 +149,11 @@ impl PeerInbox {
             .min_by_key(|&(_, &val)| val.elapsed)
             .map(|(i, _)| i)
         {
-            statistics[min_index].region_id = region_id;
-            statistics[min_index].elapsed = elapsed;
-            statistics[min_index].msg_cnt = msg_len;
+            let stat = &mut statistics[min_index];
+            stat.region_id = region_id;
+            stat.elapsed = elapsed;
+            stat.tick_flag = tick_flag;
+            stat.msg_cnt = msg_len;
         }
     }
 }
@@ -171,6 +175,7 @@ pub(crate) struct InboxPeerStat {
     pub(crate) region_id: u64,
     pub(crate) elapsed: Duration,
     pub(crate) msg_cnt: usize,
+    pub(crate) tick_flag: u64,
 }
 
 pub(crate) struct RaftWorker {

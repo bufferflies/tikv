@@ -18,6 +18,7 @@ impl TickSchedule {
 
 pub(crate) struct Ticker {
     tick: u64,
+    pub(crate) tick_flag: u64,
     schedules: Vec<TickSchedule>,
 }
 
@@ -34,7 +35,11 @@ impl Ticker {
             TickSchedule::new(config.raft_log_gc_tick_interval.as_millis() / base_interval),
             TickSchedule::new(config.peer_stale_state_check_interval.as_millis() / base_interval),
         ];
-        Self { tick: 1, schedules }
+        Self {
+            tick: 1,
+            tick_flag: 0,
+            schedules,
+        }
     }
 
     pub(crate) fn new_store(config: &Config) -> Self {
@@ -44,11 +49,16 @@ impl Ticker {
             TickSchedule::new(config.update_safe_ts_interval.as_millis() / base_interval),
             TickSchedule::new(config.local_file_gc_tick_interval.as_millis() / base_interval),
         ];
-        Self { tick: 0, schedules }
+        Self {
+            tick: 0,
+            tick_flag: 0,
+            schedules,
+        }
     }
 
     pub(crate) fn tick_clock(&mut self) {
         self.tick += 1;
+        self.tick_flag = 0;
     }
 
     pub(crate) fn schedule(&mut self, tick: PeerTick) {
@@ -57,6 +67,7 @@ impl Ticker {
             sched.run_at = 0;
             return;
         }
+        self.tick_flag |= 1 << tick.idx;
         sched.run_at = self.tick + sched.interval;
     }
 

@@ -87,7 +87,7 @@ pub struct PeerFsm {
     // applying_cnt is increased by raft worker and decreased by apply worker.
     // When we need to change the worker idx, we need to make sure the applying_cnt is zero.
     pub(crate) applying_cnt: Arc<AtomicU64>,
-    ticker: Ticker,
+    pub(crate) ticker: Ticker,
 }
 
 impl PeerFsm {
