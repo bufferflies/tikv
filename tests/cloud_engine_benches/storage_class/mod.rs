@@ -24,7 +24,6 @@ fn main() {
 
     let node_id = alloc_node_id();
     let cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = false;
         conf.coprocessor.region_split_size = ReadableSize::gb(1); // To prevent split.
 
         // Use configs the same as prod env.

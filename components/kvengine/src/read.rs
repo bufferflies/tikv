@@ -2153,7 +2153,6 @@ mod tests {
             ops in arb_mem_table_ops(10),
             ranges in query_ranges(),
             enable_enc in any::<bool>(),
-            enable_inner_key_off in any::<bool>(),
         ) {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let _enter = runtime.enter();
@@ -2175,7 +2174,7 @@ mod tests {
 
             let (outer_start, outer_end) = ApiV2::get_txn_keyspace_range(KEYSPACE_ID);
             let range = ShardRange::new(&outer_start, &outer_end);
-            let inner_key_off = KEYSPACE_PREFIX_LEN * enable_inner_key_off as usize;
+            let inner_key_off = KEYSPACE_PREFIX_LEN;
             let opt = Arc::new(crate::options::Options::default());
 
             let inner_ranges = ranges.iter().map(|&(start, end)| {
@@ -2230,7 +2229,7 @@ mod tests {
                 meta_file_cache: new_meta_file_cache(1024),
             };
             let mut snap_pb = kvenginepb::Snapshot::default();
-            snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32 * enable_inner_key_off as u32);
+            snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32);
             let props = snap_pb.mut_properties();
             if let Some(enc_key) = &enc_key {
                 props.mut_keys().push(ENCRYPTION_KEY.to_string());

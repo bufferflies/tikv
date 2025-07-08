@@ -104,8 +104,6 @@ pub struct Config {
 
     pub apply_follower_pool_size: usize,
 
-    pub enable_inner_key_offset: bool,
-
     pub aux_worker_count: usize,
 
     pub main_worker_max_util: usize,
@@ -169,7 +167,6 @@ impl Default for Config {
             channel_capacity: 40960,
             apply_pool_size: 2,
             apply_follower_pool_size: 2,
-            enable_inner_key_offset: false,
             aux_worker_count: 0,
             // The CPU utilization determines how many aux worker we use.
             // When the main raft worker utilization exceeds this value, we use aux worker

@@ -58,7 +58,6 @@ fn test_build_vector_index() {
     let node_id = alloc_node_id();
     let (temp_dir, mut oss, dfs_config) = prepare_dfs("test_build_vector_index");
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;
@@ -376,7 +375,6 @@ fn test_read_distance_from_vector_index_and_table() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;
@@ -654,7 +652,6 @@ fn test_read_distance_from_vector_index() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;

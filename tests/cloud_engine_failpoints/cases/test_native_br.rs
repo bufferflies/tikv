@@ -68,7 +68,6 @@ fn test_backup_on_scaling_up() {
     let mut cluster = ServerCluster::new(nodes.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_config.clone();
         conf.rfengine.lightweight_backup = true;
-        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
@@ -240,7 +239,6 @@ fn test_restore_on_disk_full() {
     let mut cluster = ServerCluster::new(nodes.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_config.clone();
         conf.rfengine.lightweight_backup = true;
-        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
@@ -335,7 +333,6 @@ fn test_native_br_service() {
     let mut cluster = ServerClusterBuilder::new(alloc_node_id_vec(3), |_, conf| {
         conf.dfs = dfs_config.clone();
         conf.rfengine.lightweight_backup = true;
-        conf.enable_inner_key_offset = true;
     })
     .pd(pd_wrapper)
     .build();
@@ -473,7 +470,6 @@ fn test_backup_pessimistic_lock() {
     let mut cluster = ServerCluster::new(nodes.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_config.clone();
         conf.rfengine.lightweight_backup = true;
-        conf.enable_inner_key_offset = true;
         conf.raft_store.allow_remove_leader = true;
     });
     cluster.wait_region_replicated_ext(&[], 2, true);
@@ -652,7 +648,6 @@ fn test_check_backup_ts(#[case] write_method: TxnWriteMethod) {
         conf.dfs = dfs_config.clone();
         conf.security = security_config.clone();
         conf.rfengine.lightweight_backup = true;
-        conf.enable_inner_key_offset = true;
         conf.storage.check_backup_ts = check_backup_ts;
     })
     .pd(pd_wrapper)

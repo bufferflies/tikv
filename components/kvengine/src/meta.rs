@@ -202,21 +202,19 @@ impl ShardMeta {
         end: &[u8],
         props: &pb::Properties,
         parent: Box<ShardMeta>,
-        enable_inner_key_offset: bool,
     ) -> Self {
-        let (range, inner_key_off) =
-            if enable_inner_key_offset && is_whole_keyspace_range(start, end) {
-                (ShardRange::new(start, end), KEYSPACE_PREFIX_LEN)
-            } else {
-                debug!(
-                    "engine new_split";
-                    "shard_id" => id,
-                    "start_key" => format!("{:?}", start),
-                    "end_key" => format!("{:?}", end),
-                    "inner_key_off" => parent.inner_key_off
-                );
-                (ShardRange::new(start, end), parent.inner_key_off)
-            };
+        let (range, inner_key_off) = if is_whole_keyspace_range(start, end) {
+            (ShardRange::new(start, end), KEYSPACE_PREFIX_LEN)
+        } else {
+            debug!(
+                "engine new_split";
+                "shard_id" => id,
+                "start_key" => format!("{:?}", start),
+                "end_key" => format!("{:?}", end),
+                "inner_key_off" => parent.inner_key_off
+            );
+            (ShardRange::new(start, end), parent.inner_key_off)
+        };
         Self {
             id,
             ver,
@@ -925,7 +923,6 @@ impl ShardMeta {
         split: &kvenginepb::Split,
         sequence: u64,
         initial_seq: u64,
-        enable_inner_key_offset: bool,
     ) -> Vec<ShardMeta> {
         let old = self;
         let old_storage_class = old.get_property(STORAGE_CLASS_KEY);
@@ -948,7 +945,6 @@ impl ShardMeta {
                 end_key,
                 new_shard,
                 Box::new(old.clone()),
-                enable_inner_key_offset,
             );
             meta.engine_id = self.engine_id;
             if id == old.id {
@@ -1991,22 +1987,10 @@ mod tests {
 
     #[test]
     fn test_table_overlap() {
-        test_table_overlap_helper(false);
-        test_table_overlap_helper(true);
-    }
-
-    fn test_table_overlap_helper(enable_inner_key_off: bool) {
-        let (range, inner_key_off) = if enable_inner_key_off {
-            (
-                ShardRange::new(&[b'x', 2, 3, 4, 10], &[b'x', 2, 3, 4, 20]),
-                4,
-            )
-        } else {
-            (
-                ShardRange::new(&[b'x', 2, 3, 4, 10], &[b'x', 2, 3, 4, 20]),
-                0,
-            )
-        };
+        let (range, inner_key_off) = (
+            ShardRange::new(&[b'x', 2, 3, 4, 10], &[b'x', 2, 3, 4, 20]),
+            4,
+        );
         let meta = ShardMeta {
             range,
             inner_key_off,

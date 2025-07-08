@@ -69,7 +69,6 @@ fn test_load_data() {
     let node_ids = alloc_node_id_vec(3);
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_conf.clone();
-        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
@@ -238,7 +237,6 @@ fn test_load_data_overlap() {
     let node_ids = alloc_node_id_vec(3);
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_conf.clone();
-        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();

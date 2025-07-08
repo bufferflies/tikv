@@ -257,9 +257,8 @@ impl TikvServer {
         let store_path = Path::new(&config.storage.data_dir).to_owned();
 
         // Initialize raftstore channels.
-        let mut rfstore_conf =
+        let rfstore_conf =
             rfstore::store::Config::from_old(&config.raft_store, &config.coprocessor);
-        rfstore_conf.enable_inner_key_offset = config.enable_inner_key_offset;
         let system = rfstore::store::RaftBatchSystem::new(&raw_engines, &rfstore_conf);
         let router = system.router();
 
@@ -689,9 +688,8 @@ impl TikvServer {
                 self.config.coprocessor.region_bucket_size,
             )
             .unwrap_or_else(|e| fatal!("failed to validate raftstore config {}", e));
-        let mut raftstore_conf =
+        let raftstore_conf =
             rfstore::store::Config::from_old(&self.config.raft_store, &self.config.coprocessor);
-        raftstore_conf.enable_inner_key_offset = self.config.enable_inner_key_offset;
         let raft_store = Arc::new(VersionTrack::new(raftstore_conf));
         let mut node = Node::new(
             self.system.take().unwrap(),
@@ -1064,7 +1062,6 @@ impl TikvServer {
         kv_opts.table_builder_options.flush_split_l0 = conf.kvengine.flush_split_l0;
         kv_opts.blob_table_build_options = conf.kvengine.blob_table_build_options;
         kv_opts.allow_fallback_local = conf.dfs.allow_fallback_local;
-        kv_opts.enable_inner_key_offset = conf.enable_inner_key_offset;
         kv_opts.update_inner_key_offset = conf.kvengine.update_inner_key_offset;
         kv_opts.max_del_range_delay = conf.kvengine.max_del_range_delay.into();
         kv_opts.compaction_request_version = conf.kvengine.compaction_request_version;

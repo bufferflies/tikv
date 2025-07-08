@@ -1401,7 +1401,7 @@ fn new_initial_cs(enable_inner_key_off: bool) -> pb::ChangeSet {
 
 fn new_test_options(
     path: impl AsRef<Path>,
-    enable_inner_key_off: bool,
+    _enable_inner_key_off: bool,
     block_size: usize,
 ) -> Options {
     let min_blob_size: u32 = match env::var("MIN_BLOB_SIZE") {
@@ -1427,7 +1427,6 @@ fn new_test_options(
     opts.num_compactors = 2;
     opts.blob_table_build_options.min_blob_size = min_blob_size;
     opts.max_del_range_delay = Duration::from_secs(1);
-    opts.enable_inner_key_offset = enable_inner_key_off;
     opts.read_columnar = true;
     opts
 }

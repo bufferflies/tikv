@@ -26,7 +26,6 @@ fn test_rfengine_recover_from_unhealthy() {
         conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(32);
         conf.rfengine.wal_sync_dir = "${data-dir}/raft-wal".to_string();
         conf.rfengine.lightweight_backup = true;
-        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();

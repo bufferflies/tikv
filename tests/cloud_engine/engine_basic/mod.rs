@@ -185,9 +185,7 @@ fn test_cloud_store_reverse_scan() {
 fn test_snap_marshal() {
     init_log_for_test();
     let node_id = alloc_node_id();
-    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
-    });
+    let mut cluster = ServerCluster::new(vec![node_id], |_, _| {});
     let mut client = cluster.new_client();
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key("x123".as_bytes()).unwrap_or_default();
     client.split_keyspace(keyspace_id);
@@ -285,9 +283,7 @@ fn test_apply_observer() {
 fn test_cloud_store_reset_range() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
-    let cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
-    });
+    let cluster = ServerCluster::new(vec![node_id], |_, _| {});
     let mut client = cluster.new_client();
 
     let keyspace_id =

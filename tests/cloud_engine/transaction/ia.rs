@@ -521,7 +521,6 @@ fn prepare_cluster(
     init_log_for_test();
     let node_ids = alloc_node_id_vec(3);
     let cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.rocksdb.writecf.write_buffer_size = ReadableSize(1024);
         conf.rocksdb.writecf.block_size = ReadableSize(256);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize(2048);

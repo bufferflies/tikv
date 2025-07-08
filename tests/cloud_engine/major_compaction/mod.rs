@@ -100,9 +100,7 @@ fn prepare_cluster() -> (ServerCluster, Vec<u16>) {
     for _ in 0..node_cnt {
         nodes.push(alloc_node_id());
     }
-    let cluster = ServerCluster::new(nodes.clone(), |_, conf| {
-        conf.enable_inner_key_offset = true;
-    });
+    let cluster = ServerCluster::new(nodes.clone(), |_, _| {});
     cluster.wait_region_replicated(&[], 3);
     cluster.get_pd_client().disable_default_operator();
     (cluster, nodes)

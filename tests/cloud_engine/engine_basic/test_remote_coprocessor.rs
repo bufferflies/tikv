@@ -2419,7 +2419,6 @@ impl<'a> DagTest<'a> {
         let pd = PdWrapper::new_test(1, &security_conf, None);
         let mut cluster = ServerClusterBuilder::new(vec![node_id], |_, conf| {
             conf.dfs = dfs_cfg.clone();
-            conf.enable_inner_key_offset = true;
             conf.security = security_conf.clone();
             conf.rocksdb.writecf.write_buffer_size = ReadableSize(MEM_TABLE_SIZE as u64);
             conf.rocksdb.writecf.block_size = ReadableSize(BLOCK_SIZE as u64);

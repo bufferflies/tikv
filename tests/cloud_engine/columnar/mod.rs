@@ -72,7 +72,6 @@ fn test_schema_file() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;
@@ -212,7 +211,6 @@ fn test_covert_row_to_columnar_with_ia() {
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_covert_row_to_columnar_with_ia");
 
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;
@@ -339,7 +337,6 @@ fn test_sst_and_columnar_with_ia() {
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_sst_and_columnar_with_ia");
 
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;
@@ -525,7 +522,6 @@ fn test_get_snapshot_from_leader_by_status_api() {
     let (_temp_dir, mut oss, dfs_config) =
         prepare_dfs("test_get_snapshot_from_leader_by_status_api");
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;
@@ -717,7 +713,6 @@ fn test_region_merge_with_columnar() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;
@@ -849,7 +844,6 @@ fn test_columnar_ia_file() {
     // prepare dfs
     let (temp_dir, mut oss, dfs_config) = prepare_dfs("test_columnar_ia_file");
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;
@@ -1009,7 +1003,6 @@ fn test_columnar_scan_with_filter() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
-        conf.enable_inner_key_offset = true;
         conf.kvengine
             .columnar_table_build_options
             .max_columnar_table_size = 1024;

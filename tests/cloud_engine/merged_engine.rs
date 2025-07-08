@@ -45,7 +45,6 @@ fn test_merged_engine_once() {
         conf.dfs = dfs_conf.clone();
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.target_file_size = ReadableSize::kb(256);
-        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();

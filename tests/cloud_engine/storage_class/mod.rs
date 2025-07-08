@@ -52,7 +52,6 @@ fn test_storage_class_with_schema_manager(#[case] partitioned: bool) {
     let security_config = new_security_config();
     let pd_wrapper = PdWrapper::new_test(1, &security_config, None);
     let mut cluster = ServerClusterBuilder::new(vec![node_id], |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = true;
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);
         conf.rocksdb.writecf.block_size = ReadableSize(512);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(2);
@@ -301,7 +300,6 @@ fn test_region_split_and_merge_with_storage_class(#[case] partitioned: bool) {
     let security_config = new_security_config();
     let pd_wrapper = PdWrapper::new_test(1, &security_config, None);
     let mut cluster = ServerClusterBuilder::new(vec![node_id], |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = true;
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);
         conf.rocksdb.writecf.block_size = ReadableSize(512);
         conf.rocksdb.writecf.target_file_size_base = ReadableSize::kb(2);

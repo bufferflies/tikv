@@ -71,9 +71,7 @@ impl Engine {
                 split.get_keys(),
                 i,
             );
-            let (range, inner_key_off) = if self.core.opts.enable_inner_key_offset
-                && is_whole_keyspace_range(start_key, end_key)
-            {
+            let (range, inner_key_off) = if is_whole_keyspace_range(start_key, end_key) {
                 (ShardRange::new(start_key, end_key), KEYSPACE_PREFIX_LEN)
             } else {
                 debug!(
