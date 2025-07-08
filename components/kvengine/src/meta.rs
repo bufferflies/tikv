@@ -677,14 +677,6 @@ impl ShardMeta {
             self.data_sequence = new_data_seq;
         }
         self.max_ts = std::cmp::max(self.max_ts, flush.max_ts);
-
-        if self
-            .properties
-            .get_inner_key_off_update_seq()
-            .is_some_and(|update_seq| update_seq <= self.data_sequence)
-        {
-            self.remove_inner_key_off_update_seq_property();
-        }
     }
 
     pub fn apply_initial_flush(&mut self, cs: &pb::ChangeSet) {
@@ -697,33 +689,12 @@ impl ShardMeta {
         new_meta.data_sequence = std::cmp::max(new_meta.data_sequence, self.data_sequence);
         new_meta.max_ts = std::cmp::max(new_meta.max_ts, self.max_ts);
 
-        if let Some(update_seq) = new_meta.properties.get_inner_key_off_update_seq() {
-            debug_assert!(
-                update_seq <= new_meta.data_sequence,
-                "{} meta {:?} cs {:?}",
-                self.tag(),
-                self,
-                cs
-            );
-            self.remove_inner_key_off_update_seq_property();
-        }
-
         info!("{} apply_initial_flush", self.tag();
             "prop" => ?new_meta.properties,
             "data_seq" => new_meta.data_sequence,
             "columnar_table_ids" => ?new_meta.columnar_table_ids,
             "max_ts" => new_meta.max_ts);
         *self = new_meta;
-    }
-
-    fn remove_inner_key_off_update_seq_property(&mut self) {
-        let prev = self.del_property(INNER_KEY_OFFSET_UPDATE_SEQ_KEY);
-        let update_seq = prev.map(|mut x| x.get_u64_le()).unwrap_or_default();
-        info!(
-            "{} remove inner key offset update seq property: {}",
-            self.tag(),
-            update_seq
-        );
     }
 
     fn apply_compaction(&mut self, comp: &pb::Compaction) {
@@ -762,19 +733,6 @@ impl ShardMeta {
             self.add_file(create.get_id(), FileMeta::from_blob_table(create));
         }
         self.del_property(MANUAL_MAJOR_COMPACTION);
-
-        if comp.update_inner_key_offset && self.range.keyspace_id > 0 && self.inner_key_off == 0 {
-            self.inner_key_off = KEYSPACE_PREFIX_LEN;
-            debug_assert!(
-                self.properties.get_inner_key_off_update_seq().is_none(),
-                "{} meta {:?} cs {:?}",
-                self.tag(),
-                self,
-                cs
-            );
-            self.properties.set_inner_key_off_update_seq(cs.sequence);
-            info!("{} update inner key offset", self.tag(); "seq" => cs.sequence);
-        }
     }
 
     fn is_duplicated_table_change(&self, tc: &pb::TableChange) -> bool {

@@ -405,7 +405,6 @@ fn prepare_cluster(
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.flush_split_l0 = true;
         conf.kvengine.per_keyspace_configs = per_keyspace_configs.clone();
-        conf.kvengine.update_inner_key_offset = true;
         if enable_ia {
             conf.kvengine.ia = IaConfig {
                 mem_cap: IA_MEM_CAP_DEF.into(),

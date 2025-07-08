@@ -1562,10 +1562,6 @@ impl Engine {
         total_size += data.l0_tbls.iter().map(|t| t.size()).sum::<u64>();
         total_size += data.blob_tbl_map.values().map(|t| t.size()).sum::<u64>();
 
-        let update_inner_key_offset =
-            self.opts.update_inner_key_offset && data.prepend_keyspace_id().is_some();
-        total_size += update_inner_key_offset as u64;
-
         if total_size == 0 {
             info!(
                 "{} trigger_major_compaction skipped, no tables to compact", shard.tag();
@@ -1612,11 +1608,7 @@ impl Engine {
             req.file_ids.len(),
             total_size,
         );
-        Some(self.comp_client.compact(req).await.map(|mut cs| {
-            let major_compaction = cs.mut_major_compaction();
-            major_compaction.set_update_inner_key_offset(update_inner_key_offset);
-            cs
-        }))
+        Some(self.comp_client.compact(req).await)
     }
 
     pub(crate) async fn trigger_remove_columnar_compaction(

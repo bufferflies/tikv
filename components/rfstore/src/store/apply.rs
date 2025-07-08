@@ -745,15 +745,6 @@ impl Applier {
                         if is_property_change_set(&cs) {
                             wb.set_property(cs.get_property_key(), cs.get_property_value());
                         }
-                        if cs.has_major_compaction()
-                            && cs.get_major_compaction().get_update_inner_key_offset()
-                        {
-                            info!("{} exec custom log: update inner key offset", self.tag(); "log_index" => log_index);
-                            wb.set_update_inner_key_offset();
-                            // When inner key offset is updated, the size of mem table will be
-                            // changed. So we need to clear the cached mem table state.
-                            self.clear_mem_table_state();
-                        }
                     } else {
                         warn!("{} exec custom log: shard version not match", self.tag();
                             "cs.ver" => cs.shard_ver, "log_index" => log_index);
@@ -1581,10 +1572,6 @@ impl Applier {
         })
     }
 
-    fn clear_mem_table_state(&mut self) {
-        self.mem_table_state.take();
-    }
-
     fn maybe_propose_switch_mem_table(&mut self, ctx: &mut ApplyContext, now: Instant) {
         if !self.is_leader() {
             return;
@@ -1939,7 +1926,6 @@ pub(crate) fn is_property_change_set(cs: &kvenginepb::ChangeSet) -> bool {
 // Used in recover. These change sets have side effect of switch mem-table.
 pub(crate) fn is_change_set_affect_mem_table(cs: &kvenginepb::ChangeSet) -> bool {
     is_property_change_set(cs)
-        || (cs.has_major_compaction() && cs.get_major_compaction().get_update_inner_key_offset())
 }
 
 struct MemTableState {

@@ -377,7 +377,6 @@ pub(crate) fn generate_update_conf_fn<'a>(
 
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
-        conf.kvengine.update_inner_key_offset = true;
 
         conf.kvengine.build_columnar = switches.columnar_switch_on;
         conf.kvengine
