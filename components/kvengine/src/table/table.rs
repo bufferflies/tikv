@@ -357,8 +357,9 @@ impl Value {
     }
 
     pub(crate) fn new_tombstone(version: u64) -> Self {
+        static EMPTY_BUF: &[u8] = &[];
         Self {
-            ptr: ptr::null(),
+            ptr: EMPTY_BUF.as_ptr(),
             meta: BIT_DELETE,
             user_meta_len: 0,
             len: 0,
