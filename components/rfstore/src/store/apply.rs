@@ -2079,6 +2079,9 @@ impl Applier {
             ApplyMsg::ResumeTxnFile(commit_index) => {
                 self.handle_resume_txn_file(ctx, commit_index);
             }
+            ApplyMsg::TriggerRefreshShardStates => {
+                self.trigger_refresh_shard_states(ctx);
+            }
             ApplyMsg::Change {
                 cmd,
                 region_epoch,
@@ -2128,6 +2131,15 @@ impl Applier {
             }
             _ => {}
         }
+    }
+
+    fn trigger_refresh_shard_states(&self, ctx: &mut ApplyContext) {
+        info!("{} apply trigger_refresh_shard_states", self.tag());
+        let engine = &ctx.engine;
+        let Some(shard) = engine.get_shard(self.region_id()) else {
+            return;
+        };
+        engine.refresh_shard_states(&shard);
     }
 
     /// Sequence of applying:
@@ -2861,8 +2873,8 @@ fn to_request(
         EXTRA_CF => {
             // Maybe remove it after we figured out why.
             if entry.key(buf).len() < 8 {
-                warn!("there is a key in CF_EXTRA without ts, will skip it."; 
-                    "key" => %log_wrappers::Value::key(&key), 
+                warn!("there is a key in CF_EXTRA without ts, will skip it.";
+                    "key" => %log_wrappers::Value::key(&key),
                     "raw_key" => log_wrappers::Value::key(entry.key(buf)));
                 return;
             }

@@ -980,7 +980,7 @@ impl EngineCore {
         }
     }
 
-    pub(crate) fn refresh_shard_states(&self, shard: &Shard) {
+    pub fn refresh_shard_states(&self, shard: &Shard) {
         shard.refresh_states();
 
         fail::fail_point!("before_engine_trigger_compact", |_| ());

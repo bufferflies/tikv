@@ -360,6 +360,7 @@ impl<'a> PeerMsgHandler<'a> {
                 callback,
             } => self.on_check_leader(shard_ver, callback),
             CasualMessage::ClearColumnar => self.on_clear_columnar(),
+            CasualMessage::TriggerRefreshShardStates => self.on_trigger_refresh_shard_states(),
         }
     }
 
@@ -1879,6 +1880,16 @@ impl<'a> PeerMsgHandler<'a> {
             }
         }));
         self.propose_raft_command(cmd, cb, None);
+    }
+
+    fn on_trigger_refresh_shard_states(&mut self) {
+        if !self.peer.is_leader() {
+            return;
+        }
+        self.ctx
+            .apply_msgs
+            .msgs
+            .push(ApplyMsg::TriggerRefreshShardStates);
     }
 
     fn on_pd_heartbeat_tick(&mut self) {

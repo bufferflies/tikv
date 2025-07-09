@@ -908,7 +908,20 @@ impl PdRunner {
             mgr.notify_total_data_size(kv_engine_stats.ia.data_size);
         }
         for &id_ver in &kv_engine_stats.ready_destroy_range_shards {
-            store_info.kv_engine.trigger_compact(id_ver);
+            if let Ok(shard) = store_info
+                .kv_engine
+                .get_shard_with_ver(id_ver.id, id_ver.ver)
+            {
+                // If the shard is not active, no need to trigger compact.
+                if !shard.is_active() {
+                    continue;
+                }
+                // Send trigger refresh states to peer.
+                self.router.send(
+                    shard.id,
+                    PeerMsg::CasualMessage(CasualMessage::TriggerRefreshShardStates),
+                );
+            }
         }
 
         for cf in 0..kv_engine_stats.cf_total_sizes.len() {
