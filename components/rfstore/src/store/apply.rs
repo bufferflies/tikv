@@ -1850,6 +1850,9 @@ impl Applier {
             ApplyMsg::ResumeTxnFile(commit_index) => {
                 self.handle_resume_txn_file(ctx, commit_index);
             }
+            ApplyMsg::TriggerRefreshShardStates => {
+                self.trigger_refresh_shard_states(ctx);
+            }
         }
     }
 
@@ -1892,6 +1895,15 @@ impl Applier {
             }
             _ => {}
         }
+    }
+
+    fn trigger_refresh_shard_states(&self, ctx: &mut ApplyContext) {
+        info!("{} apply trigger_refresh_shard_states", self.tag());
+        let engine = &ctx.engine;
+        let Some(shard) = engine.get_shard(self.region_id()) else {
+            return;
+        };
+        engine.refresh_shard_states(&shard);
     }
 
     /// Sequence of applying:

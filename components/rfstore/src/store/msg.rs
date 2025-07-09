@@ -133,6 +133,7 @@ pub(crate) enum ApplyMsg {
         encryption_key: Option<EncryptionKey>,
     },
     ResumeTxnFile(u64 /* commit index */),
+    TriggerRefreshShardStates,
 }
 
 pub enum StoreMsg {
@@ -499,6 +500,7 @@ pub enum CasualMessage {
         callback: Callback,
     },
     ClearColumnar,
+    TriggerRefreshShardStates,
 }
 
 impl fmt::Debug for CasualMessage {
@@ -545,6 +547,9 @@ impl fmt::Debug for CasualMessage {
             }
             CasualMessage::ClearColumnar => {
                 write!(fmt, "clear columnar",)
+            }
+            CasualMessage::TriggerRefreshShardStates => {
+                write!(fmt, "trigger refresh shard states")
             }
         }
     }
