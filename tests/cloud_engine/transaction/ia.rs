@@ -579,7 +579,7 @@ fn prepare_cluster(
         .interval_dur(Duration::from_millis(500))
         .must_wait(
             || {
-                let Some(shard) = cluster.get_active_shard_by_key(&table_key) else {
+                let Some(shard) = cluster.get_latest_shard_by_key(&table_key) else {
                     return false;
                 };
                 let stats = shard.get_stats();
@@ -600,7 +600,7 @@ fn prepare_cluster(
             },
             || {
                 let stats = cluster
-                    .get_active_shard_by_key(&table_key)
+                    .get_latest_shard_by_key(&table_key)
                     .map(|x| x.get_stats());
                 format!("wait for compacted & async timeout: {:?}", stats)
             },
@@ -619,7 +619,7 @@ fn prepare_cluster(
     info!(
         "shard: {:?}",
         cluster
-            .get_active_shard_by_key(&table_key)
+            .get_latest_shard_by_key(&table_key)
             .map(|x| x.get_stats())
     );
     (cluster, keyspace_id, table_id)

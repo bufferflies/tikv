@@ -327,16 +327,16 @@ fn test_txn_client() {
                 .unwrap();
             ref_store.destroy_range(&key100, &key200);
 
-            let snap0 = cluster.get_active_snap(&key0).unwrap();
+            let snap0 = cluster.get_latest_snap(&key0).unwrap();
             assert!(snap0.has_data_in_prefix(prefix0), "snap: {:?}", snap0);
 
-            let snap50 = cluster.get_active_snap(&i_to_key(50)).unwrap();
+            let snap50 = cluster.get_latest_snap(&i_to_key(50)).unwrap();
             assert!(snap50.has_data_in_prefix(prefix0));
             assert!(!snap50.has_data_in_prefix(prefix1));
 
-            let snap150 = cluster.get_active_snap(&i_to_key(150)).unwrap();
+            let snap150 = cluster.get_latest_snap(&i_to_key(150)).unwrap();
             assert!(!snap150.has_data_in_prefix(prefix1));
-            let snap200 = cluster.get_active_snap(&i_to_key(200)).unwrap();
+            let snap200 = cluster.get_latest_snap(&i_to_key(200)).unwrap();
             assert!(snap200.has_data_in_prefix(prefix2));
 
             // Wait for del prefixes finished.

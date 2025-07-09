@@ -348,33 +348,43 @@ impl ServerCluster {
         engine.get_snap_access(region.id).unwrap()
     }
 
-    /// Return `None` when there is no active shard.
-    pub fn get_active_shard(&self, shard_id: u64) -> Option<Arc<kvengine::Shard>> {
-        self.servers.values().find_map(|server| {
-            server
-                .get_kv_engine()
-                .get_shard(shard_id)
-                .and_then(|shard| shard.is_active().then_some(shard))
-        })
+    pub fn get_latest_shard(&self, shard_id: u64) -> Option<Arc<kvengine::Shard>> {
+        let mut shards = self
+            .servers
+            .values()
+            .filter_map(|server| server.get_kv_engine().get_shard(shard_id));
+        let mut target = shards.next()?;
+        for shard in shards {
+            if Self::compare_shard(&shard, &target).is_gt() {
+                target = shard;
+            }
+        }
+        Some(target)
     }
 
-    pub fn get_active_shard_by_key(&self, key: &[u8]) -> Option<Arc<kvengine::Shard>> {
+    fn compare_shard(m: &kvengine::Shard, n: &kvengine::Shard) -> std::cmp::Ordering {
+        assert_eq!(m.id, n.id);
+        m.ver
+            .cmp(&n.ver)
+            .then_with(|| m.get_write_sequence().cmp(&n.get_write_sequence()))
+            .then_with(|| m.get_meta_sequence().cmp(&n.get_meta_sequence()))
+            .then_with(|| m.is_active().cmp(&n.is_active()))
+    }
+
+    pub fn get_latest_shard_by_key(&self, key: &[u8]) -> Option<Arc<kvengine::Shard>> {
         let region = self
             .pd_client
             .get_region_with_retry(&encode_bytes(key), Duration::from_secs(10))
             .unwrap();
-        self.get_active_shard(region.id)
+        self.get_latest_shard(region.id)
     }
 
-    /// Get snap of active shard.
-    ///
-    /// Return `None` when there is no active shard.
-    pub fn get_active_snap(&self, key: &[u8]) -> Option<kvengine::SnapAccess> {
+    pub fn get_latest_snap(&self, key: &[u8]) -> Option<kvengine::SnapAccess> {
         let region = self
             .pd_client
             .get_region_with_retry(&encode_bytes(key), Duration::from_secs(10))
             .unwrap();
-        let snap = self.get_active_shard(region.id)?.new_snap_access();
+        let snap = self.get_latest_shard(region.id)?.new_snap_access();
         Some(snap)
     }
 

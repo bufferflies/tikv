@@ -356,6 +356,9 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.coprocessor.region_split_size = REGION_SIZE;
         conf.coprocessor.region_bucket_size = REGION_BUCKET_SIZE;
 
+        // conf.raft_store.raft_base_tick_interval is `50ms`, see `new_test_config`.
+        conf.raft_store.raft_election_timeout_ticks = 20;
+        conf.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(800);
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(5);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(15);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(25);

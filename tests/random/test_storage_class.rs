@@ -192,7 +192,7 @@ pub(crate) fn check_storage_class(
                 let mut shard_id_ver: Option<IdVer> = None;
                 let ok = TryWaiter::timeout(5).interval_dur(Duration::from_millis(500)).try_wait(
                     || {
-                        let Some(shard) = cluster.get_active_shard_by_key(&key) else {
+                        let Some(shard) = cluster.get_latest_shard_by_key(&key) else {
                             return false;
                         };
                         next_key = Some(shard.outer_end.to_vec());
@@ -232,7 +232,7 @@ pub(crate) fn check_storage_class(
                 if !ok {
                     let snap = shard_id_ver.and_then(|id_ver| {
                         cluster
-                            .get_active_shard(id_ver.id)
+                            .get_latest_shard(id_ver.id)
                             .map(|x| x.new_snap_access().display())
                     });
                     let err_msg = format!(
