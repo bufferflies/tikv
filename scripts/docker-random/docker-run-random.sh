@@ -139,6 +139,9 @@ while [[ $# -gt 0 ]]; do
     --enable-kv-engine-meta-diff)
         RUN_ARGS+=("--enable-kv-engine-meta-diff")
         ;;
+	--enable-tiflash-write-node)
+		RUN_ARGS+=("--enable-tiflash-write-node")
+		;;
 	--help)
 		show_help
 		exit 0

@@ -38,6 +38,7 @@ UPGRADE_TEST_DURATION="60s"
 DISABLE_IA_FOR_OLD_VERSION=0
 
 ENABLE_KV_ENGINE_META_DIFF=0
+ENABLE_TIFLASH_WRITE_NODE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -115,6 +116,9 @@ while [ $# -gt 0 ]; do
     --enable-kv-engine-meta-diff)
         ENABLE_KV_ENGINE_META_DIFF=1
         ;;
+    --enable-tiflash-write-node)
+        ENABLE_TIFLASH_WRITE_NODE=1
+        ;;
     *)
         echo "Usage: $0 DOCKER_ID TESTNAME [--keep-tmp-on-error] [--log-path LOG_PATH] [--memory-profile]"
         exit 1
@@ -157,6 +161,7 @@ export TEST_DUR_AFTER_UPGRADE="$UPGRADE_TEST_DURATION"
 export TEST_DUR_AFTER_DOWNGRADE="$UPGRADE_TEST_DURATION"
 export DISABLE_IA_FOR_OLD_VERSION
 export ENABLE_KV_ENGINE_META_DIFF
+export ENABLE_TIFLASH_WRITE_NODE
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs
 for i in $(seq -w 1 100000); do

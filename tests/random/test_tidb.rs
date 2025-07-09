@@ -110,6 +110,7 @@ pub(crate) const UNIQUE_WORKLOAD_KEYSPACE: u32 = 1; // Keyspace starts from 1.
 
 pub(crate) const COLUMNAR_WORKLOAD_SWITCH_ENV_KEY: &str = "COLUMNAR_WORKLOAD";
 pub(crate) const COLUMNAR_WORKLOAD_KEYSPACE: u32 = 1;
+pub(crate) const ENABLE_TIFLASH_WRITE_NODE_ENV_KEY: &str = "ENABLE_TIFLASH_WRITE_NODE";
 
 pub(crate) const VERIFY_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -445,6 +446,7 @@ pub(crate) fn start_components(
     let start_tidb = {
         let tc = tc.clone();
         let columnar_switch_on = switches.columnar_switch_on;
+        let enable_tiflash_write_node = switches.enable_tiflash_write_node;
         runtime.spawn(async move {
             tc.start_tidb(
                 INITIAL_KEYSPACE_COUNT as u16,
@@ -456,7 +458,8 @@ pub(crate) fn start_components(
                     txn_file_min_mutation_size: Some(TXN_FILE_MIN_SIZE as u64),
                     gc_interval: TIDB_GC_INTERVAL.to_owned(),
                     gc_lifetime: TIDB_GC_LIFETIME.to_owned(),
-                    tiflash_compute_mode: columnar_switch_on,
+                    tiflash_disaggregated_mode: columnar_switch_on,
+                    enable_tiflash_write_node,
                 },
             )
             .await
@@ -465,6 +468,7 @@ pub(crate) fn start_components(
     let start_tiflash = {
         let tc = tc.clone();
         let columnar_switch_on = switches.columnar_switch_on;
+        let enable_tiflash_write_node = switches.enable_tiflash_write_node;
         let dfs_config = dfs_config.clone();
         runtime.spawn(async move {
             tc.start_tiflash(
@@ -472,6 +476,7 @@ pub(crate) fn start_components(
                 &dfs_config,
                 TIFLASH_HEALTHY_TIMEOUT,
                 columnar_switch_on,
+                enable_tiflash_write_node,
             )
             .await
         })
@@ -967,6 +972,7 @@ pub(crate) struct Switches {
     pub vector_common_handle: bool,
     pub enable_kv_engine_meta_diff: bool,
     pub txn_check_backup_ts: bool,
+    pub enable_tiflash_write_node: bool,
 }
 
 impl Switches {
@@ -991,6 +997,7 @@ impl Switches {
         let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
         let enable_kv_engine_meta_diff = env_switch(ENABLE_KV_ENGINE_META_DIFF_ENV_KEY);
         let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.5);
+        let enable_tiflash_write_node = env_switch(ENABLE_TIFLASH_WRITE_NODE_ENV_KEY);
 
         Self {
             remote_cop_min_block_size,
@@ -1007,6 +1014,7 @@ impl Switches {
             vector_common_handle: rng.gen_bool(0.8),
             enable_kv_engine_meta_diff,
             txn_check_backup_ts,
+            enable_tiflash_write_node,
         }
     }
 }

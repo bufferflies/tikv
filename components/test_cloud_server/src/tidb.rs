@@ -400,9 +400,22 @@ impl TidbServers {
         let slow_log_file = self.data_path.join(format!("tidb-slow-{idx}.log"));
 
         let config_file = self.data_path.join(format!("tidb-{idx}.toml"));
+        let columnar_store_type = if options.tiflash_disaggregated_mode {
+            if options.enable_tiflash_write_node {
+                "both".to_string()
+            } else {
+                "columnar".to_string()
+            }
+        } else {
+            "tiflash".to_string()
+        };
         let mut config = TidbConfig {
             keyspace_name: keyspace_name_by_idx(idx),
             enable_safe_point_v2: true,
+            cse: CseConfig {
+                columnar_store_type,
+                enable_region_client: false,
+            },
             ..Default::default()
         };
         if let Some(txn_file_min_mutation_size) = options.txn_file_min_mutation_size {
@@ -411,7 +424,7 @@ impl TidbServers {
             config.tikv_client.txn_chunk_max_size = options.txn_chunk_max_size;
             config.tikv_client.txn_file_min_mutation_size = txn_file_min_mutation_size;
         }
-        if options.tiflash_compute_mode {
+        if options.tiflash_disaggregated_mode {
             config.disaggregated_tiflash = true;
             config.use_autoscaler = false;
             let tiflash_replicas_config = TiFlashReplicas {
@@ -593,7 +606,8 @@ pub struct StartTidbOptions {
     pub txn_file_min_mutation_size: Option<u64>,
     pub gc_interval: String,
     pub gc_lifetime: String,
-    pub tiflash_compute_mode: bool,
+    pub tiflash_disaggregated_mode: bool,
+    pub enable_tiflash_write_node: bool,
 }
 
 pub struct TidbClusterCore {
@@ -634,31 +648,34 @@ impl TidbClusterCore {
         count: u16,
         dfs: &DFSConfig,
         timeout: Duration,
-        tiflash_compute_mode: bool,
+        tiflash_disaggregated_mode: bool,
+        enable_tiflash_write_node: bool,
     ) {
         let start_time = Instant::now_coarse();
-        if tiflash_compute_mode {
+        if tiflash_disaggregated_mode && enable_tiflash_write_node {
             self.tiflash.start_minio().await;
         }
         let pd_endpoints = self.pd.endpoints();
         for idx in 0..count {
-            if !tiflash_compute_mode {
+            if !tiflash_disaggregated_mode {
                 self.tiflash
                     .start(idx, dfs.clone(), &pd_endpoints, TiFlashRole::Legacy);
-            } else {
+            } else if enable_tiflash_write_node {
                 self.tiflash
                     .start(idx, dfs.clone(), &pd_endpoints, TiFlashRole::Write);
             }
         }
         // Start 1 compute node for compute mode.
-        if tiflash_compute_mode {
+        if tiflash_disaggregated_mode {
             self.tiflash
                 .start(count, dfs.clone(), &pd_endpoints, TiFlashRole::Compute);
         }
 
         self.tiflash.must_all_healthy(timeout).await;
         // Note: TiFlash compute node may not register self to pd.
-        self.wait_tiflash_up(count, timeout);
+        if !tiflash_disaggregated_mode || enable_tiflash_write_node {
+            self.wait_tiflash_up(count, timeout);
+        }
         info!("start TiFlash success"; "takes" => ?start_time.saturating_elapsed());
     }
 
@@ -776,12 +793,20 @@ struct TidbConfig {
     tikv_client: TikvClientConfig,
     tiflash_replicas: Option<TiFlashReplicas>,
     security: TidbConfigSecurity,
+    cse: CseConfig,
 }
 
 #[derive(Default, Serialize)]
 #[serde(rename_all = "kebab-case")]
 struct TidbConfigSecurity {
     enable_sem: bool, // Disable "sem" to enable async commit & 1pc.
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct CseConfig {
+    columnar_store_type: String,
+    enable_region_client: bool,
 }
 
 #[derive(Serialize)]
