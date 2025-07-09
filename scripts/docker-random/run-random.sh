@@ -174,6 +174,9 @@ for i in $(seq -w 1 100000); do
 
     LOG="$LOG_PATH"/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID".log
     CLUSTER_LOGS="$LOG_PATH"/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID"_tc
+    mkdir -p "$CLUSTER_LOGS"
+    # Random test get logs file path from env variable "LOG_FILE"
+    export LOG_FILE="$CLUSTER_LOGS"/tikv.log
     /random/random-bin test_random_"$TESTNAME" --nocapture >"$LOG" 2>&1 || true
 
     if [ "$TESTNAME" = "with_tidb" ] || [ "$TESTNAME" = "upgrade" ]; then
@@ -190,20 +193,15 @@ for i in $(seq -w 1 100000); do
     if grep -q 'TEST SUCCEED' "$LOG"; then
         grep 'TEST SUCCEED' "$LOG"
         rm "$LOG"
+        rm -rf "$CLUSTER_LOGS" || true
         rm -rf "$TMPDIR" || true
     else
-        TIKV_LOG="$TMPDIR"/tikv.log
-        if [ -f "$TIKV_LOG" ]; then
-            sync -d "$TIKV_LOG"
-            grep -E 'CRIT|FATAL|panicked' "$TIKV_LOG" >>"$LOG" || true
-            mkdir -p "$CLUSTER_LOGS"
-            cp "$TMPDIR"/tikv*.log "$CLUSTER_LOGS" || true
-        fi
+        sync -d "$LOG_FILE"
+        grep -E 'CRIT|FATAL|panicked' "$LOG_FILE" >>"$LOG" || true
 
         # For logs of TiDB cluster components
         if compgen -G "$TMPDIR/tc*" >/dev/null; then
             chmod +r "$TMPDIR"/tc*/*.log
-            mkdir -p "$CLUSTER_LOGS"
             cp "$TMPDIR"/tc*/*.log "$TMPDIR"/tc*/*.toml "$CLUSTER_LOGS" || true
         fi
 

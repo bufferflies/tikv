@@ -3,6 +3,7 @@
 set -euo pipefail
 
 WORKDIR="/data/nvme1n1/$LOGNAME/random"
+LOGDIR="/data/nvme0n1/$LOGNAME/random"
 CONCURRENCY=4
 CPU=4
 MEMORY=8g
@@ -16,6 +17,7 @@ show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo "OPTIONS:"
     echo "  --work-dir DIR                  Set the work directory"
+    echo "  --log-dir DIR                   Set the log directory"
     echo "  --concurrency NUM               Set the concurrency"
     echo "  --cpu NUM                       Set the CPU"
     echo "  --memory NUM                    Set the memory"
@@ -30,6 +32,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
     --work-dir)
         WORKDIR="$2"
+        shift
+        ;;
+    --log-dir)
+        LOGDIR="$2"
         shift
         ;;
     --concurrency)
@@ -90,7 +96,7 @@ fi
 ./make-bin.sh "$MAKE_BIN_ARGS"
 
 mkdir -p "$WORKDIR"
-
+mkdir -p "$LOGDIR"
 export CONCURRENCY
 export CPU
 export MEMORY
@@ -100,7 +106,7 @@ RUN_ARGS=(
     "--test" "upgrade"
     "--tikv-version" "$UPGRADE_FROM"
     "--path-with-suffix"
-    "--log-path" "$WORKDIR/upgrade-logs"
+    "--log-path" "$LOGDIR/upgrade-logs"
     "--tmp-path" "$WORKDIR/upgrade-tmp"
 )
 
