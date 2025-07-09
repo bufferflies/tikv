@@ -175,6 +175,18 @@ for i in $(seq -w 1 100000); do
     LOG="$LOG_PATH"/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID".log
     CLUSTER_LOGS="$LOG_PATH"/logs/random_"$TESTNAME"_"$i"_"$DOCKER_ID"_tc
     /random/random-bin test_random_"$TESTNAME" --nocapture >"$LOG" 2>&1 || true
+
+    if [ "$TESTNAME" = "with_tidb" ] || [ "$TESTNAME" = "upgrade" ]; then
+        pkill -9 -f "/tidb-server" || true
+        pkill -9 -f "/pd-server" || true
+        pkill -9 -f "/tikv-server" || true
+        pkill -9 -f "/tikv-worker" || true
+        pkill -9 -f "/tiflash/tiflash" || true
+        pkill -9 -f "/go-tpc" || true
+        pkill -9 -f "minio" || true
+    fi
+
+    sync -d "$LOG"
     if grep -q 'TEST SUCCEED' "$LOG"; then
         grep 'TEST SUCCEED' "$LOG"
         rm "$LOG"
@@ -182,6 +194,7 @@ for i in $(seq -w 1 100000); do
     else
         TIKV_LOG="$TMPDIR"/tikv.log
         if [ -f "$TIKV_LOG" ]; then
+            sync -d "$TIKV_LOG"
             grep -E 'CRIT|FATAL|panicked' "$TIKV_LOG" >>"$LOG" || true
             mkdir -p "$CLUSTER_LOGS"
             cp "$TMPDIR"/tikv*.log "$CLUSTER_LOGS" || true
@@ -198,15 +211,5 @@ for i in $(seq -w 1 100000); do
         if [ "$KEEP_TMP_ON_ERROR" -ne 1 ]; then
             rm -rf "$TMPDIR" || true
         fi
-    fi
-
-    if [ "$TESTNAME" = "with_tidb" ] || [ "$TESTNAME" = "upgrade" ]; then
-        pkill -9 -f "/tidb-server" || true
-        pkill -9 -f "/pd-server" || true
-        pkill -9 -f "/tikv-server" || true
-        pkill -9 -f "/tikv-worker" || true
-        pkill -9 -f "/tiflash/tiflash" || true
-        pkill -9 -f "/go-tpc" || true
-        pkill -9 -f "minio" || true
     fi
 done
