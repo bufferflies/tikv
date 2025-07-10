@@ -4097,7 +4097,7 @@ async fn transform_for_columnar(
     ctx: &CompactionCtx,
     tbls: &Vec<SsTable>,
     blob_tbls: Option<Arc<HashMap<u64, BlobTable>>>,
-    overlap_tables: Vec<i64>,
+    table_ids: Vec<i64>,
     schema_file: &SchemaFile,
     target_lvl: u32,
     snap_version: Option<u64>,
@@ -4115,7 +4115,7 @@ async fn transform_for_columnar(
         ctx.encryption_key.clone(),
     );
     let mut cnt = 0;
-    for table_id in overlap_tables {
+    for table_id in table_ids {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for tbl in tbls {
@@ -4193,16 +4193,8 @@ async fn columnar_major_compact_for_add_tables(
     let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
     l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
     let mut tbls = vec![];
-    let mut smallest: Option<Vec<u8>> = None;
-    let mut biggest: Option<Vec<u8>> = None;
     for l0_tbl in &l0_tbls {
         if let Some(tbl) = l0_tbl.get_cf(WRITE_CF) {
-            if smallest.is_none() || smallest.as_ref().unwrap().deref() > tbl.smallest().deref() {
-                smallest = Some(tbl.smallest().deref().to_vec());
-            }
-            if biggest.is_none() || biggest.as_ref().unwrap().deref() < tbl.biggest().deref() {
-                biggest = Some(tbl.biggest().deref().to_vec());
-            }
             tbls.push(tbl.clone());
         }
     }
@@ -4218,22 +4210,12 @@ async fn columnar_major_compact_for_add_tables(
         let mut tables = files_to_tables(files, ctx.encryption_key.clone());
         tables.sort_by(|a, b| a.smallest().cmp(&b.smallest()));
         tables.iter().for_each(|tbl| {
-            if smallest.is_none() || smallest.as_ref().unwrap().deref() > tbl.smallest().deref() {
-                smallest = Some(tbl.smallest().deref().to_vec());
-            }
-            if biggest.is_none() || biggest.as_ref().unwrap().deref() < tbl.biggest().deref() {
-                biggest = Some(tbl.biggest().deref().to_vec());
-            }
             tbls.push(tbl.clone());
         });
     }
     if tbls.is_empty() {
         return Ok(table_changes);
     }
-    let overlap_tables = schema_file.overlap_columnar_tables(
-        InnerKey::from_inner_buf(smallest.as_ref().unwrap()),
-        InnerKey::from_inner_buf(biggest.as_ref().unwrap()),
-    );
     let snap_version = if major_compaction.target_level == 2 {
         None
     } else {
@@ -4241,11 +4223,12 @@ async fn columnar_major_compact_for_add_tables(
         // l2_snap_version as the new columnar file l0_version.
         Some(major_compaction.snap_version)
     };
+    let table_ids = major_compaction.table_ids.0.clone();
     let columnar_creates = transform_for_columnar(
         ctx,
         &tbls,
         Some(Arc::new(blob_tbls)),
-        overlap_tables,
+        table_ids,
         &schema_file,
         major_compaction.target_level,
         snap_version,

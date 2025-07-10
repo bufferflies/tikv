@@ -701,7 +701,12 @@ impl VectorIndexFile {
                     let prev_handle = self.get_handle(prev_key);
                     if prev_handle == handle {
                         let prev_version = versions[prev_key as usize];
-                        debug_assert!(prev_version > version);
+                        debug_assert!(
+                            prev_version > version,
+                            "prev_version: {}, version: {}",
+                            prev_version,
+                            version
+                        );
                         // If there is a newer version need to be read, skip the older version.
                         if prev_version <= start_ts {
                             return false;
