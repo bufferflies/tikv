@@ -49,9 +49,7 @@ use crate::{
         cache::CachedRequestHandler,
         interceptors::*,
         metrics::*,
-        remote_dispatcher::{
-            try_remote_dag_handler, LazyRemotePattern, RemoteContext, RemoteRequest,
-        },
+        remote_dispatcher::{try_remote_dag_handler, RemoteContext, RemoteRequest},
         tracker::Tracker,
         Error, *,
     },
@@ -166,6 +164,7 @@ impl<E: Engine> Endpoint<E> {
         remote_cop_url: String,
         remote_cop_min_blocks_size: usize,
         remote_cop_num_ranges: usize,
+        remote_cop_min_process_duration: Duration,
     ) {
         let worker_threads = (SysQuota::cpu_cores_quota() as usize / 4).max(2);
         let pool = Arc::new(
@@ -185,6 +184,7 @@ impl<E: Engine> Endpoint<E> {
             remote_cop_url,
             remote_cop_min_blocks_size,
             remote_cop_num_ranges,
+            remote_cop_min_process_duration,
             self.security_mgr.clone(),
             pool.handle().clone(),
         );
@@ -300,7 +300,10 @@ impl<E: Engine> Endpoint<E> {
                 } else {
                     ReqTag::index
                 };
-                let lazy_remote_pattern = LazyRemotePattern::extract(context.keyspace_id, &dag);
+                let lazy_remote_pattern = self
+                    .remote_ctx
+                    .as_ref()
+                    .and_then(|ctx| ctx.extract(context.keyspace_id, &ranges, &dag));
                 req_ctx = ReqContext::new(
                     tag,
                     context,
@@ -577,10 +580,15 @@ impl<E: Engine> Endpoint<E> {
         let mut storage_stats = Statistics::default();
         handler.collect_scan_statistics(&mut storage_stats);
         let processed_size = storage_stats.processed_size;
+        let processed_time = Duration::from_nanos(exec_summary.time_processed_ns as u64);
         tracker.collect_storage_statistics(storage_stats);
         if let Some(lazy_remote_pattern) = tracker.req_ctx.lazy_remote_pattern.take() {
             if let Some(remote_ctx) = remote_ctx {
-                remote_ctx.report_lazy_remote_pattern(lazy_remote_pattern, processed_size);
+                remote_ctx.report_lazy_remote_pattern(
+                    lazy_remote_pattern,
+                    processed_size,
+                    processed_time,
+                );
             }
         }
         let (exec_details, exec_details_v2) = tracker.get_exec_details();

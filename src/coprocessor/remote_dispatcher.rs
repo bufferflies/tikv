@@ -7,7 +7,10 @@ use bytes::{Buf, BufMut, Bytes};
 use codec::number::NumberDecoder;
 use http::{header, StatusCode};
 use kvengine::{SnapAccess, LOCK_CF};
-use kvproto::{coprocessor::Response, kvrpcpb::ExecDetailsV2};
+use kvproto::{
+    coprocessor::{KeyRange, Response},
+    kvrpcpb::ExecDetailsV2,
+};
 use protobuf::Message;
 use security::SecurityManager;
 use tidb_query_common::execute_stats::ExecSummary;
@@ -19,7 +22,7 @@ use tikv_util::{
     http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
     retry::sleep_async,
 };
-use tipb::{DagRequest, ExecType, ExprType::ColumnRef, IndexScan, TableScan};
+use tipb::{DagRequest, ExecType, Executor, ExprType::ColumnRef};
 use txn_types::{TimeStamp, TsSet};
 
 use crate::{
@@ -185,6 +188,7 @@ pub struct RemoteContextCore {
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
     pub cop_min_blocks_size: usize,
     pub cop_num_ranges: usize,
+    pub cop_min_process_duration: Duration,
     pub runtime: tokio::runtime::Handle,
     pub remote_request_cache: quick_cache::sync::Cache<String, Response>,
     pub client: security::HttpClient,
@@ -214,6 +218,7 @@ impl RemoteContext {
         cop_worker_url: String,
         cop_min_blocks_size: usize,
         cop_num_ranges: usize,
+        cop_min_process_duration: Duration,
         security_mgr: Arc<SecurityManager>,
         runtime: tokio::runtime::Handle,
     ) -> Option<Self> {
@@ -234,6 +239,7 @@ impl RemoteContext {
                 remote_worker_url,
                 cop_min_blocks_size,
                 cop_num_ranges,
+                cop_min_process_duration,
                 cop_worker_provider,
                 runtime,
                 remote_request_cache,
@@ -243,14 +249,19 @@ impl RemoteContext {
         })
     }
 
-    pub fn report_lazy_remote_pattern(&self, pattern: String, processed_size: usize) {
+    pub fn report_lazy_remote_pattern(
+        &self,
+        pattern: String,
+        processed_size: usize,
+        processed_duration: Duration,
+    ) {
         let mut stats = self.lazy_remote_patterns.entry(pattern).or_default();
-        stats.push(processed_size);
+        stats.push(processed_size, processed_duration);
     }
 
     pub fn should_offload(&self, pattern: &str) -> bool {
         if let Some(stats) = self.lazy_remote_patterns.get(pattern) {
-            stats.should_offload(self.cop_min_blocks_size)
+            stats.should_offload(self.cop_min_blocks_size, self.cop_min_process_duration)
         } else {
             false
         }
@@ -270,20 +281,20 @@ pub(crate) fn try_remote_dag_handler(
         .cop_worker_provider
         .get(snap.get_keyspace_id(), start_ts)?;
     let keyspace_id = snap.get_keyspace_id();
-    let last_executor = dag.get_executors().last().unwrap();
-    let lazy_remote_pattern = if last_executor.has_limit() {
-        let Some(lazy_remote_pattern) = &req_ctx.lazy_remote_pattern else {
-            // Do not offload coprocessor with limit because the actual cost may be much
-            // smaller.
-            return None;
-        };
-        // limit with selection should be offloaded to remote coprocessor based on
-        // actual execution cost for the dag pattern.
+    let lazy_remote_pattern = if let Some(lazy_remote_pattern) = &req_ctx.lazy_remote_pattern {
+        // Dag that extracts lazy remote pattern should be offloaded to remote
+        // coprocessor based on actual execution cost.
         if !remote_ctx.should_offload(lazy_remote_pattern) {
             return None;
         }
         lazy_remote_pattern
     } else {
+        let last_executor = dag.get_executors().last().unwrap();
+        if last_executor.has_limit() {
+            // Do not offload coprocessor with limit because the actual cost may be much
+            // smaller.
+            return None;
+        }
         ""
     };
     let mut ranges = Vec::with_capacity(req_ctx.ranges.len());
@@ -497,50 +508,62 @@ impl RequestHandler for RemoteDagDispatcher {
     }
 }
 
-pub struct LazyRemotePattern {}
-
-impl LazyRemotePattern {
-    pub fn extract(keyspace_id: u32, dag: &DagRequest) -> Option<String> {
+impl RemoteContext {
+    pub fn extract(
+        &self,
+        keyspace_id: u32,
+        ranges: &[KeyRange],
+        dag: &DagRequest,
+    ) -> Option<String> {
         let executors = dag.get_executors();
-        if executors.len() < 3 {
+        if executors.is_empty() {
             return None;
         }
         let scan_executor = &executors[0];
+        if ranges.len() >= self.cop_num_ranges {
+            // on large range pattern.
+            let mut str_buf = String::new();
+            write!(str_buf, "k{}", keyspace_id).unwrap();
+            Self::write_scan_digest(&mut str_buf, scan_executor);
+            write!(str_buf, "r").unwrap();
+            return Some(str_buf);
+        }
+        if executors.len() < 3 {
+            return None;
+        }
+
         let last_executor = &executors[executors.len() - 1];
         let second_last_executor = &executors[executors.len() - 2];
         if !last_executor.has_limit() || !second_last_executor.has_selection() {
             return None;
         }
+        // on selection with limit pattern.
         let mut str_buf = String::new();
         write!(str_buf, "k{}", keyspace_id).unwrap();
-        match scan_executor.get_tp() {
-            ExecType::TypeTableScan => {
-                Self::write_table_scan_digest(&mut str_buf, scan_executor.get_tbl_scan());
-            }
-            ExecType::TypeIndexScan => {
-                Self::write_index_scan_digest(&mut str_buf, scan_executor.get_idx_scan());
-            }
-            _ => {
-                return None;
-            }
-        }
+        Self::write_scan_digest(&mut str_buf, scan_executor);
         let selection = second_last_executor.get_selection();
         Self::write_selection_digest(&mut str_buf, selection);
         Some(str_buf)
     }
 
-    fn write_table_scan_digest(s: &mut String, tbl_scan: &TableScan) {
-        write!(s, "t{}", tbl_scan.get_table_id()).unwrap();
-        for col in tbl_scan.get_columns() {
-            write!(s, "c{}", col.get_column_id()).unwrap();
-        }
-    }
-
-    fn write_index_scan_digest(s: &mut String, idx_scan: &IndexScan) {
-        write!(s, "t{}", idx_scan.get_table_id()).unwrap();
-        write!(s, "i{}", idx_scan.get_index_id()).unwrap();
-        for col in idx_scan.get_columns() {
-            write!(s, "c{}", col.get_column_id()).unwrap();
+    fn write_scan_digest(s: &mut String, executor: &Executor) {
+        match executor.get_tp() {
+            ExecType::TypeTableScan => {
+                let tbl_scan = executor.get_tbl_scan();
+                write!(s, "t{}", tbl_scan.get_table_id()).unwrap();
+                for col in tbl_scan.get_columns() {
+                    write!(s, "c{}", col.get_column_id()).unwrap();
+                }
+            }
+            ExecType::TypeIndexScan => {
+                let idx_scan = executor.get_idx_scan();
+                write!(s, "t{}", idx_scan.get_table_id()).unwrap();
+                write!(s, "i{}", idx_scan.get_index_id()).unwrap();
+                for col in idx_scan.get_columns() {
+                    write!(s, "c{}", col.get_column_id()).unwrap();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -565,24 +588,35 @@ impl LazyRemotePattern {
 
 #[derive(Default)]
 struct RemotePatternStats {
-    processed_size: VecDeque<usize>,
+    process_stats: VecDeque<ProcessStat>,
+}
+
+#[derive(Default, Copy, Clone)]
+struct ProcessStat {
+    size: usize,
+    duration: Duration,
 }
 
 impl RemotePatternStats {
-    fn push(&mut self, processed_size: usize) {
-        self.processed_size.push_back(processed_size);
-        if self.processed_size.len() > 5 {
-            self.processed_size.pop_front();
+    fn push(&mut self, processed_size: usize, process_duration: Duration) {
+        self.process_stats.push_back(ProcessStat {
+            size: processed_size,
+            duration: process_duration,
+        });
+        if self.process_stats.len() > 5 {
+            self.process_stats.pop_front();
         }
     }
 
-    fn should_offload(&self, threshold: usize) -> bool {
-        if self.processed_size.len() < 2 {
+    fn should_offload(&self, threshold_size: usize, threshold_dur: Duration) -> bool {
+        if self.process_stats.len() < 2 {
             return false;
         }
-        let sum: usize = self.processed_size.iter().sum();
-        let avg = sum / self.processed_size.len();
-        avg > threshold
+        let sum_size: usize = self.process_stats.iter().map(|x| x.size).sum();
+        let avg_size = sum_size / self.process_stats.len();
+        let sum_duration: Duration = self.process_stats.iter().map(|stat| stat.duration).sum();
+        let avg_duration = sum_duration / self.process_stats.len() as u32;
+        avg_size > threshold_size || avg_duration > threshold_dur
     }
 }
 
@@ -730,42 +764,94 @@ mod tests {
         let mut dag = DagRequest::default();
         dag.mut_executors()
             .push(new_table_scan_executor(1, vec![1, 2, 3]));
-        assert!(LazyRemotePattern::extract(1, &dag).is_none());
-        dag.mut_executors().push(new_selection(vec![1, 2]));
-        assert!(LazyRemotePattern::extract(1, &dag).is_none());
-        dag.mut_executors().push(new_limit(100));
-        let tbl_pattern = LazyRemotePattern::extract(1, &dag).unwrap();
-        assert_eq!(tbl_pattern, "k1t1c1c2c3sc1c2");
-
-        let mut idx_dag = dag.clone();
-        let executors = idx_dag.mut_executors();
-        executors[0] = new_index_scan_executor(3, 2, vec![1, 2, 3]);
-        let idx_pattern = LazyRemotePattern::extract(1, &idx_dag).unwrap();
-        assert_eq!(idx_pattern, "k1t3i2c1c2c3sc1c2");
-
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let remote_ctx = RemoteContext::new(
             "a".to_string(),
             "b".to_string(),
             100,
-            10,
+            2,
+            Duration::from_millis(10),
             Arc::new(security::SecurityManager::default()),
             runtime.handle().clone(),
         )
         .unwrap();
-        remote_ctx.report_lazy_remote_pattern(tbl_pattern.clone(), 101);
-        assert!(!remote_ctx.should_offload(&tbl_pattern));
-        remote_ctx.report_lazy_remote_pattern(tbl_pattern.clone(), 101);
-        assert!(remote_ctx.should_offload(&tbl_pattern));
-        for _ in 0..10 {
-            remote_ctx.report_lazy_remote_pattern(tbl_pattern.clone(), 50);
-        }
-        assert!(!remote_ctx.should_offload(&tbl_pattern));
+        let make_key_range = |start: u8, end: u8| KeyRange {
+            start: vec![start],
+            end: vec![end],
+            ..Default::default()
+        };
+        let small_key_ranges = vec![make_key_range(1, 2)];
+        assert!(remote_ctx.extract(1, &small_key_ranges, &dag).is_none());
+        let large_key_ranges = vec![
+            make_key_range(1, 2),
+            make_key_range(3, 4),
+            make_key_range(5, 6),
+        ];
+        let large_key_range_pattern = remote_ctx.extract(1, &large_key_ranges, &dag).unwrap();
+        assert_eq!(large_key_range_pattern, "k1t1c1c2c3r");
 
-        assert!(!remote_ctx.should_offload(&idx_pattern));
-        remote_ctx.report_lazy_remote_pattern(idx_pattern.clone(), 101);
-        remote_ctx.report_lazy_remote_pattern(idx_pattern.clone(), 101);
-        assert!(remote_ctx.should_offload(&idx_pattern));
+        assert!(remote_ctx.extract(1, &small_key_ranges, &dag).is_none());
+        dag.mut_executors().push(new_selection(vec![1, 2]));
+        assert!(remote_ctx.extract(1, &small_key_ranges, &dag).is_none());
+        dag.mut_executors().push(new_limit(100));
+        let tbl_pattern = remote_ctx.extract(1, &small_key_ranges, &dag).unwrap();
+        assert_eq!(tbl_pattern, "k1t1c1c2c3sc1c2");
+
+        let mut idx_dag = dag.clone();
+        let executors = idx_dag.mut_executors();
+        executors[0] = new_index_scan_executor(3, 2, vec![1, 2, 3]);
+        let idx_pattern = remote_ctx.extract(1, &small_key_ranges, &idx_dag).unwrap();
+        assert_eq!(idx_pattern, "k1t3i2c1c2c3sc1c2");
+
+        let short_process_dur = Duration::from_millis(5);
+        let long_process_dur = Duration::from_millis(100);
+        remote_ctx.report_lazy_remote_pattern(tbl_pattern.clone(), 101, long_process_dur);
+        assert!(!remote_ctx.should_offload(&tbl_pattern));
+        remote_ctx.report_lazy_remote_pattern(tbl_pattern.clone(), 101, long_process_dur);
+        assert!(remote_ctx.should_offload(&tbl_pattern));
+        #[derive(Debug)]
+        struct Case {
+            processed_size: usize,
+            process_duration: Duration,
+            should_offload: bool,
+        }
+        let cases = vec![
+            Case {
+                processed_size: 50,
+                process_duration: short_process_dur,
+                should_offload: false,
+            },
+            Case {
+                processed_size: 50,
+                process_duration: long_process_dur,
+                should_offload: true,
+            },
+            Case {
+                processed_size: 101,
+                process_duration: short_process_dur,
+                should_offload: true,
+            },
+            Case {
+                processed_size: 101,
+                process_duration: long_process_dur,
+                should_offload: true,
+            },
+        ];
+        for case in cases {
+            for _ in 0..10 {
+                remote_ctx.report_lazy_remote_pattern(
+                    tbl_pattern.clone(),
+                    case.processed_size,
+                    case.process_duration,
+                );
+            }
+            assert_eq!(
+                remote_ctx.should_offload(&tbl_pattern),
+                case.should_offload,
+                "case: {:?}",
+                case
+            );
+        }
     }
 
     fn new_table_scan_executor(tbl_id: i64, col_ids: Vec<i64>) -> tipb::Executor {

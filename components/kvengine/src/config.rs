@@ -90,6 +90,11 @@ pub struct Config {
     /// value.
     pub remote_coprocessor_num_ranges: usize,
 
+    /// The minimum duration for a coprocessor request to be run on remote.
+    /// Currently, it is used by DAG that matches lazy remote pattern and
+    /// dynamically determines whether to run on remote or local.
+    pub remote_coprocessor_min_process_duration: ReadableDuration,
+
     /// If enabled, flush large L0 file will split into multiple files.
     pub flush_split_l0: bool,
 
@@ -148,6 +153,7 @@ impl Default for Config {
             remote_coprocessor_addr: "".to_string(),
             remote_coprocessor_min_blocks_size: 32 * 1024 * 1024,
             remote_coprocessor_num_ranges: 2048,
+            remote_coprocessor_min_process_duration: ReadableDuration::millis(30),
             flush_split_l0: true,
             txn_file_worker_pool_size: None,
             // 8GB memory per core, 64 * 16MB files consumes 1GB at max.
