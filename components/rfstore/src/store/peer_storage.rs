@@ -296,6 +296,7 @@ impl PeerStorage {
             .raft
             .iterate_peer_states(peer_id, false, |k, _| {
                 rwb.set_state(peer_id, region_id, k, &[]);
+                true
             });
         if truncate_logs {
             self.truncate_raft_log(rwb, rfengine::TRUNCATE_ALL_INDEX, self.raft_state.term);

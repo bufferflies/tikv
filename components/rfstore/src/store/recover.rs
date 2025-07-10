@@ -175,6 +175,7 @@ impl RecoverHandler {
         let mut state_keys = vec![];
         self.rf_engine.iterate_peer_states(peer_id, false, |k, _| {
             state_keys.push(k.to_vec());
+            true
         });
         state_keys
     }
@@ -492,6 +493,7 @@ impl kvengine::MetaIterator for RecoverHandler {
             self.rf_engine
                 .iterate_peer_states(peer.peer_id, false, |k, _| {
                     wb.set_state(peer.peer_id, peer.region_id, k, &[]);
+                    true
                 });
             peer.region_local_state.state = raft_serverpb::PeerState::Tombstone;
             let region_state_val = peer.region_local_state.write_to_bytes().unwrap();

@@ -142,6 +142,7 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
         for (peer_id, region_id, region_version) in target_regions {
             rf.iterate_peer_states(peer_id, false, |k, _| {
                 wb.set_state(peer_id, region_id, k, &[]);
+                true
             });
             let mut region_local_state = load_region_state(&rf, peer_id, region_version).unwrap();
             region_local_state.state = PeerState::Tombstone;
