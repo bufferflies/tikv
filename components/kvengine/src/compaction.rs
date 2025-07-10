@@ -4490,8 +4490,6 @@ async fn convert_row_file_to_columnar_file(
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
-    let columnar_table_ids = ret.mut_columnar_table_ids();
-    columnar_table_ids.extend_from_slice(&overlap_tables);
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
         Some(columnar_compaction.snap_version),
@@ -4637,8 +4635,6 @@ async fn compact_columnar_l0_files(
     if overlap_tables.is_empty() {
         return Ok(ret);
     }
-    let columnar_table_ids = ret.mut_columnar_table_ids();
-    columnar_table_ids.extend_from_slice(&overlap_tables);
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
         Some(snap_version),
@@ -4787,8 +4783,6 @@ async fn compact_columnar_l1_files(
         return Ok(ret);
     }
     overlap_tables.sort();
-    let columnar_table_ids = ret.mut_columnar_table_ids();
-    columnar_table_ids.extend_from_slice(&overlap_tables);
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
         None,

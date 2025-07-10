@@ -103,6 +103,7 @@ fn test_columnar_l0_compaction() {
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
     builder.set_columnar_levels(col_levels);
+    builder.set_columnar_table_ids(vec![table_id, table_id2]);
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
@@ -223,6 +224,7 @@ fn test_columnar_l1_compaction() {
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
     builder.set_columnar_levels(col_levels);
+    builder.set_columnar_table_ids(vec![table_id, table_id2]);
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
