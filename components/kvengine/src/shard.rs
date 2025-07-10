@@ -1855,6 +1855,7 @@ impl fmt::Debug for ShardData {
             .field("unloaded_tbls", &self.unloaded_tbls)
             .field("update_counter", &self.update_counter)
             .field("schema_version", &self.schema_version)
+            .field("restore_version", &self.restore_version)
             .field("schema_file", &self.schema_file_id())
             .field("columnar_table_ids", &self.columnar_table_ids)
             .finish()

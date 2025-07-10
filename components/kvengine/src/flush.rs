@@ -316,6 +316,11 @@ impl Engine {
                 }
             }
         }
+        // If the shard is restored, we need to retain the restore version.
+        if flush.shard_data.restore_version > 0 {
+            let schema_meta = initial_flush.mut_schema_meta();
+            schema_meta.set_restore_version(flush.shard_data.restore_version);
+        }
 
         let (tx, mut rx) = unbounded_channel();
         let mut send_cnt = 0;

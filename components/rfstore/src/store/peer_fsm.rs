@@ -1698,7 +1698,7 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap();
-        if !shard_meta.schema.is_valid() {
+        if !shard_meta.schema.has_value() {
             return;
         }
         let mut change_set = kvengine::new_change_set(shard_meta.id, shard_meta.ver);
