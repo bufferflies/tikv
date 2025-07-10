@@ -503,7 +503,7 @@ async fn verify_vector_data(
                     "verify_vector_data: row1 id: {:?}, text: {:?}, distance: {:?}",
                     id,
                     row.get::<&str, _>("document"),
-                    row.get::<f32, _>("distance")
+                    row.get::<Option<f32>, _>("distance")
                 );
             }
             for row in &all_col_result {
@@ -516,7 +516,7 @@ async fn verify_vector_data(
                     "verify_vector_data: row2 id: {:?}, text: {:?}, distance: {:?}",
                     id,
                     row.get::<&str, _>("document"),
-                    row.get::<f32, _>("distance")
+                    row.get::<Option<f32>, _>("distance")
                 );
             }
         }
@@ -546,10 +546,10 @@ async fn verify_vector_data(
             "verify_vector_data: row1 id: {:?}, text: {:?}, distance: {:?}, row2 id: {:?}, text: {:?}, distance: {:?}",
             id1,
             row1.get::<&str, _>("document"),
-            row1.get::<f32, _>("distance"),
+            row1.get::<Option<f32>, _>("distance"),
             id2,
             row2.get::<&str, _>("document"),
-            row2.get::<f32, _>("distance")
+            row2.get::<Option<f32>, _>("distance")
         );
         if let Err(err) = compare_rows(row1, row2) {
             if dump_rows {
@@ -571,7 +571,7 @@ async fn verify_vector_data(
                         "verify_vector_data: row1 id: {:?}, text: {:?}, distance: {:?}",
                         id,
                         row.get::<&str, _>("document"),
-                        row.get::<f32, _>("distance")
+                        row.get::<Option<f32>, _>("distance")
                     );
                 }
                 for row in all_col_result {
@@ -584,7 +584,7 @@ async fn verify_vector_data(
                         "verify_vector_data: row2 id: {:?}, text: {:?}, distance: {:?}",
                         id,
                         row.get::<&str, _>("document"),
-                        row.get::<f32, _>("distance")
+                        row.get::<Option<f32>, _>("distance")
                     );
                 }
             }
