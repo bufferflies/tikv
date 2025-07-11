@@ -576,8 +576,9 @@ impl EngineCore {
         use_direct_io: bool,
         file_path: &Path,
     ) -> Result<()> {
-        let start = Instant::now();
-        let tmp_file_name = self.tmp_file_path(id);
+        let start_time = Instant::now_coarse();
+        let mut sync_time = start_time;
+        let tmp_file_name = Self::tmp_file_path(file_path);
         if use_direct_io {
             let mut writer =
                 file_system::DirectWriter::new(self.rate_limiter.clone(), IoType::Compaction);
@@ -597,16 +598,25 @@ impl EngineCore {
                     .table_ctx(id, "write_local_file.write_tmp")?;
                 start_off = end_off;
             }
+            sync_time = Instant::now_coarse();
             file.sync_data()
                 .table_ctx(id, "write_local_file.sync_tmp")?;
         }
+        let rename_time = Instant::now_coarse();
         std::fs::rename(tmp_file_name, file_path).table_ctx(id, "write_local_file.rename")?;
+        let end_time = Instant::now_coarse();
+        let takes_msg = format!(
+            "{:?}(w:{:?},s:{:?},r:{:?})", // total(write,sync,rename)
+            end_time.saturating_duration_since(start_time),
+            sync_time.saturating_duration_since(start_time),
+            rename_time.saturating_duration_since(sync_time),
+            end_time.saturating_duration_since(rename_time)
+        );
         info!(
-            "{}: write local file {} size: {} takes {:?}",
-            self.get_engine_id(),
-            id,
-            data.len(),
-            start.saturating_elapsed()
+            "{}: write local file {}", self.get_engine_id(), id;
+            "size" => data.len(),
+            "takes" => takes_msg,
+            "path" => ?file_path.file_name().unwrap_or_default(),
         );
         Ok(())
     }
@@ -935,9 +945,9 @@ impl EngineCore {
             }
         }
         // Only the first one will write the file to disk.
-        let tmp_file_name = self.tmp_file_path(id);
+        let tmp_file_name = Self::tmp_file_path(&local_schema_file_path);
         fs::write(&tmp_file_name, data.chunk()).table_ctx(id, "load_schema_file.write_tmp")?;
-        fs::rename(&tmp_file_name, local_schema_file_path.as_path())
+        fs::rename(&tmp_file_name, local_schema_file_path)
             .table_ctx(id, "load_schema_file.rename")?;
         Ok(schema_file)
     }
@@ -973,12 +983,12 @@ impl EngineCore {
         self.opts.local_dir.join(new_vector_index_filename(file_id))
     }
 
-    fn tmp_file_path(&self, file_id: u64) -> PathBuf {
+    fn tmp_file_path(file_path: &Path) -> PathBuf {
         lazy_static::lazy_static! {
             static ref TMP_FILE_ID: AtomicU64 = AtomicU64::default();
         }
         let tmp_id = TMP_FILE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.opts.local_dir.join(new_tmp_filename(file_id, tmp_id))
+        file_path.with_extension(format!("{tmp_id}.tmp"))
     }
 }
 
@@ -1097,4 +1107,26 @@ struct LoadRemoteResult {
     fm: FileMeta,
     prepared: PreparedFileResult,
     permit: DfsLoadLimiterPermit,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[test]
+    fn test_tmp_file_path() {
+        for p in ["/var/lib/tikv/db/100.sst", "/var/lib/tikv/db/100"] {
+            let file_path = PathBuf::from(p);
+            let tmp_file_path = EngineCore::tmp_file_path(&file_path);
+            let path_str = tmp_file_path.to_str().unwrap();
+
+            let segs = path_str.split('.').collect::<Vec<_>>();
+            assert_eq!(segs.len(), 3);
+            assert_eq!(segs[0], "/var/lib/tikv/db/100");
+            u64::from_str(segs[1]).unwrap();
+            assert_eq!(segs[2], "tmp");
+        }
+    }
 }

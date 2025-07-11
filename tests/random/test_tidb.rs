@@ -406,6 +406,8 @@ pub(crate) fn generate_update_conf_fn<'a>(
         }
 
         conf.storage.flow_control.enable = true;
+        conf.storage.flow_control.min_region_speed_limit = ReadableSize(16);
+        conf.storage.flow_control.max_region_speed_limit = ReadableSize::mb(1);
         conf.storage.scheduler_worker_pool_size = cpu_cores as usize;
         conf.storage.check_backup_ts = switches.txn_check_backup_ts;
         conf.gc.enable_safe_point_v2 = true;

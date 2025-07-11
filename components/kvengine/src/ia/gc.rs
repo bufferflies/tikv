@@ -47,7 +47,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct IaGcConfig {
     pub meta_lifetime: ReadableDuration,
     pub segment_interval: ReadableDuration,
-    pub segment_tmp_lifetime: ReadableDuration,
+    pub tmp_lifetime: ReadableDuration,
 }
 
 impl Default for IaGcConfig {
@@ -55,7 +55,7 @@ impl Default for IaGcConfig {
         Self {
             meta_lifetime: ReadableDuration::days(1),
             segment_interval: ReadableDuration::days(1),
-            segment_tmp_lifetime: ReadableDuration::minutes(1),
+            tmp_lifetime: ReadableDuration::minutes(1),
         }
     }
 }
@@ -66,7 +66,7 @@ impl IaGcConfig {
         Self {
             meta_lifetime: ReadableDuration::secs(30),
             segment_interval: ReadableDuration::secs(0), // Run on every `interval`.
-            segment_tmp_lifetime: ReadableDuration::secs(10),
+            tmp_lifetime: ReadableDuration::secs(10),
         }
     }
 }
@@ -119,8 +119,16 @@ impl IaGcRunner {
     pub fn meta_file_gc(&mut self, ignore: impl Fn(u64) -> bool) -> Result<usize> {
         Self::walk_dir(
             &self.meta_path,
-            &[TABLE_META_LOCAL_FILE_SUFFIX],
-            |_extension, path, entry| self.handle_meta_file(path, &entry, &ignore),
+            &[TABLE_META_LOCAL_FILE_SUFFIX, TEMPORARY_FILE_SUFFIX],
+            |extension, path, entry| {
+                if extension == TABLE_META_LOCAL_FILE_SUFFIX {
+                    self.handle_meta_file(path, &entry, &ignore)
+                } else if extension == TEMPORARY_FILE_SUFFIX {
+                    self.handle_temp(path, &entry)
+                } else {
+                    unreachable!()
+                }
+            },
         )
     }
 
@@ -175,7 +183,7 @@ impl IaGcRunner {
                 if extension == SEGMENT_LOCAL_FILE_SUFFIX {
                     self.handle_segment(path, &ignore)
                 } else if extension == TEMPORARY_FILE_SUFFIX {
-                    self.handle_segment_temp(path, &entry)
+                    self.handle_temp(path, &entry)
                 } else {
                     unreachable!()
                 }
@@ -209,14 +217,14 @@ impl IaGcRunner {
         Ok(false)
     }
 
-    fn handle_segment_temp(&self, path: &Path, entry: &DirEntry) -> Result<bool /* is_removed */> {
+    fn handle_temp(&self, path: &Path, entry: &DirEntry) -> Result<bool /* is_removed */> {
         let metadata = try_exists!(entry.metadata()).ctx("gc.metadata")?;
         let modified_dur = metadata
             .modified()
             .ctx("gc.modified")?
             .elapsed()
             .unwrap_or_default();
-        if modified_dur >= self.config.segment_tmp_lifetime.0 {
+        if modified_dur >= self.config.tmp_lifetime.0 {
             let is_removed = self
                 .remove_file(path)
                 .with_ctx(|| format!("remove_seg_tmp.{}", path.display()))?;

@@ -519,23 +519,30 @@ fn test_local_gc() {
             fs::write(segment_path.join("1.sst.tmp"), b"data").unwrap();
             assert!(fs::read_dir(&segment_path).unwrap().next().is_some());
 
+            fs::write(meta_path.join("2.sst.tmp"), b"data").unwrap();
+            assert!(fs::read_dir(&meta_path).unwrap().next().is_some());
+
             {
                 let config = IaGcConfig::default();
                 let mut gc_runner = IaGcRunner::new(config, mgr.clone(), meta_path.clone());
                 gc_runner.set_segment_path(segment_path.clone());
                 assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 0);
+                assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), 0);
             }
 
             {
                 let config = IaGcConfig {
                     segment_interval: ReadableDuration::ZERO,
-                    segment_tmp_lifetime: ReadableDuration::ZERO,
+                    tmp_lifetime: ReadableDuration::ZERO,
                     ..Default::default()
                 };
                 let mut gc_runner = IaGcRunner::new(config, mgr, meta_path.clone());
                 gc_runner.set_segment_path(segment_path.clone());
                 assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 1);
                 assert!(fs::read_dir(&segment_path).unwrap().next().is_none());
+
+                assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), 1);
+                assert!(fs::read_dir(&meta_path).unwrap().next().is_none());
             }
         }
     });

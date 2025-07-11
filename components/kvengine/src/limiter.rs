@@ -120,7 +120,9 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
 
     /// New from another one.
     pub fn new_from(another: &WriteRateLimiter<Ty>) -> Self {
-        Self::new_impl(another.options.clone(), None)
+        let limiter = Self::new_impl(another.options.clone(), None);
+        limiter.set_speed_limit(0, another.speed_limit());
+        limiter
     }
 
     fn new_impl(options: LimiterOptions, speed_metric: Option<IntGauge>) -> Self {
@@ -156,12 +158,12 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
         self.limiter.set_speed_limit(throttle);
 
         if pre.is_infinite() && throttle.is_finite() {
-            info!("{} WriteRateLimiter::start_throttle", tag; "throttle" => throttle);
+            info!("{} {}: start_throttle", tag, Ty::TAG; "throttle" => throttle);
             ENGINE_THROTTLE_ACTION_COUNTER
                 .with_label_values(&[Ty::TAG, "start_throttle"])
                 .inc();
         } else if pre.is_finite() && throttle.is_infinite() {
-            info!("{} WriteRateLimiter::stop_throttle", tag; "pre_throttle" => pre);
+            info!("{} {}: stop_throttle", tag, Ty::TAG; "pre_throttle" => pre);
             ENGINE_THROTTLE_ACTION_COUNTER
                 .with_label_values(&[Ty::TAG, "stop_throttle"])
                 .inc();
@@ -183,7 +185,7 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
             drop(last_record_time);
 
             let rate = total as f64 / dur;
-            debug!("WriteRateLimiter::update_statistics";
+            debug!("{}: update_statistics", Ty::TAG;
                 "rate" => rate,
                 "total" => total,
                 "dur" => ?dur,
@@ -204,10 +206,12 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
             self.options.max_speed_limit,
             self.options.min_speed_limit,
         );
-        debug!("{} ShardLimiter::update_usage", tag;
-            "usage" => usage,
-            "throttle" => throttle,
-        );
+        if !throttle.is_infinite() {
+            info!("{} {}: update_usage", tag, Ty::TAG;
+                "usage" => usage,
+                "throttle" => throttle,
+            );
+        }
         self.update_speed_limit(tag, throttle);
     }
 

@@ -416,6 +416,8 @@ fn prepare_cluster(
         }
 
         conf.storage.flow_control.enable = true;
+        conf.storage.flow_control.min_region_speed_limit = ReadableSize(16);
+        conf.storage.flow_control.max_region_speed_limit = ReadableSize::mb(1);
         conf.storage.scheduler_worker_pool_size = cpu_cores;
         conf.storage.check_backup_ts = switches.txn_check_backup_ts;
     };
