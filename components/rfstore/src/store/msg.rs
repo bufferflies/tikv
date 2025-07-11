@@ -96,6 +96,27 @@ impl PeerMsg {
             PeerMsg::StoreMsgForWakeUp(_) => "StoreMsgForWakeUp",
         }
     }
+
+    pub(crate) fn type_code(&self) -> u8 {
+        match self {
+            PeerMsg::RaftMessage(_) => 1,
+            PeerMsg::RaftCommand(_) => 2,
+            PeerMsg::Tick => 3,
+            PeerMsg::Start => 4,
+            PeerMsg::ApplyResult(_) => 5,
+            PeerMsg::CasualMessage(_) => 6,
+            PeerMsg::SignificantMsg(_) => 7,
+            PeerMsg::GenerateEngineChangeSet(..) => 8,
+            PeerMsg::ApplySnapshotResult(_) => 9,
+            PeerMsg::PrepareChangeSetResult(..) => 10,
+            PeerMsg::PrepareCommitMergeResult(..) => 11,
+            PeerMsg::PrepareTxnFileResult { .. } => 12,
+            PeerMsg::Persisted(_) => 13,
+            PeerMsg::Idle(_) => 14,
+            PeerMsg::WakeUp(_) => 15,
+            PeerMsg::StoreMsgForWakeUp(_) => 16,
+        }
+    }
 }
 
 #[derive(Debug)]

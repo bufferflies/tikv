@@ -90,10 +90,14 @@ impl PeerInbox {
         let region_id = peer_fsm.region_id();
         let start = tikv_util::time::Instant::now_coarse();
         tikv_util::set_current_region_thread_local(region_id);
+        let msg_type = self.msgs[0].type_code();
         PeerMsgHandler::new(&mut peer_fsm, ctx).handle_msgs(&mut self.msgs);
         let tick_flag = peer_fsm.ticker.tick_flag;
         peer_fsm.ticker.tick_flag = 0;
+        let handle_ready_start = tikv_util::time::Instant::now_coarse();
+        let handle_msgs_duration = handle_ready_start.saturating_duration_since(start);
         peer_fsm.peer.handle_raft_ready(ctx, None);
+        let handle_ready_duration = handle_ready_start.saturating_elapsed();
         if !ctx.apply_msgs.msgs.is_empty() {
             peer_fsm.may_change_apply_worker();
             let peer_batch = ApplyBatch {
@@ -152,8 +156,11 @@ impl PeerInbox {
             let stat = &mut statistics[min_index];
             stat.region_id = region_id;
             stat.elapsed = elapsed;
+            stat.handle_msgs = handle_msgs_duration;
+            stat.handle_ready = handle_ready_duration;
             stat.tick_flag = tick_flag;
             stat.msg_cnt = msg_len;
+            stat.msg_type = msg_type;
         }
     }
 }
@@ -174,7 +181,10 @@ impl Inboxes {
 pub(crate) struct InboxPeerStat {
     pub(crate) region_id: u64,
     pub(crate) elapsed: Duration,
+    pub(crate) handle_msgs: Duration,
+    pub(crate) handle_ready: Duration,
     pub(crate) msg_cnt: usize,
+    pub(crate) msg_type: u8,
     pub(crate) tick_flag: u64,
 }
 
