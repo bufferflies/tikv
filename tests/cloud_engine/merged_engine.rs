@@ -11,7 +11,7 @@ use merged_engine::{MergedEngine, MergedEngineConfig, MergedEngineContext};
 use native_br::{backup, backup::BackupType, common::send_request_to_store};
 use pd_client::PdClient;
 use rand::Rng;
-use rfstore::store::ApplyContext;
+use rfstore::store::{load_raft_engine_meta, ApplyContext};
 use security::{GetSecurityManager, SecurityManager};
 use test_cloud_server::{
     client::{RefStore, RequestOptions},
@@ -137,7 +137,12 @@ fn test_merged_engine_once() {
     for (region_id, _) in region_peers {
         if let Some(progress) = merged_engine.get_region_progress(region_id) {
             let truncated_index = merged_raft.get_truncated_index(region_id).unwrap();
-            assert_eq!(progress.truncated_index, truncated_index);
+            if progress.truncated_index != truncated_index {
+                if let Some(cs) = load_raft_engine_meta(&merged_raft, region_id) {
+                    // When the shard is not initial flushed, the truncated index is not updated.
+                    assert!(cs.has_parent());
+                }
+            }
         }
     }
     merged_engine.close();
