@@ -1563,6 +1563,7 @@ impl Peer {
             // follower, which can lead to full message queue under high load.
             return;
         }
+        let handle_start = tikv_util::time::Instant::now_coarse();
         if !self.raft_group.has_ready() {
             return;
         }
@@ -1586,16 +1587,14 @@ impl Peer {
             }
         }
         let mut ready = self.raft_group.ready();
-        if ready.entries().len() + ready.committed_entries().len() > 0 {
-            let ready_debug = ReadyDebug(&ready);
-            debug!("{} handle ready {}", self.tag(), ready_debug);
-        }
+        let after_ready = tikv_util::time::Instant::now_coarse();
+        let ready_stats = ReadyStats::new(&ready);
         self.on_role_changed(ctx, &ready);
         self.add_ready_metric(&ready, &mut ctx.raft_metrics);
 
         // TODO(x) on leader commit index change.
 
-        if !ready.messages().is_empty() {
+        if ready_stats.messages > 0 {
             assert!(self.is_leader());
             let raft_msgs = self.build_raft_messages(ctx, ready.take_messages());
             self.send_raft_messages(ctx, raft_msgs);
@@ -1659,7 +1658,19 @@ impl Peer {
             _commit_idx: self.get_store().commit_index(),
             raft_messages: persist_messages,
         });
-        self.raft_group.advance_append_async(ready)
+        self.raft_group.advance_append_async(ready);
+        let handle_end = tikv_util::time::Instant::now_coarse();
+        let handle_duration = handle_end.saturating_duration_since(handle_start);
+        if handle_duration > Duration::from_millis(30) {
+            let ready_duration = after_ready.saturating_duration_since(handle_start);
+            warn!(
+                "{} raft ready takes too long, ready:{:?}, handle_takes:{:?} ready_takes:{:?}",
+                self.tag(),
+                ready_stats,
+                handle_duration,
+                ready_duration,
+            );
+        }
     }
 
     pub(crate) fn on_persist_ready(&mut self, ctx: &mut RaftContext, ready_number: u64) {
@@ -3909,22 +3920,32 @@ pub fn get_preprocess_cmd(entry: &eraftpb::Entry) -> Option<RaftCmdRequest> {
     Some(cmd)
 }
 
-pub struct ReadyDebug<'a>(pub &'a Ready);
+#[derive(Clone, Copy, Debug)]
+pub struct ReadyStats {
+    pub messages: usize,
+    pub committed_entries: usize,
+    pub entries: usize,
+    pub has_ss: bool,
+    pub has_hs: bool,
+    pub has_snapshot: bool,
+}
 
-impl std::fmt::Display for ReadyDebug<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let ready = self.0;
-        let committed: Vec<u64> = ready.committed_entries().iter().map(|e| e.index).collect();
-        let entries: Vec<u64> = ready.entries().iter().map(|e| e.index).collect();
-        write!(
-            f,
-            "ready {}, ss: {:?}, hs: {:?}, committed: {:?}, entries: {:?}",
-            ready.number(),
-            ready.ss(),
-            ready.hs(),
-            committed,
+impl ReadyStats {
+    pub fn new(ready: &Ready) -> Self {
+        let messages = ready.messages().len();
+        let committed_entries = ready.committed_entries().len();
+        let entries = ready.entries().len();
+        let has_ss = ready.ss().is_some();
+        let has_hs = ready.hs().is_some();
+        let has_snapshot = !ready.snapshot().is_empty();
+        ReadyStats {
+            committed_entries,
+            messages,
             entries,
-        )
+            has_ss,
+            has_hs,
+            has_snapshot,
+        }
     }
 }
 
