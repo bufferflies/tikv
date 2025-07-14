@@ -127,6 +127,11 @@ impl S3FsCore {
     ) -> Self {
         let mut config = rusoto_core::HttpConfig::new();
         config.read_buf_size(256 * 1024);
+        let endpoint = if endpoint.is_empty() {
+            format!("https://s3.{}.amazonaws.com", region.as_str())
+        } else {
+            endpoint
+        };
         let use_tls = endpoint.starts_with("https");
         let default_provider = aws::new_credentials_provider_rusoto_wrapper();
         let static_provider =
@@ -158,11 +163,6 @@ impl S3FsCore {
             } else {
                 rusoto_core::Client::new_with(static_provider, http_client)
             }
-        };
-        let endpoint = if endpoint.is_empty() {
-            format!("http://s3.{}.amazonaws.com", region.as_str())
-        } else {
-            endpoint
         };
         Self::new_with_s3_client(s3c, endpoint, region, bucket, prefix)
     }
