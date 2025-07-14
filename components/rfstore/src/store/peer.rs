@@ -1587,7 +1587,6 @@ impl Peer {
             }
         }
         let mut ready = self.raft_group.ready();
-        let after_ready = tikv_util::time::Instant::now_coarse();
         let ready_stats = ReadyStats::new(&ready);
         self.on_role_changed(ctx, &ready);
         self.add_ready_metric(&ready, &mut ctx.raft_metrics);
@@ -1661,14 +1660,12 @@ impl Peer {
         self.raft_group.advance_append_async(ready);
         let handle_end = tikv_util::time::Instant::now_coarse();
         let handle_duration = handle_end.saturating_duration_since(handle_start);
-        if handle_duration > Duration::from_millis(30) {
-            let ready_duration = after_ready.saturating_duration_since(handle_start);
+        if handle_duration > Duration::from_millis(20) {
             warn!(
-                "{} raft ready takes too long, ready:{:?}, handle_takes:{:?} ready_takes:{:?}",
+                "{} raft ready takes too long, ready:{:?}, handle_takes:{:?}",
                 self.tag(),
                 ready_stats,
                 handle_duration,
-                ready_duration,
             );
         }
     }
@@ -2657,6 +2654,7 @@ impl Peer {
     }
 
     fn apply_reads(&mut self, ctx: &mut RaftContext, ready: &Ready) {
+        let read_start = tikv_util::time::Instant::now_coarse();
         let mut propose_time = None;
         let states = ready.read_states().iter().map(|state| {
             let read_index_ctx = ReadIndexContext::parse(state.request_ctx.as_slice()).unwrap();
@@ -2689,7 +2687,6 @@ impl Peer {
             // all uncommitted reads will be dropped silently in raft.
             self.pending_reads.clear_uncommitted_on_role_change(term);
         }
-
         if let Some(propose_time) = propose_time {
             // `propose_time` is a placeholder, here cares about `Suspect` only,
             // and if it is in `Suspect` phase, the actual timestamp is useless.
@@ -2697,6 +2694,14 @@ impl Peer {
                 return;
             }
             self.maybe_renew_leader_lease(propose_time, ctx, None);
+        }
+        let read_duration = read_start.saturating_elapsed();
+        if read_duration > Duration::from_millis(20) {
+            warn!(
+                "{} apply_reads takes too long {:?}",
+                self.tag(),
+                read_duration
+            );
         }
     }
 
@@ -3925,6 +3930,7 @@ pub struct ReadyStats {
     pub messages: usize,
     pub committed_entries: usize,
     pub entries: usize,
+    pub read_states: usize,
     pub has_ss: bool,
     pub has_hs: bool,
     pub has_snapshot: bool,
@@ -3935,6 +3941,7 @@ impl ReadyStats {
         let messages = ready.messages().len();
         let committed_entries = ready.committed_entries().len();
         let entries = ready.entries().len();
+        let read_states = ready.read_states().len();
         let has_ss = ready.ss().is_some();
         let has_hs = ready.hs().is_some();
         let has_snapshot = !ready.snapshot().is_empty();
@@ -3942,6 +3949,7 @@ impl ReadyStats {
             committed_entries,
             messages,
             entries,
+            read_states,
             has_ss,
             has_hs,
             has_snapshot,

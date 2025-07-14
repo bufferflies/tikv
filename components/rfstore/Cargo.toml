@@ -43,6 +43,7 @@ pd_client = { path = "../pd_client", default-features = false }
 prometheus = { version = "0.13", features = ["nightly"] }
 prometheus-static-metric = "0.5"
 protobuf = "2.8"
+quick_cache = "0.6.14"
 raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
 raft-proto = { version = "0.7.0", default-features = false }
 raftstore = { path = "../raftstore" }

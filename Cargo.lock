@@ -7215,6 +7215,7 @@ dependencies = [
  "prometheus",
  "prometheus-static-metric",
  "protobuf",
+ "quick_cache",
  "raft",
  "raft-proto",
  "raftstore",

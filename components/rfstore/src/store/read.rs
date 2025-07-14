@@ -19,7 +19,6 @@ use raftstore::store::{
 };
 use tikv_util::{
     debug, error,
-    lru::LruCache,
     time::{monotonic_raw_now, ThreadReadId},
 };
 use time::Timespec;
@@ -241,7 +240,7 @@ pub struct LocalReader {
     kv_engine: kvengine::Engine,
     // region id -> ReadDelegate
     // The use of `Arc` here is a workaround, see the comment at `get_delegate`
-    delegates: LruCache<u64, Arc<ReadDelegate>>,
+    delegates: quick_cache::unsync::Cache<u64, Arc<ReadDelegate>>,
     // A channel to raftstore.
     router: RaftRouter,
 }
@@ -267,7 +266,7 @@ impl LocalReader {
             store_readers,
             kv_engine,
             router,
-            delegates: LruCache::with_capacity_and_sample(0, 7),
+            delegates: quick_cache::unsync::Cache::new(4096),
         }
     }
 
@@ -290,20 +289,20 @@ impl LocalReader {
             _ => {
                 debug!("update local read delegate"; "region_id" => region_id);
                 TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.cache_miss.inc());
-                let meta_len = self.store_readers.len();
                 let meta_reader = self
                     .store_readers
                     .get(&region_id)
                     .map(|reader| Arc::new(reader.value().clone()));
-                // Remove the stale delegate
-                self.delegates.remove(&region_id);
-                self.delegates.resize(meta_len);
                 match meta_reader {
                     Some(reader) => {
                         self.delegates.insert(region_id, Arc::clone(&reader));
                         Some(reader)
                     }
-                    None => None,
+                    None => {
+                        // Remove the stale delegate
+                        self.delegates.remove(&region_id);
+                        None
+                    }
                 }
             }
         }
@@ -442,7 +441,7 @@ impl Clone for LocalReader {
             store_readers: self.store_readers.clone(),
             kv_engine: self.kv_engine.clone(),
             router: self.router.clone(),
-            delegates: LruCache::with_capacity_and_sample(0, 7),
+            delegates: quick_cache::unsync::Cache::new(4096),
         }
     }
 }
