@@ -957,6 +957,9 @@ impl ShardMeta {
                 }
             }
             for vec_idx in &old.vector_indexes {
+                if !new_shard.columnar_table_ids.contains(&vec_idx.table_id) {
+                    continue;
+                }
                 let mut files = vec![];
                 for vec_file in vec_idx.get_files() {
                     if new_shard_bound.overlap_bound(vec_file.data_bound()) {
@@ -1003,6 +1006,7 @@ impl ShardMeta {
         if comp.snap_version == 0 {
             self.columnar_table_ids.clear();
             self.unconverted_l0s.clear();
+            self.vector_indexes.clear();
         } else {
             self.columnar_table_ids
                 .extend_from_slice(comp.get_columnar_table_ids());
@@ -1010,6 +1014,9 @@ impl ShardMeta {
             self.columnar_table_ids.dedup();
             self.columnar_table_ids
                 .retain(|id| !comp.get_columnar_table_ids_to_clear().contains(id));
+            let columnar_table_ids = self.columnar_table_ids.clone();
+            self.vector_indexes
+                .retain(|vec_idx| columnar_table_ids.contains(&vec_idx.table_id));
         }
     }
 

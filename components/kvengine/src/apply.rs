@@ -1186,12 +1186,15 @@ impl EngineCore {
             columnar_table_ids
                 .retain(|id| !col_comp.get_columnar_table_ids_to_clear().contains(id));
         };
+        let mut vector_indexes = old_data.vector_indexes.clone();
+        vector_indexes.retain(|vec_idx| columnar_table_ids.contains(&vec_idx.table_id));
         let mut builder = ShardDataBuilder::new(old_data);
         if clear_schema {
             builder.clear_schema();
         }
         builder.set_columnar_levels(new_col_levels);
         builder.set_columnar_table_ids(columnar_table_ids);
+        builder.set_vector_indexes(vector_indexes);
         shard.set_data(builder.build());
     }
 

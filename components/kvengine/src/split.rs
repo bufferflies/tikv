@@ -179,14 +179,6 @@ impl Engine {
                 }
             }
             new_col_levels.l2_snap_version = old_data.col_levels.l2_snap_version;
-            let mut new_vec_indexes = VectorIndexes::default();
-            for vec_index in old_data.vector_indexes.get_all() {
-                for file in &vec_index.files {
-                    if new_shard.overlap_bound(file.data_bound()) {
-                        new_vec_indexes.add_index_file(file.clone());
-                    }
-                }
-            }
             let (min_table_id, max_table_id) = get_table_id_from_data_bound(new_shard.data_bound());
             let columnar_table_ids: Vec<_> = old_data
                 .columnar_table_ids
@@ -194,6 +186,17 @@ impl Engine {
                 .filter(|&&table_id| table_id >= min_table_id && table_id <= max_table_id)
                 .copied()
                 .collect();
+            let mut new_vec_indexes = VectorIndexes::default();
+            for vec_index in old_data.vector_indexes.get_all() {
+                if !columnar_table_ids.contains(&vec_index.table_id) {
+                    continue;
+                }
+                for file in &vec_index.files {
+                    if new_shard.overlap_bound(file.data_bound()) {
+                        new_vec_indexes.add_index_file(file.clone());
+                    }
+                }
+            }
             let mut builder = ShardDataBuilder::new(new_shard.get_data());
             builder.set_mem_tbls(new_mem_tbls);
             builder.set_l0_tbls(new_l0s);
