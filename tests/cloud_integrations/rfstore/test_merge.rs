@@ -51,10 +51,10 @@ fn test_node_merge_with_slow_learner() {
     assert_eq!(right.get_start_key(), split_k2.as_encoded());
 
     // Make sure the leader has received the learner's last index.
-    cluster.must_put(b"k1", b"v1");
-    cluster.must_put(b"k3", b"v3");
-    must_get_equal(&cluster.get_engine(2), left.id, b"k1", b"v1");
-    must_get_equal(&cluster.get_engine(2), right.id, b"k3", b"v3");
+    cluster.must_put(b"k10", b"v");
+    cluster.must_put(b"k30", b"v");
+    must_get_equal(&cluster.get_engine(2), left.id, b"k10", b"v");
+    must_get_equal(&cluster.get_engine(2), right.id, b"k30", b"v");
 
     cluster.add_send_filter(IsolationFilterFactory::new(2));
     (0..20).for_each(|i| cluster.must_put(b"k1", format!("v{}", i).as_bytes()));
