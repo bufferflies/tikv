@@ -724,7 +724,7 @@ impl MergedEngine {
             &mut prepared_msgs,
         )?;
         self.handle_prepared_msgs(&mut ctx, prepared_msgs, apply_ctx);
-        self.truncate_regions(&updated_regions, &mut raft_wb);
+        self.update_progress_and_truncate(&updated_regions, &mut raft_wb);
         self.destroy_regions(destroyed_regions, &mut raft_wb);
         if !raft_wb.is_empty() {
             self.raft.write(raft_wb)?;
@@ -921,9 +921,14 @@ impl MergedEngine {
         }
     }
 
-    fn truncate_regions(&mut self, regions: &[u64], raft_wb: &mut WriteBatch) {
+    fn update_progress_and_truncate(&mut self, regions: &[u64], raft_wb: &mut WriteBatch) {
         for &region_id in regions {
             let progress = self.region_progresses.get_mut(&region_id).unwrap();
+            let commit_index = progress.commit_index;
+            progress.synced_index = commit_index;
+            // We need to keep the uncommitted index for the next round.
+            progress.entries.retain(|&index, _| index > commit_index);
+
             let truncated_idx = self.raft.get_truncated_index(region_id).unwrap();
             if progress.truncated_index > truncated_idx {
                 if let Some(preprocessor) = self.preprocessors.get_mut(&region_id) {
@@ -941,10 +946,6 @@ impl MergedEngine {
                 }
                 raft_wb.truncate_raft_log(region_id, region_id, progress.truncated_index);
             }
-            let commit_index = progress.commit_index;
-            // We need to keep the uncommitted index for the next round.
-            progress.entries.retain(|&index, _| index > commit_index);
-            progress.synced_index = progress.commit_index;
         }
     }
 
