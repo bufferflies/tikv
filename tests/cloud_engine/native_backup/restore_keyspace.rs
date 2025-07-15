@@ -973,8 +973,10 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     )
     .unwrap();
 
-    // Import data by txn file
-    // Note that txn file does not support async commit.
+    let truncate_ts_a = client.get_ts().into_inner();
+    let ref_store_a = client.dump_ref_store();
+
+    // Import data by async commit / txn file
     {
         for i in [125, 150, 220] {
             // Split region to make secondary batches of txn chunks.
@@ -1037,44 +1039,69 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     }
 
     // Restore keyspace.
-    restore_keyspace::restore_keyspace(
-        KEYSPACE_ID,
-        KEYSPACE_ID,
-        &snapshot_backup_name,
-        None,
-        s3fs,
-        RestoreConfig::default(),
-        cluster.get_pd_client(),
-        &runtime,
-        None,
-        reporter,
-    )
-    .unwrap();
-
-    // Invoke major compaction to reproduce issue by compacting the deletion of
-    // primary key.
-    // If restore keyspace do not resolve locks, the secondary keys of "put_kv" will
-    // not be compacted, and the following `wait_for_keyspace_stats` will fail.
-    let ts = client.get_ts();
-    cluster.set_gc_safe_point(ts.into_inner());
-    request_major_compaction(&runtime, &pd_client, KEYSPACE_ID);
-    wait_for_keyspace_stats(
-        &runtime,
-        &cluster,
-        &pd_client,
-        KEYSPACE_ID,
-        |stats| stats.cfs[WRITE_CF].levels.iter().all(|l| l.num_tables == 0),
-        false,
-        Duration::from_secs(10),
-    )
-    .unwrap();
-    std::thread::sleep(Duration::from_secs(10));
-
-    // Verify restored data.
-    let verified_cnt = client
-        .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
+    {
+        restore_keyspace::restore_keyspace(
+            KEYSPACE_ID,
+            KEYSPACE_ID,
+            &snapshot_backup_name,
+            None,
+            s3fs.clone(),
+            RestoreConfig::default(),
+            cluster.get_pd_client(),
+            &runtime,
+            None,
+            reporter.clone(),
+        )
         .unwrap();
-    assert_eq!(verified_cnt, (0, 200));
+
+        // Invoke major compaction to reproduce issue by compacting the deletion of
+        // primary key.
+        // If restore keyspace do not resolve locks, the secondary keys of "put_kv" will
+        // not be compacted, and the following `wait_for_keyspace_stats` will fail.
+        let ts = client.get_ts();
+        cluster.set_gc_safe_point(ts.into_inner());
+        request_major_compaction(&runtime, &pd_client, KEYSPACE_ID);
+        wait_for_keyspace_stats(
+            &runtime,
+            &cluster,
+            &pd_client,
+            KEYSPACE_ID,
+            |stats| stats.cfs[WRITE_CF].levels.iter().all(|l| l.num_tables == 0),
+            false,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_secs(10));
+
+        // Verify restored data.
+        let verified_cnt = client
+            .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
+            .unwrap();
+        assert_eq!(verified_cnt, (0, 200));
+    }
+
+    // Restore keyspace with truncate ts (truncate_ts_a).
+    // To test for resolving locks after truncate ts.
+    {
+        restore_keyspace::restore_keyspace(
+            KEYSPACE_ID,
+            KEYSPACE_ID,
+            &snapshot_backup_name,
+            None,
+            s3fs,
+            RestoreConfig::default(),
+            cluster.get_pd_client(),
+            &runtime,
+            Some(truncate_ts_a),
+            reporter,
+        )
+        .unwrap();
+        // Verify restored data.
+        let verified_cnt = client
+            .verify_data_with_given_ref_store(&ref_store_a, None, &RequestOptions::default())
+            .unwrap();
+        assert_eq!(verified_cnt, (100, 100));
+    }
 
     cluster.stop();
     oss.shutdown();

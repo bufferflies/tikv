@@ -314,6 +314,7 @@ pub fn restore_keyspace(
     let lock_resolver = LockResolver::new(
         &keyspace_tag,
         cluster.get_kvengine(),
+        truncate_ts,
         RESOLVE_LOCKS_BATCH_SIZE,
         cluster.get_shard_meta_getter(),
     );

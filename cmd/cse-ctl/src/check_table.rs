@@ -200,6 +200,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         let lock_resolver = LockResolver::new(
             cluster.tag(),
             cluster.get_kvengine(),
+            cluster_backup.backup_ts,
             RESOLVE_LOCKS_BATCH_SIZE,
             cluster.get_shard_meta_getter(),
         );

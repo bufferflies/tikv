@@ -35,6 +35,7 @@ pub struct LockResolver {
     en: kvengine::Engine,
     shards: Arc<Vec<RawRegion>>,
     shard_meta_getter: RegionMetaGetter,
+    truncate_ts: u64,
     batch_size: usize,
     txn_status: TxnStatus,
     // `cm` is actually not used but meet the requirement of `MvccTxn`.
@@ -56,6 +57,7 @@ impl LockResolver {
     pub fn new(
         tag: &str,
         en: kvengine::Engine,
+        truncate_ts: u64,
         batch_size: usize,
         shard_meta_getter: RegionMetaGetter,
     ) -> Self {
@@ -74,6 +76,7 @@ impl LockResolver {
             en,
             shards,
             shard_meta_getter,
+            truncate_ts,
             batch_size,
             txn_status,
             cm: concurrency_manager::ConcurrencyManager::new(1.into()),
@@ -196,8 +199,12 @@ impl LockResolver {
             }
 
             for (key, lock) in kv_pairs {
-                let commit_ts = self.txn_status.check_txn_status(&self.tag, &lock).await?;
-                if commit_ts > 0 {
+                let commit_ts = if lock.ts.into_inner() < self.truncate_ts {
+                    self.txn_status.check_txn_status(&self.tag, &lock).await?
+                } else {
+                    0
+                };
+                if commit_ts > 0 && commit_ts <= self.truncate_ts {
                     Self::commit_lock(&self.tag, &mut mvcc_txn, key, &lock, commit_ts.into())?;
                     locks_cnt += 1;
                 } else {
@@ -248,7 +255,9 @@ impl LockResolver {
         }
 
         let write = txn_types::Write::new(
-            WriteType::from_lock_type(lock.lock_type).unwrap(),
+            WriteType::from_lock_type(lock.lock_type).ok_or_else(|| -> Error {
+                box_err!("{} commit_lock: invalid lock: {:?}", tag, lock)
+            })?,
             lock.ts,
             None,
         )
@@ -348,8 +357,12 @@ impl LockResolver {
                         err
                     )
                 })?;
-            let commit_ts = self.txn_status.check_txn_status(&self.tag, &lock).await?;
-            let txn_file_ref = if commit_ts > 0 {
+            let commit_ts = if lock.ts.into_inner() < self.truncate_ts {
+                self.txn_status.check_txn_status(&self.tag, &lock).await?
+            } else {
+                0
+            };
+            let txn_file_ref = if commit_ts > 0 && commit_ts <= self.truncate_ts {
                 self.commit_txn_file_lock(&snap, lock_txn_file, &lock, commit_ts.into())?
             } else {
                 self.rollback_txn_file_lock(&snap, lock_txn_file, &lock)?
