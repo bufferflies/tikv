@@ -6,8 +6,13 @@ FROM hub-new.pingcap.net/keyspace/tidb:${TIDB_VERSION} as tidb
 FROM hub-new.pingcap.net/keyspace/pd:${PD_VERSION} as pd
 FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
-FROM minio/minio:latest as minio
-FROM minio/mc:latest as mc
+
+# To sync the minio image:
+#   1. brew install skopeo (macOS)
+#   2. skopeo copy --all docker://minio/minio:latest docker://hub-new.pingcap.net/kvaas/minio:latest
+#   3. skopeo copy --all docker://minio/mc:latest docker://hub-new.pingcap.net/kvaas/mc:latest
+FROM hub-new.pingcap.net/kvaas/minio:latest as minio
+FROM hub-new.pingcap.net/kvaas/mc:latest as mc
 
 FROM amazonlinux:2023.5.20241001.1
 RUN dnf update -y && dnf install -y \
