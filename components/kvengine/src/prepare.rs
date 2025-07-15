@@ -465,7 +465,7 @@ impl EngineCore {
         shard_ver: u64,
         use_direct_io: bool,
     ) -> Result<()> {
-        let shard = self.shards.get(&shard_id).unwrap();
+        let shard = self.get_shard(shard_id).unwrap();
         let tag = shard.tag();
         let mut cs = ChangeSet::new(kvenginepb::ChangeSet::default());
         let data = shard.get_data();

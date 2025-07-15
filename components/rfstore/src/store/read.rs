@@ -1,9 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use fail::fail_point;
 use kvproto::{
@@ -33,7 +30,6 @@ use crate::{
 
 #[derive(Debug)]
 pub enum ReadProgress {
-    Region(metapb::Region),
     Term(u64),
     AppliedIndexTerm(u64),
     LeaderLease(RemoteLease),
@@ -41,10 +37,6 @@ pub enum ReadProgress {
 }
 
 impl ReadProgress {
-    pub fn region(region: metapb::Region) -> ReadProgress {
-        ReadProgress::Region(region)
-    }
-
     pub fn term(term: u64) -> ReadProgress {
         ReadProgress::Term(term)
     }
@@ -159,22 +151,16 @@ pub struct ReadDelegate {
     pub leader_lease: Option<RemoteLease>,
     pub last_valid_ts: Timespec,
 
-    pub tag: String,
     pub txn_ext: Arc<TxnExt>,
     pub bucket_meta: Option<Arc<BucketMeta>>,
-
-    // `track_ver` used to keep the local `ReadDelegate` in `LocalReader`
-    // up-to-date with the global `ReadDelegate` stored at `StoreMeta`
-    pub track_ver: TrackVer,
 }
 
 impl ReadDelegate {
-    pub(crate) fn from_peer(peer: &Peer) -> ReadDelegate {
+    pub(crate) fn from_peer(peer: &Peer) -> Arc<ReadDelegate> {
         let region = peer.region().clone();
-        let region_id = region.get_id();
         let peer_id = peer.peer.get_id();
         let store_id = peer.peer.get_store_id();
-        ReadDelegate {
+        Arc::new(ReadDelegate {
             region: Arc::new(region),
             peer_id,
             store_id,
@@ -182,11 +168,13 @@ impl ReadDelegate {
             applied_index_term: peer.get_store().applied_index_term(),
             leader_lease: None,
             last_valid_ts: Timespec::new(0, 0),
-            tag: format!("[region {}] {}", region_id, peer_id),
             txn_ext: peer.txn_ext.clone(),
             bucket_meta: peer.buckets.as_ref().map(|b| b.meta.clone()),
-            track_ver: TrackVer::new(),
-        }
+        })
+    }
+
+    pub(crate) fn clone_for_update(&self) -> ReadDelegate {
+        self.clone()
     }
 
     fn fresh_valid_ts(&mut self) {
@@ -195,11 +183,7 @@ impl ReadDelegate {
 
     pub fn update(&mut self, progress: ReadProgress) {
         self.fresh_valid_ts();
-        self.track_ver.inc();
         match progress {
-            ReadProgress::Region(region) => {
-                self.region = Arc::new(region);
-            }
             ReadProgress::Term(term) => {
                 self.term = term;
             }
@@ -224,11 +208,9 @@ impl ReadDelegate {
                 } else {
                     TLS_LOCAL_READ_METRICS
                         .with(|m| m.borrow_mut().reject_reason.lease_expire.inc());
-                    debug!("rejected by lease expire"; "tag" => &self.tag);
                 }
             } else {
                 TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.term_mismatch.inc());
-                debug!("rejected by term mismatch"; "tag" => &self.tag);
             }
         }
         false
@@ -236,11 +218,8 @@ impl ReadDelegate {
 }
 
 pub struct LocalReader {
-    store_readers: Arc<dashmap::DashMap<u64, ReadDelegate>>,
+    store_readers: Arc<papaya::HashMap<u64, Arc<ReadDelegate>>>,
     kv_engine: kvengine::Engine,
-    // region id -> ReadDelegate
-    // The use of `Arc` here is a workaround, see the comment at `get_delegate`
-    delegates: quick_cache::unsync::Cache<u64, Arc<ReadDelegate>>,
     // A channel to raftstore.
     router: RaftRouter,
 }
@@ -259,14 +238,13 @@ impl ReadExecutor for LocalReader {
 impl LocalReader {
     pub fn new(
         kv_engine: kvengine::Engine,
-        store_readers: Arc<dashmap::DashMap<u64, ReadDelegate>>,
+        store_readers: Arc<papaya::HashMap<u64, Arc<ReadDelegate>>>,
         router: RaftRouter,
     ) -> Self {
         LocalReader {
             store_readers,
             kv_engine,
             router,
-            delegates: quick_cache::unsync::Cache::new(4096),
         }
     }
 
@@ -283,29 +261,8 @@ impl LocalReader {
     // is required by `LocalReadRouter: Send`, use `Arc` will introduce extra cost
     // but make the logic clear
     fn get_delegate(&mut self, region_id: u64) -> Option<Arc<ReadDelegate>> {
-        match self.delegates.get(&region_id) {
-            // The local `ReadDelegate` is up to date
-            Some(d) if !d.track_ver.any_new() => Some(Arc::clone(d)),
-            _ => {
-                debug!("update local read delegate"; "region_id" => region_id);
-                TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.cache_miss.inc());
-                let meta_reader = self
-                    .store_readers
-                    .get(&region_id)
-                    .map(|reader| Arc::new(reader.value().clone()));
-                match meta_reader {
-                    Some(reader) => {
-                        self.delegates.insert(region_id, Arc::clone(&reader));
-                        Some(reader)
-                    }
-                    None => {
-                        // Remove the stale delegate
-                        self.delegates.remove(&region_id);
-                        None
-                    }
-                }
-            }
-        }
+        let readers = self.store_readers.pin();
+        readers.get(&region_id).cloned()
     }
 
     fn pre_propose_raft_command(
@@ -409,7 +366,7 @@ impl LocalReader {
             Ok(None) => self.redirect(RaftCommand::new(req, cb)),
             Err(e) => {
                 let mut response = cmd_resp::new_error(e);
-                if let Some(delegate) = self.delegates.get(&req.get_header().get_region_id()) {
+                if let Some(delegate) = self.get_delegate(req.get_header().get_region_id()) {
                     cmd_resp::bind_term(&mut response, delegate.term);
                 }
                 cb.invoke_read(ReadResponse {
@@ -441,7 +398,6 @@ impl Clone for LocalReader {
             store_readers: self.store_readers.clone(),
             kv_engine: self.kv_engine.clone(),
             router: self.router.clone(),
-            delegates: quick_cache::unsync::Cache::new(4096),
         }
     }
 }
@@ -455,13 +411,6 @@ impl<'r> RequestInspector for Inspector<'r> {
         if self.delegate.applied_index_term == self.delegate.term {
             true
         } else {
-            debug!(
-                "rejected by term check";
-                "tag" => &self.delegate.tag,
-                "applied_index_term" => self.delegate.applied_index_term,
-                "delegate_term" => ?self.delegate.term,
-            );
-
             // only for metric.
             TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.applied_term.inc());
             false
@@ -474,65 +423,8 @@ impl<'r> RequestInspector for Inspector<'r> {
             // We skip lease check, because it is postponed until `handle_read`.
             LeaseState::Valid
         } else {
-            debug!("rejected by leader lease"; "tag" => &self.delegate.tag);
             TLS_LOCAL_READ_METRICS.with(|m| m.borrow_mut().reject_reason.no_lease.inc());
             LeaseState::Expired
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct TrackVer {
-    version: Arc<AtomicU64>,
-    local_ver: u64,
-    // source set to `true` means the `TrackVer` is created by `TrackVer::new` instead
-    // of `TrackVer::clone`, more specific, only the `ReadDelegate` created by `ReadDelegate::new`
-    // will have source `TrackVer` and be able to increase `TrackVer::version`, because these
-    // `ReadDelegate` are store at `StoreMeta` and only them will invoke `ReadDelegate::update`
-    source: bool,
-}
-
-impl TrackVer {
-    pub fn new() -> TrackVer {
-        TrackVer {
-            version: Arc::new(AtomicU64::from(0)),
-            local_ver: 0,
-            source: true,
-        }
-    }
-
-    // Take `&mut self` to prevent calling `inc` and `clone` at the same time
-    fn inc(&mut self) {
-        // Only the source `TrackVer` can increase version
-        if self.source {
-            self.version.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    fn any_new(&self) -> bool {
-        self.version.load(Ordering::Relaxed) > self.local_ver
-    }
-}
-
-impl Default for TrackVer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Clone for TrackVer {
-    fn clone(&self) -> Self {
-        TrackVer {
-            version: Arc::clone(&self.version),
-            local_ver: self.version.load(Ordering::Relaxed),
-            source: false,
-        }
-    }
-}
-
-impl Drop for ReadDelegate {
-    fn drop(&mut self) {
-        // call `inc` to notify the source `ReadDelegate` is dropped
-        self.track_ver.inc();
     }
 }

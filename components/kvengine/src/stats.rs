@@ -121,7 +121,7 @@ impl super::Engine {
     }
 
     pub fn get_shard_stat_opt(&self, region_id: u64) -> Option<ShardStats> {
-        self.shards.get(&region_id).map(|shard| shard.get_stats())
+        self.get_shard(region_id).map(|shard| shard.get_stats())
     }
 
     pub fn get_engine_stats(&self, mut shard_stats: Vec<ShardStats>) -> EngineStats {

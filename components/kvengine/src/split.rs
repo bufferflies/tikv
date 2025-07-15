@@ -16,7 +16,6 @@ use api_version::{
 };
 use bytes::{Buf, Bytes};
 use collections::HashSet;
-use dashmap::mapref::entry::Entry;
 use kvenginepb as pb;
 use schema::schema::StorageClassSpec;
 use slog_global::info;
@@ -214,18 +213,13 @@ impl Engine {
             let id = shard.id;
             if id != old_shard.id {
                 self.insert_keyspace_shard(shard.keyspace_id, id);
-                match self.shards.entry(id) {
-                    Entry::Occupied(_) => {
-                        // The shard already exists, it must be created by ingest, and it maybe
-                        // newer than this one, we avoid insert it.
-                        continue;
-                    }
-                    Entry::Vacant(entry) => {
-                        entry.insert(shard.clone());
-                    }
-                }
+                let shards = self.shards.pin();
+                // If the shard already exists, it must be created by ingest, and it maybe
+                // newer than this one, we avoid insert it.
+                let _ = shards.try_insert(id, shard.clone());
             } else {
-                self.shards.insert(id, shard.clone());
+                let shards = self.shards.pin();
+                shards.insert(id, shard.clone());
             }
             self.refresh_shard_states(&shard);
             let all_files = shard.get_all_files();

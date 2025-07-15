@@ -1468,11 +1468,14 @@ impl Peer {
             let bucket_stat = BucketStat::new(Arc::new(bucket_meta), stats);
             self.bucket_version = bucket_stat.meta.version;
             self.buckets = Some(bucket_stat);
-            if let Some(mut reader) = ctx.global.readers.get_mut(&self.region_id) {
-                reader.update(ReadProgress::RegionBuckets(
+            let readers = ctx.global.readers.pin();
+            readers.update(self.region_id, |old| {
+                let mut new_reader = old.clone_for_update();
+                new_reader.update(ReadProgress::RegionBuckets(
                     self.buckets.as_ref().unwrap().meta.clone(),
                 ));
-            }
+                Arc::new(new_reader)
+            });
         }
     }
 
@@ -2544,9 +2547,15 @@ impl Peer {
                     .coprocessor_host
                     .on_applied_current_term(StateRole::Leader, self.region());
             }
-            let progress = ReadProgress::applied_index_term(applied_index_term);
-            let mut reader = ctx.global.readers.get_mut(&self.region_id).unwrap();
-            self.maybe_update_read_progress(reader.value_mut(), progress);
+            if !self.pending_remove {
+                let readers = ctx.global.readers.pin();
+                readers.update(self.region_id, move |old| {
+                    let mut new_reader = old.clone_for_update();
+                    let progress = ReadProgress::applied_index_term(applied_index_term);
+                    new_reader.update(progress);
+                    Arc::new(new_reader)
+                });
+            }
         }
     }
 
@@ -2780,14 +2789,21 @@ impl Peer {
                 .maybe_new_remote_lease(term)
                 .map(ReadProgress::leader_lease)
         };
-        if progress.is_some() || read_progress.is_some() {
-            let mut reader = ctx.global.readers.get_mut(&self.region_id).unwrap();
+        if (progress.is_some() || read_progress.is_some()) && !self.pending_remove {
+            let readers = ctx.global.readers.pin();
+            let mut new_reader = readers
+                .get(&self.region_id)
+                .cloned()
+                .unwrap()
+                .clone_for_update();
             if let Some(progress) = progress {
-                self.maybe_update_read_progress(reader.value_mut(), progress);
+                new_reader.update(progress);
             }
             if let Some(read_progress) = read_progress {
-                self.maybe_update_read_progress(reader.value_mut(), read_progress);
+                new_reader.update(read_progress);
             }
+            let arc_new_reader = Arc::new(new_reader);
+            readers.update(self.region_id, |_| arc_new_reader.clone());
         }
     }
 
@@ -2806,22 +2822,9 @@ impl Peer {
 
         // TODO(x) update commit group
         meta.region_map.put(region);
-        meta.readers
-            .insert(self.region_id, ReadDelegate::from_peer(self));
+        let readers = meta.readers.pin();
+        readers.insert(self.region_id, ReadDelegate::from_peer(self));
         true
-    }
-
-    fn maybe_update_read_progress(&self, reader: &mut ReadDelegate, progress: ReadProgress) {
-        if self.pending_remove {
-            return;
-        }
-        debug!(
-            "update read progress";
-            "tag" => self.tag(),
-            "peer_id" => self.peer.get_id(),
-            "progress" => ?progress,
-        );
-        reader.update(progress);
     }
 
     /// Propose a request.

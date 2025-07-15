@@ -136,7 +136,7 @@ impl Engine {
         let dfs_load_limiter = DfsLoadLimiter::new(&config);
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
-            shards: DashMap::new(),
+            shards: papaya::HashMap::new(),
             keyspace_shards: DashMap::new(),
             opts: opts.clone(),
             per_keyspace_configs,
@@ -316,7 +316,7 @@ impl Engine {
 
 pub struct EngineCore {
     pub(crate) engine_id: AtomicU64,
-    pub(crate) shards: DashMap<u64, Arc<Shard>>,
+    pub(crate) shards: papaya::HashMap<u64, Arc<Shard>>,
     pub(crate) keyspace_shards: DashMap<u32 /* keyspace id */, HashSet<u64 /* shard id */>>,
     pub opts: Arc<Options>,
     pub per_keyspace_configs: Arc<HashMap<u32, PerKeyspaceConfig>>,
@@ -478,21 +478,20 @@ impl EngineCore {
         let shard = Arc::new(self.new_shard_from_change_set(cs));
         shard.set_active(active);
         self.insert_keyspace_shard(shard.keyspace_id, shard.id);
-        match self.shards.entry(shard.id) {
-            Entry::Occupied(entry) => {
-                let old = entry.get();
-                let mut old_mem_tbls = old.get_data().mem_tbls.clone();
-                let old_total_seq = old.get_write_sequence() + old.get_meta_sequence();
-                let new_total_seq = shard.get_write_sequence() + shard.get_meta_sequence();
-                // It's possible that the new version shard has the same write_sequence and meta
-                // sequence, so we need to compare shard version first.
-                if shard.ver > old.ver || new_total_seq > old_total_seq {
-                    entry.replace_entry(shard.clone());
-                    for mem_tbl in old_mem_tbls.drain(..) {
-                        self.send_free_mem_msg(FreeMemMsg::FreeMem(mem_tbl));
-                    }
-                } else {
-                    info!(
+        let shards = self.shards.pin();
+        shards.update_or_insert(shard.id, |old| {
+            let mut old_mem_tbls = old.get_data().mem_tbls.clone();
+            let old_total_seq = old.get_write_sequence() + old.get_meta_sequence();
+            let new_total_seq = shard.get_write_sequence() + shard.get_meta_sequence();
+            // It's possible that the new version shard has the same write_sequence and meta
+            // sequence, so we need to compare shard version first.
+            if shard.ver > old.ver || new_total_seq > old_total_seq {
+                for mem_tbl in old_mem_tbls.drain(..) {
+                    self.send_free_mem_msg(FreeMemMsg::FreeMem(mem_tbl));
+                }
+                shard.clone()
+            } else {
+                info!(
                         "ingest shard {} found old shard {} already exists with higher or equal sequence, skip insert",
                         shard.tag(), old.tag();
                         "new_write_seq" => shard.get_write_sequence(),
@@ -500,29 +499,20 @@ impl EngineCore {
                         "old_write_seq" => old.get_write_sequence(),
                         "old_meta_seq" => old.get_meta_sequence(),
                     );
-                    return Ok(());
-                }
+                old.clone()
             }
-            Entry::Vacant(entry) => {
-                entry.insert(shard.clone());
-            }
-        }
+        }, shard.clone());
         self.refresh_shard_states(&shard);
         Ok(())
     }
 
     pub fn get_snap_access(&self, id: u64) -> Option<SnapAccess> {
-        if let Some(ptr) = self.shards.get(&id) {
-            return Some(ptr.new_snap_access());
-        }
-        None
+        self.get_shard(id).map(|shard| shard.new_snap_access())
     }
 
     pub fn get_shard(&self, id: u64) -> Option<Arc<Shard>> {
-        if let Some(ptr) = self.shards.get(&id) {
-            return Some(ptr.value().clone());
-        }
-        None
+        let shards = self.shards.pin();
+        shards.get(&id).cloned()
     }
 
     /// Iterate over shards.
@@ -545,8 +535,10 @@ impl EngineCore {
     }
 
     pub fn remove_shard(&self, shard_id: u64) -> bool {
-        let x = self.shards.remove(&shard_id);
-        if let Some((_, shard)) = x {
+        let shards = self.shards.pin();
+        let x = shards.remove(&shard_id).cloned();
+        drop(shards);
+        if let Some(shard) = x {
             let keyspace_id = shard.keyspace_id;
             let shards_entry = self.keyspace_shards.entry(keyspace_id);
             if let Entry::Occupied(mut entry) = shards_entry {
@@ -565,7 +557,8 @@ impl EngineCore {
         let shard_id = shard.id;
         let keyspace_id = shard.keyspace_id;
         self.insert_keyspace_shard(keyspace_id, shard_id);
-        self.shards.insert(shard_id, shard)
+        let shards = self.shards.pin();
+        shards.insert(shard_id, shard).cloned()
     }
 
     pub fn insert_shard_and_refresh(&self, shard: Arc<Shard>) {
@@ -594,9 +587,10 @@ impl EngineCore {
     }
 
     pub fn size(&self) -> u64 {
-        self.shards
+        let shards = self.shards.pin();
+        shards
             .iter()
-            .map(|x| x.value().estimated_size.load(Ordering::Relaxed) + 1)
+            .map(|(_, v)| v.estimated_size.load(Ordering::Relaxed) + 1)
             .reduce(|x, y| x + y)
             .unwrap_or(0)
     }
@@ -805,9 +799,10 @@ impl EngineCore {
 
     // Use `get_all_shard_id_vers` first.
     pub fn collect_shard_id_vers(&self) -> Vec<IdVer> {
-        self.shards
+        let shards = self.shards.pin();
+        shards
             .iter()
-            .map(|x| IdVer::new(x.id, x.ver))
+            .map(|(_, x)| IdVer::new(x.id, x.ver))
             .collect()
     }
 

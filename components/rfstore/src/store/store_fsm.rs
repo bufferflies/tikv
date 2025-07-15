@@ -166,12 +166,12 @@ impl RaftBatchSystem {
             engine_total_keys_written: Arc::new(AtomicU64::new(0)),
         };
         let mut region_peers = self.load_peers(&ctx, &mut store_meta)?;
+        let readers = store_meta.readers.pin();
         for peer_fsm in &region_peers {
             let peer = peer_fsm.get_peer();
-            store_meta
-                .readers
-                .insert(peer_fsm.region_id(), ReadDelegate::from_peer(peer));
+            readers.insert(peer_fsm.region_id(), ReadDelegate::from_peer(peer));
         }
+        drop(readers);
         let mut region_ids = Vec::with_capacity(region_peers.len());
         let mut store_ctx =
             StoreContext::new(RaftContext::new(ctx.clone(), WorkerType::Main), store_meta);
@@ -361,7 +361,7 @@ pub struct StoreMeta {
 
     pub cop_host: Option<CoprocessorHost<kvengine::Engine>>,
     /// region_id -> reader
-    pub readers: Arc<dashmap::DashMap<u64, ReadDelegate>>,
+    pub readers: Arc<papaya::HashMap<u64, Arc<ReadDelegate>>>,
     /// `MsgRequestPreVote`, `MsgRequestVote` or `MsgAppend` messages from newly
     /// split Regions shouldn't be dropped if there is no such Region in
     /// this store now. So the messages are recorded temporarily and will be
@@ -377,7 +377,7 @@ impl StoreMeta {
             store_id: None,
             region_map: Default::default(),
             cop_host: None,
-            readers: Arc::new(dashmap::DashMap::new()),
+            readers: Arc::new(papaya::HashMap::new()),
             pending_msgs: RingQueue::with_capacity(vote_capacity),
             black_list: None,
         }
@@ -393,13 +393,14 @@ impl StoreMeta {
         let region_id = region.get_id();
         self.region_map.put(region.clone());
         peer.set_region(self.cop_host.as_ref().unwrap(), region, reason);
-        self.readers
-            .insert(region_id, ReadDelegate::from_peer(peer));
+        let readers = self.readers.pin();
+        readers.insert(region_id, ReadDelegate::from_peer(peer));
     }
 
     pub(crate) fn destroy_region(&mut self, region: &Region) {
         self.region_map.remove(region.id);
-        self.readers.remove(&region.id);
+        let readers = self.readers.pin();
+        readers.remove(&region.id);
     }
 }
 
@@ -567,7 +568,7 @@ pub(crate) struct GlobalContext {
     pub(crate) cfg: Arc<VersionTrack<Config>>,
     pub(crate) engines: Engines,
     pub(crate) store: metapb::Store,
-    pub(crate) readers: Arc<dashmap::DashMap<u64, ReadDelegate>>,
+    pub(crate) readers: Arc<papaya::HashMap<u64, Arc<ReadDelegate>>>,
     pub(crate) router: RaftRouter,
     pub(crate) trans: Box<dyn Transport>,
     pub(crate) trans_idle: Box<dyn Transport>,
@@ -1460,10 +1461,9 @@ impl<'a> StoreMsgHandler<'a> {
             );
             self.ctx.store_meta.region_map.put(new_region.clone());
             let read_delegate = ReadDelegate::from_peer(new_peer.get_peer());
-            self.ctx
-                .store_meta
-                .readers
-                .insert(new_region_id, read_delegate);
+            let readers = self.ctx.store_meta.readers.pin();
+            readers.insert(new_region_id, read_delegate);
+            drop(readers);
 
             new_peers.push(new_peer);
             self.ctx.global.router.send(new_region_id, PeerMsg::Start);

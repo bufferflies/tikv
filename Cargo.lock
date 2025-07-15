@@ -4297,6 +4297,7 @@ dependencies = [
  "memmap2 0.9.5",
  "nix 0.24.3",
  "num_cpus",
+ "papaya",
  "parking_lot 0.12.0",
  "prometheus",
  "prometheus-static-metric",
@@ -5709,6 +5710,16 @@ name = "panic_hook"
 version = "0.0.1"
 
 [[package]]
+name = "papaya"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f92dd0b07c53a0a0c764db2ace8c541dc47320dad97c2200c2a637ab9dd2328f"
+dependencies = [
+ "equivalent",
+ "seize",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6313,7 +6324,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.4.0",
+ "heck 0.5.0",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -7211,11 +7222,11 @@ dependencies = [
  "lazy_static",
  "log_wrappers",
  "online_config",
+ "papaya",
  "pd_client",
  "prometheus",
  "prometheus-static-metric",
  "protobuf",
- "quick_cache",
  "raft",
  "raft-proto",
  "raftstore",
@@ -7862,6 +7873,16 @@ checksum = "3676258fd3cfe2c9a0ec99ce3038798d847ce3e4bb17746373eb9f0f1ac16339"
 dependencies = [
  "core-foundation-sys",
  "libc 0.2.174",
+]
+
+[[package]]
+name = "seize"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4b8d813387d566f627f3ea1b914c068aac94c40ae27ec43f5f33bde65abefe7"
+dependencies = [
+ "libc 0.2.174",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
