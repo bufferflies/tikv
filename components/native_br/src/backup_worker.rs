@@ -38,6 +38,7 @@ enum BackupTask {
         cb: InstantBackupCallback,
     },
     BackupResult {
+        backup_ts: u64,
         res: Result<(String, ClusterBackupMeta)>,
         cb: Option<InstantBackupCallback>,
     },
@@ -112,6 +113,8 @@ struct BackupRunner {
 
     last_backup_ts: u64,
     last_backup_meta: Option<ClusterBackupMeta>,
+    // Backup ts of all backup tasks.
+    tasks_backup_ts: Vec<u64>,
 
     scheduler: Scheduler<BackupTask>,
 }
@@ -130,6 +133,7 @@ impl BackupRunner {
             last_backup_time: Instant::now() - MIN_BACKUP_INTERVAL,
             last_backup_ts: 0,
             last_backup_meta: None,
+            tasks_backup_ts: vec![],
             scheduler,
         }
     }
@@ -171,6 +175,9 @@ impl BackupRunner {
         };
 
         self.last_backup_time = Instant::now();
+        if self.periodic_backup_enabled() {
+            self.tasks_backup_ts.push(backup_ts);
+        }
 
         let config = self.config.clone();
         let pd_client = self.pd_client.clone();
@@ -187,30 +194,26 @@ impl BackupRunner {
                 backup_ts,
                 last_backup_meta,
             );
-            scheduler.schedule(BackupTask::BackupResult { res, cb })
+            scheduler.schedule(BackupTask::BackupResult { backup_ts, res, cb })
         });
     }
 
     fn handle_backup_result(
         &mut self,
+        backup_ts: u64,
         res: Result<(String, ClusterBackupMeta)>,
         cb: Option<InstantBackupCallback>,
     ) {
         match res {
             Ok((backup_path, backup_meta)) => {
                 info!("backup succeeded"; "path" => ?backup_path, "meta" => %backup_meta);
-                if self.last_backup_ts < backup_meta.backup_ts {
-                    self.last_backup_ts = backup_meta.backup_ts;
-                    if self.periodic_backup_enabled() {
+                if self.periodic_backup_enabled() {
+                    if self.last_backup_ts < backup_ts {
+                        self.last_backup_ts = backup_ts;
                         self.last_backup_meta = Some(backup_meta);
-
-                        if let Err(err) =
-                            update_service_safe_point(self.pd_client.as_ref(), self.last_backup_ts)
-                        {
-                            error!("backup worker: update safepoint failed"; "err" => ?err);
-                            NATIVE_BR_BACKUP_ERROR.inc();
-                        }
                     }
+
+                    self.try_update_service_safe_point(backup_ts);
                 }
 
                 NATIVE_BR_BACKUP_SUCCESS.inc();
@@ -225,6 +228,26 @@ impl BackupRunner {
                 if let Some(cb) = cb {
                     cb(Err(SharedError::from(err)));
                 }
+            }
+        }
+
+        if self.periodic_backup_enabled() {
+            self.tasks_backup_ts.retain(|&ts| ts != backup_ts);
+        }
+    }
+
+    fn try_update_service_safe_point(&mut self, backup_ts: u64) {
+        if self
+            .tasks_backup_ts
+            .first()
+            .is_some_and(|&ts| ts == backup_ts)
+        {
+            // Update the service safe point only for the earliest backup task.
+            // Otherwise, the backup ts of earlier tasks will be behind the service safe
+            // point.
+            if let Err(err) = update_service_safe_point(self.pd_client.as_ref(), backup_ts) {
+                error!("backup worker: update safepoint failed"; "err" => ?err);
+                NATIVE_BR_BACKUP_ERROR.inc();
             }
         }
     }
@@ -242,8 +265,8 @@ impl Runnable for BackupRunner {
             BackupTask::LightweightBackup { cb } => {
                 self.do_lightweight_backup(cb);
             }
-            BackupTask::BackupResult { res, cb } => {
-                self.handle_backup_result(res, cb);
+            BackupTask::BackupResult { backup_ts, res, cb } => {
+                self.handle_backup_result(backup_ts, res, cb);
             }
         }
     }
