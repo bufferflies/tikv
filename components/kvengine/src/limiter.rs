@@ -207,7 +207,7 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
             self.options.min_speed_limit,
         );
         if !throttle.is_infinite() {
-            info!("{} {}: update_usage", tag, Ty::TAG;
+            debug!("{} {}: update_usage", tag, Ty::TAG;
                 "usage" => usage,
                 "throttle" => throttle,
             );
