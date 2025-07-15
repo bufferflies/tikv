@@ -77,7 +77,7 @@ fn test_replication_worker() {
         || "wait for region merge".into(),
     );
     let tidb_opts = StartTidbOptions::default();
-    block_on(tc.start_tidb(1, Duration::from_secs(10), "info", tidb_opts));
+    block_on(tc.start_tidb(1, Duration::from_secs(60), "info", tidb_opts));
     let params = tc.tidb.conn_params(1);
     let opts = sqlx::mysql::MySqlConnectOptions::new()
         .host(&params.host)
