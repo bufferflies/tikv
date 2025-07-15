@@ -5350,6 +5350,7 @@ dependencies = [
  "prometheus",
  "protobuf",
  "raft",
+ "rand 0.8.5",
  "regex",
  "rfengine",
  "rfenginepb",

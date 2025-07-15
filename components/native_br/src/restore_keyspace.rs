@@ -35,6 +35,7 @@ use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
 use pd_client::{pd_control::PdControl, PdClient};
 use protobuf::Message;
 use raft::eraftpb;
+use rand::seq::SliceRandom;
 use rfengine::RfEngine;
 use rfenginepb::ClusterBackupMeta;
 use rfstore::store::{
@@ -50,7 +51,7 @@ use tikv_util::{
     merge_range::MergeRanges, mpsc, retry::try_wait_result_async,
     sys::thread::StdThreadBuildWrapper, time::Instant, HandyRwLock,
 };
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::Semaphore};
 use txn_types::TimeStamp;
 
 use crate::{
@@ -59,9 +60,9 @@ use crate::{
         ArchiveReader, StoreMeta,
     },
     common::{
-        collect_snapshot_meta_rlog_files, load_peer_raft_state, load_rf_engine_meta, now,
-        replay_wal_logs, retain_sst_files, send_request_to_store, RawRegion, RegionMetaGetter,
-        ReplayWalLogsContext, StorePeer, TableFile,
+        collect_snapshot_meta_rlog_files, get_all_stores_except_tiflash, load_peer_raft_state,
+        load_rf_engine_meta, now, replay_wal_logs, retain_sst_files, send_request_to_store,
+        RawRegion, RegionMetaGetter, ReplayWalLogsContext, StorePeer, TableFile,
     },
     error::{
         Error,
@@ -367,6 +368,7 @@ pub fn restore_keyspace(
         config.max_retry,
     ));
     let mut restore_bytes = 0;
+    let mut rng = rand::thread_rng();
     // NOTE: must call `bo::on_error` before every "continue".
     loop {
         let mut target_regions = match runtime.block_on(get_target_regions(
@@ -416,8 +418,13 @@ pub fn restore_keyspace(
         );
 
         reporter.report_step(RestoreStep::RestoreSnapshotsToServers);
-        let snapshots = cluster.generate_snapshots(target_shards);
+        let mut snapshots = cluster.generate_snapshots(target_shards);
         let snapshots_count = snapshots.len();
+        // Because we scatter regions then split it to finer region, continous regions
+        // are probably placed to the same store.
+        // So shuffle the sorted snapshots hence our requests can be scattered to
+        // stores.
+        snapshots.shuffle(&mut rng);
         let ret = restore_snapshots(
             &keyspace_tag,
             runtime,
@@ -425,6 +432,7 @@ pub fn restore_keyspace(
             snapshots,
             &mut success_ranges,
             config.timeout_restore_snapshot.0,
+            config.restore_snapshot_concurrency_factor,
             &mut bo,
         )?;
         restore_bytes += ret.restore_bytes;
@@ -2568,15 +2576,26 @@ fn restore_snapshots(
     snapshots: Vec<pb::ChangeSet>,
     success_ranges: &mut MergeRanges,
     timeout: Duration,
+    concurrency_factor: usize,
     bo: &mut Backoff,
 ) -> Result<RestoredSnapshots> {
+    let store_count = get_all_stores_except_tiflash(pd_client.as_ref())?.len();
+    let semaphore = Arc::new(Semaphore::new(concurrency_factor * store_count));
+    info!("using restore concurrency."; "concurrency_factor" => concurrency_factor, 
+        "store_count" => store_count, "semaphore" => ?semaphore);
+
     let mut handles = Vec::with_capacity(snapshots.len());
     for snap in snapshots {
         let pd_client = pd_client.clone();
+        let semaphore = semaphore.clone();
         let shard_id = snap.shard_id;
         let start = snap.get_restore_shard().get_outer_start().to_vec();
         let end = snap.get_restore_shard().get_outer_end().to_vec();
-        let task = async move { request_restore_snapshot(pd_client, &snap, timeout).await };
+
+        let task = async move {
+            let _permit = semaphore.acquire().await.unwrap();
+            request_restore_snapshot(pd_client, &snap, timeout).await
+        };
         handles.push((shard_id, runtime.spawn(task), start, end));
     }
 
