@@ -7,6 +7,7 @@ use std::{
     io::Error as IoError,
     mem,
     num::NonZeroU64,
+    ops::Deref,
     pin::Pin,
     result,
     sync::{
@@ -39,10 +40,10 @@ use raftstore::coprocessor::{
 use rfstore::{
     store,
     store::{
-        rlog, Callback as StoreCallback, CustomBuilder, ReadIndexContext, ReadResponse,
-        RegionSnapshot, WriteResponse,
+        rlog, Callback as StoreCallback, CustomBuilder, LocalReader, ReadIndexContext,
+        ReadResponse, RegionSnapshot, WriteResponse,
     },
-    Error as RaftServerError, LocalReadRouter, RaftStoreRouter, ServerRaftStoreRouter,
+    Error as RaftServerError, RaftStoreRouter,
 };
 use thiserror::Error;
 use tikv::{
@@ -60,10 +61,7 @@ use tikv_util::{
     callback::must_call, codec::number::NumberEncoder, future::paired_must_called_future_callback,
     time::Instant,
 };
-use txn_types::{
-    Key, Lock, LockType, ReqType, TimeStamp, TxnExtra, TxnExtraScheduler, WriteBatchFlags,
-    WriteRef, WriteType,
-};
+use txn_types::{Key, Lock, LockType, ReqType, TimeStamp, WriteBatchFlags, WriteRef, WriteType};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -231,9 +229,15 @@ impl WriteResFeed {
 /// `RaftKv` is a storage engine base on `RaftStore`.
 #[derive(Clone)]
 pub struct RaftKv {
-    router: ServerRaftStoreRouter,
-    engine: kvengine::Engine,
-    txn_extra_scheduler: Option<Arc<dyn TxnExtraScheduler>>,
+    reader: Arc<LocalReader>,
+}
+
+impl Deref for RaftKv {
+    type Target = LocalReader;
+
+    fn deref(&self) -> &Self::Target {
+        &self.reader
+    }
 }
 
 pub enum CmdRes {
@@ -273,16 +277,10 @@ fn on_read_result(mut read_resp: ReadResponse) -> Result<CmdRes> {
 
 impl RaftKv {
     /// Create a RaftKv using specified configuration.
-    pub fn new(router: ServerRaftStoreRouter, engine: kvengine::Engine) -> RaftKv {
+    pub fn new(reader: LocalReader) -> RaftKv {
         RaftKv {
-            router,
-            engine,
-            txn_extra_scheduler: None,
+            reader: Arc::new(reader),
         }
-    }
-
-    pub fn set_txn_extra_scheduler(&mut self, txn_extra_scheduler: Arc<dyn TxnExtraScheduler>) {
-        self.txn_extra_scheduler = Some(txn_extra_scheduler);
     }
 
     fn new_request_header(&self, ctx: &Context) -> RaftRequestHeader {
@@ -346,7 +344,7 @@ impl Engine for RaftKv {
     type Local = kvengine::Engine;
 
     fn kv_engine(&self) -> Option<kvengine::Engine> {
-        Some(self.engine.clone())
+        Some(self.kv_engine.clone())
     }
 
     fn modify_on_kv_engine(&self, _modifies: HashMap<u64, Vec<Modify>>) -> kv::Result<()> {
@@ -472,7 +470,7 @@ impl Engine for RaftKv {
 
     type SnapshotRes = impl Future<Output = kv::Result<Self::Snap>> + Send;
     fn async_snapshot(&mut self, mut ctx: SnapContext<'_>) -> Self::SnapshotRes {
-        let mut res: kv::Result<()> = (|| {
+        let res: kv::Result<()> = (|| {
             fail_point!("raftkv_async_snapshot_err", |_| {
                 Err(box_err!("injected error for async_snapshot"))
             });
@@ -507,16 +505,13 @@ impl Engine for RaftKv {
         cmd.set_header(header);
         cmd.set_requests(vec![req].into());
         if res.is_ok() {
-            res = self
-                .router
-                .read(
-                    ctx.read_id,
-                    cmd,
-                    StoreCallback::Read(Box::new(move |resp| {
-                        cb(on_read_result(resp).map_err(Error::into));
-                    })),
-                )
-                .map_err(kv::Error::from);
+            self.read(
+                ctx.read_id,
+                cmd,
+                StoreCallback::Read(Box::new(move |resp| {
+                    cb(on_read_result(resp).map_err(Error::into));
+                })),
+            );
         }
         async move {
             let res = match res {
@@ -564,14 +559,6 @@ impl Engine for RaftKv {
     ) -> Option<MvccProperties> {
         // TODO(x)
         None
-    }
-
-    fn schedule_txn_extra(&self, txn_extra: TxnExtra) {
-        if let Some(tx) = self.txn_extra_scheduler.as_ref() {
-            if !txn_extra.is_empty() {
-                tx.schedule(txn_extra);
-            }
-        }
     }
 
     fn get_kvengine(&self) -> Option<kvengine::Engine> {

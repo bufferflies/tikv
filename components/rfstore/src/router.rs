@@ -1,16 +1,11 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::cell::RefCell;
-
 use kvproto::{raft_cmdpb::RaftCmdRequest, raft_serverpb::RaftMessage};
-use tikv_util::{deadline::Deadline, mpsc::Sender, time::ThreadReadId, warn};
+use tikv_util::{deadline::Deadline, mpsc::Sender, warn};
 
-use crate::{
-    store::{
-        Callback, CasualMessage, CasualRouter, LocalReader, PeerMsg, ProposalRouter, RaftCommand,
-        SignificantMsg, StoreMsg, StoreRouter,
-    },
-    Result as RaftStoreResult,
+use crate::store::{
+    Callback, CasualMessage, CasualRouter, LocalReader, PeerMsg, ProposalRouter, RaftCommand,
+    SignificantMsg, StoreMsg, StoreRouter,
 };
 
 /// Routes messages to the raftstore.
@@ -53,60 +48,25 @@ pub trait RaftStoreRouter: StoreRouter + ProposalRouter + CasualRouter + Send + 
     }
 }
 
-pub trait LocalReadRouter: Send + Clone {
-    fn read(
-        &self,
-        read_id: Option<ThreadReadId>,
-        req: RaftCmdRequest,
-        cb: Callback,
-    ) -> RaftStoreResult<()>;
-}
-
-/// A router that routes messages to the raftstore
-pub struct ServerRaftStoreRouter {
-    router: RaftRouter,
-    local_reader: RefCell<LocalReader>,
-}
-
-impl Clone for ServerRaftStoreRouter {
-    fn clone(&self) -> Self {
-        ServerRaftStoreRouter {
-            router: self.router.clone(),
-            local_reader: self.local_reader.clone(),
-        }
-    }
-}
-
-impl ServerRaftStoreRouter {
-    /// Creates a new router.
-    pub fn new(router: RaftRouter, reader: LocalReader) -> ServerRaftStoreRouter {
-        let local_reader = RefCell::new(reader);
-        ServerRaftStoreRouter {
-            router,
-            local_reader,
-        }
-    }
-}
-
-impl StoreRouter for ServerRaftStoreRouter {
+impl StoreRouter for LocalReader {
     fn send(&self, msg: StoreMsg) {
         StoreRouter::send(&self.router, msg)
     }
 }
 
-impl ProposalRouter for ServerRaftStoreRouter {
+impl ProposalRouter for LocalReader {
     fn send(&self, cmd: RaftCommand) {
         ProposalRouter::send(&self.router, cmd)
     }
 }
 
-impl CasualRouter for ServerRaftStoreRouter {
+impl CasualRouter for LocalReader {
     fn send(&self, region_id: u64, msg: CasualMessage) {
         CasualRouter::send(&self.router, region_id, msg)
     }
 }
 
-impl RaftStoreRouter for ServerRaftStoreRouter {
+impl RaftStoreRouter for LocalReader {
     fn send_raft_msg(&self, msg: RaftMessage) {
         RaftStoreRouter::send_raft_msg(&self.router, msg)
     }
@@ -115,19 +75,6 @@ impl RaftStoreRouter for ServerRaftStoreRouter {
     /// be dropped.
     fn significant_send(&self, region_id: u64, msg: SignificantMsg) {
         RaftStoreRouter::significant_send(&self.router, region_id, msg)
-    }
-}
-
-impl LocalReadRouter for ServerRaftStoreRouter {
-    fn read(
-        &self,
-        read_id: Option<ThreadReadId>,
-        req: RaftCmdRequest,
-        cb: Callback,
-    ) -> RaftStoreResult<()> {
-        let mut local_reader = self.local_reader.borrow_mut();
-        local_reader.read(read_id, req, cb);
-        Ok(())
     }
 }
 

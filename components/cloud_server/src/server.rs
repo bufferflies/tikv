@@ -29,7 +29,6 @@ use security::SecurityManager;
 use thiserror::Error;
 use tikv::{
     coprocessor::Endpoint,
-    coprocessor_v2,
     read_pool::ReadPool,
     server::{
         load_statistics::*,
@@ -158,7 +157,6 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         security_mgr: &Arc<SecurityManager>,
         storage: Storage<RaftKv, L, F>,
         copr: Endpoint<RaftKv>,
-        copr_v2: coprocessor_v2::Endpoint,
         raft_router: T,
         resolver: S,
         env: Arc<Environment>,
@@ -186,7 +184,6 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             store_id,
             storage,
             copr,
-            copr_v2,
             raft_router.clone(),
             Arc::clone(&grpc_thread_load),
             cfg.value().enable_request_batch,

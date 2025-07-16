@@ -32,7 +32,7 @@ use rfstore::{
 };
 use tikv::{
     coprocessor::Endpoint,
-    coprocessor_v2, forward_duplex, forward_unary,
+    forward_duplex, forward_unary,
     server::{load_statistics::ThreadLoadPool, metrics::*, Proxy},
     storage::{
         errors::{
@@ -74,8 +74,6 @@ pub struct Service<T: RaftStoreRouter, L: LockManager, F: KvFormat> {
     storage: Storage<RaftKv, L, F>,
     // For handling coprocessor requests.
     copr: Endpoint<RaftKv>,
-    // For handling corprocessor v2 requests.
-    copr_v2: coprocessor_v2::Endpoint,
     // For handling raft messages.
     ch: T,
 
@@ -94,7 +92,6 @@ impl<T: RaftStoreRouter + Clone + 'static, L: LockManager + Clone, F: KvFormat +
             store_id: self.store_id,
             storage: self.storage.clone(),
             copr: self.copr.clone(),
-            copr_v2: self.copr_v2.clone(),
             ch: self.ch.clone(),
             enable_req_batch: self.enable_req_batch,
             grpc_thread_load: self.grpc_thread_load.clone(),
@@ -109,7 +106,6 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Service<T, L, F>
         store_id: u64,
         storage: Storage<RaftKv, L, F>,
         copr: Endpoint<RaftKv>,
-        copr_v2: coprocessor_v2::Endpoint,
         ch: T,
         grpc_thread_load: Arc<ThreadLoadPool>,
         enable_req_batch: bool,
@@ -119,7 +115,6 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Service<T, L, F>
             store_id,
             storage,
             copr,
-            copr_v2,
             ch,
             enable_req_batch,
             grpc_thread_load,
@@ -747,7 +742,6 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let peer = ctx.peer();
         let storage = self.storage.clone();
         let copr = self.copr.clone();
-        let copr_v2 = self.copr_v2.clone();
         let pool_size = storage.get_normal_pool_size();
         let batch_builder = BatcherBuilder::new(self.enable_req_batch, pool_size);
         let request_handler = stream.try_for_each(move |mut req| {
@@ -757,16 +751,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             let mut batcher = batch_builder.build(queue, request_ids.len());
             GRPC_REQ_BATCH_COMMANDS_SIZE.observe(requests.len() as f64);
             for (id, req) in request_ids.into_iter().zip(requests) {
-                handle_batch_commands_request(
-                    &mut batcher,
-                    &storage,
-                    &copr,
-                    &copr_v2,
-                    &peer,
-                    id,
-                    req,
-                    &tx,
-                );
+                handle_batch_commands_request(&mut batcher, &storage, &copr, &peer, id, req, &tx);
                 if let Some(batch) = batcher.as_mut() {
                     batch.maybe_commit(&storage, &tx);
                 }
@@ -1095,7 +1080,6 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
     batcher: &mut Option<ReqBatcher>,
     storage: &Storage<RaftKv, L, F>,
     copr: &Endpoint<RaftKv>,
-    _copr_v2: &coprocessor_v2::Endpoint,
     peer: &str,
     id: u64,
     req: batch_commands_request::Request,

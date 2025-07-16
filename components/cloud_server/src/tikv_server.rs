@@ -62,13 +62,13 @@ use rfstore::{
         load_raft_engine_meta, BlackList, Engines, LocalReader, MetaChangeListener, PdIdAllocator,
         RaftBatchSystem, StoreMeta, StoreMsg, PENDING_MSG_CAP,
     },
-    RaftRouter, ServerRaftStoreRouter,
+    RaftRouter,
 };
 use security::SecurityManager;
 use sst_importer::SstImporter;
 use tikv::{
     config::{ConfigController, TikvConfig},
-    coprocessor, coprocessor_v2,
+    coprocessor,
     read_pool::{build_tokio_pool, build_yatp_read_pool},
     server::{
         config::Config as ServerConfig, lock_manager::LockManager, raftkv::ReplicaReadLockChecker,
@@ -129,7 +129,7 @@ pub struct TikvServer {
     resolver: resolve::PdStoreAddrResolver,
     store_path: PathBuf,
     raw_engines: Engines,
-    engines: Option<TikvEngines>,
+    raft_kv: Option<RaftKv>,
     servers: Option<Servers>,
     region_info_accessor: RegionInfoAccessor,
     coprocessor_host: Option<CoprocessorHost<kvengine::Engine>>,
@@ -142,11 +142,6 @@ pub struct TikvServer {
     io_rate_limiter: Arc<IoRateLimiter>,
     overload_protector: OverloadProtector,
     flow_controller: Arc<FlowController>,
-}
-
-struct TikvEngines {
-    store_meta: Option<StoreMeta>,
-    engine: RaftKv,
 }
 
 struct Servers {
@@ -323,7 +318,7 @@ impl TikvServer {
             resolver,
             store_path,
             raw_engines,
-            engines: None,
+            raft_kv: None,
             servers: None,
             region_info_accessor,
             coprocessor_host,
@@ -347,10 +342,11 @@ impl TikvServer {
         self.check_conflict_addr();
         self.init_fs();
         self.init_yatp();
-        self.init_engines();
+        let store_meta = StoreMeta::new(PENDING_MSG_CAP);
+        self.init_raftkv(&store_meta);
 
         let server_config = dispatch_api_version!(self.config.storage.api_version(), {
-            self.init_servers::<API>()
+            self.init_servers::<API>(store_meta)
         });
 
         self.register_services();
@@ -550,25 +546,20 @@ impl TikvServer {
         })
     }
 
-    fn init_engines(&mut self) {
-        info!("init engines");
-        let store_meta = StoreMeta::new(PENDING_MSG_CAP);
-        let engine = RaftKv::new(
-            ServerRaftStoreRouter::new(
-                self.router.clone(),
-                LocalReader::new(
-                    self.raw_engines.kv.clone(),
-                    store_meta.readers.clone(),
-                    self.router.clone(),
-                ),
-            ),
+    fn init_raftkv(&mut self, store_meta: &StoreMeta) {
+        info!("init raftkv");
+        let raft_kv = RaftKv::new(LocalReader::new(
             self.raw_engines.kv.clone(),
-        );
-        let store_meta = Some(store_meta);
-        self.engines = Some(TikvEngines { store_meta, engine });
+            store_meta.readers.clone(),
+            self.router.clone(),
+        ));
+        self.raft_kv = Some(raft_kv);
     }
 
-    fn init_servers<F: KvFormat>(&mut self) -> Arc<VersionTrack<ServerConfig>> {
+    fn init_servers<F: KvFormat>(
+        &mut self,
+        store_meta: StoreMeta,
+    ) -> Arc<VersionTrack<ServerConfig>> {
         info!("init servers");
 
         let cfg_controller = self.cfg_controller.as_mut().unwrap();
@@ -583,7 +574,7 @@ impl TikvServer {
         let lock_mgr = LockManager::new(&self.config.pessimistic_txn);
         lock_mgr.register_detector_role_change_observer(self.coprocessor_host.as_mut().unwrap());
 
-        let engines = self.engines.as_mut().unwrap();
+        let raft_kv = self.raft_kv.as_mut().unwrap();
 
         let pd_worker = LazyWorker::new("pd-worker");
         let pd_sender = pd_worker.scheduler();
@@ -594,13 +585,13 @@ impl TikvServer {
             build_tokio_pool(
                 &self.config.readpool.unified,
                 flow_reporter,
-                engines.engine.clone(),
+                raft_kv.clone(),
             )
         } else {
             build_yatp_read_pool(
                 &self.config.readpool.unified,
                 flow_reporter.clone(),
-                engines.engine.clone(),
+                raft_kv.clone(),
             )
         };
 
@@ -658,7 +649,7 @@ impl TikvServer {
         let storage_read_pool_handle = unified_read_pool.handle();
         let reporter = rfstore::store::FlowStatsReporter::new(pd_sender);
         let storage = create_raft_storage::<_, F>(
-            engines.engine.clone(),
+            raft_kv.clone(),
             &self.config.storage,
             storage_read_pool_handle,
             lock_mgr.clone(),
@@ -730,7 +721,6 @@ impl TikvServer {
             &self.security_mgr,
             storage,
             copr,
-            coprocessor_v2::Endpoint::new(&self.config.coprocessor_v2),
             self.router.clone(),
             self.resolver.clone(),
             self.env.clone(),
@@ -782,7 +772,7 @@ impl TikvServer {
             Box::new(server.transport()),
             Box::new(server.transport_idle()),
             pd_worker,
-            engines.store_meta.take().unwrap(),
+            store_meta,
             self.coprocessor_host.clone().unwrap(),
             importer.clone(),
             self.concurrency_manager.clone(),
@@ -803,14 +793,14 @@ impl TikvServer {
 
     fn register_services(&mut self) {
         let servers = self.servers.as_mut().unwrap();
-        let engines = self.engines.as_ref().unwrap();
+        let raft_kv = self.raft_kv.as_ref().unwrap();
 
         // Import SST service.
         let (import_service, threads_pool) = ImportSstService::new(
             self.config.import.clone(),
             self.config.raft_store.raft_entry_max_size,
             self.router.clone(),
-            engines.engine.kv_engine().unwrap(),
+            raft_kv.kv_engine().unwrap(),
             servers.importer.clone(),
         );
         if servers
@@ -857,9 +847,9 @@ impl TikvServer {
 
         let backup_endpoint = backup::Endpoint::new(
             servers.node.id(),
-            engines.engine.clone(),
+            raft_kv.clone(),
             self.region_info_accessor.clone(),
-            engines.engine.kv_engine().unwrap(),
+            raft_kv.kv_engine().unwrap(),
             self.config.backup.clone(),
             self.concurrency_manager.clone(),
             self.config.storage.api_version(),

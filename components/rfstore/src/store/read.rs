@@ -73,7 +73,7 @@ pub trait ReadExecutor {
     }
 
     fn execute(
-        &mut self,
+        &self,
         msg: &RaftCmdRequest,
         region: &Arc<metapb::Region>,
         read_index: Option<u64>,
@@ -219,9 +219,9 @@ impl ReadDelegate {
 
 pub struct LocalReader {
     store_readers: Arc<papaya::HashMap<u64, Arc<ReadDelegate>>>,
-    kv_engine: kvengine::Engine,
+    pub kv_engine: kvengine::Engine,
     // A channel to raftstore.
-    router: RaftRouter,
+    pub router: RaftRouter,
 }
 
 impl ReadExecutor for LocalReader {
@@ -248,7 +248,7 @@ impl LocalReader {
         }
     }
 
-    fn redirect(&mut self, cmd: RaftCommand) {
+    fn redirect(&self, cmd: RaftCommand) {
         debug!("localreader redirects command"; "command" => ?cmd);
         let region_id = cmd.request.get_header().get_region_id();
         self.router.send(region_id, PeerMsg::RaftCommand(cmd));
@@ -260,13 +260,13 @@ impl LocalReader {
     // better choice is use `Rc` but `LocalReader: Send` will be violated, which
     // is required by `LocalReadRouter: Send`, use `Arc` will introduce extra cost
     // but make the logic clear
-    fn get_delegate(&mut self, region_id: u64) -> Option<Arc<ReadDelegate>> {
+    fn get_delegate(&self, region_id: u64) -> Option<Arc<ReadDelegate>> {
         let readers = self.store_readers.pin();
         readers.get(&region_id).cloned()
     }
 
     fn pre_propose_raft_command(
-        &mut self,
+        &self,
         req: &RaftCmdRequest,
     ) -> Result<Option<(Arc<ReadDelegate>, RequestPolicy)>> {
         // Check region id.
@@ -325,7 +325,7 @@ impl LocalReader {
     }
 
     pub fn propose_raft_command(
-        &mut self,
+        &self,
         mut read_id: Option<ThreadReadId>,
         req: RaftCmdRequest,
         cb: Callback,
@@ -386,7 +386,7 @@ impl LocalReader {
     /// ThreadReadId is composed by thread_id and a thread_local incremental
     /// sequence.
     #[inline]
-    pub fn read(&mut self, read_id: Option<ThreadReadId>, req: RaftCmdRequest, cb: Callback) {
+    pub fn read(&self, read_id: Option<ThreadReadId>, req: RaftCmdRequest, cb: Callback) {
         self.propose_raft_command(read_id, req, cb);
         maybe_tls_local_read_metrics_flush();
     }
