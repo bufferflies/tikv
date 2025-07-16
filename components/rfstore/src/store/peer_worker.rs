@@ -1008,7 +1008,14 @@ impl RaftIdleWorker {
                 IDLE_PEER_COUNT.set(self.idle_peers.len() as i64);
             } else {
                 // The peer has been waked up, resend the message to main thread.
-                self.ctx.global.router.send(region_id, *message);
+                match *message {
+                    PeerMsg::StoreMsgForWakeUp(store_msg) => {
+                        self.ctx.global.router.send_store(store_msg);
+                    }
+                    msg => {
+                        self.ctx.global.router.send(region_id, msg);
+                    }
+                }
             }
         }
         Ok(receive_time)
