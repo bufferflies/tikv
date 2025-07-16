@@ -330,7 +330,7 @@ impl RaftWorker {
                 self.ctx.idle_regions.insert(idle_region);
             }
             let process_inbox_duration = loop_start.saturating_elapsed();
-            if process_inbox_duration > Duration::from_millis(30) {
+            if process_inbox_duration > SLOW_LOG_DURATION {
                 inbox_peer_stats.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
                 warn!(
                     "store_id: {} raft worker batch loop takes too long, process_inbox_elapsed: {:?}, top_{} peers: {:?}",

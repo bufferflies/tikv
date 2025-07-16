@@ -75,6 +75,8 @@ const MAX_COMMITTED_SIZE_PER_READY: u64 = 16 * 1024 * 1024;
 pub(crate) const SPLIT_FLAG_ENCRYPTION_KEYS: u64 = 0x01;
 pub(crate) const PENDING_CONF_CHANGE_ERR_MSG: &str = "pending conf change";
 
+pub(crate) const SLOW_LOG_DURATION: Duration = Duration::from_millis(30);
+
 /// The returned states of the peer after checking whether it is stale
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StaleState {
@@ -883,6 +885,7 @@ impl Peer {
 
     #[inline]
     pub fn send_raft_messages(&mut self, ctx: &mut RaftContext, msgs: Vec<RaftMessage>) {
+        let start = tikv_util::time::Instant::now_coarse();
         let trans = if ctx.worker_type == WorkerType::Idle {
             &mut ctx.global.trans_idle
         } else {
@@ -973,6 +976,14 @@ impl Peer {
                 }
                 ctx.raft_metrics.send_message.add(msg_type, true);
             }
+        }
+        let duration = start.saturating_elapsed();
+        if duration > SLOW_LOG_DURATION {
+            warn!(
+                "{} send raft messages takes too long {:?}",
+                self.tag(),
+                duration,
+            );
         }
     }
 
@@ -1315,6 +1326,7 @@ impl Peer {
     }
 
     pub(crate) fn on_role_changed(&mut self, ctx: &mut RaftContext, ready: &Ready) {
+        let start = tikv_util::time::Instant::now_coarse();
         // Update leader lease when the Raft state changes.
         if let Some(ss) = ready.ss() {
             match ss.raft_state {
@@ -1378,6 +1390,14 @@ impl Peer {
                 .clear();
         }
         self.lead_transferee = self.raft_group.raft.lead_transferee.unwrap_or_default();
+        let duration = start.saturating_elapsed();
+        if duration > SLOW_LOG_DURATION {
+            warn!(
+                "{} on_role_changed takes too long {:?}",
+                self.tag(),
+                duration,
+            );
+        }
     }
 
     pub fn insert_peer_cache(&mut self, peer: metapb::Peer) {
@@ -1663,7 +1683,7 @@ impl Peer {
         self.raft_group.advance_append_async(ready);
         let handle_end = tikv_util::time::Instant::now_coarse();
         let handle_duration = handle_end.saturating_duration_since(handle_start);
-        if handle_duration > Duration::from_millis(20) {
+        if handle_duration > SLOW_LOG_DURATION {
             warn!(
                 "{} raft ready takes too long, ready:{:?}, handle_takes:{:?}",
                 self.tag(),
@@ -1719,6 +1739,7 @@ impl Peer {
             "{} is applying snapshot when it is ready to handle committed entries",
             tag
         );
+        let start = tikv_util::time::Instant::now_coarse();
         // Leader needs to update lease.
         let mut lease_to_be_updated = self.is_leader();
         for entry in committed_entries.iter().rev() {
@@ -1752,6 +1773,13 @@ impl Peer {
             }
         }
         self.build_apply_msg(ctx, committed_entries, new_role, preprocess_errors);
+        let duration = start.saturating_elapsed();
+        if duration > SLOW_LOG_DURATION {
+            warn!(
+                "{} handle committed entries takes too long {:?}",
+                tag, duration
+            );
+        }
     }
 
     fn build_apply_msg(
@@ -2705,7 +2733,7 @@ impl Peer {
             self.maybe_renew_leader_lease(propose_time, ctx, None);
         }
         let read_duration = read_start.saturating_elapsed();
-        if read_duration > Duration::from_millis(20) {
+        if read_duration > SLOW_LOG_DURATION {
             warn!(
                 "{} apply_reads takes too long {:?}",
                 self.tag(),

@@ -24,13 +24,13 @@ use rfengine::{
     KV_ENGINE_META_SNAP_DIFF_KEY, RAFT_STATE_KEY_BYTE, RAFT_TRUNCATED_STATE_KEY,
     REGION_META_KEY_PREFIX,
 };
-use tikv_util::{box_err, debug, info};
+use tikv_util::{box_err, debug, info, warn};
 
 use crate::{
     errors::*,
     store::{
         Engines, PeerTag, RaftApplyState, RaftContext, RaftState, RaftTruncatedState, RegionIdVer,
-        TERM_KEY,
+        SLOW_LOG_DURATION, TERM_KEY,
     },
 };
 
@@ -420,6 +420,7 @@ impl PeerStorage {
         ready: &mut raft::Ready,
         last_preprocessed_index: u64,
     ) -> Option<RestoreSnapResult> {
+        let start = tikv_util::time::Instant::now_coarse();
         let mut res = None;
         let prev_raft_state = self.raft_state;
         if !ready.snapshot().is_empty() {
@@ -451,6 +452,14 @@ impl PeerStorage {
         }
         if prev_raft_state != self.raft_state || !ready.snapshot().is_empty() {
             self.write_raft_state(ctx);
+        }
+        let duration = start.saturating_elapsed();
+        if duration > SLOW_LOG_DURATION {
+            warn!(
+                "{} peer_storage handle ready takes too long {:?}",
+                self.tag(),
+                duration
+            );
         }
         res
     }
