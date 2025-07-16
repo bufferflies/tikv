@@ -2,8 +2,10 @@
 
 use std::time::Duration;
 
-use kvproto::kvrpcpb;
-use test_cloud_server::{client::TxnMutations, util::Mutation, ServerCluster};
+use test_cloud_server::{
+    client::{PrewriteExt, TxnMutations},
+    ServerCluster,
+};
 use txn_types::LockType;
 
 use super::helper::*;
@@ -19,16 +21,17 @@ fn test_verify_is_primary() {
     let key = i_to_key(1);
     let primary = i_to_key(2);
     let value = i_to_val(3);
-    let start_ts = client.get_ts().into_inner();
+    let start_ts = client.get_ts();
 
     // Test with pessimistic lock
     let res = client
         .kv_pessimistic_lock(
-            primary.to_vec(),
-            vec![key.to_vec()],
+            primary.clone().into(),
+            vec![primary.clone().into(), key.clone().into()],
             start_ts,
+            20000,
             start_ts,
-            false,
+            None,
         )
         .expect("pessimistic lock should succeed");
     println!("res: {:?}", res);
@@ -44,20 +47,21 @@ fn test_verify_is_primary() {
     );
     assert!(result.unwrap().get_error().has_primary_mismatch());
 
+    let mut txn = client.begin_transaction(Some(start_ts));
     // Convert pessimistic lock to prewrite
     client
-        .kv_pessimistic_prewrite(
+        .kv_prewrite_ext(
             primary.to_vec().into(),
-            TxnMutations::from_normal(vec![Mutation {
-                key: key.to_vec().into(),
-                value: value.to_vec().into(),
-                op: kvrpcpb::Op::Put,
-            }]),
-            start_ts.into(),
-            start_ts.into(),
-            3000,
-            (key.len() + value.len()) as u64,
-            false,
+            Some(&vec![key.to_vec().into()]),
+            TxnMutations::from_normal(vec![
+                new_put_mutation(primary.to_vec(), value.to_vec()),
+                new_put_mutation(key.to_vec(), value.to_vec()),
+            ]),
+            &mut txn,
+            PrewriteExt {
+                for_update_ts: start_ts,
+                ..Default::default()
+            },
         )
         .expect("pessimistic prewrite should succeed");
 

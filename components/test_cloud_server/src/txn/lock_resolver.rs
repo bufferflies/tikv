@@ -10,7 +10,7 @@ use std::{
 use kvproto::kvrpcpb;
 use rfstore::store::RegionIdVer;
 use tikv::storage::mvcc::TimeStamp;
-use tikv_util::{box_err, debug, time::Instant, warn};
+use tikv_util::{box_err, debug, info, time::Instant, warn};
 
 use crate::client::{ClusterClient, Error, Result};
 
@@ -115,7 +115,7 @@ impl LockResolver {
         // TODO: optimize for read.
         for lock in opts.locks {
             let status = self.resolve_single_lock(&lock, opts.caller_start_ts, &mut clean_txns)?;
-            debug!("resolve_single_lock: lock {:?}, status {:?}", lock, status);
+            info!("resolve_single_lock: lock {:?}, status {:?}", lock, status);
             // `status.ttl != 0` means the lock is not resolved.
             if status.ttl != 0 {
                 let until_expire = self.lock_until_expired(lock.lock_version, status.ttl);
@@ -268,9 +268,9 @@ impl LockResolver {
         let is_txn_file = lock.map_or(false, |l| l.is_txn_file);
         let mut resp = self.cluster_client.kv_check_txn_status(
             primary,
-            txn_id,
-            caller_start_ts,
-            current_ts,
+            txn_id.into(),
+            caller_start_ts.into(),
+            current_ts.into(),
             rollback_if_not_exist,
             false,
             resolving_pessimistic_lock,

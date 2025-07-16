@@ -32,8 +32,8 @@ use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
     alloc_node_id, alloc_node_id_vec,
     client::{
-        ClusterClientOptions, MutateOptions, PessimisticLockExt, PrewriteExt, RequestOptions,
-        TxnMutations, TxnWriteMethod,
+        ClusterClientOptions, MutateOptions, PrewriteExt, RequestOptions, TxnMutations,
+        TxnWriteMethod,
     },
     oss::prepare_dfs,
     util::Mutation,
@@ -512,16 +512,13 @@ fn test_backup_pessimistic_lock() {
 
     let start_ts = client.get_ts();
     client
-        .kv_pessimistic_lock_ext(
-            Bytes::copy_from_slice(&pk),
-            TxnMutations::from_normal(vec![
-                pessimistic_lock(pk.clone()),
-                pessimistic_lock(sk.clone()),
-            ]),
-            PessimisticLockExt {
-                start_ts,
-                for_update_ts: start_ts,
-            },
+        .kv_pessimistic_lock(
+            pk.clone().into(),
+            vec![pk.clone().into(), sk.clone().into()],
+            start_ts,
+            20000,
+            start_ts,
+            None,
         )
         .unwrap();
     let origin_ref_store = client.dump_ref_store();
@@ -571,9 +568,9 @@ fn test_backup_pessimistic_lock() {
                 txn_muts,
                 &mut txn,
                 PrewriteExt {
-                    pessimistic_action:
-                        kvproto::kvrpcpb::PrewriteRequestPessimisticAction::DoPessimisticCheck,
+                    resolve_lock: false,
                     for_update_ts: start_ts,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -845,13 +842,6 @@ fn put(k: Vec<u8>, v: Vec<u8>) -> Mutation {
     m.set_op(Op::Put);
     m.set_key(k);
     m.set_value(v);
-    m
-}
-
-fn pessimistic_lock(k: Vec<u8>) -> Mutation {
-    let mut m = Mutation::default();
-    m.set_op(Op::PessimisticLock);
-    m.set_key(k);
     m
 }
 

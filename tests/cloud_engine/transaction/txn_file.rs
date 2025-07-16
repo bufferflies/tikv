@@ -981,7 +981,6 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         client
             .kv_prewrite(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap();
-        let start_ts = start_ts.into_inner();
         {
             // primary mismatch.
             let second_key = muts[1].key.clone();
@@ -1016,7 +1015,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
                 .unwrap();
             assert!(!resp.has_error());
             assert_eq!(resp.commit_version, 0);
-            assert_eq!(resp.get_lock_info().lock_version, start_ts);
+            assert_eq!(resp.get_lock_info().lock_version, start_ts.into_inner());
             assert_eq!(
                 resp.get_lock_info().get_primary_lock(),
                 txn_muts.primary().as_ref()
