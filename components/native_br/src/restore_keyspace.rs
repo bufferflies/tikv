@@ -2596,7 +2596,9 @@ fn restore_snapshots(
     let is_error_retryable = |err: &Error| {
         matches!(
             err,
-            Error::RegionVerNotMatch { .. } | Error::RegionNotFoundOrNoLeader(_)
+            Error::RegionVerNotMatch { .. }
+                | Error::RegionNotFoundOrNoLeader(_)
+                | Error::PdError(_)
         )
     };
 
