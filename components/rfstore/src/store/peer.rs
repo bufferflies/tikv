@@ -2284,6 +2284,8 @@ impl<'a> PreprocessRef<'a> {
                 commit
             );
         }
+        self.clear_merge_in_mem_data();
+
         let mut region = self.get_preprocessed_region().clone();
         let version = region.get_region_epoch().get_version();
         // Update version to avoid duplicated rollback requests.
@@ -3713,6 +3715,7 @@ impl Peer {
         }
     }
 
+    // Keep consistent with PreprocessRef::clear_merge_in_mem_data.
     pub(crate) fn clear_merge_in_mem_data(&mut self) {
         if self.pending_merge_state.is_some() {
             self.pending_merge_state = None;
@@ -3954,6 +3957,7 @@ pub struct PreprocessRef<'a> {
     pub last_committed_split_idx: &'a mut u64,
     pub pending_truncate: &'a mut Option<(u64 /* term */, u64 /* index */)>,
     pub pending_merge_state: &'a mut Option<MergeState>,
+    pub want_rollback_merge_peers: &'a mut HashSet<u64>,
     pub learner_skip_idx: &'a mut u64,
 
     pub encryption_key: &'a mut Option<EncryptionKey>,
@@ -3968,6 +3972,7 @@ impl<'a> PreprocessRef<'a> {
             last_committed_split_idx,
             pending_truncate,
             pending_merge_state,
+            want_rollback_merge_peers,
             preprocessed_index,
             learner_skip_idx,
             encryption_key,
@@ -3976,6 +3981,7 @@ impl<'a> PreprocessRef<'a> {
             &mut peer.last_committed_split_idx,
             &mut peer.pending_truncate,
             &mut peer.pending_merge_state,
+            &mut peer.want_rollback_merge_peers,
             &mut peer.preprocessed_index,
             &mut peer.learner_skip_idx,
             &mut peer.encryption_key,
@@ -4000,6 +4006,7 @@ impl<'a> PreprocessRef<'a> {
             last_committed_split_idx,
             pending_truncate,
             pending_merge_state,
+            want_rollback_merge_peers,
             learner_skip_idx,
             encryption_key,
         }
@@ -4048,6 +4055,12 @@ impl<'a> PreprocessRef<'a> {
             self.shard_meta(),
             self.raft_state,
         );
+    }
+
+    // Keep consistent with Peer::clear_merge_in_mem_data.
+    fn clear_merge_in_mem_data(&mut self) {
+        *self.pending_merge_state = None;
+        self.want_rollback_merge_peers.clear();
     }
 }
 

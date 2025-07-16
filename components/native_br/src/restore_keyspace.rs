@@ -2581,7 +2581,7 @@ fn restore_snapshots(
 ) -> Result<RestoredSnapshots> {
     let store_count = get_all_stores_except_tiflash(pd_client.as_ref())?.len();
     let semaphore = Arc::new(Semaphore::new(concurrency_factor * store_count));
-    info!("using restore concurrency."; "concurrency_factor" => concurrency_factor, 
+    info!("using restore concurrency."; "concurrency_factor" => concurrency_factor,
         "store_count" => store_count, "semaphore" => ?semaphore);
 
     let mut handles = Vec::with_capacity(snapshots.len());
@@ -2743,6 +2743,7 @@ struct PeerPreprocessor {
     raft_hard_state: eraftpb::HardState,
     raft_state: RaftState,
     pending_merge_state: Option<MergeState>,
+    want_rollback_merge_peers: HashSet<u64>,
     learner_skip_idx: u64,
     encryption_key: Option<EncryptionKey>,
 }
@@ -2788,6 +2789,7 @@ impl PeerPreprocessor {
             raft_hard_state: shard.raft_state.get_hard_state(),
             raft_state: shard.raft_state,
             pending_merge_state: merge_state,
+            want_rollback_merge_peers: HashSet::default(),
             learner_skip_idx: 0,
             encryption_key: None,
         }
@@ -2805,6 +2807,7 @@ impl PeerPreprocessor {
             raft_hard_state: self.raft_hard_state.clone(),
             raft_state: &mut self.raft_state,
             pending_merge_state: &mut self.pending_merge_state,
+            want_rollback_merge_peers: &mut self.want_rollback_merge_peers,
             learner_skip_idx: &mut self.learner_skip_idx,
             encryption_key: &mut self.encryption_key,
         }
