@@ -230,7 +230,8 @@ impl super::Engine {
         &self,
         keyspace_id: u32,
         table_id: i64,
-        index_id: Option<i64>, // used for vector index
+        index_id: Option<i64>, /* used for vector index, to be removed (use
+                                * collect_columnar_index_stats instead) */
     ) -> ColumnarStatusResp {
         let mut ready = 0;
         let mut vector_index_ready = 0;
@@ -272,6 +273,30 @@ impl super::Engine {
             vector_index_ready,
             total,
         }
+    }
+
+    /// Returns the aggregated stats about columnar indexes for all shards.
+    pub fn collect_columnar_index_stats(&self, keyspace_id: u32) -> Vec<super::ColumnarIndexStats> {
+        let mut res_map = super::ColumnarIndexStatsByTableIndex::default();
+        if let Some(shard_ids) = self.get_keyspace_shards(keyspace_id) {
+            shard_ids.iter().for_each(|shard_id| {
+                if let Some(shard) = self.get_shard(*shard_id) {
+                    if shard.is_active() {
+                        res_map.merge_from(shard.collect_columnar_index_stats());
+                    }
+                }
+            });
+        }
+        // Just take out map values as a vector and return the vector.
+        // We cannot return the map directly because map key is a tuple and cannot be
+        // serialized.
+        let mut res_vec: Vec<super::ColumnarIndexStats> = res_map.0.into_values().collect();
+        res_vec.sort_by(|a, b| {
+            a.table_id
+                .cmp(&b.table_id)
+                .then(a.index_id.cmp(&b.index_id))
+        });
+        res_vec
     }
 }
 

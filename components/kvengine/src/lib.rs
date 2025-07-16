@@ -41,6 +41,7 @@ pub mod split;
 pub mod stats;
 pub mod table;
 pub mod table_id;
+pub mod table_stats;
 pub mod txn_chunk_manager;
 pub mod util;
 pub mod write;
@@ -76,6 +77,7 @@ pub use shard::*;
 pub use split::*;
 pub use stats::*;
 pub use table::table::Iterator;
+pub use table_stats::*;
 pub use write::*;
 
 pub const NUM_CFS: usize = 3;

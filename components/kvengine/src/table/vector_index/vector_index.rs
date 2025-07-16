@@ -105,6 +105,10 @@ impl VectorIndexes {
         self.indexes.retain(|index| !index.files.is_empty());
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &VectorIndex> {
+        self.indexes.iter()
+    }
+
     pub fn get(&self, table_id: i64, index_id: i64, col_id: i64) -> Option<&VectorIndex> {
         self.indexes.iter().find(|vec_idx| {
             vec_idx.table_id == table_id && vec_idx.index_id == index_id && vec_idx.col_id == col_id

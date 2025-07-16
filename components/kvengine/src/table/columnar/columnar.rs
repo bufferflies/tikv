@@ -551,6 +551,11 @@ impl ColumnMeta {
         let end = self.pack_offsets.get(pack_idx + 1);
         (start, end)
     }
+
+    pub(crate) fn rows(&self) -> usize {
+        let (_, row_count) = self.pack_offsets.end_offset();
+        row_count as usize
+    }
 }
 
 pub struct PackOffsets {
@@ -699,6 +704,10 @@ impl ColumnarFile {
 
     pub(crate) fn get_table(&self, table_id: i64) -> Arc<TableMeta> {
         self.core.tables.get(&table_id).unwrap().clone()
+    }
+
+    pub(crate) fn iter_tables(&self) -> impl Iterator<Item = (&i64, &Arc<TableMeta>)> {
+        self.core.tables.iter()
     }
 
     pub(crate) fn has_table(&self, table_id: i64) -> bool {

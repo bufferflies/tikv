@@ -198,6 +198,10 @@ impl SchemaFile {
         self.core.tables.get(&table_id)
     }
 
+    pub fn iter_tables(&self) -> impl Iterator<Item = (/* table_id */ &i64, &Schema)> {
+        self.core.tables.iter()
+    }
+
     pub fn get_vector_index_schemas(&self) -> Vec<Schema> {
         let mut schemas = vec![];
         for schema in self.core.tables.values() {
