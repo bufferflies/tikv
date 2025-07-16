@@ -288,7 +288,8 @@ impl EngineCore {
         let mut msg_count = 0;
         for (&id, fm) in ids {
             let fs = self.fs.clone();
-            let use_ia_file = self.ia_ctx.is_enabled() && fm.use_ia(shard_use_ia);
+            let use_ia_file =
+                self.ia_ctx.is_enabled() && fm.use_ia(shard_use_ia || self.opts.ia.force_ia);
             let ia_ctx = if use_ia_file {
                 match self.ia_ctx.clone() {
                     IaCtx::Disabled => {

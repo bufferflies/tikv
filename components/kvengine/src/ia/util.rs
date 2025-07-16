@@ -462,6 +462,8 @@ pub struct IaConfig {
     pub table_meta_mtime_interval: ReadableDuration,
     pub dynamic_capacity: bool,
     pub cache_cap_to_total_data_size_ratio: f64,
+
+    pub force_ia: bool,
 }
 
 impl Default for IaConfig {
@@ -477,6 +479,7 @@ impl Default for IaConfig {
             table_meta_mtime_interval: ReadableDuration(IA_TABLE_META_MTIME_INTERVAL_DEF),
             dynamic_capacity: IA_DYNAMIC_CACHE_CAPACITY_DEF,
             cache_cap_to_total_data_size_ratio: IA_CACHE_CAP_TO_TOTAL_DATA_SIZE_RATIO_DEF,
+            force_ia: false,
         }
     }
 }
