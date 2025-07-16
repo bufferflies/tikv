@@ -595,8 +595,12 @@ impl StatusServer {
             .unwrap())
     }
 
-    // URI: /kvengine/snapshot/<shard_id>?start_ts=xxx&shard_ver=xxx
+    // URI: /kvengine/snapshot/<shard_id>?start_ts=xxx&shard_ver=xxx[&start_key=xxx&
+    // end_key=xxx]
+    //
     // dump kvengine shard snapshot with start_ts
+    // `start_key` and `end_key` are in the upper hex string format, e.g.
+    // `7800000174800000000000007F5F`
     async fn dump_kvengine_snapshot(
         req: Request<Body>,
         engine: kvengine::Engine,
@@ -673,7 +677,32 @@ impl StatusServer {
             Ok(shard) => {
                 let start = Instant::now_coarse();
                 let snap_access = shard.new_snap_access();
-                let outer_ranges = vec![(shard.outer_start.clone(), shard.outer_end.clone())];
+                let outer_start = if query_pairs.contains_key("start_key") {
+                    match hex::decode(query_pairs.get("start_key").unwrap().to_string()) {
+                        Ok(v) => v.into(),
+                        Err(_) => {
+                            return Ok(make_response(
+                                StatusCode::BAD_REQUEST,
+                                "start_key is not a valid hex string",
+                            ));
+                        }
+                    }
+                } else {
+                    shard.outer_start.clone()
+                };
+                let outer_end = if query_pairs.contains_key("end_key") {
+                    match hex::decode(query_pairs.get("end_key").unwrap().to_string()) {
+                        Ok(v) => v.into(),
+                        Err(_) => {
+                            return Ok(make_response(
+                                StatusCode::BAD_REQUEST,
+                                "end_key is not a valid hex string",
+                            ));
+                        }
+                    }
+                } else {
+                    shard.outer_end.clone()
+                };
                 let start_ts = u64::from_str(query_pairs.get("start_ts").unwrap()).unwrap();
                 let region_snapshot = RegionSnapshot::from_snapshot(snap_access.clone());
                 let cloud_store =
@@ -681,19 +710,16 @@ impl StatusServer {
                 // Check if the shard contains locks belongs to the ranges. If there is any
                 // lock, return the first key as LockInfo. The client should retry in this case.
                 if let Err(tikv::coprocessor::Error::Locked(lock_info)) = cloud_store
-                    .check_locks_in_range(&shard.outer_start, &shard.outer_end)
+                    .check_locks_in_range(&outer_start, &outer_end)
                     .map_err(tikv::coprocessor::Error::from)
                 {
                     delegate_resp.set_locked(lock_info);
                     let body = delegate_resp.write_to_bytes().unwrap();
                     return Ok(make_ok_response(body));
                 }
+                let outer_ranges = vec![(outer_start, outer_end)];
                 let mem_data = snap_access.build_mem_data(&outer_ranges, start_ts);
-                let (_, snap_data) = snap_access.marshal(
-                    &[(shard.outer_start.clone(), shard.outer_end.clone())],
-                    false,
-                    false,
-                );
+                let (_, snap_data) = snap_access.marshal(&outer_ranges, false, false);
                 let mem_data_len = mem_data.len();
                 let snap_data_len = snap_data.len();
                 delegate_resp.set_mem_table_data(mem_data);
