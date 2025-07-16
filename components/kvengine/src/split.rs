@@ -195,6 +195,12 @@ impl Engine {
                         new_vec_indexes.add_index_file(file.clone());
                     }
                 }
+                new_vec_indexes.update_snap_version(
+                    vec_index.table_id,
+                    vec_index.index_id,
+                    vec_index.col_id,
+                    vec_index.snap_version,
+                );
             }
             let mut builder = ShardDataBuilder::new(new_shard.get_data());
             builder.set_mem_tbls(new_mem_tbls);
@@ -542,6 +548,20 @@ impl Engine {
                         .clone();
                     vector_indexes.add_index_file(vec_idx_file);
                 }
+                let old_snap_version = vector_indexes
+                    .get(
+                        source_vec_index.table_id,
+                        source_vec_index.index_id,
+                        source_vec_index.col_id,
+                    )
+                    .map(|v| v.snap_version)
+                    .unwrap_or(0);
+                vector_indexes.update_snap_version(
+                    source_vec_index.table_id,
+                    source_vec_index.index_id,
+                    source_vec_index.col_id,
+                    std::cmp::max(old_snap_version, source_vec_index.snap_version),
+                );
             }
             let mut schema_version = old_data.schema_version;
             let mut restore_version = old_data.restore_version;

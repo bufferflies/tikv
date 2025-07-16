@@ -122,6 +122,24 @@ impl VectorIndexes {
             .find(|i| i.table_id == table_id && i.index_id == index_id && i.col_id == col_id)
     }
 
+    pub fn update_snap_version(
+        &mut self,
+        table_id: i64,
+        index_id: i64,
+        col_id: i64,
+        snap_version: u64,
+    ) {
+        if let Some(index) = self.get_mut(table_id, index_id, col_id) {
+            debug_assert!(
+                index.snap_version <= snap_version,
+                "old snap_version: {}, new snap_version: {}",
+                index.snap_version,
+                snap_version
+            );
+            index.set_snap_version(snap_version);
+        }
+    }
+
     pub fn sort(&mut self) {
         for index in &mut self.indexes {
             index.sort();
@@ -138,6 +156,7 @@ pub struct VectorIndex {
     pub table_id: i64,
     pub index_id: i64,
     pub col_id: i64,
+    pub snap_version: u64,
     pub(crate) files: Vec<VectorIndexFile>,
     pub(crate) extra_columnar_files: Vec<u64>,
 }
@@ -148,6 +167,7 @@ impl VectorIndex {
             table_id,
             index_id,
             col_id,
+            snap_version: 0,
             files: vec![],
             extra_columnar_files: vec![],
         }
@@ -158,8 +178,17 @@ impl VectorIndex {
             .sort_by(|a, b| b.snap_version().cmp(&a.snap_version()));
     }
 
+    pub fn set_snap_version(&mut self, snap_version: u64) {
+        self.snap_version = snap_version;
+    }
+
     pub fn snap_version(&self) -> u64 {
-        self.files[0].snap_version()
+        // For backward compatibility, if the snap version is 0, we use the snap version
+        // of the first file.
+        if self.snap_version == 0 && !self.files.is_empty() {
+            return self.files[0].snap_version();
+        }
+        self.snap_version
     }
 
     /// The number of vector index files with different snap version.
@@ -276,6 +305,7 @@ impl VectorIndex {
         vec_idx_pb.set_table_id(self.table_id);
         vec_idx_pb.set_index_id(self.index_id);
         vec_idx_pb.set_col_id(self.col_id);
+        vec_idx_pb.set_snap_version(self.snap_version);
         for vec_idx_file in &self.files {
             vec_idx_pb
                 .mut_files()

@@ -90,6 +90,7 @@ message UpdateVectorIndex {
   int64 col_id = 3;
   repeated VectorIndexFile added = 4;
   repeated uint64 removed = 5;
+  uint64 snap_version = 6;
 }
 
 message Flush {
@@ -242,6 +243,7 @@ message VectorIndex {
   int64 index_id = 2;
   int64 col_id = 3;
   repeated VectorIndexFile files = 4;
+  uint64 snap_version = 5;
 }
 
 message VectorIndexFile {

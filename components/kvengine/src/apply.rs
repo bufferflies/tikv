@@ -299,6 +299,12 @@ pub(crate) fn create_snapshot_tables(
                     .clone();
                 vector_indexes.add_index_file(vec_idx_file);
             }
+            vector_indexes.update_snap_version(
+                vec_idx_pb.get_table_id(),
+                vec_idx_pb.get_index_id(),
+                vec_idx_pb.get_col_id(),
+                vec_idx_pb.get_snap_version(),
+            );
         }
         vector_indexes.sort();
         builder.set_columnar_table_ids(snap.get_columnar_table_ids().to_vec());
@@ -1213,6 +1219,12 @@ impl EngineCore {
             update_vector_index.index_id,
             update_vector_index.col_id,
             &update_vector_index.removed,
+        );
+        vector_indexes.update_snap_version(
+            update_vector_index.table_id,
+            update_vector_index.index_id,
+            update_vector_index.col_id,
+            update_vector_index.snap_version,
         );
         let mut builder = ShardDataBuilder::new(shard.get_data());
         builder.set_vector_indexes(vector_indexes);

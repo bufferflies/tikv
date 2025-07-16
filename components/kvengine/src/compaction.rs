@@ -507,6 +507,7 @@ impl VectorIndexUpdate {
         update.set_index_id(self.index_id);
         update.set_col_id(self.col_id);
         update.set_removed(self.remove_file_ids.clone());
+        update.set_snap_version(self.snap_version);
         update
     }
 }

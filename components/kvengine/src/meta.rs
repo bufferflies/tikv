@@ -1030,12 +1030,14 @@ impl ShardMeta {
             old_files.retain(|f| !update_vec_idx.removed.contains(&f.id));
             old_files.extend_from_slice(update_vec_idx.get_added());
             old_idx.set_files(old_files.into());
+            old_idx.set_snap_version(update_vec_idx.snap_version);
             return;
         }
         let mut vec_idx = kvenginepb::VectorIndex::new();
         vec_idx.table_id = update_vec_idx.table_id;
         vec_idx.index_id = update_vec_idx.index_id;
         vec_idx.col_id = update_vec_idx.col_id;
+        vec_idx.set_snap_version(update_vec_idx.snap_version);
         for file in update_vec_idx.get_added() {
             vec_idx.mut_files().push(file.clone());
         }

@@ -41,7 +41,7 @@ use crate::{
         schema_file::SchemaFile,
         search,
         sstable::{L0Table, SsTable},
-        vector_index::VectorIndexes,
+        vector_index::{VectorIndex, VectorIndexes},
         BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, TxnFile,
     },
     util::{evenly_distribute, TxnFileRefPropertyHelper},
@@ -1297,7 +1297,7 @@ impl Shard {
             if vec_idx.files_count() >= self.opt.vector_index_build_options.rebuild_file_count {
                 return (1.1, true);
             }
-            vec_idx.files.first().unwrap().snap_version()
+            vec_idx.snap_version()
         } else {
             0
         };
@@ -1531,6 +1531,16 @@ impl Shard {
 
     pub fn has_vector_index(&self) -> bool {
         !self.get_data().vector_indexes.is_empty()
+    }
+
+    pub fn get_vector_index(
+        &self,
+        table_id: i64,
+        index_id: i64,
+        col_id: i64,
+    ) -> Option<VectorIndex> {
+        let data = self.get_data();
+        data.vector_indexes.get(table_id, index_id, col_id).cloned()
     }
 
     pub fn get_encryption_key(&self) -> Option<EncryptionKey> {
