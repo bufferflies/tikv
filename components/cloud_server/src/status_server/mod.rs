@@ -541,7 +541,7 @@ impl StatusServer {
         }
     }
 
-    // URI: /kvengine/columnar_status?keyspace_id=xxx&table_id=xxx
+    // URI: /kvengine/columnar_status?keyspace_id=xxx&table_id=xxx[&index_id=xxx]
     // Collect the columnar replica status of the table
     async fn collect_columnar_status(
         req: Request<Body>,
@@ -557,7 +557,15 @@ impl StatusServer {
             Ok(id) => id,
             Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
         };
-        let resp = engine.collect_columnar_status(keyspace_id, table_id);
+        let index_id = if query_pairs.contains_key("index_id") {
+            match i64::from_str(query_pairs.get("index_id").unwrap()) {
+                Ok(id) => Some(id),
+                Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
+            }
+        } else {
+            None
+        };
+        let resp = engine.collect_columnar_status(keyspace_id, table_id, index_id);
         let resp_json = serde_json::to_string_pretty(&resp).unwrap();
         Ok(Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
