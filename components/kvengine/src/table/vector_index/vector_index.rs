@@ -249,9 +249,16 @@ impl VectorIndex {
     ) -> Result<Vec<VectorItem>> {
         let mut results = vec![];
         let mut handles_dedup = HashSet::new();
+        let mut newer_index_files = vec![];
         for file in &self.files {
             let (items, deleted_handles) = file
-                .search(target, count, start_ts, enable_distance_proj)
+                .search(
+                    target,
+                    count,
+                    start_ts,
+                    enable_distance_proj,
+                    &newer_index_files,
+                )
                 .await?;
             // Add the deleted handles to the dedup set to avoid read the same handle in
             // next VectorIndexFile.
@@ -264,6 +271,7 @@ impl VectorIndex {
                 handles_dedup.insert(item.handle.clone());
                 results.push(item);
             }
+            newer_index_files.push(file.clone());
         }
 
         // Filter the results by the start_handle and end_handle.
@@ -438,6 +446,20 @@ impl VectorIndexFile {
 
     pub fn is_legacy_format(&self) -> bool {
         self.footer.format_version() == FORMAT_VERSION || self.meta_offset() == 0
+    }
+
+    pub fn contains_handle(&self, handle: &[u8]) -> bool {
+        let len = self.get_versions().len();
+        let idx = if self.is_common_handle {
+            search(len, |i| self.get_handle(i as u64) >= handle)
+        } else {
+            let mut handle = handle;
+            let int_handle = handle.get_i64_le();
+            search(len, |i| {
+                self.get_handle(i as u64).get_i64_le() >= int_handle
+            })
+        };
+        idx < len && self.get_handle(idx as u64) == handle
     }
 }
 
@@ -707,12 +729,46 @@ impl VectorIndexFile {
         }
     }
 
+    fn has_newer_version(
+        &self,
+        key: u64,
+        start_ts: u64,
+        newer_index_files: &[VectorIndexFile],
+    ) -> bool {
+        let handle = self.get_handle(key);
+        // Check if there is a newer version in this index.
+        if key > 0 {
+            let versions = self.get_versions();
+            let version = versions[key as usize];
+            let prev_key = key - 1;
+            let prev_handle = self.get_handle(prev_key);
+            if prev_handle == handle {
+                let prev_version = versions[prev_key as usize];
+                debug_assert!(
+                    prev_version > version,
+                    "prev_version: {}, version: {}",
+                    prev_version,
+                    version
+                );
+                if prev_version <= start_ts {
+                    return true;
+                }
+            }
+        }
+        // Check if there is a newer version in newer indexes.
+        newer_index_files.iter().any(|file| {
+            // Get the key of the same handle in the newer index.
+            file.contains_handle(handle)
+        })
+    }
+
     pub async fn search(
         &self,
         target: &[f32],
         count: usize,
         start_ts: u64,
         enable_distance_proj: bool,
+        newer_index_files: &[VectorIndexFile],
     ) -> Result<(Vec<VectorItem>, Vec<Vec<u8>>)> {
         if !self.is_loaded() {
             self.load_data().await?;
@@ -730,22 +786,9 @@ impl VectorIndexFile {
                 if version > start_ts {
                     return false;
                 }
-                if key > 0 {
-                    let prev_key = key - 1;
-                    let prev_handle = self.get_handle(prev_key);
-                    if prev_handle == handle {
-                        let prev_version = versions[prev_key as usize];
-                        debug_assert!(
-                            prev_version > version,
-                            "prev_version: {}, version: {}",
-                            prev_version,
-                            version
-                        );
-                        // If there is a newer version need to be read, skip the older version.
-                        if prev_version <= start_ts {
-                            return false;
-                        }
-                    }
+                // Skip if there is a newer version in this index or newer indexes.
+                if self.has_newer_version(key, start_ts, newer_index_files) {
+                    return false;
                 }
                 // This is the latest version to read, if it is mvcc deleted, skip it.
                 if self.is_null(key as usize) {
@@ -1497,7 +1540,7 @@ mod tests {
                 }
             }
             let (items, _) =
-                block_on(vec_idx.search(&[50.0f32, 150.0f32, 250.0f32], 3, u64::MAX, false))
+                block_on(vec_idx.search(&[50.0f32, 150.0f32, 250.0f32], 3, u64::MAX, false, &[]))
                     .unwrap();
             assert_eq!(items.len(), 3);
             assert_eq!(items[0].value, vec![50.0f32, 150.0f32, 250.0f32]);

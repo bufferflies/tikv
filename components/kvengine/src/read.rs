@@ -1584,14 +1584,12 @@ impl SnapAccessCore {
             schema.clone()
         };
 
-        info!("{} use vector index reader", self.tag);
-
         // For all readers except for the vector index reader, they will always read
         // with the vector column. We wrap a distance projection transformation
         // over these column readers so that they finally produce the expected output.
         // For vector index reader, it produces the vector distance column directly.
-
         let mut readers = self.collect_column_row_readers(&schema_with_vec);
+        let mem_l0_readers_count = readers.len();
         if enable_distance_proj {
             readers = readers
                 .into_iter()
@@ -1603,6 +1601,7 @@ impl SnapAccessCore {
                 .collect::<Result<Vec<_>>>()?;
         }
 
+        let mut columnar_readers_count = 0;
         for columnar_level in &self.data.col_levels.levels {
             if columnar_level.level == 2 {
                 // level 2 columnar files are all included in the vector index.
@@ -1636,9 +1635,17 @@ impl SnapAccessCore {
                 } else {
                     readers.push(Box::new(col_reader));
                 }
+                columnar_readers_count += 1;
             }
         }
         readers.push(Box::new(vector_items_reader));
+        info!(
+            "{} use vector index reader, vector_index_file_count: {}, mem_l0_readers_count: {}, columnar_readers_count: {}",
+            self.tag,
+            vector_index.files.len(),
+            mem_l0_readers_count,
+            columnar_readers_count
+        );
         let merged_reader = ColumnarMergeReader::new(schema.clone(), readers);
         let mvcc_reader = ColumnarMvccReader::new(Box::new(merged_reader), &schema, read_ts);
         Ok(Some(mvcc_reader))
