@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::table::columnar::VectorIndexDef;
+
 /// Statistics about the columnar index coverage for a specific table and index
 #[derive(Debug, Default, Serialize)]
 #[serde(default)]
@@ -20,6 +22,13 @@ pub struct ColumnarIndexStats {
 
     /// Total number of rows in columnar files which are covered by index.
     pub indexed_columnar_rows: usize,
+
+    /// Number of unindexed columnar rows that will be indexed. Not all
+    /// unindexed rows will be indexed, specifically, if the total size of
+    /// unindexed rows is below the threshold for vector index building,
+    /// these rows will not be indexed. See `Shard::need_build_vector_index`
+    /// for more details.
+    pub pending_columnar_rows: usize,
 }
 
 impl ColumnarIndexStats {
@@ -27,6 +36,7 @@ impl ColumnarIndexStats {
         self.total_columnar_rows += other.total_columnar_rows;
         self.unindexed_columnar_rows += other.unindexed_columnar_rows;
         self.indexed_columnar_rows += other.indexed_columnar_rows;
+        self.pending_columnar_rows += other.pending_columnar_rows;
     }
 }
 
@@ -47,6 +57,7 @@ impl ColumnarIndexStatsByTableIndex {
                     total_columnar_rows: 0,
                     unindexed_columnar_rows: 0,
                     indexed_columnar_rows: 0,
+                    pending_columnar_rows: 0,
                 })
                 .merge_from(stats);
         }
@@ -68,24 +79,26 @@ impl super::Shard {
             return result;
         };
 
-        let mut table_indexes = HashMap::</* table_id */ i64, /* index_id */ Vec<i64>>::new();
+        // TODO: Update to support other indexes
+        let mut table_indexes =
+            HashMap::</* table_id */ i64, HashMap</* index_id */ i64, &VectorIndexDef>>::new();
         for (table_id, schema) in schema_file.iter_tables() {
-            table_indexes
-                .entry(*table_id)
-                .or_insert_with(|| Vec::with_capacity(schema.vector_indexes.len()));
-            for index_id in schema.vector_indexes.iter().map(|idx| idx.index_id) {
+            let entry = table_indexes.entry(*table_id).or_default();
+            for idx in schema.vector_indexes.iter() {
                 result.0.insert(
-                    (*table_id, index_id),
+                    (*table_id, idx.index_id),
                     ColumnarIndexStats {
                         table_id: *table_id,
-                        index_id,
-                        index_kind: "vector".to_string(),
+                        index_id: idx.index_id,
+                        index_kind: "Vector".to_string(), /* Must be Vector or FullText to
+                                                           * aligned with the ecosystem */
                         total_columnar_rows: 0,
                         unindexed_columnar_rows: 0,
                         indexed_columnar_rows: 0,
+                        pending_columnar_rows: 0,
                     },
                 );
-                table_indexes.get_mut(table_id).unwrap().push(index_id);
+                entry.insert(idx.index_id, idx);
             }
         }
 
@@ -103,7 +116,7 @@ impl super::Shard {
                         continue;
                     }
                     let row_count = table_meta.handle_column.rows();
-                    for &index_id in table_indexes[&table_id].iter() {
+                    for &index_id in table_indexes[&table_id].keys() {
                         // For each index in the table, total_columnar_rows is the same.
                         let result_entry = result.0.get_mut(&(table_id, index_id)).unwrap();
                         result_entry.total_columnar_rows += row_count;
@@ -126,6 +139,20 @@ impl super::Shard {
                         }
                     }
                 }
+            }
+        }
+
+        // Vector index specific:
+        // Update pending_columnar_rows if unindexed_columnar_rows is above the
+        // threshold for vector index building.
+        for stats in result.0.values_mut() {
+            if stats.unindexed_columnar_rows == 0 {
+                continue;
+            }
+            let idx = table_indexes[&stats.table_id][&stats.index_id];
+            let total_pending_size = stats.unindexed_columnar_rows * idx.dimension * 4;
+            if total_pending_size >= self.opt.vector_index_build_options.delta_size {
+                stats.pending_columnar_rows = stats.unindexed_columnar_rows;
             }
         }
 

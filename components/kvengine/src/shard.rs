@@ -1332,6 +1332,11 @@ impl Shard {
                 total_row_count += row_count as usize;
             }
         }
+
+        // Note: Remember to update `collect_columnar_index_stats` when strategy here
+        // is changed, because we provide a field to notify user how many rows
+        // WILL build vector index.
+
         let total_size = total_row_count * vec_idx.dimension * 4;
         // We don't need to build vector index for small number of vectors.
         total_size >= self.opt.vector_index_build_options.delta_size
