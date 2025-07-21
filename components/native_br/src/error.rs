@@ -42,6 +42,10 @@ pub enum Error {
     PdError(pd_client::Error),
     #[error("Split regions error {0}")]
     SpitRegionsError(pd_client::Error),
+    #[error("Scatter regions error {0}")]
+    ScatterRegionsError(pd_client::Error),
+    #[error("Scatter regions timeout {remaining:?}")]
+    ScatterTimeout { remaining: Vec<u64> },
     #[error("Etcd error {0}")]
     EtcdError(etcd_client::Error),
     #[error("TiKV error {0}")]

@@ -14,6 +14,7 @@ mod feature_gate;
 pub mod metrics;
 mod tso;
 pub mod util;
+use bstr::ByteSlice;
 use security::GetSecurityManager;
 pub use util::{check_regions_boundary, grpc_error_is_unimplemented};
 
@@ -35,8 +36,10 @@ use kvproto::{
 };
 use pdpb::{LoadGlobalConfigRequest, QueryStats, WatchGlobalConfigResponse};
 use tikv_util::{
+    debug, error,
     time::{Instant, UnixSecs},
     timer::GLOBAL_TIMER_HANDLE,
+    warn,
 };
 use txn_types::TimeStamp;
 
@@ -279,6 +282,8 @@ pub const INVALID_ID: u64 = 0;
 
 const SPLIT_REGIONS_INIT_RETRY_INTERVAL_MS: u64 = 100;
 const SPLIT_REGIONS_MAX_RETRY_INTERVAL_MS: u64 = 3000;
+const SCATTER_REGIONS_MAX_RETRY_INTERVAL_MS: u64 = 30000;
+const SCATTER_REGINOS_TIMEOUT: Duration = Duration::from_secs(3600); // 1 hour
 
 /// PdClient communicates with Placement Driver (PD).
 /// Because now one PD only supports one cluster, so it is no need to pass
@@ -628,6 +633,73 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         })
     }
 
+    fn wait_regions_scattered(&self, regions: Vec<u64>) -> BoxFuture<'_, Result<Vec<u64>>> {
+        let timer = GLOBAL_TIMER_HANDLE.clone();
+        let mut retry_ms = 2000;
+        Box::pin(async move {
+            let mut pending: std::collections::HashSet<u64> = regions.iter().copied().collect();
+            let start_time = std::time::Instant::now();
+
+            loop {
+                let mut finished_this_round = Vec::new();
+
+                for &region_id in &pending {
+                    match self.get_operator(region_id) {
+                        // get operator always return header, even there is no operator in this
+                        // region.
+                        Ok(op) => {
+                            debug!(
+                                "get_operator({}) has no error, this region has an operator {:?} running",
+                                region_id,
+                                op.get_desc().to_str(),
+                            );
+                            if op.get_desc() != b"scatter-region"
+                                || op.get_status() != pdpb::OperatorStatus::Running
+                            {
+                                // 1. other operator is running, consider scatter is finished.
+                                // 2. scatter region is not running, consider it success.
+                                // or it could be timeout, in this case, we can still run next steps
+                                finished_this_round.push(region_id);
+                            }
+                        }
+                        Err(Error::RegionNotFound(_)) => {
+                            // as long as we confirm there is no operator in this region
+                            // we confirm this region has scattered.
+                            finished_this_round.push(region_id);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "get_operator({}) has other error({}), wait for next round",
+                                region_id, e
+                            );
+                        }
+                    }
+                }
+
+                for id in &finished_this_round {
+                    pending.remove(id);
+                }
+
+                if pending.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                if start_time.elapsed() > SCATTER_REGINOS_TIMEOUT {
+                    error!(
+                        "wait_regions_scattered timeout after {:?}, remaining {} regions",
+                        SCATTER_REGINOS_TIMEOUT,
+                        pending.len()
+                    );
+                    return Ok(pending.into_iter().collect());
+                }
+
+                let deadline = std::time::Instant::now() + Duration::from_millis(retry_ms);
+                timer.delay(deadline).compat().await.unwrap();
+                retry_ms = std::cmp::min(SCATTER_REGIONS_MAX_RETRY_INTERVAL_MS, retry_ms << 1);
+            }
+        })
+    }
+
     fn split_regions_with_retry(
         &self,
         keys: Vec<Vec<u8>>,
@@ -730,7 +802,7 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
 }
 
 pub(crate) const LEADER_CHANGE_RETRY: usize = 10;
-pub(crate) const REQUEST_TIMEOUT: u64 = 5; // 5s
+pub(crate) const REQUEST_TIMEOUT: u64 = 30; // 30s
 
 /// Takes the peer address (for sending raft messages) from a store.
 pub fn take_peer_address(store: &mut metapb::Store) -> String {

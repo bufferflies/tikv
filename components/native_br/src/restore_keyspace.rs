@@ -1992,12 +1992,25 @@ impl BackupCluster {
                 .map_err(|e| Error::SpitRegionsError(e))?;
             if scatter {
                 step!("Keyspace {} scatter {} regions", self.tag(), regions.len());
-                if let Err(err) = self.pd_client.scatter_regions_by_id(regions) {
+                if let Err(err) = self.pd_client.scatter_regions_by_id(regions.clone()) {
                     warn!("{} scatter regions failed: {:?}", self.tag(), err);
+                }
+                step!(
+                    "Keyspace {} wait {} regions scattered",
+                    self.tag(),
+                    regions.len()
+                );
+                let unscattered_regions = runtime
+                    .block_on(self.pd_client.wait_regions_scattered(regions))
+                    .map_err(|e| Error::ScatterRegionsError(e))?;
+
+                if !unscattered_regions.is_empty() {
+                    return Err(Error::ScatterTimeout {
+                        remaining: unscattered_regions,
+                    });
                 }
             }
         }
-
         Ok(())
     }
 
