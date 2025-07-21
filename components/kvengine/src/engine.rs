@@ -174,7 +174,6 @@ impl Engine {
             dfs_load_limiter,
             available_space_bytes: AtomicU64::new(0),
             worker_handles: Default::default(),
-            shutdown_token: tokio_util::sync::CancellationToken::new(),
         };
         let en = Engine {
             core: Arc::new(core),
@@ -305,7 +304,6 @@ impl Engine {
         self.free_tx.send(FreeMemMsg::Stop).unwrap();
 
         self.join_workers();
-        self.shutdown_token.cancel();
     }
 
     pub fn notify_memtables_size(&self, size: u64) {
@@ -343,7 +341,6 @@ pub struct EngineCore {
     pub(crate) dfs_load_limiter: DfsLoadLimiter,
     available_space_bytes: AtomicU64, // Set during store heartbeat.
     worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
-    pub(crate) shutdown_token: tokio_util::sync::CancellationToken,
 }
 
 impl Drop for EngineCore {

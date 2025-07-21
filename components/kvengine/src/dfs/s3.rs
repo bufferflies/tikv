@@ -3,6 +3,7 @@
 use std::{
     convert::TryFrom,
     fmt::{Debug, Formatter},
+    future::Future,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -29,6 +30,7 @@ use rusoto_s3::{
 };
 use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
+use tokio_util::sync::CancellationToken;
 
 use crate::dfs::{
     self,
@@ -112,6 +114,7 @@ pub struct S3FsCore {
     runtime: Option<tokio::runtime::Runtime>,
     virtual_host: bool,
     opts: ConnOptions,
+    shutdown_token: CancellationToken,
 }
 
 impl S3FsCore {
@@ -210,6 +213,7 @@ impl S3FsCore {
             runtime: Some(runtime),
             virtual_host,
             opts: options,
+            shutdown_token: CancellationToken::new(),
         }
     }
 
@@ -536,7 +540,7 @@ impl S3FsCore {
         req
     }
 
-    async fn dispatch<E>(
+    async fn dispatch_impl<E>(
         &self,
         mut req: SignedRequest,
         from_response: fn(BufferedHttpResponse) -> RusotoError<E>,
@@ -553,7 +557,18 @@ impl S3FsCore {
         Ok(Response { resp })
     }
 
-    async fn read_body(&self, resp: &mut Response) -> Result<Bytes, HttpDispatchError> {
+    async fn dispatch<E>(
+        &self,
+        req: SignedRequest,
+        from_response: fn(BufferedHttpResponse) -> RusotoError<E>,
+    ) -> Result<Response, RusotoError<E>> {
+        self.with_shutdown_safe(self.dispatch_impl(req, from_response), || {
+            RusotoError::HttpDispatch(HttpDispatchError::new("cancelled".to_string()))
+        })
+        .await
+    }
+
+    async fn read_body_impl(&self, resp: &mut Response) -> Result<Bytes, HttpDispatchError> {
         let cap = resp
             .headers
             .remove("Content-Length")
@@ -568,6 +583,13 @@ impl S3FsCore {
             buf.extend_from_slice(chunk.chunk());
         }
         Ok(Bytes::from(buf))
+    }
+
+    async fn read_body(&self, resp: &mut Response) -> Result<Bytes, HttpDispatchError> {
+        self.with_shutdown_safe(self.read_body_impl(resp), || {
+            HttpDispatchError::new("cancelled".to_string())
+        })
+        .await
     }
 
     pub async fn get_object(
@@ -889,11 +911,24 @@ impl S3FsCore {
             STORAGE_CLASS_DEFAULT
         }
     }
+
+    async fn with_shutdown_safe<F, T, E, FE>(&self, f: F, cancelled_error: FE) -> Result<T, E>
+    where
+        F: Future<Output = Result<T, E>>,
+        FE: Fn() -> E,
+    {
+        tokio::select! {
+            biased;
+            _ = self.shutdown_token.cancelled() => Err(cancelled_error()),
+            res = f => res,
+        }
+    }
 }
 
 impl Drop for S3FsCore {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
+            self.shutdown_token.cancel();
             runtime.shutdown_background();
         }
     }

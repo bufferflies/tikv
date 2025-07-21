@@ -433,7 +433,7 @@ pub enum Error {
     Other(String),
     #[error("The specified key {0} does not exist.")]
     NoSuchKey(String),
-    #[error("hyper error {0}")]
+    #[error("Hyper error {0}")]
     Hyper(String),
 }
 

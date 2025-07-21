@@ -339,7 +339,6 @@ impl EngineCore {
             let fm = fm.clone();
             join_set.spawn_on(
                 Self::load_file_from_remote(
-                    self.shutdown_token.clone(),
                     self.dfs_load_limiter.clone(),
                     fs,
                     id,
@@ -368,7 +367,6 @@ impl EngineCore {
     }
 
     async fn load_file_from_remote(
-        shutdown_token: tokio_util::sync::CancellationToken,
         dfs_load_limiter: DfsLoadLimiter,
         fs: Arc<dyn dfs::Dfs>,
         id: u64,
@@ -410,18 +408,13 @@ impl EngineCore {
             (res, permit)
         };
 
-        tokio::select! {
-            biased;
-            _ = shutdown_token.cancelled() => (),
-            (res, permit) = task => {
-                let _ = tx.send(res.map(|prepared| LoadRemoteResult {
-                    id,
-                    fm,
-                    prepared,
-                    permit,
-                }));
-            }
-        };
+        let (res, permit) = task.await;
+        let _ = tx.send(res.map(|prepared| LoadRemoteResult {
+            id,
+            fm,
+            prepared,
+            permit,
+        }));
     }
 
     fn recv_file_data(
