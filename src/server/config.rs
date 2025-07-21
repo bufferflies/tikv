@@ -116,6 +116,9 @@ pub struct Config {
     pub grpc_concurrency: usize,
     #[online_config(skip)]
     pub grpc_concurrent_stream: i32,
+    /// grpc_concurrency is calculated by (num_cores * grpc_concurrency_factor).
+    #[online_config(skip)]
+    pub grpc_concurrency_factor: f64,
     #[online_config(skip)]
     pub grpc_raft_conn_num: usize,
     pub grpc_memory_pool_quota: ReadableSize,
@@ -235,6 +238,7 @@ impl Default for Config {
             grpc_min_message_size_to_compress: DEFAULT_GRPC_MIN_MESSAGE_SIZE_TO_COMPRESS,
             grpc_concurrency: DEFAULT_GRPC_CONCURRENCY,
             grpc_concurrent_stream: DEFAULT_GRPC_CONCURRENT_STREAM,
+            grpc_concurrency_factor: 0.75, // 75% of CPU cores
             grpc_raft_conn_num: DEFAULT_GRPC_RAFT_CONN_NUM,
             grpc_stream_initial_window_size: ReadableSize(DEFAULT_GRPC_STREAM_INITIAL_WINDOW_SIZE),
             grpc_memory_pool_quota: ReadableSize(DEFAULT_GRPC_MEMORY_POOL_QUOTA),

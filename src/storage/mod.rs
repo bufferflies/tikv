@@ -595,147 +595,135 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         const CMD: CommandKind = CommandKind::get;
         let priority = ctx.get_priority();
         let priority_tag = get_priority_tag(priority);
-        let resource_tag = self.resource_tag_factory.new_tag_with_key_ranges(
-            &ctx,
-            vec![(key.as_encoded().to_vec(), key.as_encoded().to_vec())],
-        );
         let concurrency_manager = self.concurrency_manager.clone();
         let api_version = self.api_version;
 
         let quota_limiter = self.quota_limiter.clone();
         let mut sample = quota_limiter.new_sample(true);
 
-        let res = self.read_pool.spawn_handle(
-            async move {
-                let stage_scheduled_ts = Instant::now();
-                tls_collect_query(
-                    ctx.get_region_id(),
-                    ctx.get_peer(),
-                    key.as_encoded(),
-                    key.as_encoded(),
-                    false,
-                    QueryKind::Get,
-                );
-
-                KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
-                SCHED_COMMANDS_PRI_COUNTER_VEC_STATIC
-                    .get(priority_tag)
-                    .inc();
-
-                Self::check_api_version(api_version, ctx.api_version, CMD, [key.as_encoded()])?;
-
-                let command_duration = Instant::now();
-
-                // The bypass_locks and access_locks set will be checked at most once.
-                // `TsSet::vec` is more efficient here.
-                let bypass_locks = TsSet::vec_from_u64s(ctx.take_resolved_locks());
-
-                let snap_ctx = prepare_snap_ctx(
-                    &ctx,
-                    iter::once(&key),
-                    start_ts,
-                    &bypass_locks,
-                    &concurrency_manager,
-                    CMD,
-                )?;
-                let snapshot =
-                    Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx)).await?;
-
-                {
-                    let begin_instant = Instant::now();
-                    let stage_snap_recv_ts = begin_instant;
-                    let buckets = snapshot.ext().get_buckets();
-                    let mut statistics = Statistics::default();
-                    let result = {
-                        let snap_store = CloudStore::new(
-                            snapshot,
-                            start_ts.into_inner(),
-                            bypass_locks,
-                            !ctx.get_not_fill_cache(),
-                        );
-                        let res = if snap_store.is_sync() {
-                            let _guard = sample.observe_cpu();
-                            snap_store.get(&key, &mut statistics)
-                        } else {
-                            let (cpu_time, res) = sample
-                                .observe_cpu_async(snap_store.get_async(&key, &mut statistics))
-                                .await;
-                            sample.add_cpu_time(cpu_time);
-                            res
-                        };
-                        // map storage::txn::Error -> storage::Error
-                        res.map_err(Error::from).map(|r| {
-                            KV_COMMAND_KEYREAD_HISTOGRAM_STATIC.get(CMD).observe(1_f64);
-                            r
-                        })
-                    };
-                    metrics::tls_collect_scan_details(CMD, &statistics);
-                    metrics::tls_collect_read_flow(
-                        ctx.get_region_id(),
-                        Some(key.as_encoded()),
-                        Some(key.as_encoded()),
-                        &statistics,
-                        buckets.as_ref(),
-                    );
-                    let now = Instant::now();
-                    SCHED_PROCESSING_READ_HISTOGRAM_STATIC
-                        .get(CMD)
-                        .observe(duration_to_sec(
-                            now.saturating_duration_since(begin_instant),
-                        ));
-                    SCHED_HISTOGRAM_VEC_STATIC.get(CMD).observe(duration_to_sec(
-                        now.saturating_duration_since(command_duration),
-                    ));
-
-                    let read_bytes = key.len()
-                        + result
-                            .as_ref()
-                            .unwrap_or(&None)
-                            .as_ref()
-                            .map_or(0, |v| v.len());
-                    sample.add_read_bytes(read_bytes);
-                    let quota_delay = quota_limiter.consume_sample(sample, true).await;
-                    if !quota_delay.is_zero() {
-                        TXN_COMMAND_THROTTLE_TIME_COUNTER_VEC_STATIC
-                            .get(CMD)
-                            .inc_by(quota_delay.as_micros() as u64);
-                    }
-
-                    let stage_finished_ts = Instant::now();
-                    let schedule_wait_time =
-                        stage_scheduled_ts.saturating_duration_since(stage_begin_ts);
-                    let snapshot_wait_time =
-                        stage_snap_recv_ts.saturating_duration_since(stage_scheduled_ts);
-                    let wait_wall_time =
-                        stage_snap_recv_ts.saturating_duration_since(stage_begin_ts);
-                    let process_wall_time =
-                        stage_finished_ts.saturating_duration_since(stage_snap_recv_ts);
-                    let latency_stats = StageLatencyStats {
-                        schedule_wait_time_ms: duration_to_ms(schedule_wait_time),
-                        snapshot_wait_time_ms: duration_to_ms(snapshot_wait_time),
-                        wait_wall_time_ms: duration_to_ms(wait_wall_time),
-                        process_wall_time_ms: duration_to_ms(process_wall_time),
-                    };
-                    with_tls_tracker(|tracker| {
-                        tracker.metrics.read_pool_schedule_wait_nanos =
-                            schedule_wait_time.as_nanos() as u64;
-                    });
-                    Ok((
-                        result?,
-                        KvGetStatistics {
-                            stats: statistics,
-                            latency_stats,
-                        },
-                    ))
-                }
-            }
-            .in_resource_metering_tag(resource_tag),
-            priority,
-            thread_rng().next_u64(),
+        tls_collect_query(
+            ctx.get_region_id(),
+            ctx.get_peer(),
+            key.as_encoded(),
+            key.as_encoded(),
+            false,
+            QueryKind::Get,
         );
+
+        KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
+        SCHED_COMMANDS_PRI_COUNTER_VEC_STATIC
+            .get(priority_tag)
+            .inc();
+        let mut engine = self.engine.clone();
+        let read_pool = self.read_pool.clone();
+        let task_id = thread_rng().next_u64();
         async move {
-            res.map_err(|_| Error::from(ErrorInner::SchedTooBusy))
-                .await?
+            Self::check_api_version(api_version, ctx.api_version, CMD, [key.as_encoded()])?;
+
+            let command_duration = Instant::now();
+
+            // The bypass_locks and access_locks set will be checked at most once.
+            // `TsSet::vec` is more efficient here.
+            let bypass_locks = TsSet::vec_from_u64s(ctx.take_resolved_locks());
+
+            let snap_ctx = prepare_snap_ctx(
+                &ctx,
+                iter::once(&key),
+                start_ts,
+                &bypass_locks,
+                &concurrency_manager,
+                CMD,
+            )?;
+            let snapshot = Self::snapshot(&mut engine, snap_ctx).await?;
+            let is_sync = snapshot.is_sync();
+            let task = async move {
+                let begin_instant = Instant::now();
+                let stage_snap_recv_ts = begin_instant;
+                let buckets = snapshot.ext().get_buckets();
+                let mut statistics = Statistics::default();
+                let result = {
+                    let snap_store = CloudStore::new(
+                        snapshot,
+                        start_ts.into_inner(),
+                        bypass_locks,
+                        !ctx.get_not_fill_cache(),
+                    );
+                    let res = if snap_store.is_sync() {
+                        let _guard = sample.observe_cpu();
+                        snap_store.get(&key, &mut statistics)
+                    } else {
+                        let (cpu_time, res) = sample
+                            .observe_cpu_async(snap_store.get_async(&key, &mut statistics))
+                            .await;
+                        sample.add_cpu_time(cpu_time);
+                        res
+                    };
+                    // map storage::txn::Error -> storage::Error
+                    res.map_err(Error::from).map(|r| {
+                        KV_COMMAND_KEYREAD_HISTOGRAM_STATIC.get(CMD).observe(1_f64);
+                        r
+                    })
+                };
+                metrics::tls_collect_scan_details(CMD, &statistics);
+                metrics::tls_collect_read_flow(
+                    ctx.get_region_id(),
+                    Some(key.as_encoded()),
+                    Some(key.as_encoded()),
+                    &statistics,
+                    buckets.as_ref(),
+                );
+                let now = Instant::now();
+                SCHED_PROCESSING_READ_HISTOGRAM_STATIC
+                    .get(CMD)
+                    .observe(duration_to_sec(
+                        now.saturating_duration_since(begin_instant),
+                    ));
+                SCHED_HISTOGRAM_VEC_STATIC.get(CMD).observe(duration_to_sec(
+                    now.saturating_duration_since(command_duration),
+                ));
+
+                let read_bytes = key.len()
+                    + result
+                        .as_ref()
+                        .unwrap_or(&None)
+                        .as_ref()
+                        .map_or(0, |v| v.len());
+                sample.add_read_bytes(read_bytes);
+                let quota_delay = quota_limiter.consume_sample(sample, true).await;
+                if !quota_delay.is_zero() {
+                    TXN_COMMAND_THROTTLE_TIME_COUNTER_VEC_STATIC
+                        .get(CMD)
+                        .inc_by(quota_delay.as_micros() as u64);
+                }
+
+                let stage_finished_ts = Instant::now();
+                let snapshot_wait_time =
+                    stage_snap_recv_ts.saturating_duration_since(stage_begin_ts);
+                let wait_wall_time = stage_snap_recv_ts.saturating_duration_since(stage_begin_ts);
+                let process_wall_time =
+                    stage_finished_ts.saturating_duration_since(stage_snap_recv_ts);
+                let latency_stats = StageLatencyStats {
+                    schedule_wait_time_ms: 0,
+                    snapshot_wait_time_ms: duration_to_ms(snapshot_wait_time),
+                    wait_wall_time_ms: duration_to_ms(wait_wall_time),
+                    process_wall_time_ms: duration_to_ms(process_wall_time),
+                };
+                Ok((
+                    result?,
+                    KvGetStatistics {
+                        stats: statistics,
+                        latency_stats,
+                    },
+                ))
+            };
+            if is_sync {
+                task.await
+            } else {
+                read_pool
+                    .spawn_handle(task, priority, task_id)
+                    .map_err(|_| Error::from(ErrorInner::SchedTooBusy))
+                    .await?
+            }
         }
     }
 

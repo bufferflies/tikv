@@ -1850,6 +1850,8 @@ pub struct UnifiedReadPoolConfig {
     pub auto_adjust_pool_size: bool,
     // FIXME: Add more configs when they are effective in yatp
     pub use_tokio: bool,
+    /// thread couunt is calculated as `num_cores * thread_count_factor`.
+    pub thread_count_factor: f64,
 }
 
 impl UnifiedReadPoolConfig {
@@ -1906,6 +1908,7 @@ impl Default for UnifiedReadPoolConfig {
             max_tasks_per_worker: DEFAULT_READPOOL_MAX_TASKS_PER_WORKER,
             auto_adjust_pool_size: false,
             use_tokio: true,
+            thread_count_factor: 1.0,
         }
     }
 }
@@ -1923,6 +1926,7 @@ mod unified_read_pool_tests {
             max_tasks_per_worker: 2000,
             auto_adjust_pool_size: false,
             use_tokio: true,
+            thread_count_factor: 1.0,
         };
         cfg.validate().unwrap();
         let cfg = UnifiedReadPoolConfig {
@@ -2267,6 +2271,7 @@ mod readpool_tests {
             max_tasks_per_worker: 0,
             auto_adjust_pool_size: false,
             use_tokio: true,
+            thread_count_factor: 1.0,
         };
         unified.validate().unwrap_err();
         let storage = StorageReadPoolConfig {

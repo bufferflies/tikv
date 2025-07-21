@@ -367,8 +367,8 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
     reporter: R,
     engine: E,
 ) -> ReadPool {
-    let num_cores = SysQuota::cpu_cores_quota() as usize;
-    let worker_threads = num_cores.max(1);
+    let num_cores = SysQuota::cpu_cores_quota();
+    let worker_threads = (num_cores * config.thread_count_factor).max(1.0) as usize;
     let unified_read_pool_name = get_unified_read_pool_name();
     let ticker = yatp_pool::TickerWrapper::new(ReporterTicker { reporter });
     let raftkv = Arc::new(Mutex::new(engine));
