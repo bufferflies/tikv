@@ -1530,6 +1530,7 @@ impl TryWaiter {
         Err(last_err.unwrap())
     }
 
+    #[track_caller]
     pub fn must_wait<F, FnMsg>(&self, f: F, fail_msg: FnMsg)
     where
         F: FnMut() -> bool,
@@ -1541,6 +1542,7 @@ impl TryWaiter {
     }
 }
 
+#[track_caller]
 pub fn must_wait<F, FnMsg>(f: F, seconds: usize, fail_msg: FnMsg)
 where
     F: FnMut() -> bool,
@@ -1581,6 +1583,7 @@ where
 
 /// Return `None` when then the premise is not satisfied.
 /// `retry_idx` starts from 0.
+#[track_caller]
 #[must_use]
 pub fn must_wait_with_premise<T, P, F, FnMsg>(
     premise: P,

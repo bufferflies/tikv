@@ -483,13 +483,13 @@ fn test_sst_and_columnar_with_ia() {
     dfs.get_runtime()
         .block_on(dfs.create(new_schema_file_id, new_schema_file_data.into(), opts))
         .unwrap();
-    dfs.get_runtime().block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        new_schema_file_id,
-    ));
     must_wait(
         || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                new_schema_file_id,
+            ));
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
@@ -869,14 +869,14 @@ fn test_columnar_ia_file() {
         .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
         .unwrap();
     let status_addr = cluster.status_addr(node_id);
-    runtime.block_on(send_schema_file_request(
-        &status_addr,
-        keyspace_id,
-        schema_file_id,
-    ));
     let kvengine = cluster.get_kvengine(node_id);
     must_wait(
         || {
+            runtime.block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
