@@ -609,6 +609,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             false,
             QueryKind::Get,
         );
+        self.maybe_flush_read_stats();
 
         KV_COMMAND_COUNTER_VEC_STATIC.get(CMD).inc();
         SCHED_COMMANDS_PRI_COUNTER_VEC_STATIC
@@ -724,6 +725,18 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     .map_err(|_| Error::from(ErrorInner::SchedTooBusy))
                     .await?
             }
+        }
+    }
+
+    fn maybe_flush_read_stats(&self) {
+        if let Some(read_stats) = tls_maybe_take_read_stats() {
+            let _ = self.read_pool.spawn(
+                async move {
+                    tls_merge_read_stats(read_stats);
+                },
+                CommandPri::Normal,
+                thread_rng().next_u64(),
+            );
         }
     }
 

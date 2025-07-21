@@ -2,7 +2,7 @@
 
 //! Prometheus metrics for storage functionality.
 
-use std::{cell::RefCell, mem, sync::Arc};
+use std::{cell::RefCell, mem, sync::Arc, time::Duration};
 
 use collections::HashMap;
 use engine_traits::{PerfContext, PerfContextExt, PerfContextKind, PerfLevel};
@@ -22,6 +22,7 @@ use crate::{
 struct StorageLocalMetrics {
     local_scan_details: HashMap<CommandKind, Statistics>,
     local_read_stats: ReadStats,
+    last_collect_time: tikv_util::time::Instant,
 }
 
 thread_local! {
@@ -29,6 +30,7 @@ thread_local! {
         StorageLocalMetrics {
             local_scan_details: HashMap::default(),
             local_read_stats:ReadStats::default(),
+            last_collect_time: tikv_util::time::Instant::now_coarse(),
         }
     );
 }
@@ -56,6 +58,43 @@ pub fn tls_flush<R: FlowStatsReporter>(reporter: &R) {
             reporter.report_read_stats(read_stats);
         }
     });
+}
+
+const TLS_TAKE_READ_STATS_DURATION: Duration = Duration::from_secs(3);
+
+pub fn tls_maybe_take_read_stats() -> Option<ReadStats> {
+    TLS_STORAGE_METRICS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.local_read_stats.is_empty() {
+            return None;
+        }
+        if m.last_collect_time.saturating_elapsed() > TLS_TAKE_READ_STATS_DURATION {
+            m.last_collect_time = tikv_util::time::Instant::now_coarse();
+        } else {
+            return None;
+        }
+        Some(mem::take(&mut m.local_read_stats))
+    })
+}
+
+pub fn tls_merge_read_stats(read_stats: ReadStats) {
+    TLS_STORAGE_METRICS.with(|m| {
+        let mut m = m.borrow_mut();
+        // We only merge region stats because the bucket stats is less useful and
+        // expensive to merge.
+        for (id, region_info) in read_stats.region_infos {
+            match m.local_read_stats.region_infos.entry(id) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    let old = e.get_mut();
+                    old.flow.read_bytes += region_info.flow.read_bytes;
+                    old.flow.read_keys += region_info.flow.read_keys;
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(region_info);
+                }
+            }
+        }
+    })
 }
 
 pub fn tls_collect_scan_details(cmd: CommandKind, stats: &Statistics) {
