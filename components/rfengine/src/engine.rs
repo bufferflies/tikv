@@ -17,7 +17,6 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
-use dashmap::mapref::one::Ref;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::open_direct_file;
 use kvengine::dfs::{Dfs, S3Fs};
@@ -132,9 +131,9 @@ pub struct RfEngineCore {
 
     pub(crate) writer: Mutex<WalWriter>,
 
-    pub(crate) peers: dashmap::DashMap<u64, RwLock<PeerData>>,
+    pub(crate) peers: papaya::HashMap<u64, RwLock<PeerData>>,
 
-    pub(crate) dependants: dashmap::DashMap<u64, RwLock<HashSet<u64>>>,
+    pub(crate) dependants: papaya::HashMap<u64, RwLock<HashSet<u64>>>,
 
     pub(crate) task_sender: Sender<ServiceTask>,
 
@@ -278,15 +277,17 @@ impl RfEngineCore {
         self.wal_sync_dir.as_ref().unwrap_or(&self.dir)
     }
 
-    pub(crate) fn get_or_init_peer_data(
+    pub(crate) fn get_or_init_peer_data<'a>(
         &self,
         peer_id: u64,
         region_id: u64,
-    ) -> Ref<'_, u64, RwLock<PeerData>> {
-        self.peers
-            .entry(peer_id)
-            .or_insert_with(|| RwLock::new(PeerData::new(peer_id, region_id)))
-            .downgrade()
+        guard: &'a papaya::LocalGuard<'a>,
+    ) -> &'a RwLock<PeerData> {
+        self.peers.get_or_insert_with(
+            peer_id,
+            || RwLock::new(PeerData::new(peer_id, region_id)),
+            guard,
+        )
     }
 
     /// Applies and persists the write batch.
@@ -302,7 +303,8 @@ impl RfEngineCore {
         for (&peer_id, batch_data) in &wb.peers {
             let region_id = batch_data.meta.region_id;
             tikv_util::set_current_region_thread_local(region_id);
-            let peer_data = self.get_or_init_peer_data(peer_id, region_id);
+            let guard = self.peers.guard();
+            let peer_data = self.get_or_init_peer_data(peer_id, region_id, &guard);
             let mut peer_data = peer_data.write().unwrap();
             let truncated = peer_data.apply(batch_data);
             drop(peer_data);
@@ -341,26 +343,30 @@ impl RfEngineCore {
     }
 
     pub fn get_term(&self, peer_id: u64, index: u64) -> Option<u64> {
-        self.peers
+        let peers = self.peers.pin();
+        peers
             .get(&peer_id)
             .and_then(|data| data.read().unwrap().term(index))
     }
 
     pub fn get_truncated_index(&self, peer_id: u64) -> Option<u64> {
-        let peer_data_ref = self.peers.get(&peer_id)?;
+        let peers = self.peers.pin();
+        let peer_data_ref = peers.get(&peer_id)?;
         let data = peer_data_ref.read().unwrap();
         Some(data.truncated_idx)
     }
 
     pub fn get_last_index(&self, peer_id: u64) -> Option<u64> {
-        self.peers
+        let peers = self.peers.pin();
+        peers
             .get(&peer_id)
             .map(|data| data.read().unwrap().raft_logs.last_index())
             .and_then(|index| if index != 0 { Some(index) } else { None })
     }
 
     pub fn get_state(&self, peer_id: u64, key: &[u8]) -> Option<Bytes> {
-        self.peers.get(&peer_id).and_then(|data| {
+        let peers = self.peers.pin();
+        peers.get(&peer_id).and_then(|data| {
             data.read().unwrap().get_state(key).and_then(|val| {
                 // TODO: seems it's impossible.
                 if !val.is_empty() {
@@ -376,7 +382,8 @@ impl RfEngineCore {
     /// non-empty.
     pub fn get_last_state_with_prefix(&self, peer_id: u64, prefix: &[u8]) -> Option<Bytes> {
         debug_assert!(!prefix.is_empty());
-        let peer_data = self.peers.get(&peer_id)?;
+        let peers = self.peers.pin();
+        let peer_data = peers.get(&peer_id)?;
         let peer_data = peer_data.read().unwrap();
 
         let mut end_prefix = prefix.to_vec();
@@ -397,7 +404,8 @@ impl RfEngineCore {
     where
         F: FnMut(&[u8], &[u8]) -> bool,
     {
-        let peer_data = self.peers.get(&peer_id);
+        let peers = self.peers.pin();
+        let peer_data = peers.get(&peer_id);
         let peer_data = match &peer_data {
             Some(data) => data.read().unwrap(),
             None => return,
@@ -425,7 +433,8 @@ impl RfEngineCore {
     where
         F: FnMut(u64, u64, &[u8], &[u8]) -> bool,
     {
-        self.peers.iter().for_each(|data| {
+        let peers = self.peers.pin();
+        peers.iter().for_each(|(_, data)| {
             let data = data.read().unwrap();
             if data.truncated_idx == TRUNCATE_ALL_INDEX {
                 return;
@@ -462,7 +471,8 @@ impl RfEngineCore {
     /// flushed or re-ingested or destroyed, call `remove_dependent` to
     /// resume truncating the raft log.
     pub fn add_dependent(&self, region_id: u64, dependent_id: u64) {
-        let hs_ref = self.dependants.entry(region_id).or_default();
+        let dependants = self.dependants.pin();
+        let hs_ref = dependants.get_or_insert_with(region_id, || RwLock::new(HashSet::new()));
         let mut hs = hs_ref.write().unwrap();
         let newly_inserted = hs.insert(dependent_id);
         if !newly_inserted {
@@ -470,7 +480,6 @@ impl RfEngineCore {
         }
         let len = hs.len();
         drop(hs);
-        drop(hs_ref);
         let tag = PeerTag::new(self.get_engine_id(), region_id);
         info!(
             "{} add dependent {}, dependents_len {}",
@@ -479,7 +488,8 @@ impl RfEngineCore {
     }
 
     pub fn remove_dependent(&self, region_id: u64, dependent_id: u64) -> usize {
-        self.dependants
+        let dependants = self.dependants.pin();
+        dependants
             .get(&region_id)
             .map(|hs| {
                 let len = {
@@ -498,13 +508,15 @@ impl RfEngineCore {
     }
 
     pub fn with_dependents(&self, region_id: u64, f: impl FnOnce(&HashSet<u64>)) {
-        if let Some(hs) = self.dependants.get(&region_id) {
+        let dependants = self.dependants.pin();
+        if let Some(hs) = dependants.get(&region_id) {
             f(&hs.read().unwrap());
         }
     }
 
     pub fn has_dependents(&self, region_id: u64) -> bool {
-        self.dependants
+        let dependants = self.dependants.pin();
+        dependants
             .get(&region_id)
             .map_or(false, |hs| !hs.read().unwrap().is_empty())
     }
@@ -519,10 +531,10 @@ impl RfEngineCore {
     pub fn get_engine_stats(&self) -> EngineStats {
         let mut total_mem_size = 0;
         let mut total_mem_entries = 0;
-        let mut peers_stats = self
-            .peers
+        let peers = self.peers.pin();
+        let mut peers_stats = peers
             .iter()
-            .map(|data| {
+            .map(|(_, data)| {
                 let peer_stats = data.read().unwrap().get_stats();
                 total_mem_size += peer_stats.size;
                 total_mem_entries += peer_stats.num_logs;
@@ -556,7 +568,8 @@ impl RfEngineCore {
 
     /// Dumps the state of the region.
     pub fn get_peer_stats(&self, peer_id: u64) -> PeerStats {
-        self.peers
+        let peers = self.peers.pin();
+        peers
             .get(&peer_id)
             .map(|data| data.read().unwrap().get_stats())
             .unwrap_or_default()
@@ -565,7 +578,8 @@ impl RfEngineCore {
     /// Returns the index that truncating to the given index can limit the
     /// memory usage to size.
     pub fn index_to_truncate_to_size(&self, peer_id: u64, size: usize) -> u64 {
-        self.peers
+        let peers = self.peers.pin();
+        peers
             .get(&peer_id)
             .map(|data| {
                 data.read()
@@ -587,7 +601,8 @@ impl RfEngineCore {
     pub fn get_region_peer_map(&self) -> HashMap<u64 /* region_id */, u64 /* peer_id */> {
         let mut region_to_peer = HashMap::with_capacity(self.peers.len());
         let mut id_pairs = Vec::with_capacity(self.peers.len());
-        for peer_ref in self.peers.iter() {
+        let peers = self.peers.pin();
+        for (_, peer_ref) in peers.iter() {
             let peer_data = peer_ref.read().unwrap();
             let is_truncated = peer_data.truncated_idx == TRUNCATE_ALL_INDEX;
             id_pairs.push((peer_data.peer_id, peer_data.region_id, is_truncated));
@@ -608,7 +623,8 @@ impl RfEngineCore {
     }
 
     pub fn get_raft_entry(&self, peer_id: u64, index: u64) -> Option<Entry> {
-        self.peers
+        let peers = self.peers.pin();
+        peers
             .get(&peer_id)
             .and_then(|data| data.read().unwrap().get(index))
     }
@@ -625,8 +641,8 @@ impl RfEngineCore {
             return Ok(0);
         }
         let old_len = buf.len();
-        let peer_data = self
-            .peers
+        let peers = self.peers.pin();
+        let peer_data = peers
             .get(&peer_id)
             .ok_or(engine_traits::Error::EntriesCompacted)?;
         let peer_data = peer_data.read().unwrap();
@@ -1313,11 +1329,13 @@ mod tests {
         assert_eq!(wal_cnt, 4);
 
         let mut old_entries_map = HashMap::new();
-        for peer_ref in engine.peers.iter() {
+        let peers = engine.peers.pin();
+        for (peer_id, peer_ref) in peers.iter() {
             let peer_data = peer_ref.read().unwrap();
-            assert_eq!(*peer_ref.key(), peer_data.peer_id);
+            assert_eq!(*peer_id, peer_data.peer_id);
             old_entries_map.insert(peer_data.peer_id, peer_data.clone());
         }
+        drop(peers);
         assert_eq!(old_entries_map.len(), 10);
         engine.stop_worker(true);
 
@@ -1334,9 +1352,10 @@ mod tests {
                 true
             });
             assert_eq!(engine.peers.len(), 10);
-            for new_data_ref in engine.peers.iter() {
+            let peers = engine.peers.pin();
+            for (peer_id, new_data_ref) in peers.iter() {
                 let new_data = new_data_ref.read().unwrap();
-                let old_data = old_entries_map.get(new_data_ref.key()).unwrap();
+                let old_data = old_entries_map.get(peer_id).unwrap();
                 assert_eq!(
                     old_data.raft_logs.first_index(),
                     new_data.raft_logs.first_index()
@@ -1591,25 +1610,10 @@ mod tests {
 
         // Test `add_dependent` and `remove_dependent`.
         engine.add_dependent(1, 1);
-        assert!(
-            engine
-                .dependants
-                .get(&1)
-                .unwrap()
-                .read()
-                .unwrap()
-                .contains(&1)
-        );
+        let dependants = engine.dependants.pin();
+        assert!(dependants.get(&1).unwrap().read().unwrap().contains(&1));
         engine.remove_dependent(1, 1);
-        assert!(
-            !engine
-                .dependants
-                .get(&1)
-                .unwrap()
-                .read()
-                .unwrap()
-                .contains(&1)
-        );
+        assert!(!dependants.get(&1).unwrap().read().unwrap().contains(&1));
     }
 
     #[test]

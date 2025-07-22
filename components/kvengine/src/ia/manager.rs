@@ -682,11 +682,7 @@ impl IaManager {
         crate::ia::types::FileSegmentData,
         Option<crate::ia::queue::QueueItem>,
     )> {
-        let local_segments = self
-            .segments
-            .iter()
-            .map(|r| (r.key().clone(), r.value().clone()))
-            .collect::<Vec<_>>();
+        let local_segments = self.segments.get_all();
         let mut segments = Vec::with_capacity(local_segments.len());
         // TODO: find segments in queue but not in local store.
         for (ident, segment) in local_segments {

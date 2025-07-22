@@ -11,11 +11,12 @@ use crate::{log_batch::RaftLogOp, manifest::Manifest, service_worker::ServiceTas
 impl RfEngineCore {
     pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
         for (&peer_id, peer_meta) in &manifest.peers {
-            let peer_ref = self.get_or_init_peer_data(peer_id, peer_meta.region_id);
+            let guard = self.peers.guard();
+            let peer_ref = self.get_or_init_peer_data(peer_id, peer_meta.region_id, &guard);
             let mut peer_data = peer_ref.write().unwrap();
             peer_data.meta.merge(peer_meta, false);
             drop(peer_data);
-            drop(peer_ref);
+            drop(guard);
             for file in &peer_meta.files {
                 self.load_raft_log_file(
                     peer_id,
@@ -77,8 +78,12 @@ impl RfEngineCore {
                 None
             };
             WalIterator::iterate_peer_batch(data, |peer_batch| {
-                let peer_ref =
-                    self.get_or_init_peer_data(peer_batch.peer_id, peer_batch.meta.region_id);
+                let guard = self.peers.guard();
+                let peer_ref = self.get_or_init_peer_data(
+                    peer_batch.peer_id,
+                    peer_batch.meta.region_id,
+                    &guard,
+                );
                 let mut peer_data = peer_ref.write().unwrap();
                 let _ = peer_data.apply(&peer_batch);
                 if let Some(wb) = &mut wb {
@@ -169,7 +174,8 @@ impl RfEngineCore {
         for _ in 0..header.count {
             end_offs.push(data.get_u32_le());
         }
-        let peer_data_ref = self.get_or_init_peer_data(peer_id, region_id);
+        let guard = self.peers.guard();
+        let peer_data_ref = self.get_or_init_peer_data(peer_id, region_id, &guard);
         let mut peer_data = peer_data_ref.write().unwrap();
         for i in 0..header.count as usize {
             if first + i as u64 <= peer_data.truncated_idx {

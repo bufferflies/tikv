@@ -4,6 +4,7 @@ use std::{fmt, hash::Hash, ops, sync::Arc};
 
 use bytes::Bytes;
 use dashmap::{mapref::entry::Entry, DashMap};
+use papaya::Operation;
 use tikv_util::time::Instant;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -119,13 +120,14 @@ lazy_static::lazy_static! {
 
 #[derive(Default)]
 pub(crate) struct LocalSegmentMap {
-    core: DashMap<FileSegmentIdent, FileSegmentData>,
+    core: papaya::HashMap<FileSegmentIdent, FileSegmentData>,
 }
 
 impl LocalSegmentMap {
     #[inline]
     pub(crate) fn get_segment(&self, ident: &FileSegmentIdent) -> Option<FileSegmentData> {
-        self.core.get(ident).map(|x| x.value().clone())
+        let core = self.core.pin();
+        core.get(ident).cloned()
     }
 
     #[inline]
@@ -138,7 +140,8 @@ impl LocalSegmentMap {
         trace_insert_segment_data(&ident, Some(&segment_data));
 
         let mut memory_delta = segment_data.memory_size();
-        let prev = self.core.insert(ident.clone(), segment_data);
+        let core = self.core.pin();
+        let prev = core.insert(ident.clone(), segment_data).cloned();
 
         memory_delta -= prev.as_ref().map_or(0, |x| x.memory_size());
         ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE.add(memory_delta);
@@ -156,38 +159,44 @@ impl LocalSegmentMap {
         is_match: F,
     ) -> std::result::Result<(), Option<FileSegmentData>>
     where
-        F: FnOnce(&FileSegmentData, &FileSegmentData) -> bool,
+        F: Fn(&FileSegmentData, &FileSegmentData) -> bool,
     {
-        match self.core.entry(ident.clone()) {
-            Entry::Occupied(mut entry) => {
-                let prev = entry.get();
+        let core = self.core.pin();
+        let compute = core.compute(ident, |entry| {
+            if let Some((_, prev)) = entry {
                 if is_match(prev, expected) {
                     #[cfg(feature = "debug-trace-ia-segments")]
                     {
-                        trace_remove_segment_data(&ident, Some(&prev));
+                        trace_remove_segment_data(&ident, Some(prev));
                         trace_insert_segment_data(&ident, segment_data.as_ref());
                     }
 
                     let mut memory_delta = -prev.memory_size();
-                    if let Some(segment_data) = segment_data {
+                    let op = if let Some(segment_data) = &segment_data {
                         memory_delta += segment_data.memory_size();
-                        entry.insert(segment_data);
+                        Operation::Insert(segment_data.clone())
                     } else {
-                        entry.remove();
-                    }
+                        Operation::Remove
+                    };
                     ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE.add(memory_delta);
-                    Ok(())
+                    op
                 } else {
-                    Err(Some(prev.clone()))
+                    Operation::Abort(Some(prev.clone()))
                 }
+            } else {
+                Operation::Abort(None)
             }
-            Entry::Vacant(_) => Err(None),
-        }
+        });
+        if let papaya::Compute::Aborted(v) = compute {
+            return Err(v);
+        };
+        Ok(())
     }
 
     #[inline]
     pub(crate) fn remove(&self, ident: &FileSegmentIdent) -> Option<FileSegmentData> {
-        let prev = self.core.remove(ident)?.1;
+        let core = self.core.pin();
+        let prev = core.remove(ident).cloned()?;
         ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE.sub(prev.memory_size());
 
         #[cfg(feature = "debug-trace-ia-segments")]
@@ -197,13 +206,14 @@ impl LocalSegmentMap {
     }
 
     pub(crate) fn contains(&self, ident: &FileSegmentIdent) -> bool {
-        self.core.contains_key(ident)
+        let core = self.core.pin();
+        core.contains_key(ident)
     }
 
     #[cfg(any(test, feature = "testexport"))]
-    #[inline]
-    pub(crate) fn iter(&self) -> dashmap::iter::Iter<'_, FileSegmentIdent, FileSegmentData> {
-        self.core.iter()
+    pub(crate) fn get_all(&self) -> Vec<(FileSegmentIdent, FileSegmentData)> {
+        let core = self.core.pin();
+        core.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 }
 
