@@ -1992,7 +1992,16 @@ impl Engine {
     ) -> Option<Result<pb::ChangeSet>> {
         let tag = shard.tag();
         let data = shard.get_data();
-        let snap_version = shard.get_columnar_snap_version();
+        // `Shard::get_columnar_snap_version` may not monotonically increase after
+        // split, so we need to use the max of the vector index snap version and
+        // the columnar snap version to avoid vector snap version rollback.
+        let snap_version = std::cmp::max(
+            shard
+                .get_vector_index(table_id, index_id, col_id)
+                .map(|v| v.snap_version())
+                .unwrap_or_default(),
+            shard.get_columnar_snap_version(),
+        );
         let schema_file = data.schema_file.as_ref()?;
         let table_schema = schema_file.get_table(table_id)?;
         table_schema
