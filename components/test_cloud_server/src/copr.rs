@@ -23,6 +23,30 @@ use tipb::{ColumnInfo, ExecType, Executor, TableScan};
 
 use crate::client::ClusterClient;
 
+// used by full text search test.
+pub const SCORE_SAMPLE_DOCS: &[&str] = &[
+    // 0
+    "machine learning machine learning machine learning",
+    // 1
+    "machine learning algorithms. Machine learning models. Machine learning optimization.",
+    // 2
+    "Machine learning (Machine learning (Machine learning (Machine learning (Machine learning (is used in AI. Machine learning (Machine learning (Machine learning (Machine learning (Machine learning (is used in AI. Machine learning (Machine learning (Machine learning (Machine learning (Machine learning (is used in AI. Machine learning ends.",
+    // 3
+    "Understanding machine learning: basics of learning from machines. Machine learning requires data.",
+    // 4
+    "machine learning",
+    // 5
+    "This 50-word document briefly mentions machine learning once. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. Generic text about AI. ",
+    // 6
+    "Learning machine learning machine. Learning machine applications.",
+    // 7
+    "Space Tourism: Risks and Opportunities - Private companies like SpaceX and Blue Origin are making suborbital flights accessible, but safety protocols remain a critical concern.",
+    // 8
+    "Sustainable Fashion Trends - Eco-friendly materials like mushroom leather and recycled polyester are reshaping the fashion industry’s environmental impact.",
+    // 9
+    "AI-powered tools are transforming medical imaging analysis. Deep learning algorithms now detect early-stage tumors with 95% accuracy.",
+];
+
 impl ClusterClient {
     pub fn simple_cop_request(
         &mut self,
@@ -153,6 +177,20 @@ pub fn build_row_val(schema: &Schema, ctx: &mut EvalContext, i: usize) -> Vec<u8
     val
 }
 
+pub fn build_row_val_for_fts(schema: &Schema, ctx: &mut EvalContext, i: usize) -> Vec<u8> {
+    let mut cols = vec![];
+    for col_info in schema
+        .columns
+        .iter()
+        .filter(|ci| !ci.flag().contains(FieldTypeFlag::PRIMARY_KEY))
+    {
+        cols.push(col_fts_column(col_info, i));
+    }
+    let mut val = vec![];
+    val.write_row(ctx, cols).unwrap();
+    val
+}
+
 pub fn col_val_datum(col_info: &ColumnInfo, i: usize) -> Datum {
     match col_info.tp() {
         FieldTypeTp::LongLong => Datum::I64(i as i64),
@@ -183,6 +221,17 @@ fn col_val_column(col_info: &ColumnInfo, i: usize) -> Column {
             }
             _ => unimplemented!(),
         }
+    }
+}
+
+fn col_fts_column(col_info: &ColumnInfo, i: usize) -> Column {
+    match col_info.tp() {
+        FieldTypeTp::Float => Column::new(col_info.get_column_id(), Some(i as f64)),
+        FieldTypeTp::String => {
+            let str_val = SCORE_SAMPLE_DOCS[i].to_string();
+            Column::new(col_info.get_column_id(), Some(str_val.into_bytes()))
+        }
+        _ => unimplemented!(),
     }
 }
 

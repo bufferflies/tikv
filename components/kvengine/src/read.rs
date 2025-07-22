@@ -21,7 +21,7 @@ use tikv_util::{
     codec::number::{U32_SIZE, U64_SIZE},
     memory::{MemoryLimiter, MemoryLimiterGuard},
 };
-use tipb::{AnnQueryInfo, ColumnInfo};
+use tipb::{AnnQueryInfo, ColumnInfo, FtsQueryInfo};
 use txn_types::Lock;
 
 use crate::{
@@ -35,6 +35,7 @@ use crate::{
             filter::TableScanCtx, ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader,
             ColumnarReader, ColumnarRowTableReader, ColumnarTableReader, HANDLE_COL_ID,
         },
+        fts_index::FtsBruteForceReader,
         memtable::{CfTable, Hint, SkipList, WriteBatch},
         schema_file::{Schema, SchemaBuf, SchemaFile},
         sstable::SsTable,
@@ -1433,7 +1434,6 @@ impl SnapAccessCore {
         let Some(schema) = self.new_schema_from_columns(table_id, columns) else {
             return Ok(None);
         };
-
         let filter_op = scan_ctx.map(|ctx| ctx.to_filter_operator());
 
         let schema_to_read = if has_vector_distance_proj {
@@ -1441,6 +1441,72 @@ impl SnapAccessCore {
         } else {
             schema.clone()
         };
+        let mut readers = self.collect_column_row_readers(&schema_to_read);
+        for columnar_level in &self.data.col_levels.levels {
+            if columnar_level.level == 2 {
+                let concat_reader = ColumnarConcatReader::new(
+                    &columnar_level.files,
+                    schema_to_read.clone(),
+                    filter_op.clone(),
+                    self.encryption_key.clone(),
+                );
+                readers.push(Box::new(concat_reader));
+            } else {
+                for col_file in &columnar_level.files {
+                    if !col_file.has_table(schema_to_read.table_id) {
+                        continue;
+                    }
+                    let col_reader = ColumnarTableReader::new(
+                        col_file,
+                        schema_to_read.clone(),
+                        filter_op.clone(),
+                        self.encryption_key.clone(),
+                    );
+                    readers.push(Box::new(col_reader));
+                }
+            }
+        }
+        let mut merged_reader: Box<dyn ColumnarReader> =
+            Box::new(ColumnarMergeReader::new(schema_to_read.clone(), readers));
+        // As commented above, if vector distance projection is enabled,
+        // we will wrap a VectorDistanceProjector as the outside layer
+        // to produce a distance column from the vector column.
+        if has_vector_distance_proj {
+            merged_reader = Box::new(VectorDistanceProjector::new(
+                merged_reader,
+                schema.clone(),
+                ann_query.unwrap().clone(),
+            )?);
+        }
+
+        let mvcc_reader = ColumnarMvccReader::new(merged_reader, &schema, read_ts);
+        Ok(Some(mvcc_reader))
+    }
+
+    /// `new_fts_columnar_mvcc_reader` will try to construct a reader in
+    /// columnar mode. If `None` is returned, normal tikv row reading will
+    /// be used.
+    /// In `FtsBruteForceReader`, the matching fts_col may be filtered to return
+    /// only the matching rows.
+    pub fn new_fts_columnar_mvcc_reader(
+        &self,
+        table_id: i64,
+        columns: &[ColumnInfo],
+        scan_ctx: Option<&TableScanCtx>,
+        read_ts: u64,
+        fts_query: Arc<FtsQueryInfo>,
+    ) -> Result<Option<FtsBruteForceReader>> {
+        let Some(schema) = self.new_schema_from_columns(table_id, columns) else {
+            return Ok(None);
+        };
+
+        let filter_op = scan_ctx.map(|ctx| ctx.to_filter_operator());
+
+        // Fts index is not supported yet, so no matter for FtsQueryTypeNoScore or
+        // FtsQueryTypeWithScore, we need to read the fts_col column to
+        // perform fts matching or calculate scores. Therefore, we need to
+        // insert fts_col at the end of the schema if fts_col does not exist.
+        let schema_to_read = FtsBruteForceReader::generate_inner_schema(&schema, &fts_query)?;
 
         let mut readers = self.collect_column_row_readers(&schema_to_read);
 
@@ -1469,22 +1535,16 @@ impl SnapAccessCore {
             }
         }
 
-        let mut merged_reader: Box<dyn ColumnarReader> =
+        let merged_reader: Box<dyn ColumnarReader> =
             Box::new(ColumnarMergeReader::new(schema_to_read.clone(), readers));
 
-        // As commented above, if vector distance projection is enabled,
-        // we will wrap a VectorDistanceProjector as the outside layer
-        // to produce a distance column from the vector column.
-        if has_vector_distance_proj {
-            merged_reader = Box::new(VectorDistanceProjector::new(
-                merged_reader,
-                schema.clone(),
-                ann_query.unwrap().clone(),
-            )?);
-        }
-
-        let mvcc_reader = ColumnarMvccReader::new(merged_reader, &schema, read_ts);
-        Ok(Some(mvcc_reader))
+        let inner_mvcc_reader = ColumnarMvccReader::new(merged_reader, &schema_to_read, read_ts);
+        let fts_mvcc_reader = FtsBruteForceReader::new(
+            Box::new(inner_mvcc_reader),
+            schema.clone(),
+            fts_query.clone(),
+        )?;
+        Ok(Some(fts_mvcc_reader))
     }
 
     fn collect_column_row_readers(&self, schema: &Schema) -> Vec<Box<dyn ColumnarReader>> {

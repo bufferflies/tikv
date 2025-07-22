@@ -11,9 +11,7 @@ use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2, KeyMode, KvFormat};
 use bytes::{buf::Buf, Bytes};
 use kvengine::{
     read::Iterator,
-    table::columnar::{
-        filter::TableScanCtx, Block, ColumnarFilterReader, ColumnarMvccReader, HANDLE_COL_ID,
-    },
+    table::columnar::{filter::TableScanCtx, Block, ColumnarFilterReader, HANDLE_COL_ID},
     LOCK_CF,
 };
 use kvproto::{coprocessor::KeyRange, kvrpcpb::IsolationLevel};
@@ -35,12 +33,12 @@ use tidb_query_datatype::{
     EvalType, FieldTypeTp,
 };
 use tikv_util::{buffer_vec::BufferVec, info};
-use tipb::{AnnQueryInfo, TableScan};
+use tipb::{AnnQueryInfo, FtsQueryInfo, TableScan};
 use txn_types::{Key, Lock, TsSet};
 
 pub struct ColumnarScanner {
     // The current scan position.
-    reader: ColumnarMvccReader,
+    reader: Box<dyn ColumnarFilterReader>,
     keyspace_id: u32,
     output_offsets: Vec<i32>,
     eval_types: Vec<EvalType>,
@@ -54,7 +52,7 @@ pub struct ColumnarScanner {
 
 impl ColumnarScanner {
     pub fn new(
-        reader: ColumnarMvccReader,
+        reader: Box<dyn ColumnarFilterReader>,
         output_offsets: Vec<i32>,
         keyspace_id: u32,
         start_range: Vec<u8>,
@@ -308,6 +306,7 @@ fn build_columnar_scanner_internal(
     table_scan: &TableScan,
     start_ts: u64,
     ann_query: Option<&AnnQueryInfo>,
+    fts_query: Option<&FtsQueryInfo>,
 ) -> Result<Option<ColumnarScanner>> {
     let snap = match snap {
         Some(s) => s,
@@ -367,6 +366,26 @@ fn build_columnar_scanner_internal(
     );
     check_locks(&mut lock_iter, start_ts)?;
 
+    let fts_query_info = fts_query.map(|q| Arc::new(q.clone()));
+    if fts_query_info.is_some() {
+        return match snap.new_fts_columnar_mvcc_reader(
+            table_id,
+            table_scan.get_columns(),
+            None,
+            start_ts,
+            fts_query_info.unwrap(),
+        )? {
+            Some(r) => Ok(Some(ColumnarScanner::new(
+                Box::new(r),
+                get_output_offsets(table_scan),
+                keyspace_id,
+                key_range.start.clone(),
+                (start_handle, end_handle),
+            ))),
+            None => Err(StorageError(anyhow!("failed to build fts scanner")).into()),
+        };
+    }
+
     if ann_query.is_none() {
         // Not a vector search at all
         let mut executor = tipb::Executor::default();
@@ -383,7 +402,7 @@ fn build_columnar_scanner_internal(
             )?
             .map(|r| {
                 ColumnarScanner::new(
-                    r,
+                    Box::new(r),
                     get_output_offsets(table_scan),
                     keyspace_id,
                     key_range.start.clone(),
@@ -412,7 +431,7 @@ fn build_columnar_scanner_internal(
         Arc::clone(&ann_query),
     )? {
         return Ok(Some(ColumnarScanner::new(
-            r,
+            Box::new(r),
             get_output_offsets(table_scan),
             keyspace_id,
             key_range.start.clone(),
@@ -429,7 +448,7 @@ fn build_columnar_scanner_internal(
         Some(Arc::clone(&ann_query)),
     )? {
         Some(r) => Ok(Some(ColumnarScanner::new(
-            r,
+            Box::new(r),
             get_output_offsets(table_scan),
             keyspace_id,
             key_range.start.clone(),
@@ -461,8 +480,15 @@ pub fn build_columnar_scanner(
         .map(|q| q.get_enable_distance_proj())
         .unwrap_or(false);
 
-    let scanner =
-        build_columnar_scanner_internal(snap, key_ranges, table_scan, start_ts, ann_query)?;
+    let fts_query = table_scan
+        .get_used_columnar_indexes()
+        .iter()
+        .find(|idx| idx.has_fts_query_info())
+        .map(|idx| idx.get_fts_query_info());
+
+    let scanner = build_columnar_scanner_internal(
+        snap, key_ranges, table_scan, start_ts, ann_query, fts_query,
+    )?;
 
     // under `distance proj`, an error will be returned if build columnar reader
     // fails, since reading distance does not yet support normal read by rows.

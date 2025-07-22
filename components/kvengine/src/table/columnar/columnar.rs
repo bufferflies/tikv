@@ -1001,6 +1001,91 @@ impl ColumnBuffer {
         }
     }
 
+    /// Retains only the elements specified by the predicate.
+    ///
+    /// In other words, remove all elements e for which f(&e) returns false.
+    /// This method operates in place, visiting each element exactly once in the
+    /// original order, and preserves the order of the retained elements.
+    pub(crate) fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(usize) -> bool,
+    {
+        if self.length() == 0 {
+            return;
+        }
+
+        if self.fixed_size > 0 {
+            self.retain_rows_fixed_size(&mut f);
+        } else {
+            self.retain_rows_dynamic_size(&mut f);
+        }
+    }
+
+    /// Retain implementation for fixed-size columns
+    fn retain_rows_fixed_size<F>(&mut self, f: &mut F)
+    where
+        F: FnMut(usize) -> bool,
+    {
+        let mut write_idx = 0;
+        for read_idx in 0..self.length() {
+            if f(read_idx) {
+                if write_idx != read_idx {
+                    let src_start = read_idx * self.fixed_size;
+                    let src_end = src_start + self.fixed_size;
+                    let dst_start = write_idx * self.fixed_size;
+                    self.data_buf.copy_within(src_start..src_end, dst_start);
+
+                    if self.nullable {
+                        self.nulls[write_idx] = self.nulls[read_idx];
+                    }
+                }
+                write_idx += 1;
+            }
+        }
+
+        self.data_buf.truncate(write_idx * self.fixed_size);
+        if self.nullable {
+            self.nulls.truncate(write_idx);
+        }
+    }
+
+    /// Retain implementation for dynamic-size columns
+    fn retain_rows_dynamic_size<F>(&mut self, f: &mut F)
+    where
+        F: FnMut(usize) -> bool,
+    {
+        let mut write_idx = 0;
+        let mut write_data_pos = 0;
+
+        self.offsets[0] = 0; // always starts from 0
+
+        for read_idx in 0..self.length() {
+            if f(read_idx) {
+                let start = self.offsets[read_idx] as usize;
+                let end = self.offsets[read_idx + 1] as usize;
+                let len = end - start;
+
+                if write_data_pos != start {
+                    self.data_buf.copy_within(start..end, write_data_pos);
+                }
+
+                write_data_pos += len;
+                write_idx += 1;
+                self.offsets[write_idx] = write_data_pos as u32;
+
+                if self.nullable {
+                    self.nulls[write_idx - 1] = self.nulls[read_idx];
+                }
+            }
+        }
+
+        self.data_buf.truncate(write_data_pos);
+        self.offsets.truncate(write_idx + 1);
+        if self.nullable {
+            self.nulls.truncate(write_idx);
+        }
+    }
+
     pub(crate) fn parse<'a>(&mut self, mut uncompressed_pack: &'a [u8]) -> &'a [u8] {
         let _pack_format = uncompressed_pack.get_u16();
         let _encoding_type = uncompressed_pack.get_u16();
@@ -1329,6 +1414,32 @@ impl Block {
         }
     }
 
+    /// Retains only the rows specified by the predicate.
+    ///
+    /// The predicate function receives the row index and should return true for
+    /// rows to keep. This method operates in place and preserves the order
+    /// of the retained rows.
+    pub(crate) fn retain_rows<F>(&mut self, mut f: F)
+    where
+        F: FnMut(usize) -> bool,
+    {
+        let original_length = self.length();
+        if original_length == 0 {
+            return;
+        }
+
+        // Apply retain to handles
+        self.handles.retain(&mut f);
+
+        // Apply retain to versions
+        self.versions.retain(&mut f);
+
+        // Apply retain to all columns
+        for col in &mut self.columns {
+            col.retain(&mut f);
+        }
+    }
+
     pub(crate) fn append(&mut self, other: &Block, row_offset: usize, row_end_offset: usize) {
         self.handles
             .append(&other.handles, row_offset, row_end_offset);
@@ -1515,5 +1626,262 @@ impl ColumnarLevels {
 
     pub(crate) fn retain(&mut self, f: impl Fn(&ColumnarFile) -> bool) {
         self.levels.iter_mut().for_each(|l| l.files.retain(&f));
+    }
+}
+
+#[cfg(test)]
+pub mod test_retain {
+    use crate::table::columnar::{reader::tests::new_schema, Block, ColumnBuffer};
+    #[test]
+    fn test_retain_column() {
+        use std::convert::TryInto;
+        // unfixed-size, not nullable
+        {
+            let mut col = ColumnBuffer::new(1, 0, false);
+            col.push_value(b"hello");
+            col.push_value(b"bar");
+            col.push_value(b"world");
+            col.push_value(b"foo");
+            col.push_value(b"fish");
+
+            assert_eq!(col.length(), 5);
+
+            let retain_mask: Vec<bool> = (0..col.length())
+                .map(|i| match col.get_value(i) {
+                    Some(data) => std::str::from_utf8(data).unwrap().contains('o'),
+                    None => false,
+                })
+                .collect();
+
+            col.retain(|i| retain_mask[i]);
+
+            assert_eq!(col.length(), 3);
+
+            let values: Vec<&str> = (0..col.length())
+                .map(|i| std::str::from_utf8(col.get_value(i).unwrap()).unwrap())
+                .collect();
+
+            assert_eq!(values, vec!["hello", "world", "foo"]);
+        }
+
+        // fixed-size, not nullable
+        {
+            let mut col = ColumnBuffer::new(1, 8, false);
+            col.push_value(&1u64.to_le_bytes());
+            col.push_value(&2u64.to_le_bytes());
+            col.push_value(&3u64.to_le_bytes());
+            col.push_value(&4u64.to_le_bytes());
+            col.push_value(&5u64.to_le_bytes());
+
+            assert_eq!(col.length(), 5);
+
+            let retain_mask: Vec<bool> = (0..col.length())
+                .map(|i| match col.get_value(i) {
+                    Some(bytes) => u64::from_le_bytes(bytes.try_into().unwrap()) % 2 == 1,
+                    None => false,
+                })
+                .collect();
+
+            col.retain(|i| retain_mask[i]);
+
+            assert_eq!(col.length(), 3);
+
+            let expected: Vec<u64> = vec![1, 3, 5];
+            for i in 0..col.length() {
+                let bytes = col.get_value(i).unwrap();
+                let val = u64::from_le_bytes(bytes.try_into().unwrap());
+                assert_eq!(val, expected[i]);
+            }
+        }
+
+        // unfixed-size, nullable
+        {
+            let mut col = ColumnBuffer::new(1, 0, true);
+            col.push_value(b"hello");
+            col.push_null();
+            col.push_value(b"world");
+            col.push_value(b"foo");
+            col.push_null();
+
+            assert_eq!(col.length(), 5);
+
+            let retain_mask: Vec<bool> = (0..col.length())
+                .map(|i| match col.get_value(i) {
+                    Some(data) => std::str::from_utf8(data).unwrap().contains('o'),
+                    None => false,
+                })
+                .collect();
+
+            col.retain(|i| retain_mask[i]);
+
+            assert_eq!(col.length(), 3);
+            let expected = ["hello", "world", "foo"];
+
+            for i in 0..col.length() {
+                let value = col.get_value(i).unwrap();
+                assert_eq!(std::str::from_utf8(value).unwrap(), expected[i]);
+            }
+        }
+
+        // unfixed-size, nullable, retain some values and some nulls
+        {
+            let mut col = ColumnBuffer::new(1, 0, true);
+            col.push_value(b"hello");
+            col.push_null();
+            col.push_value(b"world");
+            col.push_value(b"foo");
+            col.push_null();
+
+            assert_eq!(col.length(), 5);
+
+            // retain values that contain 'o' OR retain nulls
+            let retain_mask: Vec<bool> = (0..col.length())
+                .map(|i| match col.get_value(i) {
+                    Some(data) => std::str::from_utf8(data).unwrap().contains('o'),
+                    None => true,
+                })
+                .collect();
+
+            col.retain(|i| retain_mask[i]);
+
+            assert_eq!(col.length(), 5);
+
+            assert_eq!(
+                col.get_value(0).map(|v| std::str::from_utf8(v).unwrap()),
+                Some("hello")
+            );
+            assert!(col.get_value(1).is_none()); // null
+            assert_eq!(
+                col.get_value(2).map(|v| std::str::from_utf8(v).unwrap()),
+                Some("world")
+            );
+            assert_eq!(
+                col.get_value(3).map(|v| std::str::from_utf8(v).unwrap()),
+                Some("foo")
+            );
+            assert!(col.get_value(4).is_none()); // null
+        }
+
+        // fixed-size, nullable
+        {
+            let mut col = ColumnBuffer::new(1, 8, true);
+            col.push_value(&10u64.to_le_bytes());
+            col.push_null();
+            col.push_value(&15u64.to_le_bytes());
+            col.push_value(&8u64.to_le_bytes());
+            col.push_null();
+
+            assert_eq!(col.length(), 5);
+
+            let retain_mask: Vec<bool> = (0..col.length())
+                .map(|i| match col.get_value(i) {
+                    Some(bytes) => u64::from_le_bytes(bytes.try_into().unwrap()) >= 10,
+                    None => false,
+                })
+                .collect();
+
+            col.retain(|i| retain_mask[i]);
+
+            assert_eq!(col.length(), 2);
+            let expected = [10, 15];
+
+            for i in 0..col.length() {
+                let value = col.get_value(i).unwrap();
+                assert_eq!(u64::from_le_bytes(value.try_into().unwrap()), expected[i]);
+            }
+        }
+
+        // fixed-size, not nullable, remove all values by retain
+        {
+            let mut col = ColumnBuffer::new(1, 8, false);
+            col.push_value(&1u64.to_le_bytes());
+            col.push_value(&2u64.to_le_bytes());
+            col.push_value(&3u64.to_le_bytes());
+
+            assert_eq!(col.length(), 3);
+
+            // remove all rows
+            col.retain(|_| false);
+
+            assert_eq!(col.length(), 0);
+        }
+
+        // unfixed-size, nullable, remove all values by retain
+        {
+            let mut col = ColumnBuffer::new(1, 0, true);
+            col.push_value(b"hello");
+            col.push_null();
+            col.push_value(b"world");
+
+            assert_eq!(col.length(), 3);
+
+            // remove all rows
+            col.retain(|_| false);
+
+            assert_eq!(col.length(), 0);
+        }
+    }
+
+    #[test]
+    fn test_retain_block() {
+        let handles: Vec<i64> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let nulls = [false, true, false, true, false, true, false, true, false];
+        let schema = new_schema(1, false);
+        let mut block = Block::new(&schema);
+        // 1 column is enough.
+        block.columns.pop();
+        for handle in handles {
+            block.handles.push_value(&handle.to_le_bytes());
+            block.versions.push_version(100, nulls[handle as usize]);
+            block.columns[0].push_value(&666_u64.to_le_bytes());
+        }
+
+        let length = block.length() as i64;
+        for i in 0..block.length() {
+            assert_eq!(block.get_handle_buf().get_int_handle_value(i), i as i64);
+            assert_eq!(
+                block.columns[0].get_value(i).unwrap(),
+                666_u64.to_le_bytes()
+            );
+            if i % 2 == 0 {
+                assert_eq!(block.versions.get_value(i).unwrap(), 100_u64.to_le_bytes());
+            } else {
+                assert!(block.versions.get_value(i).is_none());
+            }
+        }
+
+        let handles: Vec<_> = (0..block.handles.length())
+            .map(|i| block.get_handle_buf().get_int_handle_value(i))
+            .collect();
+
+        // retain the rows which handles < length/2
+        block.retain_rows(|row_idx| handles[row_idx] < length / 2);
+
+        // check if the length is halved
+        assert_eq!(block.handles.length() as i64, length / 2);
+        assert_eq!(block.versions.length() as i64, length / 2);
+        assert_eq!(block.columns[0].length() as i64, length / 2);
+
+        // check if the value of handles is less than half of the length
+        for i in 0..block.length() {
+            let handle = block.get_handle_buf().get_int_handle_value(i);
+            assert!(
+                handle < length / 2,
+                "handle value {} at index {} is not < {}",
+                handle,
+                i,
+                length / 2
+            );
+
+            assert_eq!(
+                block.columns[0].get_value(i).unwrap(),
+                666_u64.to_le_bytes()
+            );
+            if i % 2 == 0 {
+                assert_eq!(block.versions.get_value(i).unwrap(), 100_u64.to_le_bytes());
+            } else {
+                assert!(block.versions.get_value(i).is_none());
+            }
+        }
     }
 }

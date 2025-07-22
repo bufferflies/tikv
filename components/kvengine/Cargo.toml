@@ -32,6 +32,7 @@ bstr = "0.2"
 bytemuck = "1.14.3"
 byteorder = "1.2"
 bytes = "1.0"
+clara_fts = { path = "../clara_fts" }
 cloud_encryption = { workspace = true }
 codec = { workspace = true }
 collections = { path = "../collections" }
