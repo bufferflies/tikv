@@ -1444,6 +1444,21 @@ impl Shard {
         (size, mem_tbl.unpersisted_props_size())
     }
 
+    pub fn get_writable_mem_table(&self) -> memtable::CfTable {
+        let guard = self.data.read().unwrap();
+        return guard.get_writable_mem_table().clone();
+    }
+
+    pub fn get_mem_table_max_version(&self) -> u64 {
+        let guard = self.data.read().unwrap();
+        guard
+            .mem_tbls
+            .iter()
+            .map(|t| t.get_version())
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn has_over_bound_data(&self) -> bool {
         self.get_data().has_over_bound_data()
     }

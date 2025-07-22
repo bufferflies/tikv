@@ -39,6 +39,7 @@ use hyper::{
 };
 use kvengine::{
     dfs::{DFSConfig, FileType},
+    table::{BoundedDataSet, InnerKey},
     IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY,
 };
 use kvproto::{coprocessor::DelegateResponse, raft_serverpb::StoreIdent};
@@ -1345,6 +1346,253 @@ impl StatusServer {
         ))
     }
 
+    // curl -X POST "http://127.0.0.1:20180/flush?keyspace_id=xxx&table_id=1,2,3"
+    // Flush all regions of the specified table(s) for regions whose leader is the
+    // current TiKV, and wait until flush finished. Maximum wait time is 60s.
+    // table_id can be a single table ID or comma-separated list of table IDs.
+    async fn flush(
+        req: Request<Body>,
+        router: RaftRouter,
+        kvengine: kvengine::Engine,
+    ) -> hyper::Result<Response<Body>> {
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        if !query_pairs.contains_key("keyspace_id") || !query_pairs.contains_key("table_id") {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "keyspace_id and table_id are required".to_string(),
+            ));
+        }
+        let keyspace_id = match u32::from_str(query_pairs.get("keyspace_id").unwrap()) {
+            Ok(keyspace_id) => keyspace_id,
+            Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
+        };
+
+        // Parse table_id parameter which can be a single ID or comma-separated list
+        let table_id_str = query_pairs.get("table_id").unwrap();
+        let mut table_ids = std::collections::HashSet::new();
+        for id_str in table_id_str.split(',') {
+            let id_str = id_str.trim();
+            if id_str.is_empty() {
+                continue;
+            }
+            match i64::from_str(id_str) {
+                Ok(id) => {
+                    table_ids.insert(id);
+                }
+                Err(err) => {
+                    return Ok(make_response(
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid table_id format: {}", err),
+                    ));
+                }
+            }
+        }
+        if table_ids.is_empty() {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "table_id cannot be empty".to_string(),
+            ));
+        }
+        info!(
+            "ManualFlush: Received flush request for keyspace_id={} table_ids={:?}",
+            keyspace_id, table_ids
+        );
+
+        // Collect regions from keyspace id and table ids.
+        // We will skip regions that are not leader on this TiKV, because this manual
+        // flush is supposed to be run locally.
+        let mut target_regions = Vec::new();
+        let Some(ks_shards) = kvengine.get_keyspace_shards(keyspace_id) else {
+            info!("ManualFlush: Keyspace {} not found", keyspace_id);
+            return Ok(make_response(
+                StatusCode::NOT_FOUND,
+                format!("Keyspace {} not found", keyspace_id),
+            ));
+        };
+        let mut table_key = Vec::new();
+        for &shard_id in ks_shards.iter() {
+            let Some(shard) = kvengine.get_shard(shard_id) else {
+                continue;
+            };
+            if !shard.is_active() {
+                continue;
+            }
+            for table_id in table_ids.iter() {
+                table_key.clear();
+                table_key.put_u8(b't');
+                table_key.encode_i64(*table_id).unwrap();
+                if shard
+                    .data_bound()
+                    .overlap_key(InnerKey::from_inner_buf(&table_key))
+                {
+                    target_regions.push(shard_id);
+                    break;
+                }
+            }
+        }
+
+        target_regions.sort();
+        info!(
+            "ManualFlush: will flush these local regions: {:?}",
+            target_regions
+        );
+        if target_regions.is_empty() {
+            info!("ManualFlush: skipped, no regions found");
+            return Ok(make_response(
+                StatusCode::OK,
+                "Flush skipped, no regions found",
+            ));
+        }
+
+        // For each shard, we need to wait for a version that signifies that the
+        // memtable has been flushed.
+        // Case 1. Writable memtable is not empty -- We don't know which version to wait
+        // until we switched it. In this case, the memtable ref will be kept so that we
+        // can know a version to wait after switch.
+        // Case 2. Writable memtable is empty -- We can simply wait existing memtable
+        // flush to complete. In this case we record which version to wait and do not
+        // need to switch the memtable.
+
+        // 1. Get the writable memtable for each shard, or fill the version to wait
+        // if writable memtable is empty.
+        let mut wait_versions_by_regions = HashMap::default();
+        let mut writable_memtables = HashMap::default();
+        target_regions.retain(|region_id| {
+            let Some(shard) = kvengine.get_shard(*region_id) else {
+                // Region changed
+                return false;
+            };
+            let memtable = shard.get_writable_mem_table();
+            if memtable.size() == 0 {
+                let v = shard.get_mem_table_max_version();
+                // Note, it is possible that v == 0, if there is only one writable memtable
+                // and no sealed memtables (e.g. already flushed).
+                info!(
+                    "ManualFlush: region {} writable memtable is empty, will wait for version {}",
+                    region_id, v
+                );
+                wait_versions_by_regions.insert(*region_id, v);
+            } else {
+                // which version to wait is only known after switch.
+                // we keep a reference.
+                info!(
+                    "ManualFlush: region {} writable memtable is not empty, will switch",
+                    region_id
+                );
+                writable_memtables.insert(*region_id, memtable);
+            }
+            true
+        });
+
+        if !writable_memtables.is_empty() {
+            // 2. send FORCE_SWITCH_MEM_TABLE messages
+            // Only shards with non-empty writable memtable need to switch.
+            info!(
+                "ManualFlush: calling FORCE_SWITCH_MEM_TABLE for regions: {:?}",
+                writable_memtables.keys()
+            );
+            let mut region_futures = Vec::with_capacity(writable_memtables.len());
+            for (&region_id, memtable) in writable_memtables.iter() {
+                let (cb, fu) = paired_future_callback();
+                let callback = Callback::write(Box::new(move |_| {
+                    cb(());
+                }));
+                region_futures.push(fu);
+                router.send_casual_msg(
+                    region_id,
+                    CasualMessage::ForceSwitchMemTable {
+                        current_size: memtable.size(),
+                        callback,
+                    },
+                );
+            }
+            let _ = futures::future::join_all(region_futures).await;
+
+            // 3. At this moment, we should be able to know all versions to wait, including
+            // those writable memtables (they have a version after switch).
+            for (region_id, memtable) in writable_memtables {
+                let v = memtable.get_version();
+                info!(
+                    "ManualFlush: region {} writable memtable is switched, will wait for version {}",
+                    region_id, v
+                );
+                wait_versions_by_regions.insert(region_id, v);
+            }
+        }
+
+        let max_version_to_wait = wait_versions_by_regions
+            .values()
+            .max()
+            .copied()
+            .unwrap_or(0);
+        if max_version_to_wait == 0 {
+            info!(
+                "ManualFlush: skipped, no memtable to wait on regions: {:?}",
+                target_regions
+            );
+            return Ok(make_response(
+                StatusCode::OK,
+                format!(
+                    "Flush skipped, no memtable to wait on regions: {:?}",
+                    target_regions
+                ),
+            ));
+        }
+
+        // 4. Flush will be doing in background, after flush the changeset will be
+        // applied, so here we wait for changeset to take effect.
+        info!(
+            "ManualFlush: waiting for flush to finish on regions: {:?}",
+            wait_versions_by_regions.keys()
+        );
+        let now = Instant::now();
+        loop {
+            if now.saturating_elapsed_secs() > 60.0 {
+                info!(
+                    "ManualFlush: timed out waiting for flush to finish on regions: {:?}, will not wait any more",
+                    wait_versions_by_regions.keys()
+                );
+                return Ok(make_response(
+                    StatusCode::REQUEST_TIMEOUT,
+                    format!(
+                        "Timedout waiting flush to finish on regions: {:?}, all flush regions: {:?}",
+                        wait_versions_by_regions.keys(),
+                        target_regions
+                    ),
+                ));
+            }
+            let timer =
+                GLOBAL_TIMER_HANDLE.delay(std::time::Instant::now() + Duration::from_secs(1));
+            let end = async move {
+                Compat01As03::new(timer)
+                    .await
+                    .map_err(|_| TIMER_CANCELED.to_owned())
+            };
+            let _ = end.await;
+            wait_versions_by_regions.retain(|region_id, version| {
+                let Some(shard) = kvengine.get_shard(*region_id) else {
+                    return false;
+                };
+                if !shard.is_active() {
+                    return false;
+                }
+                // Keep this region only if it's flushed version has not reached
+                // what we want.
+                shard.get_snap_version() < *version
+            });
+            if wait_versions_by_regions.is_empty() {
+                break;
+            }
+        }
+
+        info!("ManualFlush: all finished");
+        Ok(make_response(
+            StatusCode::OK,
+            format!("Flush memtable succeeded on regions: {:?}", target_regions),
+        ))
+    }
+
     fn get_dfs_file_id(req: &Request<Body>) -> Option<u64> {
         let path = req.uri().path();
         let last = get_last_path_segment(path);
@@ -2194,6 +2442,9 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/major-compact") => {
                                 Self::major_compact(req, rfengine, router).await
+                            }
+                            (Method::POST, path) if path.starts_with("/flush") => {
+                                Self::flush(req, router, engine).await
                             }
                             (Method::POST, path) if path.starts_with("/schema_file") => {
                                 let res = Self::handle_schema_file(req, router, engine).await;

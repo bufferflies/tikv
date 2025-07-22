@@ -522,6 +522,10 @@ pub enum CasualMessage {
     },
     ClearColumnar,
     TriggerRefreshShardStates,
+    ForceSwitchMemTable {
+        current_size: u64,
+        callback: Callback,
+    },
 }
 
 impl fmt::Debug for CasualMessage {
@@ -571,6 +575,9 @@ impl fmt::Debug for CasualMessage {
             }
             CasualMessage::TriggerRefreshShardStates => {
                 write!(fmt, "trigger refresh shard states")
+            }
+            CasualMessage::ForceSwitchMemTable { .. } => {
+                write!(fmt, "manual flush")
             }
         }
     }

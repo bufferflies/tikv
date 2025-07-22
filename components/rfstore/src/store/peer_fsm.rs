@@ -339,6 +339,10 @@ impl<'a> PeerMsgHandler<'a> {
             } => self.on_check_leader(shard_ver, callback),
             CasualMessage::ClearColumnar => self.on_clear_columnar(),
             CasualMessage::TriggerRefreshShardStates => self.on_trigger_refresh_shard_states(),
+            CasualMessage::ForceSwitchMemTable {
+                current_size,
+                callback,
+            } => self.on_force_switch_mem_table(current_size, callback),
         }
     }
 
@@ -1562,6 +1566,19 @@ impl<'a> PeerMsgHandler<'a> {
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
         self.propose_raft_command(cmd, callback, None);
+    }
+
+    fn on_force_switch_mem_table(&mut self, current_size: u64, callback: Callback) {
+        if !self.peer.is_leader() {
+            callback.invoke_with_response(RaftCmdResponse::default());
+            return;
+        }
+        // Propose a command with TYPE_SWITCH_MEM_TABLE
+        let mut req = self.new_raft_cmd_request();
+        let mut builder = CustomBuilder::new();
+        builder.set_switch_mem_table(current_size);
+        req.set_custom_request(builder.build());
+        self.propose_raft_command(req, callback, None);
     }
 
     fn on_update_schema_file(&mut self, schema_file: SchemaFile) {
