@@ -596,11 +596,14 @@ impl StatusServer {
     }
 
     // URI: /kvengine/snapshot/<shard_id>?start_ts=xxx&shard_ver=xxx[&start_key=xxx&
-    // end_key=xxx]
+    // end_key=xxx][&meta_seq=xxx&write_seq=xxx]
     //
     // dump kvengine shard snapshot with start_ts
     // `start_key` and `end_key` are in the upper hex string format, e.g.
     // `7800000174800000000000007F5F`
+    // `meta_seq` and `write_seq` are used for cache validation - if they match
+    // the server's current values, a cache hit response is returned instead of
+    // snapshot data
     async fn dump_kvengine_snapshot(
         req: Request<Body>,
         engine: kvengine::Engine,
@@ -630,6 +633,15 @@ impl StatusServer {
             Ok(id) => id,
             Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
         };
+
+        // Parse optional meta_seq and write_seq parameters for cache validation
+        let client_meta_seq = query_pairs
+            .get("meta_seq")
+            .and_then(|s| u64::from_str(s).ok());
+        let client_write_seq = query_pairs
+            .get("write_seq")
+            .and_then(|s| u64::from_str(s).ok());
+
         let (cb, fut) = paired_future_callback();
         let callback = Callback::Read(Box::new(move |res| {
             cb(res);
@@ -675,11 +687,31 @@ impl StatusServer {
         }
         Ok(match engine.get_shard_with_ver(shard_id, shard_ver) {
             Ok(shard) => {
+                // Check cache validity if both meta_seq and write_seq are provided
+                if let (Some(client_meta_seq), Some(client_write_seq)) =
+                    (client_meta_seq, client_write_seq)
+                {
+                    let server_meta_seq = shard.get_meta_sequence();
+                    let server_write_seq = shard.get_write_sequence();
+
+                    if client_meta_seq == server_meta_seq && client_write_seq == server_write_seq {
+                        // Cache is valid, return empty response to indicate cache hit
+                        debug!(
+                            "cache hit for shard {} with meta_seq={}, write_seq={}",
+                            shard_id, server_meta_seq, server_write_seq
+                        );
+                        return Ok(Response::builder()
+                            .status(StatusCode::NOT_MODIFIED)
+                            .body(Body::empty())
+                            .unwrap());
+                    }
+                }
+
                 let start = Instant::now_coarse();
                 let snap_access = shard.new_snap_access();
                 let outer_start = if query_pairs.contains_key("start_key") {
                     match hex::decode(query_pairs.get("start_key").unwrap().to_string()) {
-                        Ok(v) => v.into(),
+                        Ok(v) => std::cmp::max(v.into(), shard.outer_start.clone()),
                         Err(_) => {
                             return Ok(make_response(
                                 StatusCode::BAD_REQUEST,
@@ -692,7 +724,7 @@ impl StatusServer {
                 };
                 let outer_end = if query_pairs.contains_key("end_key") {
                     match hex::decode(query_pairs.get("end_key").unwrap().to_string()) {
-                        Ok(v) => v.into(),
+                        Ok(v) => std::cmp::min(v.into(), shard.outer_end.clone()),
                         Err(_) => {
                             return Ok(make_response(
                                 StatusCode::BAD_REQUEST,
@@ -724,6 +756,7 @@ impl StatusServer {
                 let snap_data_len = snap_data.len();
                 delegate_resp.set_mem_table_data(mem_data);
                 delegate_resp.set_snapshot(snap_data);
+                delegate_resp.set_mem_table_sequence(snap_access.get_write_sequence());
                 let body = delegate_resp.write_to_bytes().unwrap();
                 debug!(
                     "dump_kvengine_snapshot time: {:?}, mem_data_size: {:?}, snap_data_size: {:?}, total_size: {:?}",
