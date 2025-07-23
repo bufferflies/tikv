@@ -9,4 +9,10 @@ lazy_static! {
         "Counter of rfstore propose switch mem table",
     )
     .unwrap();
+    pub static ref STORE_INGEST_CONVERT_TASK_STATUS: GaugeVec = register_gauge_vec!(
+        "rfstore_ingest_convert_sst_task_status_counter",
+        "Counter of rfstore ingest convert sst task status",
+        &["status"]
+    )
+    .unwrap();
 }

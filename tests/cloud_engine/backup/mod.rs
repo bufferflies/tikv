@@ -226,7 +226,10 @@ fn must_kv_put(client: &mut ClusterClient, key_count: usize, versions: usize) {
             client.put_kv(
                 j..limit,
                 |i| format!("xkey_{}", i).into_bytes(),
-                |i| format!("value_{}", i).repeat(50).into_bytes(),
+                |i| {
+                    let repeating = if i % 13 == 0 { 500 } else { 5 };
+                    format!("value_{}", i).repeat(repeating).into_bytes()
+                },
             );
             j = limit;
         }

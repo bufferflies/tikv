@@ -674,7 +674,7 @@ impl EngineCore {
         &self,
         shard_id: u64,
         shard_ver: u64,
-        mut iter: Box<dyn table::Iterator>,
+        iter: &mut dyn table::Iterator,
         ingest_id: Vec<u8>,
         meta: ShardMeta,
     ) -> Result<kvenginepb::ChangeSet> {

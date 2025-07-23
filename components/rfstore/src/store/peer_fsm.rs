@@ -55,6 +55,7 @@ use crate::{
         cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
         ingest::convert_sst,
         load_last_peer_state,
+        metrics::STORE_INGEST_CONVERT_TASK_STATUS,
         msg::Callback,
         notify_req_region_removed,
         peer::{Peer, StaleState},
@@ -1130,6 +1131,9 @@ impl<'a> PeerMsgHandler<'a> {
         let kv = self.ctx.global.engines.kv.clone();
         let shard_meta = self.peer.get_store().shard_meta.as_ref().unwrap().clone();
         spawn_anonymous_thread_with!(move || {
+            STORE_INGEST_CONVERT_TASK_STATUS
+                .with_label_values(&["running"])
+                .inc();
             tikv_util::set_current_region(shard_meta.id);
             match convert_sst(kv, importer, &msg, shard_meta) {
                 Ok(cs) => {
@@ -1145,6 +1149,9 @@ impl<'a> PeerMsgHandler<'a> {
                     cb.invoke_with_response(new_error(e));
                 }
             }
+            STORE_INGEST_CONVERT_TASK_STATUS
+                .with_label_values(&["running"])
+                .dec();
         });
     }
 
