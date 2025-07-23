@@ -122,8 +122,8 @@ while [[ $# -gt 0 ]]; do
 		RUN_ARGS+=("--async-commit-ratio" "$2")
 		shift
 		;;
-	--txn-check-backup-ts)
-		RUN_ARGS+=("--txn-check-backup-ts")
+	--no-check-backup-ts)
+		RUN_ARGS+=("--no-check-backup-ts")
 		;;
 	--oss-chaos-ratio)
 		RUN_ARGS+=("--oss-chaos-ratio" "$2")
