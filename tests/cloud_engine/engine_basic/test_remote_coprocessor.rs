@@ -11,10 +11,7 @@ use kvengine::{
         manager::IaManager,
         util::{IaCapacity, IaManagerOptionsBuilder},
     },
-    table::{
-        sstable::{BlockCache, BlockCacheType},
-        table::Row,
-    },
+    table::sstable::{BlockCache, BlockCacheType},
     txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
     ShardStats, SnapAccess, WRITE_CF,
 };
@@ -137,7 +134,7 @@ fn test_basic(#[case] enable_ia: bool) {
     let select_key_ranges = vec![dag_test.get_key_range(10, 15)];
     let snapshot = dag_test.fetch_snapshot(dag_test.get_ts().into_inner(), select_key_ranges);
 
-    snapshot.print_to_info();
+    snapshot.print_to_info(dag_test.get_txn_chunk_manager());
 }
 
 #[rstest]
@@ -2258,24 +2255,25 @@ pub struct DagTestSnapshot {
 }
 
 impl DagTestSnapshot {
-    fn print_to_info(&self) {
-        let rows: Vec<Row> = bincode::deserialize(&self.memtable_rows[4..]).unwrap();
+    fn print_to_info(&self, txn_chunk_manager: &TxnChunkManager) {
+        let mem_tbls = block_on(SnapAccess::construct_memtables(
+            0,
+            0,
+            &self.memtable_rows,
+            txn_chunk_manager,
+            None,
+        ))
+        .unwrap();
+        let rows_count = mem_tbls
+            .iter()
+            .map(|tbl| tbl.get_cf(WRITE_CF).size())
+            .sum::<usize>();
         let mut change_set = kvenginepb::ChangeSet::default();
         change_set.merge_from_bytes(&self.cs).unwrap();
         info!(
             "changeset: {:?}, ctx: {:?}, rows.len: {}",
-            self.cs,
-            self.ctx,
-            rows.len()
+            self.cs, self.ctx, rows_count
         );
-        for row in rows {
-            info!(
-                "{:?} : {:?} => {:?}",
-                row.key,
-                row.user_meta,
-                std::str::from_utf8(&row.value).unwrap()
-            );
-        }
     }
 }
 
@@ -2493,6 +2491,10 @@ impl<'a> DagTest<'a> {
 
     pub fn get_row_cache(&self) -> RowCache<'a> {
         RowCache::new(self.table)
+    }
+
+    pub fn get_txn_chunk_manager(&self) -> &TxnChunkManager {
+        &self.snap_ctx.txn_chunk_manager
     }
 
     pub fn get_key_range_all(&self) -> coppb::KeyRange {

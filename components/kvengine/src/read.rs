@@ -196,7 +196,7 @@ impl SnapAccess {
         Ok((snap, mem_limiter_guard))
     }
 
-    async fn construct_memtables(
+    pub async fn construct_memtables(
         shard_id: u64,
         shard_ver: u64,
         mut mem_table_data: &[u8],
@@ -270,21 +270,22 @@ impl SnapAccess {
 
         let mut txn_file_refs = TxnFileRefs::default();
         box_try!(txn_file_refs.merge_from_bytes(msg_data));
-
-        let worker_pool = txn_chunk_manager.worker_pool().clone();
-        let txn_chunk_manager = txn_chunk_manager.clone();
-        let txn_files = worker_pool
-            .spawn_blocking(move || {
-                txn_chunk_manager.load_txn_files_from_refs(
-                    shard_id,
-                    shard_ver,
-                    txn_file_refs.get_txn_file_refs(),
-                    encryption_key,
-                )
-            })
-            .await
-            .unwrap()?;
-        mem_tbl = mem_tbl.add_write_cf_txn_files(&txn_files);
+        if !txn_file_refs.get_txn_file_refs().is_empty() {
+            let worker_pool = txn_chunk_manager.worker_pool().clone();
+            let txn_chunk_manager = txn_chunk_manager.clone();
+            let txn_files = worker_pool
+                .spawn_blocking(move || {
+                    txn_chunk_manager.load_txn_files_from_refs(
+                        shard_id,
+                        shard_ver,
+                        txn_file_refs.get_txn_file_refs(),
+                        encryption_key,
+                    )
+                })
+                .await
+                .unwrap()?;
+            mem_tbl = mem_tbl.add_write_cf_txn_files(&txn_files);
+        }
 
         debug_assert!(
             mem_data.is_empty(),
@@ -1024,17 +1025,8 @@ impl SnapAccessCore {
 
         let mut mem_data = Vec::with_capacity(U32_SIZE /* format */);
         let (skls, txn_file_refs) = self.get_mem_tables_group_by_type(WRITE_CF, &data_bounds);
-
-        if txn_file_refs.get_txn_file_refs().is_empty() {
-            // For backward compatible.
-            // TODO: remove after all tikv-workers are upgraded.
-            mem_data.put_u32_le(MEM_DATA_FORMAT_V1);
-            self.build_skl_data(outer_ranges, start_ts, skls, &mut mem_data, false);
-            return mem_data;
-        }
-
         mem_data.put_u32_le(MEM_DATA_FORMAT_V2);
-        self.build_skl_data(outer_ranges, start_ts, skls, &mut mem_data, true);
+        self.build_skl_data(outer_ranges, start_ts, skls, &mut mem_data);
         self.build_txn_file_data(txn_file_refs, &mut mem_data);
         mem_data
     }
@@ -1045,7 +1037,6 @@ impl SnapAccessCore {
         start_ts: u64,
         skls: Vec<SkipList>,
         mem_data: &mut Vec<u8>,
-        encode_meta: bool,
     ) {
         let skl_iters = skls
             .iter()
@@ -1056,8 +1047,10 @@ impl SnapAccessCore {
         let data = self.data.clone();
         let mut key = BytesMut::new();
         key.extend_from_slice(data.keyspace_prefix());
+        // If start_ts is u64::MAX, it means all versions are needed.
+        let all_versions = start_ts == u64::MAX;
         let mut mem_iterator = Iterator {
-            all_versions: false,
+            all_versions,
             reversed: false,
             read_ts: start_ts,
             key,
@@ -1069,30 +1062,39 @@ impl SnapAccessCore {
         };
 
         let mut rows = vec![];
+        // Save mvcc versions of the same key temporarily, and append to rows with
+        // reverse order.
+        let mut mvcc_rows = vec![];
+        let mut last_key = vec![];
         for (range_start, range_end) in ranges {
             mem_iterator.seek(range_start.chunk());
             while mem_iterator.valid() {
-                let key = mem_iterator.key();
-                if key >= range_end.chunk() {
+                let key = mem_iterator.key().to_vec();
+                if key.as_slice() >= range_end.chunk() {
                     break;
                 }
-                rows.push(table::Row {
-                    key: key.to_vec(),
+                if key != last_key {
+                    for _ in 0..mvcc_rows.len() {
+                        rows.push(mvcc_rows.pop().unwrap());
+                    }
+                }
+                mvcc_rows.push(table::Row {
+                    key: key.clone(),
                     user_meta: UserMeta::from_slice(mem_iterator.user_meta()),
                     value: mem_iterator.val().to_vec(),
                 });
                 mem_iterator.next();
+                last_key = key;
             }
+        }
+        for _ in 0..mvcc_rows.len() {
+            rows.push(mvcc_rows.pop().unwrap());
         }
         let mem_size = bincode::serialized_size(&rows)
             .map_err(|e| Error::Other(e))
             .unwrap();
-        if encode_meta {
-            mem_data.reserve(U64_SIZE /* mem_size */ + mem_size as usize);
-            mem_data.put_u64_le(mem_size);
-        } else {
-            mem_data.reserve(mem_size as usize);
-        }
+        mem_data.reserve(U64_SIZE /* mem_size */ + mem_size as usize);
+        mem_data.put_u64_le(mem_size);
         bincode::serialize_into(mem_data, &rows).unwrap();
     }
 
@@ -2113,7 +2115,7 @@ mod tests {
         apply::create_snapshot_tables,
         context::{new_meta_file_cache, IaCtx, PrepareType, SnapCtx},
         dfs::{self, Dfs, InMemFs},
-        read::MEM_DATA_FORMAT_V1,
+        read::MEM_DATA_FORMAT_V2,
         shard::ShardDataBuilder,
         table::{
             self,
@@ -2239,8 +2241,14 @@ mod tests {
 
     fn mem_table_op_strategy() -> impl Strategy<Value = MemTableOp> {
         prop_oneof![
-            (prop::collection::vec(1..MAX_I, 0..=20usize), any::<bool>())
-                .prop_map(|(batch, switch)| MemTableOp::WriteBatch(batch, switch)),
+            (
+                prop::collection::vec(1..MAX_I, 0..=20usize),
+                any::<bool>(),
+                0..5usize,
+            )
+                .prop_map(|(batch, switch, mvcc_count)| MemTableOp::WriteBatch(
+                    batch, switch, mvcc_count
+                )),
             (prop::collection::vec(1..MAX_I, 0..=20usize), any::<bool>())
                 .prop_map(|(batch, switch)| MemTableOp::WriteTxnFile(batch, switch)),
         ]
@@ -2291,7 +2299,6 @@ mod tests {
             let master_key = MasterKey::new(&[1u8; 32]);
             let enc_key = enable_enc.then(||master_key.generate_encryption_key());
 
-            let has_txn_file = ops.iter().any(|op| matches!(op, MemTableOp::WriteTxnFile(is, _) if !is.is_empty()));
             let (mem_tbls, ref_store) = make_mem_tables(ops, &kb, dfs.clone(), enc_key.as_ref());
             verify_mem_tables(&mem_tbls, &ref_store, &[(kb.i_to_inner_key(0).as_ref(), kb.i_to_inner_key(MAX_I).as_ref())])?;
 
@@ -2333,10 +2340,8 @@ mod tests {
 
                 snap_access.build_mem_data(&outer_ranges, u64::MAX)
             };
-            if !has_txn_file {
-                let format_ver = mem_bin.as_slice().get_u32_le();
-                prop_assert_eq!(format_ver, MEM_DATA_FORMAT_V1);
-            }
+            let format_ver = mem_bin.as_slice().get_u32_le();
+            prop_assert_eq!(format_ver, MEM_DATA_FORMAT_V2);
 
             // Deserialize
             let snap_ctx = SnapCtx {
@@ -2374,22 +2379,26 @@ mod tests {
 
     #[derive(Debug, Clone)]
     enum MemTableOp {
-        WriteBatch(Vec<usize>, bool /* switch */),
+        WriteBatch(
+            Vec<usize>,
+            bool,  // switch
+            usize, // mvcc version count
+        ),
         WriteTxnFile(Vec<usize>, bool /* switch */),
     }
 
     #[derive(Default, Debug)]
     struct RefStore {
-        inner: BTreeMap<Bytes, String>,
+        inner: BTreeMap<(Bytes, u64), String>,
     }
 
     impl RefStore {
-        fn put(&mut self, key: OwnedInnerKey, val: String) {
-            self.inner.insert(key.into_inner(), val);
+        fn put(&mut self, key: OwnedInnerKey, ver: u64, val: String) {
+            self.inner.insert((key.into_inner(), ver), val);
         }
 
-        fn get_value(&self, key: InnerKey<'_>) -> Option<&String> {
-            self.inner.get(key.deref())
+        fn get_value(&self, key: InnerKey<'_>, ver: u64) -> Option<&String> {
+            self.inner.get(&(Bytes::copy_from_slice(key.deref()), ver))
         }
 
         fn new_in_ranges(&self, ranges: &[(InnerKey<'_>, InnerKey<'_>)]) -> Self {
@@ -2397,8 +2406,11 @@ mod tests {
             for &(start, end) in ranges {
                 let start = Bytes::copy_from_slice(start.deref());
                 let end = Bytes::copy_from_slice(end.deref());
-                for (k, v) in self.inner.range::<Bytes, _>(&start..&end) {
-                    new_store.inner.insert(k.clone(), v.clone());
+                for ((k, ver), v) in self
+                    .inner
+                    .range::<(Bytes, u64), _>((start.clone(), 0)..(end, 0))
+                {
+                    new_store.inner.insert((k.clone(), *ver), v.clone());
                 }
             }
             new_store
@@ -2433,7 +2445,7 @@ mod tests {
             let user_meta = UserMeta::new(start_ts, commit_ts);
 
             match op {
-                MemTableOp::WriteBatch(is, switch) => {
+                MemTableOp::WriteBatch(is, switch, mvcc_count) => {
                     for i in is {
                         let key = kb.i_to_inner_key(i);
                         let val = kb.i_to_val(start_ts as usize + i);
@@ -2444,7 +2456,23 @@ mod tests {
                             commit_ts,
                             val.as_bytes(),
                         );
-                        ref_store.put(key, val);
+                        ref_store.put(key.clone(), commit_ts, val.clone());
+                        let mut start_ts = start_ts;
+                        let mut commit_ts = commit_ts;
+                        for _ in 0..mvcc_count {
+                            start_ts += 1;
+                            commit_ts += 1;
+                            let user_meta = UserMeta::new(start_ts, commit_ts);
+                            let val = kb.i_to_val(start_ts as usize + i);
+                            wb.put(
+                                key.as_ref(),
+                                0,
+                                &user_meta.to_array(),
+                                commit_ts,
+                                val.as_bytes(),
+                            );
+                            ref_store.put(key.clone(), commit_ts, val.clone());
+                        }
                     }
                     let mem_tbl = mem_tbls[0].get_cf(WRITE_CF);
                     mem_tbl.put_batch(&mut wb, None, WRITE_CF);
@@ -2470,7 +2498,7 @@ mod tests {
                                 OP_PUT,
                                 val.as_bytes(),
                             );
-                            ref_store.put(key, val);
+                            ref_store.put(key, commit_ts, val.clone());
                         }
                         let mut chunk_data = vec![];
                         builder.finish(&mut chunk_data);
@@ -2524,12 +2552,12 @@ mod tests {
             iter.seek(start);
             while iter.valid() && iter.key() < end {
                 count += 1;
-                let expect = ref_store.get_value(iter.key());
+                let expect = ref_store.get_value(iter.key(), iter.value().version);
                 prop_assert!(expect.is_some(), "key: {:?}", iter.key());
                 let val = iter.value();
                 prop_assert_eq!(val.get_value(), expect.unwrap().as_bytes());
 
-                iter.next();
+                iter.next_all_version();
             }
         }
         prop_assert_eq!(count, ref_store.len());
