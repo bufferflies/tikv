@@ -1165,6 +1165,8 @@ impl EngineCore {
             .unconverted_l0s
             .retain(|l0| !col_comp.row_l0s.contains(&l0.id()));
         if old_data.columnar_table_ids.is_empty() {
+            // If the columnar_table_ids is empty, this must be the first columnar major
+            // compaction.
             let new_flushed_l0_tbls: Vec<L0Table> = old_data
                 .l0_tbls
                 .iter()

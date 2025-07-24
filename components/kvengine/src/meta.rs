@@ -950,8 +950,12 @@ impl ShardMeta {
                     if fm.get_level() == 0
                         && new_shard.schema.is_valid()
                         && old.unconverted_l0s.contains(fid)
+                        && !new_shard.columnar_table_ids.is_empty()
                     {
                         new_shard.unconverted_l0s.push(*fid);
+                    }
+                    if fm.is_columnar_file() && new_shard.columnar_table_ids.is_empty() {
+                        continue;
                     }
                     new_shard.files.insert(*fid, fm.clone());
                 }

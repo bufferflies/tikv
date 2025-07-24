@@ -450,6 +450,7 @@ pub struct ColumnarCompaction {
     source_row_files: Vec<(u32, u64)>,      // (level, id)
     source_columnar_files: Vec<(u32, u64)>, // (level, id)
     schema_file_id: u64,
+    columnar_table_ids: Vec<i64>,
     columnar_config: ColumnarTableBuildOptions,
 }
 
@@ -484,6 +485,7 @@ pub struct InPlaceCompactionCtx {
     block_size: usize,
     columnar_build_opts: ColumnarTableBuildOptions,
     schema_file_id: Option<u64>,
+    columnar_table_ids: Vec<i64>,
     spec: InPlaceCompaction,
 }
 
@@ -519,11 +521,6 @@ pub enum CompactionType {
     Major(MajorCompaction),
     L0(L0Compaction),
     L1Plus(L1PlusCompaction),
-    InPlace {
-        file_ids: Vec<(u64, u32, i32)>,
-        block_size: usize,
-        spec: InPlaceCompaction,
-    },
     InPlaceWithColumnar(InPlaceCompactionCtx),
     Columnar(ColumnarCompaction),
     ColumnarMajor(ColumnarMajorCompaction),
@@ -846,7 +843,8 @@ impl Engine {
                 col_file_ids: col_overlaps,
                 block_size: self.opts.table_builder_options.block_size,
                 columnar_build_opts: self.opts.columnar_build_options,
-                schema_file_id: shard.get_schema_file().map(|f| f.get_file_id()),
+                schema_file_id: data.schema_file.as_ref().map(|f| f.get_file_id()),
+                columnar_table_ids: data.get_columnar_table_ids_in_schema(),
                 spec: in_place_compaction_type,
             };
             req.input_size = total_size;
@@ -935,7 +933,8 @@ impl Engine {
                 col_file_ids: col_overlaps,
                 block_size: self.opts.table_builder_options.block_size,
                 columnar_build_opts: self.opts.columnar_build_options,
-                schema_file_id: shard.get_schema_file().map(|f| f.get_file_id()),
+                schema_file_id: data.schema_file.as_ref().map(|f| f.get_file_id()),
+                columnar_table_ids: data.get_columnar_table_ids_in_schema(),
                 spec: in_place_compaction,
             };
             req.input_size = total_size;
@@ -1041,7 +1040,8 @@ impl Engine {
                 col_file_ids: col_overlaps,
                 block_size: self.opts.table_builder_options.block_size,
                 columnar_build_opts: self.opts.columnar_build_options,
-                schema_file_id: shard.get_schema_file().map(|f| f.get_file_id()),
+                schema_file_id: data.schema_file.as_ref().map(|f| f.get_file_id()),
+                columnar_table_ids: data.get_columnar_table_ids_in_schema(),
                 spec: InPlaceCompaction::TrimOverBound,
             };
             req.input_size = total_size;
@@ -1133,6 +1133,7 @@ impl Engine {
                 block_size: self.opts.table_builder_options.block_size,
                 columnar_build_opts: self.opts.columnar_build_options,
                 schema_file_id: Some(meta.schema.file_id()),
+                columnar_table_ids: meta.columnar_table_ids.clone(),
                 spec: InPlaceCompaction::TrimOverBound,
             };
             req.input_size = total_size;
@@ -1653,6 +1654,8 @@ impl Engine {
             info!("{} no unconverted l0s to convert to columnar", tag);
             return None;
         }
+        debug_assert!(!data.columnar_table_ids.is_empty());
+
         let schema_file = shard.get_schema_file()?;
         let mut req = self.new_compact_request_with_shard(shard);
         let mut source_row_tables = vec![];
@@ -1664,6 +1667,7 @@ impl Engine {
             total_size += l0.size();
         }
         let num_l0s = source_row_tables.len();
+        let columnar_table_ids = data.get_columnar_table_ids_in_schema();
         let columnar_compaction = ColumnarCompaction {
             level: 0,
             safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
@@ -1671,6 +1675,7 @@ impl Engine {
             source_row_files: source_row_tables,
             source_columnar_files: vec![],
             schema_file_id: schema_file.get_file_id(),
+            columnar_table_ids,
             columnar_config: self.opts.columnar_build_options,
         };
         req.input_size = total_size;
@@ -1842,13 +1847,13 @@ impl Engine {
             );
             return None;
         }
-        if data.schema_file.is_none() {
+        let Some(schema_file) = data.schema_file.as_ref() else {
             info!(
                 "{} no schema file found, skip trigger_columnar_l0_compaction",
                 tag
             );
             return None;
-        }
+        };
         let mut req = self.new_compact_request_with_shard(shard);
         let mut total_size = 0;
         let mut smallest = l0_tbls[0].get_smallest();
@@ -1868,11 +1873,12 @@ impl Engine {
             total_size += col.get_file().size();
         }
 
-        let schema_file_id = data.schema_file.as_ref().unwrap().get_file_id();
+        let schema_file_id = schema_file.get_file_id();
         let columnar_config = self.opts.columnar_build_options;
         let estimated_num_files = total_size as usize / columnar_config.max_columnar_table_size;
         self.set_alloc_ids_for_request(&mut req, l0_tbl_ids.len(), estimated_num_files)
             .await;
+        let columnar_table_ids = data.get_columnar_table_ids_in_schema();
         let col_compaction = ColumnarCompaction {
             level: 0,
             safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
@@ -1880,6 +1886,7 @@ impl Engine {
             source_row_files: vec![],
             source_columnar_files: l0_tbl_ids,
             schema_file_id,
+            columnar_table_ids,
             columnar_config,
         };
         req.input_size = total_size;
@@ -1903,13 +1910,13 @@ impl Engine {
             );
             return None;
         }
-        if data.schema_file.is_none() {
+        let Some(schema_file) = data.schema_file.as_ref() else {
             info!(
                 "{} no schema file found, skip trigger_columnar_l1_compaction",
                 tag
             );
             return None;
-        }
+        };
 
         let mut total_size = 0;
 
@@ -1960,7 +1967,8 @@ impl Engine {
             estimated_num_files,
         )
         .await;
-        let schema_file_id = data.schema_file.as_ref().unwrap().get_file_id();
+        let schema_file_id = schema_file.get_file_id();
+        let columnar_table_ids = data.get_columnar_table_ids_in_schema();
         let columnar_compaction = ColumnarCompaction {
             level,
             safe_ts: self.get_keyspace_gc_safepoint_v2(shard.keyspace_id),
@@ -1968,6 +1976,7 @@ impl Engine {
             source_row_files: vec![],
             source_columnar_files: [l1_tbl_ids, l2_tbl_ids].concat(),
             schema_file_id,
+            columnar_table_ids,
             columnar_config,
         };
         req.input_size = total_size;
@@ -2523,33 +2532,13 @@ async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
     info!("start compaction for {}, req {:?}", tag, req);
     let mut id_allocator = LocalIdAllocator::new(ctx.id_allocator.clone(), req.file_ids.clone());
     match &req.compaction_tp {
-        // For backward compatibility, remove InPlace compaction when tikv-server is upgraded
-        CompactionType::InPlace {
-            file_ids,
-            block_size,
-            spec,
-        } => match spec {
-            InPlaceCompaction::DestroyRange(del_prefix) => {
-                cs.set_destroy_range(
-                    compact_destroy_range(ctx, *block_size, file_ids, del_prefix).await?,
-                );
-            }
-            InPlaceCompaction::TrimOverBound => {
-                cs.set_trim_over_bound(compact_trim_over_bound(ctx, *block_size, file_ids).await?);
-            }
-            InPlaceCompaction::TruncateTs(truncate_ts) => {
-                cs.set_truncate_ts(
-                    compact_truncate_ts(ctx, *block_size, file_ids, *truncate_ts).await?,
-                );
-            }
-            InPlaceCompaction::Unknown => unreachable!(),
-        },
         CompactionType::InPlaceWithColumnar(InPlaceCompactionCtx {
             file_ids,
             col_file_ids,
             block_size,
             columnar_build_opts,
             schema_file_id,
+            columnar_table_ids,
             spec,
         }) => match spec {
             InPlaceCompaction::DestroyRange(del_prefix) => {
@@ -2565,6 +2554,7 @@ async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
                         col_file_ids,
                         &mut id_allocator,
                         *schema_file_id,
+                        columnar_table_ids,
                         del_prefix,
                     )
                     .await?
@@ -2586,6 +2576,7 @@ async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
                         col_file_ids,
                         &mut id_allocator,
                         *schema_file_id,
+                        columnar_table_ids,
                     )
                     .await?
                 } else {
@@ -2606,6 +2597,7 @@ async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
                         col_file_ids,
                         &mut id_allocator,
                         *schema_file_id,
+                        columnar_table_ids,
                         *truncate_ts,
                     )
                     .await?
@@ -2792,6 +2784,7 @@ async fn compact_destroy_range_for_columnar(
     files: &[(u64, u32)],
     id_allocator: &mut LocalIdAllocator,
     schema_file_id: Option<u64>,
+    columnar_table_ids: &[i64],
     del_prefix: &[u8],
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
@@ -2817,7 +2810,7 @@ async fn compact_destroy_range_for_columnar(
     .map(|file| (file.id(), file))
     .collect();
 
-    let schema_file = if schema_file_id.is_some() {
+    let schema_file = {
         let file = load_table_files(
             &[schema_file_id.unwrap()],
             dfs.clone(),
@@ -2828,9 +2821,7 @@ async fn compact_destroy_range_for_columnar(
         .await?
         .pop()
         .unwrap();
-        Some(SchemaFile::open(file).unwrap())
-    } else {
-        None
+        SchemaFile::open(file).unwrap()
     };
 
     let mut deletes = vec![];
@@ -2840,7 +2831,6 @@ async fn compact_destroy_range_for_columnar(
     let mut cnt = 0;
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&req.outer_start).unwrap_or_default();
     for &(id, level) in files.iter() {
-        let schema_file = schema_file.as_ref().unwrap();
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file).unwrap();
         let overlap_tables = schema_file
@@ -2849,7 +2839,13 @@ async fn compact_destroy_range_for_columnar(
         delete.set_id(id);
         delete.set_level(level);
         deletes.push(delete);
-        if overlap_tables.is_empty() {
+        // TODO: disable fallback to overlap_tables after tikv-worker upgraded.
+        let columnar_table_ids = if !columnar_table_ids.is_empty() {
+            columnar_table_ids
+        } else {
+            overlap_tables.as_slice()
+        };
+        if columnar_table_ids.is_empty() {
             continue;
         }
         let mut file_builder = ColumnarFileBuilder::new(
@@ -2857,7 +2853,7 @@ async fn compact_destroy_range_for_columnar(
             columnar_file.get_l0_version(),
             ctx.encryption_key.clone(),
         );
-        for table_id in overlap_tables {
+        for &table_id in columnar_table_ids {
             let table_row_key_prefix = [
                 api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id),
                 encode_row_key(table_id, 0),
@@ -3053,6 +3049,7 @@ async fn compact_truncate_ts_for_columnar(
     files: &[(u64, u32)],
     id_allocator: &mut LocalIdAllocator,
     schema_file_id: Option<u64>,
+    columnar_table_ids: &[i64],
     truncate_ts: u64,
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
@@ -3078,7 +3075,7 @@ async fn compact_truncate_ts_for_columnar(
     .map(|file| (file.id(), file))
     .collect();
 
-    let schema_file = if schema_file_id.is_some() {
+    let schema_file = {
         let file = load_table_files(
             &[schema_file_id.unwrap()],
             dfs.clone(),
@@ -3089,9 +3086,7 @@ async fn compact_truncate_ts_for_columnar(
         .await?
         .pop()
         .unwrap();
-        Some(SchemaFile::open(file).unwrap())
-    } else {
-        None
+        SchemaFile::open(file).unwrap()
     };
 
     let mut deletes = vec![];
@@ -3099,7 +3094,6 @@ async fn compact_truncate_ts_for_columnar(
     let (tx, mut rx) = mpsc::channel(req.file_ids.len());
     let mut cnt = 0;
     for &(id, level) in files.iter() {
-        let schema_file = schema_file.as_ref().unwrap();
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file).unwrap();
         let overlap_tables = schema_file
@@ -3109,7 +3103,13 @@ async fn compact_truncate_ts_for_columnar(
         delete.set_level(level);
         deletes.push(delete);
 
-        if overlap_tables.is_empty() {
+        // TODO: disable fallback to overlap_tables after tikv-worker upgraded.
+        let columnar_table_ids = if !columnar_table_ids.is_empty() {
+            columnar_table_ids
+        } else {
+            overlap_tables.as_slice()
+        };
+        if columnar_table_ids.is_empty() {
             continue;
         }
         let mut file_builder = ColumnarFileBuilder::new(
@@ -3117,7 +3117,7 @@ async fn compact_truncate_ts_for_columnar(
             columnar_file.get_l0_version(),
             ctx.encryption_key.clone(),
         );
-        for table_id in overlap_tables {
+        for &table_id in columnar_table_ids {
             let schema = schema_file.get_table(table_id).unwrap();
             if !columnar_file.has_table(table_id) {
                 continue;
@@ -3303,6 +3303,7 @@ async fn compact_trim_over_bound_for_columnar(
     files: &[(u64, u32)],
     id_allocator: &mut LocalIdAllocator,
     schema_file_id: Option<u64>,
+    columnar_table_ids: &[i64],
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
     let dfs = &ctx.dfs;
@@ -3328,7 +3329,7 @@ async fn compact_trim_over_bound_for_columnar(
     .map(|file| (file.id(), file))
     .collect();
 
-    let schema_file = if schema_file_id.is_some() {
+    let schema_file = {
         let file = load_table_files(
             &[schema_file_id.unwrap()],
             dfs.clone(),
@@ -3339,9 +3340,7 @@ async fn compact_trim_over_bound_for_columnar(
         .await?
         .pop()
         .unwrap();
-        Some(SchemaFile::open(file).unwrap())
-    } else {
-        None
+        SchemaFile::open(file).unwrap()
     };
 
     let mut deletes = vec![];
@@ -3349,7 +3348,6 @@ async fn compact_trim_over_bound_for_columnar(
     let (tx, mut rx) = mpsc::channel(req.file_ids.len());
     let mut cnt = 0;
     for &(id, level) in files.iter() {
-        let schema_file = schema_file.as_ref().unwrap();
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file).unwrap();
         let overlap_tables = schema_file
@@ -3358,7 +3356,13 @@ async fn compact_trim_over_bound_for_columnar(
         delete.set_id(id);
         delete.set_level(level);
         deletes.push(delete);
-        if overlap_tables.is_empty() {
+        // TODO: disable fallback to overlap_tables after tikv-worker upgraded.
+        let columnar_table_ids = if !columnar_table_ids.is_empty() {
+            columnar_table_ids
+        } else {
+            overlap_tables.as_slice()
+        };
+        if columnar_table_ids.is_empty() {
             continue;
         }
         let bound_start =
@@ -3381,7 +3385,7 @@ async fn compact_trim_over_bound_for_columnar(
             columnar_file.get_l0_version(),
             ctx.encryption_key.clone(),
         );
-        for table_id in overlap_tables {
+        for &table_id in columnar_table_ids {
             let row_key_prefix = encode_row_key_prefix(table_id);
             let mut row_key_prefix_next = row_key_prefix.clone();
             convert_to_prefix_next(&mut row_key_prefix_next);
@@ -4466,6 +4470,7 @@ async fn convert_row_file_to_columnar_file(
         .map(|(_, id)| *id)
         .collect();
     ret.set_row_l0s(row_l0s);
+
     let opts = dfs::Options::default()
         .with_type(FileType::Schema)
         .with_shard(ctx.req.shard_id, ctx.req.shard_ver);
@@ -4497,7 +4502,14 @@ async fn convert_row_file_to_columnar_file(
     let smallest = l0_tbls.iter().map(|l0| l0.smallest()).min().unwrap();
     let biggest = l0_tbls.iter().map(|l0| l0.biggest()).max().unwrap();
     let overlap_tables = schema_file.overlap_columnar_tables(smallest, biggest);
-    if overlap_tables.is_empty() {
+    // TODO: use columnar_table_ids in compaction directly after tikv-worker
+    // upgraded.
+    let columnar_table_ids = if !columnar_compaction.columnar_table_ids.is_empty() {
+        columnar_compaction.columnar_table_ids.as_slice()
+    } else {
+        overlap_tables.as_slice()
+    };
+    if columnar_table_ids.is_empty() {
         return Ok(ret);
     }
     let mut file_builder = ColumnarFileBuilder::new(
@@ -4507,8 +4519,8 @@ async fn convert_row_file_to_columnar_file(
     );
     let mut cnt = 0;
     let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
-    for overlap_table in overlap_tables {
-        let schema = schema_file.get_table(overlap_table).unwrap();
+    for &table_id in columnar_table_ids {
+        let schema = schema_file.get_table(table_id).unwrap();
         let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for l0_tbl in &l0_tbls {
             if let Some(tbl) = l0_tbl.get_cf(WRITE_CF) {
@@ -4642,7 +4654,14 @@ async fn compact_columnar_l0_files(
         }
     }
     let overlap_tables = schema_file.overlap_columnar_tables(smallest, biggest);
-    if overlap_tables.is_empty() {
+    // TODO: use columnar_table_ids in compaction directly after tikv-worker
+    // upgraded.
+    let columnar_table_ids = if !columnar_compaction.columnar_table_ids.is_empty() {
+        columnar_compaction.columnar_table_ids.as_slice()
+    } else {
+        overlap_tables.as_slice()
+    };
+    if columnar_table_ids.is_empty() {
         return Ok(ret);
     }
     let mut file_builder = ColumnarFileBuilder::new(
@@ -4652,7 +4671,7 @@ async fn compact_columnar_l0_files(
     );
     let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     let mut cnt = 0;
-    for table_id in overlap_tables {
+    for &table_id in columnar_table_ids {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &col_tbls {
@@ -4789,10 +4808,18 @@ async fn compact_columnar_l1_files(
     }
 
     let mut overlap_tables = schema_file.overlap_columnar_tables(smallest, biggest);
-    if overlap_tables.is_empty() {
+    overlap_tables.sort();
+    // TODO: use columnar_table_ids in compaction directly after tikv-worker
+    // upgraded.
+    let columnar_table_ids = if !columnar_compaction.columnar_table_ids.is_empty() {
+        columnar_compaction.columnar_table_ids.as_slice()
+    } else {
+        overlap_tables.as_slice()
+    };
+    if columnar_table_ids.is_empty() {
         return Ok(ret);
     }
-    overlap_tables.sort();
+
     let mut file_builder = ColumnarFileBuilder::new(
         id_allocator.alloc_id().await,
         None,
@@ -4800,7 +4827,7 @@ async fn compact_columnar_l1_files(
     );
     let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     let mut cnt = 0;
-    for table_id in overlap_tables {
+    for &table_id in columnar_table_ids {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &l1_tbls {

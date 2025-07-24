@@ -1118,6 +1118,7 @@ impl Shard {
 
         // ColumnarMajor compaction must be done before converting L0 to columnar.
         if data.schema_file.is_some() && !data.col_levels.unconverted_l0s.is_empty() {
+            debug_assert!(!data.columnar_table_ids.is_empty());
             // Schema is outdated, wait for update or clear columnar if there are too many
             // unconverted L0.
             if self.get_outdated_schema_ver() == data.schema_file.as_ref().unwrap().get_version() {
@@ -2375,6 +2376,22 @@ impl ShardDataCore {
 
     pub fn schema_file_id(&self) -> Option<u64> {
         self.schema_file.as_ref().map(|x| x.get_file_id())
+    }
+
+    pub fn get_columnar_table_ids_in_schema(&self) -> Vec<i64> {
+        if self.schema_file.is_none() {
+            return vec![];
+        }
+        self.columnar_table_ids
+            .iter()
+            .filter(|&&id| {
+                self.schema_file
+                    .as_ref()
+                    .unwrap()
+                    .contains_columnar_table(id)
+            })
+            .copied()
+            .collect()
     }
 }
 

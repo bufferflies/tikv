@@ -133,13 +133,20 @@ impl Engine {
                 // The newly split keyspace should be empty.
                 continue;
             }
+            let (min_table_id, max_table_id) = get_table_id_from_data_bound(new_shard.data_bound());
+            let columnar_table_ids: Vec<_> = old_data
+                .columnar_table_ids
+                .iter()
+                .filter(|&&table_id| table_id >= min_table_id && table_id <= max_table_id)
+                .copied()
+                .collect();
             let new_mem_tbls = new_shard.split_mem_tables(&old_data.mem_tbls);
             let mut new_l0s = vec![];
             let mut new_unconverted_l0s = vec![];
             for l0 in &old_data.l0_tbls {
                 if new_shard.range.data_bound().overlap_bound(l0.data_bound()) {
                     new_l0s.push(l0.clone());
-                    if unconverted_l0s.contains(&l0.id()) {
+                    if unconverted_l0s.contains(&l0.id()) && !columnar_table_ids.is_empty() {
                         new_unconverted_l0s.push(l0.clone());
                     }
                 }
@@ -172,19 +179,15 @@ impl Engine {
             for col_level in &old_data.col_levels.levels {
                 let new_col_level = &mut new_col_levels.levels[col_level.level];
                 for col_file in &col_level.files {
-                    if new_shard.overlap_bound(col_file.data_bound()) {
+                    if new_shard.overlap_bound(col_file.data_bound())
+                        && !columnar_table_ids.is_empty()
+                    {
                         new_col_level.files.push(col_file.clone());
                     }
                 }
             }
             new_col_levels.l2_snap_version = old_data.col_levels.l2_snap_version;
-            let (min_table_id, max_table_id) = get_table_id_from_data_bound(new_shard.data_bound());
-            let columnar_table_ids: Vec<_> = old_data
-                .columnar_table_ids
-                .iter()
-                .filter(|&&table_id| table_id >= min_table_id && table_id <= max_table_id)
-                .copied()
-                .collect();
+
             let mut new_vec_indexes = VectorIndexes::default();
             for vec_index in old_data.vector_indexes.get_all() {
                 if !columnar_table_ids.contains(&vec_index.table_id) {

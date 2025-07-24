@@ -198,6 +198,11 @@ impl SchemaFile {
         self.core.tables.get(&table_id)
     }
 
+    pub fn contains_columnar_table(&self, table_id: i64) -> bool {
+        self.get_table(table_id)
+            .map_or(false, |schema| schema.with_columnar())
+    }
+
     pub fn iter_tables(&self) -> impl Iterator<Item = (/* table_id */ &i64, &Schema)> {
         self.core.tables.iter()
     }
