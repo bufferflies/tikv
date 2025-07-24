@@ -132,10 +132,6 @@ impl CfTableCore {
         self.tbls.iter().map(|t| t.size() as u64).sum()
     }
 
-    pub fn skip_list_entries(&self) -> usize {
-        self.tbls.iter().map(|t| t.skip_list_entries()).sum()
-    }
-
     pub fn skip_list_size(&self) -> usize {
         self.tbls.iter().map(|t| t.skl_size()).sum()
     }

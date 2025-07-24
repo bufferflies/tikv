@@ -62,10 +62,6 @@ impl SkipListExt {
         self.txn_files.iter().map(|t| t.size()).sum()
     }
 
-    pub fn skip_list_entries(&self) -> usize {
-        self.skl.entries()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.size() == 0
     }

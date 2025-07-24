@@ -338,7 +338,6 @@ pub struct ShardStats {
     pub tombs: usize,
     /// Total kv size including all storage classes.
     pub kv_size: u64,
-    pub keyspace_prefix_tables: u32,
     pub base_version: u64,
     pub meta_sequence: u64,
     pub write_sequence: u64,
@@ -600,7 +599,6 @@ impl super::Shard {
         let mut l0_cf_table_size = [0; NUM_CFS];
         let mut total_blob_size = 0;
         let mut in_use_blob_size = 0;
-        let mut keyspace_prefix_tables = 0;
         let blob_table_count = data.blob_tbl_map.len();
         // FIXME: Calculate the total size of blob files.
         let mut blob_table_size = 0;
@@ -624,14 +622,9 @@ impl super::Shard {
                 l0_table_size += l0_tbl.size() / 2;
                 partial_l0s += 1;
             }
-            let mut l0_keyspace_prefix_tables_counted = false;
             for cf in 0..NUM_CFS {
                 if let Some(cf_tbl) = l0_tbl.get_cf(cf) {
                     max_ts = max_ts_by_cf(max_ts, cf, cf_tbl.max_ts);
-                    if cf_tbl.keyspace_id.is_some() && !l0_keyspace_prefix_tables_counted {
-                        keyspace_prefix_tables += 1;
-                        l0_keyspace_prefix_tables_counted = true;
-                    }
                     if cf == WRITE_CF {
                         cf_tbl.expire_cache(0);
                     }
@@ -676,9 +669,6 @@ impl super::Shard {
                 level_stats.num_tables = l.tables.len();
                 for t in l.tables.as_slice() {
                     t.expire_cache(l.level);
-                    if t.keyspace_id.is_some() {
-                        keyspace_prefix_tables += 1;
-                    }
                     if shard_bound.contains_bound(t.data_bound()) {
                         level_stats.data_size += t.size();
                         level_stats.index_size += t.index_size();
@@ -799,7 +789,6 @@ impl super::Shard {
             old_entries,
             tombs,
             kv_size,
-            keyspace_prefix_tables,
             partial_l0s,
             shared_blob_tables,
             partial_tbls,

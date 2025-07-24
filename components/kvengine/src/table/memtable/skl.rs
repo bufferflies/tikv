@@ -5,7 +5,7 @@ use std::{
     iter::Iterator as StdIterator,
     ops::Deref,
     sync::{
-        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering, Ordering::*},
+        atomic::{AtomicU32, AtomicU64, Ordering, Ordering::*},
         Arc, Mutex,
     },
 };
@@ -234,7 +234,6 @@ pub struct SkipListCore {
     data_max_ts: AtomicU64,
     hint: Mutex<Hint>,
     user_data_size: AtomicU64,
-    user_data_entries: AtomicUsize,
 }
 
 impl SkipListCore {
@@ -249,7 +248,6 @@ impl SkipListCore {
             data_max_ts: AtomicU64::new(0),
             hint: Mutex::new(Hint::new()),
             user_data_size: AtomicU64::new(0),
-            user_data_entries: AtomicUsize::new(0),
         }
     }
 
@@ -321,12 +319,10 @@ impl SkipListCore {
             }
         }
         let data_size = batch.buf.len() + batch.entries.len() * AVG_NODE_SIZE;
-        let entries = batch.entries.len();
         // NOTE: user_data_size is not accurate when there are delete entries. So there
         // is a possibility of `self.is_empty() == true` but `self.size() > 0`.
         self.user_data_size
             .fetch_add(data_size as u64, Ordering::AcqRel);
-        self.user_data_entries.fetch_add(entries, Ordering::AcqRel);
         if batch_max_ts > data_max_ts {
             self.data_max_ts.store(batch_max_ts, Ordering::Release);
         }
@@ -709,10 +705,6 @@ impl SkipListCore {
 
     pub fn size(&self) -> u64 {
         self.user_data_size.load(Acquire)
-    }
-
-    pub fn entries(&self) -> usize {
-        self.user_data_entries.load(Acquire)
     }
 
     pub(crate) fn data_max_ts(&self) -> u64 {

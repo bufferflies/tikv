@@ -2,7 +2,6 @@
 
 use std::{cmp, collections::HashMap, iter::Iterator, sync::atomic::Ordering};
 
-use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BytesMut};
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
@@ -269,11 +268,7 @@ impl Engine {
             self.refresh_shard_states(&shard);
         }
         store_u64(&shard.write_sequence, wb.sequence);
-        let mut size = mem_tbl.size();
-        let skip_list_entries = mem_tbl.skip_list_entries();
-        if data.prepend_keyspace_id().is_some() {
-            size += (skip_list_entries * KEYSPACE_PREFIX_LEN) as u64;
-        }
+        let size = mem_tbl.size();
         let unpersisted_props_size = mem_tbl.unpersisted_props_size();
 
         #[cfg(feature = "debug-trace-mem-table")]

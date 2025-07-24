@@ -1446,11 +1446,7 @@ impl Shard {
     ) {
         let guard = self.data.read().unwrap();
         let mem_tbl = &guard.mem_tbls[0];
-        let mut size = mem_tbl.size();
-        if guard.prepend_keyspace_id().is_some() {
-            size += (mem_tbl.skip_list_entries() * KEYSPACE_PREFIX_LEN) as u64;
-        }
-        (size, mem_tbl.unpersisted_props_size())
+        (mem_tbl.size(), mem_tbl.unpersisted_props_size())
     }
 
     pub fn get_writable_mem_table(&self) -> memtable::CfTable {
@@ -2368,10 +2364,6 @@ impl ShardDataCore {
 
     pub(crate) fn is_sync(&self) -> bool {
         self.cfs[WRITE_CF].is_sync()
-    }
-
-    pub fn prepend_keyspace_id(&self) -> Option<u32> {
-        (self.range.keyspace_id > 0 && self.inner_key_off == 0).then_some(self.range.keyspace_id)
     }
 
     pub fn schema_file_id(&self) -> Option<u64> {

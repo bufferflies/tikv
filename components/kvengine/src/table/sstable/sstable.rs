@@ -9,7 +9,6 @@ use std::{
     sync::Arc,
 };
 
-use api_version::ApiV2;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
@@ -104,7 +103,7 @@ impl SsTable {
         &self,
         key: InnerKey<'_>,
         version: u64,
-        mut key_hash: u64,
+        key_hash: u64,
         out_val_owner: &mut Vec<u8>,
         level: usize,
     ) -> table::Value {
@@ -112,7 +111,6 @@ impl SsTable {
         // TODO: avoid build filter on level 3 small value table.
         let small_value = self.kv_size < self.entries as u64 * SMALL_VALUE_SIZE;
         let skip_filter = small_value && level == 3;
-        self.maybe_update_key_hash(key, &mut key_hash);
         if self.filter_size() > 0 && !skip_filter {
             let filter = self.get_filter();
             if !filter.contains(&key_hash) {
@@ -134,14 +132,6 @@ impl SsTable {
         out_val_owner.resize(val.encoded_size(), 0);
         val.encode(out_val_owner.as_mut_slice());
         Value::decode(out_val_owner.as_slice())
-    }
-
-    fn maybe_update_key_hash(&self, key: InnerKey<'_>, key_hash: &mut u64) {
-        if let Some(keyspace_id) = self.keyspace_id {
-            let mut outer_key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
-            outer_key.extend_from_slice(key.deref());
-            *key_hash = farmhash::fingerprint64(&outer_key);
-        }
     }
 
     #[maybe_async::both]
@@ -294,9 +284,6 @@ pub struct SsTableCore {
     encryption_key: Option<EncryptionKey>,
     encryption_ver: u32,
     pub l0_version: u64,
-    // Legacy table has key with keyspace_id prefix,
-    // We need to prepend it to perform bloom filter get.
-    pub keyspace_id: Option<u32>,
 }
 
 pub enum SsTableProperty {
@@ -368,7 +355,6 @@ impl SsTableCore {
                 l0_version = LittleEndian::read_u64(val);
             }
         }
-        let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(smallest_buf.chunk());
         let core = Self {
             file,
             cache,
@@ -389,7 +375,6 @@ impl SsTableCore {
             encryption_ver,
             encryption_key,
             l0_version,
-            keyspace_id,
         };
         Ok(core)
     }

@@ -398,13 +398,6 @@ impl CompactionRequest {
         format!("[{}:{}:{}]", self.engine_id, self.shard_id, self.shard_ver)
     }
 
-    pub fn prepend_keyspace_id(&self) -> Option<u32> {
-        if self.inner_key_off > 0 {
-            return None;
-        }
-        ApiV2::get_u32_keyspace_id_by_key(&self.outer_start)
-    }
-
     pub fn keyspace_id(&self) -> u32 {
         ApiV2::get_u32_keyspace_id_by_key(&self.outer_start).unwrap_or_default()
     }
