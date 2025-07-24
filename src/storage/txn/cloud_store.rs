@@ -181,7 +181,7 @@ impl<S: Snapshot> CloudStore<S> {
             let mut item = snap.get(WRITE_CF, &raw_key, u64::MAX).await;
             if item.version > start_ts {
                 item = snap.get(WRITE_CF, &raw_key, start_ts).await;
-            } else if item.version > 0 {
+            } else if item.user_meta_len() > 0 {
                 let um = UserMeta::from_slice(item.user_meta());
                 let val = ValueCacheValue::new(
                     Bytes::copy_from_slice(item.get_value()),
