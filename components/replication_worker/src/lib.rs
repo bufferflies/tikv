@@ -5,6 +5,7 @@ mod error;
 mod kube;
 mod provisioned;
 mod scheduler;
+mod ticdc_util;
 mod worker;
 
 use std::{collections::HashMap, sync::Arc};
@@ -34,7 +35,8 @@ use kvproto::{
 };
 use merged_engine::MergedEngineConfig;
 use pd_client::{PdClient, RpcClient};
-pub use provisioned::LocalProvider;
+#[cfg(feature = "testexport")]
+pub use provisioned::local_provider::LocalProvider;
 use resolved_ts::Resolver;
 pub use scheduler::*;
 use serde_derive::{Deserialize, Serialize};

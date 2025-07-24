@@ -1,7 +1,7 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     fs, mem,
     net::SocketAddr,
     ops::Deref,
@@ -55,6 +55,8 @@ use crate::{
     kube::{KeyspaceKubeService, KubeApi},
     provisioned::KeyspaceProvisionedService,
     scheduler::get_cdc_status,
+    ticdc_util,
+    ticdc_util::TiCdcError,
     CdcMsg, Error,
     Error::StoreTimeout,
     KeyspaceService, KeyspaceStates, ReplicationScheduler, ReplicationService,
@@ -406,8 +408,9 @@ impl ReplicationWorker {
         body: Bytes,
         cb: Box<dyn FnOnce(Result<(StatusCode, Bytes)>) + Send>,
     ) {
+        let tag = format!("{keyspace_id}:new_task");
         let body_string = String::from_utf8_lossy(&body).to_string();
-        info!("{} handle new task {}", keyspace_id, body_string,);
+        info!("{}: body: {}", keyspace_id, body_string,);
         #[allow(clippy::map_entry)]
         if !self.keyspaces.contains_key(&keyspace_id) {
             cb(Err(Error::OtherError("keyspace not found".into())));
@@ -422,26 +425,38 @@ impl ReplicationWorker {
             Self::report_region_to_rep_pd(&raft, &pd_client, region_id);
         }
         let states = task_svc.get_states_mut();
-        states.feeds.insert(changefeed_id, body_string);
-        self.merged_engine
-            .set_keyspace_states(keyspace_id, states.marshal())
-            .unwrap();
+        let req_body = match states.feeds.entry(changefeed_id) {
+            Entry::Vacant(e) => {
+                // Consider as a retry request.
+                // TODO: verify the request parameter.
+                e.insert(body_string);
+                self.merged_engine
+                    .set_keyspace_states(keyspace_id, states.marshal())
+                    .unwrap();
+                body
+            }
+            Entry::Occupied(e) => {
+                // Use the saved body, to ensure that the request between replication worker &
+                // TiCDC are the same.
+                Bytes::copy_from_slice(e.get().as_bytes())
+            }
+        };
+
+        // Still dispatch to TiCDC, as the previous request will failed.
+        // TODO: Remove the changefeed in replication worker on error ?
         let sec_mgr = self.ctx.pd.get_security_mgr();
         let client = sec_mgr.http_client(hyper::Client::builder()).unwrap();
         let cdc_addr = states.cdc_addr.clone();
         self.cdc_addrs.insert(keyspace_id, cdc_addr.clone());
         tokio::spawn(async move {
+            fn is_err_retryable(err: &TiCdcError) -> bool {
+                matches!(err, TiCdcError::ServerIsNotReady(_))
+            }
             let new_cdc_task_uri = sec_mgr
                 .build_uri(format!("{}/api/v2/changefeeds", &cdc_addr))
                 .unwrap();
-            info!("create new cdc task {}", new_cdc_task_uri);
-            let res = dispatch_http_post_with_retry(
-                &client,
-                &new_cdc_task_uri,
-                body,
-                DISPATCH_CDC_TIMEOUT,
-            )
-            .await;
+            let res =
+                post_to_ticdc(&tag, &client, &new_cdc_task_uri, req_body, is_err_retryable).await;
             cb(res);
         });
     }
@@ -1261,6 +1276,40 @@ async fn dispatch_http_post(
     let status = resp.status();
     let body = hyper::body::to_bytes(resp.into_body()).await?;
     Ok((status, body))
+}
+
+async fn post_to_ticdc<F>(
+    tag: &str,
+    client: &HttpClient,
+    uri: &Uri,
+    body: Bytes,
+    is_err_retryable: F,
+) -> Result<(StatusCode, Bytes)>
+where
+    F: Fn(&TiCdcError) -> bool,
+{
+    info!("{} post_to_ticdc", tag;
+        "uri" => ?uri, "body" => String::from_utf8_lossy(&body).as_ref());
+    let mut last_resp: Option<(StatusCode, Bytes)> = None;
+    let start_time = Instant::now_coarse();
+    while start_time.saturating_elapsed() < DISPATCH_CDC_TIMEOUT {
+        let (status, resp) =
+            dispatch_http_post_with_retry(client, uri, body.clone(), DISPATCH_CDC_TIMEOUT).await?;
+        if !status.is_success() {
+            let ticdc_err = ticdc_util::parse_ticdc_response(&resp);
+            if is_err_retryable(&ticdc_err) {
+                warn!("{} post_to_ticdc error", tag; "resp" => String::from_utf8_lossy(&resp).as_ref());
+                last_resp = Some((status, resp));
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        }
+        info!("{} post_to_ticdc success", tag; "resp" => String::from_utf8_lossy(&resp).as_ref());
+        return Ok((status, resp));
+    }
+    let (status, resp) = last_resp.unwrap();
+    error!("{} post_to_ticdc error", tag; "status" => ?status, "resp" => String::from_utf8_lossy(&resp).as_ref());
+    Ok((status, resp))
 }
 
 fn build_request_range(request: &ChangeDataRequest) -> (Vec<u8>, Vec<u8>) {

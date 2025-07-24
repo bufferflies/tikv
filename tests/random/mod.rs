@@ -738,3 +738,7 @@ pub(crate) fn init_logger() {
     };
     cloud_server::setup::initial_logger(&tikv_config);
 }
+
+pub(crate) fn test_id() -> String {
+    std::env::var("TEST_ID").unwrap_or_default()
+}

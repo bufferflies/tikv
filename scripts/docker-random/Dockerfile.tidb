@@ -1,11 +1,13 @@
 ARG TIDB_VERSION=v7.5.0
 ARG PD_VERSION=v8.1.0
 ARG TIFLASH_VERSION=v7.5.0
+ARG TICDC_VERSION=v7.5
 
 FROM hub-new.pingcap.net/keyspace/tidb:${TIDB_VERSION} as tidb
 FROM hub-new.pingcap.net/keyspace/pd:${PD_VERSION} as pd
 FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
+FROM hub-new.pingcap.net/kvaas/ticdc:${TICDC_VERSION} as ticdc
 
 # To sync the minio image:
 #   1. brew install skopeo (macOS)
@@ -26,6 +28,7 @@ COPY --from=tidb /tidb-server /tidb-server
 COPY --from=pd /pd-server /pd-server
 COPY --from=tiflash /tiflash /tiflash
 COPY --from=go-tpc /go-tpc /go-tpc
+COPY --from=ticdc /cdc /cdc
 COPY --from=minio /usr/bin/minio /usr/bin/minio
 COPY --from=mc /usr/bin/mc /usr/bin/mc
 
@@ -33,3 +36,4 @@ ENV TIDB_BIN=/tidb-server
 ENV PD_BIN=/pd-server
 ENV TIFLASH_BIN=/tiflash/tiflash
 ENV TPC_BIN=/go-tpc
+ENV CDC_BIN=/cdc

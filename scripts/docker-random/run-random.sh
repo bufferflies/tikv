@@ -177,9 +177,10 @@ for i in $(seq -w 1 100000); do
     mkdir -p "$CLUSTER_LOGS"
     # Random test get logs file path from env variable "LOG_FILE"
     export LOG_FILE="$CLUSTER_LOGS"/tikv.log
+    export TEST_ID="$i"
     /random/random-bin test_random_"$TESTNAME" --nocapture >"$LOG" 2>&1 || true
 
-    if [ "$TESTNAME" = "with_tidb" ] || [ "$TESTNAME" = "upgrade" ]; then
+    if [[ "$TESTNAME" =~ ^with_tidb|upgrade|replication$ ]]; then
         pkill -9 -f "/tidb-server" || true
         pkill -9 -f "/pd-server" || true
         pkill -9 -f "/tikv-server" || true
@@ -187,6 +188,7 @@ for i in $(seq -w 1 100000); do
         pkill -9 -f "/tiflash/tiflash" || true
         pkill -9 -f "/go-tpc" || true
         pkill -9 -f "minio" || true
+        pkill -9 -f "/cdc" || true
     fi
 
     sync -d "$LOG"
@@ -203,6 +205,10 @@ for i in $(seq -w 1 100000); do
         if compgen -G "$TMPDIR/tc*" >/dev/null; then
             chmod +r "$TMPDIR"/tc*/*.log
             cp "$TMPDIR"/tc*/*.log "$TMPDIR"/tc*/*.toml "$CLUSTER_LOGS" || true
+        fi
+        if compgen -G "$TMPDIR/rep*" >/dev/null; then
+            chmod +r "$TMPDIR"/rep*/*.log
+            cp "$TMPDIR"/rep*/*.log "$TMPDIR"/rep*/*.toml "$CLUSTER_LOGS" || true
         fi
 
         mv "$LOG" "$LOG_PATH"/error-logs/

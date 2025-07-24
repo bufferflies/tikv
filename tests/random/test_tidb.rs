@@ -148,7 +148,7 @@ fn test_random_with_tidb() {
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
     let security_conf = new_security_config();
-    let tc = prepare_tidb_cluster(&security_conf);
+    let tc = prepare_tidb_cluster(&security_conf, &switches);
     let mut cluster = prepare_cluster(
         &dfs_config,
         &security_conf,
@@ -212,7 +212,8 @@ fn test_random_with_tidb() {
     let stdout = std::io::stdout();
     writeln!(
         stdout.lock(),
-        "TEST SUCCEED: elapsed {:?},{:?}, region_number {}, {:?}",
+        "{} TEST SUCCEED: elapsed {:?},{:?}, region_number {}, {:?}",
+        test_id(),
         prepare_time.saturating_elapsed(),
         start_time.saturating_elapsed(),
         region_number,
@@ -222,7 +223,10 @@ fn test_random_with_tidb() {
     stdout.lock().flush().unwrap();
 }
 
-pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbCluster {
+pub(crate) fn prepare_tidb_cluster(
+    security_config: &SecurityConfig,
+    switches: &Switches,
+) -> TidbCluster {
     let pd_bin = std::env::var(PD_BIN_ENV_KEY).expect("env PD_BIN is not set");
     let pd_port_base = std::env::var(PD_PORT_ENV_KEY)
         .map(|s| s.parse().unwrap())
@@ -236,7 +240,9 @@ pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbClus
         .map(|s| s.parse().unwrap())
         .unwrap_or(TIDB_STATUS_PORT_DEFAULT);
 
-    let tiflash_bin = std::env::var(TIFLASH_BIN_ENV_KEY).expect("env TIFLASH_BIN is not set");
+    let tiflash_bin = switches
+        .tiflash_switch_on
+        .then(|| std::env::var(TIFLASH_BIN_ENV_KEY).expect("env TIFLASH_BIN is not set"));
 
     let max_merge_region_size = REGION_SIZE.div(5);
     let max_merge_region_keys = max_merge_region_size.0 / 100; // Assume 100 bytes per key, about 2000 keys.
@@ -263,7 +269,7 @@ pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbClus
         PathBuf::from(tidb_bin),
         tidb_port_base,
         tidb_status_port_base,
-        PathBuf::from(tiflash_bin),
+        tiflash_bin.map(PathBuf::from),
         INITIAL_KEYSPACE_COUNT as u16,
         security_config,
     );
@@ -271,7 +277,7 @@ pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbClus
     tc
 }
 
-fn prepare_cluster(
+pub(crate) fn prepare_cluster(
     dfs_config: &DFSConfig,
     security_conf: &SecurityConfig,
     nodes_count: usize,
@@ -448,6 +454,8 @@ pub(crate) fn start_components(
     dfs_config: &DFSConfig,
     runtime: &Runtime,
 ) {
+    let mut tasks = vec![];
+
     let start_tidb = {
         let tc = tc.clone();
         let columnar_switch_on = switches.columnar_switch_on;
@@ -470,12 +478,14 @@ pub(crate) fn start_components(
             .await
         })
     };
-    let start_tiflash = {
+    tasks.push(start_tidb);
+
+    if switches.tiflash_switch_on {
         let tc = tc.clone();
         let columnar_switch_on = switches.columnar_switch_on;
         let enable_tiflash_write_node = switches.enable_tiflash_write_node;
         let dfs_config = dfs_config.clone();
-        runtime.spawn(async move {
+        let start_tiflash = runtime.spawn(async move {
             tc.start_tiflash(
                 TIFLASH_SERVER_COUNT as u16,
                 &dfs_config,
@@ -484,12 +494,13 @@ pub(crate) fn start_components(
                 enable_tiflash_write_node,
             )
             .await
-        })
+        });
+        tasks.push(start_tiflash);
     };
-    let (start_tidb, start_tiflash) =
-        runtime.block_on(async move { futures::join!(start_tidb, start_tiflash) });
-    start_tidb.unwrap();
-    start_tiflash.unwrap();
+
+    runtime
+        .block_on(futures::future::try_join_all(tasks))
+        .unwrap();
 }
 
 pub(crate) fn prepare_workloads(
@@ -789,9 +800,11 @@ pub(crate) async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
 pub(crate) async fn check_and_stop_components(tc: &TidbCluster) {
     tc.pd.must_healthy(VERIFY_HEALTHY_TIMEOUT).await;
     tc.tidb.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
-    tc.tiflash.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
     tc.tidb.stop_all(); // To stop background tasks.
-    tc.tiflash.stop_all();
+    if let Some(tiflash) = tc.tiflash.as_ref() {
+        tiflash.must_all_healthy(VERIFY_HEALTHY_TIMEOUT).await;
+        tiflash.stop_all();
+    }
 }
 
 // TODO: merge to `verify_cluster` in `test_all.rs`.

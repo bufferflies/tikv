@@ -294,7 +294,8 @@ fn test_random_all() {
     let stdout = std::io::stdout();
     writeln!(
         stdout.lock(),
-        "TEST SUCCEED: elapsed {:?},{:?}, region {}, verified_records {}, {:?}",
+        "{} TEST SUCCEED: elapsed {:?},{:?}, region {}, verified_records {}, {:?}",
+        test_id(),
         prepare_time.saturating_elapsed(),
         start_time.saturating_elapsed(),
         region_number,

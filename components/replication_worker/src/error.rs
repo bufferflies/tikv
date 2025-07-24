@@ -1,5 +1,7 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::ticdc_util::TiCdcError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("cdc error {0}")]
@@ -20,6 +22,8 @@ pub enum Error {
     RfEngineError(#[from] rfengine::Error),
     #[error("store timeout {0}")]
     StoreTimeout(String),
+    #[error(transparent)]
+    TiCdcError(#[from] TiCdcError),
     #[error("other error {0}")]
     OtherError(String),
 }

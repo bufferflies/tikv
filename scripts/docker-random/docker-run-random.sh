@@ -136,9 +136,9 @@ while [[ $# -gt 0 ]]; do
 	--disable-ia-for-old-version)
 		RUN_ARGS+=("--disable-ia-for-old-version")
 		;;
-    --enable-kv-engine-meta-diff)
-        RUN_ARGS+=("--enable-kv-engine-meta-diff")
-        ;;
+	--enable-kv-engine-meta-diff)
+		RUN_ARGS+=("--enable-kv-engine-meta-diff")
+		;;
 	--enable-tiflash-write-node)
 		RUN_ARGS+=("--enable-tiflash-write-node")
 		;;
@@ -164,7 +164,7 @@ if [ "$REBUILD_IMAGE" -eq 1 ]; then
 fi
 
 IMAGE="amazonlinux:2023.5.20241001.1"
-if [ "$TESTNAME" = "with_tidb" ]; then
+if [[ "$TESTNAME" =~ ^with_tidb|replication$ ]]; then
 	docker build $BUILD_IMAGE_ARGS -t random-tidb --build-arg TIDB_VERSION="$TIDB_VERSION" - <Dockerfile.tidb
 	IMAGE="random-tidb"
 elif [ "$TESTNAME" = "upgrade" ]; then

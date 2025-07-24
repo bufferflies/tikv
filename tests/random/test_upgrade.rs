@@ -61,7 +61,7 @@ fn test_random_upgrade() {
     // Prepare.
     let (_temp_dir, _oss, dfs_config) = prepare_dfs("oss_");
     let security_conf = new_security_config();
-    let tc = prepare_tidb_cluster(&security_conf);
+    let tc = prepare_tidb_cluster(&security_conf, &switches);
     let (cluster, tikv_servers, tikv_workers) = prepare_cluster(
         &dfs_config,
         &security_conf,
@@ -221,7 +221,8 @@ fn test_random_upgrade() {
     let stdout = std::io::stdout();
     writeln!(
         stdout.lock(),
-        "TEST SUCCEED: elapsed {:?},{:?}, region_number {}, {:?}",
+        "{} TEST SUCCEED: elapsed {:?},{:?}, region_number {}, {:?}",
+        test_id(),
         prepare_time.saturating_elapsed(),
         start_time.saturating_elapsed(),
         region_number,

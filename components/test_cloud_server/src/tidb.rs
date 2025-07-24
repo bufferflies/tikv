@@ -549,13 +549,15 @@ impl TidbCluster {
         tidb_bin: PathBuf,
         tidb_port_base: u16,
         tidb_status_port_base: u16,
-        tiflash_bin: PathBuf,
+        tiflash_bin: Option<PathBuf>,
         pre_alloc_keyspaces: u16,
         security_conf: &SecurityConfig,
     ) -> Self {
         check_binary("pd_server", &pd_bin);
         check_binary("tidb-server", &tidb_bin);
-        check_binary("tiflash", &tiflash_bin);
+        if let Some(ref tiflash_bin) = tiflash_bin {
+            check_binary("tiflash", tiflash_bin);
+        }
 
         let security_mgr = Arc::new(SecurityManager::new(security_conf).unwrap());
         let base_path = tempfile::Builder::new().prefix("tc_").tempdir().unwrap();
@@ -576,7 +578,9 @@ impl TidbCluster {
             tidb_status_port_base,
             security_mgr.clone(),
         );
-        let tiflash = TiFlashServers::new(tiflash_bin, base_path.path().to_owned(), security_mgr);
+        let tiflash = tiflash_bin.map(|tiflash_bin| {
+            TiFlashServers::new(tiflash_bin, base_path.path().to_owned(), security_mgr)
+        });
 
         let inner = TidbClusterCore {
             data_path: base_path,
@@ -615,7 +619,7 @@ pub struct TidbClusterCore {
 
     pub pd: PdServers,
     pub tidb: TidbServers,
-    pub tiflash: TiFlashServers,
+    pub tiflash: Option<TiFlashServers>,
 }
 
 impl TidbClusterCore {
@@ -651,27 +655,28 @@ impl TidbClusterCore {
         tiflash_disaggregated_mode: bool,
         enable_tiflash_write_node: bool,
     ) {
+        let Some(tiflash) = self.tiflash.as_ref() else {
+            return;
+        };
+
         let start_time = Instant::now_coarse();
         if tiflash_disaggregated_mode && enable_tiflash_write_node {
-            self.tiflash.start_minio().await;
+            tiflash.start_minio().await;
         }
         let pd_endpoints = self.pd.endpoints();
         for idx in 0..count {
             if !tiflash_disaggregated_mode {
-                self.tiflash
-                    .start(idx, dfs.clone(), &pd_endpoints, TiFlashRole::Legacy);
+                tiflash.start(idx, dfs.clone(), &pd_endpoints, TiFlashRole::Legacy);
             } else if enable_tiflash_write_node {
-                self.tiflash
-                    .start(idx, dfs.clone(), &pd_endpoints, TiFlashRole::Write);
+                tiflash.start(idx, dfs.clone(), &pd_endpoints, TiFlashRole::Write);
             }
         }
         // Start 1 compute node for compute mode.
         if tiflash_disaggregated_mode {
-            self.tiflash
-                .start(count, dfs.clone(), &pd_endpoints, TiFlashRole::Compute);
+            tiflash.start(count, dfs.clone(), &pd_endpoints, TiFlashRole::Compute);
         }
 
-        self.tiflash.must_all_healthy(timeout).await;
+        tiflash.must_all_healthy(timeout).await;
         // Note: TiFlash compute node may not register self to pd.
         if !tiflash_disaggregated_mode || enable_tiflash_write_node {
             self.wait_tiflash_up(count, timeout);
