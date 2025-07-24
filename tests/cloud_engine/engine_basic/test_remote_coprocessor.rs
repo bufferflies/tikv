@@ -2011,8 +2011,8 @@ fn test_memory_limiter() {
     let snapshot = dag_test.fetch_snapshot(dag_test.get_ts().into_inner(), select_key_ranges);
     let quota_limiter = Arc::new(QuotaLimiter::default());
 
-    // About 160000 bytes.
-    dag_test.set_memory_limiter_cap(100000);
+    // About 160000 bytes, and 74000 bytes if compacted.
+    dag_test.set_memory_limiter_cap(50000);
     let err = dag_test
         .execute(snapshot.clone(), quota_limiter.clone(), req.clone())
         .unwrap_err();
