@@ -33,10 +33,7 @@ use rstest::rstest;
 use schema::schema::StorageClassSpec;
 use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
-    client::{
-        ClusterClientOptions, CommitAction, MutateOptions, RequestOptions, RequestPeerRole,
-        TxnWriteMethod,
-    },
+    client::{ClusterClientOptions, CommitAction, MutateOptions, RequestOptions, TxnWriteMethod},
     must_wait,
     oss::prepare_dfs,
     try_wait, ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
@@ -434,9 +431,7 @@ fn test_restore_keyspace_impl(
         if has_learner {
             verify_options.push((
                 Some((&keyspace_start, &keyspace_end)),
-                RequestOptions {
-                    peer_role: RequestPeerRole::Learner,
-                },
+                RequestOptions::learner(),
             ));
         }
         let mut verify_res = vec![];

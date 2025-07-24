@@ -135,3 +135,11 @@ pub fn new_put_mutation(key: Vec<u8>, value: Vec<u8>) -> Mutation {
         op: kvrpcpb::Op::Put,
     }
 }
+
+pub fn new_pessimistic_lock_mutation(key: Vec<u8>) -> Mutation {
+    Mutation {
+        key: key.into(),
+        value: vec![].into(),
+        op: kvrpcpb::Op::PessimisticLock,
+    }
+}

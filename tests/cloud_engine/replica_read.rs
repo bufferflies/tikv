@@ -3,10 +3,7 @@
 use futures::executor::block_on;
 use kvproto::metapb;
 use pd_client::PdClient;
-use test_cloud_server::{
-    client::{RequestOptions, RequestPeerRole},
-    try_wait, ServerCluster,
-};
+use test_cloud_server::{client::RequestOptions, try_wait, ServerCluster};
 use tikv_util::{
     store::{find_peer, new_learner_peer},
     time::Instant,
@@ -63,9 +60,7 @@ fn test_replica_read() {
         10
     ));
 
-    let options = RequestOptions {
-        peer_role: RequestPeerRole::Learner,
-    };
+    let options = RequestOptions::learner();
     for i in 0..DATA_COUNT {
         let (val, ctx) = client
             .get_key_version_opt(&i_to_key(i), u64::MAX, put_time, &options)

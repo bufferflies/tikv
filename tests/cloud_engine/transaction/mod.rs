@@ -1,10 +1,15 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
+#[macro_use]
+mod util;
 mod check_txn_status;
 mod commit;
 mod helper;
 mod ia;
+mod optimistic_2pc;
+mod pessimistic;
 mod resolve_lock;
+mod txn;
 mod txn_file;
 
 use bytes::Bytes;

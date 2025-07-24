@@ -197,17 +197,33 @@ pub enum RequestPeerRole {
 
 pub struct RequestOptions {
     pub peer_role: RequestPeerRole,
+    pub resolve_lock: bool,
 }
 
 impl Default for RequestOptions {
     fn default() -> Self {
         Self {
             peer_role: RequestPeerRole::Leader,
+            resolve_lock: true,
         }
     }
 }
 
 impl RequestOptions {
+    pub fn learner() -> Self {
+        Self {
+            peer_role: RequestPeerRole::Learner,
+            ..Default::default()
+        }
+    }
+
+    pub fn no_resolve_lock() -> Self {
+        Self {
+            resolve_lock: false,
+            ..Default::default()
+        }
+    }
+
     pub fn replica_read(&self) -> bool {
         !matches!(self.peer_role, RequestPeerRole::Leader)
     }
@@ -243,6 +259,15 @@ impl Default for MutateOptions {
             commit_action: CommitAction::SyncCommit,
             write_method: TxnWriteMethod::Normal,
             gen_index: None,
+        }
+    }
+}
+
+impl MutateOptions {
+    pub fn start_ts(start_ts: TimeStamp) -> Self {
+        Self {
+            start_ts: Some(start_ts),
+            ..Default::default()
         }
     }
 }
@@ -288,6 +313,22 @@ impl Default for PrewriteExt {
             resolve_lock: true,
             lock_ttl: Duration::from_secs(3),
             for_update_ts: TimeStamp::zero(),
+        }
+    }
+}
+
+impl PrewriteExt {
+    pub fn no_resolve_lock() -> Self {
+        Self {
+            resolve_lock: false,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_for_update_ts(for_update_ts: TimeStamp) -> Self {
+        Self {
+            for_update_ts,
+            ..Default::default()
         }
     }
 }
@@ -1860,6 +1901,9 @@ impl ClusterClient {
                     "{} get_key_version_opt: encounters key_error: {:?}",
                     tag, key_err
                 );
+                if !options.resolve_lock {
+                    return Err(Error::KeyError(key_err));
+                }
                 self.handle_key_errors(&tag, version, false, vec![key_err])
                     .expect("handle_key_errors");
                 continue;
@@ -2821,21 +2865,6 @@ impl TxnMutations {
                     .collect::<Vec<_>>();
                 req.set_keys(keys.into());
                 req.set_is_txn_file(true);
-            }
-        }
-    }
-
-    pub fn set_pessimistic_req(&self, req: &mut kvrpcpb::PessimisticLockRequest) {
-        match self {
-            Self::Muts { muts } => {
-                let mutations = muts
-                    .iter()
-                    .map(|m| kvrpcpb::Mutation::from(m))
-                    .collect::<Vec<_>>();
-                req.set_mutations(mutations.into());
-            }
-            Self::Chunks { .. } => {
-                panic!("pessimistic locking for txn chunks isn't implemented yet")
             }
         }
     }
