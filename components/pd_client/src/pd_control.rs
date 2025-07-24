@@ -17,7 +17,9 @@ use tikv_util::{
 
 use crate::Config;
 
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Sync + Send>>;
+pub type Error = security::HttpClientError;
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 const PD_CONFIG_PATH: &str = "pd/api/v1/config";
 const PD_REGIONS_STORE_PATH: &str = "pd/api/v1/regions/store";

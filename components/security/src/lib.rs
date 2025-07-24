@@ -1,7 +1,7 @@
 // Copyright 2017 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod http;
-pub use crate::http::{HttpClient, RestfulClient, Result as HttpResult};
+pub use crate::http::{Error as HttpClientError, HttpClient, RestfulClient, Result as HttpResult};
 
 #[macro_use]
 extern crate serde_derive;

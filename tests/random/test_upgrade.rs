@@ -10,7 +10,10 @@ use std::{
 };
 
 use kvengine::dfs::DFSConfig;
-use pd_client::pd_control::{PdControl, StoreInfo};
+use pd_client::{
+    pd_control,
+    pd_control::{PdControl, StoreInfo},
+};
 use rand::prelude::*;
 use security::SecurityConfig;
 use test_cloud_server::{
@@ -435,7 +438,19 @@ fn switch_servers_version<F>(
             if store.status.leader_count > 0 {
                 warn!("switch version: store still has leaders after evicting"; "node_id" => node_id, "store" => ?store);
             }
-            block_on(pd_ctl.remove_scheduler(&scheduler_name)).unwrap();
+            match block_on(pd_ctl.remove_scheduler(&scheduler_name)) {
+                Ok(_) => {}
+                Err(pd_control::Error::Http(StatusCode::NOT_FOUND, msg)) => {
+                    // Maybe caused by request retry.
+                    warn!("switch version: scheduler already removed"; "node_id" => node_id, "msg" => msg);
+                }
+                Err(err) => {
+                    panic!(
+                        "switch version: remove scheduler failed, node_id: {}, err: {:?}",
+                        node_id, err
+                    );
+                }
+            }
         }
 
         info!("switch version: stop server"; "node_id" => node_id, "from" => from.tag());

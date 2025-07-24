@@ -7849,6 +7849,7 @@ dependencies = [
  "slog",
  "slog-global",
  "tempfile",
+ "thiserror 1.0.44",
  "tikv_util",
  "tokio",
 ]

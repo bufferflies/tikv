@@ -20,6 +20,8 @@ pub enum Error {
     HyperError(#[from] hyper::Error),
     #[error("http error {0}")]
     HttpError(#[from] http::Error),
+    #[error("Security client error {0}")]
+    SecurityClientError(#[from] security::HttpClientError),
     #[error("io error {0}")]
     IoError(#[from] std::io::Error),
     #[error("protobuf error {0}")]

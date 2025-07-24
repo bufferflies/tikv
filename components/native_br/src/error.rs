@@ -62,6 +62,8 @@ pub enum Error {
     HttpError(http::StatusCode, String),
     #[error("HTTP error {0}:{1:?}")]
     HttpPbError(http::StatusCode, kvproto::errorpb::Error),
+    #[error("Security client error {0}")]
+    SecurityClientError(#[from] security::HttpClientError),
     #[error("Retry limit exceeded, last error {0}")]
     RetryLimitExceeded(Box<Error>),
     #[error("Restore other keyspace from/to default keyspace")]

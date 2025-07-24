@@ -4,7 +4,6 @@
 
 use std::{
     convert::TryFrom,
-    error::Error,
     fs, io, iter,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -15,16 +14,32 @@ use std::{
 
 use bstr::ByteSlice;
 use bytes::Bytes;
-use http::{Method, Request};
+use http::{Method, Request, StatusCode};
 use hyper::{client::HttpConnector, server::conn::AddrIncoming, Body, Uri};
 use hyper_rustls::{HttpsConnector, TlsAcceptor};
 use rustls::server::AllowAnyAnonymousOrAuthenticatedClient;
 use rustls_pemfile::Item;
-use tikv_util::{box_err, debug, time::Instant, Either};
+use tikv_util::{box_err, debug, error, time::Instant, Either};
 
 use crate::SecurityManager;
 
-pub type Result<T> = std::result::Result<T, Box<dyn Error + Sync + Send>>;
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("HTTP error: {0}:{1}")]
+    Http(StatusCode, String),
+    #[error(transparent)]
+    InvalidUri(#[from] http::uri::InvalidUri),
+    #[error(transparent)]
+    Tls(#[from] rustls::Error),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Other(#[from] Box<dyn std::error::Error + Sync + Send>),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 impl SecurityManager {
     pub fn acceptor(&self, incoming: AddrIncoming) -> Result<Either<AddrIncoming, TlsAcceptor>> {
@@ -85,7 +100,7 @@ impl SecurityManager {
 
 fn error<E>(err: E) -> io::Error
 where
-    E: Into<Box<dyn Error + Send + Sync>>,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     io::Error::new(io::ErrorKind::Other, err)
 }
@@ -241,10 +256,9 @@ impl RestfulClient {
                         return Ok(body);
                     } else if status.is_client_error() {
                         let body = body_res.map(|body| body.unwrap()).unwrap_or_default();
-                        return Err(box_err!(
-                            "{tag}: return error: {status}: {}",
-                            body.to_str_lossy()
-                        ));
+                        let msg = body.to_str_lossy();
+                        error!("{}: http client error: {}: {}", tag, status, msg.as_ref());
+                        return Err(Error::Http(status, msg.to_string()));
                     } else {
                         let body = body_res.map(|body| body.unwrap()).unwrap_or_default();
                         err = Some(box_err!(

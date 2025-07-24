@@ -91,6 +91,8 @@ pub enum Error {
     KeyErrors(Vec<kvrpcpb::KeyError>),
     #[error("Build RPC context failure region:{0:?}")]
     RpcContext(u64),
+    #[error("Security client error {0}")]
+    SecurityClientError(#[from] security::HttpClientError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
