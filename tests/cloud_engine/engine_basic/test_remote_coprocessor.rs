@@ -2674,7 +2674,7 @@ impl<'a> DagTest<'a> {
                 .unwrap();
             }
 
-            let snap = RegionSnapshot::from_snapshot(snap_access);
+            let snap = RegionSnapshot::from_snapshot(snap_access, None);
 
             let res = tikv::coprocessor::parse_request_and_handle_remote_cop::<RegionSnapshot>(
                 req,

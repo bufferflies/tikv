@@ -228,7 +228,10 @@ impl ReadExecutor for LocalReader {
     fn get_snapshot(&self, region_id: u64, region_ver: u64) -> Result<RegionSnapshot> {
         if let Some(snap) = self.kv_engine.get_snap_access(region_id) {
             if snap.get_version() == region_ver {
-                return Ok(RegionSnapshot::from_snapshot(snap));
+                return Ok(RegionSnapshot::from_snapshot(
+                    snap,
+                    self.kv_engine.get_value_cache(),
+                ));
             }
         }
         Err(Error::StaleCommand)

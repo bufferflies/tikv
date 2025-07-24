@@ -59,6 +59,7 @@ mod tests;
 
 #[cfg(feature = "debug-trace-mem-table")]
 pub mod debug;
+mod value_cache;
 
 pub use apply::*;
 pub use compaction::*;
@@ -78,6 +79,7 @@ pub use split::*;
 pub use stats::*;
 pub use table::table::Iterator;
 pub use table_stats::*;
+pub use value_cache::*;
 pub use write::*;
 
 pub const NUM_CFS: usize = 3;

@@ -399,7 +399,7 @@ async fn handle_remote_coprocessor(
         }
     }
 
-    let snap = RegionSnapshot::from_snapshot(snap_access);
+    let snap = RegionSnapshot::from_snapshot(snap_access, None);
     let process_start = Instant::now_coarse();
     let result = tikv::coprocessor::parse_request_and_handle_remote_cop(
         cop_req,

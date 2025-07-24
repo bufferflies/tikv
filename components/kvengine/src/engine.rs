@@ -45,6 +45,7 @@ use crate::{
     },
     txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
     util::{new_blob_create_pb, new_l0_create_pb, new_table_create_pb},
+    value_cache::ValueCache,
     *,
 };
 
@@ -114,6 +115,13 @@ impl Engine {
         );
         let fd_cache = FdCache::new(config.fd_cache_capacity);
         let meta_fd_cache = FdCache::new(config.fd_cache_capacity);
+        let value_cache = if !config.value_cache_capacity.is_zero() {
+            Some(ValueCache::new(
+                config.value_cache_capacity.as_memory_size(),
+            ))
+        } else {
+            None
+        };
         let (flush_tx, flush_rx) = mpsc::unbounded();
         let (compact_tx, compact_rx) = mpsc::unbounded();
         let (free_tx, free_rx) = mpsc::unbounded();
@@ -145,6 +153,7 @@ impl Engine {
             fs: fs.clone(),
             cache,
             fd_cache,
+            value_cache,
             comp_client: CompactionClient::new(
                 fs.clone(),
                 opts.remote_compactor_addr.clone(),
@@ -323,6 +332,7 @@ pub struct EngineCore {
     pub(crate) fs: Arc<dyn dfs::Dfs>,
     pub(crate) cache: BlockCache,
     pub(crate) fd_cache: FdCache,
+    pub(crate) value_cache: Option<ValueCache>,
     pub comp_client: CompactionClient,
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
     pub(crate) managed_safe_ts: AtomicU64,
@@ -980,6 +990,10 @@ impl EngineCore {
 
     pub fn remove_fd_cache(&self, file_id: u64) {
         self.fd_cache.remove(file_id);
+    }
+
+    pub fn get_value_cache(&self) -> Option<&ValueCache> {
+        self.value_cache.as_ref()
     }
 
     fn add_worker_handle(&self, handle: thread::JoinHandle<()>) {

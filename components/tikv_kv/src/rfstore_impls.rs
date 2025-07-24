@@ -3,7 +3,7 @@
 use std::{num::NonZeroU64, sync::Arc};
 
 use engine_traits::{CfName, IterOptions, ReadOptions};
-use kvengine::SnapAccess;
+use kvengine::{SnapAccess, ValueCache};
 use kvproto::kvrpcpb::ExtraOp as TxnExtraOp;
 use pd_client::BucketMeta;
 use raftstore::store::TxnExt;
@@ -89,6 +89,10 @@ impl Snapshot for rfstore::store::RegionSnapshot {
 
     fn get_kvengine_snap(&self) -> Option<&SnapAccess> {
         Some(&self.snap)
+    }
+
+    fn get_value_cache(&self) -> Option<&ValueCache> {
+        self.value_cache.as_ref()
     }
 
     fn is_sync(&self) -> bool {

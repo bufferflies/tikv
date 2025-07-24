@@ -2,7 +2,7 @@
 
 use std::{num::NonZeroU64, sync::Arc};
 
-use kvengine::SnapAccess;
+use kvengine::{SnapAccess, ValueCache};
 use kvproto::{kvrpcpb::ExtraOp as TxnExtraOp, metapb::Region};
 use pd_client::BucketMeta;
 use raftstore::store::TxnExt;
@@ -14,6 +14,7 @@ use tikv_util::{metrics::CRITICAL_ERROR, panic_when_unexpected_key_or_data, set_
 #[derive(Debug)]
 pub struct RegionSnapshot {
     pub snap: SnapAccess,
+    pub value_cache: Option<ValueCache>,
     // `None` means the snapshot does not provide peer related transaction extensions.
     pub txn_ext: Option<Arc<TxnExt>>,
     pub term: Option<NonZeroU64>,
@@ -24,12 +25,13 @@ pub struct RegionSnapshot {
 impl RegionSnapshot {
     pub fn from_raw(db: &kvengine::Engine, region: &Region) -> RegionSnapshot {
         let snap = db.get_snap_access(region.get_id()).unwrap();
-        RegionSnapshot::from_snapshot(snap)
+        RegionSnapshot::from_snapshot(snap, db.get_value_cache())
     }
 
-    pub fn from_snapshot(snap: SnapAccess) -> RegionSnapshot {
+    pub fn from_snapshot(snap: SnapAccess, value_cache: Option<&ValueCache>) -> RegionSnapshot {
         RegionSnapshot {
             snap,
+            value_cache: value_cache.cloned(),
             txn_ext: None,
             term: None,
             txn_extra_op: TxnExtraOp::Noop,
@@ -57,6 +59,7 @@ impl Clone for RegionSnapshot {
     fn clone(&self) -> Self {
         RegionSnapshot {
             snap: self.snap.clone(),
+            value_cache: self.value_cache.clone(),
             txn_ext: self.txn_ext.clone(),
             term: self.term,
             txn_extra_op: self.txn_extra_op,

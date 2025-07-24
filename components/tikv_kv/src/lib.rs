@@ -505,6 +505,10 @@ pub trait Snapshot: Sync + Send + Clone {
         None
     }
 
+    fn get_value_cache(&self) -> Option<&kvengine::ValueCache> {
+        None
+    }
+
     /// Specific for KVEngine.
     fn is_sync(&self) -> bool {
         true

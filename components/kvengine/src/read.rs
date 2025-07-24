@@ -7,7 +7,7 @@ use std::{
     iter::Iterator as _,
     marker::PhantomData,
     ops::Deref,
-    sync::{Arc, Mutex},
+    sync::{atomic::Ordering, Arc, Mutex},
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -42,9 +42,10 @@ use crate::{
         table,
         vector_index::{VectorDistanceProjector, VectorItemsReader},
         AsyncMergeIterator, BoundedDataSet, ConstraintChecker, DataBound, InnerKey,
-        Iterator as TableIterator, SkipOpTxnFileIterator, TxnFile, TxnFileIterator,
+        Iterator as TableIterator, SkipOpTxnFileIterator, TxnFile, TxnFileIterator, Value,
     },
     txn_chunk_manager::TxnChunkManager,
+    value_cache::ValidationTask,
     *,
 };
 
@@ -82,6 +83,20 @@ impl Item<'_> {
             path: AccessPath::default(),
             phantom: Default::default(),
             owned_val: None,
+            owned_blob: None,
+        }
+    }
+
+    pub fn from_cached_value(cached: &ValueCacheValue) -> Self {
+        let um = UserMeta::new(cached.start_ts, cached.version);
+        let um_buf = um.to_array();
+        let buf = Value::encode_buf(0, &um_buf, cached.version, cached.value.chunk());
+        let val = Value::decode(&buf);
+        Self {
+            val,
+            path: Default::default(),
+            phantom: Default::default(),
+            owned_val: Some(buf),
             owned_blob: None,
         }
     }
@@ -322,6 +337,7 @@ pub struct SnapAccessCore {
     base_version: u64,
     meta_seq: u64,
     write_sequence: u64,
+    cache_invalidate_sequence: u64,
     data: ShardData,
     get_hint: Mutex<Hint>,
     blob_table_prefetch_size: usize,
@@ -340,10 +356,12 @@ impl SnapAccessCore {
         let base_version = shard.get_base_version();
         let meta_seq = shard.get_meta_sequence();
         let write_sequence = shard.get_write_sequence();
+        let cache_invalidate_sequence = shard.get_cache_invalidate_sequence();
         let is_sync = data.is_sync();
         Self {
             tag: shard.tag(),
             write_sequence,
+            cache_invalidate_sequence,
             meta_seq,
             base_version,
             managed_ts: 0,
@@ -753,6 +771,10 @@ impl SnapAccessCore {
 
     pub fn get_write_sequence(&self) -> u64 {
         self.write_sequence
+    }
+
+    pub fn get_cache_invalidate_sequence(&self) -> u64 {
+        self.cache_invalidate_sequence
     }
 
     pub fn get_mem_table_version(&self) -> u64 {
@@ -1756,6 +1778,40 @@ impl SnapAccessCore {
             }
         }
         tables
+    }
+
+    pub(crate) fn validate_cached_value(&self, task: &ValidationTask, value_cache: &ValueCache) {
+        if self.get_write_sequence() == task.write_seq {
+            task.validated.store(true, Ordering::Relaxed);
+            return;
+        }
+        let target_version = task.write_seq + self.base_version;
+        let mut outer_buf = vec![];
+        for mem_tbl in &self.data.mem_tbls {
+            let mem_tbl_version = mem_tbl.get_version();
+            if mem_tbl_version > 0 && mem_tbl_version < target_version {
+                task.validated.store(true, Ordering::Relaxed);
+                return;
+            }
+            let skl = mem_tbl.get_cf(WRITE_CF);
+            let new_val = skl.get(task.key.inner_key.as_ref(), u64::MAX, &mut outer_buf);
+            if new_val.version > 0 {
+                value_cache.remove(&task.key);
+                return;
+            }
+        }
+        let latest_l0_version = self
+            .data
+            .l0_tbls
+            .first()
+            .map(|l0| l0.version())
+            .unwrap_or_default();
+        if latest_l0_version > 0 && latest_l0_version < target_version {
+            task.validated.store(true, Ordering::Relaxed);
+        } else {
+            // We don't want to access L0 tables to validate it, so just remove it.
+            value_cache.remove(&task.key);
+        }
     }
 
     // To ensure that async `SnapAccess` must be called by async methods.

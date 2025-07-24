@@ -1334,6 +1334,7 @@ pub fn new_test_config(
     config.rfengine.wal_sync_dir = format!("{}/{}/wal", base_dir.to_str().unwrap(), node_id);
     config.kvengine.block_cache_type = BlockCacheType::Quick;
     config.kvengine.ia.auto_ia_check_interval = ReadableDuration::secs(10);
+    config.kvengine.value_cache_capacity = AbsoluteOrPercentSize::Abs(ReadableSize::mb(1));
 
     // Work around https://github.com/tidbcloud/cloud-storage-engine/issues/882.
     config.server.raft_client_initial_reconnect_backoff = ReadableDuration::millis(100);

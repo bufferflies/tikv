@@ -107,7 +107,7 @@ fn cloud_store_async_get(b: &mut Bencher<'_>, options: &(usize, bool, SnapAccess
     let (data_count, use_async, snap, read_ts) = (options.0, options.1, &options.2, options.3);
 
     b.iter(|| {
-        let snapshot = RegionSnapshot::from_snapshot(snap.clone());
+        let snapshot = RegionSnapshot::from_snapshot(snap.clone(), None);
         let mut store = CloudStore::new(snapshot, read_ts, TsSet::Empty, true);
         if use_async {
             block_on(async move {

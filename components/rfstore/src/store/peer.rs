@@ -3892,7 +3892,10 @@ impl ReadExecutor for RaftContext {
     fn get_snapshot(&self, region_id: u64, region_ver: u64) -> Result<RegionSnapshot> {
         if let Some(snap) = self.global.engines.kv.get_snap_access(region_id) {
             if snap.get_version() == region_ver {
-                return Ok(RegionSnapshot::from_snapshot(snap));
+                return Ok(RegionSnapshot::from_snapshot(
+                    snap,
+                    self.global.engines.kv.get_value_cache(),
+                ));
             }
         }
         Err(Error::StaleCommand)

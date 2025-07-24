@@ -3,7 +3,7 @@
 use std::{borrow::Cow, marker::PhantomData};
 
 use bytes::{Buf, Bytes};
-use kvengine::{read, Item, SnapAccess, UserMeta};
+use kvengine::{read, Item, SnapAccess, UserMeta, ValueCacheValue};
 use kvproto::kvrpcpb::IsolationLevel;
 use tikv_kv::{Snapshot, Statistics};
 use txn_types::{is_short_value, Key, Lock, OldValue, TimeStamp, TsSet, Value, Write, WriteType};
@@ -18,6 +18,7 @@ use crate::storage::{
 pub struct CloudStore<S: Snapshot> {
     marker: PhantomData<S>,
     snapshot: kvengine::SnapAccess,
+    value_cache: Option<kvengine::ValueCache>,
     start_ts: u64,
     bypass_locks: TsSet,
     fill_cache: bool,
@@ -39,6 +40,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             self.start_ts,
             &self.bypass_locks,
             statistics,
+            self.value_cache.as_ref(),
         )
         .await?;
         if item.value_len() > 0 {
@@ -57,6 +59,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             self.start_ts,
             &self.bypass_locks,
             stat,
+            self.value_cache.as_ref(),
         )
         .await?;
         if item.value_len() > 0 {
@@ -121,6 +124,7 @@ impl<S: Snapshot> CloudStore<S> {
         Self {
             marker: PhantomData,
             snapshot: snapshot.get_kvengine_snap().unwrap().clone(),
+            value_cache: snapshot.get_value_cache().cloned(),
             start_ts,
             bypass_locks,
             fill_cache,
@@ -135,6 +139,7 @@ impl<S: Snapshot> CloudStore<S> {
         start_ts: u64,
         bypass_locks: &TsSet,
         statistics: &mut Statistics,
+        value_cache: Option<&'a kvengine::ValueCache>,
     ) -> mvcc::Result<Item<'a>> {
         tikv_util::set_current_region(snap.get_id());
 
@@ -165,7 +170,31 @@ impl<S: Snapshot> CloudStore<S> {
             );
             return Ok(Item::default());
         }
-        let item = snap.get(WRITE_CF, &raw_key, start_ts).await;
+        let item = if let Some(cache) = value_cache {
+            if let Some(val) = cache.get(snap, &raw_key, start_ts) {
+                return Ok(Item::from_cached_value(&val));
+            }
+            // We use the u64::MAX to get first to fill the cache, if version is newer,
+            // use start_ts to get again. If the we use start_ts first to get the value,
+            // we do not know if the value can be cached, because the value may be updated
+            // after the start_ts.
+            let mut item = snap.get(WRITE_CF, &raw_key, u64::MAX).await;
+            if item.version > start_ts {
+                item = snap.get(WRITE_CF, &raw_key, start_ts).await;
+            } else if item.version > 0 {
+                let um = UserMeta::from_slice(item.user_meta());
+                let val = ValueCacheValue::new(
+                    Bytes::copy_from_slice(item.get_value()),
+                    um.start_ts,
+                    item.version,
+                    snap.get_write_sequence(),
+                );
+                cache.set(snap, &raw_key, val);
+            }
+            item
+        } else {
+            snap.get(WRITE_CF, &raw_key, start_ts).await
+        };
         statistics.write.get += 1;
         statistics.write.flow_stats.read_keys += 1;
         statistics.write.flow_stats.read_bytes += user_key.len() + item.value_len();
