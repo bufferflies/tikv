@@ -963,6 +963,10 @@ impl TikvServer {
         self.overload_protector.stop();
         self.background_worker.stop();
         self.raw_engines.kv.close();
+
+        for f in self.lock_files {
+            let _ = f.unlock();
+        }
     }
 
     pub fn get_kv_engine(&self) -> kvengine::Engine {
