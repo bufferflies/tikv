@@ -454,7 +454,7 @@ impl Default for Config {
             check_peers_availability_interval: ReadableDuration::secs(30),
             ia_kv_size_discount: 0.5,
             idle_worker_tick_slow: true,
-            enable_kv_engine_meta_diff: false,
+            enable_kv_engine_meta_diff: true,
             kv_engine_meta_diff_rewrite_percent: 20,
         }
     }
