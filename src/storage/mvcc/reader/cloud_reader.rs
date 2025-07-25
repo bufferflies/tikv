@@ -159,6 +159,37 @@ impl CloudReader {
     }
 
     #[maybe_async::both]
+    pub async fn scan_write_for_key(
+        &mut self,
+        key: &Key,
+        ts: TimeStamp,
+    ) -> Result<Vec<(TimeStamp, Write)>> {
+        let raw_key = key.to_raw()?;
+        let mut res = vec![];
+        let mut cursor = self
+            .snapshot
+            .new_iterator(WRITE_CF, false, true, None, self.fill_cache)
+            .await;
+        cursor.seek(&raw_key).await;
+
+        while cursor.valid() {
+            if cursor.key() != raw_key {
+                break;
+            }
+            if !cursor.user_meta().is_empty() {
+                let user_meta = UserMeta::from_slice(cursor.user_meta());
+                // only keep the write whose commit ts less or equal than required ts.
+                if user_meta.commit_ts <= ts.into_inner() {
+                    let parsed = parse_write(&user_meta, cursor.val());
+                    res.push(parsed);
+                }
+            }
+            cursor.next().await;
+        }
+        Ok(res)
+    }
+
+    #[maybe_async::both]
     pub async fn seek_write(
         &mut self,
         key: &Key,

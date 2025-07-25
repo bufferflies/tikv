@@ -561,21 +561,23 @@ pub(crate) async fn find_mvcc_infos_by_key<S: Snapshot>(
     let mut writes = vec![];
     let mut values = vec![];
     let lock = reader.load_lock(key)?;
-    loop {
-        let opt = reader.seek_write(key, ts).await?;
-        match opt {
-            Some((commit_ts, write)) => {
-                writes.push((commit_ts, write));
-                if commit_ts.is_zero() {
-                    break;
-                }
-                ts = commit_ts.prev();
-            }
-            None => break,
-        };
-    }
     if let Some(reader) = reader.cloud_reader.as_mut() {
+        writes = reader.scan_write_for_key(key, ts)?;
         writes.extend(reader.get_extras(key));
+    } else {
+        loop {
+            let opt = reader.seek_write(key, ts).await?;
+            match opt {
+                Some((commit_ts, write)) => {
+                    writes.push((commit_ts, write));
+                    if commit_ts.is_zero() {
+                        break;
+                    }
+                    ts = commit_ts.prev();
+                }
+                None => break,
+            };
+        }
     }
     for (ts, v) in reader.scan_values_in_default(key)? {
         values.push((ts, v));

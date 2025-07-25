@@ -19,6 +19,8 @@ fn test_commit_ok() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(b"xkey").unwrap();
+    client.split_keyspace(keyspace_id);
 
     let k1 = i_to_key(1);
     let v1 = i_to_val(1);
@@ -80,7 +82,7 @@ fn test_commit_ok() {
     must_unlocked(&mut client, &k2);
     must_unlocked(&mut client, &k3);
     must_written_with_properties(&mut client, &k1, start_ts, commit_ts, WriteType::Put);
-    must_not_written(&mut client, &k2, commit_ts);
+    must_written_with_properties(&mut client, &k2, start_ts, commit_ts, WriteType::Lock);
     must_written_with_properties(&mut client, &k3, start_ts, commit_ts, WriteType::Delete);
 
     // Idempotency check: Commit again should succeed
@@ -94,8 +96,7 @@ fn test_commit_ok() {
 
     // Re-Check writes to ensure commit didn't change anything
     must_written_with_properties(&mut client, &k1, start_ts, commit_ts, WriteType::Put);
-    // LOCK type is not written to write CF anymore.
-    must_not_written(&mut client, &k2, commit_ts);
+    must_written_with_properties(&mut client, &k2, start_ts, commit_ts, WriteType::Lock);
     must_written_with_properties(&mut client, &k3, start_ts, commit_ts, WriteType::Delete);
 
     client.verify_data_with_ref_store();

@@ -18,6 +18,9 @@ fn test_pes_acquire_lock_single_new_key_then_commit() {
         });
         cluster.wait_region_replicated(&[], 1);
         let mut client = cluster.new_client();
+        let keyspace_id =
+            api_version::ApiV2::get_u32_keyspace_id_by_key("xkey".as_bytes()).unwrap();
+        client.split_keyspace(keyspace_id);
 
         // Arrange
         let k1 = i_to_key(1);

@@ -32,6 +32,8 @@ fn test_opt_commit_single_new_key() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     // Arrange
     let k1 = i_to_key(1);
@@ -71,6 +73,8 @@ fn test_opt_commit_single_existing_key_overwrite() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     // Arrange: Key K1 already has V_old
     let k1 = i_to_key(21);
@@ -130,6 +134,8 @@ fn test_opt_commit_multi_key_same_region() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     // Arrange
     let k1 = i_to_key(31);
@@ -254,6 +260,8 @@ fn test_opt_write_conflict_during_prewrite_check() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     // Arrange: K1 initial value V_old
     let k1 = i_to_key(51);
@@ -367,6 +375,8 @@ fn test_opt_rollback_lock_cleaned_by_other_txn_access() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     // Arrange: Key K1 initially has value V_old
     let k1 = i_to_key(71);

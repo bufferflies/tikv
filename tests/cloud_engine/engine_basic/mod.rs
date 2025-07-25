@@ -17,9 +17,14 @@ use pd_client::PdClient;
 use protobuf::Message;
 use replication_worker::CdcApplyObserver;
 use rfstore::store::ApplyContext;
-use test_cloud_server::{client::TxnMutations, must_wait, try_wait, util::Mutation, ServerCluster};
+use test_cloud_server::{
+    client::{MutateOptions, TxnMutations},
+    must_wait, try_wait,
+    util::Mutation,
+    ServerCluster,
+};
 use test_util::init_log_for_test;
-use tikv::storage::{txn::CloudStoreScanner, Scanner};
+use tikv::storage::{mvcc::CloudReader, txn::CloudStoreScanner, Scanner};
 use tikv_util::config::ReadableSize;
 use txn_types::{Key, TsSet};
 
@@ -117,6 +122,105 @@ fn test_increasing_put_and_split() {
         }
     }
     cluster.stop()
+}
+
+#[test]
+fn test_cloud_reader_scan_write_for_key() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let cluster = ServerCluster::new(vec![node_id], |_, _| {});
+    let mut client = cluster.new_client();
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key("x123".as_bytes()).unwrap();
+    client.split_keyspace(keyspace_id);
+    cluster.wait_pd_region_count(3);
+
+    let keys: Vec<_> = (1..=6).collect();
+    let mut ts_list = vec![];
+
+    // keyX has X versions
+    // key1: [1]
+    // key2: [1, 2]
+    // key3: [1, 2, 3]
+    // key4: [1, 2, 3, 4]
+    // key5: [1, 2, 3, 4, 5]
+    // key6: [1, 2, 3, 4, 5, 6]
+    // list of start ts: [1, 2, 3, 4, 5, 6]
+
+    for round in 0..=5 {
+        // make sure each keys commit ts large than this round start ts
+        let start_ts = client.get_ts();
+        for key in keys.iter().skip(round) {
+            client
+                .try_put_kv(
+                    std::iter::once(*key),
+                    i_to_key,
+                    i_to_val,
+                    MutateOptions {
+                        start_ts: Some(start_ts),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        ts_list.push(start_ts);
+    }
+
+    let region_id = client.get_region_id("x123".as_bytes());
+    let engine = cluster.get_kvengine(node_id);
+    let snapshot = engine.get_snap_access(region_id).unwrap();
+
+    for (key_idx, key) in keys.iter().enumerate() {
+        let key_raw = Key::from_raw(&i_to_key(*key));
+        let expect_ts: Vec<u64> = ts_list
+            .iter()
+            .take(key_idx + 1)
+            .cloned()
+            .map(|x| x.into_inner())
+            .collect();
+
+        let mut reader = CloudReader::new(snapshot.clone(), false);
+        let writes = reader
+            .scan_write_for_key(&key_raw, txn_types::TimeStamp::max())
+            .unwrap();
+        let mut actual_ts: Vec<u64> = writes.iter().map(|w| w.1.start_ts.into_inner()).collect();
+        // the largest version is on the top.
+        actual_ts.reverse();
+        assert_eq!(
+            actual_ts, expect_ts,
+            "key {} expect {:?}, got {:?}",
+            key, expect_ts, actual_ts
+        );
+
+        for &cutoff in &expect_ts {
+            let mut reader = CloudReader::new(snapshot.clone(), false);
+            let writes = reader
+                .scan_write_for_key(&key_raw, txn_types::TimeStamp::new(cutoff))
+                .unwrap();
+            let mut actual_ts: Vec<u64> =
+                writes.iter().map(|w| w.1.start_ts.into_inner()).collect();
+            actual_ts.reverse();
+            let expect_filtered: Vec<u64> =
+                expect_ts.iter().cloned().filter(|x| *x < cutoff).collect();
+            assert_eq!(
+                actual_ts, expect_filtered,
+                "key {} scan ts {:?} expect {:?}, got {:?}",
+                key, cutoff, expect_filtered, actual_ts
+            );
+        }
+
+        let min_ts = *expect_ts.iter().min().unwrap();
+        let mut reader = CloudReader::new(snapshot.clone(), false);
+        let writes = reader
+            .scan_write_for_key(&key_raw, txn_types::TimeStamp::new(min_ts - 1))
+            .unwrap();
+        assert!(
+            writes.is_empty(),
+            "key {} with scan ts={} should be empty, got {:?}",
+            key,
+            min_ts - 1,
+            writes
+        );
+    }
 }
 
 #[test]
