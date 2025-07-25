@@ -194,10 +194,20 @@ impl TikvServer {
         let cpu_cores = SysQuota::cpu_cores_quota();
         let grpc_concurrency =
             (cpu_cores * config.server.grpc_concurrency_factor).max(1.0) as usize;
+        let props = tikv_util::thread_group::current_properties();
         let env = Arc::new(
             EnvBuilder::new()
                 .cq_count(grpc_concurrency)
                 .name_prefix(thd_name!(GRPC_THREAD_PREFIX))
+                .after_start(move || {
+                    // Don't need to `add_thread_name_to_map`. See `grpc_load_stats` in
+                    // `Server::start`.
+                    tikv_alloc::add_thread_memory_accessor();
+                    tikv_util::thread_group::set_properties(props.clone());
+                })
+                .before_stop(move || {
+                    tikv_alloc::remove_thread_memory_accessor();
+                })
                 .build(),
         );
         let pd_client =
