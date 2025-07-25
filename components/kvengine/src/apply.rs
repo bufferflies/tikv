@@ -1194,6 +1194,11 @@ impl EngineCore {
             columnar_table_ids
                 .retain(|id| !col_comp.get_columnar_table_ids_to_clear().contains(id));
         };
+        // If columnar_table_ids is empty, this must be a major compaction to clear the
+        // last table. Make sure all unconverted l0s are cleared.
+        if columnar_table_ids.is_empty() {
+            new_col_levels.unconverted_l0s.clear();
+        }
         let mut vector_indexes = old_data.vector_indexes.clone();
         vector_indexes.retain(|vec_idx| columnar_table_ids.contains(&vec_idx.table_id));
         let mut builder = ShardDataBuilder::new(old_data);

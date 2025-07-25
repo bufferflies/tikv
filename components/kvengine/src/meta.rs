@@ -1018,9 +1018,14 @@ impl ShardMeta {
             self.columnar_table_ids.dedup();
             self.columnar_table_ids
                 .retain(|id| !comp.get_columnar_table_ids_to_clear().contains(id));
-            let columnar_table_ids = self.columnar_table_ids.clone();
+            let columnar_table_ids = self.columnar_table_ids.as_slice();
             self.vector_indexes
                 .retain(|vec_idx| columnar_table_ids.contains(&vec_idx.table_id));
+            // If columnar_table_ids is empty, this must be a major compaction to clear the
+            // last table. Make sure all unconverted l0s are cleared.
+            if columnar_table_ids.is_empty() {
+                self.unconverted_l0s.clear();
+            }
         }
     }
 
