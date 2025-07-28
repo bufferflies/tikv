@@ -1,14 +1,15 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt, mem, time::Duration};
+use std::{fmt, mem, sync::Arc, time::Duration};
 
 use api_version::ApiV2;
 use bytes::Bytes;
+use cloud_worker::get_keyspace_stats_from_store;
 use codec::number::NumberEncoder;
 use hyper::{http, Body};
 use kvengine::table::{
     columnar::{new_int_handle_column_info, new_version_column_info},
-    schema_file::{Schema, SchemaBuf},
+    schema_file::{Schema, SchemaBuf, SchemaFile},
 };
 use kvproto::{
     kvrpcpb, metapb,
@@ -17,6 +18,7 @@ use kvproto::{
 use log_wrappers::Value;
 use rfstore::store::RegionIdVer;
 use schema::schema::StorageClassSpec;
+use security::{SecurityConfig, SecurityManager};
 use tidb_query_datatype::{codec::table::TABLE_PREFIX, Collation, FieldTypeTp};
 use tikv::storage::mvcc::Key;
 use tikv_util::{
@@ -314,4 +316,56 @@ pub async fn broadcast_schema_file_request(
     while let Some(res) = js.join_next().await {
         res.unwrap();
     }
+}
+
+pub async fn check_schema_file_applied(
+    stores: &[Store],
+    keyspace_id: u32,
+    schema_file: &SchemaFile,
+    timeout: Duration,
+) -> bool {
+    let security_mgr = Arc::new(SecurityManager::new(&SecurityConfig::default()).unwrap());
+    let (ks_start, ks_end) = ApiV2::get_keyspace_range_by_id(keyspace_id);
+    for store in stores {
+        let shard_stats = get_keyspace_stats_from_store(store, security_mgr.clone(), timeout)
+            .await
+            .unwrap();
+        let not_applied_shards = shard_stats
+            .iter()
+            .filter(|s| {
+                ks_start <= s.start
+                    && s.end <= ks_end
+                    && schema_file.overlap(&s.start, &s.end, keyspace_id)
+                    && s.schema_version < schema_file.get_version()
+            })
+            .collect::<Vec<_>>();
+        if !not_applied_shards.is_empty() {
+            info!("shards not applied to schema version {}", schema_file.get_version();
+                "store" => store.id, "keyspace" => keyspace_id, "shards" => ?not_applied_shards,
+            );
+            return false;
+        }
+    }
+    true
+}
+
+pub async fn broadcast_schema_file_request_and_check(
+    stores: &[Store],
+    keyspace_id: u32,
+    schema_file: &SchemaFile,
+    timeout: Duration,
+) {
+    let start_time = Instant::now_coarse();
+    while start_time.saturating_elapsed() < timeout {
+        broadcast_schema_file_request(stores, keyspace_id, schema_file.get_file_id(), timeout)
+            .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        if check_schema_file_applied(stores, keyspace_id, schema_file, timeout).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    panic!("broadcast_schema_file_request_and_check timeout");
 }

@@ -28,6 +28,7 @@ use test_cloud_server::{
     keyspace::make_row_key,
     oss::{prepare_dfs, ObjectStorageService},
     tidb::TidbCluster,
+    util::broadcast_schema_file_request_and_check,
     ServerCluster, ServerClusterBuilder, TikvWorkerOptions, IA_DISK_CAP_DEF,
     IA_FREQ_UPDATE_INTERVAL_DEF, IA_MEM_CAP_DEF,
 };
@@ -520,21 +521,23 @@ fn prepare_cluster(
             .unwrap();
         if !keyspace_meta.schemas().is_empty() {
             let schema_version = 10;
-            let schema_data =
-                build_schema_file(keyspace_id, schema_version, keyspace_meta.schemas(), 0);
+            let schema_data: Bytes =
+                build_schema_file(keyspace_id, schema_version, keyspace_meta.schemas(), 0).into();
             let schema_file_id = pd_client.alloc_id().unwrap();
             runtime
                 .block_on(fs.create(
                     schema_file_id,
-                    schema_data.into(),
+                    schema_data.clone(),
                     dfs::Options::default().with_type(FileType::Schema),
                 ))
                 .unwrap();
+            let schema_file =
+                SchemaFile::open(Arc::new(InMemFile::new(schema_file_id, schema_data))).unwrap();
             // Setup schema file to stores.
-            runtime.block_on(broadcast_schema_file_request(
+            runtime.block_on(broadcast_schema_file_request_and_check(
                 &stores,
                 keyspace_id,
-                schema_file_id,
+                &schema_file,
                 Duration::from_secs(30),
             ));
         }

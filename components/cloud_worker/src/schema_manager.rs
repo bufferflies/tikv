@@ -1358,7 +1358,7 @@ pub async fn broadcast_schema_update_to_all_stores(
     Ok(())
 }
 
-async fn get_keyspace_stats_from_store(
+pub async fn get_keyspace_stats_from_store(
     store: &Store,
     security_mgr: Arc<SecurityManager>,
     timeout: Duration,

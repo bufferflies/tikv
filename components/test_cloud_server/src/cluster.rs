@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::bail;
 use bstr::ByteSlice;
+use bytes::Bytes;
 use cloud_server::TikvServer;
 use cloud_worker::{
     local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker, CloudWorkerLimiterConfig,
@@ -23,7 +24,11 @@ use kvengine::{
     dfs,
     dfs::{DFSConnOptions, Dfs, FileType},
     ia::{gc::IaGcConfig, util::IaConfig},
-    table::{schema_file::build_schema_file, sstable::BlockCacheType},
+    table::{
+        file::InMemFile,
+        schema_file::{build_schema_file, SchemaFile},
+        sstable::BlockCacheType,
+    },
     txn_chunk_manager::TxnChunkManagerConfig,
     ShardStats,
 };
@@ -63,7 +68,9 @@ use crate::{
     scheduler::Scheduler,
     tikv_bin::wait_tikv_worker_healthy,
     txn::{lock_resolver::LockResolver, txn_file::TxnFileHelper},
-    util::{broadcast_schema_file_request, get_keyspace_split_keys, get_table_split_keys},
+    util::{
+        broadcast_schema_file_request_and_check, get_keyspace_split_keys, get_table_split_keys,
+    },
 };
 
 const REGION_MEM_LIMIT_RATIO: f64 = 0.2;
@@ -1152,24 +1159,26 @@ impl ServerCluster {
 
         if !schemas.is_empty() {
             let schema_version = 10;
-            let schema_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
+            let schema_data: Bytes =
+                build_schema_file(keyspace_id, schema_version, schemas, 0).into();
             let schema_file_id = pd_client.alloc_id().unwrap();
 
             let fs = self.get_dfs().unwrap();
             let _enter = fs.get_runtime().enter();
             fs.create(
                 schema_file_id,
-                schema_data.into(),
+                schema_data.clone(),
                 dfs::Options::default().with_type(FileType::Schema),
             )
             .await
             .unwrap();
-
+            let schema_file =
+                SchemaFile::open(Arc::new(InMemFile::new(schema_file_id, schema_data))).unwrap();
             let stores = pd_client.get_all_stores(true).unwrap();
-            broadcast_schema_file_request(
+            broadcast_schema_file_request_and_check(
                 &stores,
                 keyspace_id,
-                schema_file_id,
+                &schema_file,
                 Duration::from_secs(30),
             )
             .await;

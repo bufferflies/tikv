@@ -29,6 +29,7 @@ use std::{
 };
 
 use api_version::ApiV2;
+use bytes::Bytes;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use codec::number::NumberEncoder;
 use futures::executor::block_on;
@@ -36,7 +37,10 @@ use http::{Request, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
-    table::schema_file::build_schema_file,
+    table::{
+        file::InMemFile,
+        schema_file::{build_schema_file, SchemaFile},
+    },
 };
 use kvproto::metapb::Store;
 use native_br::{common::send_request_to_store_with_retry, error::Error::HttpError};
@@ -51,7 +55,7 @@ use test_cloud_server::{
     scheduler::Scheduler,
     tidb::TidbCluster,
     try_wait_result,
-    util::broadcast_schema_file_request,
+    util::broadcast_schema_file_request_and_check,
     ServerCluster,
 };
 use test_pd_client::TestPdClient;
@@ -511,21 +515,23 @@ async fn create_new_keyspace(
     let stores = pd_client.get_all_stores(true).unwrap();
     if !keyspace_meta.schemas().is_empty() {
         let schema_version = 10;
-        let schema_data =
-            build_schema_file(new_keyspace, schema_version, keyspace_meta.schemas(), 0);
+        let schema_data: Bytes =
+            build_schema_file(new_keyspace, schema_version, keyspace_meta.schemas(), 0).into();
         let schema_file_id = pd_client.alloc_id().unwrap();
         fs.create(
             schema_file_id,
-            schema_data.into(),
+            schema_data.clone(),
             dfs::Options::default().with_type(FileType::Schema),
         )
         .await
         .unwrap();
+        let schema_file =
+            SchemaFile::open(Arc::new(InMemFile::new(schema_file_id, schema_data))).unwrap();
         // Setup schema file to stores.
-        broadcast_schema_file_request(
+        broadcast_schema_file_request_and_check(
             &stores,
             new_keyspace,
-            schema_file_id,
+            &schema_file,
             Duration::from_secs(30),
         )
         .await;

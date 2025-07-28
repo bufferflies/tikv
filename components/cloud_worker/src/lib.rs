@@ -47,6 +47,8 @@ use metrics::WORKER_MEMORY_LIMITER_CURRENT_USED;
 use pd_client::PdClient;
 use prometheus::labels;
 use replication_worker::{CdcMsg, ReplicationWorker, ReplicationWorkerConfig};
+#[cfg(feature = "testexport")]
+pub use schema_manager::get_keyspace_stats_from_store;
 pub use schema_manager::{
     broadcast_schema_update_to_all_stores, SchemaManager, SchemaManagerConfig,
 };
