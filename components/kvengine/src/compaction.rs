@@ -2332,8 +2332,9 @@ fn files_to_columnar_tables(files: Vec<Arc<dyn File>>) -> Vec<ColumnarFile> {
 async fn load_blob_tables(
     fs: Arc<dyn dfs::Dfs>,
     blob_table_ids: &[u64],
-    opts: dfs::Options,
+    mut opts: dfs::Options,
 ) -> Result<HashMap<u64, BlobTable>> {
+    opts.file_type = FileType::Blob;
     let mut tasks = Vec::with_capacity(blob_table_ids.len());
     for &id in blob_table_ids {
         let afs = fs.clone();
@@ -3514,12 +3515,13 @@ fn persist_blob_table(
     builder: &mut BlobTableBuilder,
     tx: mpsc::Sender<dfs::Result<FilePersistResult>>,
     fs: Arc<dyn dfs::Dfs>,
-    opts: dfs::Options,
+    mut opts: dfs::Options,
 ) {
     let buf = builder.finish();
     let (smallest, biggest) = builder.smallest_biggest_key();
     let blob_table_create = new_blob_create_pb(id, smallest.to_vec(), biggest.to_vec());
     let fs_clone = fs.clone();
+    opts.file_type = FileType::Blob;
     fs.get_runtime().spawn(async move {
         let _ = tx
             .send(

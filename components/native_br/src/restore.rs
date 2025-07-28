@@ -507,6 +507,8 @@ pub struct RestoreConfig {
     /// Coarse split regions when the target region cover more than the factor *
     /// number of regions in backup.
     pub coarse_split_regions_factor: usize,
+    /// Whether to restore from a packed (maybe exotic) backup.
+    pub restore_packed_backup: bool,
     /// Maximum concurrent sending restore snapshot requests.
     /// The global max concurrency is `restore_concurrency_factor * store_count`
     pub restore_snapshot_concurrency_factor: usize,
@@ -530,6 +532,7 @@ impl Default for RestoreConfig {
             strict_tolerate: false,
             store_concurrency: RESTORE_RFENGINE_CONCURRENCY,
             coarse_split_regions_factor: 64, // It's about 32 GiB when region size is 500 MiB.
+            restore_packed_backup: false,
             restore_snapshot_concurrency_factor: DEFAULT_RESTORE_SNAPSHOT_CONCURRENCY_FACTOR,
         }
     }

@@ -84,7 +84,7 @@ pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64
     ))
 }
 
-pub(crate) fn store_raft_log_file_key(store_id: u64, epoch: u32) -> String {
+pub fn store_raft_log_file_key(store_id: u64, epoch: u32) -> String {
     format!("{:016x}/r{:016x}.rlog", store_id, epoch)
 }
 

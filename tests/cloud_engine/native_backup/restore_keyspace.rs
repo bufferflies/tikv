@@ -18,28 +18,34 @@ use kvengine::{
     table::columnar::{
         build_schema_file, new_int_handle_column_info, new_version_column_info, SchemaBuf,
     },
-    WRITE_CF,
+    KvEnginePerKeyspaceConfig, WRITE_CF,
 };
 use kvproto::metapb;
 use native_br::{
-    archive, backup, common::now, metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
-    restore::RestoreConfig, restore_keyspace, step,
+    archive, backup,
+    backup::BackupType,
+    common::now,
+    metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
+    packing::{offline_pd::OfflinePd, MigratePackEnv, PackContext, PackEnv, UnpackRun},
+    restore::RestoreConfig,
+    restore_keyspace, step,
 };
-use pd_client::PdClient;
+use pd_client::{pd_control::KeyspaceMeta, PdClient};
 use rand::prelude::*;
-use rstest::rstest;
+use rstest::{fixture, rstest};
 use schema::schema::StorageClass;
 use security::{SecurityConfig, SecurityManager};
+use tempfile::TempDir;
 use test_cloud_server::{
     client::{
         ClusterClientOptions, CommitAction, MutateOptions, RequestOptions, RequestPeerRole,
-        TxnWriteMethod,
+        TxnMutations, TxnWriteMethod,
     },
     keyspace::CreateKeyspaceOptions,
     must_wait,
-    oss::prepare_dfs,
+    oss::{prepare_dfs, ObjectStorageService},
     try_wait,
-    util::request_major_compaction,
+    util::{request_major_compaction, Mutation},
     ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
@@ -50,7 +56,7 @@ use tikv_util::{
     store::new_learner_peer,
     time, warn,
 };
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use txn_types::TimeStamp;
 
 use crate::{
@@ -69,6 +75,7 @@ const BACKUP_DAYS: usize = 4;
 // The numbers have no special meaning, just to make them different.
 // Require to be larger than 72, see `i_to_val`.
 const BASIC_DATA_LEN: usize = 80;
+const LONG_DATA_LEN: usize = 8 * 1024;
 const IMPORT_DATA_LEN: usize = 82;
 const PRE_BACKUP_DATA_LEN: usize = 84;
 const POST_BACKUP_DATA_LEN: usize = 86;
@@ -1669,6 +1676,261 @@ fn test_restore_keyspace_with_failed_store(
     }
     cluster.stop();
     oss.shutdown();
+}
+
+fn write_simple_data(cluster: &ServerCluster, keyspace: u32) {
+    let mut client = cluster.new_client_opt(ClusterClientOptions {
+        with_lock_resolver: false,
+        txn_file_max_chunk_size: Some(102400),
+    });
+    let i_to_key = gen_keyspace_key(keyspace);
+    for i in 0..16 {
+        client.put_kv(i..i + 1, &i_to_key, i_to_val(LONG_DATA_LEN));
+    }
+    let region = cluster.get_pd_client().get_region(&i_to_key(0)).unwrap();
+    cluster.flush_memtable(region.id).unwrap();
+    cluster.wait_for_memtable_flushed(region.id, Duration::from_secs(10));
+    client.split(&i_to_key(1024));
+    client.put_kv(16..2048, &i_to_key, i_to_val(BASIC_DATA_LEN));
+    client.split(&i_to_key(2048));
+    client.put_kv(2048..4196, &i_to_key, i_to_val(BASIC_DATA_LEN));
+    let region = cluster.get_pd_client().get_region(&i_to_key(2049)).unwrap();
+    cluster.flush_memtable(region.id).unwrap();
+    cluster.wait_for_memtable_flushed(region.id, Duration::from_secs(10));
+    let handle = Handle::current();
+    let mut muts = vec![];
+    for i in 4196..8120 {
+        let mut m = Mutation::default();
+        m.set_key(i_to_key(i).to_vec());
+        m.set_value(i_to_val(BASIC_DATA_LEN)(0));
+        m.set_op(kvproto::kvrpcpb::Op::Put);
+        muts.push(m);
+    }
+    let chunks = handle
+        .block_on(TxnMutations::build(
+            muts,
+            TxnWriteMethod::FileBased,
+            client.txn_file_helper(),
+        ))
+        .unwrap();
+    let start_ts = client.get_ts();
+    client
+        .kv_prewrite_with_retry(chunks.primary(), None, chunks.clone(), start_ts)
+        .unwrap();
+    client.kv_commit(chunks, start_ts, client.get_ts()).unwrap();
+    request_major_compaction(&runtime(), &cluster.get_pd_client(), keyspace);
+    // Wait the compaction finish to generate blob files...
+    std::thread::sleep(Duration::from_secs(10));
+
+    // Put something to memtable.
+    client.put_kv(8120..8192, &i_to_key, i_to_val(BASIC_DATA_LEN));
+}
+
+#[fixture]
+fn runtime() -> Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+struct TestDfs {
+    _temp_dir: TempDir,
+    oss: ObjectStorageService,
+    cfg: DFSConfig,
+}
+
+impl TestDfs {
+    fn s3fs(&self) -> S3Fs {
+        self.prefixed_s3fs("")
+    }
+
+    fn prefixed_s3fs(&self, prefix: &str) -> S3Fs {
+        S3Fs::new(
+            format!("{}{}", self.cfg.prefix.clone(), prefix),
+            self.cfg.s3_endpoint.clone(),
+            self.cfg.s3_key_id.clone(),
+            self.cfg.s3_secret_key.clone(),
+            self.cfg.s3_region.clone(),
+            self.cfg.s3_bucket.clone(),
+        )
+    }
+}
+
+#[fixture]
+fn dfs() -> TestDfs {
+    let (temp_dir, oss, cfg) = prepare_dfs(&format!("test_{}", rand::random::<u64>()));
+    TestDfs {
+        _temp_dir: temp_dir,
+        oss,
+        cfg,
+    }
+}
+
+#[rstest]
+fn test_restore_packed_backup(
+    #[values(BackupType::Lightweight, BackupType::Full)] backup_type: BackupType,
+    #[values(1, 2)] target_keyspace: u32,
+    #[values(true, false)] offline_pack: bool,
+    runtime: Runtime,
+    mut dfs: TestDfs,
+) {
+    use uuid::Uuid;
+
+    const KEYSPACE_ID: u32 = 1;
+    test_util::init_log_for_test();
+    let _g = runtime.enter();
+
+    // test_util::init_log_for_test();
+    let mut s3fs = Arc::new(dfs.s3fs());
+    let tmpfs =
+        Arc::new(dfs.prefixed_s3fs(&format!("/packed-backup/flush_temp/{}", Uuid::new_v4())));
+    let security_conf = SecurityConfig::default();
+
+    let pd = PdWrapper::new_test(1, &security_conf, None);
+    let mut cluster = ServerClusterBuilder::new(alloc_node_id_vec(NODES_COUNT), |_, conf| {
+        conf.dfs = dfs.cfg.clone();
+        conf.rfengine.target_file_size = ReadableSize::mb(512); // To prevent WAL to compact.
+        conf.rfengine.wal_chunk_target_file_size = ReadableSize::mb(64);
+        conf.rfengine.lightweight_backup = true;
+        conf.enable_inner_key_offset = true;
+        conf.kvengine
+            .per_keyspace_configs
+            .push(KvEnginePerKeyspaceConfig {
+                keyspace: KEYSPACE_ID,
+                enable_blob: true,
+                ..Default::default()
+            })
+    })
+    .pd(pd)
+    .build();
+    let mut opt = TikvWorkerOptions::default();
+    opt.kv_target_file_size = ReadableSize::mb(1);
+    cluster.start_tikv_workers(alloc_node_id_vec(1), opt);
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+    client.split_keyspace(target_keyspace);
+
+    write_simple_data(&cluster, KEYSPACE_ID);
+
+    let backup_ts = client.get_ts().into_inner();
+    let backup_config = backup::BackupConfig {
+        dfs: dfs.cfg.clone(),
+        skip_keyspace_meta: true,
+        ..Default::default()
+    };
+    let (path, backup_meta) = backup::backup_cluster_with_ts(
+        backup_config,
+        backup_type,
+        "".to_owned(),
+        cluster.get_pd_client().as_ref(),
+        backup_ts,
+        None,
+    )
+    .expect("backup::backup_cluster");
+    let mut ref_store = client.dump_ref_store();
+    client.del_kv(0..8192, i_to_key);
+
+    let work_dir = TempDir::new().unwrap();
+
+    let pd_client = if offline_pack {
+        cluster.stop();
+        Arc::new(
+            runtime
+                .block_on(OfflinePd::new(
+                    backup_meta.cluster_id,
+                    backup_meta.keyspace_meta.clone(),
+                ))
+                .unwrap(),
+        ) as Arc<_>
+    } else {
+        cluster.get_pure_pd_client()
+    };
+    let mut keyspace_meta = KeyspaceMeta::default();
+    keyspace_meta.id = KEYSPACE_ID;
+    keyspace_meta.name = format!("ks{}", KEYSPACE_ID);
+    let mut ctx = PackContext::create_from_env(
+        PackEnv {
+            pd_client,
+            offline: offline_pack,
+            dfs: s3fs.clone(),
+            tmpfs: tmpfs.clone(),
+            work_path: work_dir.path().to_owned(),
+            restore_conf: Default::default(),
+            _temp_dir: None,
+            reporter: Arc::new(DummyStepReporter {}),
+        },
+        backup_meta,
+        None,
+        keyspace_meta,
+    )
+    .unwrap();
+    let (packed_path, _) = runtime.block_on(ctx.execute(&path)).unwrap();
+    cluster.stop();
+
+    let new_files = ctx.overlay_fs().modified_files();
+    assert!(!new_files.is_empty(), "no new file was flushed.");
+    for (ty, id) in new_files {
+        // Make sure the new flushed file not directly put to the upstream cluster's.
+        let exists = runtime
+            .block_on(s3fs.exists(id, Options::default().with_type(ty)))
+            .unwrap();
+        assert!(!exists, "conflicting file found {}:{}", ty, id);
+    }
+
+    // move to another cluster.
+    let s3fs_mkii = dfs.prefixed_s3fs("/mkii");
+    cluster = ServerCluster::new(
+        alloc_node_id_vec(NODES_COUNT),
+        |_, conf: &mut TikvConfig| {
+            conf.dfs = dfs.cfg.clone();
+            conf.dfs.prefix = format!("{}/mkii", conf.dfs.prefix);
+            conf.rfengine.target_file_size = ReadableSize::mb(512); // To prevent WAL to compact.
+            conf.rfengine.wal_chunk_target_file_size = ReadableSize::mb(64);
+            conf.rfengine.lightweight_backup = true;
+            conf.enable_inner_key_offset = true;
+        },
+    );
+    cluster.wait_region_replicated(&[], 3);
+    client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+    client.split_keyspace(target_keyspace);
+    s3fs = Arc::new(s3fs_mkii);
+
+    let env = runtime
+        .block_on(MigratePackEnv::load_exotic(s3fs.clone(), &packed_path))
+        .unwrap();
+    let packed_path = runtime
+        .block_on(UnpackRun::new(env, cluster.get_pure_pd_client()).execute())
+        .unwrap();
+
+    restore_keyspace::restore_keyspace(
+        KEYSPACE_ID,
+        target_keyspace,
+        &packed_path,
+        None,
+        s3fs.clone(),
+        RestoreConfig {
+            tolerate_err: 0,
+            timeout_restore_snapshot: ReadableDuration::secs(20),
+            restore_packed_backup: true,
+            ..Default::default()
+        },
+        cluster.get_pd_client(),
+        &runtime,
+        None,
+        Arc::new(DummyStepReporter::default()),
+    )
+    .unwrap();
+
+    if target_keyspace != KEYSPACE_ID {
+        ref_store.rewrite_keyspace_prefix(target_keyspace);
+    }
+    client
+        .verify_data_with_given_ref_store(&ref_store, None, &Default::default())
+        .unwrap();
+    dfs.oss.shutdown()
 }
 
 // Stop random node when `node_id` is `None`.

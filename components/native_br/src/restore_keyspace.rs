@@ -22,6 +22,7 @@ use collections::{HashMap, HashSet};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{header, Request};
 use hyper::Body;
+use itertools::Itertools;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
     ia::util::IaConfig,
@@ -32,6 +33,7 @@ use kvengine::{
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
+use pb::PackedBackup;
 use pd_client::{pd_control::PdControl, PdClient};
 use protobuf::Message;
 use raft::eraftpb;
@@ -57,7 +59,7 @@ use txn_types::TimeStamp;
 use crate::{
     archive::{
         get_cluster_backup_file_and_meta, get_incremental_backup_with_name, get_not_found_files,
-        ArchiveReader, StoreMeta,
+        get_packed_backup_meta, ArchiveReader, StoreMeta,
     },
     common::{
         collect_snapshot_meta_rlog_files, get_all_stores_except_tiflash, load_peer_raft_state,
@@ -70,6 +72,7 @@ use crate::{
         Result,
     },
     lock::LockResolver,
+    packing::RestorePackEnv,
     restore::RestoreConfig,
     step,
     tiflash::remove_tiflash_replica_of_keyspace,
@@ -195,6 +198,34 @@ pub fn restore_keyspace_with_cfg(
     )
 }
 
+pub fn load_norm_backup_meta(
+    s3fs: &Arc<S3Fs>,
+    backup_name: &str,
+) -> Result<(ClusterBackupMeta, Option<ArchiveReader>)> {
+    match get_cluster_backup_file_and_meta(s3fs, backup_name.to_owned()) {
+        Ok((_, backup_meta)) => Ok((backup_meta, None)),
+        Err(dfs::Error::NoSuchKey(err)) => {
+            warn!(
+                "The cluster backup meta {} is not found: {:?}, try the archive reader",
+                backup_name.to_owned(),
+                err
+            );
+            let backup_file =
+                get_incremental_backup_with_name(s3fs.get_prefix(), backup_name.to_owned());
+            let backup_date = backup_file.created_at().date_naive();
+            let archive_reader = ArchiveReader::new(s3fs.clone(), &backup_date)?;
+            let backup_meta = archive_reader
+                .read_meta_file()
+                .map_err(|_| MetaNotFound(backup_file.id()))?;
+            Ok((backup_meta, Some(archive_reader)))
+        }
+        Err(err) => {
+            error!("get cluster backup meta {} failed: {:?}", backup_name, err);
+            Err(Error::DfsError(err))
+        }
+    }
+}
+
 pub fn restore_keyspace(
     keyspace_id: u32,
     target_keyspace_id: u32,
@@ -235,29 +266,20 @@ pub fn restore_keyspace(
         ApiV2::get_keyspace_range_by_id(target_keyspace_id);
 
     reporter.report_step(RestoreStep::LoadBackupMeta);
-    let (cluster_backup, archive_reader) =
-        match get_cluster_backup_file_and_meta(&s3fs, backup_name.to_owned()) {
-            Ok((_, backup_meta)) => (backup_meta, None),
-            Err(dfs::Error::NoSuchKey(err)) => {
-                warn!(
-                    "The cluster backup meta {} is not found: {:?}, try the archive reader",
-                    backup_name.to_owned(),
-                    err
-                );
-                let backup_file =
-                    get_incremental_backup_with_name(s3fs.get_prefix(), backup_name.to_owned());
-                let backup_date = backup_file.created_at().date_naive();
-                let archive_reader = ArchiveReader::new(s3fs.clone(), &backup_date)?;
-                let backup_meta = archive_reader
-                    .read_meta_file()
-                    .map_err(|_| MetaNotFound(backup_file.id()))?;
-                (backup_meta, Some(archive_reader))
-            }
-            Err(err) => {
-                error!("get cluster backup meta {} failed: {:?}", backup_name, err);
-                return Err(Error::DfsError(err));
-            }
+    if config.restore_packed_backup {
+        let packed = get_packed_backup_meta(&s3fs, backup_name.to_owned())?;
+        let mut env = RestorePackEnv {
+            dfs: s3fs.clone(),
+            pd_client,
+            target_keyspace: target_keyspace_id,
+            reporter: reporter.as_ref() as &dyn ReportRestoreStepTrait,
+            restore_config: config.clone(),
+            data_dir: &working_path,
         };
+        let restored = env.execute(packed)?;
+        return Ok(restored);
+    }
+    let (cluster_backup, archive_reader) = load_norm_backup_meta(&s3fs, backup_name)?;
     let truncate_ts = if archive_reader.is_none() {
         truncate_ts
     } else {
@@ -270,8 +292,8 @@ pub fn restore_keyspace(
         cluster_backup.is_lightweight,
         log_wrappers::hex_encode_upper(keyspace_start),
         log_wrappers::hex_encode_upper(keyspace_end),
-        log_wrappers::hex_encode_upper(&target_keyspace_start),
-        log_wrappers::hex_encode_upper(&target_keyspace_end),
+        log_wrappers::hex_encode_upper(target_keyspace_start),
+        log_wrappers::hex_encode_upper(target_keyspace_end),
         cluster_backup.backup_ts,
         cluster_backup.safe_ts,
         truncate_ts,
@@ -347,6 +369,20 @@ pub fn restore_keyspace(
     let flush_cnt = cluster.flush_shards(config.timeout_wait_flush.0)?;
     step!("Keyspace {keyspace_tag} flush {flush_cnt} shards");
 
+    let mut res = prepare_and_restore_cluster(&mut cluster, config, runtime, &*reporter)?;
+    res.resolved_ts = resolved_ts.unwrap_or(truncate_ts).into();
+    Ok(res)
+}
+
+/// This should be call after all data are loaded into the KVEngine.
+/// Rfengine won't be involved in this function.
+pub fn prepare_and_restore_cluster(
+    cluster: &mut BackupCluster,
+    config: RestoreConfig,
+    runtime: &Runtime,
+    reporter: &dyn ReportRestoreStepTrait,
+) -> Result<RestoredKeyspace> {
+    let keyspace_tag = cluster.tag.clone();
     reporter.report_step(RestoreStep::TruncateTs);
     let truncate_ts_cnt = runtime.block_on(cluster.truncate_ts())?;
     step!(
@@ -356,7 +392,8 @@ pub fn restore_keyspace(
         cluster.truncate_ts
     );
 
-    // Pre-split & scatter target keyspace regions.
+    let (target_keyspace_start, target_keyspace_end) =
+        ApiV2::get_keyspace_range_by_id(cluster.target_keyspace_id);
     reporter.report_step(RestoreStep::SplitRegions);
     cluster.pre_split_and_scatter_regions(&config, runtime)?;
 
@@ -372,7 +409,7 @@ pub fn restore_keyspace(
     // NOTE: must call `bo::on_error` before every "continue".
     loop {
         let mut target_regions = match runtime.block_on(get_target_regions(
-            pd_client.as_ref() as &dyn PdClient,
+            cluster.pd_client.as_ref(),
             &target_keyspace_start,
             &target_keyspace_end,
         )) {
@@ -428,7 +465,7 @@ pub fn restore_keyspace(
         let ret = restore_snapshots(
             &keyspace_tag,
             runtime,
-            pd_client.clone(),
+            cluster.pd_client.clone(),
             snapshots,
             &mut success_ranges,
             config.timeout_restore_snapshot.0,
@@ -453,7 +490,7 @@ pub fn restore_keyspace(
 
     reporter.report_step(RestoreStep::RetainSstFiles);
     let files = cluster.get_all_shard_files(None, None);
-    match retain_sst_files(files, &s3fs) {
+    match retain_sst_files(files, &cluster.dfs) {
         Err(e) => {
             return Err(box_err!(
                 "Keyspace {} fail to retain restored sst files in s3, {:?}",
@@ -467,12 +504,12 @@ pub fn restore_keyspace(
     }
 
     let restore_ret = RestoredKeyspace {
-        keyspace_id,
-        target_keyspace_id,
-        ts: truncate_ts,
+        keyspace_id: cluster.keyspace_id,
+        target_keyspace_id: cluster.target_keyspace_id,
+        ts: cluster.truncate_ts,
         restore_bytes,
         tolerated_err: cluster.tolerated_err(),
-        resolved_ts: resolved_ts.unwrap_or(truncate_ts).into(),
+        resolved_ts: TimeStamp::zero(),
     };
     Ok(restore_ret)
 }
@@ -577,6 +614,22 @@ struct AlignedRegion {
     backup_shards_id: Vec<u64>,
 }
 
+pub struct BackupClusterOptions {
+    pub cluster_meta: ClusterBackupMeta,
+    pub path: PathBuf,
+    pub pd_client: Arc<dyn PdClient>,
+    pub dfs: Arc<S3Fs>,
+    pub restore_conf: RestoreConfig,
+    pub keyspace_id: u32,
+    pub target_keyspace_id: u32,
+    pub truncate_ts: u64,
+    pub archiving: bool,
+    pub archive_reader: Option<ArchiveReader>,
+    pub load_all_tables: bool, // `true` for "check_table" ONLY.
+    pub override_dfs: Option<Arc<dyn Dfs>>,
+    pub offline_packing: bool,
+}
+
 pub struct BackupCluster {
     tag: String,
     path: PathBuf,
@@ -599,7 +652,7 @@ pub struct BackupCluster {
     kv_engine: Option<kvengine::Engine>,
 
     // region_id -> shard.
-    shards: HashMap<u64, BackupShard>,
+    pub(crate) shards: HashMap<u64, BackupShard>,
     // region_id -> raw_meta, used for kv_engine recover.
     raw_metas: HashMap<u64, pb::ChangeSet>,
     // store_id -> Vec<shard_id>.
@@ -627,6 +680,9 @@ pub struct BackupCluster {
     load_all_tables: bool,
 
     id_allocator: Arc<dyn IdAllocator>,
+
+    /// Override the dfs used by kvengine.
+    override_dfs: Option<Arc<dyn Dfs>>,
     // NOTE: New members need to check if need to clear in reset_keyspace.
 }
 
@@ -686,6 +742,40 @@ impl BackupCluster {
         archive_reader: Option<ArchiveReader>,
         load_all_tables: bool, // `true` for "check_table" ONLY.
     ) -> Result<BackupCluster> {
+        Self::new_opt(BackupClusterOptions {
+            cluster_meta: cluster_meta.clone(),
+            path,
+            pd_client,
+            dfs,
+            restore_conf,
+            keyspace_id,
+            target_keyspace_id,
+            truncate_ts,
+            archiving,
+            archive_reader,
+            load_all_tables,
+            override_dfs: None,
+            offline_packing: false,
+        })
+    }
+
+    pub fn new_opt(options: BackupClusterOptions) -> Result<BackupCluster> {
+        let BackupClusterOptions {
+            cluster_meta,
+            path,
+            pd_client,
+            dfs,
+            restore_conf,
+            keyspace_id,
+            target_keyspace_id,
+            truncate_ts,
+            archiving,
+            archive_reader,
+            load_all_tables,
+            override_dfs,
+            offline_packing,
+        } = options;
+
         let (keyspace_start, keyspace_end) = if archiving {
             (Vec::default(), GLOBAL_SHARD_END_KEY.to_vec())
         } else {
@@ -723,6 +813,7 @@ impl BackupCluster {
             txn_chunk_ids_in_wal: None,
             load_all_tables,
             id_allocator: Arc::new(PdIdAllocator::new(pd_client)),
+            override_dfs,
         };
 
         let mut store_configs = HashMap::with_capacity(cluster_meta.stores.len());
@@ -803,6 +894,7 @@ impl BackupCluster {
                     fetch_wal_timeout,
                     archiving,
                     archive_store_meta,
+                    offline_packing,
                 );
                 if let Err(err) = &res {
                     warn!(
@@ -858,6 +950,117 @@ impl BackupCluster {
         Ok(cluster)
     }
 
+    pub fn of_packed(
+        packed_backup: &PackedBackup,
+        path: PathBuf,
+        pd_client: Arc<dyn PdClient>,
+        dfs: Arc<S3Fs>,
+        restore_conf: RestoreConfig,
+        target_keyspace_id: u32,
+        truncate_ts: u64,
+    ) -> Result<Self> {
+        let (keyspace_start, keyspace_end) =
+            ApiV2::get_keyspace_range_by_id(packed_backup.keyspace_id);
+        let tag = make_keyspace_tag(packed_backup.keyspace_id, target_keyspace_id);
+        let security_conf = restore_conf.security.clone();
+        let master_key = dfs.get_runtime().block_on(security_conf.new_master_key());
+        let mut cluster = Self {
+            tag: tag.clone(),
+            path,
+            pd_client: pd_client.clone(),
+            dfs,
+            security_conf,
+            master_key,
+            keyspace_id: packed_backup.keyspace_id,
+            target_keyspace_id,
+            keyspace_start,
+            keyspace_end,
+            truncate_ts,
+            archive_reader: None,
+            shards: Default::default(),
+            raw_metas: Default::default(),
+            raft_engines: Default::default(),
+            store_configs: Default::default(),
+            kv_engine: Default::default(),
+            store_shards: Default::default(),
+            shards_store_map: Default::default(),
+            sorted_shards: Default::default(),
+            shards_need_flush: Default::default(),
+            shards_need_truncate: Default::default(),
+            meta_applier: None,
+            meta_sender: None,
+            tolerated_err: 0,
+            txn_chunk_ids_in_wal: None,
+            load_all_tables: false,
+            id_allocator: Arc::new(PdIdAllocator::new(pd_client)),
+            override_dfs: None,
+        };
+
+        const PACKED_STORE_ID: u64 = 0;
+        const PACKED_PEER_ID: u64 = 0;
+        let shards = packed_backup
+            .shards
+            .iter()
+            .map(|s| {
+                (
+                    s.shard_id,
+                    BackupShard {
+                        region_id: s.shard_id,
+                        store_id: PACKED_STORE_ID,
+                        peer_id: PACKED_PEER_ID,
+                        need_flush: false,
+                        meta: ShardMeta::new(PACKED_STORE_ID, s),
+                        raw_meta: Some(s.clone()),
+                        raft_state: RaftState::default(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let shard_ids = shards
+            .keys()
+            .copied()
+            .sorted_by_key(|v| shards.get(v).unwrap().lower_bound())
+            .collect::<Vec<_>>();
+        cluster.raw_metas = shards
+            .iter()
+            .map(|(k, v)| (*k, v.raw_meta.clone().unwrap()))
+            .collect();
+        cluster.shards = shards.clone();
+        cluster
+            .store_shards
+            .insert(PACKED_STORE_ID, shard_ids.clone());
+        cluster.sorted_shards = shard_ids;
+
+        #[derive(Clone)]
+        struct NoopRecovery;
+        impl kvengine::RecoverHandler for NoopRecovery {
+            fn recover(
+                &self,
+                _: &kvengine::Engine,
+                _: &Arc<kvengine::Shard>,
+                _: &ShardMeta,
+            ) -> kvengine::Result<()> {
+                Ok(())
+            }
+        }
+
+        cluster.setup_kv_engine_with(
+            PACKED_STORE_ID,
+            &cluster.generate_store_config(PACKED_STORE_ID),
+            NoopRecovery,
+        )?;
+        // NOTE: should we save the txn_chunks_ids_in_wal to the pack metadata?
+        cluster.txn_chunk_ids_in_wal = Some(vec![]);
+        let mut applied_shards = cluster
+            .meta_applier
+            .as_ref()
+            .unwrap()
+            .take_shards()
+            .unwrap();
+        cluster.shards = mem::take(&mut applied_shards);
+        Ok(cluster)
+    }
+
     pub fn tag(&self) -> &str {
         &self.tag
     }
@@ -873,6 +1076,7 @@ impl BackupCluster {
         fetch_wal_timeout: Duration,
         archiving: bool,
         archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
+        offline_packing: bool,
     ) -> Result<RfEngine> {
         let rlog_files = if let Some((date, store_meta)) = &archive_store_meta {
             ArchiveReader::read_store_rlog_files(&dfs, date, store_meta)?
@@ -897,7 +1101,7 @@ impl BackupCluster {
         let rf_engine = TikvServer::init_raft_engine(conf)?;
 
         // When archiving, the dfs should have complete wal chunks.
-        let complete_wal_chunks = archiving;
+        let complete_wal_chunks = archiving || offline_packing;
         let ctx = ReplayWalLogsContext {
             pd_client,
             dfs,
@@ -940,6 +1144,7 @@ impl BackupCluster {
         fetch_wal_timeout: Duration,
         archiving: bool,
         archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
+        offline_packing: bool,
     ) -> Result<RfEngine> {
         if cluster_backup.is_lightweight {
             Self::setup_raft_engine_for_lightweight(
@@ -953,6 +1158,7 @@ impl BackupCluster {
                 fetch_wal_timeout,
                 archiving,
                 archive_store_meta,
+                offline_packing,
             )
         } else {
             Self::setup_raft_engine_for_normal(store_id, cluster_backup, conf, dfs)
@@ -977,10 +1183,18 @@ impl BackupCluster {
     }
 
     fn setup_kv_engine(&mut self, store_id: u64) -> Result<()> {
-        let conf = self.store_configs.get(&store_id).unwrap();
+        let conf = self.store_configs.get(&store_id).unwrap().clone();
         let rf_engine = self.raft_engines.get(&store_id).unwrap();
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
+        self.setup_kv_engine_with(store_id, &conf, recoverer)
+    }
 
+    fn setup_kv_engine_with(
+        &mut self,
+        store_id: u64,
+        conf: &TikvConfig,
+        recoverer: impl kvengine::RecoverHandler + 'static,
+    ) -> Result<()> {
         if self.kv_engine.is_none() {
             let io_rate_limiter =
                 Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
@@ -990,10 +1204,15 @@ impl BackupCluster {
             let store_limiter = Arc::new(StoreLimiter::dummy());
 
             let mut meta_iter = MetaIterator::new(store_id, Vec::new(), HashMap::new());
+            let dfs = if let Some(odfs) = self.override_dfs.as_ref() {
+                odfs.clone()
+            } else {
+                self.dfs.clone()
+            };
             let (kv_engine, sender, receiver) = TikvServer::init_kv_engine(
                 self.pd_client.clone(),
                 conf,
-                self.dfs.clone(),
+                dfs,
                 io_rate_limiter,
                 store_limiter,
                 &mut meta_iter,
@@ -2481,7 +2700,7 @@ impl MetaApplier {
     }
 }
 
-struct MetaIterator {
+pub struct MetaIterator {
     store_id: u64,
     shards: Vec<u64>,
     raw_metas: HashMap<u64, pb::ChangeSet>,
@@ -2523,7 +2742,7 @@ async fn get_target_regions(
 
     let mut regions = vec![];
     let mut next_key = encoded_start_key.clone();
-    while next_key < encoded_end_key {
+    while next_key < encoded_end_key && !next_key.is_empty() {
         let region = pd_client.get_region_async(&next_key).await?;
         next_key = region.get_end_key().to_vec();
         regions.push(region.into());

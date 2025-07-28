@@ -10,6 +10,7 @@ pub mod common;
 pub mod error;
 pub mod lock;
 pub mod metrics;
+pub mod packing;
 pub mod restore;
 pub mod restore_keyspace;
 mod tiflash;

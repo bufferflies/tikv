@@ -254,3 +254,31 @@ message VectorIndexDef {
   repeated string spec_keys = 4;
   repeated bytes spec_values = 5;
 }
+
+message PackedBackup {
+  repeated ChangeSet shards = 1;
+  uint64 cluster_id = 2;
+  uint64 backup_ts = 3;
+  uint64 safe_ts = 4;
+  uint32 keyspace_id = 5;
+  uint64 resolved_ts = 8;
+  uint64 engine_size = 9;
+
+  string content_bucket = 7;
+
+  string keyspace_name = 11;
+  uint64 keyspace_size = 10;
+
+  // For not-yet-unpacked backups only.
+  repeated FileRef content_file_refs = 6;
+
+  // For unpacked backups only.
+  bool unpacked = 12;
+  string unpacked_from = 13;
+}
+
+message FileRef {
+  uint32 file_type = 1;
+  uint64 file_id = 2;
+  string file_abs_path = 3;
+}

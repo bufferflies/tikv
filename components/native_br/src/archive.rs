@@ -8,6 +8,7 @@ use chrono::NaiveDate;
 use collections::{HashMap, HashSet};
 use engine_traits::GetObjectOptions;
 use kvengine::dfs::{self, DFSConfig, Dfs, FileType, Options, S3Fs, STORAGE_CLASS_GLACIER_IR};
+use kvenginepb::PackedBackup;
 use pd_client::PdClient;
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
@@ -15,7 +16,7 @@ use security::SecurityConfig;
 use tikv_util::{error, info, mpsc::Receiver, time::Instant, warn};
 
 use crate::{
-    backup::{backup_file_full_path, IncrementalBackupFile},
+    backup::{backup_file_full_path, packed_backup_prefixed, IncrementalBackupFile},
     common::{
         collect_store_wal_rlog_files, create_pd_client, StoreRlog, StoreWalRlog, TableFile,
         INCREMENTAL_BACKUP_FOLDER_FORMAT,
@@ -535,7 +536,7 @@ fn get_sorted_deleted_files(
     deleted
 }
 
-fn get_cluster_backup_files(
+pub(crate) fn get_cluster_backup_files(
     pd_client: Arc<dyn PdClient>,
     s3fs: Arc<S3Fs>,
     cluster_id: u64,
@@ -638,20 +639,18 @@ pub fn get_cluster_backup_file_and_meta(
     s3fs: &S3Fs,
     name: String,
 ) -> dfs::Result<(Bytes, ClusterBackupMeta)> {
-    let backup_key = backup_file_full_path(s3fs.get_prefix(), name.clone(), None);
+    let key = backup_file_full_path(s3fs.get_prefix(), name.clone(), None);
     let runtime = s3fs.get_runtime();
     let data = runtime.block_on(s3fs.get_object(
-        backup_key.clone(),
+        key.clone(),
         name,
         engine_traits::GetObjectOptions::default(),
     ))?;
-    let mut cluster_backup = ClusterBackupMeta::new();
+    let mut cluster_backup = ClusterBackupMeta::default();
     cluster_backup.merge_from_bytes(&data).map_err(|e| {
-        dfs::Error::Other(format!(
-            "Incorrect encoded data from s3 {}, err {}",
-            backup_key, e
-        ))
+        dfs::Error::Other(format!("Incorrect encoded data from s3 {}, err {}", key, e))
     })?;
+
     info!(
         "Restore cluster_id {}, alloc_id {}, backup_ts {}, safe_ts {}, store cnt {}",
         cluster_backup.cluster_id,
@@ -661,6 +660,24 @@ pub fn get_cluster_backup_file_and_meta(
         cluster_backup.stores.len()
     );
     Ok((data, cluster_backup))
+}
+
+pub fn get_packed_backup_meta(s3fs: &S3Fs, name: String) -> dfs::Result<PackedBackup> {
+    let key = packed_backup_prefixed(&s3fs.get_prefix(), &name);
+    let runtime = s3fs.get_runtime();
+    let data = runtime.block_on(s3fs.get_object(
+        key.clone(),
+        name,
+        engine_traits::GetObjectOptions::default(),
+    ))?;
+    let mut packed_backup = PackedBackup::default();
+    packed_backup.merge_from_bytes(&data).map_err(|e| {
+        dfs::Error::Other(format!(
+            "Incorrect packed backup data from s3 {}, err {}",
+            key, e
+        ))
+    })?;
+    Ok(packed_backup)
 }
 
 pub async fn get_all_archive_index_paths(

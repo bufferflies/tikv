@@ -8,5 +8,5 @@ failure-output = "final"
 path = "junit.xml"
 
 [[profile.ci.overrides]]
-filter = 'test(transaction::ia) | test(ia_file::test_read)'
+filter = 'test(transaction::ia) | test(ia_file::test_read) | test(test_native_br::test_backup_pessimistic_lock)'
 retries = 3

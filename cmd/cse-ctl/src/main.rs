@@ -11,6 +11,7 @@ mod common;
 mod dfsgc;
 mod http;
 mod mvcc;
+mod pack_backup;
 mod recovery;
 mod region;
 mod resolve_lock;
@@ -20,6 +21,7 @@ mod stats;
 mod test;
 mod txn_file;
 mod txn_log;
+mod unpack_backup;
 mod unsafe_recover;
 
 use std::{env, fs::OpenOptions, io, sync::LazyLock};
@@ -37,6 +39,7 @@ use crate::{
     dfsgc::{execute_dfsgc, DfsGcArgs},
     http::HttpArgs,
     mvcc::{execute_mvcc, MvccArgs},
+    pack_backup::{execute_pack_backup, PackBackupArgs},
     recovery::{execute_recovery, RecoveryArgs},
     resolve_lock::{execute_resolve_lock, ResolveLockArgs},
     restore::{execute_restore_command, RestoreCommand},
@@ -45,6 +48,7 @@ use crate::{
     test::{execute_test, TestArgs},
     txn_file::{execute_show_txn_chunk, ShowTxnChunkArgs},
     txn_log::{execute_show_txn_log, ShowTxnLogArgs},
+    unpack_backup::{execute_unpack_backup, UnpackBackupArgs},
     unsafe_recover::{execute_unsafe_recover, UnsafeRecoverArgs},
     Commands::*,
 };
@@ -68,6 +72,12 @@ fn main() {
         }
         Archive(archive_args) => {
             execute_archive(archive_args);
+        }
+        PackBackup(pack_backup_args) => {
+            execute_pack_backup(pack_backup_args);
+        }
+        UnpackBackup(unpack_backup_args) => {
+            execute_unpack_backup(unpack_backup_args);
         }
         Stats(stats_arg) => {
             execute_stats(stats_arg);
@@ -153,6 +163,10 @@ pub enum Commands {
     Restore(RestoreCommand),
     /// Archive old backups.
     Archive(ArchiveArgs),
+    /// Pack backup files into a compact representation.
+    PackBackup(PackBackupArgs),
+    /// Unpack backup files from another cluster to the current cluster.
+    UnpackBackup(UnpackBackupArgs),
     /// Stats s3 objects.
     Stats(StatsArgs),
     /// Resolve lock

@@ -214,6 +214,42 @@ pub fn show_backup_summary(
     println!("{}  lightweight: {}", indent, is_lightweight);
 }
 
+pub fn show_packed_backup_summary(
+    packed_backup_meta: &kvenginepb::PackedBackup,
+    backup_name: &str,
+    indent: usize,
+) -> bool {
+    let indent = " ".repeat(indent);
+    println!("{}[Packed Backup {}]", indent, backup_name);
+    println!("{}  cluster_id: {}", indent, packed_backup_meta.cluster_id);
+    println!("{}  backup_ts: {}", indent, packed_backup_meta.backup_ts);
+    println!("{}  safe_ts: {}", indent, packed_backup_meta.safe_ts);
+    println!(
+        "{}  resolved_ts: {}",
+        indent, packed_backup_meta.resolved_ts
+    );
+    println!(
+        "{}  keyspace_name: {}",
+        indent, packed_backup_meta.keyspace_name
+    );
+    println!(
+        "{}  keyspace_size: {}",
+        indent, packed_backup_meta.keyspace_size
+    );
+    if !packed_backup_meta.unpacked {
+        println!(
+            "{}  !!!! This backup CANNOT be recovered before you `unpack` it.",
+            indent
+        );
+        return false;
+    }
+    println!(
+        "{}  unpacked_from: {}",
+        indent, packed_backup_meta.unpacked_from
+    );
+    true
+}
+
 const START_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 #[derive(Args)]

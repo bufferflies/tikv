@@ -4,6 +4,7 @@ use std::{fmt, future::Future};
 
 use bytes::{Buf, Bytes};
 use collections::HashMap;
+use kvenginepb::TxnFileRef;
 use kvproto::kvrpcpb;
 use log_wrappers::Value;
 use protobuf::Message;
@@ -312,6 +313,11 @@ impl TxnFileRefPropertyHelper {
         chunk_ids.sort();
         chunk_ids.dedup();
         chunk_ids
+    }
+
+    /// Iterate over the txn file refs.
+    pub fn mut_txn_file_refs(&mut self) -> impl std::iter::Iterator<Item = &mut TxnFileRef> {
+        self.txn_file_refs.txn_file_refs.iter_mut()
     }
 }
 

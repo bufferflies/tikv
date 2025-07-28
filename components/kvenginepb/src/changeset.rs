@@ -9763,6 +9763,934 @@ impl ::protobuf::reflect::ProtobufValue for VectorIndexDef {
     }
 }
 
+#[derive(PartialEq,Clone,Default)]
+pub struct PackedBackup {
+    // message fields
+    pub shards: ::protobuf::RepeatedField<ChangeSet>,
+    pub cluster_id: u64,
+    pub backup_ts: u64,
+    pub safe_ts: u64,
+    pub keyspace_id: u32,
+    pub resolved_ts: u64,
+    pub engine_size: u64,
+    pub content_bucket: ::std::string::String,
+    pub keyspace_name: ::std::string::String,
+    pub keyspace_size: u64,
+    pub content_file_refs: ::protobuf::RepeatedField<FileRef>,
+    pub unpacked: bool,
+    pub unpacked_from: ::std::string::String,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a PackedBackup {
+    fn default() -> &'a PackedBackup {
+        <PackedBackup as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl PackedBackup {
+    pub fn new() -> PackedBackup {
+        ::std::default::Default::default()
+    }
+
+    // repeated .enginepb.ChangeSet shards = 1;
+
+
+    pub fn get_shards(&self) -> &[ChangeSet] {
+        &self.shards
+    }
+    pub fn clear_shards(&mut self) {
+        self.shards.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_shards(&mut self, v: ::protobuf::RepeatedField<ChangeSet>) {
+        self.shards = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_shards(&mut self) -> &mut ::protobuf::RepeatedField<ChangeSet> {
+        &mut self.shards
+    }
+
+    // Take field
+    pub fn take_shards(&mut self) -> ::protobuf::RepeatedField<ChangeSet> {
+        ::std::mem::replace(&mut self.shards, ::protobuf::RepeatedField::new())
+    }
+
+    // uint64 cluster_id = 2;
+
+
+    pub fn get_cluster_id(&self) -> u64 {
+        self.cluster_id
+    }
+    pub fn clear_cluster_id(&mut self) {
+        self.cluster_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_cluster_id(&mut self, v: u64) {
+        self.cluster_id = v;
+    }
+
+    // uint64 backup_ts = 3;
+
+
+    pub fn get_backup_ts(&self) -> u64 {
+        self.backup_ts
+    }
+    pub fn clear_backup_ts(&mut self) {
+        self.backup_ts = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_backup_ts(&mut self, v: u64) {
+        self.backup_ts = v;
+    }
+
+    // uint64 safe_ts = 4;
+
+
+    pub fn get_safe_ts(&self) -> u64 {
+        self.safe_ts
+    }
+    pub fn clear_safe_ts(&mut self) {
+        self.safe_ts = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_safe_ts(&mut self, v: u64) {
+        self.safe_ts = v;
+    }
+
+    // uint32 keyspace_id = 5;
+
+
+    pub fn get_keyspace_id(&self) -> u32 {
+        self.keyspace_id
+    }
+    pub fn clear_keyspace_id(&mut self) {
+        self.keyspace_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keyspace_id(&mut self, v: u32) {
+        self.keyspace_id = v;
+    }
+
+    // uint64 resolved_ts = 8;
+
+
+    pub fn get_resolved_ts(&self) -> u64 {
+        self.resolved_ts
+    }
+    pub fn clear_resolved_ts(&mut self) {
+        self.resolved_ts = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_resolved_ts(&mut self, v: u64) {
+        self.resolved_ts = v;
+    }
+
+    // uint64 engine_size = 9;
+
+
+    pub fn get_engine_size(&self) -> u64 {
+        self.engine_size
+    }
+    pub fn clear_engine_size(&mut self) {
+        self.engine_size = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_engine_size(&mut self, v: u64) {
+        self.engine_size = v;
+    }
+
+    // string content_bucket = 7;
+
+
+    pub fn get_content_bucket(&self) -> &str {
+        &self.content_bucket
+    }
+    pub fn clear_content_bucket(&mut self) {
+        self.content_bucket.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_content_bucket(&mut self, v: ::std::string::String) {
+        self.content_bucket = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_content_bucket(&mut self) -> &mut ::std::string::String {
+        &mut self.content_bucket
+    }
+
+    // Take field
+    pub fn take_content_bucket(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.content_bucket, ::std::string::String::new())
+    }
+
+    // string keyspace_name = 11;
+
+
+    pub fn get_keyspace_name(&self) -> &str {
+        &self.keyspace_name
+    }
+    pub fn clear_keyspace_name(&mut self) {
+        self.keyspace_name.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keyspace_name(&mut self, v: ::std::string::String) {
+        self.keyspace_name = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_keyspace_name(&mut self) -> &mut ::std::string::String {
+        &mut self.keyspace_name
+    }
+
+    // Take field
+    pub fn take_keyspace_name(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.keyspace_name, ::std::string::String::new())
+    }
+
+    // uint64 keyspace_size = 10;
+
+
+    pub fn get_keyspace_size(&self) -> u64 {
+        self.keyspace_size
+    }
+    pub fn clear_keyspace_size(&mut self) {
+        self.keyspace_size = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keyspace_size(&mut self, v: u64) {
+        self.keyspace_size = v;
+    }
+
+    // repeated .enginepb.FileRef content_file_refs = 6;
+
+
+    pub fn get_content_file_refs(&self) -> &[FileRef] {
+        &self.content_file_refs
+    }
+    pub fn clear_content_file_refs(&mut self) {
+        self.content_file_refs.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_content_file_refs(&mut self, v: ::protobuf::RepeatedField<FileRef>) {
+        self.content_file_refs = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_content_file_refs(&mut self) -> &mut ::protobuf::RepeatedField<FileRef> {
+        &mut self.content_file_refs
+    }
+
+    // Take field
+    pub fn take_content_file_refs(&mut self) -> ::protobuf::RepeatedField<FileRef> {
+        ::std::mem::replace(&mut self.content_file_refs, ::protobuf::RepeatedField::new())
+    }
+
+    // bool unpacked = 12;
+
+
+    pub fn get_unpacked(&self) -> bool {
+        self.unpacked
+    }
+    pub fn clear_unpacked(&mut self) {
+        self.unpacked = false;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_unpacked(&mut self, v: bool) {
+        self.unpacked = v;
+    }
+
+    // string unpacked_from = 13;
+
+
+    pub fn get_unpacked_from(&self) -> &str {
+        &self.unpacked_from
+    }
+    pub fn clear_unpacked_from(&mut self) {
+        self.unpacked_from.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_unpacked_from(&mut self, v: ::std::string::String) {
+        self.unpacked_from = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_unpacked_from(&mut self) -> &mut ::std::string::String {
+        &mut self.unpacked_from
+    }
+
+    // Take field
+    pub fn take_unpacked_from(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.unpacked_from, ::std::string::String::new())
+    }
+}
+
+impl ::protobuf::Message for PackedBackup {
+    fn is_initialized(&self) -> bool {
+        for v in &self.shards {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.content_file_refs {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.shards)?;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.cluster_id = tmp;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.backup_ts = tmp;
+                },
+                4 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.safe_ts = tmp;
+                },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.keyspace_id = tmp;
+                },
+                8 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.resolved_ts = tmp;
+                },
+                9 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.engine_size = tmp;
+                },
+                7 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.content_bucket)?;
+                },
+                11 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.keyspace_name)?;
+                },
+                10 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.keyspace_size = tmp;
+                },
+                6 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.content_file_refs)?;
+                },
+                12 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_bool()?;
+                    self.unpacked = tmp;
+                },
+                13 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.unpacked_from)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        for value in &self.shards {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        if self.cluster_id != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.cluster_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.backup_ts != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.backup_ts, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.safe_ts != 0 {
+            my_size += ::protobuf::rt::value_size(4, self.safe_ts, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.keyspace_id != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.keyspace_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.resolved_ts != 0 {
+            my_size += ::protobuf::rt::value_size(8, self.resolved_ts, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.engine_size != 0 {
+            my_size += ::protobuf::rt::value_size(9, self.engine_size, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if !self.content_bucket.is_empty() {
+            my_size += ::protobuf::rt::string_size(7, &self.content_bucket);
+        }
+        if !self.keyspace_name.is_empty() {
+            my_size += ::protobuf::rt::string_size(11, &self.keyspace_name);
+        }
+        if self.keyspace_size != 0 {
+            my_size += ::protobuf::rt::value_size(10, self.keyspace_size, ::protobuf::wire_format::WireTypeVarint);
+        }
+        for value in &self.content_file_refs {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        if self.unpacked != false {
+            my_size += 2;
+        }
+        if !self.unpacked_from.is_empty() {
+            my_size += ::protobuf::rt::string_size(13, &self.unpacked_from);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        for v in &self.shards {
+            os.write_tag(1, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        if self.cluster_id != 0 {
+            os.write_uint64(2, self.cluster_id)?;
+        }
+        if self.backup_ts != 0 {
+            os.write_uint64(3, self.backup_ts)?;
+        }
+        if self.safe_ts != 0 {
+            os.write_uint64(4, self.safe_ts)?;
+        }
+        if self.keyspace_id != 0 {
+            os.write_uint32(5, self.keyspace_id)?;
+        }
+        if self.resolved_ts != 0 {
+            os.write_uint64(8, self.resolved_ts)?;
+        }
+        if self.engine_size != 0 {
+            os.write_uint64(9, self.engine_size)?;
+        }
+        if !self.content_bucket.is_empty() {
+            os.write_string(7, &self.content_bucket)?;
+        }
+        if !self.keyspace_name.is_empty() {
+            os.write_string(11, &self.keyspace_name)?;
+        }
+        if self.keyspace_size != 0 {
+            os.write_uint64(10, self.keyspace_size)?;
+        }
+        for v in &self.content_file_refs {
+            os.write_tag(6, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        if self.unpacked != false {
+            os.write_bool(12, self.unpacked)?;
+        }
+        if !self.unpacked_from.is_empty() {
+            os.write_string(13, &self.unpacked_from)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> PackedBackup {
+        PackedBackup::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<ChangeSet>>(
+                    "shards",
+                    |m: &PackedBackup| { &m.shards },
+                    |m: &mut PackedBackup| { &mut m.shards },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "cluster_id",
+                    |m: &PackedBackup| { &m.cluster_id },
+                    |m: &mut PackedBackup| { &mut m.cluster_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "backup_ts",
+                    |m: &PackedBackup| { &m.backup_ts },
+                    |m: &mut PackedBackup| { &mut m.backup_ts },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "safe_ts",
+                    |m: &PackedBackup| { &m.safe_ts },
+                    |m: &mut PackedBackup| { &mut m.safe_ts },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "keyspace_id",
+                    |m: &PackedBackup| { &m.keyspace_id },
+                    |m: &mut PackedBackup| { &mut m.keyspace_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "resolved_ts",
+                    |m: &PackedBackup| { &m.resolved_ts },
+                    |m: &mut PackedBackup| { &mut m.resolved_ts },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "engine_size",
+                    |m: &PackedBackup| { &m.engine_size },
+                    |m: &mut PackedBackup| { &mut m.engine_size },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "content_bucket",
+                    |m: &PackedBackup| { &m.content_bucket },
+                    |m: &mut PackedBackup| { &mut m.content_bucket },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "keyspace_name",
+                    |m: &PackedBackup| { &m.keyspace_name },
+                    |m: &mut PackedBackup| { &mut m.keyspace_name },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "keyspace_size",
+                    |m: &PackedBackup| { &m.keyspace_size },
+                    |m: &mut PackedBackup| { &mut m.keyspace_size },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<FileRef>>(
+                    "content_file_refs",
+                    |m: &PackedBackup| { &m.content_file_refs },
+                    |m: &mut PackedBackup| { &mut m.content_file_refs },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
+                    "unpacked",
+                    |m: &PackedBackup| { &m.unpacked },
+                    |m: &mut PackedBackup| { &mut m.unpacked },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "unpacked_from",
+                    |m: &PackedBackup| { &m.unpacked_from },
+                    |m: &mut PackedBackup| { &mut m.unpacked_from },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<PackedBackup>(
+                    "PackedBackup",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static PackedBackup {
+        static mut instance: ::protobuf::lazy::Lazy<PackedBackup> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const PackedBackup,
+        };
+        unsafe {
+            instance.get(PackedBackup::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for PackedBackup {
+    fn clear(&mut self) {
+        self.shards.clear();
+        self.cluster_id = 0;
+        self.backup_ts = 0;
+        self.safe_ts = 0;
+        self.keyspace_id = 0;
+        self.resolved_ts = 0;
+        self.engine_size = 0;
+        self.content_bucket.clear();
+        self.keyspace_name.clear();
+        self.keyspace_size = 0;
+        self.content_file_refs.clear();
+        self.unpacked = false;
+        self.unpacked_from.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for PackedBackup {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.shards, "shards", buf);
+        ::protobuf::PbPrint::fmt(&self.cluster_id, "cluster_id", buf);
+        ::protobuf::PbPrint::fmt(&self.backup_ts, "backup_ts", buf);
+        ::protobuf::PbPrint::fmt(&self.safe_ts, "safe_ts", buf);
+        ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", buf);
+        ::protobuf::PbPrint::fmt(&self.resolved_ts, "resolved_ts", buf);
+        ::protobuf::PbPrint::fmt(&self.engine_size, "engine_size", buf);
+        ::protobuf::PbPrint::fmt(&self.content_bucket, "content_bucket", buf);
+        ::protobuf::PbPrint::fmt(&self.keyspace_name, "keyspace_name", buf);
+        ::protobuf::PbPrint::fmt(&self.keyspace_size, "keyspace_size", buf);
+        ::protobuf::PbPrint::fmt(&self.content_file_refs, "content_file_refs", buf);
+        ::protobuf::PbPrint::fmt(&self.unpacked, "unpacked", buf);
+        ::protobuf::PbPrint::fmt(&self.unpacked_from, "unpacked_from", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for PackedBackup {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.shards, "shards", &mut s);
+        ::protobuf::PbPrint::fmt(&self.cluster_id, "cluster_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.backup_ts, "backup_ts", &mut s);
+        ::protobuf::PbPrint::fmt(&self.safe_ts, "safe_ts", &mut s);
+        ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.resolved_ts, "resolved_ts", &mut s);
+        ::protobuf::PbPrint::fmt(&self.engine_size, "engine_size", &mut s);
+        ::protobuf::PbPrint::fmt(&self.content_bucket, "content_bucket", &mut s);
+        ::protobuf::PbPrint::fmt(&self.keyspace_name, "keyspace_name", &mut s);
+        ::protobuf::PbPrint::fmt(&self.keyspace_size, "keyspace_size", &mut s);
+        ::protobuf::PbPrint::fmt(&self.content_file_refs, "content_file_refs", &mut s);
+        ::protobuf::PbPrint::fmt(&self.unpacked, "unpacked", &mut s);
+        ::protobuf::PbPrint::fmt(&self.unpacked_from, "unpacked_from", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for PackedBackup {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct FileRef {
+    // message fields
+    pub file_type: u32,
+    pub file_id: u64,
+    pub file_abs_path: ::std::string::String,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a FileRef {
+    fn default() -> &'a FileRef {
+        <FileRef as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl FileRef {
+    pub fn new() -> FileRef {
+        ::std::default::Default::default()
+    }
+
+    // uint32 file_type = 1;
+
+
+    pub fn get_file_type(&self) -> u32 {
+        self.file_type
+    }
+    pub fn clear_file_type(&mut self) {
+        self.file_type = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_file_type(&mut self, v: u32) {
+        self.file_type = v;
+    }
+
+    // uint64 file_id = 2;
+
+
+    pub fn get_file_id(&self) -> u64 {
+        self.file_id
+    }
+    pub fn clear_file_id(&mut self) {
+        self.file_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_file_id(&mut self, v: u64) {
+        self.file_id = v;
+    }
+
+    // string file_abs_path = 3;
+
+
+    pub fn get_file_abs_path(&self) -> &str {
+        &self.file_abs_path
+    }
+    pub fn clear_file_abs_path(&mut self) {
+        self.file_abs_path.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_file_abs_path(&mut self, v: ::std::string::String) {
+        self.file_abs_path = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_file_abs_path(&mut self) -> &mut ::std::string::String {
+        &mut self.file_abs_path
+    }
+
+    // Take field
+    pub fn take_file_abs_path(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.file_abs_path, ::std::string::String::new())
+    }
+}
+
+impl ::protobuf::Message for FileRef {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.file_type = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.file_id = tmp;
+                },
+                3 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.file_abs_path)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.file_type != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.file_type, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.file_id != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.file_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if !self.file_abs_path.is_empty() {
+            my_size += ::protobuf::rt::string_size(3, &self.file_abs_path);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.file_type != 0 {
+            os.write_uint32(1, self.file_type)?;
+        }
+        if self.file_id != 0 {
+            os.write_uint64(2, self.file_id)?;
+        }
+        if !self.file_abs_path.is_empty() {
+            os.write_string(3, &self.file_abs_path)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> FileRef {
+        FileRef::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "file_type",
+                    |m: &FileRef| { &m.file_type },
+                    |m: &mut FileRef| { &mut m.file_type },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "file_id",
+                    |m: &FileRef| { &m.file_id },
+                    |m: &mut FileRef| { &mut m.file_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "file_abs_path",
+                    |m: &FileRef| { &m.file_abs_path },
+                    |m: &mut FileRef| { &mut m.file_abs_path },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<FileRef>(
+                    "FileRef",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static FileRef {
+        static mut instance: ::protobuf::lazy::Lazy<FileRef> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const FileRef,
+        };
+        unsafe {
+            instance.get(FileRef::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for FileRef {
+    fn clear(&mut self) {
+        self.file_type = 0;
+        self.file_id = 0;
+        self.file_abs_path.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for FileRef {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.file_type, "file_type", buf);
+        ::protobuf::PbPrint::fmt(&self.file_id, "file_id", buf);
+        ::protobuf::PbPrint::fmt(&self.file_abs_path, "file_abs_path", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for FileRef {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.file_type, "file_type", &mut s);
+        ::protobuf::PbPrint::fmt(&self.file_id, "file_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.file_abs_path, "file_abs_path", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for FileRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
 static file_descriptor_proto_data: &'static [u8] = b"\
     \n\x0fchangeset.proto\x12\x08enginepb\"\x81\x07\n\tChangeSet\x12\x11\n\
     \x07shardID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08shardVer\x18\x02\x20\
@@ -9879,7 +10807,19 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     dexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\
     \x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\
     \x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\
-    \x20\x03(\x0cB\0:\0B\0b\x06proto3\
+    \x20\x03(\x0cB\0:\0\"\xe3\x02\n\x0cPackedBackup\x12%\n\x06shards\x18\x01\
+    \x20\x03(\x0b2\x13.enginepb.ChangeSetB\0\x12\x14\n\ncluster_id\x18\x02\
+    \x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\x20\x01(\x04B\0\x12\x11\n\
+    \x07safe_ts\x18\x04\x20\x01(\x04B\0\x12\x15\n\x0bkeyspace_id\x18\x05\x20\
+    \x01(\rB\0\x12\x15\n\x0bresolved_ts\x18\x08\x20\x01(\x04B\0\x12\x15\n\
+    \x0bengine_size\x18\t\x20\x01(\x04B\0\x12\x18\n\x0econtent_bucket\x18\
+    \x07\x20\x01(\tB\0\x12\x17\n\rkeyspace_name\x18\x0b\x20\x01(\tB\0\x12\
+    \x17\n\rkeyspace_size\x18\n\x20\x01(\x04B\0\x12.\n\x11content_file_refs\
+    \x18\x06\x20\x03(\x0b2\x11.enginepb.FileRefB\0\x12\x12\n\x08unpacked\x18\
+    \x0c\x20\x01(\x08B\0\x12\x17\n\runpacked_from\x18\r\x20\x01(\tB\0:\0\"L\
+    \n\x07FileRef\x12\x13\n\tfile_type\x18\x01\x20\x01(\rB\0\x12\x11\n\x07fi\
+    le_id\x18\x02\x20\x01(\x04B\0\x12\x17\n\rfile_abs_path\x18\x03\x20\x01(\
+    \tB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

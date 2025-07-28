@@ -543,7 +543,6 @@ fn test_backup_pessimistic_lock() {
     let pk = i_to_key(DATA_LEN);
     let sk = i_to_key(0);
 
-    cluster.remove_node_peers(nodes[1]);
     let region = client.pd_client.get_region(&enc(&pk)).unwrap();
     assert_eq!(region.peers.len(), 1, "{:?}", region);
     cluster.evict_peer(region.peers[0].id);

@@ -239,6 +239,10 @@ impl S3FsCore {
         self.prefix.clone()
     }
 
+    pub fn get_bucket(&self) -> String {
+        self.bucket.clone()
+    }
+
     pub fn is_on_aws(&self) -> bool {
         self.hostname.contains(AWS_DOMAIN_STRING)
     }
@@ -937,14 +941,36 @@ impl S3FsCore {
         target_tagging: Option<&Tagging>,
         target_storage_class: Option<&str>,
     ) -> Result<(), dfs::Error> {
-        let mut retry_cnt = 0;
+        let full_source_key = format!("{}/{}", self.bucket, source_key);
+        self.raw_copy_object(
+            &full_source_key,
+            target_key,
+            target_tagging,
+            target_storage_class,
+        )
+        .await
+    }
+
+    /// Copy object from `source_key` to `target_key`.
+    ///
+    /// "raw" means the source key will be directly put to `x-amz-copy-source`.
+    ///
+    /// So this can be used to copy objects across buckets. For now copying a
+    /// packed backup uses this.
+    pub async fn raw_copy_object(
+        &self,
+        source_key: &str,
+        target_key: &str,
+        target_tagging: Option<&Tagging>,
+        target_storage_class: Option<&str>,
+    ) -> Result<(), dfs::Error> {
         let start_time_with_retry = Instant::now();
         let file_type = self.get_file_type_from_key(target_key);
-        let full_source_key = format!("{}/{}", self.bucket, source_key);
+        let mut retry_cnt = 0;
         loop {
             let start_time = Instant::now_coarse();
             let mut req = self.new_request("PUT", target_key);
-            req.add_header("x-amz-copy-source", &full_source_key);
+            req.add_header("x-amz-copy-source", source_key);
             req.add_header("x-amz-metadata-directive", "REPLACE");
             if let Some(target_tagging) = target_tagging {
                 req.add_header("x-amz-tagging", &target_tagging.to_url_encoded());

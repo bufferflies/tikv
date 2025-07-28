@@ -385,16 +385,24 @@ impl ObjectStorageService {
             .to_str()
             .unwrap();
         let target = parts.uri.path().strip_prefix('/').unwrap();
-        if copy_source != target {
-            return Err(anyhow!(
-                "support copy from same source only, source {}, target {}",
-                copy_source,
-                target
-            ));
-        }
-
         let file_path = Self::make_file_path(&ctx.store_path, parts.uri.path());
         let file = file_path.as_os_str().to_str().unwrap().to_owned();
+
+        if copy_source != target {
+            let source = Self::make_file_path(&ctx.store_path, &format!("/{}", copy_source));
+            let parent = file_path.parent().unwrap();
+            info!("moving local file"; "copy_source" => copy_source, "target" => target,
+                "file_path" => %file_path.display(), "source" => %source.display());
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+            std::fs::copy(&source, &file_path).with_context(|| {
+                format!(
+                    "Failed to copy file from {} to {}",
+                    source.display(),
+                    file_path.display(),
+                )
+            })?;
+        }
 
         let tagging_directive = parts
             .headers

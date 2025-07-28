@@ -1,6 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{cell::RefCell, path::PathBuf, sync::Arc, time::Instant};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::{Args, Subcommand};
@@ -23,7 +23,7 @@ use slog_global::{error, info};
 use tikv_util::{box_try, config::ReadableSize};
 
 use crate::{
-    backup::show_backup_summary,
+    backup::{show_backup_summary, show_packed_backup_summary},
     restore::Commands::{Keyspace, Pd, Tikv},
 };
 
@@ -131,6 +131,10 @@ pub struct RestoreKeyspaceArgs {
     /// Keep silent and NO confirmation when restore. Use with caution.
     #[clap(long)]
     pub silent: bool,
+    /// Whether to restore from a packed backup.
+    /// When this enabled, will find backups from `<prefix>/packed_backup/`
+    #[clap(long)]
+    pub packed: bool,
 }
 
 pub fn execute_restore_command(cmd: RestoreCommand) {
@@ -303,17 +307,46 @@ pub fn get_restore_keyspace_config_from_args(args: &RestoreKeyspaceArgs) -> Rest
     if args.key.exists() {
         config.security.key_path = args.key.to_str().unwrap().to_owned();
     }
+    config.restore_packed_backup = args.packed;
     config.dfs.override_from_env();
     config.security.override_from_env();
     config
 }
 
 #[derive(Default)]
-struct CliRestoreStepReporter {}
+struct CliRestoreStepReporter {
+    step_start: RefCell<Option<(Instant, RestoreStep)>>,
+}
 
 impl ReportRestoreStepTrait for CliRestoreStepReporter {
-    fn report_step(&self, _step: RestoreStep) {
-        // TODO: friendly output for cli use.
+    fn report_step(&self, step: RestoreStep) {
+        let mut step_start = self.step_start.borrow_mut();
+        match &*step_start {
+            Some((start, last_step)) => {
+                let elapsed = start.elapsed();
+                step!(
+                    "restore keyspace step done. takes={:?} step={:?}",
+                    elapsed,
+                    last_step
+                );
+            }
+            None => {}
+        }
+        step!("restore keyspace step started. step={:?}", step);
+        *step_start = Some((Instant::now(), step));
+    }
+}
+
+impl Drop for CliRestoreStepReporter {
+    fn drop(&mut self) {
+        if let Some((start, last_step)) = self.step_start.borrow_mut().take() {
+            let elapsed = start.elapsed();
+            step!(
+                "restore keyspace step eventually done. takes={:?} step={:?}",
+                elapsed,
+                last_step
+            );
+        }
     }
 }
 
@@ -342,8 +375,16 @@ fn show_restore_keyspace_info(
     println!("Restore Keyspace");
     println!();
 
-    let cluster_backup = native_br::restore::get_cluster_backup_meta(&s3fs, args.name.clone());
-    show_backup_summary(&cluster_backup, &args.name, 0);
+    if args.packed {
+        let packed_backup =
+            native_br::archive::get_packed_backup_meta(&s3fs, args.name.clone()).unwrap();
+        if !show_packed_backup_summary(&packed_backup, &args.name, 0) {
+            std::process::exit(1);
+        }
+    } else {
+        let cluster_backup = native_br::restore::get_cluster_backup_meta(&s3fs, args.name.clone());
+        show_backup_summary(&cluster_backup, &args.name, 0);
+    }
     println!();
 
     let inplace = args.keyspace_name == target_keyspace_name;

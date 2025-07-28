@@ -3,6 +3,7 @@
 mod config;
 mod metrics;
 mod s3;
+mod s3_overlay;
 
 use std::{
     any::Any,
@@ -28,6 +29,7 @@ use file_system;
 use metrics::*;
 use moka::future::ConcurrentCacheExt;
 pub use s3::*;
+pub use s3_overlay::OverlaidFs;
 use thiserror::Error;
 use tikv_util::{sys::thread::ThreadBuildWrapper, time::Instant};
 use tokio::runtime::Runtime;

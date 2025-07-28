@@ -67,7 +67,7 @@ const BACKUP_MAX_TOLERATED_ERROR: usize = 1;
 pub type Result<T> = std::result::Result<T, Error>;
 pub type SharedResult<T> = std::result::Result<T, SharedError>;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BackupType {
     Full,
     Incremental,
@@ -82,10 +82,26 @@ pub fn backup_file_full_path(prefix: String, name: String, backup_ts: Option<u64
     } else {
         name
     };
+    // If `name` is absolute path here, the result simply be `name`.
+    // Which is almost impossible to be expected.
+    let name = name.trim_matches('/');
     // Use `Path` to handle path separators.
     Path::new(&prefix)
         .join("backup")
         .join(name)
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Generate full path `<prefix>/ppacked_backup<name>`.
+pub fn packed_backup_prefixed(prefix: &str, name: &str) -> String {
+    let rel_name = name.trim_matches('/');
+
+    // Use `Path` to handle path separators.
+    Path::new(prefix)
+        .join("packed_backup")
+        .join(rel_name)
         .to_str()
         .unwrap()
         .to_string()
@@ -262,6 +278,7 @@ pub fn backup_cluster_with_ts(
     backup_ts: u64,
     last_backup_meta: Option<ClusterBackupMeta>,
 ) -> Result<(String, ClusterBackupMeta)> {
+    let begin = Instant::now();
     let mut stores = get_all_stores_except_tiflash(pd_client)?;
     let cluster_id = pd_client.get_cluster_id()?;
 
@@ -383,6 +400,7 @@ pub fn backup_cluster_with_ts(
         cluster_backup_meta.get_tolerated_err(),
         backup_key,
     );
+    info!("backup done"; "takes" => ?begin.saturating_elapsed(), "backup_type" => ?backup_type);
     Ok((backup_key, cluster_backup_meta))
 }
 

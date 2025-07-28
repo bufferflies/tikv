@@ -5322,6 +5322,7 @@ version = "0.0.1"
 dependencies = [
  "ahash 0.8.11",
  "api_version",
+ "async-trait",
  "bstr",
  "byteorder",
  "bytes",
@@ -5364,6 +5365,7 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
+ "strum 0.20.0",
  "tempdir",
  "tempfile",
  "test_cloud_server",
@@ -5376,6 +5378,7 @@ dependencies = [
  "tokio",
  "txn_types",
  "url",
+ "uuid 0.8.2",
 ]
 
 [[package]]
@@ -8420,15 +8423,15 @@ dependencies = [
 
 [[package]]
 name = "slog-term"
-version = "2.9.1"
+version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6e022d0b998abfe5c3782c1f03551a596269450ccd677ea51c56f8b214610e8"
+checksum = "f3668dd2252f4381d64de0c79e6c8dc6bd509d1cab3535b35a3fc9bafd1241d5"
 dependencies = [
- "is-terminal",
+ "atty",
+ "chrono",
  "slog",
  "term",
  "thread_local",
- "time 0.3.41",
 ]
 
 [[package]]
@@ -10081,7 +10084,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7619e19bc266e0f9c5e6686659d394bc57973859340060a69221e57dbc0c40"
 dependencies = [
  "deranged",
- "itoa 1.0.6",
  "num-conv",
  "powerfmt",
  "serde",

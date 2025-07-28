@@ -1,6 +1,9 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use native_br::restore_keyspace::{ReportRestoreStepTrait, RestoreStep};
+use native_br::{
+    packing::ReportPackBackupStepTrait,
+    restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
+};
 use rand::Rng;
 
 mod backup;
@@ -20,4 +23,8 @@ struct DummyStepReporter {}
 
 impl ReportRestoreStepTrait for DummyStepReporter {
     fn report_step(&self, _step: RestoreStep) {}
+}
+
+impl ReportPackBackupStepTrait for DummyStepReporter {
+    fn report_step(&self, _step: native_br::packing::PackBackupStep) {}
 }

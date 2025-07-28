@@ -100,6 +100,8 @@ pub enum Error {
     RfengineHttpSvrError(String),
     #[error("Fetch RfEngine WAL chunk error due to epoch {epoch_id} overwritten")]
     RfengineWalEpochOverwritten { epoch_id: u32 },
+    #[error("Incompatible dataset: {0}")]
+    Incompatible(String),
 }
 
 #[derive(Debug, thiserror::Error)]
