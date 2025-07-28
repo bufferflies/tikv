@@ -20,9 +20,12 @@ use hyper::{
 use kvengine::{
     context::{IaCtx, MetaFileCacheWeighter, PrepareType, SnapCtx},
     dfs::S3Fs,
+    local_compact,
+    metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
     table::{schema_file::SchemaFile, sstable::BlockCache, ChecksumType},
     txn_chunk_manager::TxnChunkManager,
-    SnapAccess,
+    CompactionCtx, CompactionRequest, CompactionType, IdAllocator, SnapAccess,
+    CURRENT_COMPACTOR_VERSION, INCOMPATIBLE_COMPACTOR_ERROR_CODE,
 };
 use pd_client::PdClient;
 use prometheus::TEXT_FORMAT;
@@ -45,6 +48,7 @@ use tikv_util::{
     metrics::{dump, dump_to},
     quota_limiter::QuotaLimiter,
     time::Instant,
+    warn,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -139,17 +143,7 @@ where
                             let ob_start = Instant::now_coarse();
 
                             let allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
-                            let resp = kvengine::handle_remote_compaction(
-                                ctx.thread_pool.clone(),
-                                ctx.s3fs.clone(),
-                                req,
-                                ctx.compression_lvl,
-                                ctx.checksum_type,
-                                allocator,
-                                ctx.master_key.clone(),
-                                ctx.memory_limiter.clone(),
-                            )
-                            .await;
+                            let resp = handle_remote_compaction(ctx, req, allocator).await;
 
                             if resp.is_ok() && resp.as_ref().unwrap().status().is_success() {
                                 REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM
@@ -273,7 +267,7 @@ async fn handle_txn_chunk(
     .await
 }
 
-// Debug API to sleep for 60 seconds
+// Debug API to sleep for 5 seconds
 #[cfg(debug_assertions)]
 async fn handle_sleep(_ctx: Arc<Context>) -> hyper::Result<hyper::Response<hyper::Body>> {
     info!("sleep for 5 seconds");
@@ -525,6 +519,125 @@ async fn handle_get_metrics(req: Request<Body>) -> hyper::Result<Response<Body>>
             .insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     }
     Ok(resp)
+}
+
+async fn handle_remote_compaction(
+    ctx: Arc<Context>,
+    req: hyper::Request<hyper::Body>,
+    id_allocator: Arc<dyn IdAllocator>,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    let thread_pool = ctx.thread_pool.clone();
+    let dfs = ctx.s3fs.clone();
+    let compression_lvl = ctx.compression_lvl;
+    let checksum_type = ctx.checksum_type;
+    let master_key = ctx.master_key.clone();
+
+    let req_body = hyper::body::to_bytes(req.into_body()).await?;
+    let result = serde_json::from_slice(req_body.chunk());
+    if result.is_err() {
+        let err_str = result.unwrap_err().to_string();
+        return Ok(hyper::Response::builder()
+            .status(400)
+            .body(err_str.into())
+            .unwrap());
+    }
+    let comp_req: CompactionRequest = result.unwrap();
+
+    if comp_req.compactor_version > CURRENT_COMPACTOR_VERSION {
+        warn!(
+            "received incompatible compactor-version({}). Upgrade tikv-worker (version:{}). Request: {:?}",
+            comp_req.compactor_version, CURRENT_COMPACTOR_VERSION, comp_req,
+        );
+        let err_str = format!("incompatible compactor version ({CURRENT_COMPACTOR_VERSION})");
+        return Ok(hyper::Response::builder()
+            .status(INCOMPATIBLE_COMPACTOR_ERROR_CODE)
+            .body(err_str.into())
+            .unwrap());
+    }
+
+    if comp_req.input_size == 0 {
+        warn!("input_size not set: {:?}", comp_req);
+        // TODO: `debug_assert!(false)`.
+    }
+
+    let _permit = if let CompactionType::VectorIndex(vec_idx_update) = &comp_req.compaction_tp {
+        // Try acquire permit without waiting. If failed, return ASAP to make the client
+        // retry request to another worker instance.
+        match ctx.worker_limiter.try_acquire_vector_index_permit() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                let err_str = "vector index compaction requests throttled";
+                warn!("{}: {:?}", err_str, vec_idx_update);
+                let body = hyper::Body::from(err_str);
+                return Ok(hyper::Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .body(body)
+                    .unwrap());
+            }
+        }
+    } else {
+        None
+    };
+
+    let memory_limiter = ctx.memory_limiter.clone();
+    let request_size = comp_req.input_size * 2; // The memory usage is 2x input size for both reading and writing.
+    let mem_limiter_guard = match memory_limiter.acquire(request_size) {
+        Ok(guard) => guard,
+        Err(exceeded_size) => {
+            ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.inc();
+            warn!("{} memory limit exceeded", comp_req.get_tag();
+                "request_size" => request_size, "exceeded" => exceeded_size,
+                "limiter" => ?memory_limiter);
+            let body = hyper::Body::from("memory limit exceeded");
+            return Ok(hyper::Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(body)
+                .unwrap());
+        }
+    };
+
+    let encryption_key = if comp_req.exported_encryption_key.is_empty() {
+        None
+    } else {
+        Some(
+            master_key
+                .decrypt_encryption_key(&comp_req.exported_encryption_key)
+                .unwrap(),
+        )
+    };
+    let comp_ctx = CompactionCtx {
+        req: Arc::new(comp_req),
+        dfs,
+        compression_lvl,
+        id_allocator,
+        encryption_key,
+        local_dir: None,
+        for_restore: false,
+        checksum_type,
+    };
+    let task = thread_pool.spawn(tikv_util::init_task_local(async move {
+        tikv_util::set_current_region(comp_ctx.req.shard_id);
+        let _guard = mem_limiter_guard;
+        local_compact(&comp_ctx).await
+    }));
+    match task.await {
+        Ok(Ok(cs)) => {
+            let data = cs.write_to_bytes().unwrap();
+            Ok(hyper::Response::builder()
+                .status(200)
+                .body(data.into())
+                .unwrap())
+        }
+        err @ Err(_) | err @ Ok(Err(_)) => {
+            let err_str = format!("{:?}", err);
+            error!("compaction failed {}", err_str);
+            let body = hyper::Body::from(err_str);
+            Ok(hyper::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(body)
+                .unwrap())
+        }
+    }
 }
 
 // check if the client allow return response with gzip compression

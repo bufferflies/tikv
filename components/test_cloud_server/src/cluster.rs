@@ -948,6 +948,7 @@ impl ServerCluster {
                     // TODO: remove after upgrade.
                     global_concurrency_factor: 10.0,
                     keyspace_concurrency_factor: 8.0,
+                    vector_index_concurrency_factor: 1.0,
                 },
                 memory_upper_threshold,
                 ..Default::default()

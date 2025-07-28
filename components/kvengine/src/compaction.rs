@@ -38,15 +38,14 @@ use tidb_query_datatype::{
     VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC,
 };
 use tikv_util::{
-    backoff::ExponentialBackoff, box_err, memory::MemoryLimiter, retry::sleep_async,
-    sys::thread::ThreadBuildWrapper, time::Instant,
+    backoff::ExponentialBackoff, box_err, retry::sleep_async, sys::thread::ThreadBuildWrapper,
+    time::Instant,
 };
 use tokio::sync::mpsc;
 
 use crate::{
     dfs,
     dfs::FileType,
-    metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
     table::{
         blobtable::{
             blobtable::BlobTable,
@@ -353,9 +352,9 @@ impl CompactionClient {
 /// `CURRENT_COMPACTOR_VERSION` is used for version compatibility checking of
 /// remote compactor. NOTE: Increase `CURRENT_COMPACTOR_VERSION` by 1 when add
 /// new feature to remote compactor.
-const CURRENT_COMPACTOR_VERSION: u32 = 3;
+pub const CURRENT_COMPACTOR_VERSION: u32 = 3;
 
-const INCOMPATIBLE_COMPACTOR_ERROR_CODE: StatusCode = StatusCode::NOT_IMPLEMENTED;
+pub const INCOMPATIBLE_COMPACTOR_ERROR_CODE: StatusCode = StatusCode::NOT_IMPLEMENTED;
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -2354,112 +2353,15 @@ async fn load_blob_tables(
     Ok(blob_tables)
 }
 
-pub async fn handle_remote_compaction(
-    thread_pool: tokio::runtime::Handle,
-    dfs: Arc<dyn dfs::Dfs>,
-    req: hyper::Request<hyper::Body>,
-    compression_lvl: i32,
-    checksum_type: ChecksumType,
-    id_allocator: Arc<dyn IdAllocator>,
-    master_key: MasterKey,
-    memory_limiter: MemoryLimiter,
-) -> hyper::Result<hyper::Response<hyper::Body>> {
-    let req_body = hyper::body::to_bytes(req.into_body()).await?;
-    let result = serde_json::from_slice(req_body.chunk());
-    if result.is_err() {
-        let err_str = result.unwrap_err().to_string();
-        return Ok(hyper::Response::builder()
-            .status(400)
-            .body(err_str.into())
-            .unwrap());
-    }
-    let comp_req: CompactionRequest = result.unwrap();
-
-    if comp_req.compactor_version > CURRENT_COMPACTOR_VERSION {
-        warn!(
-            "received incompatible compactor-version({}). Upgrade tikv-worker (version:{}). Request: {:?}",
-            comp_req.compactor_version, CURRENT_COMPACTOR_VERSION, comp_req,
-        );
-        let err_str = format!("incompatible compactor version ({CURRENT_COMPACTOR_VERSION})");
-        return Ok(hyper::Response::builder()
-            .status(INCOMPATIBLE_COMPACTOR_ERROR_CODE)
-            .body(err_str.into())
-            .unwrap());
-    }
-
-    if comp_req.input_size == 0 {
-        warn!("input_size not set: {:?}", comp_req);
-        // TODO: `debug_assert!(false)`.
-    }
-    let request_size = comp_req.input_size * 2; // The memory usage is 2x input size for both reading and writing.
-    let mem_limiter_guard = match memory_limiter.acquire(request_size) {
-        Ok(guard) => guard,
-        Err(exceeded_size) => {
-            ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.inc();
-            warn!("{} memory limit exceeded", comp_req.get_tag();
-                "request_size" => request_size, "exceeded" => exceeded_size,
-                "limiter" => ?memory_limiter);
-            let body = hyper::Body::from("memory limit exceeded");
-            return Ok(hyper::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(body)
-                .unwrap());
-        }
-    };
-
-    let encryption_key = if comp_req.exported_encryption_key.is_empty() {
-        None
-    } else {
-        Some(
-            master_key
-                .decrypt_encryption_key(&comp_req.exported_encryption_key)
-                .unwrap(),
-        )
-    };
-    let ctx = CompactionCtx {
-        req: Arc::new(comp_req),
-        dfs,
-        compression_lvl,
-        id_allocator,
-        encryption_key,
-        local_dir: None,
-        for_restore: false,
-        checksum_type,
-    };
-    let task = thread_pool.spawn(tikv_util::init_task_local(async move {
-        tikv_util::set_current_region(ctx.req.shard_id);
-        let _guard = mem_limiter_guard;
-        local_compact(&ctx).await
-    }));
-    match task.await {
-        Ok(Ok(cs)) => {
-            let data = cs.write_to_bytes().unwrap();
-            Ok(hyper::Response::builder()
-                .status(200)
-                .body(data.into())
-                .unwrap())
-        }
-        err @ Err(_) | err @ Ok(Err(_)) => {
-            let err_str = format!("{:?}", err);
-            error!("compaction failed {}", err_str);
-            let body = hyper::Body::from(err_str);
-            Ok(hyper::Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(body)
-                .unwrap())
-        }
-    }
-}
-
-pub(crate) struct CompactionCtx {
-    pub(crate) req: Arc<CompactionRequest>,
-    pub(crate) dfs: Arc<dyn dfs::Dfs>,
-    pub(crate) compression_lvl: i32,
-    pub(crate) checksum_type: ChecksumType,
-    pub(crate) id_allocator: Arc<dyn IdAllocator>,
-    pub(crate) encryption_key: Option<EncryptionKey>,
-    pub(crate) local_dir: Option<PathBuf>,
-    for_restore: bool,
+pub struct CompactionCtx {
+    pub req: Arc<CompactionRequest>,
+    pub dfs: Arc<dyn dfs::Dfs>,
+    pub compression_lvl: i32,
+    pub checksum_type: ChecksumType,
+    pub id_allocator: Arc<dyn IdAllocator>,
+    pub encryption_key: Option<EncryptionKey>,
+    pub local_dir: Option<PathBuf>,
+    pub for_restore: bool,
 }
 
 fn merge_table_change(
@@ -2510,7 +2412,7 @@ impl LocalIdAllocator {
     }
 }
 
-async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
+pub async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
     let req = &ctx.req;
     if req.compactor_version != CURRENT_COMPACTOR_VERSION {
         return Err(CompactionNotRetryable(format!(

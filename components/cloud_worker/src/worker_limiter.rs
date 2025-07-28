@@ -4,7 +4,7 @@ use std::{error::Error, sync::Arc};
 
 use dashmap::DashMap;
 use tikv_util::sys::SysQuota;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -12,6 +12,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub struct WorkerLimiterConfig {
     pub global_concurrency_factor: f64,
     pub keyspace_concurrency_factor: f64,
+    pub vector_index_concurrency_factor: f64,
 }
 
 impl Default for WorkerLimiterConfig {
@@ -19,6 +20,7 @@ impl Default for WorkerLimiterConfig {
         Self {
             global_concurrency_factor: 96.0,
             keyspace_concurrency_factor: 32.0,
+            vector_index_concurrency_factor: 1.0,
         }
     }
 }
@@ -46,6 +48,7 @@ pub(crate) struct Permit {
 pub(crate) struct WorkerLimiter {
     global_semaphore: Arc<Semaphore>,
     keyspace_semaphores: Arc<DashMap<u32, Arc<Semaphore>>>,
+    vector_index_semaphore: Arc<Semaphore>,
     cfg: Arc<WorkerLimiterConfig>,
 }
 
@@ -58,9 +61,13 @@ impl WorkerLimiter {
         let global_concurrency =
             MIN_CONCURRENCY.max((cpu_cores * cfg.global_concurrency_factor) as usize);
         let global_semaphore = Arc::new(Semaphore::new(global_concurrency));
+        let vector_index_semaphore = Arc::new(Semaphore::new(
+            MIN_CONCURRENCY.max((cpu_cores * cfg.vector_index_concurrency_factor) as usize),
+        ));
         Self {
             global_semaphore,
             keyspace_semaphores: Arc::new(DashMap::new()),
+            vector_index_semaphore,
             cfg: Arc::new(cfg),
         }
     }
@@ -86,6 +93,13 @@ impl WorkerLimiter {
             _keyspace_permit,
         }
     }
+
+    pub(crate) fn try_acquire_vector_index_permit(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        let semaphore = self.vector_index_semaphore.clone();
+        semaphore.try_acquire_owned()
+    }
 }
 
 #[cfg(test)]
@@ -108,9 +122,11 @@ mod tests {
 
     #[test]
     fn test_worker_limiter_concurrency() {
+        test_util::init_log_for_test();
         let config = WorkerLimiterConfig {
             global_concurrency_factor: 6.0,
             keyspace_concurrency_factor: 2.0,
+            vector_index_concurrency_factor: 1.0,
         };
         let worker_limiter = WorkerLimiter::new(config);
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -119,6 +135,7 @@ mod tests {
             .build()
             .unwrap();
         let global_counter = Arc::new(Mutex::new(ConcurrencyCounter::default()));
+        let vector_index_counter = Arc::new(Mutex::new(ConcurrencyCounter::default()));
         let keyspace_counters = Arc::new(Mutex::new(HashMap::new()));
         let cpu_cores = SysQuota::cpu_cores_quota() as u32;
         let mut handles = vec![];
@@ -155,6 +172,27 @@ mod tests {
             });
             handles.push(handle);
         }
+        for _ in 0..(100 * cpu_cores) {
+            let worker_limiter = worker_limiter.clone();
+            let vector_index_counter = vector_index_counter.clone();
+            let handle = runtime.spawn(async move {
+                let Ok(_permit) = worker_limiter.try_acquire_vector_index_permit() else {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    return;
+                };
+                {
+                    let mut guard = vector_index_counter.lock().unwrap();
+                    guard.running += 1;
+                    guard.max_running = guard.max_running.max(guard.running);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                {
+                    let mut guard = vector_index_counter.lock().unwrap();
+                    guard.running -= 1;
+                }
+            });
+            handles.push(handle);
+        }
         for handle in handles {
             runtime.block_on(handle).unwrap();
         }
@@ -176,5 +214,11 @@ mod tests {
                         .available_permits()
             );
         }
+        let counter_guard = vector_index_counter.lock().unwrap();
+        assert_eq!(counter_guard.running, 0);
+        assert_eq!(
+            counter_guard.max_running,
+            worker_limiter.vector_index_semaphore.available_permits()
+        );
     }
 }
