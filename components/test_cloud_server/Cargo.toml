@@ -64,6 +64,7 @@ tidb_query_common = { workspace = true }
 tidb_query_datatype = { workspace = true }
 tikv = { path = "../.." }
 tikv-client = { workspace = true }
+tikv_alloc = { workspace = true }
 tikv_util = { path = "../tikv_util" }
 tipb = { workspace = true }
 tokio = { version = "1", features = ["full"] }

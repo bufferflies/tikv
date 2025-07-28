@@ -356,6 +356,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         let mut rng = thread_rng();
         conf.dfs = dfs_config.clone();
         conf.dfs.allow_fallback_local = false;
+        conf.server.grpc_concurrency = (cpu_cores as usize / tikv_server_nodes_count).max(2);
         conf.server.grpc_compression_type = GrpcCompressionType::Gzip;
         conf.security = security_conf.clone();
 

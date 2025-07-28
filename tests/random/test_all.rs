@@ -381,6 +381,7 @@ fn prepare_cluster(
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = dfs.clone();
         conf.dfs.allow_fallback_local = false;
+        conf.server.grpc_concurrency = (cpu_cores / nodes_count).max(2);
         conf.server.grpc_compression_type = GrpcCompressionType::Gzip;
         conf.security = security_conf.clone();
 

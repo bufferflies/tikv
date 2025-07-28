@@ -12,7 +12,7 @@ use std::{
 use anyhow::bail;
 use bstr::ByteSlice;
 use bytes::Bytes;
-use cloud_server::TikvServer;
+use cloud_server::{server::GRPC_THREAD_PREFIX, TikvServer};
 use cloud_worker::{
     local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker, CloudWorkerLimiterConfig,
 };
@@ -55,6 +55,7 @@ use tikv_util::{
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     error, info,
     sys::SysQuota,
+    thd_name,
     thread_group::GroupProperties,
     time::Instant,
     warn,
@@ -219,13 +220,23 @@ impl ServerCluster {
         // Use new DFS instance for each node to be the same as production env.
         let dfs = Self::prepare_dfs(&config, pd_client.clone());
         let _ = self.dfs.get_or_insert_with(|| dfs.clone());
-        let mut server = TikvServer::setup(
-            config,
-            self.security_mgr.clone(),
-            self.env.clone(),
-            pd_client,
-            dfs,
+
+        let props = tikv_util::thread_group::current_properties();
+        let env = Arc::new(
+            EnvBuilder::new()
+                .cq_count(config.server.grpc_concurrency)
+                .name_prefix(thd_name!(format!("{}-{}", GRPC_THREAD_PREFIX, node_id)))
+                .after_start(move || {
+                    tikv_alloc::add_thread_memory_accessor();
+                    tikv_util::thread_group::set_properties(props.clone());
+                })
+                .before_stop(move || {
+                    tikv_alloc::remove_thread_memory_accessor();
+                })
+                .build(),
         );
+
+        let mut server = TikvServer::setup(config, self.security_mgr.clone(), env, pd_client, dfs);
         server.run();
         let store_id = server.get_store_id();
         if let std::collections::hash_map::Entry::Vacant(e) = self.channels.entry(store_id) {
@@ -1320,6 +1331,7 @@ pub fn new_test_config(
     config.server.cluster_id = 1;
     config.server.addr = node_addr(node_id);
     config.server.status_addr = node_status_addr(node_id);
+    config.server.grpc_concurrency = 2;
     config.server.grpc_keepalive_time = ReadableDuration::secs(1);
     config.server.grpc_keepalive_timeout = ReadableDuration::secs(1);
     config.readpool.unified.max_tasks_per_worker = 4000;

@@ -9185,6 +9185,7 @@ dependencies = [
  "tidb_query_datatype",
  "tikv",
  "tikv-client",
+ "tikv_alloc",
  "tikv_util",
  "tipb",
  "tokio",
