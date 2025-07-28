@@ -170,7 +170,6 @@ fn test_random_with_tidb() {
         &tc,
         &keyspace_manager,
         &switches,
-        false,
         &runtime,
         &tables,
         running.clone(),
@@ -294,7 +293,6 @@ pub(crate) fn prepare_cluster(
         nodes_count,
         &tikv_worker_nodes,
         switches,
-        false,
     );
     let pd = PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
     let mut cluster = ServerClusterBuilder::new(nodes, update_conf_fn)
@@ -344,7 +342,6 @@ pub(crate) fn generate_update_conf_fn<'a>(
     tikv_server_nodes_count: usize,
     tikv_worker_nodes: &'a [u16],
     switches: &'a Switches,
-    disable_ia: bool,
 ) -> impl Fn(u16, &mut TikvConfig) + 'a {
     let cpu_cores = SysQuota::cpu_cores_quota() as u64;
     // It's 512 for 4 cores & 4 nodes.
@@ -399,18 +396,18 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.kvengine.vector_index_build_options.rebuild_file_count = 2;
         conf.kvengine.dfs_load_concurrency_per_core = dfs_load_concurrency_per_core as usize;
         conf.kvengine.dfs_load_concurrency_per_request = dfs_load_concurrency_per_request as usize;
-
+        conf.kvengine.value_cache_capacity = if switches.enable_value_cache {
+            ReadableSize::mb(1).into()
+        } else {
+            0.into()
+        };
         conf.kvengine.ia = IaConfig {
             segment_size: conf.rocksdb.writecf.block_size.0 as i64 * 4,
             freq_update_interval: ReadableDuration(IA_FREQ_UPDATE_INTERVAL_DEF),
             auto_ia_check_interval: ReadableDuration::secs(3),
             ..Default::default()
         };
-        if disable_ia {
-            conf.disable_ia();
-        } else {
-            conf.enable_ia();
-        }
+        conf.enable_ia();
 
         conf.storage.flow_control.enable = true;
         conf.storage.flow_control.min_region_speed_limit = ReadableSize(16);
@@ -663,7 +660,6 @@ pub(crate) fn start_workloads(
     tc: &TidbCluster,
     keyspace_manager: &KeyspaceManager,
     switches: &Switches,
-    disable_ia: bool,
     runtime: &Runtime,
     tables: &[Arc<TableMeta>],
     running: Running,
@@ -710,7 +706,7 @@ pub(crate) fn start_workloads(
             switches.vector_common_handle,
         )));
     }
-    if !disable_ia && switches.ia_table_ratio > 0.0 && !tables.is_empty() {
+    if switches.ia_table_ratio > 0.0 && !tables.is_empty() {
         async_handles.push(runtime.spawn(spawn_alter_storage_class(
             tc.clone(),
             keyspace_manager.clone(),
@@ -992,6 +988,7 @@ pub(crate) struct Switches {
     pub enable_kv_engine_meta_diff: bool,
     pub txn_check_backup_ts: bool,
     pub enable_tiflash_write_node: bool,
+    pub enable_value_cache: bool,
 }
 
 impl Switches {
@@ -1018,6 +1015,7 @@ impl Switches {
         let enable_kv_engine_meta_diff = env_switch(ENABLE_KV_ENGINE_META_DIFF_ENV_KEY);
         let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.5);
         let enable_tiflash_write_node = env_switch(ENABLE_TIFLASH_WRITE_NODE_ENV_KEY);
+        let enable_value_cache = env_switch_opt("ENABLE_VALUE_CACHE", 0);
 
         Self {
             remote_cop_min_block_size,
@@ -1035,6 +1033,7 @@ impl Switches {
             enable_kv_engine_meta_diff,
             txn_check_backup_ts,
             enable_tiflash_write_node,
+            enable_value_cache,
         }
     }
 }

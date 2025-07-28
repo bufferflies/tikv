@@ -133,11 +133,11 @@ while [[ $# -gt 0 ]]; do
 		RUN_ARGS+=("--upgrade-test-duration" "$2")
 		shift
 		;;
-	--disable-ia-for-old-version)
-		RUN_ARGS+=("--disable-ia-for-old-version")
+	--disable-kv-engine-meta-diff)
+		RUN_ARGS+=("--disable-kv-engine-meta-diff")
 		;;
-	--enable-kv-engine-meta-diff)
-		RUN_ARGS+=("--enable-kv-engine-meta-diff")
+	--enable-value-cache)
+		RUN_ARGS+=("--enable-value-cache")
 		;;
 	--enable-tiflash-write-node)
 		RUN_ARGS+=("--enable-tiflash-write-node")

@@ -35,9 +35,9 @@ TXN_CHECK_BACKUP_TS=1
 OSS_CHAOS_RATIO=0.2
 
 UPGRADE_TEST_DURATION="60s"
-DISABLE_IA_FOR_OLD_VERSION=0
 
-ENABLE_KV_ENGINE_META_DIFF=0
+ENABLE_KV_ENGINE_META_DIFF=1
+ENABLE_VALUE_CACHE=0
 ENABLE_TIFLASH_WRITE_NODE=0
 
 while [ $# -gt 0 ]; do
@@ -110,11 +110,11 @@ while [ $# -gt 0 ]; do
         UPGRADE_TEST_DURATION="$2"
         shift
         ;;
-    --disable-ia-for-old-version)
-        DISABLE_IA_FOR_OLD_VERSION=1
+    --disable-kv-engine-meta-diff)
+        ENABLE_KV_ENGINE_META_DIFF=0
         ;;
-    --enable-kv-engine-meta-diff)
-        ENABLE_KV_ENGINE_META_DIFF=1
+    --enable-value-cache)
+        ENABLE_VALUE_CACHE=1
         ;;
     --enable-tiflash-write-node)
         ENABLE_TIFLASH_WRITE_NODE=1
@@ -159,8 +159,9 @@ export OSS_CHAOS_RATIO
 export TEST_DUR_BEFORE_UPGRADE="$UPGRADE_TEST_DURATION"
 export TEST_DUR_AFTER_UPGRADE="$UPGRADE_TEST_DURATION"
 export TEST_DUR_AFTER_DOWNGRADE="$UPGRADE_TEST_DURATION"
-export DISABLE_IA_FOR_OLD_VERSION
+
 export ENABLE_KV_ENGINE_META_DIFF
+export ENABLE_VALUE_CACHE
 export ENABLE_TIFLASH_WRITE_NODE
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs

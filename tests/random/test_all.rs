@@ -367,13 +367,11 @@ fn prepare_cluster(
     // TODO: adjust rate for oss chaos.
     oss.set_max_write_bytes_per_sec(KV_TARGET_FILE_SIZE.0 as usize * 640);
 
-    let enable_kv_engine_meta_diff = rand::thread_rng().gen_bool(0.5);
     info!("prepare_cluster";
         "per_keyspace_configs" => ?per_keyspace_configs,
         "dfs_conn_opts" => ?dfs_config.conn_options,
         "rfengine_target_file_size" => ?rfengine_target_file_size,
         "dfs_worker_memory_limit" => ?dfs_worker_memory_limit,
-        "enable_kv_engine_meta_diff" => ?enable_kv_engine_meta_diff,
     );
 
     let dfs = dfs_config.clone();
@@ -391,7 +389,7 @@ fn prepare_cluster(
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
-        conf.raft_store.enable_kv_engine_meta_diff = enable_kv_engine_meta_diff;
+        conf.raft_store.enable_kv_engine_meta_diff = true;
 
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(96);
@@ -408,6 +406,11 @@ fn prepare_cluster(
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
         conf.kvengine.flush_split_l0 = true;
         conf.kvengine.per_keyspace_configs = per_keyspace_configs.clone();
+        conf.kvengine.value_cache_capacity = if switches.enable_value_cache {
+            ReadableSize::mb(1).into()
+        } else {
+            0.into()
+        };
         if enable_ia {
             conf.kvengine.ia = IaConfig {
                 mem_cap: IA_MEM_CAP_DEF.into(),
@@ -595,6 +598,7 @@ pub(crate) struct Switches {
     pub ia_table_ratio: f64,
     pub enable_oss_chaos: bool,
     pub txn_check_backup_ts: bool,
+    pub enable_value_cache: bool,
 }
 
 impl Switches {
@@ -603,11 +607,13 @@ impl Switches {
         let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.5);
         let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
         let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
+        let enable_value_cache = env_switch_opt("ENABLE_VALUE_CACHE", 0);
 
         Self {
             ia_table_ratio,
             enable_oss_chaos,
             txn_check_backup_ts,
+            enable_value_cache,
         }
     }
 }
