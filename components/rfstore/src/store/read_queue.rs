@@ -15,7 +15,7 @@ use raftstore::store::metrics::*;
 use tikv_util::{
     box_err,
     codec::number::{NumberEncoder, MAX_VAR_U64_LEN},
-    debug,
+    debug, error,
     memory::HeapSize,
     time::{duration_to_sec, monotonic_raw_now},
     MustConsumeVec,
@@ -23,7 +23,10 @@ use tikv_util::{
 use time::Timespec;
 use uuid::Uuid;
 
-use crate::{store::Callback, Result};
+use crate::{
+    store::{util::PeerTag, Callback},
+    Result,
+};
 
 const READ_QUEUE_SHRINK_SIZE: usize = 64;
 
@@ -187,14 +190,39 @@ impl ReadIndexQueue {
         None
     }
 
-    pub fn advance_leader_reads<T>(&mut self, states: T)
+    pub fn advance_leader_reads<T>(&mut self, tag: PeerTag, states: T)
     where
         T: IntoIterator<Item = (Uuid, Option<LockInfo>, u64)>,
     {
-        for (uuid, _, index) in states {
-            assert_eq!(uuid, self.reads[self.ready_cnt].id);
-            self.reads[self.ready_cnt].read_index = Some(index);
-            self.ready_cnt += 1;
+        let mut states_iter = states.into_iter();
+        while let Some((uuid, info, index)) = states_iter.next() {
+            let invalid_id = match self.reads.get_mut(self.ready_cnt) {
+                Some(r) if r.id == uuid => {
+                    r.read_index = Some(index);
+                    self.ready_cnt += 1;
+                    continue;
+                }
+                Some(r) => Some((r.id, r.propose_time)),
+                None => None,
+            };
+
+            error!("{} unexpected uuid detected", tag; "current_id" => ?invalid_id);
+            let mut expect_id_track = vec![];
+            for i in (0..self.ready_cnt).rev().take(10).rev() {
+                expect_id_track.push((i, self.reads.get(i).map(|r| (r.id, r.propose_time))));
+            }
+            for i in (self.ready_cnt..self.reads.len()).take(10) {
+                expect_id_track.push((i, self.reads.get(i).map(|r| (r.id, r.propose_time))));
+            }
+            let mut actual_id_track = vec![(uuid, info.is_some(), index)];
+            for (id, info, index) in states_iter.take(20) {
+                actual_id_track.push((id, info.is_some(), index));
+            }
+            error!("context around"; "expect_id_track" => ?expect_id_track, "actual_id_track" => ?actual_id_track);
+            panic!(
+                "{} unexpected uuid detected {} != {:?} at {}",
+                tag, uuid, invalid_id, self.ready_cnt
+            );
         }
     }
 
