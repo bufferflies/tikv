@@ -1401,6 +1401,7 @@ mod tests {
                     vec![Key::from_raw(b"k1")],
                     80.into(),
                     80.into(),
+                    None,
                     Context::default(),
                 ),
                 expect_ok_callback(tx.clone(), 1),
