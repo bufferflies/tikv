@@ -736,8 +736,6 @@ impl Peer {
             notify_req_region_removed(self.region_id, cb);
         }
 
-        PdRunner::set_storage_size_metric(self.region(), None, false);
-
         info!(
             "peer destroy itself";
             "tag" => self.tag(),
@@ -1314,8 +1312,11 @@ impl Peer {
     }
 
     pub fn notify_role_changed(&self, pd_scheduler: &Scheduler<PdTask>, role: StateRole) {
+        let keyspace_id =
+            api_version::ApiV2::get_u32_keyspace_id_by_key(self.region().get_start_key());
         if let Err(e) = pd_scheduler.schedule(PdTask::RoleChanged {
             region_id: self.region_id,
+            keyspace_id,
             role,
         }) {
             error!(
@@ -1366,7 +1367,6 @@ impl Peer {
                 }
                 StateRole::Follower => {
                     self.leader_lease.expire();
-                    PdRunner::set_storage_size_metric(self.region(), None, false)
                 }
                 _ => {}
             }

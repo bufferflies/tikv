@@ -1670,7 +1670,11 @@ impl<'a> StoreMsgHandler<'a> {
             RegionChangeEvent::Destroy,
             peer_fsm.peer.get_role(),
         );
-        let task = PdTask::DestroyPeer { region_id };
+        let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(peer_fsm.peer.region().get_start_key());
+        let task = PdTask::DestroyPeer {
+            region_id,
+            keyspace_id,
+        };
         if let Err(e) = self.ctx.global.pd_scheduler.schedule(task) {
             error!(
                 "failed to notify pd";

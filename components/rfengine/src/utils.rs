@@ -5,9 +5,9 @@ use std::{
     result::Result as StdResult,
 };
 
-use api_version::{ApiV2, KeyMode, KvFormat};
+use api_version::ApiV2;
 use bytes::{BufMut, Bytes, BytesMut};
-use kvproto::{metapb, raft_serverpb::RegionLocalState};
+use kvproto::raft_serverpb::RegionLocalState;
 use protobuf::Message as _;
 use regex::Regex;
 use tikv_util::info;
@@ -36,16 +36,6 @@ pub fn region_state_key(version: u64) -> Bytes {
     key.freeze()
 }
 
-fn is_api_v2_region(region: &metapb::Region) -> bool {
-    let startkey = region.start_key.as_slice();
-    let endkey = region.end_key.as_slice();
-
-    let start_key_mode = ApiV2::parse_key_mode(startkey);
-    let end_key_mode = ApiV2::parse_key_mode(endkey);
-
-    start_key_mode == KeyMode::Txn && end_key_mode == KeyMode::Txn
-}
-
 pub fn compress_lz4(uncompressed: &[u8], compressed_buf: &mut Vec<u8>) -> std::io::Result<usize> {
     let compress_bound: i32 = unsafe { lz4::liblz4::LZ4_compressBound(uncompressed.len() as i32) };
     let existed_bytes = compressed_buf.len();
@@ -62,14 +52,6 @@ pub fn compress_lz4(uncompressed: &[u8], compressed_buf: &mut Vec<u8>) -> std::i
 
 pub fn decompress_lz4(content: &[u8]) -> std::io::Result<Vec<u8>> {
     lz4::block::decompress(content, None)
-}
-
-pub fn get_region_keyspace_id_str(region: &metapb::Region) -> Option<String> {
-    if is_api_v2_region(region) {
-        let keyspace_id_str = ApiV2::get_keyspace_id_str(region.start_key.as_slice());
-        return Some(keyspace_id_str);
-    }
-    None
 }
 
 pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64) -> PathBuf {
