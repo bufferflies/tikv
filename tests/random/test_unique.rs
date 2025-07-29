@@ -7,7 +7,7 @@ use std::{fmt, sync::atomic::Ordering::Relaxed, time::Duration};
 use anyhow::{Context, Result};
 use futures::future::join_all;
 use rand::prelude::*;
-use sqlx::{MySql, MySqlPool, Row};
+use sqlx::{Executor, MySql, MySqlPool, Row};
 use test_cloud_server::{keyspace::KeyspaceManager, tidb::TidbCluster};
 use tikv_util::{debug, error, info, time::Instant, warn};
 
@@ -17,7 +17,8 @@ use crate::{
         MAX_PADDING_SIZE,
     },
     test_tidb::connect_tidb,
-    Running, UNIQUE_WORKLOAD_CONFLICT_COUNTER, UNIQUE_WORKLOAD_TXN_COUNTER,
+    Running, UNIQUE_TABLE_DDL_COUNTER, UNIQUE_WORKLOAD_CONFLICT_COUNTER,
+    UNIQUE_WORKLOAD_TXN_COUNTER,
 };
 
 const UNIQUE_WORKLOAD_CONCURRENCY: usize = 4;
@@ -25,7 +26,6 @@ pub(crate) const UNIQUE_DB_NAME: &str = "uniq";
 pub(crate) const UNIQUE_TABLE_NAME: &str = "rows";
 
 const VALUE0_MAX: i32 = 1000;
-const VALUE1_MAX: i32 = VALUE0_MAX * 10; // To generate index key in a wider range.
 
 /// 0.1% stock data which are inserted during preparation and will not be
 /// deleted. So the probability of conflict for a insert with 100 rows will be
@@ -73,7 +73,7 @@ pub(crate) async fn prepare_unique_workload(
 
         let mut values = Vec::with_capacity(STOCK_DATA_NUM as usize);
         for val0 in 0..STOCK_DATA_NUM {
-            let val1 = rng.gen_range(0..VALUE1_MAX);
+            let val1 = val0 * 10;
             values.push(format!("({val0}, {val1}, 0x{hex_padding})"));
         }
 
@@ -95,6 +95,7 @@ pub(crate) async fn run_unique_workload(
     keyspace_manager: KeyspaceManager,
     keyspace_id: u32,
     use_txn_file: bool,
+    run_ddl: bool,
     running: Running,
 ) {
     info!("run_unique_workload"; "use_txn_file" => use_txn_file);
@@ -136,7 +137,7 @@ pub(crate) async fn run_unique_workload(
                             val0s.push(val0);
                         }
 
-                        let val1 = rng.gen_range(0..VALUE1_MAX);
+                        let val1 = val0 * 10;
                         values.push(format!("({val0}, {val1}, 0x{hex_padding})"));
 
                         val0 = (val0 + 1) % VALUE0_MAX;
@@ -163,7 +164,7 @@ pub(crate) async fn run_unique_workload(
                         if expect_conflict {
                             let mut conn = pool.acquire().await.unwrap();
                             match list_rows(&mut conn).await {
-                                Ok((rows, _)) => {
+                                Ok(rows) => {
                                     info!("{} unique workload list rows", tag; "rows" => ?rows);
                                 }
                                 Err(err) => {
@@ -211,15 +212,31 @@ pub(crate) async fn run_unique_workload(
         handles.push(handle);
     }
 
-    let pool_copy = pool.clone();
-    handles.push(tokio::spawn(async move {
-        let start_time = Instant::now();
-        while running.get() {
-            retry_or_panic!(verify_unique(&pool_copy).await.context("verify_unique"));
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        info!("verify unique thread exit"; "dur" => ?start_time.saturating_elapsed());
-    }));
+    if run_ddl {
+        let pool = pool.clone();
+        let running = running.clone();
+        handles.push(tokio::spawn(async move {
+            let start_time = Instant::now();
+            while running.get() {
+                retry_or_panic!(run_modify_column(&pool).await.context("run_modify_column"));
+                UNIQUE_TABLE_DDL_COUNTER.fetch_add(1, Relaxed);
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            info!("modify column thread exit"; "dur" => ?start_time.saturating_elapsed());
+        }));
+    }
+
+    {
+        let pool = pool.clone();
+        handles.push(tokio::spawn(async move {
+            let start_time = Instant::now();
+            while running.get() {
+                retry_or_panic!(verify(&pool).await.context("verify"));
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            info!("verify unique thread exit"; "dur" => ?start_time.saturating_elapsed());
+        }));
+    }
 
     join_all(handles).await;
 
@@ -227,9 +244,9 @@ pub(crate) async fn run_unique_workload(
     while retry <= 30 {
         retry += 1;
         let check = async {
-            verify_unique(&pool).await.context("verify")?;
+            verify(&pool).await.context("verify")?;
             let mut conn = pool.acquire().await.unwrap();
-            let (rows, _) = list_rows(&mut conn).await.context("list")?;
+            let rows = list_rows(&mut conn).await.context("list")?;
             info!("unique rows: {:?}", rows);
             Ok(())
         };
@@ -237,6 +254,40 @@ pub(crate) async fn run_unique_workload(
         return;
     }
     panic!("unique: final check retry limit exceeded");
+}
+
+async fn run_modify_column(pool: &MySqlPool) -> Result<()> {
+    let column = if thread_rng().gen_bool(0.5) {
+        "val0"
+    } else {
+        "val1"
+    };
+
+    // int -> bigint.
+    let sql = format!(
+        "alter table `{UNIQUE_DB_NAME}`.`{UNIQUE_TABLE_NAME}` \
+         modify column `{column}` bigint not null"
+    );
+    info!("run_modify_column"; "sql" => &sql);
+    {
+        pool.execute(sql.as_str())
+            .await
+            .context("run_modify_column")?;
+    }
+
+    // bigint -> int, need reorg.
+    let sql = format!(
+        "alter table `{UNIQUE_DB_NAME}`.`{UNIQUE_TABLE_NAME}` \
+         modify column `{column}` int not null"
+    );
+    info!("run_modify_column (reorg)"; "sql" => &sql);
+    {
+        pool.execute(sql.as_str())
+            .await
+            .context("run_modify_column")?;
+    }
+
+    Ok(())
 }
 
 async fn do_sql(tag: &str, pool: &MySqlPool, sql: &str, optimistic_txn: bool) -> Result<()> {
@@ -252,49 +303,103 @@ async fn do_sql(tag: &str, pool: &MySqlPool, sql: &str, optimistic_txn: bool) ->
 }
 
 async fn verify_unique(pool: &MySqlPool) -> Result<()> {
-    let mut conn = pool.acquire().await.context("acquire")?;
-    sqlx::query("begin")
-        .execute(&mut conn)
+    let mut txn = Transaction::begin_read("verify_unique", pool)
         .await
-        .context("verify_begin")?;
+        .context("begin")?;
+    let read_ts = txn.start_ts();
     let sql = format!(
-        "select val0, count(*) as cnt, \
-         TIDB_CURRENT_TSO() as tso \
+        "select val0, count(*) as cnt \
          from `{UNIQUE_DB_NAME}`.`{UNIQUE_TABLE_NAME}` \
          group by val0 having cnt > 1 "
     );
-    let rows = sqlx::query(&sql)
-        .fetch_all(&mut conn)
-        .await
-        .context("select sum")?;
+    let rows = {
+        sqlx::query(&sql)
+            .fetch_all(txn.conn())
+            .await
+            .context("select duplicated")?
+    };
     if !rows.is_empty() {
         for row in rows {
             let val0: i32 = row.get("val0");
             let cnt: i64 = row.get("cnt");
-            let tso: i64 = row.get("tso");
-            error!("unique value has duplicated rows"; "val0" => val0, "cnt" => cnt, "tso" => tso);
+            error!("unique value has duplicated rows"; "val0" => val0, "cnt" => cnt, "read_ts" => read_ts);
         }
 
-        let (rows, tso) = list_rows(&mut conn).await?;
-        error!("duplicated unique rows"; "rows" => ?rows, "tso" => tso);
+        let rows = list_rows(txn.conn()).await?;
+        error!("duplicated unique rows"; "rows" => ?rows, "read_ts" => read_ts);
 
         panic!("unique value duplicated rows");
     }
     Ok(())
 }
 
-async fn list_rows<'a, E>(executor: E) -> Result<(Vec<UniqueRow>, i64 /* tso */)>
+async fn verify_value(pool: &MySqlPool) -> Result<()> {
+    let mut txn = Transaction::begin_read("verify_value", pool)
+        .await
+        .context("begin")?;
+    let read_ts = txn.start_ts();
+    let sql = format!(
+        "select id, val0, val1 \
+         from `{UNIQUE_DB_NAME}`.`{UNIQUE_TABLE_NAME}` \
+         where val1 != val0 * 10"
+    );
+    let rows = {
+        sqlx::query(&sql)
+            .fetch_all(txn.conn())
+            .await
+            .context("select value")?
+    };
+    if !rows.is_empty() {
+        for row in rows {
+            let id: i32 = row.get("id");
+            let val0: i32 = row.get("val0");
+            let val1: i32 = row.get("val1");
+            error!("unique table have incorrect values"; "id" => id, "val0" => val0, "val1" => val1, "read_ts" => read_ts);
+        }
+
+        let rows = list_rows(txn.conn()).await?;
+        info!("list rows"; "rows" => ?rows, "read_ts" => read_ts);
+
+        panic!("unique table incorrect values");
+    }
+    Ok(())
+}
+
+async fn check_table(pool: &MySqlPool) -> Result<()> {
+    let check_table = format!("admin check table `{UNIQUE_DB_NAME}`.`{UNIQUE_TABLE_NAME}`");
+    let rows = {
+        pool.fetch_all(check_table.as_str())
+            .await
+            .context("check_table")?
+    };
+    if !rows.is_empty() {
+        for row in rows {
+            warn!("check table result: {:?}", row);
+        }
+        panic!("unique check table error");
+    }
+    Ok(())
+}
+
+async fn verify(pool: &MySqlPool) -> Result<()> {
+    verify_unique(pool).await.context("verify_unique")?;
+    verify_value(pool).await.context("verify_value")?;
+    check_table(pool).await.context("check_table")
+}
+
+async fn list_rows<'a, E>(executor: E) -> Result<Vec<UniqueRow>>
 where
     E: sqlx::Executor<'a, Database = MySql>,
 {
     let sql = format!(
-        "select id, val0, val1, padding, TIDB_CURRENT_TSO() as tso from `{UNIQUE_DB_NAME}`.`{UNIQUE_TABLE_NAME}` order by id"
+        "select id, val0, val1, padding from `{UNIQUE_DB_NAME}`.`{UNIQUE_TABLE_NAME}` order by id"
     );
-    let mut tso: Option<i64> = None;
-    let rows = sqlx::query(&sql)
-        .fetch_all(executor)
-        .await
-        .context("select all")?;
+    let rows = {
+        sqlx::query(&sql)
+            .fetch_all(executor)
+            .await
+            .context("select all")?
+    };
     let unique_rows = rows
         .into_iter()
         .map(|row| {
@@ -303,7 +408,6 @@ where
             let val1: i32 = row.get("val1");
             let mut padding: Vec<u8> = row.get("padding");
             padding.truncate(16);
-            let _ = tso.get_or_insert_with(|| row.get("tso"));
             UniqueRow {
                 id,
                 val0,
@@ -312,7 +416,7 @@ where
             }
         })
         .collect::<Vec<_>>();
-    Ok((unique_rows, tso.unwrap()))
+    Ok(unique_rows)
 }
 
 #[derive(PartialEq)]

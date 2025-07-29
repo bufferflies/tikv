@@ -223,7 +223,8 @@ async fn verify_bank_accounts(
                 .context("select sum")?;
             let sum: i32 = row.get("sum");
             let accounts = list_bank_accounts(txn.conn(), use_tiflash).await;
-            info!("verify_bank_accounts: try again"; "sum" => sum, "accounts" => ?accounts, "read_ts" => txn.start_ts());
+            info!("verify_bank_accounts: try again"; "sum" => sum, "accounts" => ?accounts,
+                "read_ts" => txn.start_ts(), "use_tiflash" => use_tiflash);
         }
 
         #[cfg(feature = "debug-trace-txn-tasks")]
@@ -233,10 +234,11 @@ async fn verify_bank_accounts(
         dump_accounts_history();
 
         panic!(
-            "sum is not zero: {}, read_ts {}, accounts {:?}",
+            "sum is not zero: {}, read_ts {}, accounts {:?}, use_tiflash {}",
             sum,
             txn.start_ts(),
-            accounts
+            accounts,
+            use_tiflash
         );
     }
     Ok(())

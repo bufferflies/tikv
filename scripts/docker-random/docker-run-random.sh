@@ -142,6 +142,9 @@ while [[ $# -gt 0 ]]; do
 	--enable-tiflash-write-node)
 		RUN_ARGS+=("--enable-tiflash-write-node")
 		;;
+	--tidb-next-gen)
+		RUN_ARGS+=("--tidb-next-gen")
+		;;
 	--help)
 		show_help
 		exit 0

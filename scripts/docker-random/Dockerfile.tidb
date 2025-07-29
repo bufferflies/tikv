@@ -4,6 +4,7 @@ ARG TIFLASH_VERSION=v7.5.0
 ARG TICDC_VERSION=v7.5
 
 FROM hub-new.pingcap.net/keyspace/tidb:${TIDB_VERSION} as tidb
+FROM hub-new.pingcap.net/kvaas/tidb-next-gen:latest as tidb-next-gen
 FROM hub-new.pingcap.net/keyspace/pd:${PD_VERSION} as pd
 FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
@@ -25,6 +26,7 @@ RUN dnf update -y && dnf install -y \
     ghostscript
 
 COPY --from=tidb /tidb-server /tidb-server
+COPY --from=tidb-next-gen /tidb-server /tidb-server-next-gen
 COPY --from=pd /pd-server /pd-server
 COPY --from=tiflash /tiflash /tiflash
 COPY --from=go-tpc /go-tpc /go-tpc
@@ -33,6 +35,7 @@ COPY --from=minio /usr/bin/minio /usr/bin/minio
 COPY --from=mc /usr/bin/mc /usr/bin/mc
 
 ENV TIDB_BIN=/tidb-server
+ENV TIDB_NEXT_GEN_BIN=/tidb-server-next-gen
 ENV PD_BIN=/pd-server
 ENV TIFLASH_BIN=/tiflash/tiflash
 ENV TPC_BIN=/go-tpc

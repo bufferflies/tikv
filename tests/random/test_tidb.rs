@@ -79,6 +79,7 @@ const PD_HEALTHY_TIMEOUT: Duration = Duration::from_secs(30);
 const PD_TSO_SVC_COUNT: usize = 2;
 
 const TIDB_BIN_ENV_KEY: &str = "TIDB_BIN";
+const TIDB_NEXT_GEN_BIN_ENV_KEY: &str = "TIDB_NEXT_GEN_BIN";
 const TIDB_PORT_ENV_KEY: &str = "TIDB_PORT";
 const TIDB_PORT_DEFAULT: u16 = 4000;
 const TIDB_STATUS_PORT_ENV_KEY: &str = "TIDB_STATUS_PORT";
@@ -231,7 +232,12 @@ pub(crate) fn prepare_tidb_cluster(
         .map(|s| s.parse().unwrap())
         .unwrap_or(PD_PORT_DEFAULT);
 
-    let tidb_bin = std::env::var(TIDB_BIN_ENV_KEY).expect("env TIDB_BIN is not set");
+    let tidb_bin_env = if !switches.tidb_next_gen {
+        TIDB_BIN_ENV_KEY
+    } else {
+        TIDB_NEXT_GEN_BIN_ENV_KEY
+    };
+    let tidb_bin = std::env::var(tidb_bin_env).expect("env TIDB_BIN is not set");
     let tidb_port_base = std::env::var(TIDB_PORT_ENV_KEY)
         .map(|s| s.parse().unwrap())
         .unwrap_or(TIDB_PORT_DEFAULT);
@@ -271,6 +277,7 @@ pub(crate) fn prepare_tidb_cluster(
         tiflash_bin.map(PathBuf::from),
         INITIAL_KEYSPACE_COUNT as u16,
         security_config,
+        switches.tidb_next_gen,
     );
     block_on(tc.start_pd(PD_COUNT as u16, PD_HEALTHY_TIMEOUT));
     tc
@@ -558,32 +565,26 @@ async fn prepare_tidb_variables(
     keyspace_manager: &KeyspaceManager,
     switches: &Switches,
 ) {
-    let mut switch_sqls = vec![];
-    if !switches.global_use_txn_file {
-        switch_sqls.push("SET GLOBAL tidb_disable_txn_file = 'ON'");
-    }
-    if switches.async_commit_switch_on {
-        switch_sqls.push("SET GLOBAL tidb_enable_async_commit = 'ON'");
-        switch_sqls.push("SET GLOBAL tidb_enable_1pc = 'ON'");
-    }
-
-    let variables = vec![
-        ("tidb_disable_txn_file", !switches.global_use_txn_file),
+    let mut variables = vec![
         ("tidb_enable_async_commit", switches.async_commit_switch_on),
         ("tidb_enable_1pc", switches.async_commit_switch_on),
     ];
+    if !switches.tidb_next_gen {
+        variables.push(("tidb_disable_txn_file", !switches.global_use_txn_file));
+    } else {
+        variables.push(("tidb_pessimistic_txn_fair_locking", false));
+    }
 
-    if !switch_sqls.is_empty() {
-        for keyspace_id in keyspace_manager.get_all_keyspaces() {
-            let pool = connect_tidb(tc, keyspace_manager, keyspace_id).await;
+    for keyspace_id in keyspace_manager.get_all_keyspaces() {
+        let pool = connect_tidb(tc, keyspace_manager, keyspace_id).await;
 
-            let mut conn = pool.acquire().await.unwrap();
-            for &sql in &switch_sqls {
-                info!("{}: TiDB var: {}", keyspace_id, sql);
-                conn.execute(sql).await.unwrap();
-            }
-            conn.detach(); // Drop the connection, as we set global variables only.
+        let mut conn = pool.acquire().await.unwrap();
+        for &(var, value) in &variables {
+            let sql = format!("SET GLOBAL {} = {}", var, value as i64);
+            info!("{}: TiDB var: {}", keyspace_id, sql);
+            conn.execute(sql.as_str()).await.unwrap();
         }
+        conn.detach(); // Drop the connection, as we set global variables only.
     }
 
     // Verify variables.
@@ -604,6 +605,9 @@ pub(crate) async fn collect_tables(
     keyspace_manager: &KeyspaceManager,
     switches: &Switches,
 ) -> Vec<Arc<TableMeta>> {
+    if switches.ia_table_ratio <= 0.0 {
+        return vec![];
+    }
     let mut tables = vec![];
     let all_keyspaces = keyspace_manager.get_all_keyspaces();
 
@@ -694,6 +698,7 @@ pub(crate) fn start_workloads(
             keyspace_manager.clone(),
             UNIQUE_WORKLOAD_KEYSPACE,
             switches.global_use_txn_file,
+            switches.unique_ddl_switch_on,
             running.clone(),
         )));
     }
@@ -980,6 +985,7 @@ pub(crate) struct Switches {
     pub jepsen_switch_on: bool,
     pub jepsen_use_txn_file: bool,
     pub unique_workload_switch_on: bool,
+    pub unique_ddl_switch_on: bool,
     pub global_use_txn_file: bool,
     pub restart_tso_svc: bool,
     pub async_commit_switch_on: bool,
@@ -989,6 +995,7 @@ pub(crate) struct Switches {
     pub txn_check_backup_ts: bool,
     pub enable_tiflash_write_node: bool,
     pub enable_value_cache: bool,
+    pub tidb_next_gen: bool,
 }
 
 impl Switches {
@@ -1004,6 +1011,7 @@ impl Switches {
         let jepsen_switch_on = env_switch(JEPSEN_WORKLOAD_SWITCH_ENV_KEY);
         let jepsen_use_txn_file = env_switch(JEPSEN_WORKLOAD_USE_TXN_FILE_ENV_KEY);
         let unique_workload_switch_on = env_switch_opt(UNIQUE_WORKLOAD_SWITCH_ENV_KEY, 0);
+        let unique_ddl_switch_on = rng.gen_bool(0.0); // TODO: enable after consistency issue fixed.
 
         let global_use_txn_file = env_switch(ENABLE_GLOBAL_TXN_FILE_ENV_KEY);
         let global_use_txn_file = global_use_txn_file && rng.gen_bool(ENABLE_GLOBAL_TXN_FILE_RATIO);
@@ -1016,6 +1024,7 @@ impl Switches {
         let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.5);
         let enable_tiflash_write_node = env_switch(ENABLE_TIFLASH_WRITE_NODE_ENV_KEY);
         let enable_value_cache = env_switch_opt("ENABLE_VALUE_CACHE", 0);
+        let tidb_next_gen = env_switch_opt("TIDB_NEXT_GEN", 0);
 
         Self {
             remote_cop_min_block_size,
@@ -1025,6 +1034,7 @@ impl Switches {
             jepsen_switch_on,
             jepsen_use_txn_file,
             unique_workload_switch_on,
+            unique_ddl_switch_on,
             global_use_txn_file,
             restart_tso_svc,
             async_commit_switch_on,
@@ -1034,6 +1044,7 @@ impl Switches {
             txn_check_backup_ts,
             enable_tiflash_write_node,
             enable_value_cache,
+            tidb_next_gen,
         }
     }
 }
@@ -1048,6 +1059,7 @@ pub(crate) struct WorkloadStats {
     pub jepsen_bank_retry: usize,
     pub unique_workload: usize,
     pub unique_conflict: usize,
+    pub unique_ddl: usize,
     pub async_shards: usize,
     pub remote_compact_exceed_memory_limit: u64,
     pub backup_count: u64,
@@ -1064,6 +1076,7 @@ impl WorkloadStats {
         let jepsen_bank_retry = JEPSEN_BANK_TXN_RETRY_COUNTER.load(Ordering::SeqCst);
         let unique_workload = UNIQUE_WORKLOAD_TXN_COUNTER.load(Ordering::SeqCst);
         let unique_conflict = UNIQUE_WORKLOAD_CONFLICT_COUNTER.load(Ordering::SeqCst);
+        let unique_ddl = UNIQUE_TABLE_DDL_COUNTER.load(Ordering::SeqCst);
         let async_shards = ASYNC_SHARD_COUNTER.load(Ordering::SeqCst);
         let remote_compact_exceed_memory_limit =
             ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.get();
@@ -1084,6 +1097,7 @@ impl WorkloadStats {
             jepsen_bank_retry,
             unique_workload,
             unique_conflict,
+            unique_ddl,
             async_shards,
             remote_compact_exceed_memory_limit,
             backup_count,

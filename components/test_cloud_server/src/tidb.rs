@@ -347,6 +347,8 @@ pub struct TidbServers {
     security_mgr: Arc<SecurityManager>,
 
     children: DashMap<u16 /* idx */, process::Child>,
+
+    next_gen: bool,
 }
 
 impl TidbServers {
@@ -356,6 +358,7 @@ impl TidbServers {
         port_base: u16,
         status_port_base: u16,
         security_mgr: Arc<SecurityManager>,
+        next_gen: bool,
     ) -> Self {
         Self {
             bin_path,
@@ -364,11 +367,16 @@ impl TidbServers {
             status_port_base,
             security_mgr,
             children: DashMap::new(),
+            next_gen,
         }
     }
 
     pub fn root(&self, idx: u16) -> String {
-        format!("{}.root", keyspace_name_by_idx(idx))
+        if !self.next_gen {
+            format!("{}.root", keyspace_name_by_idx(idx))
+        } else {
+            "root".to_string()
+        }
     }
 
     pub fn port(&self, idx: u16) -> u16 {
@@ -474,7 +482,7 @@ impl TidbServers {
 
     pub fn get_tidb_control(&self, idx: u16) -> TidbControl {
         let endpoint = format!("127.0.0.1:{}", self.status_port(idx));
-        TidbControl::new(endpoint, self.security_mgr.clone())
+        TidbControl::new(endpoint, self.security_mgr.clone(), self.next_gen)
     }
 
     pub async fn must_healthy(&self, idx: u16, timeout: Duration) {
@@ -552,6 +560,7 @@ impl TidbCluster {
         tiflash_bin: Option<PathBuf>,
         pre_alloc_keyspaces: u16,
         security_conf: &SecurityConfig,
+        next_gen: bool,
     ) -> Self {
         check_binary("pd_server", &pd_bin);
         check_binary("tidb-server", &tidb_bin);
@@ -577,6 +586,7 @@ impl TidbCluster {
             tidb_port_base,
             tidb_status_port_base,
             security_mgr.clone(),
+            next_gen,
         );
         let tiflash = tiflash_bin.map(|tiflash_bin| {
             TiFlashServers::new(tiflash_bin, base_path.path().to_owned(), security_mgr)
@@ -841,6 +851,7 @@ struct TikvClientConfig {
 }
 
 const TIDB_HEALTH_PATH: &str = "health";
+const TIDB_STATUS_PATH: &str = "status";
 
 // Ref: https://github.com/tidbcloud/tidb-cse/blob/release-7.1-keyspace/server/health_handler.go
 // {"status":"up","token":"keyspace_a"}
@@ -851,20 +862,43 @@ struct TidbHealth {
     token: String,  // keyspace name
 }
 
+// Ref: https://github.com/pingcap/tidb/blob/v8.5.2/pkg/server/http_status.go#L563
+#[derive(Default, Deserialize, Debug)]
+#[serde(default)]
+struct TidbStatus {
+    version: String,
+    status: TidbStatusDetail,
+}
+
+#[derive(Default, Deserialize, Debug)]
+#[serde(default)]
+struct TidbStatusDetail {
+    init_stats_percentage: f64,
+}
+
 /// TidbControl provides access to HTTP APIs of TiDB, which are not included in
 /// gRPC interface. It's also expected to act like the tool `tidb-ctl`.
 #[derive(Clone)]
 pub struct TidbControl {
     client: RestfulClient,
+    next_gen: bool,
 }
 
 impl TidbControl {
-    pub fn new(endpoint: String, security_mgr: Arc<SecurityManager>) -> Self {
+    pub fn new(endpoint: String, security_mgr: Arc<SecurityManager>, next_gen: bool) -> Self {
         let client = RestfulClient::new("tidb-ctl", vec![endpoint], security_mgr).unwrap();
-        Self { client }
+        Self { client, next_gen }
     }
 
     pub async fn health(&self) -> Result<()> {
+        if !self.next_gen {
+            self.query_health().await
+        } else {
+            self.query_status().await
+        }
+    }
+
+    async fn query_health(&self) -> Result<()> {
         let resp = self.client.get::<TidbHealth>(TIDB_HEALTH_PATH).await;
         match resp {
             Ok(health) if health.status == "up" => {
@@ -873,6 +907,18 @@ impl TidbControl {
             }
             Ok(health) => Err(box_err!("tidb-ctl: unhealthy: {:?}", health)),
             Err(e) => Err(box_err!("tidb-ctl: check healthy failed: {:?}", e)),
+        }
+    }
+
+    async fn query_status(&self) -> Result<()> {
+        let resp = self.client.get::<TidbStatus>(TIDB_STATUS_PATH).await;
+        match resp {
+            Ok(status) if status.status.init_stats_percentage >= 90.0 => {
+                info!("tidb-ctl: status: {:?}", status);
+                Ok(())
+            }
+            Ok(status) => Err(box_err!("tidb-ctl: not ready: {:?}", status)),
+            Err(e) => Err(box_err!("tidb-ctl: check status failed: {:?}", e)),
         }
     }
 }

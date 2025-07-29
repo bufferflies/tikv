@@ -30,6 +30,8 @@ const RETRYABLE_DB_ERR_MSGS: &[&str] = &[
     "Region epoch not match after retries",
     "tikv aborts txn",
     "Resolve lock timeout",
+    "public column val0 has changed", // Reason: modify column val0/val1 in unique workload.
+    "public column val1 has changed",
 ];
 
 const RETRYABLE_TSO_ERR_MSGS: &[&str] = &[

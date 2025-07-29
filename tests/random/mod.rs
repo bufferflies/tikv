@@ -95,6 +95,7 @@ lazy_static::lazy_static! {
     pub static ref JEPSEN_BANK_TXN_RETRY_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref UNIQUE_WORKLOAD_TXN_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref UNIQUE_WORKLOAD_CONFLICT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    pub static ref UNIQUE_TABLE_DDL_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref COLUMNAR_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref COLUMNAR_RETRY_COUNTER: AtomicUsize = AtomicUsize::new(0);
     pub static ref ALTER_TABLE_NON_IA_COUNTER: AtomicUsize = AtomicUsize::new(0);
