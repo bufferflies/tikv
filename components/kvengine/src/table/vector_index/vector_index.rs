@@ -177,9 +177,14 @@ impl VectorIndex {
         }
     }
 
+    // Sort the vector index files stable. If the snap_version is the same,
+    // we sort the files by file_id to make the order stable.
     pub(crate) fn sort(&mut self) {
-        self.files
-            .sort_by(|a, b| b.snap_version().cmp(&a.snap_version()));
+        self.files.sort_by(|a, b| {
+            b.snap_version()
+                .cmp(&a.snap_version())
+                .then_with(|| b.file_id().cmp(&a.file_id()))
+        });
     }
 
     pub fn set_snap_version(&mut self, snap_version: u64) {
