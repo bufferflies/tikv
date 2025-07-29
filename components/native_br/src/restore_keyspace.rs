@@ -2918,7 +2918,7 @@ async fn request_restore_snapshot(
             .body(Body::from(post_data.clone()))
             .unwrap();
         match send_request_to_store(req, &store, security_mgr.as_ref(), timeout / 2).await {
-            Ok(resp) => {
+            Ok((_, resp)) => {
                 let resp: RestoreShardResponse = serde_json::from_slice(&resp).unwrap();
                 debug!("{} request_restore_snapshot succeed", tag);
                 return Ok(resp);

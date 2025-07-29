@@ -95,7 +95,7 @@ pub async fn send_request_to_store(
     store: &Store,
     security_mgr: &SecurityManager,
     timeout: Duration,
-) -> Result<Bytes> {
+) -> Result<(StatusCode, Bytes)> {
     debug_assert!(!timeout.is_zero());
     let client = security_mgr.http_client(hyper::Client::builder())?;
     let uri_str = format!("{}", req.uri());
@@ -138,7 +138,7 @@ pub async fn send_request_to_store(
         }
     }
     match body {
-        Ok(body) => Ok(body),
+        Ok(body) => Ok((status, body)),
         Err(err) => {
             error!(
                 "convert response failed, store {}, err {:?}, uri {:?}",
@@ -165,7 +165,7 @@ where
     while start_time.saturating_elapsed() < timeout {
         let req = build_req();
         match send_request_to_store(req, store, security_mgr, timeout / 2).await {
-            Ok(resp) => return Ok(resp),
+            Ok((_, resp)) => return Ok(resp),
             Err(err) if is_error_retryable(&err) => {
                 last_err = Some(err);
                 tokio::time::sleep(Duration::from_millis(500)).await;

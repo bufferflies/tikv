@@ -5,12 +5,13 @@ use std::{sync::Arc, time::Duration};
 use api_version::ApiV2;
 use futures::executor::block_on;
 use kvengine::{dfs::S3Fs, table::BIT_DELETE, WRITE_CF};
+use kvproto::metapb;
 use merged_engine::{MergedEngine, MergedEngineConfig, MergedEngineContext};
 use native_br::{backup, backup::BackupType, common::send_request_to_store};
 use pd_client::PdClient;
 use rand::Rng;
 use rfstore::store::ApplyContext;
-use security::GetSecurityManager;
+use security::{GetSecurityManager, SecurityManager};
 use test_cloud_server::{
     client::{RefStore, RequestOptions},
     oss::prepare_dfs,
@@ -22,6 +23,7 @@ use tikv_util::{
     codec::bytes::encode_bytes,
     config::{env_or_default, ReadableDuration, ReadableSize},
 };
+use tokio::runtime::Runtime;
 
 use crate::{alloc_node_id_vec, i_to_key};
 
@@ -41,7 +43,7 @@ fn test_merged_engine_once() {
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_conf.clone();
         conf.rfengine.lightweight_backup = true;
-        conf.rfengine.target_file_size = ReadableSize::mb(16);
+        conf.rfengine.target_file_size = ReadableSize::kb(256);
         conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
@@ -184,35 +186,56 @@ fn update_merged_engine(
     let dfs = cluster.get_dfs().unwrap();
     let stores = cluster.get_stores();
     for store_id in stores {
-        let store_progress = merged_engine.get_store_progress(store_id).unwrap();
-        let epoch = store_progress.epoch;
-        let start_off = store_progress.offset;
         let store = pd_client.get_store(store_id).unwrap();
+        update_merged_engine_for_store(&security_mgr, merged_engine, &store, dfs.get_runtime());
+    }
+    let router = merged_engine.get_router();
+    let mut apply_ctx = ApplyContext::new(merged_engine.get_kv(), Some(router));
+    merged_engine.sync_merged(&mut apply_ctx).unwrap();
+}
+
+fn update_merged_engine_for_store(
+    security_mgr: &SecurityManager,
+    merged_engine: &mut MergedEngine,
+    store: &metapb::Store,
+    runtime: &Runtime,
+) {
+    let store_id = store.id;
+    let store_progress = merged_engine.get_store_progress(store_id).unwrap();
+    let mut epoch = store_progress.epoch;
+    let mut start_off = store_progress.offset;
+    loop {
         let uri = security_mgr
             .build_uri(format!(
                 "{}/rfengine/wal_chunk?epoch_id={}&start_off={}&end_off=0",
-                &store.status_address, epoch, start_off
+                store.status_address, epoch, start_off
             ))
             .unwrap();
         let req = http::Request::get(uri.clone())
             .body(hyper::Body::empty())
             .unwrap();
-        let runtime = dfs.get_runtime();
-        let data = runtime
+        let (status, data) = runtime
             .block_on(send_request_to_store(
                 req,
-                &store,
-                &security_mgr,
+                store,
+                security_mgr,
                 Duration::from_secs(10),
             ))
             .unwrap();
+        let data_len = data.len();
         merged_engine
             .update_wal(store_id, epoch, start_off, data)
             .unwrap();
+        if status == http::StatusCode::PARTIAL_CONTENT {
+            merged_engine
+                .rotate_wal(store_id, epoch, start_off + data_len as u64)
+                .unwrap();
+            epoch += 1;
+            start_off = 0;
+            continue;
+        }
+        return;
     }
-    let router = merged_engine.get_router();
-    let mut apply_ctx = ApplyContext::new(merged_engine.get_kv(), Some(router));
-    merged_engine.sync_merged(&mut apply_ctx).unwrap();
 }
 
 fn kv_engine_to_ref_store(kv: &kvengine::Engine) -> RefStore {

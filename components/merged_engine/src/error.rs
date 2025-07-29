@@ -14,6 +14,10 @@ pub enum Error {
     DfsError(#[from] kvengine::dfs::Error),
     #[error("Br error {0}")]
     BrError(#[from] native_br::error::Error),
+    #[error("store progress mismatch {0}")]
+    StoreProgressMismatch(String),
+    #[error("{0} store progress not found")]
+    StoreProgressNotFound(u64),
 }
 
 pub type Result<T> = std::result::Result<T, crate::Error>;
