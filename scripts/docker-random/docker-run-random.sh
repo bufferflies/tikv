@@ -209,5 +209,5 @@ for ((i = 0; i < "$CONCURRENCY"; i++)); do
 		$TMP_VOLUME \
 		$LOG_VOLUME \
 		"$IMAGE" \
-		/bin/sh /random/run-random.sh "$i" "$TESTNAME" "${RUN_ARGS[@]}"
+		/bin/bash /random/run-random.sh "$i" "$TESTNAME" "${RUN_ARGS[@]}"
 done
