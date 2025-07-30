@@ -1654,7 +1654,8 @@ impl Default for FileMeta {
 }
 
 pub fn is_move_down(comp: &pb::Compaction) -> bool {
-    comp.top_deletes.len() == comp.table_creates.len()
+    !comp.top_deletes.is_empty()
+        && comp.top_deletes.len() == comp.table_creates.len()
         && comp.top_deletes[0] == comp.table_creates[0].id
 }
 
