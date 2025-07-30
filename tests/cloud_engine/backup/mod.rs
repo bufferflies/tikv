@@ -115,6 +115,15 @@ fn test_backup_and_import() {
     let key_count = 2000;
     must_kv_put(&mut client1, key_count, 3);
 
+    // split x key and tidb key
+    client1.split(b"t_key");
+    // build tidb key data
+    client1.put_kv(
+        0..1000,
+        |i| format!("t_key{:08}", i).into_bytes(),
+        |i| format!("val{:04}", i).repeat(i % 32 + 1).into_bytes(),
+    );
+
     // Push down backup request.
     let backup_ts = client1.get_ts();
     let resps1 = backup(
@@ -187,6 +196,9 @@ fn test_backup_and_import() {
     }
     let resp = import_sst_client.multi_ingest(&ingest).unwrap();
     assert!(!resp.has_error(), "{:?}", resp);
+
+    // split again make sure the files to be back up ed are same.
+    client2.split(b"t_key");
 
     // Backup file should have same contents.
     let resps2 = backup(

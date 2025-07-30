@@ -242,15 +242,19 @@ impl RocksMultiFileIterator {
     }
 
     fn next_impl(&mut self) -> crate::Result<()> {
-        if self.state.is_none() {
+        let Some(state) = self.state.as_mut() else {
             return Ok(());
+        };
+
+        if state.iter.valid()? {
+            state.iter.next()?;
         }
 
-        if !self.state.as_ref().unwrap().iter.valid()? && !self.move_to_next_file()? {
-            return Ok(());
+        // invalid after next means we reach the end of one sst file.
+        if !state.iter.valid()? {
+            // move to next sst file
+            self.move_to_next_file()?;
         }
-
-        self.state.as_mut().unwrap().iter.next()?;
         Ok(())
     }
 
