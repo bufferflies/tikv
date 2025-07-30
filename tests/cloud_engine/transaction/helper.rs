@@ -133,6 +133,7 @@ pub fn new_put_mutation(key: Vec<u8>, value: Vec<u8>) -> Mutation {
         key: key.into(),
         value: value.into(),
         op: kvrpcpb::Op::Put,
+        ..Default::default()
     }
 }
 
@@ -141,5 +142,24 @@ pub fn new_pessimistic_lock_mutation(key: Vec<u8>) -> Mutation {
         key: key.into(),
         value: vec![].into(),
         op: kvrpcpb::Op::PessimisticLock,
+        ..Default::default()
+    }
+}
+
+pub fn new_delete_mutation(key: Vec<u8>) -> Mutation {
+    Mutation {
+        key: key.into(),
+        value: vec![].into(),
+        op: kvrpcpb::Op::Del,
+        ..Default::default()
+    }
+}
+
+pub fn new_lock_mutation(key: Vec<u8>) -> Mutation {
+    Mutation {
+        key: key.into(),
+        value: vec![].into(),
+        op: kvrpcpb::Op::Lock,
+        ..Default::default()
     }
 }

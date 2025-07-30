@@ -156,6 +156,7 @@ fn test_pes_acquire_lock_key_locked_wait_and_write_conflict_after_release() {
                     op: Op::PessimisticLock,
                     key: k1.clone().into(),
                     value: vec![].into(),
+                    ..Default::default()
                 }]),
                 start_ts_other,
             )

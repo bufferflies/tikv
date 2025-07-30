@@ -638,6 +638,7 @@ fn make_put(key: Bytes, value: Bytes) -> Mutation {
         op: kvrpcpb::Op::Put,
         key,
         value,
+        ..Default::default()
     }
 }
 
@@ -646,6 +647,7 @@ fn make_insert(key: Bytes, value: Bytes) -> Mutation {
         op: kvrpcpb::Op::Insert,
         key,
         value,
+        ..Default::default()
     }
 }
 

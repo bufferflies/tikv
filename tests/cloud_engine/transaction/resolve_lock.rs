@@ -31,6 +31,7 @@ fn test_resolve_lock() {
                 key: Bytes::from(i_to_key(i)),
                 value: Bytes::from(i_to_val(i)),
                 op: kvrpcpb::Op::Put,
+                ..Default::default()
             });
         }
         let start_ts = client.get_ts();
@@ -53,6 +54,7 @@ fn test_resolve_lock() {
                 key: Bytes::from(i_to_key(i)),
                 value: Bytes::from(i_to_val(i)),
                 op: kvrpcpb::Op::Put,
+                ..Default::default()
             });
         }
         let start_ts = client.get_ts();

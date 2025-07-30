@@ -2,6 +2,7 @@
 
 use std::{sync::mpsc, thread, time::Duration};
 
+use kvproto::kvrpcpb::{Assertion, Op};
 use test_cloud_server::{
     client::{ClusterClient, PrewriteExt, RequestOptions, TxnMutations},
     ServerCluster,
@@ -44,6 +45,8 @@ pub(crate) enum TestOperation {
         key: Option<Vec<u8>>,
         for_update_ts: Option<TimeStamp>,
         value: Option<Vec<u8>>,
+        assertion: Assertion,
+        op_type: Op,
     },
     Commit {
         start_ts: TimeStamp,
@@ -78,6 +81,26 @@ impl TestOperation {
                 *check_value = true;
             }
             _ => unreachable!("value can only be set for prewrite"),
+        }
+        self
+    }
+
+    pub fn assert(mut self, assertion_val: Assertion) -> Self {
+        match self {
+            TestOperation::Prewrite {
+                ref mut assertion, ..
+            } => *assertion = assertion_val,
+            _ => unreachable!("assertion can only be set for prewrite"),
+        }
+        self
+    }
+
+    pub fn delete(mut self) -> Self {
+        match self {
+            TestOperation::Prewrite {
+                ref mut op_type, ..
+            } => *op_type = Op::Del,
+            _ => unreachable!("op_type can only be set for prewrite"),
         }
         self
     }
@@ -130,6 +153,8 @@ macro_rules! prewrite {
             key: None,
             for_update_ts: None,
             value: None,
+            assertion: Assertion::None,
+            op_type: Op::Put,
         }
     };
     ($start_ts:expr, $key:expr,expire) => {
@@ -139,6 +164,8 @@ macro_rules! prewrite {
             key: Some($key.clone()),
             for_update_ts: None,
             value: None,
+            assertion: Assertion::None,
+            op_type: Op::Put,
         }
     };
     ($start_ts:expr) => {
@@ -148,6 +175,8 @@ macro_rules! prewrite {
             key: None,
             for_update_ts: None,
             value: None,
+            assertion: Assertion::None,
+            op_type: Op::Put,
         }
     };
     ($start_ts:expr, $key:expr) => {
@@ -157,6 +186,8 @@ macro_rules! prewrite {
             key: Some($key.clone()),
             for_update_ts: None,
             value: None,
+            assertion: Assertion::None,
+            op_type: Op::Put,
         }
     };
 }
@@ -169,6 +200,8 @@ macro_rules! pessimistic_prewrite {
             key: None,
             for_update_ts: Some(ts($for_update_ts)),
             value: None,
+            assertion: Assertion::None,
+            op_type: Op::Put,
         }
     };
     ($start_ts:expr, $for_update_ts:expr, $key:expr,expire) => {
@@ -178,6 +211,8 @@ macro_rules! pessimistic_prewrite {
             key: Some($key.clone()),
             for_update_ts: Some(ts($for_update_ts)),
             value: None,
+            assertion: Assertion::None,
+            op_type: Op::Put,
         }
     };
     ($start_ts:expr, $for_update_ts:expr) => {
@@ -187,6 +222,8 @@ macro_rules! pessimistic_prewrite {
             key: None,
             for_update_ts: Some(ts($for_update_ts)),
             value: None,
+            assertion: Assertion::None,
+            op_type: Op::Put,
         }
     };
     ($start_ts:expr, $for_update_ts:expr, $key:expr) => {
@@ -196,6 +233,8 @@ macro_rules! pessimistic_prewrite {
             key: Some($key.clone()),
             for_update_ts: Some(ts($for_update_ts)),
             value: None,
+            assertion: Assertion::None,
+            op_type: Op::Put,
         }
     };
 }
@@ -525,12 +564,27 @@ fn execute_single_operation(
             key,
             for_update_ts,
             value,
+            assertion,
+            op_type,
         } => {
             let target_key = key.as_deref().unwrap_or(default_key);
             let default_val = i_to_val(2);
             let val = value.as_ref().map(|v| v.as_slice()).unwrap_or(&default_val);
-            let mutations = vec![new_put_mutation(target_key.to_vec(), val.to_vec())];
-            let txn_muts = TxnMutations::from_normal(mutations);
+
+            // Create mutation with assertion support
+            let mut mutation = match op_type {
+                Op::Put => new_put_mutation(target_key.to_vec(), val.to_vec()),
+                Op::Del => new_delete_mutation(target_key.to_vec()),
+                Op::Lock => new_lock_mutation(target_key.to_vec()),
+                _ => new_put_mutation(target_key.to_vec(), val.to_vec()),
+            };
+
+            // Set assertion if specified
+            if *assertion != Assertion::None {
+                mutation.set_assertion(*assertion);
+            }
+
+            let txn_muts = TxnMutations::from_normal(vec![mutation]);
             let ttl = if *expired { 1 } else { 20000 };
             let mut txn = client.begin_transaction(Some(*start_ts));
             match client.kv_prewrite_ext(
