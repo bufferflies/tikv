@@ -38,7 +38,7 @@ use hyper::{
     Body, Method, Request, Response, Server, StatusCode,
 };
 use kvengine::{
-    dfs::{DFSConfig, FileType},
+    dfs::FileType,
     table::{BoundedDataSet, InnerKey},
     IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY,
 };
@@ -533,7 +533,7 @@ impl StatusServer {
     // Collect the columnar replica status of the table
     async fn collect_columnar_status(
         req: Request<Body>,
-        engine: kvengine::Engine,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -573,7 +573,7 @@ impl StatusServer {
     /// indexes in the keyspace
     async fn collect_columnar_index_stats(
         req: Request<Body>,
-        engine: kvengine::Engine,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -607,8 +607,8 @@ impl StatusServer {
     // snapshot data
     async fn dump_kvengine_snapshot(
         req: Request<Body>,
-        engine: kvengine::Engine,
-        router: RaftRouter,
+        engine: &kvengine::Engine,
+        router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         let path = req.uri().path();
         let last = get_last_path_segment(path);
@@ -775,7 +775,7 @@ impl StatusServer {
 
     async fn dump_kvengine_meta(
         req: Request<Body>,
-        engine: kvengine::Engine,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let path = req.uri().path();
         let last = get_last_path_segment(path);
@@ -799,7 +799,7 @@ impl StatusServer {
 
     async fn dump_kvengine_stats(
         req: Request<Body>,
-        engine: kvengine::Engine,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let path = req.uri().path();
         let last = get_last_path_segment(path);
@@ -808,7 +808,7 @@ impl StatusServer {
             // get all shard state in given keyspace id.
             if path.starts_with("/kvengine/keyspace") {
                 let range = ApiV2::get_txn_keyspace_range(id as u32);
-                match Self::get_covered_shards_by_range(Some(range), &engine) {
+                match Self::get_covered_shards_by_range(Some(range), engine) {
                     Ok(shards) => {
                         let states: Vec<ShardStats> =
                             shards.iter().map(|s| s.get_stats()).collect();
@@ -870,7 +870,7 @@ impl StatusServer {
 
     async fn add_remote_compactor(
         req: Request<Body>,
-        mut comp_client: kvengine::CompactionClient,
+        comp_client: &kvengine::CompactionClient,
     ) -> hyper::Result<Response<Body>> {
         let mut body = Vec::new();
         req.into_body()
@@ -911,14 +911,14 @@ impl StatusServer {
 
     async fn ingest_files(
         req: Request<Body>,
-        router: RaftRouter,
-        engine: kvengine::Engine,
+        router: &RaftRouter,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let cs = Self::get_change_set_request(req).await?;
-        let tag = tag_from_cs(&engine, &cs);
+        let tag = tag_from_cs(engine, &cs);
         info!("[{}] receive ingest_files request: {:?}", tag, cs);
 
-        if let Err(errpb) = check_available_space(&engine) {
+        if let Err(errpb) = check_available_space(engine) {
             warn!("[{}] reject ingest files, low space", tag);
             return Ok(make_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -970,7 +970,7 @@ impl StatusServer {
 
     async fn dump_rfengine_stats(
         req: Request<Body>,
-        engine: rfengine::RfEngine,
+        engine: &RfEngine,
     ) -> hyper::Result<Response<Body>> {
         let path = req.uri().path();
         let last = get_last_path_segment(path);
@@ -995,7 +995,7 @@ impl StatusServer {
     // code maybe PARTIAL_CONTENT if the request epoch_id is not the latest.
     async fn rfengine_wal_chunk(
         req: Request<Body>,
-        engine: rfengine::RfEngine,
+        engine: &RfEngine,
     ) -> hyper::Result<Response<Body>> {
         let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
         if !engine.is_lightweight_backup_enabled() {
@@ -1059,8 +1059,8 @@ impl StatusServer {
     // region_id=xxx]
     async fn unsafe_recover(
         req: Request<Body>,
-        rf: rfengine::RfEngine,
-        engine: kvengine::Engine,
+        rf: &RfEngine,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let bad_request_resp =
             |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned() + "\n");
@@ -1078,7 +1078,7 @@ impl StatusServer {
             Ok(cluster_id) => cluster_id,
             Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
         };
-        let store_ident = load_store_ident(&rf).unwrap_or_default();
+        let store_ident = load_store_ident(rf).unwrap_or_default();
         if cluster_id != store_ident.cluster_id {
             return Ok(bad_request_resp("cluster_id not match"));
         }
@@ -1093,7 +1093,7 @@ impl StatusServer {
             };
             match rf.get_region_peer_map().get(&region_id) {
                 Some(&peer_id) => {
-                    let cs = load_raft_engine_meta(&rf, peer_id);
+                    let cs = load_raft_engine_meta(rf, peer_id);
                     if cs.is_none() {
                         return Ok(bad_request_resp(
                             format!("region {} peer {} not exists", region_id, peer_id).as_str(),
@@ -1121,7 +1121,7 @@ impl StatusServer {
                 prefix.put_u8(b't');
                 prefix.encode_i64(table_id as i64).unwrap();
             }
-            if let Some(regions) = collect_prefix_regions(&rf, &prefix) {
+            if let Some(regions) = collect_prefix_regions(rf, &prefix) {
                 regions
             } else {
                 return Ok(bad_request_resp("collect none region with prefix"));
@@ -1144,7 +1144,7 @@ impl StatusServer {
                 ));
             }
 
-            let old_raft_state = match Self::load_raft_state(&rf, peer_id, region_version) {
+            let old_raft_state = match Self::load_raft_state(rf, peer_id, region_version) {
                 Some(state) => state,
                 None => {
                     return Ok(bad_request_resp(
@@ -1170,7 +1170,7 @@ impl StatusServer {
             let raft_log_term = rf
                 .get_term(peer_id, origin_last_index)
                 .unwrap_or(RAFT_INIT_LOG_TERM);
-            let Some(old_cs) = load_raft_engine_meta(&rf, peer_id) else {
+            let Some(old_cs) = load_raft_engine_meta(rf, peer_id) else {
                 return Ok(bad_request_resp(
                     format!(
                         "region {} peer {} raft engine meta not exists",
@@ -1189,7 +1189,7 @@ impl StatusServer {
             let term = std::cmp::max(raft_log_term, meta_term) + 3;
 
             let _ = match Self::write_empty_engine_meta(
-                &rf,
+                rf,
                 &mut wb,
                 peer_id,
                 region_id,
@@ -1245,8 +1245,8 @@ impl StatusServer {
     // Note: return 404 when no match region is found.
     async fn major_compact(
         req: Request<Body>,
-        rf: RfEngine,
-        router: RaftRouter,
+        rf: &RfEngine,
+        router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         info!("major compact request: {:?}", req);
         let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
@@ -1278,7 +1278,7 @@ impl StatusServer {
             let region_to_peers = rf.get_region_peer_map();
             match region_to_peers.get(&region_id) {
                 Some(&peer_id) => {
-                    let cs = load_raft_engine_meta(&rf, peer_id);
+                    let cs = load_raft_engine_meta(rf, peer_id);
                     if cs.is_none() {
                         return Ok(not_found_resp(
                             format!("region {} peer {} not exists", region_id, peer_id).as_str(),
@@ -1306,7 +1306,7 @@ impl StatusServer {
                 prefix.put_u8(b't');
                 prefix.encode_i64(table_id as i64).unwrap();
             }
-            if let Some(regions) = collect_prefix_regions(&rf, &prefix) {
+            if let Some(regions) = collect_prefix_regions(rf, &prefix) {
                 regions
                     .into_iter()
                     .map(|(_, region_id, _)| region_id)
@@ -1353,8 +1353,8 @@ impl StatusServer {
     // table_id can be a single table ID or comma-separated list of table IDs.
     async fn flush(
         req: Request<Body>,
-        router: RaftRouter,
-        kvengine: kvengine::Engine,
+        router: &RaftRouter,
+        kvengine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -1695,7 +1695,7 @@ impl StatusServer {
 
     async fn handle_recovery(
         req: Request<Body>,
-        engine: kvengine::Engine,
+        engine: &kvengine::Engine,
         data_dir: &str,
     ) -> hyper::Result<Response<Body>> {
         let path = req.uri().path();
@@ -1717,10 +1717,7 @@ impl StatusServer {
 
     async fn backup_rfengine(
         req: Request<Body>,
-        engine: rfengine::RfEngine,
-        kvengine: kvengine::Engine,
-        concurrency_manager: ConcurrencyManager,
-        dfs_conf: DFSConfig,
+        ctx: &StatusContext,
     ) -> hyper::Result<Response<Body>> {
         let body = hyper::body::to_bytes(req.into_body()).await?;
         let backup_config: serde_json::Result<rfengine::BackupConfig> =
@@ -1731,7 +1728,7 @@ impl StatusServer {
         let backup_config = backup_config.unwrap();
 
         // Check if lightweight backup enabled.
-        if backup_config.lightweight && !engine.is_lightweight_backup_enabled() {
+        if backup_config.lightweight && !ctx.rfengine.is_lightweight_backup_enabled() {
             return Ok(make_response(
                 StatusCode::BAD_REQUEST,
                 "lightweight backup not enabled",
@@ -1740,7 +1737,8 @@ impl StatusServer {
 
         let cluster_id = backup_config.cluster_id;
         let mut store_ident = StoreIdent::default();
-        let data = engine
+        let data = ctx
+            .rfengine
             .get_state(0, rfengine::STORE_IDENT_KEY)
             .unwrap_or_default();
         store_ident.merge_from_bytes(data.chunk()).unwrap();
@@ -1757,11 +1755,12 @@ impl StatusServer {
 
         let (wait_backup_ts_ok, wait_backup_ts_dur) =
             if let Some(backup_ts) = backup_config.backup_ts {
-                concurrency_manager.update_max_ts(backup_ts.into());
+                ctx.concurrency_manager.update_max_ts(backup_ts.into());
 
-                concurrency_manager.replace_backup_ts(backup_ts.into());
+                ctx.concurrency_manager.replace_backup_ts(backup_ts.into());
                 let start_time = Instant::now_coarse();
-                let ok = concurrency_manager
+                let ok = ctx
+                    .concurrency_manager
                     .wait_old_backup_ts_released(
                         backup_ts.into(),
                         backup_config.backup_ts_wait_timeout(),
@@ -1774,15 +1773,16 @@ impl StatusServer {
                 (true, None)
             };
 
-        let s3fs = kvengine::dfs::S3Fs::new_from_config(dfs_conf);
+        let s3fs =
+            kvengine::dfs::S3Fs::new_from_config(ctx.cfg_controller.get_current().dfs.clone());
         let (callback, future) = paired_future_callback();
         let task = rfengine::BackupTask::new(Box::new(s3fs), callback, backup_config);
-        engine.backup(task);
+        ctx.rfengine.backup(task);
         Ok(match future.await {
             Ok(resp) => match resp {
                 Ok(mut meta) => {
                     info!("{}: backup finished", meta.store_id; "wait_backup_ts" => ?wait_backup_ts_dur);
-                    estimate_backup_size_by(&kvengine, meta.mut_keyspace_size());
+                    estimate_backup_size_by(&ctx.kvengine, meta.mut_keyspace_size());
                     meta.set_has_missing_commit_record(!wait_backup_ts_ok);
                     Response::builder()
                         .body(Body::from(meta.write_to_bytes().unwrap()))
@@ -1854,16 +1854,16 @@ impl StatusServer {
 
     async fn restore_shard(
         req: Request<Body>,
-        router: RaftRouter,
-        engine: kvengine::Engine,
+        router: &RaftRouter,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let accept_pb = req.headers().is_accept_protobuf();
         let req = Self::get_restore_shard_request(req).await?;
-        let tag = tag_from_cs(&engine, &req.cs);
+        let tag = tag_from_cs(engine, &req.cs);
         let shard_id = req.cs.get_shard_id();
         debug!("[{}] receive restore_shard request: {:?}", tag, req);
 
-        if let Err(errpb) = check_available_space(&engine) {
+        if let Err(errpb) = check_available_space(engine) {
             warn!("[{}] reject restore shard, low space", tag; "err" => ?errpb);
             return Ok(make_errpb_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1919,8 +1919,8 @@ impl StatusServer {
 
     async fn handle_schema_file(
         req: Request<Body>,
-        router: RaftRouter,
-        engine: kvengine::Engine,
+        router: &RaftRouter,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
         let query = req.uri().query().unwrap_or("");
@@ -1975,7 +1975,7 @@ impl StatusServer {
     /// [keyspace_id=xxx][shard_id=1][confirm_all=true|false]
     async fn handle_clear_columnar(
         req: Request<Body>,
-        router: RaftRouter,
+        router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
         let query = req.uri().query().unwrap_or("");
@@ -2051,7 +2051,7 @@ impl StatusServer {
     /// POST /build_columnar?switch=true|false
     async fn handle_build_columnar(
         req: Request<Body>,
-        engine: kvengine::Engine,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -2116,7 +2116,7 @@ fn get_bool_param(query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>, key: &str) 
 impl StatusServer {
     pub async fn dump_region_meta(
         _req: Request<Body>,
-        _router: RaftRouter,
+        _router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         // TODO(x)
         Ok(hyper::Response::new(Body::empty()))
@@ -2124,7 +2124,7 @@ impl StatusServer {
 
     pub async fn handle_sync_region(
         req: Request<Body>,
-        router: RaftRouter,
+        router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         let mut body = Vec::new();
         req.into_body()
@@ -2187,7 +2187,7 @@ impl StatusServer {
 
     pub async fn handle_sync_region_by_id(
         req: Request<Body>,
-        router: RaftRouter,
+        router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         let mut body = Vec::new();
         req.into_body()
@@ -2261,32 +2261,24 @@ impl StatusServer {
         I::Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         C: ServerConnection,
     {
-        let security_config = self.security_config.clone();
-        let cfg_controller = self.cfg_controller.clone();
-        let router = self.router.clone();
-        let engine = self.kvengine.clone();
-        let rfengine = self.rfengine.clone();
-        let concurrency_manager = self.concurrency_manager.clone();
+        let ctx = Arc::new(StatusContext {
+            security_config: self.security_config.clone(),
+            cfg_controller: self.cfg_controller.clone(),
+            router: self.router.clone(),
+            kvengine: self.kvengine.clone(),
+            rfengine: self.rfengine.clone(),
+            concurrency_manager: self.concurrency_manager.clone(),
+        });
         // Start to serve.
         let server = builder.serve(make_service_fn(move |conn: &C| {
             let x509 = conn.get_x509();
-            let security_config = security_config.clone();
-            let cfg_controller = cfg_controller.clone();
-            let router = router.clone();
-            let engine = engine.clone();
-            let rfengine = rfengine.clone();
-            let concurrency_manager = concurrency_manager.clone();
+            let ctx = ctx.clone();
             async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
                     let start = Instant::now_coarse();
                     let x509 = x509.clone();
-                    let security_config = security_config.clone();
-                    let cfg_controller = cfg_controller.clone();
-                    let router = router.clone();
-                    let engine = engine.clone();
-                    let rfengine = rfengine.clone();
-                    let concurrency_manager = concurrency_manager.clone();
+                    let ctx = ctx.clone();
                     tikv_util::init_task_local(async move {
                         let path = req.uri().path().to_owned();
                         let method = req.method().to_owned();
@@ -2310,7 +2302,7 @@ impl StatusServer {
                                 | (&Method::GET, "/debug/pprof/profile")
                         );
 
-                        if should_check_cert && !check_cert(security_config, x509) {
+                        if should_check_cert && !check_cert(&ctx.security_config, x509) {
                             return Ok(make_response(
                                 StatusCode::FORBIDDEN,
                                 "certificate role error",
@@ -2319,7 +2311,7 @@ impl StatusServer {
 
                         match (method, path.as_ref()) {
                             (Method::GET, "/metrics") => {
-                                Self::handle_get_metrics(req, &cfg_controller)
+                                Self::handle_get_metrics(req, &ctx.cfg_controller)
                             }
                             (Method::GET, "/status") => Ok(Response::default()),
                             (Method::GET, "/debug/pprof/heap_list") => {
@@ -2349,10 +2341,10 @@ impl StatusServer {
                             }
                             (Method::POST, "/debug/pprof/symbol") => Self::get_symbol(req).await,
                             (Method::GET, "/config") => {
-                                Self::get_config(req, &cfg_controller).await
+                                Self::get_config(req, &ctx.cfg_controller).await
                             }
                             (Method::POST, "/config") => {
-                                Self::update_config(cfg_controller.clone(), req).await
+                                Self::update_config(ctx.cfg_controller.clone(), req).await
                             }
                             (Method::GET, "/debug/pprof/profile") => {
                                 Self::dump_cpu_prof_to_resp(req).await
@@ -2366,17 +2358,17 @@ impl StatusServer {
                             #[cfg(debug_assertions)]
                             (Method::GET, "/debug/sleep") => Self::handle_debug_sleep().await,
                             (Method::GET, path) if path.starts_with("/region") => {
-                                Self::dump_region_meta(req, router).await
+                                Self::dump_region_meta(req, &ctx.router).await
                             }
                             (Method::GET, path) if path.starts_with("/sync_region_by_id") => {
-                                let resp = Self::handle_sync_region_by_id(req, router).await?;
+                                let resp = Self::handle_sync_region_by_id(req, &ctx.router).await?;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .sync_region_by_id
                                     .observe(start.saturating_elapsed().as_secs_f64());
                                 Ok(resp)
                             }
                             (Method::GET, path) if path.starts_with("/sync_region") => {
-                                let resp = Self::handle_sync_region(req, router).await?;
+                                let resp = Self::handle_sync_region(req, &ctx.router).await?;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .sync_region
                                     .observe(start.saturating_elapsed().as_secs_f64());
@@ -2387,15 +2379,15 @@ impl StatusServer {
                             }
                             (Method::GET, path) if path.starts_with("/kvengine") => {
                                 let res = if path.starts_with("/kvengine/snapshot/") {
-                                    Self::dump_kvengine_snapshot(req, engine, router).await
+                                    Self::dump_kvengine_snapshot(req, &ctx.kvengine, &ctx.router).await
                                 } else if path.starts_with("/kvengine/columnar_status") {
-                                    Self::collect_columnar_status(req, engine).await
+                                    Self::collect_columnar_status(req, &ctx.kvengine).await
                                 } else if path.starts_with("/kvengine/columnar_index_stats") {
-                                    Self::collect_columnar_index_stats(req, engine).await
+                                    Self::collect_columnar_index_stats(req, &ctx.kvengine).await
                                 } else if path.starts_with("/kvengine/meta/") {
-                                    Self::dump_kvengine_meta(req, engine).await
+                                    Self::dump_kvengine_meta(req, &ctx.kvengine).await
                                 } else {
-                                    Self::dump_kvengine_stats(req, engine).await
+                                    Self::dump_kvengine_stats(req, &ctx.kvengine).await
                                 };
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .kvengine
@@ -2404,71 +2396,70 @@ impl StatusServer {
                             }
                             (Method::GET, path) if path.starts_with("/rfengine") => {
                                 if path.starts_with("/rfengine/wal_chunk") {
-                                    let res = Self::rfengine_wal_chunk(req, rfengine).await;
+                                    let res = Self::rfengine_wal_chunk(req, &ctx.rfengine).await;
                                     STATUS_REQ_HISTOGRAM_STATIC
                                         .rf_wal_chunk
                                         .observe(start.saturating_elapsed().as_secs_f64());
                                     res
                                 } else {
-                                    Self::dump_rfengine_stats(req, rfengine).await
+                                    Self::dump_rfengine_stats(req, &ctx.rfengine).await
                                 }
                             }
                             (Method::POST, path) if path.starts_with("/rfengine/backup") => {
-                                let dfs_conf = cfg_controller.get_current().dfs.clone();
-                                let res = Self::backup_rfengine(req, rfengine, engine, concurrency_manager, dfs_conf).await;
+                                let res = Self::backup_rfengine(req, &ctx).await;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .rf_backup
                                     .observe(start.saturating_elapsed().as_secs_f64());
                                 res
                             }
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
-                                let res = Self::restore_shard(req, router, engine).await;
+                                let res = Self::restore_shard(req, &ctx.router, &ctx.kvengine).await;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .restore_shard
                                     .observe(start.saturating_elapsed().as_secs_f64());
                                 res
                             }
                             (Method::POST, path) if path.starts_with("/kvengine/compactor") => {
-                                Self::add_remote_compactor(req, engine.comp_client.clone()).await
+                                Self::add_remote_compactor(req, &ctx.kvengine.comp_client).await
                             }
                             (Method::POST, path) if path.starts_with("/ingest_files") => {
-                                let res = Self::ingest_files(req, router, engine).await;
+                                let res = Self::ingest_files(req, &ctx.router, &ctx.kvengine).await;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .ingest_files
                                     .observe(start.saturating_elapsed().as_secs_f64());
                                 res
                             }
                             (Method::POST, path) if path.starts_with("/unsafe_recover") => {
-                                Self::unsafe_recover(req, rfengine, engine).await
+                                Self::unsafe_recover(req, &ctx.rfengine, &ctx.kvengine).await
                             }
                             (Method::POST, path) if path.starts_with("/major-compact") => {
-                                Self::major_compact(req, rfengine, router).await
+                                Self::major_compact(req, &ctx.rfengine, &ctx.router).await
                             }
                             (Method::POST, path) if path.starts_with("/flush") => {
-                                Self::flush(req, router, engine).await
+                                Self::flush(req, &ctx.router, &ctx.kvengine).await
                             }
                             (Method::POST, path) if path.starts_with("/schema_file") => {
-                                let res = Self::handle_schema_file(req, router, engine).await;
+                                let res = Self::handle_schema_file(req, &ctx.router, &ctx.kvengine).await;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .schema_file
                                     .observe(start.saturating_elapsed().as_secs_f64());
                                 res
                             }
                             (Method::POST, path) if path.starts_with("/clear_columnar") => {
-                                Self::handle_clear_columnar(req, router).await
+                                Self::handle_clear_columnar(req, &ctx.router).await
                             }
                             (Method::POST, path) if path.starts_with("/build_columnar") => {
-                                Self::handle_build_columnar(req, engine).await
+                                Self::handle_build_columnar(req, &ctx.kvengine).await
                             }
                             (Method::GET, path) if path.starts_with("/dfs/") => {
-                                Self::handle_dfs_file_read(req, engine).await
+                                Self::handle_dfs_file_read(req, ctx.kvengine.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/dfs/") => {
-                                Self::handle_dfs_file_create(req, engine).await
+                                Self::handle_dfs_file_create(req, ctx.kvengine.clone()).await
                             }
                             (Method::GET | Method::POST, path) if path.starts_with("/recovery/") => {
-                                let data_dir = &cfg_controller.get_current().storage.data_dir;
-                                Self::handle_recovery(req, engine, data_dir).await
+                                let data_dir = &ctx.cfg_controller.get_current().storage.data_dir;
+                                Self::handle_recovery(req, &ctx.kvengine, data_dir).await
                             },
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }
@@ -2528,6 +2519,15 @@ impl StatusServer {
     }
 }
 
+struct StatusContext {
+    security_config: Arc<SecurityConfig>,
+    cfg_controller: ConfigController,
+    router: RaftRouter,
+    kvengine: kvengine::Engine,
+    rfengine: RfEngine,
+    concurrency_manager: ConcurrencyManager,
+}
+
 // To unify TLS/Plain connection usage in start_serve function
 trait ServerConnection {
     fn get_x509(&self) -> Option<X509>;
@@ -2549,7 +2549,7 @@ impl ServerConnection for AddrStream {
 // be called where the access should be controlled.
 //
 // For now, the check only verifies the role of the peer certificate.
-fn check_cert(security_config: Arc<SecurityConfig>, cert: Option<X509>) -> bool {
+fn check_cert(security_config: &SecurityConfig, cert: Option<X509>) -> bool {
     // if `cert_allowed_cn` is empty, skip check and return true
     if !security_config.cert_allowed_cn.is_empty() {
         if let Some(x509) = cert {

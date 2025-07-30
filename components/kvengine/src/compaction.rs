@@ -164,7 +164,7 @@ impl CompactionClient {
         }
     }
 
-    pub fn add_remote_compactor(&mut self, remote_url: String) {
+    pub fn add_remote_compactor(&self, remote_url: String) {
         if !remote_url.is_empty() {
             let mut remote_compactors = self.remote_compactors.lock().unwrap();
             remote_compactors.last_failure = Instant::now().sub(RETRY_INTERVAL);
