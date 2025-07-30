@@ -816,7 +816,7 @@ pub(crate) async fn verify_cluster(
     tables: &[Arc<TableMeta>],
 ) {
     if switches.ia_table_ratio > 0.0 {
-        check_storage_class(cluster, tables, Duration::from_secs(180));
+        check_storage_class(cluster, tables, Duration::from_secs(240));
     }
     assert_eq!(ENGINE_IA_SYNC_READ_COUNTER.get(), 0);
 

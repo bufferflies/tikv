@@ -190,7 +190,7 @@ pub(crate) fn check_storage_class(
 
                 let mut next_key: Option<Vec<u8>> = None;
                 let mut shard_id_ver: Option<IdVer> = None;
-                let ok = TryWaiter::timeout(5).interval_dur(Duration::from_millis(500)).try_wait(
+                let ok = TryWaiter::timeout(1).interval_dur(Duration::from_millis(300)).try_wait(
                     || {
                         let Some(shard) = cluster.get_latest_shard_by_key(&key) else {
                             return false;
@@ -204,7 +204,8 @@ pub(crate) fn check_storage_class(
                         }
 
                         let snap = shard.new_snap_access();
-                        let ok = expect_sc == table.storage_class_spec().target_storage_class(Duration::MAX);
+                        let shard_sc = shard.get_storage_class_spec().target_storage_class(Duration::MAX);
+                        let ok = expect_sc == shard_sc;
                         let check_sync = || {
                             if expect_sync {
                                 snap.is_sync()
@@ -215,8 +216,8 @@ pub(crate) fn check_storage_class(
                         let ok = ok && check_sync();
                         info!("{} check storage class: ok: {}", id_ver, ok;
                             "table" => ?table, "snap" => ?snap.display(),
-                            "expect_sc" => ?expect_sc, "sc_spec" => ?table.storage_class_spec(),
-                            "target_sc" => ?table.storage_class_spec().target_storage_class(Duration::MAX),
+                            "expect_sc" => ?expect_sc, "shard_sc" => ?shard_sc,
+                            "table_spec" => ?table.storage_class_spec(), "shard_spec" => ?shard.get_storage_class_spec(),
                             "expect_sync" => expect_sync, "sync" => snap.is_sync(), "write_cf_level_n_is_empty" => snap.write_cf_level_n_is_empty(),
                         );
                         if ok {
