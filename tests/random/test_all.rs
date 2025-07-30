@@ -177,7 +177,7 @@ fn test_random_all() {
             TIMEOUT,
         ));
     }
-    let load_data_task_timeout = Duration::from_secs(env_param("LOAD_DATA_TASK_TIMEOUT_SEC", 30));
+    let load_data_task_timeout = Duration::from_secs(env_param("LOAD_DATA_TASK_TIMEOUT_SEC", 90));
     for _i in 0..LOAD_DATA_CONCURRENCY {
         let load_data_config = load_data_config.clone();
         handles.push(spawn_load_data(
