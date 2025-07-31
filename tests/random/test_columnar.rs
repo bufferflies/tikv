@@ -2,7 +2,7 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicU64, Ordering::Relaxed},
         Arc,
     },
     time::Duration,
@@ -20,6 +20,7 @@ use sqlx::{
 };
 use test_cloud_server::{keyspace::KeyspaceManager, tidb::TidbCluster};
 use tikv_util::{debug, error, info, time::Instant};
+use tokio::sync::Mutex;
 
 use crate::{
     sql_util::{
@@ -195,20 +196,15 @@ pub(crate) async fn run_columnar_workload(
 
     let mut handles = Vec::with_capacity(WORKLOAD_CONCURRENCY);
     let max_id = Arc::new(AtomicU64::new(0));
-    let pause_signal = Arc::new(AtomicBool::new(false));
+    let running_mutex = Arc::new(Mutex::new(()));
     for tid in 0..WORKLOAD_CONCURRENCY {
         let pool = pool.clone();
         let running = running.clone();
         let max_id = max_id.clone();
-        let pause_signal = pause_signal.clone();
         let handle = tokio::spawn(async move {
             let tag = format!("columnar-{}-{}", keyspace_id, tid);
             let start_time = Instant::now();
             while running.get() {
-                if pause_signal.load(Relaxed) {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
                 let mut sqls = generate_insert_sqls(10);
                 let del_sqls = generate_delete_sqls(10, max_id.load(Relaxed), vector_common_handle);
                 sqls.extend(del_sqls);
@@ -231,14 +227,11 @@ pub(crate) async fn run_columnar_workload(
     }
 
     let pool_copy = pool.clone();
-    let pause_signal_copy = pause_signal.clone();
+    let running_mutex_copy = running_mutex.clone();
     handles.push(tokio::spawn(async move {
         let start_time = Instant::now();
         while running.get() {
-            if pause_signal_copy.load(Relaxed) {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
+            let guard = running_mutex_copy.lock().await;
             info!("verify_data randomly");
             match verify_data(&pool_copy, false, vector_common_handle).await {
                 Ok(_) => {
@@ -248,20 +241,19 @@ pub(crate) async fn run_columnar_workload(
                     panic!("verify_data randomly error: {}", err);
                 }
             }
+            drop(guard);
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
         info!("columnar verify thread exit"; "dur" => ?start_time.saturating_elapsed());
     }));
 
     let pool_copy = pool.clone();
+    let running_mutex_copy = running_mutex.clone();
     handles.push(tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         info!("pause columnar workload trigger columnar major compaction");
-        pause_signal.store(true, Relaxed);
-        // wait for already running workload done
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let _guard = running_mutex_copy.lock().await;
         trigger_columnar_major_compaction(&pool_copy).await;
-        pause_signal.store(false, Relaxed);
     }));
 
     join_all(handles).await;
