@@ -30,6 +30,7 @@ pub const PROP_KEY_SMALLEST: &[u8] = b"smallest";
 pub const PROP_KEY_BIGGEST: &[u8] = b"biggest";
 pub const PROP_KEY_MAX_VERSION: &[u8] = b"max_ver";
 pub const PROP_KEY_SNAP_VERSION: &[u8] = b"snap_ver";
+pub const PROP_KEY_ESTIMATED_KV_SIZE: &[u8] = b"estimated_kv_size";
 
 pub fn new_version_column_info() -> ColumnInfo {
     let mut col_info = ColumnInfo::new();
@@ -62,6 +63,7 @@ pub struct ColumnarFileBuilder {
     snap_version: Option<u64>,
     tables: Vec<ColumnarTableBuilder>,
     pub(crate) estimated_size: usize,
+    pub(crate) estimated_kv_size: usize,
     pub(crate) smallest: Vec<u8>,
     pub(crate) biggest: Vec<u8>,
     encryption_key: Option<EncryptionKey>,
@@ -155,6 +157,7 @@ impl ColumnarFileBuilder {
             file_id,
             snap_version,
             estimated_size: 0,
+            estimated_kv_size: 0,
             tables: vec![],
             smallest: vec![],
             biggest: vec![],
@@ -164,6 +167,7 @@ impl ColumnarFileBuilder {
 
     pub fn add_table(&mut self, table: ColumnarTableBuilder) {
         self.estimated_size += table.get_estimated_size();
+        self.estimated_kv_size += table.get_estimated_kv_size();
         self.tables.push(table);
     }
 
@@ -211,6 +215,11 @@ impl ColumnarFileBuilder {
                 &encryption_key.current_ver.to_le_bytes(),
             );
         }
+        add_property(
+            &mut property_buf,
+            PROP_KEY_ESTIMATED_KV_SIZE,
+            &self.estimated_kv_size.to_le_bytes(),
+        );
         let file_total_size = packs_total_size
             + index_total_size
             + property_buf.len()
@@ -269,6 +278,7 @@ impl ColumnarFileBuilder {
     pub(crate) fn reset(&mut self, id: u64) {
         self.file_id = id;
         self.estimated_size = 0;
+        self.estimated_kv_size = 0;
         self.tables.clear();
     }
 }
@@ -474,6 +484,15 @@ impl ColumnarTableBuilder {
         }
         estimated_size
     }
+
+    pub(crate) fn get_estimated_kv_size(&self) -> usize {
+        let mut estimated_kv_size =
+            self.handle_builder.estimated_kv_size + self.version_builder.estimated_kv_size;
+        for cb in &self.column_builders {
+            estimated_kv_size += cb.get_estimated_kv_size();
+        }
+        estimated_kv_size
+    }
 }
 
 pub struct ColumnarColumnBuilder {
@@ -489,6 +508,7 @@ pub struct ColumnarColumnBuilder {
     compressed_buf: Vec<u8>,
     compressed_packs: Vec<Vec<u8>>,
     estimated_size: usize,
+    estimated_kv_size: usize,
 }
 
 #[derive(Default, Copy, Clone, Debug)]
@@ -528,6 +548,7 @@ impl ColumnarColumnBuilder {
             compressed_buf: vec![],
             compressed_packs: vec![],
             estimated_size: 0,
+            estimated_kv_size: 0,
         }
     }
 
@@ -674,6 +695,7 @@ impl ColumnarColumnBuilder {
     }
 
     fn compress_pack(&mut self) -> Vec<u8> {
+        self.estimated_kv_size += self.uncompressed_buf.len();
         compress_pack(&self.uncompressed_buf, &mut self.compressed_buf)
     }
 
@@ -783,6 +805,10 @@ impl ColumnarColumnBuilder {
             packs_data_size,
             index_size,
         }
+    }
+
+    pub(crate) fn get_estimated_kv_size(&self) -> usize {
+        self.estimated_kv_size
     }
 
     #[inline]

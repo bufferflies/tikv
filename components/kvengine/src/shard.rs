@@ -93,6 +93,8 @@ pub struct Shard {
     pub(crate) max_ts: AtomicU64,
     pub(crate) estimated_kv_size: AtomicU64,
     pub(crate) estimated_ia_kv_size: AtomicU64,
+    pub(crate) estimated_columnar_size: AtomicU64,
+    pub(crate) estimated_columnar_kv_size: AtomicU64,
 
     pub(crate) sst_max_ts: AtomicU64, // the max_ts of sst files (mem-tables excluded)
 
@@ -237,6 +239,8 @@ impl Shard {
             max_ts: Default::default(),
             estimated_kv_size: Default::default(),
             estimated_ia_kv_size: Default::default(),
+            estimated_columnar_size: Default::default(),
+            estimated_columnar_kv_size: Default::default(),
             sst_max_ts: Default::default(),
             lv2plus_max_ts: Default::default(),
             lv2plus_tombs: Default::default(),
@@ -636,6 +640,8 @@ impl Shard {
         );
         store_u64(&self.estimated_kv_size, lv_stats.kv_size);
         store_u64(&self.estimated_ia_kv_size, lv_stats.ia_kv_size);
+        store_u64(&self.estimated_columnar_size, lv_stats.columnar_size);
+        store_u64(&self.estimated_columnar_kv_size, lv_stats.columnar_kv_size);
 
         store_u64(&self.lv2plus_max_ts, lv_stats.lv2plus_max_ts);
         store_u64(&self.lv2plus_tombs, lv_stats.lv2plus_tombs);
@@ -942,6 +948,14 @@ impl Shard {
 
     pub fn get_estimated_ia_kv_size(&self) -> u64 {
         self.estimated_ia_kv_size.load(Ordering::Relaxed)
+    }
+
+    pub fn get_estimated_columnar_size(&self) -> u64 {
+        self.estimated_columnar_size.load(Ordering::Relaxed)
+    }
+
+    pub fn get_estimated_columnar_kv_size(&self) -> u64 {
+        self.estimated_columnar_kv_size.load(Ordering::Relaxed)
     }
 
     pub fn get_initial_flushed(&self) -> bool {
@@ -2281,6 +2295,7 @@ impl ShardDataCore {
         let mut stats = LevelStatsLite::default();
         level.files.iter().for_each(|tbl| {
             stats.columnar_size += tbl.size();
+            stats.columnar_kv_size += tbl.get_estimated_kv_size() as u64;
         });
         stats
     }

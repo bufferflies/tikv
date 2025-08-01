@@ -240,6 +240,8 @@ pub struct PeerStat {
     pub approximate_size: u64,
     pub approximate_keys: u64,
     pub approximate_kv_size: u64,
+    pub approximate_columnar_size: u64,
+    pub approximate_columnar_kv_size: u64,
 }
 
 pub struct ProposedAdminCmd {
@@ -1521,6 +1523,8 @@ impl Peer {
             approximate_size: self.peer_stat.approximate_size,
             approximate_keys: self.peer_stat.approximate_keys,
             approximate_kv_size: self.peer_stat.approximate_kv_size,
+            approximate_columnar_size: self.peer_stat.approximate_columnar_size,
+            approximate_columnar_kv_size: self.peer_stat.approximate_columnar_kv_size,
             replication_status: None,
             bucket_stat,
         });

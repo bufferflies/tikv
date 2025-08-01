@@ -11,9 +11,12 @@ use tidb_query_datatype::{FieldTypeAccessor, FieldTypeFlag, FieldTypeTp};
 use tipb::ColumnInfo;
 
 use crate::table::{
-    columnar::builder::{
-        TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
-        PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
+    columnar::{
+        builder::{
+            TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
+            PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
+        },
+        PROP_KEY_ESTIMATED_KV_SIZE,
     },
     file::File,
     parse_prop_data,
@@ -658,6 +661,7 @@ impl ColumnarFile {
         let mut max_version = 0;
         let mut l0_version = None;
         let mut encryption_ver = 0;
+        let mut estimated_kv_size = 0;
         let property_offset = table_offsets_offset - footer.properties_size as u64;
         let property_buf =
             file.read_table_meta(property_offset, footer.properties_size as usize)?;
@@ -674,6 +678,8 @@ impl ColumnarFile {
                 l0_version = Some(val.get_u64_le());
             } else if key == PROP_KEY_ENCRYPTION_VER {
                 encryption_ver = val.get_u32_le();
+            } else if key == PROP_KEY_ESTIMATED_KV_SIZE {
+                estimated_kv_size = val.get_u64_le() as usize;
             }
             prop_remain = remain;
         }
@@ -698,6 +704,7 @@ impl ColumnarFile {
                 tables,
                 encryption_ver,
                 index_offset,
+                estimated_kv_size,
             }),
         })
     }
@@ -764,6 +771,10 @@ impl ColumnarFile {
         self.core.encryption_ver
     }
 
+    pub fn get_estimated_kv_size(&self) -> usize {
+        self.core.estimated_kv_size
+    }
+
     pub fn to_columnar_create(&self, lvl: usize) -> ColumnarCreate {
         let mut columnar_create = ColumnarCreate::new();
         columnar_create.set_id(self.id());
@@ -790,6 +801,7 @@ struct ColumnarFileCore {
     tables: HashMap<i64, Arc<TableMeta>>,
     encryption_ver: u32,
     index_offset: u32,
+    estimated_kv_size: usize,
 }
 
 pub struct ColumnBuffer {

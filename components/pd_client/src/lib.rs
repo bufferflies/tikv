@@ -66,6 +66,8 @@ pub struct RegionStat {
     pub approximate_size: u64,
     pub approximate_keys: u64,
     pub approximate_kv_size: u64,
+    pub approximate_columnar_size: u64,
+    pub approximate_columnar_kv_size: u64,
     pub last_report_ts: UnixSecs,
     // cpu_usage is the CPU time usage of the leader region since the last heartbeat,
     // which is calculated by cpu_time_delta/heartbeat_reported_interval.

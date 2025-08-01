@@ -16,7 +16,12 @@ use engine_traits::{CfNamesExt, MiscExt};
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::{compat::Future01CompatExt, FutureExt};
-use kvengine::{context::IaCtx, GLOBAL_SHARD_END_KEY};
+use kvengine::{
+    context::IaCtx,
+    table::{DataBound, InnerKey},
+    table_id::get_table_id_from_data_bound,
+    GLOBAL_SHARD_END_KEY,
+};
 use kvproto::{
     metapb,
     metapb::Region,
@@ -34,6 +39,7 @@ use prometheus::local::LocalHistogram;
 use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::store::{util, util::ConfChangeKind, ReadStats, TxnExt, WriteStats};
 use tikv_util::{
+    codec::bytes::decode_bytes,
     debug, error, info,
     store::{find_peer, QueryStats},
     time::UnixSecs,
@@ -91,6 +97,8 @@ pub struct HeartbeatTask {
     pub approximate_size: u64,
     pub approximate_keys: u64,
     pub approximate_kv_size: u64,
+    pub approximate_columnar_size: u64,
+    pub approximate_columnar_kv_size: u64,
     pub replication_status: Option<RegionReplicationStatus>,
     pub bucket_stat: Option<BucketStat>,
 }
@@ -240,6 +248,8 @@ pub struct PeerStat {
     pub approximate_keys: u64,
     pub approximate_size: u64,
     pub approximate_kv_size: u64,
+    pub approximate_columnar_size: u64,
+    pub approximate_columnar_kv_size: u64,
     pub role: StateRole,
 
     pub down_peers: Vec<pdpb::PeerStats>,
@@ -630,12 +640,37 @@ impl PdRunner {
                 .get(&store_id)
                 .map_or(false, |is_tiflash| *is_tiflash)
         });
+        let columnar_one_table = if let (Ok(lower_bound), Ok(upper_bound)) = (
+            decode_bytes(&mut region.get_start_key(), false),
+            decode_bytes(&mut region.get_end_key(), false),
+        ) {
+            let data_bound = DataBound::new(
+                InnerKey::from_outer_key(&lower_bound),
+                InnerKey::from_outer_end_key(&upper_bound),
+                false,
+            );
+            let (min_table_id, max_table_id) = get_table_id_from_data_bound(data_bound);
+            min_table_id == max_table_id && region_stat.approximate_columnar_size > 0
+        } else {
+            false
+        };
+        // If there has tiflash replicas, use the kv size as the columnar kv size.
+        let columnar_kv_size = if has_tiflash_replicas || columnar_one_table {
+            Some(region_stat.approximate_kv_size)
+        // TODO: uncomment this when we have columnar kv size freshed.
+        // } else if region_stat.approximate_columnar_kv_size > 0 {
+        //     Some(region_stat.approximate_columnar_kv_size)
+        } else if region_stat.approximate_columnar_size > 0 {
+            Some(region_stat.approximate_columnar_size)
+        } else {
+            None
+        };
         let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(region.get_start_key());
         PdRunner::set_storage_size_metric(
             region.id,
             keyspace_id,
             Some(region_stat.approximate_kv_size),
-            has_tiflash_replicas,
+            columnar_kv_size,
         );
 
         let changed = self
@@ -686,7 +721,7 @@ impl PdRunner {
         region_id: u64,
         keyspace_id: Option<u32>,
         kv_size: Option<u64>,
-        has_tiflash_replicas: bool,
+        columnar_kv_size: Option<u64>,
     ) {
         let region_id_string = region_id.to_string();
         let region_id_str = region_id_string.as_str();
@@ -702,11 +737,6 @@ impl PdRunner {
                             region_id_str,
                             keyspace_id_str,
                         ]);
-                        let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
-                            "tiflash_used",
-                            region_id_str,
-                            keyspace_id_str,
-                        ]);
                     }
                     Some(size) => {
                         debug!(
@@ -714,15 +744,39 @@ impl PdRunner {
                             "region_id_str" => region_id_str,
                             "keyspace_id_str" => keyspace_id_str,
                             "kv_size"=>size,
-                            "has_tiflash_replicas" => has_tiflash_replicas,
                         );
                         STORE_SIZE_GAUGE_VEC
                             .with_label_values(&["used", region_id_str, keyspace_id_str])
                             .set(size as i64);
-                        let tiflash_size = if has_tiflash_replicas { size } else { 0 };
+                    }
+                }
+                match columnar_kv_size {
+                    None => {
+                        if STORE_SIZE_GAUGE_VEC
+                            .get_metric_with_label_values(&[
+                                "tiflash_used",
+                                region_id_str,
+                                keyspace_id_str,
+                            ])
+                            .is_ok()
+                        {
+                            let _ = STORE_SIZE_GAUGE_VEC.remove_label_values(&[
+                                "tiflash_used",
+                                region_id_str,
+                                keyspace_id_str,
+                            ]);
+                        }
+                    }
+                    Some(size) => {
+                        debug!(
+                            "update STORE_SIZE_GAUGE_VEC";
+                            "region_id_str" => region_id_str,
+                            "keyspace_id_str" => keyspace_id_str,
+                            "columnar_kv_size"=> size,
+                        );
                         STORE_SIZE_GAUGE_VEC
                             .with_label_values(&["tiflash_used", region_id_str, keyspace_id_str])
-                            .set(tiflash_size as i64);
+                            .set(size as i64);
                     }
                 }
             }
@@ -1154,7 +1208,7 @@ impl PdRunner {
                 info!("remove peer statistic record in pd"; "region" => tag)
             }
         }
-        Self::set_storage_size_metric(region_id, keyspace_id, None, false);
+        Self::set_storage_size_metric(region_id, keyspace_id, None, None);
     }
 
     #[allow(unused)]
@@ -1398,7 +1452,7 @@ impl PdRunner {
         if role != StateRole::Leader {
             peer_stat.down_peers.clear();
             peer_stat.pending_peers.clear();
-            Self::set_storage_size_metric(region_id, keyspace_id, None, false)
+            Self::set_storage_size_metric(region_id, keyspace_id, None, None)
         }
     }
 }
@@ -1452,6 +1506,8 @@ impl Runnable for PdRunner {
                     peer_stat.approximate_size = hb_task.approximate_size;
                     peer_stat.approximate_keys = hb_task.approximate_keys;
                     peer_stat.approximate_kv_size = hb_task.approximate_kv_size;
+                    peer_stat.approximate_columnar_size = hb_task.approximate_columnar_size;
+                    peer_stat.approximate_columnar_kv_size = hb_task.approximate_columnar_kv_size;
 
                     let read_bytes_delta =
                         peer_stat.read_bytes - peer_stat.last_region_report_read_bytes;
@@ -1503,6 +1559,8 @@ impl Runnable for PdRunner {
                         approximate_size: hb_task.approximate_size,
                         approximate_keys: hb_task.approximate_keys,
                         approximate_kv_size: hb_task.approximate_kv_size,
+                        approximate_columnar_size: hb_task.approximate_columnar_size,
+                        approximate_columnar_kv_size: hb_task.approximate_columnar_kv_size,
                         last_report_ts,
                         cpu_usage: 0,
                     },

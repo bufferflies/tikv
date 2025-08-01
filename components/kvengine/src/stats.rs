@@ -183,6 +183,7 @@ impl super::Engine {
                 let engine_col_level = &mut engine_stats.columnar_levels[i];
                 engine_col_level.num_files += col_level.num_files;
                 engine_col_level.data_size += col_level.data_size;
+                engine_col_level.data_kv_size += col_level.data_kv_size;
             }
             engine_stats.vector_indexes.data_size += shard.vector_indexes.data_size;
             engine_stats.vector_indexes.num_files += shard.vector_indexes.num_files;
@@ -326,7 +327,6 @@ pub struct ShardStats {
     pub l0_table_size: u64,
     pub l0_cf_table_size: [u64; NUM_CFS],
     pub cfs: Vec<CfStats>,
-    pub col_levels_stats: Vec<LevelStats>,
 
     pub index_size: u64,
     pub in_mem_index_size: u64,
@@ -472,6 +472,7 @@ impl CfStats {
 pub struct ColumnarLevelStats {
     pub num_files: usize,
     pub data_size: u64,
+    pub data_kv_size: u64,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
@@ -498,6 +499,7 @@ pub struct LevelStatsLite {
     pub max_ts: u64,
     // The following is for Columnar.
     pub columnar_size: u64,
+    pub columnar_kv_size: u64, // Total kv size of columnar tables.
 }
 
 impl LevelStatsLite {
@@ -512,6 +514,7 @@ impl LevelStatsLite {
             self.lv2plus_tombs += other.lv2plus_tombs;
             self.lv2plus_entries_write_cf += other.lv2plus_entries_write_cf;
             self.columnar_size += other.columnar_size;
+            self.columnar_kv_size += other.columnar_kv_size;
         }
         self.max_ts = max_ts_by_cf(self.max_ts, cf, other.max_ts);
     }
@@ -534,7 +537,6 @@ pub struct LevelStats {
     pub tombs: usize,
     pub kv_size: u64,
     pub in_use_blob_size: u64,
-    pub columnar_size: u64,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
@@ -723,15 +725,6 @@ impl super::Shard {
             }
             cfs.push(cf_stat);
         }
-        let mut col_levels_stats = vec![];
-        for cl in data.col_levels.levels.as_slice() {
-            let mut level_stats = LevelStats::default();
-            level_stats.level = cl.level;
-            for tbl in cl.files.as_slice() {
-                level_stats.columnar_size += tbl.size();
-            }
-            col_levels_stats.push(level_stats);
-        }
         total_size += in_use_blob_size;
         let priority = self.compaction_priority.read().unwrap().clone();
         let compaction_cf = priority.as_ref().map_or(0, |x| x.cf());
@@ -745,6 +738,11 @@ impl super::Shard {
         for (i, l) in data.col_levels.levels.iter().enumerate() {
             columnar_levels[i].num_files = l.files.len();
             columnar_levels[i].data_size = l.files.iter().map(|c| c.get_file().size()).sum();
+            columnar_levels[i].data_kv_size = l
+                .files
+                .iter()
+                .map(|c| c.get_estimated_kv_size() as u64)
+                .sum();
         }
         let mut vector_indexes = VectorIndexStats::default();
         for vi in data.vector_indexes.get_all() {
@@ -775,7 +773,6 @@ impl super::Shard {
             total_blob_size,
             in_use_blob_size,
             cfs,
-            col_levels_stats,
             base_version: self.get_base_version(),
             meta_sequence: self.get_meta_sequence(),
             write_sequence: self.get_write_sequence(),
@@ -924,6 +921,7 @@ mod tests {
             data_size: 10000,
             blob_size: 20000,
             kv_size: 8000,
+            columnar_kv_size: 1000,
             ia_kv_size: 800,
             entries: 2000,
             lv2plus_max_ts: 50,
@@ -943,6 +941,7 @@ mod tests {
                 data_size: 20000,
                 blob_size: 40000,
                 kv_size: 16000,
+                columnar_kv_size: 2000,
                 ia_kv_size: 1600,
                 entries: 4000,
                 lv2plus_max_ts: 60,
@@ -961,8 +960,9 @@ mod tests {
             LevelStatsLite {
                 data_size: 30000,
                 blob_size: 60000,
-                kv_size: 16000,   // unchanged
-                ia_kv_size: 1600, // unchanged
+                kv_size: 16000,         // unchanged
+                columnar_kv_size: 2000, // unchanged
+                ia_kv_size: 1600,       // unchanged
                 entries: 6000,
                 lv2plus_max_ts: 60,
                 lv2plus_tombs: 2000,            // unchanged
@@ -979,8 +979,9 @@ mod tests {
             LevelStatsLite {
                 data_size: 40000,
                 blob_size: 80000,
-                kv_size: 16000,   // unchanged
-                ia_kv_size: 1600, // unchanged
+                kv_size: 16000,         // unchanged
+                columnar_kv_size: 2000, // unchanged
+                ia_kv_size: 1600,       // unchanged
                 entries: 8000,
                 lv2plus_max_ts: 60,             // unchanged
                 lv2plus_tombs: 2000,            // unchanged
@@ -999,6 +1000,7 @@ mod tests {
                 data_size: 40000,               // unchanged
                 blob_size: 80000,               // unchanged
                 kv_size: 16000,                 // unchanged
+                columnar_kv_size: 2000,         // unchanged
                 ia_kv_size: 1600,               // unchanged
                 entries: 8000,                  // unchanged
                 lv2plus_max_ts: 60,             // unchanged
