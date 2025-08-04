@@ -1497,15 +1497,43 @@ impl ColumnarRowTableReader {
                 return Err(table::Error::Other("invalid col id".to_string()));
             }
         }
+
         for (offset, col_info) in self.schema.columns.iter().enumerate() {
             let col_id = col_info.get_column_id();
             let col_buf = &mut block.columns[offset];
+
             if datums_map.contains_key(&col_id) {
                 Self::push_col_buf_with_row_v1_datum(
                     col_buf,
                     col_info,
                     datums_map.get(&col_id).unwrap(),
                 );
+            } else if !self.is_int_handle && get_primary_key(col_info) {
+                // get value from common handle
+                let mut common_handle =
+                    block.handles.get_not_null_value(block.handles.length() - 1);
+                for &pk_col_id in &self.schema.pk_col_ids {
+                    let (datum, remain) = datum::split_datum(common_handle, false).unwrap();
+                    if pk_col_id == col_id {
+                        if let Err(e) =
+                            Self::push_col_buf_with_common_handle_datum(col_buf, col_info, datum)
+                        {
+                            error!(
+                                "decode_row_columns_v1 pk: {:?}, col_info col_id: {}, col_buf col_id: {}, tp: {}, offset: {}, val_len: {}, schema: {:?}",
+                                e,
+                                col_id,
+                                col_buf.col_id,
+                                col_info.get_tp(),
+                                offset,
+                                datum.len(),
+                                self.schema
+                            );
+                            return Err(table::Error::Other(e.to_string()));
+                        }
+                        break;
+                    }
+                    common_handle = remain;
+                }
             } else if let Some(default_val) = &self.default_vals[offset] {
                 col_buf.push_value(default_val);
             } else {
@@ -1525,6 +1553,7 @@ impl ColumnarRowTableReader {
                 return Err(table::Error::SchemaOutOfDate(err_info));
             }
         }
+
         let values = row_slice.values();
         for (offset, col_info) in self.schema.columns.iter().enumerate() {
             let col_id = col_info.get_column_id();
