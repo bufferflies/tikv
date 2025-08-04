@@ -101,7 +101,7 @@ impl<S: Snapshot, F: KvFormat> AnalyzeContext<S, F> {
                 Vec::default().as_slice(),
                 &snap_bytes,
             );
-            remote_req.key = format!("analyze:{}", key);
+            remote_req.key = format!("analyze:{}:{}", key, start_ts);
             remote_req.req_body = Bytes::from(req_body);
             ctx
         });
