@@ -1467,6 +1467,9 @@ impl<'a> StoreMsgHandler<'a> {
 
             new_peers.push(new_peer);
             self.ctx.global.router.send(new_region_id, PeerMsg::Start);
+            if is_leader {
+                self.ctx.global.router.send(new_region_id, PeerMsg::Tick);
+            }
 
             if !is_leader {
                 if let Some(msg) = self
