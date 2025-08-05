@@ -116,7 +116,7 @@ impl Tikv for CopService {
         delegate_req.set_ranges(key_ranges.into());
         delegate_req.set_start_ts(req.get_start_ts());
         let max_handle_duration = self.cfg.max_handle_duration;
-        let snap_ctx = self.ctx.get_snap_ctx();
+        let snap_ctx = self.ctx.get_snap_ctx(None);
         let quota_limiter = self.ctx.quota_limiter.clone();
         let mem_limiter = self.ctx.memory_limiter.clone();
         let peer = Some(ctx.peer());

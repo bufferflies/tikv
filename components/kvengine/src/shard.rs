@@ -397,7 +397,7 @@ impl Shard {
                     let ident = FileSegmentIdent::new(*id, 0, fm.l0_size as u64);
                     ia_mgr.is_segment_cached(&ident).then_some(
                         ia_mgr
-                            .get_segment_handle(ident, fm.file_type)
+                            .get_segment_handle(ident, fm.file_type, Some(ctx.dfs.deref()))
                             .await?
                             .into_inner(),
                     )
@@ -548,6 +548,7 @@ impl Shard {
                                 data_dir.deref(),
                                 opts,
                                 ia_mgr,
+                                Some(fs),
                             )
                             .await
                         })
@@ -557,7 +558,7 @@ impl Shard {
                     // Cache the whole file as a segment.
                     let ident = FileSegmentIdent::new(id, 0, fm.l0_size as u64);
                     ia_mgr
-                        .get_segment_handle(ident, fm.file_type)
+                        .get_segment_handle(ident, fm.file_type, Some(fs))
                         .await
                         .map(|handle| handle.into_inner())
                         .map_err(|err| err.into())

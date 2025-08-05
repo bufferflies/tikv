@@ -2,6 +2,7 @@
 
 mod config;
 mod metrics;
+mod remote_cached;
 mod s3;
 
 use std::{
@@ -22,6 +23,7 @@ use bytes::Bytes;
 pub use config::{Config as DFSConfig, ConnOptions as DFSConnOptions};
 use file_system;
 use metrics::*;
+pub use remote_cached::*;
 pub use s3::*;
 use thiserror::Error;
 use tikv_util::time::Instant;

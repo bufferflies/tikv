@@ -5,6 +5,7 @@ use std::{
     future::Future,
     iter::FromIterator,
     marker::PhantomData,
+    ops::Deref,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -113,6 +114,8 @@ pub struct Endpoint<E: Engine> {
     pub overload_protector: Option<OverloadProtector>,
 
     security_mgr: Arc<SecurityManager>,
+
+    status_addr: String,
 }
 
 impl<E: Engine> tikv_util::AssertSend for Endpoint<E> {}
@@ -136,7 +139,11 @@ impl<E: Engine> Endpoint<E> {
             }
             _ => None,
         };
-
+        let status_addr = if cfg.advertise_status_addr.is_empty() {
+            cfg.status_addr.clone()
+        } else {
+            cfg.advertise_status_addr.clone()
+        };
         Self {
             read_pool,
             semaphore,
@@ -155,6 +162,7 @@ impl<E: Engine> Endpoint<E> {
             remote_pool: None,
             overload_protector,
             security_mgr,
+            status_addr,
         }
     }
 
@@ -187,6 +195,7 @@ impl<E: Engine> Endpoint<E> {
             remote_cop_min_process_duration,
             self.security_mgr.clone(),
             pool.handle().clone(),
+            self.status_addr.clone(),
         );
         self.remote_pool = Some(pool);
     }
@@ -1250,8 +1259,9 @@ pub async fn prefetch_ia_remote_segments(
     for (ident, ftype) in segments {
         let tag = tag.to_string();
         let mgr = ia_mgr.clone();
+        let dfs = snap_ctx.dfs.clone();
         let task = async move {
-            mgr.prefetch_segment(ident.clone(), ftype, keyspace_id, deadline).map_err(|err| -> Error {
+            mgr.prefetch_segment(ident.clone(), ftype, keyspace_id, deadline, Some(dfs.deref())).map_err(|err| -> Error {
                 error!("{} prefetch segment failed", tag; "ident" => %ident, "ftype" => ?ftype, "err" => ?err);
                 if let kvengine::table::Error::DeadlineExceeded(_) = err {
                     Error::DeadlineExceeded

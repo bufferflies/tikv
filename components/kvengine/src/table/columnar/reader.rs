@@ -800,8 +800,14 @@ impl ColumnarMvccReader {
         for ident in idents {
             let mgr = ia_mgr.clone();
             let task = async move {
-                mgr.prefetch_segment(ident.clone(), FileType::Columnar, keyspace_id, deadline)
-                    .await
+                mgr.prefetch_segment(
+                    ident.clone(),
+                    FileType::Columnar,
+                    keyspace_id,
+                    deadline,
+                    None,
+                )
+                .await
             };
             tasks.push(tokio::spawn(task));
         }

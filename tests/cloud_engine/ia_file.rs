@@ -110,6 +110,7 @@ fn test_read(#[case] mut ia_cap: IaCapacity) {
             temp_dir,
             &dfs_opts,
             &mgr,
+            None,
         )
         .await
         .unwrap();
@@ -216,6 +217,7 @@ fn test_init() {
                     &local_path,
                     &dfs_opts,
                     &mgr,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -320,6 +322,7 @@ fn test_abnormal_local_file() {
                 &local_path,
                 &dfs_opts,
                 &mgr,
+                None,
             )
             .await
             .unwrap();
@@ -362,6 +365,7 @@ fn test_abnormal_local_file() {
                 &local_path,
                 &dfs_opts,
                 &mgr,
+                None,
             )
             .await
             .unwrap();
@@ -438,6 +442,7 @@ fn test_local_gc() {
                 &meta_path,
                 &dfs_opts,
                 &mgr,
+                None,
             )
             .await
             .unwrap();

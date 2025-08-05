@@ -19,7 +19,7 @@ use schema::schema::StorageClass;
 
 use crate::{
     dfs,
-    dfs::FileType,
+    dfs::{Dfs, FileType},
     ia::{
         manager::{IaManager, ReadAt},
         types::{FileSegmentIdent, TABLE_META_LOCAL_FILE_SUFFIX},
@@ -257,7 +257,7 @@ impl IaFile {
         let ident = self.align_to_segment(start_off, end_off)?;
         debug!("{} read range", self.id; "start" => start_off, "end" => end_off, "ident" => %ident);
         self.mgr
-            .read_segment(ident, self.ftype, None, None, &mut read_at)
+            .read_segment(ident, self.ftype, None, None, &mut read_at, None)
             .await
     }
 
@@ -273,11 +273,14 @@ impl IaFile {
         data_dir: &Path,
         opts: &dfs::Options,
         ia_mgr: &IaManager,
+        dfs: Option<&dyn Dfs>,
     ) -> Result<Bytes> {
         let local_path = table_meta_file_local_path(file_id, ftype, data_dir);
         let local_path_cloned = local_path.clone();
         let runtime = ia_mgr.get_dfs().get_runtime();
         let read_result = runtime.spawn_blocking(move || fs::read(local_path_cloned));
+        let ia_dfs = ia_mgr.get_dfs();
+        let dfs = dfs.unwrap_or(ia_dfs);
         let table_meta_data = match read_result.await.unwrap() {
             Ok(bytes) => {
                 let should_set_mtime = ia_mgr.access_table_meta(file_id);
@@ -298,13 +301,9 @@ impl IaFile {
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 let opts = opts.with_type(ftype).with_start_off(table_meta_off);
-                let bytes = ia_mgr
-                    .get_dfs()
-                    .read_file(file_id, opts)
-                    .await
-                    .map_err(|err| {
-                        Error::IaMgr(format!("{} prepare meta: failed: {:?}", file_id, err))
-                    })?;
+                let bytes = dfs.read_file(file_id, opts).await.map_err(|err| {
+                    Error::IaMgr(format!("{} prepare meta: failed: {:?}", file_id, err))
+                })?;
                 let bytes_cloned = bytes.clone();
                 let save_res = runtime.spawn_blocking(move || {
                     Self::save_table_meta(file_id, &local_path, &bytes_cloned)
@@ -442,7 +441,7 @@ impl File for IaFile {
             end_off: self.table_meta_off,
         };
 
-        let segment_handle = self.mgr.get_segment_handle(ident, self.ftype).await?;
+        let segment_handle = self.mgr.get_segment_handle(ident, self.ftype, None).await?;
 
         let file = segment_handle.into_inner();
         Ok(file.mmap()?.to_aligned())

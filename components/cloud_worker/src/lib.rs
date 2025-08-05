@@ -306,6 +306,11 @@ fn start_server(
     };
     let meta_file_cache_size = config.cop_block_cache_size.0 / 4;
     let meta_file_cache = new_meta_file_cache(meta_file_cache_size);
+    let http_client = Arc::new(
+        security_mgr
+            .http_client(hyper::Client::builder())
+            .expect("create http client failed"),
+    );
     let ctx = Arc::new(server::Context {
         compression_lvl,
         checksum_type,
@@ -326,6 +331,8 @@ fn start_server(
         ia_ctx,
         read_columnar: config.read_columnar,
         meta_file_cache,
+        http_client,
+        remote_cache_ttl: config.cop_remote_dfs_cache_ttl.0,
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
@@ -734,6 +741,8 @@ pub struct Config {
     pub cop_block_cache_size: ReadableSize,
     // Used to calculate block cache capacity of items. Should be the same as tikv-server.
     pub cop_block_size: ReadableSize,
+    // Used to determine if the file is expired on the remote dfs cache.
+    pub cop_remote_dfs_cache_ttl: ReadableDuration,
     // The thread pool size is cpu_cores * thread_pool_size_factor,
     pub thread_pool_size_factor: f64,
     pub report_wru: bool,
@@ -792,6 +801,7 @@ impl Default for Config {
             cop_addr: String::from("0.0.0.0:9500"),
             cop_block_cache_size: ReadableSize(block_cache_size),
             cop_block_size: ReadableSize::kb(32),
+            cop_remote_dfs_cache_ttl: ReadableDuration::hours(1),
             thread_pool_size_factor: 1.0,
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,

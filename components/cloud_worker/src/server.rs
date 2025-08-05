@@ -19,7 +19,8 @@ use hyper::{
 };
 use kvengine::{
     context::{IaCtx, MetaFileCacheWeighter, PrepareType, SnapCtx},
-    dfs::S3Fs,
+    dfs,
+    dfs::{S3Fs, DFS_REMOTE_CACHE_ADDR_HEADER},
     local_compact,
     metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
     table::{schema_file::SchemaFile, sstable::BlockCache, ChecksumType},
@@ -32,6 +33,7 @@ use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use replication_worker::ReplicationScheduler;
 use rfstore::store::{PdIdAllocator, RegionSnapshot};
+use security::HttpClient;
 use tikv::{
     coprocessor::{
         remote_dispatcher::decode_remote_cop_request, REQ_TYPE_ANALYZE, REQ_TYPE_CHECKSUM,
@@ -81,12 +83,24 @@ pub(crate) struct Context {
     pub ia_ctx: IaCtx,
     pub read_columnar: bool,
     pub meta_file_cache: Arc<quick_cache::sync::Cache<u64, Bytes, MetaFileCacheWeighter>>,
+    pub http_client: Arc<HttpClient>,
+    pub remote_cache_ttl: Duration,
 }
 
 impl Context {
-    pub(crate) fn get_snap_ctx(&self) -> SnapCtx {
+    pub(crate) fn get_snap_ctx(&self, dfs_remote_cache_addr: Option<&str>) -> SnapCtx {
+        let dfs: Arc<dyn dfs::Dfs> = if let Some(dfs_cache_addr) = dfs_remote_cache_addr {
+            Arc::new(dfs::RemoteCachedDfs::new(
+                self.s3fs.clone(),
+                dfs_cache_addr.to_string(),
+                self.http_client.clone(),
+                self.remote_cache_ttl,
+            ))
+        } else {
+            self.s3fs.clone()
+        };
         SnapCtx {
-            dfs: self.s3fs.clone(),
+            dfs,
             master_key: self.master_key.clone(),
             block_cache: self.block_cache.clone(),
             vector_index_cache: None,
@@ -332,7 +346,7 @@ async fn handle_remote_coprocessor(
 
     let req_type = cop_req.get_tp();
     let snap_start = Instant::now_coarse();
-    let snap_ctx = ctx.get_snap_ctx();
+    let snap_ctx = ctx.get_snap_ctx(get_dfs_remote_cache_addr(&parts));
     let mem_limiter = ctx.memory_limiter.clone();
     let snap_access_res =
         SnapAccess::construct_snapshot(&tag, &snap_ctx, mem_data, snap_data, mem_limiter).await;
@@ -478,6 +492,14 @@ async fn handle_remote_coprocessor(
                 .unwrap())
         }
     }
+}
+
+fn get_dfs_remote_cache_addr(parts: &http::request::Parts) -> Option<&str> {
+    parts
+        .headers
+        .get(DFS_REMOTE_CACHE_ADDR_HEADER)?
+        .to_str()
+        .ok()
 }
 
 pub fn get_cop_req_tag(cop_req: &kvproto::coprocessor::Request) -> String {

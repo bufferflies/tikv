@@ -85,7 +85,10 @@ use tikv_util::{
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::{Builder, Runtime},
-    sync::oneshot::{self, Receiver, Sender},
+    sync::{
+        oneshot::{self, Receiver, Sender},
+        Semaphore,
+    },
 };
 use tokio_openssl::SslStream;
 use txn_types::TsSet;
@@ -1630,9 +1633,11 @@ impl StatusServer {
         )
     }
 
+    const DFS_FILE_READ_CONCURRENCY: usize = 128;
+
     async fn handle_dfs_file_read(
         req: Request<Body>,
-        engine: kvengine::Engine,
+        ctx: &StatusContext,
     ) -> hyper::Result<Response<Body>> {
         let id_opt = Self::get_dfs_file_id(&req);
         if id_opt.is_none() {
@@ -1640,28 +1645,61 @@ impl StatusServer {
         }
         let id = id_opt.unwrap();
         let (file_type, start_off, end_off) = Self::get_dfs_read_args(&req);
-        let (callback, future) = paired_future_callback();
-        std::thread::spawn(move || {
-            let res = match file_type {
+        let handle_res = tokio::runtime::Handle::try_current();
+        if let Err(handle_err) = handle_res {
+            error!("Failed to get tokio runtime handle: {:?}", handle_err);
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to get tokio runtime handle",
+            ));
+        }
+        let _permit = match ctx.dfs_file_read_semaphore.try_acquire() {
+            Err(_) => {
+                warn!("too many concurrent DFS file read requests");
+                return Ok(make_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "too many concurrent DFS file read requests",
+                ));
+            }
+            Ok(permit) => permit,
+        };
+        let start = Instant::now_coarse();
+        let handle = handle_res.unwrap();
+        let engine = ctx.kvengine.clone();
+        let spawn_res = handle
+            .spawn_blocking(move || match file_type {
                 FileType::TxnChunk => {
                     debug_assert_eq!(start_off, 0);
                     engine.get_txn_chunk_manager().read_local_chunk(id)
                 }
                 _ => engine.read_local_file(id, file_type, start_off, end_off),
-            };
-            callback(res);
-        });
-        let res = future.await.unwrap();
-        Ok(match res {
-            Ok(data) => Response::builder()
-                .header(header::CONTENT_TYPE, "application/octet-stream")
-                .body(Body::from(data))
-                .unwrap(),
-            Err(err) => make_response(
+            })
+            .await;
+        if let Err(handle_err) = spawn_res {
+            error!("Failed to execute blocking task: {:?}", handle_err);
+            return Ok(make_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Internal Server Error {}", err),
-            ),
-        })
+                "failed to execute blocking task",
+            ));
+        }
+        let read_res = spawn_res.unwrap();
+        if let Err(read_err) = read_res {
+            error!("Failed to read file: {:?}", read_err);
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read file {:?}", read_err),
+            ));
+        }
+        info!(
+            "read local dfs file {} takes {:?}",
+            id,
+            start.saturating_elapsed()
+        );
+        let data = read_res.unwrap();
+        Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(data))
+            .unwrap())
     }
 
     async fn handle_dfs_file_create(
@@ -2268,6 +2306,7 @@ impl StatusServer {
             kvengine: self.kvengine.clone(),
             rfengine: self.rfengine.clone(),
             concurrency_manager: self.concurrency_manager.clone(),
+            dfs_file_read_semaphore: Semaphore::new(Self::DFS_FILE_READ_CONCURRENCY),
         });
         // Start to serve.
         let server = builder.serve(make_service_fn(move |conn: &C| {
@@ -2452,7 +2491,7 @@ impl StatusServer {
                                 Self::handle_build_columnar(req, &ctx.kvengine).await
                             }
                             (Method::GET, path) if path.starts_with("/dfs/") => {
-                                Self::handle_dfs_file_read(req, ctx.kvengine.clone()).await
+                                Self::handle_dfs_file_read(req, &ctx).await
                             }
                             (Method::POST, path) if path.starts_with("/dfs/") => {
                                 Self::handle_dfs_file_create(req, ctx.kvengine.clone()).await
@@ -2526,6 +2565,7 @@ struct StatusContext {
     kvengine: kvengine::Engine,
     rfengine: RfEngine,
     concurrency_manager: ConcurrencyManager,
+    dfs_file_read_semaphore: Semaphore,
 }
 
 // To unify TLS/Plain connection usage in start_serve function

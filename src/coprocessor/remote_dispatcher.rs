@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use codec::number::NumberDecoder;
 use http::{header, StatusCode};
-use kvengine::{SnapAccess, LOCK_CF};
+use kvengine::{dfs::DFS_REMOTE_CACHE_ADDR_HEADER, SnapAccess, LOCK_CF};
 use kvproto::{
     coprocessor::{KeyRange, Response},
     kvrpcpb::ExecDetailsV2,
@@ -64,6 +64,7 @@ pub async fn remote_request(
         .uri(remote_addr)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::ACCEPT, CONTENT_TYPE_PROTOBUF)
+        .header(DFS_REMOTE_CACHE_ADDR_HEADER, remote_ctx.status_addr.clone())
         .body(hyper::Body::from(req_body))
         .map_err(|e| Error::Other(e.to_string()))?;
     let client = remote_ctx.client.clone();
@@ -193,6 +194,7 @@ pub struct RemoteContextCore {
     pub remote_request_cache: quick_cache::sync::Cache<String, Response>,
     pub client: security::HttpClient,
     lazy_remote_patterns: dashmap::DashMap<String, RemotePatternStats>,
+    status_addr: String,
 }
 
 pub trait CopWorkerProvider: Send + Sync {
@@ -221,6 +223,7 @@ impl RemoteContext {
         cop_min_process_duration: Duration,
         security_mgr: Arc<SecurityManager>,
         runtime: tokio::runtime::Handle,
+        status_addr: String,
     ) -> Option<Self> {
         if remote_worker_url.is_empty() && cop_worker_url.is_empty() {
             return None;
@@ -245,6 +248,7 @@ impl RemoteContext {
                 remote_request_cache,
                 client,
                 lazy_remote_patterns,
+                status_addr,
             }),
         })
     }
@@ -773,6 +777,7 @@ mod tests {
             Duration::from_millis(10),
             Arc::new(security::SecurityManager::default()),
             runtime.handle().clone(),
+            String::new(),
         )
         .unwrap();
         let make_key_range = |start: u8, end: u8| KeyRange {

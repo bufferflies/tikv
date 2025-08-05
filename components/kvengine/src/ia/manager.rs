@@ -329,6 +329,7 @@ impl IaManagerCore {
         keyspace_id: Option<u32>,
         deadline: Option<Deadline>,
         read_at: &mut ReadAt<'_>,
+        dfs: Option<&dyn Dfs>,
     ) -> Result<()> {
         let (start_off, end_off) = (read_at.start_off(), read_at.end_off());
         if start_off > end_off || start_off < ident.start_off || ident.end_off < end_off {
@@ -370,7 +371,7 @@ impl IaManagerCore {
             }
 
             let data = self
-                .read_segment_from_remote(&ident, ftype, keyspace_id, deadline)
+                .read_segment_from_remote(&ident, ftype, keyspace_id, deadline, dfs)
                 .await?;
             self.segments
                 .set_segment_data(ident.clone(), FileSegmentData::InMem(data.clone()));
@@ -393,6 +394,7 @@ impl IaManagerCore {
         ftype: FileType,
         keyspace_id: Option<u32>,
         deadline: Option<Deadline>,
+        dfs: Option<&dyn Dfs>,
     ) -> Result<Bytes> {
         let _permit = self.acquire_concurrency_permit(keyspace_id).await;
         if deadline.is_some_and(|d| d.check().is_err()) {
@@ -400,13 +402,14 @@ impl IaManagerCore {
                 "acquire concurrency permit timeout: {ident}"
             )));
         }
+        let dfs = dfs.unwrap_or_else(|| self.fs.deref());
 
         let opts = dfs::Options::default()
             .with_type(ftype)
             .with_start_off(ident.start_off)
             .with_end_off(ident.end_off);
-        let _enter = self.fs.get_runtime().enter();
-        Ok(self.fs.read_file(ident.file_id, opts).await?)
+        let _enter = dfs.get_runtime().enter();
+        Ok(dfs.read_file(ident.file_id, opts).await?)
     }
 
     fn read_segment_from_cache(
@@ -475,6 +478,7 @@ impl IaManagerCore {
         ftype: FileType,
         keyspace_id: u32,
         deadline: Deadline,
+        dfs: Option<&dyn Dfs>,
     ) -> Result<()> {
         let mut buf: [u8; 0] = [];
         let mut read_at = ReadAt::new(buf.as_mut_slice(), ident.start_off, false);
@@ -484,6 +488,7 @@ impl IaManagerCore {
             Some(keyspace_id),
             Some(deadline),
             &mut read_at,
+            dfs,
         )
         .await
     }
@@ -492,10 +497,11 @@ impl IaManagerCore {
         &self,
         ident: FileSegmentIdent,
         ftype: FileType,
+        dfs: Option<&dyn Dfs>,
     ) -> Result<SegmentHandle> {
         let mut buf: [u8; 0] = [];
         let mut read_at = ReadAt::new(buf.as_mut_slice(), ident.start_off, true);
-        self.read_segment(ident.clone(), ftype, None, None, &mut read_at)
+        self.read_segment(ident.clone(), ftype, None, None, &mut read_at, dfs)
             .await?;
         let handle = read_at.segment_handle.unwrap();
         debug!("get segment handle"; "ident" => ?ident, "ftype" => ?ftype, "handle" => ?handle);
