@@ -676,7 +676,7 @@ mod tests {
                 std::env::temp_dir(),
                 1024 * 1024,
                 CompressionType::Lz4Compression,
-                CompressionType::NoCompression,
+                CompressionType::Lz4Compression,
                 dfs_config,
                 1024 * 1024,
                 4096,

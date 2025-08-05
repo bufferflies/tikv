@@ -275,7 +275,7 @@ impl RfEngineCore {
                         dir.to_owned(),
                         cfg.wal_chunk_target_file_size.0 as usize,
                         CompressionType::Lz4Compression,
-                        CompressionType::NoCompression,
+                        CompressionType::Lz4Compression,
                         dfs_conf.unwrap(),
                         cfg.rlog_cache_capacity.0 as usize,
                         cfg.rlog_cache_size_threshold.0 as usize,
