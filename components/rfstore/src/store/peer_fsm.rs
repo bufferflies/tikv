@@ -1296,7 +1296,7 @@ impl<'a> PeerMsgHandler<'a> {
             raftstore::coprocessor::metrics::REGION_KEYS_HISTOGRAM
                 .observe(estimated_entries as f64);
             if estimated_size >= region_max_size || estimated_entries >= region_max_entries {
-                if let Some(k) = shard.get_suggest_split_key() {
+                if let Some(k) = shard.get_suggest_split_key(self.ctx.cfg.region_bucket_size.0) {
                     info!(
                         "region {} split, estimated size {}, estimated entries {}, max_size {}",
                         self.peer.tag(),

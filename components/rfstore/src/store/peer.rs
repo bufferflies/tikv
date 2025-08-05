@@ -1447,7 +1447,8 @@ impl Peer {
                 return;
             }
             self.last_bucket_update_meta_sequence = meta_sequence;
-            let mut bucket_size = ctx.cfg.region_bucket_size.0;
+            let origin_bucket_size = ctx.cfg.region_bucket_size.0;
+            let mut bucket_size = origin_bucket_size;
             if shard.has_vector_index() {
                 // increase the bucket size to better serve vector index.
                 bucket_size *= 2;
@@ -1455,7 +1456,9 @@ impl Peer {
             let estimated_size = shard.get_estimated_size();
             let expected_bucket_count = (estimated_size + bucket_size - 1) / bucket_size;
             let mut bucket_keys = vec![self.region().get_start_key().to_vec()];
-            if let Some(keys) = shard.get_evenly_split_keys(expected_bucket_count as usize) {
+            if let Some(keys) =
+                shard.get_evenly_split_keys(expected_bucket_count as usize, origin_bucket_size)
+            {
                 bucket_keys.extend(
                     keys.into_iter()
                         .map(|k| Key::from_raw(k.chunk()).into_encoded()),

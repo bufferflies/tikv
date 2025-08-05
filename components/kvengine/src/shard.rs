@@ -701,8 +701,8 @@ impl Shard {
     }
 
     /// Get suggest key for region split.
-    pub fn get_suggest_split_key(&self) -> Option<Bytes> {
-        let candidate_keys = self.get_candidate_inner_keys();
+    pub fn get_suggest_split_key(&self, bucket_size: u64) -> Option<Bytes> {
+        let candidate_keys = self.get_candidate_inner_keys(bucket_size);
         if candidate_keys.is_empty() {
             return None;
         }
@@ -714,7 +714,7 @@ impl Shard {
         [self.keyspace_prefix(), inner_key.deref()].concat().into()
     }
 
-    fn get_candidate_inner_keys(&self) -> Vec<OwnedInnerKey> {
+    fn get_candidate_inner_keys(&self, bucket_size: u64) -> Vec<OwnedInnerKey> {
         let data = self.get_data();
         let mut ln_tables = 0;
         data.for_each_level(|_, lvl| {
@@ -734,26 +734,29 @@ impl Shard {
                 }
             }
         }
-        let max_table_size = self.opt.table_builder_options.max_table_size;
-        let block_size = self.opt.table_builder_options.block_size;
-        let step = max_table_size / block_size;
-        for l0 in data.l0_tbls.iter() {
-            for cf in WRITE_CF..=LOCK_CF {
-                if let Some(tbl) = l0.get_cf(cf) {
-                    if tbl.size() < max_table_size as u64 {
-                        // ignore small l0 table.
-                        continue;
-                    }
-                    let idx = tbl.load_index();
-                    if idx.num_blocks() <= step {
-                        continue;
-                    }
-                    for i in (step..idx.num_blocks()).step_by(step) {
-                        let sample_key = idx.clone_block_key(i);
-                        if sample_key.as_ref() > data.inner_start()
-                            && sample_key.as_ref() < data.inner_end()
-                        {
-                            candidate_inner_keys.push(sample_key);
+        let l0_size: u64 = data.l0_tbls.iter().map(|l0| l0.size()).sum();
+        if l0_size > bucket_size {
+            let max_table_size = self.opt.table_builder_options.max_table_size;
+            let block_size = self.opt.table_builder_options.block_size;
+            let step = max_table_size / block_size;
+            for l0 in data.l0_tbls.iter() {
+                for cf in WRITE_CF..=LOCK_CF {
+                    if let Some(tbl) = l0.get_cf(cf) {
+                        if tbl.size() < max_table_size as u64 {
+                            // ignore small l0 table.
+                            continue;
+                        }
+                        let idx = tbl.load_index();
+                        if idx.num_blocks() <= step {
+                            continue;
+                        }
+                        for i in (step..idx.num_blocks()).step_by(step) {
+                            let sample_key = idx.clone_block_key(i);
+                            if sample_key.as_ref() > data.inner_start()
+                                && sample_key.as_ref() < data.inner_end()
+                            {
+                                candidate_inner_keys.push(sample_key);
+                            }
                         }
                     }
                 }
@@ -763,11 +766,11 @@ impl Shard {
         candidate_inner_keys
     }
 
-    pub fn get_evenly_split_keys(&self, count: usize) -> Option<Vec<Bytes>> {
+    pub fn get_evenly_split_keys(&self, count: usize, bucket_size: u64) -> Option<Vec<Bytes>> {
         if count <= 1 {
             return None;
         }
-        let candidate_inner_keys = self.get_candidate_inner_keys();
+        let candidate_inner_keys = self.get_candidate_inner_keys(bucket_size);
         if candidate_inner_keys.len() < 2 {
             return None;
         }

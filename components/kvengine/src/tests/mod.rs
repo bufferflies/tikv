@@ -776,7 +776,7 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
         builder.set_cfs([cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
         shard.set_data_opt(builder.build(), false);
 
-        let key = shard.get_suggest_split_key();
+        let key = shard.get_suggest_split_key(1);
         assert_eq!(
             key.map(|k| k.to_vec()),
             expect_split_key.map(|i| engine.key_builder.i_to_outer_key(i)),
@@ -955,7 +955,7 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
         builder.set_cfs([cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
         shard.set_data_opt(builder.build(), false);
 
-        let split_keys = shard.get_evenly_split_keys(split_count);
+        let split_keys = shard.get_evenly_split_keys(split_count, 1);
         assert_eq!(
             split_keys.map(|keys| keys.into_iter().map(|k| k.to_vec()).collect::<Vec<_>>()),
             expect_split_keys.map(|keys| keys
