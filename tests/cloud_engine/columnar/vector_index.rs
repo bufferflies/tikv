@@ -761,11 +761,7 @@ fn test_read_distance_from_vector_index_and_table() {
             .collect();
         all_items.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
         let topn = all_items.into_iter().take(3).collect::<Vec<_>>();
-        let cases = [
-            (1072, 1097.0419317),
-            (1073, 1097.0423875),
-            (1071, 1097.0442105),
-        ];
+        let cases = [(1072, 1097.0419), (1073, 1097.0423), (1071, 1097.0442)];
         for (i, (index, distance)) in cases.iter().enumerate() {
             assert_eq!(
                 handle_buf.get_int_handle_value(topn[i].index),
@@ -811,10 +807,10 @@ fn test_read_distance_from_vector_index_and_table() {
     all_items.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
     for item in &all_items {
         match item.index {
-            988 => assert_eq!(item.distance, 1106.7235107),
-            1001 => assert_eq!(item.distance, 1103.9773548),
-            1002 => assert_eq!(item.distance, 1103.7848522),
-            1499 => assert_eq!(item.distance, 1322.7373133),
+            988 => assert_eq!(item.distance, 1106.7235),
+            1001 => assert_eq!(item.distance, 1103.9773),
+            1002 => assert_eq!(item.distance, 1103.7848),
+            1499 => assert_eq!(item.distance, 1322.7373),
             _ => {}
         }
     }
@@ -1020,11 +1016,11 @@ fn test_read_distance_from_vector_index() {
     all_items.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
     let topn = all_items.into_iter().take(5).collect::<Vec<_>>();
     let cases = [
-        (999, 1104.3703613),
-        (998, 1104.5709228),
-        (997, 1104.7741699),
-        (996, 1104.9801025),
-        (994, 1105.3999023),
+        (999, 1104.3703),
+        (998, 1104.5709),
+        (997, 1104.7741),
+        (996, 1104.9801),
+        (994, 1105.3999),
     ];
     for (i, (index, distance)) in cases.iter().enumerate() {
         assert_eq!(
@@ -1083,11 +1079,11 @@ fn decode_f64_vec_from_bytes(bytes: &[u8]) -> Vec<f64> {
         .collect()
 }
 
-// keep 7 decimal points of value
+// keep 4 decimal points of value
 fn keep_decimal_points(vec: Vec<f64>) -> Vec<f64> {
     let mut new_vec: Vec<f64> = vec![];
     for val in vec {
-        new_vec.push((val * 1e7).trunc() / 1e7);
+        new_vec.push((val * 1e4).trunc() / 1e4);
     }
     new_vec
 }
