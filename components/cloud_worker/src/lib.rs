@@ -47,7 +47,7 @@ pub use metrics::REMOTE_COMPACT_REQ_HANDLE_HISTOGRAM;
 use metrics::WORKER_MEMORY_LIMITER_CURRENT_USED;
 use pd_client::{keyspace::init_keyspace_manager, PdClient};
 use prometheus::labels;
-use replication_worker::{ReplicationWorker, ReplicationWorkerConfig};
+use replication_worker::{CdcMsg, ReplicationWorker, ReplicationWorkerConfig};
 pub use schema_manager::{
     broadcast_schema_update_to_all_stores, SchemaManager, SchemaManagerConfig,
 };
@@ -133,7 +133,7 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
     );
 
     let running_ctl = RunningController::default();
-    let server = start_server(
+    let (server, _) = start_server(
         config,
         config_file_path,
         thread_pool.clone(),
@@ -167,7 +167,7 @@ fn start_server(
     hyper_runtime: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
     running_ctl: &RunningController,
-) -> ServerFuture {
+) -> (ServerFuture, Arc<server::Context>) {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(kvengine::dfs::S3Fs::new(
         dfs_config.prefix,
@@ -329,6 +329,10 @@ fn start_server(
             thread::spawn(move || replication_worker.run());
             scheduler
         })
+        .map_err(|e| {
+            error!("failed to create replication worker"; "err" => ?e);
+        })
+        .ok()
     } else {
         None
     };
@@ -402,7 +406,7 @@ fn start_server(
             addr: config.cop_addr,
             max_handle_duration: Duration::from_secs(60),
         };
-        let cop_server = remote_cop::RemoteCopServer::new(ctx, cop_config);
+        let cop_server = remote_cop::RemoteCopServer::new(ctx.clone(), cop_config);
         cop_server_opt = Some(cop_server);
     }
     if let Some(server) = cop_server_opt.as_mut() {
@@ -421,7 +425,7 @@ fn start_server(
         run_prometheus_push(config.push_metrics_addr, config.push_metrics_interval.0);
     }
 
-    ServerFuture::new(server, cop_server_opt)
+    (ServerFuture::new(server, cop_server_opt), ctx)
 }
 
 fn run_prometheus_push(push_metrics_addr: String, push_metrics_interval: Duration) {
@@ -499,6 +503,7 @@ pub struct CloudWorker {
     pd: Arc<dyn PdClient>,
 
     svc_handle: Option<thread::JoinHandle<()>>,
+    ctx: Option<Arc<server::Context>>,
     notify: Arc<tokio::sync::Notify>,
     running_ctl: RunningController,
 }
@@ -533,6 +538,7 @@ impl CloudWorker {
             hyper_runtime,
             pd,
             svc_handle: None,
+            ctx: None,
             notify: Arc::new(tokio::sync::Notify::new()),
             running_ctl: RunningController::default(),
         }
@@ -543,7 +549,7 @@ impl CloudWorker {
     }
 
     pub fn start(&mut self) {
-        let server = start_server(
+        let (server, ctx) = start_server(
             self.config.clone(),
             self.config_file_path.clone(),
             self.thread_pool.clone(),
@@ -573,9 +579,15 @@ impl CloudWorker {
             })
         });
         self.svc_handle = Some(svc_handle);
+        self.ctx = Some(ctx);
     }
 
     pub fn shutdown(mut self) {
+        if let Some(ctx) = self.ctx.take() {
+            if let Some(rep_scheduler) = &ctx.replication_scheduler {
+                rep_scheduler.schedule(CdcMsg::Stop);
+            }
+        }
         if let Some(handle) = self.svc_handle.take() {
             self.notify.notify_waiters();
             handle.join().unwrap();

@@ -7,6 +7,7 @@ mod test_drop_table;
 mod test_jepsen;
 mod test_load_data;
 mod test_native_br;
+mod test_replication;
 mod test_storage_class;
 mod test_tidb;
 mod test_tpc;

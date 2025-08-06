@@ -1,8 +1,9 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use api_version::ApiV2;
+use bytes::Bytes;
 use futures::executor::block_on;
 use kvengine::{dfs::S3Fs, table::BIT_DELETE, WRITE_CF};
 use kvproto::metapb;
@@ -10,7 +11,7 @@ use merged_engine::{MergedEngine, MergedEngineConfig, MergedEngineContext};
 use native_br::{backup, backup::BackupType, common::send_request_to_store};
 use pd_client::PdClient;
 use rand::Rng;
-use rfstore::store::ApplyContext;
+use rfstore::store::{load_raft_engine_meta, ApplyContext};
 use security::{GetSecurityManager, SecurityManager};
 use test_cloud_server::{
     client::{RefStore, RequestOptions},
@@ -44,7 +45,6 @@ fn test_merged_engine_once() {
         conf.dfs = dfs_conf.clone();
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.target_file_size = ReadableSize::kb(256);
-        conf.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
@@ -91,8 +91,14 @@ fn test_merged_engine_once() {
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
     };
     let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
-    merged_engine.load_keyspaces(vec![keyspace_id]).unwrap();
+    let recover_handle = merged_engine.recover_handler.clone();
     let merged_kv = merged_engine.get_kv();
+    let mut keyspaces = HashMap::default();
+    keyspaces.insert(keyspace_id, Bytes::new());
+    MergedEngine::load_shards(&ctx, &merged_kv, recover_handle, &keyspaces).unwrap();
+    merged_engine
+        .set_keyspace_states(keyspace_id, vec![0].into())
+        .unwrap();
     let all_shards = merged_kv.get_all_shard_id_vers();
     assert_eq!(all_shards.len(), 2);
     let mut ref_store = kv_engine_to_ref_store(&merged_kv);
@@ -131,7 +137,12 @@ fn test_merged_engine_once() {
     for (region_id, _) in region_peers {
         if let Some(progress) = merged_engine.get_region_progress(region_id) {
             let truncated_index = merged_raft.get_truncated_index(region_id).unwrap();
-            assert_eq!(progress.truncated_index, truncated_index);
+            if progress.truncated_index != truncated_index {
+                if let Some(cs) = load_raft_engine_meta(&merged_raft, region_id) {
+                    // When the shard is not initial flushed, the truncated index is not updated.
+                    assert!(cs.has_parent());
+                }
+            }
         }
     }
     merged_engine.close();

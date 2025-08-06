@@ -163,13 +163,13 @@ impl MetaIterator for EmptyMetaIterator {
 }
 
 pub struct MergedEngine {
-    ctx: MergedEngineContext,
+    pub ctx: MergedEngineContext,
     manifest: Manifest,
     region_progresses: HashMap<u64, RegionProgress>,
     updated_regions: HashSet<u64>,
     raft: RfEngine,
-    kv: kvengine::Engine,
-    recover_handler: RecoverHandler,
+    pub kv: kvengine::Engine,
+    pub recover_handler: RecoverHandler,
     preprocessors: HashMap<u64, Preprocessor>,
     appliers: HashMap<u64, Applier>,
     peer_receiver: mpsc::Receiver<(u64, Box<PeerMsg>)>,
@@ -229,12 +229,14 @@ impl MergedEngine {
             recover_handler.clone(),
         )
         .unwrap();
-        Self::load_shards(
-            &ctx,
-            &kv,
-            recover_handler.clone(),
-            manifest.keyspace_ids.clone(),
-        )?;
+        tikv_util::init_task_local_sync(|| {
+            Self::load_shards(
+                &ctx,
+                &kv,
+                recover_handler.clone(),
+                &manifest.keyspace_states,
+            )
+        })?;
 
         let (store_sender, store_receiver) = mpsc::unbounded();
         let (peer_sender, peer_receiver) = mpsc::unbounded();
@@ -255,38 +257,43 @@ impl MergedEngine {
         })
     }
 
-    pub fn load_keyspaces(&mut self, keyspace_ids: Vec<u32>) -> Result<()> {
-        let mut new_keyspaces = HashSet::new();
-        for keyspace_id in keyspace_ids {
-            if self.manifest.add_keyspace_id(keyspace_id) {
-                new_keyspaces.insert(keyspace_id);
-            }
+    pub fn set_keyspace_states(&mut self, keyspace_id: u32, states: Bytes) -> Result<()> {
+        let old = self
+            .manifest
+            .set_keyspace_states(keyspace_id, states.clone());
+        if old == Some(states.clone()) {
+            return Ok(()); // no change
         }
-        info!("load keyspaces {:?}", new_keyspaces);
-        self.manifest.persist()?;
-        Self::load_shards(
-            &self.ctx,
-            &self.kv,
-            self.recover_handler.clone(),
-            new_keyspaces,
-        )
+        self.manifest.persist()
+    }
+
+    pub fn remove_keyspace(&mut self, keyspace_id: u32) {
+        self.manifest.keyspace_states.remove(&keyspace_id);
+    }
+
+    pub fn get_keyspaces(&self) -> Vec<u32> {
+        self.manifest.keyspace_states.keys().cloned().collect()
+    }
+
+    pub fn get_keyspace_states(&self, keyspace_id: u32) -> Option<Bytes> {
+        self.manifest.keyspace_states.get(&keyspace_id).cloned()
     }
 
     pub fn get_router(&self) -> RaftRouter {
         self.router.clone()
     }
 
-    fn load_shards(
+    pub fn load_shards(
         ctx: &MergedEngineContext,
         kv: &kvengine::Engine,
         mut recoverer: RecoverHandler,
-        keyspace_ids: HashSet<u32>,
+        keyspace_states: &HashMap<u32, Bytes>,
     ) -> Result<()> {
         let engine_id = ctx.config.merged_store_id;
         let mut metas = HashMap::new();
         recoverer.iterate(|cs| {
             let meta = ShardMeta::new(engine_id, &cs);
-            if keyspace_ids.contains(&meta.range.keyspace_id) {
+            if keyspace_states.contains_key(&meta.range.keyspace_id) {
                 info!("load keyspace insert cs {:?}", cs);
                 metas.insert(meta.id, meta);
             }
@@ -478,12 +485,7 @@ impl MergedEngine {
         )?;
         let raft_db_path = Path::new(&store_config.raft_store.raftdb_path);
         let data_dir = Path::new(&store_config.storage.data_dir);
-        let rf_engine = RfEngine::open(
-            raft_db_path,
-            &store_config.rfengine,
-            Some(data_dir),
-            Some(store_config.dfs.clone()),
-        )?;
+        let rf_engine = RfEngine::open(raft_db_path, &store_config.rfengine, Some(data_dir), None)?;
         let ctx = ReplayWalLogsContext {
             pd_client: ctx.pd.clone(),
             dfs: ctx.fs.clone(),
@@ -491,7 +493,7 @@ impl MergedEngine {
             cluster_backup: backup_meta,
             rf_engine: &rf_engine,
             complete_wal_chunks: false,
-            full_restore: true,
+            full_restore: false,
             fetch_wal_timeout: ctx.config.timeout_fetch_wal.0,
         };
         let tag = &format!("merged_{}", store_id);
@@ -559,6 +561,18 @@ impl MergedEngine {
         self.manifest.store_progresses.get(&store_id).cloned()
     }
 
+    pub fn get_or_insert_store_progress(&mut self, store_id: u64) -> StoreProgress {
+        *self
+            .manifest
+            .store_progresses
+            .entry(store_id)
+            .or_insert_with(|| StoreProgress {
+                store_id,
+                epoch: 1,
+                offset: 0,
+            })
+    }
+
     pub fn get_keyspace_regions(&self, keyspace_id: u32) -> Vec<u64> {
         let mut regions = Vec::new();
         for (&region_id, progress) in &self.region_progresses {
@@ -602,6 +616,9 @@ impl MergedEngine {
         for mut origin_wb in origin_batches {
             let region_peer_map = origin_wb.get_region_peer_map();
             for (&region_id, &peer_id) in &region_peer_map {
+                if region_id == 0 {
+                    continue;
+                }
                 let progress = self.region_progresses.entry(region_id).or_insert_with(|| {
                     let bin = origin_wb
                         .get_latest_state(peer_id, region_id, REGION_META_KEY_PREFIX)
@@ -706,7 +723,7 @@ impl MergedEngine {
             &mut prepared_msgs,
         )?;
         self.handle_prepared_msgs(&mut ctx, prepared_msgs, apply_ctx);
-        self.truncate_regions(&updated_regions, &mut raft_wb);
+        self.update_progress_and_truncate(&updated_regions, &mut raft_wb);
         self.destroy_regions(destroyed_regions, &mut raft_wb);
         if !raft_wb.is_empty() {
             self.raft.write(raft_wb)?;
@@ -723,6 +740,7 @@ impl MergedEngine {
         destroyed_regions: &mut HashSet<u64>,
         prepared_msgs: &mut HashMap<u64, Vec<(u64, Box<PeerMsg>)>>,
     ) -> Result<()> {
+        info!("sync merged for regions {:?}", updated_regions);
         let mut update_queue = VecDeque::from(updated_regions.to_vec());
         let merged_store_id = self.ctx.config.merged_store_id;
         let mut merged_wb = rfengine::WriteBatch::new();
@@ -733,11 +751,13 @@ impl MergedEngine {
             let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
             let high: u64 = progress.commit_index + 1;
             if low >= high {
+                finished_regions.insert(updated_region);
                 continue;
             }
             if self.raft.get_truncated_index(updated_region).is_none() {
                 // region is newly inserted, should process parent first.
                 update_queue.push_back(updated_region);
+                info!("newly inserted region {}", updated_region);
                 continue;
             }
             let preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
@@ -814,8 +834,6 @@ impl MergedEngine {
                             source.shard_id,
                             TRUNCATE_ALL_INDEX,
                         );
-                        // the source must have been applied already, we can remove it now.
-                        self.kv.remove_shard(source.shard_id);
                     }
                 }
                 entries.push(entry);
@@ -834,6 +852,7 @@ impl MergedEngine {
             if merged_wb_estimated_size > RAFT_WRITE_BATCH_SIZE {
                 ctx.raft.persist(merged_wb)?;
                 merged_wb = WriteBatch::new();
+                merged_wb_estimated_size = 0;
             }
             let shard = self.kv.get_shard(updated_region);
             if shard.is_none() {
@@ -894,18 +913,30 @@ impl MergedEngine {
             prepared_msgs.entry(id).or_default().push((id, peer_msg));
         }
         for (region_id, msgs) in prepared_msgs {
-            let applier = self.appliers.get_mut(&region_id).unwrap();
+            let Some(applier) = self.appliers.get_mut(&region_id) else {
+                continue;
+            };
             Self::apply_prepared_msgs(ctx, applier, msgs, apply_ctx);
         }
     }
 
-    fn truncate_regions(&mut self, regions: &[u64], raft_wb: &mut WriteBatch) {
+    fn update_progress_and_truncate(&mut self, regions: &[u64], raft_wb: &mut WriteBatch) {
         for &region_id in regions {
             let progress = self.region_progresses.get_mut(&region_id).unwrap();
+            let commit_index = progress.commit_index;
+            progress.synced_index = commit_index;
+            // We need to keep the uncommitted index for the next round.
+            progress.entries.retain(|&index, _| index > commit_index);
+
             let truncated_idx = self.raft.get_truncated_index(region_id).unwrap();
             if progress.truncated_index > truncated_idx {
                 if let Some(preprocessor) = self.preprocessors.get_mut(&region_id) {
                     if let Some(shard_meta) = preprocessor.as_ref().shard_meta {
+                        if shard_meta.parent.is_some() {
+                            // skip truncating region with parent, the parent may need the old
+                            // raft logs on recover.
+                            continue;
+                        }
                         if shard_meta.data_sequence < progress.truncated_index {
                             shard_meta.data_sequence = progress.truncated_index;
                             write_engine_meta(raft_wb, region_id, shard_meta);
@@ -914,10 +945,6 @@ impl MergedEngine {
                 }
                 raft_wb.truncate_raft_log(region_id, region_id, progress.truncated_index);
             }
-            let commit_index = progress.commit_index;
-            // We need to keep the uncommitted index for the next round.
-            progress.entries.retain(|&index, _| index > commit_index);
-            progress.synced_index = progress.commit_index;
         }
     }
 

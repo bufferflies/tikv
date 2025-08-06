@@ -661,6 +661,11 @@ impl Applier {
             _ => Err(box_err!("unsupported admin command type")),
         }?;
         response.set_cmd_type(cmd_type);
+        if let Some(observer) = &mut ctx.observer {
+            let region_id = req.get_header().get_region_id();
+            let region_version = req.get_header().get_region_epoch().get_version();
+            observer.on_apply_admin(region_id, region_version, ctx.exec_log_index, request);
+        }
 
         let mut resp = RaftCmdResponse::default();
         if !req.get_header().get_uuid().is_empty() {
@@ -2409,6 +2414,12 @@ impl ApplyContext {
 
     pub fn take_apply_observer(&mut self) -> Option<Box<dyn ApplyObserver>> {
         self.observer.take()
+    }
+
+    pub fn flush_observer(&mut self) {
+        if let Some(observer) = &mut self.observer {
+            observer.flush();
+        }
     }
 
     pub(crate) fn get_engine_wb(&self, region_id: u64) -> RefMut<'_, WriteBatch> {

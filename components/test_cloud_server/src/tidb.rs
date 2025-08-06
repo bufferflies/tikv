@@ -30,6 +30,8 @@ use crate::{
     try_wait, try_wait_result_async,
 };
 
+const SYSTEM_KEYSPACE_NAME: &str = "SYSTEM";
+
 // Set small update_interval to speed up recover new tso from legacy tso.
 pub const PD_CLIENT_UPDATE_INTERVAL: ReadableDuration = ReadableDuration::secs(10);
 
@@ -336,6 +338,20 @@ impl PdServers {
     }
 }
 
+struct SystemTidbInfo {
+    process: process::Child,
+    status_port: u16,
+}
+
+impl SystemTidbInfo {
+    pub fn new(process: process::Child, status_port: u16) -> Self {
+        Self {
+            process,
+            status_port,
+        }
+    }
+}
+
 /// Starts/stops tidb-servers and provides interfaces such as host, port,
 /// username, and password.
 pub struct TidbServers {
@@ -346,7 +362,9 @@ pub struct TidbServers {
 
     security_mgr: Arc<SecurityManager>,
 
-    children: DashMap<u16 /* idx */, process::Child>,
+    keyspace_tidb: DashMap<String /* keyspace */, SystemTidbInfo>,
+
+    next_gen: bool,
 }
 
 impl TidbServers {
@@ -356,6 +374,7 @@ impl TidbServers {
         port_base: u16,
         status_port_base: u16,
         security_mgr: Arc<SecurityManager>,
+        next_gen: bool,
     ) -> Self {
         Self {
             bin_path,
@@ -363,12 +382,17 @@ impl TidbServers {
             port_base,
             status_port_base,
             security_mgr,
-            children: DashMap::new(),
+            keyspace_tidb: DashMap::new(),
+            next_gen,
         }
     }
 
     pub fn root(&self, idx: u16) -> String {
-        format!("{}.root", keyspace_name_by_idx(idx))
+        if !self.next_gen {
+            format!("{}.root", keyspace_name_by_idx(idx))
+        } else {
+            "root".to_string()
+        }
     }
 
     pub fn port(&self, idx: u16) -> u16 {
@@ -388,20 +412,26 @@ impl TidbServers {
         }
     }
 
-    pub fn start(
+    pub fn system_conn_params(&self) -> ConnParams {
+        self.conn_params(0)
+    }
+
+    pub fn start_by_keyspace(
         &self,
-        idx: u16,
+        keyspace: &str,
         pd_endpoints: &[String],
         log_level: &str,
         options: StartTidbOptions,
+        port: u16,
+        status_port: u16,
     ) {
         let pd_endpoints = pd_endpoints.join(",");
-        let log_file = self.data_path.join(format!("tidb-{idx}.log"));
-        let slow_log_file = self.data_path.join(format!("tidb-slow-{idx}.log"));
+        let log_file = self.data_path.join(format!("tidb-{keyspace}.log"));
+        let slow_log_file = self.data_path.join(format!("tidb-slow-{keyspace}.log"));
 
-        let config_file = self.data_path.join(format!("tidb-{idx}.toml"));
+        let config_file = self.data_path.join(format!("tidb-{keyspace}.toml"));
         let mut config = TidbConfig {
-            keyspace_name: keyspace_name_by_idx(idx),
+            keyspace_name: keyspace.to_string(),
             enable_safe_point_v2: true,
             ..Default::default()
         };
@@ -442,8 +472,8 @@ impl TidbServers {
             .arg("--host=127.0.0.1")
             .arg("--status-host=127.0.0.1")
             .arg(format!("--path={}", pd_endpoints))
-            .arg(format!("-P={}", self.port(idx)))
-            .arg(format!("--status={}", self.status_port(idx)))
+            .arg(format!("-P={}", port))
+            .arg(format!("--status={}", status_port))
             .arg(format!("--log-file={}", log_file.display()))
             .arg(format!("--log-slow-query={}", slow_log_file.display()))
             .arg(format!("--config={}", config_file.display()));
@@ -455,17 +485,70 @@ impl TidbServers {
         }
         info!("start tidb-server"; "cmd" => ?cmd);
         let child = cmd.spawn().unwrap();
-        let old = self.children.insert(idx, child);
-        assert!(old.is_none(), "tidb-{} already started", idx);
+        let old = self.keyspace_tidb.insert(
+            keyspace.to_string(),
+            SystemTidbInfo::new(child, status_port),
+        );
+        assert!(old.is_none(), "tidb-{} already started", keyspace);
     }
 
-    pub fn get_tidb_control(&self, idx: u16) -> TidbControl {
-        let endpoint = format!("127.0.0.1:{}", self.status_port(idx));
-        TidbControl::new(endpoint, self.security_mgr.clone())
+    pub fn start_system(
+        &self,
+        pd_endpoints: &[String],
+        log_level: &str,
+        options: StartTidbOptions,
+    ) {
+        // We use port_base/
+        let port = self.port(0);
+        let status_port = self.status_port(0);
+        self.start_by_keyspace(
+            SYSTEM_KEYSPACE_NAME,
+            pd_endpoints,
+            log_level,
+            options,
+            port,
+            status_port,
+        );
     }
 
-    pub async fn must_healthy(&self, idx: u16, timeout: Duration) {
-        let tidb_ctl = self.get_tidb_control(idx);
+    pub fn start(
+        &self,
+        idx: u16,
+        pd_endpoints: &[String],
+        log_level: &str,
+        options: StartTidbOptions,
+    ) {
+        let keyspace = keyspace_name_by_idx(idx);
+        let port = self.port(idx);
+        let status_port = self.status_port(idx);
+        self.start_by_keyspace(
+            &keyspace,
+            pd_endpoints,
+            log_level,
+            options,
+            port,
+            status_port,
+        );
+    }
+
+    fn get_tidb_control(&self, keyspace: &str) -> Option<TidbControl> {
+        let info = self.keyspace_tidb.get(keyspace);
+        if let Some(tidb_info) = info {
+            let endpoint = format!("127.0.0.1:{}", tidb_info.status_port);
+            Some(TidbControl::new(
+                endpoint,
+                self.security_mgr.clone(),
+                self.next_gen,
+            ))
+        } else {
+            None
+        }
+    }
+
+    async fn must_healthy_by_keyspace(&self, keyspace: &str, timeout: Duration) {
+        let tidb_ctl = self.get_tidb_control(keyspace).unwrap();
+        info!("TiDB-{keyspace} is starting...");
+
         try_wait_result_async(
             || {
                 let tidb_ctl = tidb_ctl.clone();
@@ -483,34 +566,38 @@ impl TidbServers {
             timeout.as_secs() as usize,
         )
         .await
-        .unwrap_or_else(|e| panic!("wait TiDB-{} healthy timeout: {:?}", idx, e));
-        info!("TiDB-{idx} is ready");
+        .unwrap_or_else(|e| panic!("wait TiDB-{} healthy timeout: {:?}", keyspace, e));
+        info!("TiDB-{keyspace} is ready");
     }
 
     pub async fn must_all_healthy(&self, timeout: Duration) {
-        let all = self.get_all_indexes();
-        for idx in all {
-            self.must_healthy(idx, timeout).await;
+        let all = self.get_all_keyspaces();
+        for keyspace in all {
+            self.must_healthy_by_keyspace(&keyspace, timeout).await;
         }
     }
 
-    pub fn stop(&self, idx: u16) {
-        let (_, mut child) = self.children.remove(&idx).unwrap();
+    fn stop_by_keyspace(&self, keyspace: &str) {
+        let (_, info) = self.keyspace_tidb.remove(keyspace).unwrap();
+        let mut child = info.process;
         // TODO: gracefully kill by SIGINT
         child.kill().unwrap_or_else(|err| {
-            panic!("tidb-{} has exited unexpectedly: {}", idx, err);
+            panic!("tidb-{} has exited unexpectedly: {}", keyspace, err);
         })
     }
 
     pub fn stop_all(&self) {
-        let all = self.get_all_indexes();
-        for idx in all {
-            self.stop(idx);
+        let all = self.get_all_keyspaces();
+        for keyspace in all {
+            self.stop_by_keyspace(&keyspace);
         }
     }
 
-    fn get_all_indexes(&self) -> Vec<u16> {
-        self.children.iter().map(|kv| *kv.key()).collect::<Vec<_>>()
+    fn get_all_keyspaces(&self) -> Vec<String> {
+        self.keyspace_tidb
+            .iter()
+            .map(|kv| kv.key().clone())
+            .collect::<Vec<_>>()
     }
 }
 
@@ -539,6 +626,7 @@ impl TidbCluster {
         tiflash_bin: PathBuf,
         pre_alloc_keyspaces: u16,
         security_conf: &SecurityConfig,
+        next_gen: bool,
     ) -> Self {
         check_binary("pd_server", &pd_bin);
         check_binary("tidb-server", &tidb_bin);
@@ -562,6 +650,7 @@ impl TidbCluster {
             tidb_port_base,
             tidb_status_port_base,
             security_mgr.clone(),
+            next_gen,
         );
         let tiflash = TiFlashServers::new(tiflash_bin, base_path.path().to_owned(), security_mgr);
 
@@ -594,6 +683,7 @@ pub struct StartTidbOptions {
     pub gc_interval: String,
     pub gc_lifetime: String,
     pub tiflash_compute_mode: bool,
+    pub enable_system_tidb: bool,
 }
 
 pub struct TidbClusterCore {
@@ -620,6 +710,14 @@ impl TidbClusterCore {
     ) {
         let start_time = Instant::now_coarse();
         let pd_endpoints = self.pd.endpoints();
+        if options.enable_system_tidb {
+            self.tidb
+                .start_system(&pd_endpoints, log_level, options.clone());
+            self.tidb
+                .must_healthy_by_keyspace(SYSTEM_KEYSPACE_NAME, timeout)
+                .await;
+        }
+
         // Start from 1 as keyspace 0 is reserved.
         for idx in 1..=count {
             self.tidb
@@ -811,6 +909,7 @@ struct TikvClientConfig {
 }
 
 const TIDB_HEALTH_PATH: &str = "health";
+const TIDB_STATUS_PATH: &str = "status";
 
 // Ref: https://github.com/tidbcloud/tidb-cse/blob/release-7.1-keyspace/server/health_handler.go
 // {"status":"up","token":"keyspace_a"}
@@ -821,20 +920,43 @@ struct TidbHealth {
     token: String,  // keyspace name
 }
 
+// Ref: https://github.com/pingcap/tidb/blob/v8.5.2/pkg/server/http_status.go#L563
+#[derive(Default, Deserialize, Debug)]
+#[serde(default)]
+struct TidbStatus {
+    version: String,
+    status: TidbStatusDetail,
+}
+
+#[derive(Default, Deserialize, Debug)]
+#[serde(default)]
+struct TidbStatusDetail {
+    init_stats_percentage: f64,
+}
+
 /// TidbControl provides access to HTTP APIs of TiDB, which are not included in
 /// gRPC interface. It's also expected to act like the tool `tidb-ctl`.
 #[derive(Clone)]
 pub struct TidbControl {
     client: RestfulClient,
+    next_gen: bool,
 }
 
 impl TidbControl {
-    pub fn new(endpoint: String, security_mgr: Arc<SecurityManager>) -> Self {
+    pub fn new(endpoint: String, security_mgr: Arc<SecurityManager>, next_gen: bool) -> Self {
         let client = RestfulClient::new("tidb-ctl", vec![endpoint], security_mgr).unwrap();
-        Self { client }
+        Self { client, next_gen }
     }
 
     pub async fn health(&self) -> Result<()> {
+        if !self.next_gen {
+            self.query_health().await
+        } else {
+            self.query_status().await
+        }
+    }
+
+    async fn query_health(&self) -> Result<()> {
         let resp = self.client.get::<TidbHealth>(TIDB_HEALTH_PATH).await;
         match resp {
             Ok(health) if health.status == "up" => {
@@ -845,12 +967,24 @@ impl TidbControl {
             Err(e) => Err(box_err!("tidb-ctl: check healthy failed: {:?}", e)),
         }
     }
+
+    async fn query_status(&self) -> Result<()> {
+        let resp = self.client.get::<TidbStatus>(TIDB_STATUS_PATH).await;
+        match resp {
+            Ok(status) if status.status.init_stats_percentage >= 90.0 => {
+                info!("tidb-ctl: status: {:?}", status);
+                Ok(())
+            }
+            Ok(status) => Err(box_err!("tidb-ctl: not ready: {:?}", status)),
+            Err(e) => Err(box_err!("tidb-ctl: check status failed: {:?}", e)),
+        }
+    }
 }
 
 /// On real PD, keyspaces are indexed by name other than id.
 /// So we need the conversion between keyspace id & name, to locate TiDB in
 /// TidbCluster.
-const KEYSPACE_NAME_PREFIX: &str = "ks";
+const KEYSPACE_NAME_PREFIX: &str = "keyspace";
 
 fn keyspace_name_by_idx(idx: u16) -> String {
     format!("{KEYSPACE_NAME_PREFIX}{idx}")

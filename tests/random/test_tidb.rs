@@ -251,6 +251,7 @@ pub(crate) fn prepare_tidb_cluster(security_config: &SecurityConfig) -> TidbClus
         PathBuf::from(tiflash_bin),
         INITIAL_KEYSPACE_COUNT as u16,
         security_config,
+        true,
     );
     block_on(tc.start_pd(PD_COUNT as u16, PD_HEALTHY_TIMEOUT));
     tc
@@ -420,6 +421,7 @@ pub(crate) fn start_components(
                     gc_interval: TIDB_GC_INTERVAL.to_owned(),
                     gc_lifetime: TIDB_GC_LIFETIME.to_owned(),
                     tiflash_compute_mode: columnar_switch_on,
+                    enable_system_tidb: false,
                 },
             )
             .await
