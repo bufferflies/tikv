@@ -1,19 +1,14 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
-    fs, mem,
-    net::SocketAddr,
-    ops::Deref,
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
+    collections::hash_map::Entry, fs, mem, net::SocketAddr, ops::Deref, path::PathBuf,
+    str::FromStr, sync::Arc, time::Duration,
 };
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
 use cdc::{CdcEvent, Conn, ConnId};
+use collections::{HashMap, HashSet};
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
 use grpcio_health::{create_health, HealthService, ServingStatus};
@@ -128,9 +123,9 @@ pub struct ReplicationWorker {
 
     apply_ctx: ApplyContext,
 
-    region_requests: HashMap<u64, RegionRequests>,
-    conn_regions: HashMap<ConnId, HashSet<u64>>,
-    region_to_keyspace: HashMap<u64, u32>,
+    region_requests: HashMap<u64 /* region_id */, RegionRequests>,
+    conn_regions: HashMap<ConnId, HashSet<u64 /* region_id */>>,
+    region_to_keyspace: HashMap<u64 /* region_id */, u32 /* keyspace_id */>,
 
     last_update_time: TimeStamp,
     stop: bool,
@@ -167,7 +162,7 @@ impl ReplicationWorker {
         let backup_ts = TimeStamp::new(cluster_backup.backup_ts);
         let merged_engine = MergedEngine::new(ctx.clone(), cluster_backup)?;
         let keyspace_ids = merged_engine.get_keyspaces();
-        let mut keyspace_services = HashMap::new();
+        let mut keyspace_services = HashMap::default();
         let cdc_addrs = Arc::new(dashmap::DashMap::new());
         let kube_api = if config.is_kube_mode() {
             info!("init k8s api");
@@ -902,7 +897,7 @@ impl ReplicationWorker {
             // When new keyspace added, loading shards takes long time, we need a dedicated
             // thread to do it.
             std::thread::spawn(move || {
-                let mut states = HashMap::new();
+                let mut states = HashMap::default();
                 states.insert(keyspace_id, Bytes::new());
                 let res =
                     MergedEngine::load_shards(&merged_engine_ctx, &kv, recover_handler, &states)

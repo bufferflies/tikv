@@ -6,7 +6,7 @@ mod preprocessor;
 
 use std::{
     cmp::max,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     mem,
     path::{Path, PathBuf},
     sync::Arc,
@@ -16,6 +16,7 @@ use std::{
 use api_version::ApiV2;
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::MasterKey;
+use collections::{HashMap, HashSet};
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use kvengine::{
@@ -56,7 +57,10 @@ use tikv_util::{
     info, mpsc, warn,
 };
 
-use crate::{manifest::Manifest, preprocessor::Preprocessor};
+use crate::{
+    manifest::{Manifest, UncommittedEntries},
+    preprocessor::Preprocessor,
+};
 
 const RAFT_WRITE_BATCH_SIZE: usize = 4 * 1024 * 1024;
 
@@ -106,7 +110,7 @@ impl RegionProgress {
     pub fn new(keyspace_id: u32) -> Self {
         Self {
             keyspace_id,
-            entries: HashMap::new(),
+            entries: HashMap::default(),
             synced_index: 0,
             commit_index: 0,
             truncated_index: 0,
@@ -203,12 +207,14 @@ impl MergedEngine {
             let (region_progresses, store_progresses) =
                 Self::recover_from_backup(&ctx, &backup_meta, &raft)?;
             manifest.store_progresses = store_progresses;
-            manifest.persist()?;
+            // Note: manifest is not persisted here to avoid saving all entries. If
+            // replication worker restart before next loop, we will recover from backup
+            // again.
             region_progresses
         } else {
-            Self::recover_from_merged_raft_engine(&raft)?
+            Self::recover_from_merged_raft_engine(&raft, &manifest.uncommitted_entries)?
         };
-        let mut preprocessors = HashMap::new();
+        let mut preprocessors = HashMap::default();
         for (region_id, _) in raft.get_region_peer_map() {
             if region_id == 0 {
                 continue;
@@ -245,12 +251,12 @@ impl MergedEngine {
             ctx,
             manifest,
             region_progresses,
-            updated_regions: HashSet::new(),
+            updated_regions: HashSet::default(),
             raft,
             kv,
             recover_handler,
             preprocessors,
-            appliers: HashMap::new(),
+            appliers: HashMap::default(),
             _store_receiver: store_receiver,
             peer_receiver,
             router,
@@ -290,7 +296,7 @@ impl MergedEngine {
         keyspace_states: &HashMap<u32, Bytes>,
     ) -> Result<()> {
         let engine_id = ctx.config.merged_store_id;
-        let mut metas = HashMap::new();
+        let mut metas = std::collections::HashMap::default();
         recoverer.iterate(|cs| {
             let meta = ShardMeta::new(engine_id, &cs);
             if keyspace_states.contains_key(&meta.range.keyspace_id) {
@@ -312,9 +318,9 @@ impl MergedEngine {
         backup_meta: &ClusterBackupMeta,
         merged_raft: &RfEngine,
     ) -> Result<(HashMap<u64, RegionProgress>, HashMap<u64, StoreProgress>)> {
-        let mut region_progresses = HashMap::new();
-        let mut store_progresses = HashMap::new();
-        let mut raftdb_pathes = Vec::new();
+        let mut region_progresses = HashMap::default();
+        let mut store_progresses = HashMap::default();
+        let mut raftdb_paths = Vec::new();
         for store in backup_meta.get_stores() {
             let store_progress = StoreProgress {
                 store_id: store.get_store_id(),
@@ -329,7 +335,7 @@ impl MergedEngine {
                 store_path.join("raft").to_str().unwrap().to_string();
             store_config.rfengine.lightweight_backup = false;
             let origin = Self::setup_raft_engine(ctx, backup_meta, store).unwrap();
-            raftdb_pathes.push(store_config.raft_store.raftdb_path);
+            raftdb_paths.push(store_config.raft_store.raftdb_path);
             let region_peers_map = origin.get_region_peer_map();
             for (region_id, peer_id) in region_peers_map {
                 if region_id == 0 {
@@ -418,7 +424,7 @@ impl MergedEngine {
             }
         }
         // destroy original raft engines
-        for raftdb_path in raftdb_pathes {
+        for raftdb_path in raftdb_paths {
             let raft_path = Path::new(&raftdb_path);
             // clean up dir
             std::fs::remove_dir_all(raft_path).unwrap();
@@ -428,8 +434,9 @@ impl MergedEngine {
 
     fn recover_from_merged_raft_engine(
         merged_raft: &RfEngine,
+        uncommitted_entries: &UncommittedEntries,
     ) -> Result<HashMap<u64, RegionProgress>> {
-        let mut region_progersses = HashMap::new();
+        let mut region_progresses = HashMap::default();
 
         // Get region progresses from RfEngine.
         let region_peers_map = merged_raft.get_region_peer_map();
@@ -445,7 +452,7 @@ impl MergedEngine {
             let keyspace_id =
                 ApiV2::get_u32_keyspace_id_by_key(region_state.get_region().get_start_key())
                     .unwrap_or_default();
-            let region_progress = region_progersses
+            let region_progress = region_progresses
                 .entry(region_id)
                 .or_insert(RegionProgress::new(keyspace_id));
             region_progress.commit_index = commit;
@@ -453,9 +460,12 @@ impl MergedEngine {
             region_progress.truncated_index = merged_raft
                 .get_truncated_index(region_id)
                 .unwrap_or(RAFT_INIT_LOG_INDEX);
+            if let Some(entries) = uncommitted_entries.get_region_entries(region_id) {
+                region_progress.entries = entries.clone();
+            }
         }
 
-        Ok(region_progersses)
+        Ok(region_progresses)
     }
 
     fn setup_raft_engine(
@@ -699,7 +709,7 @@ impl MergedEngine {
         let mut remove_dependents = Vec::new();
         let mut apply_msgs = ApplyMsgs::default();
         let raft_cfg = rfstore::store::Config::default();
-        let mut destroying = HashSet::new();
+        let mut destroying = std::collections::HashSet::default();
         let raft_engine = self.raft.clone();
         let router = self.router.clone();
         let mut ctx = PreprocessContext {
@@ -713,9 +723,9 @@ impl MergedEngine {
             router: Some(&router),
             destroying: &mut destroying,
         };
-        let mut prepared_msgs = HashMap::new();
+        let mut prepared_msgs = HashMap::default();
         let updated_regions: Vec<u64> = self.updated_regions.drain().collect();
-        let mut destroyed_regions = HashSet::new();
+        let mut destroyed_regions = HashSet::default();
         self.sync_merged_for_regions(
             &mut ctx,
             apply_ctx,
@@ -729,6 +739,8 @@ impl MergedEngine {
         if !raft_wb.is_empty() {
             self.raft.write(raft_wb)?;
         }
+        self.manifest
+            .update_region_progresses(&self.region_progresses);
         self.manifest.persist()?;
         Ok(())
     }
@@ -746,7 +758,7 @@ impl MergedEngine {
         let merged_store_id = self.ctx.config.merged_store_id;
         let mut merged_wb = rfengine::WriteBatch::new();
         let mut merged_wb_estimated_size = 0;
-        let mut finished_regions = HashSet::new();
+        let mut finished_regions = HashSet::default();
         while let Some(updated_region) = update_queue.pop_front() {
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
             let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;

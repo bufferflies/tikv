@@ -12,7 +12,6 @@ testexport = []
 failpoints = ["fail/failpoints", "tikv/failpoints"]
 
 [dependencies]
-ahash = "0.8.11"
 api_version = { workspace = true }
 bstr = "0.2"
 byteorder = "1.2"

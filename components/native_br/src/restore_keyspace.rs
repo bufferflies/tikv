@@ -13,12 +13,11 @@ use std::{
     time::Duration,
 };
 
-use ahash::HashMapExt;
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
 use cloud_encryption::{EncryptionKey, MasterKey};
 use cloud_server::{RestoreShardResponse, TikvServer};
-use collections::{HashMap, HashSet};
+use collections::{HashMap, HashMapExt, HashSet};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{header, Request};
 use hyper::Body;
@@ -967,7 +966,7 @@ impl BackupCluster {
             // TODO: enable flow control to avoid OOM during recovery.
             let store_limiter = Arc::new(StoreLimiter::dummy());
 
-            let mut meta_iter = MetaIterator::new(store_id, Vec::new(), HashMap::new());
+            let mut meta_iter = MetaIterator::new(store_id, Vec::new(), HashMap::default());
             let (kv_engine, sender, receiver) = TikvServer::init_kv_engine(
                 self.pd_client.clone(),
                 conf,
@@ -1210,11 +1209,11 @@ impl BackupCluster {
         let tag = self.tag();
         // Will need to retry when `get_leader_shards_and_preprocess` produce new shards
         // after preprocess.
-        let mut leader_shards = HashMap::new();
+        let mut leader_shards = HashMap::default();
         let mut retry = 0_usize;
         let is_full_range = self.is_full_range();
         loop {
-            let mut all_shards = HashMap::new();
+            let mut all_shards = HashMap::default();
             for (&store_id, rf_engine) in &self.raft_engines {
                 let store_shards = if is_full_range {
                     Self::collect_full_shards(store_id, rf_engine)?
@@ -1257,7 +1256,7 @@ impl BackupCluster {
 
         if is_full_range {
             // Reserve all the leader shards for archiving.
-            let mut shards: HashMap<u64, BackupShard> = HashMap::new();
+            let mut shards: HashMap<u64, BackupShard> = HashMap::default();
             let sorted_shards = leader_shards
                 .values()
                 .sorted_by(|a, b| a.start().cmp(b.start()))

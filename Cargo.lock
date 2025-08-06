@@ -4969,6 +4969,7 @@ dependencies = [
  "slog",
  "slog-global",
  "slog-term",
+ "tempfile",
  "thiserror 1.0.44",
  "tikv",
  "tikv_util",
@@ -5157,7 +5158,6 @@ dependencies = [
 name = "native_br"
 version = "0.0.1"
 dependencies = [
- "ahash 0.8.11",
  "api_version",
  "bstr",
  "byteorder",
@@ -6988,6 +6988,7 @@ dependencies = [
  "bytes",
  "cdc",
  "chrono",
+ "collections",
  "dashmap 5.1.0",
  "futures 0.3.28",
  "grpcio",
