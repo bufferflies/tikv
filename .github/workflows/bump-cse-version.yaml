@@ -1,0 +1,39 @@
+name: Bump CSE Version to aws-shared-cd
+
+# This workflow will create a new pull request to bump the TiDB version to aws-shared-provider.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to bump, like commit sha"
+        required: true
+      deploy_env:
+        description: "Deploy Environment"
+        required: true
+        default: "dev"
+        type: choice
+        # Should be consistent with:
+        # https://github.com/tidbcloud/aws-shared-cd/blob/main/.github/workflows/bump-tikv.yaml
+        options:
+          - dev
+          - staging
+          - prod
+
+jobs:
+  bump-CSE-version:
+    name: bump CSE version
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.version }}
+
+      - name: Invoke workflow in aws-shared-cd repo with inputs
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: Bump TiKV version
+          repo: tidbcloud/aws-shared-cd
+          ref: refs/heads/main
+          token: ${{ secrets.GIT_ACTION_BOT }}
+          inputs: '{ "commit_tikv": "${{ github.event.inputs.version }}", "env": "${{ github.event.inputs.deploy_env }}", "action_url": "${{github.server_url}}/${{ github.repository }}/actions/runs/${{ github.run_id }}", "author": "${{ github.actor }}" }'
