@@ -207,7 +207,7 @@ impl IaGcRunner {
         if ignore(segment_ident.file_id) {
             return Ok(false);
         }
-        if !self.ia_mgr.contains_segment(&segment_ident) {
+        if !self.ia_mgr.contains_segment(segment_ident) {
             warn!("ia gc: segment file is leaked"; "path" => ?path, "segment" => %segment_ident);
             let is_removed = self
                 .remove_file(path)

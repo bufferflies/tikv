@@ -19,7 +19,7 @@ pub const SEGMENT_LOCAL_FILE_DOT_SUFFIX: &str = ".seg";
 
 /// The identifier of a file segment.
 #[repr(C)]
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileSegmentIdent {
     pub file_id: u64,
     pub start_off: u64,
@@ -125,9 +125,9 @@ pub(crate) struct LocalSegmentMap {
 
 impl LocalSegmentMap {
     #[inline]
-    pub(crate) fn get_segment(&self, ident: &FileSegmentIdent) -> Option<FileSegmentData> {
+    pub(crate) fn get_segment(&self, ident: FileSegmentIdent) -> Option<FileSegmentData> {
         let core = self.core.pin();
-        core.get(ident).cloned()
+        core.get(&ident).cloned()
     }
 
     #[inline]
@@ -137,16 +137,16 @@ impl LocalSegmentMap {
         segment_data: FileSegmentData,
     ) -> Option<FileSegmentData> {
         #[cfg(feature = "debug-trace-ia-segments")]
-        trace_insert_segment_data(&ident, Some(&segment_data));
+        trace_insert_segment_data(ident, Some(&segment_data));
 
         let mut memory_delta = segment_data.memory_size();
         let core = self.core.pin();
-        let prev = core.insert(ident.clone(), segment_data).cloned();
+        let prev = core.insert(ident, segment_data).cloned();
 
         memory_delta -= prev.as_ref().map_or(0, |x| x.memory_size());
         ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE.add(memory_delta);
         #[cfg(feature = "debug-trace-ia-segments")]
-        trace_remove_segment_data(&ident, prev.as_ref());
+        trace_remove_segment_data(ident, prev.as_ref());
 
         prev
     }
@@ -167,8 +167,8 @@ impl LocalSegmentMap {
                 if is_match(prev, expected) {
                     #[cfg(feature = "debug-trace-ia-segments")]
                     {
-                        trace_remove_segment_data(&ident, Some(prev));
-                        trace_insert_segment_data(&ident, segment_data.as_ref());
+                        trace_remove_segment_data(ident, Some(prev));
+                        trace_insert_segment_data(ident, segment_data.as_ref());
                     }
 
                     let mut memory_delta = -prev.memory_size();
@@ -194,26 +194,26 @@ impl LocalSegmentMap {
     }
 
     #[inline]
-    pub(crate) fn remove(&self, ident: &FileSegmentIdent) -> Option<FileSegmentData> {
+    pub(crate) fn remove(&self, ident: FileSegmentIdent) -> Option<FileSegmentData> {
         let core = self.core.pin();
-        let prev = core.remove(ident).cloned()?;
+        let prev = core.remove(&ident).cloned()?;
         ENGINE_IA_MANAGER_SEGMENTS_MEMORY_SIZE.sub(prev.memory_size());
 
         #[cfg(feature = "debug-trace-ia-segments")]
-        trace_remove_segment_data(&ident, Some(&prev));
+        trace_remove_segment_data(ident, Some(&prev));
 
         Some(prev)
     }
 
-    pub(crate) fn contains(&self, ident: &FileSegmentIdent) -> bool {
+    pub(crate) fn contains(&self, ident: FileSegmentIdent) -> bool {
         let core = self.core.pin();
-        core.contains_key(ident)
+        core.contains_key(&ident)
     }
 
     #[cfg(any(test, feature = "testexport"))]
     pub(crate) fn get_all(&self) -> Vec<(FileSegmentIdent, FileSegmentData)> {
         let core = self.core.pin();
-        core.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        core.iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 }
 

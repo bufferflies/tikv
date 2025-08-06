@@ -80,10 +80,7 @@ impl S3FifoHandle {
 
     pub(crate) fn read(&self, ident: FileSegmentIdent, insert_main: bool) -> Result<()> {
         self.task_tx
-            .send(FifoTask::Read {
-                ident: ident.clone(),
-                insert_main,
-            })
+            .send(FifoTask::Read { ident, insert_main })
             .map_err(|e| Error::IaMgr(format!("read: send failed: {ident}: {e:?}")))?;
         Ok(())
     }
@@ -97,10 +94,7 @@ impl S3FifoHandle {
             let _ = tx.send(x);
         });
         self.task_tx
-            .send(FifoTask::GetItem {
-                ident: ident.clone(),
-                cb,
-            })
+            .send(FifoTask::GetItem { ident, cb })
             .map_err(|e| Error::IaMgr(format!("get_item: send failed: {ident}: {e:?}")))?;
         Ok(rx.await.unwrap())
     }
@@ -216,7 +210,7 @@ impl S3Fifo {
         info!("s3fifo core started");
         while let Ok(task) = self.task_rx.recv() {
             match task {
-                FifoTask::Read { ident, insert_main } => match self.read(&ident, insert_main) {
+                FifoTask::Read { ident, insert_main } => match self.read(ident, insert_main) {
                     Ok(pos) => debug!("read"; "ident" => %ident, "pos" => ?pos),
                     Err(err) => error!("read failed"; "ident" => %ident, "err" => ?err),
                 },
@@ -229,7 +223,7 @@ impl S3Fifo {
 
                 #[cfg(any(test, feature = "testexport"))]
                 FifoTask::GetItem { ident, cb } => {
-                    cb(self.get_item(&ident));
+                    cb(self.get_item(ident));
                 }
                 #[cfg(any(test, feature = "testexport"))]
                 FifoTask::Flush(cb) => cb(self.pending_tasks()),
@@ -237,7 +231,7 @@ impl S3Fifo {
         }
     }
 
-    fn get_item_ref(&self, ident: &FileSegmentIdent) -> Option<(&QueueItemMeta, QueueItemPos)> {
+    fn get_item_ref(&self, ident: FileSegmentIdent) -> Option<(&QueueItemMeta, QueueItemPos)> {
         self.small_queue
             .get(ident)
             .map(|item| (item, QueueItemPos::Small))
@@ -248,7 +242,7 @@ impl S3Fifo {
             })
     }
 
-    fn read(&mut self, ident: &FileSegmentIdent, insert_main: bool) -> Result<QueueItemPos> {
+    fn read(&mut self, ident: FileSegmentIdent, insert_main: bool) -> Result<QueueItemPos> {
         debug!("fifo.read"; "ident" => %ident);
         let small_queue_cap = self.small_queue.capacity();
         if small_queue_cap > 0 && ident.size() > small_queue_cap as u64 {
@@ -263,10 +257,10 @@ impl S3Fifo {
             queue_item.access(self.freq_update_interval);
             pos
         } else if insert_main || small_queue_cap == 0 || self.is_in_ghost(ident) {
-            self.insert_main(ident.clone());
+            self.insert_main(ident);
             QueueItemPos::Main
         } else {
-            self.insert_small(ident.clone());
+            self.insert_small(ident);
             QueueItemPos::Small
         };
         Ok(pos)
@@ -275,13 +269,13 @@ impl S3Fifo {
     fn insert_small(&mut self, ident: FileSegmentIdent) {
         debug!("fifo.insert_small"; "ident" => %ident);
         #[cfg(feature = "debug-trace-ia-segments")]
-        trace_segment_action(&ident, SegmentAction::InsertSmall);
+        trace_segment_action(ident, SegmentAction::InsertSmall);
 
-        self.small_queue.push(ident.clone());
-        self.evict_small(&ident);
+        self.small_queue.push(ident);
+        self.evict_small(ident);
     }
 
-    fn evict_small(&mut self, ident: &FileSegmentIdent) {
+    fn evict_small(&mut self, ident: FileSegmentIdent) {
         debug!("fifo.evict_small"; "for" => %ident);
         let mut cap = None;
         while self.small_queue.is_oversize(&mut cap) {
@@ -294,13 +288,13 @@ impl S3Fifo {
                 "queue_item" => ?queue_item,
                 "for" => %ident);
             #[cfg(feature = "debug-trace-ia-segments")]
-            trace_segment_action(&tail, SegmentAction::EvictFromSmall);
+            trace_segment_action(tail, SegmentAction::EvictFromSmall);
 
             if queue_item.freq() > 1 {
                 // Item meta is cleared when move to main queue.
-                self.insert_main(tail.clone());
+                self.insert_main(tail);
             } else {
-                self.insert_ghost(tail.clone());
+                self.insert_ghost(tail);
                 self.evict_item(tail);
             };
         }
@@ -309,18 +303,18 @@ impl S3Fifo {
     fn insert_main(&mut self, ident: FileSegmentIdent) {
         debug!("fifo.insert_main"; "ident" => %ident);
         #[cfg(feature = "debug-trace-ia-segments")]
-        trace_segment_action(&ident, SegmentAction::InsertMain);
+        trace_segment_action(ident, SegmentAction::InsertMain);
 
-        let current = self.move_item_to_store(ident.clone());
+        let current = self.move_item_to_store(ident);
         if current.is_some() {
-            self.main_queue.push(ident.clone());
-            self.evict_main(&ident);
+            self.main_queue.push(ident);
+            self.evict_main(ident);
         } else {
             warn!("insert main: skip, segment data is not cached"; "ident" => %ident);
         }
     }
 
-    fn evict_main(&mut self, ident: &FileSegmentIdent) {
+    fn evict_main(&mut self, ident: FileSegmentIdent) {
         debug!("fifo.evict_main"; "for" => %ident);
         let mut cap = None;
         while self.main_queue.is_oversize(&mut cap) {
@@ -333,21 +327,23 @@ impl S3Fifo {
                 "queue_item" => ?queue_item,
                 "for" => %ident);
             #[cfg(feature = "debug-trace-ia-segments")]
-            trace_segment_action(&tail, SegmentAction::EvictFromMain);
+            trace_segment_action(tail, SegmentAction::EvictFromMain);
 
             self.evict_item(tail);
         }
     }
 
-    fn is_in_ghost(&self, ident: &FileSegmentIdent) -> bool {
+    fn is_in_ghost(&self, ident: FileSegmentIdent) -> bool {
         let fingerprint = ident.fingerprint();
         let idx = fingerprint as usize % self.ghost_queue.len();
-        self.ghost_queue[idx].as_ref().map_or(false, |x| x == ident)
+        self.ghost_queue[idx]
+            .as_ref()
+            .map_or(false, |&x| x == ident)
     }
 
     fn insert_ghost(&mut self, ident: FileSegmentIdent) {
         #[cfg(feature = "debug-trace-ia-segments")]
-        trace_segment_action(&ident, SegmentAction::InsertGhost);
+        trace_segment_action(ident, SegmentAction::InsertGhost);
 
         let fingerprint = ident.fingerprint();
         let idx = fingerprint as usize % self.ghost_queue.len();
@@ -355,7 +351,7 @@ impl S3Fifo {
     }
 
     fn evict_item(&self, ident: FileSegmentIdent) {
-        match self.segment_data_ctx.remove_segment_data(&ident) {
+        match self.segment_data_ctx.remove_segment_data(ident) {
             None => {
                 warn!("evict item: skip, not cached"; "ident" => %ident);
             }
@@ -372,7 +368,7 @@ impl S3Fifo {
         let task_counter = self.task_counter.clone();
         let ctx = self.segment_data_ctx.clone();
         self.runtime.spawn_blocking(move || {
-            let res = ctx.remove_from_main_store(&ident);
+            let res = ctx.remove_from_main_store(ident);
             match &res {
                 Ok(Some(())) => {
                     debug!("remove from main store: done"; "ident" => %ident);
@@ -387,7 +383,7 @@ impl S3Fifo {
             }
 
             #[cfg(feature = "debug-trace-ia-segments")]
-            trace_segment_action(&ident, SegmentAction::RemoveFromMainStore(res));
+            trace_segment_action(ident, SegmentAction::RemoveFromMainStore(res));
 
             drop(task_counter);
         });
@@ -395,7 +391,7 @@ impl S3Fifo {
 
     // Return current segment data before move.
     fn move_item_to_store(&self, ident: FileSegmentIdent) -> Option<FileSegmentData> {
-        let segment_data = self.segment_data_ctx.get_segment_data(&ident);
+        let segment_data = self.segment_data_ctx.get_segment_data(ident);
         match &segment_data {
             Some(FileSegmentData::InMem(bytes)) => {
                 self.spawn_save_to_main_store(ident, bytes.clone());
@@ -403,12 +399,12 @@ impl S3Fifo {
             Some(FileSegmentData::InStore) => {
                 debug!("move item: skip, already in main store"; "ident" => %ident);
                 #[cfg(feature = "debug-trace-ia-segments")]
-                trace_segment_action(&ident, SegmentAction::SkipMoveAlreadyInStore);
+                trace_segment_action(ident, SegmentAction::SkipMoveAlreadyInStore);
             }
             None => {
                 warn!("move item: skip, not cached"; "ident" => %ident);
                 #[cfg(feature = "debug-trace-ia-segments")]
-                trace_segment_action(&ident, SegmentAction::SkipMoveNotCached);
+                trace_segment_action(ident, SegmentAction::SkipMoveNotCached);
             }
         }
         segment_data
@@ -419,7 +415,7 @@ impl S3Fifo {
         let ctx = self.segment_data_ctx.clone();
         let task_tx = self.task_tx.clone();
         self.runtime.spawn_blocking(move || {
-            let res = ctx.save_to_main_store(&ident, bytes);
+            let res = ctx.save_to_main_store(ident, bytes);
             match &res {
                 Ok(()) => {
                     debug!("save to main store: done"; "ident" => %ident);
@@ -435,11 +431,10 @@ impl S3Fifo {
             }
 
             #[cfg(feature = "debug-trace-ia-segments")]
-            trace_segment_action(&ident, SegmentAction::MoveToMainStore(res));
+            trace_segment_action(ident, SegmentAction::MoveToMainStore(res));
 
             // Hold the `task_counter` to help detecting there is another new task.
-            if let Err(err) = task_tx.send(FifoTask::SavedToMainStore(ident.clone(), task_counter))
-            {
+            if let Err(err) = task_tx.send(FifoTask::SavedToMainStore(ident, task_counter)) {
                 warn!("save to main store: send task failed"; "ident" => %ident, "err" => ?err);
             }
         });
@@ -448,7 +443,7 @@ impl S3Fifo {
     fn post_move_item_to_store(&self, ident: FileSegmentIdent) {
         let res = self
             .segment_data_ctx
-            .set_segment_data_from_mem_to_store(ident.clone());
+            .set_segment_data_from_mem_to_store(ident);
         match &res {
             Ok(()) => {
                 debug!("post move item: done"; "ident" => %ident);
@@ -460,18 +455,18 @@ impl S3Fifo {
             Err(None) => {
                 // Aggressively remove from main store, as disk usage is more important.
                 warn!("move item: skip, segment has been evicted"; "ident" => %ident);
-                self.spawn_remove_from_main_store(ident.clone());
+                self.spawn_remove_from_main_store(ident);
             }
         }
 
         #[cfg(feature = "debug-trace-ia-segments")]
-        trace_segment_action(&ident, SegmentAction::PostMoveToMainStore(res));
+        trace_segment_action(ident, SegmentAction::PostMoveToMainStore(res));
     }
 }
 
 #[cfg(any(test, feature = "testexport"))]
 impl S3Fifo {
-    fn get_item(&self, ident: &FileSegmentIdent) -> Option<QueueItem> {
+    fn get_item(&self, ident: FileSegmentIdent) -> Option<QueueItem> {
         self.small_queue
             .get(ident)
             .map(|meta| QueueItem::from_small(meta.clone()))
@@ -568,13 +563,13 @@ impl Queue {
         }
     }
 
-    fn get(&self, ident: &FileSegmentIdent) -> Option<&QueueItemMeta> {
-        self.items.get(ident)
+    fn get(&self, ident: FileSegmentIdent) -> Option<&QueueItemMeta> {
+        self.items.get(&ident)
     }
 
     fn push(&mut self, ident: FileSegmentIdent) {
         self.total_size += ident.size() as i64;
-        self.items.insert(ident.clone(), QueueItemMeta::default());
+        self.items.insert(ident, QueueItemMeta::default());
         self.queue.push_back(ident);
     }
 

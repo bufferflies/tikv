@@ -1261,7 +1261,7 @@ pub async fn prefetch_ia_remote_segments(
         let mgr = ia_mgr.clone();
         let dfs = snap_ctx.dfs.clone();
         let task = async move {
-            mgr.prefetch_segment(ident.clone(), ftype, keyspace_id, deadline, Some(dfs.deref())).map_err(|err| -> Error {
+            mgr.prefetch_segment(ident, ftype, keyspace_id, deadline, Some(dfs.deref())).map_err(|err| -> Error {
                 error!("{} prefetch segment failed", tag; "ident" => %ident, "ftype" => ?ftype, "err" => ?err);
                 if let kvengine::table::Error::DeadlineExceeded(_) = err {
                     Error::DeadlineExceeded

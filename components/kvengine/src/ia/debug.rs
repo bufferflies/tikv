@@ -36,16 +36,16 @@ lazy_static::lazy_static! {
     static ref SEGMENTS_ACTION_HISTORY: DashMap<FileSegmentIdent, Arc<ArrayQueue<SegmentAction>>> = DashMap::default();
 }
 
-pub(crate) fn trace_segment_action(ident: &FileSegmentIdent, action: SegmentAction) {
+pub(crate) fn trace_segment_action(ident: FileSegmentIdent, action: SegmentAction) {
     let history = SEGMENTS_ACTION_HISTORY
-        .entry(ident.clone())
+        .entry(ident)
         .or_insert_with(|| Arc::new(ArrayQueue::new(SEGMENT_ACTION_HISTORY_CAP)))
         .clone();
     history.force_push(action);
 }
 
 pub(crate) fn trace_insert_segment_data(
-    ident: &FileSegmentIdent,
+    ident: FileSegmentIdent,
     segment_data: Option<&FileSegmentData>,
 ) {
     match segment_data {
@@ -60,7 +60,7 @@ pub(crate) fn trace_insert_segment_data(
 }
 
 pub(crate) fn trace_remove_segment_data(
-    ident: &FileSegmentIdent,
+    ident: FileSegmentIdent,
     segment_data: Option<&FileSegmentData>,
 ) {
     match segment_data {
@@ -74,8 +74,8 @@ pub(crate) fn trace_remove_segment_data(
     }
 }
 
-pub(crate) fn dump_segment_action_history(ident: &FileSegmentIdent) -> Vec<SegmentAction> {
-    let Some(history) = SEGMENTS_ACTION_HISTORY.remove(ident) else {
+pub(crate) fn dump_segment_action_history(ident: FileSegmentIdent) -> Vec<SegmentAction> {
+    let Some(history) = SEGMENTS_ACTION_HISTORY.remove(&ident) else {
         return vec![];
     };
     let history = history.1;

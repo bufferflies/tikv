@@ -466,7 +466,7 @@ impl File for IaFile {
                     continue;
                 }
                 ident_set.insert(ident.start_off);
-                if !self.mgr.is_segment_cached(&ident) {
+                if !self.mgr.is_segment_cached(ident) {
                     segments.push(ident);
                 }
                 total_segments += 1;

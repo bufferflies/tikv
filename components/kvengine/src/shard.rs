@@ -395,7 +395,7 @@ impl Shard {
                 } else if fm.is_l0_sst_with_size() {
                     // Cache the whole file as a segment.
                     let ident = FileSegmentIdent::new(*id, 0, fm.l0_size as u64);
-                    ia_mgr.is_segment_cached(&ident).then_some(
+                    ia_mgr.is_segment_cached(ident).then_some(
                         ia_mgr
                             .get_segment_handle(ident, fm.file_type, Some(ctx.dfs.deref()))
                             .await?

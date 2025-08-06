@@ -76,7 +76,7 @@ impl<'a> ReadAt<'a> {
         self.offset + self.buf.len() as u64
     }
 
-    fn read_from_segment_bytes(&mut self, ident: &FileSegmentIdent, seg_data: &Bytes) {
+    fn read_from_segment_bytes(&mut self, ident: FileSegmentIdent, seg_data: &Bytes) {
         let (start_off, end_off) = (self.start_off(), self.end_off());
         debug_assert!(
             start_off <= end_off && ident.start_off <= start_off && end_off <= ident.end_off
@@ -314,7 +314,7 @@ impl IaManagerCore {
         for k in keys {
             if let Some(ident) = FileSegmentIdent::parse_local_filename(&k) {
                 self.segments
-                    .set_segment_data(ident.clone(), FileSegmentData::InStore);
+                    .set_segment_data(ident, FileSegmentData::InStore);
                 self.fifo.read(ident, true)?;
             }
         }
@@ -354,16 +354,16 @@ impl IaManagerCore {
             }
             debug!("read segment finished"; "ident" => %ident, "elapsed" => ?elapsed, "cache_hit" => cache_hit);
         };
-        if let Some(()) = self.read_segment_from_cache(&ident, read_at)? {
+        if let Some(()) = self.read_segment_from_cache(ident, read_at)? {
             on_finish(true);
             return Ok(());
         }
 
         let data = {
-            let _loading_guard = self.loading_segments.get_locked(ident.clone()).await;
+            let _loading_guard = self.loading_segments.get_locked(ident).await;
 
             // Check cache again. Another thread may have filled the cache.
-            if let Some(()) = self.read_segment_from_cache(&ident, read_at)? {
+            if let Some(()) = self.read_segment_from_cache(ident, read_at)? {
                 on_finish(true);
                 // Not necessary to remove ident from `loading_segments`, as there must be
                 // another concurrent request read the segment from remote.
@@ -371,26 +371,26 @@ impl IaManagerCore {
             }
 
             let data = self
-                .read_segment_from_remote(&ident, ftype, keyspace_id, deadline, dfs)
+                .read_segment_from_remote(ident, ftype, keyspace_id, deadline, dfs)
                 .await?;
             self.segments
-                .set_segment_data(ident.clone(), FileSegmentData::InMem(data.clone()));
+                .set_segment_data(ident, FileSegmentData::InMem(data.clone()));
 
             self.loading_segments.remove(&ident);
 
             data
         };
 
-        self.fifo.read(ident.clone(), false)?;
+        self.fifo.read(ident, false)?;
 
-        read_at.read_from_segment_bytes(&ident, &data);
+        read_at.read_from_segment_bytes(ident, &data);
         on_finish(false);
         Ok(())
     }
 
     async fn read_segment_from_remote(
         &self,
-        ident: &FileSegmentIdent,
+        ident: FileSegmentIdent,
         ftype: FileType,
         keyspace_id: Option<u32>,
         deadline: Option<Deadline>,
@@ -414,7 +414,7 @@ impl IaManagerCore {
 
     fn read_segment_from_cache(
         &self,
-        ident: &FileSegmentIdent,
+        ident: FileSegmentIdent,
         read_at: &mut ReadAt<'_>,
     ) -> Result<Option<()>> {
         let segment_data = try_some!(self.segments.get_segment(ident));
@@ -427,7 +427,7 @@ impl IaManagerCore {
         };
 
         if res.is_some() {
-            self.fifo.read(ident.clone(), false)?;
+            self.fifo.read(ident, false)?;
         }
         Ok(res)
     }
@@ -435,7 +435,7 @@ impl IaManagerCore {
     // Note: when `read_at.buf` is empty, the existence of segment is not checked.
     fn read_segment_from_local_store(
         &self,
-        ident: &FileSegmentIdent,
+        ident: FileSegmentIdent,
         read_at: &mut ReadAt<'_>,
     ) -> Result<Option<()>> {
         debug!("read segment from local"; "ident" => %ident);
@@ -460,11 +460,11 @@ impl IaManagerCore {
     // Note: It's possible that the segment is of `SegmentData::InStore` but
     // actually not existed. In such condition this method will still return
     // true.
-    pub fn is_segment_cached(&self, ident: &FileSegmentIdent) -> bool {
+    pub fn is_segment_cached(&self, ident: FileSegmentIdent) -> bool {
         self.segments.get_segment(ident).is_some()
     }
 
-    pub fn segment_cached_position(&self, ident: &FileSegmentIdent) -> FileSegmentPosition {
+    pub fn segment_cached_position(&self, ident: FileSegmentIdent) -> FileSegmentPosition {
         match self.segments.get_segment(ident) {
             Some(FileSegmentData::InMem(_)) => FileSegmentPosition::InMem,
             Some(FileSegmentData::InStore) => FileSegmentPosition::InStore,
@@ -501,7 +501,7 @@ impl IaManagerCore {
     ) -> Result<SegmentHandle> {
         let mut buf: [u8; 0] = [];
         let mut read_at = ReadAt::new(buf.as_mut_slice(), ident.start_off, true);
-        self.read_segment(ident.clone(), ftype, None, None, &mut read_at, dfs)
+        self.read_segment(ident, ftype, None, None, &mut read_at, dfs)
             .await?;
         let handle = read_at.segment_handle.unwrap();
         debug!("get segment handle"; "ident" => ?ident, "ftype" => ?ftype, "handle" => ?handle);
@@ -537,7 +537,7 @@ impl IaManagerCore {
         }
     }
 
-    pub fn contains_segment(&self, ident: &FileSegmentIdent) -> bool {
+    pub fn contains_segment(&self, ident: FileSegmentIdent) -> bool {
         self.segments.contains(ident)
     }
 
@@ -692,7 +692,7 @@ impl IaManager {
         let mut segments = Vec::with_capacity(local_segments.len());
         // TODO: find segments in queue but not in local store.
         for (ident, segment) in local_segments {
-            let queue_item = self.fifo.get_item(ident.clone()).await.unwrap();
+            let queue_item = self.fifo.get_item(ident).await.unwrap();
             segments.push((ident, segment, queue_item));
         }
         segments
@@ -737,23 +737,23 @@ impl SegmentDataContext {
     }
 
     #[inline]
-    pub(crate) fn get_segment_data(&self, ident: &FileSegmentIdent) -> Option<FileSegmentData> {
+    pub(crate) fn get_segment_data(&self, ident: FileSegmentIdent) -> Option<FileSegmentData> {
         self.segments.get_segment(ident)
     }
 
     #[inline]
-    pub(crate) fn remove_segment_data(&self, ident: &FileSegmentIdent) -> Option<FileSegmentData> {
+    pub(crate) fn remove_segment_data(&self, ident: FileSegmentIdent) -> Option<FileSegmentData> {
         self.segments.remove(ident)
     }
 
     #[inline]
-    pub(crate) fn remove_from_main_store(&self, ident: &FileSegmentIdent) -> Result<Option<()>> {
+    pub(crate) fn remove_from_main_store(&self, ident: FileSegmentIdent) -> Result<Option<()>> {
         self.main_store
             .remove(ident.file_id, &ident.local_filename())
     }
 
     #[inline]
-    pub(crate) fn save_to_main_store(&self, ident: &FileSegmentIdent, bytes: Bytes) -> Result<()> {
+    pub(crate) fn save_to_main_store(&self, ident: FileSegmentIdent, bytes: Bytes) -> Result<()> {
         self.main_store
             .save(ident.file_id, &ident.local_filename(), bytes)
     }

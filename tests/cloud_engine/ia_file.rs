@@ -343,12 +343,12 @@ fn test_abnormal_local_file() {
             main_store
                 .remove(
                     file_id,
-                    &FileSegmentIdent {
+                    &(FileSegmentIdent {
                         file_id,
                         start_off: 10,
                         end_off: 20,
                     }
-                    .local_filename(),
+                    .local_filename()),
                 )
                 .unwrap();
         }

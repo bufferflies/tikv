@@ -114,7 +114,7 @@ impl VectorIndexCache {
             ENGINE_VECTOR_INDEX_CACHE_HIT.inc();
             // If the segment is invalid, we need to remove it from the cache. But we can
             // return it from cache this time.
-            if !Self::is_file_valid(&cached.segment_ident, &cached, &self.ia_mgr) {
+            if !Self::is_file_valid(cached.segment_ident, &cached, &self.ia_mgr) {
                 self.cache.remove(&file_id);
                 self.stats.expired.fetch_add(1, Ordering::Relaxed);
             }
@@ -171,7 +171,7 @@ impl VectorIndexCache {
         let mut expired_count = 0;
 
         for (file_id, cached) in cache.iter() {
-            let should_remove = !Self::is_file_valid(&cached.segment_ident, &cached, ia_mgr);
+            let should_remove = !Self::is_file_valid(cached.segment_ident, &cached, ia_mgr);
             if should_remove {
                 cache.remove(&file_id);
                 stats.expired.fetch_add(1, Ordering::Relaxed);
@@ -192,7 +192,7 @@ impl VectorIndexCache {
     }
 
     fn is_file_valid(
-        segment_ident: &FileSegmentIdent,
+        segment_ident: FileSegmentIdent,
         cached: &CachedIndexData,
         ia_mgr: &IaManager,
     ) -> bool {

@@ -564,12 +564,12 @@ pub mod test_util {
     };
 
     #[cfg(feature = "debug-trace-ia-segments")]
-    fn dump_segment_action_history(ident: &FileSegmentIdent) -> Vec<SegmentAction> {
+    fn dump_segment_action_history(ident: FileSegmentIdent) -> Vec<SegmentAction> {
         crate::ia::debug::dump_segment_action_history(ident)
     }
 
     #[cfg(not(feature = "debug-trace-ia-segments"))]
-    fn dump_segment_action_history(_ident: &FileSegmentIdent) -> &'static str {
+    fn dump_segment_action_history(_ident: FileSegmentIdent) -> &'static str {
         "(disabled)"
     }
 
@@ -586,7 +586,7 @@ pub mod test_util {
         let mut main_cached_size = 0;
         let mut mismatch_segments = vec![];
         for (ident, segment, queue_item) in segments {
-            let history = dump_segment_action_history(ident);
+            let history = dump_segment_action_history(*ident);
             debug!("verify_local_segments"; "ident" => ?ident, "segment" => ?segment,
                 "queue_item" => ?queue_item, "history" => ?history);
 
@@ -617,7 +617,7 @@ pub mod test_util {
                         // See https://github.com/tidbcloud/cloud-storage-engine/issues/1993#issuecomment-2567583092.
                         warn!("pos mismatch, queue: {:?}, store: {:?}", queue_item.pos, segment;
                                 "ident" =>?ident, "segment" => ?segment, "queue_item" => ?queue_item, "history" => ?history);
-                        mismatch_segments.push(ident.clone());
+                        mismatch_segments.push(ident);
                     }
                     (QueueItemPos::Main, FileSegmentData::InMem(_)) => {
                         panic!(
