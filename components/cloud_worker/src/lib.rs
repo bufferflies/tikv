@@ -801,7 +801,7 @@ impl Default for Config {
             cop_addr: String::from("0.0.0.0:9500"),
             cop_block_cache_size: ReadableSize(block_cache_size),
             cop_block_size: ReadableSize::kb(32),
-            cop_remote_dfs_cache_ttl: ReadableDuration::hours(1),
+            cop_remote_dfs_cache_ttl: ReadableDuration::minutes(10),
             thread_pool_size_factor: 1.0,
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,

@@ -1633,7 +1633,7 @@ impl StatusServer {
         )
     }
 
-    const DFS_FILE_READ_CONCURRENCY: usize = 128;
+    const DFS_FILE_READ_CONCURRENCY: usize = 64;
 
     async fn handle_dfs_file_read(
         req: Request<Body>,
