@@ -7,7 +7,7 @@ mod preprocessor;
 use std::{
     cmp::max,
     collections::VecDeque,
-    mem,
+    mem, ops,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -54,7 +54,7 @@ use serde_derive::{Deserialize, Serialize};
 use tikv::config::TikvConfig;
 use tikv_util::{
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
-    info, mpsc, warn,
+    debug, info, mpsc, warn,
 };
 
 use crate::{
@@ -63,6 +63,10 @@ use crate::{
 };
 
 const RAFT_WRITE_BATCH_SIZE: usize = 4 * 1024 * 1024;
+
+// The quorum size when replicas number is 3.
+// Used to check whether the Raft log is committed.
+const QUORUM_SIZE: u8 = 2;
 
 #[derive(Clone)]
 pub struct MergedEngineContext {
@@ -100,21 +104,48 @@ impl Default for MergedEngineConfig {
 #[derive(Clone, Debug)]
 pub struct RegionProgress {
     pub keyspace_id: u32,
-    pub entries: HashMap<u64, RaftLogOp>,
+    pub region_id: u64,
+    pub entries: HashMap<u64 /* log_index */, RaftLogOpWithCounter>,
     pub synced_index: u64,
     pub commit_index: u64,
     pub truncated_index: u64,
 }
 
 impl RegionProgress {
-    pub fn new(keyspace_id: u32) -> Self {
+    pub fn new(keyspace_id: u32, region_id: u64) -> Self {
         Self {
             keyspace_id,
+            region_id,
             entries: HashMap::default(),
             synced_index: 0,
             commit_index: 0,
             truncated_index: 0,
         }
+    }
+
+    pub fn upsert_entry<F>(&mut self, log_index: u64, term: u32, or_insert: F)
+    where
+        F: FnOnce() -> RaftLogOpWithCounter,
+    {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+
+        if let Some(existing_op) = self.entries.get_mut(&log_index) {
+            debug_assert_eq!(log_index, existing_op.index);
+            match existing_op.term.cmp(&term) {
+                Greater => return,
+                Equal => {
+                    existing_op.inc_counter();
+                    if existing_op.counter() >= QUORUM_SIZE && existing_op.index > self.commit_index
+                    {
+                        self.commit_index = existing_op.index;
+                        debug!("upsert_entry: advance commit index: {}", self.commit_index; "region" => self.region_id);
+                    }
+                    return;
+                }
+                Less => {}
+            }
+        }
+        self.entries.insert(log_index, or_insert());
     }
 }
 
@@ -351,7 +382,7 @@ impl MergedEngine {
                 let preprocess_index = raft_state.get_last_preprocessed_index();
                 let region_progress = region_progresses
                     .entry(region_id)
-                    .or_insert(RegionProgress::new(keyspace_id));
+                    .or_insert(RegionProgress::new(keyspace_id, region_id));
                 if raft_state.get_last_index() > preprocess_index {
                     // Fetch uncommitted entries, and insert them into region progress, so that they
                     // will be replayed when commit index advances (during sync_merged).
@@ -371,14 +402,10 @@ impl MergedEngine {
                         );
                     }
                     for entry in entry_buf.iter() {
-                        if let Some(existing_op) = region_progress.entries.get(&entry.index) {
-                            if existing_op.term >= entry.term as u32 {
-                                continue;
-                            }
-                        }
-                        region_progress
-                            .entries
-                            .insert(entry.index, RaftLogOp::new(entry));
+                        debug!("recover from backup: insert log index {}", entry.index; "region" => region_id);
+                        region_progress.upsert_entry(entry.index, entry.term as u32, || {
+                            RaftLogOp::new(entry).into()
+                        });
                     }
                 }
                 // Committed entries will be replayed right away during the recovery process
@@ -454,7 +481,7 @@ impl MergedEngine {
                     .unwrap_or_default();
             let region_progress = region_progresses
                 .entry(region_id)
-                .or_insert(RegionProgress::new(keyspace_id));
+                .or_insert(RegionProgress::new(keyspace_id, region_id));
             region_progress.commit_index = commit;
             region_progress.synced_index = commit;
             region_progress.truncated_index = merged_raft
@@ -642,9 +669,10 @@ impl MergedEngine {
                         region_local_state.get_region().get_start_key(),
                     )
                     .unwrap_or_default();
-                    RegionProgress::new(keyspace_id)
+                    RegionProgress::new(keyspace_id, region_id)
                 });
                 if progress.truncated_index == TRUNCATE_ALL_INDEX {
+                    debug!("update_wal: truncate all"; "region" => region_id);
                     continue;
                 }
                 if let Some(truncated_idx) = origin_wb.get_truncated_idx(peer_id) {
@@ -662,17 +690,14 @@ impl MergedEngine {
                         raft_state.unmarshal(v);
                         if raft_state.get_commit() > progress.commit_index {
                             progress.commit_index = raft_state.get_commit();
+                            debug!("update_wal: advance commit index {}", progress.commit_index; "region" => region_id);
                         }
                     }
                 }
                 origin_wb.read_peer_logs(peer_id, |logs| {
                     for log_op in logs {
-                        if let Some(existing_op) = progress.entries.get(&log_op.index) {
-                            if existing_op.term >= log_op.term {
-                                continue;
-                            }
-                        }
-                        progress.entries.insert(log_op.index, log_op.clone());
+                        debug!("update_wal: insert log index {}", log_op.index; "region" => region_id);
+                        progress.upsert_entry(log_op.index, log_op.term, ||log_op.clone().into());
                     }
                 });
                 self.updated_regions.insert(region_id);
@@ -939,6 +964,7 @@ impl MergedEngine {
             let commit_index = progress.commit_index;
             progress.synced_index = commit_index;
             // We need to keep the uncommitted index for the next round.
+            debug!("update_progress_and_truncate: truncate <= {}", commit_index; "region" => region_id);
             progress.entries.retain(|&index, _| index > commit_index);
 
             let truncated_idx = self.raft.get_truncated_index(region_id).unwrap();
@@ -1095,4 +1121,40 @@ fn merge_region_local_state(
         }
     }
     merged
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RaftLogOpWithCounter {
+    pub op: RaftLogOp,
+    counter: u8,
+}
+
+impl ops::Deref for RaftLogOpWithCounter {
+    type Target = RaftLogOp;
+
+    fn deref(&self) -> &Self::Target {
+        &self.op
+    }
+}
+
+impl ops::DerefMut for RaftLogOpWithCounter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.op
+    }
+}
+
+impl From<RaftLogOp> for RaftLogOpWithCounter {
+    fn from(op: RaftLogOp) -> Self {
+        RaftLogOpWithCounter { op, counter: 1 }
+    }
+}
+
+impl RaftLogOpWithCounter {
+    pub fn inc_counter(&mut self) {
+        self.counter = self.counter.saturating_add(1);
+    }
+
+    pub fn counter(&self) -> u8 {
+        self.counter
+    }
 }

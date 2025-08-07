@@ -14,7 +14,7 @@ use raft_proto::eraftpb;
 use rfengine::RaftLogOp;
 use tikv_util::{box_err, info};
 
-use crate::{Error, RegionProgress, Result, StoreProgress};
+use crate::{Error, RaftLogOpWithCounter, RegionProgress, Result, StoreProgress};
 
 const CHANGESET_VERSION: u32 = 1;
 const CHANGESET_META_SIZE: usize = 16; // 4(version) + 4 (num_keyspace_ids) + 4 (num_stores) + 4 (checksum)
@@ -150,7 +150,7 @@ impl Manifest {
 
 #[derive(Default)]
 pub(crate) struct UncommittedEntries {
-    regions: HashMap<u64 /* region_id */, HashMap<u64 /* log_index */, RaftLogOp>>,
+    regions: HashMap<u64 /* region_id */, HashMap<u64 /* log_index */, RaftLogOpWithCounter>>,
 }
 
 impl fmt::Debug for UncommittedEntries {
@@ -182,6 +182,7 @@ impl UncommittedEntries {
             buf.put_u64_le(region_id);
             buf.put_u32_le(entries.len() as u32);
             for entry in entries.values() {
+                buf.put_u8(entry.counter());
                 let entry_bytes = entry.to_entry().write_to_bytes().unwrap();
                 buf.put_u32_le(entry_bytes.len() as u32);
                 buf.put_slice(&entry_bytes);
@@ -197,6 +198,7 @@ impl UncommittedEntries {
             let num_entries = buf.get_u32_le() as usize;
             let mut entries = HashMap::with_capacity(num_entries);
             for _ in 0..num_entries {
+                let counter = buf.get_u8();
                 let entry_len = buf.get_u32_le() as usize;
                 if buf.remaining() < entry_len {
                     return Err(box_err!(
@@ -212,14 +214,17 @@ impl UncommittedEntries {
                     .map_err(|e| -> Error { box_err!("invalid entry data: {}", e) })?;
                 buf.advance(entry_len);
                 let op = RaftLogOp::new(&entry);
-                entries.insert(entry.index, op);
+                entries.insert(entry.index, RaftLogOpWithCounter { op, counter });
             }
             regions.insert(region_id, entries);
         }
         Ok(Self { regions })
     }
 
-    pub(crate) fn get_region_entries(&self, region_id: u64) -> Option<&HashMap<u64, RaftLogOp>> {
+    pub(crate) fn get_region_entries(
+        &self,
+        region_id: u64,
+    ) -> Option<&HashMap<u64, RaftLogOpWithCounter>> {
         self.regions.get(&region_id)
     }
 }
@@ -230,7 +235,7 @@ mod tests {
     use collections::HashMap;
     use rfengine::RaftLogOp;
 
-    use crate::{manifest::Manifest, RegionProgress, Result};
+    use crate::{manifest::Manifest, RaftLogOpWithCounter, RegionProgress, Result};
 
     #[test]
     fn test_manifest() -> Result<()> {
@@ -262,13 +267,18 @@ mod tests {
         Ok(())
     }
 
-    fn make_entries(entry_indexes: &[u64]) -> HashMap<u64, RaftLogOp> {
-        let mut m: HashMap<u64, RaftLogOp> = Default::default();
+    fn make_entries(entry_indexes: &[u64]) -> HashMap<u64, RaftLogOpWithCounter> {
+        let mut m: HashMap<u64, RaftLogOpWithCounter> = Default::default();
         for &index in entry_indexes {
-            m.entry(index).or_insert_with(|| RaftLogOp {
-                index,
-                ..Default::default()
-            });
+            m.entry(index)
+                .and_modify(|op| op.inc_counter())
+                .or_insert_with(|| {
+                    RaftLogOp {
+                        index,
+                        ..Default::default()
+                    }
+                    .into()
+                });
         }
         m
     }
@@ -276,17 +286,17 @@ mod tests {
     fn make_region_entries_and_progresses(
         region_entry_indexes: Vec<(u64 /* region_id */, Vec<u64> /* log_index */)>,
     ) -> (
-        HashMap<u64, HashMap<u64, RaftLogOp>>,
+        HashMap<u64, HashMap<u64, RaftLogOpWithCounter>>,
         HashMap<u64, RegionProgress>,
     ) {
-        let region_entries: HashMap<u64, HashMap<u64, RaftLogOp>> = region_entry_indexes
+        let region_entries: HashMap<u64, HashMap<u64, RaftLogOpWithCounter>> = region_entry_indexes
             .iter()
             .map(|(region_id, indexes)| (*region_id, make_entries(indexes)))
             .collect();
         let region_progresses: HashMap<u64, RegionProgress> = region_entry_indexes
             .iter()
             .map(|(region_id, indexes)| {
-                let mut progress = RegionProgress::new(1);
+                let mut progress = RegionProgress::new(1, 100);
                 progress.entries = make_entries(indexes);
                 (*region_id, progress)
             })
