@@ -225,6 +225,15 @@ impl ChangeData for ReplicationService {
         &mut self,
         ctx: RpcContext<'_>,
         stream: RequestStream<ChangeDataRequest>,
+        sink: DuplexSink<ChangeDataEvent>,
+    ) {
+        self.event_feed_v2(ctx, stream, sink);
+    }
+
+    fn event_feed_v2(
+        &mut self,
+        ctx: RpcContext<'_>,
+        stream: RequestStream<ChangeDataRequest>,
         mut sink: DuplexSink<ChangeDataEvent>,
     ) {
         let (event_sink, mut event_drain) =
