@@ -229,11 +229,15 @@ impl SchemaFile {
         self.core.restore_version
     }
 
-    pub fn set_restore_version(self, restore_version: u64) -> Self {
+    pub fn set_restore_version_and_keyspace_id(
+        self,
+        restore_version: u64,
+        keyspace_id: u32,
+    ) -> Self {
         Self {
             core: Arc::new(SchemaFileCore {
                 file_id: self.core.file_id,
-                keyspace_id: self.core.keyspace_id,
+                keyspace_id,
                 version: self.core.version,
                 restore_version,
                 tables: self.core.tables.clone(),

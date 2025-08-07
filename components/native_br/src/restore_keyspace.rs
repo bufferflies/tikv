@@ -2016,7 +2016,8 @@ impl BackupCluster {
             self.tag(),
             self.truncate_ts
         );
-        let new_schema_file = schema_file.set_restore_version(self.truncate_ts);
+        let new_schema_file = schema_file
+            .set_restore_version_and_keyspace_id(self.truncate_ts, self.target_keyspace_id);
         let new_schema_file_id = *self.id_allocator.alloc_id(1)?.first().unwrap();
         let schema_data = new_schema_file.to_bytes();
         let opts = dfs::Options::default().with_type(dfs::FileType::Schema);
@@ -2025,9 +2026,10 @@ impl BackupCluster {
                 .create(new_schema_file_id, Bytes::from(schema_data), opts),
         )?;
         info!(
-            "Keyspace {} update schema file {schema_file_id} restore version to {}, new file id {new_schema_file_id}",
+            "Keyspace {} update schema file {schema_file_id} restore version to {} and keyspace_id to {}, new file id {new_schema_file_id}",
             self.tag(),
-            self.truncate_ts
+            self.truncate_ts,
+            self.target_keyspace_id,
         );
         Ok(new_schema_file_id)
     }
