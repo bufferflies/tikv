@@ -377,7 +377,14 @@ pub fn backup_cluster_with_ts(
     };
 
     let alloc_id = pd_client.alloc_id()?;
-    let safe_ts = runtime.block_on(pd_client.get_gc_safe_point())?;
+    let gc_status = runtime.block_on(pd_client.get_all_keyspaces_gc_states())?;
+
+    let safe_ts = gc_status
+        .keyspace_gc_states
+        .values()
+        .map(|v| v.txn_safe_point.into_inner())
+        .max()
+        .unwrap_or(backup_ts);
     if safe_ts > backup_ts {
         return Err(Error::TsError(safe_ts, backup_ts));
     }
