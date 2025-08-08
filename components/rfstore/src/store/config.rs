@@ -124,6 +124,9 @@ pub struct Config {
 
     // The percent of kv engine meta diff to rewrite. Default is 50.
     pub kv_engine_meta_diff_rewrite_percent: usize,
+
+    // The maximum batch size for io worker.
+    pub io_worker_max_batch_size: ReadableSize,
 }
 
 impl Default for Config {
@@ -181,6 +184,7 @@ impl Default for Config {
             idle_worker_tick_slow: true,
             enable_kv_engine_meta_diff: true,
             kv_engine_meta_diff_rewrite_percent: 20,
+            io_worker_max_batch_size: ReadableSize::mb(1),
         }
     }
 }
@@ -256,6 +260,8 @@ impl Config {
         cfg.enable_kv_engine_meta_diff = old.enable_kv_engine_meta_diff;
 
         cfg.kv_engine_meta_diff_rewrite_percent = old.kv_engine_meta_diff_rewrite_percent;
+
+        cfg.io_worker_max_batch_size = old.io_worker_max_batch_size;
 
         if cfg!(debug_assertions) && cfg.raft_base_tick_interval.as_millis() < 100 {
             // It is a test config, adjust the fields not included in the old.

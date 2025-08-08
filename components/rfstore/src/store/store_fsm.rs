@@ -202,6 +202,7 @@ impl RaftBatchSystem {
             ctx.engines.raft.clone(),
             self.router.clone(),
             ctx.trans.clone(),
+            ctx.cfg.value().io_worker_max_batch_size.0 as usize,
         );
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()

@@ -34,8 +34,6 @@ use tikv_util::{
 use super::*;
 use crate::{store::metrics::IDLE_PEER_COUNT, RaftRouter};
 
-const MERGED_WRITE_BATCH_MAX_SIZE: usize = 4 * 1024 * 1024; // 4 MiB.
-
 #[derive(Clone)]
 pub(crate) struct PeerStates {
     pub(crate) applier: Arc<Mutex<Applier>>,
@@ -725,6 +723,7 @@ pub(crate) struct IoWorker {
     router: RaftRouter,
     trans: Box<dyn Transport>,
     wb: WriteBatch,
+    max_batch_size: usize,
 }
 
 impl IoWorker {
@@ -732,6 +731,7 @@ impl IoWorker {
         engine: rfengine::RfEngine,
         router: RaftRouter,
         trans: Box<dyn Transport>,
+        max_batch_size: usize,
     ) -> (Self, Sender<Option<IoTask>>) {
         let (sender, receiver) = tikv_util::mpsc::bounded(256);
         (
@@ -741,6 +741,7 @@ impl IoWorker {
                 router,
                 trans,
                 wb: Default::default(),
+                max_batch_size,
             },
             sender,
         )
@@ -754,7 +755,7 @@ impl IoWorker {
             let mut total_estimated_size = task.raft_wb.estimated_size();
             tasks.push(task);
             for _ in 0..len {
-                if total_estimated_size >= MERGED_WRITE_BATCH_MAX_SIZE {
+                if total_estimated_size >= self.max_batch_size {
                     break;
                 }
 
