@@ -27,6 +27,7 @@ use crate::{
     dfs_worker::{Healthy, LightweightBackupConfig, ObjectStorageTask, ObjectStorageWorker},
     log_batch::RaftLogBlock,
     manifest::Manifest,
+    write_batch::PeerBatch,
     writer::WalWriter,
     BackupTask, Error,
 };
@@ -55,7 +56,7 @@ pub(crate) enum ServiceTask {
         epoch_id: u32,
     },
     Write {
-        wb: crate::write_batch::WriteBatch,
+        wb: Arc<Vec<PeerBatch>>,
     },
     Backup(BackupTask),
     Truncates(Vec<Vec<RaftLogBlock>>),
@@ -198,7 +199,7 @@ impl ServiceWorker {
         self.engine_id.load(Ordering::SeqCst)
     }
 
-    fn handle_write(&mut self, wb: &crate::write_batch::WriteBatch) {
+    fn handle_write(&mut self, wb: &[PeerBatch]) {
         if let Some(wal_writer) = &mut self.async_wal_writer {
             wal_writer.write_batch(wb).unwrap();
             let file_off = wal_writer.file_off;

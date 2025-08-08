@@ -3158,6 +3158,15 @@ impl TikvConfig {
             .rfengine
             .wal_sync_dir
             .replace("${data-dir}", &self.storage.data_dir);
+        self.rfengine.wal_secondary_dir = self
+            .rfengine
+            .wal_secondary_dir
+            .replace("${data-dir}", &self.storage.data_dir);
+        if !self.rfengine.wal_secondary_dir.is_empty()
+            && self.rfengine.wal_secondary_dir == self.rfengine.wal_sync_dir
+        {
+            return Err("rfengine.wal_secondary_dir can't be same as rfengine.wal_sync_dir".into());
+        }
 
         let kv_db_path = self.infer_kv_engine_path(None)?;
         if kv_db_path == self.raft_store.raftdb_path {

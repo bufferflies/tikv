@@ -111,6 +111,11 @@ lazy_static! {
         "raft_engine_dfs_worker_healthy",
         "Status of healthy dfs worker",
     ).unwrap();
+    pub static ref RFENGINE_DOUBLE_WRITE_HEALTHY_GAUGE: IntGauge = register_int_gauge!(
+        "raft_engine_double_write_healthy",
+        "Status of healthy wal double write",
+    )
+    .unwrap();
 }
 
 #[cfg(feature = "testexport")]

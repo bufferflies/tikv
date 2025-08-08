@@ -5,6 +5,7 @@ use std::{
     cmp,
     fs::{File, OpenOptions},
     io::Read,
+    mem,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     ptr::NonNull,
@@ -12,14 +13,20 @@ use std::{
         atomic::{AtomicU32, Ordering},
         Arc,
     },
+    thread::JoinHandle,
     time::Duration,
 };
 
 use bytes::{Buf, BufMut};
 use file_system::open_direct_file;
-use tikv_util::{time::Instant, warn};
+use tikv_util::{
+    info,
+    mpsc::{Receiver, Sender},
+    time::Instant,
+    warn,
+};
 
-use crate::{write_batch::PeerBatch, *};
+use crate::{load::wal_exists, write_batch::PeerBatch, *};
 
 // WAL file will be rotated and overwritten on every `EPOCH_ROTATE_LEN` epoches.
 pub(crate) const EPOCH_ROTATE_LEN: u32 = 4;
@@ -28,7 +35,7 @@ pub(crate) const EPOCH_SNAPSHOT_LEN: u32 = 8;
 pub const BATCH_HEADER_SIZE: usize = 4 /* epoch_id */ + 4 /* checksum */ + 4 /* batch_len */;
 pub(crate) const INITIAL_BUF_SIZE: usize = 8 * 1024 * 1024;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Copy, Clone)]
 pub enum WriterType {
     Sync,
     Async,
@@ -390,9 +397,8 @@ impl WalWriter {
         }
     }
 
-    pub(crate) fn flush(&mut self) -> Result<(usize, bool)> {
+    pub(crate) fn flush(&mut self) -> Result<(u32, u64, bool)> {
         self.compress_batch();
-        let data_len = self.buf.len();
         let batch = self.buf.as_mut();
         let (mut batch_header, batch_payload) = batch.split_at_mut(BATCH_HEADER_SIZE);
         let checksum = crc32c::crc32c(batch_payload);
@@ -428,11 +434,11 @@ impl WalWriter {
         self.file_off += aligned_len as u64;
         self.buf.truncate(BATCH_HEADER_SIZE);
 
-        Ok((data_len, rotated))
+        Ok((self.epoch_id, self.file_off, rotated))
     }
 
-    pub(crate) fn write_batch(&mut self, wb: &WriteBatch) -> Result<(usize, bool)> {
-        for peer_batch in wb.peers.values() {
+    pub(crate) fn write_batch(&mut self, wb: &[PeerBatch]) -> Result<(u32, u64, bool)> {
+        for peer_batch in wb {
             self.append_region_data(peer_batch);
         }
         self.flush()
@@ -539,10 +545,272 @@ pub(crate) fn epoch_to_idx(epoch_id: u32) -> usize {
     (epoch_id % EPOCH_ROTATE_LEN) as usize
 }
 
+pub(crate) enum WalWriterExt {
+    SingleWriter(WalWriter),
+    DoubleWriter(DoubleWriter),
+}
+
+const DOUBLE_WRITE_UNHEALTHY_THRESHOLD: usize = 4096;
+
+impl WalWriterExt {
+    pub(crate) fn write_batch(&mut self, wb: Arc<Vec<PeerBatch>>) -> Result<(u32, u64, bool)> {
+        match self {
+            WalWriterExt::SingleWriter(writer) => writer.write_batch(wb.as_slice()),
+            WalWriterExt::DoubleWriter(double_writer) => double_writer.write_batch(wb),
+        }
+    }
+
+    pub(crate) fn get_file_off(&self) -> u64 {
+        match self {
+            WalWriterExt::SingleWriter(writer) => writer.file_off,
+            WalWriterExt::DoubleWriter(double_writer) => double_writer.file_off,
+        }
+    }
+
+    pub(crate) fn get_epoch_id(&self) -> u32 {
+        match self {
+            WalWriterExt::SingleWriter(writer) => writer.epoch_id,
+            WalWriterExt::DoubleWriter(double_writer) => double_writer.epoch_id,
+        }
+    }
+
+    pub(crate) fn open_file(&mut self, epoch_id: u32, file_off: u64) -> Result<()> {
+        match self {
+            WalWriterExt::SingleWriter(writer) => writer.open_file(epoch_id, file_off),
+            WalWriterExt::DoubleWriter(writer) => writer.open_file(epoch_id, file_off),
+        }
+    }
+}
+
+fn load_epoch_offset(wal_dir: &Path, manifest_epoch: u32) -> Result<(u32, u64)> {
+    let mut epoch_id = manifest_epoch + 1;
+    if !wal_exists(wal_dir, epoch_id) {
+        // may fall behind too much or newly created wal dir.
+        return Ok((epoch_id, 0));
+    }
+    while wal_exists(wal_dir, epoch_id + 1) {
+        epoch_id += 1;
+    }
+    let mut iter = WalIterator::new(wal_dir.to_path_buf(), epoch_id);
+    iter.iterate_batch(|_, _| {})?;
+    Ok((epoch_id, iter.offset))
+}
+
+pub(crate) struct DoubleWriter {
+    pub(crate) senders: Vec<Sender<DoubleWriterMessage>>,
+    pub(crate) handles: Vec<JoinHandle<()>>,
+    pub(crate) epoch_id: u32,
+    pub(crate) file_off: u64,
+}
+
+impl DoubleWriter {
+    pub(crate) fn new(
+        primary_writer: WalWriter,
+        secondary_writer: WalWriter,
+        manifest_epoch: u32,
+    ) -> Result<Self> {
+        Self::sync_writer_files(&primary_writer.dir, &secondary_writer.dir, manifest_epoch)?;
+        let (primary_sender, primary_handle) = DoubleWriterWorker::start(primary_writer);
+        let (secondary_sender, secondary_handle) = DoubleWriterWorker::start(secondary_writer);
+        RFENGINE_DOUBLE_WRITE_HEALTHY_GAUGE.set(1);
+        Ok(Self {
+            senders: vec![primary_sender, secondary_sender],
+            handles: vec![primary_handle, secondary_handle],
+            epoch_id: 0, // will be set on open_file.
+            file_off: 0, // will be set on open_file.
+        })
+    }
+
+    pub(crate) fn sync_writer_files(
+        primary_dir: &PathBuf,
+        secondary_dir: &PathBuf,
+        manifest_epoch: u32,
+    ) -> Result<()> {
+        let (primary_epoch_id, primary_file_off) =
+            load_epoch_offset(primary_dir.as_path(), manifest_epoch)?;
+        let (secondary_epoch_id, secondary_file_off) =
+            load_epoch_offset(secondary_dir.as_path(), manifest_epoch)?;
+        let mut faster_dir = primary_dir;
+        let mut faster_epoch = primary_epoch_id;
+        let mut faster_file_off = primary_file_off;
+        let mut slower_dir = secondary_dir;
+        let mut slower_epoch = secondary_epoch_id;
+        let mut slower_file_off = secondary_file_off;
+        if (primary_epoch_id, primary_file_off) < (secondary_epoch_id, secondary_file_off) {
+            faster_dir = secondary_dir;
+            faster_epoch = secondary_epoch_id;
+            faster_file_off = secondary_file_off;
+            slower_dir = primary_dir;
+            slower_epoch = primary_epoch_id;
+            slower_file_off = primary_file_off;
+        }
+        let fast_dir_str = faster_dir.to_string_lossy();
+        let slow_dir_str = slower_dir.to_string_lossy();
+        if faster_epoch != slower_epoch {
+            // The slower writer maybe newly created, so we need to copy all files.
+            let start_epoch = (manifest_epoch + 1).max(slower_epoch);
+            for epoch_id in start_epoch..=faster_epoch {
+                let faster_file_path = wal_file_name(faster_dir, epoch_id);
+                let slower_file_path = wal_file_name(slower_dir, epoch_id);
+                info!(
+                    "copy file at epoch {} from {} to {}",
+                    epoch_id, fast_dir_str, slow_dir_str,
+                );
+                file_system::copy_and_sync(faster_file_path.as_path(), slower_file_path.as_path())?;
+            }
+            file_system::sync_dir(slower_dir.as_path())?;
+        } else if faster_file_off != slower_file_off {
+            // Only need to copy the delta.
+            let faster_file_path = wal_file_name(faster_dir, faster_epoch);
+            let faster_file = File::open(faster_file_path)?;
+            let delta_size = (faster_file_off - slower_file_off) + BATCH_HEADER_SIZE as u64;
+            let mut delta_buf = vec![0u8; delta_size as usize];
+            faster_file.read_exact_at(&mut delta_buf, slower_file_off)?;
+            let slower_file_path = wal_file_name(slower_dir, faster_epoch);
+            info!(
+                "sync wal files at epoch {} from {} file_off {} to {} file_off {}",
+                faster_epoch, fast_dir_str, faster_file_off, slow_dir_str, slower_file_off
+            );
+            let slower_file = File::options()
+                .create(true)
+                .write(true)
+                .open(slower_file_path)?;
+            slower_file.write_all_at(&delta_buf, slower_file_off)?;
+            slower_file.sync_data()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn write_batch(&mut self, wb: Arc<Vec<PeerBatch>>) -> Result<(u32, u64, bool)> {
+        let (tx, rx) = tikv_util::mpsc::bounded(2);
+        for sender in &self.senders {
+            sender
+                .send(DoubleWriterMessage::Write {
+                    wb: wb.clone(),
+                    res_tx: tx.clone(),
+                })
+                .unwrap();
+        }
+        let (epoch, offset, rotated) = rx.recv().unwrap()?;
+        self.epoch_id = epoch;
+        self.file_off = offset;
+        Ok((epoch, offset, rotated))
+    }
+
+    pub(crate) fn open_file(&mut self, epoch_id: u32, file_off: u64) -> Result<()> {
+        let (tx, rx) = tikv_util::mpsc::bounded(2);
+        for sender in &self.senders {
+            let msg = DoubleWriterMessage::OpenFile {
+                epoch_id,
+                file_off,
+                res_tx: tx.clone(),
+            };
+            sender.send(msg).unwrap();
+        }
+        rx.recv().unwrap()?;
+        rx.recv().unwrap()?;
+        self.epoch_id = epoch_id;
+        self.file_off = file_off;
+        Ok(())
+    }
+}
+
+impl Drop for DoubleWriter {
+    fn drop(&mut self) {
+        for sender in &self.senders {
+            sender.send(DoubleWriterMessage::Stop).ok();
+        }
+        for handle in mem::take(&mut self.handles) {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub(crate) struct DoubleWriterWorker {
+    writer: WalWriter,
+    rx: Receiver<DoubleWriterMessage>,
+    healthy: bool,
+}
+
+pub(crate) enum DoubleWriterMessage {
+    Write {
+        wb: Arc<Vec<PeerBatch>>,
+        res_tx: Sender<Result<(u32, u64, bool)>>,
+    },
+    OpenFile {
+        epoch_id: u32,
+        file_off: u64,
+        res_tx: Sender<Result<()>>,
+    },
+    Stop,
+}
+
+impl DoubleWriterWorker {
+    pub(crate) fn start(writer: WalWriter) -> (Sender<DoubleWriterMessage>, JoinHandle<()>) {
+        let (tx, rx) = tikv_util::mpsc::unbounded();
+        let handle = std::thread::spawn(move || {
+            let mut worker = Self {
+                writer,
+                rx,
+                healthy: true,
+            };
+            worker.run();
+        });
+        (tx, handle)
+    }
+
+    pub(crate) fn run(&mut self) {
+        while let Ok(msg) = self.rx.recv() {
+            match msg {
+                DoubleWriterMessage::Write { wb, res_tx } => {
+                    if !self.healthy {
+                        continue;
+                    }
+                    if self.rx.len() > DOUBLE_WRITE_UNHEALTHY_THRESHOLD {
+                        // The writer fall behind too much, to void OOM, we stop writing.
+                        self.healthy = false;
+                        let dir_str = self.writer.dir.to_string_lossy();
+                        tikv_util::error!(
+                            "double writer {} is unhealthy, too many pending messages",
+                            dir_str
+                        );
+                        RFENGINE_DOUBLE_WRITE_HEALTHY_GAUGE.set(0);
+                        continue;
+                    }
+                    let _ = res_tx.send(self.writer.write_batch(&wb));
+                }
+                DoubleWriterMessage::OpenFile {
+                    epoch_id,
+                    file_off,
+                    res_tx,
+                } => {
+                    let result = self.writer.open_file(epoch_id, file_off);
+                    let _ = res_tx.send(result);
+                }
+                DoubleWriterMessage::Stop => {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{os::unix::fs::FileExt, sync::atomic::Ordering::SeqCst};
+
+    use rand::Rng;
+    use tikv_util::info;
+
     use super::DmaBuffer;
-    use crate::{writer::Version::V2, WalHeader};
+    use crate::{
+        compact_worker::wal_file_name,
+        config::Config,
+        iterator::WalIterator,
+        test_util::{get_epoch_file_off, init_logger, prepare_rfengine, prepare_rfengine_with_idx},
+        writer::Version::V2,
+        RfEngine, WalHeader, BATCH_HEADER_SIZE,
+    };
 
     #[test]
     fn test_dma_buffer() {
@@ -572,5 +840,82 @@ mod tests {
         let mut buf = [0_u8; WalHeader::len()];
         wal_header.encode_to(buf.as_mut_slice());
         assert_eq!(WalHeader::decode(buf.as_slice()).unwrap(), wal_header);
+    }
+
+    #[test]
+    fn test_double_writer() {
+        init_logger();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let wal_size = 512 * 1024_usize;
+        let dir_path = tmp_dir.path();
+        let sync_wal_path = dir_path.join("wal-sync");
+        let wal_secondary_path = dir_path.join("wal-secondary");
+        let mut cfg = Config::new(wal_size);
+        cfg.wal_sync_dir = sync_wal_path.to_str().unwrap().to_owned();
+        cfg.wal_secondary_dir = wal_secondary_path.to_str().unwrap().to_owned();
+        let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
+        prepare_rfengine(&engine);
+        // Stop the worker to make compaction fall behind, to cover the case that two
+        // writers on different epoch.
+        engine.stop_worker(true);
+        let mut rnd = rand::thread_rng();
+        prepare_rfengine_with_idx(&engine, 1051, 1051 + rnd.gen_range(0..300));
+        let (epoch, file_off) = get_epoch_file_off(&engine);
+        let manifest_epoch = engine.compacted_epoch.load(SeqCst);
+        info!(
+            "manifest_epoch: {}, current_epoch: {}, file_off: {}",
+            manifest_epoch, epoch, file_off
+        );
+        let engine_stats = engine.get_engine_stats();
+        drop(engine);
+        for _ in 0..10 {
+            // randomly truncate a wal file to simulate a slow wal writer.
+            let truncate_path = if rnd.gen_bool(0.5) {
+                &sync_wal_path
+            } else {
+                &wal_secondary_path
+            };
+            let truncate_epoch_id = rnd.gen_range((manifest_epoch + 1)..=epoch);
+            let wal_file = wal_file_name(truncate_path.as_path(), truncate_epoch_id);
+            assert!(wal_file.exists());
+            let mut wal_iter = WalIterator::new(truncate_path.clone(), truncate_epoch_id);
+            let mut file_offs = vec![];
+            wal_iter
+                .iterate_batch(|_, file_off| {
+                    file_offs.push(file_off);
+                })
+                .unwrap();
+            if file_offs.is_empty() {
+                continue;
+            }
+            let truncate_file_off = file_offs[rnd.gen_range(0..file_offs.len())];
+            info!(
+                "truncate wal file epoch {}, file_off: {}",
+                truncate_epoch_id, truncate_file_off
+            );
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&wal_file)
+                .unwrap();
+            let eof_data = vec![0u8; BATCH_HEADER_SIZE];
+            file.write_all_at(&eof_data, truncate_file_off).unwrap();
+            // We also need to reset the next file header to simulate a slow wal writer.
+            // Because we fast check the next file header to determine if the current file
+            // is valid.
+            let next_wal_file_path = wal_file_name(truncate_path.as_path(), truncate_epoch_id + 1);
+            let next_wal_file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&next_wal_file_path)
+                .unwrap();
+            next_wal_file.write_all_at(&eof_data, 0).unwrap();
+            // Set to cli_mode to avoid compaction.
+            cfg.cli_mode = true;
+            let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
+            let (new_epoch, new_file_off) = get_epoch_file_off(&engine);
+            assert_eq!(new_epoch, epoch);
+            assert_eq!(new_file_off, file_off);
+            let new_stats = engine.get_engine_stats();
+            assert_eq!(new_stats.total_mem_entries, engine_stats.total_mem_entries);
+        }
     }
 }

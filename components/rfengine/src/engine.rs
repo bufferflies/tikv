@@ -129,7 +129,7 @@ pub struct RfEngineCore {
 
     pub wal_sync_dir: Option<PathBuf>,
 
-    pub(crate) writer: Mutex<WalWriter>,
+    pub(crate) writer: Mutex<WalWriterExt>,
 
     pub(crate) peers: papaya::HashMap<u64, RwLock<PeerData>>,
 
@@ -162,7 +162,9 @@ impl RfEngineCore {
         let wal_size = cfg.target_file_size.0 as usize;
         let compression_threshold = cfg.batch_compression_threshold.0 as usize;
         let wal_sync_dir = (!cfg.wal_sync_dir.is_empty()).then(|| PathBuf::from(&cfg.wal_sync_dir));
-        init_wal_files(dir, wal_sync_dir.as_ref())?;
+        let wal_secondary_dir =
+            (!cfg.wal_secondary_dir.is_empty()).then(|| PathBuf::from(&cfg.wal_secondary_dir));
+        init_wal_files(dir, wal_sync_dir.as_ref(), wal_secondary_dir.as_ref())?;
 
         // Lock the rfengine directory to prevent concurrent opening.
         let lock_path = dir.join("LOCK");
@@ -189,13 +191,31 @@ impl RfEngineCore {
             writer_type,
             cfg.write_throttle_duration.0,
         );
+        let writer_ext = if cfg.wal_secondary_dir.is_empty() {
+            WalWriterExt::SingleWriter(writer)
+        } else {
+            let wal_secondary_dir = PathBuf::from(&cfg.wal_secondary_dir);
+            let secondary_writer = WalWriter::new(
+                &wal_secondary_dir,
+                wal_size,
+                compression_threshold,
+                compacted_epoch.clone(),
+                writer_type,
+                cfg.write_throttle_duration.0,
+            );
+            WalWriterExt::DoubleWriter(DoubleWriter::new(
+                writer,
+                secondary_writer,
+                manifest.epoch_id,
+            )?)
+        };
         let dfs_worker_healthy = dfs_worker::Healthy::default();
         let mut en = Self {
             dir: dir.to_owned(),
             wal_sync_dir,
             peers: Default::default(),
             dependants: Default::default(),
-            writer: Mutex::new(writer),
+            writer: Mutex::new(writer_ext),
             task_sender: service_tx,
             service_worker_handle: Mutex::new(None),
             engine_id,
@@ -205,6 +225,9 @@ impl RfEngineCore {
             _lock: lock,
         };
         let async_offset = en.load(&manifest)?;
+        if cfg.cli_mode {
+            return Ok(en);
+        }
         {
             let async_wal_writer = if en.is_async_wal_enabled() {
                 let mut async_wal_writer = WalWriter::new(
@@ -323,19 +346,24 @@ impl RfEngineCore {
     /// `persist` in the I/O thread.
     pub fn persist(&self, wb: WriteBatch) -> Result<usize> {
         let timer = Instant::now_coarse();
+        let wb = Arc::new(wb.into_vector());
         let mut writer = self.writer.lock().unwrap();
-        let epoch_id = writer.epoch_id;
-        let (size, rotated) = writer.write_batch(&wb)?;
+        let old_file_off = writer.get_file_off();
+        let (epoch_id, file_off, rotated) = writer.write_batch(wb.clone())?;
         if rotated {
-            self.current_epoch_id
-                .store(writer.epoch_id, Ordering::SeqCst);
-            self.try_send_task(ServiceTask::Rotate { epoch_id });
+            self.current_epoch_id.store(epoch_id, Ordering::SeqCst);
+            self.try_send_task(ServiceTask::Rotate {
+                epoch_id: epoch_id - 1,
+            });
         }
         if self.is_async_wal_enabled() {
             self.try_send_task(ServiceTask::Write { wb });
         }
         ENGINE_PERSIST_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
-        Ok(size)
+        if rotated {
+            return Ok(file_off as usize);
+        }
+        Ok(file_off.saturating_sub(old_file_off) as usize)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -692,14 +720,14 @@ impl RfEngineCore {
             // Note: when async wal is enabled, `file_off` is acquired from
             // `async_wal_writer` in worker.
             let writer = self.writer.lock().unwrap();
-            task.file_off = writer.file_off;
+            task.file_off = writer.get_file_off();
         }
         self.try_send_task(ServiceTask::Backup(task));
     }
 
     pub fn get_epoch_offset(&self) -> (u32, u64) {
         let writer = self.writer.lock().unwrap();
-        (writer.epoch_id, writer.file_off)
+        (writer.get_epoch_id(), writer.get_file_off())
     }
 
     pub(crate) fn is_async_wal_enabled(&self) -> bool {
@@ -910,7 +938,7 @@ pub fn lightweight_restore(
 ) -> Result<u32> {
     let start_time = Instant::now_coarse();
 
-    init_wal_files(dir, None)?;
+    init_wal_files(dir, None, None)?;
 
     let mut snap_store_meta = StoreBackupMeta::default();
     if snap_epoch > 0 {
@@ -967,7 +995,7 @@ pub fn restore(
         .iter()
         .find(|x| x.store_id == store_id)
         .expect("store not found");
-    init_wal_files(dir, None).unwrap();
+    init_wal_files(dir, None, None).unwrap();
     let wal_chunks = store_meta.get_wal_chunks();
     if !wal_chunks.is_empty() {
         let keys: Vec<(String, GetObjectOptions)> = wal_chunks
@@ -1009,11 +1037,20 @@ pub fn restore(
     }
 }
 
-pub(crate) fn init_wal_files(dir: &Path, wal_sync_dir: Option<&PathBuf>) -> Result<()> {
+pub(crate) fn init_wal_files(
+    dir: &Path,
+    wal_sync_dir: Option<&PathBuf>,
+    wal_secondary_dir: Option<&PathBuf>,
+) -> Result<()> {
     if !dir.exists() {
         create_dir_all(dir)?;
     }
     open_wal_files(dir)?;
+    if let Some(wal_secondary_dir) = wal_secondary_dir {
+        if !wal_secondary_dir.exists() {
+            create_dir_all(wal_secondary_dir)?;
+        }
+    }
     if wal_sync_dir.is_none() {
         return Ok(());
     }
@@ -1648,12 +1685,10 @@ mod tests {
             assert_eq!(engine.peers.len(), 10);
             engine.stop_worker(true);
         }
-        let (compacted_epoch, current_epoch) = {
+        let compacted_epoch = engine.compacted_epoch.load(Ordering::Relaxed);
+        let current_epoch = {
             let writer = engine.writer.lock().unwrap();
-            (
-                writer.compacted_epoch.load(Ordering::SeqCst),
-                writer.epoch_id,
-            )
+            writer.get_epoch_id()
         };
 
         for ep in compacted_epoch + 1..=current_epoch {
@@ -1753,7 +1788,7 @@ mod tests {
     fn test_init_wal_files() {
         init_logger();
         let tmp_dir = tempfile::tempdir().unwrap();
-        init_wal_files(tmp_dir.path(), None).unwrap();
+        init_wal_files(tmp_dir.path(), None, None).unwrap();
         let check_file_exists = |path: &Path| {
             for idx in 0..4 {
                 assert!(wal_file_path(path, idx).exists());
@@ -1773,7 +1808,7 @@ mod tests {
 
         // upgrade to use wal_sync_dir
         let wal_sync_dir = tmp_dir.path().join("wal_sync_dir");
-        init_wal_files(tmp_dir.path(), Some(&wal_sync_dir)).unwrap();
+        init_wal_files(tmp_dir.path(), Some(&wal_sync_dir), None).unwrap();
         assert!(!upgrade_mark_file_path(tmp_dir.path()).exists());
         let check_files = || {
             for idx in 0..4 {
@@ -1793,8 +1828,21 @@ mod tests {
         File::create(upgrade_mark_file_path(tmp_dir.path())).unwrap();
 
         // init_wal_files again should recover from the interrupted upgrade.
-        init_wal_files(tmp_dir.path(), Some(&wal_sync_dir)).unwrap();
+        init_wal_files(tmp_dir.path(), Some(&wal_sync_dir), None).unwrap();
         check_files();
+
+        // wal_secondary_dir is created no matter if wal_sync_dir is provided.
+        let wal_secondary_dir = tmp_dir.path().join("wal_secondary_dir");
+        init_wal_files(
+            tmp_dir.path(),
+            Some(&wal_sync_dir),
+            Some(&wal_secondary_dir),
+        )
+        .unwrap();
+        assert!(wal_secondary_dir.exists());
+        fs::remove_dir(wal_secondary_dir.as_path()).unwrap();
+        init_wal_files(tmp_dir.path(), None, Some(&wal_secondary_dir)).unwrap();
+        assert!(wal_secondary_dir.exists());
     }
 
     fn wait_for_rlogs_truncated(en: &RfEngine, peer_id: u64, seconds: usize) {

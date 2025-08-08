@@ -259,13 +259,13 @@ pub mod test_util {
 
     use api_version::api_v2::TXN_KEY_PREFIX;
     use byteorder::{BigEndian, ByteOrder};
-    use bytes::{BufMut, BytesMut};
+    use bytes::{Buf, BufMut, BytesMut};
     use kvproto::raft_serverpb::RegionLocalState;
     use protobuf::Message;
     use raft_proto::{eraftpb, eraftpb::EntryType};
     use tikv_util::time::Instant;
 
-    use crate::region_state_key;
+    use crate::{region_state_key, RfEngine, WriteBatch};
 
     static INIT: Once = Once::new();
 
@@ -349,6 +349,36 @@ pub mod test_util {
             entry.set_context(vec![context].into());
         }
         entry
+    }
+
+    pub fn prepare_rfengine(engine: &RfEngine) {
+        prepare_rfengine_with_idx(engine, 1, 1050);
+    }
+
+    pub fn prepare_rfengine_with_idx(engine: &RfEngine, start_idx: u64, end_idx: u64) {
+        let mut wb = WriteBatch::new();
+        for peer_id in 1..=10_u64 {
+            let (key, val) = make_state_kv(2, 1);
+            let region_id = peer_id + 1;
+            wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
+        }
+        engine.write(wb).unwrap();
+        for idx in start_idx..=end_idx {
+            let mut wb = WriteBatch::new();
+            for peer_id in 1..=10_u64 {
+                let region_id = peer_id + 1;
+                wb.append_raft_log(peer_id, region_id, &make_log_data(idx, 128));
+                let (key, val) = make_state_kv(1, idx);
+                wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
+            }
+            engine.write(wb).unwrap();
+        }
+        assert_eq!(engine.peers.len(), 10);
+    }
+
+    pub fn get_epoch_file_off(engine: &RfEngine) -> (u32, u64) {
+        let writer = engine.writer.lock().unwrap();
+        (writer.get_epoch_id(), writer.get_file_off())
     }
 }
 

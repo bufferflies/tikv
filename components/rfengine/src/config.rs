@@ -25,6 +25,9 @@ pub struct Config {
     /// It's used to reduce the latency of writing wal.
     pub wal_sync_dir: String,
 
+    /// The directory to support double write for low tail latency.
+    pub wal_secondary_dir: String,
+
     /// Whether to enable the lightweight backup.
     ///
     /// Default: false
@@ -74,6 +77,7 @@ impl Default for Config {
             target_file_size: ReadableSize::mb(512),
             worker_rate_limit: ReadableSize::mb(125),
             wal_sync_dir: "".to_owned(),
+            wal_secondary_dir: "".to_owned(),
             lightweight_backup: false,
             wal_chunk_target_file_size: ReadableSize::mb(64),
             cli_mode: false,

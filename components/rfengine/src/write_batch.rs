@@ -111,6 +111,12 @@ impl WriteBatch {
     pub fn estimated_size(&self) -> usize {
         self.peers.values().map(|b| b.estimated_size()).sum()
     }
+
+    /// Convert `WriteBatch` into a vector of `PeerBatch` to make the iteration
+    /// deterministic.
+    pub(crate) fn into_vector(self) -> Vec<PeerBatch> {
+        self.peers.into_values().collect()
+    }
 }
 
 /// `RegionBatch` is a batch of modifications in one region.
