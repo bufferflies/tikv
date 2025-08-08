@@ -559,11 +559,20 @@ impl ShardMeta {
         }
         if cs.has_update_schema_meta() {
             let schema_version = cs.get_update_schema_meta().get_version();
-            if schema_version <= self.schema.file_ver() {
+            let cur_ver = self.schema.file_ver();
+            let valid = self.schema.is_valid();
+            let is_duplicated = if valid {
+                cur_ver >= schema_version
+            } else {
+                cur_ver > schema_version
+            };
+            if is_duplicated {
                 info!(
-                    "{} skip duplicated update schema meta version {}",
+                    "{} skip duplicated update schema meta version {}, cur_ver: {}, valid: {}",
                     self.tag(),
-                    schema_version
+                    schema_version,
+                    cur_ver,
+                    valid
                 );
                 return true;
             }
