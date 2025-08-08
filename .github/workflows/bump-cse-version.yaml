@@ -17,7 +17,7 @@ on:
         options:
           - dev
           - staging
-          - prod
+          - production
 
 jobs:
   bump-CSE-version:
