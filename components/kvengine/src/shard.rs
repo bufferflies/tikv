@@ -1812,8 +1812,8 @@ impl ShardDataBuilder {
     }
 
     #[inline]
-    pub(crate) fn clear_schema(&mut self) {
-        self.set_schema(0, 0, None);
+    pub(crate) fn clear_schema(&mut self, restore_version: u64) {
+        self.schema = Some((0, restore_version, None));
     }
 
     pub(crate) fn set_columnar_levels(&mut self, columnar_levels: ColumnarLevels) {

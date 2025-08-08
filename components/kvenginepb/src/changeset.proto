@@ -42,9 +42,11 @@ message ChangeSet {
   SchemaMeta update_schema_meta = 23;
   ColumnarCompaction columnar_compaction = 24;
   UpdateVectorIndex update_vector_index = 25;
+  // Deprecated field. Replaced by clear_columnar_with_restore_version.
   bool clear_columnar = 26;
   // Used for shard meta persist by diff.
   Snapshot snapshot_diff = 27;
+  ClearColumnar clear_columnar_with_restore_version = 28;
 }
 
 // A set of small changesets of the same peer.
@@ -267,3 +269,5 @@ message VectorIndexDef {
   repeated string spec_keys = 4;
   repeated bytes spec_values = 5;
 }
+
+message ClearColumnar { uint64 restore_version = 1; }

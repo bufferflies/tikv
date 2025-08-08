@@ -354,8 +354,8 @@ impl ShardMeta {
             self.apply_update_vector_index(cs.get_update_vector_index());
             return;
         }
-        if cs.get_clear_columnar() {
-            self.clear_columnar();
+        if cs.get_clear_columnar() || cs.has_clear_columnar_with_restore_version() {
+            self.clear_columnar(cs);
             return;
         }
         // NOTE: Used for shard meta persist by diff.
@@ -1011,6 +1011,7 @@ impl ShardMeta {
             self.columnar_table_ids.clear();
             self.unconverted_l0s.clear();
             self.vector_indexes.clear();
+            self.schema.clear(self.schema.restore_ver());
         } else {
             self.columnar_table_ids
                 .extend_from_slice(comp.get_columnar_table_ids());
@@ -1071,9 +1072,19 @@ impl ShardMeta {
         }
     }
 
-    pub fn clear_columnar(&mut self) {
-        info!("{} shard_meta apply clear_columnar", self.tag());
-        self.schema.clear();
+    pub fn clear_columnar(&mut self, cs: &pb::ChangeSet) {
+        let restore_version = if cs.has_clear_columnar_with_restore_version() {
+            cs.get_clear_columnar_with_restore_version()
+                .get_restore_version()
+        } else {
+            self.schema.restore_ver()
+        };
+        info!(
+            "{} shard_meta apply clear_columnar, restore_version: {:?}",
+            self.tag(),
+            restore_version
+        );
+        self.schema.clear(restore_version);
         self.columnar_table_ids.clear();
         self.columnar_l2_snap_version = 0;
         self.unconverted_l0s.clear();
@@ -1735,10 +1746,9 @@ impl SchemaFileMeta {
         self.schema_restore_ver = schema_restore_ver;
     }
 
-    pub fn clear(&mut self) {
+    pub fn clear(&mut self, reset_restore_version: u64) {
         self.schema_file_id = 0;
-        self.schema_file_ver = 0;
-        self.schema_restore_ver = 0;
+        self.schema_restore_ver = reset_restore_version;
     }
 
     pub fn to_snapshot(&self, snap: &mut pb::Snapshot) {

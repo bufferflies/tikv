@@ -2009,8 +2009,8 @@ impl StatusServer {
     /// Clear columnar data of the specified keyspace or shard.
     ///
     /// If keyspace_id is 0, clear all columnar data of all shards.
-    /// POST /clear_columnar?
-    /// [keyspace_id=xxx][shard_id=1][confirm_all=true|false]
+    /// POST /clear_columnar?[restore_version=xxxx]
+    /// [&keyspace_id=xxx][&shard_id=1][&confirm_all=true|false]
     async fn handle_clear_columnar(
         req: Request<Body>,
         router: &RaftRouter,
@@ -2021,6 +2021,8 @@ impl StatusServer {
         if !query_pairs.contains_key("keyspace_id") && !query_pairs.contains_key("shard_id") {
             return Ok(bad_request_resp("keyspace_id or shard_id not found"));
         }
+        // If restore_version is not set, do no update the restore version.
+        let restore_version = get_uint_param(&query_pairs, "restore_version");
         let mut shard_ids = vec![];
         if query_pairs.contains_key("keyspace_id") {
             let keyspace_id = match get_uint_param(&query_pairs, "keyspace_id") {
@@ -2065,7 +2067,10 @@ impl StatusServer {
             let region_id_vers = res.unwrap();
             for region_id_ver in region_id_vers {
                 shard_ids.push(region_id_ver.id());
-                router.send_casual_msg(region_id_ver.id(), CasualMessage::ClearColumnar);
+                router.send_casual_msg(
+                    region_id_ver.id(),
+                    CasualMessage::ClearColumnar { restore_version },
+                );
             }
         } else {
             let shard_id = match get_uint_param(&query_pairs, "shard_id") {
@@ -2075,7 +2080,7 @@ impl StatusServer {
                 }
             };
             shard_ids.push(shard_id);
-            router.send_casual_msg(shard_id, CasualMessage::ClearColumnar);
+            router.send_casual_msg(shard_id, CasualMessage::ClearColumnar { restore_version });
         }
 
         Ok(Response::new(Body::from(format!(

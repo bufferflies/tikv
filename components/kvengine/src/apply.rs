@@ -424,8 +424,8 @@ impl EngineCore {
             self.apply_restore_shard(&shard, cs)?;
         } else if cs.has_update_schema_meta() {
             self.apply_update_schema_meta(&shard, cs);
-        } else if cs.get_clear_columnar() {
-            self.apply_clear_columnar(&shard);
+        } else if cs.get_clear_columnar() || cs.has_clear_columnar_with_restore_version() {
+            self.apply_clear_columnar(&shard, cs);
         } else if cs.get_property_key() == STORAGE_CLASS_KEY {
             self.apply_update_storage_class(&shard, cs);
         }
@@ -1128,11 +1128,21 @@ impl EngineCore {
         }
     }
 
-    fn apply_clear_columnar(&self, shard: &Shard) {
-        info!("{} shard apply clear_columnar", shard.tag());
+    fn apply_clear_columnar(&self, shard: &Shard, cs: &ChangeSet) {
+        let restore_version = if cs.has_clear_columnar_with_restore_version() {
+            cs.get_clear_columnar_with_restore_version()
+                .get_restore_version()
+        } else {
+            shard.get_data().restore_version
+        };
+        info!(
+            "{} shard apply clear_columnar, restore_version: {:?}",
+            shard.tag(),
+            restore_version
+        );
         let old_data = shard.get_data();
         let mut builder = ShardDataBuilder::new(old_data);
-        builder.clear_schema();
+        builder.clear_schema(restore_version);
         builder.set_columnar_levels(ColumnarLevels::new());
         builder.set_vector_indexes(VectorIndexes::default());
         builder.set_columnar_table_ids(vec![]);
@@ -1201,9 +1211,10 @@ impl EngineCore {
         }
         let mut vector_indexes = old_data.vector_indexes.clone();
         vector_indexes.retain(|vec_idx| columnar_table_ids.contains(&vec_idx.table_id));
+        let old_restore_version = old_data.restore_version;
         let mut builder = ShardDataBuilder::new(old_data);
         if clear_schema {
-            builder.clear_schema();
+            builder.clear_schema(old_restore_version);
         }
         builder.set_columnar_levels(new_col_levels);
         builder.set_columnar_table_ids(columnar_table_ids);

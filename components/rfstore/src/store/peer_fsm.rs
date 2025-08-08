@@ -337,7 +337,9 @@ impl<'a> PeerMsgHandler<'a> {
                 shard_ver,
                 callback,
             } => self.on_check_leader(shard_ver, callback),
-            CasualMessage::ClearColumnar => self.on_clear_columnar(),
+            CasualMessage::ClearColumnar { restore_version } => {
+                self.on_clear_columnar(restore_version)
+            }
             CasualMessage::TriggerRefreshShardStates => self.on_trigger_refresh_shard_states(),
             CasualMessage::ForceSwitchMemTable {
                 current_size,
@@ -1620,8 +1622,29 @@ impl<'a> PeerMsgHandler<'a> {
             );
             return;
         }
-        if shard_meta.schema.file_ver() >= schema_file.get_version() {
-            info!("{} skip stale schema file", tag);
+        update_schema_meta.set_restore_version(schema_file.get_restore_version());
+        info!(
+            "{} on_update_schema_file {:?}, file_ver: {}",
+            tag,
+            shard_meta.schema,
+            schema_file.get_version()
+        );
+        let cur_ver = shard_meta.schema.file_ver();
+        let new_ver = schema_file.get_version();
+        let valid = shard_meta.schema.is_valid();
+        // If the schema file is valid, we should skip if the new_ver is not newer.
+        // In `clear_columnar` case, the schema file is invalid and we need to update
+        // the schema file with the same version.
+        let should_skip = if valid {
+            cur_ver >= new_ver
+        } else {
+            cur_ver > new_ver
+        };
+        if should_skip {
+            info!(
+                "{} skip stale schema file (cur_ver={}, new_ver={}, valid={})",
+                tag, cur_ver, new_ver, valid
+            );
             return;
         }
         if !overlap {
@@ -1646,10 +1669,8 @@ impl<'a> PeerMsgHandler<'a> {
             }
         }
         info!(
-            "{} propose update schema file {}",
-            tag,
-            update_schema_meta.get_file_id();
-            "schema_version" => update_schema_meta.get_version(),
+            "{} propose update schema file {:?}",
+            tag, update_schema_meta
         );
         self.propose_change_set(change_set, Callback::None);
     }
@@ -1724,7 +1745,7 @@ impl<'a> PeerMsgHandler<'a> {
         callback.invoke_with_response(resp);
     }
 
-    fn on_clear_columnar(&mut self) {
+    fn on_clear_columnar(&mut self, restore_version: Option<u64>) {
         if !self.peer.is_leader() {
             return;
         }
@@ -1733,7 +1754,12 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
         let mut change_set = kvengine::new_change_set(shard_meta.id, shard_meta.ver);
-        change_set.set_clear_columnar(true);
+        let clear_columnar = change_set.mut_clear_columnar_with_restore_version();
+        if let Some(restore_version) = restore_version {
+            clear_columnar.set_restore_version(restore_version);
+        } else {
+            clear_columnar.set_restore_version(shard_meta.schema.restore_ver());
+        }
         info!("{} propose clear_columnar", self.peer.tag());
         self.propose_change_set(change_set, Callback::None);
     }
