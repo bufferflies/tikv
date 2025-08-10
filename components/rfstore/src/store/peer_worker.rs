@@ -210,7 +210,6 @@ pub(crate) struct RaftWorker {
 }
 
 const MAX_BATCH_COUNT: usize = 1024;
-const MAX_BATCH_SIZE: usize = 1024 * 1024;
 const PEER_INBOX_STATISTIC_COUNT: usize = 5;
 
 impl RaftWorker {
@@ -454,7 +453,9 @@ impl RaftWorker {
                 while let Ok((region_id, msg)) = self.receiver.try_recv() {
                     batch_size += msg.size();
                     self.append_msg(inboxes, region_id, msg);
-                    if self.batch_msg_count > MAX_BATCH_COUNT || batch_size > MAX_BATCH_SIZE {
+                    if self.batch_msg_count > MAX_BATCH_COUNT
+                        || batch_size > self.ctx.cfg.raft_worker_max_batch_size.0 as usize
+                    {
                         break;
                     }
                 }

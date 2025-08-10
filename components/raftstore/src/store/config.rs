@@ -340,8 +340,8 @@ pub struct Config {
     /// The percent of kv engine meta diff to rewrite. Default is 50.
     pub kv_engine_meta_diff_rewrite_percent: usize,
 
-    /// The maximum batch size for io worker.
-    pub io_worker_max_batch_size: ReadableSize,
+    /// The maximum batch size for raft worker.
+    pub raft_worker_max_batch_size: ReadableSize,
 }
 
 impl Default for Config {
@@ -459,7 +459,7 @@ impl Default for Config {
             idle_worker_tick_slow: true,
             enable_kv_engine_meta_diff: true,
             kv_engine_meta_diff_rewrite_percent: 20,
-            io_worker_max_batch_size: ReadableSize::mb(1),
+            raft_worker_max_batch_size: ReadableSize::mb(1),
         }
     }
 }
