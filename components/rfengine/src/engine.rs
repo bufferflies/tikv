@@ -6,6 +6,7 @@ use std::{
     fmt::{Display, Formatter},
     fs,
     fs::{create_dir_all, File, OpenOptions},
+    mem,
     ops::{Deref, DerefMut},
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
@@ -489,6 +490,19 @@ impl RfEngineCore {
         if let Some(h) = handle.take() {
             self.try_send_task(ServiceTask::Close { force });
             h.join().unwrap();
+        }
+    }
+
+    pub fn close_writer(&self) {
+        let mut _double_writer = None;
+        {
+            let mut writer = self.writer.lock().unwrap();
+            match writer.deref_mut() {
+                WalWriterExt::SingleWriter(_) => {}
+                WalWriterExt::DoubleWriter(w) => {
+                    _double_writer = Some(mem::take(w));
+                }
+            }
         }
     }
 

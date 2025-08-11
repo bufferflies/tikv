@@ -970,6 +970,7 @@ impl TikvServer {
 
         self.to_stop.into_iter().for_each(|s| s.stop());
         self.raw_engines.raft.stop_worker(force);
+        self.raw_engines.raft.close_writer();
         self.overload_protector.stop();
         self.background_worker.stop();
         self.raw_engines.kv.close();

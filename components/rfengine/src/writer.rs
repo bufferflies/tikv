@@ -596,6 +596,7 @@ fn load_epoch_offset(wal_dir: &Path, manifest_epoch: u32) -> Result<(u32, u64)> 
     Ok((epoch_id, iter.offset))
 }
 
+#[derive(Default)]
 pub(crate) struct DoubleWriter {
     pub(crate) senders: Vec<Sender<DoubleWriterMessage>>,
     pub(crate) handles: Vec<JoinHandle<()>>,
