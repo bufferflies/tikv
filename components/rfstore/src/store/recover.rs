@@ -297,6 +297,9 @@ impl RecoverHandler {
             applier.apply_state.applied_index = ctx.exec_log_index;
             applier.apply_state.applied_index_term = ctx.exec_log_term;
         }
+        if let Some(last_entry) = entries.last() {
+            shard.update_write_sequence_on_recover(last_entry.index);
+        }
         Ok(())
     }
 }

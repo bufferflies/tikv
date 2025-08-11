@@ -901,6 +901,10 @@ impl Shard {
         self.write_sequence.load(Ordering::Acquire)
     }
 
+    pub fn update_write_sequence_on_recover(&self, seq: u64) {
+        self.write_sequence.store(seq, Ordering::Release);
+    }
+
     pub fn get_cache_invalidate_sequence(&self) -> u64 {
         self.cache_invalidate_sequence.load(Ordering::Acquire)
     }

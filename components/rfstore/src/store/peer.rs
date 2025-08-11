@@ -3104,11 +3104,15 @@ impl Peer {
     fn pre_transfer_leader(&mut self, peer: &metapb::Peer) -> bool {
         // Checks if safe to transfer leader.
         if self.raft_group.raft.has_pending_conf() {
+            let pending_conf_index = self.raft_group.raft.pending_conf_index;
+            let applied_index = self.get_store().applied_index();
             info!(
                 "reject transfer leader due to pending conf change";
                 "tag" => self.tag(),
                 "peer_id" => self.peer.get_id(),
                 "peer" => ?peer,
+                "pending_conf_index" => pending_conf_index,
+                "applied_index" => applied_index,
             );
             return false;
         }
@@ -3454,7 +3458,13 @@ impl Peer {
             match req.get_admin_request().get_cmd_type() {
                 AdminCmdType::Split | AdminCmdType::BatchSplit => {
                     if self.raft_group.raft.pending_conf_index > self.get_store().applied_index() {
-                        info!("there is a pending conf change, try later"; "region" => self.tag());
+                        let pending_conf_index = self.raft_group.raft.pending_conf_index;
+                        let applied_index = self.get_store().applied_index();
+                        info!("there is a pending conf change, try later";
+                            "region" => self.tag(),
+                            "pending_conf_index" => pending_conf_index,
+                            "applied_index" => applied_index,
+                        );
                         return Err(box_err!(PENDING_CONF_CHANGE_ERR_MSG));
                     }
                     ctx.insert(ProposalContext::PRE_PROCESS);
@@ -3658,10 +3668,14 @@ impl Peer {
         }
 
         if self.raft_group.raft.has_pending_conf() {
+            let pending_conf_index = self.raft_group.raft.pending_conf_index;
+            let applied_index = self.raft_group.raft.raft_log.applied;
             info!(
                 "there is a pending conf change, try later";
                 "tag" => self.tag(),
                 "peer_id" => self.peer.get_id(),
+                "pending_conf_index" => pending_conf_index,
+                "applied_index" => applied_index,
             );
             return Err(box_err!(
                 "{} there is a pending conf change, try later",
