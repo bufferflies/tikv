@@ -32,6 +32,7 @@ use kvengine::{
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
+use pb::VectorIndex;
 use pd_client::{pd_control::PdControl, PdClient};
 use protobuf::Message;
 use raft::eraftpb;
@@ -2076,6 +2077,7 @@ impl BackupCluster {
             let mut properties_helper =
                 kvengine::util::PropertiesHelper::new_from_shard_meta(&meta);
             properties_helper.set_rewrite_range_prefix(!self.is_inplace_restore());
+            let mut vector_indexes = HashMap::default();
             for shard in shards {
                 let mut all_l0_ssts: HashSet<u64> = HashSet::default();
                 for (&file_id, file_meta) in shard.meta.all_files() {
@@ -2087,6 +2089,19 @@ impl BackupCluster {
                         }
                     }
                 }
+                for vec_idx in shard.meta.vector_indexes.iter() {
+                    for file in vec_idx.files.iter() {
+                        vector_indexes
+                            .entry((vec_idx.table_id, vec_idx.col_id, vec_idx.index_id))
+                            .or_insert((HashMap::default(), vec_idx.get_snap_version()))
+                            .0
+                            .insert(file.get_id(), file.clone());
+                    }
+                }
+                meta.columnar_l2_snap_version = cmp::max(
+                    meta.columnar_l2_snap_version,
+                    shard.meta.columnar_l2_snap_version,
+                );
                 // Only add the filtered l0s from ShardMeta.unconverted_l0s
                 // to meta.unconverted_l0s
                 meta.unconverted_l0s.extend(
@@ -2120,6 +2135,18 @@ impl BackupCluster {
                     meta.schema.update_by_restore(0, 0, self.truncate_ts);
                 }
             }
+            meta.vector_indexes = vector_indexes
+                .into_iter()
+                .map(|((table_id, col_id, index_id), (files, snap_version))| {
+                    let mut vector_index = VectorIndex::default();
+                    vector_index.set_table_id(table_id);
+                    vector_index.set_col_id(col_id);
+                    vector_index.set_index_id(index_id);
+                    vector_index.set_files(files.into_values().collect());
+                    vector_index.set_snap_version(snap_version);
+                    vector_index
+                })
+                .collect();
 
             properties_helper.build_to_shard_meta(&mut meta);
             target_shards.push(meta);
