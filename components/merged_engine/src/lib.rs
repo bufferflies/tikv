@@ -6,7 +6,7 @@ mod preprocessor;
 
 use std::{
     cmp::max,
-    collections::VecDeque,
+    collections::{hash_map::Entry as HashMapEntry, VecDeque},
     mem, ops,
     path::{Path, PathBuf},
     sync::Arc,
@@ -54,7 +54,7 @@ use serde_derive::{Deserialize, Serialize};
 use tikv::config::TikvConfig;
 use tikv_util::{
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
-    debug, info, mpsc, warn,
+    debug, error, info, mpsc, warn,
 };
 
 use crate::{
@@ -250,7 +250,13 @@ impl MergedEngine {
             if region_id == 0 {
                 continue;
             }
-            let processor = Preprocessor::new(&raft, merged_store_id, region_id, &ctx.master_key);
+            let Some(processor) =
+                Preprocessor::new(&raft, merged_store_id, region_id, &ctx.master_key)
+            else {
+                error!("{} failed to create preprocessor", region_id);
+                debug_assert!(false);
+                continue;
+            };
             preprocessors.insert(region_id, processor);
         }
         let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
@@ -657,20 +663,24 @@ impl MergedEngine {
                 if region_id == 0 {
                     continue;
                 }
-                let progress = self.region_progresses.entry(region_id).or_insert_with(|| {
-                    let bin = origin_wb
-                        .get_latest_state(peer_id, region_id, REGION_META_KEY_PREFIX)
-                        .unwrap_or_else(|| {
-                            panic!("store {} region {} meta not found", store_id, region_id);
-                        });
-                    let mut region_local_state = RegionLocalState::new();
-                    region_local_state.merge_from_bytes(bin).unwrap();
-                    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(
-                        region_local_state.get_region().get_start_key(),
-                    )
-                    .unwrap_or_default();
-                    RegionProgress::new(keyspace_id, region_id)
-                });
+                let progress = match self.region_progresses.entry(region_id) {
+                    HashMapEntry::Occupied(e) => e.into_mut(),
+                    HashMapEntry::Vacant(e) => {
+                        let Some(bin) =
+                            origin_wb.get_latest_state(peer_id, region_id, REGION_META_KEY_PREFIX)
+                        else {
+                            info!("{}:{} update_wal: meta not found", store_id, region_id);
+                            continue;
+                        };
+                        let mut region_local_state = RegionLocalState::new();
+                        region_local_state.merge_from_bytes(bin).unwrap();
+                        let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(
+                            region_local_state.get_region().get_start_key(),
+                        )
+                        .unwrap_or_default();
+                        e.insert(RegionProgress::new(keyspace_id, region_id))
+                    }
+                };
                 if progress.truncated_index == TRUNCATE_ALL_INDEX {
                     debug!("update_wal: truncate all"; "region" => region_id);
                     continue;
@@ -795,17 +805,27 @@ impl MergedEngine {
             if self.raft.get_truncated_index(updated_region).is_none() {
                 // region is newly inserted, should process parent first.
                 update_queue.push_back(updated_region);
-                info!("newly inserted region {}", updated_region);
+                info!("{} sync_merged: region is newly inserted", updated_region);
                 continue;
             }
-            let preprocessor = self.preprocessors.entry(updated_region).or_insert_with(|| {
-                Preprocessor::new(
-                    &self.raft,
-                    ctx.store_id,
-                    updated_region,
-                    &self.ctx.master_key,
-                )
-            });
+            let preprocessor = match self.preprocessors.entry(updated_region) {
+                HashMapEntry::Occupied(e) => e.into_mut(),
+                HashMapEntry::Vacant(e) => {
+                    let Some(preprocessor) = Preprocessor::new(
+                        &self.raft,
+                        ctx.store_id,
+                        updated_region,
+                        &self.ctx.master_key,
+                    ) else {
+                        info!(
+                            "{} sync_merged: region is merged or destroyed",
+                            updated_region
+                        );
+                        continue;
+                    };
+                    e.insert(preprocessor)
+                }
+            };
             let mut preprocessor_ref = preprocessor.as_ref();
             let mut entries = Vec::new();
             let mut postponed = false;

@@ -25,7 +25,6 @@ use kvproto::{
         create_change_data, ChangeDataRequest, Event, EventLogType, EventRow, EventRowOpType,
         ResolvedTs,
     },
-    errorpb::EpochNotMatch,
     metapb,
     pdpb::StoreStats,
     raft_cmdpb::AdminRequest,
@@ -417,7 +416,7 @@ impl ReplicationWorker {
         let keyspace_region_ids = self.merged_engine.get_keyspace_regions(keyspace_id);
         let raft = self.merged_engine.get_raft();
         for region_id in keyspace_region_ids {
-            Self::report_region_to_rep_pd(&raft, &pd_client, region_id);
+            Self::report_region_to_rep_pd_by_id(&raft, &pd_client, region_id);
         }
         let states = task_svc.get_states_mut();
         let req_body = match states.feeds.entry(changefeed_id) {
@@ -463,26 +462,17 @@ impl ReplicationWorker {
 
     fn handle_register(&mut self, request: ChangeDataRequest, conn_id: ConnId) -> Result<()> {
         let region_id = request.region_id;
-        let keyspace_id = self.get_keyspace_id(region_id);
-        let conn = self.conns.get(&conn_id).unwrap();
-        let shard_opt = self.merged_engine.get_kv().get_shard(request.region_id);
-        if shard_opt.is_none() {
-            let mut error = cdcpb::Error::new();
-            let not_found = error.mut_region_not_found();
-            not_found.set_region_id(request.region_id);
-            Self::send_error_event(conn, &request, error);
+        let Some(shard) = self.merged_engine.get_kv().get_shard(request.region_id) else {
+            self.send_region_not_found(conn_id, &request);
             return Ok(());
-        }
-        let shard = shard_opt.unwrap();
+        };
         if shard.ver != request.get_region_epoch().get_version() {
-            let mut error = cdcpb::Error::new();
-            error.set_epoch_not_match(EpochNotMatch::new());
-            Self::send_error_event(conn, &request, error);
+            self.send_epoch_not_match(conn_id, &request);
             return Ok(());
         }
         info!("cdc register {:?}, conn_id {:?}", request, conn_id);
         let region_changes = self.region_requests.entry(region_id).or_default();
-        region_changes.keyspace_id = keyspace_id;
+        region_changes.keyspace_id = shard.keyspace_id;
         region_changes.add(&request, conn_id);
         self.conn_regions
             .entry(conn_id)
@@ -541,14 +531,38 @@ impl ReplicationWorker {
         Ok(())
     }
 
-    fn send_error_event(conn: &Conn, request: &ChangeDataRequest, error: cdcpb::Error) {
+    fn send_error_event(&self, conn_id: ConnId, request: &ChangeDataRequest, error: cdcpb::Error) {
+        let Some(conn) = self.conns.get(&conn_id) else {
+            warn!("send_error_event: conn not found"; "conn_id" => ?conn_id);
+            return;
+        };
+
         let mut event = Event::new();
         event.set_region_id(request.region_id);
         event.set_request_id(request.request_id);
         event.set_error(error);
-        conn.get_sink()
-            .unbounded_send(CdcEvent::Event(event), false)
-            .unwrap();
+        if let Err(err) = conn.get_sink().unbounded_send(CdcEvent::Event(event), true) {
+            warn!("send_error_event: failed"; "conn_id" => ?conn_id, "err" => ?err);
+        }
+    }
+
+    fn send_region_not_found(&self, conn_id: ConnId, request: &ChangeDataRequest) {
+        let mut error = cdcpb::Error::new();
+        error
+            .mut_region_not_found()
+            .set_region_id(request.region_id);
+        self.send_error_event(conn_id, request, error);
+    }
+
+    fn send_epoch_not_match(&self, conn_id: ConnId, request: &ChangeDataRequest) {
+        let mut error = cdcpb::Error::new();
+        let epoch_not_match = error.mut_epoch_not_match();
+        let rep_region =
+            Self::get_region_for_rep(&self.merged_engine.get_raft(), request.region_id);
+        if let Some(rep_region) = rep_region {
+            epoch_not_match.mut_current_regions().push(rep_region);
+        }
+        self.send_error_event(conn_id, request, error);
     }
 
     fn handle_deregister(&mut self, conn_id: ConnId) {
@@ -571,12 +585,16 @@ impl ReplicationWorker {
         }
     }
 
-    fn get_keyspace_id(&mut self, region_id: u64) -> u32 {
-        *self.region_to_keyspace.entry(region_id).or_insert_with(|| {
-            self.merged_engine
-                .get_region_progress(region_id)
-                .unwrap()
-                .keyspace_id
+    fn get_keyspace_id(&mut self, region_id: u64) -> Option<u32> {
+        Some(match self.region_to_keyspace.entry(region_id) {
+            Entry::Occupied(e) => *e.get(),
+            Entry::Vacant(e) => {
+                let keyspace_id = self
+                    .merged_engine
+                    .get_region_progress(region_id)?
+                    .keyspace_id;
+                *e.insert(keyspace_id)
+            }
         })
     }
 
@@ -812,16 +830,19 @@ impl ReplicationWorker {
         });
     }
 
-    fn report_region_to_rep_pd(raft: &RfEngine, rep_pd_cli: &Arc<dyn PdClient>, region_id: u64) {
-        if raft.get_truncated_index(region_id) == Some(TRUNCATE_ALL_INDEX) {
-            // region has been merged.
+    fn report_region_to_rep_pd_by_id(
+        raft: &RfEngine,
+        rep_pd_cli: &Arc<dyn PdClient>,
+        region_id: u64,
+    ) {
+        let Some(rep_region) = Self::get_region_for_rep(raft, region_id) else {
             return;
-        }
-        let mut region_local_state = rfstore::store::load_last_peer_state(raft, region_id).unwrap();
-        let mut region = region_local_state.take_region();
-        region.set_start_key(Self::trim_keyspace_prefix(region.get_start_key()));
-        region.set_end_key(Self::trim_keyspace_prefix(region.get_end_key()));
-        info!("report region to pd event {:?}", region);
+        };
+        Self::report_region_to_rep_pd(rep_pd_cli, rep_region);
+    }
+
+    fn report_region_to_rep_pd(rep_pd_cli: &Arc<dyn PdClient>, region: metapb::Region) {
+        info!("{} report region to pd event {:?}", region.id, region);
         let leader = region.get_peers()[0].clone();
         let mut stats = RegionStat::default();
         stats.approximate_kv_size = 100 * 1024 * 1024;
@@ -833,6 +854,20 @@ impl ReplicationWorker {
                 warn!("region heartbeat failed"; "err" => ?err);
             }
         });
+    }
+
+    // The keyspace prefix will be trimmed for `rep-pd` & `rep-cdc`.
+    fn get_region_for_rep(raft: &RfEngine, region_id: u64) -> Option<metapb::Region> {
+        if raft.get_truncated_index(region_id) == Some(TRUNCATE_ALL_INDEX) {
+            // region has been merged.
+            return None;
+        }
+
+        let mut region_local_state = rfstore::store::load_last_peer_state(raft, region_id)?;
+        let mut region = region_local_state.take_region();
+        region.set_start_key(Self::trim_keyspace_prefix(region.get_start_key()));
+        region.set_end_key(Self::trim_keyspace_prefix(region.get_end_key()));
+        Some(region)
     }
 
     fn trim_keyspace_prefix(mut region_key: &[u8]) -> Vec<u8> {
@@ -1028,16 +1063,34 @@ impl ReplicationWorker {
         admin: AdminRequest,
     ) -> Result<()> {
         let raft = self.merged_engine.get_raft();
-        let keyspace_id = self.get_keyspace_id(region_id);
-        let task_ctx = self.keyspaces.get(&keyspace_id).unwrap();
-        let pd_client = task_ctx.get_pd_client();
-        Self::report_region_to_rep_pd(&raft, &pd_client, region_id);
-        if admin.has_splits() {
-            let split = admin.get_splits();
-            for req in split.get_requests() {
-                Self::report_region_to_rep_pd(&raft, &pd_client, req.get_new_region_id());
+        let rep_region_opt = Self::get_region_for_rep(&raft, region_id);
+
+        if let Some(rep_region) = &rep_region_opt {
+            let Some(keyspace_id) = self.get_keyspace_id(region_id) else {
+                let err_msg = format!("handle_applied_admin: region {} not found", region_id);
+                debug_assert!(false, "{}", &err_msg);
+                return Err(Error::OtherError(err_msg));
+            };
+            let task_ctx = self.keyspaces.get(&keyspace_id).unwrap();
+            let pd_client = task_ctx.get_pd_client();
+            Self::report_region_to_rep_pd(&pd_client, rep_region.clone());
+            if admin.has_splits() {
+                let split = admin.get_splits();
+                for req in split.get_requests() {
+                    Self::report_region_to_rep_pd_by_id(&raft, &pd_client, req.get_new_region_id());
+                }
             }
+        } else {
+            info!("{} handle_applied_admin: region is merged", region_id);
         }
+
+        let mut error = cdcpb::Error::new();
+        let epoch_not_match = error.mut_epoch_not_match();
+        // Set `region_not_found` if `rep_region_opt` is `None` ?
+        if let Some(rep_region) = rep_region_opt {
+            epoch_not_match.mut_current_regions().push(rep_region);
+        }
+
         if let Some(region_requests) = self.region_requests.get_mut(&region_id) {
             let mut requests_to_remove = vec![];
             for (&request_id, request) in &region_requests.requests {
@@ -1051,10 +1104,11 @@ impl ReplicationWorker {
                 let mut event = Event::new();
                 event.set_region_id(region_id);
                 event.set_request_id(request_id);
-                let mut error = cdcpb::Error::new();
-                error.set_epoch_not_match(EpochNotMatch::new());
-                event.set_error(error);
-                info!("{} send error event {:?}", region_id, event);
+                event.set_error(error.clone());
+                info!(
+                    "{} handle_applied_admin: send error event {:?}",
+                    region_id, event
+                );
                 conn.get_sink()
                     .unbounded_send(CdcEvent::Event(event), false)
                     .map_err(|e| cdc::Error::from(e))?;

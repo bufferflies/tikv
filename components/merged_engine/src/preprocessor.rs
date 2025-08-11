@@ -6,7 +6,7 @@ use kvengine::{ShardMeta, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY};
 use kvproto::{metapb, raft_serverpb::MergeState};
 use raft_proto::eraftpb::HardState;
 use rfstore::store::{state::RaftState, PreprocessRef, RAFT_INIT_LOG_TERM};
-use tikv_util::codec::bytes::encode_bytes;
+use tikv_util::{codec::bytes::encode_bytes, info};
 
 pub(crate) struct Preprocessor {
     preprocessed_index: u64,
@@ -30,11 +30,12 @@ impl Preprocessor {
         store_id: u64,
         region_id: u64,
         master_key: &MasterKey,
-    ) -> Self {
-        let shard_meta = rfstore::store::load_engine_meta(raft, store_id, region_id)
-            .unwrap_or_else(|| {
-                panic!("failed to load engine meta for region {}", region_id);
-            });
+    ) -> Option<Self> {
+        let shard_meta =
+            rfstore::store::load_engine_meta(raft, store_id, region_id).or_else(|| {
+                info!("{} new_preprocessor: no engine meta for region", region_id);
+                None
+            })?;
         let encryption_key = shard_meta
             .get_property(ENCRYPTION_KEY)
             .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
@@ -58,7 +59,7 @@ impl Preprocessor {
         raft_hard_state.set_term(RAFT_INIT_LOG_TERM);
         raft_state.set_last_preprocessed_index(raft_index);
         raft_state.set_hard_state(&raft_hard_state);
-        Self {
+        Some(Self {
             preprocessed_index: raft_index,
             region,
             preprocessed_region: None,
@@ -72,7 +73,7 @@ impl Preprocessor {
             want_rollback_merge_peers: collections::HashSet::default(),
             learner_skip_idx: raft_index,
             encryption_key,
-        }
+        })
     }
 
     pub(crate) fn as_ref(&mut self) -> PreprocessRef<'_> {
