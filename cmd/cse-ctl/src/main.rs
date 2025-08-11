@@ -6,6 +6,7 @@ extern crate serde_derive;
 
 mod archive;
 mod backup;
+mod check_columnar;
 mod check_table;
 mod common;
 mod dfsgc;
@@ -33,6 +34,7 @@ use slog::Drain;
 use crate::{
     archive::{execute_archive, execute_show_archive, ArchiveArgs, ShowArchiveArgs},
     backup::{execute_backup, execute_show_backup, BackupArgs, ShowBackupArgs},
+    check_columnar::{execute_check_columnar, CheckColumnarArgs},
     check_table::{execute_check_table, CheckTableArgs},
     dfsgc::{execute_dfsgc, DfsGcArgs},
     http::HttpArgs,
@@ -94,6 +96,9 @@ fn main() {
         Region(region_cmd) => {
             execute_region_command(region_cmd);
         }
+        CheckColumnar(args) => {
+            execute_check_columnar(args);
+        }
     }
 }
 
@@ -121,8 +126,14 @@ fn init_logger() {
 }
 
 fn init_logger_impl<W: 'static + io::Write + Send>(writer: W, level: slog::Level) {
-    let decorator = slog_term::PlainDecorator::new(writer);
-    let drain = slog_term::CompactFormat::new(decorator).build();
+    let drain: Box<dyn slog::Drain<Ok = (), Err = std::io::Error> + Send> =
+        if atty::is(atty::Stream::Stdout) {
+            let dec = slog_term::TermDecorator::new().build();
+            Box::new(slog_term::CompactFormat::new(dec).build())
+        } else {
+            let dec = slog_term::PlainDecorator::new(writer);
+            Box::new(slog_term::CompactFormat::new(dec).build())
+        };
     let drain = std::sync::Mutex::new(drain).filter_level(level).fuse();
     let logger = slog::Logger::root(drain, slog::o!());
     slog_global::set_global(logger);
@@ -159,6 +170,8 @@ pub enum Commands {
     ResolveLock(ResolveLockArgs),
     /// CheckTable check data consistency on each table.
     CheckTable(CheckTableArgs),
+    /// CheckColumnar check columnar data consistency.
+    CheckColumnar(CheckColumnarArgs),
     /// Mvcc gets the mvcc information of given keys.
     Mvcc(MvccArgs),
     /// Show some information.

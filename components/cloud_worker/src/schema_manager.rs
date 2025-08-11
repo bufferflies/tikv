@@ -19,8 +19,7 @@ use dashmap::DashMap;
 use http::Request;
 use hyper::Body;
 use kvengine::{
-    dfs,
-    dfs::Dfs,
+    dfs::{self, Dfs, S3Fs},
     table::{
         columnar::{
             new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
@@ -35,6 +34,7 @@ use kvengine::{
 };
 use kvproto::metapb::Store;
 use native_br::common::send_request_to_store_with_retry;
+use pd_client::PdClient;
 use rfstore::store::PdIdAllocator;
 use schema::schema::{
     convert_column_infos_to_tipb, ColumnInfo, IndexInfo, StorageClassSpec, TableInfo,
@@ -326,6 +326,20 @@ impl Default for SchemaManagerConfig {
     }
 }
 
+pub struct SchemaMgrContext {
+    pub s3fs: Arc<S3Fs>,
+    pub pd: Arc<dyn PdClient>,
+}
+
+impl From<Arc<Context>> for SchemaMgrContext {
+    fn from(ctx: Arc<Context>) -> Self {
+        Self {
+            s3fs: ctx.s3fs.clone(),
+            pd: ctx.pd.clone(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SchemaManager {
     core: Arc<SchemaManagerCore>,
@@ -340,8 +354,8 @@ impl Deref for SchemaManager {
 }
 
 impl SchemaManager {
-    pub(crate) fn new(
-        ctx: Arc<Context>,
+    pub fn new(
+        ctx: Arc<SchemaMgrContext>,
         security_mgr: Arc<SecurityManager>,
         security_config: SecurityConfig,
         config: SchemaManagerConfig,
@@ -413,7 +427,7 @@ impl SchemaManager {
         });
     }
 
-    pub(crate) async fn refresh_keyspace_stats(
+    pub async fn refresh_keyspace_stats(
         &self,
         keyspace_stats: &mut HashMap<u32, Vec<ShardStatsLite>>,
         stores: &[Store],
@@ -1004,7 +1018,7 @@ struct BlacklistKeyspace {
 }
 
 pub struct SchemaManagerCore {
-    ctx: Arc<Context>,
+    ctx: Arc<SchemaMgrContext>,
     security_mgr: Arc<SecurityManager>,
     config: SchemaManagerConfig,
     txn_client: TxnClient,
@@ -1015,7 +1029,7 @@ pub struct SchemaManagerCore {
 
 impl SchemaManagerCore {
     pub(crate) fn new(
-        ctx: Arc<Context>,
+        ctx: Arc<SchemaMgrContext>,
         security_mgr: Arc<SecurityManager>,
         config: SchemaManagerConfig,
         txn_client: TxnClient,
@@ -1069,7 +1083,7 @@ impl SchemaManagerCore {
             .map_or(false, |blacklist| blacklist.contains(&keyspace_id))
     }
 
-    fn get_tikv_stores(&self) -> (Vec<Store>, Vec<Store> /* stores_not_match */) {
+    pub fn get_tikv_stores(&self) -> (Vec<Store>, Vec<Store> /* stores_not_match */) {
         let all_stores = match get_all_stores_except_tiflash(&self.ctx.pd) {
             Ok(stores) => stores,
             Err(err) => {
@@ -1090,6 +1104,10 @@ impl SchemaManagerCore {
         } else {
             (all_stores, vec![])
         }
+    }
+
+    pub fn get_schema_file_from_local(&self, keyspace_id: u32) -> Result<Option<SchemaFile>> {
+        read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id)
     }
 }
 

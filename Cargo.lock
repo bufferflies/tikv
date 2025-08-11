@@ -1583,6 +1583,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "colored"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
+dependencies = [
+ "lazy_static",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "concurrency_manager"
 version = "0.0.1"
 dependencies = [
@@ -1919,10 +1929,13 @@ version = "0.1.0"
 dependencies = [
  "api_version",
  "async-trait",
+ "atty",
  "bytes",
  "chrono",
  "clap 3.2.22",
  "cloud_encryption",
+ "cloud_worker",
+ "colored",
  "engine_traits",
  "farmhash",
  "futures 0.3.28",

@@ -1778,6 +1778,10 @@ impl SnapAccessCore {
         tables
     }
 
+    pub fn get_columnar_table_ids(&self) -> Vec<i64> {
+        self.data.columnar_table_ids.clone()
+    }
+
     pub(crate) fn validate_cached_value(&self, task: &ValidationTask, value_cache: &ValueCache) {
         if self.get_write_sequence() == task.write_seq {
             task.validated.store(true, Ordering::Relaxed);

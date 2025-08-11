@@ -50,7 +50,7 @@ use replication_worker::{CdcMsg, ReplicationWorker, ReplicationWorkerConfig};
 #[cfg(feature = "testexport")]
 pub use schema_manager::get_keyspace_stats_from_store;
 pub use schema_manager::{
-    broadcast_schema_update_to_all_stores, SchemaManager, SchemaManagerConfig,
+    broadcast_schema_update_to_all_stores, SchemaManager, SchemaManagerConfig, SchemaMgrContext,
 };
 use security::{SecurityConfig, SecurityManager};
 pub use server::get_cop_req_tag;
@@ -339,7 +339,7 @@ fn start_server(
 
     if config.schema_manager.enabled {
         let schema_manager = SchemaManager::new(
-            ctx.clone(),
+            Arc::new(ctx.clone().into()),
             security_mgr.clone(),
             config.security.clone(),
             config.schema_manager.clone(),

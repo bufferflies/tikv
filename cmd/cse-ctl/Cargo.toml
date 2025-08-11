@@ -7,10 +7,13 @@ edition = "2021"
 [dependencies]
 api_version = { workspace = true }
 async-trait = "0.1"
+atty = "0.2"
 bytes = "1.0"
 chrono = "0.4"
 clap = { version = "3.2", features = ["derive"] }
 cloud_encryption = { workspace = true }
+cloud_worker = { workspace = true }
+colored = "2.0"
 engine_traits = { workspace = true }
 farmhash = "1.1.5"
 futures = "0.3"
