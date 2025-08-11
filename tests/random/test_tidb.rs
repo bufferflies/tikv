@@ -3,7 +3,7 @@
 use std::{
     io::Write as _,
     ops::Div,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
@@ -389,6 +389,14 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
         conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
+        conf.rfengine.wal_secondary_dir = if switches.enable_wal_double_write {
+            Path::new(&conf.rfengine.wal_sync_dir)
+                .with_file_name("wal2")
+                .to_string_lossy()
+                .to_string()
+        } else {
+            "".to_string()
+        };
 
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
@@ -995,6 +1003,7 @@ pub(crate) struct Switches {
     pub txn_check_backup_ts: bool,
     pub enable_tiflash_write_node: bool,
     pub enable_value_cache: bool,
+    pub enable_wal_double_write: bool,
     pub tidb_next_gen: bool,
 }
 
@@ -1024,6 +1033,7 @@ impl Switches {
         let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.5);
         let enable_tiflash_write_node = env_switch(ENABLE_TIFLASH_WRITE_NODE_ENV_KEY);
         let enable_value_cache = env_switch_opt("ENABLE_VALUE_CACHE", 0);
+        let enable_wal_double_write = env_switch_opt("ENABLE_WAL_DOUBLE_WRITE", 0);
         let tidb_next_gen = env_switch_opt("TIDB_NEXT_GEN", 0);
 
         Self {
@@ -1044,6 +1054,7 @@ impl Switches {
             txn_check_backup_ts,
             enable_tiflash_write_node,
             enable_value_cache,
+            enable_wal_double_write,
             tidb_next_gen,
         }
     }

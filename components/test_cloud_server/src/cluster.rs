@@ -1354,7 +1354,8 @@ pub fn new_test_config(
     config.rocksdb.max_sub_compactions = 1;
     config.rfengine.target_file_size = ReadableSize::kb(128);
     config.rfengine.wal_sync_dir = format!("{}/{}/wal", base_dir.to_str().unwrap(), node_id);
-    config.rfengine.wal_secondary_dir = format!("{}/{}/wal2", base_dir.to_str().unwrap(), node_id);
+    // config.rfengine.wal_secondary_dir = format!("{}/{}/wal2",
+    // base_dir.to_str().unwrap(), node_id);
     config.kvengine.block_cache_type = BlockCacheType::Quick;
     config.kvengine.ia.auto_ia_check_interval = ReadableDuration::secs(10);
     config.kvengine.value_cache_capacity = 0.into();

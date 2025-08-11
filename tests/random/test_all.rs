@@ -2,6 +2,7 @@
 
 use std::{
     io::Write as _,
+    path::Path,
     sync::{atomic::Ordering, Arc, RwLock},
     time::Duration,
 };
@@ -401,6 +402,14 @@ fn prepare_cluster(
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.wal_chunk_target_file_size = rfengine_target_file_size / 8;
         conf.rfengine.dfs_worker_memory_limit = dfs_worker_memory_limit.into();
+        conf.rfengine.wal_secondary_dir = if switches.enable_wal_double_write {
+            Path::new(&conf.rfengine.wal_sync_dir)
+                .with_file_name("wal2")
+                .to_string_lossy()
+                .to_string()
+        } else {
+            "".to_string()
+        };
 
         conf.kvengine.compaction_tombs_count = 100;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(3));
@@ -599,6 +608,7 @@ pub(crate) struct Switches {
     pub enable_oss_chaos: bool,
     pub txn_check_backup_ts: bool,
     pub enable_value_cache: bool,
+    pub enable_wal_double_write: bool,
 }
 
 impl Switches {
@@ -608,12 +618,14 @@ impl Switches {
         let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
         let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
         let enable_value_cache = env_switch_opt("ENABLE_VALUE_CACHE", 0);
+        let enable_wal_double_write = env_switch_opt("ENABLE_WAL_DOUBLE_WRITE", 0);
 
         Self {
             ia_table_ratio,
             enable_oss_chaos,
             txn_check_backup_ts,
             enable_value_cache,
+            enable_wal_double_write,
         }
     }
 }

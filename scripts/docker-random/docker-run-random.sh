@@ -139,6 +139,9 @@ while [[ $# -gt 0 ]]; do
 	--enable-value-cache)
 		RUN_ARGS+=("--enable-value-cache")
 		;;
+	--enable-wal-double-write)
+		RUN_ARGS+=("--enable-wal-double-write")
+		;;
 	--enable-tiflash-write-node)
 		RUN_ARGS+=("--enable-tiflash-write-node")
 		;;

@@ -38,6 +38,7 @@ UPGRADE_TEST_DURATION="60s"
 
 ENABLE_KV_ENGINE_META_DIFF=1
 ENABLE_VALUE_CACHE=0
+ENABLE_WAL_DOUBLE_WRITE=0
 ENABLE_TIFLASH_WRITE_NODE=0
 
 TIDB_NEXT_GEN=0
@@ -118,6 +119,9 @@ while [ $# -gt 0 ]; do
     --enable-value-cache)
         ENABLE_VALUE_CACHE=1
         ;;
+    --enable-wal-double-write)
+        ENABLE_WAL_DOUBLE_WRITE=1
+        ;;
     --enable-tiflash-write-node)
         ENABLE_TIFLASH_WRITE_NODE=1
         ;;
@@ -167,6 +171,7 @@ export TEST_DUR_AFTER_DOWNGRADE="$UPGRADE_TEST_DURATION"
 
 export ENABLE_KV_ENGINE_META_DIFF
 export ENABLE_VALUE_CACHE
+export ENABLE_WAL_DOUBLE_WRITE
 export ENABLE_TIFLASH_WRITE_NODE
 
 export TIDB_NEXT_GEN
