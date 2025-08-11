@@ -754,10 +754,10 @@ pub fn write_engine_meta_diff(
         return;
     };
 
-    let mut merged_diffs = get_engine_meta_diffs(raft, Some(raft_wb), peer_id, shard_id);
+    let mut merged_diffs = get_engine_meta_diffs(raft, Some(raft_wb), peer_id);
     merged_diffs.change_sets.push(cs.clone());
     let shard_meta_bin =
-        get_states_from_wb_or_engine(raft, Some(raft_wb), peer_id, shard_id, KV_ENGINE_META_KEY)
+        get_states_from_wb_or_engine(raft, Some(raft_wb), peer_id, KV_ENGINE_META_KEY)
             .unwrap_or_else(|| panic!("{} shard meta not exists", shard_meta.tag()));
     let shard_meta_size = shard_meta_bin.len();
     let need_rewrite =
@@ -782,13 +782,12 @@ pub fn write_engine_meta_diff(
 
 fn get_states_from_wb_or_engine(
     raft: &rfengine::RfEngine,
-    raft_wb: Option<&mut rfengine::WriteBatch>,
+    raft_wb: Option<&rfengine::WriteBatch>,
     peer_id: u64,
-    region_id: u64,
     key: &[u8],
 ) -> Option<Bytes> {
     if let Some(raft_wb) = raft_wb {
-        match raft_wb.get_state(peer_id, region_id, key) {
+        match raft_wb.get_state(peer_id, key) {
             Some(v) if !v.is_empty() => Some(Bytes::copy_from_slice(v)),
             Some([]) => None,
             None => raft.get_state(peer_id, key),
@@ -805,19 +804,14 @@ fn get_states_from_wb_or_engine(
 
 fn get_engine_meta_diffs(
     raft: &rfengine::RfEngine,
-    mut raft_wb: Option<&mut rfengine::WriteBatch>,
+    raft_wb: Option<&rfengine::WriteBatch>,
     peer_id: u64,
-    shard_id: u64,
 ) -> kvenginepb::ChangeSets {
     let mut last_seq = 0;
 
-    let mut merged_diffs = if let Some(diffs) = get_states_from_wb_or_engine(
-        raft,
-        raft_wb.as_deref_mut(),
-        peer_id,
-        shard_id,
-        KV_ENGINE_META_DIFF_KEY,
-    ) {
+    let mut merged_diffs = if let Some(diffs) =
+        get_states_from_wb_or_engine(raft, raft_wb, peer_id, KV_ENGINE_META_DIFF_KEY)
+    {
         let mut change_sets = kvenginepb::ChangeSets::default();
         change_sets.merge_from_bytes(&diffs).unwrap();
         if !change_sets.change_sets.is_empty() {
@@ -828,13 +822,9 @@ fn get_engine_meta_diffs(
         kvenginepb::ChangeSets::default()
     };
 
-    if let Some(snap_diff) = get_states_from_wb_or_engine(
-        raft,
-        raft_wb,
-        peer_id,
-        shard_id,
-        KV_ENGINE_META_SNAP_DIFF_KEY,
-    ) {
+    if let Some(snap_diff) =
+        get_states_from_wb_or_engine(raft, raft_wb, peer_id, KV_ENGINE_META_SNAP_DIFF_KEY)
+    {
         let mut cs = kvenginepb::ChangeSet::default();
         cs.merge_from_bytes(&snap_diff).unwrap();
         if cs.get_sequence() >= last_seq {
@@ -867,7 +857,7 @@ pub fn load_engine_meta(
     let mut change_set = kvenginepb::ChangeSet::default();
     change_set.merge_from_bytes(&shard_meta_bin).unwrap();
     let mut shard_meta = ShardMeta::new(store_id, &change_set);
-    let meta_diffs = get_engine_meta_diffs(raft, None, peer_id, shard_meta.id);
+    let meta_diffs = get_engine_meta_diffs(raft, None, peer_id);
     for cs in meta_diffs.change_sets.iter() {
         shard_meta.apply_change_set(cs);
     }
@@ -946,6 +936,16 @@ pub fn load_last_raft_state(raft: &rfengine::RfEngine, peer_id: u64) -> Option<R
             raft_state.unmarshal(&v);
             raft_state
         })
+}
+
+pub fn load_last_raft_state_from_wb(wb: &rfengine::WriteBatch, peer_id: u64) -> Option<RaftState> {
+    let bin = wb.get_latest_state(peer_id, &[RAFT_STATE_KEY_BYTE])?;
+    if bin.is_empty() {
+        return None;
+    }
+    let mut raft_state = RaftState::default();
+    raft_state.unmarshal(bin);
+    Some(raft_state)
 }
 
 pub fn collect_prefix_regions(

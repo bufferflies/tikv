@@ -23,29 +23,20 @@ use kvengine::{
     dfs::S3Fs, ia::util::IaConfig, limiter::StoreLimiter, MetaIterator, Shard, ShardMeta, TERM_KEY,
 };
 use kvenginepb::ChangeSet;
-use kvproto::{
-    metapb,
-    metapb::Peer,
-    raft_cmdpb::AdminRequest,
-    raft_serverpb::{RegionLocalState, StoreIdent},
-};
+use kvproto::{metapb, metapb::Peer, raft_cmdpb::AdminRequest, raft_serverpb::StoreIdent};
 use native_br::common::{
     collect_snapshot_meta_rlog_files, replay_wal_logs_from_backup, ReplayWalLogsContext,
 };
 use pd_client::PdClient;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
-use rfengine::{
-    iterator::WalIterator, RaftLogOp, RfEngine, WriteBatch, RAFT_STATE_KEY_BYTE,
-    REGION_META_KEY_PREFIX, TRUNCATE_ALL_INDEX,
-};
+use rfengine::{iterator::WalIterator, RaftLogOp, RfEngine, WriteBatch, TRUNCATE_ALL_INDEX};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::{
     store::{
-        get_preprocess_cmd,
-        state::{RaftApplyState, RaftState},
-        write_engine_meta, Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator,
-        PeerMsg, PreprocessContext, PreprocessRef, RecoverHandler, StoreMsg, RAFT_INIT_LOG_INDEX,
+        get_preprocess_cmd, load_last_raft_state_from_wb, state::RaftApplyState, write_engine_meta,
+        Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator, PeerMsg,
+        PreprocessContext, PreprocessRef, RecoverHandler, StoreMsg, RAFT_INIT_LOG_INDEX,
     },
     RaftRouter,
 };
@@ -657,7 +648,7 @@ impl MergedEngine {
         wal_iterator.iterate_write_batch(|origin_wb| {
             origin_batches.push(origin_wb);
         })?;
-        for mut origin_wb in origin_batches {
+        for origin_wb in origin_batches {
             let region_peer_map = origin_wb.get_region_peer_map();
             for (&region_id, &peer_id) in &region_peer_map {
                 if region_id == 0 {
@@ -666,14 +657,11 @@ impl MergedEngine {
                 let progress = match self.region_progresses.entry(region_id) {
                     HashMapEntry::Occupied(e) => e.into_mut(),
                     HashMapEntry::Vacant(e) => {
-                        let Some(bin) =
-                            origin_wb.get_latest_state(peer_id, region_id, REGION_META_KEY_PREFIX)
+                        let Some(region_local_state) = origin_wb.get_latest_peer_state(peer_id)
                         else {
-                            info!("{}:{} update_wal: meta not found", store_id, region_id);
+                            info!("{}:{} update_wal: no peer state in wb", store_id, region_id);
                             continue;
                         };
-                        let mut region_local_state = RegionLocalState::new();
-                        region_local_state.merge_from_bytes(bin).unwrap();
                         let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(
                             region_local_state.get_region().get_start_key(),
                         )
@@ -692,16 +680,13 @@ impl MergedEngine {
                         progress.truncated_index = truncated_idx;
                     }
                 }
-                if let Some(v) =
-                    origin_wb.get_latest_state(peer_id, region_id, &[RAFT_STATE_KEY_BYTE])
-                {
-                    if !v.is_empty() {
-                        let mut raft_state = RaftState::default();
-                        raft_state.unmarshal(v);
-                        if raft_state.get_commit() > progress.commit_index {
-                            progress.commit_index = raft_state.get_commit();
-                            debug!("update_wal: advance commit index {}", progress.commit_index; "region" => region_id);
-                        }
+                if let Some(raft_state) = load_last_raft_state_from_wb(&origin_wb, peer_id) {
+                    if raft_state.get_commit() > progress.commit_index {
+                        progress.commit_index = raft_state.get_commit();
+                        debug!(
+                            "{} update_wal: advance commit index {}",
+                            region_id, progress.commit_index
+                        );
                     }
                 }
                 origin_wb.read_peer_logs(peer_id, |logs| {

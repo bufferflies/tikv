@@ -6,9 +6,11 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes};
+use kvproto::raft_serverpb::RegionLocalState;
+use protobuf::Message;
 use raft_proto::eraftpb;
 
-use crate::{log_batch::RaftLogOp, PeerMeta};
+use crate::{log_batch::RaftLogOp, PeerMeta, REGION_META_KEY_PREFIX};
 
 /// `WriteBatch` contains multiple regions' `RegionBatch`.
 #[derive(Default)]
@@ -23,37 +25,39 @@ impl WriteBatch {
         }
     }
 
-    pub(crate) fn get_peer(&mut self, peer_id: u64, region_id: u64) -> &mut PeerBatch {
+    pub(crate) fn get_peer_mut(&mut self, peer_id: u64, region_id: u64) -> &mut PeerBatch {
         self.peers
             .entry(peer_id)
             .or_insert_with(|| PeerBatch::new(peer_id, region_id))
     }
 
+    pub(crate) fn get_peer(&self, peer_id: u64) -> Option<&PeerBatch> {
+        self.peers.get(&peer_id)
+    }
+
     pub fn append_raft_log(&mut self, peer_id: u64, region_id: u64, entry: &eraftpb::Entry) {
         let op = RaftLogOp::new(entry);
-        self.get_peer(peer_id, region_id).append_raft_log(op);
+        self.get_peer_mut(peer_id, region_id).append_raft_log(op);
     }
 
     pub fn truncate_raft_log(&mut self, peer_id: u64, region_id: u64, index: u64) {
-        self.get_peer(peer_id, region_id).truncate(index);
+        self.get_peer_mut(peer_id, region_id).truncate(index);
     }
 
     pub fn set_state(&mut self, peer_id: u64, region_id: u64, key: &[u8], val: &[u8]) {
-        self.get_peer(peer_id, region_id).set_state(key, val);
+        self.get_peer_mut(peer_id, region_id).set_state(key, val);
     }
 
-    pub fn get_state(&mut self, peer_id: u64, region_id: u64, key: &[u8]) -> Option<&[u8]> {
-        self.get_peer(peer_id, region_id).get_state(key)
+    pub fn get_state(&self, peer_id: u64, key: &[u8]) -> Option<&[u8]> {
+        self.get_peer(peer_id)?.get_state(key)
     }
 
-    pub fn get_latest_state(
-        &mut self,
-        peer_id: u64,
-        region_id: u64,
-        key_prefix: &[u8],
-    ) -> Option<&[u8]> {
-        self.get_peer(peer_id, region_id)
-            .get_latest_state(key_prefix)
+    pub fn get_latest_state(&self, peer_id: u64, key_prefix: &[u8]) -> Option<&[u8]> {
+        self.get_peer(peer_id)?.get_latest_state(key_prefix)
+    }
+
+    pub fn get_latest_peer_state(&self, peer_id: u64) -> Option<RegionLocalState> {
+        self.get_peer(peer_id)?.get_latest_peer_state()
     }
 
     pub fn get_truncated_idx(&self, peer_id: u64) -> Option<u64> {
@@ -173,6 +177,13 @@ impl PeerBatch {
             .rev()
             .find(|(k, _)| k.starts_with(key_prefix))
             .map(|(_, v)| v.chunk())
+    }
+
+    pub fn get_latest_peer_state(&self) -> Option<RegionLocalState> {
+        let bin = self.get_latest_state(REGION_META_KEY_PREFIX)?;
+        let mut region_local_state = RegionLocalState::new();
+        region_local_state.merge_from_bytes(bin).unwrap();
+        Some(region_local_state)
     }
 
     pub fn append_raft_log(&mut self, op: RaftLogOp) {

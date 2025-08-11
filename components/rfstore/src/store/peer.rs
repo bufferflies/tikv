@@ -2181,7 +2181,7 @@ impl<'a> PreprocessRef<'a> {
                     // raft_wb too.
                     || ctx
                         .raft_wb
-                        .get_state(new_peer_id, new_region.id, KV_ENGINE_META_KEY)
+                        .get_state(new_peer_id, KV_ENGINE_META_KEY)
                         .is_some()
                 {
                     info!(
