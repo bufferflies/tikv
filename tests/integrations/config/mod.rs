@@ -755,6 +755,7 @@ fn test_serde_custom_tikv_config() {
         ca_path: "invalid path".to_owned(),
         cert_path: "invalid path".to_owned(),
         key_path: "invalid path".to_owned(),
+        cert_reload_interval: ReadableDuration::ZERO,
         override_ssl_target: "".to_owned(),
         cert_allowed_cn,
         redact_info_log: Some(true),

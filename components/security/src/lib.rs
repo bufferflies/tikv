@@ -1,6 +1,7 @@
 // Copyright 2017 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod http;
+mod metrics;
 pub use crate::http::{Error as HttpClientError, HttpClient, RestfulClient, Result as HttpResult};
 
 #[macro_use]
@@ -24,8 +25,9 @@ use grpcio::{
     ServerCredentialsFetcher,
 };
 use kvproto::encryptionpb::MasterKeyKms;
+use tikv_util::config::ReadableDuration;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct SecurityConfig {
@@ -33,6 +35,7 @@ pub struct SecurityConfig {
     pub ca_path: String,
     pub cert_path: String,
     pub key_path: String,
+    pub cert_reload_interval: ReadableDuration,
     // Test purpose only.
     #[serde(skip)]
     pub override_ssl_target: String,
@@ -90,6 +93,22 @@ pub struct ClientSuite {
     pub ca: Pem,
     pub client_cert: Pem,
     pub client_key: Secret,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            ca_path: String::default(),
+            cert_path: String::default(),
+            key_path: String::default(),
+            cert_reload_interval: ReadableDuration::hours(1),
+            override_ssl_target: String::default(),
+            cert_allowed_cn: HashSet::default(),
+            redact_info_log: None,
+            encryption: EncryptionConfig::default(),
+            master_key: cloud_encryption::MasterKeyConfig::default(),
+        }
+    }
 }
 
 impl SecurityConfig {

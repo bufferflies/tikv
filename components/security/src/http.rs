@@ -4,12 +4,14 @@
 
 use std::{
     convert::TryFrom,
+    error::Error as StdError,
     fs, io, iter,
+    result::Result as StdResult,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use bstr::ByteSlice;
@@ -17,11 +19,16 @@ use bytes::Bytes;
 use http::{Method, Request, StatusCode};
 use hyper::{client::HttpConnector, server::conn::AddrIncoming, Body, Uri};
 use hyper_rustls::{HttpsConnector, TlsAcceptor};
-use rustls::server::AllowAnyAnonymousOrAuthenticatedClient;
+use rustls::{
+    client::ResolvesClientCert,
+    server::{AllowAnyAnonymousOrAuthenticatedClient, ClientHello, ResolvesServerCert},
+    sign::{any_supported_type, CertifiedKey},
+    SignatureScheme,
+};
 use rustls_pemfile::Item;
 use tikv_util::{box_err, debug, error, time::Instant, Either};
 
-use crate::SecurityManager;
+use crate::{metrics::HYPER_RELOAD_CERT_COUNTER, SecurityConfig, SecurityManager};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -36,7 +43,7 @@ pub enum Error {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Other(#[from] Box<dyn std::error::Error + Sync + Send>),
+    Other(#[from] Box<dyn StdError + Sync + Send>),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -61,13 +68,13 @@ impl SecurityManager {
 
     fn tls_acceptor(&self, incoming: AddrIncoming) -> Result<TlsAcceptor> {
         let ca = load_root_store(&self.cfg.ca_path)?;
-        let cert = load_certs(&self.cfg.cert_path)?;
-        let key = load_key(&self.cfg.key_path)?;
+        let cert_resolver = ReloadWhenChanged::new(self.cfg.clone())?;
 
         let tls_config = rustls::ServerConfig::builder()
             .with_safe_defaults()
             .with_client_cert_verifier(AllowAnyAnonymousOrAuthenticatedClient::new(ca).boxed())
-            .with_single_cert(cert, key)?;
+            .with_cert_resolver(cert_resolver);
+
         let acceptor = TlsAcceptor::builder()
             .with_tls_config(tls_config)
             .with_alpn_protocols(vec![b"http/1.1".to_vec(), b"h2".to_vec()])
@@ -81,12 +88,11 @@ impl SecurityManager {
             Ok(HttpClient::Http(hyper::Client::new()))
         } else {
             let ca = load_root_store(&self.cfg.ca_path)?;
-            let cert = load_certs(&self.cfg.cert_path)?;
-            let key = load_key(&self.cfg.key_path)?;
+            let cert_resolver = ReloadWhenChanged::new(self.cfg.clone())?;
             let tls_config = rustls::ClientConfig::builder()
                 .with_safe_defaults()
                 .with_root_certificates(ca)
-                .with_client_auth_cert(cert, key)?;
+                .with_client_cert_resolver(cert_resolver);
 
             let connector = hyper_rustls::HttpsConnectorBuilder::new()
                 .with_tls_config(tls_config)
@@ -98,9 +104,115 @@ impl SecurityManager {
     }
 }
 
+struct ReloadWhenChanged {
+    cfg: Arc<SecurityConfig>,
+    latest: Mutex<CertState>,
+}
+
+struct CertState {
+    key: Arc<CertifiedKey>,
+    atime: SystemTime,
+    mtime: SystemTime,
+}
+
+#[derive(Debug)]
+enum CertType {
+    Server,
+    Client,
+}
+
+impl ReloadWhenChanged {
+    fn new(cfg: Arc<SecurityConfig>) -> StdResult<Arc<Self>, Box<dyn StdError + Sync + Send>> {
+        let mtime = fs::metadata(&cfg.cert_path)?.modified()?;
+        Ok(Arc::new(Self {
+            cfg: cfg.clone(),
+            latest: Mutex::new(CertState {
+                key: Self::load_certified_key(&cfg)?,
+                atime: SystemTime::now(),
+                mtime,
+            }),
+        }))
+    }
+
+    fn load_certified_key(
+        cfg: &SecurityConfig,
+    ) -> std::result::Result<Arc<CertifiedKey>, Box<dyn StdError + Sync + Send>> {
+        let cert = load_certs(&cfg.cert_path)?;
+        let key = load_key(&cfg.key_path)?;
+        Ok(Arc::new(CertifiedKey::new(cert, any_supported_type(&key)?)))
+    }
+
+    fn resolve_impl(&self, cert_type: CertType) -> Arc<CertifiedKey> {
+        let mut latest = self.latest.lock().unwrap();
+        let old_key = latest.key.clone();
+        if SystemTime::now()
+            .duration_since(latest.atime)
+            .unwrap_or_default()
+            < self.cfg.cert_reload_interval.0
+        {
+            return old_key;
+        }
+
+        // Update the access time of the cert state.
+        latest.atime = SystemTime::now();
+        let mut mtime = Some(latest.mtime);
+        match self.cfg.is_modified(&mut mtime) {
+            Ok(false) => {
+                return old_key;
+            }
+            Err(e) => {
+                HYPER_RELOAD_CERT_COUNTER
+                    .with_label_values(&["fail", &format!("{:?}", cert_type)])
+                    .inc();
+                error!( "fail to check mtime of certificates"; "err"=>?e, "cert_type"=>?cert_type);
+                return old_key;
+            }
+            _ => {}
+        }
+
+        match Self::load_certified_key(&self.cfg) {
+            Ok(new_key) => {
+                latest.key = new_key;
+                latest.mtime = mtime.unwrap();
+                HYPER_RELOAD_CERT_COUNTER
+                    .with_label_values(&["success", &format!("{:?}", cert_type)])
+                    .inc();
+                latest.key.clone()
+            }
+            Err(e) => {
+                HYPER_RELOAD_CERT_COUNTER
+                    .with_label_values(&["fail", &format!("{:?}", cert_type)])
+                    .inc();
+                error!("fail to load certificates";"err"=>?e,"cert_type"=>?cert_type);
+                old_key
+            }
+        }
+    }
+}
+
+impl ResolvesServerCert for ReloadWhenChanged {
+    fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.resolve_impl(CertType::Server))
+    }
+}
+
+impl ResolvesClientCert for ReloadWhenChanged {
+    fn resolve(
+        &self,
+        _acceptable_issuers: &[&[u8]],
+        _sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        Some(self.resolve_impl(CertType::Client))
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
 fn error<E>(err: E) -> io::Error
 where
-    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    E: Into<Box<dyn StdError + Send + Sync>>,
 {
     io::Error::new(io::ErrorKind::Other, err)
 }
