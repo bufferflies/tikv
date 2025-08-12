@@ -8,7 +8,7 @@ use resolved_ts::Resolver;
 use security::SecurityConfig;
 
 use crate::{
-    bootstrap, worker::new_keyspace_pd_client, KeyspaceService, KeyspaceStates,
+    bootstrap, util::new_keyspace_pd_client, KeyspaceService, KeyspaceStates,
     ReplicationWorkerConfig, Result,
 };
 

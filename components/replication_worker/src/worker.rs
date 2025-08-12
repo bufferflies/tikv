@@ -5,7 +5,7 @@ use std::{
     str::FromStr, sync::Arc, time::Duration,
 };
 
-use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
+use api_version::ApiV2;
 use bytes::Bytes;
 use cdc::{CdcEvent, Conn, ConnId};
 use collections::{HashMap, HashSet};
@@ -13,11 +13,11 @@ use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
 use grpcio_health::{create_health, HealthService, ServingStatus};
 use http::Request;
-use hyper::{http, Body, StatusCode, Uri};
+use hyper::{http, Body, StatusCode};
 use kvengine::{
     dfs::{Dfs, S3Fs},
     table::InnerKey,
-    Engine, SnapAccess, UserMeta, GLOBAL_SHARD_END_KEY, LOCK_CF, WRITE_CF,
+    Engine, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
 };
 use kvproto::{
     cdcpb,
@@ -34,12 +34,15 @@ use merged_engine::{MergedEngine, MergedEngineContext};
 use native_br::common::{
     collect_wal_chunks_with_retry, get_latest_backup_meta, CollectWalChunksContext,
 };
-use pd_client::{PdClient, RegionStat, RpcClient};
+use pd_client::{PdClient, RegionStat};
 use rfengine::{assemble_wal_chunks, RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
-use security::{HttpClient, SecurityConfig, SecurityManager};
+use security::{HttpClient, SecurityConfig};
 use tikv_util::{
-    codec, codec::bytes::decode_bytes, debug, error, info, mpsc::Sender, thd_name, time::Instant,
+    codec, debug, error, info,
+    mpsc::{Receiver, Sender},
+    thd_name,
+    time::Instant,
     warn,
 };
 use txn_types::{LockType, TimeStamp};
@@ -49,8 +52,11 @@ use crate::{
     kube::{KeyspaceKubeService, KubeApi},
     provisioned::KeyspaceProvisionedService,
     scheduler::get_cdc_status,
-    ticdc_util,
     ticdc_util::TiCdcError,
+    util::{
+        build_request_range, build_request_range_for_keyspace, keyspace_prefix_len, post_to_ticdc,
+        DISPATCH_CDC_TIMEOUT,
+    },
     CdcMsg, Error,
     Error::StoreTimeout,
     KeyspaceService, KeyspaceStates, ReplicationScheduler, ReplicationService,
@@ -59,7 +65,6 @@ use crate::{
 
 const MAX_INITIALIZE_SCAN_BATCH_BYTES: usize = 1024 * 1024;
 const FETCH_WAL_TIMEOUT: Duration = Duration::from_secs(30);
-const DISPATCH_CDC_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_STORES_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// information about a ChangeDataRequest.
@@ -117,8 +122,8 @@ pub struct ReplicationWorker {
 
     conns: HashMap<ConnId, Conn>,
 
-    tx: tikv_util::mpsc::Sender<CdcMsg>,
-    rx: tikv_util::mpsc::Receiver<CdcMsg>,
+    tx: Sender<CdcMsg>,
+    rx: Receiver<CdcMsg>,
 
     apply_ctx: ApplyContext,
 
@@ -1286,121 +1291,5 @@ impl RegisterHandler {
             conn_id: self.conn_id,
             initialized: self.initialized,
         });
-    }
-}
-
-async fn dispatch_http_post_with_retry(
-    client: &HttpClient,
-    uri: &Uri,
-    body: Bytes,
-    timeout: Duration,
-) -> Result<(StatusCode, Bytes)> {
-    let mut last_err: Option<Error> = None;
-    let start_time = Instant::now_coarse();
-    while start_time.saturating_elapsed() < timeout {
-        match dispatch_http_post(client, uri, body.clone()).await {
-            Ok(resp) => {
-                return Ok(resp);
-            }
-            Err(err) => {
-                last_err = Some(err);
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-        }
-    }
-    Err(last_err.unwrap())
-}
-
-async fn dispatch_http_post(
-    client: &HttpClient,
-    uri: &Uri,
-    req_body: Bytes,
-) -> Result<(StatusCode, Bytes)> {
-    let req = http::Request::builder()
-        .uri(uri)
-        .method("POST")
-        .body(req_body.into())
-        .unwrap();
-    let resp = client.request(req).await?;
-    let status = resp.status();
-    let body = hyper::body::to_bytes(resp.into_body()).await?;
-    Ok((status, body))
-}
-
-async fn post_to_ticdc<F>(
-    tag: &str,
-    client: &HttpClient,
-    uri: &Uri,
-    body: Bytes,
-    is_err_retryable: F,
-) -> Result<(StatusCode, Bytes)>
-where
-    F: Fn(&TiCdcError) -> bool,
-{
-    info!("{} post_to_ticdc", tag;
-        "uri" => ?uri, "body" => String::from_utf8_lossy(&body).as_ref());
-    let mut last_resp: Option<(StatusCode, Bytes)> = None;
-    let start_time = Instant::now_coarse();
-    while start_time.saturating_elapsed() < DISPATCH_CDC_TIMEOUT {
-        let (status, resp) =
-            dispatch_http_post_with_retry(client, uri, body.clone(), DISPATCH_CDC_TIMEOUT).await?;
-        if !status.is_success() {
-            let ticdc_err = ticdc_util::parse_ticdc_response(&resp);
-            if is_err_retryable(&ticdc_err) {
-                warn!("{} post_to_ticdc error", tag; "resp" => String::from_utf8_lossy(&resp).as_ref());
-                last_resp = Some((status, resp));
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-        }
-        info!("{} post_to_ticdc success", tag; "resp" => String::from_utf8_lossy(&resp).as_ref());
-        return Ok((status, resp));
-    }
-    let (status, resp) = last_resp.unwrap();
-    error!("{} post_to_ticdc error", tag; "status" => ?status, "resp" => String::from_utf8_lossy(&resp).as_ref());
-    Ok((status, resp))
-}
-
-fn build_request_range(request: &ChangeDataRequest) -> (Vec<u8>, Vec<u8>) {
-    let mut encoded_start_key = request.get_start_key();
-    let start_key = decode_bytes(&mut encoded_start_key, false).unwrap_or_default();
-    let end_key = if request.get_end_key().is_empty() {
-        GLOBAL_SHARD_END_KEY.to_vec()
-    } else {
-        let mut encoded_end_key = request.get_end_key();
-        decode_bytes(&mut encoded_end_key, false).unwrap_or_default()
-    };
-    (start_key, end_key)
-}
-
-fn build_request_range_for_keyspace(
-    keyspace_id: u32,
-    request: &ChangeDataRequest,
-) -> (Vec<u8>, Vec<u8>) {
-    let (start_key, end_ekey) = build_request_range(request);
-    let mut prepended_start_key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
-    prepended_start_key.extend_from_slice(&start_key);
-    let mut prepended_end_key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
-    prepended_end_key.extend_from_slice(&end_ekey);
-    (prepended_start_key, prepended_end_key)
-}
-
-pub(crate) async fn new_keyspace_pd_client(
-    pd_url: String,
-    sec_conf: &SecurityConfig,
-) -> Arc<RpcClient> {
-    let sec_mgr = Arc::new(SecurityManager::new(sec_conf).unwrap());
-    Arc::new(
-        RpcClient::new_async(&pd_client::Config::new(vec![pd_url]), None, sec_mgr)
-            .await
-            .unwrap(),
-    )
-}
-
-fn keyspace_prefix_len(keyspace_id: u32) -> usize {
-    if keyspace_id > 0 {
-        KEYSPACE_PREFIX_LEN
-    } else {
-        0
     }
 }

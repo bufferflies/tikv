@@ -6,6 +6,7 @@ mod kube;
 mod provisioned;
 mod scheduler;
 mod ticdc_util;
+mod util;
 mod worker;
 
 use std::{collections::HashMap, sync::Arc};

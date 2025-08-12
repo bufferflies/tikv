@@ -18,7 +18,7 @@ use security::SecurityConfig;
 use tikv_util::{info, warn};
 
 use crate::{
-    bootstrap, worker::new_keyspace_pd_client, Error, KeyspaceService, KeyspaceStates,
+    bootstrap, util::new_keyspace_pd_client, Error, KeyspaceService, KeyspaceStates,
     ReplicationWorkerConfig, Result,
 };
 
