@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pd_client::PdClient;
-use resolved_ts::Resolver;
 use security::SecurityConfig;
 
 use crate::{
@@ -18,7 +17,6 @@ pub(crate) struct KeyspaceProvisionedService {
     sec_conf: SecurityConfig,
     pub(crate) states: KeyspaceStates,
     pd_client: Option<Arc<dyn PdClient>>,
-    resolver: Resolver,
 }
 
 impl KeyspaceProvisionedService {
@@ -34,7 +32,6 @@ impl KeyspaceProvisionedService {
             sec_conf: sec_conf.clone(),
             states,
             pd_client: None,
-            resolver: Resolver::new(0),
         }
     }
 }
@@ -72,10 +69,6 @@ impl KeyspaceService for KeyspaceProvisionedService {
 
     fn get_pd_client(&self) -> Arc<dyn PdClient> {
         self.pd_client.as_ref().unwrap().clone()
-    }
-
-    fn get_resolver(&mut self) -> &mut Resolver {
-        &mut self.resolver
     }
 }
 

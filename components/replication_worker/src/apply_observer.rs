@@ -7,9 +7,10 @@ use kvengine::{
     table::memtable::WriteBatchEntry, SnapAccess, UserMeta, WriteBatch, LOCK_CF, WRITE_CF,
 };
 use kvproto::{cdcpb, cdcpb::Event, raft_cmdpb::AdminRequest};
+use log_wrappers::Value as LogValue;
 use rfstore::store::ApplyObserver;
 use tidb_query_datatype::codec::table::{INDEX_PREFIX_SEP, PREFIX_LEN, TABLE_PREFIX};
-use tikv_util::{error, info};
+use tikv_util::{debug, error, info};
 use txn_types::{Lock, LockType};
 
 use crate::CdcMsg;
@@ -166,6 +167,14 @@ impl EventBuilder {
         }
         event_row.set_type(cdcpb::EventLogType::Committed);
         self.rows.mut_entries().push(event_row);
+
+        debug!("{} add_row", self.snap_access.get_tag();
+            "key" => LogValue::key(entry_key),
+            "version" => entry.version,
+            "start_ts" => user_meta.start_ts,
+            "commit_ts" => user_meta.commit_ts,
+            "log_index" => self.index,
+        );
     }
 
     fn add_lock(&mut self, entry: &WriteBatchEntry, buf: &[u8]) {
@@ -176,11 +185,25 @@ impl EventBuilder {
         }
         if entry.value(buf).is_empty() {
             self.tracked_locks.push((entry_key.to_vec(), 0));
+
+            debug!("{} add_lock (untrack)", self.snap_access.get_tag();
+                "key" => LogValue::key(entry_key),
+                "version" => entry.version,
+                "log_index" => self.index,
+            );
             return;
         }
         let lock = Lock::parse(entry.value(buf)).unwrap();
         self.tracked_locks
             .push((entry.key(buf).to_vec(), lock.ts.into_inner()));
+        debug!("{} add_lock", self.snap_access.get_tag();
+            "key" => LogValue::key(entry_key),
+            "version" => entry.version,
+            "lock.ts" => lock.ts,
+            "lock.ty" => ?lock.lock_type,
+            "log_index" => self.index,
+        );
+
         let mut event_row = cdcpb::EventRow::default();
         event_row.set_key(entry_key.to_vec());
         event_row.set_start_ts(lock.ts.into_inner());

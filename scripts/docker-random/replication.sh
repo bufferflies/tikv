@@ -108,6 +108,7 @@ RUN_ARGS=(
     "--no-txn-file"
     "--no-jepsen"
     "--no-tpc"
+    "--async-commit-ratio" "0.0"
     "--ia-table-ratio" "0.0"
 )
 

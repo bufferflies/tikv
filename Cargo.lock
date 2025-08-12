@@ -7012,6 +7012,7 @@ dependencies = [
  "kube",
  "kvengine",
  "kvproto",
+ "log_wrappers",
  "merged_engine",
  "native_br",
  "nix 0.24.3",

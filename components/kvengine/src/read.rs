@@ -802,6 +802,10 @@ impl SnapAccessCore {
         self.data.inner_end()
     }
 
+    pub fn clone_start_key(&self) -> Bytes {
+        self.data.outer_start.clone()
+    }
+
     pub fn clone_end_key(&self) -> Bytes {
         self.data.outer_end.clone()
     }

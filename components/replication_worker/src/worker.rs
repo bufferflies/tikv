@@ -30,6 +30,7 @@ use kvproto::{
     raft_cmdpb::AdminRequest,
     tikvpb::create_tikv,
 };
+use log_wrappers::Value as LogValue;
 use merged_engine::{MergedEngine, MergedEngineContext};
 use native_br::common::{
     collect_wal_chunks_with_retry, get_latest_backup_meta, CollectWalChunksContext,
@@ -49,13 +50,13 @@ use txn_types::{LockType, TimeStamp};
 
 use crate::{
     apply_observer::{is_index_key, CdcApplyObserver, RegionEvents},
+    delegate::{RegionDelegate, RegionResolver},
     kube::{KeyspaceKubeService, KubeApi},
     provisioned::KeyspaceProvisionedService,
     scheduler::get_cdc_status,
     ticdc_util::TiCdcError,
     util::{
-        build_request_range, build_request_range_for_keyspace, keyspace_prefix_len, post_to_ticdc,
-        DISPATCH_CDC_TIMEOUT,
+        build_request_range_for_keyspace, keyspace_prefix_len, post_to_ticdc, DISPATCH_CDC_TIMEOUT,
     },
     CdcMsg, Error,
     Error::StoreTimeout,
@@ -66,47 +67,6 @@ use crate::{
 const MAX_INITIALIZE_SCAN_BATCH_BYTES: usize = 1024 * 1024;
 const FETCH_WAL_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_STORES_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// information about a ChangeDataRequest.
-struct RequestInfo {
-    conn_id: ConnId,
-    region_version: u64,
-    start_key: Vec<u8>,
-    end_key: Vec<u8>,
-    resolved_ts: TimeStamp,
-    initialized: bool,
-    pending_events: Vec<Event>,
-}
-
-impl RequestInfo {
-    fn in_range(&self, key: &[u8]) -> bool {
-        key >= self.start_key.as_slice() && key < self.end_key.as_slice()
-    }
-}
-
-#[derive(Default)]
-struct RegionRequests {
-    keyspace_id: u32,
-    requests: HashMap<u64, RequestInfo>,
-}
-
-impl RegionRequests {
-    fn add(&mut self, request: &ChangeDataRequest, conn_id: ConnId) {
-        let request_id = request.get_request_id();
-        let region_version = request.get_region_epoch().get_version();
-        let (start_key, end_key) = build_request_range(request);
-        let request_info = RequestInfo {
-            conn_id,
-            region_version,
-            start_key,
-            end_key,
-            resolved_ts: TimeStamp::zero(),
-            initialized: false,
-            pending_events: vec![],
-        };
-        self.requests.insert(request_id, request_info);
-    }
-}
 
 pub struct ReplicationWorker {
     ctx: MergedEngineContext,
@@ -127,7 +87,7 @@ pub struct ReplicationWorker {
 
     apply_ctx: ApplyContext,
 
-    region_requests: HashMap<u64 /* region_id */, RegionRequests>,
+    region_delegates: HashMap<u64 /* region_id */, RegionDelegate>,
     conn_regions: HashMap<ConnId, HashSet<u64 /* region_id */>>,
     region_to_keyspace: HashMap<u64 /* region_id */, u32 /* keyspace_id */>,
 
@@ -238,7 +198,7 @@ impl ReplicationWorker {
             tx: tx.clone(),
             rx,
             apply_ctx,
-            region_requests: Default::default(),
+            region_delegates: Default::default(),
             conn_regions: Default::default(),
             region_to_keyspace: Default::default(),
             last_update_time: backup_ts,
@@ -353,20 +313,16 @@ impl ReplicationWorker {
                 self.handle_result(res, "register");
             }
             CdcMsg::RegisterResult {
-                keyspace_id,
                 event,
-                tracked_locks,
                 conn_id,
                 initialized,
             } => {
-                let res = self.handle_register_result(
-                    keyspace_id,
-                    event,
-                    tracked_locks,
-                    conn_id,
-                    initialized,
-                );
+                let res = self.handle_register_result(event, conn_id, initialized);
                 self.handle_result(res, "register_result");
+            }
+            CdcMsg::ScanLocksResult { region_id, locks } => {
+                let res = self.handle_scan_locks_result(region_id, locks);
+                self.handle_result(res, "scan_locks_result");
             }
             CdcMsg::Deregister(conn_id) => {
                 self.handle_deregister(conn_id);
@@ -475,15 +431,27 @@ impl ReplicationWorker {
             self.send_epoch_not_match(conn_id, &request);
             return Ok(());
         }
-        info!("cdc register {:?}, conn_id {:?}", request, conn_id);
-        let region_changes = self.region_requests.entry(region_id).or_default();
-        region_changes.keyspace_id = shard.keyspace_id;
-        region_changes.add(&request, conn_id);
+        info!("cdc register"; "req" => ?request, "conn" => ?conn_id);
+        let delegate = self
+            .region_delegates
+            .entry(region_id)
+            .or_insert_with(|| RegionDelegate::new(shard.keyspace_id, region_id));
+
+        let snap_access = shard.new_snap_access();
+        if delegate.resolver.is_none() {
+            delegate.resolver = Some(RegionResolver::new_pending());
+            let snap_access = snap_access.clone();
+            let mut locks_handler = ScanLocksHandler::new(snap_access, self.tx.clone());
+            self.runtime.spawn_blocking(move || {
+                locks_handler.scan_locks();
+            });
+        }
+
+        delegate.requests.add(&request, conn_id);
         self.conn_regions
             .entry(conn_id)
             .or_default()
             .insert(region_id);
-        let snap_access = shard.new_snap_access();
         let mut register_handler =
             RegisterHandler::new(conn_id, &request, snap_access, self.tx.clone());
         self.runtime
@@ -493,30 +461,23 @@ impl ReplicationWorker {
 
     fn handle_register_result(
         &mut self,
-        keyspace_id: u32,
         event: Event,
-        tracked_locks: Vec<(Vec<u8>, TimeStamp)>,
         conn_id: ConnId,
         initialized: bool,
     ) -> Result<()> {
         let region_id = event.get_region_id();
-        let Some(region_requests) = self.region_requests.get_mut(&region_id) else {
-            warn!("handle_register_result: region request not found"; "region_id" => region_id);
+        let Some(delegate) = self.region_delegates.get_mut(&region_id) else {
+            warn!(
+                "{} handle_register_result: region delegate not found",
+                region_id
+            );
             return Ok(());
         };
-        let Some(request_info) = region_requests.requests.get_mut(&event.get_request_id()) else {
-            warn!("handle_register_result: request not found"; "region_id" => region_id, "request_id" => event.get_request_id());
+        let Some(request_info) = delegate.requests.get_mut(&event.get_request_id()) else {
+            warn!("{} handle_register_result: request not found", region_id; "request_id" => event.get_request_id());
             return Ok(());
         };
         request_info.initialized = initialized;
-        let Some(task_ctx) = self.keyspaces.get_mut(&keyspace_id) else {
-            warn!("handle_register_result: keyspace not found"; "keyspace_id" => keyspace_id);
-            return Ok(());
-        };
-        let resolver = task_ctx.get_resolver();
-        for (lock_key, lock_ts) in tracked_locks {
-            resolver.track_lock(lock_ts, lock_key, None);
-        }
         let Some(conn) = self.conns.get(&conn_id) else {
             warn!("handle_register_result: conn not found"; "conn_id" => ?conn_id);
             return Ok(());
@@ -533,6 +494,38 @@ impl ReplicationWorker {
                     .map_err(|e| cdc::Error::from(e))?;
             }
         }
+        Ok(())
+    }
+
+    fn handle_scan_locks_result(
+        &mut self,
+        region_id: u64,
+        locks: Result<Vec<(Vec<u8>, TimeStamp)>>,
+    ) -> Result<()> {
+        let Some(delegate) = self.region_delegates.get_mut(&region_id) else {
+            warn!(
+                "{} handle_scan_locks_result: region delegate not found",
+                region_id
+            );
+            return Ok(());
+        };
+
+        match locks {
+            Ok(locks) => {
+                delegate.handle_scan_locks(locks);
+            }
+            Err(err) => {
+                error!("{} handle_scan_locks_result: scan locks error", region_id; "err" => ?err);
+                delegate.resolver = None;
+
+                let mut cdc_err = cdcpb::Error::default();
+                cdc_err
+                    .mut_server_is_busy()
+                    .set_reason(format!("scan locks failed: {:?}", err));
+                delegate.broadcast_error(cdc_err, &self.conns);
+            }
+        }
+
         Ok(())
     }
 
@@ -574,10 +567,10 @@ impl ReplicationWorker {
         self.conns.remove(&conn_id);
         if let Some(conn_regions) = self.conn_regions.remove(&conn_id) {
             for region_id in conn_regions {
-                if let Some(region_change) = self.region_requests.get_mut(&region_id) {
-                    region_change.requests.retain(|_, v| v.conn_id != conn_id);
-                    if region_change.requests.is_empty() {
-                        self.region_requests.remove(&region_id);
+                if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
+                    delegate.requests.retain(|_, v| v.conn_id != conn_id);
+                    if delegate.requests.is_empty() {
+                        self.remove_region(region_id);
                     }
                 }
             }
@@ -604,36 +597,38 @@ impl ReplicationWorker {
     }
 
     fn send_resolved_ts(&mut self) -> Result<()> {
-        for task in self.keyspaces.values_mut() {
-            task.get_resolver().resolve(self.last_update_time);
-        }
-        for (&region_id, region_request) in &mut self.region_requests {
-            if let Some(task_ctx) = self.keyspaces.get_mut(&region_request.keyspace_id) {
-                let ts = task_ctx.get_resolver().resolved_ts();
-                for (&request_id, req_info) in &mut region_request.requests {
-                    if req_info.resolved_ts != ts && req_info.initialized {
-                        let mut resolved_ts = ResolvedTs::default();
-                        resolved_ts.set_regions(vec![region_id]);
-                        resolved_ts.set_request_id(request_id);
-                        resolved_ts.set_ts(ts.into_inner());
-                        debug!(
-                            "send resolved_ts {:?} to request {}",
-                            resolved_ts, request_id
-                        );
-                        let conn = self.conns.get(&req_info.conn_id).unwrap();
-                        conn.get_sink()
-                            .unbounded_send(CdcEvent::ResolvedTs(resolved_ts), false)
-                            .map_err(|e| cdc::Error::from(e))?;
-                        req_info.resolved_ts = ts;
-                    }
-                }
+        info!("send_resolved_ts"; "last_update_time" => self.last_update_time);
+        for (&region_id, delegate) in &mut self.region_delegates {
+            let Some(ts) = delegate
+                .resolver
+                .as_mut()
+                .and_then(|r| r.resolve(self.last_update_time))
+            else {
+                continue;
             };
+            debug!("{} resolved ts: {}", region_id, ts);
+            for (&request_id, req_info) in delegate.requests.iter_mut() {
+                if req_info.resolved_ts != ts && req_info.initialized {
+                    let mut resolved_ts = ResolvedTs::default();
+                    resolved_ts.set_regions(vec![region_id]);
+                    resolved_ts.set_request_id(request_id);
+                    resolved_ts.set_ts(ts.into_inner());
+                    debug!("{} send resolved_ts {}", region_id, ts; "request" => request_id);
+                    let conn = self.conns.get(&req_info.conn_id).unwrap();
+                    conn.get_sink()
+                        .unbounded_send(CdcEvent::ResolvedTs(resolved_ts), false)
+                        .map_err(|e| cdc::Error::from(e))?;
+                    req_info.resolved_ts = ts;
+                }
+            }
         }
         Ok(())
     }
 
     fn maybe_update_merged_engine(&mut self) -> Result<()> {
-        if TimeStamp::physical_now() - self.last_update_time.physical() < 3000 {
+        if TimeStamp::physical_now().saturating_sub(self.last_update_time.physical())
+            < self.config.sync_interval.as_millis()
+        {
             return Ok(());
         }
         let new_timestamp = self.update_stores_with_retry(UPDATE_STORES_TIMEOUT)?;
@@ -709,7 +704,7 @@ impl ReplicationWorker {
     fn update_stores(&mut self) -> Result<TimeStamp> {
         let _enter = self.ctx.fs.get_runtime().enter();
         let stores = native_br::common::get_all_stores_except_tiflash(self.ctx.pd.as_ref())?;
-        let ts = block_on(self.ctx.pd.get_tso())?;
+        let ts = self.ctx.pd.get_min_tso()?;
         let mut errors = vec![];
         for store in stores {
             let store_id = store.id;
@@ -984,20 +979,18 @@ impl ReplicationWorker {
         cb: Box<dyn FnOnce(Result<()>) + Send>,
     ) {
         self.cdc_addrs.remove(&keyspace_id);
-        let runtime = self.ctx.fs.get_runtime();
         let Some(mut svc) = self.keyspaces.remove(&keyspace_id) else {
             cb(Err(Error::OtherError("keyspace not found".into())));
             return;
         };
         let keyspace_regions = self.merged_engine.get_keyspace_regions(keyspace_id);
         let kv = self.merged_engine.get_kv();
-        keyspace_regions.iter().for_each(|region_id| {
-            self.region_to_keyspace.remove(region_id);
-            self.region_requests.remove(region_id);
-            kv.remove_shard(*region_id);
+        keyspace_regions.iter().for_each(|&region_id| {
+            self.remove_region(region_id);
+            kv.remove_shard(region_id);
         });
         self.merged_engine.remove_keyspace(keyspace_id);
-        runtime.spawn(async move {
+        self.ctx.fs.get_runtime().spawn(async move {
             let res = svc.destroy().await;
             cb(res);
         });
@@ -1020,8 +1013,8 @@ impl ReplicationWorker {
     }
 
     fn handle_applied(&mut self, region_id: u64, region_events: RegionEvents) -> Result<()> {
-        if let Some(region_requests) = self.region_requests.get_mut(&region_id) {
-            for (&request_id, req_info) in &mut region_requests.requests {
+        if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
+            for (&request_id, req_info) in delegate.requests.iter_mut() {
                 let conn = self.conns.get(&req_info.conn_id).unwrap();
                 for event in &region_events.events {
                     let mut event_to_send = Event::new();
@@ -1033,6 +1026,14 @@ impl ReplicationWorker {
                         for entry in event.get_entries().get_entries() {
                             if req_info.in_range(entry.get_key()) {
                                 entries_to_send.push(entry.clone());
+
+                                debug!("send event";
+                                    "key" => LogValue::key(entry.get_key()),
+                                    "commit_ts" => entry.get_commit_ts(),
+                                    "region" => region_id,
+                                    "request" => request_id,
+                                    "r_type" => ?entry.r_type,
+                                    "op_type" => ?entry.op_type);
                             }
                         }
                     }
@@ -1045,16 +1046,16 @@ impl ReplicationWorker {
                     }
                 }
             }
-            let task_ctx = self
-                .keyspaces
-                .get_mut(&region_requests.keyspace_id)
-                .unwrap();
-            let resolver = task_ctx.get_resolver();
-            for (track_key, start_ts) in region_events.tracked_locks {
-                if start_ts == 0 {
-                    resolver.untrack_lock(&track_key, None);
-                } else {
-                    resolver.track_lock(start_ts.into(), track_key, None);
+
+            if let Some(resolver) = delegate.resolver.as_mut() {
+                for (track_key, start_ts) in region_events.tracked_locks {
+                    if start_ts == 0 {
+                        // TODO: handle error.
+                        resolver.untrack_lock(&track_key).unwrap();
+                    } else {
+                        // TODO: handle error.
+                        resolver.track_lock(start_ts.into(), track_key).unwrap();
+                    }
                 }
             }
         }
@@ -1096,15 +1097,15 @@ impl ReplicationWorker {
             epoch_not_match.mut_current_regions().push(rep_region);
         }
 
-        if let Some(region_requests) = self.region_requests.get_mut(&region_id) {
+        if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
             let mut requests_to_remove = vec![];
-            for (&request_id, request) in &region_requests.requests {
+            for (&request_id, request) in delegate.requests.iter() {
                 if request.region_version <= region_version {
                     requests_to_remove.push(request_id);
                 }
             }
             for request_id in requests_to_remove {
-                let request = region_requests.requests.remove(&request_id).unwrap();
+                let request = delegate.requests.remove(&request_id).unwrap();
                 let conn = self.conns.get(&request.conn_id).unwrap();
                 let mut event = Event::new();
                 event.set_region_id(region_id);
@@ -1118,11 +1119,16 @@ impl ReplicationWorker {
                     .unbounded_send(CdcEvent::Event(event), false)
                     .map_err(|e| cdc::Error::from(e))?;
             }
-            if region_requests.requests.is_empty() {
-                self.region_requests.remove(&region_id);
+            if delegate.requests.is_empty() {
+                self.remove_region(region_id);
             }
         }
         Ok(())
+    }
+
+    fn remove_region(&mut self, region_id: u64) {
+        self.region_to_keyspace.remove(&region_id);
+        self.region_delegates.remove(&region_id);
     }
 }
 
@@ -1135,7 +1141,6 @@ struct RegisterHandler {
     end_key: Bytes,
     checkpoint_ts: u64,
     event_rows: Vec<EventRow>,
-    tracked_locks: Vec<(Vec<u8>, TimeStamp)>,
     initialized: bool,
 }
 
@@ -1159,20 +1164,16 @@ impl RegisterHandler {
             end_key: end_key.into(),
             checkpoint_ts,
             event_rows: vec![],
-            tracked_locks: vec![],
             initialized: false,
         }
     }
 
     async fn handle_register(&mut self) {
-        info!(
-            "cdc register {:?}, conn_id {:?}",
-            self.request_id, self.conn_id
-        );
+        let region_id = self.snap_access.get_id();
+        info!("{} cdc register", region_id; "request" => self.request_id, "conn" => ?self.conn_id);
         let mut entries_bytes = 0;
         let keyspace_id = self.snap_access.get_keyspace_id();
-        let mut tracked_locks = vec![];
-        // scan locks for resolver to track.
+        let keyspace_prefix_len = keyspace_prefix_len(keyspace_id);
         let mut lock_iter = self
             .snap_access
             .new_iterator(LOCK_CF, false, false, None, false);
@@ -1180,7 +1181,7 @@ impl RegisterHandler {
         while lock_iter.valid() {
             let mut event_row = EventRow::new();
             let lock_key = lock_iter.key();
-            event_row.set_key(lock_key[keyspace_prefix_len(keyspace_id)..].to_vec());
+            event_row.set_key(lock_key[keyspace_prefix_len..].to_vec());
             if is_index_key(event_row.get_key()) {
                 lock_iter.next();
                 continue;
@@ -1198,9 +1199,6 @@ impl RegisterHandler {
                 }
             }
             event_row.set_start_ts(lock.ts.into_inner());
-            tracked_locks.push((event_row.get_key().to_vec(), lock.ts));
-            self.tracked_locks
-                .push((event_row.get_key().to_vec(), lock.ts));
             let val = lock.short_value.take().unwrap_or_default();
             event_row.set_value(val);
             event_row.set_type(EventLogType::Prewrite);
@@ -1212,11 +1210,8 @@ impl RegisterHandler {
             }
             lock_iter.next();
         }
-        let region_id = self.snap_access.get_id();
-        info!(
-            "{}:{} incremental scan checkpoint ts {}",
-            region_id, self.request_id, self.checkpoint_ts,
-        );
+
+        info!("{} start incremental scan", region_id; "request" => self.request_id, "checkpoint_ts" => self.checkpoint_ts);
         // scan incremental write after checkpoint ts;
         let mut write_iter = self
             .snap_access
@@ -1275,9 +1270,7 @@ impl RegisterHandler {
     }
 
     fn send_rows(&mut self) {
-        let keyspace_id = self.snap_access.get_keyspace_id();
         let event_rows = mem::take(&mut self.event_rows);
-        let tracked_locks = mem::take(&mut self.tracked_locks);
         let mut new_event = Event::new();
         new_event.set_region_id(self.snap_access.get_id());
         new_event.set_request_id(self.request_id);
@@ -1285,11 +1278,71 @@ impl RegisterHandler {
 
         debug!("send event {:?}", new_event);
         let _ = self.sender.send(CdcMsg::RegisterResult {
-            keyspace_id,
             event: new_event,
-            tracked_locks,
             conn_id: self.conn_id,
             initialized: self.initialized,
         });
+    }
+}
+
+struct ScanLocksHandler {
+    snap_access: SnapAccess,
+    sender: Sender<CdcMsg>,
+    locks: Vec<(Vec<u8>, TimeStamp)>,
+}
+
+impl ScanLocksHandler {
+    fn new(snap_access: SnapAccess, sender: Sender<CdcMsg>) -> Self {
+        Self {
+            snap_access,
+            sender,
+            locks: vec![],
+        }
+    }
+
+    fn scan_locks(&mut self) {
+        let region_id = self.snap_access.get_id();
+        let res = self.scan_locks_impl();
+        let locks = res.map(|_| mem::take(&mut self.locks));
+        if let Err(e) = self
+            .sender
+            .send(CdcMsg::ScanLocksResult { region_id, locks })
+        {
+            warn!("{} failed to send scan locks result", self.snap_access.get_tag(); "err" => ?e);
+        }
+    }
+
+    fn scan_locks_impl(&mut self) -> Result<()> {
+        let keyspace_id = self.snap_access.get_keyspace_id();
+        let tag = self.snap_access.get_tag();
+        info!("{} cdc scan locks", tag; "keyspace" => keyspace_id);
+
+        let keyspace_prefix_len = keyspace_prefix_len(keyspace_id);
+        let mut lock_iter = self
+            .snap_access
+            .new_iterator(LOCK_CF, false, false, None, false);
+        lock_iter.set_range(
+            self.snap_access.clone_start_key(),
+            self.snap_access.clone_end_key(),
+        );
+        while lock_iter.valid() {
+            let inner_lock_key = &lock_iter.key()[keyspace_prefix_len..];
+            if is_index_key(inner_lock_key) {
+                lock_iter.next();
+                continue;
+            }
+            let lock_val = lock_iter.val();
+            let lock = txn_types::Lock::parse(lock_val).unwrap();
+            if !matches!(lock.lock_type, LockType::Put | LockType::Delete) {
+                lock_iter.next();
+                continue;
+            }
+            self.locks
+                .push((lock_iter.key()[keyspace_prefix_len..].to_vec(), lock.ts));
+            lock_iter.next();
+        }
+
+        info!("{} cdc scan locks", tag; "keyspace" => keyspace_id, "locks" => self.locks.len());
+        Ok(())
     }
 }

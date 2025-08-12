@@ -1,6 +1,7 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod apply_observer;
+mod delegate;
 mod error;
 mod kube;
 mod provisioned;
@@ -38,7 +39,6 @@ use merged_engine::MergedEngineConfig;
 use pd_client::{PdClient, RpcClient};
 #[cfg(feature = "testexport")]
 pub use provisioned::local_provider::LocalProvider;
-use resolved_ts::Resolver;
 pub use scheduler::*;
 use serde_derive::{Deserialize, Serialize};
 use tikv::tikv_build_version;
@@ -62,6 +62,9 @@ pub struct ReplicationWorkerConfig {
     pub cdc_sts_name: String,
     pub namespace: String,
 
+    /// The interval to sync changes from WAL.
+    pub sync_interval: ReadableDuration,
+
     pub report_region_interval: ReadableDuration,
     pub merged_engine: MergedEngineConfig,
 }
@@ -75,6 +78,7 @@ impl Default for ReplicationWorkerConfig {
             pd_sts_name: "".to_string(),
             cdc_sts_name: "".to_string(),
             namespace: "".to_string(),
+            sync_interval: ReadableDuration::secs(3),
             report_region_interval: ReadableDuration::secs(60),
             merged_engine: Default::default(),
         }
@@ -135,8 +139,6 @@ pub trait KeyspaceService: Send {
     fn get_states_mut(&mut self) -> &mut KeyspaceStates;
 
     fn get_pd_client(&self) -> Arc<dyn PdClient>;
-
-    fn get_resolver(&mut self) -> &mut Resolver;
 }
 
 pub enum CdcMsg {
@@ -163,11 +165,13 @@ pub enum CdcMsg {
         conn_id: ConnId,
     },
     RegisterResult {
-        keyspace_id: u32,
         event: cdcpb::Event,
-        tracked_locks: Vec<(Vec<u8>, TimeStamp)>,
         conn_id: ConnId,
         initialized: bool,
+    },
+    ScanLocksResult {
+        region_id: u64,
+        locks: Result<Vec<(Vec<u8>, TimeStamp)>>,
     },
     Applied {
         region_id: u64,

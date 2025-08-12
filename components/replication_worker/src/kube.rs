@@ -13,7 +13,6 @@ use k8s_openapi::{
 };
 use kube::{api::PostParams, Api};
 use pd_client::PdClient;
-use resolved_ts::Resolver;
 use security::SecurityConfig;
 use tikv_util::{info, warn};
 
@@ -33,7 +32,6 @@ pub(crate) struct KeyspaceKubeService {
     conf: ReplicationWorkerConfig,
     sec_conf: SecurityConfig,
     task_states: KeyspaceStates,
-    resolver: Resolver,
     pd_client: Option<Arc<dyn PdClient>>,
     scheme: String,
 }
@@ -62,7 +60,6 @@ impl KeyspaceKubeService {
             conf: conf.clone(),
             sec_conf: sec_conf.clone(),
             task_states,
-            resolver: Resolver::new(0),
             pd_client: None,
             scheme,
         }
@@ -106,10 +103,6 @@ impl KeyspaceService for KeyspaceKubeService {
 
     fn get_pd_client(&self) -> Arc<dyn PdClient> {
         self.pd_client.clone().unwrap()
-    }
-
-    fn get_resolver(&mut self) -> &mut Resolver {
-        &mut self.resolver
     }
 }
 
