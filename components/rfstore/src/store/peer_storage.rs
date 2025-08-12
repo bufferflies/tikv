@@ -213,6 +213,9 @@ impl raft::Storage for PeerStorage {
             return Err(raft::Error::Store(StorageError::Unavailable));
         }
         let snap_term = self.snapshot_term();
+        if snap_index == self.truncated_index() {
+            debug_assert_eq!(snap_term, self.truncated_term());
+        }
 
         let mut snap = eraftpb::Snapshot::default();
         let change_set = self.shard_meta.as_ref().unwrap().to_change_set();
