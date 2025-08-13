@@ -10,14 +10,15 @@ FROM hub-new.pingcap.net/keyspace/tiflash:${TIFLASH_VERSION} as tiflash
 FROM hub-new.pingcap.net/kvaas/go-tpc:small-size as go-tpc
 FROM hub-new.pingcap.net/kvaas/ticdc:${TICDC_VERSION} as ticdc
 
-# To sync the minio image:
+# To sync the external images:
 #   1. brew install skopeo (macOS)
 #   2. skopeo copy --all docker://minio/minio:latest docker://hub-new.pingcap.net/kvaas/minio:latest
 #   3. skopeo copy --all docker://minio/mc:latest docker://hub-new.pingcap.net/kvaas/mc:latest
+#   4. skopeo copy --all docker://amazonlinux:2023.5.20241001.1 docker://hub-new.pingcap.net/kvaas/amazonlinux:2023.5.20241001.1
 FROM hub-new.pingcap.net/kvaas/minio:latest as minio
 FROM hub-new.pingcap.net/kvaas/mc:latest as mc
 
-FROM amazonlinux:2023.5.20241001.1
+FROM hub-new.pingcap.net/kvaas/amazonlinux:2023.5.20241001.1
 RUN dnf update -y && dnf install -y \
     procps-ng \
     binutils \
