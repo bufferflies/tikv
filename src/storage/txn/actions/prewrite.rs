@@ -771,7 +771,17 @@ fn async_commit_timestamps(
         let max_ts = txn.concurrency_manager.max_ts();
         fail_point!("before-set-lock-in-memory");
         let min_commit_ts = cmp::max(cmp::max(max_ts, start_ts), for_update_ts).next();
-        let min_commit_ts = cmp::max(lock.min_commit_ts, min_commit_ts);
+        let mut min_commit_ts = cmp::max(lock.min_commit_ts, min_commit_ts);
+
+        let mut reject_by_backup_ts = false;
+        if let Some(backup_ts) = txn.backup_ts.as_ref() {
+            let backup_ts = backup_ts.get();
+            if min_commit_ts < backup_ts {
+                min_commit_ts = backup_ts;
+                reject_by_backup_ts = true;
+            }
+            txn.backup_ts_checked = true;
+        }
 
         #[cfg(feature = "failpoints")]
         let injected_fallback = (|| {
@@ -790,6 +800,7 @@ fn async_commit_timestamps(
                 "start_ts" => start_ts,
                 "min_commit_ts" => min_commit_ts,
                 "max_commit_ts" => max_commit_ts,
+                "reject_by_backup_ts" => reject_by_backup_ts,
                 "lock" => ?lock);
             return Err(ErrorInner::CommitTsTooLarge {
                 start_ts,

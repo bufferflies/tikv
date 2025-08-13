@@ -74,7 +74,7 @@ fn test_resolve_lock() {
         thread::sleep(Duration::from_secs(1));
         let commit_ts = client.get_ts();
         client
-            .kv_commit(txn_muts, start_ts, commit_ts)
+            .kv_commit(txn_muts, start_ts, commit_ts, false)
             .expect("kv_commit");
 
         handle.join().unwrap();

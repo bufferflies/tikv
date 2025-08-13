@@ -31,7 +31,8 @@ pub async fn commit<S: Snapshot>(
             let mut min_commit_ts = lock.min_commit_ts;
             let mut reject_by_backup_ts = false;
 
-            if let Some(backup_ts) = txn.backup_ts.as_ref() {
+            // Should not reject async commit.
+            if let (Some(false), Some(backup_ts)) = (txn.use_async_commit, txn.backup_ts.as_ref()) {
                 if key.is_encoded_from(&lock.primary) {
                     let backup_ts = backup_ts.get();
                     if min_commit_ts < backup_ts {

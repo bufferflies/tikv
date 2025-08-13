@@ -255,6 +255,7 @@ impl From<CommitRequest> for TypedCommand<TxnStatus> {
             keys,
             req.get_start_version().into(),
             req.get_commit_version().into(),
+            req.get_use_async_commit(),
             req.get_is_txn_file(),
             req.take_context(),
         )
@@ -1039,6 +1040,7 @@ pub mod test_util {
             keys,
             TimeStamp::from(lock_ts),
             TimeStamp::from(commit_ts),
+            false,
             false,
             ctx,
         );

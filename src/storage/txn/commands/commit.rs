@@ -31,6 +31,8 @@ command! {
             lock_ts: txn_types::TimeStamp,
             /// The commit timestamp.
             commit_ts: txn_types::TimeStamp,
+            /// The commit is using async commit.
+            use_async_commit: bool,
             /// Used in file based transaction.
             is_txn_file: bool,
         }
@@ -56,7 +58,11 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for Commit {
                 commit_ts: self.commit_ts,
             }));
         }
-        let mut txn = MvccTxn::new_with_backup_ts(self.lock_ts, context.concurrency_manager);
+        let mut txn = MvccTxn::new_with_backup_ts(
+            self.lock_ts,
+            context.concurrency_manager,
+            self.use_async_commit,
+        );
         let mut reader = ReaderWithStats::new(
             SnapshotReader::new_with_ctx(self.lock_ts, snapshot, &self.ctx),
             context.statistics,

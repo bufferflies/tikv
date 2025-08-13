@@ -97,6 +97,7 @@ pub(crate) fn spawn_txn_file_write(
                                 ),
                                 write_method: TxnWriteMethod::FileBased,
                                 gen_index: Some(Box::new(gen_index)),
+                                ..Default::default()
                             },
                         )
                         .unwrap()

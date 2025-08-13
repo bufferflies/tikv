@@ -613,7 +613,7 @@ fn execute_single_operation(
             let target_key = key.as_deref().unwrap_or(default_key);
             let mutations = vec![new_put_mutation(target_key.to_vec(), i_to_val(2))];
             let txn_muts = TxnMutations::from_normal(mutations);
-            match client.kv_commit(txn_muts, *start_ts, *commit_ts) {
+            match client.kv_commit(txn_muts, *start_ts, *commit_ts, false) {
                 Ok(_) => ExpectedResult::Success,
                 Err(_) => ExpectedResult::Fail,
             }

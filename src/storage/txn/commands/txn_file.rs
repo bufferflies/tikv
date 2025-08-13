@@ -962,7 +962,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileComman
         debug!("txn file process write"; "cmd" => ?cmd, "txn_file_ref" => ?self.txn_file_ref, "ctx" => ?ctx, "snap" => ?snap);
 
         let mut txn = if let box Command::Commit(_) = &cmd {
-            MvccTxn::new_with_backup_ts(self.ts(), context.concurrency_manager)
+            MvccTxn::new_with_backup_ts(self.ts(), context.concurrency_manager, false)
         } else {
             MvccTxn::new(self.ts(), context.concurrency_manager)
         };

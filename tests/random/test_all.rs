@@ -616,7 +616,7 @@ impl Switches {
         let mut rng = thread_rng();
         let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.5);
         let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
-        let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
+        let txn_check_backup_ts = env_switch("TXN_CHECK_BACKUP_TS");
         let enable_value_cache = env_switch_opt("ENABLE_VALUE_CACHE", 0);
         let enable_wal_double_write = env_switch_opt("ENABLE_WAL_DOUBLE_WRITE", 0);
 

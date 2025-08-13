@@ -71,7 +71,7 @@ fn test_get_put(#[case] enable_ia: bool, #[case] write_method: TxnWriteMethod) {
 
     // Commit:
     let new_commit_ts = client
-        .kv_commit(txn_muts.clone(), start_ts, commit_ts)
+        .kv_commit(txn_muts.clone(), start_ts, commit_ts, false)
         .unwrap();
     assert!(new_commit_ts > commit_ts);
 
@@ -219,7 +219,7 @@ fn test_write_conflict(#[case] enable_ia: bool, #[case] write_method: TxnWriteMe
         .unwrap();
     let commit_ts = client.get_ts();
     client
-        .kv_commit(txn_muts.clone(), start_ts, commit_ts)
+        .kv_commit(txn_muts.clone(), start_ts, commit_ts, false)
         .unwrap();
 
     // Another write:
@@ -353,7 +353,7 @@ fn test_insert(#[case] enable_ia: bool, #[case] write_method: TxnWriteMethod) {
             .kv_prewrite(key.clone(), None, txn_muts.clone(), start_ts)
             .unwrap();
         client
-            .kv_commit(txn_muts.clone(), start_ts, client.get_ts())
+            .kv_commit(txn_muts.clone(), start_ts, client.get_ts(), false)
             .unwrap();
 
         client.put_kv_in_ref_store(vec![mutation]);

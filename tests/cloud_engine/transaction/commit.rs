@@ -73,6 +73,7 @@ fn test_commit_ok() {
             TxnMutations::from_normal(mutations.clone()),
             start_ts,
             commit_ts,
+            false,
         )
         .expect("commit failed");
 
@@ -90,6 +91,7 @@ fn test_commit_ok() {
             TxnMutations::from_normal(mutations.clone()),
             start_ts,
             commit_ts,
+            false,
         )
         .expect("idempotent commit failed");
 
@@ -127,7 +129,7 @@ fn test_commit_err() {
         ..Default::default()
     }]);
     let err = client
-        .kv_commit(commit_muts_k.clone(), ts1, ts2)
+        .kv_commit(commit_muts_k.clone(), ts1, ts2, false)
         .unwrap_err();
     match err {
         Error::KeyError(key_error) => {
@@ -167,6 +169,7 @@ fn test_commit_err() {
             TxnMutations::from_normal(prewrite_muts.clone()),
             start_ts_wrong,
             commit_ts_ok,
+            false,
         )
         .unwrap_err();
     // Should still be TxnLockNotFound because the lock's start_ts doesn't match
@@ -205,6 +208,7 @@ fn test_commit_err() {
             TxnMutations::from_normal(prewrite_muts.clone()),
             start_ts_ok,
             commit_ts_after_rollback,
+            false,
         )
         .unwrap_err();
     // Commit after rollback should also result in TxnLockNotFound or a conflict

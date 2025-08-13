@@ -78,6 +78,9 @@ pub struct MvccTxn {
     pub(crate) backup_ts: Option<TrackedBackupTs>,
     // Used to indicate that the `backup_ts` has been checked (with `commit_ts`).
     pub(crate) backup_ts_checked: bool,
+    // Used to indicate whether it is an async commit transaction. `None` if not set.
+    // Currently, it's only used for check `commit_ts` with `backup_ts`.
+    pub(crate) use_async_commit: Option<bool>,
 }
 
 impl MvccTxn {
@@ -93,15 +96,18 @@ impl MvccTxn {
             guards: vec![],
             backup_ts: None,
             backup_ts_checked: false,
+            use_async_commit: None,
         }
     }
 
     pub fn new_with_backup_ts(
         start_ts: TimeStamp,
         concurrency_manager: ConcurrencyManager,
+        use_async_commit: bool,
     ) -> MvccTxn {
         let mut mvcc_txn = Self::new(start_ts, concurrency_manager);
         mvcc_txn.backup_ts = mvcc_txn.concurrency_manager.get_latest_backup_ts();
+        mvcc_txn.use_async_commit = Some(use_async_commit);
         mvcc_txn
     }
 

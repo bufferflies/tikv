@@ -1027,8 +1027,7 @@ impl Switches {
 
         let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
         let async_commit_switch_on = rng.gen_bool(env_param("ASYNC_COMMIT_RATIO", 0.1));
-        // Async commit is not compatible with check backup ts by now.
-        let txn_check_backup_ts = !async_commit_switch_on && env_switch("TXN_CHECK_BACKUP_TS");
+        let txn_check_backup_ts = env_switch("TXN_CHECK_BACKUP_TS");
         let enable_kv_engine_meta_diff = env_switch(ENABLE_KV_ENGINE_META_DIFF_ENV_KEY);
         let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.5);
         let enable_tiflash_write_node = env_switch(ENABLE_TIFLASH_WRITE_NODE_ENV_KEY);
