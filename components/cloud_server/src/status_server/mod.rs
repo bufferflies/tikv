@@ -39,7 +39,7 @@ use hyper::{
 };
 use kvengine::{
     dfs::FileType,
-    table::{BoundedDataSet, InnerKey},
+    table::{BoundedDataSet, InnerKey, SnapVersion},
     IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY,
 };
 use kvproto::{coprocessor::DelegateResponse, raft_serverpb::StoreIdent};
@@ -1516,7 +1516,7 @@ impl StatusServer {
             // 3. At this moment, we should be able to know all versions to wait, including
             // those writable memtables (they have a version after switch).
             for (region_id, memtable) in writable_memtables {
-                let v = memtable.get_version();
+                let v = memtable.get_snap_version();
                 info!(
                     "ManualFlush: region {} writable memtable is switched, will wait for version {}",
                     region_id, v
@@ -1529,8 +1529,8 @@ impl StatusServer {
             .values()
             .max()
             .copied()
-            .unwrap_or(0);
-        if max_version_to_wait == 0 {
+            .unwrap_or(SnapVersion::zero());
+        if max_version_to_wait.is_zero() {
             info!(
                 "ManualFlush: skipped, no memtable to wait on regions: {:?}",
                 target_regions
@@ -1583,7 +1583,7 @@ impl StatusServer {
                 }
                 // Keep this region only if it's flushed version has not reached
                 // what we want.
-                shard.get_snap_version() < *version
+                shard.get_persisted_snap_version() < *version
             });
             if wait_versions_by_regions.is_empty() {
                 break;

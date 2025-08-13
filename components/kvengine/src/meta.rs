@@ -21,7 +21,7 @@ use util::TxnFileRefExt as _;
 use super::*;
 use crate::{
     dfs::FileType,
-    table::{BoundedDataSet, DataBound, InnerKey},
+    table::{BoundedDataSet, DataBound, InnerKey, SnapVersion},
     table_id::{get_table_id_from_data_bound, merge_columnar_table_ids},
     util::{TxnFileLocks, TxnFileRefPropertyHelper},
 };
@@ -57,7 +57,7 @@ pub struct ShardMeta {
     pub columnar_table_ids: Vec<i64>,
     pub unconverted_l0s: Vec<u64>,
     pub vector_indexes: Vec<kvenginepb::VectorIndex>,
-    pub columnar_l2_snap_version: u64,
+    pub columnar_l2_snap_version: SnapVersion,
 
     /// The following are memory-based field(s).
     ///
@@ -102,7 +102,7 @@ impl ShardMeta {
             max_ts: snap.max_ts,
             columnar_table_ids: snap.columnar_table_ids.clone(),
             unconverted_l0s: snap.unconverted_l0s.clone(),
-            columnar_l2_snap_version: snap.columnar_l2_snap_version,
+            columnar_l2_snap_version: snap.columnar_l2_snap_version.into(),
             txn_file_locks,
             ..Default::default()
         };
@@ -991,7 +991,7 @@ impl ShardMeta {
 
     pub fn apply_columnar_compaction(&mut self, comp: &pb::ColumnarCompaction) {
         if comp.target_level == 2 {
-            self.columnar_l2_snap_version = comp.snap_version;
+            self.columnar_l2_snap_version = comp.snap_version.into();
         }
         let col_change = comp.get_columnar_change();
         for col_create in col_change.get_columnar_creates() {
@@ -1095,7 +1095,7 @@ impl ShardMeta {
         );
         self.schema.clear(restore_version);
         self.columnar_table_ids.clear();
-        self.columnar_l2_snap_version = 0;
+        self.columnar_l2_snap_version = SnapVersion::zero();
         self.unconverted_l0s.clear();
         self.vector_indexes.clear();
         self.files.retain(|_, fm| {
@@ -1136,7 +1136,7 @@ impl ShardMeta {
         snap.set_data_sequence(self.data_sequence);
         snap.set_max_ts(self.max_ts);
         snap.set_columnar_table_ids(self.columnar_table_ids.clone());
-        snap.set_columnar_l2_snap_version(self.columnar_l2_snap_version);
+        snap.set_columnar_l2_snap_version(self.columnar_l2_snap_version.into_inner());
         self.schema.to_snapshot(&mut snap);
         snap.set_unconverted_l0s(self.unconverted_l0s.clone());
         snap.set_vector_indexes(self.vector_indexes.clone().into());

@@ -12,7 +12,7 @@ use crate::{
     max_ts_by_cf,
     table::{
         blobtable::BlobRef, file::File, table::Result, BoundedDataSet, ChecksumType, DataBound,
-        Error, InnerKey, Value, NO_COMPRESSION,
+        Error, InnerKey, SnapVersion, Value, NO_COMPRESSION,
     },
     util::new_l0_create_pb,
     NUM_CFS, WRITE_CF,
@@ -22,14 +22,14 @@ const L0_FOOTER_SIZE: usize = std::mem::size_of::<L0Footer>();
 
 #[derive(Default, Clone)]
 pub struct L0Footer {
-    version: u64,
+    snap_version: SnapVersion,
     num_cfs: u32,
     magic: u32,
 }
 
 impl L0Footer {
     pub fn unmarshal(&mut self, bin: &[u8]) {
-        self.version = LittleEndian::read_u64(bin);
+        self.snap_version = LittleEndian::read_u64(bin).into();
         self.num_cfs = LittleEndian::read_u32(&bin[8..]);
         self.magic = LittleEndian::read_u32(&bin[12..]);
     }
@@ -165,7 +165,7 @@ impl L0TableCore {
         let mut footer = L0Footer::default();
         footer.num_cfs = NUM_CFS as u32;
         footer.magic = MAGIC_NUMBER_SPLIT_L0;
-        footer.version = tbl.l0_version;
+        footer.snap_version = tbl.snap_version;
         let smallest = tbl.clone_smallest();
         let biggest = tbl.clone_biggest();
         let max_ts = tbl.max_ts;
@@ -260,8 +260,8 @@ impl L0TableCore {
         InnerKey::from_inner_buf(self.biggest.chunk())
     }
 
-    pub fn version(&self) -> u64 {
-        self.footer.version
+    pub fn snap_version(&self) -> SnapVersion {
+        self.footer.snap_version
     }
 
     pub fn has_data_in_bound(&self, bound: DataBound<'_>) -> bool {
@@ -300,7 +300,7 @@ impl BoundedDataSet for L0TableCore {
 
 pub struct L0Builder {
     builders: Vec<Builder>,
-    version: u64,
+    version: SnapVersion,
     count: usize,
     fid: u64,
 }
@@ -309,7 +309,7 @@ impl L0Builder {
     pub fn new(
         fid: u64,
         block_size: usize,
-        version: u64,
+        version: SnapVersion,
         checksum_type: ChecksumType,
         encryption_key: Option<EncryptionKey>,
     ) -> Self {
@@ -361,7 +361,7 @@ impl L0Builder {
         for offset in offsets {
             buf.put_u32_le(offset);
         }
-        buf.put_u64_le(self.version);
+        buf.put_u64_le(self.version.into_inner());
         buf.put_u32_le(NUM_CFS as u32);
         buf.put_u32_le(MAGIC_NUMBER);
         let (smallest, biggest) = self.smallest_biggest();

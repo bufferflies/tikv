@@ -2,11 +2,13 @@
 
 use std::{
     cmp::Ordering,
-    fmt::{Debug, Formatter},
+    fmt,
+    fmt::{Debug, Display, Formatter},
     iter::Iterator as StdIterator,
     mem::size_of,
     ops::Deref,
     ptr, result, slice,
+    sync::{atomic, atomic::AtomicU64},
 };
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
@@ -990,6 +992,76 @@ pub struct DumpKv {
 impl std::fmt::Debug for DumpKv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}:{}:{:?}", self.key, self.ver, self.value)
+    }
+}
+
+/// SnapVersion is calculated from (base_version + write_sequence), it is used
+/// as the version of L0 table, columnar table and vector index file.
+#[derive(
+    Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[repr(transparent)]
+pub struct SnapVersion(u64);
+
+impl From<u64> for SnapVersion {
+    fn from(v: u64) -> Self {
+        SnapVersion(v)
+    }
+}
+
+impl SnapVersion {
+    pub const fn zero() -> SnapVersion {
+        SnapVersion(0)
+    }
+
+    pub const fn new(base_version: u64, data_sequence: u64) -> SnapVersion {
+        SnapVersion(base_version + data_sequence)
+    }
+
+    pub fn into_inner(self) -> u64 {
+        self.0
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn is_not_zero(self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl Display for SnapVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl slog::Value for SnapVersion {
+    fn serialize(
+        &self,
+        record: &slog::Record<'_>,
+        key: slog::Key,
+        serializer: &mut dyn slog::Serializer,
+    ) -> slog::Result {
+        slog::Value::serialize(&self.0, record, key, serializer)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct AtomicSnapVersion(AtomicU64);
+
+impl AtomicSnapVersion {
+    pub fn new(v: SnapVersion) -> Self {
+        Self(AtomicU64::new(v.0))
+    }
+
+    pub fn load(&self) -> SnapVersion {
+        self.0.load(atomic::Ordering::Acquire).into()
+    }
+
+    pub fn store(&self, v: SnapVersion) {
+        self.0.store(v.into_inner(), atomic::Ordering::Release);
     }
 }
 

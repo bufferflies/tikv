@@ -61,7 +61,7 @@ use crate::{
         schema_file::SchemaFile,
         sstable::{self, builder::TableBuilderOptions, BlockCache, L0Builder, SsTable},
         vector_index::{VectorIndexBuildOptions, VectorIndexBuilder},
-        BoundedDataSet, ChecksumType, DataBound, InnerKey,
+        BoundedDataSet, ChecksumType, DataBound, InnerKey, SnapVersion,
     },
     table_id::{get_table_id_from_data_bound, is_bound_overlap_with_table_ids},
     util::{
@@ -438,7 +438,7 @@ pub struct L1PlusCompaction {
 pub struct ColumnarCompaction {
     level: u32,
     safe_ts: u64,
-    snap_version: u64,
+    snap_version: SnapVersion,
     source_row_files: Vec<(u32, u64)>,      // (level, id)
     source_columnar_files: Vec<(u32, u64)>, // (level, id)
     schema_file_id: u64,
@@ -457,7 +457,7 @@ pub struct ColumnarMajorCompaction {
     table_ids: (Vec<i64>, Vec<i64>), /* (table ids that need to add columnar, table ids that
                                       * need to clear columnar) */
     columnar_config: ColumnarTableBuildOptions,
-    snap_version: u64,
+    snap_version: SnapVersion,
     target_level: u32, // target level for columnar tables create
 }
 
@@ -486,7 +486,7 @@ pub struct VectorIndexUpdate {
     table_id: i64,
     index_id: i64,
     col_id: i64,
-    snap_version: u64,
+    snap_version: SnapVersion,
     schema_file_id: u64,
     col_file_ids: Vec<(u64, u32)>,
     remove_file_ids: Vec<u64>,
@@ -501,7 +501,7 @@ impl VectorIndexUpdate {
         update.set_index_id(self.index_id);
         update.set_col_id(self.col_id);
         update.set_removed(self.remove_file_ids.clone());
-        update.set_snap_version(self.snap_version);
+        update.set_snap_version(self.snap_version.into_inner());
         update
     }
 }
@@ -1626,7 +1626,7 @@ impl Engine {
             old_columnar_tables,
             schema_file_id: 0,
             table_ids: (vec![], vec![]),
-            snap_version: 0,
+            snap_version: SnapVersion::zero(),
             columnar_config: self.opts.columnar_build_options,
             target_level: 2, // Set target level to 2 for clear columnar to reset l2_snap_version.
         };
@@ -1651,11 +1651,11 @@ impl Engine {
         let schema_file = shard.get_schema_file()?;
         let mut req = self.new_compact_request_with_shard(shard);
         let mut source_row_tables = vec![];
-        let mut snap_version = 0;
+        let mut snap_version = SnapVersion::zero();
         let mut total_size = 0;
         for l0 in &data.col_levels.unconverted_l0s {
             source_row_tables.push((0, l0.id()));
-            snap_version = snap_version.max(l0.version());
+            snap_version = snap_version.max(l0.snap_version());
             total_size += l0.size();
         }
         let num_l0s = source_row_tables.len();
@@ -1767,12 +1767,12 @@ impl Engine {
         let mut snap_version = shard.get_columnar_l2_snap_version();
         let target_level = if !has_columnar_file_overlap {
             // If target_level is 2 and snap_version is 0, snap_version should be updated.
-            if snap_version == 0 {
+            if snap_version.is_zero() {
                 snap_version = l0_tbls
                     .iter()
-                    .map(|t| t.version())
+                    .map(|t| t.snap_version())
                     .max()
-                    .unwrap_or(shard.get_snap_version());
+                    .unwrap_or(shard.get_persisted_snap_version());
             }
             2
         } else {
@@ -1851,7 +1851,7 @@ impl Engine {
         let mut smallest = l0_tbls[0].get_smallest();
         let mut biggest = l0_tbls[0].get_biggest();
         let mut l0_tbl_ids = Vec::with_capacity(l0_tbls.len());
-        let mut snap_version = 0;
+        let mut snap_version = SnapVersion::zero();
         for col in l0_tbls {
             if smallest > col.get_smallest() {
                 smallest = col.get_smallest();
@@ -1859,8 +1859,8 @@ impl Engine {
             if biggest < col.get_biggest() {
                 biggest = col.get_biggest();
             }
-            let l0_version = col.get_l0_version().unwrap();
-            snap_version = snap_version.max(l0_version);
+            let col_snap_version = col.get_snap_version().unwrap();
+            snap_version = snap_version.max(col_snap_version);
             l0_tbl_ids.push((0, col.get_file().id()));
             total_size += col.get_file().size();
         }
@@ -1915,7 +1915,7 @@ impl Engine {
         let mut smallest = l1_tbls[0].get_smallest();
         let mut biggest = l1_tbls[0].get_biggest();
         let mut l1_tbl_ids = Vec::with_capacity(l1_tbls.len());
-        let mut snap_version = 0;
+        let mut snap_version = SnapVersion::zero();
         for col in l1_tbls {
             if smallest > col.get_smallest() {
                 smallest = col.get_smallest();
@@ -1923,8 +1923,8 @@ impl Engine {
             if biggest < col.get_biggest() {
                 biggest = col.get_biggest();
             }
-            let l0_version = col.get_l0_version().unwrap();
-            snap_version = snap_version.max(l0_version);
+            let col_snap_version = col.get_snap_version().unwrap();
+            snap_version = snap_version.max(col_snap_version);
             l1_tbl_ids.push((1, col.get_file().id()));
             total_size += col.get_file().size();
         }
@@ -2010,25 +2010,25 @@ impl Engine {
             .iter()
             .find(|idx| idx.index_id == index_id && idx.col_id == col_id)?;
         let mut remove_file_ids = vec![];
-        let old_idx_ver =
+        let old_idx_snap_ver =
             if let Some(old_vec_idx) = data.vector_indexes.get(table_id, index_id, col_id) {
                 if rebuild {
                     for file in &old_vec_idx.files {
                         remove_file_ids.push(file.file_id());
                     }
-                    0
+                    SnapVersion::zero()
                 } else {
                     old_vec_idx.snap_version()
                 }
             } else {
-                0
+                SnapVersion::zero()
             };
         let mut col_file_ids = vec![];
         let mut total_size = 0;
         for col_lvl in &data.col_levels.levels {
             for col_file in &col_lvl.files {
-                let l0_version = col_file.get_l0_version().unwrap_or(1);
-                if col_file.has_table(table_id) && l0_version > old_idx_ver {
+                let col_snap_version = col_file.get_snap_version().unwrap_or(1.into());
+                if col_file.has_table(table_id) && col_snap_version > old_idx_snap_ver {
                     let f = col_file.get_file();
                     col_file_ids.push((f.id(), col_lvl.level as u32));
                     total_size += f.size();
@@ -2579,7 +2579,7 @@ async fn compact_destroy_range(
             let mut builder = L0Builder::new(
                 new_id,
                 block_size,
-                t.version(),
+                t.snap_version(),
                 checksum_type,
                 ctx.encryption_key.clone(),
             );
@@ -2745,7 +2745,7 @@ async fn compact_destroy_range_for_columnar(
         }
         let mut file_builder = ColumnarFileBuilder::new(
             id_allocator.alloc_id().await,
-            columnar_file.get_l0_version(),
+            columnar_file.get_snap_version(),
             ctx.encryption_key.clone(),
         );
         for &table_id in columnar_table_ids {
@@ -2854,7 +2854,7 @@ async fn compact_truncate_ts(
             let mut builder = L0Builder::new(
                 new_id,
                 block_size,
-                t.version(),
+                t.snap_version(),
                 checksum_type,
                 ctx.encryption_key.clone(),
             );
@@ -3009,7 +3009,7 @@ async fn compact_truncate_ts_for_columnar(
         }
         let mut file_builder = ColumnarFileBuilder::new(
             id_allocator.alloc_id().await,
-            columnar_file.get_l0_version(),
+            columnar_file.get_snap_version(),
             ctx.encryption_key.clone(),
         );
         for &table_id in columnar_table_ids {
@@ -3113,7 +3113,7 @@ async fn compact_trim_over_bound(
             let mut builder = L0Builder::new(
                 new_id,
                 block_size,
-                t.version(),
+                t.snap_version(),
                 checksum_tp,
                 ctx.encryption_key.clone(),
             );
@@ -3277,7 +3277,7 @@ async fn compact_trim_over_bound_for_columnar(
         };
         let mut file_builder = ColumnarFileBuilder::new(
             id_allocator.alloc_id().await,
-            columnar_file.get_l0_version(),
+            columnar_file.get_snap_version(),
             ctx.encryption_key.clone(),
         );
         for &table_id in columnar_table_ids {
@@ -3732,7 +3732,7 @@ async fn l0_compact(
     )
     .await?;
     let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
-    l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
+    l0_tbls.sort_by(|a, b| b.snap_version().cmp(&a.snap_version()));
     let mut comp = pb::Compaction::new();
     comp.set_top_deletes(l0_compaction.l0_tables.clone());
     comp.set_level(0_u32);
@@ -3869,7 +3869,7 @@ async fn major_compact(
     )
     .await?;
     let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
-    l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
+    l0_tbls.sort_by(|a, b| b.snap_version().cmp(&a.snap_version()));
     l0_tbls.iter().for_each(|tbl| {
         let mut tbl_delete = pb::TableDelete::new();
         tbl_delete.set_id(tbl.id());
@@ -4009,7 +4009,7 @@ async fn transform_for_columnar(
     table_ids: Vec<i64>,
     schema_file: &SchemaFile,
     target_lvl: u32,
-    snap_version: Option<u64>,
+    snap_version: Option<SnapVersion>,
     columnar_config: &ColumnarTableBuildOptions,
     id_allocator: &mut LocalIdAllocator,
 ) -> Result<Vec<ColumnarCreate>> {
@@ -4100,7 +4100,7 @@ async fn columnar_major_compact_for_add_tables(
     )
     .await?;
     let mut l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
-    l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
+    l0_tbls.sort_by(|a, b| b.snap_version().cmp(&a.snap_version()));
     let mut tbls = vec![];
     for l0_tbl in &l0_tbls {
         if let Some(tbl) = l0_tbl.get_cf(WRITE_CF) {
@@ -4129,7 +4129,7 @@ async fn columnar_major_compact_for_add_tables(
         None
     } else {
         // Level 1 columnar file need sort by snap_version. Use the shard's
-        // l2_snap_version as the new columnar file l0_version.
+        // l2_snap_version as the new columnar file snap_version.
         Some(major_compaction.snap_version)
     };
     let table_ids = major_compaction.table_ids.0.clone();
@@ -4200,7 +4200,7 @@ async fn columnar_major_compact_for_clear_tables(
         }
         let mut file_builder = ColumnarFileBuilder::new(
             id_allocator.alloc_id().await,
-            columnar_table.get_l0_version(),
+            columnar_table.get_snap_version(),
             ctx.encryption_key.clone(),
         );
         // The table_ids_to_clear not exist in overlap_tables, so after the compaction,
@@ -4267,10 +4267,10 @@ async fn columnar_major_compact(
     id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::new();
-    ret.set_snap_version(major_compaction.snap_version);
+    ret.set_snap_version(major_compaction.snap_version.into_inner());
     ret.set_target_level(major_compaction.target_level);
     // Clear all columnar tables.
-    if major_compaction.snap_version == 0 {
+    if major_compaction.snap_version.is_zero() {
         let columnar_changes = ret.mut_columnar_change();
         for &(level, file_id) in major_compaction.old_columnar_tables.iter() {
             let mut tbl_delete = pb::ColumnarDelete::new();
@@ -4356,7 +4356,7 @@ async fn convert_row_file_to_columnar_file(
     id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::new();
-    ret.set_snap_version(columnar_compaction.snap_version);
+    ret.set_snap_version(columnar_compaction.snap_version.into_inner());
     ret.set_target_level(columnar_compaction.level);
     let row_l0s: Vec<u64> = columnar_compaction
         .source_row_files
@@ -4488,7 +4488,7 @@ async fn compact_columnar_l0_files(
     id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::default();
-    ret.set_snap_version(columnar_compaction.snap_version);
+    ret.set_snap_version(columnar_compaction.snap_version.into_inner());
     ret.set_target_level(1);
     let tag = ctx.req.get_tag();
     let fs = &ctx.dfs;
@@ -4535,7 +4535,7 @@ async fn compact_columnar_l0_files(
     let col_tbls = files_to_columnar_tables(col_files);
     let snap_version = col_tbls
         .iter()
-        .map(|f| f.get_l0_version().unwrap())
+        .map(|f| f.get_snap_version().unwrap())
         .max()
         .unwrap();
     let mut smallest = col_tbls[0].get_smallest();
@@ -4631,7 +4631,7 @@ async fn compact_columnar_l1_files(
     id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::ColumnarCompaction> {
     let mut ret = pb::ColumnarCompaction::default();
-    ret.set_snap_version(columnar_compaction.snap_version);
+    ret.set_snap_version(columnar_compaction.snap_version.into_inner());
     ret.set_target_level(2);
     let tag = ctx.req.get_tag();
     let fs = &ctx.dfs;

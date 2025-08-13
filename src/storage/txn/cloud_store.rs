@@ -144,7 +144,11 @@ impl<S: Snapshot> CloudStore<S> {
         tikv_util::set_current_region(snap.get_id());
 
         let raw_key = user_key.to_raw()?;
-        let item = snap.get(LOCK_CF, &raw_key, snap.get_mem_table_version());
+        let item = snap.get(
+            LOCK_CF,
+            &raw_key,
+            snap.get_mem_table_snap_version().into_inner(),
+        );
         statistics.lock.get += 1;
         statistics.lock.flow_stats.read_keys += 1;
         statistics.lock.flow_stats.read_bytes += raw_key.len() + item.value_len();

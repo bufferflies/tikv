@@ -23,6 +23,7 @@ use slog_global::info;
 use crate::{
     table::{
         columnar::ColumnarLevels, vector_index::VectorIndexes, BoundedDataSet, DataBound, InnerKey,
+        SnapVersion,
     },
     table_id::{get_table_id_from_data_bound, keys_belong_to_same_table, merge_columnar_table_ids},
     *,
@@ -106,7 +107,7 @@ impl Engine {
                 store_u64(&new_shard.meta_seq, initial_seq);
                 store_u64(&new_shard.write_sequence, initial_seq);
             }
-            store_u64(&new_shard.snap_version, old_shard.get_snap_version());
+            new_shard.set_persisted_snap_version(old_shard.get_persisted_snap_version());
             if !old_del_prefixes.is_empty() {
                 // We need to use the old shard's DEL_PREFIXES_KEY to overwrite the new shard's
                 // DEL_PREFIXES_KEY. because the destroy_range compaction may have not
@@ -255,7 +256,7 @@ impl Engine {
         force_switch_mem_table: bool,
     ) {
         shard.write_sequence.store(sequence, Release);
-        let version = shard.load_mem_table_version();
+        let version = shard.load_mem_table_snap_version();
         // Switch the old shard mem-table, so the first mem-table is always empty.
         // ignore the read-only mem-table to be flushed. let the new shard handle it.
         self.switch_mem_table(shard, version, force_switch_mem_table, sequence);
@@ -449,11 +450,14 @@ impl Engine {
             &new_shard.base_version,
             max(source_mem_tbl_version, target_mem_tbl_version) - sequence,
         );
-        let source_snap_version = source_snap.get_base_version() + source_snap.get_data_sequence();
-        store_u64(
-            &new_shard.snap_version,
-            max(old_shard.get_snap_version(), source_snap_version),
+        let source_snap_version = SnapVersion::new(
+            source_snap.get_base_version(),
+            source_snap.get_data_sequence(),
         );
+        new_shard.set_persisted_snap_version(max(
+            old_shard.get_persisted_snap_version(),
+            source_snap_version,
+        ));
 
         let data = if !clear_source {
             // merge source DEL_PREFIXES_KEY to new shard
@@ -494,7 +498,7 @@ impl Engine {
             for l0 in source.l0_tables.values() {
                 l0_tbls.push(l0.clone())
             }
-            l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
+            l0_tbls.sort_by(|a, b| b.snap_version().cmp(&a.snap_version()));
             let mut new_cf_builders = [
                 ShardCfBuilder::new(0),
                 ShardCfBuilder::new(1),
@@ -538,7 +542,7 @@ impl Engine {
             }
             columnar_levels.l2_snap_version = max(
                 old_data.col_levels.l2_snap_version,
-                source_snap.columnar_l2_snap_version,
+                source_snap.columnar_l2_snap_version.into(),
             );
             columnar_levels.sort();
             let mut vector_indexes = old_data.vector_indexes.clone();
@@ -558,12 +562,12 @@ impl Engine {
                         source_vec_index.col_id,
                     )
                     .map(|v| v.snap_version)
-                    .unwrap_or(0);
+                    .unwrap_or(SnapVersion::zero());
                 vector_indexes.update_snap_version(
                     source_vec_index.table_id,
                     source_vec_index.index_id,
                     source_vec_index.col_id,
-                    std::cmp::max(old_snap_version, source_vec_index.snap_version),
+                    std::cmp::max(old_snap_version, source_vec_index.snap_version.into()),
                 );
             }
             let mut schema_version = old_data.schema_version;
@@ -671,10 +675,8 @@ impl Engine {
             &new_shard.estimated_ia_kv_size,
             old_shard.get_estimated_ia_kv_size(),
         );
-        store_u64(
-            &new_shard.snap_version,
-            new_shard.get_base_version() + sequence,
-        );
+        new_shard
+            .set_persisted_snap_version(SnapVersion::new(new_shard.get_base_version(), sequence));
         new_shard
     }
 }

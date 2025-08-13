@@ -23,7 +23,7 @@ use crate::table::{
     schema_file::Schema,
     search,
     sstable::{L0Table, PROP_KEY_ENCRYPTION_VER},
-    BoundedDataSet, DataBound, InnerKey, LZ4_COMPRESSION,
+    BoundedDataSet, DataBound, InnerKey, SnapVersion, LZ4_COMPRESSION,
 };
 
 pub const HANDLE_COL_ID: i32 = -1;
@@ -659,7 +659,7 @@ impl ColumnarFile {
         let mut smallest_key = vec![];
         let mut biggest_key = vec![];
         let mut max_version = 0;
-        let mut l0_version = None;
+        let mut snap_version = None;
         let mut encryption_ver = 0;
         let mut estimated_kv_size = 0;
         let property_offset = table_offsets_offset - footer.properties_size as u64;
@@ -675,7 +675,7 @@ impl ColumnarFile {
             } else if key == PROP_KEY_MAX_VERSION {
                 max_version = val.get_u64_le();
             } else if key == PROP_KEY_SNAP_VERSION {
-                l0_version = Some(val.get_u64_le());
+                snap_version = Some(val.get_u64_le().into());
             } else if key == PROP_KEY_ENCRYPTION_VER {
                 encryption_ver = val.get_u32_le();
             } else if key == PROP_KEY_ESTIMATED_KV_SIZE {
@@ -700,7 +700,7 @@ impl ColumnarFile {
                 smallest_key,
                 biggest_key,
                 max_version,
-                l0_version,
+                snap_version,
                 tables,
                 encryption_ver,
                 index_offset,
@@ -755,8 +755,8 @@ impl ColumnarFile {
         self.core.max_version
     }
 
-    pub fn get_l0_version(&self) -> Option<u64> {
-        self.core.l0_version
+    pub fn get_snap_version(&self) -> Option<SnapVersion> {
+        self.core.snap_version
     }
 
     pub fn size(&self) -> u64 {
@@ -797,7 +797,7 @@ struct ColumnarFileCore {
     smallest_key: Vec<u8>,
     biggest_key: Vec<u8>,
     max_version: u64,
-    l0_version: Option<u64>,
+    snap_version: Option<SnapVersion>,
     tables: HashMap<i64, Arc<TableMeta>>,
     encryption_ver: u32,
     index_offset: u32,
@@ -1597,9 +1597,9 @@ impl ColumnarLevel {
     pub(crate) fn sort(&mut self) {
         if self.level < 2 {
             self.files.sort_by(|a, b| {
-                let a_l0_version = a.get_l0_version().unwrap();
-                let b_l0_version = b.get_l0_version().unwrap();
-                b_l0_version.cmp(&a_l0_version)
+                let a_snap_version = a.get_snap_version().unwrap();
+                let b_snap_version = b.get_snap_version().unwrap();
+                b_snap_version.cmp(&a_snap_version)
             })
         } else {
             self.files
@@ -1612,7 +1612,7 @@ impl ColumnarLevel {
 pub(crate) struct ColumnarLevels {
     pub(crate) unconverted_l0s: Vec<L0Table>,
     pub(crate) levels: Vec<ColumnarLevel>,
-    pub(crate) l2_snap_version: u64,
+    pub(crate) l2_snap_version: SnapVersion,
 }
 
 impl ColumnarLevels {
@@ -1624,7 +1624,7 @@ impl ColumnarLevels {
                 ColumnarLevel::new(1),
                 ColumnarLevel::new(2),
             ],
-            l2_snap_version: 0,
+            l2_snap_version: SnapVersion::zero(),
         }
     }
 

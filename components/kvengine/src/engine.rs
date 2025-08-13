@@ -41,7 +41,7 @@ use crate::{
         memtable::{CfTable, CfTableCore},
         schema_file::SchemaFile,
         sstable::{BlockCache, MAGIC_NUMBER},
-        BoundedDataSet, DataBound, InnerKey, ZSTD_COMPRESSION,
+        BoundedDataSet, DataBound, InnerKey, SnapVersion, ZSTD_COMPRESSION,
     },
     txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
     util::{new_blob_create_pb, new_l0_create_pb, new_table_create_pb},
@@ -442,9 +442,9 @@ impl EngineCore {
         let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone(), &self.master_key);
         let data = shard.get_data();
         info!(
-            "ingest shard {} mem_table_version {}, inner_key_off {}, change {:?}",
+            "ingest shard {} mem_table_snap_version {}, inner_key_off {}, change {:?}",
             shard.tag(),
-            shard.load_mem_table_version(),
+            shard.load_mem_table_snap_version(),
             data.inner_key_off,
             &cs,
         );
@@ -614,7 +614,7 @@ impl EngineCore {
         let mut tasks = Vec::with_capacity(mem_tbls.len() - 1);
         while let Some(mem_tbl) = mem_tbls.pop() {
             // writable mem-table's version is 0.
-            if mem_tbl.get_version() != 0 {
+            if mem_tbl.get_snap_version().is_not_zero() {
                 tasks.push(FlushTask::new_normal(shard, mem_tbl));
             }
         }
@@ -640,15 +640,16 @@ impl EngineCore {
         // A newly split shard's meta_sequence is an in-mem state until initial flush.
         let data_sequence = shard.get_meta_sequence();
         let base_version = shard.get_base_version();
+        let snap_version = SnapVersion::new(base_version, data_sequence);
         let mut max_ts = shard.get_sst_max_ts();
         let mut properties: Option<kvenginepb::Properties> = None;
         for mem_tbl in &data.mem_tbls.as_slice()[1..] {
             debug!(
-                "trigger initial flush check mem table version {}, size {}",
-                mem_tbl.get_version(),
+                "trigger initial flush check mem table snap version {}, size {}",
+                mem_tbl.get_snap_version(),
                 mem_tbl.size(),
             );
-            if mem_tbl.get_version() <= base_version + data_sequence {
+            if mem_tbl.get_snap_version() <= snap_version {
                 if properties.is_none() {
                     // To persist properties of first mem-table.
                     properties = Some(mem_tbl.get_properties().unwrap_or_default());
@@ -688,7 +689,7 @@ impl EngineCore {
         meta: ShardMeta,
     ) -> Result<kvenginepb::ChangeSet> {
         let shard = self.get_shard_with_ver(shard_id, shard_ver)?;
-        let l0_version = shard.load_mem_table_version();
+        let snap_version = shard.load_mem_table_snap_version();
         let mut cs = new_change_set(shard_id, shard_ver);
         let ingest_files = cs.mut_ingest_files();
         ingest_files
@@ -744,7 +745,7 @@ impl EngineCore {
                         for offset in offsets {
                             buf.put_u32_le(offset);
                         }
-                        buf.put_u64_le(l0_version);
+                        buf.put_u64_le(snap_version.into_inner());
                         buf.put_u32_le(NUM_CFS as u32);
                         buf.put_u32_le(MAGIC_NUMBER);
                         let l0_create =
@@ -845,9 +846,9 @@ impl EngineCore {
                     warn!("{} trigger_flush error: {:?}", shard.tag(), err);
                 }
             } else {
-                let table_version = change_set_table_version(cs);
+                let snap_version = change_set_snap_version(cs);
                 let id_ver = IdVer::new(cs.shard_id, cs.shard_ver);
-                self.send_flush_msg(FlushMsg::Committed((id_ver, table_version)));
+                self.send_flush_msg(FlushMsg::Committed((id_ver, snap_version)));
             }
         }
         if rejected

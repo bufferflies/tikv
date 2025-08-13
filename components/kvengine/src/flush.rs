@@ -24,7 +24,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender as Sender};
 use crate::{
     table::{
         memtable, memtable::CfTable, sstable, sstable::Builder, BoundedDataSet, InnerKey,
-        NO_COMPRESSION,
+        SnapVersion, NO_COMPRESSION,
     },
     util::{new_l0_create_pb, TxnFileRefPropertyHelper},
     *,
@@ -85,10 +85,10 @@ impl FlushTask {
         smallest < self.inner_start() && self.inner_end() <= biggest
     }
 
-    pub(crate) fn table_version(&self) -> u64 {
+    pub(crate) fn snap_version(&self) -> SnapVersion {
         match (&self.normal, &self.initial) {
-            (Some(normal), None) => normal.get_version(),
-            (None, Some(initial)) => initial.table_version(),
+            (Some(normal), None) => normal.get_snap_version(),
+            (None, Some(initial)) => initial.snap_version(),
             _ => unreachable!(),
         }
     }
@@ -106,8 +106,8 @@ pub(crate) struct InitialFlush {
 }
 
 impl InitialFlush {
-    fn table_version(&self) -> u64 {
-        self.base_version + self.data_sequence
+    fn snap_version(&self) -> SnapVersion {
+        SnapVersion::new(self.base_version, self.data_sequence)
     }
 }
 
@@ -141,18 +141,18 @@ impl Engine {
 
         let mut cs = new_change_set(task.id_ver.id, task.id_ver.ver);
         let m = task.normal.as_ref().unwrap();
-        let flush_version = m.get_version();
+        let snap_version = m.get_snap_version();
         let tag = ShardTag::new(self.get_engine_id(), task.id_ver);
         let max_ts = m.data_max_ts();
         info!(
-            "{} flush mem-table version {}, size {}, data max ts {}",
+            "{} flush mem-table snap_version {}, size {}, data max ts {}",
             tag,
-            flush_version,
+            snap_version,
             m.size(),
             max_ts,
         );
         let flush = cs.mut_flush();
-        flush.set_version(flush_version);
+        flush.set_version(snap_version.into_inner());
         flush.set_max_ts(max_ts);
         if let Some(props) = m.get_properties() {
             let mut filtered_props = kvenginepb::Properties::default();
@@ -160,7 +160,7 @@ impl Engine {
             for (key, mut val) in props.keys.into_iter().zip(props.values.into_iter()) {
                 if is_property_need_flush(&key) {
                     if key == TXN_FILE_REF {
-                        val = clear_finished_txn_files(&tag, val, flush_version);
+                        val = clear_finished_txn_files(&tag, val, snap_version);
                     }
                     filtered_props.mut_keys().push(key);
                     filtered_props.mut_values().push(val);
@@ -220,7 +220,7 @@ impl Engine {
         initial_flush.set_data_sequence(flush.data_sequence);
         initial_flush.set_max_ts(flush.max_ts);
         if let Some(props) = flush.properties {
-            let flush_version = flush.base_version + flush.data_sequence;
+            let flush_version = SnapVersion::new(flush.base_version, flush.data_sequence);
             let mut filtered_props = kvenginepb::Properties::default();
             debug_assert_eq!(props.get_keys().len(), props.get_values().len());
             for (key, mut val) in props.keys.into_iter().zip(props.values.into_iter()) {
@@ -301,9 +301,9 @@ impl Engine {
                         }
                         false
                     });
-                    if flush.shard_data.col_levels.l2_snap_version > 0 {
+                    if flush.shard_data.col_levels.l2_snap_version.is_not_zero() {
                         initial_flush.set_columnar_l2_snap_version(
-                            flush.shard_data.col_levels.l2_snap_version,
+                            flush.shard_data.col_levels.l2_snap_version.into_inner(),
                         );
                     }
 
@@ -387,7 +387,7 @@ impl Engine {
                 checksum_type,
                 task.encryption_key.clone(),
             );
-            write_cf_builder.set_l0_version(m.get_version());
+            write_cf_builder.set_snap_version(m.get_snap_version());
             let mut it = m.get_cf(WRITE_CF).new_iterator(false);
             it.seek(start);
             let mut last_key = vec![];
@@ -429,7 +429,7 @@ impl Engine {
         let mut l0_builder = sstable::L0Builder::new(
             l0_fid,
             self.opts.table_builder_options.block_size,
-            m.get_version(),
+            m.get_snap_version(),
             checksum_type,
             task.encryption_key.clone(),
         );
@@ -524,7 +524,7 @@ pub(crate) enum FlushMsg {
 
     /// Committed message is sent when a flush is committed to the raft group,
     /// so we can notify the next finished task.
-    Committed((IdVer, u64)),
+    Committed((IdVer, SnapVersion)),
 
     /// Clear message is sent when a shard changed its version or set to
     /// inactive. Then all the previous tasks will be discarded.
@@ -572,9 +572,9 @@ impl FlushWorker {
                         }
                     }
                 }
-                FlushMsg::Committed((id_ver, table_version)) => {
+                FlushMsg::Committed((id_ver, snap_version)) => {
                     let task_manager = self.get_shard_task_manager(id_ver.id);
-                    if let Some(finished) = task_manager.handle_committed(table_version) {
+                    if let Some(finished) = task_manager.handle_committed(snap_version) {
                         self.engine.meta_change_listener.on_change_set(finished);
                     }
                 }
@@ -601,7 +601,7 @@ impl FlushWorker {
     fn spawn_flush_task(&mut self, task: FlushTask, term: u64) {
         let engine = self.engine.clone();
         self.pool.spawn(tikv_util::init_task_local(async move {
-            let table_version = task.table_version();
+            let snap_version = task.snap_version();
             let id_ver = task.id_ver;
             tikv_util::set_current_region(id_ver.id);
             let res = if task.normal.is_some() {
@@ -611,7 +611,7 @@ impl FlushWorker {
             };
             engine.send_flush_msg(FlushMsg::Result(FlushResult {
                 id_ver,
-                table_version,
+                snap_version,
                 term,
                 res,
             }));
@@ -632,12 +632,12 @@ pub(crate) struct ShardTaskManager {
     task_queue: VecDeque<FlushTask>,
     /// finished contains tasks that successfully flushed, but not yet notified
     /// to the meta listener.
-    finished: HashMap<u64, kvenginepb::ChangeSet>,
+    finished: HashMap<SnapVersion, kvenginepb::ChangeSet>,
     /// The flush notified the meta listener but not yet committed.
     notified: Option<kvenginepb::ChangeSet>,
-    /// committed_table_version is updated when the notified change set is
+    /// committed_snap_version is updated when the notified change set is
     /// committed in the raft group.
-    committed_table_version: u64,
+    committed_snap_version: SnapVersion,
 }
 
 impl ShardTaskManager {
@@ -650,12 +650,12 @@ impl ShardTaskManager {
     }
 
     fn enqueue_task(&mut self, task: &FlushTask) -> bool {
-        if task.table_version() <= self.last_enqueued_table_version() {
+        if task.snap_version() <= self.last_enqueued_snap_version() {
             debug!("{} flush task dropped", task.id_ver;
-                "task.table_version" => task.table_version(),
-                "last_task" => self.task_queue.back().map(|t| t.table_version()),
-                "notified" => self.notified.as_ref().map(|cs| change_set_table_version(cs)),
-                "committed" => self.committed_table_version,
+                "task.snap_version" => task.snap_version(),
+                "last_task" => self.task_queue.back().map(|t| t.snap_version()),
+                "notified" => self.notified.as_ref().map(|cs| change_set_snap_version(cs)),
+                "committed" => self.committed_snap_version,
             );
             return false;
         }
@@ -663,13 +663,13 @@ impl ShardTaskManager {
         true
     }
 
-    fn last_enqueued_table_version(&self) -> u64 {
+    fn last_enqueued_snap_version(&self) -> SnapVersion {
         if let Some(task) = self.task_queue.back() {
-            task.table_version()
+            task.snap_version()
         } else if let Some(notified) = self.notified.as_ref() {
-            change_set_table_version(notified)
+            change_set_snap_version(notified)
         } else {
-            self.committed_table_version
+            self.committed_snap_version
         }
     }
 
@@ -682,10 +682,10 @@ impl ShardTaskManager {
             info!("{} discard old term flush result {:?}", tag, res.res);
             return Either::Left(None);
         }
-        let table_version = res.table_version;
+        let snap_version = res.snap_version;
         match res.res {
             Ok(cs) => {
-                self.finished.insert(table_version, cs);
+                self.finished.insert(snap_version, cs);
                 Either::Left(
                     self.notified
                         .is_none()
@@ -695,13 +695,13 @@ impl ShardTaskManager {
             }
             Err(err) => {
                 info!(
-                    "{} flush task failed, table version {}, error {:?}, retrying",
-                    tag, res.table_version, err
+                    "{} flush task failed, snap version {}, error {:?}, retrying",
+                    tag, res.snap_version, err
                 );
                 let task = self
                     .task_queue
                     .iter()
-                    .find(|task| task.table_version() == table_version)
+                    .find(|task| task.snap_version() == snap_version)
                     .expect("failed task should exist")
                     .clone();
                 Either::Right(task)
@@ -709,13 +709,13 @@ impl ShardTaskManager {
         }
     }
 
-    fn handle_committed(&mut self, table_version: u64) -> Option<kvenginepb::ChangeSet> {
-        if self.committed_table_version < table_version {
-            self.committed_table_version = table_version;
+    fn handle_committed(&mut self, snap_version: SnapVersion) -> Option<kvenginepb::ChangeSet> {
+        if self.committed_snap_version < snap_version {
+            self.committed_snap_version = snap_version;
         }
         if let Some(notified) = self.notified.take() {
-            let notified_table_version = change_set_table_version(&notified);
-            if notified_table_version == table_version {
+            let notified_snap_version = change_set_snap_version(&notified);
+            if notified_snap_version == snap_version {
                 return self.take_finished_task_for_notify();
             }
             self.notified = Some(notified);
@@ -725,7 +725,7 @@ impl ShardTaskManager {
 
     fn take_finished_task_for_notify(&mut self) -> Option<kvenginepb::ChangeSet> {
         if let Some(task) = self.task_queue.front() {
-            if let Some(cs) = self.finished.remove(&task.table_version()) {
+            if let Some(cs) = self.finished.remove(&task.snap_version()) {
                 self.task_queue.pop_front();
                 self.notified = Some(cs.clone());
                 return Some(cs);
@@ -735,26 +735,30 @@ impl ShardTaskManager {
     }
 }
 
-pub(crate) fn change_set_table_version(cs: &kvenginepb::ChangeSet) -> u64 {
+pub(crate) fn change_set_snap_version(cs: &kvenginepb::ChangeSet) -> SnapVersion {
     if cs.has_flush() {
-        return cs.get_flush().version;
+        return cs.get_flush().version.into();
     } else if cs.has_initial_flush() {
         let initial_flush = cs.get_initial_flush();
-        return initial_flush.base_version + initial_flush.data_sequence;
+        return SnapVersion::new(initial_flush.base_version, initial_flush.data_sequence);
     }
     unreachable!("unexpected change set {:?}", cs);
 }
 
-pub(crate) fn clear_finished_txn_files(tag: &ShardTag, v: Vec<u8>, version: u64) -> Vec<u8> {
+pub(crate) fn clear_finished_txn_files(
+    tag: &ShardTag,
+    v: Vec<u8>,
+    version: SnapVersion,
+) -> Vec<u8> {
     let mut prop = TxnFileRefPropertyHelper::from_property(Some(Bytes::from(v))).unwrap();
-    prop.clear_finished(version);
+    prop.clear_finished_txn_file_lock(version);
     debug!("{} flush mem-table: clear finished txn files", tag; "prop" => ?prop, "version" => version);
     prop.marshall()
 }
 
 pub(crate) struct FlushResult {
     id_ver: IdVer,
-    table_version: u64,
+    snap_version: SnapVersion,
     term: u64,
     res: Result<kvenginepb::ChangeSet>,
 }

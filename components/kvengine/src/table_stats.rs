@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::table::columnar::VectorIndexDef;
+use crate::table::{columnar::VectorIndexDef, SnapVersion};
 
 /// Statistics about the columnar index coverage for a specific table and index
 #[derive(Debug, Default, Serialize)]
@@ -104,7 +104,8 @@ impl super::Shard {
 
         // snap_versions comes from existing vector indexes in the shard.
         // If a vector index is not built yet, it will not be in this map.
-        let mut snap_versions = HashMap::<(/* table_id */ i64, /* index_id */ i64), u64>::new();
+        let mut snap_versions =
+            HashMap::<(/* table_id */ i64, /* index_id */ i64), SnapVersion>::new();
         for vec_idx in data.vector_indexes.iter() {
             snap_versions.insert((vec_idx.table_id, vec_idx.index_id), vec_idx.snap_version());
         }
@@ -124,11 +125,11 @@ impl super::Shard {
                         let snap_version = snap_versions
                             .get(&(table_id, index_id))
                             .copied()
-                            .unwrap_or(0);
+                            .unwrap_or(SnapVersion::zero());
                         let mut is_indexed = false;
-                        if snap_version > 0
+                        if snap_version.is_not_zero()
                             && (col_level.level == 2
-                                || file.get_l0_version().unwrap_or_default() <= snap_version)
+                                || file.get_snap_version().unwrap_or_default() <= snap_version)
                         {
                             is_indexed = true;
                         }

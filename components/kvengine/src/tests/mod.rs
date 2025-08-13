@@ -569,7 +569,13 @@ fn test_lock_cf_repeatable_read() {
     verify_locks(&snap, 120, 130, 3000, false);
     verify_locks(&snap, 130, 140, 4000, true);
     verify_locks(&snap, 140, 150, mem_tbl_ver5, false);
-    verify_locks(&snap, 150, 300, snap.get_mem_table_version(), false);
+    verify_locks(
+        &snap,
+        150,
+        300,
+        snap.get_mem_table_snap_version().into_inner(),
+        false,
+    );
 
     // Write more mem table data.
     {
@@ -586,13 +592,25 @@ fn test_lock_cf_repeatable_read() {
 
     // Verify repeatable read.
     verify_locks(&snap, 140, 150, mem_tbl_ver5, false);
-    verify_locks(&snap, 150, 300, snap.get_mem_table_version(), false);
+    verify_locks(
+        &snap,
+        150,
+        300,
+        snap.get_mem_table_snap_version().into_inner(),
+        false,
+    );
 
     // Check latest snapshot.
     let snap = shard.new_snap_access();
     verify_locks(&snap, 140, 150, mem_tbl_ver5, false);
     verify_locks(&snap, 150, 160, txn_file_ver6, false);
-    verify_locks(&snap, 160, 300, snap.get_mem_table_version(), false);
+    verify_locks(
+        &snap,
+        160,
+        300,
+        snap.get_mem_table_snap_version().into_inner(),
+        false,
+    );
 }
 
 #[rstest]
@@ -1516,7 +1534,7 @@ fn new_l0table_file(
     let block_size = engine.opts.table_builder_options.block_size;
     let fs = engine.fs.clone();
 
-    let mut builder = L0Builder::new(id, block_size, version, ChecksumType::Crc32, None);
+    let mut builder = L0Builder::new(id, block_size, version.into(), ChecksumType::Crc32, None);
     for cf in 0..NUM_CFS {
         for i in begin[cf]..end[cf] {
             let key = engine.key_builder.i_to_inner_key(i);

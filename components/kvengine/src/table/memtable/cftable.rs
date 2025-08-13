@@ -5,14 +5,14 @@ use std::{
     iter::Iterator as StdIterator,
     ops::Deref,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
 
 use super::{Arena, SkipList};
 use crate::{
-    table::{memtable::skl_ext::SkipListExt, DataBound, TxnFile},
+    table::{memtable::skl_ext::SkipListExt, AtomicSnapVersion, DataBound, SnapVersion, TxnFile},
     EXTRA_CF, NUM_CFS, WRITE_CF,
 };
 
@@ -45,7 +45,7 @@ impl CfTable {
     pub fn new_split(&self) -> Self {
         let tbls = self.core.tbls.clone();
         let arena = self.core.arena.clone();
-        let ver = AtomicU64::new(self.ver.load(Ordering::Acquire));
+        let snap_ver = AtomicSnapVersion::new(self.snap_ver.load());
         let force_switch = AtomicBool::new(self.force_switch.load(Ordering::Acquire));
         let props = Mutex::new(self.core.props.lock().unwrap().clone());
         let unpersisted_props_size = AtomicUsize::new(self.core.unpersisted_props_size());
@@ -53,7 +53,7 @@ impl CfTable {
             core: Arc::new(CfTableCore {
                 tbls,
                 arena,
-                ver,
+                snap_ver,
                 force_switch,
                 props,
                 unpersisted_props_size,
@@ -66,7 +66,7 @@ impl CfTable {
         let mut tbls = self.core.tbls.clone();
         tbls[WRITE_CF] = tbls[WRITE_CF].add_txn_files(txn_files);
         let arena = self.core.arena.clone();
-        let ver = AtomicU64::new(self.ver.load(Ordering::Acquire));
+        let snap_ver = AtomicSnapVersion::new(self.snap_ver.load());
         let force_switch = AtomicBool::new(self.force_switch.load(Ordering::Acquire));
         let props = Mutex::new(self.core.props.lock().unwrap().clone());
         let unpersisted_props_size = AtomicUsize::new(self.core.unpersisted_props_size());
@@ -74,7 +74,7 @@ impl CfTable {
             core: Arc::new(CfTableCore {
                 tbls,
                 arena,
-                ver,
+                snap_ver,
                 force_switch,
                 props,
                 unpersisted_props_size,
@@ -86,7 +86,7 @@ impl CfTable {
 pub struct CfTableCore {
     tbls: [SkipListExt; NUM_CFS],
     arena: Arc<Arena>,
-    ver: AtomicU64,
+    snap_ver: AtomicSnapVersion,
     force_switch: AtomicBool,
     props: Mutex<Option<kvenginepb::Properties>>,
     unpersisted_props_size: AtomicUsize,
@@ -108,7 +108,7 @@ impl CfTableCore {
                 SkipListExt::new(SkipList::new(Some(arena.clone()))),
             ],
             arena,
-            ver: AtomicU64::new(0),
+            snap_ver: AtomicSnapVersion::new(SnapVersion::zero()),
             force_switch: AtomicBool::new(false),
             props: Mutex::new(None),
             unpersisted_props_size: AtomicUsize::default(),
@@ -136,8 +136,8 @@ impl CfTableCore {
         self.tbls.iter().map(|t| t.skl_size()).sum()
     }
 
-    pub fn set_version(&self, ver: u64) {
-        self.ver.store(ver, Ordering::Release)
+    pub fn set_snap_version(&self, snap_ver: SnapVersion) {
+        self.snap_ver.store(snap_ver)
     }
 
     pub fn set_properties(&self, props: kvenginepb::Properties) {
@@ -157,8 +157,8 @@ impl CfTableCore {
         self.unpersisted_props_size.load(Ordering::Acquire)
     }
 
-    pub fn get_version(&self) -> u64 {
-        self.ver.load(Ordering::Acquire)
+    pub fn get_snap_version(&self) -> SnapVersion {
+        self.snap_ver.load()
     }
 
     pub fn set_force_switch(&self) {

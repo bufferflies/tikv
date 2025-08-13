@@ -138,7 +138,7 @@ pub(crate) fn print_l0_table(l0: &L0Table) {
     println!("  tombs: {}", l0.tombs());
     println!("  entries_write_cf: {}", l0.entries_write_cf());
     println!("  kv_size: {}", l0.kv_size());
-    println!("  version: {}", l0.version());
+    println!("  version: {}", l0.snap_version());
     println!(
         "  smallest: {}",
         log_wrappers::hex_encode_upper(l0.smallest().deref())

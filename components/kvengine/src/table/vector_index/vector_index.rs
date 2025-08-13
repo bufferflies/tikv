@@ -30,7 +30,7 @@ use crate::{
         },
         BoundedDataSet, DataBound, Error,
         Error::Other,
-        InnerKey, Result,
+        InnerKey, Result, SnapVersion,
     },
 };
 
@@ -131,7 +131,7 @@ impl VectorIndexes {
         table_id: i64,
         index_id: i64,
         col_id: i64,
-        snap_version: u64,
+        snap_version: SnapVersion,
     ) {
         if let Some(index) = self.get_mut(table_id, index_id, col_id) {
             debug_assert!(
@@ -160,7 +160,7 @@ pub struct VectorIndex {
     pub table_id: i64,
     pub index_id: i64,
     pub col_id: i64,
-    pub snap_version: u64,
+    pub snap_version: SnapVersion,
     pub(crate) files: Vec<VectorIndexFile>,
     pub(crate) extra_columnar_files: Vec<u64>,
 }
@@ -171,7 +171,7 @@ impl VectorIndex {
             table_id,
             index_id,
             col_id,
-            snap_version: 0,
+            snap_version: SnapVersion::zero(),
             files: vec![],
             extra_columnar_files: vec![],
         }
@@ -187,14 +187,14 @@ impl VectorIndex {
         });
     }
 
-    pub fn set_snap_version(&mut self, snap_version: u64) {
+    pub fn set_snap_version(&mut self, snap_version: SnapVersion) {
         self.snap_version = snap_version;
     }
 
-    pub fn snap_version(&self) -> u64 {
+    pub fn snap_version(&self) -> SnapVersion {
         // For backward compatibility, if the snap version is 0, we use the snap version
         // of the first file.
-        if self.snap_version == 0 && !self.files.is_empty() {
+        if self.snap_version.is_zero() && !self.files.is_empty() {
             return self.files[0].snap_version();
         }
         self.snap_version
@@ -219,7 +219,7 @@ impl VectorIndex {
                     continue;
                 }
                 if self.files.iter().any(|vec_idx_file| {
-                    vec_idx_file.snap_version() > file.get_l0_version().unwrap_or_default()
+                    vec_idx_file.snap_version() > file.get_snap_version().unwrap_or_default()
                         && !vec_idx_file.overlap_bound(file.data_bound())
                 }) {
                     self.extra_columnar_files.push(file.id());
@@ -232,7 +232,7 @@ impl VectorIndex {
         if self.extra_columnar_files.contains(&col_file.id()) {
             return false;
         }
-        if col_file.get_l0_version().unwrap_or_default() <= self.snap_version() {
+        if col_file.get_snap_version().unwrap_or_default() <= self.snap_version() {
             return true;
         }
         false
@@ -322,7 +322,7 @@ impl VectorIndex {
         vec_idx_pb.set_table_id(self.table_id);
         vec_idx_pb.set_index_id(self.index_id);
         vec_idx_pb.set_col_id(self.col_id);
-        vec_idx_pb.set_snap_version(self.snap_version);
+        vec_idx_pb.set_snap_version(self.snap_version.into_inner());
         for vec_idx_file in &self.files {
             vec_idx_pb
                 .mut_files()
@@ -421,7 +421,7 @@ impl VectorIndexFile {
         self.core.file.size()
     }
 
-    pub fn snap_version(&self) -> u64 {
+    pub fn snap_version(&self) -> SnapVersion {
         self.core.snap_version
     }
 
@@ -485,7 +485,7 @@ impl BoundedDataSet for VectorIndexFile {
 pub struct VectorIndexFileCore {
     file: Arc<dyn File>,
     footer: VectorIndexFileFooter,
-    snap_version: u64,
+    snap_version: SnapVersion,
     table_id: i64,
     index_id: i32,
     column_id: i32,
@@ -548,7 +548,7 @@ impl VectorIndexFile {
         let prop_offset = footer_offset - prop_size as u64;
         let prop_data = file.read_table_meta(prop_offset, prop_size)?;
         let mut prop_data_buf = prop_data.chunk();
-        let mut snap_version = 0;
+        let mut snap_version = SnapVersion::zero();
         let mut table_id = 0;
         let mut index_id = 0;
         let mut column_id = 0;
@@ -581,7 +581,7 @@ impl VectorIndexFile {
             } else if prop_key == PROP_METRIC_REPR.as_bytes() {
                 metric_repr = prop_value.get_i32_le();
             } else if prop_key == PROP_SNAP_VERSION.as_bytes() {
-                snap_version = prop_value.get_u64_le();
+                snap_version = prop_value.get_u64_le().into();
             }
         }
         Ok(VectorIndexFile {
@@ -846,7 +846,7 @@ impl VectorIndexFile {
     pub fn to_vector_index_file_pb(&self) -> kvenginepb::VectorIndexFile {
         let mut vec_idx_file_pb = kvenginepb::VectorIndexFile::new();
         vec_idx_file_pb.set_id(self.file_id());
-        vec_idx_file_pb.set_snap_version(self.snap_version());
+        vec_idx_file_pb.set_snap_version(self.snap_version().into_inner());
         vec_idx_file_pb.set_smallest(self.smallest().to_vec());
         vec_idx_file_pb.set_biggest(self.biggest().to_vec());
         vec_idx_file_pb.set_meta_offset(self.meta_offset());
@@ -1030,7 +1030,7 @@ impl VectorItemsReader {
                 readers.push(Box::new(concat_reader));
             } else {
                 for file in &columnar_level.files {
-                    if file.get_l0_version().unwrap_or_default() > vector_index.snap_version() {
+                    if file.get_snap_version().unwrap_or_default() > vector_index.snap_version() {
                         continue;
                     }
                     if !file.has_table(schema.table_id) {
@@ -1202,7 +1202,7 @@ pub struct VectorIndexBuilder {
     footer: VectorIndexFileFooter,
     is_common_handle: bool,
     metric_repr: i32,
-    snap_version: u64,
+    snap_version: SnapVersion,
     table_id: i64,
     index_id: i32,
     col_id: i32,
@@ -1222,7 +1222,7 @@ impl VectorIndexBuilder {
     pub fn new(
         dimension: usize,
         metric: &str,
-        snap_version: u64,
+        snap_version: SnapVersion,
         table_id: i64,
         index_id: i64,
         col_id: i64,
@@ -1413,7 +1413,10 @@ impl VectorIndexBuilder {
             data_size += self.nulls.len() as u32;
         }
         self.meta_offset = data_size;
-        write_prop(PROP_SNAP_VERSION, &self.snap_version.to_le_bytes());
+        write_prop(
+            PROP_SNAP_VERSION,
+            &self.snap_version.into_inner().to_le_bytes(),
+        );
         write_prop(PROP_TABLE_ID, &self.table_id.to_le_bytes());
         write_prop(PROP_INDEX_ID, &self.index_id.to_le_bytes());
         write_prop(PROP_COLUMN_ID, &self.col_id.to_le_bytes());
@@ -1496,6 +1499,7 @@ mod tests {
         file::LocalFile,
         schema_file::{Schema, SchemaBuf},
         vector_index::{VectorIndex, VectorIndexBuilder, VectorIndexFile},
+        SnapVersion,
     };
 
     const TEST_DIMENSION: usize = 3;
@@ -1504,13 +1508,13 @@ mod tests {
     fn test_vector_index_file() {
         ::test_util::init_log_for_test();
         for common_handle in [true, false] {
-            let vec_idx = build_vector_index_file(common_handle, 100, 200, 1);
+            let vec_idx = build_vector_index_file(common_handle, 100, 200, 1.into());
             block_on(vec_idx.load_data()).unwrap();
             assert_eq!(vec_idx.index().size(), 100);
             assert_eq!(vec_idx.table_id, 1);
             assert_eq!(vec_idx.index_id, 1);
             assert_eq!(vec_idx.column_id, 1);
-            assert_eq!(vec_idx.snap_version, 1);
+            assert_eq!(vec_idx.snap_version.into_inner(), 1);
             assert_eq!(vec_idx.is_common_handle, common_handle);
             if common_handle {
                 assert_eq!(
@@ -1562,7 +1566,7 @@ mod tests {
         common_handle: bool,
         start: i64,
         end: i64,
-        snap_version: u64,
+        snap_version: SnapVersion,
     ) -> VectorIndexFile {
         build_vector_index_file_with_deleted(common_handle, start, end, 0, 0, snap_version)
     }
@@ -1573,13 +1577,13 @@ mod tests {
         let mut vector_index = VectorIndex::new(1, 1, 1);
         vector_index
             .files
-            .push(build_vector_index_file(false, 100, 200, 1));
+            .push(build_vector_index_file(false, 100, 200, 1.into()));
         vector_index
             .files
-            .push(build_vector_index_file(false, 150, 200, 2));
+            .push(build_vector_index_file(false, 150, 200, 2.into()));
         vector_index
             .files
-            .push(build_vector_index_file(false, 151, 200, 3));
+            .push(build_vector_index_file(false, 151, 200, 3.into()));
         vector_index.sort();
 
         // Perform a search
@@ -1605,7 +1609,7 @@ mod tests {
         end: i64,
         del_start: i64,
         del_end: i64,
-        snap_version: u64,
+        snap_version: SnapVersion,
     ) -> VectorIndexFile {
         let mut builder =
             VectorIndexBuilder::new(3, "cosine", snap_version, 1, 1, 1, common_handle).unwrap();
@@ -1640,14 +1644,18 @@ mod tests {
                 } else {
                     block.handles.push_value(&i.to_le_bytes());
                 }
-                block.versions.push_version(snap_version + 1, true);
+                block
+                    .versions
+                    .push_version(snap_version.into_inner() + 1, true);
             }
             if common_handle {
                 block.handles.push_value(&i_to_common_handle(i));
             } else {
                 block.handles.push_value(&i.to_le_bytes());
             }
-            block.versions.push_version(snap_version, false);
+            block
+                .versions
+                .push_version(snap_version.into_inner(), false);
         }
         let vec_col_buf = &mut block.columns[0];
         for i in start..end {
@@ -1681,7 +1689,12 @@ mod tests {
             vector_index
                 .files
                 .push(build_vector_index_file_with_deleted(
-                    false, 100, 200, 150, 160, 1,
+                    false,
+                    100,
+                    200,
+                    150,
+                    160,
+                    1.into(),
                 ));
             vector_index.sort();
 
@@ -1709,17 +1722,22 @@ mod tests {
             let mut vector_index = VectorIndex::new(1, 1, 1);
             vector_index
                 .files
-                .push(build_vector_index_file(false, 100, 200, 1));
+                .push(build_vector_index_file(false, 100, 200, 1.into()));
             vector_index
                 .files
-                .push(build_vector_index_file(false, 150, 200, 2));
+                .push(build_vector_index_file(false, 150, 200, 2.into()));
             vector_index
                 .files
-                .push(build_vector_index_file(false, 151, 200, 3));
+                .push(build_vector_index_file(false, 151, 200, 3.into()));
             vector_index
                 .files
                 .push(build_vector_index_file_with_deleted(
-                    false, 140, 160, 150, 170, 4,
+                    false,
+                    140,
+                    160,
+                    150,
+                    170,
+                    4.into(),
                 ));
             vector_index.sort();
 

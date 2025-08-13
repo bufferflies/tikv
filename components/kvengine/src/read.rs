@@ -42,7 +42,8 @@ use crate::{
         table,
         vector_index::{VectorDistanceProjector, VectorItemsReader},
         AsyncMergeIterator, BoundedDataSet, ConstraintChecker, DataBound, InnerKey,
-        Iterator as TableIterator, SkipOpTxnFileIterator, TxnFile, TxnFileIterator, Value,
+        Iterator as TableIterator, SkipOpTxnFileIterator, SnapVersion, TxnFile, TxnFileIterator,
+        Value,
     },
     txn_chunk_manager::TxnChunkManager,
     value_cache::ValidationTask,
@@ -482,7 +483,7 @@ impl SnapAccessCore {
         } else if CF_MANAGED[cf] && self.managed_ts != 0 {
             self.managed_ts
         } else if !CF_MANAGED[cf] {
-            self.get_mem_table_version()
+            self.get_mem_table_snap_version().into_inner()
         } else {
             u64::MAX
         }
@@ -778,8 +779,8 @@ impl SnapAccessCore {
         self.cache_invalidate_sequence
     }
 
-    pub fn get_mem_table_version(&self) -> u64 {
-        self.base_version + self.write_sequence
+    pub fn get_mem_table_snap_version(&self) -> SnapVersion {
+        SnapVersion::new(self.base_version, self.write_sequence)
     }
 
     pub fn get_start_key(&self) -> &[u8] {
@@ -971,7 +972,7 @@ impl SnapAccessCore {
             snap.set_schema_meta(schema_file.to_schema_meta());
         }
         snap.set_columnar_table_ids(self.data.columnar_table_ids.clone());
-        snap.set_columnar_l2_snap_version(self.data.col_levels.l2_snap_version);
+        snap.set_columnar_l2_snap_version(self.data.col_levels.l2_snap_version.into_inner());
         let vector_indexes = snap.mut_vector_indexes();
         for index in self.data.vector_indexes.get_all() {
             vector_indexes.push(index.to_vector_index_pb());
@@ -1281,7 +1282,7 @@ impl SnapAccessCore {
             while txn_file_iter.valid() {
                 let mut val = vec![];
                 let txn_file_key = txn_file_iter.key();
-                let version = self.get_mem_table_version();
+                let version = self.get_mem_table_snap_version().into_inner();
                 let lock_val = self.get_value(
                     LOCK_CF,
                     txn_file_key,
@@ -1627,7 +1628,7 @@ impl SnapAccessCore {
         }
         if !self.data.col_levels.levels[2].files.is_empty() {
             // Make sure the l2_snap_version is set.
-            debug_assert!(self.data.col_levels.l2_snap_version > 0);
+            debug_assert!(self.data.col_levels.l2_snap_version.is_not_zero());
         }
 
         let Some(vector_index) = self.data.vector_indexes.get(table_id, index_id, col_id) else {
@@ -1791,11 +1792,11 @@ impl SnapAccessCore {
             task.validated.store(true, Ordering::Relaxed);
             return;
         }
-        let target_version = task.write_seq + self.base_version;
+        let target_version: SnapVersion = (task.write_seq + self.base_version).into();
         let mut outer_buf = vec![];
         for mem_tbl in &self.data.mem_tbls {
-            let mem_tbl_version = mem_tbl.get_version();
-            if mem_tbl_version > 0 && mem_tbl_version < target_version {
+            let mem_tbl_version = mem_tbl.get_snap_version();
+            if mem_tbl_version > SnapVersion::default() && mem_tbl_version < target_version {
                 task.validated.store(true, Ordering::Relaxed);
                 return;
             }
@@ -1806,13 +1807,15 @@ impl SnapAccessCore {
                 return;
             }
         }
-        let latest_l0_version = self
+        let latest_l0_snap_version = self
             .data
             .l0_tbls
             .first()
-            .map(|l0| l0.version())
+            .map(|l0| l0.snap_version())
             .unwrap_or_default();
-        if latest_l0_version > 0 && latest_l0_version < target_version {
+        if latest_l0_snap_version > SnapVersion::default()
+            && latest_l0_snap_version < target_version
+        {
             task.validated.store(true, Ordering::Relaxed);
         } else {
             // We don't want to access L0 tables to validate it, so just remove it.

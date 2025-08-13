@@ -10,7 +10,7 @@ use xorf::BinaryFuse8;
 
 use super::super::table::Value;
 use crate::table::{
-    blobtable::BlobRef, ChecksumType, InnerKey, BIT_HAS_OLD_VERSION, LZ4_COMPRESSION,
+    blobtable::BlobRef, ChecksumType, InnerKey, SnapVersion, BIT_HAS_OLD_VERSION, LZ4_COMPRESSION,
     NO_COMPRESSION, VALUE_VERSION_LEN, ZSTD_COMPRESSION,
 };
 pub const PROP_KEY_SMALLEST: &[u8] = b"smallest";
@@ -22,7 +22,7 @@ pub const PROP_KEY_TOMBS: &[u8] = b"tombs";
 pub const PROP_KEY_KV_SIZE: &[u8] = b"kv_size";
 pub const PROP_KEY_IN_USE_TOTAL_BLOB_SIZE: &[u8] = b"in_use_total_blob_size";
 pub const PROP_KEY_ENCRYPTION_VER: &[u8] = b"encryption_ver";
-pub const PROP_KEY_L0_VERSION: &[u8] = b"l0_ver";
+pub const PROP_KEY_SNAP_VERSION: &[u8] = b"l0_ver"; // keep the l0_ver for compatibility.
 pub const AUX_INDEX_BINARY_FUSE8: u32 = 1;
 pub const INDEX_FORMAT_V1: u32 = 1;
 pub const BLOCK_FORMAT_V1: u32 = 1;
@@ -128,7 +128,7 @@ pub struct Builder {
     /// Total size of the in use values stored in the blob table.
     total_blob_size: u64,
     encryption_key: Option<EncryptionKey>,
-    l0_version: u64,
+    snap_version: SnapVersion,
 }
 
 impl Builder {
@@ -153,8 +153,8 @@ impl Builder {
         x
     }
 
-    pub fn set_l0_version(&mut self, l0_version: u64) {
-        self.l0_version = l0_version;
+    pub fn set_snap_version(&mut self, snap_version: SnapVersion) {
+        self.snap_version = snap_version;
     }
 
     pub fn reset(&mut self, sst_fid: u64) {
@@ -308,7 +308,7 @@ impl Builder {
         footer.compression_type = self.block_builder.compression_tp;
         footer.checksum_type = self.checksum_type.value();
         footer.table_format_version = TABLE_FORMAT_V1;
-        footer.magic = if self.l0_version > 0 {
+        footer.magic = if self.snap_version.is_not_zero() {
             MAGIC_NUMBER_SPLIT_L0
         } else {
             MAGIC_NUMBER
@@ -356,8 +356,12 @@ impl Builder {
                 &encryption_key.current_ver.to_le_bytes(),
             );
         }
-        if self.l0_version > 0 {
-            Builder::add_property(buf, PROP_KEY_L0_VERSION, &self.l0_version.to_le_bytes());
+        if self.snap_version.is_not_zero() {
+            Builder::add_property(
+                buf,
+                PROP_KEY_SNAP_VERSION,
+                &self.snap_version.into_inner().to_le_bytes(),
+            );
         }
         let checksum = self.checksum_type.checksum(&buf[(origin_len + 4)..]);
         LittleEndian::write_u32(&mut buf[origin_len..], checksum);

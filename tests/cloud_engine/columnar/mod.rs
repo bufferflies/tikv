@@ -421,7 +421,7 @@ fn test_sst_and_columnar_with_ia() {
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
                     let stats = shard.get_stats();
-                    let snap_version = shard.get_snap_version();
+                    let snap_version = shard.get_persisted_snap_version();
                     let columnar_snap_version = shard.get_columnar_snap_version();
                     if stats.cfs[0].levels[0].num_tables > 0
                         && snap_version == columnar_snap_version
@@ -441,7 +441,7 @@ fn test_sst_and_columnar_with_ia() {
             let all_id_vers = kvengine.get_all_shard_id_vers();
             for id_ver in all_id_vers {
                 if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
-                    let snap_version = shard.get_snap_version();
+                    let snap_version = shard.get_persisted_snap_version();
                     let columnar_snap_version = shard.get_columnar_snap_version();
                     info!(
                         "shard: {:?}, snap_version: {}, columnar_snap_version: {}",

@@ -8,7 +8,7 @@ use protobuf::Message;
 use slog_global::info;
 
 use crate::{
-    table::{self, memtable, InnerKey, TxnFile},
+    table::{self, memtable, InnerKey, SnapVersion, TxnFile},
     util::TxnFileRefPropertyHelper,
     value_cache::ValueCacheKeyRef,
     *,
@@ -131,13 +131,19 @@ impl Engine {
     // `force`: Should be set to `true` during split/merge, to help initial flush
     // get the properties need to be flush.
     // See https://github.com/tidbcloud/cloud-storage-engine/issues/1553.
-    pub fn switch_mem_table(&self, shard: &Shard, version: u64, force: bool, write_sequence: u64) {
+    pub fn switch_mem_table(
+        &self,
+        shard: &Shard,
+        snap_version: SnapVersion,
+        force: bool,
+        write_sequence: u64,
+    ) {
         let data = shard.get_data();
         let mem_table = data.get_writable_mem_table();
         if !force && mem_table.size() == 0 {
             return;
         }
-        mem_table.set_version(version);
+        mem_table.set_snap_version(snap_version);
         if force {
             mem_table.set_force_switch();
         }
@@ -157,9 +163,9 @@ impl Engine {
         new_data.refresh_for_limiter(&shard.tag());
         shard.set_data(new_data);
         info!(
-            "shard {} switch mem-table version {}, size {}, force {}, write_seq {}",
+            "shard {} switch mem-table snap_version {}, size {}, force {}, write_seq {}",
             shard.tag(),
-            version,
+            snap_version,
             mem_table.size(),
             force,
             write_sequence,
@@ -182,8 +188,8 @@ impl Engine {
             let tag = ShardTag::new(self.get_engine_id(), IdVer::new(wb.shard_id, 0));
             panic!("{} unable to get shard", tag);
         });
-        let version = shard.get_base_version() + wb.sequence;
-        self.update_write_batch_version(wb, version);
+        let snap_version = SnapVersion::new(shard.get_base_version(), wb.sequence);
+        self.update_write_batch_snap_version(wb, snap_version);
         let mut data = shard.get_data();
         let snap = shard.new_snap_access();
         let mut mem_tbl = data.get_writable_mem_table();
@@ -277,7 +283,7 @@ impl Engine {
         }
 
         if wb.switch_mem_table || size > self.opts.max_mem_table_size {
-            self.switch_mem_table(&shard, version, false, wb.sequence);
+            self.switch_mem_table(&shard, snap_version, false, wb.sequence);
             if let Err(err) = self.trigger_flush(&shard) {
                 warn!("{} trigger_flush error: {:?}", shard.tag(), err);
             }
@@ -355,11 +361,11 @@ impl Engine {
         }
     }
 
-    fn update_write_batch_version(&self, wb: &mut WriteBatch, version: u64) {
+    fn update_write_batch_snap_version(&self, wb: &mut WriteBatch, snap_version: SnapVersion) {
         for cf in 0..NUM_CFS {
             if !CF_MANAGED[cf] {
                 wb.get_cf_mut(cf).iterate_mut(|e, _| {
-                    e.version = version;
+                    e.version = snap_version.into_inner();
                 });
             };
         }
@@ -367,7 +373,7 @@ impl Engine {
             let mut txn_file_refs = TxnFileRefs::new();
             txn_file_refs.merge_from_bytes(txn_file_refs_bin).unwrap();
             for txn_file_ref in txn_file_refs.mut_txn_file_refs().iter_mut() {
-                txn_file_ref.version = version;
+                txn_file_ref.version = snap_version.into_inner();
             }
             wb.set_property(TXN_FILE_REF, &txn_file_refs.write_to_bytes().unwrap());
         }
@@ -397,11 +403,12 @@ impl Engine {
     pub fn flush_shard_for_restore(&self, shard: &Shard) -> Result<()> {
         let write_seq = shard.get_write_sequence();
         let meta_seq = shard.get_meta_sequence();
-        let ver = shard.get_base_version() + cmp::max(write_seq, meta_seq) + 1;
+        let snap_ver =
+            SnapVersion::new(shard.get_base_version(), cmp::max(write_seq, meta_seq) + 1);
         debug!(
-            "{} flush_shard_for_restore, ver: {}, base_ver: {}, write_seq: {}, meta_seq: {}",
+            "{} flush_shard_for_restore, snap_ver: {}, base_ver: {}, write_seq: {}, meta_seq: {}",
             shard.tag(),
-            ver,
+            snap_ver,
             shard.get_base_version(),
             write_seq,
             meta_seq,
@@ -410,7 +417,7 @@ impl Engine {
         if !shard.get_initial_flushed() {
             self.load_unloaded_tables(shard.id, shard.ver, false)?;
         }
-        self.switch_mem_table(shard, ver, false, write_seq);
+        self.switch_mem_table(shard, snap_ver, false, write_seq);
         self.set_shard_active(shard.id, true);
         self.trigger_flush(shard)
     }

@@ -24,7 +24,7 @@ use crate::{
         schema_file::SchemaFile,
         sstable::{BlockCache, L0Table, SsTable},
         vector_index::{VectorIndexCache, VectorIndexFile, VectorIndexes},
-        BoundedDataSet, TxnFile,
+        BoundedDataSet, SnapVersion, TxnFile,
     },
     *,
 };
@@ -227,7 +227,7 @@ pub(crate) fn create_snapshot_tables(
             );
         }
     }
-    l0_tbls.sort_by(|a, b| b.version().cmp(&a.version()));
+    l0_tbls.sort_by(|a, b| b.snap_version().cmp(&a.snap_version()));
 
     if prepare_sst {
         for blob_create in blob_creates {
@@ -288,7 +288,7 @@ pub(crate) fn create_snapshot_tables(
                 );
             }
         }
-        col_levels.l2_snap_version = snap.columnar_l2_snap_version;
+        col_levels.l2_snap_version = snap.columnar_l2_snap_version.into();
         col_levels.sort();
         for vec_idx_pb in snap.get_vector_indexes() {
             for vec_idx_file_pb in vec_idx_pb.get_files() {
@@ -303,7 +303,7 @@ pub(crate) fn create_snapshot_tables(
                 vec_idx_pb.get_table_id(),
                 vec_idx_pb.get_index_id(),
                 vec_idx_pb.get_col_id(),
-                vec_idx_pb.get_snap_version(),
+                vec_idx_pb.get_snap_version().into(),
             );
         }
         vector_indexes.sort();
@@ -459,10 +459,10 @@ impl EngineCore {
                 let l0_tbl = cs.l0_tables.get(&l0_create.get_id()).unwrap().clone();
                 l0s.push(l0_tbl);
             }
-            let l0_version = l0s.first().unwrap().version();
+            let l0_snap_version = l0s.first().unwrap().snap_version();
             let last = new_mem_tbls.pop().unwrap();
-            let last_version = last.get_version();
-            if last_version != l0_version {
+            let last_version = last.get_snap_version();
+            if last_version != l0_snap_version {
                 #[cfg(feature = "debug-trace-mem-table")]
                 {
                     debug::dump_mem_table_actions(shard.id);
@@ -474,7 +474,7 @@ impl EngineCore {
                     shard.tag(),
                     last_version,
                     last.size(),
-                    l0_version,
+                    l0_snap_version,
                     shard.get_meta_sequence(),
                     cs.sequence,
                 );
@@ -508,8 +508,8 @@ impl EngineCore {
                 self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
             }
         }
-        store_u64(&shard.snap_version, flush.get_version());
-        shard.clear_finished_txn_file_refs(flush.version);
+        shard.set_persisted_snap_version(flush.get_version().into());
+        shard.clear_finished_txn_file_refs(flush.version.into());
     }
 
     fn apply_initial_flush(&self, shard: &Shard, cs: &ChangeSet) {
@@ -533,11 +533,12 @@ impl EngineCore {
         // `lock_txn_files` is ignored because it does not depend on initial flush to
         // keep consistency between peers, as only target region has txn file locks.
         builder.set_lock_txn_files(data.lock_txn_files.clone());
-        let mut max_flushed_mem_tbl_version = 0;
+        let mut max_flushed_mem_tbl_version = SnapVersion::zero();
         mem_tbls.retain(|x| {
-            let version = x.get_version();
-            let flushed =
-                version > 0 && version <= initial_flush.base_version + initial_flush.data_sequence;
+            let version = x.get_snap_version();
+            let flushed = version > SnapVersion::zero()
+                && version
+                    <= SnapVersion::new(initial_flush.base_version, initial_flush.data_sequence);
             if flushed {
                 if max_flushed_mem_tbl_version < version {
                     max_flushed_mem_tbl_version = version;
@@ -746,7 +747,7 @@ impl EngineCore {
                         .into_iter()
                         .map(|id| cs.l0_tables.get(&id).unwrap().clone()),
                 );
-                new_l0s.sort_by(|a, b| b.version().cmp(&a.version()));
+                new_l0s.sort_by(|a, b| b.snap_version().cmp(&a.snap_version()));
             } else {
                 let old_level = new_cfs[cf as usize].get_level(level);
                 let mut new_level_tables = old_level.tables.as_ref().clone();
@@ -977,7 +978,7 @@ impl EngineCore {
             let l0_table = cs.l0_tables.get(&l0_create.get_id()).unwrap().clone();
             new_l0s.push(l0_table);
         }
-        new_l0s.sort_unstable_by(|a, b| b.version().cmp(&a.version()));
+        new_l0s.sort_unstable_by(|a, b| b.snap_version().cmp(&a.snap_version()));
         let mut scf_builder = ShardCfBuilder::new(0);
         for level in &old_data.cfs[0].levels {
             for old_tbl in level.tables.as_ref() {
@@ -1046,7 +1047,9 @@ impl EngineCore {
         store_u64(&new_shard.write_sequence, cs.sequence);
         debug_assert!(!cs.has_parent());
         store_bool(&new_shard.initial_flushed, true);
-        store_u64(&new_shard.snap_version, snap.base_version + cs.sequence);
+        new_shard
+            .persisted_snap_version
+            .store(SnapVersion::new(snap.base_version, cs.sequence));
 
         let old_data = old_shard.get_data();
         let old_inner_key_off = old_data.inner_key_off;
@@ -1056,9 +1059,9 @@ impl EngineCore {
         }
 
         info!(
-            "{} restore shard: mem_table_version {}, change {:?}",
+            "{} restore shard: mem_table_snap_version {}, change {:?}",
             new_shard.tag(),
-            new_shard.load_mem_table_version(),
+            new_shard.load_mem_table_snap_version(),
             &cs,
         );
         if old_inner_key_off != new_inner_key_off {
@@ -1158,7 +1161,7 @@ impl EngineCore {
         let old_data = shard.get_data();
         let mut new_col_levels = old_data.col_levels.clone();
         if col_comp.target_level == 2 {
-            new_col_levels.l2_snap_version = col_comp.get_snap_version();
+            new_col_levels.l2_snap_version = col_comp.get_snap_version().into();
         }
         let deletes: HashSet<u64> = col_change
             .get_columnar_deletes()
@@ -1242,7 +1245,7 @@ impl EngineCore {
             update_vector_index.table_id,
             update_vector_index.index_id,
             update_vector_index.col_id,
-            update_vector_index.snap_version,
+            update_vector_index.snap_version.into(),
         );
         let mut builder = ShardDataBuilder::new(shard.get_data());
         builder.set_vector_indexes(vector_indexes);

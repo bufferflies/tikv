@@ -18,7 +18,7 @@ use crate::table::{
     },
     schema_file::Schema,
     sstable::PROP_KEY_ENCRYPTION_VER,
-    ChecksumType, LZ4_COMPRESSION,
+    ChecksumType, SnapVersion, LZ4_COMPRESSION,
 };
 
 pub const PACK_MAX_ROW_COUNT: usize = 8192;
@@ -60,7 +60,7 @@ pub fn new_common_handle_column_info() -> ColumnInfo {
 
 pub struct ColumnarFileBuilder {
     pub file_id: u64,
-    snap_version: Option<u64>,
+    snap_version: Option<SnapVersion>,
     tables: Vec<ColumnarTableBuilder>,
     pub(crate) estimated_size: usize,
     pub(crate) estimated_kv_size: usize,
@@ -150,7 +150,7 @@ impl Default for ColumnarTableBuildOptions {
 impl ColumnarFileBuilder {
     pub fn new(
         file_id: u64,
-        snap_version: Option<u64>,
+        snap_version: Option<SnapVersion>,
         encryption_key: Option<EncryptionKey>,
     ) -> Self {
         ColumnarFileBuilder {
@@ -205,7 +205,7 @@ impl ColumnarFileBuilder {
             add_property(
                 &mut property_buf,
                 PROP_KEY_SNAP_VERSION,
-                &snap_version.to_le_bytes(),
+                &snap_version.into_inner().to_le_bytes(),
             );
         }
         if let Some(encryption_key) = &self.encryption_key {

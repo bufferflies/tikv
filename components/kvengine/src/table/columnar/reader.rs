@@ -2161,7 +2161,7 @@ pub mod tests {
         let mut rng = rand::thread_rng();
         let mut file_builder = ColumnarFileBuilder::new(
             file_id,
-            Some(version), // use version as l0_version for test
+            Some(version.into()), // use version as snap_version for test
             encryption_key.clone(),
         );
         let cf_tbl = CfTable::new();

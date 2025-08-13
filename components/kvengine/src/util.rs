@@ -9,7 +9,10 @@ use log_wrappers::Value;
 use protobuf::Message;
 use tikv_util::box_err;
 
-use crate::{table::TxnFile, DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY};
+use crate::{
+    table::{SnapVersion, TxnFile},
+    DeletePrefixes, ShardMeta, ShardTag, UserMeta, DEL_PREFIXES_KEY,
+};
 
 /// A helper function to evenly distribute `total` into `count` parts.
 /// Note: when `total` <= `count`, return `[1; total]`.
@@ -85,14 +88,14 @@ pub fn new_columnar_create_pb(
 
 pub fn new_vector_index_file_pb(
     id: u64,
-    snap_version: u64,
+    snap_version: SnapVersion,
     smallest: Vec<u8>,
     biggest: Vec<u8>,
     offset: u32,
 ) -> kvenginepb::VectorIndexFile {
     let mut vec_idx_file = kvenginepb::VectorIndexFile::new();
     vec_idx_file.set_id(id);
-    vec_idx_file.set_snap_version(snap_version);
+    vec_idx_file.set_snap_version(snap_version.into_inner());
     vec_idx_file.set_smallest(smallest);
     vec_idx_file.set_biggest(biggest);
     vec_idx_file.set_meta_offset(offset);
@@ -282,9 +285,11 @@ impl TxnFileRefPropertyHelper {
         (is_commit, is_rollback)
     }
 
-    pub fn clear_finished(&mut self, version: u64) {
+    pub fn clear_finished_txn_file_lock(&mut self, version: SnapVersion) {
         let mut refs = self.txn_file_refs.take_txn_file_refs().into_vec();
-        refs.retain(|r| r.get_version() > version || !r.get_lock_val_prefix().is_empty());
+        refs.retain(|r| {
+            r.get_version() > version.into_inner() || !r.get_lock_val_prefix().is_empty()
+        });
         self.txn_file_refs.set_txn_file_refs(refs.into());
     }
 

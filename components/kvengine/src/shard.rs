@@ -42,7 +42,8 @@ use crate::{
         search,
         sstable::{L0Table, SsTable},
         vector_index::{VectorIndex, VectorIndexes},
-        BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, TxnFile,
+        AtomicSnapVersion, BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, SnapVersion,
+        TxnFile,
     },
     util::{evenly_distribute, TxnFileRefPropertyHelper},
     *,
@@ -114,9 +115,9 @@ pub struct Shard {
     // cache_invalidate_sequence is sequence that invalidates all the previous cached values.
     pub(crate) cache_invalidate_sequence: AtomicU64,
 
-    // snap_version is the latest L0 table's version, equals to:
+    // persisted_snap_version is the latest L0 table's snap version, equals to:
     //     ShardMeta.data_sequence + ShardMeta.base_version
-    pub(crate) snap_version: AtomicU64,
+    pub(crate) persisted_snap_version: AtomicSnapVersion,
 
     pub(crate) compaction_priority: RwLock<Option<CompactionPriority>>,
 
@@ -248,7 +249,7 @@ impl Shard {
             meta_seq: Default::default(),
             write_sequence: Default::default(),
             cache_invalidate_sequence: Default::default(),
-            snap_version: Default::default(),
+            persisted_snap_version: Default::default(),
             compaction_priority: RwLock::new(None),
             encryption_key,
             outdated_schema_ver: Default::default(),
@@ -304,9 +305,7 @@ impl Shard {
         shard.base_version.store(snap.base_version, Release);
         shard.meta_seq.store(cs.sequence, Release);
         shard.write_sequence.store(snap.data_sequence, Release);
-        shard
-            .snap_version
-            .store(snap.base_version + snap.data_sequence, Release);
+        shard.set_persisted_snap_version(SnapVersion::new(snap.base_version, snap.data_sequence));
         shard
     }
 
@@ -828,8 +827,8 @@ impl Shard {
         self.properties.remove(key);
     }
 
-    pub(crate) fn load_mem_table_version(&self) -> u64 {
-        self.get_base_version() + self.write_sequence.load(Acquire)
+    pub(crate) fn load_mem_table_snap_version(&self) -> SnapVersion {
+        SnapVersion::new(self.get_base_version(), self.get_write_sequence())
     }
 
     pub fn get_all_files(&self) -> Vec<u64> {
@@ -909,15 +908,19 @@ impl Shard {
         self.cache_invalidate_sequence.load(Ordering::Acquire)
     }
 
-    pub fn get_snap_version(&self) -> u64 {
-        self.snap_version.load(Ordering::Acquire)
+    pub fn get_persisted_snap_version(&self) -> SnapVersion {
+        self.persisted_snap_version.load()
     }
 
-    pub fn get_columnar_snap_version(&self) -> u64 {
+    pub(crate) fn set_persisted_snap_version(&self, snap_version: SnapVersion) {
+        self.persisted_snap_version.store(snap_version)
+    }
+
+    pub fn get_columnar_snap_version(&self) -> SnapVersion {
         self.get_data().get_columnar_snap_version()
     }
 
-    pub fn get_columnar_l2_snap_version(&self) -> u64 {
+    pub fn get_columnar_l2_snap_version(&self) -> SnapVersion {
         self.get_data().col_levels.l2_snap_version
     }
 
@@ -1253,7 +1256,7 @@ impl Shard {
     fn maybe_override_by_vector_index(data: &ShardData) -> Option<CompactionPriority> {
         if !data.vector_indexes.is_empty() {
             let first_l1_columnar = data.col_levels.levels[1].files.first().unwrap();
-            let l2_snap_after_compaction = first_l1_columnar.get_l0_version().unwrap();
+            let l2_snap_after_compaction = first_l1_columnar.get_snap_version().unwrap();
             for vec_idx in data.vector_indexes.get_all() {
                 if vec_idx.need_rebuild() {
                     return Some(CompactionPriority::UpdateVectorIndex {
@@ -1330,12 +1333,12 @@ impl Shard {
             }
             vec_idx.snap_version()
         } else {
-            0
+            SnapVersion::zero()
         };
         if !self.need_build_vector_index(data, table_id, vec_idx, snap_version) {
             return (0.0, false);
         }
-        (1.1, snap_version == 0)
+        (1.1, snap_version.is_zero())
     }
 
     fn need_build_vector_index(
@@ -1343,11 +1346,11 @@ impl Shard {
         data: &ShardData,
         table_id: i64,
         vec_idx: &VectorIndexDef,
-        snap_version: u64,
+        snap_version: SnapVersion,
     ) -> bool {
         let mut total_row_count = 0usize;
         for col_level in &data.col_levels.levels {
-            if col_level.level == 2 && snap_version > 0 {
+            if col_level.level == 2 && snap_version.is_not_zero() {
                 // The level 2 columnar files are already included in vector index.
                 continue;
             }
@@ -1355,7 +1358,9 @@ impl Shard {
                 if !file.has_table(table_id) {
                     continue;
                 }
-                if snap_version > 0 && file.get_l0_version().unwrap_or_default() <= snap_version {
+                if snap_version.is_not_zero()
+                    && file.get_snap_version().unwrap_or_default() <= snap_version
+                {
                     continue;
                 }
                 let tbl_meta = file.get_table(table_id);
@@ -1476,14 +1481,14 @@ impl Shard {
         return guard.get_writable_mem_table().clone();
     }
 
-    pub fn get_mem_table_max_version(&self) -> u64 {
+    pub fn get_mem_table_max_version(&self) -> SnapVersion {
         let guard = self.data.read().unwrap();
         guard
             .mem_tbls
             .iter()
-            .map(|t| t.get_version())
+            .map(|t| t.get_snap_version())
             .max()
-            .unwrap_or(0)
+            .unwrap_or_default()
     }
 
     pub fn has_over_bound_data(&self) -> bool {
@@ -1565,7 +1570,7 @@ impl Shard {
         // columnar files contains the table or the columnar data is too small to
         // build vector index, treat it as ready.
         if data.columnar_table_ids.contains(&table_id)
-            && !self.need_build_vector_index(&data, table_id, vec_idx_def, 0)
+            && !self.need_build_vector_index(&data, table_id, vec_idx_def, SnapVersion::zero())
         {
             return true;
         }
@@ -1613,7 +1618,8 @@ impl Shard {
         let parent_data = parent.get_data();
 
         let mem_tbls = self.split_mem_tables(&parent_data.mem_tbls);
-        let mem_tbl_vers: Vec<u64> = mem_tbls.iter().map(|tbl| tbl.get_version()).collect();
+        let mem_tbl_vers: Vec<SnapVersion> =
+            mem_tbls.iter().map(|tbl| tbl.get_snap_version()).collect();
 
         for prop_key in PROPERTIES_COPY_FROM_PARENT_IN_RECOVERY {
             if let Some(val) = parent.get_property(prop_key) {
@@ -1653,10 +1659,10 @@ impl Shard {
         self.get_estimated_size() == 0
     }
 
-    pub(crate) fn clear_finished_txn_file_refs(&self, version: u64) {
+    pub(crate) fn clear_finished_txn_file_refs(&self, version: SnapVersion) {
         if let Some(val) = self.get_property(TXN_FILE_REF) {
             let mut prop = TxnFileRefPropertyHelper::from_property(Some(val)).unwrap();
-            prop.clear_finished(version);
+            prop.clear_finished_txn_file_lock(version);
             self.set_property(TXN_FILE_REF, &prop.marshall());
             debug!("{} clear finished txn file ref", self.tag(); "prop" => ?prop, "version" => version);
         }
@@ -2184,12 +2190,15 @@ impl ShardDataCore {
         files
     }
 
-    pub(crate) fn get_columnar_snap_version(&self) -> u64 {
-        let mut max_version = 0;
+    pub(crate) fn get_columnar_snap_version(&self) -> SnapVersion {
+        let mut max_version = SnapVersion::zero();
         for cl in self.col_levels.levels.iter() {
             if cl.level < 2 {
                 for f in cl.files.iter() {
-                    max_version = cmp::max(max_version, f.get_l0_version().unwrap_or(0));
+                    max_version = cmp::max(
+                        max_version,
+                        f.get_snap_version().unwrap_or(SnapVersion::zero()),
+                    );
                 }
             } else {
                 max_version = cmp::max(max_version, self.col_levels.l2_snap_version);

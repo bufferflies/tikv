@@ -6,7 +6,9 @@ use api_version::ApiV2;
 use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use collections::HashSet;
-use kvengine::{collect_snap_lock_txn_file_refs, Engine, FilePrepareType, Shard, ShardMeta};
+use kvengine::{
+    collect_snap_lock_txn_file_refs, table::SnapVersion, Engine, FilePrepareType, Shard, ShardMeta,
+};
 use kvenginepb::ChangeSet;
 use kvproto::{
     metapb,
@@ -262,7 +264,7 @@ impl RecoverHandler {
                     // children to copy.
                     ctx.engine.switch_mem_table(
                         shard,
-                        meta.base_version + ctx.exec_log_index,
+                        SnapVersion::new(meta.base_version, ctx.exec_log_index),
                         true,
                         ctx.exec_log_index,
                     );

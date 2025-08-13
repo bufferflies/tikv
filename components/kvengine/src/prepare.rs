@@ -532,7 +532,7 @@ impl EngineCore {
                 }
             }
         }
-        new_l0s.sort_by(|a, b| b.version().cmp(&a.version()));
+        new_l0s.sort_by(|a, b| b.snap_version().cmp(&a.snap_version()));
         let mut scfs = [ShardCf::new(0), ShardCf::new(1), ShardCf::new(2)];
         for cf in 0..NUM_CFS {
             let scf = &mut scf_builders.as_mut_slice()[cf];

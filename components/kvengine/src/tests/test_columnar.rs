@@ -32,7 +32,7 @@ use crate::{
         file::{File, InMemFile},
         schema_file::{build_schema_file, SchemaFile},
         sstable::{BlockCache, SsTable},
-        ChecksumType,
+        ChecksumType, SnapVersion,
     },
     tests::{
         keyspace_prefix, new_test_engine_opt, prepare_table_region, try_wait, Splitter, TestEngine,
@@ -442,7 +442,7 @@ fn test_columnar_major_compaction() {
         COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok);
-    assert_eq!(shard.get_columnar_snap_version(), 0);
+    assert_eq!(shard.get_columnar_snap_version(), SnapVersion::zero());
     assert!(shard.get_data().schema_file.is_some());
 }
 
@@ -710,7 +710,7 @@ fn test_columnar_major_compaction_multiple_tables() {
         COLUMNAR_COMPACTION_WAIT_TIME,
     );
     assert!(ok);
-    assert_eq!(shard.get_columnar_snap_version(), 0);
+    assert_eq!(shard.get_columnar_snap_version(), SnapVersion::zero());
     assert!(shard.get_data().schema_file.is_some());
 }
 
