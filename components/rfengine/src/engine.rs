@@ -208,6 +208,7 @@ impl RfEngineCore {
                 writer,
                 secondary_writer,
                 manifest.epoch_id,
+                cfg.wal_double_write_unhealthy_size.0 as usize,
             )?)
         };
         let dfs_worker_healthy = dfs_worker::Healthy::default();

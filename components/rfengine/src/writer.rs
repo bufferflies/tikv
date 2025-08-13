@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
         Arc,
     },
     thread::JoinHandle,
@@ -550,8 +550,6 @@ pub(crate) enum WalWriterExt {
     DoubleWriter(DoubleWriter),
 }
 
-const DOUBLE_WRITE_UNHEALTHY_THRESHOLD: usize = 4096;
-
 impl WalWriterExt {
     pub(crate) fn write_batch(&mut self, wb: Arc<Vec<PeerBatch>>) -> Result<(u32, u64, bool)> {
         match self {
@@ -602,6 +600,7 @@ pub(crate) struct DoubleWriter {
     pub(crate) handles: Vec<JoinHandle<()>>,
     pub(crate) epoch_id: u32,
     pub(crate) file_off: u64,
+    pub(crate) total_size: Arc<AtomicUsize>,
 }
 
 impl DoubleWriter {
@@ -609,16 +608,21 @@ impl DoubleWriter {
         primary_writer: WalWriter,
         secondary_writer: WalWriter,
         manifest_epoch: u32,
+        unhealthy_size: usize,
     ) -> Result<Self> {
         Self::sync_writer_files(&primary_writer.dir, &secondary_writer.dir, manifest_epoch)?;
-        let (primary_sender, primary_handle) = DoubleWriterWorker::start(primary_writer);
-        let (secondary_sender, secondary_handle) = DoubleWriterWorker::start(secondary_writer);
+        let total_size = Arc::new(AtomicUsize::new(0));
+        let (primary_sender, primary_handle) =
+            DoubleWriterWorker::start(primary_writer, unhealthy_size, total_size.clone());
+        let (secondary_sender, secondary_handle) =
+            DoubleWriterWorker::start(secondary_writer, unhealthy_size, total_size.clone());
         RFENGINE_DOUBLE_WRITE_HEALTHY_GAUGE.set(1);
         Ok(Self {
             senders: vec![primary_sender, secondary_sender],
             handles: vec![primary_handle, secondary_handle],
             epoch_id: 0, // will be set on open_file.
             file_off: 0, // will be set on open_file.
+            total_size,
         })
     }
 
@@ -684,6 +688,8 @@ impl DoubleWriter {
 
     pub(crate) fn write_batch(&mut self, wb: Arc<Vec<PeerBatch>>) -> Result<(u32, u64, bool)> {
         let (tx, rx) = tikv_util::mpsc::bounded(2);
+        self.total_size
+            .fetch_add(write_batch_size(&wb), Ordering::SeqCst);
         for sender in &self.senders {
             sender
                 .send(DoubleWriterMessage::Write {
@@ -731,6 +737,9 @@ pub(crate) struct DoubleWriterWorker {
     writer: WalWriter,
     rx: Receiver<DoubleWriterMessage>,
     healthy: bool,
+    unhealthy_size: usize,
+    total_size: Arc<AtomicUsize>,
+    handled_size: usize,
 }
 
 pub(crate) enum DoubleWriterMessage {
@@ -747,13 +756,20 @@ pub(crate) enum DoubleWriterMessage {
 }
 
 impl DoubleWriterWorker {
-    pub(crate) fn start(writer: WalWriter) -> (Sender<DoubleWriterMessage>, JoinHandle<()>) {
+    pub(crate) fn start(
+        writer: WalWriter,
+        unhealthy_size: usize,
+        total_size: Arc<AtomicUsize>,
+    ) -> (Sender<DoubleWriterMessage>, JoinHandle<()>) {
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let handle = std::thread::spawn(move || {
             let mut worker = Self {
                 writer,
                 rx,
                 healthy: true,
+                unhealthy_size,
+                total_size,
+                handled_size: 0,
             };
             worker.run();
         });
@@ -767,8 +783,10 @@ impl DoubleWriterWorker {
                     if !self.healthy {
                         continue;
                     }
-                    if self.rx.len() > DOUBLE_WRITE_UNHEALTHY_THRESHOLD {
-                        // The writer fall behind too much, to void OOM, we stop writing.
+                    let fall_behind_size =
+                        self.total_size.load(Ordering::Relaxed) - self.handled_size;
+                    if fall_behind_size > self.unhealthy_size {
+                        // If the writer fall behind too much, we stop writing.
                         self.healthy = false;
                         let dir_str = self.writer.dir.to_string_lossy();
                         tikv_util::error!(
@@ -778,6 +796,7 @@ impl DoubleWriterWorker {
                         RFENGINE_DOUBLE_WRITE_HEALTHY_GAUGE.set(0);
                         continue;
                     }
+                    self.handled_size += write_batch_size(&wb);
                     let _ = res_tx.send(self.writer.write_batch(&wb));
                 }
                 DoubleWriterMessage::OpenFile {
@@ -794,6 +813,10 @@ impl DoubleWriterWorker {
             }
         }
     }
+}
+
+fn write_batch_size(wb: &[PeerBatch]) -> usize {
+    wb.iter().map(|b| b.raft_logs_encoded_len).sum()
 }
 
 #[cfg(test)]

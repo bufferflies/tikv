@@ -28,6 +28,10 @@ pub struct Config {
     /// The directory to support double write for low tail latency.
     pub wal_secondary_dir: String,
 
+    /// One of the double writer becomes unhealthy when its fall behind size
+    /// exceeds this value.
+    pub wal_double_write_unhealthy_size: ReadableSize,
+
     /// Whether to enable the lightweight backup.
     ///
     /// Default: false
@@ -78,6 +82,7 @@ impl Default for Config {
             worker_rate_limit: ReadableSize::mb(125),
             wal_sync_dir: "".to_owned(),
             wal_secondary_dir: "".to_owned(),
+            wal_double_write_unhealthy_size: ReadableSize::mb(256),
             lightweight_backup: false,
             wal_chunk_target_file_size: ReadableSize::mb(64),
             cli_mode: false,

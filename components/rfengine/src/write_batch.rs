@@ -113,7 +113,7 @@ impl WriteBatch {
     }
 
     pub fn estimated_size(&self) -> usize {
-        self.peers.values().map(|b| b.estimated_size()).sum()
+        self.peers.values().map(|b| b.raft_logs_encoded_len).sum()
     }
 
     /// Convert `WriteBatch` into a vector of `PeerBatch` to make the iteration
@@ -128,6 +128,7 @@ pub(crate) struct PeerBatch {
     pub(crate) peer_id: u64,
     pub(crate) meta: PeerMeta,
     pub(crate) raft_logs: VecDeque<RaftLogOp>,
+    pub(crate) raft_logs_encoded_len: usize,
 }
 
 impl Deref for PeerBatch {
@@ -149,6 +150,7 @@ impl PeerBatch {
             peer_id,
             meta: PeerMeta::new(region_id),
             raft_logs: Default::default(),
+            raft_logs_encoded_len: 0,
         }
     }
 
@@ -157,7 +159,9 @@ impl PeerBatch {
             return;
         }
         while let Some(true) = self.raft_logs.front().map(|l| l.index <= idx) {
-            self.raft_logs.pop_front();
+            if let Some(old) = self.raft_logs.pop_front() {
+                self.raft_logs_encoded_len -= old.encoded_len();
+            }
         }
         self.truncated_idx = idx;
     }
@@ -194,7 +198,9 @@ impl PeerBatch {
             op.index
         );
         while let Some(true) = self.raft_logs.back().map(|l| l.index + 1 != op.index) {
-            self.raft_logs.pop_back();
+            if let Some(old) = self.raft_logs.pop_back() {
+                self.raft_logs_encoded_len -= old.encoded_len();
+            }
         }
         debug_assert!(
             self.raft_logs.is_empty()
@@ -204,6 +210,7 @@ impl PeerBatch {
                     .map(|l| l.index + 1 == op.index)
                     .unwrap()
         );
+        self.raft_logs_encoded_len += op.encoded_len();
         self.raft_logs.push_back(op);
     }
 
@@ -223,13 +230,7 @@ impl PeerBatch {
             len += 2 /* key_len */ + key.len() + 4 /* val_len */ + val.len();
         }
         len += self.raft_logs.len() * 4 /* log_end_offset */;
-        self.raft_logs
-            .iter()
-            .fold(len, |acc, l| acc + l.encoded_len())
-    }
-
-    pub(crate) fn estimated_size(&self) -> usize {
-        self.raft_logs.iter().map(|l| l.encoded_len()).sum()
+        len + self.raft_logs_encoded_len
     }
 
     ///  +-----------+-------------+-----------------+---------------+--------------+--------------+-----------------+------------+-------------------+--------------+-----+------------------+-----+--------------+-----+
@@ -286,6 +287,7 @@ impl PeerBatch {
             let end_index = log_index_buf.get_u32_le() as usize;
             let log_op = RaftLogOp::decode(&buf[start_index..end_index]);
             start_index = end_index;
+            batch.raft_logs_encoded_len += log_op.encoded_len();
             batch.raft_logs.push_back(log_op);
         }
         batch
