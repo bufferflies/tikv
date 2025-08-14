@@ -28,8 +28,6 @@ use crate::{
     storage::txn::check_locks,
 };
 
-const REMOTE_REQUEST_CACHE_CAPACITY: u64 = 64;
-
 pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
 pub const REMOTE_COP_FORMAT_V1: u32 = 1;
@@ -96,26 +94,18 @@ pub async fn remote_handle_request(
     deadline: Deadline,
 ) -> Result<Response> {
     info!("handle {} request, {}", req_type, tag);
-    let key = remote_req.key.clone();
     let req_body = remote_req.req_body.clone();
-    let resp = remote_ctx
-        .remote_request_cache
-        .try_get_with(key, async move {
-            let resp_body = remote_request(
-                remote_ctx,
-                &remote_ctx.remote_worker_url,
-                tag,
-                req_body,
-                deadline,
-            )
-            .await?;
-            let mut resp = Response::default();
-            resp.merge_from_bytes(&resp_body)
-                .map_err(|err| Error::Other(format!("{tag}: decode response failed: {err:?}")))?;
-            Ok(resp)
-        })
-        .await
-        .map_err(|err: Arc<Error>| err.as_ref().clone())?;
+    let resp_body = remote_request(
+        remote_ctx,
+        &remote_ctx.remote_worker_url,
+        tag,
+        req_body,
+        deadline,
+    )
+    .await?;
+    let mut resp = Response::default();
+    resp.merge_from_bytes(&resp_body)
+        .map_err(|err| Error::Other(format!("{tag}: decode response failed: {err:?}")))?;
 
     debug_assert!(
         !resp.has_region_error() && !resp.has_locked(),
@@ -172,7 +162,6 @@ pub struct RemoteContextCore {
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
     pub cop_min_blocks_size: usize,
     pub runtime: tokio::runtime::Handle,
-    pub remote_request_cache: moka::future::Cache<String, Response>,
     pub client: security::HttpClient,
     status_addr: String,
 }
@@ -209,10 +198,6 @@ impl RemoteContext {
         let client = security_mgr
             .http_client(hyper::Client::builder().pool_max_idle_per_host(0).clone())
             .unwrap();
-        let remote_request_cache = moka::future::Cache::builder()
-            .max_capacity(REMOTE_REQUEST_CACHE_CAPACITY)
-            .time_to_live(REMOTE_REQUEST_TIMEOUT * 5)
-            .build();
         let cop_worker_provider = Arc::new(StaticCopWorkerProvider {
             worker_url: cop_worker_url,
         });
@@ -222,7 +207,6 @@ impl RemoteContext {
                 cop_min_blocks_size,
                 cop_worker_provider,
                 runtime,
-                remote_request_cache,
                 client,
                 status_addr,
             }),
