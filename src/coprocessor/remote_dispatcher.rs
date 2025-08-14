@@ -33,10 +33,6 @@ use crate::{
     storage::txn::check_locks,
 };
 
-// The maximum memory usage of remote request cache is 64 x 16MiB = 1GiB.
-const REMOTE_REQUEST_CACHE_CAPACITY: u64 = 64;
-const REMOTE_REQUEST_CACHE_MAX_RESPONSE_SIZE: u32 = 16 << 20; // 16 MiB
-
 pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
 pub const REMOTE_COP_FORMAT_V1: u32 = 1;
@@ -107,32 +103,18 @@ pub async fn remote_handle_request(
     deadline: Deadline,
 ) -> Result<Response> {
     info!("handle {} request, {}", req_type, tag);
-    let key = remote_req.key.clone();
     let req_body = remote_req.req_body.clone();
-    let resp = match remote_ctx
-        .remote_request_cache
-        .get_value_or_guard_async(&key)
-        .await
-    {
-        Ok(resp) => resp,
-        Err(g) => {
-            let resp_body = remote_request(
-                remote_ctx,
-                &remote_ctx.remote_worker_url,
-                tag,
-                req_body,
-                deadline,
-            )
-            .await?;
-            let mut resp = Response::default();
-            resp.merge_from_bytes(&resp_body)
-                .map_err(|err| Error::Other(format!("{tag}: decode response failed: {err:?}")))?;
-            if resp.compute_size() <= REMOTE_REQUEST_CACHE_MAX_RESPONSE_SIZE {
-                let _ = g.insert(resp.clone());
-            }
-            resp
-        }
-    };
+    let resp_body = remote_request(
+        remote_ctx,
+        &remote_ctx.remote_worker_url,
+        tag,
+        req_body,
+        deadline,
+    )
+    .await?;
+    let mut resp = Response::default();
+    resp.merge_from_bytes(&resp_body)
+        .map_err(|err| Error::Other(format!("{tag}: decode response failed: {err:?}")))?;
 
     debug_assert!(
         !resp.has_region_error() && !resp.has_locked(),
@@ -191,7 +173,6 @@ pub struct RemoteContextCore {
     pub cop_num_ranges: usize,
     pub cop_min_process_duration: Duration,
     pub runtime: tokio::runtime::Handle,
-    pub remote_request_cache: quick_cache::sync::Cache<String, Response>,
     pub client: security::HttpClient,
     lazy_remote_patterns: dashmap::DashMap<String, RemotePatternStats>,
     status_addr: String,
@@ -231,8 +212,6 @@ impl RemoteContext {
         let client = security_mgr
             .http_client(hyper::Client::builder().pool_max_idle_per_host(0).clone())
             .unwrap();
-        let remote_request_cache =
-            quick_cache::sync::Cache::new(REMOTE_REQUEST_CACHE_CAPACITY as usize);
         let cop_worker_provider = Arc::new(StaticCopWorkerProvider {
             worker_url: cop_worker_url,
         });
@@ -245,7 +224,6 @@ impl RemoteContext {
                 cop_min_process_duration,
                 cop_worker_provider,
                 runtime,
-                remote_request_cache,
                 client,
                 lazy_remote_patterns,
                 status_addr,
