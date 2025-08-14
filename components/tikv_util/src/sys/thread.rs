@@ -492,7 +492,7 @@ macro_rules! spawn_anonymous_thread_with {
 
         let thread_name = format!(
             "{}-{}",
-            std::env::var("CARGO_PKG_NAME").unwrap_or("unknown".into()),
+            option_env!("CARGO_PKG_NAME").unwrap_or("unknown".into()),
             THREAD_PREFIX
         );
         std::thread::Builder::new()

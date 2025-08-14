@@ -36743,23 +36743,11 @@
           }
         },
         {
+          "aliasColors": {},
+          "bars": false,
           "cacheTimeout": null,
-          "cards": {
-            "cardPadding": null,
-            "cardRound": null
-          },
-          "color": {
-            "cardColor": "#b4ff00",
-            "colorScale": "sqrt",
-            "colorScheme": "interpolateSpectral",
-            "exponent": 0.5,
-            "max": null,
-            "min": null,
-            "mode": "spectrum"
-          },
-          "dataFormat": "tsbuckets",
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "The time consumed to wait for handling remote compaction requests",
+          "description": "Number of remote requests being waiting, limited by concurrency limiter",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -36770,89 +36758,129 @@
               }
             }
           },
+          "fill": 1,
+          "fillGradient": 1,
+          "grid": {
+            "threshold1": null,
+            "threshold1Color": "rgba(216, 200, 27, 0.27)",
+            "threshold2": null,
+            "threshold2Color": "rgba(234, 112, 112, 0.22)"
+          },
           "gridPos": {
             "h": 7,
             "w": 12,
             "x": 0,
             "y": 7
           },
-          "heatmap": {},
           "height": null,
           "hideTimeOverride": false,
-          "hideZeroBuckets": true,
-          "highlightCards": true,
           "id": 267,
           "interval": null,
+          "isNew": true,
           "legend": {
-            "show": false
+            "alignAsTable": true,
+            "avg": false,
+            "current": true,
+            "hideEmpty": true,
+            "hideZero": true,
+            "max": true,
+            "min": false,
+            "rightSide": true,
+            "show": true,
+            "sideWidth": null,
+            "sort": "max",
+            "sortDesc": true,
+            "total": false,
+            "values": true
           },
+          "lines": true,
+          "linewidth": 1,
           "links": [],
-          "maxDataPoints": 512,
+          "maxDataPoints": null,
           "maxPerRow": null,
           "minSpan": null,
-          "options": {},
+          "nullPointMode": "null as zero",
+          "options": {
+            "alertThreshold": true,
+            "dataLinks": []
+          },
+          "percentage": false,
+          "pointradius": 5,
+          "points": false,
+          "renderer": "flot",
           "repeat": null,
           "repeatDirection": null,
-          "reverseYBuckets": false,
+          "seriesOverrides": [],
           "span": null,
+          "stack": false,
+          "steppedLine": false,
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(increase(\n    tikv_worker_limiter_request_wait_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by (le) ",
-              "format": "heatmap",
+              "expr": "sum(rate(\n    tikv_worker_limiter_waiting_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "{{le}}",
+              "legendFormat": "{{type}} {{$additional_groupby}}",
               "metric": "",
-              "query": "sum(increase(\n    tikv_worker_limiter_request_wait_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by (le) ",
+              "query": "sum(rate(\n    tikv_worker_limiter_waiting_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
             }
           ],
+          "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "Compaction Request Wait duration",
+          "title": "Concurrency Limiter Waiting Length",
           "tooltip": {
             "msResolution": true,
             "shared": true,
-            "show": true,
-            "showHistogram": true,
             "sort": 0,
             "value_type": "individual"
           },
           "transformations": [],
           "transparent": false,
-          "type": "heatmap",
-          "xAxis": {
+          "type": "graph",
+          "xaxis": {
             "mode": "time",
             "name": null,
             "show": true,
             "values": []
           },
-          "xBucketNumber": null,
-          "xBucketSize": null,
-          "yAxis": {
-            "decimals": 1,
-            "format": "s",
-            "label": null,
-            "logBase": 1,
-            "max": null,
-            "min": null,
-            "show": true
-          },
-          "yBucketBound": "upper",
-          "yBucketNumber": null,
-          "yBucketSize": null
+          "yaxes": [
+            {
+              "decimals": null,
+              "format": "short",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            },
+            {
+              "decimals": null,
+              "format": "short",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            }
+          ],
+          "yaxis": {
+            "align": false,
+            "alignLevel": 0
+          }
         },
         {
           "aliasColors": {},
           "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "The time consumed to wait for handling remote compaction requests",
+          "description": "The waiting duration of handling remote requests limited by concurrency limiter",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -36915,90 +36943,22 @@
           "renderer": "flot",
           "repeat": null,
           "repeatDirection": null,
-          "seriesOverrides": [
-            {
-              "alias": "/^count/",
-              "bars": false,
-              "dashLength": 1,
-              "dashes": true,
-              "fill": 2,
-              "fillBelowTo": null,
-              "lines": true,
-              "spaceLength": 1,
-              "transform": "negative-Y",
-              "yaxis": 2,
-              "zindex": -3
-            },
-            {
-              "alias": "/^avg/",
-              "bars": false,
-              "fill": 7,
-              "fillBelowTo": null,
-              "lines": true,
-              "yaxis": 1,
-              "zindex": 0
-            }
-          ],
+          "seriesOverrides": [],
           "span": null,
           "stack": false,
           "steppedLine": false,
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
+              "expr": "histogram_quantile($optional_quantile,(\n    sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "99.99% {{$additional_groupby}}",
+              "legendFormat": "{{type}} - $optional_quantile {{$additional_groupby}}",
               "metric": "",
-              "query": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
-              "refId": "",
-              "step": 10,
-              "target": ""
-            },
-            {
-              "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "histogram_quantile(0.99,(\n    sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
-              "format": "time_series",
-              "hide": false,
-              "instant": false,
-              "interval": "",
-              "intervalFactor": 1,
-              "legendFormat": "99% {{$additional_groupby}}",
-              "metric": "",
-              "query": "histogram_quantile(0.99,(\n    sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
-              "refId": "",
-              "step": 10,
-              "target": ""
-            },
-            {
-              "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "(sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by ($additional_groupby)  / sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by ($additional_groupby) )",
-              "format": "time_series",
-              "hide": false,
-              "instant": false,
-              "interval": "",
-              "intervalFactor": 1,
-              "legendFormat": "avg {{$additional_groupby}}",
-              "metric": "",
-              "query": "(sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by ($additional_groupby)  / sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by ($additional_groupby) )",
-              "refId": "",
-              "step": 10,
-              "target": ""
-            },
-            {
-              "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
-              "format": "time_series",
-              "hide": true,
-              "instant": false,
-              "interval": "",
-              "intervalFactor": 1,
-              "legendFormat": "count {{$additional_groupby}}",
-              "metric": "",
-              "query": "sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
+              "query": "histogram_quantile($optional_quantile,(\n    sum(rate(\n    tikv_worker_limiter_request_wait_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -37007,7 +36967,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "Compaction Request Wait duration",
+          "title": "Concurrency Limiter Waiting Duration",
           "tooltip": {
             "msResolution": true,
             "shared": true,
@@ -37123,7 +37083,7 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum((\n    tikv_worker_remote_compact_processing_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\"}\n    \n)) by (instance, $additional_groupby) ",
+              "expr": "sum(rate(\n    tikv_worker_remote_compact_processing_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -37131,22 +37091,7 @@
               "intervalFactor": 1,
               "legendFormat": "processing {{$additional_groupby}}",
               "metric": "",
-              "query": "sum((\n    tikv_worker_remote_compact_processing_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\"}\n    \n)) by (instance, $additional_groupby) ",
-              "refId": "",
-              "step": 10,
-              "target": ""
-            },
-            {
-              "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum((\n    tikv_worker_limiter_waiting_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    \n)) by (instance, $additional_groupby) ",
-              "format": "time_series",
-              "hide": false,
-              "instant": false,
-              "interval": "",
-              "intervalFactor": 1,
-              "legendFormat": "waiting {{$additional_groupby}}",
-              "metric": "",
-              "query": "sum((\n    tikv_worker_limiter_waiting_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",type=\"compaction\"}\n    \n)) by (instance, $additional_groupby) ",
+              "query": "sum(rate(\n    tikv_worker_remote_compact_processing_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -37271,7 +37216,7 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    tikv_worker_remote_compact_failed_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "expr": "sum(rate(\n    tikv_worker_remote_compact_failed_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -37279,7 +37224,7 @@
               "intervalFactor": 1,
               "legendFormat": "{{type}} {{$additional_groupby}}",
               "metric": "",
-              "query": "sum(rate(\n    tikv_worker_remote_compact_failed_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "query": "sum(rate(\n    tikv_worker_remote_compact_failed_requests_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -38194,7 +38139,7 @@
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    tikv_worker_remote_cop_dag_request_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
+              "expr": "sum(rate(\n    tikv_worker_remote_analyze_request_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -38202,14 +38147,14 @@
               "intervalFactor": 1,
               "legendFormat": "analyze {{$additional_groupby}}",
               "metric": "",
-              "query": "sum(rate(\n    tikv_worker_remote_cop_dag_request_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
+              "query": "sum(rate(\n    tikv_worker_remote_analyze_request_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    tikv_worker_remote_cop_dag_request_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
+              "expr": "sum(rate(\n    tikv_worker_remote_checksum_request_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -38217,7 +38162,7 @@
               "intervalFactor": 1,
               "legendFormat": "checksum {{$additional_groupby}}",
               "metric": "",
-              "query": "sum(rate(\n    tikv_worker_remote_cop_dag_request_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
+              "query": "sum(rate(\n    tikv_worker_remote_checksum_request_counter\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$worker_instance\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""

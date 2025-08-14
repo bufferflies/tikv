@@ -5805,15 +5805,42 @@ def CloudWorkerService() -> RowPanel:
         ),
     )
     layout.row(
-        heatmap_panel_graph_panel_histogram_quantile_pairs(
-            heatmap_title="Compaction Request Wait duration",
-            heatmap_description="The time consumed to wait for handling remote compaction requests",
-            graph_title="Compaction Request Wait duration",
-            graph_description="The time consumed to wait for handling remote compaction requests",
-            yaxis_format=UNITS.SECONDS,
-            metric="tikv_worker_limiter_request_wait_duration_seconds",
-            label_selectors=['type="compaction"'],
-        ),
+        [
+            graph_panel(
+                title="Concurrency Limiter Waiting Length",
+                description="Number of remote requests being waiting, limited by concurrency limiter",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_limiter_waiting_requests_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
+                            by_labels=["type"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Concurrency Limiter Waiting Duration",
+                description="The waiting duration of handling remote requests limited by concurrency limiter",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "tikv_worker_limiter_request_wait_duration_seconds",
+                            label_selectors=['instance=~"$worker_instance"'],
+                            is_optional_quantile=True,
+                            skip_default_instance=True,
+                            by_labels=["type"],
+                        ),
+                        legend_format="{{type}} - " + OPTIONAL_QUANTILE_INPUT,
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
     )
     layout.row(
         [
@@ -5823,19 +5850,14 @@ def CloudWorkerService() -> RowPanel:
                 yaxes=yaxes(left_format=UNITS.SHORT),
                 targets=[
                     target(
-                        expr=expr_sum(
+                        expr=expr_sum_rate(
                             "tikv_worker_remote_compact_processing_requests_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
+                            by_labels=[],
+                            skip_default_instance=True,
                         ),
                         additional_groupby=True,
                         legend_format="processing",
-                    ),
-                    target(
-                        expr=expr_sum(
-                            "tikv_worker_limiter_waiting_requests_counter",
-                            label_selectors=['type="compaction"'],
-                        ),
-                        additional_groupby=True,
-                        legend_format="waiting",
                     ),
                 ],
             ),
@@ -5847,7 +5869,9 @@ def CloudWorkerService() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_worker_remote_compact_failed_requests_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
                             by_labels=["type"],
+                            skip_default_instance=True,
                         ),
                         additional_groupby=True,
                     ),
@@ -5935,7 +5959,7 @@ def CloudWorkerService() -> RowPanel:
                     ),
                     target(
                         expr=expr_sum_rate(
-                            "tikv_worker_remote_cop_dag_request_counter",
+                            "tikv_worker_remote_analyze_request_counter",
                             label_selectors=['instance=~"$worker_instance"'],
                             by_labels=[],
                             skip_default_instance=True,
@@ -5945,7 +5969,7 @@ def CloudWorkerService() -> RowPanel:
                     ),
                     target(
                         expr=expr_sum_rate(
-                            "tikv_worker_remote_cop_dag_request_counter",
+                            "tikv_worker_remote_checksum_request_counter",
                             label_selectors=['instance=~"$worker_instance"'],
                             by_labels=[],
                             skip_default_instance=True,
