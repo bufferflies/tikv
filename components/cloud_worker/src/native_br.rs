@@ -675,6 +675,8 @@ pub(crate) struct BrContext {
     pub restore_tasks: RwLock<TasksMap>,
     pub keyspace_tasks: RwLock<KeyspacesMap>,
     pub backup_worker: BackupWorker,
+
+    pub v1x_tasks: RwLock<HashMap<u64, v1x::Task>>,
 }
 
 impl BrContext {
@@ -1044,6 +1046,8 @@ impl NativeBrManager {
             restore_tasks: Default::default(),
             keyspace_tasks: Default::default(),
             backup_worker,
+
+            v1x_tasks: Default::default(),
         };
         if let Err(err) = context.init() {
             warn!("BR context init failed: {:?}", err);
@@ -1223,31 +1227,57 @@ fn check_task(task: &RestoreTask, keyspace_name: &str) -> Result<()> {
 }
 
 pub mod v1x {
-    use std::{collections::HashMap, fmt::Display, marker::PhantomData, str::FromStr, sync::Arc};
+    use std::{
+        collections::HashMap,
+        fmt::{Debug, Display},
+        marker::PhantomData,
+        path::Path,
+        sync::Arc,
+    };
 
+    use chrono::{DateTime, NaiveDateTime, Utc};
     use futures::{stream::FuturesUnordered, TryStreamExt};
-    use http::StatusCode;
+    use http::{Method, StatusCode};
     use hyper::{Body, Request, Response};
-    use kvengine::dfs::S3Fs;
-    use native_br::backup::IncrementalBackupFile;
-    use pd_client::pd_control::KeyspaceMeta;
+    use kvengine::dfs::{DFSConfig, S3Fs};
+    use native_br::{
+        backup::IncrementalBackupFile,
+        packing::{
+            maybe_block_in_place, MigratePackEnv, PackBackupStep, PackConfig, PackContext,
+            ReportPackBackupStepTrait, ReportUnpackStepTrait, UnpackRun, UnpackStep,
+        },
+        restore_keyspace::{self, ReportRestoreStepTrait, RestoreStep},
+    };
+    use pd_client::pd_control::{KeyspaceMeta, PdControl};
     use protobuf::Message;
     use rfenginepb::ClusterBackupMeta;
     use serde::{
         de::{value::MapDeserializer, IntoDeserializer},
-        Deserialize, Deserializer,
+        Deserialize, Deserializer, Serialize,
     };
-    use tikv_util::{box_try, warn};
+    use serde_json::json;
+    use tikv::storage::mvcc::TimeStamp;
+    use tikv_util::{box_try, info, warn, HandyRwLock};
+    use tokio::task::spawn_blocking;
 
     use crate::{
         common::{make_json_response, make_response},
-        error::Error,
-        metrics::{NATIVE_BR_COUNTER_VEC, NATIVE_BR_HISTOGRAM_VEC},
-        native_br::{BackupItem, NativeBrManager},
+        error::{Error, Error::NotFound},
+        metrics::{NATIVE_BR_HISTOGRAM_VEC, NATIVE_BR_V1X_COUNTER_VEC},
+        native_br::{BackupItem, BrContext, NativeBrManager},
     };
 
-    pub(crate) const V1X_BACKUPS_API_PATH: &str = "/api/v1/x/backups";
-    pub type Result<T> = std::result::Result<T, HttpError>;
+    pub(crate) const API_V1X: &str = "/api/v1/x/";
+
+    type HttpResult<T> = std::result::Result<T, HttpError>;
+    type Result<T> = std::result::Result<T, Error>;
+
+    fn ts_to_datetime(ts: impl Into<TimeStamp>) -> DateTime<Utc> {
+        let ts: TimeStamp = ts.into();
+        NaiveDateTime::from_timestamp_millis(ts.physical() as _)
+            .unwrap_or_else(|| panic!("timestamp too huge to be converted to datetime: {}", ts))
+            .and_utc()
+    }
 
     #[derive(Debug)]
     pub struct HttpError(Response<Body>);
@@ -1257,6 +1287,22 @@ pub mod v1x {
             let crate_err: Error = err.into();
             match crate_err {
                 Error::CheckError(msg) => Self::error_response(StatusCode::BAD_REQUEST, msg),
+                Error::NotFound(resource) => Self::error_response(
+                    StatusCode::NOT_FOUND,
+                    format!("resource {resource} not found"),
+                ),
+                Error::RestoreKeyspaceTaskConflict(task_id) => Self::error_response(
+                    StatusCode::CONFLICT,
+                    format!("task {task_id} conflicts with your request"),
+                ),
+                Error::Existed(msg) => Self::error_response(
+                    StatusCode::CONFLICT,
+                    format!("resource already existed: {}", msg),
+                ),
+                Error::ReachConcurrencyLimit(limit) => Self::error_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!("concurrent running task reaches limit: {}", limit),
+                ),
                 otherwise => {
                     Self::error_response(StatusCode::INTERNAL_SERVER_ERROR, otherwise.to_string())
                 }
@@ -1291,22 +1337,6 @@ pub mod v1x {
             assert!(!status_code.is_success(), "{}", status_code);
             Self(make_response(status_code, body))
         }
-    }
-
-    /// Deserialize a type implementing `FromStr`.
-    /// Thanks https://users.rust-lang.org/t/serde-fromstr-on-a-field/99457/7
-    ///
-    /// NOTE: This isn't effective enough(requires an extra copy), maybe
-    /// replace it with `serde_with`.
-    fn de_from_str<'de, D, T: FromStr<Err = E>, E: Display>(
-        deserializer: D,
-    ) -> std::result::Result<T, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let buf = String::deserialize(deserializer)?;
-        T::from_str(&buf)
-            .map_err(|err| serde::de::Error::custom(format!("failed to parse a field: {}", err)))
     }
 
     struct FieldHinttedStrDe<'a, E> {
@@ -1363,9 +1393,12 @@ pub mod v1x {
     pub struct ListBackupRequest {
         #[serde(default)]
         from_prefix: String,
-        #[serde(deserialize_with = "de_from_str", default)]
+        #[serde(with = "serde_with::rust::display_fromstr", default)]
         load_details: bool,
-        #[serde(deserialize_with = "de_from_str", default = "default_max_count")]
+        #[serde(
+            with = "serde_with::rust::display_fromstr",
+            default = "default_max_count"
+        )]
         max_count: u64,
     }
 
@@ -1414,46 +1447,578 @@ pub mod v1x {
         pub safe_ts: u64,
         pub keyspaces: Vec<KeyspaceBackupInfo>,
     }
-    pub(crate) async fn serve_backup(
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    #[serde(tag = "state")]
+    pub enum TaskState {
+        Pending,
+        Init,
+        Running {
+            last_update_time: DateTime<Utc>,
+            status: String,
+            info: serde_json::Value,
+        },
+        Error {
+            error: String,
+        },
+        Done {
+            info: serde_json::Value,
+        },
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    struct StateTransform<State: Serialize> {
+        to: State,
+        at: DateTime<Utc>,
+    }
+
+    impl TaskState {
+        pub fn is_done(&self) -> bool {
+            matches!(self, TaskState::Done { .. })
+        }
+
+        pub fn state_string(&self) -> String {
+            let mut base = serde_json::to_value(self).unwrap()["state"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            if let Self::Running { status, .. } = self {
+                base.push_str("::");
+                base.push_str(status.as_str());
+            }
+            base
+        }
+
+        fn init(&mut self) {
+            if let TaskState::Done { .. } | TaskState::Running { .. } = self {
+                warn!("invalid state transform: Done | Running -> Init");
+                return;
+            }
+            if let TaskState::Error { error } = self {
+                info!("retrying failed task"; "err" => %error);
+            }
+
+            *self = TaskState::Init;
+        }
+
+        fn running(&mut self, new_status: String) {
+            *self = Self::Running {
+                last_update_time: Utc::now(),
+                status: new_status,
+                info: serde_json::Value::Null,
+            }
+        }
+
+        fn error(&mut self, err: &Error) {
+            if let TaskState::Error { .. } | TaskState::Done { .. } = self {
+                warn!("invalid state transform: Error | Done -> Error"; "err" => %err);
+                return;
+            }
+
+            *self = Self::Error {
+                error: err.to_string(),
+            };
+        }
+
+        fn done(&mut self, by: serde_json::value::Value) {
+            if let TaskState::Error { .. } | TaskState::Done { .. } = self {
+                warn!("invalid state transform: Error | Done -> Done"; "by" => %by);
+                return;
+            }
+
+            *self = Self::Done { info: by };
+        }
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    #[serde(tag = "type")]
+    pub enum TaskRequest {
+        PackBackup(CreatePackBackupRequest),
+        RestorePacked(CreateRestorePackedBackupRequest),
+    }
+
+    impl TaskRequest {
+        fn id(&self) -> u64 {
+            match self {
+                TaskRequest::PackBackup(r) => r.id,
+                TaskRequest::RestorePacked(r) => r.id,
+            }
+        }
+
+        async fn run(self, br_mgr: Arc<NativeBrManager>) {
+            match self {
+                TaskRequest::PackBackup(req) => Self::run_create_pack_backup(br_mgr, req).await,
+                TaskRequest::RestorePacked(req) => Self::run_restore_packed(br_mgr, req).await,
+            }
+        }
+
+        async fn run_restore_packed(
+            br: Arc<NativeBrManager>,
+            req: CreateRestorePackedBackupRequest,
+        ) {
+            let cfg = br.config.rl().clone();
+            let br_cx = &br.context;
+            let s3fs = br_cx.s3fs.clone();
+            let pd_cli = br_cx.pd_client.clone();
+
+            let exec = async {
+                let truncate_ts = req
+                    .point_in_time
+                    .map(|t| TimeStamp::compose(t.naive_utc().timestamp_millis() as _, 0));
+
+                let mig_env = MigratePackEnv::load_exotic(s3fs.clone(), &req.exotic_backup).await?;
+                let packed_keyspace_id = mig_env.get_packed_backup().keyspace_id;
+                let packed_keyspace_name = mig_env.get_packed_backup().keyspace_name.clone();
+                let packed_cluster_id = mig_env.get_packed_backup().cluster_id;
+
+                if truncate_ts
+                    .is_some_and(|ts| ts.into_inner() < mig_env.get_packed_backup().safe_ts)
+                {
+                    return Err(Error::CheckError(format!(
+                        "you want to restore to {} but it was already reaped by GC (until {})",
+                        ts_to_datetime(truncate_ts.unwrap()),
+                        ts_to_datetime(mig_env.get_packed_backup().safe_ts),
+                    )));
+                }
+
+                let reporter = Arc::new(ApiV1xReporter {
+                    cx: br_cx.clone(),
+                    id: req.id,
+                });
+                let mut run = UnpackRun::new(mig_env, pd_cli.clone(), reporter.clone());
+                let target = run.execute().await?;
+                let mut restore_cfg = cfg.to_restore_config();
+                restore_cfg.restore_packed_backup = true;
+                let pd_control = PdControl::new(restore_cfg.pd.clone(), pd_cli.get_security_mgr())?;
+                let target_keyspace = pd_control.get_keyspace_by_name(&req.keyspace).await?;
+                let working_path = br_cx.working_path(req.id);
+                let br_cx = br_cx.clone();
+
+                ReportRestoreStepTrait::report_step(reporter.as_ref(), RestoreStep::InstantBackup);
+                br_cx
+                    .backup_worker
+                    .instant_backup_with_retry(cfg.native_br.instant_backup_timeout.0)
+                    .await?;
+                let restored = spawn_blocking(move || {
+                    restore_keyspace::restore_keyspace(
+                        packed_keyspace_id,
+                        target_keyspace.id,
+                        &target,
+                        Some(working_path),
+                        s3fs,
+                        restore_cfg,
+                        pd_cli,
+                        &br_cx.runtime,
+                        None,
+                        reporter,
+                    )
+                })
+                .await
+                .unwrap()?;
+
+                let user_view = RestoredKeyspaceView {
+                    origin_cluster_id: packed_cluster_id,
+                    origin_keyspace_name: packed_keyspace_name,
+                    target_cluster_id: req.cluster_id,
+                    target_keyspace_name: req.keyspace.clone(),
+                    point_in_time: ts_to_datetime(restored.ts),
+                    restore_bytes: restored.restore_bytes,
+                    tolerated_err: restored.tolerated_err,
+                };
+
+                Result::Ok(user_view)
+            };
+
+            br_cx.finish_task(req.id, exec.await);
+        }
+
+        async fn run_create_pack_backup(br: Arc<NativeBrManager>, req: CreatePackBackupRequest) {
+            let cfg = br.config.rl().clone();
+            let br_cx = &br.context;
+            let mut pcfg = PackConfig::default();
+            pcfg.offline = true;
+            pcfg.dfs = cfg.dfs;
+            pcfg.backup_name = req.backup_name;
+            pcfg.keyspace_name = req.keyspace;
+            pcfg.data_dir = Some(Path::new(&cfg.data_dir).to_owned());
+            req.s3_override.apply(&mut pcfg.dfs);
+            let reporter = ApiV1xReporter {
+                cx: Arc::clone(br_cx),
+                id: req.id,
+            };
+
+            br_cx.with_task(req.id, |task| task.with_mut_state(|s| s.init()));
+
+            let res = async {
+                // NOTE: `create_from_config` cannot be asyncrhonous because it create a runtime
+                // internally... (Somehow it is terrifying to bind a tokio runtime to every S3
+                // client...)
+                let mut ctx = maybe_block_in_place(|| PackContext::create_from_config(&pcfg))?;
+                ctx.set_reporter(Arc::new(reporter));
+                let (path, meta) = ctx.execute(&pcfg.backup_name).await?;
+                let view = PackedBackupView {
+                    cluster_id: meta.cluster_id,
+                    backup_ts: meta.backup_ts,
+                    safe_ts: meta.safe_ts,
+                    keyspace_name: meta.get_keyspace_name().to_string(),
+                    resolved_ts: meta.resolved_ts,
+                    engine_size: meta.engine_size,
+                    keyspace_size: meta.keyspace_size,
+                    path,
+                };
+                tokio::task::spawn_blocking(move || drop(ctx));
+                Result::Ok(view)
+            }
+            .await;
+
+            br_cx.finish_task(req.id, res);
+        }
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct Task {
+        id: u64,
+        request: TaskRequest,
+        #[serde(default = "Utc::now", skip_deserializing)]
+        create_time: DateTime<Utc>,
+        #[serde(flatten)]
+        state: TaskState,
+        state_trans: Vec<StateTransform<String>>,
+    }
+
+    impl Task {
+        pub fn with_mut_state(&mut self, f: impl FnOnce(&mut TaskState)) {
+            let old_state_str = self.state.state_string();
+            f(&mut self.state);
+            let new_state_str = self.state.state_string();
+            if new_state_str != old_state_str {
+                self.state_trans.push(StateTransform {
+                    to: new_state_str,
+                    at: Utc::now(),
+                })
+            }
+        }
+
+        pub fn state(&self) -> &TaskState {
+            &self.state
+        }
+    }
+
+    #[derive(Deserialize, Clone, Serialize, Debug)]
+    pub struct CreatePackBackupRequest {
+        #[serde(with = "serde_with::rust::display_fromstr")]
+        id: u64,
+        backup_name: String,
+        keyspace: String,
+        #[serde(flatten)]
+        s3_override: S3Override,
+    }
+
+    #[derive(Deserialize)]
+    struct TaskRef {
+        #[serde(with = "serde_with::rust::display_fromstr")]
+        id: u64,
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct CreateRestorePackedBackupRequest {
+        #[serde(with = "serde_with::rust::display_fromstr")]
+        id: u64,
+        #[serde(with = "serde_with::rust::display_fromstr")]
+        cluster_id: u64,
+        exotic_backup: String,
+        keyspace: String,
+        #[serde(default)]
+        point_in_time: Option<DateTime<Utc>>,
+    }
+
+    #[derive(Serialize, Debug, Deserialize)]
+    pub struct PackedBackupView {
+        pub cluster_id: u64,
+        pub backup_ts: u64,
+        pub safe_ts: u64,
+        pub keyspace_name: String,
+        pub resolved_ts: u64,
+        pub engine_size: u64,
+        pub keyspace_size: u64,
+        pub path: String,
+    }
+
+    #[derive(Serialize, Debug, Deserialize)]
+    pub struct RestoredKeyspaceView {
+        pub origin_cluster_id: u64,
+        pub origin_keyspace_name: String,
+        pub target_cluster_id: u64,
+        pub target_keyspace_name: String,
+
+        pub point_in_time: DateTime<Utc>,
+        pub restore_bytes: u64,
+
+        pub tolerated_err: usize,
+    }
+
+    #[derive(Serialize, Debug, Clone, Deserialize)]
+    pub struct S3Override {
+        #[serde(
+            default,
+            rename = "use_s3_bucket",
+            skip_serializing_if = "Option::is_none"
+        )]
+        pub bucket: Option<String>,
+        #[serde(
+            default,
+            rename = "use_prefix",
+            skip_serializing_if = "Option::is_none"
+        )]
+        pub prefix: Option<String>,
+    }
+
+    impl S3Override {
+        fn apply(&self, cfg: &mut DFSConfig) {
+            if let Some(ref bucket) = self.bucket {
+                cfg.s3_bucket = bucket.clone();
+            }
+            if let Some(ref prefix) = self.prefix {
+                cfg.prefix = prefix.clone();
+            }
+        }
+    }
+
+    trait ResponseableExt {
+        fn json_with_status(self, status: StatusCode) -> Response<Body>;
+    }
+
+    impl<T: Serialize> ResponseableExt for HttpResult<T> {
+        fn json_with_status(self, status: StatusCode) -> Response<Body> {
+            match self {
+                Ok(v) => make_json_response(status, &v),
+                Err(err_resp) => err_resp.0,
+            }
+        }
+    }
+
+    impl NativeBrManager {
+        fn spawn_task(self: &Arc<Self>, request: TaskRequest) -> Result<Task> {
+            let task_id = request.id();
+            let mut tasks = self.context.v1x_tasks.wl();
+            if let Some(task) = tasks.get(&task_id) {
+                // NOTE: maybe add a digest to each task...
+                // So we can know this is a confliction or just a duplicated request.
+                return Err(Error::Existed(format!(
+                    "task(id={},req={:?})",
+                    task.id, task.request
+                )));
+            }
+
+            let state = TaskState::Pending;
+            let task = Task {
+                id: task_id,
+                request: request.clone(),
+                create_time: Utc::now(),
+                state,
+                state_trans: vec![],
+            };
+            tasks.insert(task_id, task);
+            drop(tasks);
+
+            self.context.runtime.spawn(request.run(self.clone()));
+            self.context.get_task_for_api(task_id)
+        }
+    }
+
+    impl BrContext {
+        fn with_task(&self, id: u64, f: impl FnOnce(&mut Task)) {
+            let mut tasks = self.v1x_tasks.wl();
+            let Some(task) = tasks.get_mut(&id) else {
+                warn!("Reporting error to a removed task."; "task" => %id);
+                return;
+            };
+
+            f(task)
+        }
+
+        fn get_task_for_api(&self, id: u64) -> Result<Task> {
+            let tasks = self.v1x_tasks.rl();
+            let Some(task) = tasks.get(&id) else {
+                return Err(NotFound(format!("task(id={id})")));
+            };
+
+            Ok(task.clone())
+        }
+
+        fn delete_task_for_api(&self, id: u64) -> Result<Task> {
+            let mut tasks = self.v1x_tasks.wl();
+            let Some(task) = tasks.remove(&id) else {
+                return Err(NotFound(format!("task(id={id})")));
+            };
+
+            Ok(task)
+        }
+
+        fn finish_task(&self, task_id: u64, result: Result<impl Serialize>) {
+            let mut tasks = self.v1x_tasks.wl();
+            let Some(task) = tasks.get_mut(&task_id) else {
+                return;
+            };
+
+            match result {
+                Ok(val) => {
+                    let json_val = serde_json::to_value(val).unwrap();
+                    task.with_mut_state(|s| s.done(json_val));
+                }
+                Err(err) => task.with_mut_state(|s| s.error(&err)),
+            }
+        }
+    }
+
+    struct ApiV1xReporter {
+        cx: Arc<BrContext>,
+        id: u64,
+    }
+
+    impl ApiV1xReporter {}
+
+    impl ReportPackBackupStepTrait for ApiV1xReporter {
+        fn report_step(&self, step: PackBackupStep) {
+            self.cx.with_task(self.id, |task| {
+                task.with_mut_state(|s| s.running(format!("{step:?}")))
+            })
+        }
+    }
+
+    impl ReportRestoreStepTrait for ApiV1xReporter {
+        fn report_step(&self, step: RestoreStep) {
+            self.cx.with_task(self.id, |task| {
+                task.with_mut_state(|s| s.running(format!("{step:?}")))
+            })
+        }
+    }
+
+    impl ReportUnpackStepTrait for ApiV1xReporter {
+        fn report_step(&self, step: UnpackStep) {
+            self.cx.with_task(self.id, |task| {
+                task.with_mut_state(|s| s.running(format!("{step:?}")))
+            })
+        }
+    }
+
+    pub(crate) async fn serve(
         br_ctx: Arc<NativeBrManager>,
         req: Request<Body>,
     ) -> hyper::Result<Response<Body>> {
-        let ctx = RequestContext::new(req, br_ctx);
+        let ctx = HttpRequestContext::new(req, br_ctx);
 
-        Ok(match handle_backup(ctx).await {
-            Ok(resp) => resp,
-            Err(err) => {
-                warn!("handle backup error: {:?}", err);
-                err.0
-            }
-        })
+        let path = ctx.raw_req.uri().path().to_owned();
+        let method = ctx.raw_req.method().clone();
+        let res = do_serve(ctx).await;
+
+        if res.status().is_server_error() {
+            warn!("API V1x encounters internal error."; "resp" => ?res, "path" => path, "method" => %method);
+        }
+        Ok(res)
     }
 
-    async fn handle_backup(ctx: RequestContext) -> Result<Response<Body>> {
-        let res = match ctx.raw_req.method() {
-            &hyper::Method::GET => handle_list_backup(ctx)
-                .await
-                .map(|v| make_json_response(StatusCode::OK, &v)),
-            _ => Err(HttpError::error_response(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "",
-            )),
+    async fn do_serve(mut ctx: HttpRequestContext) -> Response<Body> {
+        let path = ctx
+            .raw_req
+            .uri()
+            .path()
+            .split('/')
+            .map(|s| s.to_owned())
+            .collect::<Vec<_>>();
+        let borrowed_path = path.iter().map(|s| &**s).collect::<Vec<_>>();
+        let method = ctx.raw_req.method().clone();
+
+        let not_found = |ctx: &HttpRequestContext| {
+            (
+                make_json_response(
+                    StatusCode::NOT_FOUND,
+                    &json!({"path": ctx.raw_req.uri().path()}),
+                ),
+                "path_not_found",
+            )
         };
-        if res.is_err() {
-            NATIVE_BR_COUNTER_VEC
-                .with_label_values(&["list_backup_x_fail"])
-                .inc();
-        }
+        let method_not_allowed = |ctx: &HttpRequestContext| {
+            (
+                make_json_response(
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    &json!({"path": ctx.raw_req.uri().path(), "method": method.to_string()}),
+                ),
+                "method_not_allowed",
+            )
+        };
+
+        let (res, tag) = match borrowed_path.as_slice() {
+            [.., "task", "pack_backup", id] => match method {
+                Method::PUT => {
+                    ctx.request_params.insert("id".to_string(), id.to_string());
+                    let res = handle_create_pack(ctx)
+                        .await
+                        .json_with_status(StatusCode::CREATED);
+                    (res, "create_pack_backup")
+                }
+                _ => method_not_allowed(&ctx),
+            },
+            [.., "task", "restore_packed", id] => {
+                ctx.request_params.insert("id".to_string(), id.to_string());
+                match method {
+                    Method::PUT => {
+                        let res = handle_restore_packed(ctx)
+                            .await
+                            .json_with_status(StatusCode::CREATED);
+                        (res, "restore_packed_backup")
+                    }
+                    _ => method_not_allowed(&ctx),
+                }
+            }
+            [.., "task", id] => {
+                ctx.request_params.insert("id".to_string(), id.to_string());
+                match method {
+                    Method::GET => {
+                        let res = handle_get_task(ctx).await.json_with_status(StatusCode::OK);
+                        (res, "get_task")
+                    }
+                    Method::DELETE => {
+                        let res = handle_delete_task(ctx)
+                            .await
+                            .json_with_status(StatusCode::OK);
+                        (res, "delete_task")
+                    }
+                    _ => method_not_allowed(&ctx),
+                }
+            }
+            [.., "backups"] => match method {
+                Method::GET => {
+                    let res = handle_list_backup(ctx)
+                        .await
+                        .json_with_status(StatusCode::OK);
+                    (res, "list_backup")
+                }
+                _ => method_not_allowed(&ctx),
+            },
+            _ => not_found(&ctx),
+        };
+
+        let result = if res.status().is_success() {
+            "success"
+        } else if res.status().is_client_error() {
+            "client_error"
+        } else {
+            "failure"
+        };
+        NATIVE_BR_V1X_COUNTER_VEC
+            .with_label_values(&[tag, result])
+            .inc();
+
         res
     }
-
-    struct RequestContext {
+    struct HttpRequestContext {
         br: Arc<NativeBrManager>,
         raw_req: Request<Body>,
         request_params: HashMap<String, String>,
     }
 
-    impl RequestContext {
+    impl HttpRequestContext {
         fn new(req: Request<Body>, br: Arc<NativeBrManager>) -> Self {
             Self {
                 br,
@@ -1462,7 +2027,7 @@ pub mod v1x {
             }
         }
 
-        fn query_params<'de, T: Deserialize<'de>>(&self) -> Result<T> {
+        fn query_params<'de, T: Deserialize<'de>>(&self) -> HttpResult<T> {
             let query = self.raw_req.uri().query().unwrap_or("");
             let query_pairs: HashMap<_, _> =
                 url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -1481,7 +2046,40 @@ pub mod v1x {
         }
     }
 
-    async fn handle_list_backup(ctx: RequestContext) -> Result<ListBackupResponse> {
+    async fn handle_get_task(ctx: HttpRequestContext) -> HttpResult<Task> {
+        let r: TaskRef = ctx.query_params()?;
+        let task = ctx.br.context.get_task_for_api(r.id)?;
+        Ok(task)
+    }
+
+    async fn handle_delete_task(ctx: HttpRequestContext) -> HttpResult<Task> {
+        let r: TaskRef = ctx.query_params()?;
+        let task = ctx.br.context.delete_task_for_api(r.id)?;
+        Ok(task)
+    }
+
+    async fn handle_create_pack(ctx: HttpRequestContext) -> HttpResult<Task> {
+        let req: CreatePackBackupRequest = ctx.query_params()?;
+        ctx.br
+            .spawn_task(TaskRequest::PackBackup(req.clone()))
+            .map_err(HttpError::from)
+    }
+
+    async fn handle_restore_packed(ctx: HttpRequestContext) -> HttpResult<Task> {
+        let req: CreateRestorePackedBackupRequest = ctx.query_params()?;
+        if req.cluster_id != ctx.br.get_cluster_id()? {
+            Err(Error::CheckError(format!(
+                "our cluster is {} but you want to restore {}",
+                ctx.br.get_cluster_id()?,
+                req.cluster_id
+            )))?
+        }
+
+        let task = ctx.br.spawn_task(TaskRequest::RestorePacked(req.clone()))?;
+        Ok(task)
+    }
+
+    async fn handle_list_backup(ctx: HttpRequestContext) -> HttpResult<ListBackupResponse> {
         let ob_start_time = tikv_util::time::Instant::now();
         let cluster_id = ctx.br.get_cluster_id()?;
 
@@ -1515,7 +2113,7 @@ pub mod v1x {
             let mut st = FuturesUnordered::new();
             for v in files {
                 st.push(async move {
-                    Result::Ok(Backup {
+                    HttpResult::Ok(Backup {
                         name: v.key.strip_prefix(full_prefix).unwrap().to_string(),
                         last_modify_time: v.last_modified,
                         details: if load_details {
@@ -1560,7 +2158,7 @@ pub mod v1x {
         s3fs: &S3Fs,
         key: &str,
         keyspaces: &HashMap<u32, KeyspaceMeta>,
-    ) -> Result<BackupDetails> {
+    ) -> HttpResult<BackupDetails> {
         let backup_meta_bytes = s3fs
             .get_object(key.to_owned(), key.to_owned(), Default::default())
             .await?;
@@ -1595,7 +2193,7 @@ pub mod v1x {
     }
 
     #[cfg(not(feature = "testexport"))]
-    async fn load_keyspaces(br_ctx: &NativeBrManager) -> Result<HashMap<u32, KeyspaceMeta>> {
+    async fn load_keyspaces(br_ctx: &NativeBrManager) -> HttpResult<HashMap<u32, KeyspaceMeta>> {
         let ctl = br_ctx.get_pd_ctl()?;
         let mut keyspaces = HashMap::default();
         let mut next_page_token = None;
@@ -1612,7 +2210,7 @@ pub mod v1x {
     // for now the test cluster doesn't support PD's http API...
     // use a mocked keyspace meta to make the test case happy...
     #[cfg(feature = "testexport")]
-    async fn load_keyspaces(_br_ctx: &NativeBrManager) -> Result<HashMap<u32, KeyspaceMeta>> {
+    async fn load_keyspaces(_br_ctx: &NativeBrManager) -> HttpResult<HashMap<u32, KeyspaceMeta>> {
         let meta = |id, name: &str| {
             let mut meta = KeyspaceMeta::default();
             meta.id = id;
@@ -1694,6 +2292,57 @@ pub mod test_utils {
                 .finish();
             Ok(box_try!(
                 self.inner.get(format!("api/v1/x/backups?{query}")).await
+            ))
+        }
+
+        pub async fn pack_backup(
+            &self,
+            id: u64,
+            backup_name: &str,
+            keyspace_name: &str,
+        ) -> HttpResult<super::v1x::Task> {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("backup_name", backup_name.to_string()),
+                    ("keyspace", keyspace_name.to_string()),
+                ])
+                .finish();
+            Ok(box_try!(
+                self.inner
+                    .put(
+                        format!("api/v1/x/task/pack_backup/{id}?{query}"),
+                        &DummyRequest {}
+                    )
+                    .await
+            ))
+        }
+
+        pub async fn restore_packed_backup(
+            &self,
+            id: u64,
+            exotic_path: &str,
+            keyspace_name: &str,
+        ) -> HttpResult<super::v1x::Task> {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("cluster_id", self.cluster_id.to_string()),
+                    ("exotic_backup", exotic_path.to_string()),
+                    ("keyspace", keyspace_name.to_string()),
+                ])
+                .finish();
+            Ok(box_try!(
+                self.inner
+                    .put(
+                        format!("api/v1/x/task/restore_packed/{id}?{query}"),
+                        &DummyRequest {}
+                    )
+                    .await
+            ))
+        }
+
+        pub async fn get_task_status(&self, id: u64) -> HttpResult<super::v1x::Task> {
+            Ok(box_try!(
+                self.inner.get(format!("api/v1/x/task/{id}")).await
             ))
         }
 

@@ -12,7 +12,9 @@ use std::{
 use bytes::Bytes;
 use chrono::Utc;
 use cloud_worker::native_br::{
-    test_utils::NativeBrSvcClient, v1x::Backup, BackupItem, RestoreState,
+    test_utils::NativeBrSvcClient,
+    v1x::{Backup, PackedBackupView, TaskState},
+    BackupItem, RestoreState,
 };
 use collections::HashMap;
 use fail::cfg_callback;
@@ -491,6 +493,115 @@ fn test_native_br_service(#[values(true, false)] use_api_v1x: bool) {
 
     cluster.stop();
     oss.shutdown();
+}
+
+#[test]
+fn test_native_br_service_x() {
+    test_util::init_log_for_test();
+    const KEYSPACE_ID: u32 = 1;
+    const DATA_LEN: usize = 100;
+    const VALUE_SIZE: usize = 64;
+
+    let mock_get_keyspace_fp = "pd_ctl::mock_get_keyspace_by_name";
+    let mock_get_keyspace_fp2 = "offline_pd::mock_get_keyspace_by_name";
+    fail::cfg(mock_get_keyspace_fp, "return").unwrap();
+    fail::cfg(mock_get_keyspace_fp2, "return").unwrap();
+
+    let runtime = Runtime::new().unwrap();
+    let _enter = runtime.enter();
+
+    let (_temp_dir, _oss, dfs_config) = prepare_dfs("t_");
+    let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
+    let mut cluster = ServerClusterBuilder::new(alloc_node_id_vec(3), |_, conf| {
+        conf.dfs = dfs_config.clone();
+        conf.rfengine.lightweight_backup = true;
+        conf.enable_inner_key_offset = true;
+    })
+    .pd(pd_wrapper)
+    .build();
+    let tikv_worker_id = alloc_node_id();
+    let tikv_worker_opts = TikvWorkerOptions {
+        backup_interval: Duration::from_millis(1010),
+        backup_skip_keyspace_meta: true,
+        restore_timeout_pd_control: Duration::from_secs(3),
+        ..Default::default()
+    };
+    cluster.start_tikv_workers(vec![tikv_worker_id], tikv_worker_opts.clone());
+    cluster.wait_region_replicated(&[], 3);
+
+    let pd_client = cluster.get_pd_client();
+    let cluster_id = pd_client.get_cluster_id().unwrap();
+
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+    client.split_keyspace(2);
+
+    let i_to_key = i_to_keyspace_key(KEYSPACE_ID);
+    client.put_kv(0..DATA_LEN, &i_to_key, random_value::<VALUE_SIZE>);
+    client.verify_data_with_ref_store();
+
+    let datetime0 = Utc::now();
+    let mut ref_store0 = client.dump_ref_store();
+
+    let security_mgr = Arc::new(SecurityManager::default());
+    let br_cli =
+        NativeBrSvcClient::new(cluster_id, cluster.tikv_worker_endpoints(), security_mgr).unwrap();
+
+    let backup_x = TryWaiter::timeout(10)
+        .interval(1)
+        .try_wait_result(|| {
+            let mut backups = block_on(
+                br_cli.list_backups_x(
+                    // add 1s to fetch the backup after written.
+                    (datetime0 + chrono::Duration::seconds(1))
+                        .format("%Y%m%d/%H%M%S")
+                        .to_string(),
+                    true,
+                    1000,
+                ),
+            )
+            .unwrap();
+            backups
+                .data
+                .pop()
+                .ok_or(Err::<Backup, String>("no backup found".to_string()))
+        })
+        .unwrap();
+    info!("backup v1x: {:?}", backup_x);
+
+    for node in cluster.get_nodes() {
+        cluster.get_rfengine(node).upload_wal_chunk();
+    }
+
+    let pack_backup =
+        block_on(br_cli.pack_backup(1, &backup_x.name, &format!("ks{KEYSPACE_ID}"))).unwrap();
+    println!(">>> {pack_backup:?}");
+
+    assert!(TryWaiter::timeout(10).interval(1).try_wait(|| {
+        let task = block_on(br_cli.get_task_status(1)).unwrap();
+        task.state().is_done()
+    }));
+    let task = block_on(br_cli.get_task_status(1)).unwrap();
+    let TaskState::Done { info } = task.state() else {
+        unreachable!()
+    };
+    let packed_backup = serde_json::from_value::<PackedBackupView>(info.clone()).unwrap();
+
+    let restore = block_on(br_cli.restore_packed_backup(2, &packed_backup.path, "ks2")).unwrap();
+    println!(">>> {restore:?}");
+
+    assert!(TryWaiter::timeout(100).interval(1).try_wait(|| {
+        let task = block_on(br_cli.get_task_status(2)).unwrap();
+        println!(">> {task:?}");
+        task.state().is_done()
+    }));
+    ref_store0.rewrite_keyspace_prefix(2);
+    client
+        .verify_data_with_given_ref_store(&ref_store0, None, &Default::default())
+        .unwrap();
+
+    fail::remove(mock_get_keyspace_fp);
+    fail::remove(mock_get_keyspace_fp2);
 }
 
 #[test]

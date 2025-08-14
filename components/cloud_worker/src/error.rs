@@ -24,6 +24,10 @@ pub enum Error {
     NativeBackupRestoreError(#[from] native_br::error::Error),
     #[error("restore keyspace task conflict with id {0}")]
     RestoreKeyspaceTaskConflict(u64),
+    #[error("resource {0} not found")]
+    NotFound(String),
+    #[error("resource {0} already exists")]
+    Existed(String),
     #[error("datetime parse error {0}")]
     DateTimeParseError(#[from] chrono::ParseError),
     #[error("ReachLimit {0}")]

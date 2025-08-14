@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use clap::Args;
 use kvengine::dfs::Dfs;
-use native_br::packing::{MigratePackEnv, UnpackRun};
+use native_br::packing::{MigratePackEnv, NoopReporter, UnpackRun};
 use tikv_util::info;
 
 use crate::common::CommonConfig;
@@ -68,7 +68,7 @@ pub fn execute_unpack_backup(args: UnpackBackupArgs) {
         info!("Loading exotic packed backup from: {}", args.exotic_path);
 
         let migrate_env = MigratePackEnv::load_exotic(s3fs.clone(), &args.exotic_path).await?;
-        let mut unpack_run = UnpackRun::new(migrate_env, pd_client);
+        let mut unpack_run = UnpackRun::new(migrate_env, pd_client, Arc::new(NoopReporter));
         let result = unpack_run.execute().await?;
         Ok::<String, native_br::error::Error>(result)
     };

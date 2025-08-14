@@ -32,6 +32,7 @@ lazy_static! {
     )
     .unwrap();
 
+
     pub static ref REMOTE_COPR_DAG_REQ_COUNTER: IntCounter = register_int_counter!(
         "tikv_worker_remote_cop_dag_request_counter",
         "Total count of remote copr requests",
@@ -137,4 +138,11 @@ lazy_static! {
         "tikv_worker_memory_limiter_current_used",
         "Current used memory reported by worker memory limiter",
     ).unwrap();
+
+    pub static ref NATIVE_BR_V1X_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
+        "tikv_worker_native_br_v1x_counter",
+        "The counter of native br v1x operations",
+        &["type", "result"]
+    )
+    .unwrap();
 }

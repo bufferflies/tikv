@@ -8,8 +8,7 @@ use std::{
 };
 
 use chrono::Utc;
-use futures::{executor::block_on, stream::FuturesUnordered, TryStreamExt};
-use itertools::Itertools;
+use futures::{stream::FuturesUnordered, TryStreamExt};
 use kvengine::{
     dfs::{DFSConfig, Dfs, FileType, OverlaidFs, S3Fs},
     util::TxnFileRefPropertyHelper,
@@ -73,7 +72,7 @@ pub struct PackedBackupMeta {
     pub packed_content: PackedBackup,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum PackBackupStep {
     CreateAdHocKvEngine,
     ResolveLock,
@@ -81,20 +80,19 @@ pub enum PackBackupStep {
     CreateMeta,
 }
 
-pub trait ReportPackBackupStepTrait {
+pub struct NoopReporter;
+
+pub trait ReportPackBackupStepTrait: Send + Sync + 'static {
     fn report_step(&self, _step: PackBackupStep) {}
 }
 
-pub struct NopReportBackupStep;
-impl ReportPackBackupStepTrait for NopReportBackupStep {}
+impl ReportPackBackupStepTrait for NoopReporter {}
 
 pub fn pack_backup_with_cfg(
     reporter: Arc<dyn ReportPackBackupStepTrait>,
     cfg: PackConfig,
 ) -> Result<PackedBackupMeta> {
     info!("Welcome to pack backup."; "cfg" => ?cfg);
-    let mut ctx = PackContext::create_from_config(&cfg)?;
-    ctx.set_reporter(reporter);
     // `ctx.execute` contains `load_tables_by_id` which is blocking.
     // If execute it in the dfs runtime, it may block the whole dfs runtime
     // which finally sticks the whole procedure.
@@ -102,8 +100,10 @@ pub fn pack_backup_with_cfg(
         .enable_all()
         .build()
         .unwrap();
-    let handle = runtime.handle().clone();
-    let (path, content) = handle.block_on(ctx.execute(&cfg.backup_name))?;
+    let mut ctx = PackContext::create_from_config(&cfg)?;
+    ctx.set_reporter(reporter);
+
+    let (path, content) = runtime.block_on(ctx.execute(&cfg.backup_name))?;
     Ok(PackedBackupMeta {
         copyable_path: path,
         packed_content: content,
@@ -123,7 +123,7 @@ pub struct PackEnv {
     pub reporter: Arc<dyn ReportPackBackupStepTrait>,
 }
 
-fn maybe_block_in_place<T>(f: impl FnOnce() -> T) -> T {
+pub fn maybe_block_in_place<T>(f: impl FnOnce() -> T) -> T {
     if let Ok(hnd) = tokio::runtime::Handle::try_current() {
         if hnd.runtime_flavor() == RuntimeFlavor::MultiThread {
             return tokio::task::block_in_place(f);
@@ -146,10 +146,12 @@ impl PackContext {
 
     pub fn create_from_config(config: &PackConfig) -> Result<Self> {
         let dfs = Arc::new(S3Fs::new_from_config(config.dfs.clone()));
+        let hnd = dfs.get_runtime().handle();
 
-        let (backup_meta, archive_reader) = load_norm_backup_meta(&dfs, &config.backup_name)?;
+        let (backup_meta, archive_reader) =
+            hnd.block_on(load_norm_backup_meta(&dfs, &config.backup_name))?;
         let (pd_client, keyspace_meta) = if config.offline {
-            let pd_client = dfs.get_runtime().block_on(OfflinePd::new(
+            let pd_client = hnd.block_on(OfflinePd::new(
                 backup_meta.cluster_id,
                 backup_meta.keyspace_meta.clone(),
             ))?;
@@ -162,7 +164,7 @@ impl PackContext {
             let pd_client = Arc::new(create_pd_client(&config.security, &config.pd_config))
                 as Arc<dyn PdClient>;
             let pd_ctl = PdControl::new(config.pd_config.clone(), pd_client.get_security_mgr())?;
-            let keyspace_meta = block_on(pd_ctl.get_keyspace_by_name(&config.keyspace_name))?;
+            let keyspace_meta = hnd.block_on(pd_ctl.get_keyspace_by_name(&config.keyspace_name))?;
             (pd_client, keyspace_meta)
         };
 
@@ -203,7 +205,7 @@ impl PackContext {
             offline: config.offline,
             _temp_dir,
             restore_conf,
-            reporter: Arc::new(NopReportBackupStep),
+            reporter: Arc::new(NoopReporter),
         };
         Self::create_from_env(env, backup_meta, archive_reader, keyspace_meta)
     }
@@ -224,12 +226,15 @@ impl PackContext {
             )));
         }
 
-        let overlay_fs = Arc::new(OverlaidFs::new(env.dfs.clone(), env.tmpfs.clone()));
+        let overlay_fs = Arc::new(OverlaidFs::new(
+            Arc::clone(&env.dfs),
+            Arc::clone(&env.tmpfs),
+        ));
         let opt = BackupClusterOptions {
             cluster_meta: backup_meta.clone(),
             path: env.work_path,
             pd_client: env.pd_client.clone(),
-            dfs: env.dfs.clone(),
+            dfs: Arc::clone(&env.dfs),
             restore_conf: env.restore_conf,
             keyspace_id: keyspace_meta.id,
             target_keyspace_id: keyspace_meta.id,
@@ -237,7 +242,7 @@ impl PackContext {
             archiving: false,
             archive_reader,
             load_all_tables: false,
-            override_dfs: Some(overlay_fs.clone()),
+            override_dfs: Some(Arc::clone(&overlay_fs) as Arc<dyn Dfs>),
             offline_packing: env.offline,
         };
         let cluster = maybe_block_in_place(|| BackupCluster::new_opt(opt))?;
@@ -372,6 +377,10 @@ pub struct MigratePackEnv {
 }
 
 impl MigratePackEnv {
+    pub fn get_packed_backup(&self) -> &PackedBackup {
+        &self.packed
+    }
+
     pub async fn load_exotic(s3fs: Arc<S3Fs>, exotic_path: &str) -> Result<Self> {
         let uuid = Uuid::new_v4();
         let now = Utc::now();
@@ -394,12 +403,6 @@ impl MigratePackEnv {
             exotic_path: exotic_path.to_owned(),
         })
     }
-}
-
-pub struct UnpackRun {
-    menv: MigratePackEnv,
-    pd_client: Arc<dyn PdClient>,
-    id_remap: BTreeMap<u64, u64>,
 }
 
 pub struct RestorePackEnv<'a> {
@@ -450,12 +453,38 @@ impl MigratePackEnv {
     }
 }
 
+#[derive(Debug)]
+pub enum UnpackStep {
+    VerifyBackup,
+    AllocateNewIds,
+    MoveTableFiles,
+    WriteNewMeta,
+}
+
+pub trait ReportUnpackStepTrait: Send + Sync + 'static {
+    fn report_step(&self, _step: UnpackStep) {}
+}
+
+impl ReportUnpackStepTrait for NoopReporter {}
+
+pub struct UnpackRun {
+    menv: MigratePackEnv,
+    pd_client: Arc<dyn PdClient>,
+    id_remap: BTreeMap<u64, u64>,
+    reporter: Arc<dyn ReportUnpackStepTrait>,
+}
+
 impl UnpackRun {
-    pub fn new(env: MigratePackEnv, pd_client: Arc<dyn PdClient>) -> Self {
+    pub fn new(
+        env: MigratePackEnv,
+        pd_client: Arc<dyn PdClient>,
+        reporter: Arc<dyn ReportUnpackStepTrait>,
+    ) -> Self {
         Self {
             menv: env,
             pd_client,
             id_remap: BTreeMap::new(),
+            reporter,
         }
     }
 
@@ -483,10 +512,16 @@ impl UnpackRun {
     }
 
     pub async fn unpack_ssts(&mut self) -> Result<()> {
-        for chunk in &self.menv.packed.get_shards().iter().chunks(128) {
-            futures::future::try_join_all(chunk.map(|cs| self.verify_changeset_recoverable(cs)))
-                .await?;
+        self.reporter.report_step(UnpackStep::VerifyBackup);
+        let max_conc = 128;
+        let mut futures = FuturesUnordered::new();
+        for cs in self.menv.packed.get_shards().iter() {
+            futures.push(self.verify_changeset_recoverable(cs));
+            if futures.len() >= max_conc {
+                futures.try_next().await?;
+            }
         }
+        futures.try_for_each(|()| futures::future::ok(())).await?;
         self.move_files().await?;
         let mut shards = self.menv.packed.take_shards();
         for shard in shards.iter_mut() {
@@ -518,8 +553,10 @@ impl UnpackRun {
     async fn move_files(&mut self) -> Result<()> {
         let max_conc = 128;
         let mut futures = FuturesUnordered::new();
+        self.reporter.report_step(UnpackStep::AllocateNewIds);
         let new_ids = self.paged_allocate_new_ids().await?;
 
+        self.reporter.report_step(UnpackStep::MoveTableFiles);
         for (file, new_id) in self
             .menv
             .packed
@@ -722,6 +759,10 @@ pub mod offline_pd {
         }
 
         pub fn keyspace_id(&self, keyspace: &str) -> Result<u32> {
+            fail::fail_point!("offline_pd::mock_get_keyspace_by_name", |_| {
+                let id: u32 = keyspace.strip_prefix("ks").unwrap().parse().unwrap();
+                Ok(id)
+            });
             self.etcd
                 .get(&keyspace_id_key(keyspace, self.cluster_id))
                 .ok_or_else(|| {

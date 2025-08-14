@@ -26,7 +26,9 @@ use native_br::{
     backup::BackupType,
     common::now,
     metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
-    packing::{offline_pd::OfflinePd, MigratePackEnv, PackContext, PackEnv, UnpackRun},
+    packing::{
+        offline_pd::OfflinePd, MigratePackEnv, NoopReporter, PackContext, PackEnv, UnpackRun,
+    },
     restore::RestoreConfig,
     restore_keyspace, step,
 };
@@ -1902,7 +1904,9 @@ fn test_restore_packed_backup(
         .block_on(MigratePackEnv::load_exotic(s3fs.clone(), &packed_path))
         .unwrap();
     let packed_path = runtime
-        .block_on(UnpackRun::new(env, cluster.get_pure_pd_client()).execute())
+        .block_on(
+            UnpackRun::new(env, cluster.get_pure_pd_client(), Arc::new(NoopReporter)).execute(),
+        )
         .unwrap();
 
     restore_keyspace::restore_keyspace(

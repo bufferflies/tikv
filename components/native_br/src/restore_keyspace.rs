@@ -198,11 +198,11 @@ pub fn restore_keyspace_with_cfg(
     )
 }
 
-pub fn load_norm_backup_meta(
+pub async fn load_norm_backup_meta(
     s3fs: &Arc<S3Fs>,
     backup_name: &str,
 ) -> Result<(ClusterBackupMeta, Option<ArchiveReader>)> {
-    match get_cluster_backup_file_and_meta(s3fs, backup_name.to_owned()) {
+    match get_cluster_backup_file_and_meta(s3fs, backup_name.to_owned()).await {
         Ok((_, backup_meta)) => Ok((backup_meta, None)),
         Err(dfs::Error::NoSuchKey(err)) => {
             warn!(
@@ -213,9 +213,10 @@ pub fn load_norm_backup_meta(
             let backup_file =
                 get_incremental_backup_with_name(s3fs.get_prefix(), backup_name.to_owned());
             let backup_date = backup_file.created_at().date_naive();
-            let archive_reader = ArchiveReader::new(s3fs.clone(), &backup_date)?;
+            let archive_reader = ArchiveReader::new_async(s3fs.clone(), &backup_date).await?;
             let backup_meta = archive_reader
-                .read_meta_file()
+                .read_meta_file_async()
+                .await
                 .map_err(|_| MetaNotFound(backup_file.id()))?;
             Ok((backup_meta, Some(archive_reader)))
         }
@@ -279,7 +280,9 @@ pub fn restore_keyspace(
         let restored = env.execute(packed)?;
         return Ok(restored);
     }
-    let (cluster_backup, archive_reader) = load_norm_backup_meta(&s3fs, backup_name)?;
+    let (cluster_backup, archive_reader) = s3fs
+        .get_runtime()
+        .block_on(load_norm_backup_meta(&s3fs, backup_name))?;
     let truncate_ts = if archive_reader.is_none() {
         truncate_ts
     } else {

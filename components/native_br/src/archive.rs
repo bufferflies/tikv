@@ -410,9 +410,9 @@ fn archive_backup_files(
     }
     let back_file = backups.first().unwrap();
     let file_name = back_file.name().to_string();
-    let (meta_file_data, cluster_backup) =
-        get_cluster_backup_file_and_meta(&s3fs, file_name.clone())
-            .map_err(|e| Error::DfsError(e))?;
+    let (meta_file_data, cluster_backup) = runtime
+        .block_on(get_cluster_backup_file_and_meta(&s3fs, file_name.clone()))
+        .map_err(|e| Error::DfsError(e))?;
     let files = get_cluster_backup_files(
         pd_client.clone(),
         s3fs.clone(),
@@ -635,17 +635,18 @@ pub fn get_incremental_backup_with_name(prefix: String, name: String) -> Increme
     IncrementalBackupFile::try_from_full_path(&backup_key).unwrap()
 }
 
-pub fn get_cluster_backup_file_and_meta(
+pub async fn get_cluster_backup_file_and_meta(
     s3fs: &S3Fs,
     name: String,
 ) -> dfs::Result<(Bytes, ClusterBackupMeta)> {
     let key = backup_file_full_path(s3fs.get_prefix(), name.clone(), None);
-    let runtime = s3fs.get_runtime();
-    let data = runtime.block_on(s3fs.get_object(
-        key.clone(),
-        name,
-        engine_traits::GetObjectOptions::default(),
-    ))?;
+    let data = s3fs
+        .get_object(
+            key.clone(),
+            name,
+            engine_traits::GetObjectOptions::default(),
+        )
+        .await?;
     let mut cluster_backup = ClusterBackupMeta::default();
     cluster_backup.merge_from_bytes(&data).map_err(|e| {
         dfs::Error::Other(format!("Incorrect encoded data from s3 {}, err {}", key, e))
@@ -748,14 +749,21 @@ pub fn get_latest_archive_date(s3fs: &S3Fs, start_date: &chrono::NaiveDate) -> R
 }
 
 pub fn get_archive_index(s3fs: &S3Fs, date: String) -> Result<(ArchiveIndex, Bytes)> {
+    s3fs.get_runtime()
+        .handle()
+        .clone()
+        .block_on(get_archive_index_async(s3fs, date))
+}
+
+pub async fn get_archive_index_async(s3fs: &S3Fs, date: String) -> Result<(ArchiveIndex, Bytes)> {
     let index_key = archive_index_key(s3fs.get_prefix(), date.clone());
     let data = s3fs
-        .get_runtime()
-        .block_on(s3fs.get_object(
+        .get_object(
             index_key.clone(),
             index_key.clone(),
             GetObjectOptions::default(),
-        ))
+        )
+        .await
         .map_err(|e| {
             error!(
                 "failed to get archived index with date {}, err {}",
@@ -1409,12 +1417,16 @@ pub struct ArchiveReader {
 
 impl ArchiveReader {
     pub fn new(s3fs: Arc<S3Fs>, date: &NaiveDate) -> Result<Self> {
+        s3fs.get_runtime()
+            .handle()
+            .clone()
+            .block_on(Self::new_async(s3fs, date))
+    }
+
+    pub async fn new_async(s3fs: Arc<S3Fs>, date: &NaiveDate) -> Result<Self> {
         let start_date = archive_format_date(date);
-        let (index_keys, _) = s3fs.get_runtime().block_on(get_all_archive_index_paths(
-            &s3fs,
-            start_date.clone(),
-            usize::MAX,
-        ))?;
+        let (index_keys, _) =
+            get_all_archive_index_paths(&s3fs, start_date.clone(), usize::MAX).await?;
         if index_keys.is_empty() {
             return Err(Error::ArchiveError(format!(
                 "failed to get archive reader on {}",
@@ -1426,7 +1438,7 @@ impl ArchiveReader {
         let mut archive_addresses: HashMap<u64, ArchiveAddress> = HashMap::default();
         for index_key in index_keys {
             let date = parse_index_date(&index_key.clone());
-            let (archive_index, _) = get_archive_index(&s3fs, date.clone())?;
+            let (archive_index, _) = get_archive_index_async(&s3fs, date.clone()).await?;
             if date.eq(&start_date) {
                 meta_archive_address = Some(ArchiveAddress::new(
                     date.clone(),
@@ -1461,11 +1473,15 @@ impl ArchiveReader {
     }
 
     pub fn read_meta_file(&self) -> Result<ClusterBackupMeta> {
+        self.s3fs
+            .get_runtime()
+            .block_on(self.read_meta_file_async())
+    }
+
+    pub async fn read_meta_file_async(&self) -> Result<ClusterBackupMeta> {
         if let Some(archive_addr) = self.get_meta_archive_addr() {
-            return self
-                .s3fs
-                .get_runtime()
-                .block_on(get_archived_object(&self.s3fs, archive_addr))
+            return get_archived_object(&self.s3fs, archive_addr)
+                .await
                 .and_then(|data| {
                     let mut cluster_backup_meta = ClusterBackupMeta::new();
                     cluster_backup_meta.merge_from_bytes(&data).map_err(|e| {

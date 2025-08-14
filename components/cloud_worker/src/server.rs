@@ -180,10 +180,9 @@ where
                         "/txn_chunk" => handle_txn_chunk(ctx, req).await,
                         "/write_sst" => handle_write_sst(ctx, req).await,
 
-                        native_br::v1x::V1X_BACKUPS_API_PATH => {
-                            native_br::v1x::serve_backup(ctx.br_manager.clone(), req).await
+                        path if path.starts_with(native_br::v1x::API_V1X) => {
+                            native_br::v1x::serve(ctx.br_manager.clone(), req).await
                         }
-
                         _ => Ok(hyper::Response::builder()
                             .status(404)
                             .body(hyper::Body::from("Not Found"))
