@@ -1367,6 +1367,12 @@ impl ShardMeta {
                 .iter()
                 .any(|&id| id >= min_table_id && id <= max_table_id)
         });
+        // Source or target shard may has pending columnar major compaction, after merge
+        // the columnar_table_ids will not contains the table. If columnar_table_ids is
+        // empty, we should also clear the unconverted_l0s.
+        if columnar_table_ids.is_empty() {
+            self.unconverted_l0s.clear();
+        }
         self.vector_indexes
             .retain(|vec| columnar_table_ids.contains(&vec.table_id));
     }

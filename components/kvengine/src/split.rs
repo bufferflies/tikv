@@ -693,6 +693,9 @@ fn retain_columnar_and_vector(
             .iter()
             .any(|&id| id >= min_table_id && id <= max_table_id)
     });
+    if columnar_table_ids.is_empty() {
+        col_levels.unconverted_l0s.clear();
+    }
     vector_indexes.retain(|idx| columnar_table_ids.contains(&idx.table_id));
 }
 
