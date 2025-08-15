@@ -347,7 +347,7 @@ impl RfEngineCore {
     /// implement async I/O, i.e., call `apply` in the main thread and call
     /// `persist` in the I/O thread.
     pub fn persist(&self, wb: WriteBatch) -> Result<usize> {
-        let timer = Instant::now_coarse();
+        let timer = Instant::now();
         let wb = Arc::new(wb.into_vector());
         let mut writer = self.writer.lock().unwrap();
         let old_file_off = writer.get_file_off();

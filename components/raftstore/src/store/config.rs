@@ -342,6 +342,10 @@ pub struct Config {
 
     /// The maximum batch size for raft worker.
     pub raft_worker_max_batch_size: ReadableSize,
+
+    /// The minimum duration for IO worker to write data.
+    /// This is used to avoid too frequent writes to avoid write amplification.
+    pub io_worker_min_write_duration: ReadableDuration,
 }
 
 impl Default for Config {
@@ -460,6 +464,7 @@ impl Default for Config {
             enable_kv_engine_meta_diff: true,
             kv_engine_meta_diff_rewrite_percent: 20,
             raft_worker_max_batch_size: ReadableSize::mb(1),
+            io_worker_min_write_duration: ReadableDuration::millis(1),
         }
     }
 }

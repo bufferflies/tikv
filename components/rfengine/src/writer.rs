@@ -428,13 +428,24 @@ impl WalWriter {
             std::thread::sleep(duration);
         }
 
-        let timer = Instant::now_coarse();
+        let timer = Instant::now();
         self.file().write_all_at(self.buf.as_ref(), self.file_off)?;
-        ENGINE_WAL_WRITE_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
+        let write_duration = timer.saturating_elapsed();
+        Self::maybe_log_slow_write(write_duration, aligned_len);
+        ENGINE_WAL_WRITE_DURATION_HISTOGRAM.observe(write_duration.as_secs_f64());
         self.file_off += aligned_len as u64;
         self.buf.truncate(BATCH_HEADER_SIZE);
 
         Ok((self.epoch_id, self.file_off, rotated))
+    }
+
+    fn maybe_log_slow_write(write_duration: Duration, aligned_len: usize) {
+        if write_duration > Duration::from_millis(40) && aligned_len < 64 * 1024 {
+            info!(
+                "wal write takes too long {:?}, size: {}",
+                write_duration, aligned_len
+            );
+        }
     }
 
     pub(crate) fn write_batch(&mut self, wb: &[PeerBatch]) -> Result<(u32, u64, bool)> {
