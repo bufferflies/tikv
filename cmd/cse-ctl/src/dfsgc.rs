@@ -91,7 +91,8 @@ pub struct DfsGcArgs {
     pub start_time_safe_interval: ReadableDuration,
 
     /// File types whitelist, only files with these file types will be GCed.
-    /// Use `,` to separate multiple file types. E.g. "sst,txn".
+    /// Use `,` to separate multiple file types.
+    /// E.g. "sst,txn,blob,col,schema,vec".
     #[clap(long, value_delimiter = ',', default_value = "sst")]
     pub file_types_whitelist: Vec<String>,
 

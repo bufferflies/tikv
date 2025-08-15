@@ -1376,6 +1376,20 @@ impl BackupCluster {
                         ftype: FileType::TxnChunk,
                     }),
             );
+            if shard.meta.schema.is_valid() {
+                files.push(TableFile {
+                    id: shard.meta.schema.file_id(),
+                    ftype: FileType::Schema,
+                });
+            }
+            for vec_idx in &shard.meta.vector_indexes {
+                for idx_file in vec_idx.get_files() {
+                    files.push(TableFile {
+                        id: idx_file.get_id(),
+                        ftype: FileType::VectorIndex,
+                    });
+                }
+            }
         }
         files.extend(
             self.txn_chunk_ids_in_wal

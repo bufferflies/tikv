@@ -882,8 +882,8 @@ pub fn get_archived_wals(
 pub fn get_not_found_files(s3fs: &S3Fs, files: Vec<TableFile>) -> Result<Vec<TableFile>> {
     let (result_tx, result_rx) = tikv_util::mpsc::bounded(files.len());
     let mut not_found_files = Vec::default();
-    let recv_sst_existence = |not_found_files: &mut Vec<TableFile>,
-                              result_tx: &Receiver<dfs::Result<(TableFile, bool)>>|
+    let recv_table_file_existence = |not_found_files: &mut Vec<TableFile>,
+                                     result_tx: &Receiver<dfs::Result<(TableFile, bool)>>|
      -> Result<()> {
         let (f, exist) = result_tx.recv().unwrap()?;
         if !exist {
@@ -907,11 +907,11 @@ pub fn get_not_found_files(s3fs: &S3Fs, files: Vec<TableFile>) -> Result<Vec<Tab
         if msg_count < LOAD_FILE_CONCURRENCY {
             msg_count += 1;
         } else {
-            recv_sst_existence(&mut not_found_files, &result_rx)?;
+            recv_table_file_existence(&mut not_found_files, &result_rx)?;
         }
     }
     for _ in 0..msg_count {
-        recv_sst_existence(&mut not_found_files, &result_rx)?;
+        recv_table_file_existence(&mut not_found_files, &result_rx)?;
     }
     Ok(not_found_files)
 }
@@ -1992,6 +1992,6 @@ mod tests {
     }
 
     fn get_file_type(file_id: u64) -> FileType {
-        FileType::from_u8(file_id as u8 % 2).unwrap()
+        FileType::from_u8(file_id as u8 % 6).unwrap()
     }
 }
