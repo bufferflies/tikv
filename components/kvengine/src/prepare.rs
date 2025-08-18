@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom},
     iter::Iterator,
     ops::Deref,
     os::unix::fs::{FileExt, MetadataExt},
@@ -17,7 +17,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use dashmap::mapref::entry::Entry;
-use file_system::{IoOp, IoType};
+use file_system::IoType;
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
 use schema::schema::StorageClassSpec;
@@ -570,7 +570,6 @@ impl EngineCore {
         file_path: &Path,
     ) -> Result<()> {
         let start_time = Instant::now_coarse();
-        let mut sync_time = start_time;
         let tmp_file_name = Self::tmp_file_path(file_path);
         if use_direct_io {
             let mut writer =
@@ -581,28 +580,25 @@ impl EngineCore {
         } else {
             let mut file = std::fs::File::create(&tmp_file_name)
                 .table_ctx(id, "write_local_file.create_tmp")?;
-            let mut start_off = 0;
-            let write_batch_size = 256 * 1024;
-            while start_off < data.len() {
-                self.rate_limiter
-                    .request(IoType::Compaction, IoOp::Write, write_batch_size);
-                let end_off = std::cmp::min(start_off + write_batch_size, data.len());
-                file.write_all(&data[start_off..end_off])
-                    .table_ctx(id, "write_local_file.write_tmp")?;
-                start_off = end_off;
+            let synced_data = file_system::write_all_with_rate_limiter(
+                &mut file,
+                data.chunk(),
+                &self.rate_limiter,
+                256 * 1024,
+            )
+            .table_ctx(id, "write_local_file.write_tmp")?;
+            if synced_data < data.len() {
+                file.sync_data()
+                    .table_ctx(id, "write_local_file.sync_tmp")?;
             }
-            sync_time = Instant::now_coarse();
-            file.sync_data()
-                .table_ctx(id, "write_local_file.sync_tmp")?;
         }
         let rename_time = Instant::now_coarse();
         std::fs::rename(tmp_file_name, file_path).table_ctx(id, "write_local_file.rename")?;
         let end_time = Instant::now_coarse();
         let takes_msg = format!(
-            "{:?}(w:{:?},s:{:?},r:{:?})", // total(write,sync,rename)
+            "{:?}(w:{:?},r:{:?})", // total(write,sync,rename)
             end_time.saturating_duration_since(start_time),
-            sync_time.saturating_duration_since(start_time),
-            rename_time.saturating_duration_since(sync_time),
+            rename_time.saturating_duration_since(start_time),
             end_time.saturating_duration_since(rename_time)
         );
         info!(

@@ -19,7 +19,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use engine_traits::{GetObjectOptions, ObjectStorage};
-use file_system::open_direct_file;
+use file_system::{open_direct_file, IoRateLimitMode, IoRateLimiter};
 use kvengine::dfs::{Dfs, S3Fs};
 use kvproto::raft_serverpb::{self, StoreIdent};
 use protobuf::Message;
@@ -278,6 +278,9 @@ impl RfEngineCore {
             } else {
                 None
             };
+            let compact_rate_limiter =
+                Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, false));
+            compact_rate_limiter.set_io_rate_limit(cfg.compact_bytes_per_sec.0 as usize);
             let epoch_id = en.current_epoch_id.load(Ordering::SeqCst);
             let mut service_worker = ServiceWorker::new(
                 dir.to_owned(),
@@ -289,6 +292,7 @@ impl RfEngineCore {
                 lightweight_backup_args,
                 dfs_worker_healthy,
                 cfg.compact_wal_sync_concurrency,
+                compact_rate_limiter,
             );
             let join_handle = thread::spawn(move || service_worker.run());
             let mut guard = en.service_worker_handle.lock().unwrap();

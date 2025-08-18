@@ -1,6 +1,9 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    fs::File,
+    io,
+    io::Write,
     str::FromStr,
     sync::{
         atomic::{AtomicU32, AtomicUsize, Ordering},
@@ -559,6 +562,33 @@ impl IoRateLimiter {
         }
         bytes
     }
+}
+
+/// Write data to a file with rate limiting and periodic sync, returns the
+/// synced size.
+pub fn write_all_with_rate_limiter(
+    file: &mut File,
+    data: &[u8],
+    rate_limiter: &IoRateLimiter,
+    batch_size: usize,
+) -> io::Result<usize> {
+    let mut start_off = 0;
+    let mut bytes_since_last_sync = 0;
+    while start_off < data.len() {
+        let allowed = rate_limiter.request(
+            IoType::Compaction,
+            IoOp::Write,
+            (data.len() - start_off).min(batch_size),
+        );
+        file.write_all(&data[start_off..start_off + allowed])?;
+        start_off += allowed;
+        bytes_since_last_sync += allowed;
+        if bytes_since_last_sync >= batch_size {
+            file.sync_data()?;
+            bytes_since_last_sync = 0;
+        }
+    }
+    Ok(data.len() - bytes_since_last_sync)
 }
 
 lazy_static! {

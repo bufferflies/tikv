@@ -44,8 +44,8 @@ use openssl::{
     hash::{self, Hasher, MessageDigest},
 };
 pub use rate_limiter::{
-    get_io_rate_limiter, set_io_rate_limiter, IoBudgetAdjustor, IoRateLimitMode, IoRateLimiter,
-    IoRateLimiterStatistics,
+    get_io_rate_limiter, set_io_rate_limiter, write_all_with_rate_limiter, IoBudgetAdjustor,
+    IoRateLimitMode, IoRateLimiter, IoRateLimiterStatistics,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use strum::{EnumCount, EnumIter};

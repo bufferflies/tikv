@@ -12,6 +12,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use file_system::IoRateLimiter;
 use kvengine::dfs::S3Fs;
 use rfenginepb::StoreBackupMeta;
 use slog_global::{error, info};
@@ -103,6 +104,7 @@ impl ServiceWorker {
         lightweight_backup: Option<(LightweightBackupConfig, Arc<S3Fs>)>,
         healthy: Healthy,
         compact_wal_sync_concurrency: usize,
+        compact_rate_limiter: Arc<IoRateLimiter>,
     ) -> Self {
         let engine_id = manifest.engine_id.clone();
         let (compact_worker_tx, compact_rx) = tikv_util::mpsc::unbounded();
@@ -114,6 +116,7 @@ impl ServiceWorker {
             lightweight_backup.as_ref(),
             healthy.clone(),
             compact_wal_sync_concurrency,
+            compact_rate_limiter,
         );
         let handle = std::thread::Builder::new()
             .name("compact-wal-worker".to_string())
