@@ -350,6 +350,8 @@ impl RfEngineCore {
     /// Persists the write batch to WAL. It can be used in another thread to
     /// implement async I/O, i.e., call `apply` in the main thread and call
     /// `persist` in the I/O thread.
+    /// When the epoch is rotated, the return size would be 4096 which is not
+    /// accurate but ok to be used as metrics.
     pub fn persist(&self, wb: WriteBatch) -> Result<usize> {
         let timer = Instant::now();
         let wb = Arc::new(wb.into_vector());
@@ -367,7 +369,7 @@ impl RfEngineCore {
         }
         ENGINE_PERSIST_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
         if rotated {
-            return Ok(file_off as usize);
+            return Ok(4096);
         }
         Ok(file_off.saturating_sub(old_file_off) as usize)
     }

@@ -81,12 +81,15 @@ impl fmt::Debug for ServiceTask {
     }
 }
 
+const ASYNC_WRITER_SYNC_SIZE: u64 = 256 * 1024;
+
 /// Service worker maintains the async WAL files, provide read service for HTTP
 /// API, compaction and backup tasks.
 pub(crate) struct ServiceWorker {
     engine_id: Arc<AtomicU64>,
     epoch_id: Arc<AtomicU32>,
     async_wal_writer: Option<WalWriter>,
+    bytes_since_last_sync: u64,
     rx: Receiver<ServiceTask>,
     compact_worker_handle: WorkerHandle,
     dfs_worker_handle: Option<ObjectStorageWorkerHandle>,
@@ -155,6 +158,7 @@ impl ServiceWorker {
             engine_id,
             epoch_id: service_worker_epoch,
             async_wal_writer,
+            bytes_since_last_sync: 0,
             dfs_worker_handle,
             rx,
             compact_worker_handle,
@@ -204,9 +208,18 @@ impl ServiceWorker {
 
     fn handle_write(&mut self, wb: &[PeerBatch]) {
         if let Some(wal_writer) = &mut self.async_wal_writer {
-            wal_writer.write_batch(wb).unwrap();
-            let file_off = wal_writer.file_off;
-            let epoch_id = wal_writer.epoch_id;
+            let old_file_off = wal_writer.file_off;
+            let (epoch_id, file_off, rotated) = wal_writer.write_batch(wb).unwrap();
+            if rotated {
+                // When rotated, the old file is already synced.
+                self.bytes_since_last_sync = 0;
+            } else {
+                self.bytes_since_last_sync += file_off - old_file_off;
+            }
+            if self.bytes_since_last_sync > ASYNC_WRITER_SYNC_SIZE {
+                wal_writer.file().sync_data().unwrap();
+                self.bytes_since_last_sync = 0;
+            }
             if self.is_lightweight_enabled() {
                 // Send write task to object storage worker.
                 let task = crate::dfs_worker::ObjectStorageTask::Sync { epoch_id, file_off };

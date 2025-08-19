@@ -381,7 +381,7 @@ impl WalWriter {
         Ok(())
     }
 
-    fn file(&self) -> &File {
+    pub(crate) fn file(&self) -> &File {
         self.fd.as_ref().unwrap()
     }
 
