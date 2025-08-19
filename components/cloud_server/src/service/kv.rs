@@ -44,10 +44,11 @@ use tikv::{
         SecondaryLocksStatus, Storage, TxnStatus,
     },
 };
+use tikv_kv::StageLatencyStats;
 use tikv_util::{
     future::{paired_future_callback, poll_future_notify},
     mpsc::future::{unbounded, BatchReceiver, Sender, WakePolicy},
-    time::{duration_to_ms, duration_to_sec, Instant},
+    time::Instant,
 };
 use txn_types::{self, Key};
 
@@ -140,7 +141,7 @@ macro_rules! handle_request {
                 sink.success(resp).await?;
                 GRPC_MSG_HISTOGRAM_STATIC
                     .$fn_name
-                    .observe(duration_to_sec(begin_instant.saturating_elapsed()));
+                    .observe(begin_instant.saturating_elapsed().as_secs_f64());
                 ServerResult::Ok(())
             }
             .map_err(|e| {
@@ -262,7 +263,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             sink.success(resp).await?;
             GRPC_MSG_HISTOGRAM_STATIC
                 .coprocessor
-                .observe(duration_to_sec(begin_instant.saturating_elapsed()));
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
             ServerResult::Ok(())
         }
         .map_err(|e| {
@@ -290,7 +291,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             sink.success(resp).await?;
             GRPC_MSG_HISTOGRAM_STATIC
                 .delegate_coprocessor
-                .observe(duration_to_sec(begin_instant.saturating_elapsed()));
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
             ServerResult::Ok(())
         }
         .map_err(|e| {
@@ -447,7 +448,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             sink.success(resp).await?;
             GRPC_MSG_HISTOGRAM_STATIC
                 .unsafe_destroy_range
-                .observe(duration_to_sec(begin_instant.saturating_elapsed()));
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
             ServerResult::Ok(())
         }
         .map_err(|e| {
@@ -483,7 +484,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                 Ok(_) => {
                     GRPC_MSG_HISTOGRAM_STATIC
                         .coprocessor_stream
-                        .observe(duration_to_sec(begin_instant.saturating_elapsed()));
+                        .observe(begin_instant.saturating_elapsed().as_secs_f64());
                     let _ = sink.close().await;
                 }
                 Err(e) => {
@@ -637,7 +638,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             sink.success(resp).await?;
             GRPC_MSG_HISTOGRAM_STATIC
                 .split_region
-                .observe(duration_to_sec(begin_instant.saturating_elapsed()));
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
             ServerResult::Ok(())
         }
         .map_err(|e| {
@@ -1456,7 +1457,7 @@ fn future_get<L: LockManager, F: KvFormat>(
 
     async move {
         let v = v.await;
-        let duration_ms = duration_to_ms(start.saturating_elapsed());
+        let duration = start.saturating_elapsed();
         let mut resp = GetResponse::default();
         if let Some(err) = extract_region_error(&v) {
             resp.set_region_error(err);
@@ -1466,10 +1467,7 @@ fn future_get<L: LockManager, F: KvFormat>(
                     let exec_detail_v2 = resp.mut_exec_details_v2();
                     let scan_detail_v2 = exec_detail_v2.mut_scan_detail_v2();
                     stats.stats.write_scan_detail(scan_detail_v2);
-                    let time_detail = exec_detail_v2.mut_time_detail();
-                    time_detail.set_kv_read_wall_time_ms(duration_ms);
-                    time_detail.set_wait_wall_time_ms(stats.latency_stats.wait_wall_time_ms);
-                    time_detail.set_process_wall_time_ms(stats.latency_stats.process_wall_time_ms);
+                    set_time_detail(exec_detail_v2, duration, &stats.latency_stats);
                     match val {
                         Some(val) => resp.set_value(val),
                         None => resp.set_not_found(true),
@@ -1481,6 +1479,26 @@ fn future_get<L: LockManager, F: KvFormat>(
         Ok(resp)
     }
     .boxed()
+}
+
+fn set_time_detail(
+    exec_detail_v2: &mut ExecDetailsV2,
+    total_dur: Duration,
+    stats: &StageLatencyStats,
+) {
+    let duration_ns = total_dur.as_nanos() as u64;
+    // deprecated. we will remove the `time_detail` field in future version.
+    {
+        let time_detail = exec_detail_v2.mut_time_detail();
+        time_detail.set_kv_read_wall_time_ms(duration_ns / 1_000_000);
+        time_detail.set_wait_wall_time_ms(stats.wait_wall_time_ns / 1_000_000);
+        time_detail.set_process_wall_time_ms(stats.process_wall_time_ns / 1_000_000);
+    }
+
+    let time_detail_v2 = exec_detail_v2.mut_time_detail_v2();
+    time_detail_v2.set_kv_read_wall_time_ns(duration_ns);
+    time_detail_v2.set_wait_wall_time_ns(stats.wait_wall_time_ns);
+    time_detail_v2.set_process_wall_time_ns(stats.process_wall_time_ns);
 }
 
 fn future_scan<L: LockManager, F: KvFormat>(
@@ -1559,7 +1577,7 @@ fn future_batch_get<L: LockManager, F: KvFormat>(
 
     async move {
         let v = v.await;
-        let duration_ms = duration_to_ms(start.saturating_elapsed());
+        let duration = start.saturating_elapsed();
         let mut resp = BatchGetResponse::default();
         if let Some(err) = extract_region_error(&v) {
             resp.set_region_error(err);
@@ -1570,10 +1588,7 @@ fn future_batch_get<L: LockManager, F: KvFormat>(
                     let exec_detail_v2 = resp.mut_exec_details_v2();
                     let scan_detail_v2 = exec_detail_v2.mut_scan_detail_v2();
                     stats.stats.write_scan_detail(scan_detail_v2);
-                    let time_detail = exec_detail_v2.mut_time_detail();
-                    time_detail.set_kv_read_wall_time_ms(duration_ms);
-                    time_detail.set_wait_wall_time_ms(stats.latency_stats.wait_wall_time_ms);
-                    time_detail.set_process_wall_time_ms(stats.latency_stats.process_wall_time_ms);
+                    set_time_detail(exec_detail_v2, duration, &stats.latency_stats);
                     resp.set_pairs(pairs.into());
                 }
                 Err(e) => {

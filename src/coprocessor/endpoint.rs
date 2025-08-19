@@ -19,7 +19,7 @@ use kvengine::{
 };
 use kvproto::{
     coprocessor as coppb, errorpb, kvrpcpb,
-    kvrpcpb::{ScanDetailV2, TimeDetail},
+    kvrpcpb::{ScanDetailV2, TimeDetail, TimeDetailV2},
 };
 use overload_protector::{CopTaskStats, OverloadProtector};
 use protobuf::{CodedInputStream, Message};
@@ -1146,6 +1146,9 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
     let mut time_detail = TimeDetail::default();
     time_detail.set_process_wall_time_ms((exec_summary.time_processed_ns / 1000000) as u64);
 
+    let mut time_detail_v2 = TimeDetailV2::default();
+    time_detail_v2.set_process_wall_time_ns(exec_summary.time_processed_ns as u64);
+
     let mut storage_stats = Statistics::default();
     handler.collect_scan_statistics(&mut storage_stats);
 
@@ -1157,6 +1160,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
     let mut exec_details_v2 = kvrpcpb::ExecDetailsV2::default();
     exec_details_v2.set_scan_detail_v2(detail_v2);
     exec_details_v2.set_time_detail(time_detail);
+    exec_details_v2.set_time_detail_v2(time_detail_v2);
     resp.set_exec_details_v2(exec_details_v2);
     Ok(resp)
 }
