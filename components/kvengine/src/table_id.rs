@@ -105,6 +105,42 @@ pub fn is_table_boundary_key(key: InnerKey<'_>) -> bool {
     key.len() == TABLE_PREFIX_KEY_LEN && decode_table_id(key.as_ref()).is_ok()
 }
 
+/// Get the table id of the ingest files changeset belongs to.
+///
+/// All ssts in changeset should be belongs to the same table.
+pub fn get_table_id_from_ingest_files(ingest_files: &kvenginepb::IngestFiles) -> Option<i64> {
+    let mut unique_table_id = None;
+    for tbl in ingest_files.get_l0_creates() {
+        let smallest = tbl.get_smallest();
+        if let Ok(table_id) = decode_table_id(smallest) {
+            if unique_table_id.is_none() {
+                unique_table_id = Some(table_id);
+            } else {
+                debug_assert_eq!(
+                    table_id,
+                    unique_table_id.unwrap(),
+                    "table id should be same"
+                );
+            }
+        }
+    }
+    for tbl in ingest_files.get_table_creates() {
+        let smallest = tbl.get_smallest();
+        if let Ok(table_id) = decode_table_id(smallest) {
+            if unique_table_id.is_none() {
+                unique_table_id = Some(table_id);
+            } else {
+                debug_assert_eq!(
+                    table_id,
+                    unique_table_id.unwrap(),
+                    "table id should be same"
+                );
+            }
+        }
+    }
+    unique_table_id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

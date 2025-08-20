@@ -26,6 +26,7 @@ use crate::{
         vector_index::{VectorIndexCache, VectorIndexFile, VectorIndexes},
         BoundedDataSet, SnapVersion, TxnFile,
     },
+    table_id::get_table_id_from_ingest_files,
     *,
 };
 
@@ -991,11 +992,16 @@ impl EngineCore {
         }
         let new_cf = scf_builder.build();
         let mut new_cfs = old_data.cfs.clone();
+        let mut columnar_table_ids = old_data.columnar_table_ids.clone();
+        if let Some(table_id) = get_table_id_from_ingest_files(ingest_files) {
+            columnar_table_ids.retain(|id| *id != table_id);
+        }
         new_cfs[0] = new_cf;
         let mut builder = ShardDataBuilder::new(old_data);
         builder.set_l0_tbls(new_l0s);
         builder.set_blob_tbls(new_blob_tbl_map);
         builder.set_cfs(new_cfs);
+        builder.set_columnar_table_ids(columnar_table_ids);
         shard.set_data(builder.build());
         Ok(())
     }

@@ -22,7 +22,9 @@ use super::*;
 use crate::{
     dfs::FileType,
     table::{BoundedDataSet, DataBound, InnerKey, SnapVersion},
-    table_id::{get_table_id_from_data_bound, merge_columnar_table_ids},
+    table_id::{
+        get_table_id_from_data_bound, get_table_id_from_ingest_files, merge_columnar_table_ids,
+    },
     util::{TxnFileLocks, TxnFileRefPropertyHelper},
 };
 
@@ -844,6 +846,9 @@ impl ShardMeta {
         }
         for blob_tbl in ingest_files.get_blob_creates() {
             self.add_file(blob_tbl.id, FileMeta::from_blob_table(blob_tbl));
+        }
+        if let Some(table_id) = get_table_id_from_ingest_files(ingest_files) {
+            self.columnar_table_ids.retain(|id| *id != table_id);
         }
     }
 
