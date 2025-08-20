@@ -6,6 +6,7 @@ use bytes::{Buf, Bytes};
 use kvengine::{read, Item, SnapAccess, UserMeta};
 use kvproto::kvrpcpb::IsolationLevel;
 use tikv_kv::{Snapshot, Statistics};
+use tikv_util::txn_debug;
 use txn_types::{is_short_value, Key, Lock, OldValue, TimeStamp, TsSet, Value, Write, WriteType};
 
 use crate::storage::{
@@ -33,6 +34,13 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
 
     #[maybe_async]
     async fn get(&self, user_key: &Key, statistics: &mut Statistics) -> Result<Option<Value>> {
+        txn_debug!(
+            "CloudStore::get entry";
+            "key" => log_wrappers::Value::key(user_key.as_encoded()),
+            "start_ts" => ?self.start_ts,
+            "region_id" => self.snapshot.get_id()
+        );
+
         let item = Self::get_inner(
             user_key,
             &self.snapshot,
@@ -41,15 +49,33 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             statistics,
         )
         .await?;
-        if item.value_len() > 0 {
-            Ok(Some(item.get_value().to_vec()))
+
+        let result = if item.value_len() > 0 {
+            Some(item.get_value().to_vec())
         } else {
-            Ok(None)
-        }
+            None
+        };
+
+        txn_debug!(
+            "CloudStore::get result";
+            "key" => log_wrappers::Value::key(user_key.as_encoded()),
+            "start_ts" => ?self.start_ts,
+            "region_id" => self.snapshot.get_id(),
+            "result" => ?result.as_ref().map(|v| log_wrappers::Value::value(v))
+        );
+
+        Ok(result)
     }
 
     #[maybe_async]
     async fn incremental_get(&mut self, user_key: &Key) -> Result<Option<Value>> {
+        txn_debug!(
+            "CloudStore::incremental_get entry";
+            "key" => log_wrappers::Value::key(user_key.as_encoded()),
+            "start_ts" => ?self.start_ts,
+            "region_id" => self.snapshot.get_id()
+        );
+
         let stat = &mut self.stats;
         let item = Self::get_inner(
             user_key,
@@ -59,11 +85,22 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             stat,
         )
         .await?;
-        if item.value_len() > 0 {
-            Ok(Some(item.get_value().to_vec()))
+
+        let result = if item.value_len() > 0 {
+            Some(item.get_value().to_vec())
         } else {
-            Ok(None)
-        }
+            None
+        };
+
+        txn_debug!(
+            "CloudStore::incremental_get result";
+            "key" => log_wrappers::Value::key(user_key.as_encoded()),
+            "start_ts" => ?self.start_ts,
+            "region_id" => self.snapshot.get_id(),
+            "result" => ?result.as_ref().map(|v| log_wrappers::Value::value(v))
+        );
+
+        Ok(result)
     }
 
     fn incremental_get_take_statistics(&mut self) -> Statistics {
@@ -80,6 +117,14 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
         keys: &[Key],
         statistics: &mut Vec<Statistics>,
     ) -> Result<Vec<Result<Option<Value>>>> {
+        txn_debug!(
+            "CloudStore::batch_get entry";
+            "keys_count" => keys.len(),
+            "keys" => ?keys,
+            "start_ts" => ?self.start_ts,
+            "region_id" => self.snapshot.get_id()
+        );
+
         let mut res_vec = Vec::with_capacity(keys.len());
         for key in keys {
             let mut stats = Statistics::default();
@@ -87,6 +132,21 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             res_vec.push(res);
             statistics.push(stats);
         }
+
+        txn_debug!(
+            "CloudStore::batch_get result";
+            "keys_count" => keys.len(),
+            "start_ts" => ?self.start_ts,
+            "region_id" => self.snapshot.get_id(),
+            "result" => ?res_vec.iter().map(|r| {
+                match r {
+                    Ok(Some(value)) => Ok(log_wrappers::Value::value(value)),
+                    Ok(None) => Ok(log_wrappers::Value::value(b"")),
+                    Err(e) => Err(e)
+                }
+            }).collect::<Vec<_>>()
+        );
+
         Ok(res_vec)
     }
 
@@ -99,6 +159,15 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
         lower_bound: Option<Key>,
         upper_bound: Option<Key>,
     ) -> Result<Self::Scanner> {
+        txn_debug!(
+            "CloudStore::scanner entry";
+            "desc" => desc,
+            "start_ts" => ?self.start_ts,
+            "region_id" => self.snapshot.get_id(),
+            "lower_bound" => ?lower_bound,
+            "upper_bound" => ?upper_bound
+        );
+
         self.scanner_inner(desc, lower_bound, upper_bound, false)
             .await
     }
@@ -399,10 +468,21 @@ impl CloudStoreScanner {
 impl super::Scanner for CloudStoreScanner {
     #[maybe_async]
     async fn next(&mut self) -> Result<Option<(Key, Value)>> {
-        Ok(self
+        let result = self
             .next_inner()
             .await?
-            .map(|(key, _user_meta, val)| (key, val)))
+            .map(|(key, _user_meta, val)| (key, val));
+
+        txn_debug!(
+            "CloudStoreScanner::next";
+            "start_ts" => ?self.start_ts,
+            "region_id" => self.snap.get_id(),
+            "result" => ?result.as_ref().map(|(key, value)| {
+                (key, log_wrappers::Value::value(value))
+            })
+        );
+
+        Ok(result)
     }
 
     fn met_newer_ts_data(&self) -> NewerTsCheckState {

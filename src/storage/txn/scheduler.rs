@@ -406,7 +406,10 @@ impl<L: LockManager> SchedulerInner<L> {
                     .get(tctx.tag)
                     .wakeup_deadline_exceeded
                     .inc();
-                debug!("acquire_lock_on_wakeup: deadline exceeded"; "cid" => cid, "lock" => ?tctx.lock);
+                txn_debug!(
+                    "acquire_lock_on_wakeup: deadline exceeded";
+                    "cid" => cid, "lock" => ?tctx.lock
+                );
                 return Err((tctx.lock.region_id, e.into()));
             }
             tctx.on_schedule();
@@ -527,9 +530,18 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     }
 
     pub(in crate::storage) fn run_cmd(&self, cmd: Command, callback: StorageCallback) {
+        txn_debug!(
+            "Scheduler::run_cmd";
+            "cmd" => ?cmd, "region_id" => cmd.ctx().get_region_id()
+        );
+
         // write flow control
         if cmd.need_flow_control() && self.inner.too_busy(cmd.ctx().region_id) {
             SCHED_TOO_BUSY_COUNTER_VEC.get(cmd.tag()).inc();
+            txn_debug!(
+                "Scheduler::run_cmd flow control rejected";
+                "cmd" => ?cmd, "region_id" => cmd.ctx().get_region_id()
+            );
             callback.execute(ProcessResult::Failed {
                 err: StorageError::from(StorageErrorInner::SchedTooBusy),
             });
@@ -568,7 +580,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     ) {
         let cid = specified_cid.unwrap_or_else(|| self.inner.gen_id());
         let tracker = get_tls_tracker_token();
-        debug!("received new command"; "cid" => cid, "cmd" => ?cmd, "tracker" => ?tracker);
+        txn_debug!(
+            "received new command";
+            "cid" => cid, "cmd" => ?cmd, "tracker" => ?tracker
+        );
         #[cfg(feature = "debug-trace-txn-tasks")]
         crate::storage::txn::debug::trace_txn_task(cid, &cmd);
 
@@ -721,7 +736,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         F: Future<Output = ()> + Send + 'static,
     {
         if let Err(err) = self.get_sched_pool().spawn(f, priority, cid) {
-            debug!("try spawn task failed"; "cid" => cid, "err" => ?err);
+            txn_debug!("try spawn task failed"; "cid" => cid, "err" => ?err);
             SCHED_TOO_BUSY_COUNTER_VEC.get(tag).inc();
             self.finish_with_err(cid, StorageError::from(StorageErrorInner::SchedTooBusy));
         }
@@ -740,6 +755,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     /// Executes the task in the sched pool.
     fn execute(&self, mut task: Task) {
         set_tls_tracker_token(task.tracker);
+        txn_debug!(
+            "Scheduler::execute";
+            "cid" => task.cid, "cmd" => ?task.cmd, "region_id" => task.cmd.ctx().get_region_id(), "tracker" => ?task.tracker
+        );
         let sched = self.clone();
         let pri = task.cmd.priority();
         let cid = task.cid;
@@ -798,17 +817,16 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         }
                         task.extra_op = extra_op;
 
-                        debug!(
-                            "process cmd with snapshot";
-                            "cid" => task.cid, "term" => ?term, "extra_op" => ?extra_op,
-                            "trakcer" => ?task.tracker
+                        txn_debug!(
+                            "process cmd with snapshot"; 
+                            "cid" => task.cid, "term" => ?term, "extra_op" => ?extra_op, "tracker" => ?task.tracker
                         );
                         sched.process(snapshot, task).await;
                     }
                     Err(err) => {
                         SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_err.inc();
 
-                        debug!("get snapshot failed"; "cid" => task.cid, "err" => ?err);
+                        txn_debug!("get snapshot failed"; "cid" => task.cid, "err" => ?err);
                         sched.finish_with_err(task.cid, Error::from(err));
                     }
                 }
@@ -825,12 +843,15 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         StorageError: From<ER>,
     {
         let err = StorageError::from(err);
-        debug!("write command finished with error"; "cid" => cid, "err" => ?err);
         #[cfg(feature = "debug-trace-txn-tasks")]
         crate::storage::txn::debug::trace_txn_task_error(cid, &err);
 
         let tctx = self.inner.dequeue_task_context(cid);
-
+        let tracker = tctx.task.as_ref().map(|t| t.tracker);
+        txn_debug!(
+            "write command finished with error";
+            "cid" => cid, "err" => ?err, "tracker" => ?tracker
+        );
         SCHED_STAGE_COUNTER_VEC.get(tctx.tag).error.inc();
 
         let pr = ProcessResult::Failed { err };
@@ -851,7 +872,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     fn on_read_finished(&self, cid: u64, pr: ProcessResult, tag: CommandKind) {
         SCHED_STAGE_COUNTER_VEC.get(tag).read_finish.inc();
 
-        debug!("read command finished"; "cid" => cid);
+        txn_debug!(
+            "Scheduler::on_read_finished";
+            "cid" => cid, "tag" => ?tag, "result" => ?pr
+        );
         let tctx = self.inner.dequeue_task_context(cid);
         if let ProcessResult::NextCommand { cmd } = pr {
             SCHED_STAGE_COUNTER_VEC.get(tag).next_cmd.inc();
@@ -890,8 +914,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             SCHED_STAGE_COUNTER_VEC.get(tag).write_finish.inc();
         }
 
-        debug!("write command finished";
-            "cid" => cid, "pipelined" => pipelined, "async_apply_prewrite" => async_apply_prewrite);
+        txn_debug!(
+            "Scheduler::on_write_finished";
+            "cid" => cid, "tag" => ?tag, "pipelined" => pipelined,
+            "async_apply_prewrite" => async_apply_prewrite, "result" => ?result, "pr" => ?pr
+        );
         drop(lock_guards);
 
         if result.is_ok() && !known_txn_status.is_empty() {
@@ -984,6 +1011,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let start_ts = lock_info.parameters.start_ts;
         let is_first_lock = lock_info.parameters.is_first_lock;
         let wait_timeout = lock_info.parameters.wait_timeout;
+
+        txn_debug!("wait for lock"; "cid" => cid, "key" => %key, "start_ts" => ?start_ts, "tracker" => ?tracker, "is_first_lock" => is_first_lock, "wait_timeout" => ?wait_timeout);
 
         let diag_ctx = DiagnosticContext {
             key: lock_info.key.to_raw().unwrap(),
@@ -1141,7 +1170,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         tag: CommandKind,
         stage: CommandStageKind,
     ) {
-        debug!("early return response"; "cid" => cid);
+        txn_debug!("early return response"; "cid" => cid, "tag" => ?tag, "stage" => ?stage);
         SCHED_STAGE_COUNTER_VEC.get(tag).get(stage).inc();
         cb.execute(pr);
         // It won't release locks here until write finished.
@@ -1204,7 +1233,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     /// `ReadFinished` message back to the `Scheduler`.
     async fn process_read(self, snapshot: E::Snap, task: Task, statistics: &mut Statistics) {
         fail_point!("txn_before_process_read");
-        debug!("process read cmd in worker pool"; "cid" => task.cid);
+        txn_debug!("process read cmd in worker pool"; "cid" => task.cid, "tracker" => ?task.tracker);
 
         if let Some(snap_access) = snapshot.get_kvengine_snap() {
             tikv_util::set_current_region(snap_access.get_id());
@@ -1314,7 +1343,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             // the error to the callback, and releases the latches.
             Err(err) => {
                 SCHED_STAGE_COUNTER_VEC.get(tag).prepare_write_err.inc();
-                debug!("write command failed"; "cid" => cid, "err" => ?err);
+                txn_debug!("write command failed"; "cid" => cid, "err" => ?err, "tracker" => ?tracker);
                 scheduler.finish_with_err(cid, err);
                 return;
             }
@@ -1551,7 +1580,13 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let mut res = unsafe {
             with_tls_engine(|e: &mut E| {
                 tikv_util::set_current_region(region_id);
-                e.async_write(&ctx, to_be_write, subscribed, Some(on_applied))
+                e.async_write(
+                    &ctx,
+                    to_be_write,
+                    subscribed,
+                    Some(on_applied),
+                    Some(tracker),
+                )
             })
         };
         drop(downgraded_guard);
@@ -1926,7 +1961,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     }
                     Err(err) => {
                         SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_err.inc();
-                        debug!("txn file: get snapshot failed"; "cid" => cid, "cmd" => ?cmd, "err" => ?err);
+                        txn_debug!(
+                            "txn file: get snapshot failed";
+                            "cid" => cid, "cmd" => ?cmd, "err" => ?err
+                        );
                         Self::finish_txn_file_cmd_with_err(cid, tag, callback, err);
                     }
                 }

@@ -78,6 +78,7 @@ use collections::HashMap;
 use concurrency_manager::{ConcurrencyManager, KeyHandleGuard};
 use engine_traits::{raw_ttl::ttl_to_expire_ts, CfName, CF_DEFAULT, CF_LOCK, CF_WRITE, DATA_CFS};
 use futures::prelude::*;
+use hex;
 use kvproto::{
     kvrpcpb::{
         ApiVersion, ChecksumAlgorithm, CommandPri, Context, GetRequest, IsolationLevel, KeyRange,
@@ -95,6 +96,7 @@ use tikv_util::{
     future::try_poll,
     quota_limiter::QuotaLimiter,
     time::{duration_to_sec, Instant, ThreadReadId},
+    txn_debug,
 };
 use tracker::{
     clear_tls_tracker_token, set_tls_tracker_token, with_tls_tracker, TrackedFuture, TrackerToken,
@@ -591,6 +593,15 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         key: Key,
         start_ts: TimeStamp,
     ) -> impl Future<Output = Result<(Option<Value>, KvGetStatistics)>> {
+        txn_debug!(
+            "Storage::get entry";
+            "key" => %key,
+            "start_ts" => ?start_ts,
+            "region_id" => ctx.get_region_id(),
+            "peer_id" => ctx.get_peer().get_id(),
+            "term" => ctx.get_term()
+        );
+
         let stage_begin_ts = Instant::now();
         const CMD: CommandKind = CommandKind::get;
         let priority = ctx.get_priority();
@@ -720,6 +731,15 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         tracker.metrics.read_pool_schedule_wait_nanos =
                             schedule_wait_time.as_nanos() as u64;
                     });
+                    txn_debug!(
+                        "Storage::get result";
+                        "key" => %key,
+                        "start_ts" => ?start_ts,
+                        "region_id" => ctx.get_region_id(),
+                        "peer_id" => ctx.get_peer().get_id(),
+                        "term" => ctx.get_term(),
+                        "result" => ?result.as_ref().map(|v| v.as_ref().map(|val| log_wrappers::Value::value(val)))
+                    );
                     Ok((
                         result?,
                         KvGetStatistics {
@@ -953,6 +973,16 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         keys: Vec<Key>,
         start_ts: TimeStamp,
     ) -> impl Future<Output = Result<(Vec<Result<KvPair>>, KvGetStatistics)>> {
+        let keys_count = keys.len();
+        txn_debug!(
+            "Storage::batch_get entry";
+            "keys_count" => keys_count,
+            "start_ts" => ?start_ts,
+            "region_id" => ctx.get_region_id(),
+            "peer_id" => ctx.get_peer().get_id(),
+            "term" => ctx.get_term()
+        );
+
         let stage_begin_ts = Instant::now();
         const CMD: CommandKind = CommandKind::batch_get;
         let priority = ctx.get_priority();
@@ -1104,6 +1134,22 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         wait_wall_time_ns: wait_wall_time.as_nanos() as u64,
                         process_wall_time_ns: process_wall_time.as_nanos() as u64,
                     };
+                    txn_debug!(
+                        "Storage::batch_get result";
+                        "keys_count" => keys_count,
+                        "start_ts" => ?start_ts,
+                        "region_id" => ctx.get_region_id(),
+                        "peer_id" => ctx.get_peer().get_id(),
+                        "term" => ctx.get_term(),
+                        "result" => ?result.as_ref().map(|pairs| {
+                            pairs.iter().map(|r| {
+                                match r {
+                                    Ok((key, value)) => format!("{}:{}", hex::encode(key), hex::encode(value)),
+                                    Err(e) => format!("Error: {}", e)
+                                }
+                            }).collect::<Vec<_>>()
+                        }).map_err(|e| format!("{:?}", e))
+                    );
                     Ok((
                         result?,
                         KvGetStatistics {
@@ -1141,6 +1187,21 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         key_only: bool,
         reverse_scan: bool,
     ) -> impl Future<Output = Result<Vec<Result<KvPair>>>> {
+        let start_key_clone = start_key.clone();
+        let end_key_clone = end_key.clone();
+        txn_debug!(
+            "Storage::scan entry";
+            "start_key" => ?start_key,
+            "end_key" => ?end_key,
+            "limit" => limit,
+            "start_ts" => ?start_ts,
+            "key_only" => key_only,
+            "reverse_scan" => reverse_scan,
+            "region_id" => ctx.get_region_id(),
+            "peer_id" => ctx.get_peer().get_id(),
+            "term" => ctx.get_term()
+        );
+
         const CMD: CommandKind = CommandKind::scan;
         let priority = ctx.get_priority();
         let priority_tag = get_priority_tag(priority);
@@ -1292,15 +1353,40 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         now.saturating_duration_since(command_duration),
                     ));
 
-                    res.map_err(Error::from).map(|results| {
-                        KV_COMMAND_KEYREAD_HISTOGRAM_STATIC
-                            .get(CMD)
-                            .observe(results.len() as f64);
-                        results
+                    let final_results = res.map_err(Error::from).map(|results| {
+                        let result_count = results.len();
+                        let final_results: Vec<Result<KvPair>> = results
                             .into_iter()
                             .map(|x| x.map_err(Error::from))
-                            .collect()
-                    })
+                            .collect();
+                        KV_COMMAND_KEYREAD_HISTOGRAM_STATIC
+                            .get(CMD)
+                            .observe(result_count as f64);
+                        final_results
+                    });
+
+                    txn_debug!(
+                        "Storage::scan result";
+                        "start_key" => ?start_key_clone,
+                        "end_key" => ?end_key_clone,
+                        "limit" => limit,
+                        "start_ts" => ?start_ts,
+                        "key_only" => key_only,
+                        "reverse_scan" => reverse_scan,
+                        "region_id" => ctx.get_region_id(),
+                        "peer_id" => ctx.get_peer().get_id(),
+                        "term" => ctx.get_term(),
+                        "result" => ?final_results.as_ref().map(|pairs| {
+                            pairs.iter().map(|r| {
+                                match r {
+                                    Ok((key, value)) => Ok((log_wrappers::Value::key(key), log_wrappers::Value::value(value))),
+                                    Err(e) => Err(e)
+                                }
+                            }).collect::<Vec<_>>()
+                        }).map_err(|e| format!("{:?}", e))
+                    );
+
+                    final_results
                 }
             }
             .in_resource_metering_tag(resource_tag),
@@ -1322,6 +1408,17 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         end_key: Option<Key>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LockInfo>>> {
+        txn_debug!(
+            "Storage::scan_lock entry";
+            "max_ts" => ?max_ts,
+            "start_key" => ?start_key,
+            "end_key" => ?end_key,
+            "limit" => limit,
+            "region_id" => ctx.get_region_id(),
+            "peer_id" => ctx.get_peer().get_id(),
+            "term" => ctx.get_term()
+        );
+
         const CMD: CommandKind = CommandKind::scan_lock;
         let priority = ctx.get_priority();
         let priority_tag = get_priority_tag(priority);
@@ -1408,7 +1505,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
 
                 let snapshot =
                     Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx)).await?;
-                Self::with_perf_context(CMD, || {
+                let result = Self::with_perf_context(CMD, || {
                     let begin_instant = Instant::now();
                     let mut statistics = Statistics::default();
                     let buckets = snapshot.ext().get_buckets();
@@ -1452,7 +1549,27 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     ));
 
                     Ok(locks)
-                })
+                });
+
+                txn_debug!(
+                    "Storage::scan_lock result";
+                    "max_ts" => ?max_ts,
+                    "start_key" => ?start_key,
+                    "end_key" => ?end_key,
+                    "limit" => limit,
+                    "region_id" => ctx.get_region_id(),
+                    "peer_id" => ctx.get_peer().get_id(),
+                    "term" => ctx.get_term(),
+                    "result" => ?result.as_ref().map(|locks| {
+                        locks.iter().map(|lock| {
+                            format!("key:{},lock_type:{:?},ts:{}",
+                                log_wrappers::Value::key(&lock.key),
+                                lock.lock_type,
+                                lock.lock_version)
+                        }).collect::<Vec<_>>()
+                    }).map_err(|e| format!("{:?}", e))
+                );
+                result
             }
             .in_resource_metering_tag(resource_tag),
             priority,
@@ -3081,8 +3198,10 @@ impl<E: Engine> Engine for TxnTestEngine<E> {
         batch: WriteData,
         subscribed: u8,
         on_applied: Option<OnAppliedCb>,
+        tracker: Option<TrackerToken>,
     ) -> Self::WriteRes {
-        self.engine.async_write(ctx, batch, subscribed, on_applied)
+        self.engine
+            .async_write(ctx, batch, subscribed, on_applied, tracker)
     }
 }
 

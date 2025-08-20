@@ -55,7 +55,7 @@ use tikv::{
         },
     },
 };
-use tikv_kv::{OnAppliedCb, WriteEvent};
+use tikv_kv::{OnAppliedCb, TrackerToken, WriteEvent};
 use tikv_util::{
     callback::must_call, codec::number::NumberEncoder, future::paired_must_called_future_callback,
     time::Instant,
@@ -359,6 +359,7 @@ impl Engine for RaftKv {
         mut batch: WriteData,
         subscribed: u8,
         on_applied: Option<OnAppliedCb>,
+        tracker: Option<TrackerToken>,
     ) -> Self::WriteRes {
         let mut res = (|| {
             fail_point!("raftkv_async_write");
@@ -402,21 +403,80 @@ impl Engine for RaftKv {
 
         let (tx, rx) = WriteResFeed::pair();
         if res.is_ok() {
+            let region_id = ctx.get_region_id();
             let proposed_cb = if !WriteEvent::subscribed_proposed(subscribed) {
+                #[cfg(feature = "jepsen-debug")]
+                {
+                    // Create logging-only callback when not subscribed
+                    txn_debug!(
+                        "RaftKv::async_write proposed_cb created (logging-only)";
+                        "region_id" => region_id, "tracker" => ?tracker
+                    );
+                    Some(Box::new(move || {
+                        txn_debug!(
+                            "RaftKv::async_write proposed_cb executed (logging-only)";
+                            "region_id" => region_id, "tracker" => ?tracker
+                        );
+                    }) as store::ExtCallback)
+                }
+                #[cfg(not(feature = "jepsen-debug"))]
                 None
             } else {
                 let tx = tx.clone();
-                Some(Box::new(move || tx.notify_proposed()) as store::ExtCallback)
+                txn_debug!(
+                    "RaftKv::async_write proposed_cb created";
+                    "region_id" => region_id, "tracker" => ?tracker
+                );
+                Some(Box::new(move || {
+                    txn_debug!(
+                        "RaftKv::async_write proposed_cb executed";
+                        "region_id" => region_id, "tracker" => ?tracker
+                    );
+                    tx.notify_proposed()
+                }) as store::ExtCallback)
             };
             let committed_cb = if !WriteEvent::subscribed_committed(subscribed) {
+                #[cfg(feature = "jepsen-debug")]
+                {
+                    // Create logging-only callback when not subscribed
+                    txn_debug!(
+                        "RaftKv::async_write committed_cb created (logging-only)";
+                        "region_id" => region_id, "tracker" => ?tracker
+                    );
+                    Some(Box::new(move || {
+                        txn_debug!(
+                            "RaftKv::async_write committed_cb executed (logging-only)";
+                            "region_id" => region_id, "tracker" => ?tracker
+                        );
+                    }) as store::ExtCallback)
+                }
+                #[cfg(not(feature = "jepsen-debug"))]
                 None
             } else {
                 let tx = tx.clone();
-                Some(Box::new(move || tx.notify_committed()) as store::ExtCallback)
+                txn_debug!(
+                    "RaftKv::async_write committed_cb created";
+                    "region_id" => region_id, "tracker" => ?tracker
+                );
+                Some(Box::new(move || {
+                    txn_debug!(
+                        "RaftKv::async_write committed_cb executed";
+                        "region_id" => region_id, "tracker" => ?tracker
+                    );
+                    tx.notify_committed()
+                }) as store::ExtCallback)
             };
             let applied_tx = tx.clone();
+            txn_debug!(
+                "RaftKv::async_write applied_cb created";
+                "region_id" => region_id, "tracker" => ?tracker
+            );
             let applied_cb = must_call(
                 Box::new(move |resp: WriteResponse| {
+                    txn_debug!(
+                        "RaftKv::async_write applied_cb executed";
+                        "region_id" => region_id, "resp" => ?resp, "tracker" => ?tracker
+                    );
                     fail_point!("applied_cb_return_undetermined_err", |_| {
                         applied_tx.notify(Err(kv::Error::from(Error::Undetermined(
                             ASYNC_WRITE_CALLBACK_DROPPED_ERR_MSG.to_string(),
@@ -1047,9 +1107,11 @@ mod tests {
             batch: WriteData,
             subscribed: u8,
             on_applied: Option<OnAppliedCb>,
+            tracker: Option<TrackerToken>,
         ) -> Self::WriteRes {
             self.set_write_data(&batch);
-            self.base.async_write(ctx, batch, subscribed, on_applied)
+            self.base
+                .async_write(ctx, batch, subscribed, on_applied, tracker)
         }
     }
 

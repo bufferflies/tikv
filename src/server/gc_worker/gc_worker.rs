@@ -1251,6 +1251,7 @@ pub mod test_gc_worker {
     };
     use raftstore::store::RegionSnapshot;
     use tikv_kv::{write_modifies, OnAppliedCb};
+    use tracker::TrackerToken;
     use txn_types::{Key, TimeStamp};
 
     use crate::{
@@ -1316,6 +1317,7 @@ pub mod test_gc_worker {
             mut batch: WriteData,
             subscribed: u8,
             on_applied: Option<OnAppliedCb>,
+            tracker_token: Option<TrackerToken>,
         ) -> Self::WriteRes {
             batch.modifies.iter_mut().for_each(|modify| match modify {
                 Modify::Delete(_, ref mut key) => {
@@ -1332,7 +1334,8 @@ pub mod test_gc_worker {
                     *end_key = Key::from_encoded(keys::data_end_key(end_key.as_encoded()));
                 }
             });
-            self.0.async_write(ctx, batch, subscribed, on_applied)
+            self.0
+                .async_write(ctx, batch, subscribed, on_applied, tracker_token)
         }
 
         type SnapshotRes = impl Future<Output = EngineResult<Self::Snap>> + Send;
@@ -1390,9 +1393,15 @@ pub mod test_gc_worker {
             batch: WriteData,
             subscribed: u8,
             on_applied: Option<OnAppliedCb>,
+            tracker_token: Option<TrackerToken>,
         ) -> Self::WriteRes {
-            self.engines.lock().unwrap()[&ctx.region_id]
-                .async_write(ctx, batch, subscribed, on_applied)
+            self.engines.lock().unwrap()[&ctx.region_id].async_write(
+                ctx,
+                batch,
+                subscribed,
+                on_applied,
+                tracker_token,
+            )
         }
 
         type SnapshotRes = impl Future<Output = EngineResult<Self::Snap>> + Send;

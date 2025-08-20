@@ -34,7 +34,7 @@ use super::{
     write_modifies, Callback, DummySnapshotExt, Engine, Error, ErrorInner,
     Iterator as EngineIterator, Modify, Result, SnapContext, Snapshot, WriteData,
 };
-use crate::{FakeExtension, OnAppliedCb, RaftExtension, WriteEvent};
+use crate::{FakeExtension, OnAppliedCb, RaftExtension, TrackerToken, WriteEvent};
 
 // Duplicated in test_engine_builder
 const TEMP_DIR: &str = "";
@@ -261,6 +261,7 @@ impl<RE: RaftExtension + 'static> Engine for RocksEngine<RE> {
         batch: WriteData,
         subscribed: u8,
         on_applied: Option<OnAppliedCb>,
+        _tracker: Option<TrackerToken>,
     ) -> Self::WriteRes {
         let (mut tx, mut rx) = mpsc::channel::<WriteEvent>(WriteEvent::event_capacity(subscribed));
         let res = (move || {

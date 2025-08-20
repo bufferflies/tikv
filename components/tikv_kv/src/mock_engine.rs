@@ -9,7 +9,9 @@ use collections::HashMap;
 use kvproto::kvrpcpb::Context;
 
 use super::Result;
-use crate::{Engine, Modify, OnAppliedCb, RocksEngine, SnapContext, WriteData, WriteEvent};
+use crate::{
+    Engine, Modify, OnAppliedCb, RocksEngine, SnapContext, TrackerToken, WriteData, WriteEvent,
+};
 
 /// A mock engine is a simple wrapper around RocksEngine
 /// but with the ability to assert the modifies,
@@ -174,6 +176,7 @@ impl Engine for MockEngine {
         batch: WriteData,
         subscribed: u8,
         on_applied: Option<OnAppliedCb>,
+        tracker: Option<TrackerToken>,
     ) -> Self::WriteRes {
         if let Some(expected_modifies) = self.expected_modifies.as_ref() {
             let mut expected_writes = expected_modifies.0.lock().unwrap();
@@ -186,7 +189,8 @@ impl Engine for MockEngine {
         }
         let mut last_modifies = self.last_modifies.lock().unwrap();
         last_modifies.push(batch.modifies.clone());
-        self.base.async_write(ctx, batch, subscribed, on_applied)
+        self.base
+            .async_write(ctx, batch, subscribed, on_applied, tracker)
     }
 }
 

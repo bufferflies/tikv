@@ -163,6 +163,41 @@ macro_rules! impl_display_as_debug {
     };
 }
 
+/// Transaction debug logging macro for jepsen-debug feature.
+/// When jepsen-debug feature is enabled, logs at info level for visibility.
+/// Otherwise, logs at debug level.
+///
+/// This macro supports both slog-style structured logging and standard format
+/// strings:
+///
+/// slog style: txn_debug!("message"; "key1" => value1, "key2" => ?value2)
+/// standard style: txn_debug!("message: {}, key2: {:?}", value1, value2)
+#[macro_export]
+macro_rules! txn_debug {
+    // slog-style: message; key-value pairs
+    ($msg:expr; $($args:tt)*) => {
+        #[cfg(feature = "jepsen-debug")]
+        {
+            info!($msg; $($args)*);
+        }
+        #[cfg(not(feature = "jepsen-debug"))]
+        {
+            debug!($msg; $($args)*);
+        }
+    };
+    // Standard format string style: message with format args
+    ($($arg:tt)+) => {
+        #[cfg(feature = "jepsen-debug")]
+        {
+            log::info!($($arg)+);
+        }
+        #[cfg(not(feature = "jepsen-debug"))]
+        {
+            log::debug!($($arg)+);
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;

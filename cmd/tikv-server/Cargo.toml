@@ -30,6 +30,8 @@ nortcheck = ["server/nortcheck"]
 
 pprof-fp = ["tikv/pprof-fp"]
 
+jepsen-debug = ["tikv/jepsen-debug"]
+
 [dependencies]
 clap = "2.32"
 cloud_server = { path = "../../components/cloud_server", default-features = false }

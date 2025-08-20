@@ -54,6 +54,7 @@ use raftstore::store::{PessimisticLockPair, TxnExt};
 use thiserror::Error;
 use tikv_util::{deadline::Deadline, escape, time::ThreadReadId, timer::GLOBAL_TIMER_HANDLE};
 use tracker::with_tls_tracker;
+pub use tracker::TrackerToken;
 use txn_types::{Key, PessimisticLock, ReqType, TimeStamp, TxnExtra, Value};
 
 pub use self::{
@@ -365,6 +366,7 @@ pub trait Engine: Send + Clone + 'static {
         batch: WriteData,
         subscribed: u8,
         on_applied: Option<OnAppliedCb>,
+        tracker_token: Option<TrackerToken>,
     ) -> Self::WriteRes;
 
     fn write(&self, ctx: &Context, batch: WriteData) -> Result<()> {
@@ -723,7 +725,7 @@ pub fn write<E: Engine>(
     batch: WriteData,
     on_applied: Option<OnAppliedCb>,
 ) -> impl std::future::Future<Output = Option<Result<()>>> {
-    let mut res = engine.async_write(ctx, batch, WriteEvent::BASIC_EVENT, on_applied);
+    let mut res = engine.async_write(ctx, batch, WriteEvent::BASIC_EVENT, on_applied, None);
     async move {
         loop {
             match res.next().await {

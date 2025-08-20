@@ -21,7 +21,7 @@ use txn_types::{Key, Value};
 use super::SnapContext;
 use crate::{
     DummySnapshotExt, Engine, Error as EngineError, ErrorInner as EngineErrorInner, Iterator,
-    Modify, OnAppliedCb, Result as EngineResult, Snapshot, WriteData, WriteEvent,
+    Modify, OnAppliedCb, Result as EngineResult, Snapshot, TrackerToken, WriteData, WriteEvent,
 };
 
 type RwLockTree = RwLock<BTreeMap<Key, Value>>;
@@ -94,6 +94,7 @@ impl Engine for BTreeEngine {
         batch: WriteData,
         _subscribed: u8,
         _on_applied: Option<OnAppliedCb>,
+        _tracker: Option<TrackerToken>,
     ) -> Self::WriteRes {
         let res = if batch.modifies.is_empty() {
             Err(EngineError::from(EngineErrorInner::EmptyRequest))

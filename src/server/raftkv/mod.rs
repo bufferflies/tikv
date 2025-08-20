@@ -49,7 +49,7 @@ use raftstore::{
     },
 };
 use thiserror::Error;
-use tikv_kv::{write_modifies, OnAppliedCb, WriteEvent};
+use tikv_kv::{write_modifies, OnAppliedCb, TrackerToken, WriteEvent};
 use tikv_util::{
     codec::number::NumberEncoder,
     future::{paired_future_callback, paired_must_called_future_callback},
@@ -419,6 +419,7 @@ where
         batch: WriteData,
         subscribed: u8,
         on_applied: Option<OnAppliedCb>,
+        _tracker: Option<TrackerToken>,
     ) -> Self::WriteRes {
         let mut res = (|| {
             fail_point!("raftkv_async_write");

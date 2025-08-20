@@ -34,7 +34,7 @@ use mockall::automock;
 use pd_client::{PdClient, PdFuture};
 use prometheus::{register_int_gauge, IntGauge};
 use thiserror::Error;
-use tikv_util::{error, future::block_on_timeout, time::Instant, warn};
+use tikv_util::{future::block_on_timeout, time::Instant, *};
 use txn_types::{Key, Lock, TimeStamp};
 
 pub use self::{
@@ -199,11 +199,19 @@ impl ConcurrencyManager {
     pub fn update_max_ts(
         &self,
         new_ts: TimeStamp,
-        source: impl IntoErrorSource,
+        source: impl IntoErrorSource + Clone,
     ) -> Result<(), InvalidMaxTsUpdate> {
         if new_ts.is_max() {
             return Ok(());
         }
+
+        txn_debug!(
+            "ConcurrencyManager::update_max_ts entry";
+            "new_ts" => ?new_ts,
+            "old_max_ts" => ?self.max_ts(),
+            "source" => source.clone().into_error_source()
+        );
+
         let limit = self.max_ts_limit.load();
 
         // check that new_ts is less than or equal to the limit
