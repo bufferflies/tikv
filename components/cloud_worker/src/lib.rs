@@ -281,7 +281,7 @@ fn start_server(
         block_cache.clone(),
         None,
         thread_pool.handle().clone().into(),
-        config.txn_chunk_manager,
+        config.txn_chunk_manager.clone(),
     );
 
     let replication_scheduler = if config.replication_worker.enabled {
@@ -312,6 +312,7 @@ fn start_server(
             .expect("create http client failed"),
     );
     let ctx = Arc::new(server::Context {
+        config: config.clone(),
         compression_lvl,
         checksum_type,
         thread_pool: thread_pool.handle().clone(),
@@ -743,6 +744,8 @@ pub struct Config {
     pub cop_block_size: ReadableSize,
     // Used to determine if the file is expired on the remote dfs cache.
     pub cop_remote_dfs_cache_ttl: ReadableDuration,
+    // When the coprocessor response reached this value, we update paging_size to return early.
+    pub cop_max_resp_size: ReadableSize,
     // The thread pool size is cpu_cores * thread_pool_size_factor,
     pub thread_pool_size_factor: f64,
     pub report_wru: bool,
@@ -802,6 +805,7 @@ impl Default for Config {
             cop_block_cache_size: ReadableSize(block_cache_size),
             cop_block_size: ReadableSize::kb(32),
             cop_remote_dfs_cache_ttl: ReadableDuration::minutes(10),
+            cop_max_resp_size: ReadableSize::mb(32),
             thread_pool_size_factor: 1.0,
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,

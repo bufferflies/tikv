@@ -105,6 +105,8 @@ pub struct Endpoint<E: Engine> {
 
     _phantom: PhantomData<E>,
 
+    max_resp_size: u64,
+
     quota_limiter: Arc<QuotaLimiter>,
 
     remote_ctx: Option<RemoteContext>,
@@ -163,6 +165,7 @@ impl<E: Engine> Endpoint<E> {
             overload_protector,
             security_mgr,
             status_addr,
+            max_resp_size: cfg.cop_max_resp_size.0,
         }
     }
 
@@ -242,10 +245,16 @@ impl<E: Engine> Endpoint<E> {
         req: coppb::Request,
         peer: Option<String>,
         is_streaming: bool,
+        max_resp_size: u64,
     ) -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
         let api_version = req.get_context().get_api_version();
         dispatch_api_version!(api_version, {
-            self.parse_request_and_check_memory_locks_impl::<API>(req, peer, is_streaming)
+            self.parse_request_and_check_memory_locks_impl::<API>(
+                req,
+                peer,
+                is_streaming,
+                max_resp_size,
+            )
         })
     }
 
@@ -258,6 +267,7 @@ impl<E: Engine> Endpoint<E> {
         mut req: coppb::Request,
         peer: Option<String>,
         is_streaming: bool,
+        max_resp_size: u64,
     ) -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
         fail_point!("coprocessor_parse_request", |_| Err(box_err!(
             "unsupported tp (failpoint)"
@@ -360,6 +370,7 @@ impl<E: Engine> Endpoint<E> {
                         batch_row_limit,
                         req.get_is_cache_enabled(),
                         paging_size,
+                        max_resp_size,
                         quota_limiter,
                     )
                     .data_version(data_version)
@@ -690,7 +701,7 @@ impl<E: Engine> Endpoint<E> {
         let result_of_batch = self.process_batch_tasks(&mut req, &peer);
         set_tls_tracker_token(tracker);
         let result_of_future = self
-            .parse_request_and_check_memory_locks(req, peer, false)
+            .parse_request_and_check_memory_locks(req, peer, false, self.max_resp_size)
             .map(|(handler_builder, req_ctx)| self.handle_unary_request(req_ctx, handler_builder));
         async move {
             let res = match result_of_future {
@@ -754,7 +765,12 @@ impl<E: Engine> Endpoint<E> {
             );
             let mut response = coppb::StoreBatchTaskResponse::new();
             response.set_task_id(task_id);
-            match self.parse_request_and_check_memory_locks(cur_req, peer.clone(), false) {
+            match self.parse_request_and_check_memory_locks(
+                cur_req,
+                peer.clone(),
+                false,
+                self.max_resp_size,
+            ) {
                 Ok((handler_builder, req_ctx)) => {
                     let cur_tracker = GLOBAL_TRACKERS.insert(::tracker::Tracker::new(request_info));
                     set_tls_tracker_token(cur_tracker);
@@ -924,7 +940,7 @@ impl<E: Engine> Endpoint<E> {
         peer: Option<String>,
     ) -> impl futures::stream::Stream<Item = coppb::Response> {
         let result_of_stream = self
-            .parse_request_and_check_memory_locks(req, peer, true)
+            .parse_request_and_check_memory_locks(req, peer, true, u64::MAX)
             .and_then(|(handler_builder, req_ctx)| {
                 self.handle_stream_request(req_ctx, handler_builder)
             }); // Result<Stream<Resp, Error>, Error>
@@ -1004,6 +1020,7 @@ pub async fn parse_request_and_handle_remote_cop<S: 'static + Snapshot>(
     req: coppb::Request,
     peer: Option<String>,
     max_handle_duration: Duration,
+    max_resp_size: u64,
     quota_limiter: Arc<QuotaLimiter>,
     snap: S,
 ) -> Result<MemoryTraceGuard<coppb::Response>> {
@@ -1013,6 +1030,7 @@ pub async fn parse_request_and_handle_remote_cop<S: 'static + Snapshot>(
             req,
             peer,
             max_handle_duration,
+            max_resp_size,
             quota_limiter,
             snap,
         )
@@ -1024,6 +1042,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
     mut req: coppb::Request,
     peer: Option<String>,
     max_handle_duration: Duration,
+    max_resp_size: u64,
     quota_limiter: Arc<QuotaLimiter>,
     snap: S,
 ) -> Result<MemoryTraceGuard<coppb::Response>> {
@@ -1095,6 +1114,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 64,
                 req.get_is_cache_enabled(),
                 paging_size,
+                max_resp_size,
                 quota_limiter,
             )
             .data_version(data_version)

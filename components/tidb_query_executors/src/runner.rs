@@ -37,10 +37,6 @@ use super::{
 // may consider accepting this value from TiDB side.
 const BATCH_INITIAL_SIZE: usize = 32;
 
-// When the response reached the MAX_RESPONSE_SIZE, we update paging_size to
-// return early.
-const MAX_RESPONSE_SIZE: u64 = 256 * 1024 * 1024;
-
 // TODO: This value is chosen based on MonetDB/X100's research without our own
 // benchmarks.
 pub use tidb_query_expr::types::BATCH_MAX_SIZE;
@@ -81,6 +77,11 @@ pub struct BatchExecutorsRunner<SS> {
     /// If it's a paging request, paging_size indicates to the required size for
     /// current page.
     paging_size: Option<u64>,
+
+    /// The maximum size of the response. If the response size exceeds this
+    /// value, the response will be returned early and the the client will
+    /// send a new request with the unprocessed range.
+    max_resp_size: u64,
 
     quota_limiter: Arc<QuotaLimiter>,
 }
@@ -424,6 +425,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         deadline: Deadline,
         stream_row_limit: usize,
         paging_size: Option<u64>,
+        max_resp_size: u64,
         quota_limiter: Arc<QuotaLimiter>,
         snap: Option<kvengine::SnapAccess>,
     ) -> Result<Self> {
@@ -476,6 +478,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
             stream_row_limit,
             encode_type,
             paging_size,
+            max_resp_size,
             quota_limiter,
         })
     }
@@ -531,7 +534,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
                 chunks_size += chunk.compute_size() as u64;
                 chunks.push(chunk);
                 record_all += record_len;
-                if chunks_size > MAX_RESPONSE_SIZE {
+                if chunks_size > self.max_resp_size {
                     tikv_util::info!("reach max response size, row count {}", record_all);
                     self.paging_size = Some(record_all as u64);
                 }

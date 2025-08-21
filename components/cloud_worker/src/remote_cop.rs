@@ -120,6 +120,7 @@ impl Tikv for CopService {
         let quota_limiter = self.ctx.quota_limiter.clone();
         let mem_limiter = self.ctx.memory_limiter.clone();
         let peer = Some(ctx.peer());
+        let max_resp_size = self.ctx.config.cop_max_resp_size.0;
         let future = async move {
             let delegate_start = Instant::now_coarse();
             let mut resp = client
@@ -145,6 +146,7 @@ impl Tikv for CopService {
                 req,
                 peer,
                 max_handle_duration,
+                max_resp_size,
                 quota_limiter.clone(),
                 snapshot,
             )

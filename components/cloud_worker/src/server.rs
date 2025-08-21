@@ -61,9 +61,11 @@ use crate::{
     txn_chunk,
     txn_chunk::TxnChunkHandler,
     worker_limiter::WorkerLimiter,
+    Config,
 };
 
 pub(crate) struct Context {
+    pub config: Config,
     pub compression_lvl: i32,
     pub checksum_type: ChecksumType,
     pub thread_pool: tokio::runtime::Handle,
@@ -413,6 +415,7 @@ async fn handle_remote_coprocessor(
         cop_req,
         None,
         Duration::from_secs(60),
+        ctx.config.cop_max_resp_size.0,
         ctx.quota_limiter.clone(),
         snap,
     )
