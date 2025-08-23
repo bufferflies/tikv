@@ -475,8 +475,27 @@ impl CpuUtilCollector {
         self.cpu_total = new_cpu_total;
     }
 
-    pub(crate) fn get_cpu_util_ref(&self) -> Arc<AtomicUsize> {
-        self.cpu_util.clone()
+    pub(crate) fn get_cpu_util_ref(&self) -> CpuUtilRef {
+        CpuUtilRef {
+            cpu_util: self.cpu_util.clone(),
+            thread_prefix: self.thread_prefix.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct CpuUtilRef {
+    cpu_util: Arc<AtomicUsize>,
+    thread_prefix: String,
+}
+
+impl CpuUtilRef {
+    pub fn get_cpu_util(&self) -> usize {
+        self.cpu_util.load(Relaxed)
+    }
+
+    pub fn thread_prefix(&self) -> &str {
+        &self.thread_prefix
     }
 }
 
@@ -489,13 +508,15 @@ mod tests {
     #[test]
     #[ignore]
     fn test_cpu_util_collector() {
-        let mut collector = CpuUtilCollector::new("cpu_util_test".to_string());
+        let prefix = "cpu_util_test".to_string();
+        let mut collector = CpuUtilCollector::new(prefix.clone());
+        let cpu_ref = collector.get_cpu_util_ref();
         let mut handles = vec![];
         let sleep_micros = Arc::new(AtomicUsize::new(10));
         for i in 0..3 {
             let sleep_micros = sleep_micros.clone();
             let handle = std::thread::Builder::new()
-                .name(format!("cpu_util_test_{}", i))
+                .name(format!("{}_{}", cpu_ref.thread_prefix(), i))
                 .spawn_wrapper(move || {
                     let mut counter = 0u64;
                     loop {
@@ -510,15 +531,15 @@ mod tests {
                 .unwrap();
             handles.push(handle);
         }
-        let cpu_ref = collector.get_cpu_util_ref();
         for sleep_dur in [10, 100, 1000] {
             sleep_micros.store(sleep_dur, Relaxed);
             println!("sleep {}us", sleep_dur);
             for _ in 0..5 {
                 std::thread::sleep(Duration::from_millis(100));
                 collector.update();
-                println!("cpu:{}", cpu_ref.load(Relaxed));
+                println!("cpu:{}", cpu_ref.get_cpu_util());
             }
         }
+        assert_eq!(prefix, cpu_ref.thread_prefix());
     }
 }

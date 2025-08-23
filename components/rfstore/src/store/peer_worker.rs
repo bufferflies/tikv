@@ -4,10 +4,7 @@ use std::{
     cmp::min,
     collections::{hash_map::Entry, HashMap},
     mem,
-    sync::{
-        atomic::{AtomicUsize, Ordering::Relaxed},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -153,7 +150,7 @@ pub(crate) struct RaftWorker {
     // The cpu usage percent for sum of raft worker thread and aux threads.
     // It is updated by background threads and checked in raft thread to update active aux
     // worker count.
-    cpu_util: Arc<AtomicUsize>,
+    cpu_util: CpuUtilRef,
     active_aux_count: usize,
 }
 
@@ -168,7 +165,7 @@ impl RaftWorker {
         router: RaftRouter,
         io_sender: Sender<Option<IoTask>>,
         store_fsm: StoreFsm,
-        cpu_util: Arc<AtomicUsize>,
+        cpu_util: CpuUtilRef,
     ) -> (Self, Vec<Receiver<Option<ApplyBatch>>>) {
         let all_apply_pool_size = ctx.cfg.apply_pool_size + ctx.cfg.apply_follower_pool_size;
         let mut apply_senders = Vec::with_capacity(all_apply_pool_size);
@@ -217,7 +214,7 @@ impl RaftWorker {
             self.aux_res_receivers.push(aux_result_rx);
             self.sent_aux_task.push(false);
             let aux_handle = std::thread::Builder::new()
-                .name(format!("raft-aux-worker-{}", i + 1))
+                .name(format!("{}-{}", self.cpu_util.thread_prefix(), i + 1))
                 .spawn_wrapper(move || aux_worker.run())
                 .unwrap();
             self.aux_handles.push(aux_handle);
@@ -476,7 +473,7 @@ impl RaftWorker {
         if cfg.aux_worker_count == 0 {
             return;
         }
-        let cpu_usage = self.cpu_util.load(Relaxed);
+        let cpu_usage = self.cpu_util.get_cpu_util();
         let origin_active_aux_count = self.active_aux_count;
         if cpu_usage < cfg.main_worker_max_util {
             self.active_aux_count = 0;

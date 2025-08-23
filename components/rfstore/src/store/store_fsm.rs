@@ -179,7 +179,7 @@ impl RaftBatchSystem {
             store_handler.register(peer);
         }
         let store_id = ctx.store.get_id();
-        let raft_cpu_util_collector = CpuUtilCollector::new("raftstore_".to_string());
+        let raft_cpu_util_collector = CpuUtilCollector::new("rfstore".to_string());
         let cpu_util_ref = raft_cpu_util_collector.get_cpu_util_ref();
         let pd_runner = PdRunner::new(
             store_id,
@@ -218,11 +218,11 @@ impl RaftBatchSystem {
             ctx.router.clone(),
             io_sender,
             store_fsm,
-            cpu_util_ref,
+            cpu_util_ref.clone(),
         );
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()
-            .name("rfstore-0".to_string())
+            .name(format!("{}-0", cpu_util_ref.thread_prefix()))
             .spawn_wrapper(move || {
                 tikv_util::thread_group::set_properties(props);
                 rw.run();
