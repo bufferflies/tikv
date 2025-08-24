@@ -535,14 +535,15 @@ impl EngineCore {
         // keep consistency between peers, as only target region has txn file locks.
         builder.set_lock_txn_files(data.lock_txn_files.clone());
         let mut max_flushed_mem_tbl_version = SnapVersion::zero();
+        let new_snap_version =
+            SnapVersion::new(initial_flush.base_version, initial_flush.data_sequence);
         mem_tbls.retain(|x| {
-            let version = x.get_snap_version();
-            let flushed = version > SnapVersion::zero()
-                && version
-                    <= SnapVersion::new(initial_flush.base_version, initial_flush.data_sequence);
+            let mem_tbl_snap_version = x.get_snap_version();
+            let flushed =
+                mem_tbl_snap_version.is_not_zero() && mem_tbl_snap_version <= new_snap_version;
             if flushed {
-                if max_flushed_mem_tbl_version < version {
-                    max_flushed_mem_tbl_version = version;
+                if max_flushed_mem_tbl_version < mem_tbl_snap_version {
+                    max_flushed_mem_tbl_version = mem_tbl_snap_version;
                 }
                 self.send_free_mem_msg(FreeMemMsg::FreeMem(x.clone()));
             }
@@ -562,6 +563,7 @@ impl EngineCore {
         info!("{} apply_initial_flush", shard.tag(); "seq" => cs.sequence);
         shard.set_data(new_data);
         shard.clear_finished_txn_file_refs(max_flushed_mem_tbl_version);
+        shard.set_persisted_snap_version(new_snap_version);
 
         store_bool(&shard.initial_flushed, true);
         // Switched memtables can't be flushed until initial flush finished, so we

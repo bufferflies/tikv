@@ -112,9 +112,6 @@ pub struct Shard {
     // write_sequence is the raft log index of the applied write batch.
     pub(crate) write_sequence: AtomicU64,
 
-    // cache_invalidate_sequence is sequence that invalidates all the previous cached values.
-    pub(crate) cache_invalidate_sequence: AtomicU64,
-
     // persisted_snap_version is the latest L0 table's snap version, equals to:
     //     ShardMeta.data_sequence + ShardMeta.base_version
     pub(crate) persisted_snap_version: AtomicSnapVersion,
@@ -248,7 +245,6 @@ impl Shard {
             lv2plus_entries_write_cf: Default::default(),
             meta_seq: Default::default(),
             write_sequence: Default::default(),
-            cache_invalidate_sequence: Default::default(),
             persisted_snap_version: Default::default(),
             compaction_priority: RwLock::new(None),
             encryption_key,
@@ -902,10 +898,6 @@ impl Shard {
 
     pub fn update_write_sequence_on_recover(&self, seq: u64) {
         self.write_sequence.store(seq, Ordering::Release);
-    }
-
-    pub fn get_cache_invalidate_sequence(&self) -> u64 {
-        self.cache_invalidate_sequence.load(Ordering::Acquire)
     }
 
     pub fn get_persisted_snap_version(&self) -> SnapVersion {

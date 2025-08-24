@@ -1063,6 +1063,17 @@ impl AtomicSnapVersion {
     pub fn store(&self, v: SnapVersion) {
         self.0.store(v.into_inner(), atomic::Ordering::Release);
     }
+
+    pub fn compare_exchange(&self, current: SnapVersion, new: SnapVersion) -> bool {
+        self.0
+            .compare_exchange(
+                current.into_inner(),
+                new.into_inner(),
+                atomic::Ordering::SeqCst,
+                atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
 }
 
 #[cfg(test)]

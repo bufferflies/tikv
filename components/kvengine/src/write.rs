@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp, collections::HashMap, iter::Iterator, sync::atomic::Ordering};
+use std::{cmp, collections::HashMap, iter::Iterator};
 
 use bytes::{Buf, BytesMut};
 use kvenginepb::{TxnFileRef, TxnFileRefs};
@@ -10,7 +10,6 @@ use slog_global::info;
 use crate::{
     table::{self, memtable, InnerKey, SnapVersion, TxnFile},
     util::TxnFileRefPropertyHelper,
-    value_cache::ValueCacheKeyRef,
     *,
 };
 
@@ -198,7 +197,6 @@ impl Engine {
                 .get_cf(cf)
                 .put_batch(wb.get_cf_mut(cf), Some(&snap), cf);
         }
-        self.handle_value_cache(wb, &snap);
         let mut need_refresh_shard_states = false;
 
         // Property may be duplicated when `Shard.properties` is restored from
@@ -255,7 +253,7 @@ impl Engine {
                     shard.properties.set(k.as_str(), v.chunk());
                 }
                 TXN_FILE_REF => {
-                    self.write_txn_file_ref(&shard, v.chunk(), wb.sequence);
+                    self.write_txn_file_ref(&shard, v.chunk());
                     need_refresh_shard_states = true;
 
                     data = shard.get_data();
@@ -293,7 +291,7 @@ impl Engine {
         }
     }
 
-    fn write_txn_file_ref(&self, shard: &Shard, v: &[u8], sequence: u64) {
+    fn write_txn_file_ref(&self, shard: &Shard, v: &[u8]) {
         let mut txn_file_refs = TxnFileRefs::new();
         txn_file_refs.merge_from_bytes(v).unwrap();
         debug_assert_eq!(txn_file_refs.txn_file_refs.len(), 1);
@@ -318,9 +316,6 @@ impl Engine {
             mem_tbls[0] = old_data
                 .get_writable_mem_table()
                 .add_write_cf_txn_files(&[txn_file]);
-            shard
-                .cache_invalidate_sequence
-                .store(sequence, Ordering::Release);
         }
         let mut builder = ShardDataBuilder::new(old_data);
         builder.set_mem_tbls(mem_tbls);
@@ -377,27 +372,6 @@ impl Engine {
             }
             wb.set_property(TXN_FILE_REF, &txn_file_refs.write_to_bytes().unwrap());
         }
-    }
-
-    fn handle_value_cache(&self, wb: &WriteBatch, snap_access: &SnapAccess) {
-        let Some(value_cache) = self.value_cache.as_ref() else {
-            return;
-        };
-        if let Some(validate_tasks) = value_cache.fetch_validate_keys(snap_access.get_id()) {
-            for task in validate_tasks {
-                snap_access.validate_cached_value(&task, value_cache);
-            }
-        }
-        let write_cf_wb = wb.get_cf(WRITE_CF);
-        write_cf_wb.iterate(|e, buf| {
-            let key = e.key(buf);
-            let row_key_ref = ValueCacheKeyRef {
-                shard_ver: snap_access.get_version() as u32,
-                keyspace_id: snap_access.get_keyspace_id(),
-                inner_key: InnerKey::from_inner_buf(key),
-            };
-            value_cache.remove(&row_key_ref);
-        });
     }
 
     pub fn flush_shard_for_restore(&self, shard: &Shard) -> Result<()> {

@@ -153,7 +153,8 @@ impl<S: Snapshot> CloudStore<S> {
         statistics.lock.flow_stats.read_keys += 1;
         statistics.lock.flow_stats.read_bytes += raw_key.len() + item.value_len();
         statistics.lock.processed_keys += 1;
-        if item.value_len() > 0 {
+        let has_lock = item.value_len() > 0;
+        if has_lock {
             let lock = Lock::parse(item.get_value()).unwrap();
             Lock::check_ts_conflict(
                 Cow::Borrowed(&lock),
@@ -175,7 +176,7 @@ impl<S: Snapshot> CloudStore<S> {
             return Ok(Item::default());
         }
         let item = if let Some(cache) = value_cache {
-            if let Some(val) = cache.get(snap, &raw_key, start_ts) {
+            if let Some(val) = cache.get(snap, &raw_key, start_ts, has_lock) {
                 return Ok(Item::from_cached_value(&val));
             }
             // We use the u64::MAX to get first to fill the cache, if version is newer,
@@ -185,13 +186,13 @@ impl<S: Snapshot> CloudStore<S> {
             let mut item = snap.get(WRITE_CF, &raw_key, u64::MAX).await;
             if item.version > start_ts {
                 item = snap.get(WRITE_CF, &raw_key, start_ts).await;
-            } else if item.user_meta_len() > 0 {
+            } else if item.user_meta_len() > 0 && !has_lock {
                 let um = UserMeta::from_slice(item.user_meta());
                 let val = ValueCacheValue::new(
                     Bytes::copy_from_slice(item.get_value()),
                     um.start_ts,
                     item.version,
-                    snap.get_write_sequence(),
+                    snap.get_mem_table_snap_version(),
                 );
                 cache.set(snap, &raw_key, val);
             }
