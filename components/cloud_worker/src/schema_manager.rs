@@ -44,6 +44,7 @@ use security::{SecurityConfig, SecurityManager};
 use tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC;
 use tikv_client::{BoundRange, Key, KvPair, TransactionOptions, Value};
 use tikv_util::{box_err, config::ReadableDuration, debug, error, info, warn};
+use tokio::sync::Semaphore;
 
 use crate::{
     error::{Error, Error::SchemaError, Result},
@@ -54,6 +55,7 @@ use crate::{
 const DEFAULT_TIMEOUT: ReadableDuration = ReadableDuration::secs(5);
 const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024; // 32MB
 const KEYSPACE_REFRESH_INTERVAL: ReadableDuration = ReadableDuration::secs(30);
+const DEFAULT_SCHEMA_UPLOAD_CONCURRENCY: usize = 16;
 
 const META_FILE_MAGIC: u32 = 0x5E9EDFF4;
 const META_FILE_FORMAT_VER: u16 = 1;
@@ -245,7 +247,7 @@ impl MetaFile {
 
     fn add_file(&self, keyspace_id: u32, file_id: u64, schema_version: i64) {
         if let Some((_, version)) = self.get_latest_file(keyspace_id) {
-            assert!(version < schema_version, "schema version must be in order");
+            assert!(version <= schema_version, "schema version must be in order");
         }
 
         self.core
@@ -253,6 +255,10 @@ impl MetaFile {
             .entry(keyspace_id)
             .and_modify(|v| v.push((file_id, schema_version)))
             .or_insert(vec![(file_id, schema_version)]);
+    }
+
+    fn add_default_file(&self, keyspace_id: u32, schema_version: i64) {
+        self.add_file(keyspace_id, 0, schema_version);
     }
 
     fn add_checked_version(&self, keyspace_id: u32, version: i64) {
@@ -311,6 +317,8 @@ pub struct SchemaManagerConfig {
     pub blacklist_file: PathBuf,
     // The tier of TiKV stores to push schema file. Used for canary release.
     pub tikv_stores_tier: String,
+    // Maximum concurrent schema upload tasks
+    pub schema_upload_concurrency: usize,
 }
 
 impl Default for SchemaManagerConfig {
@@ -322,6 +330,7 @@ impl Default for SchemaManagerConfig {
             enabled: false,
             blacklist_file: PathBuf::new(), // Empty means no blacklist filtering.
             tikv_stores_tier: "".to_string(), // Empty means match all stores.
+            schema_upload_concurrency: DEFAULT_SCHEMA_UPLOAD_CONCURRENCY,
         }
     }
 }
@@ -395,6 +404,10 @@ impl SchemaManager {
     }
 
     pub(crate) fn run(&self, runtime: Arc<tokio::runtime::Runtime>) {
+        if let Err(e) = self.repair_meta_file_if_needed() {
+            error!("repair meta file error: {:?}", e);
+        }
+
         let self_clone = self.clone();
         runtime.spawn(async move {
             loop {
@@ -476,292 +489,380 @@ impl SchemaManager {
             .push(shard_stats);
     }
 
-    pub(crate) async fn refresh_keyspace_schema(
+    /// Validates if a keyspace should be processed for schema refresh
+    /// Returns None if keyspace should be skipped, Some(write_sequence) if
+    /// should continue
+    fn validate_keyspace_for_refresh(
         &self,
-        keyspace_stats: &HashMap<u32, Vec<ShardStatsLite>>,
-        stores: &[Store],
-    ) -> Result<()> {
-        let (tx, rx) = tikv_util::mpsc::unbounded();
-        let runtime = self.ctx.s3fs.get_runtime();
-        let mut spawn_task_count = 0;
-        for (&keyspace_id, keyspace_shard_stats) in keyspace_stats {
-            // Skip the default keyspace. The tikv-client not support the default keyspace
-            // with ApiV2NoPrefixCodec.
-            if keyspace_id == DEFAULT_KEYSPACE_ID {
-                continue;
-            }
-            if self.in_blacklist(keyspace_id) {
-                // Remove the keyspace schema file and index from meta file.
-                if self.remove_keyspace_local_file(keyspace_id)? {
-                    info!(
-                        "{}: keyspace is in blacklist, remove local schema files",
-                        keyspace_id
-                    );
-                }
-                continue;
-            }
-            // If the keyspace has only one shard, we check the write sequence if changed.
-            // If the write sequence is not changed, we skip the refresh. This is useful to
-            // avoid large number of infrequent small keyspaces to check schema metadata
-            // from TiKV.
-            let update_write_sequence = if keyspace_shard_stats.len() == 1 {
-                let seq = self.meta_file.get_write_sequence(keyspace_id);
-                let shard_stats = keyspace_shard_stats.first().unwrap();
-                if seq.is_some_and(|seq| seq == shard_stats.write_sequence) {
-                    debug!(
-                        "{}: write sequence is not changed, skip",
-                        keyspace_id;
-                        "seq" => ?seq, "shard_stats" => ?shard_stats
-                    );
-                    continue;
-                }
-                Some(shard_stats.write_sequence)
-            } else {
-                None
-            };
-            debug!(
-                "{}: update write sequence: {}",
-                keyspace_id,
-                update_write_sequence.is_some()
-            );
-
-            let keyspace_total_size = keyspace_shard_stats
-                .iter()
-                .map(|s| s.total_size)
-                .sum::<u64>();
-            if keyspace_total_size == 0 {
-                debug!("{}: keyspace total size is 0, ignore keyspace", keyspace_id);
-                continue;
-            }
-
-            if self.check_if_keyspace_restore_in_progress(keyspace_shard_stats) {
-                info!("{}: keyspace restore in progress, skip", keyspace_id);
-                continue;
-            }
-
-            // 1. Try to read schema file from local.
-            let local_schema_file =
-                match read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id) {
-                    Ok(Some(local_schema_file)) => Some(local_schema_file),
-                    Ok(None) => None,
-                    Err(err) => {
-                        warn!("read schema file from local failed: {:?}", err);
-                        None
-                    }
-                };
-
-            // Check the remote schema_version in store shard_stats to ensure the state
-            // applied to kvengine.
-            let cur_schema_version = if let Some(schema_file) = &local_schema_file {
-                let cur_schema_version = schema_file.get_version();
-                let cur_restore_version = schema_file.get_restore_version();
-                debug!(
-                    "{}: schema_file_id: {}, schema_version: {}, restore_version: {}",
-                    keyspace_id,
-                    schema_file.get_file_id(),
-                    schema_file.get_version(),
-                    cur_restore_version,
-                );
-                if self.check_if_keyspace_restored(
-                    keyspace_id,
-                    keyspace_shard_stats,
-                    cur_schema_version,
-                    cur_restore_version,
-                ) {
-                    // If the keyspace is just restored, the schema_restore_version in shard will be
-                    // reset to backup_ts after restoration. In this case, we should remove the old
-                    // schema file and try to rebuild it in next loop.
-                    self.remove_keyspace_local_file(keyspace_id)?;
-                    info!(
-                        "{}: keyspace is restored, remove local schema files",
-                        keyspace_id
-                    );
-                    continue;
-                }
-                if self
-                    .check_store_schema_version(
-                        keyspace_id,
-                        cur_schema_version,
-                        schema_file,
-                        keyspace_shard_stats,
-                        stores,
-                    )
-                    .await
-                {
-                    continue;
-                }
-                Some(cur_schema_version)
-            } else {
-                None
-            };
-
-            // 2. Check the latest schema version compare with cache, if any
-            // update, fetch all the new schemas and update to S3.
-            let checked_version = self.meta_file.get_checked_version(keyspace_id);
-            if let (Some(checked), Some(cur)) = (checked_version, cur_schema_version) {
-                debug_assert!(checked >= cur, "{} {}", checked, cur);
-            }
-            let checked_version = checked_version.or(cur_schema_version);
-
-            let kv_scanner = Arc::new(self.clone());
-            let kv_getter = Arc::new(self.clone());
-            let (schema_version, table_infos) = match schema::sync_schema(
-                kv_getter,
-                kv_scanner,
-                keyspace_id,
-                checked_version,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    // TODO: report metrics and alarm.
-                    error!("{}: sync schema failed, skip", keyspace_id; "err" => ?err);
-                    continue;
-                }
-            };
-
-            if checked_version.is_some_and(|v| v == schema_version) {
-                debug!("{}: schema is up-to-date, skip", keyspace_id; "schema_ver" => schema_version,
-                    "cur_ver" => ?cur_schema_version, "checked_ver" => ?checked_version);
-                if self.meta_file.get_checked_version(keyspace_id).is_none() {
-                    self.meta_file
-                        .add_checked_version(keyspace_id, schema_version);
-                }
-                if let Some(write_sequence) = update_write_sequence {
-                    self.meta_file
-                        .add_write_sequence(keyspace_id, write_sequence);
-                }
-                continue;
-            }
-            info!(
-                "{}: sync schema: schema_version: {}, checked_version: {:?}, table_infos: {}",
-                keyspace_id,
-                schema_version,
-                checked_version,
-                table_infos.len()
-            );
-            debug!("{}: sync schema", keyspace_id; "schema_ver" => schema_version, "tables" => ?table_infos);
-
-            let old_storage_class_tables = local_schema_file
-                .as_ref()
-                .map(|schema_file| schema_file.tables_with_storage_class());
-            // If the old specified storage class becomes unspecified, the storage class is
-            // removed from the schema file.
-            let sc_need_update_schema = table_infos.iter().any(|ti| {
-                ti.with_storage_class_spec()
-                    || old_storage_class_tables
-                        .as_ref()
-                        .is_some_and(|tables| tables.contains(&ti.id))
-            });
-            let columnar_need_update_schema = table_infos.iter().any(|ti| {
-                // local schema file not exist, need to update.
-                if local_schema_file.is_none() {
-                    return true;
-                }
-                // If ti has columnar or schema has columnar, need to update.
-                let local_schema = local_schema_file.as_ref().unwrap().get_table(ti.id);
-                ti.with_columnar() || local_schema.map(|s| s.with_columnar()).unwrap_or_default()
-            });
-
-            if local_schema_file.is_some() && !sc_need_update_schema && !columnar_need_update_schema
-            {
-                debug!("{}: schema has no required changes, skip", keyspace_id;
-                    "schema_version" => schema_version, "tables" => ?table_infos, "old_sc_tables" => ?old_storage_class_tables);
-                self.meta_file
-                    .add_checked_version(keyspace_id, schema_version);
-                if let Some(write_sequence) = update_write_sequence {
-                    self.meta_file
-                        .add_write_sequence(keyspace_id, write_sequence);
-                }
-                continue;
-            }
-
-            let schema_restore_version = keyspace_shard_stats
-                .first()
-                .map(|s| s.schema_restore_version)
-                .unwrap_or(0);
-            info!("{}: sync schema: rebuild schema", keyspace_id;
-                "cur_schema_ver" => ?cur_schema_version,
-                "schema_ver" => schema_version,
-                "schema_restore_ver" => schema_restore_version,
-                "table_infos" => table_infos.len());
-            // 3. Build the schema file and upload to S3.
-            let schemas = match self.build_new_schema(local_schema_file.as_ref(), table_infos) {
-                Ok(schema) => schema,
-                Err(err) => {
-                    // TODO: report metrics and alarm.
-                    error!("{}: build new schema failed", keyspace_id; "err" => ?err);
-                    continue;
-                }
-            };
-            debug!("{}: build new schema", keyspace_id; "schemas" => ?schemas, "cur_schema_ver" => ?cur_schema_version, "schema_ver" => schema_version);
-            if schemas.is_none() {
-                self.meta_file
-                    .add_checked_version(keyspace_id, schema_version);
-                if let Some(write_sequence) = update_write_sequence {
-                    self.meta_file
-                        .add_write_sequence(keyspace_id, write_sequence);
-                }
-                continue;
-            }
-
-            // build schema file with the schema restore version from shard stats.
-            let new_schema_file_data = schema_file::build_schema_file(
-                keyspace_id,
-                schema_version,
-                schemas.unwrap(),
-                schema_restore_version,
-            );
-            let file_id = *self
-                .id_allocator
-                .alloc_id(1)
-                .map_err(|e| Error::Other(box_err!(e.to_string())))?
-                .first()
-                .unwrap();
-            let dfs = self.ctx.s3fs.clone();
-            let tx_clone = tx.clone();
-            spawn_task_count += 1;
-            runtime.spawn(async move {
-                let data = Bytes::from(new_schema_file_data.clone());
-                let opts = dfs::Options::default().with_type(dfs::FileType::Schema);
-                let res: Result<u64> = dfs
-                    .create(file_id, data.clone(), opts)
-                    .await
-                    .map(|()| file_id)
-                    .map_err(Into::into);
-                let _ = tx_clone
-                    .send((keyspace_id, file_id, schema_version, data, res))
-                    .map_err(|err| {
-                        // Should happen only when `refresh_keyspace_schema` is aborted.
-                        warn!("{} refresh keyspace schema: send failed: {:?}", keyspace_id, err;
-                            "file_id" => file_id, "schema_ver" => schema_version);
-                    });
-            });
+        keyspace_id: u32,
+        keyspace_shard_stats: &[ShardStatsLite],
+    ) -> Option<Option<u64>> {
+        // Skip the default keyspace. The tikv-client not support the default keyspace
+        // with ApiV2NoPrefixCodec.
+        if keyspace_id == DEFAULT_KEYSPACE_ID {
+            return None;
         }
 
-        for _ in 0..spawn_task_count {
-            let (keyspace_id, file_id, schema_version, data, res) = rx.recv().unwrap();
+        if self.in_blacklist(keyspace_id) {
+            // Remove the keyspace schema file and index from meta file.
+            if let Ok(true) = self.remove_keyspace_local_file(keyspace_id) {
+                info!(
+                    "{}: keyspace is in blacklist, remove local schema files",
+                    keyspace_id
+                );
+            }
+            return None;
+        }
+
+        // Check write sequence for single-shard keyspaces
+        let update_write_sequence = if keyspace_shard_stats.len() == 1 {
+            let seq = self.meta_file.get_write_sequence(keyspace_id);
+            let shard_stats = keyspace_shard_stats.first().unwrap();
+            if seq.is_some_and(|seq| seq == shard_stats.write_sequence) {
+                debug!(
+                    "{}: write sequence is not changed, skip",
+                    keyspace_id;
+                    "seq" => ?seq, "shard_stats" => ?shard_stats
+                );
+                return None;
+            }
+            Some(shard_stats.write_sequence)
+        } else {
+            None
+        };
+
+        debug!(
+            "{}: update write sequence: {}",
+            keyspace_id,
+            update_write_sequence.is_some()
+        );
+
+        // Check if keyspace has any data
+        let keyspace_total_size = keyspace_shard_stats
+            .iter()
+            .map(|s| s.total_size)
+            .sum::<u64>();
+        if keyspace_total_size == 0 {
+            debug!("{}: keyspace total size is 0, ignore keyspace", keyspace_id);
+            return None;
+        }
+
+        // Check if keyspace restore is in progress
+        if self.check_if_keyspace_restore_in_progress(keyspace_shard_stats) {
+            info!("{}: keyspace restore in progress, skip", keyspace_id);
+            return None;
+        }
+
+        Some(update_write_sequence)
+    }
+
+    /// Processes local schema file and determines current schema version
+    /// Returns (local_schema_file, cur_schema_version, handle_next_keyspace)
+    async fn process_local_schema_file(
+        &self,
+        keyspace_id: u32,
+        keyspace_shard_stats: &[ShardStatsLite],
+        stores: &[Store],
+    ) -> Result<(Option<SchemaFile>, Option<i64>, bool)> {
+        // Try to read schema file from local.
+        let local_schema_file =
+            match read_schema_file_from_local(&self.config.dir, &self.meta_file, keyspace_id) {
+                Ok(Some(local_schema_file)) => Some(local_schema_file),
+                Ok(None) => None,
+                Err(err) => {
+                    warn!("read schema file from local failed: {:?}", err);
+                    None
+                }
+            };
+
+        // Check the remote schema_version in store shard_stats to ensure the state
+        // applied to kvengine.
+        let cur_schema_version = if let Some(schema_file) = &local_schema_file {
+            let cur_schema_version = schema_file.get_version();
+            let cur_restore_version = schema_file.get_restore_version();
+            debug!(
+                "{}: schema_file_id: {}, schema_version: {}, restore_version: {}",
+                keyspace_id,
+                schema_file.get_file_id(),
+                schema_file.get_version(),
+                cur_restore_version,
+            );
+            if self.check_if_keyspace_restored(
+                keyspace_id,
+                keyspace_shard_stats,
+                cur_schema_version,
+                cur_restore_version,
+            ) {
+                // If the keyspace is just restored, the schema_restore_version in shard will be
+                // reset to backup_ts after restoration. In this case, we should remove the old
+                // schema file and try to rebuild it in next loop.
+                self.remove_keyspace_local_file(keyspace_id)?;
+                info!(
+                    "{}: keyspace is restored, remove local schema files",
+                    keyspace_id
+                );
+                return Ok((None, None, true));
+            }
+            if self
+                .check_store_schema_version(
+                    keyspace_id,
+                    cur_schema_version,
+                    schema_file,
+                    keyspace_shard_stats,
+                    stores,
+                )
+                .await
+            {
+                return Ok((local_schema_file, Some(cur_schema_version), true));
+            }
+            Some(cur_schema_version)
+        } else {
+            get_stats_schema_version(keyspace_shard_stats)
+        };
+
+        Ok((local_schema_file, cur_schema_version, false))
+    }
+
+    /// Synchronizes schema from TiKV and handles up-to-date cases
+    /// Returns (schema_version, table_infos, handle_next_keyspace)
+    async fn sync_schema_and_check_updates(
+        &self,
+        keyspace_id: u32,
+        local_schema_file: &Option<SchemaFile>,
+        cur_schema_version: Option<i64>,
+        update_write_sequence: Option<u64>,
+    ) -> Result<(i64, Vec<TableInfo>, bool)> {
+        // Check the latest schema version compare with cache, if any
+        // update, fetch all the new schemas and update to S3.
+        let checked_version = self.meta_file.get_checked_version(keyspace_id);
+        if let (Some(checked), Some(cur)) = (checked_version, cur_schema_version) {
+            debug_assert!(checked >= cur, "{} {}", checked, cur);
+        }
+        let checked_version = checked_version.or(cur_schema_version);
+        let sync_from_version = if local_schema_file.is_some() {
+            checked_version
+        } else {
+            // If local schema file not exists, trigger full schema sync.
+            None
+        };
+
+        let kv_scanner = Arc::new(self.clone());
+        let kv_getter = Arc::new(self.clone());
+
+        // Get schema version without sync schema diff. We can avoid scanning schema
+        // diffs if the schema version not changed.
+        let schema_version = match schema::get_schema_version(kv_getter.clone(), keyspace_id).await
+        {
+            Ok(schema_version) => schema_version,
+            Err(err) => {
+                error!("{}: get schema version failed, skip", keyspace_id; "err" => ?err);
+                return Err(Error::Other(box_err!(
+                    "get schema version failed: {:?}",
+                    err
+                )));
+            }
+        };
+
+        if checked_version.is_some_and(|v| v == schema_version) {
+            debug!("{}: schema is up-to-date, skip", keyspace_id; "schema_ver" => schema_version,
+                "cur_ver" => ?cur_schema_version, "checked_ver" => ?checked_version);
+            if self.meta_file.get_checked_version(keyspace_id).is_none() {
+                self.meta_file
+                    .add_checked_version(keyspace_id, schema_version);
+            }
+            if let Some(write_sequence) = update_write_sequence {
+                self.meta_file
+                    .add_write_sequence(keyspace_id, write_sequence);
+            }
+            if local_schema_file.is_none() {
+                self.meta_file.add_default_file(keyspace_id, schema_version);
+            }
+            return Ok((schema_version, vec![], true));
+        }
+
+        let (schema_version, table_infos) = match schema::sync_schema(
+            kv_getter,
+            kv_scanner,
+            keyspace_id,
+            sync_from_version,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                // TODO: report metrics and alarm.
+                error!("{}: sync schema failed, skip", keyspace_id; "err" => ?err);
+                return Err(Error::Other(box_err!("sync schema failed: {:?}", err)));
+            }
+        };
+
+        info!(
+            "{}: sync schema: schema_version: {}, checked_version: {:?}, table_infos: {}",
+            keyspace_id,
+            schema_version,
+            checked_version,
+            table_infos.len()
+        );
+        debug!("{}: sync schema", keyspace_id; "schema_ver" => schema_version, "tables" => ?table_infos);
+
+        Ok((schema_version, table_infos, false))
+    }
+
+    /// Checks if schema needs update and prepares schemas for building
+    /// Returns (schemas, handle_next_keyspace)
+    fn check_schema_update_requirements(
+        &self,
+        keyspace_id: u32,
+        local_schema_file: &Option<SchemaFile>,
+        table_infos: Vec<TableInfo>,
+        schema_version: i64,
+        checked_version: Option<i64>,
+        update_write_sequence: Option<u64>,
+    ) -> Result<(Option<Vec<Schema>>, bool)> {
+        let old_storage_class_tables = local_schema_file
+            .as_ref()
+            .map(|schema_file| schema_file.tables_with_storage_class());
+        // If the old specified storage class becomes unspecified, the storage class is
+        // removed from the schema file.
+        let sc_need_update_schema = table_infos.iter().any(|ti| {
+            ti.with_storage_class_spec()
+                || old_storage_class_tables
+                    .as_ref()
+                    .is_some_and(|tables| tables.contains(&ti.id))
+        });
+        let columnar_need_update_schema = table_infos.iter().any(|ti| {
+            // local schema file not exist, need to update.
+            if local_schema_file.is_none() {
+                return true;
+            }
+            // If ti has columnar or schema has columnar, need to update.
+            let local_schema = local_schema_file.as_ref().unwrap().get_table(ti.id);
+            ti.with_columnar() || local_schema.map(|s| s.with_columnar()).unwrap_or_default()
+        });
+
+        if local_schema_file.is_some() && !sc_need_update_schema && !columnar_need_update_schema {
+            debug!("{}: schema has no required changes, skip", keyspace_id;
+                "schema_version" => schema_version, "tables" => ?table_infos, "old_sc_tables" => ?old_storage_class_tables);
+            self.meta_file
+                .add_checked_version(keyspace_id, schema_version);
+            if let Some(write_sequence) = update_write_sequence {
+                self.meta_file
+                    .add_write_sequence(keyspace_id, write_sequence);
+            }
+            return Ok((None, true));
+        }
+
+        info!("{}: sync schema: rebuild schema", keyspace_id;
+            "cur_schema_ver" => ?checked_version,
+            "schema_ver" => schema_version,
+            "table_infos" => table_infos.len());
+
+        // Build the schema file and upload to S3.
+        let schemas = match self.build_new_schema(local_schema_file.as_ref(), table_infos) {
+            Ok(schema) => schema,
+            Err(err) => {
+                // TODO: report metrics and alarm.
+                error!("{}: build new schema failed", keyspace_id; "err" => ?err);
+                return Err(err);
+            }
+        };
+        debug!("{}: build new schema", keyspace_id; "schemas" => ?schemas, "cur_schema_ver" => ?checked_version, "schema_ver" => schema_version);
+
+        if schemas.is_none() {
+            self.meta_file
+                .add_checked_version(keyspace_id, schema_version);
+            if let Some(write_sequence) = update_write_sequence {
+                self.meta_file
+                    .add_write_sequence(keyspace_id, write_sequence);
+            }
+            return Ok((None, true));
+        }
+
+        // No tables need to build.
+        if checked_version == Some(0) && schemas.as_ref().unwrap().is_empty() {
+            self.meta_file
+                .add_checked_version(keyspace_id, schema_version);
+            // Add default file to indicate the keyspace is already synced. There is no
+            // valid schema file in local.
+            self.meta_file.add_default_file(keyspace_id, 0);
+            if let Some(write_sequence) = update_write_sequence {
+                self.meta_file
+                    .add_write_sequence(keyspace_id, write_sequence);
+            }
+            return Ok((None, true));
+        }
+
+        Ok((schemas, false))
+    }
+
+    /// Spawns async task to build and upload schema file
+    /// Returns the spawned task count increment
+    fn spawn_schema_upload_task(
+        &self,
+        keyspace_id: u32,
+        schema_version: i64,
+        schemas: Vec<Schema>,
+        keyspace_shard_stats: &[ShardStatsLite],
+        stores: &[Store],
+        tx: tikv_util::mpsc::Sender<(u32, u64, i64)>,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<u32> {
+        let schema_restore_version = keyspace_shard_stats
+            .first()
+            .map(|s| s.schema_restore_version)
+            .unwrap_or(0);
+
+        // Build schema file with the schema restore version from shard stats.
+        let new_schema_file_data = schema_file::build_schema_file(
+            keyspace_id,
+            schema_version,
+            schemas,
+            schema_restore_version,
+        );
+        let file_id = *self
+            .id_allocator
+            .alloc_id(1)
+            .map_err(|e| Error::Other(box_err!(e.to_string())))?
+            .first()
+            .unwrap();
+
+        let dfs = self.ctx.s3fs.clone();
+        let tx_clone = tx.clone();
+        let self_clone = self.clone();
+        let stores = stores.to_vec();
+        let semaphore = self.schema_upload_semaphore.clone();
+
+        runtime.spawn(async move {
+            // Acquire semaphore permit to limit concurrency.
+            let _permit = semaphore.acquire().await.unwrap();
+
+            let data = Bytes::from(new_schema_file_data.clone());
+            let opts = dfs::Options::default().with_type(dfs::FileType::Schema);
+            let res: Result<u64> = dfs
+                .create(file_id, data.clone(), opts)
+                .await
+                .map(|()| file_id)
+                .map_err(Into::into);
             if let Err(err) = res {
                 error!("{}: failed to update schema file", keyspace_id;
                     "file_id" => file_id, "schema_ver" => schema_version, "err" => ?err);
-                continue;
+                return;
             }
             if let Err(err) =
-                write_schema_file_to_local(&self.config.dir, keyspace_id, file_id, data)
+                write_schema_file_to_local(&self_clone.config.dir, keyspace_id, file_id, data)
             {
                 error!("{}: failed to write schema file to local", keyspace_id;
                     "file_id" => file_id, "schema_ver" => schema_version, "err" => ?err);
-                continue;
+                return;
             }
 
-            // 4. Callback TiKV to update the new schema file to shard meta.
+            // Callback TiKV to update the new schema file to shard meta.
             info!("{}: broadcast schema update to stores", keyspace_id;
                 "file_id" => file_id, "schema_ver" => schema_version);
             if let Err(err) = broadcast_schema_update_to_all_stores(
-                stores,
-                self.security_mgr.clone(),
-                self.config.http_timeout.0,
+                &stores,
+                self_clone.security_mgr.clone(),
+                self_clone.config.http_timeout.0,
                 keyspace_id,
                 file_id,
             )
@@ -772,7 +873,26 @@ impl SchemaManager {
                 error!("{}: failed to broadcast schema update", keyspace_id;
                     "file_id" => file_id, "schema_ver" => schema_version, "err" => ?err);
             }
+            let _ = tx_clone
+                .send((keyspace_id, file_id, schema_version))
+                .map_err(|err| {
+                    // Should happen only when `refresh_keyspace_schema` is aborted.
+                    warn!("{} refresh keyspace schema: send failed: {:?}", keyspace_id, err;
+                        "file_id" => file_id, "schema_ver" => schema_version);
+                });
+        });
 
+        Ok(1)
+    }
+
+    /// Handles completion of all spawned tasks and saves meta file
+    fn handle_task_completion(
+        &self,
+        rx: tikv_util::mpsc::Receiver<(u32, u64, i64)>,
+        spawn_task_count: u32,
+    ) -> Result<()> {
+        for _ in 0..spawn_task_count {
+            let (keyspace_id, file_id, schema_version) = rx.recv().unwrap();
             self.meta_file
                 .add_file(keyspace_id, file_id, schema_version);
             self.meta_file
@@ -786,6 +906,105 @@ impl SchemaManager {
         let meta = self.meta_file.write();
         write_meta_file_to_local(&self.config.dir, Bytes::from(meta))
             .map_err(|err| -> Error { box_err!("write_meta_file_to_local failed: {:?}", err) })?;
+        Ok(())
+    }
+
+    pub(crate) async fn refresh_keyspace_schema(
+        &self,
+        keyspace_stats: &HashMap<u32, Vec<ShardStatsLite>>,
+        stores: &[Store],
+    ) -> Result<()> {
+        let (tx, rx) = tikv_util::mpsc::unbounded::<(u32, u64, i64)>();
+        let runtime = self.ctx.s3fs.get_runtime();
+        let mut spawn_task_count = 0;
+
+        for (&keyspace_id, keyspace_shard_stats) in keyspace_stats {
+            // 1. Validate keyspace for processing
+            let update_write_sequence =
+                match self.validate_keyspace_for_refresh(keyspace_id, keyspace_shard_stats) {
+                    Some(write_seq) => write_seq,
+                    None => continue, // Skip this keyspace
+                };
+
+            // 2. Process local schema file
+            let (local_schema_file, cur_schema_version, handle_next_keyspace) = match self
+                .process_local_schema_file(keyspace_id, keyspace_shard_stats, stores)
+                .await
+            {
+                Ok((local, cur, cont)) => (local, cur, cont),
+                Err(err) => {
+                    error!("{}: process local schema file failed", keyspace_id; "err" => ?err);
+                    continue;
+                }
+            };
+            if handle_next_keyspace {
+                continue;
+            }
+
+            // 3. Sync schema and check for updates
+            let (schema_version, table_infos, handle_next_keyspace) = match self
+                .sync_schema_and_check_updates(
+                    keyspace_id,
+                    &local_schema_file,
+                    cur_schema_version,
+                    update_write_sequence,
+                )
+                .await
+            {
+                Ok((ver, tables, cont)) => (ver, tables, cont),
+                Err(err) => {
+                    error!("{}: sync schema and check updates failed", keyspace_id; "err" => ?err);
+                    continue;
+                }
+            };
+            if handle_next_keyspace {
+                continue;
+            }
+
+            // 4. Check schema update requirements
+            let checked_version = self
+                .meta_file
+                .get_checked_version(keyspace_id)
+                .or(cur_schema_version);
+            let (schemas, handle_next_keyspace) = match self.check_schema_update_requirements(
+                keyspace_id,
+                &local_schema_file,
+                table_infos,
+                schema_version,
+                checked_version,
+                update_write_sequence,
+            ) {
+                Ok((schemas, cont)) => (schemas, cont),
+                Err(err) => {
+                    error!("{}: check schema update requirements failed", keyspace_id; "err" => ?err);
+                    continue;
+                }
+            };
+            if handle_next_keyspace {
+                continue;
+            }
+
+            // 5. Spawn schema upload task
+            let schemas = schemas.unwrap();
+            match self.spawn_schema_upload_task(
+                keyspace_id,
+                schema_version,
+                schemas,
+                keyspace_shard_stats,
+                stores,
+                tx.clone(),
+                runtime,
+            ) {
+                Ok(task_count) => spawn_task_count += task_count,
+                Err(err) => {
+                    error!("{}: spawn schema upload task failed", keyspace_id; "err" => ?err);
+                    continue;
+                }
+            }
+        }
+
+        // 6. Handle task completion
+        self.handle_task_completion(rx, spawn_task_count)?;
         Ok(())
     }
 
@@ -807,9 +1026,9 @@ impl SchemaManager {
             .first()
             .map(|s| s.schema_restore_version)
             .unwrap_or_default();
-        // If the schema_version in local schema file is larger than shard stats, or the
-        // restore_version is inconsistent, it means the keyspace is just restored.
-        if stats_restore_version > cur_restore_version {
+        // If the restored_version in local schema file is not the same as shard stats,
+        // it means the keyspace is just restored.
+        if stats_restore_version != cur_restore_version {
             info!("{}: keyspace restored", keyspace_id;
                 "stats_restore_ver" => stats_restore_version,
                 "cur_restore_ver" => cur_restore_version,
@@ -932,12 +1151,13 @@ impl SchemaManager {
             let base = schema_file.export_schemas();
             schemas = merge_schema_diffs(base, schemas, &to_be_removed);
         }
+
         Ok(Some(schemas))
     }
 
     fn remove_keyspace_local_file(&self, keyspace_id: u32) -> Result<bool> {
         if let Some((_, files)) = self.meta_file.remove_keyspace(keyspace_id) {
-            let file_ids: Vec<u64> = files.iter().map(|f| f.0).collect();
+            let file_ids: Vec<u64> = files.iter().map(|f| f.0).filter(|f| *f > 0).collect();
             remove_schema_file_from_local(&self.config.dir, keyspace_id, &file_ids).map_err(
                 |err| -> Error {
                     box_err!(
@@ -950,6 +1170,113 @@ impl SchemaManager {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn repair_meta_file_if_needed(&self) -> Result<()> {
+        let mut repaired_schemas = 0;
+        let mut repaired_keyspaces = 0;
+
+        let entries = match fs::read_dir(&self.config.dir) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(()),
+        };
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name,
+                None => continue,
+            };
+            let keyspace_id = match dir_name.parse::<u32>() {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            let latest_file_id = self
+                .meta_file
+                .get_latest_file(keyspace_id)
+                .map(|f| f.0)
+                .unwrap_or(0);
+            let mut keyspace_repaired = false;
+            if let Ok(file_names) = get_all_schema_files_in_order(&path) {
+                for file_name in file_names {
+                    if let Ok(file_id) =
+                        u64::from_str_radix(file_name.strip_suffix(".schema").unwrap_or(""), 16)
+                    {
+                        if file_id <= latest_file_id {
+                            continue;
+                        }
+                        if let Ok(schema_file) =
+                            self.read_and_validate_schema_file(keyspace_id, file_id, &path)
+                        {
+                            let schema_version = schema_file.get_version();
+                            self.meta_file
+                                .add_file(keyspace_id, file_id, schema_version);
+                            info!(
+                                "repaired meta_file for keyspace {}: file_id={:016x}, schema_version={}",
+                                keyspace_id, file_id, schema_version
+                            );
+                            repaired_schemas += 1;
+                            keyspace_repaired = true;
+                        }
+                    }
+                }
+            }
+            if keyspace_repaired {
+                repaired_keyspaces += 1;
+            }
+        }
+
+        if repaired_keyspaces > 0 {
+            let meta = self.meta_file.write();
+            write_meta_file_to_local(&self.config.dir, Bytes::from(meta)).map_err(
+                |err| -> Error { box_err!("failed to persist repaired meta_file: {:?}", err) },
+            )?;
+
+            info!(
+                "meta_file repaired for {} keyspaces, {} schemas",
+                repaired_keyspaces, repaired_schemas
+            );
+        }
+
+        Ok(())
+    }
+
+    fn read_and_validate_schema_file(
+        &self,
+        keyspace_id: u32,
+        file_id: u64,
+        keyspace_dir: &Path,
+    ) -> Result<SchemaFile> {
+        let file_path = keyspace_dir.join(format!("{:016x}.schema", file_id));
+
+        if !file_path.exists() {
+            return Err(Error::CheckError(format!(
+                "schema file not found: {}",
+                file_path.display()
+            )));
+        }
+        let fd = Arc::new(fs::File::open(&file_path)?);
+        let local_file = Arc::new(LocalFile::from_file(file_id, file_path, fd)?);
+        let schema_file = SchemaFile::open(local_file)?;
+        if schema_file.get_file_id() != file_id {
+            return Err(Error::CheckError(format!(
+                "schema file ID mismatch: expected {}, got {}",
+                file_id,
+                schema_file.get_file_id()
+            )));
+        }
+        debug!(
+            "validated schema file for keyspace {}: file_id={:016x}, version={}",
+            keyspace_id,
+            file_id,
+            schema_file.get_version()
+        );
+        Ok(schema_file)
     }
 }
 
@@ -1025,6 +1352,7 @@ pub struct SchemaManagerCore {
     meta_file: MetaFile,
     id_allocator: Arc<dyn IdAllocator>,
     blacklist_keyspaces: Option<HashSet<u32>>,
+    schema_upload_semaphore: Arc<Semaphore>,
 }
 
 impl SchemaManagerCore {
@@ -1054,6 +1382,13 @@ impl SchemaManagerCore {
             MetaFile::new()
         };
         let id_allocator = Arc::new(PdIdAllocator::new(ctx.pd.clone()));
+        let concurrency = if config.schema_upload_concurrency > 0 {
+            config.schema_upload_concurrency
+        } else {
+            DEFAULT_SCHEMA_UPLOAD_CONCURRENCY
+        };
+        let schema_upload_semaphore = Arc::new(Semaphore::new(concurrency));
+
         let mgr = Self {
             ctx,
             security_mgr,
@@ -1062,6 +1397,7 @@ impl SchemaManagerCore {
             meta_file,
             id_allocator,
             blacklist_keyspaces,
+            schema_upload_semaphore,
         };
 
         if !mgr.config.tikv_stores_tier.is_empty() {
@@ -1265,6 +1601,25 @@ fn find_latest_schema_file<P: AsRef<Path>>(dir_path: P) -> Result<Option<String>
     Ok(latest_file)
 }
 
+fn get_all_schema_files_in_order<P: AsRef<Path>>(dir_path: P) -> Result<Vec<String>> {
+    let mut files: Vec<String> = Vec::new();
+    info!(
+        "searching all schema files in order in {}",
+        dir_path.as_ref().display()
+    );
+    let entries = fs::read_dir(&dir_path)?;
+    for entry in entries {
+        let entry = entry?;
+        if let Ok(file_name) = entry.file_name().into_string() {
+            if file_name.ends_with(".schema") {
+                files.push(file_name);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 fn merge_schema_diffs(
     mut base: BTreeMap<i64, Schema>,
     added: Vec<Schema>,
@@ -1298,6 +1653,9 @@ fn read_schema_file_from_local<P: AsRef<Path>>(
         let latest_schema_filename = latest_schema_filename.unwrap();
         u64::from_str_radix(latest_schema_filename.strip_suffix(".schema").unwrap(), 16)?
     };
+    if file_id == 0 {
+        return Ok(None);
+    }
 
     let file_path = dir.join(format!("{:016x}.schema", file_id));
     let fd = Arc::new(fs::File::open(file_path.as_path())?);
@@ -1390,6 +1748,24 @@ pub async fn get_keyspace_stats_from_store(
         send_request_to_store_with_retry(req, store, security_mgr.as_ref(), timeout).await?;
     let resp: Vec<ShardStatsLite> = serde_json::from_slice(&resp_bytes)?;
     Ok(resp)
+}
+
+fn get_stats_schema_version(keyspace_shard_stats: &[ShardStatsLite]) -> Option<i64> {
+    let mut valid_versions = keyspace_shard_stats
+        .iter()
+        .filter(|s| s.schema_version > 0)
+        .map(|s| s.schema_version);
+
+    if let Some(first_version) = valid_versions.next() {
+        if valid_versions.all(|v| v == first_version) {
+            Some(first_version)
+        } else {
+            None
+        }
+    } else {
+        // No valid schema version found, return 0.
+        Some(0)
+    }
 }
 
 #[inline]

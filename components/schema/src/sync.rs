@@ -24,6 +24,22 @@ const HASH_DATA_TYPE: u8 = b'h';
 
 const MAX_DIFF_VERSION: i64 = 256;
 
+// Get schema version from meta.
+pub async fn get_schema_version(
+    kv_getter: Arc<dyn KvGetter>,
+    keyspace_id: u32,
+) -> Result<i64, String> {
+    let schema_version_data = kv_getter.get(&schema_version_key(keyspace_id)).await?;
+    if schema_version_data.is_none() {
+        return Ok(0);
+    }
+    let schema_version = String::from_utf8(schema_version_data.unwrap())
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    Ok(schema_version)
+}
+
 // Sync schema for keyspace_id if needed.
 pub async fn sync_schema(
     kv_getter: Arc<dyn KvGetter>,
