@@ -136,11 +136,8 @@ while [[ $# -gt 0 ]]; do
 	--disable-kv-engine-meta-diff)
 		RUN_ARGS+=("--disable-kv-engine-meta-diff")
 		;;
-	--enable-value-cache)
-		RUN_ARGS+=("--enable-value-cache")
-		;;
-	--enable-wal-double-write)
-		RUN_ARGS+=("--enable-wal-double-write")
+	--disable-value-cache)
+		RUN_ARGS+=("--disable-value-cache")
 		;;
 	--enable-tiflash-write-node)
 		RUN_ARGS+=("--enable-tiflash-write-node")

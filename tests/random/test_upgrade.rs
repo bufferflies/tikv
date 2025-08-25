@@ -116,6 +116,7 @@ fn test_random_upgrade() {
         Servers::ServerCluster(&cluster),
         |_, conf| {
             conf.raft_store.enable_kv_engine_meta_diff = true;
+            enable_value_cache(conf);
         },
         &server_configs,
         pd_ctl.as_ref(),
@@ -140,6 +141,7 @@ fn test_random_upgrade() {
         Servers::TikvServers(&tikv_servers),
         |_, conf| {
             conf.raft_store.enable_kv_engine_meta_diff = true;
+            disable_value_cache(conf);
         },
         &server_configs,
         pd_ctl.as_ref(),
@@ -164,6 +166,7 @@ fn test_random_upgrade() {
         Servers::ServerCluster(&cluster),
         |_, conf| {
             conf.raft_store.enable_kv_engine_meta_diff = true;
+            enable_value_cache(conf);
         },
         &server_configs,
         pd_ctl.as_ref(),
@@ -276,6 +279,7 @@ fn prepare_cluster(
     let update_conf_fn_override = |node_id: u16, conf: &mut TikvConfig| {
         update_conf_fn(node_id, conf);
         conf.raft_store.enable_kv_engine_meta_diff = false;
+        disable_value_cache(conf); // Remove after next upgrade.
     };
     let pd_wrapper =
         PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
@@ -620,4 +624,13 @@ impl UpgradeTestSwitches {
             graceful_restart,
         }
     }
+}
+
+fn disable_value_cache(conf: &mut TikvConfig) {
+    conf.kvengine.value_cache_capacity = 0.into();
+}
+
+fn enable_value_cache(conf: &mut TikvConfig) {
+    use tikv_util::config::ReadableSize;
+    conf.kvengine.value_cache_capacity = ReadableSize::mb(1).into();
 }
