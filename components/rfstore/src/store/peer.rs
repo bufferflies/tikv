@@ -2299,7 +2299,6 @@ impl<'a> PreprocessRef<'a> {
         let initial_flush_seq = new_meta.seq;
 
         new_meta.rollback_merge(entry.index);
-        new_meta.set_property(TERM_KEY, &entry.term.to_le_bytes());
         self.update_meta_on_version_change(ctx, &new_meta, &region, None);
         ctx.apply_msgs
             .msgs
