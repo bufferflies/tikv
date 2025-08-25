@@ -49,12 +49,29 @@ use crate::{
     *,
 };
 
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum MajorCompactionType {
+    Disable,
+    Enable,
+    EnableColumnar,
+}
+
+impl From<&[u8]> for MajorCompactionType {
+    fn from(s: &[u8]) -> Self {
+        match s {
+            MANUAL_MAJOR_COMPACTION_ENABLE_COLUMNAR => MajorCompactionType::EnableColumnar,
+            MANUAL_MAJOR_COMPACTION_ENABLE => MajorCompactionType::Enable,
+            _ => MajorCompactionType::Disable,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ShardPendingOperations {
     pub(crate) del_prefixes: Arc<DeletePrefixes>,
     pub(crate) truncate_ts: Option<u64>,
     pub(crate) trim_over_bound: bool,
-    pub(crate) manual_major_compaction: bool,
+    pub(crate) manual_major_compaction: MajorCompactionType,
     pub(crate) storage_class_spec: StorageClassSpec,
 }
 
@@ -64,7 +81,7 @@ impl ShardPendingOperations {
             del_prefixes: Arc::new(DeletePrefixes::new_with_keyspace_id(keyspace_id)),
             truncate_ts: None,
             trim_over_bound: false,
-            manual_major_compaction: false,
+            manual_major_compaction: MajorCompactionType::Disable,
             storage_class_spec: StorageClassSpec::default(),
         }
     }
@@ -185,6 +202,7 @@ pub const TRIM_OVER_BOUND_ENABLE: &[u8] = &[1];
 pub const TRIM_OVER_BOUND_DISABLE: &[u8] = b"";
 
 pub const MANUAL_MAJOR_COMPACTION_ENABLE: &[u8] = &[1];
+pub const MANUAL_MAJOR_COMPACTION_ENABLE_COLUMNAR: &[u8] = &[2];
 pub const MANUAL_MAJOR_COMPACTION_DISABLE: &[u8] = b"";
 
 pub(crate) const INITIAL_UPDATE_COUNTER: u64 = 0;
@@ -266,7 +284,7 @@ impl Shard {
             }
             if let Some(val) = get_shard_property(MANUAL_MAJOR_COMPACTION, props) {
                 if !val.is_empty() {
-                    pending_ops.manual_major_compaction = true;
+                    pending_ops.manual_major_compaction = MajorCompactionType::from(val.as_slice());
                 }
             }
             if let Some(val) = get_shard_property(STORAGE_CLASS_KEY, props) {
@@ -687,12 +705,8 @@ impl Shard {
 
     pub(crate) fn set_manual_major_compaction(&self, val: &[u8]) -> bool {
         let mut pending_ops = self.pending_ops.write().unwrap();
-        if !val.is_empty() {
-            pending_ops.manual_major_compaction = true;
-            return true;
-        }
-        pending_ops.manual_major_compaction = false;
-        false
+        pending_ops.manual_major_compaction = MajorCompactionType::from(val);
+        !val.is_empty()
     }
 
     /// Get suggest key for region split.
@@ -803,7 +817,7 @@ impl Shard {
                     self.properties.remove(MANUAL_MAJOR_COMPACTION);
                 }
                 let mut pending_ops = self.pending_ops.write().unwrap();
-                pending_ops.manual_major_compaction = !val.is_empty();
+                pending_ops.manual_major_compaction = MajorCompactionType::from(val);
             }
             STORAGE_CLASS_KEY => {
                 let mut pending_ops = self.pending_ops.write().unwrap();
@@ -990,6 +1004,22 @@ impl Shard {
         trim_over_bound && !shard_data.has_mem_over_bound_data()
     }
 
+    fn ready_to_manual_major_compaction(comp: MajorCompactionType, shard_data: &ShardData) -> bool {
+        match comp {
+            MajorCompactionType::Disable => false,
+            MajorCompactionType::Enable => !shard_data.has_unconverted_l0s(),
+            MajorCompactionType::EnableColumnar => {
+                shard_data
+                    .schema_file
+                    .as_ref()
+                    .map(|f| !f.tables_with_columnar().is_empty())
+                    .unwrap_or(false)
+                    && !shard_data.columnar_table_ids.is_empty()
+                    && !shard_data.get_all_columnar_files().is_empty()
+            }
+        }
+    }
+
     fn refresh_compaction_priority(&self) {
         let data = self.get_data();
         let pending_ops = self.pending_ops.read().unwrap();
@@ -1003,13 +1033,25 @@ impl Shard {
         } else if Self::ready_to_trim_over_bound(pending_ops.trim_over_bound, &data) {
             *self.compaction_priority.write().unwrap() = Some(CompactionPriority::TrimOverBound);
             return;
-        } else if pending_ops.manual_major_compaction && !data.has_unconverted_l0s() {
+        } else if Self::ready_to_manual_major_compaction(pending_ops.manual_major_compaction, &data)
+        {
             // Set major compaction priority to 2.0 to make it less likely to be picked up
             // when there are other shards waiting to be compacted.
-            *self.compaction_priority.write().unwrap() = Some(CompactionPriority::Major {
-                score: 2.0,
-                is_manual: true,
-            });
+            let is_columnar =
+                pending_ops.manual_major_compaction == MajorCompactionType::EnableColumnar;
+            *self.compaction_priority.write().unwrap() = if !is_columnar {
+                Some(CompactionPriority::Major {
+                    score: 2.0,
+                    is_manual: true,
+                })
+            } else {
+                Some(CompactionPriority::ColumnarMajor {
+                    table_ids_to_add: vec![],
+                    table_ids_to_clear: vec![],
+                    is_manual: true,
+                    schema_version: data.schema_file.as_ref().unwrap().get_version(),
+                })
+            };
             return;
         }
         if !data.blob_tbl_map.is_empty() {
@@ -1212,6 +1254,8 @@ impl Shard {
             return Some(CompactionPriority::ColumnarMajor {
                 table_ids_to_add,
                 table_ids_to_clear,
+                is_manual: false,
+                schema_version: data.schema_file.as_ref().unwrap().get_version(),
             });
         }
 
@@ -1386,6 +1430,7 @@ impl Shard {
         if self.is_compacting()
             || self.get_compaction_priority().is_some()
             || self.pending_ops.read().unwrap().manual_major_compaction
+                != MajorCompactionType::Disable
         {
             return false;
         }
@@ -1497,10 +1542,6 @@ impl Shard {
 
     pub fn get_truncate_ts(&self) -> Option<u64> {
         self.pending_ops.read().unwrap().truncate_ts
-    }
-
-    pub fn get_manual_major_compaction(&self) -> bool {
-        self.pending_ops.read().unwrap().manual_major_compaction
     }
 
     pub fn get_storage_class_spec(&self) -> StorageClassSpec {

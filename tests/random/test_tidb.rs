@@ -169,6 +169,7 @@ fn test_random_with_tidb() {
     let running = Running::new_start();
     let async_handles = start_workloads(
         &tc,
+        pd_client.clone(),
         &keyspace_manager,
         &switches,
         &runtime,
@@ -670,6 +671,7 @@ pub(crate) async fn collect_tables(
 
 pub(crate) fn start_workloads(
     tc: &TidbCluster,
+    pd_client: Arc<dyn PdClient>,
     keyspace_manager: &KeyspaceManager,
     switches: &Switches,
     runtime: &Runtime,
@@ -713,6 +715,7 @@ pub(crate) fn start_workloads(
     if switches.columnar_switch_on {
         async_handles.push(runtime.spawn(run_columnar_workload(
             tc.clone(),
+            pd_client.clone(),
             keyspace_manager.clone(),
             COLUMNAR_WORKLOAD_KEYSPACE,
             running.clone(),

@@ -1,6 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    iter::FromIterator,
     rc::Rc,
     sync::{atomic::Ordering, Arc, Mutex},
     thread,
@@ -8,6 +9,7 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
+use collections::HashSet;
 use futures::executor::block_on;
 use rand::prelude::*;
 use tidb_query_datatype::{
@@ -369,13 +371,15 @@ fn test_columnar_major_compaction() {
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_cfs([write_cf, ShardCf::new(LOCK_CF), ShardCf::new(EXTRA_CF)]);
-    builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
+    builder.set_schema(schema_file.get_version(), 0, Some(schema_file.clone()));
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
     *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor {
         table_ids_to_add: vec![table_id],
         table_ids_to_clear: vec![],
+        is_manual: false,
+        schema_version: schema_file.get_version(),
     });
     engine.trigger_compact(id_ver);
     info!("trigger columnar major compaction {}", shard.tag());
@@ -570,6 +574,8 @@ fn test_columnar_major_compaction_multiple_tables() {
     *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor {
         table_ids_to_add: schema_file.export_backend_table_ids(),
         table_ids_to_clear: vec![],
+        is_manual: false,
+        schema_version: schema_file.get_version(),
     });
     engine.trigger_compact(id_ver);
     info!("trigger columnar major compaction {}", shard.tag());
@@ -658,6 +664,8 @@ fn test_columnar_major_compaction_multiple_tables() {
     *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor {
         table_ids_to_add: vec![4, 5],
         table_ids_to_clear: vec![3],
+        is_manual: false,
+        schema_version: schema_file.get_version(),
     });
     engine.trigger_compact(id_ver);
     info!("trigger columnar major compaction {}", shard.tag());
@@ -687,6 +695,40 @@ fn test_columnar_major_compaction_multiple_tables() {
         verify_columnar_for_table(&schema_file, &snap, table_id);
     }
 
+    let ok = try_wait(|| shard.compaction_priority.read().unwrap().is_none(), 5);
+    assert!(ok, "wait other compaction failed");
+
+    // Test manual columnar major compaction.
+    let data = shard.get_data();
+    shard.set_data(ShardDataBuilder::new(data).build());
+    *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarMajor {
+        table_ids_to_add: vec![1, 2, 4, 5],
+        table_ids_to_clear: vec![],
+        is_manual: true,
+        schema_version: schema_file.get_version(),
+    });
+    engine.trigger_compact(id_ver);
+    info!("trigger manual columnar major compaction {}", shard.tag());
+    let old_file_ids = HashSet::from_iter(shard.get_all_col_files().iter().cloned());
+    let ok = try_wait(
+        || {
+            let new_file_ids = HashSet::from_iter(shard.get_all_col_files().iter().cloned());
+            info!(
+                "wait manual columnar major compaction {} file_ids: {:?}",
+                shard.tag(),
+                new_file_ids
+            );
+            old_file_ids.difference(&new_file_ids).count() == 0
+        },
+        COLUMNAR_COMPACTION_WAIT_TIME,
+    );
+    assert!(ok);
+    let table_ids = shard.get_data().columnar_table_ids.clone();
+    let snap = shard.new_snap_access();
+    assert_eq!(table_ids, vec![1, 2, 4, 5]);
+    for table_id in table_ids {
+        verify_columnar_for_table(&schema_file, &snap, table_id);
+    }
     let ok = try_wait(|| shard.compaction_priority.read().unwrap().is_none(), 5);
     assert!(ok, "wait other compaction failed");
 

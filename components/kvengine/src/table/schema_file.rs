@@ -436,6 +436,14 @@ impl SchemaFile {
             .collect::<Vec<_>>()
     }
 
+    pub fn tables_with_columnar(&self) -> Vec<i64> {
+        self.core
+            .tables
+            .iter()
+            .filter_map(|(&table_id, schema)| schema.with_columnar().then_some(table_id))
+            .collect()
+    }
+
     // Note: This function return table id of regular & partitioned tables, but not
     // partition id of sub partitions.
     pub fn tables_with_storage_class(&self) -> HashSet<i64> {

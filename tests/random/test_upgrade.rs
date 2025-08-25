@@ -85,6 +85,7 @@ fn test_random_upgrade() {
     let running = Running::new_start();
     let async_handles = start_workloads(
         &tc,
+        pd_client.clone(),
         &keyspace_manager,
         &switches,
         &runtime,

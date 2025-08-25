@@ -998,6 +998,7 @@ impl ShardMeta {
         if comp.target_level == 2 {
             self.columnar_l2_snap_version = comp.snap_version.into();
         }
+
         let col_change = comp.get_columnar_change();
         for col_create in col_change.get_columnar_creates() {
             self.files.insert(
@@ -1041,6 +1042,9 @@ impl ShardMeta {
             if columnar_table_ids.is_empty() {
                 self.unconverted_l0s.clear();
             }
+        }
+        if comp.get_is_manual_major_compaction() {
+            self.del_property(MANUAL_MAJOR_COMPACTION);
         }
     }
 

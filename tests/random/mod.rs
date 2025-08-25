@@ -290,6 +290,7 @@ pub(crate) fn spawn_major_compact(
                         security_mgr,
                         store.clone(),
                         keyspace_id,
+                        false,
                     )));
                 }
                 for handle in handles {
@@ -308,11 +309,12 @@ pub(crate) async fn request_major_compact_on_store(
     security_mgr: Arc<SecurityManager>,
     store: Store,
     keyspace_id: u32,
+    columnar: bool,
 ) -> Result<()> {
     let uri = security_mgr
         .build_uri(format!(
-            "{}/major-compact?major_compact=true&keyspace_id={}",
-            &store.status_address, keyspace_id
+            "{}/major-compact?major_compact=true&keyspace_id={}&columnar={}",
+            &store.status_address, keyspace_id, columnar
         ))
         .unwrap();
     let req = || Request::post(&uri).body(Body::empty()).unwrap();

@@ -640,6 +640,8 @@ impl PdRunner {
                 .get(&store_id)
                 .map_or(false, |is_tiflash| *is_tiflash)
         });
+
+        // TODO: remove this after columnar kv size freshed.
         let columnar_one_table = if let (Ok(lower_bound), Ok(upper_bound)) = (
             decode_bytes(&mut region.get_start_key(), false),
             decode_bytes(&mut region.get_end_key(), false),
@@ -657,7 +659,7 @@ impl PdRunner {
         // If there has tiflash replicas, use the kv size as the columnar kv size.
         let columnar_kv_size = if has_tiflash_replicas || columnar_one_table {
             Some(region_stat.approximate_kv_size)
-        // TODO: uncomment this when we have columnar kv size freshed.
+        // TODO: uncomment after columnar kv size freshed.
         // } else if region_stat.approximate_columnar_kv_size > 0 {
         //     Some(region_stat.approximate_columnar_kv_size)
         } else if region_stat.approximate_columnar_size > 0 {

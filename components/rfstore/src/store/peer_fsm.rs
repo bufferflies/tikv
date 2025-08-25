@@ -19,7 +19,7 @@ use kvengine::{
     ia::ia_auto_file::report_transitions, table::schema_file::SchemaFile,
     table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard, DEL_PREFIXES_KEY,
     MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE,
-    TERM_KEY,
+    MANUAL_MAJOR_COMPACTION_ENABLE_COLUMNAR, TERM_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -330,8 +330,9 @@ impl<'a> PeerMsgHandler<'a> {
             }
             CasualMessage::MajorCompact {
                 major_compact,
+                columnar,
                 callback,
-            } => self.on_manual_major_compact(major_compact, callback),
+            } => self.on_manual_major_compact(major_compact, columnar, callback),
             CasualMessage::UpdateSchemaFile(schema_file) => self.on_update_schema_file(schema_file),
             CasualMessage::CheckLeader {
                 shard_ver,
@@ -1564,7 +1565,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.propose_raft_command(cmd, callback, None);
     }
 
-    fn on_manual_major_compact(&mut self, major_compact: bool, callback: Callback) {
+    fn on_manual_major_compact(&mut self, major_compact: bool, columnar: bool, callback: Callback) {
         if !self.peer.is_leader() {
             callback.invoke_with_response(RaftCmdResponse::default());
             return;
@@ -1574,7 +1575,11 @@ impl<'a> PeerMsgHandler<'a> {
         let mut cs = kvengine::new_change_set(id_ver.id(), id_ver.ver());
         cs.set_property_key(MANUAL_MAJOR_COMPACTION.to_string());
         if major_compact {
-            cs.set_property_value(MANUAL_MAJOR_COMPACTION_ENABLE.to_vec());
+            if columnar {
+                cs.set_property_value(MANUAL_MAJOR_COMPACTION_ENABLE_COLUMNAR.to_vec());
+            } else {
+                cs.set_property_value(MANUAL_MAJOR_COMPACTION_ENABLE.to_vec());
+            }
         } else {
             cs.set_property_value(MANUAL_MAJOR_COMPACTION_DISABLE.to_vec());
         }

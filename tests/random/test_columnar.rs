@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use futures::future::join_all;
+use pd_client::PdClient;
 use rand::prelude::*;
 use sqlx::{
     types::{
@@ -23,6 +24,7 @@ use tikv_util::{debug, error, info, time::Instant};
 use tokio::sync::Mutex;
 
 use crate::{
+    request_major_compact_on_store,
     sql_util::{
         get_engine_hint, is_db_error_retryable, wait_tiflash_or_columnar_replicas_available,
         DEADLOCK_ERR_MSG,
@@ -177,8 +179,21 @@ async fn trigger_columnar_major_compaction(pool: &Pool<MySql>) {
     .await;
 }
 
+async fn trigger_manual_columnar_major_compaction(pd_client: Arc<dyn PdClient>, keyspace_id: u32) {
+    let tag = "trigger_manual_columnar_major_compaction";
+    info!("{}: trigger manual columnar major compaction", tag);
+    let security_mgr = pd_client.get_security_mgr();
+    let stores = pd_client.get_all_stores(true).unwrap();
+    for store in stores {
+        request_major_compact_on_store(security_mgr.clone(), store, keyspace_id, true)
+            .await
+            .unwrap();
+    }
+}
+
 pub(crate) async fn run_columnar_workload(
     tc: TidbCluster,
+    pd_client: Arc<dyn PdClient>,
     keyspace_manager: KeyspaceManager,
     keyspace_id: u32,
     running: Running,
@@ -228,9 +243,10 @@ pub(crate) async fn run_columnar_workload(
 
     let pool_copy = pool.clone();
     let running_mutex_copy = running_mutex.clone();
+    let running_copy = running.clone();
     handles.push(tokio::spawn(async move {
         let start_time = Instant::now();
-        while running.get() {
+        while running_copy.get() {
             let guard = running_mutex_copy.lock().await;
             info!("verify_data randomly");
             match verify_data(&pool_copy, false, vector_common_handle).await {
@@ -254,6 +270,15 @@ pub(crate) async fn run_columnar_workload(
         info!("pause columnar workload trigger columnar major compaction");
         let _guard = running_mutex_copy.lock().await;
         trigger_columnar_major_compaction(&pool_copy).await;
+    }));
+
+    let pd_client_copy = pd_client.clone();
+    let running_copy = running.clone();
+    handles.push(tokio::spawn(async move {
+        while running_copy.get() {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            trigger_manual_columnar_major_compaction(pd_client_copy.clone(), keyspace_id).await;
+        }
     }));
 
     join_all(handles).await;

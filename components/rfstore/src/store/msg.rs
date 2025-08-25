@@ -513,6 +513,7 @@ pub enum CasualMessage {
     TriggerTrimOverBound(TrimOverBoundParameter),
     MajorCompact {
         major_compact: bool,
+        columnar: bool,
         callback: Callback,
     },
     UpdateSchemaFile(SchemaFile),
@@ -558,8 +559,16 @@ impl fmt::Debug for CasualMessage {
             CasualMessage::TriggerTrimOverBound(param) => {
                 write!(fmt, "trigger trim over bound {:?}", param)
             }
-            CasualMessage::MajorCompact { major_compact, .. } => {
-                write!(fmt, "major compact {:?}", major_compact)
+            CasualMessage::MajorCompact {
+                major_compact,
+                columnar,
+                ..
+            } => {
+                write!(
+                    fmt,
+                    "major compact {:?}, columnar: {}",
+                    major_compact, columnar
+                )
             }
             CasualMessage::UpdateSchemaFile(schema_file) => {
                 write!(

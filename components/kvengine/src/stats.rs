@@ -16,7 +16,7 @@ use crate::{
         ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM,
     },
     table::{BoundedDataSet, DataBound, InnerKey},
-    IdVer, LevelHandler, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
+    IdVer, LevelHandler, MajorCompactionType, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
 };
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -796,7 +796,8 @@ impl super::Shard {
             has_del_prefixes: !pending_ops.del_prefixes.is_empty(),
             ready_to_destroy_range: Self::ready_to_destroy_range(&pending_ops.del_prefixes, &data),
             trim_over_bound: pending_ops.trim_over_bound,
-            manual_major_compaction: pending_ops.manual_major_compaction,
+            manual_major_compaction: pending_ops.manual_major_compaction
+                != MajorCompactionType::Disable,
             storage_class_spec: sc_spec,
             ia: ia_stats,
             is_sync: data.is_sync(),

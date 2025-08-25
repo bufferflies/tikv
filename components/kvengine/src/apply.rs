@@ -1165,6 +1165,7 @@ impl EngineCore {
             return;
         }
         let col_comp = cs.get_columnar_compaction();
+        let is_manual_major_compaction = col_comp.get_is_manual_major_compaction();
         let col_change = col_comp.get_columnar_change();
         let old_data = shard.get_data();
         let mut new_col_levels = old_data.col_levels.clone();
@@ -1185,9 +1186,10 @@ impl EngineCore {
         new_col_levels
             .unconverted_l0s
             .retain(|l0| !col_comp.row_l0s.contains(&l0.id()));
-        if old_data.columnar_table_ids.is_empty() {
+        let mut columnar_table_ids = old_data.columnar_table_ids.clone();
+        if columnar_table_ids.is_empty() {
             // If the columnar_table_ids is empty, this must be the first columnar major
-            // compaction.
+            // compaction or manual columnar major compaction.
             let new_flushed_l0_tbls: Vec<L0Table> = old_data
                 .l0_tbls
                 .iter()
@@ -1196,7 +1198,6 @@ impl EngineCore {
                 .collect();
             new_col_levels.unconverted_l0s.extend(new_flushed_l0_tbls);
         }
-        let mut columnar_table_ids = old_data.columnar_table_ids.clone();
         let mut clear_schema = false;
         if col_comp.get_snap_version() == 0 {
             new_col_levels.unconverted_l0s.clear();
@@ -1231,6 +1232,9 @@ impl EngineCore {
         builder.set_columnar_table_ids(columnar_table_ids);
         builder.set_vector_indexes(vector_indexes);
         shard.set_data(builder.build());
+        if is_manual_major_compaction {
+            shard.set_property(MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE);
+        }
     }
 
     fn apply_update_vector_index(&self, shard: &Shard, cs: &ChangeSet) {

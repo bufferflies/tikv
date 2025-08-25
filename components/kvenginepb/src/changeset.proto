@@ -84,6 +84,7 @@ message ColumnarCompaction {
   uint32 target_level = 4;
   repeated int64 columnar_table_ids = 5;
   repeated int64 columnar_table_ids_to_clear = 6;
+  bool is_manual_major_compaction = 7;
 }
 
 message UpdateVectorIndex {

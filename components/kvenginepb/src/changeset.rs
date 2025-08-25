@@ -2773,6 +2773,7 @@ pub struct ColumnarCompaction {
     pub target_level: u32,
     pub columnar_table_ids: ::std::vec::Vec<i64>,
     pub columnar_table_ids_to_clear: ::std::vec::Vec<i64>,
+    pub is_manual_major_compaction: bool,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -2926,6 +2927,21 @@ impl ColumnarCompaction {
     pub fn take_columnar_table_ids_to_clear(&mut self) -> ::std::vec::Vec<i64> {
         ::std::mem::replace(&mut self.columnar_table_ids_to_clear, ::std::vec::Vec::new())
     }
+
+    // bool is_manual_major_compaction = 7;
+
+
+    pub fn get_is_manual_major_compaction(&self) -> bool {
+        self.is_manual_major_compaction
+    }
+    pub fn clear_is_manual_major_compaction(&mut self) {
+        self.is_manual_major_compaction = false;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_is_manual_major_compaction(&mut self, v: bool) {
+        self.is_manual_major_compaction = v;
+    }
 }
 
 impl ::protobuf::Message for ColumnarCompaction {
@@ -2968,6 +2984,13 @@ impl ::protobuf::Message for ColumnarCompaction {
                 6 => {
                     ::protobuf::rt::read_repeated_int64_into(wire_type, is, &mut self.columnar_table_ids_to_clear)?;
                 },
+                7 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_bool()?;
+                    self.is_manual_major_compaction = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -2999,6 +3022,9 @@ impl ::protobuf::Message for ColumnarCompaction {
         for value in &self.columnar_table_ids_to_clear {
             my_size += ::protobuf::rt::value_size(6, *value, ::protobuf::wire_format::WireTypeVarint);
         };
+        if self.is_manual_major_compaction != false {
+            my_size += 2;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -3025,6 +3051,9 @@ impl ::protobuf::Message for ColumnarCompaction {
         for v in &self.columnar_table_ids_to_clear {
             os.write_int64(6, *v)?;
         };
+        if self.is_manual_major_compaction != false {
+            os.write_bool(7, self.is_manual_major_compaction)?;
+        }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -3097,6 +3126,11 @@ impl ::protobuf::Message for ColumnarCompaction {
                     |m: &ColumnarCompaction| { &m.columnar_table_ids_to_clear },
                     |m: &mut ColumnarCompaction| { &mut m.columnar_table_ids_to_clear },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
+                    "is_manual_major_compaction",
+                    |m: &ColumnarCompaction| { &m.is_manual_major_compaction },
+                    |m: &mut ColumnarCompaction| { &mut m.is_manual_major_compaction },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<ColumnarCompaction>(
                     "ColumnarCompaction",
                     fields,
@@ -3125,6 +3159,7 @@ impl ::protobuf::Clear for ColumnarCompaction {
         self.target_level = 0;
         self.columnar_table_ids.clear();
         self.columnar_table_ids_to_clear.clear();
+        self.is_manual_major_compaction = false;
         self.unknown_fields.clear();
     }
 }
@@ -3140,6 +3175,7 @@ impl ::protobuf::PbPrint for ColumnarCompaction {
         ::protobuf::PbPrint::fmt(&self.target_level, "target_level", buf);
         ::protobuf::PbPrint::fmt(&self.columnar_table_ids, "columnar_table_ids", buf);
         ::protobuf::PbPrint::fmt(&self.columnar_table_ids_to_clear, "columnar_table_ids_to_clear", buf);
+        ::protobuf::PbPrint::fmt(&self.is_manual_major_compaction, "is_manual_major_compaction", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -3156,6 +3192,7 @@ impl ::std::fmt::Debug for ColumnarCompaction {
         ::protobuf::PbPrint::fmt(&self.target_level, "target_level", &mut s);
         ::protobuf::PbPrint::fmt(&self.columnar_table_ids, "columnar_table_ids", &mut s);
         ::protobuf::PbPrint::fmt(&self.columnar_table_ids_to_clear, "columnar_table_ids_to_clear", &mut s);
+        ::protobuf::PbPrint::fmt(&self.is_manual_major_compaction, "is_manual_major_compaction", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -10473,92 +10510,93 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x20\x01(\x08B\0:\0\"f\n\nSchemaMeta\x12\x15\n\x0bkeyspace_id\x18\x01\
     \x20\x01(\rB\0\x12\x11\n\x07file_id\x18\x02\x20\x01(\x04B\0\x12\x11\n\
     \x07version\x18\x03\x20\x01(\x03B\0\x12\x19\n\x0frestore_version\x18\x04\
-    \x20\x01(\x04B\0:\0\"\xd0\x01\n\x12ColumnarCompaction\x120\n\x0fcolumnar\
+    \x20\x01(\x04B\0:\0\"\xf6\x01\n\x12ColumnarCompaction\x120\n\x0fcolumnar\
     _change\x18\x01\x20\x01(\x0b2\x15.enginepb.TableChangeB\0\x12\x16\n\x0cs\
     nap_version\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07row_l0s\x18\x03\x20\x03\
     (\x04B\0\x12\x16\n\x0ctarget_level\x18\x04\x20\x01(\rB\0\x12\x1c\n\x12co\
     lumnar_table_ids\x18\x05\x20\x03(\x03B\0\x12%\n\x1bcolumnar_table_ids_to\
-    _clear\x18\x06\x20\x03(\x03B\0:\0\"\xa6\x01\n\x11UpdateVectorIndex\x12\
-    \x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\
-    \x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05a\
-    dded\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0\x12\x11\n\x07\
-    removed\x18\x05\x20\x03(\x04B\0\x12\x16\n\x0csnap_version\x18\x06\x20\
-    \x01(\x04B\0:\0\"\xab\x01\n\x05Flush\x12&\n\x08l0Create\x18\x01\x20\x01(\
-    \x0b2\x12.enginepb.L0CreateB\0\x12*\n\nproperties\x18\x02\x20\x01(\x0b2\
-    \x14.enginepb.PropertiesB\0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\
-    \x12\x10\n\x06max_ts\x18\x05\x20\x01(\x04B\0\x12'\n\tl0Creates\x18\x06\
-    \x20\x03(\x0b2\x12.enginepb.L0CreateB\0:\0\"\xb4\x04\n\x08Snapshot\x12\
-    \x15\n\x0bouter_start\x18\x01\x20\x01(\x0cB\0\x12\x13\n\touter_end\x18\
-    \x02\x20\x01(\x0cB\0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.engine\
-    pb.PropertiesB\0\x12'\n\tl0Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0\
-    CreateB\0\x12-\n\x0ctableCreates\x18\x06\x20\x03(\x0b2\x15.enginepb.Tabl\
-    eCreateB\0\x12\x15\n\x0bbaseVersion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rd\
-    ata_sequence\x18\x08\x20\x01(\x04B\0\x12+\n\x0bBlobCreates\x18\t\x20\x03\
-    (\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\n\x06max_ts\x18\n\x20\x01(\x04\
-    B\0\x12\x17\n\rinner_key_off\x18\x0b\x20\x01(\rB\0\x123\n\x0fcolumnarCre\
-    ates\x18\x0c\x20\x03(\x0b2\x18.enginepb.ColumnarCreateB\0\x12+\n\x0bsche\
-    ma_meta\x18\r\x20\x01(\x0b2\x14.enginepb.SchemaMetaB\0\x12\x19\n\x0funco\
-    nverted_l0s\x18\x0f\x20\x03(\x04B\0\x12/\n\x0evector_indexes\x18\x10\x20\
-    \x03(\x0b2\x15.enginepb.VectorIndexB\0\x12\x1c\n\x12columnar_table_ids\
-    \x18\x11\x20\x03(\x03B\0\x12\"\n\x18columnar_l2_snap_version\x18\x12\x20\
-    \x01(\x04B\0:\0\"Q\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\
-    \x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\
-    \x03\x20\x01(\x0cB\0\x12\x0e\n\x04size\x18\x04\x20\x01(\rB\0:\0\"C\n\nBl\
-    obCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\
-    \x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\
-    \"z\n\x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\
-    \x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\
-    \x12\x12\n\x08smallest\x18\x04\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\
-    \x05\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x07\x20\x01(\rB\0:\0\"\
-    <\n\x0bTableDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05\
-    level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"\
-    o\n\x0eColumnarCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\
-    \x05level\x18\x02\x20\x01(\rB\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\
-    \x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_o\
-    ffset\x18\x05\x20\x01(\rB\0:\0\"1\n\x0eColumnarDelete\x12\x0c\n\x02ID\
-    \x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0:\0\"D\
-    \n\x05Split\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.Propert\
-    iesB\0\x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\xd2\x01\n\x0bInges\
-    tFiles\x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\
-    \x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\
-    \0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\
-    \x12+\n\x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\
-    \x12\x10\n\x06max_ts\x18\x05\x20\x01(\x04B\0:\0\"C\n\nProperties\x12\x11\
-    \n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\
-    \tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"\xef\x01\n\x0bTabl\
-    eChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableD\
-    eleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.Table\
-    CreateB\0\x12\x16\n\x0cfile_ids_map\x18\x03\x20\x03(\x04B\0\x123\n\x0fco\
-    lumnarDeletes\x18\x04\x20\x03(\x0b2\x18.enginepb.ColumnarDeleteB\0\x123\
-    \n\x0fcolumnarCreates\x18\x05\x20\x03(\x0b2\x18.enginepb.ColumnarCreateB\
-    \0:\0\">\n\x0bTxnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\
-    \x14.enginepb.TxnFileRefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08star\
-    t_ts\x18\x01\x20\x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\
-    \0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\
-    \x04\x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\
-    \0\x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower\
-    _bound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\
-    \x20\x01(\x0cB\0:\0\"\xde\x01\n\x06Schema\x12\x12\n\x08table_id\x18\x01\
-    \x20\x01(\x03B\0\x12\x11\n\x07columns\x18\x02\x20\x03(\x0cB\0\x12\x14\n\
-    \npk_col_ids\x18\x03\x20\x03(\x03B\0\x122\n\x0evector_indexes\x18\x04\
-    \x20\x03(\x0b2\x18.enginepb.VectorIndexDefB\0\x12\x0e\n\x04keys\x18\x05\
-    \x20\x03(\tB\0\x12\x10\n\x06values\x18\x06\x20\x03(\x0cB\0\x12)\n\nparti\
-    tions\x18\x07\x20\x03(\x0b2\x13.enginepb.PartitionB\0\x12\x14\n\nmax_col\
-    _id\x18\x08\x20\x01(\x03B\0:\0\"=\n\tPartition\x12\x0c\n\x02id\x18\x01\
-    \x20\x01(\x03B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06va\
-    lues\x18\x03\x20\x03(\x0cB\0:\0\"\x8d\x01\n\x0bVectorIndex\x12\x12\n\x08\
-    table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\
-    \x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05files\x18\
-    \x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0\x12\x16\n\x0csnap_ver\
-    sion\x18\x05\x20\x01(\x04B\0:\0\"w\n\x0fVectorIndexFile\x12\x0c\n\x02id\
-    \x18\x01\x20\x01(\x04B\0\x12\x16\n\x0csnap_version\x18\x02\x20\x01(\x04B\
-    \0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\
-    \x18\x04\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x06\x20\x01(\rB\0:\
-    \0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\
-    \x12\x10\n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\
-    \x03\x20\x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\
-    \x0bspec_values\x18\x05\x20\x03(\x0cB\0:\0\",\n\rClearColumnar\x12\x19\n\
-    \x0frestore_version\x18\x01\x20\x01(\x04B\0:\0B\0b\x06proto3\
+    _clear\x18\x06\x20\x03(\x03B\0\x12$\n\x1ais_manual_major_compaction\x18\
+    \x07\x20\x01(\x08B\0:\0\"\xa6\x01\n\x11UpdateVectorIndex\x12\x12\n\x08ta\
+    ble_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\
+    \x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05added\x18\
+    \x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0\x12\x11\n\x07removed\
+    \x18\x05\x20\x03(\x04B\0\x12\x16\n\x0csnap_version\x18\x06\x20\x01(\x04B\
+    \0:\0\"\xab\x01\n\x05Flush\x12&\n\x08l0Create\x18\x01\x20\x01(\x0b2\x12.\
+    enginepb.L0CreateB\0\x12*\n\nproperties\x18\x02\x20\x01(\x0b2\x14.engine\
+    pb.PropertiesB\0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x10\n\
+    \x06max_ts\x18\x05\x20\x01(\x04B\0\x12'\n\tl0Creates\x18\x06\x20\x03(\
+    \x0b2\x12.enginepb.L0CreateB\0:\0\"\xb4\x04\n\x08Snapshot\x12\x15\n\x0bo\
+    uter_start\x18\x01\x20\x01(\x0cB\0\x12\x13\n\touter_end\x18\x02\x20\x01(\
+    \x0cB\0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.Properties\
+    B\0\x12'\n\tl0Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12\
+    -\n\x0ctableCreates\x18\x06\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\
+    \x12\x15\n\x0bbaseVersion\x18\x07\x20\x01(\x04B\0\x12\x17\n\rdata_sequen\
+    ce\x18\x08\x20\x01(\x04B\0\x12+\n\x0bBlobCreates\x18\t\x20\x03(\x0b2\x14\
+    .enginepb.BlobCreateB\0\x12\x10\n\x06max_ts\x18\n\x20\x01(\x04B\0\x12\
+    \x17\n\rinner_key_off\x18\x0b\x20\x01(\rB\0\x123\n\x0fcolumnarCreates\
+    \x18\x0c\x20\x03(\x0b2\x18.enginepb.ColumnarCreateB\0\x12+\n\x0bschema_m\
+    eta\x18\r\x20\x01(\x0b2\x14.enginepb.SchemaMetaB\0\x12\x19\n\x0funconver\
+    ted_l0s\x18\x0f\x20\x03(\x04B\0\x12/\n\x0evector_indexes\x18\x10\x20\x03\
+    (\x0b2\x15.enginepb.VectorIndexB\0\x12\x1c\n\x12columnar_table_ids\x18\
+    \x11\x20\x03(\x03B\0\x12\"\n\x18columnar_l2_snap_version\x18\x12\x20\x01\
+    (\x04B\0:\0\"Q\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\
+    \x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\
+    \x20\x01(\x0cB\0\x12\x0e\n\x04size\x18\x04\x20\x01(\rB\0:\0\"C\n\nBlobCr\
+    eate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\
+    \x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0:\0\"z\
+    \n\x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05l\
+    evel\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\
+    \x12\n\x08smallest\x18\x04\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\
+    \x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x07\x20\x01(\rB\0:\0\"<\n\
+    \x0bTableDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05lev\
+    el\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"o\n\
+    \x0eColumnarCreate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05\
+    level\x18\x02\x20\x01(\rB\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\
+    \0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\
+    \x18\x05\x20\x01(\rB\0:\0\"1\n\x0eColumnarDelete\x12\x0c\n\x02ID\x18\x01\
+    \x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0:\0\"D\n\x05Spl\
+    it\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\
+    \x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\xd2\x01\n\x0bIngestFiles\
+    \x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\
+    \x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\
+    \n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12+\n\
+    \x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\
+    \n\x06max_ts\x18\x05\x20\x01(\x04B\0:\0\"C\n\nProperties\x12\x11\n\x07sh\
+    ardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\
+    \x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"\xef\x01\n\x0bTableChan\
+    ge\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDelete\
+    B\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreat\
+    eB\0\x12\x16\n\x0cfile_ids_map\x18\x03\x20\x03(\x04B\0\x123\n\x0fcolumna\
+    rDeletes\x18\x04\x20\x03(\x0b2\x18.enginepb.ColumnarDeleteB\0\x123\n\x0f\
+    columnarCreates\x18\x05\x20\x03(\x0b2\x18.enginepb.ColumnarCreateB\0:\0\
+    \">\n\x0bTxnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\x14.eng\
+    inepb.TxnFileRefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08start_ts\x18\
+    \x01\x20\x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\0\x12\
+    \x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\x04\
+    \x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\0\
+    \x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_b\
+    ound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\x20\
+    \x01(\x0cB\0:\0\"\xde\x01\n\x06Schema\x12\x12\n\x08table_id\x18\x01\x20\
+    \x01(\x03B\0\x12\x11\n\x07columns\x18\x02\x20\x03(\x0cB\0\x12\x14\n\npk_\
+    col_ids\x18\x03\x20\x03(\x03B\0\x122\n\x0evector_indexes\x18\x04\x20\x03\
+    (\x0b2\x18.enginepb.VectorIndexDefB\0\x12\x0e\n\x04keys\x18\x05\x20\x03(\
+    \tB\0\x12\x10\n\x06values\x18\x06\x20\x03(\x0cB\0\x12)\n\npartitions\x18\
+    \x07\x20\x03(\x0b2\x13.enginepb.PartitionB\0\x12\x14\n\nmax_col_id\x18\
+    \x08\x20\x01(\x03B\0:\0\"=\n\tPartition\x12\x0c\n\x02id\x18\x01\x20\x01(\
+    \x03B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\x18\
+    \x03\x20\x03(\x0cB\0:\0\"\x8d\x01\n\x0bVectorIndex\x12\x12\n\x08table_id\
+    \x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\x03B\0\
+    \x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05files\x18\x04\x20\
+    \x03(\x0b2\x19.enginepb.VectorIndexFileB\0\x12\x16\n\x0csnap_version\x18\
+    \x05\x20\x01(\x04B\0:\0\"w\n\x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\
+    \x20\x01(\x04B\0\x12\x16\n\x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\
+    \x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\
+    \x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x06\x20\x01(\rB\0:\0\"z\n\
+    \x0eVectorIndexDef\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\
+    \n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\
+    \x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_\
+    values\x18\x05\x20\x03(\x0cB\0:\0\",\n\rClearColumnar\x12\x19\n\x0fresto\
+    re_version\x18\x01\x20\x01(\x04B\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

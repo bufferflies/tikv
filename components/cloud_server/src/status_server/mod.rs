@@ -1244,7 +1244,7 @@ impl StatusServer {
     }
 
     // URI: /major_compact?major_compact=xxx[&keyspace_id=xxx[&table_id=xxx]][&
-    // region_id=xxx]
+    // region_id=xxx][&columnar=true]
     // Note: return 404 when no match region is found.
     async fn major_compact(
         req: Request<Body>,
@@ -1272,6 +1272,9 @@ impl StatusServer {
         let region_id = query_pairs.get("region_id");
         let keyspace_id = query_pairs.get("keyspace_id");
         let table_id = query_pairs.get("table_id");
+        let columnar = query_pairs
+            .get("columnar")
+            .map_or(false, |s| bool::from_str(s).unwrap_or(false));
 
         let target_regions = if let Some(region_id) = region_id {
             let region_id = match u64::from_str(region_id) {
@@ -1336,6 +1339,7 @@ impl StatusServer {
                 *region_id,
                 CasualMessage::MajorCompact {
                     major_compact,
+                    columnar,
                     callback,
                 },
             );
