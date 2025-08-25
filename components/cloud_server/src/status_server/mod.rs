@@ -42,12 +42,13 @@ use kvengine::{
     table::{BoundedDataSet, InnerKey, SnapVersion},
     IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY,
 };
-use kvproto::{coprocessor::DelegateResponse, raft_serverpb::StoreIdent};
+use kvproto::{coprocessor::DelegateResponse, errorpb, metapb, raft_serverpb::StoreIdent};
 use online_config::OnlineConfig;
 use openssl::{
     ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVerifyMode},
     x509::X509,
 };
+use pd_client::PdClient;
 use pin_project::pin_project;
 use profile::*;
 use prometheus::TEXT_FORMAT;
@@ -73,13 +74,13 @@ use tikv::{
 };
 use tikv_util::{
     codec::bytes::decode_bytes,
-    config::ReadableSize,
+    config::{AbsoluteOrPercentSize, ReadableSize},
     future::paired_future_callback,
     http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
     logger::set_log_level,
     metrics::{dump, dump_to},
     sys::thread::ThreadBuildWrapper,
-    time::Instant,
+    time::{Instant, UnixSecs},
     timer::GLOBAL_TIMER_HANDLE,
 };
 use tokio::{
@@ -89,6 +90,7 @@ use tokio::{
         oneshot::{self, Receiver, Sender},
         Semaphore,
     },
+    task::JoinSet,
 };
 use tokio_openssl::SslStream;
 use txn_types::TsSet;
@@ -113,6 +115,10 @@ const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(600);
 const SERVER_TCP_KEEPALIVE: Duration = Duration::from_secs(120);
 
 const BACKUP_TS_WAIT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+const STORES_INFO_CACHE_TTL: Duration = Duration::from_secs(5);
+// Maximum TTL when fail to get stores info from PD.
+const STORES_INFO_CACHE_MAX_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -150,6 +156,7 @@ pub struct StatusServer {
     kvengine: kvengine::Engine,
     rfengine: rfengine::RfEngine,
     concurrency_manager: ConcurrencyManager,
+    pd_client: Arc<dyn PdClient>,
 }
 
 impl StatusServer {
@@ -161,6 +168,7 @@ impl StatusServer {
         kvengine: kvengine::Engine,
         rfengine: rfengine::RfEngine,
         concurrency_manager: ConcurrencyManager,
+        pd_client: Arc<dyn PdClient>,
     ) -> Result<Self> {
         let thread_pool = Builder::new_multi_thread()
             .enable_all()
@@ -183,6 +191,7 @@ impl StatusServer {
             kvengine,
             rfengine,
             concurrency_manager,
+            pd_client,
         })
     }
 
@@ -914,15 +923,21 @@ impl StatusServer {
 
     async fn ingest_files(
         req: Request<Body>,
-        router: &RaftRouter,
-        engine: &kvengine::Engine,
+        ctx: &StatusContext,
     ) -> hyper::Result<Response<Body>> {
         let cs = Self::get_change_set_request(req).await?;
-        let tag = tag_from_cs(engine, &cs);
+        let tag = tag_from_cs(&ctx.kvengine, &cs);
         info!("[{}] receive ingest_files request: {:?}", tag, cs);
 
-        if let Err(errpb) = check_available_space(engine) {
+        if let Err(errpb) = check_available_space(&ctx.kvengine) {
             warn!("[{}] reject ingest files, low space", tag);
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                errpb.write_to_bytes().unwrap(),
+            ));
+        }
+        if let Err(errpb) = check_follower_available_space(ctx, cs.shard_id, cs.shard_ver).await {
+            warn!("[{}] reject ingest files, follower low space", tag; "err" => ?errpb);
             return Ok(make_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 errpb.write_to_bytes().unwrap(),
@@ -933,7 +948,7 @@ impl StatusServer {
         let callback = Callback::write(Box::new(move |res| {
             cb(res);
         }));
-        router.send_casual_msg(
+        ctx.router.send_casual_msg(
             cs.get_shard_id(),
             CasualMessage::IngestFiles { cs, callback },
         );
@@ -1896,17 +1911,24 @@ impl StatusServer {
 
     async fn restore_shard(
         req: Request<Body>,
-        router: &RaftRouter,
-        engine: &kvengine::Engine,
+        ctx: &StatusContext,
     ) -> hyper::Result<Response<Body>> {
         let accept_pb = req.headers().is_accept_protobuf();
         let req = Self::get_restore_shard_request(req).await?;
-        let tag = tag_from_cs(engine, &req.cs);
+        let tag = tag_from_cs(&ctx.kvengine, &req.cs);
         let shard_id = req.cs.get_shard_id();
         debug!("[{}] receive restore_shard request: {:?}", tag, req);
 
-        if let Err(errpb) = check_available_space(engine) {
+        if let Err(errpb) = check_available_space(&ctx.kvengine) {
             warn!("[{}] reject restore shard, low space", tag; "err" => ?errpb);
+            return Ok(make_errpb_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &errpb,
+                accept_pb,
+            ));
+        }
+        if let Err(errpb) = check_follower_available_space(ctx, shard_id, req.cs.shard_ver).await {
+            warn!("[{}] reject restore shard, follower low space", tag; "err" => ?errpb);
             return Ok(make_errpb_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &errpb,
@@ -1918,7 +1940,7 @@ impl StatusServer {
         let callback = Callback::write(Box::new(move |res| {
             cb(res);
         }));
-        router.send_casual_msg(
+        ctx.router.send_casual_msg(
             req.cs.get_shard_id(),
             CasualMessage::RestoreShard {
                 cs: req.cs,
@@ -1946,7 +1968,7 @@ impl StatusServer {
                 accept_pb,
             ))
         } else {
-            let stat = engine.get_shard_stat(shard_id);
+            let stat = ctx.kvengine.get_shard_stat(shard_id);
             let resp = RestoreShardResponse {
                 shard_id,
                 restore_bytes: stat.kv_size,
@@ -2316,6 +2338,8 @@ impl StatusServer {
             rfengine: self.rfengine.clone(),
             concurrency_manager: self.concurrency_manager.clone(),
             dfs_file_read_semaphore: Semaphore::new(Self::DFS_FILE_READ_CONCURRENCY),
+            stores_info: Arc::new(StoresInfo::new(self.pd_client.clone())),
+            thread_pool: self.thread_pool.handle().clone(),
         });
         // Start to serve.
         let server = builder.serve(make_service_fn(move |conn: &C| {
@@ -2461,7 +2485,7 @@ impl StatusServer {
                                 res
                             }
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
-                                let res = Self::restore_shard(req, &ctx.router, &ctx.kvengine).await;
+                                let res = Self::restore_shard(req, &ctx).await;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .restore_shard
                                     .observe(start.saturating_elapsed().as_secs_f64());
@@ -2471,7 +2495,7 @@ impl StatusServer {
                                 Self::add_remote_compactor(req, &ctx.kvengine.comp_client).await
                             }
                             (Method::POST, path) if path.starts_with("/ingest_files") => {
-                                let res = Self::ingest_files(req, &ctx.router, &ctx.kvengine).await;
+                                let res = Self::ingest_files(req, &ctx).await;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .ingest_files
                                     .observe(start.saturating_elapsed().as_secs_f64());
@@ -2575,6 +2599,8 @@ struct StatusContext {
     rfengine: RfEngine,
     concurrency_manager: ConcurrencyManager,
     dfs_file_read_semaphore: Semaphore,
+    stores_info: Arc<StoresInfo>,
+    thread_pool: tokio::runtime::Handle,
 }
 
 // To unify TLS/Plain connection usage in start_serve function
@@ -2834,19 +2860,167 @@ fn check_available_space(
     engine: &kvengine::Engine,
 ) -> std::result::Result<(), kvproto::errorpb::Error> {
     if engine.is_low_space() {
-        let disk_full = kvproto::errorpb::DiskFull {
-            store_id: vec![engine.get_engine_id()],
-            reason: format!(
+        Err(make_errpb_disk_full(
+            vec![engine.get_engine_id()],
+            format!(
                 "available space is low: {}",
                 ReadableSize(engine.available_space()).as_mb_f64()
             ),
-            ..Default::default()
-        };
-        let mut errpb = kvproto::errorpb::Error::default();
-        errpb.set_disk_full(disk_full);
-        Err(errpb)
+        ))
     } else {
         Ok(())
+    }
+}
+
+async fn check_follower_available_space(
+    ctx: &StatusContext,
+    region_id: u64,
+    region_ver: u64,
+) -> std::result::Result<(), errorpb::Error> {
+    let (cb, fut) = paired_future_callback();
+    ctx.router.send_store_msg(StoreMsg::GetRegionById {
+        region_id,
+        callback: cb,
+    });
+    let region = fut
+        .await
+        .map_err(|e| {
+            // Return not leader to let caller retry.
+            make_errpb_not_leader(
+                region_id,
+                None,
+                format!("failed to get region {}: {}", region_id, e),
+            )
+        })?
+        .ok_or_else(|| make_errpb_region_not_found(region_id))?;
+    if region.get_region_epoch().version != region_ver {
+        return Err(make_errpb_epoch_not_match(region));
+    }
+
+    let current_store_id = ctx.kvengine.get_engine_id();
+    let followers = region
+        .get_peers()
+        .iter()
+        .filter(|p| p.store_id != current_store_id && p.role != metapb::PeerRole::Learner);
+    let mut join_set = JoinSet::new();
+    for follower in followers {
+        let stores_info = ctx.stores_info.clone();
+        let store_id = follower.store_id;
+        join_set.spawn_on(
+            async move {
+                stores_info
+                    .get_store_stats(store_id)
+                    .await
+                    .map(|stats| (store_id, stats))
+            },
+            &ctx.thread_pool,
+        );
+    }
+
+    let low_space_threshold = ctx.cfg_controller.get_current().storage.low_space_threshold;
+
+    let mut disk_full_stores = vec![];
+    let mut disk_full_stores_available_size = vec![];
+    while let Some(res) = join_set.join_next().await {
+        match res {
+            Ok(Ok((store_id, stats))) => {
+                if is_store_low_space(stats, low_space_threshold) {
+                    disk_full_stores.push(store_id);
+                    disk_full_stores_available_size.push(ReadableSize(stats.available).as_mb_f64());
+                }
+            }
+            Ok(Err(pd_err)) => {
+                // Return not leader to make caller retry.
+                return Err(make_errpb_not_leader(
+                    region_id,
+                    None,
+                    format!("failed to get store stats: {:?}", pd_err),
+                ));
+            }
+            Err(e) => {
+                // Return not leader to make caller retry.
+                return Err(make_errpb_not_leader(
+                    region_id,
+                    None,
+                    format!("failed to get store stats: {}", e),
+                ));
+            }
+        }
+    }
+
+    if disk_full_stores.is_empty() {
+        Ok(())
+    } else {
+        Err(make_errpb_disk_full(
+            disk_full_stores,
+            format!(
+                "available space is low: {:?}",
+                disk_full_stores_available_size
+            ),
+        ))
+    }
+}
+
+fn is_store_low_space(stats: StoreStatsLite, low_space_threshold: AbsoluteOrPercentSize) -> bool {
+    fail::fail_point!("is_store_low_space", |_| true);
+
+    stats.available <= low_space_threshold.absolute(stats.capacity)
+}
+
+#[derive(Default, Clone, Copy, Debug)]
+struct StoreStatsLite {
+    update_time_secs: u64,
+    capacity: u64,
+    available: u64,
+}
+
+type StoresStatsCache =
+    papaya::HashMap<u64 /* self */, Arc<tokio::sync::Mutex<StoreStatsLite>>>;
+
+struct StoresInfo {
+    pd_client: Arc<dyn PdClient>,
+    cache: StoresStatsCache,
+}
+
+impl StoresInfo {
+    fn new(pd_client: Arc<dyn PdClient>) -> Self {
+        Self {
+            pd_client,
+            cache: StoresStatsCache::default(),
+        }
+    }
+
+    async fn get_store_stats(&self, store_id: u64) -> pd_client::Result<StoreStatsLite> {
+        let stats_lite = self
+            .cache
+            .pin()
+            .get_or_insert_with(store_id, Default::default)
+            .clone();
+        let mut stats_lite = stats_lite.lock_owned().await;
+
+        let now = UnixSecs::now().into_inner();
+        if stats_lite.update_time_secs + STORES_INFO_CACHE_TTL.as_secs() > now {
+            return Ok(*stats_lite);
+        }
+
+        let stats = match self.pd_client.get_store_stats_async(store_id).await {
+            Ok(stats) => stats,
+            Err(e) => {
+                if stats_lite.update_time_secs + STORES_INFO_CACHE_MAX_TTL.as_secs() > now {
+                    warn!("get_store_stats failed, use stale cache"; "store" => store_id, "err" => ?e);
+                    return Ok(*stats_lite);
+                } else {
+                    error!("get_store_stats failed"; "store" => store_id, "err" => ?e);
+                    return Err(e);
+                }
+            }
+        };
+
+        stats_lite.update_time_secs = now;
+        stats_lite.capacity = stats.capacity;
+        stats_lite.available = stats.available;
+        info!("get_store_stats"; "store" => store_id, "stats" => ?stats_lite);
+        Ok(*stats_lite)
     }
 }
 
@@ -2887,4 +3061,43 @@ fn tag_from_cs(engine: &kvengine::Engine, cs: &kvenginepb::ChangeSet) -> ShardTa
         engine.get_engine_id(),
         IdVer::new(cs.shard_id, cs.shard_ver),
     )
+}
+
+fn make_errpb_not_leader(
+    region_id: u64,
+    leader: Option<metapb::Peer>,
+    msg: String,
+) -> errorpb::Error {
+    let mut errpb = errorpb::Error::default();
+    errpb.set_message(msg);
+    errpb.mut_not_leader().set_region_id(region_id);
+    if let Some(leader) = leader {
+        errpb.mut_not_leader().set_leader(leader);
+    }
+    errpb
+}
+
+fn make_errpb_region_not_found(region_id: u64) -> errorpb::Error {
+    let mut errpb = errorpb::Error::default();
+    errpb.mut_region_not_found().set_region_id(region_id);
+    errpb
+}
+
+fn make_errpb_epoch_not_match(region: metapb::Region) -> errorpb::Error {
+    let mut errpb = errorpb::Error::default();
+    errpb
+        .mut_epoch_not_match()
+        .set_current_regions(vec![region].into());
+    errpb
+}
+
+fn make_errpb_disk_full(stores_id: Vec<u64>, reason: String) -> errorpb::Error {
+    let disk_full = errorpb::DiskFull {
+        store_id: stores_id,
+        reason,
+        ..Default::default()
+    };
+    let mut errpb = errorpb::Error::default();
+    errpb.set_disk_full(disk_full);
+    errpb
 }

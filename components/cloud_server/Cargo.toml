@@ -70,6 +70,7 @@ num_cpus = "1"
 online_config = { path = "../online_config" }
 openssl = "0.10"
 overload_protector = { workspace = true }
+papaya = "0.2.3"
 paste = "1.0"
 pd_client = { path = "../pd_client", default-features = false }
 pin-project = "1.0"

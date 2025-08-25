@@ -7,6 +7,7 @@ use futures::executor::block_on;
 use kvengine::table::{ChecksumType, ZSTD_COMPRESSION};
 use load_data::task::{LoadDataConfig, LoadDataContext};
 use pd_client::PdClient;
+use rand::Rng;
 use test_cloud_server::{
     alloc_node_id_vec,
     client::RequestOptions,
@@ -30,7 +31,11 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 fn test_load_data() {
     test_util::init_log_for_test();
 
-    let low_space_fp = "engine_is_low_space";
+    let low_space_fp = if rand::thread_rng().gen_bool(0.5) {
+        "engine_is_low_space" // leader is low space.
+    } else {
+        "is_store_low_space" // follower is low space.
+    };
 
     let (temp_dir, _oss, dfs_conf) = prepare_dfs("test");
     let base_dir = temp_dir.path();

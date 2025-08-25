@@ -173,6 +173,10 @@ pub enum StoreMsg {
         end: Vec<u8>,
         callback: Box<dyn FnOnce(Vec<RegionIdVer>) + Send>,
     },
+    GetRegionById {
+        region_id: u64,
+        callback: Box<dyn FnOnce(Option<metapb::Region>) + Send>,
+    },
     SyncRegion {
         start: Vec<u8>,
         end: Vec<u8>,

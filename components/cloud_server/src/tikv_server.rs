@@ -935,6 +935,7 @@ impl TikvServer {
                 self.raw_engines.kv.clone(),
                 self.raw_engines.raft.clone(),
                 self.concurrency_manager.clone(),
+                self.pd_client.clone(),
             ) {
                 Ok(status_server) => Box::new(status_server),
                 Err(e) => {

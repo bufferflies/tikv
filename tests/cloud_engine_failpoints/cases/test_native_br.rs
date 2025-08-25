@@ -28,6 +28,7 @@ use native_br::{
     restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
 };
 use pd_client::PdClient;
+use rand::Rng;
 use security::{SecurityConfig, SecurityManager};
 use test_cloud_server::{
     alloc_node_id, alloc_node_id_vec,
@@ -228,7 +229,11 @@ fn test_restore_on_disk_full() {
     const DATA_LEN: usize = 10;
     const VALUE_SIZE: usize = 64;
 
-    let low_space_fp = "engine_is_low_space";
+    let low_space_fp = if rand::thread_rng().gen_bool(0.5) {
+        "engine_is_low_space" // leader is low space.
+    } else {
+        "is_store_low_space" // follower is low space.
+    };
 
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("t_");
     let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));

@@ -828,6 +828,12 @@ impl<'a> StoreMsgHandler<'a> {
             } => {
                 self.on_get_regions_in_range(start, end, callback);
             }
+            StoreMsg::GetRegionById {
+                region_id,
+                callback,
+            } => {
+                self.on_get_region_by_id(region_id, callback);
+            }
             StoreMsg::SyncRegion {
                 start,
                 end,
@@ -1729,6 +1735,15 @@ impl<'a> StoreMsgHandler<'a> {
             .map(|r| RegionIdVer::from_region(r))
             .collect();
         callback(regions)
+    }
+
+    fn on_get_region_by_id(
+        &self,
+        region_id: u64,
+        callback: Box<dyn FnOnce(Option<metapb::Region>) + Send>,
+    ) {
+        let region_opt = self.ctx.store_meta.region_map.get(region_id).cloned();
+        callback(region_opt);
     }
 
     fn on_sync_region(

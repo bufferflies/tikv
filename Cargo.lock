@@ -1352,6 +1352,7 @@ dependencies = [
  "online_config",
  "openssl",
  "overload_protector",
+ "papaya",
  "paste",
  "pd_client",
  "pin-project",
