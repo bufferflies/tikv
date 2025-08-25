@@ -424,10 +424,30 @@ impl MergedEngine {
                 region_progress.truncated_index = truncated_index;
                 // merge states
                 let mut batch = rfengine::WriteBatch::new();
+                let mut has_engine_meta_diff = false;
+                let mut has_engine_meta_snap_diff = false;
                 origin.iterate_peer_states(peer_id, false, |k, v| {
                     update_peer_state(&mut batch, k, v, merged_raft.get_engine_id(), region_id);
+                    match k {
+                        rfengine::KV_ENGINE_META_DIFF_KEY => has_engine_meta_diff = true,
+                        rfengine::KV_ENGINE_META_SNAP_DIFF_KEY => has_engine_meta_snap_diff = true,
+                        _ => {}
+                    }
                     true
                 });
+
+                if !has_engine_meta_diff {
+                    batch.set_state(region_id, region_id, rfengine::KV_ENGINE_META_DIFF_KEY, &[]);
+                }
+                if !has_engine_meta_snap_diff {
+                    batch.set_state(
+                        region_id,
+                        region_id,
+                        rfengine::KV_ENGINE_META_SNAP_DIFF_KEY,
+                        &[],
+                    );
+                }
+
                 // merge raft logs
                 let mut entry_buf = Vec::new();
                 let low_idx = merged_commit_index.max(truncated_index) + 1;
@@ -1042,6 +1062,7 @@ fn update_peer_state(
     store_id: u64,
     region_id: u64,
 ) {
+    // TODO: Compare and overwrite state only when it's newer.
     if k.starts_with(rfengine::REGION_META_KEY_PREFIX) {
         let mut origin_state = kvproto::raft_serverpb::RegionLocalState::new();
         origin_state.merge_from_bytes(v).unwrap();
