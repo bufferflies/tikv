@@ -41,7 +41,7 @@ use txn_types::{self, Key};
 use super::batch::{BatcherBuilder, ReqBatcher};
 use crate::{
     coprocessor::Endpoint,
-    coprocessor_v2, forward_duplex, forward_unary, log_net_error,
+    forward_duplex, forward_unary, log_net_error,
     server::{
         gc_worker::GcWorker, load_statistics::ThreadLoadPool, metrics::*, snap::Task as SnapTask,
         Error, Proxy, Result as ServerResult,
@@ -70,8 +70,6 @@ pub struct Service<E: Engine, L: LockManager, F: KvFormat> {
     storage: Storage<E, L, F>,
     // For handling coprocessor requests.
     copr: Endpoint<E>,
-    // For handling corprocessor v2 requests.
-    copr_v2: coprocessor_v2::Endpoint,
     // For handling snapshot.
     snap_scheduler: Scheduler<SnapTask>,
     // For handling `CheckLeader` request.
@@ -94,7 +92,6 @@ impl<E: Engine + Clone, L: LockManager + Clone, F: KvFormat> Clone for Service<E
             gc_worker: self.gc_worker.clone(),
             storage: self.storage.clone(),
             copr: self.copr.clone(),
-            copr_v2: self.copr_v2.clone(),
             snap_scheduler: self.snap_scheduler.clone(),
             check_leader_scheduler: self.check_leader_scheduler.clone(),
             enable_req_batch: self.enable_req_batch,
@@ -112,7 +109,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Service<E, L, F> {
         storage: Storage<E, L, F>,
         gc_worker: GcWorker<E>,
         copr: Endpoint<E>,
-        copr_v2: coprocessor_v2::Endpoint,
         snap_scheduler: Scheduler<SnapTask>,
         check_leader_scheduler: Scheduler<CheckLeaderTask>,
         grpc_thread_load: Arc<ThreadLoadPool>,
@@ -125,7 +121,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Service<E, L, F> {
             gc_worker,
             storage,
             copr,
-            copr_v2,
             snap_scheduler,
             check_leader_scheduler,
             enable_req_batch,
@@ -464,36 +459,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
         ctx.spawn(task);
     }
 
-    fn raw_coprocessor(
-        &mut self,
-        ctx: RpcContext<'_>,
-        mut req: RawCoprocessorRequest,
-        sink: UnarySink<RawCoprocessorResponse>,
-    ) {
-        let source = req.mut_context().take_request_source();
-        let begin_instant = Instant::now();
-        let future = future_raw_coprocessor(&self.copr_v2, &self.storage, req);
-        let task = async move {
-            let resp = future.await?;
-            sink.success(resp).await?;
-            let elapsed = begin_instant.saturating_elapsed();
-            GRPC_MSG_HISTOGRAM_STATIC
-                .raw_coprocessor
-                .observe(elapsed.as_secs_f64());
-            record_request_source_metrics(source, elapsed);
-            ServerResult::Ok(())
-        }
-        .map_err(|e| {
-            log_net_error!(e, "kv rpc failed";
-                "request" => "coprocessor_v2"
-            );
-            GRPC_MSG_FAIL_COUNTER.raw_coprocessor.inc();
-        })
-        .map(|_| ());
-
-        ctx.spawn(task);
-    }
-
     fn unsafe_destroy_range(
         &mut self,
         ctx: RpcContext<'_>,
@@ -793,7 +758,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
         let peer = ctx.peer();
         let storage = self.storage.clone();
         let copr = self.copr.clone();
-        let copr_v2 = self.copr_v2.clone();
         let pool_size = storage.get_normal_pool_size();
         let batch_builder = BatcherBuilder::new(self.enable_req_batch, pool_size);
         let request_handler = stream.try_for_each(move |mut req| {
@@ -803,16 +767,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             let mut batcher = batch_builder.build(queue, request_ids.len());
             GRPC_REQ_BATCH_COMMANDS_SIZE.observe(requests.len() as f64);
             for (id, req) in request_ids.into_iter().zip(requests) {
-                handle_batch_commands_request(
-                    &mut batcher,
-                    &storage,
-                    &copr,
-                    &copr_v2,
-                    &peer,
-                    id,
-                    req,
-                    &tx,
-                );
+                handle_batch_commands_request(&mut batcher, &storage, &copr, &peer, id, req, &tx);
                 if let Some(batch) = batcher.as_mut() {
                     batch.maybe_commit(&storage, &tx);
                 }
@@ -1029,7 +984,6 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
     batcher: &mut Option<ReqBatcher>,
     storage: &Storage<E, L, F>,
     copr: &Endpoint<E>,
-    copr_v2: &coprocessor_v2::Endpoint,
     peer: &str,
     id: u64,
     req: batch_commands_request::Request,
@@ -1122,6 +1076,7 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
                 Some(batch_commands_request::request::Cmd::BufferBatchGet(_)) => unimplemented!(),
                 Some(batch_commands_request::request::Cmd::GetHealthFeedback(_)) => unimplemented!(),
                 Some(batch_commands_request::request::Cmd::BroadcastTxnStatus(_)) => unimplemented!(),
+                Some(batch_commands_request::request::Cmd::RawCoprocessor(_)) => unimplemented!(),
             }
         }
     }
@@ -1150,7 +1105,6 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
         RawScan, future_raw_scan(storage), raw_scan;
         RawDeleteRange, future_raw_delete_range(storage), raw_delete_range;
         RawBatchScan, future_raw_batch_scan(storage), raw_batch_scan;
-        RawCoprocessor, future_raw_coprocessor(copr_v2, storage), coprocessor;
         PessimisticLock, future_acquire_pessimistic_lock(storage), kv_pessimistic_lock;
         PessimisticRollback, future_pessimistic_rollback(storage), kv_pessimistic_rollback;
     }
@@ -1871,15 +1825,6 @@ fn future_copr<E: Engine>(
     req: Request,
 ) -> impl Future<Output = ServerResult<MemoryTraceGuard<Response>>> {
     let ret = copr.parse_and_handle_unary_request(req, peer);
-    async move { Ok(ret.await) }
-}
-
-fn future_raw_coprocessor<E: Engine, L: LockManager, F: KvFormat>(
-    copr_v2: &coprocessor_v2::Endpoint,
-    storage: &Storage<E, L, F>,
-    req: RawCoprocessorRequest,
-) -> impl Future<Output = ServerResult<RawCoprocessorResponse>> {
-    let ret = copr_v2.handle_request(storage, req);
     async move { Ok(ret.await) }
 }
 

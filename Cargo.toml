@@ -64,7 +64,6 @@ chrono = "0.4"
 codec = { workspace = true }
 collections = { workspace = true }
 concurrency_manager = { workspace = true }
-coprocessor_plugin_api = { workspace = true }
 crc32fast = "1.2"
 crc64fast = "0.1"
 crossbeam = "0.8"
@@ -177,7 +176,6 @@ yatp = { workspace = true }
 
 [dev-dependencies]
 api_version = { workspace = true, features = ["testexport"] }
-example_coprocessor_plugin = { workspace = true } # should be a binary dependency
 hyper-openssl = "0.9"
 kvengine = { workspace = true, features = ["testexport"] }
 panic_hook = { workspace = true }
@@ -231,12 +229,10 @@ procinfo = { git = "https://github.com/tikv/procinfo-rs", rev = "6599eb9dca74229
 resolver = "2"
 members = [
   "cmd/cse-ctl",
-  "cmd/tikv-ctl",
   "cmd/tikv-server",
   "cmd/tikv-worker",
   "components/api_version",
   "components/backup",
-  "components/backup-stream",
   "components/batch-system",
   "components/builtin_dfs",
   "components/case_macros",
@@ -254,7 +250,6 @@ members = [
   "components/codec",
   "components/collections",
   "components/concurrency_manager",
-  "components/coprocessor_plugin_api",
   "components/encryption",
   "components/encryption/export",
   "components/engine_rocks_helper",
@@ -276,7 +271,6 @@ members = [
   "components/pd_client",
   "components/profiler",
   "components/raftstore",
-  "components/raftstore-v2",
   "components/recovery",
   "components/replication_worker",
   "components/resolved_ts",
@@ -291,7 +285,6 @@ members = [
   "components/test_backup",
   "components/test_cloud_server",
   "components/test_coprocessor",
-  "components/test_coprocessor_plugin/example_plugin",
   "components/test_pd",
   "components/test_pd_client",
   "components/test_raftstore",
@@ -324,7 +317,6 @@ aws = { path = "components/cloud/aws" }
 azure = { path = "components/cloud/azure" }
 aliyun = { path = "components/cloud/aliyun" }
 backup = { path = "components/backup", default-features = false }
-backup-stream = { path = "components/backup-stream", default-features = false }
 batch-system = { path = "components/batch-system" }
 case_macros = { path = "components/case_macros" }
 causal_ts = { path = "components/causal_ts" }
@@ -367,7 +359,6 @@ pd_client = { path = "components/pd_client" }
 profiler = { path = "components/profiler" }
 raft_log_engine = { path = "components/raft_log_engine" }
 raftstore = { path = "components/raftstore", default-features = false }
-raftstore_v2 = { path = "components/raftstore-v2", default-features = false }
 recovery = { path = "components/recovery" }
 replication_worker = { path = "components/replication_worker" }
 resolved_ts = { path = "components/resolved_ts" }
@@ -378,11 +369,9 @@ rfstore = { path = "components/rfstore" }
 schema = { path = "components/schema" }
 security = { path = "components/security" }
 server = { path = "components/server" }
-snap_recovery = { path = "components/snap_recovery" }
 sst_importer = { path = "components/sst_importer" }
 test_backup = { path = "components/test_backup" }
 test_coprocessor = { path = "components/test_coprocessor", default-features = false }
-example_coprocessor_plugin = { path = "components/test_coprocessor_plugin/example_plugin" }
 test_cloud_server = { path = "components/test_cloud_server" }
 test_pd = { path = "components/test_pd" }
 test_pd_client = { path = "components/test_pd_client" }

@@ -28,11 +28,6 @@ use std::{
 };
 
 use api_version::{dispatch_api_version, KvFormat};
-use backup_stream::{
-    config::BackupStreamConfigManager,
-    metadata::{ConnectionConfig, LazyEtcdClient},
-    observer::BackupStreamObserver,
-};
 use causal_ts::CausalTsProviderImpl;
 use cdc::{CdcConfigManager, MemoryQuota};
 use concurrency_manager::ConcurrencyManager;
@@ -58,7 +53,6 @@ use grpcio_health::HealthService;
 use kvproto::{
     brpb::create_backup, cdcpb::create_change_data, deadlock::create_deadlock,
     debugpb::create_debug, import_sstpb::create_import_sst, kvrpcpb::ApiVersion,
-    logbackuppb::create_log_backup, recoverdatapb::create_recover_data,
     resource_usage_agent::create_resource_metering_pub_sub,
 };
 use pd_client::{PdClient, RpcClient};
@@ -82,11 +76,9 @@ use raftstore::{
     RaftRouterCompactedEventSender,
 };
 use security::SecurityManager;
-use snap_recovery::RecoveryService;
 use tikv::{
     config::{ConfigController, DbConfigManger, DbType, LogConfigManager, TikvConfig},
     coprocessor::{self, MEMTRACE_ROOT as MEMTRACE_COPROCESSOR},
-    coprocessor_v2,
     import::{ImportSstService, SstImporter},
     read_pool::{build_yatp_read_pool, ReadPool, ReadPoolConfigManager},
     server::{
@@ -239,7 +231,6 @@ struct TikvServer<ER: RaftEngine> {
     quota_limiter: Arc<QuotaLimiter>,
     causal_ts_provider: Option<Arc<CausalTsProviderImpl>>, // used for rawkv apiv2
     tablet_factory: Option<Arc<dyn TabletFactory<RocksEngine> + Send + Sync>>,
-    br_snap_recovery_mode: bool, // use for br snapshot recovery
 }
 
 struct TikvEngines<EK: KvEngine, ER: RaftEngine> {
@@ -256,7 +247,6 @@ struct Servers<EK: KvEngine, ER: RaftEngine> {
     cdc_scheduler: tikv_util::worker::Scheduler<cdc::Task>,
     cdc_memory_quota: MemoryQuota,
     rsmeter_pubsub_service: resource_metering::PubSubService,
-    backup_stream_scheduler: Option<tikv_util::worker::Scheduler<backup_stream::Task>>,
 }
 
 type LocalServer<EK, ER> = Server<resolve::PdStoreAddrResolver, LocalRaftKv<EK, ER>>;
@@ -283,30 +273,6 @@ where
         );
         let pd_client =
             Self::connect_to_pd_cluster(&mut config, env.clone(), Arc::clone(&security_mgr));
-        // check if TiKV need to run in snapshot recovery mode
-        let is_recovering_marked = match pd_client.is_recovering_marked() {
-            Err(e) => {
-                warn!(
-                    "failed to get recovery mode from PD";
-                    "error" => ?e,
-                );
-                false
-            }
-            Ok(marked) => marked,
-        };
-
-        if is_recovering_marked {
-            // Run a TiKV server in recovery modeß
-            info!("TiKV running in Snapshot Recovery Mode");
-            snap_recovery::init_cluster::enter_snap_recovery_mode(&mut config);
-            // connect_to_pd_cluster retreived the cluster id from pd
-            let cluster_id = config.server.cluster_id;
-            snap_recovery::init_cluster::start_recovery(
-                config.clone(),
-                cluster_id,
-                pd_client.clone(),
-            );
-        }
 
         // Initialize and check config
         let cfg_controller = Self::init_config(config);
@@ -391,7 +357,6 @@ where
             quota_limiter,
             causal_ts_provider,
             tablet_factory: None,
-            br_snap_recovery_mode: is_recovering_marked,
         }
     }
 
@@ -952,7 +917,6 @@ where
                 None,
                 self.security_mgr.clone(),
             ),
-            coprocessor_v2::Endpoint::new(&self.config.coprocessor_v2),
             self.resolver.clone().unwrap(),
             snap_mgr.clone(),
             gc_worker.clone(),
@@ -971,53 +935,6 @@ where
                 server.get_grpc_mem_quota().clone(),
             )),
         );
-
-        // Start backup stream
-        let backup_stream_scheduler = if self.config.backup_stream.enable {
-            // Create backup stream.
-            let mut backup_stream_worker = Box::new(LazyWorker::new("backup-stream"));
-            let backup_stream_scheduler = backup_stream_worker.scheduler();
-
-            // Register backup-stream observer.
-            let backup_stream_ob = BackupStreamObserver::new(backup_stream_scheduler.clone());
-            backup_stream_ob.register_to(self.coprocessor_host.as_mut().unwrap());
-            // Register config manager.
-            cfg_controller.register(
-                tikv::config::Module::BackupStream,
-                Box::new(BackupStreamConfigManager(backup_stream_worker.scheduler())),
-            );
-
-            let etcd_cli = LazyEtcdClient::new(
-                self.config.pd.endpoints.as_slice(),
-                ConnectionConfig {
-                    keep_alive_interval: self.config.server.grpc_keepalive_time.0,
-                    keep_alive_timeout: self.config.server.grpc_keepalive_timeout.0,
-                    tls: self
-                        .security_mgr
-                        .client_suite()
-                        .map_err(|err| {
-                            warn!("Failed to load client TLS suite, ignoring TLS config."; "err" => %err);
-                        })
-                        .ok(),
-                },
-            );
-            let backup_stream_endpoint = backup_stream::Endpoint::new(
-                node.id(),
-                etcd_cli,
-                self.config.backup_stream.clone(),
-                backup_stream_scheduler.clone(),
-                backup_stream_ob,
-                self.region_info_accessor.clone(),
-                self.router.clone(),
-                self.pd_client.clone(),
-                self.concurrency_manager.clone(),
-            );
-            backup_stream_worker.start(backup_stream_endpoint);
-            self.to_stop.push(backup_stream_worker);
-            Some(backup_stream_scheduler)
-        } else {
-            None
-        };
 
         let import_path = self.store_path.join("import");
         let mut importer = SstImporter::new(
@@ -1178,7 +1095,6 @@ where
             cdc_scheduler,
             cdc_memory_quota,
             rsmeter_pubsub_service,
-            backup_stream_scheduler,
         });
 
         server_config
@@ -1300,31 +1216,6 @@ where
             .is_some()
         {
             warn!("failed to register resource metering pubsub service");
-        }
-
-        if let Some(sched) = servers.backup_stream_scheduler.take() {
-            let pitr_service = backup_stream::Service::new(sched);
-            if servers
-                .server
-                .register_service(create_log_backup(pitr_service))
-                .is_some()
-            {
-                fatal!("failed to register log backup service");
-            }
-        }
-
-        // the present tikv in recovery mode, start recovery service
-        if self.br_snap_recovery_mode {
-            let recovery_service =
-                RecoveryService::new(engines.engines.clone(), self.router.clone());
-
-            if servers
-                .server
-                .register_service(create_recover_data(recovery_service))
-                .is_some()
-            {
-                fatal!("failed to register recovery service");
-            }
         }
     }
 

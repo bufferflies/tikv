@@ -37,7 +37,6 @@ use super::{
 };
 use crate::{
     coprocessor::Endpoint,
-    coprocessor_v2,
     read_pool::ReadPool,
     server::{gc_worker::GcWorker, Proxy},
     storage::{lock_manager::LockManager, Engine, Storage},
@@ -92,7 +91,6 @@ where
         security_mgr: &Arc<SecurityManager>,
         storage: Storage<E, L, F>,
         copr: Endpoint<E>,
-        copr_v2: coprocessor_v2::Endpoint,
         resolver: S,
         snap_mgr: SnapManager,
         gc_worker: GcWorker<E>,
@@ -130,7 +128,6 @@ where
             storage,
             gc_worker,
             copr,
-            copr_v2,
             lazy_worker.scheduler(),
             check_leader_scheduler,
             Arc::clone(&grpc_thread_load),
@@ -543,7 +540,6 @@ mod tests {
             None,
             Arc::new(SecurityManager::default()),
         );
-        let copr_v2 = coprocessor_v2::Endpoint::new(&coprocessor_v2::Config::default());
         let debug_thread_pool = Arc::new(
             TokioBuilder::new_multi_thread()
                 .thread_name(thd_name!("debugger"))
@@ -561,7 +557,6 @@ mod tests {
             &security_mgr,
             storage,
             copr,
-            copr_v2,
             MockResolver {
                 quick_fail: Arc::clone(&quick_fail),
                 addr: Arc::clone(&addr),

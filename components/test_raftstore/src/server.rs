@@ -48,7 +48,7 @@ use tempfile::TempDir;
 use test_pd_client::TestPdClient;
 use tikv::{
     config::ConfigController,
-    coprocessor, coprocessor_v2,
+    coprocessor,
     import::{ImportSstService, SstImporter},
     read_pool::ReadPool,
     server::{
@@ -470,7 +470,6 @@ impl ServerCluster {
             None,
             Arc::new(SecurityManager::default()),
         );
-        let copr_v2 = coprocessor_v2::Endpoint::new(&cfg.coprocessor_v2);
         let mut server = None;
         // Create Debug service.
         let debug_thread_pool = Arc::new(
@@ -522,7 +521,6 @@ impl ServerCluster {
                 &security_mgr,
                 store.clone(),
                 copr.clone(),
-                copr_v2.clone(),
                 resolver.clone(),
                 snap_mgr.clone(),
                 gc_worker.clone(),

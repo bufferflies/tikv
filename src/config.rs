@@ -71,7 +71,6 @@ use tikv_util::{
 };
 
 use crate::{
-    coprocessor_v2::Config as CoprocessorV2Config,
     import::Config as ImportConfig,
     server::{
         gc_worker::{GcConfig, RawCompactionFilterFactory, WriteCompactionFilterFactory},
@@ -2998,9 +2997,6 @@ pub struct TikvConfig {
     #[online_config(submodule)]
     pub coprocessor: CopConfig,
 
-    #[online_config(skip)]
-    pub coprocessor_v2: CoprocessorV2Config,
-
     #[online_config(submodule)]
     pub rocksdb: DbConfig,
 
@@ -3085,7 +3081,6 @@ impl Default for TikvConfig {
             metric: MetricConfig::default(),
             raft_store: RaftstoreConfig::default(),
             coprocessor: CopConfig::default(),
-            coprocessor_v2: CoprocessorV2Config::default(),
             pd: PdConfig::default(),
             rocksdb: DbConfig::default(),
             raftdb: RaftDbConfig::default(),
@@ -5544,7 +5539,6 @@ mod tests {
         cfg.storage.block_cache.capacity = None; // Either `None` and a value is computed or `Some(_)` fixed value.
         cfg.memory_usage_limit = None;
         cfg.raft_engine.mut_config().memory_limit = None;
-        cfg.coprocessor_v2.coprocessor_plugin_directory = None; // Default is `None`, which is represented by not setting the key.
         cfg.rocksdb.defaultcf.level0_slowdown_writes_trigger = None;
         cfg.rocksdb.defaultcf.level0_stop_writes_trigger = None;
         cfg.rocksdb.defaultcf.soft_pending_compaction_bytes_limit = None;
