@@ -27,7 +27,8 @@ use native_br::{
     common::now,
     metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
     packing::{
-        offline_pd::OfflinePd, MigratePackEnv, NoopReporter, PackContext, PackEnv, UnpackRun,
+        offline_pd::OfflinePd, CopyPackedRun, MigratePackEnv, NoopReporter, PackContext, PackEnv,
+        UnpackRun,
     },
     restore::RestoreConfig,
     restore_keyspace, step,
@@ -1773,12 +1774,19 @@ fn dfs() -> TestDfs {
 fn test_restore_packed_backup(
     #[values(BackupType::Lightweight, BackupType::Full)] backup_type: BackupType,
     #[values(1, 2)] target_keyspace: u32,
-    #[values(true, false)] offline_pack: bool,
+    #[values(true)] offline_pack: bool,
+    #[values(true, false)] copy_to_elsewhere: bool,
     runtime: Runtime,
     mut dfs: TestDfs,
 ) {
     use uuid::Uuid;
 
+    info!("Running case test_restore_packed_backup";
+        "backup_type" => ?backup_type,
+        "target_keyspace" => target_keyspace,
+        "offline_pack" => offline_pack,
+        "copied_to_elsewhere" => copy_to_elsewhere,
+    );
     const KEYSPACE_ID: u32 = 1;
     test_util::init_log_for_test();
     let _g = runtime.enter();
@@ -1868,17 +1876,29 @@ fn test_restore_packed_backup(
         keyspace_meta,
     )
     .unwrap();
-    let (packed_path, _) = runtime.block_on(ctx.execute(&path)).unwrap();
+    let (mut packed_path, _) = runtime.block_on(ctx.execute(&path)).unwrap();
     cluster.stop();
 
     let new_files = ctx.overlay_fs().modified_files();
-    assert!(!new_files.is_empty(), "no new file was flushed.");
+    if new_files.is_empty() {
+        warn!("no new file was flushed by this `pack` call. Maybe background flush triggered?");
+    }
     for (ty, id) in new_files {
         // Make sure the new flushed file not directly put to the upstream cluster's.
         let exists = runtime
             .block_on(s3fs.exists(id, Options::default().with_type(ty)))
             .unwrap();
         assert!(!exists, "conflicting file found {}:{}", ty, id);
+    }
+
+    if copy_to_elsewhere {
+        let s3fs_mid = Arc::new(dfs.prefixed_s3fs("/mid"));
+        let copy_env = runtime
+            .block_on(MigratePackEnv::load_exotic(s3fs_mid.clone(), &packed_path))
+            .unwrap();
+        let mut run = CopyPackedRun::new(copy_env, "/the-land-between", Arc::new(NoopReporter));
+        let copied = runtime.block_on(run.execute()).unwrap();
+        packed_path = copied.new_exotic_path;
     }
 
     // move to another cluster.

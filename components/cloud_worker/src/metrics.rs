@@ -145,4 +145,10 @@ lazy_static! {
         &["type", "result"]
     )
     .unwrap();
+
+    pub static ref NATIVE_BR_V1X_BACKGROUND_TASKS: IntGaugeVec = register_int_gauge_vec!(
+        "tikv_worker_native_running_tasks",
+        "The running tasks of v1x API",
+        &["type"]
+    ).unwrap();
 }

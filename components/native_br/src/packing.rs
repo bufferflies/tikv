@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    fmt::Display,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -24,7 +25,7 @@ use rfenginepb::ClusterBackupMeta;
 use rfstore::store::PdIdAllocator;
 use security::SecurityConfig;
 use tempdir::TempDir;
-use tikv_util::{box_err, box_try, info};
+use tikv_util::{box_err, box_try, info, warn};
 use tokio::runtime::RuntimeFlavor;
 use uuid::Uuid;
 
@@ -381,6 +382,37 @@ impl MigratePackEnv {
         &self.packed
     }
 
+    pub fn get_file_copy_source(&self, file: &FileRef) -> String {
+        format!(
+            "{}/{}",
+            self.packed.content_bucket,
+            file.get_file_abs_path()
+        )
+    }
+
+    pub async fn save_patched_meta_to(
+        &self,
+        key: &str,
+        patch: impl FnOnce(&mut PackedBackup),
+    ) -> Result<()> {
+        let mut packed = self.packed.clone();
+        patch(&mut packed);
+        let data = protobuf::Message::write_to_bytes(&packed).unwrap();
+        self.dfs
+            .put_object(key.to_owned(), data.into(), key.to_owned())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn save_patched_meta_to_rel(
+        &self,
+        rel_key: &str,
+        patch: impl FnOnce(&mut PackedBackup),
+    ) -> Result<()> {
+        let key = packed_backup_prefixed(&self.dfs.get_prefix(), rel_key);
+        self.save_patched_meta_to(&key, patch).await
+    }
+
     pub async fn load_exotic(s3fs: Arc<S3Fs>, exotic_path: &str) -> Result<Self> {
         let uuid = Uuid::new_v4();
         let now = Utc::now();
@@ -393,10 +425,16 @@ impl MigratePackEnv {
         // origin meta is accessible from this context.
         s3fs.raw_copy_object(exotic_path, &tmp, None, None).await?;
         let packed_bytes = s3fs
-            .get_object(tmp, format!("temp({uuid})"), Default::default())
+            .get_object(tmp.clone(), format!("temp({uuid})"), Default::default())
             .await?;
         let mut packed = PackedBackup::new();
         box_try!(packed.merge_from_bytes(&packed_bytes));
+
+        // NOTE: actually, the tmp object won't be deleted but just tagged.
+        // Perhaps a lifecycle rule at the whole `tmp` prefix is fine enough...
+        if let Err(err) = s3fs.delete_object(tmp, format!("temp({uuid})")).await {
+            warn!("failed to delete tempfile during loading exotic packed backup."; "err" => ?err);
+        }
         Ok(Self {
             dfs: s3fs,
             packed,
@@ -442,23 +480,156 @@ impl<'a> RestorePackEnv<'a> {
     }
 }
 
-impl MigratePackEnv {
-    pub async fn save_current_meta_to(&self, rel_key: &str) -> Result<()> {
-        let data = protobuf::Message::write_to_bytes(&self.packed).unwrap();
-        let key = packed_backup_prefixed(&self.dfs.get_prefix(), rel_key);
-        self.dfs
-            .put_object(key, data.into(), rel_key.to_owned())
-            .await?;
-        Ok(())
+#[derive(Serialize, Debug)]
+#[serde(untagged)]
+pub enum CopyStep {
+    FetchMeta,
+    CopySst {
+        total: usize,
+        running: usize,
+        done: usize,
+    },
+    SaveMeta,
+}
+
+impl CopyStep {
+    pub fn stage_name(&self) -> &'static str {
+        match self {
+            CopyStep::FetchMeta => "FetchMeta",
+            CopyStep::CopySst { .. } => "CopySst",
+            CopyStep::SaveMeta => "SaveMeta",
+        }
     }
 }
 
-#[derive(Debug)]
+pub trait ReportCopyStepTrait: Send + Sync + 'static {
+    fn report_step(&self, _step: CopyStep) {}
+}
+
+impl ReportCopyStepTrait for NoopReporter {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CopiedPackedBackup {
+    pub new_exotic_path: String,
+    pub files_copied: usize,
+}
+
+pub struct CopyPackedRun {
+    menv: MigratePackEnv,
+    target_prefix: String,
+    new_name: String,
+    reporter: Arc<dyn ReportCopyStepTrait>,
+}
+
+impl CopyPackedRun {
+    pub fn new(
+        menv: MigratePackEnv,
+        target_prefix: impl ToString,
+        reporter: Arc<dyn ReportCopyStepTrait>,
+    ) -> Self {
+        Self {
+            menv,
+            target_prefix: target_prefix.to_string(),
+            new_name: Utc::now().format("_meta/%Y%d%m/%H%M%S.meta").to_string(),
+            reporter,
+        }
+    }
+
+    fn prefixed(&self, pathlike: impl Display) -> String {
+        let cluster_id = self.menv.get_packed_backup().cluster_id;
+        format!(
+            "{}/{}/{}/{}",
+            self.menv.dfs.get_prefix().trim_matches('/'),
+            self.target_prefix.trim_matches('/'),
+            cluster_id,
+            pathlike
+        )
+    }
+
+    pub async fn execute(&mut self) -> Result<CopiedPackedBackup> {
+        let new_files = self.copy_ssts().await?;
+
+        self.reporter.report_step(CopyStep::SaveMeta);
+        let files_copied = new_files.len();
+        let new_meta_path = self.prefixed(&self.new_name);
+        let new_content_bucket = self.menv.dfs.get_bucket();
+        self.menv
+            .save_patched_meta_to(&new_meta_path, move |meta| {
+                meta.content_file_refs = new_files.into();
+                meta.content_bucket = new_content_bucket;
+            })
+            .await?;
+        let copied = CopiedPackedBackup {
+            new_exotic_path: format!("{}/{}", self.menv.dfs.get_bucket(), new_meta_path),
+            files_copied,
+        };
+        Ok(copied)
+    }
+
+    async fn copy_ssts(&self) -> Result<Vec<FileRef>> {
+        let max_conc = 128;
+        let mut futures = FuturesUnordered::new();
+        let mut new_files = vec![];
+        let total_ssts = self.menv.packed.content_file_refs.len();
+        for file in self.menv.packed.get_content_file_refs() {
+            self.reporter.report_step(CopyStep::CopySst {
+                total: total_ssts,
+                running: futures.len(),
+                done: new_files.len(),
+            });
+
+            if futures.len() > max_conc {
+                new_files.push(futures.try_next().await?.unwrap());
+            }
+
+            let source_key = self.menv.get_file_copy_source(file);
+            let file_key = self.menv.dfs.rel_file_key(
+                file.file_id,
+                FileType::from_u8(file.file_type as u8).unwrap_or(FileType::Sst),
+            );
+            let target_key = self.prefixed(file_key);
+            let mut new_file = file.clone();
+            futures.push(async move {
+                self.menv
+                    .dfs
+                    .raw_copy_object(&source_key, &target_key, None, None)
+                    .await?;
+                new_file.set_file_abs_path(target_key);
+                Result::Ok(new_file)
+            });
+        }
+
+        while let Some(file) = futures.try_next().await? {
+            new_files.push(file);
+            self.reporter.report_step(CopyStep::CopySst {
+                total: total_ssts,
+                running: futures.len(),
+                done: new_files.len(),
+            });
+        }
+
+        Ok(new_files)
+    }
+}
+
+#[derive(Serialize, Debug)]
+#[serde(untagged)]
 pub enum UnpackStep {
-    VerifyBackup,
+    VerifyBackup { total: usize, finished: usize },
     AllocateNewIds,
-    MoveTableFiles,
+    MoveTableFiles { total: usize, finished: usize },
     WriteNewMeta,
+}
+
+impl UnpackStep {
+    pub fn stage_name(&self) -> &'static str {
+        match self {
+            UnpackStep::VerifyBackup { .. } => "VerifyBackup",
+            UnpackStep::AllocateNewIds => "AllocateNewIds",
+            UnpackStep::MoveTableFiles { .. } => "MoveTableFiles",
+            UnpackStep::WriteNewMeta => "WriteNewMeta",
+        }
+    }
 }
 
 pub trait ReportUnpackStepTrait: Send + Sync + 'static {
@@ -496,32 +667,46 @@ impl UnpackRun {
             )));
         }
         self.unpack_ssts().await?;
-        // Set to the current cluster id.
-        // So we know the backup meta was deeply copied.
-        let packed = &mut self.menv.packed;
-        packed.set_cluster_id(self.pd_client.get_cluster_id()?);
-        packed.set_unpacked(true);
-        packed.set_unpacked_from(self.menv.exotic_path.clone());
-        packed.clear_content_file_refs();
 
         let packed_backup_name = Utc::now()
             .format("exotic/%Y%m%d/%H%M%S.packed.meta")
             .to_string();
-        self.menv.save_current_meta_to(&packed_backup_name).await?;
+        let cluster_id = self.pd_client.get_cluster_id()?;
+        self.menv
+            .save_patched_meta_to_rel(&packed_backup_name, |packed| {
+                // Set to the current cluster id.
+                // So we know the backup meta was deeply copied.
+                packed.set_cluster_id(cluster_id);
+                packed.set_unpacked(true);
+                packed.set_unpacked_from(self.menv.exotic_path.clone());
+                packed.clear_content_file_refs();
+            })
+            .await?;
         Ok(packed_backup_name)
     }
 
     pub async fn unpack_ssts(&mut self) -> Result<()> {
-        self.reporter.report_step(UnpackStep::VerifyBackup);
+        let total = self.menv.packed.shards.len();
+        let mut finished = 0usize;
         let max_conc = 128;
         let mut futures = FuturesUnordered::new();
         for cs in self.menv.packed.get_shards().iter() {
+            self.reporter
+                .report_step(UnpackStep::VerifyBackup { total, finished });
             futures.push(self.verify_changeset_recoverable(cs));
             if futures.len() >= max_conc {
                 futures.try_next().await?;
+                finished += 1;
             }
         }
-        futures.try_for_each(|()| futures::future::ok(())).await?;
+        futures
+            .try_for_each(|()| {
+                finished += 1;
+                self.reporter
+                    .report_step(UnpackStep::VerifyBackup { total, finished });
+                futures::future::ok(())
+            })
+            .await?;
         self.move_files().await?;
         let mut shards = self.menv.packed.take_shards();
         for shard in shards.iter_mut() {
@@ -555,8 +740,9 @@ impl UnpackRun {
         let mut futures = FuturesUnordered::new();
         self.reporter.report_step(UnpackStep::AllocateNewIds);
         let new_ids = self.paged_allocate_new_ids().await?;
+        let total = self.menv.packed.content_file_refs.len();
+        let mut finished = 0usize;
 
-        self.reporter.report_step(UnpackStep::MoveTableFiles);
         for (file, new_id) in self
             .menv
             .packed
@@ -564,8 +750,11 @@ impl UnpackRun {
             .iter()
             .zip(new_ids.iter())
         {
+            self.reporter
+                .report_step(UnpackStep::MoveTableFiles { total, finished });
             if futures.len() > max_conc {
                 futures.try_next().await?;
+                finished += 1;
             }
             let source_key = format!(
                 "{}/{}",
@@ -592,7 +781,15 @@ impl UnpackRun {
             });
         }
 
-        futures.try_for_each(|()| futures::future::ok(())).await?;
+        futures
+            .try_for_each(|()| {
+                finished += 1;
+                self.reporter
+                    .report_step(UnpackStep::MoveTableFiles { total, finished });
+
+                futures::future::ok(())
+            })
+            .await?;
         Ok(())
     }
 

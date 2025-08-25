@@ -5360,6 +5360,29 @@ def KvEngine() -> RowPanel:
                     ),
                 ],
             ),
+            graph_panel(
+                title="Prepare ChangeSet File Load Source",
+                description="The file load statistic when preparing changeset",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_prepare_load_remote_file",
+                            by_labels=[],
+                        ),
+                        legend_format="s3",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_prepare_use_local_file",
+                            by_labels=[],
+                        ),
+                        legend_format="local",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
         ]
     )
     layout.row(
@@ -6024,6 +6047,80 @@ def CloudWorkerService() -> RowPanel:
                         additional_groupby=True,
                     )
                 ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Native BR Backup Operations",
+                description="Number of successful and failed backup operations",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "native_br_backup_success",
+                            skip_default_instance=True,
+                        ),
+                        legend_format="success",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "native_br_backup_error",
+                            skip_default_instance=True,
+                        ),
+                        legend_format="error",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Native BR Restore Errors",
+                description="Number of errors during restoration by type",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "native_br_restore_error",
+                            by_labels=["type"],
+                            skip_default_instance=True,
+                        ),
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "native_br_restore_rfengine_wal_epoch_overwritten_error",
+                            skip_default_instance=True,
+                        ),
+                        legend_format="wal_epoch_overwritten",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Native BR Restored Snapshot Bytes",
+                description="Total bytes of restored snapshots",
+                yaxes=yaxes(left_format=UNITS.BYTES_SEC_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "native_br_restored_snapshot_bytes",
+                            skip_default_instance=True,
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            heatmap_panel(
+                title="Native BR Restore Snapshot Request Duration",
+                description="Duration of restore snapshot of a shard",
+                metric="native_br_restore_snapshot_request_secs_bucket",
+                yaxis=yaxis(format=UNITS.SECONDS),
             ),
         ]
     )

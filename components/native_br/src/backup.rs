@@ -94,17 +94,11 @@ pub fn backup_file_full_path(prefix: String, name: String, backup_ts: Option<u64
         .to_string()
 }
 
-/// Generate full path `<prefix>/ppacked_backup<name>`.
+/// Generate full path `<prefix>/packed_backup/<name>`.
 pub fn packed_backup_prefixed(prefix: &str, name: &str) -> String {
+    let rel_prefix = prefix.trim_matches('/');
     let rel_name = name.trim_matches('/');
-
-    // Use `Path` to handle path separators.
-    Path::new(prefix)
-        .join("packed_backup")
-        .join(rel_name)
-        .to_str()
-        .unwrap()
-        .to_string()
+    format!("{rel_prefix}/packed_backup/{rel_name}")
 }
 
 pub fn execute_incremental_backup(

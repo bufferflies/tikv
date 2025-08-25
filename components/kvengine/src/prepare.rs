@@ -311,6 +311,7 @@ impl EngineCore {
                                     self.cache.clone(),
                                     encryption_key.clone(),
                                 )?;
+                                metrics::ENGINE_PREPARE_USE_LOCAL_FILE.inc();
                                 continue;
                             }
                         };
@@ -326,6 +327,7 @@ impl EngineCore {
                         self.cache.clone(),
                         encryption_key.clone(),
                     )?;
+                    metrics::ENGINE_PREPARE_USE_LOCAL_FILE.inc();
                     continue;
                 }
                 IaCtx::Disabled
@@ -349,6 +351,7 @@ impl EngineCore {
                             .map(|data| (data, Some((ia_mgr, data_dir))))
                     }
                 };
+                metrics::ENGINE_PREPARE_LOAD_REMOTE_FILE.inc();
                 let _ = tx.send(res.map(|(data, ia_mgr)| (id, fm, data, ia_mgr, permit)));
             });
             if msg_count < LOAD_FILE_CONCURRENCY {

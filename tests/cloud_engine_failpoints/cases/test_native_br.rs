@@ -13,7 +13,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use cloud_worker::native_br::{
     test_utils::NativeBrSvcClient,
-    v1x::{Backup, PackedBackupView, TaskState},
+    v1x::{Backup, PackedBackupView, S3Override, TaskState},
     BackupItem, RestoreState,
 };
 use collections::HashMap;
@@ -27,6 +27,7 @@ use kvproto::{
 };
 use native_br::{
     backup,
+    packing::CopiedPackedBackup,
     restore::RestoreConfig,
     restore_keyspace,
     restore_keyspace::{ReportRestoreStepTrait, RestoreStep},
@@ -495,8 +496,11 @@ fn test_native_br_service(#[values(true, false)] use_api_v1x: bool) {
     oss.shutdown();
 }
 
-#[test]
-fn test_native_br_service_x() {
+#[rstest::rstest]
+#[case::trivial(false, false)]
+#[case::with_override_pack(true, false)]
+#[case::with_move(false, true)]
+fn test_native_br_service_x(#[case] override_pack: bool, #[case] copy_to_another_pfx: bool) {
     test_util::init_log_for_test();
     const KEYSPACE_ID: u32 = 1;
     const DATA_LEN: usize = 100;
@@ -547,24 +551,12 @@ fn test_native_br_service_x() {
     let br_cli =
         NativeBrSvcClient::new(cluster_id, cluster.tikv_worker_endpoints(), security_mgr).unwrap();
 
+    let target_datetime = datetime0 + chrono::Duration::seconds(1);
     let backup_x = TryWaiter::timeout(10)
         .interval(1)
         .try_wait_result(|| {
-            let mut backups = block_on(
-                br_cli.list_backups_x(
-                    // add 1s to fetch the backup after written.
-                    (datetime0 + chrono::Duration::seconds(1))
-                        .format("%Y%m%d/%H%M%S")
-                        .to_string(),
-                    true,
-                    1000,
-                ),
-            )
-            .unwrap();
-            backups
-                .data
-                .pop()
-                .ok_or(Err::<Backup, String>("no backup found".to_string()))
+            let backup = runtime.block_on(br_cli.get_backup_for_pitr(target_datetime));
+            backup
         })
         .unwrap();
     info!("backup v1x: {:?}", backup_x);
@@ -573,26 +565,63 @@ fn test_native_br_service_x() {
         cluster.get_rfengine(node).upload_wal_chunk();
     }
 
-    let pack_backup =
-        block_on(br_cli.pack_backup(1, &backup_x.name, &format!("ks{KEYSPACE_ID}"))).unwrap();
+    let pack_backup = if override_pack {
+        block_on(br_cli.pack_backup_with_override(
+            1,
+            &backup_x.name,
+            &format!("ks{KEYSPACE_ID}"),
+            S3Override {
+                prefix: Some(dfs_config.prefix.clone()),
+                bucket: Some(dfs_config.s3_bucket.clone()),
+            },
+        ))
+    } else {
+        block_on(br_cli.pack_backup(1, &backup_x.name, &format!("ks{KEYSPACE_ID}")))
+    }
+    .unwrap();
     println!(">>> {pack_backup:?}");
 
     assert!(TryWaiter::timeout(10).interval(1).try_wait(|| {
         let task = block_on(br_cli.get_task_status(1)).unwrap();
         task.state().is_done()
     }));
+
     let task = block_on(br_cli.get_task_status(1)).unwrap();
     let TaskState::Done { info } = task.state() else {
         unreachable!()
     };
     let packed_backup = serde_json::from_value::<PackedBackupView>(info.clone()).unwrap();
+    let restore_path = if copy_to_another_pfx {
+        let copy = block_on(br_cli.copy_packed_backup_with_override(
+            3,
+            &packed_backup.path,
+            "somewhere-else",
+            S3Override {
+                prefix: Some("far-far-away".to_owned()),
+                bucket: None,
+            },
+        ))
+        .unwrap();
+        println!(">>> {copy:?}");
+        assert!(TryWaiter::timeout(10).interval(1).try_wait(|| {
+            let task = block_on(br_cli.get_task_status(3)).unwrap();
+            task.state().is_done()
+        }));
+        let task = block_on(br_cli.get_task_status(3)).unwrap();
+        let TaskState::Done { info } = task.state() else {
+            unreachable!()
+        };
+        let copied_backup = serde_json::from_value::<CopiedPackedBackup>(info.clone()).unwrap();
+        copied_backup.new_exotic_path
+    } else {
+        packed_backup.path
+    };
 
-    let restore = block_on(br_cli.restore_packed_backup(2, &packed_backup.path, "ks2")).unwrap();
+    let restore = block_on(br_cli.restore_packed_backup(2, &restore_path, "ks2")).unwrap();
     println!(">>> {restore:?}");
 
     assert!(TryWaiter::timeout(100).interval(1).try_wait(|| {
         let task = block_on(br_cli.get_task_status(2)).unwrap();
-        println!(">> {task:?}");
         task.state().is_done()
     }));
     ref_store0.rewrite_keyspace_prefix(2);

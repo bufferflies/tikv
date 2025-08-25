@@ -49,7 +49,7 @@ use slog_global::{debug, error, info, warn};
 use tempdir::TempDir;
 use tikv::{config::TikvConfig, storage::mvcc::Key};
 use tikv_util::{
-    backoff::ExponentialBackoff, box_err, box_try, http::CONTENT_TYPE_PROTOBUF,
+    backoff::ExponentialBackoff, box_err, box_try, defer, http::CONTENT_TYPE_PROTOBUF,
     merge_range::MergeRanges, mpsc, retry::try_wait_result_async,
     sys::thread::StdThreadBuildWrapper, time::Instant, HandyRwLock,
 };
@@ -72,6 +72,7 @@ use crate::{
         Result,
     },
     lock::LockResolver,
+    metrics,
     packing::RestorePackEnv,
     restore::RestoreConfig,
     step,
@@ -210,8 +211,13 @@ pub async fn load_norm_backup_meta(
                 backup_name.to_owned(),
                 err
             );
-            let backup_file =
-                get_incremental_backup_with_name(s3fs.get_prefix(), backup_name.to_owned());
+            let Some(backup_file) =
+                get_incremental_backup_with_name(s3fs.get_prefix(), backup_name.to_owned())
+            else {
+                // The key cannot be parsed as an periodical backup. Skip it.
+                return Err(Error::DfsError(dfs::Error::NoSuchKey(err)));
+            };
+
             let backup_date = backup_file.created_at().date_naive();
             let archive_reader = ArchiveReader::new_async(s3fs.clone(), &backup_date).await?;
             let backup_meta = archive_reader
@@ -2889,6 +2895,7 @@ async fn request_restore_snapshot(
     let mut last_err = None;
     let mut retry_cnt = 0;
     let start_time = Instant::now();
+    defer! { metrics::NATIVE_BR_RESTORE_SNAPSHOT_REQUEST_SECS.observe(start_time.saturating_elapsed_secs()) }
     'retry: while start_time.saturating_elapsed() < timeout {
         retry_cnt += 1;
         let (region, leader) = match pd_client.get_region_leader_by_id(cs.shard_id).await? {
@@ -2898,6 +2905,8 @@ async fn request_restore_snapshot(
                 warn!("{}:{}: {:?}", cs.shard_id, cs.shard_ver, e);
                 last_err = Some(e);
                 tokio::time::sleep(Duration::from_millis(200)).await;
+                metrics::NATIVE_BR_RESTORE_ERROR
+                    .with_label_values(&["restore_snapshot::pd_reigon_not_found_or_no_leader"]);
                 continue 'retry;
             }
         };
@@ -2905,6 +2914,8 @@ async fn request_restore_snapshot(
         let region_ver = region.get_region_epoch().get_version();
         let shard_ver = cs.get_shard_ver();
         if region_ver != shard_ver {
+            metrics::NATIVE_BR_RESTORE_ERROR
+                .with_label_values(&["restore_snapshot::pd_epoch_not_match"]);
             return Err(Error::RegionVerNotMatch {
                 expected: shard_ver,
                 actual: region_ver,
@@ -2923,14 +2934,19 @@ async fn request_restore_snapshot(
         match send_request_to_store(req, &store, security_mgr.as_ref(), timeout / 2).await {
             Ok((_, resp)) => {
                 let resp: RestoreShardResponse = serde_json::from_slice(&resp).unwrap();
+                metrics::NATIVE_BR_RESTORED_SNAPSHOT_KV_BYTES.inc_by(resp.restore_bytes);
                 debug!("{} request_restore_snapshot succeed", tag);
                 return Ok(resp);
             }
             Err(Error::HttpPbError(status, mut err)) => {
                 warn!("{} request_restore_snapshot failed: {:?}", tag, err);
                 let sleep_dur = if err.has_disk_full() {
+                    metrics::NATIVE_BR_RESTORE_ERROR
+                        .with_label_values(&["restore_snapshot::store_disk_full"]);
                     return Err(Error::StoreDiskFull(err.take_disk_full().take_store_id()));
                 } else if err.has_epoch_not_match() {
+                    metrics::NATIVE_BR_RESTORE_ERROR
+                        .with_label_values(&["restore_snapshot::epoch_not_match"]);
                     return Err(Error::RegionVerNotMatch {
                         expected: shard_ver,
                         actual: err
@@ -2940,8 +2956,13 @@ async fn request_restore_snapshot(
                             .map_or(0, |r| r.get_region_epoch().get_version()),
                     });
                 } else if err.has_not_leader() && err.get_not_leader().has_leader() {
+                    metrics::NATIVE_BR_RESTORE_ERROR
+                        .with_label_values(&["restore_snapshot::not_leader"]);
                     Duration::from_millis(50)
                 } else {
+                    metrics::NATIVE_BR_RESTORE_ERROR
+                        .with_label_values(&["restore_snapshot::unknown_http"]);
+                    warn!("restore snapshot encounters generic error."; "err" => ?err);
                     Duration::from_millis(500)
                 };
                 tokio::time::sleep(sleep_dur).await;
@@ -2954,6 +2975,8 @@ async fn request_restore_snapshot(
                     tag, e, region, leader
                 );
                 warn!("{}", err_msg);
+                metrics::NATIVE_BR_RESTORE_ERROR
+                    .with_label_values(&["restore_snapshot::unknown_internal"]);
                 last_err = Some(Err(box_err!(err_msg)));
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue 'retry;

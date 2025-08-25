@@ -20,4 +20,15 @@ lazy_static! {
             "Number of errors that epoch of rfengine WAL is overwritten"
         )
         .unwrap();
+    pub static ref NATIVE_BR_RESTORED_SNAPSHOT_KV_BYTES: IntCounter = register_int_counter!(
+        "native_br_restored_snapshot_bytes",
+        "Total bytes of restored snapshot"
+    )
+    .unwrap();
+    pub static ref NATIVE_BR_RESTORE_SNAPSHOT_REQUEST_SECS: Histogram = register_histogram!(
+        "native_br_restore_snapshot_request_secs",
+        "Duration of snapshot restore requests in seconds",
+        exponential_buckets(0.01, 2.0, 16).unwrap()
+    )
+    .unwrap();
 }

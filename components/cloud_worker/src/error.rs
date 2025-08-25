@@ -24,10 +24,20 @@ pub enum Error {
     NativeBackupRestoreError(#[from] native_br::error::Error),
     #[error("restore keyspace task conflict with id {0}")]
     RestoreKeyspaceTaskConflict(u64),
-    #[error("resource {0} not found")]
-    NotFound(String),
+    #[error("resource {resource} not found")]
+    NotFound {
+        resource: String,
+        identity: Option<String>,
+        notes: Option<String>,
+    },
     #[error("resource {0} already exists")]
     Existed(String),
+    #[error("state trans {from:?} => {to:?} isn't avaliable in resource {resource:?}")]
+    InvalidStateTrans {
+        resource: String,
+        from: String,
+        to: String,
+    },
     #[error("datetime parse error {0}")]
     DateTimeParseError(#[from] chrono::ParseError),
     #[error("ReachLimit {0}")]
@@ -45,3 +55,25 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    pub fn identitied_not_found(resource: impl ToString, identity: impl ToString) -> Self {
+        Self::not_found(resource, Some(identity), None::<u8>)
+    }
+
+    pub fn noted_not_found(resource: impl ToString, notes: impl ToString) -> Self {
+        Self::not_found(resource, None::<u8>, Some(notes))
+    }
+
+    pub fn not_found(
+        resourece: impl ToString,
+        identity: Option<impl ToString>,
+        notes: Option<impl ToString>,
+    ) -> Self {
+        Self::NotFound {
+            resource: resourece.to_string(),
+            identity: identity.map(|s| s.to_string()),
+            notes: notes.map(|s| s.to_string()),
+        }
+    }
+}

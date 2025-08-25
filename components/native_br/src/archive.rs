@@ -630,9 +630,12 @@ pub async fn get_daily_incremental_backups(
     Ok((files, reach_limit))
 }
 
-pub fn get_incremental_backup_with_name(prefix: String, name: String) -> IncrementalBackupFile {
+pub fn get_incremental_backup_with_name(
+    prefix: String,
+    name: String,
+) -> Option<IncrementalBackupFile> {
     let backup_key = backup_file_full_path(prefix, name, None);
-    IncrementalBackupFile::try_from_full_path(&backup_key).unwrap()
+    IncrementalBackupFile::try_from_full_path(&backup_key)
 }
 
 pub async fn get_cluster_backup_file_and_meta(

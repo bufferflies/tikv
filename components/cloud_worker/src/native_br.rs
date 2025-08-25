@@ -1241,10 +1241,12 @@ pub mod v1x {
     use hyper::{Body, Request, Response};
     use kvengine::dfs::{DFSConfig, S3Fs};
     use native_br::{
-        backup::IncrementalBackupFile,
+        backup::{backup_file_full_path, IncrementalBackupFile},
+        common::get_all_incremental_backups,
         packing::{
-            maybe_block_in_place, MigratePackEnv, PackBackupStep, PackConfig, PackContext,
-            ReportPackBackupStepTrait, ReportUnpackStepTrait, UnpackRun, UnpackStep,
+            CopyPackedRun, CopyStep, MigratePackEnv, PackBackupStep, PackConfig, PackContext,
+            ReportCopyStepTrait, ReportPackBackupStepTrait, ReportUnpackStepTrait, UnpackRun,
+            UnpackStep,
         },
         restore_keyspace::{self, ReportRestoreStepTrait, RestoreStep},
     };
@@ -1257,14 +1259,14 @@ pub mod v1x {
     };
     use serde_json::json;
     use tikv::storage::mvcc::TimeStamp;
-    use tikv_util::{box_try, info, warn, HandyRwLock};
+    use tikv_util::{box_try, defer, info, warn, HandyRwLock};
     use tokio::task::spawn_blocking;
 
     use crate::{
-        common::{make_json_response, make_response},
-        error::{Error, Error::NotFound},
-        metrics::{NATIVE_BR_HISTOGRAM_VEC, NATIVE_BR_V1X_COUNTER_VEC},
-        native_br::{BackupItem, BrContext, NativeBrManager},
+        common::make_json_response,
+        error::Error,
+        metrics::{self, NATIVE_BR_HISTOGRAM_VEC, NATIVE_BR_V1X_COUNTER_VEC},
+        native_br::{BackupItem, BrContext, NativeBrManager, BACKUP_NAME_FORMAT},
     };
 
     pub(crate) const API_V1X: &str = "/api/v1/x/";
@@ -1282,30 +1284,64 @@ pub mod v1x {
     #[derive(Debug)]
     pub struct HttpError(Response<Body>);
 
+    fn internal_code(e: &Error) -> &'static str {
+        match e {
+            Error::CheckError(_) => "CheckErr",
+            Error::NotFound { .. } => "NotFound",
+            Error::RestoreKeyspaceTaskConflict(_) => "RestoreKeyspaceTaskConflict",
+            Error::Existed(_) => "Existed",
+            Error::InvalidStateTrans { .. } => "InvalidStateTrans",
+            Error::ReachConcurrencyLimit(_) => "ReachConcurrencyLimit",
+            _ => "InternalErr",
+        }
+    }
+
     impl<T: Into<Error>> From<T> for HttpError {
         fn from(err: T) -> Self {
             let crate_err: Error = err.into();
+            let ic = internal_code(&crate_err);
             match crate_err {
-                Error::CheckError(msg) => Self::error_response(StatusCode::BAD_REQUEST, msg),
-                Error::NotFound(resource) => Self::error_response(
+                Error::CheckError(msg) => Self::error_response(ic, StatusCode::BAD_REQUEST, msg),
+                Error::NotFound {
+                    resource,
+                    identity,
+                    notes,
+                } => Self::error_response(
+                    ic,
                     StatusCode::NOT_FOUND,
-                    format!("resource {resource} not found"),
+                    json!({
+                        "resource": resource,
+                        "identity": identity,
+                        "notes": notes
+                    }),
                 ),
-                Error::RestoreKeyspaceTaskConflict(task_id) => Self::error_response(
-                    StatusCode::CONFLICT,
-                    format!("task {task_id} conflicts with your request"),
-                ),
+                Error::RestoreKeyspaceTaskConflict(task_id) => {
+                    Self::error_response(ic, StatusCode::CONFLICT, json!({"task_id": task_id}))
+                }
                 Error::Existed(msg) => Self::error_response(
+                    ic,
                     StatusCode::CONFLICT,
                     format!("resource already existed: {}", msg),
                 ),
+                Error::InvalidStateTrans { resource, from, to } => Self::error_response(
+                    ic,
+                    StatusCode::CONFLICT,
+                    json!({
+                        "resource": resource,
+                        "from": from,
+                        "to": to,
+                    }),
+                ),
                 Error::ReachConcurrencyLimit(limit) => Self::error_response(
+                    ic,
                     StatusCode::TOO_MANY_REQUESTS,
                     format!("concurrent running task reaches limit: {}", limit),
                 ),
-                otherwise => {
-                    Self::error_response(StatusCode::INTERNAL_SERVER_ERROR, otherwise.to_string())
-                }
+                otherwise => Self::error_response(
+                    ic,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    otherwise.to_string(),
+                ),
             }
         }
     }
@@ -1333,9 +1369,17 @@ pub mod v1x {
     }
 
     impl HttpError {
-        fn error_response(status_code: StatusCode, body: impl Into<Body>) -> Self {
+        fn error_response(
+            internal_code: impl ToString,
+            status_code: StatusCode,
+            body: impl Serialize,
+        ) -> Self {
             assert!(!status_code.is_success(), "{}", status_code);
-            Self(make_response(status_code, body))
+            let b = json!({
+                "internal_code": internal_code.to_string(),
+                "error": body,
+            });
+            Self(make_json_response(status_code, &b))
         }
     }
 
@@ -1385,8 +1429,13 @@ pub mod v1x {
         }
     }
 
-    fn v1_compat_id(key: &str) -> Option<u64> {
-        IncrementalBackupFile::try_from_full_path(key).map(|file| file.id())
+    fn v1_compat_info(key: &str) -> Option<(u64, String)> {
+        IncrementalBackupFile::try_from_full_path(key).map(|file| {
+            (
+                file.id(),
+                file.created_at().format(BACKUP_NAME_FORMAT).to_string(),
+            )
+        })
     }
 
     #[derive(Deserialize, Serialize)]
@@ -1421,6 +1470,7 @@ pub mod v1x {
         pub details: Option<BackupDetails>,
 
         pub v1_compat_id: Option<u64>,
+        pub v1_compat_name: Option<String>,
     }
 
     impl Backup {
@@ -1454,8 +1504,8 @@ pub mod v1x {
         Pending,
         Init,
         Running {
-            last_update_time: DateTime<Utc>,
-            status: String,
+            info_last_update_time: DateTime<Utc>,
+            step: String,
             info: serde_json::Value,
         },
         Error {
@@ -1482,7 +1532,7 @@ pub mod v1x {
                 .as_str()
                 .unwrap()
                 .to_owned();
-            if let Self::Running { status, .. } = self {
+            if let Self::Running { step: status, .. } = self {
                 base.push_str("::");
                 base.push_str(status.as_str());
             }
@@ -1501,12 +1551,30 @@ pub mod v1x {
             *self = TaskState::Init;
         }
 
-        fn running(&mut self, new_status: String) {
+        fn running(&mut self, to_step: String) {
+            if let TaskState::Done { .. } | TaskState::Error { .. } = self {
+                warn!("invalid state transform: Done | Error -> Running");
+                return;
+            }
+
             *self = Self::Running {
-                last_update_time: Utc::now(),
-                status: new_status,
+                info_last_update_time: Utc::now(),
+                step: to_step,
                 info: serde_json::Value::Null,
             }
+        }
+
+        fn running_info(&mut self, to_step: String, info: impl Serialize) {
+            if let TaskState::Done { .. } | TaskState::Error { .. } = self {
+                warn!("invalid state transform: Done | Error -> Running");
+                return;
+            }
+
+            *self = Self::Running {
+                info_last_update_time: Utc::now(),
+                step: to_step,
+                info: serde_json::to_value(info).unwrap_or_default(),
+            };
         }
 
         fn error(&mut self, err: &Error) {
@@ -1530,11 +1598,12 @@ pub mod v1x {
         }
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
     #[serde(tag = "type")]
     pub enum TaskRequest {
         PackBackup(CreatePackBackupRequest),
         RestorePacked(CreateRestorePackedBackupRequest),
+        CopyPacked(CreateCopyBackupRequest),
     }
 
     impl TaskRequest {
@@ -1542,14 +1611,48 @@ pub mod v1x {
             match self {
                 TaskRequest::PackBackup(r) => r.id,
                 TaskRequest::RestorePacked(r) => r.id,
+                TaskRequest::CopyPacked(r) => r.id,
+            }
+        }
+
+        fn task_type(&self) -> &'static str {
+            match self {
+                TaskRequest::PackBackup(_) => "pack_backup",
+                TaskRequest::RestorePacked(_) => "restore_packed",
+                TaskRequest::CopyPacked(_) => "copy_packed",
             }
         }
 
         async fn run(self, br_mgr: Arc<NativeBrManager>) {
+            let m = metrics::NATIVE_BR_V1X_BACKGROUND_TASKS.with_label_values(&[self.task_type()]);
+            m.inc();
+            defer! { m.dec() }
             match self {
                 TaskRequest::PackBackup(req) => Self::run_create_pack_backup(br_mgr, req).await,
                 TaskRequest::RestorePacked(req) => Self::run_restore_packed(br_mgr, req).await,
+                TaskRequest::CopyPacked(req) => Self::run_copy_packed(br_mgr, req).await,
             }
+        }
+
+        async fn run_copy_packed(br: Arc<NativeBrManager>, req: CreateCopyBackupRequest) {
+            let br_cx = &br.context;
+            let s3fs = br.overriden_storage(&req.s3_override);
+
+            let exec = async {
+                let reporter = Arc::new(ApiV1xReporter {
+                    cx: br_cx.clone(),
+                    id: req.id,
+                }) as Arc<dyn ReportCopyStepTrait>;
+                reporter.report_step(CopyStep::FetchMeta);
+                let mig_env = MigratePackEnv::load_exotic(s3fs, &req.exotic_backup).await?;
+                let mut copy_run = CopyPackedRun::new(mig_env, &req.copy_to, reporter.clone());
+                let res = copy_run.execute().await?;
+                // To drop the s3fs with its internal runtime...
+                tokio::task::spawn_blocking(move || drop(copy_run));
+                Result::Ok(res)
+            };
+
+            br_cx.finish_task(req.id, exec.await)
         }
 
         async fn run_restore_packed(
@@ -1649,13 +1752,23 @@ pub mod v1x {
 
             br_cx.with_task(req.id, |task| task.with_mut_state(|s| s.init()));
 
+            let pcfg2 = pcfg.clone();
             let res = async {
                 // NOTE: `create_from_config` cannot be asyncrhonous because it create a runtime
                 // internally... (Somehow it is terrifying to bind a tokio runtime to every S3
                 // client...)
-                let mut ctx = maybe_block_in_place(|| PackContext::create_from_config(&pcfg))?;
+                let mut ctx =
+                    tokio::task::spawn_blocking(move || PackContext::create_from_config(&pcfg2))
+                        .await
+                        .unwrap()?;
                 ctx.set_reporter(Arc::new(reporter));
-                let (path, meta) = ctx.execute(&pcfg.backup_name).await?;
+                let (path, meta) = ctx
+                    .execute(
+                        pcfg.backup_name
+                            .strip_suffix(".meta")
+                            .unwrap_or(&pcfg.backup_name),
+                    )
+                    .await?;
                 let view = PackedBackupView {
                     cluster_id: meta.cluster_id,
                     backup_ts: meta.backup_ts,
@@ -1704,7 +1817,7 @@ pub mod v1x {
         }
     }
 
-    #[derive(Deserialize, Clone, Serialize, Debug)]
+    #[derive(Deserialize, Clone, Serialize, Debug, PartialEq, Eq)]
     pub struct CreatePackBackupRequest {
         #[serde(with = "serde_with::rust::display_fromstr")]
         id: u64,
@@ -1720,7 +1833,22 @@ pub mod v1x {
         id: u64,
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
+    #[derive(Deserialize)]
+    pub struct GetBackupRequest {
+        #[serde(flatten)]
+        s3_override: S3Override,
+        #[serde(flatten)]
+        query: GetBackupQuery,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(tag = "query")]
+    pub enum GetBackupQuery {
+        #[serde(rename = "for-pitr")]
+        ForPointInTimeRestore { point_in_time: DateTime<Utc> },
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
     pub struct CreateRestorePackedBackupRequest {
         #[serde(with = "serde_with::rust::display_fromstr")]
         id: u64,
@@ -1730,6 +1858,21 @@ pub mod v1x {
         keyspace: String,
         #[serde(default)]
         point_in_time: Option<DateTime<Utc>>,
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct CreateCopyBackupRequest {
+        #[serde(with = "serde_with::rust::display_fromstr")]
+        id: u64,
+        /// Override the target (defaultly current DFS configuration of
+        /// `tikv-api`)
+        #[serde(flatten)]
+        s3_override: S3Override,
+        /// The exotic backup path.
+        /// It should be <bucket>/<meta_object_key>.
+        exotic_backup: String,
+        /// Copy the backup to the specified prefix.
+        copy_to: String,
     }
 
     #[derive(Serialize, Debug, Deserialize)]
@@ -1757,7 +1900,7 @@ pub mod v1x {
         pub tolerated_err: usize,
     }
 
-    #[derive(Serialize, Debug, Clone, Deserialize)]
+    #[derive(Serialize, Debug, Clone, Deserialize, PartialEq, Eq)]
     pub struct S3Override {
         #[serde(
             default,
@@ -1782,6 +1925,10 @@ pub mod v1x {
                 cfg.prefix = prefix.clone();
             }
         }
+
+        fn enabled(&self) -> bool {
+            self.bucket.is_some() || self.prefix.is_some()
+        }
     }
 
     trait ResponseableExt {
@@ -1798,6 +1945,16 @@ pub mod v1x {
     }
 
     impl NativeBrManager {
+        fn overriden_storage(&self, s3_override: &S3Override) -> Arc<S3Fs> {
+            if s3_override.enabled() {
+                let mut cfg = self.config.read().unwrap().dfs.clone();
+                s3_override.apply(&mut cfg);
+                Arc::new(S3Fs::new_from_config(cfg))
+            } else {
+                self.context.s3fs.clone()
+            }
+        }
+
         fn spawn_task(self: &Arc<Self>, request: TaskRequest) -> Result<Task> {
             let task_id = request.id();
             let mut tasks = self.context.v1x_tasks.wl();
@@ -1840,7 +1997,7 @@ pub mod v1x {
         fn get_task_for_api(&self, id: u64) -> Result<Task> {
             let tasks = self.v1x_tasks.rl();
             let Some(task) = tasks.get(&id) else {
-                return Err(NotFound(format!("task(id={id})")));
+                return Err(Error::identitied_not_found("task", id));
             };
 
             Ok(task.clone())
@@ -1848,11 +2005,18 @@ pub mod v1x {
 
         fn delete_task_for_api(&self, id: u64) -> Result<Task> {
             let mut tasks = self.v1x_tasks.wl();
-            let Some(task) = tasks.remove(&id) else {
-                return Err(NotFound(format!("task(id={id})")));
+            let Some(task) = tasks.get(&id) else {
+                return Err(Error::identitied_not_found("task", id));
             };
+            if !matches!(task.state, TaskState::Done { .. } | TaskState::Error { .. }) {
+                return Err(Error::InvalidStateTrans {
+                    resource: "v1x::task".to_owned(),
+                    from: task.state.state_string(),
+                    to: "Absent".to_owned(),
+                });
+            }
 
-            Ok(task)
+            Ok(tasks.remove(&id).unwrap())
         }
 
         fn finish_task(&self, task_id: u64, result: Result<impl Serialize>) {
@@ -1897,7 +2061,15 @@ pub mod v1x {
     impl ReportUnpackStepTrait for ApiV1xReporter {
         fn report_step(&self, step: UnpackStep) {
             self.cx.with_task(self.id, |task| {
-                task.with_mut_state(|s| s.running(format!("{step:?}")))
+                task.with_mut_state(|s| s.running_info(step.stage_name().to_owned(), step))
+            })
+        }
+    }
+
+    impl ReportCopyStepTrait for ApiV1xReporter {
+        fn report_step(&self, step: native_br::packing::CopyStep) {
+            self.cx.with_task(self.id, |task| {
+                task.with_mut_state(|s| s.running_info(step.stage_name().to_owned(), step))
             })
         }
     }
@@ -1931,31 +2103,46 @@ pub mod v1x {
 
         let not_found = |ctx: &HttpRequestContext| {
             (
-                make_json_response(
+                HttpError::error_response(
+                    "PathNotFound",
                     StatusCode::NOT_FOUND,
                     &json!({"path": ctx.raw_req.uri().path()}),
-                ),
+                )
+                .0,
                 "path_not_found",
             )
         };
         let method_not_allowed = |ctx: &HttpRequestContext| {
             (
-                make_json_response(
+                HttpError::error_response(
+                    "MethodNotAllowed",
                     StatusCode::METHOD_NOT_ALLOWED,
                     &json!({"path": ctx.raw_req.uri().path(), "method": method.to_string()}),
-                ),
+                )
+                .0,
                 "method_not_allowed",
             )
         };
 
+        let ob_start_time = tikv_util::time::Instant::now();
         let (res, tag) = match borrowed_path.as_slice() {
+            [.., "task", "copy_backup", id] => match method {
+                Method::PUT => {
+                    ctx.request_params.insert("id".to_string(), id.to_string());
+                    let res = handle_copy_pack(ctx)
+                        .await
+                        .json_with_status(StatusCode::CREATED);
+                    (res, "x_create_copy_backup")
+                }
+                _ => method_not_allowed(&ctx),
+            },
             [.., "task", "pack_backup", id] => match method {
                 Method::PUT => {
                     ctx.request_params.insert("id".to_string(), id.to_string());
                     let res = handle_create_pack(ctx)
                         .await
                         .json_with_status(StatusCode::CREATED);
-                    (res, "create_pack_backup")
+                    (res, "x_create_pack_backup")
                 }
                 _ => method_not_allowed(&ctx),
             },
@@ -1966,7 +2153,7 @@ pub mod v1x {
                         let res = handle_restore_packed(ctx)
                             .await
                             .json_with_status(StatusCode::CREATED);
-                        (res, "restore_packed_backup")
+                        (res, "x_restore_packed_backup")
                     }
                     _ => method_not_allowed(&ctx),
                 }
@@ -1976,23 +2163,32 @@ pub mod v1x {
                 match method {
                     Method::GET => {
                         let res = handle_get_task(ctx).await.json_with_status(StatusCode::OK);
-                        (res, "get_task")
+                        (res, "x_get_task")
                     }
                     Method::DELETE => {
                         let res = handle_delete_task(ctx)
                             .await
                             .json_with_status(StatusCode::OK);
-                        (res, "delete_task")
+                        (res, "x_delete_task")
                     }
                     _ => method_not_allowed(&ctx),
                 }
             }
+            [.., "backup"] => match method {
+                Method::GET => {
+                    let res = handle_get_backup(ctx)
+                        .await
+                        .json_with_status(StatusCode::OK);
+                    (res, "x_query_backup")
+                }
+                _ => method_not_allowed(&ctx),
+            },
             [.., "backups"] => match method {
                 Method::GET => {
                     let res = handle_list_backup(ctx)
                         .await
                         .json_with_status(StatusCode::OK);
-                    (res, "list_backup")
+                    (res, "x_list_backup")
                 }
                 _ => method_not_allowed(&ctx),
             },
@@ -2006,8 +2202,12 @@ pub mod v1x {
         } else {
             "failure"
         };
+
+        NATIVE_BR_HISTOGRAM_VEC
+            .with_label_values(&[tag])
+            .observe(ob_start_time.saturating_elapsed_secs());
         NATIVE_BR_V1X_COUNTER_VEC
-            .with_label_values(&[tag, result])
+            .with_label_values(&[tag.strip_prefix("x_").unwrap_or(tag), result])
             .inc();
 
         res
@@ -2027,7 +2227,7 @@ pub mod v1x {
             }
         }
 
-        fn query_params<'de, T: Deserialize<'de>>(&self) -> HttpResult<T> {
+        fn query_params<'de, T: Deserialize<'de>>(&self) -> Result<T> {
             let query = self.raw_req.uri().query().unwrap_or("");
             let query_pairs: HashMap<_, _> =
                 url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -2042,7 +2242,7 @@ pub mod v1x {
                 );
             let de = MapDeserializer::<_, Error>::new(it);
 
-            Ok(T::deserialize(de)?)
+            T::deserialize(de)
         }
     }
 
@@ -2056,6 +2256,13 @@ pub mod v1x {
         let r: TaskRef = ctx.query_params()?;
         let task = ctx.br.context.delete_task_for_api(r.id)?;
         Ok(task)
+    }
+
+    async fn handle_copy_pack(ctx: HttpRequestContext) -> HttpResult<Task> {
+        let req: CreateCopyBackupRequest = ctx.query_params()?;
+        ctx.br
+            .spawn_task(TaskRequest::CopyPacked(req.clone()))
+            .map_err(HttpError::from)
     }
 
     async fn handle_create_pack(ctx: HttpRequestContext) -> HttpResult<Task> {
@@ -2079,8 +2286,62 @@ pub mod v1x {
         Ok(task)
     }
 
+    async fn handle_get_backup(ctx: HttpRequestContext) -> HttpResult<Backup> {
+        let req: GetBackupRequest = ctx.query_params()?;
+        let GetBackupQuery::ForPointInTimeRestore { point_in_time } = req.query;
+
+        let s3 = ctx.br.overriden_storage(&req.s3_override);
+        let (backups, _) = get_all_incremental_backups(
+            &s3,
+            &point_in_time.date_naive(),
+            Some(&point_in_time.time()),
+            1,
+        )
+        .await?;
+
+        if backups.is_empty() {
+            return Err(Error::noted_not_found(
+                "backup",
+                format_args!(
+                    "a suitable backup for point in time restore to {}",
+                    point_in_time
+                ),
+            )
+            .into());
+        }
+
+        let backup = backups.into_iter().next().unwrap();
+        let backup_name = backup_file_full_path(s3.get_prefix(), backup.name().to_owned(), None);
+        let keyspaces = load_keyspaces(&ctx.br).await?;
+        let details = fetch_backup_details(&s3, &backup_name, &keyspaces).await?;
+        let target_ts = TimeStamp::compose(point_in_time.naive_utc().timestamp_millis() as _, 0);
+        if details.safe_ts > target_ts.into_inner() {
+            return Err(Error::noted_not_found("backup", format_args!(
+                "you are querying a backup with timestamp you want({target_ts}); there is one but that timestamp was GCed(to {})",
+                details.safe_ts
+            )).into());
+        }
+        if details.backup_ts < target_ts.into_inner() {
+            // In case PD local time drifts...
+            // What can we do later in this scenario? Suggest the user use a former
+            // timestamp and try again?
+            return Err(Error::noted_not_found("backup", format_args!(
+                "you are querying a backup with timestamp you want({target_ts}); there is one but that timestamp is beyond the backup time({})",
+                details.backup_ts
+            )).into());
+        }
+
+        let actual_backup = Backup {
+            name: backup.name().to_owned(),
+            last_modify_time: backup.created_at().to_rfc3339(),
+            details: Some(details),
+            v1_compat_id: Some(backup.id()),
+            v1_compat_name: Some(backup.created_at().format(BACKUP_NAME_FORMAT).to_string()),
+        };
+        Ok(actual_backup)
+    }
+
     async fn handle_list_backup(ctx: HttpRequestContext) -> HttpResult<ListBackupResponse> {
-        let ob_start_time = tikv_util::time::Instant::now();
         let cluster_id = ctx.br.get_cluster_id()?;
 
         let params: ListBackupRequest = ctx.query_params()?;
@@ -2113,6 +2374,7 @@ pub mod v1x {
             let mut st = FuturesUnordered::new();
             for v in files {
                 st.push(async move {
+                    let v1_compat = v1_compat_info(&v.key);
                     HttpResult::Ok(Backup {
                         name: v.key.strip_prefix(full_prefix).unwrap().to_string(),
                         last_modify_time: v.last_modified,
@@ -2124,7 +2386,8 @@ pub mod v1x {
                         } else {
                             None
                         },
-                        v1_compat_id: v1_compat_id(&v.key),
+                        v1_compat_id: v1_compat.as_ref().map(|(a, _)| *a),
+                        v1_compat_name: v1_compat.map(|(_, b)| b),
                     })
                 });
 
@@ -2143,10 +2406,6 @@ pub mod v1x {
 
         backups.sort_by(|bk1, bk2| bk1.name.cmp(&bk2.name));
 
-        NATIVE_BR_HISTOGRAM_VEC
-            .with_label_values(&["list_backup_x"])
-            .observe(ob_start_time.saturating_elapsed_secs());
-
         Ok(ListBackupResponse {
             data: backups,
             cluster_id,
@@ -2158,7 +2417,7 @@ pub mod v1x {
         s3fs: &S3Fs,
         key: &str,
         keyspaces: &HashMap<u32, KeyspaceMeta>,
-    ) -> HttpResult<BackupDetails> {
+    ) -> Result<BackupDetails> {
         let backup_meta_bytes = s3fs
             .get_object(key.to_owned(), key.to_owned(), Default::default())
             .await?;
@@ -2210,7 +2469,7 @@ pub mod v1x {
     // for now the test cluster doesn't support PD's http API...
     // use a mocked keyspace meta to make the test case happy...
     #[cfg(feature = "testexport")]
-    async fn load_keyspaces(_br_ctx: &NativeBrManager) -> HttpResult<HashMap<u32, KeyspaceMeta>> {
+    async fn load_keyspaces(_br_ctx: &NativeBrManager) -> Result<HashMap<u32, KeyspaceMeta>> {
         let meta = |id, name: &str| {
             let mut meta = KeyspaceMeta::default();
             meta.id = id;
@@ -2301,12 +2560,36 @@ pub mod test_utils {
             backup_name: &str,
             keyspace_name: &str,
         ) -> HttpResult<super::v1x::Task> {
-            let query = url::form_urlencoded::Serializer::new(String::new())
-                .extend_pairs([
-                    ("backup_name", backup_name.to_string()),
-                    ("keyspace", keyspace_name.to_string()),
-                ])
-                .finish();
+            // Backward compatible: call the variant with no S3 override.
+            self.pack_backup_with_override(
+                id,
+                backup_name,
+                keyspace_name,
+                super::v1x::S3Override {
+                    bucket: None,
+                    prefix: None,
+                },
+            )
+            .await
+        }
+
+        pub async fn pack_backup_with_override(
+            &self,
+            id: u64,
+            backup_name: &str,
+            keyspace_name: &str,
+            s3_override: super::v1x::S3Override,
+        ) -> HttpResult<super::v1x::Task> {
+            let mut ser = url::form_urlencoded::Serializer::new(String::new());
+            ser.append_pair("backup_name", backup_name);
+            ser.append_pair("keyspace", keyspace_name);
+            if let Some(bucket) = s3_override.bucket.as_deref() {
+                ser.append_pair("use_s3_bucket", bucket);
+            }
+            if let Some(prefix) = s3_override.prefix.as_deref() {
+                ser.append_pair("use_prefix", prefix);
+            }
+            let query = ser.finish();
             Ok(box_try!(
                 self.inner
                     .put(
@@ -2323,13 +2606,11 @@ pub mod test_utils {
             exotic_path: &str,
             keyspace_name: &str,
         ) -> HttpResult<super::v1x::Task> {
-            let query = url::form_urlencoded::Serializer::new(String::new())
-                .extend_pairs([
-                    ("cluster_id", self.cluster_id.to_string()),
-                    ("exotic_backup", exotic_path.to_string()),
-                    ("keyspace", keyspace_name.to_string()),
-                ])
-                .finish();
+            let mut ser = url::form_urlencoded::Serializer::new(String::new());
+            ser.append_pair("cluster_id", &self.cluster_id.to_string());
+            ser.append_pair("exotic_backup", exotic_path);
+            ser.append_pair("keyspace", keyspace_name);
+            let query = ser.finish();
             Ok(box_try!(
                 self.inner
                     .put(
@@ -2337,6 +2618,89 @@ pub mod test_utils {
                         &DummyRequest {}
                     )
                     .await
+            ))
+        }
+
+        pub async fn copy_packed_backup(
+            &self,
+            id: u64,
+            exotic_path: &str,
+            copy_to: &str,
+        ) -> HttpResult<super::v1x::Task> {
+            // Backward compatible: call the variant with no S3 override.
+            self.copy_packed_backup_with_override(
+                id,
+                exotic_path,
+                copy_to,
+                super::v1x::S3Override {
+                    bucket: None,
+                    prefix: None,
+                },
+            )
+            .await
+        }
+
+        pub async fn copy_packed_backup_with_override(
+            &self,
+            id: u64,
+            exotic_path: &str,
+            copy_to: &str,
+            s3_override: super::v1x::S3Override,
+        ) -> HttpResult<super::v1x::Task> {
+            let mut ser = url::form_urlencoded::Serializer::new(String::new());
+            ser.append_pair("exotic_backup", exotic_path);
+            ser.append_pair("copy_to", copy_to);
+            if let Some(bucket) = s3_override.bucket.as_deref() {
+                ser.append_pair("use_s3_bucket", bucket);
+            }
+            if let Some(prefix) = s3_override.prefix.as_deref() {
+                ser.append_pair("use_prefix", prefix);
+            }
+            let query = ser.finish();
+            Ok(box_try!(
+                self.inner
+                    .put(
+                        format!("api/v1/x/task/copy_backup/{id}?{query}"),
+                        &DummyRequest {}
+                    )
+                    .await
+            ))
+        }
+
+        // Query a suitable backup for point-in-time restore via API v1x.
+        pub async fn get_backup_for_pitr(
+            &self,
+            point_in_time: DateTime<Utc>,
+        ) -> HttpResult<super::v1x::Backup> {
+            self.get_backup_for_pitr_with_override(
+                point_in_time,
+                super::v1x::S3Override {
+                    bucket: None,
+                    prefix: None,
+                },
+            )
+            .await
+        }
+
+        // Variant that allows overriding the target S3 bucket/prefix.
+        pub async fn get_backup_for_pitr_with_override(
+            &self,
+            point_in_time: DateTime<Utc>,
+            s3_override: super::v1x::S3Override,
+        ) -> HttpResult<super::v1x::Backup> {
+            let mut ser = url::form_urlencoded::Serializer::new(String::new());
+            // match GetBackupQuery::ForPointInTimeRestore { .. }
+            ser.append_pair("query", "for-pitr");
+            ser.append_pair("point_in_time", &point_in_time.to_rfc3339());
+            if let Some(bucket) = s3_override.bucket.as_deref() {
+                ser.append_pair("use_s3_bucket", bucket);
+            }
+            if let Some(prefix) = s3_override.prefix.as_deref() {
+                ser.append_pair("use_prefix", prefix);
+            }
+            let query = ser.finish();
+            Ok(box_try!(
+                self.inner.get(format!("api/v1/x/backup?{query}")).await
             ))
         }
 

@@ -211,6 +211,30 @@ impl S3FsCore {
         }
     }
 
+    pub fn rel_file_key(&self, file_id: u64, file_type: FileType) -> String {
+        let idx = (fingerprint64(file_id.to_le_bytes().as_slice())) as u8;
+        match file_type {
+            FileType::Sst => {
+                format!("{:02x}/{:016x}.sst", idx, file_id)
+            }
+            FileType::Blob => {
+                format!("blob/{:02x}/{:016x}.blob", idx, file_id)
+            }
+            FileType::TxnChunk => {
+                format!("txn/{:02x}/{:016x}.txn", idx, file_id)
+            }
+            FileType::Schema => {
+                format!("schema/{:02x}/{:016x}.schema", idx, file_id)
+            }
+            FileType::Columnar => {
+                format!("col/{:02x}/{:016x}.col", idx, file_id)
+            }
+            FileType::VectorIndex => {
+                format!("vec/{:02x}/{:016x}.vec", idx, file_id)
+            }
+        }
+    }
+
     pub fn file_key(&self, file_id: u64, file_type: FileType) -> String {
         let idx = (fingerprint64(file_id.to_le_bytes().as_slice())) as u8;
         match file_type {

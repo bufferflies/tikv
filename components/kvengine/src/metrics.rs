@@ -153,6 +153,16 @@ lazy_static! {
         "Histogram of levels where tables are ingested",
         vec![0.0, 1.0, 2.0, 3.0]
     ).unwrap();
+
+    pub static ref ENGINE_PREPARE_LOAD_REMOTE_FILE: IntCounter = register_int_counter!(
+        "kv_engine_prepare_load_remote_file",
+        "Total number of remote files loaded during preparing changeset"
+    ).unwrap();
+
+    pub static ref ENGINE_PREPARE_USE_LOCAL_FILE: IntCounter = register_int_counter!(
+        "kv_engine_prepare_use_local_file",
+        "Total number local file hit during preparing changeset"
+    ).unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {
