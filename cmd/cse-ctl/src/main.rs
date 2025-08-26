@@ -1,5 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 #![feature(lazy_cell)]
+#![feature(path_file_prefix)]
 
 #[macro_use]
 extern crate serde_derive;
@@ -16,6 +17,7 @@ mod recovery;
 mod region;
 mod resolve_lock;
 mod restore;
+mod schema_file;
 mod sst;
 mod stats;
 mod test;
@@ -42,6 +44,7 @@ use crate::{
     recovery::{execute_recovery, RecoveryArgs},
     resolve_lock::{execute_resolve_lock, ResolveLockArgs},
     restore::{execute_restore_command, RestoreCommand},
+    schema_file::{execute_show_schema, ShowSchemaArgs},
     sst::{execute_scan_bad_table, execute_show_sst, ScanBadTableFileArgs, ShowSstArgs},
     stats::{execute_stats, StatsArgs},
     test::{execute_test, TestArgs},
@@ -202,6 +205,7 @@ enum ShowCommands {
     Archive(ShowArchiveArgs),
     TxnChunk(ShowTxnChunkArgs),
     TxnLog(ShowTxnLogArgs),
+    Schema(ShowSchemaArgs),
 }
 
 fn execute_show(args: ShowArgs) {
@@ -225,5 +229,8 @@ fn execute_show(args: ShowArgs) {
             execute_show_txn_chunk(args);
         }
         ShowCommands::TxnLog(args) => execute_show_txn_log(args),
+        ShowCommands::Schema(args) => {
+            execute_show_schema(args);
+        }
     }
 }
