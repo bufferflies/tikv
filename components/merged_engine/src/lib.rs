@@ -424,28 +424,23 @@ impl MergedEngine {
                 region_progress.truncated_index = truncated_index;
                 // merge states
                 let mut batch = rfengine::WriteBatch::new();
-                let mut has_engine_meta_diff = false;
-                let mut has_engine_meta_snap_diff = false;
                 origin.iterate_peer_states(peer_id, false, |k, v| {
                     update_peer_state(&mut batch, k, v, merged_raft.get_engine_id(), region_id);
-                    match k {
-                        rfengine::KV_ENGINE_META_DIFF_KEY => has_engine_meta_diff = true,
-                        rfengine::KV_ENGINE_META_SNAP_DIFF_KEY => has_engine_meta_snap_diff = true,
-                        _ => {}
-                    }
                     true
                 });
 
-                if !has_engine_meta_diff {
-                    batch.set_state(region_id, region_id, rfengine::KV_ENGINE_META_DIFF_KEY, &[]);
-                }
-                if !has_engine_meta_snap_diff {
-                    batch.set_state(
-                        region_id,
-                        region_id,
+                if batch
+                    .get_state(region_id, rfengine::KV_ENGINE_META_KEY)
+                    .is_some()
+                {
+                    for k in [
+                        rfengine::KV_ENGINE_META_DIFF_KEY,
                         rfengine::KV_ENGINE_META_SNAP_DIFF_KEY,
-                        &[],
-                    );
+                    ] {
+                        if batch.get_state(region_id, k).is_none() {
+                            batch.set_state(region_id, region_id, k, &[]);
+                        }
+                    }
                 }
 
                 // merge raft logs
