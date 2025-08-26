@@ -2306,8 +2306,12 @@ impl<'a> PreprocessRef<'a> {
         // proposed before proposing conf change, but it make things complicated.
         // Another way is make conf change also check region version, but this is not
         // backward compatible.
-        let conf_version = region.get_region_epoch().get_conf_ver() + 1;
-        region.mut_region_epoch().set_conf_ver(conf_version);
+        // Change conf version only when there are multiple peers, to meet the
+        // requirement of merged engine which has no conf change.
+        if region.get_peers().len() > 1 {
+            let conf_version = region.get_region_epoch().get_conf_ver() + 1;
+            region.mut_region_epoch().set_conf_ver(conf_version);
+        }
         let mut merge_state = MergeState::default();
         merge_state.set_target(prepare_merge.get_target().to_owned());
         merge_state.set_commit(entry.index);
