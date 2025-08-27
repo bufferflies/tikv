@@ -10691,6 +10691,1186 @@ impl ::protobuf::reflect::ProtobufValue for FileRef {
     }
 }
 
+#[derive(PartialEq,Clone,Default)]
+pub struct EncryptionMeta {
+    // message fields
+    pub keyspace_id: u32,
+    pub current: ::protobuf::SingularPtrField<EncryptionEpoch>,
+    pub master_key: ::protobuf::SingularPtrField<MasterKey>,
+    pub data_keys: ::std::collections::HashMap<u32, DataKey>,
+    pub history: ::protobuf::RepeatedField<EncryptionEpoch>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a EncryptionMeta {
+    fn default() -> &'a EncryptionMeta {
+        <EncryptionMeta as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl EncryptionMeta {
+    pub fn new() -> EncryptionMeta {
+        ::std::default::Default::default()
+    }
+
+    // uint32 keyspace_id = 1;
+
+
+    pub fn get_keyspace_id(&self) -> u32 {
+        self.keyspace_id
+    }
+    pub fn clear_keyspace_id(&mut self) {
+        self.keyspace_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_keyspace_id(&mut self, v: u32) {
+        self.keyspace_id = v;
+    }
+
+    // .enginepb.EncryptionEpoch current = 2;
+
+
+    pub fn get_current(&self) -> &EncryptionEpoch {
+        self.current.as_ref().unwrap_or_else(|| EncryptionEpoch::default_instance())
+    }
+    pub fn clear_current(&mut self) {
+        self.current.clear();
+    }
+
+    pub fn has_current(&self) -> bool {
+        self.current.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_current(&mut self, v: EncryptionEpoch) {
+        self.current = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_current(&mut self) -> &mut EncryptionEpoch {
+        if self.current.is_none() {
+            self.current.set_default();
+        }
+        self.current.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_current(&mut self) -> EncryptionEpoch {
+        self.current.take().unwrap_or_else(|| EncryptionEpoch::new())
+    }
+
+    // .enginepb.MasterKey master_key = 3;
+
+
+    pub fn get_master_key(&self) -> &MasterKey {
+        self.master_key.as_ref().unwrap_or_else(|| MasterKey::default_instance())
+    }
+    pub fn clear_master_key(&mut self) {
+        self.master_key.clear();
+    }
+
+    pub fn has_master_key(&self) -> bool {
+        self.master_key.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_master_key(&mut self, v: MasterKey) {
+        self.master_key = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_master_key(&mut self) -> &mut MasterKey {
+        if self.master_key.is_none() {
+            self.master_key.set_default();
+        }
+        self.master_key.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_master_key(&mut self) -> MasterKey {
+        self.master_key.take().unwrap_or_else(|| MasterKey::new())
+    }
+
+    // repeated .enginepb.EncryptionMeta.data_keys_MapEntry data_keys = 4;
+
+
+    pub fn get_data_keys(&self) -> &::std::collections::HashMap<u32, DataKey> {
+        &self.data_keys
+    }
+    pub fn clear_data_keys(&mut self) {
+        self.data_keys.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_data_keys(&mut self, v: ::std::collections::HashMap<u32, DataKey>) {
+        self.data_keys = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_data_keys(&mut self) -> &mut ::std::collections::HashMap<u32, DataKey> {
+        &mut self.data_keys
+    }
+
+    // Take field
+    pub fn take_data_keys(&mut self) -> ::std::collections::HashMap<u32, DataKey> {
+        ::std::mem::replace(&mut self.data_keys, ::std::collections::HashMap::new())
+    }
+
+    // repeated .enginepb.EncryptionEpoch history = 5;
+
+
+    pub fn get_history(&self) -> &[EncryptionEpoch] {
+        &self.history
+    }
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_history(&mut self, v: ::protobuf::RepeatedField<EncryptionEpoch>) {
+        self.history = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_history(&mut self) -> &mut ::protobuf::RepeatedField<EncryptionEpoch> {
+        &mut self.history
+    }
+
+    // Take field
+    pub fn take_history(&mut self) -> ::protobuf::RepeatedField<EncryptionEpoch> {
+        ::std::mem::replace(&mut self.history, ::protobuf::RepeatedField::new())
+    }
+}
+
+impl ::protobuf::Message for EncryptionMeta {
+    fn is_initialized(&self) -> bool {
+        for v in &self.current {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.master_key {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.history {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.keyspace_id = tmp;
+                },
+                2 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.current)?;
+                },
+                3 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.master_key)?;
+                },
+                4 => {
+                    ::protobuf::rt::read_map_into::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<DataKey>>(wire_type, is, &mut self.data_keys)?;
+                },
+                5 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.history)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.keyspace_id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.keyspace_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if let Some(ref v) = self.current.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        if let Some(ref v) = self.master_key.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        my_size += ::protobuf::rt::compute_map_size::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<DataKey>>(4, &self.data_keys);
+        for value in &self.history {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.keyspace_id != 0 {
+            os.write_uint32(1, self.keyspace_id)?;
+        }
+        if let Some(ref v) = self.current.as_ref() {
+            os.write_tag(2, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.master_key.as_ref() {
+            os.write_tag(3, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        ::protobuf::rt::write_map_with_cached_sizes::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<DataKey>>(4, &self.data_keys, os)?;
+        for v in &self.history {
+            os.write_tag(5, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> EncryptionMeta {
+        EncryptionMeta::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "keyspace_id",
+                    |m: &EncryptionMeta| { &m.keyspace_id },
+                    |m: &mut EncryptionMeta| { &mut m.keyspace_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<EncryptionEpoch>>(
+                    "current",
+                    |m: &EncryptionMeta| { &m.current },
+                    |m: &mut EncryptionMeta| { &mut m.current },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<MasterKey>>(
+                    "master_key",
+                    |m: &EncryptionMeta| { &m.master_key },
+                    |m: &mut EncryptionMeta| { &mut m.master_key },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_map_accessor::<_, ::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<DataKey>>(
+                    "data_keys",
+                    |m: &EncryptionMeta| { &m.data_keys },
+                    |m: &mut EncryptionMeta| { &mut m.data_keys },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<EncryptionEpoch>>(
+                    "history",
+                    |m: &EncryptionMeta| { &m.history },
+                    |m: &mut EncryptionMeta| { &mut m.history },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<EncryptionMeta>(
+                    "EncryptionMeta",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static EncryptionMeta {
+        static mut instance: ::protobuf::lazy::Lazy<EncryptionMeta> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const EncryptionMeta,
+        };
+        unsafe {
+            instance.get(EncryptionMeta::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for EncryptionMeta {
+    fn clear(&mut self) {
+        self.keyspace_id = 0;
+        self.current.clear();
+        self.master_key.clear();
+        self.data_keys.clear();
+        self.history.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for EncryptionMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", buf);
+        ::protobuf::PbPrint::fmt(&self.current, "current", buf);
+        ::protobuf::PbPrint::fmt(&self.master_key, "master_key", buf);
+        ::protobuf::PbPrint::fmt(&self.data_keys, "data_keys", buf);
+        ::protobuf::PbPrint::fmt(&self.history, "history", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for EncryptionMeta {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.current, "current", &mut s);
+        ::protobuf::PbPrint::fmt(&self.master_key, "master_key", &mut s);
+        ::protobuf::PbPrint::fmt(&self.data_keys, "data_keys", &mut s);
+        ::protobuf::PbPrint::fmt(&self.history, "history", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for EncryptionMeta {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct EncryptionEpoch {
+    // message fields
+    pub file_id: u64,
+    pub data_key_id: u32,
+    pub created_at: u64,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a EncryptionEpoch {
+    fn default() -> &'a EncryptionEpoch {
+        <EncryptionEpoch as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl EncryptionEpoch {
+    pub fn new() -> EncryptionEpoch {
+        ::std::default::Default::default()
+    }
+
+    // uint64 file_id = 1;
+
+
+    pub fn get_file_id(&self) -> u64 {
+        self.file_id
+    }
+    pub fn clear_file_id(&mut self) {
+        self.file_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_file_id(&mut self, v: u64) {
+        self.file_id = v;
+    }
+
+    // uint32 data_key_id = 2;
+
+
+    pub fn get_data_key_id(&self) -> u32 {
+        self.data_key_id
+    }
+    pub fn clear_data_key_id(&mut self) {
+        self.data_key_id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_data_key_id(&mut self, v: u32) {
+        self.data_key_id = v;
+    }
+
+    // uint64 created_at = 3;
+
+
+    pub fn get_created_at(&self) -> u64 {
+        self.created_at
+    }
+    pub fn clear_created_at(&mut self) {
+        self.created_at = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_created_at(&mut self, v: u64) {
+        self.created_at = v;
+    }
+}
+
+impl ::protobuf::Message for EncryptionEpoch {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.file_id = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.data_key_id = tmp;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.created_at = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.file_id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.file_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.data_key_id != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.data_key_id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.created_at != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.created_at, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.file_id != 0 {
+            os.write_uint64(1, self.file_id)?;
+        }
+        if self.data_key_id != 0 {
+            os.write_uint32(2, self.data_key_id)?;
+        }
+        if self.created_at != 0 {
+            os.write_uint64(3, self.created_at)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> EncryptionEpoch {
+        EncryptionEpoch::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "file_id",
+                    |m: &EncryptionEpoch| { &m.file_id },
+                    |m: &mut EncryptionEpoch| { &mut m.file_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "data_key_id",
+                    |m: &EncryptionEpoch| { &m.data_key_id },
+                    |m: &mut EncryptionEpoch| { &mut m.data_key_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "created_at",
+                    |m: &EncryptionEpoch| { &m.created_at },
+                    |m: &mut EncryptionEpoch| { &mut m.created_at },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<EncryptionEpoch>(
+                    "EncryptionEpoch",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static EncryptionEpoch {
+        static mut instance: ::protobuf::lazy::Lazy<EncryptionEpoch> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const EncryptionEpoch,
+        };
+        unsafe {
+            instance.get(EncryptionEpoch::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for EncryptionEpoch {
+    fn clear(&mut self) {
+        self.file_id = 0;
+        self.data_key_id = 0;
+        self.created_at = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for EncryptionEpoch {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.file_id, "file_id", buf);
+        ::protobuf::PbPrint::fmt(&self.data_key_id, "data_key_id", buf);
+        ::protobuf::PbPrint::fmt(&self.created_at, "created_at", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for EncryptionEpoch {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.file_id, "file_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.data_key_id, "data_key_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.created_at, "created_at", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for EncryptionEpoch {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct MasterKey {
+    // message fields
+    pub vendor: ::std::string::String,
+    pub cmek_id: ::std::string::String,
+    pub region: ::std::string::String,
+    pub endpoint: ::std::string::String,
+    pub ciphertext: ::std::vec::Vec<u8>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a MasterKey {
+    fn default() -> &'a MasterKey {
+        <MasterKey as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl MasterKey {
+    pub fn new() -> MasterKey {
+        ::std::default::Default::default()
+    }
+
+    // string vendor = 1;
+
+
+    pub fn get_vendor(&self) -> &str {
+        &self.vendor
+    }
+    pub fn clear_vendor(&mut self) {
+        self.vendor.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_vendor(&mut self, v: ::std::string::String) {
+        self.vendor = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_vendor(&mut self) -> &mut ::std::string::String {
+        &mut self.vendor
+    }
+
+    // Take field
+    pub fn take_vendor(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.vendor, ::std::string::String::new())
+    }
+
+    // string cmek_id = 2;
+
+
+    pub fn get_cmek_id(&self) -> &str {
+        &self.cmek_id
+    }
+    pub fn clear_cmek_id(&mut self) {
+        self.cmek_id.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_cmek_id(&mut self, v: ::std::string::String) {
+        self.cmek_id = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_cmek_id(&mut self) -> &mut ::std::string::String {
+        &mut self.cmek_id
+    }
+
+    // Take field
+    pub fn take_cmek_id(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.cmek_id, ::std::string::String::new())
+    }
+
+    // string region = 3;
+
+
+    pub fn get_region(&self) -> &str {
+        &self.region
+    }
+    pub fn clear_region(&mut self) {
+        self.region.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_region(&mut self, v: ::std::string::String) {
+        self.region = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_region(&mut self) -> &mut ::std::string::String {
+        &mut self.region
+    }
+
+    // Take field
+    pub fn take_region(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.region, ::std::string::String::new())
+    }
+
+    // string endpoint = 4;
+
+
+    pub fn get_endpoint(&self) -> &str {
+        &self.endpoint
+    }
+    pub fn clear_endpoint(&mut self) {
+        self.endpoint.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_endpoint(&mut self, v: ::std::string::String) {
+        self.endpoint = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_endpoint(&mut self) -> &mut ::std::string::String {
+        &mut self.endpoint
+    }
+
+    // Take field
+    pub fn take_endpoint(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.endpoint, ::std::string::String::new())
+    }
+
+    // bytes ciphertext = 5;
+
+
+    pub fn get_ciphertext(&self) -> &[u8] {
+        &self.ciphertext
+    }
+    pub fn clear_ciphertext(&mut self) {
+        self.ciphertext.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_ciphertext(&mut self, v: ::std::vec::Vec<u8>) {
+        self.ciphertext = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_ciphertext(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.ciphertext
+    }
+
+    // Take field
+    pub fn take_ciphertext(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.ciphertext, ::std::vec::Vec::new())
+    }
+}
+
+impl ::protobuf::Message for MasterKey {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.vendor)?;
+                },
+                2 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.cmek_id)?;
+                },
+                3 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.region)?;
+                },
+                4 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.endpoint)?;
+                },
+                5 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.ciphertext)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if !self.vendor.is_empty() {
+            my_size += ::protobuf::rt::string_size(1, &self.vendor);
+        }
+        if !self.cmek_id.is_empty() {
+            my_size += ::protobuf::rt::string_size(2, &self.cmek_id);
+        }
+        if !self.region.is_empty() {
+            my_size += ::protobuf::rt::string_size(3, &self.region);
+        }
+        if !self.endpoint.is_empty() {
+            my_size += ::protobuf::rt::string_size(4, &self.endpoint);
+        }
+        if !self.ciphertext.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(5, &self.ciphertext);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if !self.vendor.is_empty() {
+            os.write_string(1, &self.vendor)?;
+        }
+        if !self.cmek_id.is_empty() {
+            os.write_string(2, &self.cmek_id)?;
+        }
+        if !self.region.is_empty() {
+            os.write_string(3, &self.region)?;
+        }
+        if !self.endpoint.is_empty() {
+            os.write_string(4, &self.endpoint)?;
+        }
+        if !self.ciphertext.is_empty() {
+            os.write_bytes(5, &self.ciphertext)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> MasterKey {
+        MasterKey::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "vendor",
+                    |m: &MasterKey| { &m.vendor },
+                    |m: &mut MasterKey| { &mut m.vendor },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "cmek_id",
+                    |m: &MasterKey| { &m.cmek_id },
+                    |m: &mut MasterKey| { &mut m.cmek_id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "region",
+                    |m: &MasterKey| { &m.region },
+                    |m: &mut MasterKey| { &mut m.region },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                    "endpoint",
+                    |m: &MasterKey| { &m.endpoint },
+                    |m: &mut MasterKey| { &mut m.endpoint },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "ciphertext",
+                    |m: &MasterKey| { &m.ciphertext },
+                    |m: &mut MasterKey| { &mut m.ciphertext },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<MasterKey>(
+                    "MasterKey",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static MasterKey {
+        static mut instance: ::protobuf::lazy::Lazy<MasterKey> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const MasterKey,
+        };
+        unsafe {
+            instance.get(MasterKey::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for MasterKey {
+    fn clear(&mut self) {
+        self.vendor.clear();
+        self.cmek_id.clear();
+        self.region.clear();
+        self.endpoint.clear();
+        self.ciphertext.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for MasterKey {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.vendor, "vendor", buf);
+        ::protobuf::PbPrint::fmt(&self.cmek_id, "cmek_id", buf);
+        ::protobuf::PbPrint::fmt(&self.region, "region", buf);
+        ::protobuf::PbPrint::fmt(&self.endpoint, "endpoint", buf);
+        ::protobuf::PbPrint::fmt(&self.ciphertext, "ciphertext", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for MasterKey {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.vendor, "vendor", &mut s);
+        ::protobuf::PbPrint::fmt(&self.cmek_id, "cmek_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.region, "region", &mut s);
+        ::protobuf::PbPrint::fmt(&self.endpoint, "endpoint", &mut s);
+        ::protobuf::PbPrint::fmt(&self.ciphertext, "ciphertext", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for MasterKey {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct DataKey {
+    // message fields
+    pub ciphertext: ::std::vec::Vec<u8>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a DataKey {
+    fn default() -> &'a DataKey {
+        <DataKey as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl DataKey {
+    pub fn new() -> DataKey {
+        ::std::default::Default::default()
+    }
+
+    // bytes ciphertext = 1;
+
+
+    pub fn get_ciphertext(&self) -> &[u8] {
+        &self.ciphertext
+    }
+    pub fn clear_ciphertext(&mut self) {
+        self.ciphertext.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_ciphertext(&mut self, v: ::std::vec::Vec<u8>) {
+        self.ciphertext = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_ciphertext(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.ciphertext
+    }
+
+    // Take field
+    pub fn take_ciphertext(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.ciphertext, ::std::vec::Vec::new())
+    }
+}
+
+impl ::protobuf::Message for DataKey {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.ciphertext)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if !self.ciphertext.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(1, &self.ciphertext);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if !self.ciphertext.is_empty() {
+            os.write_bytes(1, &self.ciphertext)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> DataKey {
+        DataKey::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "ciphertext",
+                    |m: &DataKey| { &m.ciphertext },
+                    |m: &mut DataKey| { &mut m.ciphertext },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<DataKey>(
+                    "DataKey",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static DataKey {
+        static mut instance: ::protobuf::lazy::Lazy<DataKey> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const DataKey,
+        };
+        unsafe {
+            instance.get(DataKey::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for DataKey {
+    fn clear(&mut self) {
+        self.ciphertext.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for DataKey {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.ciphertext, "ciphertext", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for DataKey {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.ciphertext, "ciphertext", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for DataKey {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
 static file_descriptor_proto_data: &'static [u8] = b"\
     \n\x0fchangeset.proto\x12\x08enginepb\"\x81\x07\n\tChangeSet\x12\x11\n\
     \x07shardID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08shardVer\x18\x02\x20\
@@ -10819,7 +11999,20 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x0c\x20\x01(\x08B\0\x12\x17\n\runpacked_from\x18\r\x20\x01(\tB\0:\0\"L\
     \n\x07FileRef\x12\x13\n\tfile_type\x18\x01\x20\x01(\rB\0\x12\x11\n\x07fi\
     le_id\x18\x02\x20\x01(\x04B\0\x12\x17\n\rfile_abs_path\x18\x03\x20\x01(\
-    \tB\0:\0B\0b\x06proto3\
+    \tB\0:\0\"\xb7\x02\n\x0eEncryptionMeta\x12\x15\n\x0bkeyspace_id\x18\x01\
+    \x20\x01(\rB\0\x12,\n\x07current\x18\x02\x20\x01(\x0b2\x19.enginepb.Encr\
+    yptionEpochB\0\x12)\n\nmaster_key\x18\x03\x20\x01(\x0b2\x13.enginepb.Mas\
+    terKeyB\0\x12@\n\tdata_keys\x18\x04\x20\x03(\x0b2+.enginepb.EncryptionMe\
+    ta.data_keys_MapEntryB\0\x12,\n\x07history\x18\x05\x20\x03(\x0b2\x19.eng\
+    inepb.EncryptionEpochB\0\x1aC\n\x12data_keys_MapEntry\x12\t\n\x03key\x18\
+    \x01(\r\x12\x1e\n\x05value\x18\x02(\x0b2\x11.enginepb.DataKey:\x028\x01:\
+    \0\"S\n\x0fEncryptionEpoch\x12\x11\n\x07file_id\x18\x01\x20\x01(\x04B\0\
+    \x12\x15\n\x0bdata_key_id\x18\x02\x20\x01(\rB\0\x12\x14\n\ncreated_at\
+    \x18\x03\x20\x01(\x04B\0:\0\"n\n\tMasterKey\x12\x10\n\x06vendor\x18\x01\
+    \x20\x01(\tB\0\x12\x11\n\x07cmek_id\x18\x02\x20\x01(\tB\0\x12\x10\n\x06r\
+    egion\x18\x03\x20\x01(\tB\0\x12\x12\n\x08endpoint\x18\x04\x20\x01(\tB\0\
+    \x12\x14\n\nciphertext\x18\x05\x20\x01(\x0cB\0:\0\"!\n\x07DataKey\x12\
+    \x14\n\nciphertext\x18\x01\x20\x01(\x0cB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {
