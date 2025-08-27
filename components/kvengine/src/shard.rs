@@ -1089,9 +1089,9 @@ impl Shard {
             }
         }
 
-        if let Some(columnar_priority) = self.get_columnar_compaction_high_priority(&data) {
+        if let Some(priority) = self.get_col_or_vec_idx_compaction_high_priority(&data) {
             let mut lock = self.compaction_priority.write().unwrap();
-            *lock = Some(columnar_priority);
+            *lock = Some(priority);
             return;
         }
 
@@ -1163,7 +1163,7 @@ impl Shard {
         *lock = priority;
     }
 
-    fn get_columnar_compaction_high_priority(
+    fn get_col_or_vec_idx_compaction_high_priority(
         &self,
         data: &ShardData,
     ) -> Option<CompactionPriority> {
@@ -1175,12 +1175,34 @@ impl Shard {
             return Some(CompactionPriority::ColumnarClear);
         }
 
+        // The vector index is removed from schema file, remove it.
+        let Some(schema_file) = data.schema_file.as_ref() else {
+            return None;
+        };
+        for vec_idx in data.vector_indexes.get_all() {
+            if let Some(schema) = schema_file.get_table(vec_idx.table_id) {
+                if !schema
+                    .vector_indexes
+                    .iter()
+                    .any(|idx| idx.index_id == vec_idx.index_id && idx.col_id == vec_idx.col_id)
+                {
+                    return Some(CompactionPriority::UpdateVectorIndex {
+                        score: 2.0,
+                        table_id: vec_idx.table_id,
+                        index_id: vec_idx.index_id,
+                        col_id: vec_idx.col_id,
+                        rebuild: true,
+                    });
+                }
+            }
+        }
+
         // ColumnarMajor compaction must be done before converting L0 to columnar.
-        if data.schema_file.is_some() && !data.col_levels.unconverted_l0s.is_empty() {
+        if !data.col_levels.unconverted_l0s.is_empty() {
             debug_assert!(!data.columnar_table_ids.is_empty());
             // Schema is outdated, wait for update or clear columnar if there are too many
             // unconverted L0.
-            if self.get_outdated_schema_ver() == data.schema_file.as_ref().unwrap().get_version() {
+            if self.get_outdated_schema_ver() == schema_file.get_version() {
                 if data.has_too_many_unconverted_l0s() {
                     ENGINE_COLUMNAR_TOO_MANY_UNCONVERTED_L0S.inc();
                     warn!(

@@ -2113,41 +2113,60 @@ impl Engine {
                 .unwrap_or_default(),
             shard.get_columnar_snap_version(),
         );
-        let schema_file = data.schema_file.as_ref()?;
-        let table_schema = schema_file.get_table(table_id)?;
-        table_schema
-            .vector_indexes
-            .iter()
-            .find(|idx| idx.index_id == index_id && idx.col_id == col_id)?;
-        let mut remove_file_ids = vec![];
-        let old_idx_snap_ver =
-            if let Some(old_vec_idx) = data.vector_indexes.get(table_id, index_id, col_id) {
-                if rebuild {
-                    for file in &old_vec_idx.files {
-                        remove_file_ids.push(file.file_id());
-                    }
-                    SnapVersion::zero()
-                } else {
-                    old_vec_idx.snap_version()
-                }
-            } else {
-                SnapVersion::zero()
-            };
+        let Some(schema_file) = data.schema_file.as_ref() else {
+            warn!(
+                "{} no schema file found, skip trigger_vector_index_update",
+                tag
+            );
+            return None;
+        };
+        let vector_index_removed = if let Some(table_schema) = schema_file.get_table(table_id) {
+            !table_schema
+                .vector_indexes
+                .iter()
+                .any(|idx| idx.index_id == index_id && idx.col_id == col_id)
+        } else {
+            true
+        };
         let mut col_file_ids = vec![];
         let mut total_size = 0;
-        for col_lvl in &data.col_levels.levels {
-            for col_file in &col_lvl.files {
-                let col_snap_version = col_file.get_snap_version().unwrap_or(1.into());
-                if col_file.has_table(table_id) && col_snap_version > old_idx_snap_ver {
-                    let f = col_file.get_file();
-                    col_file_ids.push((f.id(), col_lvl.level as u32));
-                    total_size += f.size();
+        let mut req = self.new_compact_request_with_shard(shard);
+        let mut remove_file_ids = vec![];
+        // If the vector index is not in the schema, we need to remove the vector index.
+        if vector_index_removed {
+            if let Some(old_vec_idx) = data.vector_indexes.get(table_id, index_id, col_id) {
+                for file in &old_vec_idx.files {
+                    // The vector index will be removed from vector_indexes if all files of the
+                    // vector index are removed.
+                    remove_file_ids.push(file.file_id());
+                }
+            }
+        } else {
+            let old_idx_snap_ver =
+                if let Some(old_vec_idx) = data.vector_indexes.get(table_id, index_id, col_id) {
+                    if rebuild {
+                        for file in &old_vec_idx.files {
+                            remove_file_ids.push(file.file_id());
+                        }
+                        SnapVersion::zero()
+                    } else {
+                        old_vec_idx.snap_version()
+                    }
+                } else {
+                    SnapVersion::zero()
+                };
+            for col_lvl in &data.col_levels.levels {
+                for col_file in &col_lvl.files {
+                    let col_snap_version = col_file.get_snap_version().unwrap_or(1.into());
+                    if col_file.has_table(table_id) && col_snap_version > old_idx_snap_ver {
+                        let f = col_file.get_file();
+                        col_file_ids.push((f.id(), col_lvl.level as u32));
+                        total_size += f.size();
+                    }
                 }
             }
         }
-        let mut req = self.new_compact_request_with_shard(shard);
-        req.input_size = total_size;
-        req.compaction_tp = CompactionType::VectorIndex(VectorIndexUpdate {
+        let vector_index_update = VectorIndexUpdate {
             table_id,
             index_id,
             col_id,
@@ -2156,7 +2175,20 @@ impl Engine {
             col_file_ids,
             remove_file_ids,
             vector_index_build_opts: self.opts.vector_index_build_options,
-        });
+        };
+        if vector_index_removed {
+            info!(
+                "{} trigger vector index removed in local, table_id: {}, index_id: {}, col_id: {}",
+                tag, table_id, index_id, col_id
+            );
+            let mut cs = pb::ChangeSet::default();
+            cs.set_shard_id(shard.id);
+            cs.set_shard_ver(shard.ver);
+            cs.set_update_vector_index(vector_index_update.to_pb_without_added());
+            return Some(Ok(cs));
+        }
+        req.compaction_tp = CompactionType::VectorIndex(vector_index_update);
+        req.input_size = total_size;
         info!("{} trigger vector index update", tag; "total_size" => total_size);
         Some(self.comp_client.compact(req).await)
     }
@@ -5043,6 +5075,7 @@ async fn update_vector_index(
     .unwrap();
     let schema_file = SchemaFile::open(schema_file_data)?;
     let full_schema = schema_file.get_table(update_vec_idx.table_id).unwrap();
+    let mut ret = update_vec_idx.to_pb_without_added();
     let vec_idx_def = full_schema
         .vector_indexes
         .iter()
@@ -5091,7 +5124,6 @@ async fn update_vector_index(
         );
         readers.push(Box::new(reader));
     }
-    let mut ret = update_vec_idx.to_pb_without_added();
     if readers.is_empty() {
         info!("update vector index result {:?}", ret);
         return Ok(ret);

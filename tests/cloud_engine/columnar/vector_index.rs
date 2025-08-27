@@ -543,6 +543,28 @@ fn build_vector_schema(table_id: i64, metric: tipb::VectorDistanceMetric) -> Sch
     .into()
 }
 
+fn build_empty_schema(table_id: i64) -> Schema {
+    let pk_col_ids = vec![1];
+    let mut handle_column = new_int_handle_column_info();
+    handle_column.set_column_id(1);
+    handle_column.set_pk_handle(true);
+    let version_column = new_version_column_info();
+    let columns = vec![];
+    let vector_indexes = vec![];
+    SchemaBuf::new(
+        table_id,
+        handle_column,
+        version_column,
+        columns,
+        pk_col_ids,
+        0,
+        vector_indexes,
+        StorageClassSpec::default(),
+        None,
+    )
+    .into()
+}
+
 #[test]
 fn test_read_distance_from_vector_index_and_table() {
     test_util::init_log_for_test();
@@ -1029,6 +1051,132 @@ fn test_read_distance_from_vector_index() {
         );
         assert_eq!(topn[i].distance, *distance);
     }
+}
+
+#[test]
+fn test_drop_vector_index() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_drop_vector_index");
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.kvengine
+            .columnar_table_build_options
+            .max_columnar_table_size = 1024;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 9;
+        conf.kvengine.vector_index_build_options.delta_size = 1024;
+        conf.kvengine.build_columnar = true;
+        conf.kvengine.read_columnar = true;
+        conf.dfs = dfs_config.clone();
+    });
+    let dfs = cluster.get_dfs().unwrap();
+    let (keyspace_id, table_ids) = dfs
+        .get_runtime()
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
+    let t1 = table_ids[0];
+    let schema = build_vector_schema(t1, tipb::VectorDistanceMetric::Cosine);
+    let schema_file_data = build_schema_file(keyspace_id, 10, vec![schema.clone()], 0);
+    let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    dfs.get_runtime()
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    let status_addr = cluster.status_addr(node_id);
+    let kvengine = cluster.get_kvengine(node_id);
+    let all_ids_vers = kvengine.get_all_shard_id_vers();
+    assert_eq!(all_ids_vers.len(), 8);
+    must_wait(
+        || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
+            for &id_ver in &all_ids_vers {
+                let shard = kvengine.get_shard(id_ver.id).unwrap();
+                if shard.get_schema_file().is_some() {
+                    return true;
+                }
+            }
+            false
+        },
+        10,
+        || "failed to wait schema file".to_string(),
+    );
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    let step = 200;
+    let total_cnt = 1000;
+    for i in (0..total_cnt).step_by(step) {
+        client.put_kv(
+            i..i + step,
+            |i: usize| {
+                let mut guard = ctx.lock().unwrap();
+                build_row_key(keyspace_id, &schema, &mut guard, i)
+            },
+            |i| {
+                let mut guard = ctx.lock().unwrap();
+                build_row_val(&schema, &mut guard, i)
+            },
+        );
+    }
+    must_wait(
+        || {
+            for &id_ver in &all_ids_vers {
+                let shard = kvengine.get_shard(id_ver.id).unwrap();
+                let vec_idx_files = shard.get_all_vec_idx_files();
+                if !vec_idx_files.is_empty() {
+                    return true;
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build vector index file".to_string(),
+    );
+
+    // Drop vector index in schema
+    let no_vector_index_schema = build_empty_schema(t1);
+    let schema_file_data = build_schema_file(keyspace_id, 11, vec![no_vector_index_schema], 0);
+    let new_schema_file_id = schema_file_id + 1;
+    dfs.get_runtime()
+        .block_on(dfs.create(new_schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    must_wait(
+        || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                new_schema_file_id,
+            ));
+            for &id_ver in &all_ids_vers {
+                let shard = kvengine.get_shard(id_ver.id).unwrap();
+                if shard.get_schema_file().is_some() {
+                    return true;
+                }
+            }
+            false
+        },
+        10,
+        || "failed to wait schema file".to_string(),
+    );
+    must_wait(
+        || {
+            for &id_ver in &all_ids_vers {
+                let shard = kvengine.get_shard(id_ver.id).unwrap();
+                let vec_idx_files = shard.get_all_vec_idx_files();
+                if !vec_idx_files.is_empty() {
+                    return false;
+                }
+            }
+            true
+        },
+        10,
+        || "failed to drop vector index file".to_string(),
+    );
+    cluster.stop();
+    oss.shutdown();
 }
 
 // only for L2 distance
