@@ -22,7 +22,8 @@ use collections::{HashMap, HashMapExt, HashSet};
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use kvengine::{
-    dfs::S3Fs, ia::util::IaConfig, limiter::StoreLimiter, MetaIterator, Shard, ShardMeta, TERM_KEY,
+    dfs::S3Fs, ia::util::IaConfig, limiter::StoreLimiter, IdVer, MetaIterator, Shard, ShardMeta,
+    ShardTag, TERM_KEY,
 };
 use kvenginepb::ChangeSet;
 use kvproto::{metapb, metapb::Peer, raft_cmdpb::AdminRequest, raft_serverpb::StoreIdent};
@@ -37,8 +38,9 @@ use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::{
     store::{
         get_preprocess_cmd, load_last_raft_state_from_wb, state::RaftApplyState, write_engine_meta,
-        Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator, PeerMsg,
-        PreprocessContext, PreprocessRef, RecoverHandler, StoreMsg, RAFT_INIT_LOG_INDEX,
+        Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator, PeerMsg, PeerTag,
+        PreprocessContext, PreprocessRef, RecoverHandler, RegionIdVer, StoreMsg,
+        RAFT_INIT_LOG_INDEX,
     },
     RaftRouter,
 };
@@ -243,6 +245,7 @@ impl MergedEngine {
             if region_id == 0 {
                 continue;
             }
+            tikv_util::set_current_region(region_id);
             let Some(processor) =
                 Preprocessor::new(&raft, merged_store_id, region_id, &ctx.master_key)
             else {
@@ -406,6 +409,7 @@ impl MergedEngine {
                     ApiV2::get_u32_keyspace_id_by_key(region_state.get_region().get_start_key())
                         .unwrap_or_default();
                 let region_version = region_state.get_region().get_region_epoch().get_version();
+                let tag = ShardTag::new(store.store_id, IdVer::new(region_id, region_version));
                 let raft_state =
                     rfstore::store::load_peer_raft_state(&origin, peer_id, region_version).unwrap();
                 let preprocess_index = raft_state.get_last_preprocessed_index();
@@ -426,12 +430,15 @@ impl MergedEngine {
                         &mut entry_buf,
                     ) {
                         panic!(
-                            "fetch raft entries failed for region {}, low: {}, high: {}, err: {}",
-                            region_id, low_idx, high_idx, err
+                            "{} fetch raft entries failed for region, low: {}, high: {}, err: {}",
+                            tag, low_idx, high_idx, err
                         );
                     }
                     for entry in entry_buf.iter() {
-                        debug!("recover from backup: insert log index {}", entry.index; "region" => region_id);
+                        debug!(
+                            "{} recover from backup: insert log index {}",
+                            tag, entry.index
+                        );
                         region_progress.upsert_entry(entry.index, entry.term as u32, || {
                             RaftLogOp::new(entry).into()
                         });
@@ -701,12 +708,15 @@ impl MergedEngine {
                 if region_id == 0 {
                     continue;
                 }
+                tikv_util::set_current_region(region_id);
+                let tag = ShardTag::new(store_id, IdVer::new(region_id, 0));
+
                 let progress = match self.region_progresses.entry(region_id) {
                     HashMapEntry::Occupied(e) => e.into_mut(),
                     HashMapEntry::Vacant(e) => {
                         let Some(region_local_state) = origin_wb.get_latest_peer_state(peer_id)
                         else {
-                            info!("{}:{} update_wal: no peer state in wb", store_id, region_id);
+                            info!("{} update_wal: no peer state in wb", tag);
                             continue;
                         };
                         let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(
@@ -717,7 +727,7 @@ impl MergedEngine {
                     }
                 };
                 if progress.truncated_index == TRUNCATE_ALL_INDEX {
-                    debug!("update_wal: truncate all"; "region" => region_id);
+                    debug!("{} update_wal: truncate all", tag);
                     continue;
                 }
                 if let Some(truncated_idx) = origin_wb.get_truncated_idx(peer_id) {
@@ -732,14 +742,14 @@ impl MergedEngine {
                         progress.commit_index = raft_state.get_commit();
                         debug!(
                             "{} update_wal: advance commit index {}",
-                            region_id, progress.commit_index
+                            tag, progress.commit_index
                         );
                     }
                 }
                 origin_wb.read_peer_logs(peer_id, |logs| {
                     for log_op in logs {
-                        debug!("update_wal: insert log index {}", log_op.index; "region" => region_id);
-                        progress.upsert_entry(log_op.index, log_op.term, ||log_op.clone().into());
+                        debug!("{} update_wal: insert log index {}", tag, log_op.index);
+                        progress.upsert_entry(log_op.index, log_op.term, || log_op.clone().into());
                     }
                 });
                 self.updated_regions.insert(region_id);
@@ -820,13 +830,15 @@ impl MergedEngine {
         destroyed_regions: &mut HashSet<u64>,
         prepared_msgs: &mut HashMap<u64, Vec<(u64, Box<PeerMsg>)>>,
     ) -> Result<()> {
-        info!("sync merged for regions {:?}", updated_regions);
-        let mut update_queue = VecDeque::from(updated_regions.to_vec());
         let merged_store_id = self.ctx.config.merged_store_id;
+        info!("sync merged for regions {:?}", updated_regions; "store" => merged_store_id);
+        let mut update_queue = VecDeque::from(updated_regions.to_vec());
         let mut merged_wb = rfengine::WriteBatch::new();
         let mut merged_wb_estimated_size = 0;
         let mut finished_regions = HashSet::default();
         while let Some(updated_region) = update_queue.pop_front() {
+            tikv_util::set_current_region(updated_region);
+            let mut tag = PeerTag::new(merged_store_id, RegionIdVer::new(updated_region, 0));
             let progress = self.region_progresses.get_mut(&updated_region).unwrap();
             let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
             let high: u64 = progress.commit_index + 1;
@@ -837,7 +849,7 @@ impl MergedEngine {
             if self.raft.get_truncated_index(updated_region).is_none() {
                 // region is newly inserted, should process parent first.
                 update_queue.push_back(updated_region);
-                info!("{} sync_merged: region is newly inserted", updated_region);
+                info!("{} sync_merged: region is newly inserted", tag);
                 continue;
             }
             let preprocessor = match self.preprocessors.entry(updated_region) {
@@ -849,16 +861,14 @@ impl MergedEngine {
                         updated_region,
                         &self.ctx.master_key,
                     ) else {
-                        info!(
-                            "{} sync_merged: region is merged or destroyed",
-                            updated_region
-                        );
+                        info!("{} sync_merged: region is merged or destroyed", tag);
                         continue;
                     };
                     e.insert(preprocessor)
                 }
             };
             let mut preprocessor_ref = preprocessor.as_ref();
+            tag = preprocessor_ref.tag();
             let mut entries = Vec::new();
             let mut postponed = false;
             // preprocess entries.
@@ -868,8 +878,8 @@ impl MergedEngine {
                     .get(&log_index)
                     .unwrap_or_else(|| {
                         panic!(
-                            "entry not found for region {}, log index {}",
-                            updated_region, log_index
+                            "{} entry not found for region {}, log index {}",
+                            tag, updated_region, log_index
                         )
                     })
                     .to_entry();
@@ -883,8 +893,8 @@ impl MergedEngine {
                             progress.synced_index = log_index - 1;
                             postponed = true;
                             info!(
-                                "{} postponed at {}, low {}, high {}",
-                                updated_region, log_index, low, high
+                                "{} commit merge postponed at {}, low {}, high {}",
+                                tag, log_index, low, high
                             );
                             break;
                         }
@@ -892,7 +902,7 @@ impl MergedEngine {
                 }
                 let err = preprocessor_ref.preprocess_committed_entry(ctx, &entry);
                 if let Some(err) = err {
-                    warn!("preprocess committed entry failed"; "region_id" => updated_region, "err" => ?err);
+                    warn!("{} preprocess committed entry failed: {:?}", tag, err);
                     // clear failed command.
                     admin_req = None;
                     entry.set_data(Bytes::new());
@@ -968,7 +978,7 @@ impl MergedEngine {
                             Ok((id, msg)) => (id, msg),
                             Err(err) => {
                                 if err.is_timeout() {
-                                    warn!("waiting for region {} to unpause", updated_region);
+                                    warn!("{} waiting for region to unpause", tag);
                                     continue;
                                 }
                                 return Err(Error::Other(Box::new(err)));
@@ -1003,6 +1013,7 @@ impl MergedEngine {
             prepared_msgs.entry(id).or_default().push((id, peer_msg));
         }
         for (region_id, msgs) in prepared_msgs {
+            tikv_util::set_current_region(region_id);
             let Some(applier) = self.appliers.get_mut(&region_id) else {
                 continue;
             };
@@ -1012,11 +1023,16 @@ impl MergedEngine {
 
     fn update_progress_and_truncate(&mut self, regions: &[u64], raft_wb: &mut WriteBatch) {
         for &region_id in regions {
+            tikv_util::set_current_region(region_id);
+            let tag = ShardTag::new(self.ctx.config.merged_store_id, IdVer::new(region_id, 0));
             let progress = self.region_progresses.get_mut(&region_id).unwrap();
             let commit_index = progress.commit_index;
             progress.synced_index = commit_index;
             // We need to keep the uncommitted index for the next round.
-            debug!("update_progress_and_truncate: truncate <= {}", commit_index; "region" => region_id);
+            debug!(
+                "{} update_progress_and_truncate: truncate <= {}",
+                tag, commit_index
+            );
             progress.entries.retain(|&index, _| index > commit_index);
 
             let truncated_idx = self.raft.get_truncated_index(region_id).unwrap();
@@ -1041,6 +1057,7 @@ impl MergedEngine {
 
     fn destroy_regions(&mut self, destroyed_regions: HashSet<u64>, raft_wb: &mut WriteBatch) {
         for region_id in destroyed_regions {
+            tikv_util::set_current_region(region_id);
             self.raft.iterate_peer_states(region_id, false, |k, _| {
                 raft_wb.set_state(region_id, region_id, k, &[]);
                 true

@@ -168,6 +168,26 @@ fn start_server(
     pd: Arc<dyn PdClient>,
     running_ctl: &RunningController,
 ) -> (ServerFuture, Arc<server::Context>) {
+    tikv_util::init_task_local_sync(|| {
+        start_server_impl(
+            config,
+            config_file_path,
+            thread_pool,
+            hyper_runtime,
+            pd,
+            running_ctl,
+        )
+    })
+}
+
+fn start_server_impl(
+    config: Config,
+    config_file_path: Option<PathBuf>,
+    thread_pool: Arc<Runtime>,
+    hyper_runtime: Arc<Runtime>,
+    pd: Arc<dyn PdClient>,
+    running_ctl: &RunningController,
+) -> (ServerFuture, Arc<server::Context>) {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_config));
 

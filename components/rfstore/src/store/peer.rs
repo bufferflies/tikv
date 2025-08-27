@@ -4125,7 +4125,7 @@ impl<'a> PreprocessRef<'a> {
         self.peer.get_id()
     }
 
-    fn tag(&self) -> PeerTag {
+    pub fn tag(&self) -> PeerTag {
         PeerTag::new(self.store_id(), RegionIdVer::from_region(self.region))
     }
 
