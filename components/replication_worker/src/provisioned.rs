@@ -90,9 +90,9 @@ pub mod local_provider {
     use pd_client::pd_control::PdControl;
     use security::{RestfulClient, SecurityConfig, SecurityManager};
     use serde_derive::Deserialize;
-    use tikv_util::{info, retry::try_wait_result_async};
+    use tikv_util::{box_err, info, retry::try_wait_result_async};
 
-    use crate::{Error, Result};
+    use crate::Result;
 
     pub struct LocalProvider {
         pub keyspace_id: u32,
@@ -291,7 +291,7 @@ pub mod local_provider {
                 || Duration::from_millis(200),
             )
             .await
-            .map_err(|s| Error::OtherError(s))
+            .map_err(|s| box_err!("{}", s))
         }
 
         pub async fn wait_tidb_healthy(&self, timeout: Duration) -> Result<()> {
@@ -315,7 +315,7 @@ pub mod local_provider {
                 || Duration::from_millis(200),
             )
             .await
-            .map_err(|s| Error::OtherError(s))
+            .map_err(|s| box_err!("{}", s))
         }
     }
 

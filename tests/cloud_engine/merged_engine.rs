@@ -91,11 +91,10 @@ fn test_merged_engine_once() {
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
     };
     let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
-    let recover_handle = merged_engine.recover_handler.clone();
     let merged_kv = merged_engine.get_kv();
     let mut keyspaces = HashMap::default();
     keyspaces.insert(keyspace_id, Bytes::new());
-    MergedEngine::load_shards(&ctx, &merged_kv, recover_handle, &keyspaces).unwrap();
+    merged_engine.load_shards(&keyspaces).unwrap();
     merged_engine
         .set_keyspace_states(keyspace_id, vec![0].into())
         .unwrap();

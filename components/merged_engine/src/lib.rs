@@ -6,7 +6,9 @@ mod preprocessor;
 
 use std::{
     cmp::max,
-    collections::{hash_map::Entry as HashMapEntry, VecDeque},
+    collections::{
+        hash_map::Entry as HashMapEntry, HashMap as StdHashMap, HashSet as StdHashSet, VecDeque,
+    },
     mem, ops,
     path::{Path, PathBuf},
     sync::Arc,
@@ -16,7 +18,7 @@ use std::{
 use api_version::ApiV2;
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::MasterKey;
-use collections::{HashMap, HashSet};
+use collections::{HashMap, HashMapExt, HashSet};
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use kvengine::{
@@ -264,7 +266,7 @@ impl MergedEngine {
         )
         .unwrap();
         tikv_util::init_task_local_sync(|| {
-            Self::load_shards(
+            Self::load_shards_impl(
                 &ctx,
                 &kv,
                 recover_handler.clone(),
@@ -317,23 +319,53 @@ impl MergedEngine {
         self.router.clone()
     }
 
-    pub fn load_shards(
+    fn load_shards_impl(
         ctx: &MergedEngineContext,
         kv: &kvengine::Engine,
         mut recoverer: RecoverHandler,
         keyspace_states: &HashMap<u32, Bytes>,
     ) -> Result<()> {
+        let metas = Self::load_shard_metas_impl(ctx, &mut recoverer, keyspace_states)?;
+        kv.load_shards(metas, recoverer, None)?;
+        Ok(())
+    }
+
+    fn load_shard_metas_impl(
+        ctx: &MergedEngineContext,
+        recoverer: &mut RecoverHandler,
+        keyspace_states: &HashMap<u32, Bytes>,
+    ) -> Result<StdHashMap<u64 /* region_id */, ShardMeta>> {
         let engine_id = ctx.config.merged_store_id;
-        let mut metas = std::collections::HashMap::default();
+        let mut metas = StdHashMap::default();
         recoverer.iterate(|cs| {
-            let meta = ShardMeta::new(engine_id, &cs);
-            if keyspace_states.contains_key(&meta.range.keyspace_id) {
-                info!("load keyspace insert cs {:?}", cs);
+            debug_assert!(cs.has_snapshot());
+            let keyspace_id = get_keyspace_id_of_snapshot(cs.get_snapshot());
+            if keyspace_states.contains_key(&keyspace_id) {
+                let meta = ShardMeta::new(engine_id, &cs);
+                info!("{} load shard meta: {:?}", meta.tag(), cs);
                 metas.insert(meta.id, meta);
             }
         })?;
-        kv.load_shards(metas, recoverer, None)?;
-        Ok(())
+        Ok(metas)
+    }
+
+    pub fn load_shards(&self, keyspace_states: &HashMap<u32, Bytes>) -> Result<()> {
+        Self::load_shards_impl(
+            &self.ctx,
+            &self.kv,
+            self.recover_handler.clone(),
+            keyspace_states,
+        )
+    }
+
+    pub fn load_keyspace_shard_metas(
+        &self,
+        keyspace_id: u32,
+    ) -> Result<StdHashMap<u64 /* region_id */, ShardMeta>> {
+        let mut states = HashMap::with_capacity(1);
+        states.insert(keyspace_id, Bytes::new());
+        let mut recoverer = self.recover_handler.clone();
+        Self::load_shard_metas_impl(&self.ctx, &mut recoverer, &states)
     }
 
     pub fn close(&self) {
@@ -744,7 +776,7 @@ impl MergedEngine {
         let mut remove_dependents = Vec::new();
         let mut apply_msgs = ApplyMsgs::default();
         let raft_cfg = rfstore::store::Config::default();
-        let mut destroying = std::collections::HashSet::default();
+        let mut destroying = StdHashSet::default();
         let raft_engine = self.raft.clone();
         let router = self.router.clone();
         let mut ctx = PreprocessContext {
@@ -1178,4 +1210,8 @@ impl RaftLogOpWithCounter {
     pub fn counter(&self) -> u8 {
         self.counter
     }
+}
+
+fn get_keyspace_id_of_snapshot(snap: &kvenginepb::Snapshot) -> u32 {
+    ApiV2::get_u32_keyspace_id_by_key(snap.get_outer_start()).unwrap_or_default()
 }

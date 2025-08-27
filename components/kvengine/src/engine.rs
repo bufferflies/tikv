@@ -297,6 +297,54 @@ impl Engine {
         Ok(())
     }
 
+    // This method is used for merged_engine to prepare remote files for recovery.
+    pub fn prepare_shards(&self, metas: &collections::HashMap<u64, ShardMeta>) -> Result<()> {
+        let concurrency = usize::from_str(&env::var("RECOVERY_CONCURRENCY").unwrap_or_default())
+            .unwrap_or_else(|_| std::cmp::min(num_cpus::get() * 4, 64));
+        info!("prepare concurrency {}", concurrency);
+        let (result_tx, result_rx) = tikv_util::mpsc::bounded(concurrency);
+        let runtime = self.fs.get_runtime();
+        let mut msg_count = 0;
+
+        let mut prepare_meta = |meta: &ShardMeta| -> Result<()> {
+            let engine = self.clone();
+            let result_tx = result_tx.clone();
+            let cs = meta.to_change_set();
+            let prepare_type = FilePrepareType::from_shard_meta(meta);
+            let task = move || -> Result<()> {
+                tikv_util::set_current_region(cs.shard_id);
+                engine.prepare_change_set(cs, false, prepare_type, None, None, None)?;
+                Ok(())
+            };
+            runtime.spawn_blocking(move || {
+                let _ = result_tx.send(tikv_util::init_task_local_sync(task));
+            });
+            if msg_count < concurrency {
+                msg_count += 1;
+            } else {
+                result_rx.recv().unwrap()?;
+            }
+            Ok(())
+        };
+
+        let mut parents = collections::HashSet::default();
+        for meta in metas.values() {
+            if let Some(parent) = &meta.parent {
+                let id_ver = IdVer::new(parent.id, parent.ver);
+                if !parents.contains(&id_ver) {
+                    prepare_meta(parent.as_ref())?;
+                    parents.insert(id_ver);
+                }
+            }
+
+            prepare_meta(meta)?;
+        }
+        for _ in 0..msg_count {
+            result_rx.recv().unwrap()?;
+        }
+        Ok(())
+    }
+
     /// Should close engine explicitly if engine is not useful anymore but
     /// process is still running.
     pub fn close(&self) {

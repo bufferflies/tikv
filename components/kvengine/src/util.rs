@@ -356,6 +356,11 @@ impl TxnFileLocks {
     }
 
     #[inline]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[inline]
     pub fn seq(&self) -> u64 {
         self.seq
     }

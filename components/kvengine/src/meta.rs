@@ -3,6 +3,7 @@
 use std::{
     cmp::max,
     collections::{HashMap, HashSet},
+    fmt,
     iter::Iterator,
 };
 
@@ -74,6 +75,29 @@ pub struct ShardMeta {
     /// * On restore from backup: replay raft logs from applied index (instead
     ///   of preprocessed index). See `BackupCluster::preprocess_shard`.
     pub(crate) txn_file_locks: TxnFileLocks,
+}
+
+impl fmt::Display for ShardMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShardMeta")
+            .field("tag", &self.tag())
+            .field("range", &self.range)
+            .field("inner_key_off", &self.inner_key_off)
+            .field("seq", &self.seq)
+            .field("files", &self.files.len())
+            .field("properties", &self.properties)
+            .field("base_ver", &self.base_version)
+            .field("data_seq", &self.data_sequence)
+            .field("max_ts", &self.max_ts)
+            .field("parent", &self.parent.is_some())
+            .field("schema", &self.schema)
+            .field("columnar_table_ids", &self.columnar_table_ids.len())
+            .field("unconverted_l0s", &self.unconverted_l0s.len())
+            .field("vector_indexes", &self.vector_indexes.len())
+            .field("columnar_l2_snap_version", &self.columnar_l2_snap_version)
+            .field("txn_file_locks", &self.txn_file_locks.len())
+            .finish()
+    }
 }
 
 impl ShardMeta {

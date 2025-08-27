@@ -1,8 +1,14 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::hash_map::Entry, fs, mem, net::SocketAddr, ops::Deref, path::PathBuf,
-    str::FromStr, sync::Arc, time::Duration,
+    collections::{hash_map::Entry, HashMap as StdHashMap},
+    fs, mem,
+    net::SocketAddr,
+    ops::Deref,
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
 };
 
 use api_version::ApiV2;
@@ -17,7 +23,7 @@ use hyper::{http, Body, StatusCode};
 use kvengine::{
     dfs::{Dfs, S3Fs},
     table::InnerKey,
-    Engine, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
+    Engine, ShardMeta, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
 };
 use kvproto::{
     cdcpb,
@@ -40,7 +46,7 @@ use rfengine::{assemble_wal_chunks, RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig};
 use tikv_util::{
-    codec, debug, error, info,
+    box_err, codec, debug, error, info,
     mpsc::{Receiver, Sender},
     thd_name,
     time::Instant,
@@ -288,12 +294,16 @@ impl ReplicationWorker {
             CdcMsg::GetKeyspaces { cb } => {
                 cb(self.keyspaces.keys().cloned().collect());
             }
-            CdcMsg::AddKeyspaceResult {
+            CdcMsg::LoadKeyspaceShards {
                 keyspace_id,
-                result,
+                task_service,
                 cb,
             } => {
-                let res = self.handle_add_keyspace_result(keyspace_id, result);
+                let res = self.handle_load_keyspace_shards(keyspace_id, task_service);
+                cb(res);
+            }
+            CdcMsg::LoadKeyspaceShardMetas { keyspace_id, cb } => {
+                let res = self.handle_load_keyspace_shard_metas(keyspace_id);
                 cb(res);
             }
             CdcMsg::RemoveKeyspace { keyspace_id, cb } => {
@@ -749,7 +759,7 @@ impl ReplicationWorker {
             }
             if !status.is_success() {
                 let err_str = String::from_utf8_lossy(&data);
-                return Err(Error::OtherError(err_str.to_string()));
+                return Err(box_err!("{}", err_str));
             }
             let data_len = data.len();
             self.merged_engine
@@ -913,11 +923,11 @@ impl ReplicationWorker {
             ))
         };
         let scheduler = self.scheduler();
-        let merged_engine_ctx = self.merged_engine.ctx.clone();
         let kv = self.merged_engine.kv.clone();
-        let recover_handler = self.merged_engine.recover_handler.clone();
         let http_client = self.http_client.clone();
-        tokio::spawn(async move {
+        tokio::spawn(tikv_util::init_task_local(async move {
+            let start_time = Instant::now_coarse();
+            // Start service.
             let res = task_service.start().await;
             if res.is_err() {
                 cb(res);
@@ -925,35 +935,117 @@ impl ReplicationWorker {
             }
             let cdc_addr = task_service.get_states().cdc_addr.clone();
             let res = get_cdc_status(&http_client, &cdc_addr, DISPATCH_CDC_TIMEOUT).await;
-            if res.is_err() {
-                cb(Err(Error::OtherError("cdc_status failed".into())));
+            if let Err(e) = res {
+                cb(Err(box_err!("cdc_status failed: {:?}", e)));
                 return;
             }
-            // When new keyspace added, loading shards takes long time, we need a dedicated
-            // thread to do it.
-            std::thread::spawn(move || {
-                let mut states = HashMap::default();
-                states.insert(keyspace_id, Bytes::new());
-                let res =
-                    MergedEngine::load_shards(&merged_engine_ctx, &kv, recover_handler, &states)
-                        .map_err(|e| Error::from(e));
-                scheduler.schedule(CdcMsg::AddKeyspaceResult {
-                    keyspace_id,
-                    result: res.map(|_| task_service),
-                    cb,
-                });
+
+            // Prepare shards.
+            // Note that the rfengine will update at the same time. So during load shards,
+            // we will prepare again.
+            let prepare_time = Instant::now_coarse();
+            let mut metas = HashMap::default();
+            if let Err(e) =
+                Self::prepare_keyspace_shard_metas(keyspace_id, &scheduler, &kv, &mut metas).await
+            {
+                cb(Err(box_err!("prepare keyspace metas failed: {:?}", e)));
+                return;
+            }
+            // Prepare again in case some shards are changed during last prepare.
+            if let Err(e) =
+                Self::prepare_keyspace_shard_metas(keyspace_id, &scheduler, &kv, &mut metas).await
+            {
+                cb(Err(box_err!("prepare keyspace metas failed: {:?}", e)));
+                return;
+            }
+
+            // Load shards.
+            let load_shards_time = Instant::now_coarse();
+            let cb_with_log = move |res: Result<()>| {
+                let end_time = Instant::now_coarse();
+                info!("{} add_keyspace: {:?}", keyspace_id, &res;
+                    "takes" => ?end_time.saturating_duration_since(start_time),
+                    "start_svc" => ?prepare_time.saturating_duration_since(start_time),
+                    "prepare" => ?load_shards_time.saturating_duration_since(prepare_time),
+                    "load_shards" => ?end_time.saturating_duration_since(load_shards_time),
+                );
+                cb(res);
+            };
+            scheduler.schedule(CdcMsg::LoadKeyspaceShards {
+                keyspace_id,
+                task_service,
+                cb: Box::new(cb_with_log),
             });
-        });
+        }));
     }
 
-    fn handle_add_keyspace_result(
+    async fn upsert_keyspace_shard_metas(
+        keyspace_id: u32,
+        scheduler: &ReplicationScheduler,
+        metas: &mut HashMap<u64 /* region_id */, ShardMeta>,
+    ) -> Result<()> {
+        let (cb, fut) = tikv_util::future::paired_future_callback();
+        scheduler.schedule(CdcMsg::LoadKeyspaceShardMetas { keyspace_id, cb });
+        let new_metas = fut
+            .await
+            .map_err(|_| -> Error { box_err!("load keyspace metas canceled") })?
+            .map_err(|e| -> Error { box_err!("load keyspace metas failed: {:?}", e) })?;
+
+        for (region_id, meta) in new_metas {
+            match metas.entry(region_id) {
+                Entry::Vacant(e) => {
+                    e.insert(meta);
+                }
+                Entry::Occupied(mut e) => {
+                    let exist_meta = e.get_mut();
+                    if exist_meta.seq < meta.seq {
+                        *exist_meta = meta;
+                    } else {
+                        debug_assert_eq!(exist_meta.seq, meta.seq);
+                        e.remove();
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn prepare_keyspace_shard_metas(
+        keyspace_id: u32,
+        scheduler: &ReplicationScheduler,
+        kv: &Engine,
+        metas: &mut HashMap<u64 /* region_id */, ShardMeta>,
+    ) -> Result<()> {
+        let start_time = Instant::now_coarse();
+        Self::upsert_keyspace_shard_metas(keyspace_id, scheduler, metas).await?;
+
+        let prepare_time = Instant::now_coarse();
+        if !metas.is_empty() {
+            kv.prepare_shards(metas)
+                .map_err(|e| -> Error { box_err!("prepare keyspace metas failed: {:?}", e) })?;
+        }
+
+        let end_time = Instant::now_coarse();
+        info!("{} prepare_keyspace_shard_metas", keyspace_id;
+            "count" => metas.len(),
+            "load" => ?prepare_time.saturating_duration_since(start_time),
+            "prepare" => ?end_time.saturating_duration_since(prepare_time),
+        );
+        Ok(())
+    }
+
+    fn handle_load_keyspace_shards(
         &mut self,
         keyspace_id: u32,
-        result: Result<Box<dyn KeyspaceService>>,
+        task_service: Box<dyn KeyspaceService>,
     ) -> Result<()> {
-        let svc = result?;
-        let states = svc.get_states().marshal();
-        let rep_pd_cli = svc.get_pd_client();
+        let mut states = HashMap::default();
+        states.insert(keyspace_id, Bytes::new());
+        self.merged_engine.load_shards(&states)?;
+
+        let states = task_service.get_states().marshal();
+        let rep_pd_cli = task_service.get_pd_client();
         let raft = self.merged_engine.get_raft();
         let kv = self.merged_engine.get_kv();
         let interval = self.config.report_region_interval.0;
@@ -967,10 +1059,19 @@ impl ReplicationWorker {
             )
             .await
         });
-        self.keyspaces.insert(keyspace_id, svc);
+        self.keyspaces.insert(keyspace_id, task_service);
         self.merged_engine
             .set_keyspace_states(keyspace_id, states)?;
         Ok(())
+    }
+
+    fn handle_load_keyspace_shard_metas(
+        &mut self,
+        keyspace_id: u32,
+    ) -> Result<StdHashMap<u64 /* region_id */, ShardMeta>> {
+        self.merged_engine
+            .load_keyspace_shard_metas(keyspace_id)
+            .map_err(Into::into)
     }
 
     fn handle_remove_keyspace_service(
@@ -1075,7 +1176,7 @@ impl ReplicationWorker {
             let Some(keyspace_id) = self.get_keyspace_id(region_id) else {
                 let err_msg = format!("handle_applied_admin: region {} not found", region_id);
                 debug_assert!(false, "{}", &err_msg);
-                return Err(Error::OtherError(err_msg));
+                return Err(box_err!("{}", err_msg));
             };
             let task_ctx = self.keyspaces.get(&keyspace_id).unwrap();
             let pd_client = task_ctx.get_pd_client();

@@ -205,7 +205,7 @@ pub fn cf_name_to_num(cf_name: &str) -> usize {
 /// If `data` is corrupted, this function will panic.
 // TODO: make sure received entries are not corrupted
 #[inline]
-pub fn parse_data_at<T: Message + Default>(data: &[u8], index: u64, tag: &PeerTag) -> T {
+pub fn parse_data_at<T: Message + Default>(data: &[u8], index: u64, tag: PeerTag) -> T {
     let mut result = T::default();
     result.merge_from_bytes(data).unwrap_or_else(|e| {
         panic!("{} data is corrupted at {}: {:?}", tag, index, e);
@@ -214,7 +214,7 @@ pub fn parse_data_at<T: Message + Default>(data: &[u8], index: u64, tag: &PeerTa
 }
 
 pub fn parse_raft_cmd(
-    tag: &PeerTag,
+    tag: PeerTag,
     entry: &eraftpb::Entry,
     encryption_key: Option<&EncryptionKey>,
     decryption_buf: &mut Vec<u8>,
@@ -267,6 +267,15 @@ impl slog::Value for PeerTag {
         serializer: &mut dyn Serializer,
     ) -> slog::Result {
         serializer.emit_str(key, &self.to_string())
+    }
+}
+
+impl From<kvengine::ShardTag> for PeerTag {
+    fn from(tag: kvengine::ShardTag) -> Self {
+        Self {
+            store_id: tag.engine_id,
+            id_ver: RegionIdVer::new(tag.id_ver.id, tag.id_ver.ver),
+        }
     }
 }
 

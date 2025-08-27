@@ -72,6 +72,29 @@ fn test_random_replication() {
     )
     .expect("backup::backup_cluster");
 
+    let pool = runtime.block_on(connect_tidb(&tc, &keyspace_manager, KEYSPACE_ID));
+
+    info!("create table");
+    let table_name = "rep_table";
+    let create_table =
+        format!("create table {table_name} (id int primary key, col_i int, col_s varchar(1024))");
+    block_on(sqlx::query(&create_table).execute(&pool)).unwrap();
+
+    let select_table_id = format!(
+        "select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = '{table_name}'"
+    );
+    let row = block_on(sqlx::query(&select_table_id).fetch_one(&pool)).unwrap();
+    let table_id: i64 = row.get("tidb_table_id");
+    let val_fn = generate_random_string("rep".to_string());
+
+    // Prepare workload.
+    info!("prepare table");
+    for i in 1..=5 {
+        let val = String::from_utf8(val_fn(1000)).unwrap();
+        let sql = format!("insert into `{table_name}` values ({i}, {i}, '{val}')");
+        block_on(sqlx::query(&sql).execute(&pool)).unwrap();
+    }
+
     let rep_dir = tempfile::Builder::new().prefix("rep_").tempdir().unwrap();
     let rep_dir = rep_dir.path();
 
@@ -127,24 +150,11 @@ fn test_random_replication() {
     let resp = dispatch_http(&worker_client, get_task_list_url, "GET", "".to_string()).unwrap();
     assert!(resp.contains(changefeed_id));
 
-    let pool = runtime.block_on(connect_tidb(&tc, &keyspace_manager, KEYSPACE_ID));
-
-    let table_name = "rep_table";
-    let create_table =
-        format!("create table {table_name} (id int primary key, col_i int, col_s varchar(1024))");
-    block_on(sqlx::query(&create_table).execute(&pool)).unwrap();
-
-    let select_table_id = format!(
-        "select tidb_table_id from information_schema.tables where table_schema = 'test' and table_name = '{table_name}'"
-    );
-    let row = block_on(sqlx::query(&select_table_id).fetch_one(&pool)).unwrap();
-    let table_id: i64 = row.get("tidb_table_id");
-    let val_fn = generate_random_string("rep".to_string());
-
     // Start workload.
+    info!("start workload");
     let start_time = Instant::now();
 
-    for i in 1..=10 {
+    for i in 6..=10 {
         let val = String::from_utf8(val_fn(1000)).unwrap();
         let sql = format!("insert into `{table_name}` values ({i}, {i}, '{val}')");
         block_on(sqlx::query(&sql).execute(&pool)).unwrap();
@@ -152,6 +162,7 @@ fn test_random_replication() {
     }
 
     // pause the changefeed
+    info!("pause changefeed");
     let pause_task_url =
         format!("{worker_base_url}/api/v2/changefeeds/{changefeed_id}/pause?keyspace_id=1");
     dispatch_http(&worker_client, pause_task_url, "POST", "".to_string()).unwrap();
@@ -172,6 +183,7 @@ fn test_random_replication() {
     thread::sleep(Duration::from_secs(3));
 
     // resume the changefeed
+    info!("resume changefeed");
     let resume_task_url =
         format!("{worker_base_url}/api/v2/changefeeds/{changefeed_id}/resume?keyspace_id=1");
     dispatch_http(
@@ -217,9 +229,12 @@ fn test_random_replication() {
         10,
         || "wait for region merge".into(),
     );
+
+    info!("shutdown replication worker");
     worker.shutdown();
 
     // write some data to make the wal rotate more than 4 times.
+    info!("update workload");
     let update_count = 20;
     for _ in 0..update_count {
         let sql = format!("update `{table_name}` set col_i = col_i + 1");
@@ -227,6 +242,7 @@ fn test_random_replication() {
     }
 
     // restart the replication worker.
+    info!("restart replication worker");
     worker = CloudWorker::new(worker_conf.clone(), None, 2, pd_client.clone());
     worker.start();
     for i in 4..=8 {

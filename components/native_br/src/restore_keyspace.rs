@@ -2348,7 +2348,7 @@ impl BackupCluster {
                     }
 
                     let req =
-                        parse_raft_cmd(&peer_tag, &e, encryption_key.as_ref(), &mut decryption_buf);
+                        parse_raft_cmd(peer_tag, &e, encryption_key.as_ref(), &mut decryption_buf);
                     if req.get_header().get_region_epoch().version != meta.shard_ver {
                         continue;
                     }

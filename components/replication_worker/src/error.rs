@@ -25,7 +25,7 @@ pub enum Error {
     #[error(transparent)]
     TiCdcError(#[from] TiCdcError),
     #[error("other error {0}")]
-    OtherError(String),
+    OtherError(#[from] Box<dyn std::error::Error + Sync + Send>),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

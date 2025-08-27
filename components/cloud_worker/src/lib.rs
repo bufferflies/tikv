@@ -294,7 +294,7 @@ fn start_server(
         )
         .map(|mut replication_worker| {
             let scheduler = replication_worker.scheduler();
-            thread::spawn(move || replication_worker.run());
+            thread::spawn(move || tikv_util::init_task_local_sync(|| replication_worker.run()));
             scheduler
         })
         .map_err(|e| {

@@ -7,7 +7,7 @@ use http::{HeaderMap, HeaderValue};
 use hyper::{Body, Method, Request, Response, Result, StatusCode, Uri};
 use security::HttpClient;
 use serde::{Deserialize, Serialize};
-use tikv_util::{future::paired_future_callback, info};
+use tikv_util::{box_err, future::paired_future_callback, info};
 
 use crate::{CdcMsg, Error};
 
@@ -414,12 +414,12 @@ pub(crate) async fn get_cdc_status(
         };
         let resp_data = hyper::body::to_bytes(resp.into_body()).await?;
         let status = serde_json::from_slice::<CdcStatus>(&resp_data)
-            .map_err(|e| Error::OtherError(format!("Failed to parse CDC status: {}", e)))?;
+            .map_err(|e| -> Error { box_err!("Failed to parse CDC status: {}", e) })?;
         if status.liveness == 0 {
             return Ok(());
         }
     }
-    Err(Error::OtherError("CDC status check timed out".to_string()))
+    Err(box_err!("CDC status check timed out"))
 }
 
 #[cfg(test)]

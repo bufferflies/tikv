@@ -1325,8 +1325,8 @@ impl Display for PeerTag {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap, fs::OpenOptions, io::BufReader, os::unix::prelude::FileExt,
-        time::Duration,
+        assert_matches::assert_matches, collections::HashMap, fs::OpenOptions, io::BufReader,
+        os::unix::prelude::FileExt, time::Duration,
     };
 
     use engine_traits::Error as TraitError;
@@ -1591,10 +1591,10 @@ mod tests {
             );
             assert_eq!(buf, peer1_entries[..i as usize]);
         }
-        assert!(matches!(
+        assert_matches!(
             engine.fetch_raft_entries_to(1, 11, 12, None, &mut buf),
             Err(TraitError::EntriesUnavailable),
-        ));
+        );
         // Test `fetch_entries_to` limits size.
         let mut max_size = 0;
         for (i, entry) in peer1_entries.iter().enumerate() {

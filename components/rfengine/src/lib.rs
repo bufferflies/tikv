@@ -3,6 +3,7 @@
 #![cfg_attr(test, feature(test))]
 // Bytes as map key
 #![allow(clippy::mutable_key_type)]
+#![feature(assert_matches)]
 
 #[cfg(test)]
 extern crate test;

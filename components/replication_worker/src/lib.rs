@@ -10,7 +10,10 @@ mod ticdc_util;
 mod util;
 mod worker;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashMap as StdHashMap},
+    sync::Arc,
+};
 
 use api_version::ApiV2;
 pub use apply_observer::{CdcApplyObserver, RegionEvents};
@@ -21,7 +24,7 @@ pub use error::{Error, Result};
 use futures::{future, SinkExt, TryFutureExt, TryStreamExt};
 use grpcio::{DuplexSink, RequestStream, RpcContext, RpcStatus, RpcStatusCode, UnarySink};
 use http::StatusCode;
-use kvengine::{Shard, WRITE_CF};
+use kvengine::{Shard, ShardMeta, WRITE_CF};
 use kvproto::{
     cdcpb,
     cdcpb::{ChangeDataEvent, ChangeDataRequest},
@@ -148,10 +151,14 @@ pub enum CdcMsg {
         cdc_addr: String,
         cb: Box<dyn FnOnce(Result<()>) + Send>,
     },
-    AddKeyspaceResult {
+    LoadKeyspaceShards {
         keyspace_id: u32,
-        result: Result<Box<dyn KeyspaceService>>,
+        task_service: Box<dyn KeyspaceService>,
         cb: Box<dyn FnOnce(Result<()>) + Send>,
+    },
+    LoadKeyspaceShardMetas {
+        keyspace_id: u32,
+        cb: Box<dyn FnOnce(Result<StdHashMap<u64 /* region_id */, ShardMeta>>) + Send>,
     },
     NewTask {
         keyspace_id: u32,

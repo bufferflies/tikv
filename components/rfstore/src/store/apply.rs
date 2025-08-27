@@ -914,7 +914,7 @@ impl Applier {
 
     pub(crate) fn parse_cmd(&mut self, entry: &eraftpb::Entry) -> RaftCmdRequest {
         parse_raft_cmd(
-            &self.tag(),
+            self.tag(),
             entry,
             self.encryption_key.as_ref(),
             &mut self.decryption_buf,
@@ -1056,7 +1056,7 @@ impl Applier {
         // ApplyResult::Yield
         // });
         let index = entry.get_index();
-        let (cmd, conf_change) = parse_conf_change_cmd(entry, &self.tag());
+        let (cmd, conf_change) = parse_conf_change_cmd(entry, self.tag());
         let (resp, result) = self.apply_raft_log(ctx, &cmd);
         self.handle_apply_result(ctx, resp, &result, true);
         match result {
@@ -2183,7 +2183,7 @@ pub(crate) fn build_split_pb(
 
 pub(crate) fn parse_conf_change_cmd(
     entry: &eraftpb::Entry,
-    tag: &PeerTag,
+    tag: PeerTag,
 ) -> (RaftCmdRequest, ConfChangeV2) {
     let (index, _) = (entry.get_index(), entry.get_term());
     let conf_change: ConfChangeV2 = match entry.get_entry_type() {

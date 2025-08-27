@@ -133,7 +133,7 @@ pub(crate) fn execute_show_txn_log(args: ShowTxnLogArgs) {
                     &mut entries,
                 )
                 .unwrap();
-            txn_logs.extend_from_slice(&parse_txn_log(&peer_tag, filter.as_ref(), &entries));
+            txn_logs.extend_from_slice(&parse_txn_log(peer_tag, filter.as_ref(), &entries));
         }
     }
     for log in txn_logs {
@@ -166,7 +166,7 @@ impl LogFilter for KeyRangeFilter {
     }
 }
 
-fn parse_txn_log(tag: &PeerTag, filter: &dyn LogFilter, entries: &[Entry]) -> Vec<String> {
+fn parse_txn_log(tag: PeerTag, filter: &dyn LogFilter, entries: &[Entry]) -> Vec<String> {
     let mut txn_logs = vec![];
     for e in entries {
         if e.data.is_empty() || e.entry_type != EntryType::EntryNormal {
