@@ -2111,12 +2111,25 @@ impl BackupCluster {
             if idx > 0 && key_in_shard(target_region.get_start_key(), get_backup_shard(idx - 1)) {
                 idx -= 1;
             }
+            let target_inner_begin = InnerKey::from_outer_key(target_region.get_start_key());
             let target_inner_end = InnerKey::from_outer_end_key(target_region.get_end_key());
             let mut aligned_shards_id = vec![];
             while idx < sorted_backup_shards_id.len()
                 && get_backup_shard(idx).inner_start() < target_inner_end
             {
-                aligned_shards_id.push(sorted_backup_shards_id[idx]);
+                // When retrying, some of regions may be filtered out.
+                // In this scenario, we need to advance the cursor of `backup` to the first
+                // region actually overlapping with target.
+                //
+                // An example: without this `if`, the shard `a` will be mistakenly added to
+                // `backup_shards_id` when processing the target region `b`.
+                //
+                // Backup Shards  |-------|--a--|----|--...
+                // Target Regions |-----|----|     |----b---|
+                //                            ^^^^^ filtered out by preivous restore.
+                if get_backup_shard(idx).inner_end() > target_inner_begin {
+                    aligned_shards_id.push(sorted_backup_shards_id[idx]);
+                }
                 idx += 1;
             }
 
@@ -3322,6 +3335,24 @@ mod tests {
             vec![ b"3",    b"32",            b"34",  b"36", b"37", b"38", b"39", b"4"],
             vec![ b"3",    b"32",   b"33",   b"34",  b"36",                      b"4"],
             vec![vec![0], vec![1], vec![1], vec![2],         vec![3,4,5,6]],
+            ),
+            #[cfg_attr(rustfmt, rustfmt_skip)]
+            (
+                vec![b"2", b"25", b"41",               b"51", b"55"],
+                vec!                    [b"42", b"5"],
+                vec![vec![2]],
+            ),
+            #[cfg_attr(rustfmt, rustfmt_skip)]
+            (
+                vec![b"1", b"11", b"2", b"25",       b"41", b"5"],
+                vec![                          b"4",        b"5"],
+                vec![vec![3, 4]],
+            ),
+            #[cfg_attr(rustfmt, rustfmt_skip)]
+            (
+                vec![b"1", b"11", b"2", b"25", b"4", b"41", b"5"],
+                vec![                          b"4",        b"5"],
+                vec![vec![4, 5]],
             ),
         ];
 
