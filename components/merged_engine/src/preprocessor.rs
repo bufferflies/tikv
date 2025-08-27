@@ -59,6 +59,16 @@ impl Preprocessor {
         raft_hard_state.set_term(RAFT_INIT_LOG_TERM);
         raft_state.set_last_preprocessed_index(raft_index);
         raft_state.set_hard_state(&raft_hard_state);
+
+        let mut region_state = raft
+            .load_region_state(shard_meta.id, shard_meta.ver)
+            .unwrap_or_else(|| {
+                panic!("{} failed to load region state", shard_meta.tag());
+            });
+        let merge_state = region_state
+            .has_merge_state()
+            .then(|| region_state.take_merge_state());
+
         Some(Self {
             preprocessed_index: raft_index,
             region,
@@ -69,7 +79,7 @@ impl Preprocessor {
             pending_truncate: None,
             raft_hard_state,
             raft_state,
-            pending_merge_state: None,
+            pending_merge_state: merge_state,
             want_rollback_merge_peers: collections::HashSet::default(),
             learner_skip_idx: raft_index,
             encryption_key,
