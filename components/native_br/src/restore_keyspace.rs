@@ -2133,6 +2133,13 @@ impl BackupCluster {
                 idx += 1;
             }
 
+            if aligned_shards_id.len() > 1 {
+                warn!("unaligned backup shard and region.";
+                    "region" => ?target_region,
+                    "aligned_shards_id" => ?aligned_shards_id,
+                );
+            }
+
             aligned_regions.push(AlignedRegion {
                 target_region,
                 backup_shards_id: aligned_shards_id,
@@ -2875,10 +2882,18 @@ fn restore_snapshots(
                 disk_full_stores.extend(stores_id);
             }
             Err(e) if is_error_retryable(&e) => {
-                info!("{} request_restore_snapshot error: {:?}, retry", tag, e);
+                let range = (
+                    InnerKey::from_outer_key(&start),
+                    InnerKey::from_outer_end_key(&end),
+                );
+                info!("{} request_restore_snapshot error: {:?}, retry", tag, e; "range" => ?range);
             }
             Err(e) => {
-                error!("{} request_restore_snapshot error: {:?}", tag, e);
+                let range = (
+                    InnerKey::from_outer_key(&start),
+                    InnerKey::from_outer_end_key(&end),
+                );
+                error!("{} request_restore_snapshot error: {:?}", tag, e; "range" => ?range);
                 return Err(e);
             }
         }

@@ -45,6 +45,7 @@ use crate::{
 const MAX_S3_REQ_BATCH_SIZE: usize = 1024;
 pub const INCREMENTAL_BACKUP_FOLDER_FORMAT: &str = "%Y%m%d";
 pub const INCREMENTAL_BACKUP_FILE_NAME_FORMAT: &str = "%H%M%S";
+pub const PACKED_META_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
 
 pub fn create_pd_client(security_conf: &SecurityConfig, pd_conf: &pd_client::Config) -> RpcClient {
     let security_mgr = Arc::new(

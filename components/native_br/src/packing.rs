@@ -33,7 +33,7 @@ use self::offline_pd::OfflinePd;
 use crate::{
     archive::ArchiveReader,
     backup::packed_backup_prefixed,
-    common::create_pd_client,
+    common::{create_pd_client, PACKED_META_NAME_FORMAT},
     error::Error,
     lock::LockResolver,
     restore::RestoreConfig,
@@ -139,9 +139,15 @@ impl PackContext {
     }
 
     fn packed_backup_path(&self, backup_name: &str) -> String {
+        let now = Utc::now();
         packed_backup_prefixed(
             &self.dfs.base_fs().get_prefix(),
-            &format!("native/{backup_name}/packed.meta"),
+            &format!(
+                "native/{}/{}/{}.packed.meta",
+                backup_name,
+                self.keyspace_meta.name,
+                now.format(PACKED_META_NAME_FORMAT)
+            ),
         )
     }
 

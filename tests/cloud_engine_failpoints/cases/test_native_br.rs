@@ -586,6 +586,13 @@ fn test_native_br_service_x(#[case] override_pack: bool, #[case] copy_to_another
         task.state().is_done()
     }));
 
+    // pack backup for another keyspace to verify that the meta won't be overridden.
+    block_on(br_cli.pack_backup(100, &backup_x.name, "ks2")).unwrap();
+    assert!(TryWaiter::timeout(10).interval(1).try_wait(|| {
+        let task = block_on(br_cli.get_task_status(100)).unwrap();
+        task.state().is_done()
+    }));
+
     let task = block_on(br_cli.get_task_status(1)).unwrap();
     let TaskState::Done { info } = task.state() else {
         unreachable!()
