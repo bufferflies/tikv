@@ -107,7 +107,6 @@ impl Engine {
                 store_u64(&new_shard.meta_seq, initial_seq);
                 store_u64(&new_shard.write_sequence, initial_seq);
             }
-            new_shard.set_persisted_snap_version(old_shard.get_persisted_snap_version());
             if !old_del_prefixes.is_empty() {
                 // We need to use the old shard's DEL_PREFIXES_KEY to overwrite the new shard's
                 // DEL_PREFIXES_KEY. because the destroy_range compaction may have not
@@ -217,6 +216,7 @@ impl Engine {
             builder.set_columnar_levels(new_col_levels);
             builder.set_vector_indexes(new_vec_indexes);
             builder.set_columnar_table_ids(columnar_table_ids);
+            builder.set_persisted_version(old_data.persisted_version);
             new_shard.set_data(builder.build());
         }
         for shard in new_shards.drain(..) {
@@ -450,14 +450,6 @@ impl Engine {
             &new_shard.base_version,
             max(source_mem_tbl_version, target_mem_tbl_version) - sequence,
         );
-        let source_snap_version = SnapVersion::new(
-            source_snap.get_base_version(),
-            source_snap.get_data_sequence(),
-        );
-        new_shard.set_persisted_snap_version(max(
-            old_shard.get_persisted_snap_version(),
-            source_snap_version,
-        ));
 
         let data = if !clear_source {
             // merge source DEL_PREFIXES_KEY to new shard
@@ -489,6 +481,11 @@ impl Engine {
 
             // merge shard data
             let old_data = old_shard.get_data();
+            let source_snap_version = SnapVersion::new(
+                source_snap.get_base_version(),
+                source_snap.get_data_sequence(),
+            );
+            let new_snap_version = max(old_data.persisted_version, source_snap_version);
             let mem_tbls = old_data.mem_tbls.clone();
             let mut blob_tbl_map = old_data.blob_tbl_map.as_ref().clone();
             for v in source.blob_tables.values() {
@@ -612,6 +609,7 @@ impl Engine {
             builder.set_schema(schema_version, restore_version, schema_file);
             builder.set_vector_indexes(vector_indexes);
             builder.set_columnar_table_ids(columnar_table_ids);
+            builder.set_persisted_version(new_snap_version);
             builder.build()
         } else {
             info!(
@@ -675,8 +673,6 @@ impl Engine {
             &new_shard.estimated_ia_kv_size,
             old_shard.get_estimated_ia_kv_size(),
         );
-        new_shard
-            .set_persisted_snap_version(SnapVersion::new(new_shard.get_base_version(), sequence));
         new_shard
     }
 }

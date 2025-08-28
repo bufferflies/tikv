@@ -42,8 +42,7 @@ use crate::{
         search,
         sstable::{L0Table, SsTable},
         vector_index::{VectorIndex, VectorIndexes},
-        AtomicSnapVersion, BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, SnapVersion,
-        TxnFile,
+        BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, SnapVersion, TxnFile,
     },
     util::{evenly_distribute, TxnFileRefPropertyHelper},
     *,
@@ -128,10 +127,6 @@ pub struct Shard {
 
     // write_sequence is the raft log index of the applied write batch.
     pub(crate) write_sequence: AtomicU64,
-
-    // persisted_snap_version is the latest L0 table's snap version, equals to:
-    //     ShardMeta.data_sequence + ShardMeta.base_version
-    pub(crate) persisted_snap_version: AtomicSnapVersion,
 
     pub(crate) compaction_priority: RwLock<Option<CompactionPriority>>,
 
@@ -263,7 +258,6 @@ impl Shard {
             lv2plus_entries_write_cf: Default::default(),
             meta_seq: Default::default(),
             write_sequence: Default::default(),
-            persisted_snap_version: Default::default(),
             compaction_priority: RwLock::new(None),
             encryption_key,
             outdated_schema_ver: Default::default(),
@@ -319,7 +313,6 @@ impl Shard {
         shard.base_version.store(snap.base_version, Release);
         shard.meta_seq.store(cs.sequence, Release);
         shard.write_sequence.store(snap.data_sequence, Release);
-        shard.set_persisted_snap_version(SnapVersion::new(snap.base_version, snap.data_sequence));
         shard
     }
 
@@ -915,11 +908,7 @@ impl Shard {
     }
 
     pub fn get_persisted_snap_version(&self) -> SnapVersion {
-        self.persisted_snap_version.load()
-    }
-
-    pub(crate) fn set_persisted_snap_version(&self, snap_version: SnapVersion) {
-        self.persisted_snap_version.store(snap_version)
+        self.get_data().persisted_version
     }
 
     pub fn get_columnar_snap_version(&self) -> SnapVersion {
@@ -1804,6 +1793,7 @@ pub(crate) struct ShardDataBuilder {
     columnar_levels: Option<ColumnarLevels>,
     vector_indexes: Option<VectorIndexes>,
     columnar_table_ids: Option<Vec<i64>>,
+    persisted_version: Option<SnapVersion>,
 }
 
 impl ShardDataBuilder {
@@ -1823,6 +1813,7 @@ impl ShardDataBuilder {
             columnar_levels: None,
             vector_indexes: None,
             columnar_table_ids: None,
+            persisted_version: None,
         }
     }
 
@@ -1893,6 +1884,10 @@ impl ShardDataBuilder {
         self.columnar_table_ids = Some(columnar_table_ids);
     }
 
+    pub(crate) fn set_persisted_version(&mut self, persisted_version: SnapVersion) {
+        self.persisted_version = Some(persisted_version);
+    }
+
     pub(crate) fn build(mut self) -> ShardData {
         let (schema_version, restore_version, schema_file) =
             self.schema.take().unwrap_or_else(|| {
@@ -1918,9 +1913,7 @@ impl ShardDataBuilder {
         }
         ShardData::new(
             self.range.take().unwrap_or_else(|| self.old.range.clone()),
-            self.inner_key_off
-                .take()
-                .unwrap_or_else(|| self.old.inner_key_off),
+            self.inner_key_off.take().unwrap_or(self.old.inner_key_off),
             self.mem_tbls
                 .take()
                 .unwrap_or_else(|| self.old.mem_tbls.clone()),
@@ -1949,6 +1942,9 @@ impl ShardDataBuilder {
             self.columnar_table_ids
                 .take()
                 .unwrap_or_else(|| self.old.columnar_table_ids.clone()),
+            self.persisted_version
+                .take()
+                .unwrap_or(self.old.persisted_version),
         )
     }
 }
@@ -2017,6 +2013,7 @@ impl ShardData {
             ColumnarLevels::new(),
             VectorIndexes::default(),
             vec![],
+            SnapVersion::zero(),
         )
     }
 
@@ -2037,6 +2034,7 @@ impl ShardData {
         col_levels: ColumnarLevels,
         vector_indexes: VectorIndexes,
         columnar_table_ids: Vec<i64>,
+        persisted_version: SnapVersion,
     ) -> Self {
         assert!(!mem_tbls.is_empty());
 
@@ -2058,6 +2056,7 @@ impl ShardData {
                 col_levels,
                 vector_indexes,
                 columnar_table_ids,
+                persisted_version,
             }),
         }
     }
@@ -2092,6 +2091,7 @@ pub(crate) struct ShardDataCore {
     // columnar_table_ids is the list of columnar table ids that have been columnar major
     // compacted.
     pub(crate) columnar_table_ids: Vec<i64>,
+    pub(crate) persisted_version: SnapVersion,
 }
 
 impl Deref for ShardDataCore {

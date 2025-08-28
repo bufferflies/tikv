@@ -336,7 +336,6 @@ pub struct SnapAccessCore {
     tag: ShardTag,
     managed_ts: u64,
     base_version: u64,
-    persisted_snap_version: SnapVersion,
     meta_seq: u64,
     write_sequence: u64,
     data: ShardData,
@@ -350,21 +349,16 @@ pub struct SnapAccessCore {
 
 impl SnapAccessCore {
     pub fn new(shard: &Shard) -> Self {
-        Self::new_from_shard_data(shard, shard.get_data())
-    }
-
-    pub(crate) fn new_from_shard_data(shard: &Shard, data: ShardData) -> Self {
         let base_version = shard.get_base_version();
-        let persisted_snap_version = shard.get_persisted_snap_version();
         let meta_seq = shard.get_meta_sequence();
         let write_sequence = shard.get_write_sequence();
+        let data = shard.get_data();
         let is_sync = data.is_sync();
         Self {
             tag: shard.tag(),
             write_sequence,
             meta_seq,
             base_version,
-            persisted_snap_version,
             managed_ts: 0,
             data,
             get_hint: Mutex::new(Hint::new()),
@@ -1784,17 +1778,16 @@ impl SnapAccessCore {
 
     // validate_cached_value validate the cached value for the given inner_key and
     // snap_version.
-    // By checking the mem tables and L0 tables with greater snap_version, we ensure
-    // the cached value is still valid.
+    // By checking the mem tables with greater snap_version, we ensure the cached
+    // value is still valid.
     // If there are newer values the newer values is returned.
-    // If there maybe newer values in the level1+ tables, None is returned.
+    // If there maybe newer values in the persisted tables, None is returned.
     pub(crate) fn validate_cached_value(
         &self,
         inner_key: InnerKey<'_>,
         snap_version: SnapVersion,
         out_val_owner: &mut Vec<u8>,
     ) -> Option<table::Value> {
-        let key_hash = farmhash::fingerprint64(inner_key.deref());
         for i in 0..self.data.mem_tbls.len() {
             let cf_tbl = &self.data.mem_tbls[i];
             let mem_tbl_snap_version = cf_tbl.get_snap_version();
@@ -1807,22 +1800,8 @@ impl SnapAccessCore {
                 return Some(v);
             }
         }
-        if self.data.l0_tbls.is_empty() && self.persisted_snap_version < snap_version {
-            // If there l0_tables is not empty, the persisted snap version may not be
-            // accurate. Because the data is updated before
-            // persisted_snap_version.
+        if self.data.persisted_version < snap_version {
             return Some(Value::new());
-        }
-        for l0 in &self.data.l0_tbls {
-            if l0.snap_version() < snap_version {
-                return Some(Value::new());
-            }
-            if let Some(tbl) = &l0.get_cf(WRITE_CF) {
-                let v = tbl.get(inner_key, u64::MAX, key_hash, out_val_owner, 0);
-                if v.is_valid() {
-                    return Some(v);
-                }
-            }
         }
         None
     }

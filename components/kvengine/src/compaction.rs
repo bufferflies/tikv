@@ -1791,7 +1791,7 @@ impl Engine {
                     .iter()
                     .map(|t| t.snap_version())
                     .max()
-                    .unwrap_or(shard.get_persisted_snap_version());
+                    .unwrap_or(data.persisted_version);
             }
             2
         } else {

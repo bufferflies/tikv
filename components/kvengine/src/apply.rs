@@ -316,6 +316,7 @@ pub(crate) fn create_snapshot_tables(
     builder.set_lock_txn_files(tables.lock_txn_files.clone());
     builder.set_columnar_levels(col_levels);
     builder.set_vector_indexes(vector_indexes);
+    builder.set_persisted_version(SnapVersion::new(snap.base_version, snap.data_sequence));
 }
 
 // Note: keep consistency with `create_snapshot_tables`.
@@ -449,6 +450,7 @@ impl EngineCore {
         let flush = cs.get_flush();
         let old_data = shard.get_data();
         let mut new_mem_tbls = old_data.mem_tbls.clone();
+        let flush_version = flush.get_version().into();
         if flush.has_l0_create() || !flush.get_l0_creates().is_empty() {
             let mut l0s = vec![];
             if flush.has_l0_create() {
@@ -494,6 +496,7 @@ impl EngineCore {
             builder.set_mem_tbls(new_mem_tbls);
             builder.set_l0_tbls(new_l0_tbls);
             builder.set_columnar_levels(col_levels);
+            builder.set_persisted_version(flush_version);
             shard.set_data(builder.build());
             self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
         } else {
@@ -505,11 +508,11 @@ impl EngineCore {
                 let last = new_mem_tbls.pop().unwrap();
                 let mut builder = ShardDataBuilder::new(old_data);
                 builder.set_mem_tbls(new_mem_tbls);
+                builder.set_persisted_version(flush_version);
                 shard.set_data(builder.build());
                 self.send_free_mem_msg(FreeMemMsg::FreeMem(last));
             }
         }
-        shard.set_persisted_snap_version(flush.get_version().into());
         shard.clear_finished_txn_file_refs(flush.version.into());
     }
 
@@ -537,6 +540,7 @@ impl EngineCore {
         let mut max_flushed_mem_tbl_version = SnapVersion::zero();
         let new_snap_version =
             SnapVersion::new(initial_flush.base_version, initial_flush.data_sequence);
+        builder.set_persisted_version(new_snap_version);
         mem_tbls.retain(|x| {
             let mem_tbl_snap_version = x.get_snap_version();
             let flushed =
@@ -563,7 +567,6 @@ impl EngineCore {
         info!("{} apply_initial_flush", shard.tag(); "seq" => cs.sequence);
         shard.set_data(new_data);
         shard.clear_finished_txn_file_refs(max_flushed_mem_tbl_version);
-        shard.set_persisted_snap_version(new_snap_version);
 
         store_bool(&shard.initial_flushed, true);
         // Switched memtables can't be flushed until initial flush finished, so we
@@ -1045,6 +1048,7 @@ impl EngineCore {
             cs.get_restore_version(),
             cs.get_schema_file(),
         );
+        builder.set_persisted_version(SnapVersion::new(snap.base_version, cs.sequence));
         let new_data = builder.build();
         let new_inner_key_off = new_data.inner_key_off;
         new_shard.set_data(new_data);
@@ -1055,9 +1059,6 @@ impl EngineCore {
         store_u64(&new_shard.write_sequence, cs.sequence);
         debug_assert!(!cs.has_parent());
         store_bool(&new_shard.initial_flushed, true);
-        new_shard
-            .persisted_snap_version
-            .store(SnapVersion::new(snap.base_version, cs.sequence));
 
         let old_data = old_shard.get_data();
         let old_inner_key_off = old_data.inner_key_off;

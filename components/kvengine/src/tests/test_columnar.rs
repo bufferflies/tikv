@@ -372,6 +372,7 @@ fn test_columnar_major_compaction() {
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_cfs([write_cf, ShardCf::new(LOCK_CF), ShardCf::new(EXTRA_CF)]);
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file.clone()));
+    builder.set_persisted_version(SnapVersion::new(0, 1));
     shard.set_data(builder.build());
     shard.initial_flushed.store(true, Ordering::SeqCst);
     let id_ver = shard.id_ver();
