@@ -1368,6 +1368,7 @@ dependencies = [
  "recovery",
  "regex",
  "resolved_ts",
+ "resource_control",
  "resource_metering",
  "rev_lines",
  "rfengine",
@@ -6980,6 +6981,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "resource_control"
+version = "0.1.0"
+dependencies = [
+ "api_version",
+ "async-trait",
+ "bytes",
+ "dashmap 4.0.2",
+ "fs2",
+ "http",
+ "hyper",
+ "kvengine",
+ "kvproto",
+ "lazy_static",
+ "online_config",
+ "pd_client",
+ "prometheus",
+ "prometheus-static-metric",
+ "rand 0.8.5",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "slog",
+ "slog-global",
+ "test_util",
+ "tikv-client",
+ "tikv_util",
+ "tokio",
+]
+
+[[package]]
 name = "resource_metering"
 version = "0.0.1"
 dependencies = [
@@ -9596,6 +9627,7 @@ dependencies = [
  "recovery",
  "regex",
  "reqwest",
+ "resource_control",
  "resource_metering",
  "rev_lines",
  "rfengine",

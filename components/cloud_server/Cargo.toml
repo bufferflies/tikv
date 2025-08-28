@@ -17,10 +17,10 @@ failpoints = ["fail/failpoints"]
 cloud-aws = ["encryption_export/cloud-aws"]
 cloud-gcp = ["encryption_export/cloud-gcp"]
 test-engines-rocksdb = [
-  "tikv/test-engines-rocksdb",
+    "tikv/test-engines-rocksdb",
 ]
 test-engines-panic = [
-  "tikv/test-engines-panic",
+    "tikv/test-engines-panic",
 ]
 
 nortcheck = ["engine_rocks/nortcheck"]
@@ -86,6 +86,7 @@ rand = "0.8"
 recovery = { workspace = true }
 regex = "1.5"
 resolved_ts = { path = "../resolved_ts", default-features = false }
+resource_control = { path = "../resource_control", default-features = false }
 resource_metering = { path = "../resource_metering" }
 rev_lines = "0.2.1"
 rfengine = { path = "../rfengine", default-features = false }

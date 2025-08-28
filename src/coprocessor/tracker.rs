@@ -27,6 +27,9 @@ enum TrackerState {
     /// The tracker is notified that the snapshot needed by the task is ready.
     SnapshotRetrieved(Instant),
 
+    /// The tracker is notified that the task needs to slow down.
+    SlowDown(Instant),
+
     /// The tracker is notified that all items just began.
     AllItemsBegan,
 
@@ -56,6 +59,7 @@ pub struct Tracker<E: Engine> {
     snapshot_wait_time: Duration, // Wait time spent on waiting for a snapshot
     handler_build_time: Duration, /* Time spent on building the handler (not included in total
                                    * wait time) */
+    slow_down_time: Duration, // Time spent on slowing down.
     req_lifetime: Duration,
 
     // Suspend time between processing two items
@@ -92,6 +96,7 @@ impl<E: Engine> Tracker<E> {
             schedule_wait_time: Duration::default(),
             snapshot_wait_time: Duration::default(),
             handler_build_time: Duration::default(),
+            slow_down_time: Duration::default(),
             req_lifetime: Duration::default(),
             item_process_time: Duration::default(),
             item_suspend_time: Duration::default(),
@@ -128,10 +133,20 @@ impl<E: Engine> Tracker<E> {
         }
     }
 
-    pub fn on_begin_all_items(&mut self) {
+    pub fn on_slow_down(&mut self) {
         if let TrackerState::SnapshotRetrieved(at) = self.current_stage {
             let now = Instant::now();
             self.handler_build_time = now - at;
+            self.current_stage = TrackerState::SlowDown(now);
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub fn on_begin_all_items(&mut self) {
+        if let TrackerState::SlowDown(at) = self.current_stage {
+            let now = Instant::now();
+            self.slow_down_time = now - at;
             self.current_stage = TrackerState::AllItemsBegan;
         } else {
             unreachable!()
@@ -258,6 +273,7 @@ impl<E: Engine> Tracker<E> {
                 req_tag
                     .merge_from_bytes(&tracker.req_info.resource_group_tag)
                     .unwrap_or_default();
+
                 info!(#"slow_log", "slow-query";
                     "connection_id" => source_stmt.get_connection_id(),
                     "session_alias" => source_stmt.get_session_alias(),
@@ -269,6 +285,7 @@ impl<E: Engine> Tracker<E> {
                     "wait_time.schedule" => ?self.schedule_wait_time,
                     "wait_time.snapshot" => ?self.snapshot_wait_time,
                     "handler_build_time" => ?self.handler_build_time,
+                    "slow_down_time" => ?self.slow_down_time,
                     "total_process_time" => ?self.total_process_time,
                     "total_suspend_time" => ?self.total_suspend_time,
                     "txn_start_ts" => self.req_ctx.txn_start_ts,
@@ -412,6 +429,9 @@ impl<E: Engine> Drop for Tracker<E> {
             self.on_snapshot_finished();
         }
         if let TrackerState::SnapshotRetrieved(_) = self.current_stage {
+            self.on_slow_down();
+        }
+        if let TrackerState::SlowDown(_) = self.current_stage {
             self.on_begin_all_items();
         }
         if let TrackerState::ItemBegan(_) = self.current_stage {

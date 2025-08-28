@@ -54,6 +54,7 @@ use raftstore::{
     coprocessor::{Config as CopConfig, RegionInfoAccessor},
     store::{CompactionGuardGeneratorFactory, Config as RaftstoreConfig, SplitConfig},
 };
+use resource_control::Config as ResourceControlConfig;
 use resource_metering::Config as ResourceMeteringConfig;
 use rfengine::RfEngineConfig;
 use security::SecurityConfig;
@@ -3051,6 +3052,9 @@ pub struct TikvConfig {
     #[online_config(submodule)]
     pub overload: OverloadConfig,
 
+    #[online_config(submodule)]
+    pub resource_control: ResourceControlConfig,
+
     #[online_config(skip)]
     pub causal_ts: CausalTsConfig,
 }
@@ -3100,6 +3104,7 @@ impl Default for TikvConfig {
             backup_stream: BackupStreamConfig::default(),
             dfs: DFSConfig::default(),
             overload: OverloadConfig::default(),
+            resource_control: ResourceControlConfig::default(),
             causal_ts: CausalTsConfig::default(),
         }
     }
@@ -4033,6 +4038,7 @@ pub enum Module {
     ResolvedTs,
     ResourceMetering,
     Overload,
+    ResourceControl,
     BackupStream,
     Quota,
     Log,
@@ -4064,6 +4070,7 @@ impl From<&str> for Module {
             "resolved_ts" => Module::ResolvedTs,
             "resource_metering" => Module::ResourceMetering,
             "overload" => Module::Overload,
+            "resource_control" => Module::ResourceControl,
             "quota" => Module::Quota,
             "log" => Module::Log,
             "memory" => Module::Memory,

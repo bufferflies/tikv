@@ -32,6 +32,10 @@ use kvproto::{
 };
 use overload_protector::{CopTaskStats, OverloadProtector};
 use protobuf::{CodedInputStream, Message};
+use resource_control::{
+    KeyspaceReadLimiter, Metric, ReadLimiter, Resource, ResourceController, ResourceEvent,
+    ResourcePublisher, Scope, Severity, REQUEST_WAIT_HISTOGRAM_VEC,
+};
 use resource_metering::{FutureExt, ResourceTagFactory, StreamExt};
 use security::SecurityManager;
 use tidb_query_common::execute_stats::ExecSummary;
@@ -117,6 +121,10 @@ pub struct Endpoint<E: Engine> {
 
     security_mgr: Arc<SecurityManager>,
 
+    pub resource_publisher: Option<Arc<dyn ResourcePublisher>>,
+    pub resource_controller: Option<ResourceController>,
+    pub read_limiter: Option<ReadLimiter>,
+
     status_addr: String,
 }
 
@@ -164,6 +172,9 @@ impl<E: Engine> Endpoint<E> {
             remote_pool: None,
             overload_protector,
             security_mgr,
+            resource_publisher: None,
+            resource_controller: None,
+            read_limiter: None,
             status_addr,
             max_resp_size: cfg.cop_max_resp_size.0,
         }
@@ -201,6 +212,12 @@ impl<E: Engine> Endpoint<E> {
             self.status_addr.clone(),
         );
         self.remote_pool = Some(pool);
+    }
+
+    pub fn set_resource_controller(&mut self, mut controller: ResourceController) {
+        self.resource_publisher = Some(controller.publisher());
+        self.read_limiter = controller.get_read_limiter();
+        self.resource_controller = Some(controller);
     }
 
     fn check_memory_locks(
@@ -349,6 +366,9 @@ impl<E: Engine> Endpoint<E> {
                     if let Some(handler) =
                         try_remote_dag_handler(snap.get_kvengine_snap(), &dag, req_ctx, remote_ctx)
                     {
+                        with_tls_tracker(|tracker| {
+                            tracker.req_info.is_remote = true;
+                        });
                         return Ok(handler);
                     }
                     let data_version = snap.ext().get_data_version();
@@ -534,6 +554,12 @@ impl<E: Engine> Endpoint<E> {
         mut tracker: Box<Tracker<E>>,
         handler_builder: RequestHandlerBuilder<E::Snap>,
         remote_ctx: Option<RemoteContext>,
+        resource_publisher: Option<Arc<dyn ResourcePublisher>>,
+        keyspace_read_limiter: Option<(
+            KeyspaceReadLimiter,
+            bool, // dry_run
+            bool, // debug
+        )>,
     ) -> Result<MemoryTraceGuard<coppb::Response>> {
         // When this function is being executed, it may be queued for a long time, so
         // that deadline may exceed.
@@ -578,6 +604,36 @@ impl<E: Engine> Endpoint<E> {
         } else {
             handler_builder(snapshot, &tracker.req_ctx)?
         };
+
+        tracker.on_slow_down();
+
+        let (mut request_type, mut is_remote) = (RequestType::Unknown, false);
+        with_tls_tracker(|tracker| {
+            request_type = tracker.req_info.request_type;
+            is_remote = tracker.req_info.is_remote;
+        });
+        if let Some((keyspace_read_limiter, dry_run, debug)) = &keyspace_read_limiter
+            && !is_remote
+            && matches!(request_type, RequestType::CoprocessorDag)
+        {
+            let wait_time = if *dry_run {
+                keyspace_read_limiter.take_wait_time()
+            } else {
+                keyspace_read_limiter.wait().await
+            };
+            REQUEST_WAIT_HISTOGRAM_VEC
+                .with_label_values(&["read"])
+                .observe(wait_time.as_secs_f64());
+            if *debug && !wait_time.is_zero() {
+                let keyspace_id = tracker.req_ctx.context.keyspace_id;
+                let region_id = tracker.req_ctx.context.region_id;
+                let task_id = tracker.req_ctx.context.task_id;
+                info!(
+                    "resource control keyspace {}, region {}, task {}, mock {} sleep {:?} for DAG request",
+                    keyspace_id, region_id, task_id, *dry_run, wait_time
+                );
+            }
+        }
 
         tracker.on_begin_all_items();
 
@@ -626,6 +682,25 @@ impl<E: Engine> Endpoint<E> {
             resp.set_exec_details_v2(exec_details_v2);
         }
         resp.set_latest_buckets_version(buckets_version);
+        if let Some(resource_publisher) = &resource_publisher
+            && !is_remote
+            && matches!(request_type, RequestType::CoprocessorDag)
+            && processed_size > 0
+        {
+            resource_publisher.publish(ResourceEvent::CollectMetric(Metric {
+                resource: Resource::Read {
+                    bytes: processed_size as u64,
+                },
+                scope: Scope::Region {
+                    keyspace_id: tracker.req_ctx.context.keyspace_id,
+                    region_id: tracker.req_ctx.context.region_id,
+                },
+                severity: Severity::Normal,
+            }));
+            if let Some((keyspace_read_limiter, ..)) = &keyspace_read_limiter {
+                keyspace_read_limiter.consume(processed_size)
+            }
+        }
         Ok(resp)
     }
 
@@ -639,6 +714,7 @@ impl<E: Engine> Endpoint<E> {
         handler_builder: RequestHandlerBuilder<E::Snap>,
     ) -> impl Future<Output = Result<MemoryTraceGuard<coppb::Response>>> {
         let priority = req_ctx.context.get_priority();
+        let keyspace_id = req_ctx.context.keyspace_id;
         let task_id = req_ctx.build_task_id();
         let key_ranges = req_ctx
             .ranges
@@ -652,6 +728,27 @@ impl<E: Engine> Endpoint<E> {
         let tracker = Box::new(Tracker::new(req_ctx, self.slow_log_threshold));
 
         let remote_ctx = self.remote_ctx.clone();
+        let (resource_enabled, resource_dry_run, resource_debug) = self
+            .resource_controller
+            .as_ref()
+            .map(|controller| {
+                (
+                    controller.get_enabled(),
+                    controller.get_dry_run(),
+                    controller.get_debug(),
+                )
+            })
+            .unwrap_or_default();
+        let (resource_publisher, keyspace_read_limiter) = if resource_enabled {
+            let keyspace_read_limiter = self
+                .read_limiter
+                .as_ref()
+                .and_then(|read_limiter| read_limiter.get_limiter(keyspace_id))
+                .map(|limiter| (limiter, resource_dry_run, resource_debug));
+            (self.resource_publisher.clone(), keyspace_read_limiter)
+        } else {
+            (None, None)
+        };
         let res = self
             .read_pool
             .spawn_handle(
@@ -660,6 +757,8 @@ impl<E: Engine> Endpoint<E> {
                     tracker,
                     handler_builder,
                     remote_ctx,
+                    resource_publisher,
+                    keyspace_read_limiter,
                 )
                 .in_resource_metering_tag(resource_tag),
                 priority,

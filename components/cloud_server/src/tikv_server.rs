@@ -56,6 +56,7 @@ use raftstore::{
     },
     RegionInfoAccessor,
 };
+use resource_control::{CpuType, ReadLimiter, ReadSubscriber, ResourceController, ResourceType};
 use rfengine::{RfEngine, STORE_IDENT_KEY};
 use rfstore::{
     store::{
@@ -142,6 +143,7 @@ pub struct TikvServer {
     io_rate_limiter: Arc<IoRateLimiter>,
     overload_protector: OverloadProtector,
     flow_controller: Arc<FlowController>,
+    resource_controller: ResourceController,
 }
 
 struct Servers {
@@ -313,6 +315,7 @@ impl TikvServer {
             config.quota.max_delay_duration,
             config.quota.enable_auto_tune,
         ));
+        let resource_controller = Self::init_resource_controller(&config);
         let mut overload_protector_worker = OverloadProtectorWorker::new(config.overload.clone());
         let overload_protector = overload_protector_worker.get_protector();
         std::thread::spawn(move || {
@@ -342,6 +345,7 @@ impl TikvServer {
             io_rate_limiter,
             overload_protector,
             flow_controller: Arc::new(flow_controller),
+            resource_controller,
         }
     }
 
@@ -373,6 +377,7 @@ impl TikvServer {
         {
             self.run_prometheus_push();
         }
+        self.resource_controller.run();
     }
 
     fn run_watch_ks_gc_safepoint(&mut self) {
@@ -657,6 +662,15 @@ impl TikvServer {
             Box::new(overload_cfg_manager),
         );
 
+        let resource_control_cfg_manager = resource_control::ConfigManager::new(
+            self.resource_controller.publisher(),
+            self.config.resource_control.clone(),
+        );
+        cfg_controller.register(
+            tikv::config::Module::ResourceControl,
+            Box::new(resource_control_cfg_manager),
+        );
+
         let storage_read_pool_handle = unified_read_pool.handle();
         let reporter = rfstore::store::FlowStatsReporter::new(pd_sender);
         let storage = create_raft_storage::<_, F>(
@@ -725,6 +739,7 @@ impl TikvServer {
                 .remote_coprocessor_min_process_duration
                 .0,
         );
+        copr.set_resource_controller(self.resource_controller.clone());
         // Create server
         let server = Server::new(
             node.id(),
@@ -973,6 +988,7 @@ impl TikvServer {
         self.raw_engines.raft.stop_worker(force);
         self.raw_engines.raft.close_writer();
         self.overload_protector.stop();
+        self.resource_controller.stop();
         self.background_worker.stop();
         self.raw_engines.kv.close();
 
@@ -1347,6 +1363,22 @@ impl TikvServer {
         ));
         let flow_controller = FlowController::Cloud(limiter.clone());
         (flow_controller, limiter)
+    }
+
+    fn init_resource_controller(config: &TikvConfig) -> ResourceController {
+        let mut resource_controller = ResourceController::new(config.resource_control.clone());
+        let read_limiter = ReadLimiter::new(config.resource_control.clone());
+        resource_controller.set_read_limiter(read_limiter.clone());
+        let read_subscriber = ReadSubscriber::new(read_limiter, config.resource_control.clone());
+        resource_controller.register_subscriber(
+            ResourceType::Cpu {
+                cpu_type: CpuType::UnifiedReadPool,
+            },
+            Box::new(read_subscriber.clone()),
+        );
+        resource_controller
+            .register_subscriber(ResourceType::Read, Box::new(read_subscriber.clone()));
+        resource_controller
     }
 }
 
