@@ -109,7 +109,10 @@ impl ResourceController {
                     break;
                 }
             }
-            event_hub.on_events(&events);
+            let stop = event_hub.on_events(&events);
+            if stop {
+                return;
+            }
             events.clear();
         }
     }

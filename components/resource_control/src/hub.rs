@@ -350,9 +350,10 @@ impl ResourceHub for EventHub {
         }
         let mut guard = self.data.write().unwrap();
         let data = guard.deref_mut();
-        let mut metrics = data.metrics.take().unwrap();
+        let mut metrics = data.metrics.take().unwrap_or_default();
         for event in events {
-            if self.handle_event(&mut metrics, event, data) {
+            let stop = self.handle_event(&mut metrics, event, data);
+            if stop {
                 return true;
             }
         }
