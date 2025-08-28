@@ -67,7 +67,7 @@ use rfstore::{
 use security::SecurityManager;
 use sst_importer::SstImporter;
 use tikv::{
-    config::{ConfigController, TikvConfig},
+    config::{ConfigController, LogConfigManager, TikvConfig},
     coprocessor, coprocessor_v2,
     read_pool::{build_tokio_pool, build_yatp_read_pool},
     server::{
@@ -598,6 +598,7 @@ impl TikvServer {
                 &self.quota_limiter,
             ))),
         );
+        cfg_controller.register(tikv::config::Module::Log, Box::new(LogConfigManager));
 
         let lock_mgr = LockManager::new(&self.config.pessimistic_txn);
         lock_mgr.register_detector_role_change_observer(self.coprocessor_host.as_mut().unwrap());
