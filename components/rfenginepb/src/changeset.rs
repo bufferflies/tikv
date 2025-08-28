@@ -1133,6 +1133,7 @@ pub struct StoreBackupMeta {
     pub epoch: u32,
     pub offset: u64,
     pub keyspace_size: ::std::collections::HashMap<u32, BackupSize>,
+    pub has_missing_commit_record: bool,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -1291,6 +1292,21 @@ impl StoreBackupMeta {
     pub fn take_keyspace_size(&mut self) -> ::std::collections::HashMap<u32, BackupSize> {
         ::std::mem::replace(&mut self.keyspace_size, ::std::collections::HashMap::new())
     }
+
+    // bool has_missing_commit_record = 8;
+
+
+    pub fn get_has_missing_commit_record(&self) -> bool {
+        self.has_missing_commit_record
+    }
+    pub fn clear_has_missing_commit_record(&mut self) {
+        self.has_missing_commit_record = false;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_has_missing_commit_record(&mut self, v: bool) {
+        self.has_missing_commit_record = v;
+    }
 }
 
 impl ::protobuf::Message for StoreBackupMeta {
@@ -1349,6 +1365,13 @@ impl ::protobuf::Message for StoreBackupMeta {
                 7 => {
                     ::protobuf::rt::read_map_into::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<BackupSize>>(wire_type, is, &mut self.keyspace_size)?;
                 },
+                8 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_bool()?;
+                    self.has_missing_commit_record = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1382,6 +1405,9 @@ impl ::protobuf::Message for StoreBackupMeta {
             my_size += ::protobuf::rt::value_size(6, self.offset, ::protobuf::wire_format::WireTypeVarint);
         }
         my_size += ::protobuf::rt::compute_map_size::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<BackupSize>>(7, &self.keyspace_size);
+        if self.has_missing_commit_record != false {
+            my_size += 2;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1411,6 +1437,9 @@ impl ::protobuf::Message for StoreBackupMeta {
             os.write_uint64(6, self.offset)?;
         }
         ::protobuf::rt::write_map_with_cached_sizes::<::protobuf::types::ProtobufTypeUint32, ::protobuf::types::ProtobufTypeMessage<BackupSize>>(7, &self.keyspace_size, os)?;
+        if self.has_missing_commit_record != false {
+            os.write_bool(8, self.has_missing_commit_record)?;
+        }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -1488,6 +1517,11 @@ impl ::protobuf::Message for StoreBackupMeta {
                     |m: &StoreBackupMeta| { &m.keyspace_size },
                     |m: &mut StoreBackupMeta| { &mut m.keyspace_size },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
+                    "has_missing_commit_record",
+                    |m: &StoreBackupMeta| { &m.has_missing_commit_record },
+                    |m: &mut StoreBackupMeta| { &mut m.has_missing_commit_record },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<StoreBackupMeta>(
                     "StoreBackupMeta",
                     fields,
@@ -1517,6 +1551,7 @@ impl ::protobuf::Clear for StoreBackupMeta {
         self.epoch = 0;
         self.offset = 0;
         self.keyspace_size.clear();
+        self.has_missing_commit_record = false;
         self.unknown_fields.clear();
     }
 }
@@ -1533,6 +1568,7 @@ impl ::protobuf::PbPrint for StoreBackupMeta {
         ::protobuf::PbPrint::fmt(&self.epoch, "epoch", buf);
         ::protobuf::PbPrint::fmt(&self.offset, "offset", buf);
         ::protobuf::PbPrint::fmt(&self.keyspace_size, "keyspace_size", buf);
+        ::protobuf::PbPrint::fmt(&self.has_missing_commit_record, "has_missing_commit_record", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1550,6 +1586,7 @@ impl ::std::fmt::Debug for StoreBackupMeta {
         ::protobuf::PbPrint::fmt(&self.epoch, "epoch", &mut s);
         ::protobuf::PbPrint::fmt(&self.offset, "offset", &mut s);
         ::protobuf::PbPrint::fmt(&self.keyspace_size, "keyspace_size", &mut s);
+        ::protobuf::PbPrint::fmt(&self.has_missing_commit_record, "has_missing_commit_record", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -3493,39 +3530,40 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x0cB\0\x12\x0f\n\x05value\x18\x02\x20\x01(\x0cB\0:\0\"e\n\x0bRaftLogFil\
     e\x12\x15\n\x0bfirst_index\x18\x01\x20\x01(\x04B\0\x12\x14\n\nlast_index\
     \x18\x02\x20\x01(\x04B\0\x12\x13\n\tlast_term\x18\x03\x20\x01(\rB\0\x12\
-    \x12\n\x08epoch_id\x18\x04\x20\x01(\rB\0:\0\"\xc3\x02\n\x0fStoreBackupMe\
+    \x12\n\x08epoch_id\x18\x04\x20\x01(\rB\0:\0\"\xe8\x02\n\x0fStoreBackupMe\
     ta\x12\x12\n\x08store_id\x18\x01\x20\x01(\x04B\0\x12#\n\x08manifest\x18\
     \x02\x20\x01(\x0b2\x0f.rfpb.ChangeSetB\0\x12$\n\nwal_chunks\x18\x03\x20\
     \x03(\x0b2\x0e.rfpb.WalChunkB\0\x12\x1d\n\x13raft_meta_start_off\x18\x04\
     \x20\x01(\x04B\0\x12\x0f\n\x05epoch\x18\x05\x20\x01(\rB\0\x12\x10\n\x06o\
     ffset\x18\x06\x20\x01(\x04B\0\x12E\n\rkeyspace_size\x18\x07\x20\x03(\x0b\
-    2,.rfpb.StoreBackupMeta.keyspace_size_MapEntryB\0\x1aF\n\x16keyspace_siz\
-    e_MapEntry\x12\t\n\x03key\x18\x01(\r\x12\x1d\n\x05value\x18\x02(\x0b2\
-    \x10.rfpb.BackupSize:\x028\x01:\0\"\x1e\n\nBackupSize\x12\x0e\n\x04size\
-    \x18\x01\x20\x01(\x04B\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\
-    \x20\x01(\rB\0\x12\x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\
-    \x07end_off\x18\x03\x20\x01(\x04B\0:\0\"\xdb\x02\n\x11ClusterBackupMeta\
-    \x12'\n\x06stores\x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\
-    \x14\n\ncluster_id\x18\x02\x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\
-    \x20\x01(\x04B\0\x12\x12\n\x08alloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\
-    \x07safe_ts\x18\x05\x20\x01(\x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\
-    \x03(\x0b2..rfpb.ClusterBackupMeta.keyspace_meta_MapEntryB\0\x12\x17\n\r\
-    meta_revision\x18\x07\x20\x01(\x03B\0\x12\x18\n\x0eis_lightweight\x18\
-    \x08\x20\x01(\x08B\0\x12\x17\n\rtolerated_err\x18\t\x20\x01(\rB\0\x1a4\n\
-    \x16keyspace_meta_MapEntry\x12\t\n\x03key\x18\x01(\x0c\x12\x0b\n\x05valu\
-    e\x18\x02(\x0c:\x028\x01:\0\"}\n\x11RaftLogBackupFile\x12\x11\n\x07peer_\
-    id\x18\x01\x20\x01(\x04B\0\x12\x15\n\x0bfirst_index\x18\x02\x20\x01(\x04\
-    B\0\x12\x14\n\nlast_index\x18\x03\x20\x01(\x04B\0\x12\x13\n\tstart_off\
-    \x18\x04\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x05\x20\x01(\x04B\0:\0\
-    \"W\n\x12KeySpaceBackupMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\rB\
-    \0\x12(\n\x05files\x18\x02\x20\x03(\x0b2\x17.rfpb.RaftLogBackupFileB\0:\
-    \0\"D\n\x11RaftLogMetaHeader\x12\x11\n\x07version\x18\x01\x20\x01(\x04B\
-    \0\x12\x1a\n\x10compression_type\x18\x02\x20\x01(\rB\0:\0\"\xd7\x01\n\
-    \x16StoreRaftLogBackupMeta\x12)\n\x06header\x18\x01\x20\x01(\x0b2\x17.rf\
-    pb.RaftLogMetaHeaderB\0\x12D\n\traft_logs\x18\x02\x20\x03(\x0b2/.rfpb.St\
-    oreRaftLogBackupMeta.raft_logs_MapEntryB\0\x1aJ\n\x12raft_logs_MapEntry\
-    \x12\t\n\x03key\x18\x01(\r\x12%\n\x05value\x18\x02(\x0b2\x18.rfpb.KeySpa\
-    ceBackupMeta:\x028\x01:\0B\0b\x06proto3\
+    2,.rfpb.StoreBackupMeta.keyspace_size_MapEntryB\0\x12#\n\x19has_missing_\
+    commit_record\x18\x08\x20\x01(\x08B\0\x1aF\n\x16keyspace_size_MapEntry\
+    \x12\t\n\x03key\x18\x01(\r\x12\x1d\n\x05value\x18\x02(\x0b2\x10.rfpb.Bac\
+    kupSize:\x028\x01:\0\"\x1e\n\nBackupSize\x12\x0e\n\x04size\x18\x01\x20\
+    \x01(\x04B\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\x01\x20\x01(\rB\
+    \0\x12\x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\
+    \x03\x20\x01(\x04B\0:\0\"\xdb\x02\n\x11ClusterBackupMeta\x12'\n\x06store\
+    s\x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\x14\n\ncluster_i\
+    d\x18\x02\x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\x20\x01(\x04B\0\
+    \x12\x12\n\x08alloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07safe_ts\x18\
+    \x05\x20\x01(\x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\x03(\x0b2..rfpb.C\
+    lusterBackupMeta.keyspace_meta_MapEntryB\0\x12\x17\n\rmeta_revision\x18\
+    \x07\x20\x01(\x03B\0\x12\x18\n\x0eis_lightweight\x18\x08\x20\x01(\x08B\0\
+    \x12\x17\n\rtolerated_err\x18\t\x20\x01(\rB\0\x1a4\n\x16keyspace_meta_Ma\
+    pEntry\x12\t\n\x03key\x18\x01(\x0c\x12\x0b\n\x05value\x18\x02(\x0c:\x028\
+    \x01:\0\"}\n\x11RaftLogBackupFile\x12\x11\n\x07peer_id\x18\x01\x20\x01(\
+    \x04B\0\x12\x15\n\x0bfirst_index\x18\x02\x20\x01(\x04B\0\x12\x14\n\nlast\
+    _index\x18\x03\x20\x01(\x04B\0\x12\x13\n\tstart_off\x18\x04\x20\x01(\x04\
+    B\0\x12\x11\n\x07end_off\x18\x05\x20\x01(\x04B\0:\0\"W\n\x12KeySpaceBack\
+    upMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\rB\0\x12(\n\x05files\
+    \x18\x02\x20\x03(\x0b2\x17.rfpb.RaftLogBackupFileB\0:\0\"D\n\x11RaftLogM\
+    etaHeader\x12\x11\n\x07version\x18\x01\x20\x01(\x04B\0\x12\x1a\n\x10comp\
+    ression_type\x18\x02\x20\x01(\rB\0:\0\"\xd7\x01\n\x16StoreRaftLogBackupM\
+    eta\x12)\n\x06header\x18\x01\x20\x01(\x0b2\x17.rfpb.RaftLogMetaHeaderB\0\
+    \x12D\n\traft_logs\x18\x02\x20\x03(\x0b2/.rfpb.StoreRaftLogBackupMeta.ra\
+    ft_logs_MapEntryB\0\x1aJ\n\x12raft_logs_MapEntry\x12\t\n\x03key\x18\x01(\
+    \r\x12%\n\x05value\x18\x02(\x0b2\x18.rfpb.KeySpaceBackupMeta:\x028\x01:\
+    \0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

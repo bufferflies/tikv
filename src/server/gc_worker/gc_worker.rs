@@ -1623,7 +1623,14 @@ mod tests {
         // Commit.
         let keys: Vec<_> = init_keys.iter().map(|k| Key::from_raw(k)).collect();
         wait_op!(|cb| storage.sched_txn_command(
-            commands::Commit::new(keys, start_ts, commit_ts.into(), false, Context::default()),
+            commands::Commit::new(
+                keys,
+                start_ts,
+                commit_ts.into(),
+                false,
+                false,
+                Context::default()
+            ),
             cb
         ))
         .unwrap()

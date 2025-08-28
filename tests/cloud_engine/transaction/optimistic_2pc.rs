@@ -49,7 +49,7 @@ fn test_opt_commit_single_new_key() {
 
     let commit_ts = client.get_ts();
     client
-        .kv_commit(txn_muts.clone(), start_ts, commit_ts)
+        .kv_commit(txn_muts.clone(), start_ts, commit_ts, false)
         .expect("Commit failed for T1");
 
     // Assert
@@ -110,7 +110,7 @@ fn test_opt_commit_single_existing_key_overwrite() {
 
     let t1_commit_ts = client.get_ts();
     client
-        .kv_commit(t1_txn_muts, t1_start_ts, t1_commit_ts)
+        .kv_commit(t1_txn_muts, t1_start_ts, t1_commit_ts, false)
         .expect("Commit failed for T1");
 
     // Assert
@@ -166,7 +166,7 @@ fn test_opt_commit_multi_key_same_region() {
 
     let commit_ts = client.get_ts();
     client
-        .kv_commit(txn_muts, start_ts, commit_ts)
+        .kv_commit(txn_muts, start_ts, commit_ts, false)
         .expect("Commit failed for T1");
 
     // Assert

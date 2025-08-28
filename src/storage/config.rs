@@ -77,6 +77,8 @@ pub struct Config {
     #[online_config(skip)]
     pub enable_async_apply_prewrite: bool,
     #[online_config(skip)]
+    pub check_backup_ts: bool,
+    #[online_config(skip)]
     pub api_version: u8,
     #[online_config(skip)]
     pub enable_ttl: bool,
@@ -112,6 +114,7 @@ impl Default for Config {
             reserve_raft_space: ReadableSize::gb(DEFAULT_RESERVED_RAFT_SPACE_GB),
             low_space_threshold: AbsoluteOrPercentSize::Percent(20.),
             enable_async_apply_prewrite: false,
+            check_backup_ts: false,
             api_version: 1,
             enable_ttl: false,
             ttl_check_poll_interval: ReadableDuration::hours(12),

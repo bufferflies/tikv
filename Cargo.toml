@@ -411,7 +411,7 @@ raft = { version = "0.7.0", default-features = false, features = [
 ] }
 tipb = { git = "https://github.com/pingcap/tipb.git" }
 tikv-client = { version = "0.3.0", git = "https://github.com/tikv/client-rust.git", branch = "cse", default-features = false }
-kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+kvproto = { git = "https://github.com/pingcap/kvproto.git", rev = "f08901d17bf4e86d7a1fd0159f5fb72285f21f60" }
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
 moka = { version = "0.9.6", features = ["future"] }
 tokio-timer = { git = "https://github.com/tikv/tokio", branch = "tokio-timer-hotfix" }

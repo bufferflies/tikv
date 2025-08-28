@@ -739,7 +739,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
             .unwrap();
         let commit_ts0 = client.get_ts();
         client
-            .kv_commit(txn_muts0.clone(), start_ts0, commit_ts0)
+            .kv_commit(txn_muts0.clone(), start_ts0, commit_ts0, false)
             .unwrap();
         client.put_kv_in_ref_store(muts0);
         client.verify_data_with_ref_store();
@@ -758,7 +758,9 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         let (_, txn_muts) = make_mutations("with_prewrite");
         let start_ts = client.get_ts();
         let commit_ts = client.get_ts();
-        let err = client.kv_commit(txn_muts, start_ts, commit_ts).unwrap_err();
+        let err = client
+            .kv_commit(txn_muts, start_ts, commit_ts, false)
+            .unwrap_err();
         expect_err_msg(&err, "TxnLockNotFound");
         client.verify_data_with_ref_store();
     }
@@ -780,12 +782,14 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
 
         let commit_ts0 = client.get_ts();
         let err = client
-            .kv_commit(txn_muts0, start_ts0, commit_ts0)
+            .kv_commit(txn_muts0, start_ts0, commit_ts0, false)
             .unwrap_err();
         expect_err_msg(&err, "TxnLockNotFound");
 
         let commit_ts1 = client.get_ts();
-        client.kv_commit(txn_muts1, start_ts1, commit_ts1).unwrap();
+        client
+            .kv_commit(txn_muts1, start_ts1, commit_ts1, false)
+            .unwrap();
         client.put_kv_in_ref_store(muts1);
         client.verify_data_with_ref_store();
     }
@@ -804,7 +808,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         let txn0 = rt.spawn_blocking(move || {
             thread::sleep(Duration::from_secs(1));
             let new_commit_ts = client_clone
-                .kv_commit(txn_muts0_clone.clone(), start_ts0, commit_ts0)
+                .kv_commit(txn_muts0_clone.clone(), start_ts0, commit_ts0, false)
                 .unwrap();
             assert!(
                 new_commit_ts > commit_ts0,
@@ -836,7 +840,6 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
                 commit_ts0,
                 CommitAction::AsyncCommitSecondaryKeys(Duration::ZERO),
             )
-            .unwrap()
             .unwrap();
         // Will return the commit_ts in request other than of committed record.
         assert_eq!(dup_commit_ts, commit_ts0);
@@ -876,7 +879,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         // Commit after rollback.
         let commit_ts = client.get_ts();
         let err = client
-            .kv_commit(txn_muts.clone(), start_ts, commit_ts)
+            .kv_commit(txn_muts.clone(), start_ts, commit_ts, false)
             .unwrap_err();
         expect_err_msg(&err, "TxnLockNotFound");
 
@@ -889,7 +892,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
             .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap();
         client
-            .kv_commit(txn_muts.clone(), start_ts, commit_ts)
+            .kv_commit(txn_muts.clone(), start_ts, commit_ts, false)
             .unwrap();
         // Rollback after committed.
         let err = client.kv_rollback(txn_muts, start_ts).unwrap_err();
@@ -939,7 +942,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         // Commit after rollback.
         let commit_ts = client.get_ts();
         let err = client
-            .kv_commit(txn_muts.clone(), start_ts, commit_ts)
+            .kv_commit(txn_muts.clone(), start_ts, commit_ts, false)
             .unwrap_err();
         expect_err_msg(&err, "TxnLockNotFound");
 
@@ -951,7 +954,9 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
         client
             .kv_prewrite_with_retry(txn_muts.primary(), None, txn_muts.clone(), start_ts)
             .unwrap();
-        client.kv_commit(txn_muts, start_ts, commit_ts).unwrap();
+        client
+            .kv_commit(txn_muts, start_ts, commit_ts, false)
+            .unwrap();
         // Rollback after committed.
         let err = client
             .kv_resolve_lock_for_mutations(start_ts.into_inner(), None, muts.clone(), use_txn_file)
@@ -1207,7 +1212,9 @@ fn test_commit_primary_region() {
 
     // Commit must fail.
     let commit_ts = client.get_ts();
-    let err = client.kv_commit(txn_muts, start_ts, commit_ts).unwrap_err();
+    let err = client
+        .kv_commit(txn_muts, start_ts, commit_ts, false)
+        .unwrap_err();
     expect_err_msg(&err, "TxnLockNotFound");
 
     {

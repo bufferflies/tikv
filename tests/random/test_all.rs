@@ -91,6 +91,7 @@ fn test_random_all() {
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
+        backup_delay: ReadableDuration::secs(1),
         tolerate_err: 1,
         skip_keyspace_meta: true,
         ..Default::default()
@@ -360,6 +361,7 @@ fn prepare_cluster(
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
+        conf.storage.check_backup_ts = switches.txn_check_backup_ts;
     };
     let pd_wrapper = PdWrapper::new_test(1, security_conf, None);
     let mut cluster = ServerClusterBuilder::new(nodes, update_conf_fn)
@@ -527,13 +529,18 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
 #[derive(Debug)]
 pub(crate) struct Switches {
     pub ia_table_ratio: f64,
+    pub txn_check_backup_ts: bool,
 }
 
 impl Switches {
     pub fn from_env() -> Self {
         let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.2);
+        let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
 
-        Self { ia_table_ratio }
+        Self {
+            ia_table_ratio,
+            txn_check_backup_ts,
+        }
     }
 }
 

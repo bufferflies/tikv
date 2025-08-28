@@ -839,6 +839,7 @@ impl ServerCluster {
         let (_, tikv_config) = self.confs.iter().next().unwrap_or_else(|| {
             panic!("no tikv config found");
         });
+        let first_worker_idx = worker_ids[0];
         for idx in worker_ids {
             let data_dir = self.tmp_dir.path().join(format!("worker-{idx}"));
             std::fs::create_dir_all(&data_dir)
@@ -849,6 +850,13 @@ impl ServerCluster {
             } else {
                 // Small threshold to cover the process of handling memory limit exceeded.
                 (opts.kv_target_file_size.0 * 32).into()
+            };
+
+            // Periodical backup can be enabled on NO more than one tikv worker.
+            let backup_interval = if idx == first_worker_idx {
+                opts.backup_interval
+            } else {
+                Duration::ZERO
             };
 
             let tikv_worker_conf = cloud_worker::Config {
@@ -869,7 +877,8 @@ impl ServerCluster {
                 cop_block_size: tikv_config.rocksdb.writecf.block_size,
                 data_dir: data_dir.to_string_lossy().into_owned(),
                 native_br: NativeBrConfig {
-                    backup_interval: ReadableDuration(opts.backup_interval),
+                    backup_interval: ReadableDuration(backup_interval),
+                    backup_delay: ReadableDuration(opts.backup_delay),
                     #[cfg(feature = "testexport")]
                     backup_skip_keyspace_meta: opts.backup_skip_keyspace_meta,
                     restore_timeout_pd_control: ReadableDuration(opts.restore_timeout_pd_control),
@@ -969,8 +978,14 @@ impl ServerCluster {
             None
         } else {
             let endpoints = self.tikv_worker_endpoints();
-            let helper =
-                TxnFileHelper::new(max_chunk_size, endpoints, self.security_mgr.clone()).unwrap();
+            let runtime = self.dfs.as_ref().unwrap().get_runtime().handle().clone();
+            let helper = TxnFileHelper::new(
+                max_chunk_size,
+                endpoints,
+                self.security_mgr.clone(),
+                runtime,
+            )
+            .unwrap();
             Some(Arc::new(helper))
         }
     }
@@ -1257,6 +1272,7 @@ pub fn new_test_config(
     config.storage.enable_ttl = true;
     config.storage.scheduler_concurrency = 4096;
     config.storage.low_space_threshold = AbsoluteOrPercentSize::Abs(ReadableSize::mb(1));
+    config.storage.check_backup_ts = true;
     config.server.cluster_id = 1;
     config.server.addr = node_addr(node_id);
     config.server.status_addr = node_status_addr(node_id);
@@ -1361,6 +1377,7 @@ pub struct TikvWorkerOptions {
     pub ia_disk_cap: u64,
 
     pub backup_interval: Duration,
+    pub backup_delay: Duration,
     pub backup_skip_keyspace_meta: bool,
 
     pub restore_timeout_pd_control: Duration,
@@ -1379,7 +1396,8 @@ impl Default for TikvWorkerOptions {
             ia_mem_cap: IA_MEM_CAP_DEF,
             ia_disk_cap: IA_DISK_CAP_DEF,
             backup_interval: Duration::ZERO,
-            backup_skip_keyspace_meta: false,
+            backup_delay: Duration::ZERO,
+            backup_skip_keyspace_meta: true,
             restore_timeout_pd_control: Duration::from_secs(10),
         }
     }

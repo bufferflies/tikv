@@ -229,6 +229,7 @@ pub struct MutateOptions {
     pub commit_action: CommitAction,
     pub write_method: TxnWriteMethod,
     pub gen_index: Option<GenIndexFn>,
+    pub no_verify: bool,
 }
 
 impl Default for MutateOptions {
@@ -238,6 +239,7 @@ impl Default for MutateOptions {
             commit_action: CommitAction::SyncCommit,
             write_method: TxnWriteMethod::Normal,
             gen_index: None,
+            no_verify: false,
         }
     }
 }
@@ -291,6 +293,7 @@ impl ClusterClient {
             TxnMutations::from_normal(mutations.to_vec()),
             start_ts,
             commit_ts,
+            false,
         )
         .expect("kv_commit");
         self.del_kv_in_ref_store(mutations.to_vec());
@@ -310,12 +313,10 @@ impl ClusterClient {
         rng: Range<usize>,
         gen_key: F,
         options: MutateOptions,
-    ) -> Result<u64 /* commit_ts */>
+    ) -> Result<TimeStamp /* commit_ts */>
     where
         F: Fn(usize) -> Vec<u8>,
     {
-        let start_ts = options.start_ts.unwrap_or_else(|| self.get_ts());
-
         let mut mutations = vec![];
         for i in rng {
             let mut m = Mutation::default();
@@ -329,26 +330,25 @@ impl ClusterClient {
             self.txn_file_helper.clone(),
         ))?;
         let secondaries = self.async_commit.then(|| txn_muts.secondaries());
-        self.kv_prewrite_with_retry(
+        let mut txn = self.begin_transaction(None);
+        self.kv_prewrite_txn(
             txn_muts.primary(),
             secondaries.as_ref(),
             txn_muts.clone(),
-            start_ts,
+            &mut txn,
         )?;
-        let commit_ts = self.get_ts();
 
-        match options.commit_action {
+        let commit_ts = match options.commit_action {
             CommitAction::NoCommit => {
-                return Ok(0);
+                return Ok(0.into());
             }
             commit_action => {
-                self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action)?;
+                self.kv_commit_ext(txn_muts, txn.start_ts, txn.get_commit_ts(), commit_action)?
             }
-        }
+        };
 
         self.del_kv_in_ref_store(mutations);
-        let commit_ts = commit_ts.into_inner();
-        self.set_max_ts(commit_ts);
+        self.set_max_ts(commit_ts.into_inner());
         Ok(commit_ts)
     }
 
@@ -361,10 +361,12 @@ impl ClusterClient {
 
     pub fn put_commit(&mut self, start_ts: TimeStamp, mutations: &[Mutation]) -> Result<TimeStamp> {
         let put_time = Instant::now();
-        let commit_ts = self.get_ts();
+        assert!(!self.async_commit);
+        let req_commit_ts = self.get_ts();
         let first = mutations.first().unwrap().clone();
         let txn_muts = TxnMutations::from_normal(mutations.to_vec());
-        self.kv_commit(txn_muts, start_ts, commit_ts)
+        let commit_ts = self
+            .kv_commit(txn_muts, start_ts, req_commit_ts, false)
             .expect("kv_commit");
         self.verify_key_value(
             first.get_key(),
@@ -378,14 +380,15 @@ impl ClusterClient {
         Ok(commit_ts)
     }
 
-    pub fn put_kv<R, F, G>(&mut self, rng: R, gen_key: F, gen_val: G)
+    // Return commit_ts.
+    pub fn put_kv<R, F, G>(&mut self, rng: R, gen_key: F, gen_val: G) -> TimeStamp
     where
         R: IntoIterator<Item = usize>,
         F: Fn(usize) -> Vec<u8>,
         G: Fn(usize) -> Vec<u8>,
     {
         self.try_put_kv(rng, gen_key, gen_val, MutateOptions::default())
-            .unwrap();
+            .unwrap()
     }
 
     pub fn try_put_kv<R, F, G>(
@@ -394,7 +397,7 @@ impl ClusterClient {
         gen_key: F,
         gen_val: G,
         options: MutateOptions,
-    ) -> Result<u64 /* commit_ts or start_ts when NoCommit */>
+    ) -> Result<TimeStamp /* commit_ts or start_ts when NoCommit */>
     where
         R: IntoIterator<Item = usize>,
         F: Fn(usize) -> Vec<u8>,
@@ -429,36 +432,47 @@ impl ClusterClient {
             options.write_method,
             self.txn_file_helper.clone(),
         ))?;
-        let secondaries = self.async_commit.then(|| txn_muts.secondaries());
+        let mut txn = self.begin_transaction(Some(start_ts));
+        let secondaries = txn.async_commit.then(|| txn_muts.secondaries());
 
         let put_time = Instant::now();
-        self.kv_prewrite_with_retry(
+        fail::fail_point!("client::before_kv_prewrite");
+
+        self.kv_prewrite_txn(
             txn_muts.primary(),
             secondaries.as_ref(),
             txn_muts.clone(),
-            start_ts,
+            &mut txn,
         )?;
-        let commit_ts = self.get_ts();
 
-        match options.commit_action {
+        fail::fail_point!("client::before_kv_commit");
+
+        let commit_ts = match &options.commit_action {
             CommitAction::NoCommit => {
-                return Ok(start_ts.into_inner());
+                return Ok(start_ts);
             }
-            commit_action => {
-                self.kv_commit_ext(txn_muts, start_ts, commit_ts, commit_action)?;
-            }
-        }
+            commit_action => self.kv_commit_ext(
+                txn_muts,
+                txn.start_ts,
+                txn.get_commit_ts(),
+                commit_action.clone(),
+            )?,
+        };
 
-        let commit_ts = commit_ts.into_inner();
-        self.verify_key_value(
-            first.get_key(),
-            Some(first.get_value()),
-            commit_ts,
-            put_time,
-            &RequestOptions::default(),
-        )?;
+        let no_commit = matches!(options.commit_action, CommitAction::NoCommit);
+        let no_verify = options.no_verify;
+
+        if !no_commit && !no_verify {
+            self.verify_key_value(
+                first.get_key(),
+                Some(first.get_value()),
+                commit_ts.into_inner(),
+                put_time,
+                &RequestOptions::default(),
+            )?;
+        }
         self.put_kv_in_ref_store(mutations);
-        self.set_max_ts(commit_ts);
+        self.set_max_ts(commit_ts.into_inner());
         Ok(commit_ts)
     }
 
@@ -488,7 +502,8 @@ impl ClusterClient {
 
         // Commit
         let commit_ts_hint = self.get_ts();
-        let final_commit_ts = self.kv_commit(txn_muts, start_ts, commit_ts_hint)?;
+        let final_commit_ts =
+            self.kv_commit(txn_muts, start_ts, commit_ts_hint, self.async_commit)?;
 
         // Update ref_store and max_ts
         self.put_kv_in_ref_store(mutations_slice.to_vec());
@@ -512,22 +527,37 @@ impl ClusterClient {
         self.max_ts.load(Ordering::Relaxed)
     }
 
-    pub fn kv_mutate(&mut self, muts: Vec<Mutation>) -> Result<()> {
+    pub fn kv_mutate(&mut self, muts: Vec<Mutation>) -> Result<TimeStamp /* commit_ts */> {
         assert!(!muts.is_empty());
         let txn_muts = TxnMutations::from_normal(muts);
         let secondaries = self.async_commit.then(|| txn_muts.secondaries());
         let start_ts = self.get_ts();
-        self.kv_prewrite_with_retry(
+        let mut txn = self.begin_transaction(Some(start_ts));
+        self.kv_prewrite_txn(
             txn_muts.primary(),
             secondaries.as_ref(),
             txn_muts.clone(),
-            start_ts,
+            &mut txn,
         )?;
 
-        let commit_ts = self.get_ts();
-        self.kv_commit(txn_muts, start_ts, commit_ts)?;
+        let commit_ts = self.kv_commit(
+            txn_muts,
+            txn.start_ts,
+            txn.get_commit_ts(),
+            txn.async_commit,
+        )?;
         self.set_max_ts(commit_ts.into_inner());
-        Ok(())
+        Ok(commit_ts)
+    }
+
+    pub fn begin_transaction(&self, start_ts: Option<TimeStamp>) -> Transaction {
+        let start_ts = start_ts.unwrap_or_else(|| self.get_ts());
+        Transaction {
+            start_ts,
+            min_commit_ts: 0.into(),
+            async_commit: self.async_commit,
+            pd_client: self.pd_client.clone(),
+        }
     }
 
     pub fn kv_prewrite_with_retry(
@@ -537,7 +567,33 @@ impl ClusterClient {
         muts: TxnMutations,
         ts: TimeStamp,
     ) -> Result<()> {
-        self.kv_prewrite_with_retry_opt(pk, secondaries, muts, ts, true, 3000, TimeStamp::zero())
+        self.kv_prewrite_with_retry_opt(pk, secondaries, muts, ts, true, 3000, TimeStamp::zero())?;
+        Ok(())
+    }
+
+    pub fn kv_prewrite_txn(
+        &mut self,
+        pk: Bytes,
+        secondaries: Option<&Vec<Bytes>>,
+        muts: TxnMutations,
+        txn: &mut Transaction,
+    ) -> Result<()> {
+        // Don't use muts.primary() for pk & muts.secondaries() for secondary keys, as
+        // `kv_prewrite` will recursively be invoked in `kv_prewrite_single_region`.
+        let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
+        for (id_ver, group_muts) in groups {
+            self.kv_prewrite_single_region_with_retry_opt(
+                id_ver,
+                pk.clone(),
+                secondaries,
+                group_muts,
+                txn,
+                true,
+                3000,
+                TimeStamp::zero(),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn kv_prewrite_with_retry_opt(
@@ -546,6 +602,29 @@ impl ClusterClient {
         secondaries: Option<&Vec<Bytes>>,
         muts: TxnMutations,
         ts: TimeStamp,
+        resolve_locks: bool,
+        ttl: u64,
+        for_update_ts: TimeStamp,
+    ) -> Result<()> {
+        let mut txn = self.begin_transaction(Some(ts));
+        self.kv_prewrite_with_retry_opt_txn(
+            pk,
+            secondaries,
+            muts,
+            &mut txn,
+            resolve_locks,
+            ttl,
+            for_update_ts,
+        )?;
+        Ok(())
+    }
+
+    pub fn kv_prewrite_with_retry_opt_txn(
+        &mut self,
+        pk: Bytes,
+        secondaries: Option<&Vec<Bytes>>,
+        muts: TxnMutations,
+        txn: &mut Transaction,
         resolve_locks: bool,
         ttl: u64,
         for_update_ts: TimeStamp,
@@ -559,7 +638,7 @@ impl ClusterClient {
                 pk.clone(),
                 secondaries,
                 group_muts,
-                ts,
+                txn,
                 resolve_locks,
                 ttl,
                 for_update_ts,
@@ -574,7 +653,7 @@ impl ClusterClient {
         pk: Bytes,
         secondary_keys: Option<&Vec<Bytes>>,
         muts: TxnMutations,
-        ts: TimeStamp,
+        txn: &mut Transaction,
         resolve_locks: bool,
         ttl: u64,
         for_update_ts: TimeStamp,
@@ -592,7 +671,7 @@ impl ClusterClient {
                     pk,
                     secondary_keys,
                     muts,
-                    ts,
+                    txn.start_ts,
                     resolve_locks,
                     ttl,
                     for_update_ts,
@@ -606,10 +685,10 @@ impl ClusterClient {
             prewrite_req.set_context(ctx);
             muts.set_prewrite_req(&mut prewrite_req);
             prewrite_req.primary_lock = pk.to_vec();
-            prewrite_req.start_version = ts.into_inner();
+            prewrite_req.start_version = txn.start_ts.into_inner();
             prewrite_req.lock_ttl = ttl;
             prewrite_req.min_commit_ts = prewrite_req.start_version + 1;
-            prewrite_req.use_async_commit = self.async_commit;
+            prewrite_req.use_async_commit = txn.async_commit;
             prewrite_req.assertion_level = kvrpcpb::AssertionLevel::Strict;
             if for_update_ts.into_inner() > 0 {
                 prewrite_req.set_for_update_ts(for_update_ts.into_inner());
@@ -645,11 +724,11 @@ impl ClusterClient {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(&region_err) {
-                    return self.kv_prewrite_with_retry_opt(
+                    return self.kv_prewrite_with_retry_opt_txn(
                         pk,
                         secondary_keys,
                         muts,
-                        ts,
+                        txn,
                         resolve_locks,
                         ttl,
                         for_update_ts,
@@ -669,6 +748,19 @@ impl ClusterClient {
                     return Err(Error::KeyErrors(key_errors.into_vec()));
                 }
                 continue;
+            }
+
+            if txn.async_commit {
+                if resp.min_commit_ts == 0 {
+                    info!("{} fallback to 2pc", tag);
+                    txn.async_commit = false;
+                    txn.min_commit_ts = 0.into();
+                } else {
+                    let prev_min_commit_ts = txn.min_commit_ts;
+                    txn.min_commit_ts = txn.min_commit_ts.max(resp.min_commit_ts.into());
+                    debug!("{} async commit resp", tag; "resp" => ?resp, "start_ts" => txn.start_ts,
+                        "min_commit_ts" => txn.min_commit_ts, "prev_min_commit_ts" => prev_min_commit_ts);
+                }
             }
             return Ok(());
         }
@@ -726,6 +818,7 @@ impl ClusterClient {
         muts: TxnMutations,
         start_ts: TimeStamp,
         mut commit_ts: TimeStamp,
+        use_async_commit: bool,
     ) -> Result<TimeStamp> {
         // fail_point!("kv_commmit");
         // println!("{:?}", fail::list());
@@ -733,7 +826,7 @@ impl ClusterClient {
         let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
         for (id_ver, group_muts) in groups {
             commit_ts = self
-                .kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts)?
+                .kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts, use_async_commit)?
                 .max(commit_ts);
         }
         Ok(commit_ts)
@@ -746,9 +839,9 @@ impl ClusterClient {
         start_ts: TimeStamp,
         mut commit_ts: TimeStamp,
         commit_action: CommitAction,
-    ) -> Result<Option<TimeStamp>> {
+    ) -> Result<TimeStamp> {
         match commit_action {
-            CommitAction::SyncCommit => Ok(Some(self.kv_commit(muts, start_ts, commit_ts)?)),
+            CommitAction::SyncCommit => Ok(self.kv_commit(muts, start_ts, commit_ts, false)?),
             CommitAction::AsyncCommitSecondaryKeys(delay) => {
                 let mut primary_groups = muts
                     .group_by_regions(self, PrimaryFilter::PrimaryOnly)
@@ -756,7 +849,7 @@ impl ClusterClient {
                 assert_eq!(primary_groups.len(), 1);
                 let (id_ver, group_muts) = primary_groups.swap_remove(0);
                 commit_ts =
-                    self.kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts)?;
+                    self.kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts, false)?;
 
                 if delay < Duration::MAX {
                     let mut client = self.clone();
@@ -766,26 +859,27 @@ impl ClusterClient {
                             .group_by_regions(&mut client, PrimaryFilter::Secondaries)
                             .unwrap();
                         for (id_ver, group_muts) in secondary_groups {
-                            if let Err(err) = client
-                                .kv_commit_single_region(id_ver, group_muts, start_ts, commit_ts)
-                            {
+                            if let Err(err) = client.kv_commit_single_region(
+                                id_ver, group_muts, start_ts, commit_ts, false,
+                            ) {
                                 warn!("secondaries commit failed: {:?}", err; "start_ts" => ?start_ts);
                             }
                         }
                     });
                 }
-                Ok(Some(commit_ts))
+                Ok(commit_ts)
             }
-            CommitAction::NoCommit => Ok(None),
+            CommitAction::NoCommit => Ok(0.into()),
             CommitAction::AsyncCommit(delay) => {
+                assert!(self.async_commit);
                 let mut client = self.clone();
                 thread::spawn(move || {
                     thread::sleep(delay);
-                    if let Err(err) = client.kv_commit(muts, start_ts, commit_ts) {
+                    if let Err(err) = client.kv_commit(muts, start_ts, commit_ts, true) {
                         warn!("async commit failed: {:?}", err; "start_ts" => ?start_ts);
                     }
                 });
-                Ok(None)
+                Ok(commit_ts)
             }
         }
     }
@@ -796,6 +890,7 @@ impl ClusterClient {
         muts: TxnMutations,
         start_ts: TimeStamp,
         mut commit_ts: TimeStamp,
+        use_async_commit: bool,
     ) -> Result<TimeStamp> {
         let region_id = id_ver.id();
         let mut errors: Vec<(ShardTag, Error)> = vec![];
@@ -806,7 +901,7 @@ impl ClusterClient {
                 .new_rpc_ctx(region_id, &muts.primary())
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
-                return self.kv_commit(muts, start_ts, commit_ts);
+                return self.kv_commit(muts, start_ts, commit_ts, use_async_commit);
             }
             let ctx = ctx.unwrap();
             let tag = Self::tag_from_ctx(&ctx);
@@ -817,6 +912,7 @@ impl ClusterClient {
             commit_req.start_version = start_ts.into_inner();
             muts.set_commit_req(&mut commit_req);
             commit_req.commit_version = commit_ts.into_inner();
+            commit_req.use_async_commit = use_async_commit;
             let result = kv_client.kv_commit(&commit_req);
             if let Err(err) = result {
                 errors.push((tag, err.into()));
@@ -832,7 +928,7 @@ impl ClusterClient {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(&region_err) {
-                    return self.kv_commit(muts, start_ts, commit_ts);
+                    return self.kv_commit(muts, start_ts, commit_ts, use_async_commit);
                 }
                 error!("{} unexpected error {:?}", tag, region_err);
                 return Err(Error::RegionError(region_err));
@@ -2893,5 +2989,23 @@ fn api_version_of_key(key: &[u8]) -> kvrpcpb::ApiVersion {
     match ApiV2::parse_key_mode(key) {
         KeyMode::Txn | KeyMode::Raw => kvrpcpb::ApiVersion::V2,
         _ => kvrpcpb::ApiVersion::V1,
+    }
+}
+
+pub struct Transaction {
+    start_ts: TimeStamp,
+    min_commit_ts: TimeStamp,
+    async_commit: bool,
+
+    pd_client: Arc<dyn PdClient>,
+}
+
+impl Transaction {
+    fn get_commit_ts(&self) -> TimeStamp {
+        if !self.async_commit {
+            block_on(self.pd_client.get_tso()).unwrap()
+        } else {
+            self.min_commit_ts
+        }
     }
 }

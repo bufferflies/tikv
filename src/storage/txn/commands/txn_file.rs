@@ -21,7 +21,10 @@ use txn_types::{Key, LockType, TimeStamp, WriteType};
 use crate::storage::{
     lock_manager::LockManager,
     mvcc,
-    mvcc::{CloudReader, ErrorInner, TxnCommitRecord},
+    mvcc::{
+        metrics::MVCC_COMMIT_REJECT_BY_BACKUP_TS_COUNTER_VEC, CloudReader, ErrorInner, MvccTxn,
+        TxnCommitRecord,
+    },
     txn::{
         commands::{
             CheckTxnStatus, CommandExt, Commit, Prewrite, ReleasedLocks, ResolveLock,
@@ -515,14 +518,17 @@ impl TxnFileCommand {
         start_ts: TimeStamp,
         commit_ts: TimeStamp,
         snap_access: &SnapAccess,
-    ) -> crate::storage::mvcc::Result<()> {
-        let is_primary_txn_file = || {
+    ) -> crate::storage::mvcc::Result<bool /* is_primary */> {
+        if !snap_access.key_is_in_range(&lock.primary) {
+            return Ok(false);
+        }
+
+        let is_primary_txn_file = {
             let primary_inner = InnerKey::from_outer_key(&lock.primary);
             lock_txn_file.lower_bound() <= primary_inner
                 && primary_inner < lock_txn_file.upper_bound()
         };
-
-        if snap_access.key_is_in_range(&lock.primary) && !is_primary_txn_file() {
+        if !is_primary_txn_file {
             let txn_lock_not_found = || -> mvcc::Error {
                 ErrorInner::TxnLockNotFound {
                     start_ts,
@@ -545,11 +551,11 @@ impl TxnFileCommand {
                         "commit_ts mismatch: start_ts {}, commit_ts {}, committed_ts {}",
                         start_ts, commit_ts, committed_ts
                     );
-                    Ok(())
+                    Ok(is_primary_txn_file)
                 }
             };
         }
-        Ok(())
+        Ok(is_primary_txn_file)
     }
 
     #[maybe_async::both]
@@ -558,6 +564,7 @@ impl TxnFileCommand {
         snap_access: &SnapAccess,
         commit_ts: TimeStamp,
         keys: Option<Vec<Key>>,
+        txn: &mut MvccTxn,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         let start_ts = self.ts();
         if commit_ts <= start_ts {
@@ -567,29 +574,46 @@ impl TxnFileCommand {
         }
         if let Some(lock_txn_file) = snap_access.get_lock_txn_file(self.txn_file_ref.start_ts) {
             let lock = txn_types::Lock::parse(lock_txn_file.get_lock_val_prefix())?;
-            self.check_commit_primary_region(
-                &lock,
-                &lock_txn_file,
-                start_ts,
-                commit_ts,
-                snap_access,
-            )
-            .await?;
+            let is_primary = self
+                .check_commit_primary_region(
+                    &lock,
+                    &lock_txn_file,
+                    start_ts,
+                    commit_ts,
+                    snap_access,
+                )
+                .await?;
 
             debug_assert_eq!(lock.ts, self.ts());
-            if commit_ts < lock.min_commit_ts {
+            let mut min_commit_ts = lock.min_commit_ts;
+            let mut reject_by_backup_ts = false;
+            if is_primary {
+                if let Some(backup_ts) = txn.backup_ts.as_ref() {
+                    let backup_ts = backup_ts.get();
+                    if min_commit_ts < backup_ts {
+                        min_commit_ts = backup_ts;
+                        reject_by_backup_ts = true;
+                    }
+                    txn.backup_ts_checked = true;
+                }
+            }
+            if commit_ts < min_commit_ts {
                 info!(
                     "trying to commit with smaller commit_ts than min_commit_ts";
                     "lock" => ?lock,
                     "start_ts" => start_ts,
                     "commit_ts" => commit_ts,
-                    "min_commit_ts" => lock.min_commit_ts,
+                    "min_commit_ts" => min_commit_ts,
+                    "reject_by_backup_ts" => reject_by_backup_ts,
                 );
+                if reject_by_backup_ts {
+                    MVCC_COMMIT_REJECT_BY_BACKUP_TS_COUNTER_VEC.txn_file.inc();
+                }
                 return Err(ErrorInner::CommitTsExpired {
                     start_ts,
                     commit_ts,
                     key: lock.primary.clone(),
-                    min_commit_ts: lock.min_commit_ts,
+                    min_commit_ts,
                 }
                 .into());
             }
@@ -827,11 +851,12 @@ impl TxnFileCommand {
         snap_access: &SnapAccess,
         commit_ts: TimeStamp,
         resolve_keys: Option<Vec<Key>>,
+        txn: &mut MvccTxn,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         let res = if commit_ts.is_zero() {
             self.process_rollback(snap_access, resolve_keys).await
         } else {
-            self.process_commit(snap_access, commit_ts, resolve_keys)
+            self.process_commit(snap_access, commit_ts, resolve_keys, txn)
                 .await
         };
         match res {
@@ -851,9 +876,10 @@ impl TxnFileCommand {
         &mut self,
         snap_access: &SnapAccess,
         mut resolve_lock: ResolveLock,
+        txn: &mut MvccTxn,
     ) -> crate::storage::mvcc::Result<ProcessResult> {
         let um = UserMeta::from_slice(self.txn_file_ref.get_user_meta());
-        self.process_resolve_txn_lock(snap_access, um.commit_ts.into(), None)
+        self.process_resolve_txn_lock(snap_access, um.commit_ts.into(), None, txn)
             .await?;
         let resolved_txn = resolve_lock.txn_file_status.remove(&self.ts());
         debug_assert!(resolved_txn.is_some());
@@ -933,18 +959,26 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileComman
     async fn process_write(
         mut self,
         snapshot: S,
-        _context: WriteContext<'_, L>,
+        context: WriteContext<'_, L>,
     ) -> crate::storage::txn::Result<WriteResult> {
         let snap = snapshot.get_kvengine_snap().unwrap();
         let cmd = mem::take(&mut self.inner_cmd).unwrap();
         let ctx = cmd.ctx().clone();
         debug!("txn file process write"; "cmd" => ?cmd, "txn_file_ref" => ?self.txn_file_ref, "ctx" => ?ctx, "snap" => ?snap);
 
+        let mut txn = if let box Command::Commit(_) = &cmd {
+            MvccTxn::new_with_backup_ts(self.ts(), context.concurrency_manager, false)
+        } else {
+            MvccTxn::new(self.ts(), context.concurrency_manager)
+        };
         let pr = match *cmd {
             Command::Prewrite(_) => self.process_prewrite(snap).await?,
             Command::Commit(commit) => {
-                self.process_commit(snap, commit.commit_ts, Some(commit.keys))
-                    .await?
+                let pr = self
+                    .process_commit(snap, commit.commit_ts, Some(commit.keys), &mut txn)
+                    .await?;
+                fail::fail_point!("txn::txn_file_process_commit_finish");
+                pr
             }
             Command::Rollback(rollback) => self.process_rollback(snap, Some(rollback.keys)).await?,
             Command::TxnHeartBeat(txn_heartbeat) => {
@@ -960,10 +994,17 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileComman
                 )
                 .await?
             }
-            Command::ResolveLock(resolve) => self.process_resolve_lock(snap, resolve).await?,
+            Command::ResolveLock(resolve) => {
+                self.process_resolve_lock(snap, resolve, &mut txn).await?
+            }
             Command::ResolveLockLite(resolve) => {
-                self.process_resolve_txn_lock(snap, resolve.commit_ts, Some(resolve.resolve_keys))
-                    .await?
+                self.process_resolve_txn_lock(
+                    snap,
+                    resolve.commit_ts,
+                    Some(resolve.resolve_keys),
+                    &mut txn,
+                )
+                .await?
             }
             _ => {
                 return Err(box_err!("unsupported txn file command"));
@@ -972,6 +1013,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileComman
         let mut write_data = WriteData::default();
         if self.modified {
             write_data.txn_file = Some(self.txn_file_ref.clone());
+            write_data.backup_ts_checked = txn.take_checked_backup_ts();
         }
         let result = WriteResult {
             ctx,

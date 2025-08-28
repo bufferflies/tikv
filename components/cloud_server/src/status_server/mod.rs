@@ -19,6 +19,7 @@ use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
 use async_stream::stream;
 use bytes::{Buf, BufMut, BytesMut};
 use collections::HashMap;
+use concurrency_manager::ConcurrencyManager;
 use flate2::{write::GzEncoder, Compression};
 use futures::{
     compat::Compat01As03,
@@ -106,6 +107,8 @@ static MISSING_ACTIONS: &[u8] = b"Missing param actions";
 #[cfg(feature = "failpoints")]
 static FAIL_POINTS_REQUEST_PATH: &str = "/fail";
 
+const BACKUP_TS_WAIT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct LogLevelRequest {
@@ -141,6 +144,7 @@ pub struct StatusServer {
     security_config: Arc<SecurityConfig>,
     kvengine: kvengine::Engine,
     rfengine: rfengine::RfEngine,
+    concurrency_manager: ConcurrencyManager,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -165,6 +169,7 @@ impl StatusServer {
         router: RaftRouter,
         kvengine: kvengine::Engine,
         rfengine: rfengine::RfEngine,
+        concurrency_manager: ConcurrencyManager,
     ) -> Result<Self> {
         let thread_pool = Builder::new_multi_thread()
             .enable_all()
@@ -193,6 +198,7 @@ impl StatusServer {
             security_config,
             kvengine,
             rfengine,
+            concurrency_manager,
         })
     }
 
@@ -1532,6 +1538,7 @@ impl StatusServer {
         req: Request<Body>,
         engine: rfengine::RfEngine,
         kvengine: kvengine::Engine,
+        concurrency_manager: ConcurrencyManager,
         dfs_conf: DFSConfig,
     ) -> hyper::Result<Response<Body>> {
         let body = hyper::body::to_bytes(req.into_body()).await?;
@@ -1567,22 +1574,48 @@ impl StatusServer {
             ));
         }
 
-        let s3fs = kvengine::dfs::S3Fs::new(
-            dfs_conf.prefix,
-            dfs_conf.s3_endpoint,
-            dfs_conf.s3_key_id,
-            dfs_conf.s3_secret_key,
-            dfs_conf.s3_region,
-            dfs_conf.s3_bucket,
-        );
+        let (wait_backup_ts_ok, wait_backup_ts_dur) = if let Some(backup_ts) =
+            backup_config.backup_ts
+        {
+            if let Err(err) = concurrency_manager.update_max_ts(backup_ts.into(), "backup_rfengine")
+            {
+                return Ok(make_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("the backup ts isn't a valid max_ts: {err:?}"),
+                ));
+            }
+
+            concurrency_manager.replace_backup_ts(backup_ts.into());
+            let start_time = tikv_util::time::Instant::now_coarse();
+            let mut ok = concurrency_manager
+                .wait_old_backup_ts_released(
+                    backup_ts.into(),
+                    backup_config.backup_ts_wait_timeout(),
+                    backup_config.backup_ts_ttl(),
+                    BACKUP_TS_WAIT_RETRY_INTERVAL,
+                )
+                .await;
+
+            if !concurrency_manager.need_check_backup_ts() {
+                warn!("Backup triggered when `need_check_backup_ts` disabled."; "backup_ts" => backup_ts);
+                ok = false;
+            }
+
+            (ok, Some(start_time.saturating_elapsed()))
+        } else {
+            (true, None)
+        };
+
+        let s3fs = kvengine::dfs::S3Fs::new_from_config(dfs_conf);
         let (callback, future) = paired_future_callback();
         let task = rfengine::BackupTask::new(Box::new(s3fs), callback, backup_config);
         engine.backup(task);
         Ok(match future.await {
             Ok(resp) => match resp {
                 Ok(mut meta) => {
-                    info!("{}: backup finished", meta.store_id);
+                    info!("{}: backup finished", meta.store_id; "wait_backup_ts" => ?wait_backup_ts_dur);
                     estimate_backup_size_by(&kvengine, meta.mut_keyspace_size());
+                    meta.set_has_missing_commit_record(!wait_backup_ts_ok);
                     Response::builder()
                         .body(Body::from(meta.write_to_bytes().unwrap()))
                         .unwrap()
@@ -2055,6 +2088,7 @@ impl StatusServer {
         let router = self.router.clone();
         let engine = self.kvengine.clone();
         let rfengine = self.rfengine.clone();
+        let concurrency_manager = self.concurrency_manager.clone();
         // Start to serve.
         let server = builder.serve(make_service_fn(move |conn: &C| {
             let x509 = conn.get_x509();
@@ -2063,6 +2097,7 @@ impl StatusServer {
             let router = router.clone();
             let engine = engine.clone();
             let rfengine = rfengine.clone();
+            let concurrency_manager = concurrency_manager.clone();
             async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
@@ -2072,6 +2107,7 @@ impl StatusServer {
                     let router = router.clone();
                     let engine = engine.clone();
                     let rfengine = rfengine.clone();
+                    let concurrency_manager = concurrency_manager.clone();
                     tikv_util::init_task_local(async move {
                         let path = req.uri().path().to_owned();
                         let method = req.method().to_owned();
@@ -2188,13 +2224,8 @@ impl StatusServer {
                                 }
                             }
                             (Method::POST, path) if path.starts_with("/rfengine/backup") => {
-                                Self::backup_rfengine(
-                                    req,
-                                    rfengine,
-                                    engine,
-                                    cfg_controller.get_current().dfs.clone(),
-                                )
-                                .await
+                                let dfs_conf = cfg_controller.get_current().dfs.clone();
+                                Self::backup_rfengine(req, rfengine, engine, concurrency_manager, dfs_conf).await
                             }
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
                                 Self::restore_shard(req, router, engine).await

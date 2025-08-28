@@ -316,7 +316,8 @@ impl TikvServer {
         if latest_ts.is_none() {
             panic!("failed to get timestamp from PD");
         }
-        let concurrency_manager = ConcurrencyManager::new(latest_ts.unwrap());
+        let concurrency_manager =
+            ConcurrencyManager::new_opt(latest_ts.unwrap(), config.storage.check_backup_ts);
 
         // use different quota for front-end and back-end requests
         let quota_limiter = Arc::new(QuotaLimiter::new(
@@ -959,6 +960,7 @@ impl TikvServer {
                 self.router.clone(),
                 self.raw_engines.kv.clone(),
                 self.raw_engines.raft.clone(),
+                self.concurrency_manager.clone(),
             ) {
                 Ok(status_server) => Box::new(status_server),
                 Err(e) => {

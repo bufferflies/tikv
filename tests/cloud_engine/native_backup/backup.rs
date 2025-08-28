@@ -24,7 +24,10 @@ use test_cloud_server::{
 };
 use test_pd_client::PdWrapper;
 use tikv::config::TikvConfig;
-use tikv_util::{config::ReadableSize, info};
+use tikv_util::{
+    config::{ReadableDuration, ReadableSize},
+    info,
+};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -72,6 +75,7 @@ fn start_cluster_and_backup(
     // TODO: support testing for keyspace meta backup.
     let backup_config = backup::BackupConfig {
         dfs: dfs_config,
+        backup_delay: ReadableDuration::secs(1),
         skip_keyspace_meta: true,
         ..Default::default()
     };
@@ -259,9 +263,10 @@ fn test_periodic_backup() {
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
         skip_keyspace_meta: true,
+        backup_delay: ReadableDuration::secs(1),
         ..Default::default()
     };
-    let backup_worker =
+    let mut backup_worker =
         backup_worker::BackupWorker::new(backup_config, pd_client.clone(), Duration::from_secs(2));
 
     let now = Utc::now().date_naive();

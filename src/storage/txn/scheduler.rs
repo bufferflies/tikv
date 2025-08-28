@@ -37,7 +37,7 @@ use std::{
 
 use causal_ts::CausalTsProviderImpl;
 use collections::HashMap;
-use concurrency_manager::{ConcurrencyManager, KeyHandleGuard};
+use concurrency_manager::{ConcurrencyManager, KeyHandleGuard, TrackedBackupTs};
 use crossbeam::utils::CachePadded;
 use engine_traits::{CF_DEFAULT, CF_LOCK, CF_WRITE};
 use futures::{compat::Future01CompatExt, StreamExt};
@@ -1557,7 +1557,9 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let downgraded_guard = pessimistic_locks_guard.and_then(|guard| {
             (!removed_pessimistic_locks.is_empty()).then(|| RwLockWriteGuard::downgrade(guard))
         });
+        let backup_ts_checked: Option<TrackedBackupTs> = to_be_write.backup_ts_checked.take();
         let on_applied = Box::new(move |res: &mut kv::Result<()>| {
+            drop(backup_ts_checked);
             if res.is_ok() && !removed_pessimistic_locks.is_empty() {
                 // Removing pessimistic locks when it succeeds to apply. This should be done in
                 // the apply thread, to make sure it happens before other admin commands are
@@ -2155,6 +2157,7 @@ mod tests {
                 vec![Key::from_raw(b"k")],
                 10.into(),
                 20.into(),
+                false,
                 false,
                 Context::default(),
             )

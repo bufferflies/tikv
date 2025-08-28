@@ -343,6 +343,7 @@ where
                 .unwrap(),
             Some(pd_client.clone()),
             config.storage.max_ts.max_drift.0,
+            config.storage.check_backup_ts,
         );
 
         // use different quota for front-end and back-end requests

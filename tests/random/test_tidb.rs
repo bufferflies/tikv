@@ -14,6 +14,7 @@ use kvengine::{
     dfs::DFSConfig, ia::util::IaConfig, metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
     table::sstable::BlockCacheType,
 };
+use native_br::metrics::NATIVE_BR_BACKUP_SUCCESS;
 use pd_client::{
     pd_control,
     pd_control::{OpKind, PdControl, PdScheduleConfig},
@@ -281,6 +282,9 @@ fn prepare_cluster(
             kv_target_file_size: KV_TARGET_FILE_SIZE,
             cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
             cop_block_cache_type: switches.block_cache_type,
+            backup_interval: Duration::from_secs(5),
+            backup_delay: Duration::from_secs(3),
+            backup_skip_keyspace_meta: false,
             ..Default::default()
         },
     );
@@ -368,6 +372,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
 
         conf.storage.flow_control.enable = true;
         conf.storage.scheduler_worker_pool_size = cpu_cores;
+        conf.storage.check_backup_ts = switches.txn_check_backup_ts;
         conf.gc.enable_safe_point_v2 = true;
 
         if switches.remote_cop_min_block_size > 0 {
@@ -910,6 +915,7 @@ pub(crate) struct Switches {
     pub restart_tso_svc: bool,
     pub async_commit_switch_on: bool,
     pub ia_table_ratio: f64,
+    pub txn_check_backup_ts: bool,
 }
 
 impl Switches {
@@ -936,6 +942,7 @@ impl Switches {
 
         let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
         let async_commit_switch_on = rng.gen_bool(env_param("ASYNC_COMMIT_RATIO", 0.1));
+        let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
         let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.2);
 
         Self {
@@ -951,6 +958,7 @@ impl Switches {
             restart_tso_svc,
             async_commit_switch_on,
             ia_table_ratio,
+            txn_check_backup_ts,
         }
     }
 }
@@ -967,6 +975,7 @@ pub(crate) struct WorkloadStats {
     pub unique_conflict: usize,
     pub async_shards: usize,
     pub remote_compact_exceed_memory_limit: u64,
+    pub backup_count: u64,
 }
 
 impl WorkloadStats {
@@ -981,6 +990,7 @@ impl WorkloadStats {
         let async_shards = ASYNC_SHARD_COUNTER.load(Ordering::SeqCst);
         let remote_compact_exceed_memory_limit =
             ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER.get();
+        let backup_count = NATIVE_BR_BACKUP_SUCCESS.get();
         Self {
             keyspace_count,
             node_restart,
@@ -991,6 +1001,7 @@ impl WorkloadStats {
             unique_conflict,
             async_shards,
             remote_compact_exceed_memory_limit,
+            backup_count,
         }
     }
 }

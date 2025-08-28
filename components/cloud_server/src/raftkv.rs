@@ -1078,7 +1078,7 @@ mod tests {
         }
 
         fn set_write_data(&self, data: &WriteData) {
-            let clone = WriteData::new(data.modifies.clone(), data.extra.clone());
+            let clone = WriteData::new(data.modifies.clone(), data.extra.clone(), None);
             *self.last_write_data.lock().unwrap() = Some(clone);
         }
     }
@@ -1253,6 +1253,7 @@ mod tests {
                     vec![Key::from_raw(b"k1"), Key::from_raw(b"k2")],
                     10.into(),
                     20.into(),
+                    false,
                     false,
                     Context::default(),
                 ),

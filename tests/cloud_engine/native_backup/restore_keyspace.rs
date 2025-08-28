@@ -253,6 +253,7 @@ fn test_restore_keyspace_impl(
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
+        backup_delay: ReadableDuration::secs(1),
         skip_keyspace_meta: true,
         ..Default::default()
     };
@@ -628,6 +629,7 @@ fn test_restore_archived_keyspace_impl(
 
     let backup_config = backup::BackupConfig {
         dfs: dfs_config.clone(),
+        backup_delay: ReadableDuration::secs(1),
         security: security_config.clone(),
         skip_keyspace_meta: true,
         ..Default::default()
@@ -1032,7 +1034,8 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
                             ..Default::default()
                         },
                     )
-                    .unwrap(),
+                    .unwrap()
+                    .into_inner(),
             );
         }
     }
@@ -1045,6 +1048,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config,
+            backup_delay: ReadableDuration::secs(1),
             skip_keyspace_meta: true,
             ..Default::default()
         };
@@ -1171,6 +1175,7 @@ fn test_restore_keyspace_with_no_chunk() {
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config,
+            backup_delay: ReadableDuration::secs(1),
             skip_keyspace_meta: true,
             ..Default::default()
         };
@@ -1269,6 +1274,7 @@ fn test_restore_keyspace_with_slow_dfs() {
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config.clone(),
+            backup_delay: ReadableDuration::secs(1),
             skip_keyspace_meta: true,
             ..Default::default()
         };
@@ -1419,6 +1425,7 @@ fn test_restore_keyspace_with_schema() {
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config,
+            backup_delay: ReadableDuration::secs(1),
             skip_keyspace_meta: true,
             ..Default::default()
         };
@@ -1564,6 +1571,7 @@ fn test_restore_keyspace_with_failed_store(
         let backup_ts = client.get_ts().into_inner();
         let backup_config = backup::BackupConfig {
             dfs: dfs_config,
+            backup_delay: ReadableDuration::secs(1),
             tolerate_err: 1,
             skip_keyspace_meta: true,
             timeout: ReadableDuration::secs(3),
@@ -1720,7 +1728,9 @@ fn write_simple_data(cluster: &ServerCluster, keyspace: u32) {
     client
         .kv_prewrite_with_retry(chunks.primary(), None, chunks.clone(), start_ts)
         .unwrap();
-    client.kv_commit(chunks, start_ts, client.get_ts()).unwrap();
+    client
+        .kv_commit(chunks, start_ts, client.get_ts(), false)
+        .unwrap();
     request_major_compaction(&runtime(), &cluster.get_pd_client(), keyspace);
     // Wait the compaction finish to generate blob files...
     std::thread::sleep(Duration::from_secs(10));

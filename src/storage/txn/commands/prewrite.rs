@@ -496,7 +496,11 @@ impl<K: PrewriteKind> Prewriter<K> {
             .await?;
         self.check_max_ts_synced(&snapshot)?;
 
-        let mut txn = MvccTxn::new(self.start_ts, context.concurrency_manager);
+        let mut txn = if self.secondary_keys.is_some() || self.try_one_pc {
+            MvccTxn::new_with_backup_ts(self.start_ts, context.concurrency_manager, true)
+        } else {
+            MvccTxn::new(self.start_ts, context.concurrency_manager)
+        };
         let mut reader = ReaderWithStats::new(
             SnapshotReader::new_with_ctx(self.start_ts, snapshot, &self.ctx),
             context.statistics,
@@ -732,7 +736,8 @@ impl<K: PrewriteKind> Prewriter<K> {
             // If an error (KeyIsLocked or WriteConflict) occurs before, these lock guards
             // are dropped along with `txn` automatically.
             let lock_guards = txn.take_guards();
-            let mut to_be_write = WriteData::new(txn.into_modifies(), extra);
+            let backup_ts_checked = txn.take_checked_backup_ts();
+            let mut to_be_write = WriteData::new(txn.into_modifies(), extra, backup_ts_checked);
             to_be_write.set_disk_full_opt(self.ctx.get_disk_full_opt());
 
             WriteResult {
@@ -776,6 +781,8 @@ impl<K: PrewriteKind> Prewriter<K> {
         if (!async_commit_ts.is_zero() || self.try_one_pc) && async_apply_prewrite {
             result.response_policy = ResponsePolicy::OnCommitted
         }
+
+        fail::fail_point!("txn::prewrite_process_write_finish");
 
         result
     }

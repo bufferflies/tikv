@@ -615,7 +615,7 @@ fn execute_single_operation(
             let target_key = key.as_deref().unwrap_or(default_key);
             let mutations = vec![new_put_mutation(target_key.to_vec(), i_to_val(2))];
             let txn_muts = TxnMutations::from_normal(mutations);
-            match client.kv_commit(txn_muts, *start_ts, *commit_ts) {
+            match client.kv_commit(txn_muts, *start_ts, *commit_ts, false) {
                 Ok(_) => ExpectedResult::Success,
                 Err(_) => ExpectedResult::Fail,
             }
@@ -659,7 +659,13 @@ fn execute_single_operation(
 
 pub(crate) fn run_test_cases(cases: Vec<TestCase>) {
     test_util::init_log_for_test();
-    let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
+    let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, cfg| {
+        // NOTE or FIXME?: Test cases here are using really small timestamps.
+        // If `check_backup_ts` enabled, they are probably committing with a timestamp
+        // in a (relatively) far future and this surely breaks the test cases'
+        // assumption.
+        cfg.storage.check_backup_ts = false;
+    });
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
 

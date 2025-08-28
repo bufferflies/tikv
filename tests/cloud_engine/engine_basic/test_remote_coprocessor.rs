@@ -2127,7 +2127,7 @@ impl<'a> Insert<'a> {
 
         let commit_ts = self.client.get_ts();
         self.client
-            .kv_commit(txn_muts, start_ts, commit_ts)
+            .kv_commit(txn_muts, start_ts, commit_ts, false)
             .unwrap()
     }
 
