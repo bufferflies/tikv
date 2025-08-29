@@ -404,7 +404,18 @@ impl MergedEngine {
                 if region_id == 0 {
                     continue;
                 }
-                let region_state = rfstore::store::load_last_peer_state(&origin, peer_id).unwrap();
+                let Some(region_state) = rfstore::store::load_last_peer_state(&origin, peer_id)
+                else {
+                    let mut states = HashMap::default();
+                    origin.iterate_peer_states(peer_id, false, |k, v| {
+                        states.insert(Bytes::copy_from_slice(k), Bytes::copy_from_slice(v));
+                        true
+                    });
+                    warn!("{}:{} recover_from_backup: no peer state for region", store.store_id, region_id;
+                        "peer" => peer_id, "states" => ?states);
+                    debug_assert!(false);
+                    continue;
+                };
                 let keyspace_id =
                     ApiV2::get_u32_keyspace_id_by_key(region_state.get_region().get_start_key())
                         .unwrap_or_default();
