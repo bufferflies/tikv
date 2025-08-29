@@ -49,6 +49,8 @@ use tikv_util::{config::ReadableDuration, error, info, warn};
 use txn_types::TimeStamp;
 pub use worker::ReplicationWorker;
 
+use crate::delegate::RequestId;
+
 pub(crate) const K8S_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -189,7 +191,7 @@ pub enum CdcMsg {
         region_version: u64,
         admin: AdminRequest,
     },
-    Deregister(ConnId),
+    Deregister(Deregister),
     RemoveTask {
         keyspace_id: u32,
         change_feed_id: String,
@@ -203,6 +205,19 @@ pub enum CdcMsg {
         cb: Box<dyn FnOnce(Vec<u32>) + Send>,
     },
     Stop,
+}
+
+pub enum Deregister {
+    Conn(ConnId),
+    Request {
+        conn_id: ConnId,
+        request_id: RequestId,
+    },
+    Region {
+        conn_id: ConnId,
+        request_id: RequestId,
+        region_id: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -234,13 +249,16 @@ impl ReplicationService {
 
 static CDC_CHANNEL_CAPACITY: usize = 128;
 
-impl ChangeData for ReplicationService {
-    fn event_feed(
+impl ReplicationService {
+    fn handle_event_feed(
         &mut self,
         ctx: RpcContext<'_>,
         stream: RequestStream<ChangeDataRequest>,
         mut sink: DuplexSink<ChangeDataEvent>,
+        _event_feed_v2: bool,
     ) {
+        // TODO: parse header for event_feed_v2.
+
         let (event_sink, mut event_drain) =
             cdc::channel(CDC_CHANNEL_CAPACITY, self.memory_quota.clone());
         let peer = ctx.peer();
@@ -261,14 +279,8 @@ impl ChangeData for ReplicationService {
         let scheduler = self.scheduler.clone();
         let recv_req = stream.try_for_each(move |request| {
             info!("got event feed request {:?}", request);
-            let ret = scheduler
-                .send(CdcMsg::Register { request, conn_id })
-                .map_err(|e| {
-                    grpcio::Error::RpcFailure(RpcStatus::with_message(
-                        RpcStatusCode::INVALID_ARGUMENT,
-                        format!("{:?}", e),
-                    ))
-                });
+            let ret = Self::handle_request(&scheduler, request, conn_id)
+                .map_err(|rpc_status| grpcio::Error::RpcFailure(rpc_status));
             future::ready(ret)
         });
 
@@ -277,15 +289,15 @@ impl ChangeData for ReplicationService {
         ctx.spawn(async move {
             let res = recv_req.await;
             // Unregister this downstream only.
-            if let Err(e) = scheduler.send(CdcMsg::Deregister(conn_id)) {
-                error!("cdc deregister failed"; "error" => ?e, "conn_id" => ?conn_id);
+            if let Err(e) = scheduler.send(CdcMsg::Deregister(Deregister::Conn(conn_id))) {
+                error!("cdc deregister failed"; "error" => ?e, "conn" => ?conn_id);
             }
             match res {
                 Ok(()) => {
-                    info!("cdc receive closed"; "downstream" => peer, "conn_id" => ?conn_id);
+                    info!("cdc receive closed"; "downstream" => peer, "conn" => ?conn_id);
                 }
                 Err(e) => {
-                    warn!("cdc receive failed"; "error" => ?e, "downstream" => peer, "conn_id" => ?conn_id);
+                    warn!("cdc receive failed"; "error" => ?e, "downstream" => peer, "conn" => ?conn_id);
                 }
             }
         });
@@ -296,20 +308,81 @@ impl ChangeData for ReplicationService {
         ctx.spawn(async move {
             let res = event_drain.forward(&mut sink).await;
             // Unregister this downstream only.
-            if let Err(e) = scheduler.send(CdcMsg::Deregister(conn_id)) {
-                error!("cdc deregister failed"; "error" => ?e);
+            if let Err(e) = scheduler.send(CdcMsg::Deregister(Deregister::Conn(conn_id))) {
+                error!("cdc deregister failed"; "error" => ?e, "conn" => ?conn_id);
             }
             match res {
                 Ok(_s) => {
-                    info!("cdc send closed"; "downstream" => peer, "conn_id" => ?conn_id);
+                    info!("cdc send closed"; "downstream" => peer, "conn" => ?conn_id);
                     let _ = sink.close().await;
                 }
                 Err(e) => {
-                    warn!("cdc send failed"; "error" => ?e, "downstream" => peer, "conn_id" => ?conn_id);
+                    warn!("cdc send failed"; "error" => ?e, "downstream" => peer, "conn" => ?conn_id);
                 }
             }
         });
-        info!("cdc event feed started");
+        info!("cdc event feed started"; "conn" => ?conn_id);
+    }
+
+    fn handle_request(
+        scheduler: &tikv_util::mpsc::Sender<CdcMsg>,
+        request: ChangeDataRequest,
+        conn_id: ConnId,
+    ) -> std::result::Result<(), RpcStatus> {
+        match request.request {
+            None | Some(cdcpb::ChangeDataRequest_oneof_request::Register(_)) => scheduler
+                .send(CdcMsg::Register { request, conn_id })
+                .map_err(|e| {
+                    RpcStatus::with_message(
+                        RpcStatusCode::RESOURCE_EXHAUSTED,
+                        format!("replication worker is busy: {:?}", e),
+                    )
+                }),
+            Some(cdcpb::ChangeDataRequest_oneof_request::Deregister(_)) => {
+                let deregister = if request.region_id == 0 {
+                    Deregister::Request {
+                        conn_id,
+                        request_id: request.request_id.into(),
+                    }
+                } else {
+                    Deregister::Region {
+                        conn_id,
+                        request_id: request.request_id.into(),
+                        region_id: request.region_id,
+                    }
+                };
+                scheduler.send(CdcMsg::Deregister(deregister)).map_err(|e| {
+                    RpcStatus::with_message(
+                        RpcStatusCode::RESOURCE_EXHAUSTED,
+                        format!("replication worker is busy: {:?}", e),
+                    )
+                })
+            }
+            _ => Err(RpcStatus::with_message(
+                RpcStatusCode::INVALID_ARGUMENT,
+                format!("request not supported: {:?}", request),
+            )),
+        }
+    }
+}
+
+impl ChangeData for ReplicationService {
+    fn event_feed(
+        &mut self,
+        ctx: RpcContext<'_>,
+        stream: RequestStream<ChangeDataRequest>,
+        sink: DuplexSink<ChangeDataEvent>,
+    ) {
+        self.handle_event_feed(ctx, stream, sink, false);
+    }
+
+    fn event_feed_v2(
+        &mut self,
+        ctx: RpcContext<'_>,
+        stream: RequestStream<ChangeDataRequest>,
+        sink: DuplexSink<ChangeDataEvent>,
+    ) {
+        self.handle_event_feed(ctx, stream, sink, true);
     }
 }
 

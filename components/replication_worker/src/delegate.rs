@@ -1,8 +1,8 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::mem;
+use std::{fmt, mem};
 
-use cdc::{CdcEvent, Conn, ConnId};
+use cdc::{CdcEvent, Conn, ConnId, Sink};
 use collections::HashMap;
 use kvproto::cdcpb;
 use log_wrappers::Value as LogValue;
@@ -12,9 +12,58 @@ use txn_types::TimeStamp;
 
 use crate::{error::Result, util::build_request_range};
 
+/// An identifier of a ChangeDataRequest.
+///
+/// - ChangeDataRequest from the same changefeed on different connections or
+///   different regions has the same RequestId.
+/// - Different ChangeDataRequest on different TiCDC instances can have the same
+///   RequestId.
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+pub struct RequestId(u64);
+
+impl RequestId {
+    pub fn into_inner(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for RequestId {
+    fn from(id: u64) -> Self {
+        RequestId(id)
+    }
+}
+
+impl fmt::Debug for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
+// Different connection (from different TiCDC instances) can have the same
+// RequestId. So use (ConnId, RequestId) to make it unique.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct RequestKey {
+    pub conn_id: ConnId,
+    pub request_id: RequestId,
+}
+
+impl RequestKey {
+    pub fn new(conn_id: ConnId, request_id: RequestId) -> Self {
+        Self {
+            conn_id,
+            request_id,
+        }
+    }
+}
+
 /// Information about a ChangeDataRequest.
 pub(crate) struct RequestInfo {
-    pub(crate) conn_id: ConnId,
     pub(crate) region_version: u64,
     pub(crate) start_key: Vec<u8>,
     pub(crate) end_key: Vec<u8>,
@@ -31,11 +80,11 @@ impl RequestInfo {
 
 #[derive(Default)]
 pub(crate) struct RegionRequests {
-    inner: HashMap<u64 /* request_id */, RequestInfo>,
+    inner: HashMap<RequestKey, RequestInfo>,
 }
 
 impl std::ops::Deref for RegionRequests {
-    type Target = HashMap<u64, RequestInfo>;
+    type Target = HashMap<RequestKey, RequestInfo>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -50,11 +99,10 @@ impl std::ops::DerefMut for RegionRequests {
 
 impl RegionRequests {
     pub(crate) fn add(&mut self, request: &cdcpb::ChangeDataRequest, conn_id: ConnId) {
-        let request_id = request.get_request_id();
+        let request_id: RequestId = request.get_request_id().into();
         let region_version = request.get_region_epoch().get_version();
         let (start_key, end_key) = build_request_range(request);
         let request_info = RequestInfo {
-            conn_id,
             region_version,
             start_key,
             end_key,
@@ -62,7 +110,8 @@ impl RegionRequests {
             initialized: false,
             pending_events: vec![],
         };
-        self.inner.insert(request_id, request_info);
+        self.inner
+            .insert(RequestKey::new(conn_id, request_id), request_info);
     }
 }
 
@@ -178,12 +227,12 @@ impl RegionDelegate {
             region_id: self.region_id,
             ..Default::default()
         };
-        for (&request_id, req_info) in self.requests.iter() {
-            let Some(conn) = conns.get(&req_info.conn_id) else {
+        for req_key in self.requests.keys() {
+            let Some(conn) = conns.get(&req_key.conn_id) else {
                 continue;
             };
 
-            event.set_request_id(request_id);
+            event.set_request_id(req_key.request_id.into_inner());
             event.set_error(error.clone());
             if let Err(err) = conn
                 .get_sink()
@@ -191,8 +240,8 @@ impl RegionDelegate {
             {
                 warn!("{} failed to send error event", self.region_id;
                     "keyspace" => self.keyspace_id,
-                    "conn" => ?req_info.conn_id,
-                    "request" => request_id,
+                    "conn" => ?req_key.conn_id,
+                    "request" => %req_key.request_id,
                     "err" => ?err);
             }
         }
@@ -207,5 +256,36 @@ impl RegionDelegate {
         }
         let resolver = pending_resolver.to_resolver(self.region_id, locks);
         self.resolver = Some(resolver);
+    }
+
+    pub(crate) fn unsubscribe(
+        &mut self,
+        conn_id: ConnId,
+        request_id: RequestId,
+        sink: Option<&Sink>,
+    ) {
+        if self
+            .requests
+            .remove(&RequestKey::new(conn_id, request_id))
+            .is_none()
+        {
+            return;
+        }
+
+        if let Some(sink) = sink {
+            let mut err_event = cdcpb::Error::new();
+            err_event
+                .mut_region_not_found()
+                .set_region_id(self.region_id);
+            let event = cdcpb::Event {
+                region_id: self.region_id,
+                request_id: request_id.into_inner(),
+                event: Some(cdcpb::Event_oneof_event::Error(err_event)),
+                ..Default::default()
+            };
+            if let Err(e) = sink.unbounded_send(CdcEvent::Event(event), true) {
+                warn!("{} unsubscribe: send event failed", self.region_id; "request" => %request_id, "err" => ?e);
+            }
+        }
     }
 }

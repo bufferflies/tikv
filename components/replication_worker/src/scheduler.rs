@@ -83,7 +83,7 @@ pub async fn handle_cdc_request(
     } else {
         Ok(Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(Body::empty())
+            .body("replication worker is disabled".into())
             .unwrap())
     }
 }
