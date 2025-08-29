@@ -59,8 +59,8 @@ use raftstore::{
 use rfengine::{RfEngine, STORE_IDENT_KEY};
 use rfstore::{
     store::{
-        BlackList, Engines, LocalReader, MetaChangeListener, PdIdAllocator, RaftBatchSystem,
-        StoreMeta, StoreMsg, PENDING_MSG_CAP,
+        memory::MEMTRACE_ROOT as MEMTRACE_RFSTORE, BlackList, Engines, LocalReader,
+        MetaChangeListener, PdIdAllocator, RaftBatchSystem, StoreMeta, StoreMsg, PENDING_MSG_CAP,
     },
     RaftRouter, ServerRaftStoreRouter,
 };
@@ -101,6 +101,7 @@ use tikv_util::{
 use tokio::runtime::Builder;
 
 use crate::{
+    memory::MemoryTraceManager,
     node::*,
     raftkv::*,
     resolve,
@@ -927,6 +928,8 @@ impl TikvServer {
 
     fn init_metrics_flusher(&mut self, fetcher: BytesFetcher) {
         let mut io_metrics = IoMetricsManager::new(fetcher);
+        let mut mem_trace_metrics = MemoryTraceManager::default();
+        mem_trace_metrics.register_provider(MEMTRACE_RFSTORE.clone());
         let kv = self.raw_engines.kv.clone();
         let raft = self.raw_engines.raft.clone();
         self.background_worker
@@ -935,6 +938,7 @@ impl TikvServer {
                 KvEngine::flush_metrics(&kv, "kv");
                 RaftEngine::flush_metrics(&raft, "raft");
                 io_metrics.flush(now);
+                mem_trace_metrics.flush(now);
             });
     }
 

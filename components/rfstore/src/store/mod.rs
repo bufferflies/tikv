@@ -7,6 +7,7 @@ pub mod config;
 pub mod engine;
 pub mod ingest;
 pub mod io_limiter;
+pub mod memory;
 pub mod metrics;
 pub mod msg;
 pub mod pd_handler;

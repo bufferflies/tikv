@@ -24,6 +24,7 @@ pub mod server;
 pub mod service;
 pub mod signal_handler;
 pub use raftkv::*;
+mod memory;
 mod raft_client;
 mod resolve;
 pub mod status_server;

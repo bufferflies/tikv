@@ -571,6 +571,8 @@ impl ApplyWorker {
             for msg in batch.msgs.drain(..) {
                 applier.handle_msg(&mut self.ctx, msg);
             }
+
+            applier.update_memory_trace(&mut Default::default());
             batch
                 .applying_cnt
                 .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);

@@ -46,8 +46,11 @@ use raftstore::store::{
     util::{ChangePeerI, ConfChangeKind},
 };
 use rand::Rng;
+use tikv_alloc::TraceEvent;
 use tikv_util::{
-    box_err, debug, error, info, spawn_anonymous_thread_with,
+    box_err, debug, error, info,
+    memory::HeapSize,
+    spawn_anonymous_thread_with,
     store::{find_peer, find_peer_mut, remove_peer},
     sys::thread::StdThreadBuildWrapper,
     time::{duration_to_sec, Instant},
@@ -56,10 +59,12 @@ use tikv_util::{
 use time::Timespec;
 use txn_types::LockType;
 
+use self::memory::MEMTRACE_APPLYS;
 use super::*;
 use crate::{
     errors::*,
     store::{
+        apply::memtrace::ApplyMemoryTrace,
         cmd_resp::{bind_term, err_resp},
         metrics::STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER,
     },
@@ -287,6 +292,8 @@ pub struct Applier {
         u64,  // current term
         bool, // is_active
     )>,
+
+    trace: ApplyMemoryTrace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1257,6 +1264,7 @@ impl Applier {
                 self.pending_cmds.append_normal(cmd);
             }
         }
+
         // TODO: observe it in batch.
         APPLY_PROPOSAL.observe(propose_num as f64);
     }
@@ -1535,6 +1543,14 @@ impl Applier {
         if let Some(cmd) = self.pending_cmds.conf_change.take() {
             notify_req_region_removed(self.region.get_id(), cmd.cb);
         }
+
+        self.pending_cmds.normals.clear();
+        self.pending_cmds.normals.shrink_to_fit();
+        let mut event = TraceEvent::default();
+        if let Some(e) = self.trace.reset(ApplyMemoryTrace::default()) {
+            event = event + e;
+        }
+        MEMTRACE_APPLYS.trace(event);
     }
 
     fn handle_unsafe_destroy(&mut self, ctx: &mut ApplyContext, region_id: u64) {
@@ -1931,6 +1947,16 @@ impl Applier {
         // Will resume after `apply_restore_shard`. See `apply_prepared_change_set`.
         self.paused_apply_queue
             .pause(cs.sequence, &format!("{} restore_shard", self.tag()));
+    }
+
+    pub(crate) fn update_memory_trace(&mut self, event: &mut TraceEvent) {
+        let pending_cmds = self.pending_cmds.heap_size();
+        let task = ApplyMemoryTrace { pending_cmds };
+
+        if let Some(e) = self.trace.reset(task) {
+            *event = *event + e;
+        }
+        MEMTRACE_APPLYS.trace(*event);
     }
 }
 
@@ -2578,6 +2604,27 @@ fn change_set_label(cs: &kvenginepb::ChangeSet) -> &'static str {
         "restore_shard"
     } else {
         "other"
+    }
+}
+
+mod memtrace {
+    use memory_trace_macros::MemoryTraceHelper;
+    use tikv_util::memory::HeapSize;
+
+    use super::*;
+
+    #[derive(MemoryTraceHelper, Default, Debug)]
+    pub struct ApplyMemoryTrace {
+        pub pending_cmds: usize,
+        // todo: there `pub merge_yield: usize` in
+        // `components/raftstore/fsm/apply.rs` but not here, maybe we need to
+        // figure out where `merge_yield` went.
+    }
+
+    impl HeapSize for PendingCmdQueue {
+        fn heap_size(&self) -> usize {
+            self.normals.capacity() * mem::size_of::<PendingCmd>()
+        }
     }
 }
 
