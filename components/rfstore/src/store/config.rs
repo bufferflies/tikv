@@ -229,8 +229,8 @@ impl Config {
 
         let num_cpus = tikv_util::sys::SysQuota::cpu_cores_quota() as usize;
         cfg.aux_worker_count = num_cpus / 8;
-        cfg.apply_pool_size = (num_cpus / 4).max(1);
-        cfg.apply_follower_pool_size = cfg.apply_pool_size;
+        cfg.apply_pool_size = old.apply_batch_system.pool_size;
+        cfg.apply_follower_pool_size = old.apply_batch_system.low_priority_pool_size;
 
         cfg.local_file_gc_tick_interval = old.local_file_gc_tick_interval;
         cfg.local_file_gc_timeout = old.local_file_gc_timeout;

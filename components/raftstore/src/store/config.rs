@@ -329,6 +329,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
+        let num_cpus = tikv_util::sys::SysQuota::cpu_cores_quota() as usize;
         Config {
             prevote: true,
             raftdb_path: String::new(),
@@ -390,7 +391,11 @@ impl Default for Config {
             snap_generator_pool_size: 2,
             cleanup_import_sst_interval: ReadableDuration::minutes(10),
             local_read_batch_size: 1024,
-            apply_batch_system: BatchSystemConfig::default(),
+            apply_batch_system: BatchSystemConfig {
+                pool_size: (num_cpus / 4).max(1),
+                low_priority_pool_size: (num_cpus / 4).max(1),
+                ..Default::default()
+            },
             store_batch_system: BatchSystemConfig::default(),
             store_io_pool_size: 0,
             store_io_notify_capacity: 40960,
