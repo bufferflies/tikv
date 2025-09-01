@@ -97,6 +97,8 @@ pub struct ReplicationWorker {
     conn_regions: HashMap<ConnId, HashSet<u64 /* region_id */>>,
     region_to_keyspace: HashMap<u64 /* region_id */, u32 /* keyspace_id */>,
 
+    resolved_regions: HashMap<(TimeStamp, RequestKey), Vec<u64 /* region_id */>>,
+
     last_update_time: TimeStamp,
     stop: bool,
 }
@@ -207,6 +209,7 @@ impl ReplicationWorker {
             region_delegates: Default::default(),
             conn_regions: Default::default(),
             region_to_keyspace: Default::default(),
+            resolved_regions: Default::default(),
             last_update_time: backup_ts,
             stop: false,
         };
@@ -259,6 +262,7 @@ impl ReplicationWorker {
         info!("replication worker started");
         loop {
             let res = self.rx.recv_timeout(Duration::from_millis(100));
+            let has_msg = res.is_ok();
             match res {
                 Ok(msg) => {
                     self.handle_msg(msg);
@@ -276,11 +280,17 @@ impl ReplicationWorker {
                 info!("replication_worker stopped");
                 return;
             }
-            if let Err(err) = self.send_resolved_ts() {
-                error!("send resolved ts error"; "err" => ?err);
+            let should_sync = self.should_sync();
+            if has_msg || should_sync {
+                // When has message (e.g. `CdcMsg::Applied`), send resolved_ts in time.
+                if let Err(err) = self.send_resolved_ts() {
+                    error!("send resolved ts error"; "err" => ?err);
+                }
             }
-            if let Err(err) = self.maybe_update_merged_engine() {
-                error!("update merged engine error"; "err" => ?err);
+            if should_sync {
+                if let Err(err) = self.maybe_update_merged_engine() {
+                    error!("update merged engine error"; "err" => ?err);
+                }
             }
         }
     }
@@ -667,6 +677,7 @@ impl ReplicationWorker {
 
     fn send_resolved_ts(&mut self) -> Result<()> {
         info!("send_resolved_ts"; "last_update_time" => self.last_update_time);
+        self.resolved_regions.clear();
         for (&region_id, delegate) in &mut self.region_delegates {
             let Some(ts) = delegate
                 .resolver
@@ -675,36 +686,51 @@ impl ReplicationWorker {
             else {
                 continue;
             };
-            debug!("{} resolved ts: {}", region_id, ts);
+            debug!("{} send_resolved_ts: ts: {}", region_id, ts);
             for (req_key, req_info) in delegate.requests.iter_mut() {
                 if req_info.resolved_ts != ts && req_info.initialized {
-                    let mut resolved_ts = ResolvedTs::default();
-                    resolved_ts.set_regions(vec![region_id]);
-                    resolved_ts.set_request_id(req_key.request_id.into_inner());
-                    resolved_ts.set_ts(ts.into_inner());
-                    debug!("{} send resolved_ts {}", region_id, ts; "request" => %req_key.request_id);
-                    let conn = self.conns.get(&req_key.conn_id).unwrap();
-                    conn.get_sink()
-                        .unbounded_send(CdcEvent::ResolvedTs(resolved_ts), false)
-                        .map_err(|e| cdc::Error::from(e))?;
+                    debug_assert!(req_info.resolved_ts < ts);
+                    self.resolved_regions
+                        .entry((ts, *req_key))
+                        .or_default()
+                        .push(region_id);
                     req_info.resolved_ts = ts;
                 }
             }
+        }
+
+        // TODO: Send small ts with small batch first.
+        // Ref: https://github.com/tikv/tikv/blob/release-7.5/components/cdc/src/endpoint.rs, on_min_ts.
+        for ((ts, req_key), regions) in self.resolved_regions.drain() {
+            let Some(conn) = self.conns.get(&req_key.conn_id) else {
+                warn!("send_resolved_ts: conn not found"; "conn_id" => ?req_key.conn_id);
+                continue;
+            };
+
+            let mut resolved_ts = ResolvedTs::default();
+            resolved_ts.set_regions(regions);
+            resolved_ts.set_request_id(req_key.request_id.into_inner());
+            resolved_ts.set_ts(ts.into_inner());
+            debug!("send_resolved_ts: msg: {:?}", resolved_ts; "conn" => ?req_key.conn_id);
+            // Return error when channel is full. It's OK to drop other left resolved_ts.
+            conn.get_sink()
+                .unbounded_send(CdcEvent::ResolvedTs(resolved_ts), false)
+                .map_err(|e| cdc::Error::from(e))?;
         }
         Ok(())
     }
 
     fn maybe_update_merged_engine(&mut self) -> Result<()> {
-        if TimeStamp::physical_now().saturating_sub(self.last_update_time.physical())
-            < self.config.sync_interval.as_millis()
-        {
-            return Ok(());
-        }
         let new_timestamp = self.update_stores_with_retry(UPDATE_STORES_TIMEOUT)?;
         self.merged_engine.sync_merged(&mut self.apply_ctx)?;
         self.apply_ctx.flush_observer();
         self.last_update_time = new_timestamp;
         Ok(())
+    }
+
+    fn should_sync(&self) -> bool {
+        TimeStamp::physical_now().saturating_sub(self.last_update_time.physical())
+            >= self.config.sync_interval.as_millis()
     }
 
     async fn report_regions_loop(
