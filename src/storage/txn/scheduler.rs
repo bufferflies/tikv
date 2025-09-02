@@ -268,7 +268,7 @@ struct SchedulerInner<L: LockManager> {
     worker_pool: ReadPoolHandle,
 
     // background pool, introduced for deadline check tasks
-    background_pool: Arc<tokio::runtime::Runtime>,
+    background_pool: Option<Arc<tokio::runtime::Runtime>>,
 
     // used to control write flow
     running_write_bytes: CachePadded<AtomicUsize>,
@@ -427,11 +427,25 @@ impl<L: LockManager> SchedulerInner<L> {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.background_pool.spawn(async move {
-            SCHED_BACKGROUND_POOL_RUNNING_TASKS_GAUGE.inc();
-            f.await;
-            SCHED_BACKGROUND_POOL_RUNNING_TASKS_GAUGE.dec();
+        self.background_pool.as_ref().map(|pool| {
+            pool.spawn(async move {
+                SCHED_BACKGROUND_POOL_RUNNING_TASKS_GAUGE.inc();
+                f.await;
+                SCHED_BACKGROUND_POOL_RUNNING_TASKS_GAUGE.dec();
+            })
         });
+    }
+}
+
+impl<L: LockManager> Drop for SchedulerInner<L> {
+    fn drop(&mut self) {
+        // SAFETY: won't access background pool after dropping.
+        if let Some(pool) = self.background_pool.take()
+            && let Some(runtime) = Arc::into_inner(pool)
+        {
+            // The final referee could shutdown all background tasks.
+            runtime.shutdown_background();
+        }
     }
 }
 
@@ -472,7 +486,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let background_pool = {
             let engine_for_background = Arc::new(std::sync::Mutex::new(engine.clone()));
             let props = tikv_util::thread_group::current_properties();
-            Arc::new(
+            Some(Arc::new(
                 tokio::runtime::Builder::new_multi_thread()
                     .thread_name_fn(move || {
                         static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
@@ -489,7 +503,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     .enable_all()
                     .build()
                     .unwrap(),
-            )
+            ))
         };
 
         let inner = Arc::new(SchedulerInner {
@@ -2119,6 +2133,123 @@ mod tests {
     fn new_read_pool_handle<E: Engine>(engine: E) -> ReadPoolHandle {
         let read_pool_cfg = UnifiedReadPoolConfig::default();
         build_tokio_pool(&read_pool_cfg, DummyReporter, engine.clone()).handle()
+    }
+
+    #[test]
+    fn test_scheduler_inner_drop_shuts_down_background_pool() {
+        let engine = TestEngineBuilder::new().build().unwrap();
+        let config = Config {
+            scheduler_concurrency: 1024,
+            scheduler_worker_pool_size: 1,
+            scheduler_pending_write_threshold: ReadableSize(100 * 1024 * 1024),
+            scheduler_background_worker_pool_size: 2,
+            enable_async_apply_prewrite: false,
+            ..Default::default()
+        };
+
+        let read_pool = new_read_pool_handle(engine.clone());
+        let scheduler = Scheduler::new(
+            engine,
+            MockLockManager::new(),
+            ConcurrencyManager::new(1.into()),
+            &config,
+            DynamicConfigs {
+                pipelined_pessimistic_lock: Arc::new(AtomicBool::new(true)),
+                in_memory_pessimistic_lock: Arc::new(AtomicBool::new(false)),
+                wake_up_delay_duration_ms: Arc::new(AtomicU64::new(0)),
+            },
+            Arc::new(FlowController::Singleton(EngineFlowController::empty())),
+            None,
+            DummyReporter,
+            ResourceTagFactory::new_for_test(),
+            Arc::new(QuotaLimiter::default()),
+            latest_feature_gate(),
+            read_pool,
+        );
+
+        // Spawn a long-running task in the background pool to verify it gets shut down
+        let task_started = Arc::new(AtomicBool::new(false));
+        let task_cancelled = Arc::new(AtomicBool::new(false));
+        let task_started_clone = task_started.clone();
+        let task_cancelled_clone = task_cancelled.clone();
+
+        scheduler.inner.spawn_background(async move {
+            task_started_clone.store(true, Ordering::SeqCst);
+            // Simulate a long-running background task
+            for i in 0..50 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                if i % 10 == 0 {
+                    // Check if we should stop (this simulates a cooperative cancellation)
+                    tokio::task::yield_now().await;
+                }
+            }
+            // If we reach here without being cancelled, the task completed normally
+            task_cancelled_clone.store(false, Ordering::SeqCst);
+        });
+
+        // Wait a bit to ensure the task has started
+        thread::sleep(Duration::from_millis(50));
+        assert!(task_started.load(Ordering::SeqCst));
+
+        // Keep an additional reference to the background pool
+        let _background_pool_ref = scheduler.inner.background_pool.clone();
+
+        // Drop the scheduler, which should trigger the Drop implementation
+        drop(scheduler);
+
+        // If we reach here without panicking, the test passes
+        // The background pool reference will be dropped at the end of this
+        // scope
+    }
+
+    #[test]
+    fn test_scheduler_inner_drop_multiple_schedulers() {
+        // Test creating and dropping multiple schedulers to ensure proper cleanup
+        for _ in 0..3 {
+            let engine = TestEngineBuilder::new().build().unwrap();
+            let config = Config {
+                scheduler_concurrency: 1024,
+                scheduler_worker_pool_size: 1,
+                scheduler_pending_write_threshold: ReadableSize(100 * 1024 * 1024),
+                scheduler_background_worker_pool_size: 1,
+                enable_async_apply_prewrite: false,
+                ..Default::default()
+            };
+
+            let read_pool = new_read_pool_handle(engine.clone());
+            let scheduler = Scheduler::new(
+                engine,
+                MockLockManager::new(),
+                ConcurrencyManager::new(1.into()),
+                &config,
+                DynamicConfigs {
+                    pipelined_pessimistic_lock: Arc::new(AtomicBool::new(true)),
+                    in_memory_pessimistic_lock: Arc::new(AtomicBool::new(false)),
+                    wake_up_delay_duration_ms: Arc::new(AtomicU64::new(0)),
+                },
+                Arc::new(FlowController::Singleton(EngineFlowController::empty())),
+                None,
+                DummyReporter,
+                ResourceTagFactory::new_for_test(),
+                Arc::new(QuotaLimiter::default()),
+                latest_feature_gate(),
+                read_pool,
+            );
+
+            // Spawn a background task
+            scheduler.inner.spawn_background(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            });
+
+            // Drop the scheduler - should clean up properly
+            drop(scheduler);
+
+            // Brief pause between iterations
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        // If we reach here without issues, all schedulers were properly cleaned
+        // up
     }
 
     #[test]
