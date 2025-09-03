@@ -7375,6 +7375,8 @@ dependencies = [
  "slog-global",
  "slog-term",
  "sst_importer",
+ "strum 0.20.0",
+ "strum_macros 0.24.3",
  "tempfile",
  "test_pd_client",
  "test_util",

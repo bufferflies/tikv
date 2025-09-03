@@ -15,6 +15,7 @@ use std::{
 use bytes::Buf;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
+use itertools::Itertools;
 use kvengine::{
     table::{columnar::SchemaFile, DataBound, InnerKey},
     table_id::is_table_boundary_key,
@@ -38,13 +39,14 @@ use raft_proto::eraftpb;
 use raftstore::store::util;
 use rand::{thread_rng, Rng};
 use schema::schema::StorageClass;
+use strum::{EnumCount, VariantNames};
 use tikv_util::{
     box_err,
     codec::bytes::{decode_bytes, encode_bytes, encode_bytes_maybe_empty},
-    debug, error, info, spawn_anonymous_thread_with,
+    debug, error, info, slow_log, spawn_anonymous_thread_with,
     store::{find_peer, is_learner, region_on_same_stores},
     sys::thread::StdThreadBuildWrapper,
-    time::duration_to_sec,
+    time::{duration_to_sec, SlowTimer},
     trace, warn,
 };
 use txn_types::{Key, WriteBatchFlags};
@@ -242,7 +244,11 @@ impl<'a> PeerMsgHandler<'a> {
 
     #[allow(clippy::vec_box)]
     pub fn handle_msgs(&mut self, msgs: &mut Vec<Box<PeerMsg>>) {
+        let timer = SlowTimer::from_millis(100);
+        let mut distribution = [0; PeerMsg::COUNT];
+        let count = msgs.len();
         for m in msgs.drain(..) {
+            distribution[m.discriminant()] += 1;
             match *m {
                 PeerMsg::RaftMessage(msg) => {
                     let msg_type = msg.get_message().get_msg_type();
@@ -291,6 +297,19 @@ impl<'a> PeerMsgHandler<'a> {
                     self.on_prepared_txn_file(entry_index, peer_id);
                 }
             }
+            slow_log!(
+                T timer,
+                "{} handle {} peer messages {:?}",
+                self.fsm.peer.tag(),
+                count,
+                PeerMsg::VARIANTS.iter().zip(distribution).filter(|(_, c)| *c > 0).format(", "),
+            );
+            self.ctx.raft_metrics.peer_msg_len.observe(count as f64);
+            self.ctx
+                .raft_metrics
+                .event_time
+                .peer_msg
+                .observe(duration_to_sec(timer.saturating_elapsed()));
         }
     }
 

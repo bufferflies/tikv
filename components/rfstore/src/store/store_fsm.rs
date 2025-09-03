@@ -34,6 +34,7 @@ use raftstore::{
     },
     store::{
         local_metrics::RaftMetrics,
+        metrics::RaftEventDurationType,
         util,
         util::{is_initial_msg, is_region_initialized},
     },
@@ -46,8 +47,10 @@ use tikv_util::{
     config::VersionTrack,
     debug, error, info,
     mpsc::Receiver,
+    slow_log,
     store::{find_peer, is_learner},
     sys::thread::StdThreadBuildWrapper,
+    time::{duration_to_sec, Instant as TiInstant, SlowTimer},
     warn,
     worker::{Builder, LazyWorker, Scheduler},
     RingQueue,
@@ -765,6 +768,8 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     pub(crate) fn handle_msg(&mut self, msg: StoreMsg) -> Option<u64> {
+        let timer = SlowTimer::from_millis(100);
+        let msg_debug = msg.to_debug();
         let mut apply_region = None;
         match msg {
             StoreMsg::Tick => self.on_tick(),
@@ -825,12 +830,26 @@ impl<'a> StoreMsgHandler<'a> {
                 self.store.stopped = true;
             }
         }
+        slow_log!(
+            T timer,
+            "[store {}] handle store messages {:?}",
+            self.store.id,
+            msg_debug,
+        );
+        self.ctx
+            .raft_metrics
+            .event_time
+            .store_msg
+            .observe(timer.saturating_elapsed().as_secs_f64());
         apply_region
     }
 
     fn on_tick(&mut self) {
+        let timer = TiInstant::now_coarse();
         self.store.ticker.tick_clock();
+        let mut tag = None;
         if self.store.ticker.is_on_store_tick(STORE_TICK_PD_HEARTBEAT) {
+            tag = Some(RaftEventDurationType::pd_store_heartbeat);
             self.on_pd_heartbeat_tick();
         }
         if self
@@ -838,9 +857,11 @@ impl<'a> StoreMsgHandler<'a> {
             .ticker
             .is_on_store_tick(STORE_TICK_UPDATE_GC_SAFE_POINT)
         {
+            tag = Some(RaftEventDurationType::update_gc_safe_point);
             self.on_update_gc_safe_point();
         }
         if self.store.ticker.is_on_store_tick(STORE_TICK_LOCAL_FILE_GC) {
+            tag = Some(RaftEventDurationType::local_file_gc);
             self.on_local_file_gc();
         }
         if self.ctx.cfg.aux_worker_count > 0 {
@@ -849,6 +870,15 @@ impl<'a> StoreMsgHandler<'a> {
                 .global
                 .pd_scheduler
                 .schedule(PdTask::UpdateRaftCpuUtil);
+        }
+        let elapsed = timer.saturating_elapsed();
+        slow_log!(elapsed, "[store {}] handle tick {:?}", self.store.id, tag);
+        if let Some(tag) = tag {
+            self.ctx
+                .raft_metrics
+                .event_time
+                .get(tag)
+                .observe(duration_to_sec(elapsed));
         }
     }
 

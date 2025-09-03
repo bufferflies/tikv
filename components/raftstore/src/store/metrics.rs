@@ -231,6 +231,9 @@ make_static_metric! {
         raft_engine_purge,
         peer_msg,
         store_msg,
+        // rfstore store tick
+        update_gc_safe_point,
+        local_file_gc,
     }
 
     pub label_enum RaftLogGcSkippedReason {

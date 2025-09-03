@@ -15,4 +15,10 @@ lazy_static! {
         &["status"]
     )
     .unwrap();
+    pub static ref STORE_SYNC_AUX_WORKER_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "rfstore_sync_aux_worker_duration_seconds",
+        "Bucketed histogram of syncing aux workers",
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    )
+    .unwrap();
 }

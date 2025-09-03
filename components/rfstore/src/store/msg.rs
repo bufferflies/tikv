@@ -16,6 +16,7 @@ use kvproto::{
 use pd_client::{BucketMeta, BucketStat};
 use raft_proto::eraftpb;
 use raftstore::store::util::KeysInfoFormatter;
+use strum::{EnumCount, EnumVariantNames};
 use tikv_util::time::Instant;
 
 use super::{Peer, RaftApplyState};
@@ -23,7 +24,7 @@ use crate::store::{
     ApplyMetrics, ExecResult, Proposal, RegionIdVer, RegionSnapshot, TrimOverBoundParameter,
 };
 
-#[derive(Debug)]
+#[derive(EnumCount, EnumVariantNames, Debug)]
 pub enum PeerMsg {
     RaftMessage(rspb::RaftMessage),
     RaftCommand(RaftCommand),
@@ -70,6 +71,24 @@ impl PeerMsg {
                 0
             }
             _ => 0,
+        }
+    }
+
+    pub(crate) fn discriminant(&self) -> usize {
+        match self {
+            PeerMsg::RaftMessage(_) => 0,
+            PeerMsg::RaftCommand(_) => 1,
+            PeerMsg::Tick => 2,
+            PeerMsg::Start => 3,
+            PeerMsg::ApplyResult(_) => 4,
+            PeerMsg::CasualMessage(_) => 5,
+            PeerMsg::SignificantMsg(_) => 6,
+            PeerMsg::GenerateEngineChangeSet(_) => 7,
+            PeerMsg::ApplySnapshotResult(_) => 8,
+            PeerMsg::PrepareChangeSetResult(..) => 9,
+            PeerMsg::PrepareCommitMergeResult(..) => 10,
+            PeerMsg::PrepareTxnFileResult { .. } => 11,
+            PeerMsg::Persisted(_) => 12,
         }
     }
 }
@@ -147,6 +166,112 @@ pub enum StoreMsg {
         region_id: u64,
         req: RaftCmdRequest,
         callback: Callback,
+    },
+    CheckMerge(u64),
+    Stop,
+}
+
+impl StoreMsg {
+    pub(crate) fn to_debug(&self) -> StoreMsgDebug {
+        match self {
+            StoreMsg::Tick => StoreMsgDebug::Tick,
+            StoreMsg::Start { store } => StoreMsgDebug::Start {
+                store: store.clone(),
+            },
+            StoreMsg::StoreUnreachable { store_id } => StoreMsgDebug::StoreUnreachable {
+                store_id: *store_id,
+            },
+            StoreMsg::GenerateEngineChangeSet(cs) => StoreMsgDebug::GenerateEngineChangeSet {
+                shard_id: cs.shard_id,
+                shard_ver: cs.shard_ver,
+            },
+            StoreMsg::RaftMessage(msg) => StoreMsgDebug::RaftMessage {
+                region_id: msg.region_id,
+                from_peer: msg.get_from_peer().id,
+                to_peer: msg.get_to_peer().id,
+                msg_type: msg.get_message().msg_type,
+                is_tombstone: msg.is_tombstone,
+            },
+            StoreMsg::SnapshotReady(region_id) => StoreMsgDebug::SnapshotReady(*region_id),
+            StoreMsg::GetRegionsInRange { start, end, .. } => StoreMsgDebug::GetRegionsInRange {
+                start: start.clone(),
+                end: end.clone(),
+            },
+            StoreMsg::SyncRegion {
+                start,
+                end,
+                limit,
+                reverse,
+                ..
+            } => StoreMsgDebug::SyncRegion {
+                start: start.clone(),
+                end: end.clone(),
+                limit: *limit,
+                reverse: *reverse,
+            },
+            StoreMsg::SyncRegionById { region_id, .. } => StoreMsgDebug::SyncRegionById {
+                region_id: *region_id,
+            },
+            StoreMsg::ApplyResult { region_id, peer_id } => StoreMsgDebug::ApplyResult {
+                region_id: *region_id,
+                peer_id: *peer_id,
+            },
+            StoreMsg::DependentsEmpty(region_id) => StoreMsgDebug::DependentsEmpty(*region_id),
+            StoreMsg::PrepareMerge { region_id, .. } => StoreMsgDebug::PrepareMerge {
+                region_id: *region_id,
+            },
+            StoreMsg::CheckMerge(region_id) => StoreMsgDebug::CheckMerge(*region_id),
+            StoreMsg::Stop => StoreMsgDebug::Stop,
+        }
+    }
+}
+
+/// A clone of [`StoreMsg`] which is cheap to clone from [`StoreMsg`] and have
+/// enough information for debugging.
+// allow dead_code because there is a false positive where enum fields are used
+// in derived Debug.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) enum StoreMsgDebug {
+    Tick,
+    Start {
+        store: metapb::Store,
+    },
+    StoreUnreachable {
+        store_id: u64,
+    },
+    GenerateEngineChangeSet {
+        shard_id: u64,
+        shard_ver: u64,
+    },
+    RaftMessage {
+        region_id: u64,
+        from_peer: u64,
+        to_peer: u64,
+        msg_type: eraftpb::MessageType,
+        is_tombstone: bool,
+    },
+    SnapshotReady(u64),
+    GetRegionsInRange {
+        start: Vec<u8>,
+        end: Vec<u8>,
+    },
+    SyncRegion {
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: usize,
+        reverse: bool,
+    },
+    SyncRegionById {
+        region_id: u64,
+    },
+    ApplyResult {
+        region_id: u64,
+        peer_id: u64,
+    },
+    DependentsEmpty(u64 /* region id */),
+    PrepareMerge {
+        region_id: u64,
     },
     CheckMerge(u64),
     Stop,

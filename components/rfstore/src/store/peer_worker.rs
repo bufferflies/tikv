@@ -27,7 +27,7 @@ use tikv_util::{
     warn,
 };
 
-use super::*;
+use super::{metrics::*, *};
 use crate::RaftRouter;
 
 const MERGED_WRITE_BATCH_MAX_SIZE: usize = 4 * 1024 * 1024; // 4 MiB.
@@ -303,11 +303,26 @@ impl RaftWorker {
     }
 
     fn sync_aux_worker(&mut self) {
+        let timer = if self.active_aux_count != 0 {
+            Some(tikv_util::time::Instant::now_coarse())
+        } else {
+            None
+        };
         for i in 0..self.ctx.cfg.aux_worker_count {
             if self.sent_aux_task[i] {
                 self.aux_res_receivers[i].recv().unwrap();
                 self.sent_aux_task[i] = false;
             }
+        }
+        if let Some(timer) = timer {
+            let elapsed = timer.saturating_elapsed();
+            if elapsed > Duration::from_millis(100) {
+                warn!(
+                    "raft worker sync aux worker takes too long";
+                    "duration" => ?elapsed,
+                );
+            }
+            STORE_SYNC_AUX_WORKER_DURATION_HISTOGRAM.observe(duration_to_sec(elapsed));
         }
     }
 
