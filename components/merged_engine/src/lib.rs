@@ -968,6 +968,8 @@ impl MergedEngine {
             let shard = self.kv.get_shard(updated_region);
             if shard.is_none() {
                 // shard is not in the keyspace range, skip apply.
+                debug!("{} sync_merged_for_regions: skip apply", tag);
+                preprocessor.sync_region();
                 continue;
             }
             let shard = shard.unwrap();
