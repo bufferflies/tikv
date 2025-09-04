@@ -296,6 +296,10 @@ impl MergedEngine {
         })
     }
 
+    fn merged_store_id(&self) -> u64 {
+        self.ctx.config.merged_store_id
+    }
+
     pub fn set_keyspace_states(&mut self, keyspace_id: u32, states: Bytes) -> Result<()> {
         let old = self
             .manifest
@@ -800,8 +804,8 @@ impl MergedEngine {
         let mut destroying = StdHashSet::default();
         let raft_engine = self.raft.clone();
         let router = self.router.clone();
-        let mut ctx = PreprocessContext {
-            store_id: self.ctx.config.merged_store_id,
+        let pre_ctx = PreprocessContext {
+            store_id: self.merged_store_id(),
             kv: None,
             raft: &raft_engine,
             raft_wb: &mut raft_wb,
@@ -811,21 +815,19 @@ impl MergedEngine {
             router: Some(&router),
             destroying: &mut destroying,
         };
-        let mut prepared_msgs = HashMap::default();
-        let updated_regions: Vec<u64> = self.updated_regions.drain().collect();
-        let mut destroyed_regions = HashSet::default();
-        self.sync_merged_for_regions(
-            &mut ctx,
+        let mut ctx = SyncRegionsContext {
+            pre_ctx,
             apply_ctx,
-            &updated_regions,
-            &mut destroyed_regions,
-            &mut prepared_msgs,
-        )?;
-        self.handle_prepared_msgs(&mut ctx, prepared_msgs, apply_ctx);
-        self.update_progress_and_truncate(&updated_regions, &mut raft_wb);
-        self.destroy_regions(destroyed_regions, &mut raft_wb);
-        if !raft_wb.is_empty() {
-            self.raft.write(raft_wb)?;
+            prepared_msgs: HashMap::default(),
+            destroyed_regions: HashSet::default(),
+        };
+        let updated_regions: Vec<u64> = self.updated_regions.drain().collect();
+        self.sync_merged_for_regions(&mut ctx, &updated_regions)?;
+        self.handle_prepared_msgs(&mut ctx);
+        self.update_progress_and_truncate(&updated_regions, ctx.raft_wb);
+        self.destroy_regions(&mut ctx);
+        if !ctx.raft_wb.is_empty() {
+            self.raft.write(mem::take(ctx.raft_wb))?;
         }
         self.manifest
             .update_region_progresses(&self.region_progresses);
@@ -835,13 +837,10 @@ impl MergedEngine {
 
     fn sync_merged_for_regions(
         &mut self,
-        ctx: &mut PreprocessContext<'_>,
-        apply_ctx: &mut ApplyContext,
+        ctx: &mut SyncRegionsContext<'_>,
         updated_regions: &[u64],
-        destroyed_regions: &mut HashSet<u64>,
-        prepared_msgs: &mut HashMap<u64, Vec<(u64, Box<PeerMsg>)>>,
     ) -> Result<()> {
-        let merged_store_id = self.ctx.config.merged_store_id;
+        let merged_store_id = self.merged_store_id();
         info!("sync merged for regions {:?}", updated_regions; "store" => merged_store_id);
         let mut update_queue = VecDeque::from(updated_regions.to_vec());
         let mut merged_wb = rfengine::WriteBatch::new();
@@ -849,164 +848,21 @@ impl MergedEngine {
         let mut finished_regions = HashSet::default();
         while let Some(updated_region) = update_queue.pop_front() {
             tikv_util::set_current_region(updated_region);
-            let mut tag = PeerTag::new(merged_store_id, RegionIdVer::new(updated_region, 0));
-            let progress = self.region_progresses.get_mut(&updated_region).unwrap();
-            let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
-            let high: u64 = progress.commit_index + 1;
-            if low >= high {
-                finished_regions.insert(updated_region);
-                continue;
-            }
-            if self.raft.get_truncated_index(updated_region).is_none() {
-                // region is newly inserted, should process parent first.
-                update_queue.push_back(updated_region);
-                info!("{} sync_merged: region is newly inserted", tag);
-                continue;
-            }
-            let preprocessor = match self.preprocessors.entry(updated_region) {
-                HashMapEntry::Occupied(e) => e.into_mut(),
-                HashMapEntry::Vacant(e) => {
-                    let Some(preprocessor) = Preprocessor::new(
-                        &self.raft,
-                        ctx.store_id,
-                        updated_region,
-                        &self.ctx.master_key,
-                    ) else {
-                        info!("{} sync_merged: region is merged or destroyed", tag);
-                        continue;
-                    };
-                    e.insert(preprocessor)
+            match self.sync_region(
+                ctx,
+                updated_region,
+                &finished_regions,
+                &mut merged_wb,
+                &mut merged_wb_estimated_size,
+            )? {
+                SyncRegionResult::Finished => {
+                    finished_regions.insert(updated_region);
                 }
-            };
-            let mut preprocessor_ref = preprocessor.as_ref();
-            tag = preprocessor_ref.tag();
-            let mut entries = Vec::new();
-            let mut postponed = false;
-            // preprocess entries.
-            for log_index in low..high {
-                let mut entry = progress
-                    .entries
-                    .get(&log_index)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "{} entry not found for region {}, log index {}",
-                            tag, updated_region, log_index
-                        )
-                    })
-                    .to_entry();
-                let mut admin_req = update_entry(&mut entry, merged_store_id);
-                if let Some(admin) = admin_req.as_ref() {
-                    if admin.has_commit_merge() {
-                        let commit_merge = admin.get_commit_merge();
-                        if !finished_regions.contains(&commit_merge.get_source().get_id()) {
-                            // need to process source region first.
-                            update_queue.push_back(updated_region);
-                            progress.synced_index = log_index - 1;
-                            postponed = true;
-                            info!(
-                                "{} commit merge postponed at {}, low {}, high {}",
-                                tag, log_index, low, high
-                            );
-                            break;
-                        }
-                    }
+                SyncRegionResult::Postponed => {
+                    update_queue.push_back(updated_region);
                 }
-                let err = preprocessor_ref.preprocess_committed_entry(ctx, &entry);
-                if let Some(err) = err {
-                    warn!("{} preprocess committed entry failed: {:?}", tag, err);
-                    // clear failed command.
-                    admin_req = None;
-                    entry.set_data(Bytes::new());
-                }
-                preprocessor_ref
-                    .raft_state
-                    .set_last_preprocessed_index(*preprocessor_ref.preprocessed_index);
-                let mut hs = eraftpb::HardState::default();
-                hs.set_term(1);
-                hs.set_vote(updated_region);
-                hs.set_commit(progress.commit_index);
-                preprocessor_ref.raft_state.set_hard_state(&hs);
-                preprocessor_ref.raft_state.set_last_index(log_index);
-                ctx.raft_wb
-                    .append_raft_log(updated_region, updated_region, &entry);
-                if let Some(admin_req) = admin_req {
-                    if admin_req.has_commit_merge() {
-                        let last_change_set = ctx.apply_msgs.get_last_change_set();
-                        let source = last_change_set.unwrap();
-                        destroyed_regions.insert(source.shard_id);
-                        ctx.raft
-                            .iterate_peer_states(source.shard_id, false, |k, _| {
-                                ctx.raft_wb
-                                    .set_state(source.shard_id, source.shard_id, k, &[]);
-                                true
-                            });
-                        ctx.raft_wb.truncate_raft_log(
-                            source.shard_id,
-                            source.shard_id,
-                            TRUNCATE_ALL_INDEX,
-                        );
-                    }
-                }
-                entries.push(entry);
+                SyncRegionResult::Dropped => continue,
             }
-            if !postponed {
-                finished_regions.insert(updated_region);
-            }
-            if ctx.raft_wb.is_empty() {
-                continue;
-            }
-            preprocessor_ref.write_raft_state(ctx);
-            let mut wb = mem::take(ctx.raft_wb);
-            ctx.raft.apply(&mut wb);
-            merged_wb_estimated_size += wb.estimated_size();
-            merged_wb.merge_write_batch(wb);
-            if merged_wb_estimated_size > RAFT_WRITE_BATCH_SIZE {
-                ctx.raft.persist(merged_wb)?;
-                merged_wb = WriteBatch::new();
-                merged_wb_estimated_size = 0;
-            }
-            let shard = self.kv.get_shard(updated_region);
-            if shard.is_none() {
-                // shard is not in the keyspace range, skip apply.
-                debug!("{} sync_merged_for_regions: skip apply", tag);
-                preprocessor.sync_region();
-                continue;
-            }
-            let shard = shard.unwrap();
-            // apply committed entries.
-            let applier = self
-                .appliers
-                .entry(updated_region)
-                .or_insert_with(|| Self::new_applier(&shard, preprocessor_ref, low - 1));
-            ctx.build_apply_msg_for_replication(entries);
-            ctx.handle_apply_msgs_for_replication(applier, apply_ctx);
-            // We keep waiting for paused region because later region may depend on it.
-            while applier.is_paused() {
-                let msgs = if let Some(msgs) = prepared_msgs.remove(&updated_region) {
-                    // received by previous region, handle it now.
-                    msgs
-                } else {
-                    let (id, peer_msg) =
-                        match self.peer_receiver.recv_timeout(Duration::from_secs(3)) {
-                            Ok((id, msg)) => (id, msg),
-                            Err(err) => {
-                                if err.is_timeout() {
-                                    warn!("{} waiting for region to unpause", tag);
-                                    continue;
-                                }
-                                return Err(Error::Other(Box::new(err)));
-                            }
-                        };
-                    if id != updated_region {
-                        // For another region, handle it later.
-                        prepared_msgs.entry(id).or_default().push((id, peer_msg));
-                        continue;
-                    }
-                    vec![(id, peer_msg)]
-                };
-                Self::apply_prepared_msgs(ctx, applier, msgs, apply_ctx);
-            }
-            preprocessor.sync_region();
         }
         if !merged_wb.is_empty() {
             self.raft.persist(merged_wb)?;
@@ -1014,30 +870,196 @@ impl MergedEngine {
         Ok(())
     }
 
-    fn handle_prepared_msgs(
+    fn sync_region(
         &mut self,
-        ctx: &mut PreprocessContext<'_>,
-        mut prepared_msgs: HashMap<u64, Vec<(u64, Box<PeerMsg>)>>,
-        apply_ctx: &mut ApplyContext,
-    ) {
+        ctx: &mut SyncRegionsContext<'_>,
+        updated_region: u64,
+        finished_regions: &HashSet<u64>,
+        merged_wb: &mut rfengine::WriteBatch,
+        merged_wb_estimated_size: &mut usize,
+    ) -> Result<SyncRegionResult> {
+        let merged_store_id = self.merged_store_id();
+        let mut tag = PeerTag::new(merged_store_id, RegionIdVer::new(updated_region, 0));
+        let progress = self.region_progresses.get_mut(&updated_region).unwrap();
+        let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
+        let high: u64 = progress.commit_index + 1;
+        if low >= high {
+            return Ok(SyncRegionResult::Finished);
+        }
+        if self.raft.get_truncated_index(updated_region).is_none() {
+            // region is newly inserted, should process parent first.
+            info!("{} sync_merged: region is newly inserted", tag);
+            return Ok(SyncRegionResult::Postponed);
+        }
+        let preprocessor = match self.preprocessors.entry(updated_region) {
+            HashMapEntry::Occupied(e) => e.into_mut(),
+            HashMapEntry::Vacant(e) => {
+                let Some(preprocessor) = Preprocessor::new(
+                    &self.raft,
+                    ctx.store_id,
+                    updated_region,
+                    &self.ctx.master_key,
+                ) else {
+                    info!("{} sync_merged: region is merged or destroyed", tag);
+                    return Ok(SyncRegionResult::Dropped);
+                };
+                e.insert(preprocessor)
+            }
+        };
+        let mut preprocessor_ref = preprocessor.as_ref();
+        tag = preprocessor_ref.tag();
+        let mut entries = Vec::new();
+        let mut res = SyncRegionResult::Finished;
+        // preprocess entries.
+        for log_index in low..high {
+            let mut entry = progress
+                .entries
+                .get(&log_index)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} entry not found for region {}, log index {}",
+                        tag, updated_region, log_index
+                    )
+                })
+                .to_entry();
+            let mut admin_req = update_entry(&mut entry, merged_store_id);
+            if let Some(admin) = admin_req.as_ref() {
+                if admin.has_commit_merge() {
+                    let commit_merge = admin.get_commit_merge();
+                    if !finished_regions.contains(&commit_merge.get_source().get_id()) {
+                        // need to process source region first.
+                        progress.synced_index = log_index - 1;
+                        res = SyncRegionResult::Postponed;
+                        info!(
+                            "{} commit merge postponed at {}, low {}, high {}",
+                            tag, log_index, low, high
+                        );
+                        break;
+                    }
+                }
+            }
+            let err = preprocessor_ref.preprocess_committed_entry(ctx, &entry);
+            if let Some(err) = err {
+                warn!("{} preprocess committed entry failed: {:?}", tag, err);
+                // clear failed command.
+                admin_req = None;
+                entry.set_data(Bytes::new());
+            }
+            preprocessor_ref
+                .raft_state
+                .set_last_preprocessed_index(*preprocessor_ref.preprocessed_index);
+            let mut hs = eraftpb::HardState::default();
+            hs.set_term(1);
+            hs.set_vote(updated_region);
+            hs.set_commit(progress.commit_index);
+            preprocessor_ref.raft_state.set_hard_state(&hs);
+            preprocessor_ref.raft_state.set_last_index(log_index);
+            ctx.raft_wb
+                .append_raft_log(updated_region, updated_region, &entry);
+            if let Some(admin_req) = admin_req {
+                if admin_req.has_commit_merge() {
+                    let last_change_set = ctx.apply_msgs.get_last_change_set();
+                    let source = last_change_set.unwrap();
+                    ctx.destroyed_regions.insert(source.shard_id);
+                    ctx.raft
+                        .iterate_peer_states(source.shard_id, false, |k, _| {
+                            ctx.raft_wb
+                                .set_state(source.shard_id, source.shard_id, k, &[]);
+                            true
+                        });
+                    ctx.raft_wb.truncate_raft_log(
+                        source.shard_id,
+                        source.shard_id,
+                        TRUNCATE_ALL_INDEX,
+                    );
+                }
+            }
+            entries.push(entry);
+        }
+        if ctx.raft_wb.is_empty() {
+            return Ok(res);
+        }
+        preprocessor_ref.write_raft_state(ctx);
+        let mut wb = mem::take(ctx.raft_wb);
+        ctx.raft.apply(&mut wb);
+        *merged_wb_estimated_size += wb.estimated_size();
+        merged_wb.merge_write_batch(wb);
+        if *merged_wb_estimated_size > RAFT_WRITE_BATCH_SIZE {
+            ctx.raft.persist(mem::take(merged_wb))?;
+            *merged_wb_estimated_size = 0;
+        }
+        let shard = self.kv.get_shard(updated_region);
+        if shard.is_none() {
+            // shard is not in the keyspace range, skip apply.
+            debug!("{} sync_merged_for_regions: skip apply", tag);
+            preprocessor.sync_region();
+            return Ok(res);
+        }
+        let shard = shard.unwrap();
+        // apply committed entries.
+        let applier = self
+            .appliers
+            .entry(updated_region)
+            .or_insert_with(|| Self::new_applier(&shard, preprocessor_ref, low - 1));
+        ctx.build_apply_msg_for_replication(entries);
+        ctx.pre_ctx
+            .handle_apply_msgs_for_replication(applier, ctx.apply_ctx);
+        // We keep waiting for paused region because later region may depend on it.
+        while applier.is_paused() {
+            let msgs = if let Some(msgs) = ctx.prepared_msgs.remove(&updated_region) {
+                // received by previous region, handle it now.
+                msgs
+            } else {
+                let (id, peer_msg) = match self.peer_receiver.recv_timeout(Duration::from_secs(3)) {
+                    Ok((id, msg)) => (id, msg),
+                    Err(err) => {
+                        if err.is_timeout() {
+                            warn!("{} waiting for region to unpause", tag);
+                            continue;
+                        }
+                        return Err(Error::Other(Box::new(err)));
+                    }
+                };
+                if id != updated_region {
+                    // For another region, handle it later.
+                    ctx.prepared_msgs
+                        .entry(id)
+                        .or_default()
+                        .push((id, peer_msg));
+                    continue;
+                }
+                vec![(id, peer_msg)]
+            };
+            Self::apply_prepared_msgs(ctx, applier, msgs);
+        }
+        preprocessor.sync_region();
+
+        Ok(res)
+    }
+
+    fn handle_prepared_msgs(&mut self, ctx: &mut SyncRegionsContext<'_>) {
         let msg_count = self.peer_receiver.len();
         for _ in 0..msg_count {
             let (id, peer_msg) = self.peer_receiver.recv().unwrap();
-            prepared_msgs.entry(id).or_default().push((id, peer_msg));
+            ctx.prepared_msgs
+                .entry(id)
+                .or_default()
+                .push((id, peer_msg));
         }
+        let prepared_msgs = mem::take(&mut ctx.prepared_msgs);
         for (region_id, msgs) in prepared_msgs {
             tikv_util::set_current_region(region_id);
             let Some(applier) = self.appliers.get_mut(&region_id) else {
                 continue;
             };
-            Self::apply_prepared_msgs(ctx, applier, msgs, apply_ctx);
+            Self::apply_prepared_msgs(ctx, applier, msgs);
         }
     }
 
     fn update_progress_and_truncate(&mut self, regions: &[u64], raft_wb: &mut WriteBatch) {
         for &region_id in regions {
             tikv_util::set_current_region(region_id);
-            let tag = ShardTag::new(self.ctx.config.merged_store_id, IdVer::new(region_id, 0));
+            let tag = ShardTag::new(self.merged_store_id(), IdVer::new(region_id, 0));
             let progress = self.region_progresses.get_mut(&region_id).unwrap();
             let commit_index = progress.commit_index;
             progress.synced_index = commit_index;
@@ -1068,14 +1090,16 @@ impl MergedEngine {
         }
     }
 
-    fn destroy_regions(&mut self, destroyed_regions: HashSet<u64>, raft_wb: &mut WriteBatch) {
-        for region_id in destroyed_regions {
+    fn destroy_regions(&mut self, ctx: &mut SyncRegionsContext<'_>) {
+        for region_id in ctx.destroyed_regions.drain() {
             tikv_util::set_current_region(region_id);
             self.raft.iterate_peer_states(region_id, false, |k, _| {
-                raft_wb.set_state(region_id, region_id, k, &[]);
+                ctx.pre_ctx.raft_wb.set_state(region_id, region_id, k, &[]);
                 true
             });
-            raft_wb.truncate_raft_log(region_id, region_id, TRUNCATE_ALL_INDEX);
+            ctx.pre_ctx
+                .raft_wb
+                .truncate_raft_log(region_id, region_id, TRUNCATE_ALL_INDEX);
             self.appliers.remove(&region_id);
             self.kv.remove_shard(region_id);
             self.preprocessors.remove(&region_id);
@@ -1100,15 +1124,50 @@ impl MergedEngine {
     }
 
     fn apply_prepared_msgs(
-        ctx: &mut PreprocessContext<'_>,
+        ctx: &mut SyncRegionsContext<'_>,
         applier: &mut Applier,
         msgs: Vec<(u64, Box<PeerMsg>)>,
-        apply_ctx: &mut ApplyContext,
     ) {
         for (_, msg) in msgs {
             ctx.build_prepared_msg_for_replication(msg);
         }
-        ctx.handle_apply_msgs_for_replication(applier, apply_ctx);
+        ctx.pre_ctx
+            .handle_apply_msgs_for_replication(applier, ctx.apply_ctx);
+    }
+}
+
+enum SyncRegionResult {
+    Finished,
+    Postponed,
+    Dropped,
+}
+
+struct SyncRegionsContext<'a> {
+    pre_ctx: PreprocessContext<'a>,
+    apply_ctx: &'a mut ApplyContext,
+    prepared_msgs: HashMap<u64 /* region_id */, Vec<(u64 /* region_id */, Box<PeerMsg>)>>,
+    destroyed_regions: HashSet<u64>,
+}
+
+impl<'a> ops::Deref for SyncRegionsContext<'a> {
+    type Target = PreprocessContext<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pre_ctx
+    }
+}
+
+impl ops::DerefMut for SyncRegionsContext<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.pre_ctx
+    }
+}
+
+impl Drop for SyncRegionsContext<'_> {
+    fn drop(&mut self) {
+        debug_assert!(self.prepared_msgs.is_empty());
+        debug_assert!(self.destroyed_regions.is_empty());
+        debug_assert!(self.raft_wb.is_empty());
     }
 }
 
