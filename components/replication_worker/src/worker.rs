@@ -1285,6 +1285,17 @@ impl ReplicationWorker {
             info!("{} handle_applied_admin: region is merged", tag);
         }
 
+        if admin.has_commit_merge() {
+            let source_region = admin.get_commit_merge().get_source();
+            info!("{} handle_applied_admin: remove source region of merge", tag; "source" => ?source_region);
+
+            let mut error = cdcpb::Error::new();
+            error.mut_region_not_found().set_region_id(source_region.id);
+            if let Err(e) = self.remove_stale_requests(tag, source_region.id, u64::MAX, error) {
+                warn!("{} handle_applied_admin: send error failed", tag; "err" => ?e);
+            }
+        }
+
         let mut error = cdcpb::Error::new();
         if let Some(rep_region) = rep_region_opt {
             error
@@ -1295,6 +1306,16 @@ impl ReplicationWorker {
             error.mut_region_not_found().set_region_id(region_id);
         }
 
+        self.remove_stale_requests(tag, region_id, region_version, error)
+    }
+
+    fn remove_stale_requests(
+        &mut self,
+        tag: ShardTag,
+        region_id: u64,
+        region_version: u64,
+        error: cdcpb::Error,
+    ) -> Result<()> {
         if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
             let mut requests_to_remove = vec![];
             for (req_key, request) in delegate.requests.iter() {
