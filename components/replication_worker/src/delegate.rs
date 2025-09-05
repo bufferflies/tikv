@@ -47,7 +47,7 @@ impl fmt::Display for RequestId {
 
 // Different connection (from different TiCDC instances) can have the same
 // RequestId. So use (ConnId, RequestId) to make it unique.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct RequestKey {
     pub conn_id: ConnId,
     pub request_id: RequestId,
@@ -59,6 +59,15 @@ impl RequestKey {
             conn_id,
             request_id,
         }
+    }
+}
+
+impl fmt::Debug for RequestKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Request")
+            .field("conn", &self.conn_id.into_inner())
+            .field("request", &self.request_id)
+            .finish()
     }
 }
 

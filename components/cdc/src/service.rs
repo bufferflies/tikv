@@ -40,6 +40,10 @@ impl ConnId {
     pub fn new() -> ConnId {
         ConnId(CONNECTION_ID_ALLOC.fetch_add(1, Ordering::SeqCst))
     }
+
+    pub fn into_inner(self) -> usize {
+        self.0
+    }
 }
 
 impl Default for ConnId {

@@ -245,8 +245,11 @@ impl ReplicationWorker {
         Ok(worker)
     }
 
-    fn get_region_tag(&self, region_id: u64) -> ShardTag {
-        ShardTag::new(self.ctx.config.merged_store_id, IdVer::new(region_id, 0))
+    fn get_region_tag(&self, region_id: u64, region_version: u64) -> ShardTag {
+        ShardTag::new(
+            self.ctx.config.merged_store_id,
+            IdVer::new(region_id, region_version),
+        )
     }
 
     pub fn scheduler(&self) -> ReplicationScheduler {
@@ -491,7 +494,7 @@ impl ReplicationWorker {
     ) -> Result<()> {
         let request_id: RequestId = event.get_request_id().into();
         let region_id = event.get_region_id();
-        let tag = self.get_region_tag(region_id);
+        let tag = self.get_region_tag(region_id, 0);
         let Some(delegate) = self.region_delegates.get_mut(&region_id) else {
             warn!("{} handle_register_result: region delegate not found", tag; "conn" => ?conn_id, "request" => %request_id);
             return Ok(());
@@ -1199,7 +1202,7 @@ impl ReplicationWorker {
     }
 
     fn handle_applied(&mut self, region_id: u64, region_events: RegionEvents) -> Result<()> {
-        let tag = self.get_region_tag(region_id);
+        let tag = self.get_region_tag(region_id, 0);
         if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
             for (req_key, req_info) in delegate.requests.iter_mut() {
                 let Some(conn) = self.conns.get(&req_key.conn_id) else {
@@ -1259,12 +1262,13 @@ impl ReplicationWorker {
         region_version: u64,
         admin: AdminRequest,
     ) -> Result<()> {
+        let tag = self.get_region_tag(region_id, region_version);
         let raft = self.merged_engine.get_raft();
         let rep_region_opt = Self::get_region_for_rep(&raft, region_id);
 
         if let Some(rep_region) = &rep_region_opt {
             let Some(keyspace_id) = self.get_keyspace_id(region_id) else {
-                let err_msg = format!("handle_applied_admin: region {} not found", region_id);
+                let err_msg = format!("{} handle_applied_admin: region not found", tag);
                 debug_assert!(false, "{}", &err_msg);
                 return Err(box_err!("{}", err_msg));
             };
@@ -1278,14 +1282,17 @@ impl ReplicationWorker {
                 }
             }
         } else {
-            info!("{} handle_applied_admin: region is merged", region_id);
+            info!("{} handle_applied_admin: region is merged", tag);
         }
 
         let mut error = cdcpb::Error::new();
-        let epoch_not_match = error.mut_epoch_not_match();
-        // Set `region_not_found` if `rep_region_opt` is `None` ?
         if let Some(rep_region) = rep_region_opt {
-            epoch_not_match.mut_current_regions().push(rep_region);
+            error
+                .mut_epoch_not_match()
+                .mut_current_regions()
+                .push(rep_region);
+        } else {
+            error.mut_region_not_found().set_region_id(region_id);
         }
 
         if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
@@ -1295,6 +1302,8 @@ impl ReplicationWorker {
                     requests_to_remove.push(*req_key);
                 }
             }
+            info!("{} handle_applied_admin: send error to requests", tag;
+                "err" => ?error, "requests" => ?requests_to_remove);
             for req_key in requests_to_remove {
                 delegate.requests.remove(&req_key).unwrap();
                 let Some(conn) = self.conns.get(&req_key.conn_id) else {
@@ -1304,10 +1313,6 @@ impl ReplicationWorker {
                 event.set_region_id(region_id);
                 event.set_request_id(req_key.request_id.into_inner());
                 event.set_error(error.clone());
-                info!(
-                    "{} handle_applied_admin: send error event {:?}",
-                    region_id, event
-                );
                 conn.get_sink()
                     .unbounded_send(CdcEvent::Event(event), false)
                     .map_err(|e| cdc::Error::from(e))?;
