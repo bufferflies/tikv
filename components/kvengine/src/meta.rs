@@ -1229,11 +1229,16 @@ impl ShardMeta {
             .get_all_chunk_ids()
     }
 
-    pub(crate) fn get_blob_files(&self) -> Vec<(u64, Vec<u8>, Vec<u8>)> {
+    pub(crate) fn get_blob_files(&self) -> Vec<(u64, Vec<u8>, Vec<u8>, u32)> {
         let mut blob_files = vec![];
         for (id, file) in &self.files {
             if file.file_type == FileType::Blob {
-                blob_files.push((*id, file.smallest.to_vec(), file.biggest.to_vec()));
+                blob_files.push((
+                    *id,
+                    file.smallest.to_vec(),
+                    file.biggest.to_vec(),
+                    file.table_meta_off,
+                ));
             }
         }
         blob_files
@@ -1527,7 +1532,7 @@ pub struct FileMeta {
     // Available ONLY for SST level 0.
     pub l0_size: u32,
 
-    // Available ONLY for SST (level 1+) & Columnar.
+    // Available ONLY for SST (level 1+) & Columnar & VectorIndex & Blob.
     pub table_meta_off: u32,
 }
 
@@ -1585,6 +1590,7 @@ impl FileMeta {
             FileType::Sst if (self.cf as usize == WRITE_CF && self.level > 0) => true,
             FileType::Columnar => true,
             FileType::VectorIndex => true,
+            FileType::Blob => true,
             _ => false,
         }
     }
@@ -1637,7 +1643,7 @@ impl FileMeta {
             table.get_smallest(),
             table.get_biggest(),
             0,
-            0,
+            table.get_meta_offset(),
         )
     }
 

@@ -25,12 +25,13 @@ use crate::{
         types::{FileSegmentIdent, TABLE_META_LOCAL_FILE_SUFFIX},
     },
     metrics::ENGINE_IA_SYNC_READ_COUNTER,
-    new_columnar_filename, new_sst_filename, new_vector_index_filename,
+    new_blob_filename, new_columnar_filename, new_sst_filename, new_vector_index_filename,
     table::{
+        blobtable::{self, blobtable::BlobTable},
         columnar::{ColumnarFileFooter, TableMeta, TableOffsets},
         file::{File, InMemFile, MmapData},
         search, sstable,
-        sstable::SsTable,
+        sstable::{Index, SsTable},
         vector_index::VectorIndexFileFooter,
         Error, Result,
     },
@@ -71,6 +72,7 @@ impl IaFile {
             FileType::Sst => Self::open_for_sst(id, table_meta_file, mgr),
             FileType::Columnar => Self::open_for_columnar(id, table_meta_file, mgr),
             FileType::VectorIndex => Self::open_for_vector(id, fm, table_meta_file, mgr),
+            FileType::Blob => Self::open_for_blob(id, table_meta_file, mgr),
             _ => Err(Error::IaMgr(format!(
                 "{id} open: file type not supported: {:?}",
                 fm.file_type
@@ -238,6 +240,41 @@ impl IaFile {
         };
 
         debug!("{} ia open for vector: {:?}", id, f);
+        Ok(f)
+    }
+
+    fn open_for_blob(id: u64, table_meta_file: Arc<dyn File>, mgr: IaManager) -> Result<Self> {
+        let footer_data = table_meta_file.read_footer(BlobTable::footer_size())?;
+        let mut footer = blobtable::builder::BlobFooter::default();
+        footer.unmarshal(&footer_data);
+        if !footer.is_match() {
+            return Err(Error::IaMgr(format!(
+                "{id} open for blob: footer not match"
+            )));
+        }
+
+        let meta_size = table_meta_file.size();
+        let table_meta_off = footer.index_offset as u64;
+        let segment_size = mgr.segment_size() as u64;
+        let mut f = Self {
+            id,
+            size: table_meta_off + meta_size,
+            ftype: FileType::Blob,
+            table_meta_off,
+            segment_offsets: vec![],
+            table_meta_file: table_meta_file.clone(),
+            mgr,
+        };
+
+        let table_offsets_data = f.read_table_meta(table_meta_off, footer.index_len())?;
+        let mut builder = SegmentOffsetsBuilder::new(segment_size);
+        let index = Index::new_for_blob(table_offsets_data)?;
+        for pos in 0..index.num_blocks() {
+            builder.push_block_off(index.get_block_addr_for_blob(pos) as u64);
+        }
+        builder.push_boundary(table_meta_off);
+        f.segment_offsets = builder.finish();
+
         Ok(f)
     }
 
@@ -598,6 +635,11 @@ pub fn table_meta_file_local_path(file_id: u64, file_type: FileType, data_dir: &
         FileType::VectorIndex => data_dir.join(format!(
             "{}.{}",
             new_vector_index_filename(file_id).display(),
+            TABLE_META_LOCAL_FILE_SUFFIX
+        )),
+        FileType::Blob => data_dir.join(format!(
+            "{}.{}",
+            new_blob_filename(file_id).display(),
             TABLE_META_LOCAL_FILE_SUFFIX
         )),
         _ => unimplemented!("file type not supported: {:?}", file_type),

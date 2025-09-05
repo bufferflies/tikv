@@ -739,6 +739,7 @@ impl SsTableCore {
     }
 }
 
+// Used in sstable and blobtable.
 #[derive(Clone)]
 pub struct Index {
     common_prefix: Bytes,
@@ -748,13 +749,21 @@ pub struct Index {
 }
 
 impl Index {
-    pub(crate) fn new(mut data: Bytes) -> Result<Self> {
+    pub(crate) fn new(data: Bytes) -> Result<Self> {
+        Self::new_with_opts(data, BLOCK_ADDR_SIZE)
+    }
+
+    pub(crate) fn new_for_blob(data: Bytes) -> Result<Self> {
+        Self::new_with_opts(data, 4)
+    }
+
+    fn new_with_opts(mut data: Bytes, block_addr_size: usize) -> Result<Self> {
         let _checksum = data.get_u32_le();
         assert_eq!(data.get_u32_le(), INDEX_FORMAT_V1);
         let num_blocks = data.get_u32_le() as usize;
         let block_key_offs = data.slice(..num_blocks * 4);
         data.advance(block_key_offs.len());
-        let block_addrs = data.slice(..num_blocks * BLOCK_ADDR_SIZE);
+        let block_addrs = data.slice(..num_blocks * block_addr_size);
         data.advance(block_addrs.len());
         let common_prefix_len = data.get_u16_le() as usize;
         let common_prefix = data.slice(..common_prefix_len);
@@ -776,6 +785,11 @@ impl Index {
     pub(crate) fn get_block_addr(&self, pos: usize) -> BlockAddress {
         let off = pos * BLOCK_ADDR_SIZE;
         BlockAddress::from_slice(&self.block_addrs[off..off + BLOCK_ADDR_SIZE])
+    }
+
+    pub(crate) fn get_block_addr_for_blob(&self, pos: usize) -> u32 {
+        let off = pos * 4;
+        LittleEndian::read_u32(&self.block_addrs[off..off + 4])
     }
 
     pub fn num_blocks(&self) -> usize {

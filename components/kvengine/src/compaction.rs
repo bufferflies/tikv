@@ -3565,7 +3565,8 @@ fn persist_blob_table(
 ) {
     let buf = builder.finish();
     let (smallest, biggest) = builder.smallest_biggest_key();
-    let blob_table_create = new_blob_create_pb(id, smallest.to_vec(), biggest.to_vec());
+    let meta_off = builder.meta_offset() as u32;
+    let blob_table_create = new_blob_create_pb(id, smallest.to_vec(), biggest.to_vec(), meta_off);
     let fs_clone = fs.clone();
     fs.get_runtime().spawn(async move {
         let _ = tx
@@ -3654,6 +3655,7 @@ async fn compact_for_cf(
                 config.compression_type,
                 compression_lvl,
                 config.min_blob_size,
+                config.block_size,
                 ctx.encryption_key.clone(),
             ),
         ))
@@ -3704,7 +3706,7 @@ async fn compact_for_cf(
                             bt_builder,
                             tx.clone(),
                             fs.clone(),
-                            opts,
+                            opts.with_type(FileType::Blob),
                         );
                         cur_blob_table_id = id_allocator.alloc_id().await;
                         bt_builder.reset(cur_blob_table_id);
@@ -3770,7 +3772,6 @@ async fn compact_for_cf(
                         false
                     };
                     if blob_table.compression_tp() != bt_config.compression_type
-                        || blob_table.compression_lvl() != compression_lvl
                         || blob_table.min_blob_size() != bt_config.min_blob_size
                     {
                         need_recompress_blob = true;
@@ -3836,7 +3837,13 @@ async fn compact_for_cf(
     if let Some((_, bt_builder)) = &mut blob_table_builder {
         if !bt_builder.is_empty() {
             cnt += 1;
-            persist_blob_table(cur_blob_table_id, bt_builder, tx, fs.clone(), opts);
+            persist_blob_table(
+                cur_blob_table_id,
+                bt_builder,
+                tx,
+                fs.clone(),
+                opts.with_type(FileType::Blob),
+            );
         }
     }
     let mut errors = vec![];

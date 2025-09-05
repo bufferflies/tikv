@@ -762,8 +762,9 @@ impl EngineCore {
         );
         let mut fids = vec![];
 
-        for (id, smallest, biggest) in meta.get_blob_files() {
-            let blob_create = new_blob_create_pb(id, smallest.to_vec(), biggest.to_vec());
+        for (id, smallest, biggest, table_meta_off) in meta.get_blob_files() {
+            let blob_create =
+                new_blob_create_pb(id, smallest.to_vec(), biggest.to_vec(), table_meta_off);
             warn!("ingest blob file: {}, {:?}, {:?}", id, smallest, biggest);
             ingest_files.mut_blob_creates().push(blob_create);
         }
@@ -1131,7 +1132,7 @@ pub fn new_tmp_filename(file_id: u64, tmp_id: u64) -> PathBuf {
 }
 
 pub fn new_blob_filename(file_id: u64) -> PathBuf {
-    PathBuf::from(format!("{:016x}.sst", file_id))
+    PathBuf::from(format!("{:016x}.blob", file_id))
 }
 
 pub fn new_schema_filename(file_id: u64) -> PathBuf {

@@ -16,7 +16,12 @@ use kvengine::{
             LocalStore,
         },
     },
-    table::{file::InMemFile, sstable, ChecksumType, InnerKey, Value, NO_COMPRESSION},
+    table::{
+        blobtable::builder::BlobTableBuilder,
+        file::InMemFile,
+        sstable::{self},
+        ChecksumType, InnerKey, Value, NO_COMPRESSION,
+    },
     FileMeta,
 };
 use proptest::prelude::*;
@@ -555,6 +560,120 @@ fn test_local_gc() {
     oss.shutdown();
 }
 
+#[test]
+fn test_blob_ia() {
+    init_log_for_test();
+
+    let (temp_dir, mut oss, dfs_conf) = prepare_dfs("test");
+    let temp_dir = temp_dir.path();
+
+    let s3fs = S3Fs::new_from_config(dfs_conf);
+    let _s3fs = s3fs.clone();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    let rt = runtime.handle().clone();
+    runtime.block_on(async move {
+        let local_path = temp_dir.join("ia");
+        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), local_path.clone(), 1000.into());
+        let options = IaManagerOptionsBuilder::default()
+            .capacity(ia_cap)
+            .segment_size(SEGMENT_SIZE)
+            .freq_update_interval(FREQ_UPDATE_INTERVAL)
+            .build()
+            .unwrap();
+
+        let mgr = IaManager::new(
+            options.clone(),
+            Arc::new(s3fs.clone()),
+            None,
+            rt.clone().into(),
+        )
+        .unwrap();
+
+        let kvs = generate_key_values("key", 1024);
+        let (sst_data, sst_meta_off, blob_data, blob_meta_off) =
+            make_blob_table_with_kvs(1, 2, &kvs);
+
+        s3fs.put_object(
+            s3fs.file_key(1, FileType::Sst),
+            sst_data,
+            "1.sst".to_string(),
+        )
+        .await
+        .unwrap();
+        s3fs.put_object(
+            s3fs.file_key(2, FileType::Blob),
+            blob_data.clone(),
+            "2.blob".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let dfs_opts = dfs::Options::default().with_shard(1, 1);
+        // Prepare table meta.
+        IaFile::prepare_table_meta(
+            1,
+            FileType::Sst,
+            sst_meta_off,
+            &local_path,
+            &dfs_opts,
+            &mgr,
+            None,
+        )
+        .await
+        .unwrap();
+        IaFile::prepare_table_meta(
+            2,
+            FileType::Blob,
+            blob_meta_off,
+            &local_path,
+            &dfs_opts,
+            &mgr,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let ia_sst =
+            IaFile::open_in_path(1, &make_file_meta(FileType::Sst), &local_path, mgr.clone())
+                .unwrap();
+        let _ = ia_sst.multi_read_async(5, 10).await.unwrap();
+        let _ = ia_sst.multi_read_async(5, 10).await.unwrap();
+
+        let ia_blob =
+            IaFile::open_in_path(2, &make_file_meta(FileType::Blob), &local_path, mgr.clone())
+                .unwrap();
+        let data1 = ia_blob.multi_read_async(100, 64).await.unwrap();
+        assert!(data1.len() < SEGMENT_SIZE as usize * 2);
+        let data2 = ia_blob.multi_read_async(100, 64).await.unwrap();
+        assert_eq!(data1, data2);
+
+        // To make sure that segments are written to local store.
+        mgr.flush_tasks(Duration::from_secs(5)).await.unwrap();
+    });
+
+    oss.shutdown();
+}
+
+pub(crate) fn generate_key_values(prefix: &str, n: usize) -> Vec<(String, String)> {
+    assert!(n <= 10000);
+    let mut results = Vec::with_capacity(n);
+    for i in 0..n {
+        let k = format!("{}{:04}", prefix, i);
+        // Generate an random string with random length.
+        let length = rand::thread_rng().gen_range(0..=128);
+        let random_string: String = (0..length)
+            .map(|_| rand::thread_rng().gen_range(b'a'..=b'z') as char)
+            .collect();
+        results.push((k, random_string));
+    }
+    results
+}
+
 fn make_sstable(
     file_id: u64,
     block_size: usize,
@@ -600,4 +719,40 @@ fn make_sstable(
     let file_data = Bytes::from(buf);
     let user_data = file_data.slice(0..res.meta_offset as usize);
     (file_data, user_data, res.meta_offset as u64)
+}
+
+fn make_blob_table_with_kvs(
+    sst_fid: u64,
+    blob_fid: u64,
+    kvs: &Vec<(String, String)>,
+) -> (Bytes, u64, Bytes, u64) {
+    let mut sst_builder = sstable::Builder::new(
+        sst_fid,
+        BLOCK_SIZE,
+        NO_COMPRESSION,
+        0,
+        ChecksumType::default(),
+        None,
+    );
+    let mut blob_builder = BlobTableBuilder::new(blob_fid, NO_COMPRESSION, 0, 0, 32, None);
+    let meta = 0u8;
+
+    for (k, v) in kvs {
+        let value_buf = Value::encode_buf(meta, &[0], 0, v.as_bytes());
+        let mut v = Value::decode(value_buf.as_slice());
+        v.set_blob_ref();
+        let blob_ref = blob_builder.add(InnerKey::from_inner_buf(k.as_bytes()), &v);
+        sst_builder.add(InnerKey::from_inner_buf(k.as_bytes()), &v, Some(blob_ref));
+    }
+
+    let mut buf = Vec::with_capacity(sst_builder.estimated_size());
+
+    let build_result = sst_builder.finish(0, &mut buf);
+
+    (
+        buf.into(),
+        build_result.meta_offset as u64,
+        blob_builder.finish(),
+        blob_builder.meta_offset() as u64,
+    )
 }

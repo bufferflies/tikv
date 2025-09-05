@@ -62,11 +62,17 @@ pub fn new_table_create_pb(
     tbl_create
 }
 
-pub fn new_blob_create_pb(id: u64, smallest: Vec<u8>, biggest: Vec<u8>) -> kvenginepb::BlobCreate {
+pub fn new_blob_create_pb(
+    id: u64,
+    smallest: Vec<u8>,
+    biggest: Vec<u8>,
+    meta_offset: u32,
+) -> kvenginepb::BlobCreate {
     let mut blob_create = kvenginepb::BlobCreate::new();
     blob_create.set_id(id);
     blob_create.set_smallest(smallest);
     blob_create.set_biggest(biggest);
+    blob_create.set_meta_offset(meta_offset);
     blob_create
 }
 

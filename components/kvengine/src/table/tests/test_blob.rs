@@ -51,7 +51,7 @@ pub(crate) fn build_blob_test_table_with_kvs(kvs: &Vec<(String, String)>) -> (Ss
     let sst_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let blob_fid = TEST_ID_ALLOC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let mut sst_builder = new_table_builder_for_test(sst_fid);
-    let mut blob_builder = BlobTableBuilder::new(blob_fid, NO_COMPRESSION, 0, 0, None);
+    let mut blob_builder = BlobTableBuilder::new(blob_fid, NO_COMPRESSION, 0, 0, 1024 * 1024, None);
     let meta = 0u8;
 
     for (k, v) in kvs {

@@ -173,7 +173,6 @@ pub(crate) fn print_blob_table(blob: &BlobTable) {
     );
     println!("  total_blob_size: {}", blob.total_blob_size());
     println!("  compression_tp: {}", blob.compression_tp());
-    println!("  compression_lvl: {}", blob.compression_lvl());
     println!("  min_blob_size: {}", blob.min_blob_size());
 }
 

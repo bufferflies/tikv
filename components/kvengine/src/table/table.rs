@@ -371,7 +371,7 @@ impl Value {
     }
 
     #[inline(always)]
-    pub(crate) fn set_blob_ref(&mut self) {
+    pub fn set_blob_ref(&mut self) {
         assert!(!self.is_blob_ref());
         self.meta |= BIT_BLOB_REF;
     }

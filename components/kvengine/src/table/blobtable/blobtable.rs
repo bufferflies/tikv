@@ -9,16 +9,34 @@ use kvenginepb::BlobCreate;
 use super::{builder::*, BlobRef};
 use crate::{
     error::IoContext,
+    ia::types::FileSegmentIdent,
     table::{
-        file::File, sstable::PROP_KEY_ENCRYPTION_VER, BoundedDataSet, ChecksumType, DataBound,
-        Error, InnerKey, Result, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
+        file::File,
+        sstable::{Index, PROP_KEY_ENCRYPTION_VER},
+        BoundedDataSet, ChecksumType, DataBound, Error, InnerKey, Result, LZ4_COMPRESSION,
+        NO_COMPRESSION, ZSTD_COMPRESSION,
     },
 };
+
+fn verify_blob_checksum(checksum_type: u8, meta_slice: &[u8], data_slice: &[u8]) -> Result<()> {
+    if checksum_type == ChecksumType::None as u8 {
+        return Ok(());
+    }
+
+    let checksum = LittleEndian::read_u32(meta_slice);
+    let got_checksum = ChecksumType::from(checksum_type).checksum(data_slice);
+    if checksum != got_checksum {
+        Err(Error::InvalidChecksum("blob checksum mismatch".to_owned()))
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct BlobTable {
     file: Option<Arc<dyn File>>,
     preloaded_data: Option<Bytes>,
+    index: Index,
     footer: BlobFooter,
     smallest_key: Bytes,
     biggest_key: Bytes,
@@ -31,6 +49,8 @@ impl BlobTable {
         let size = file.size();
         let footer_data = file.read_footer(Self::footer_size())?;
         footer.unmarshal(&footer_data);
+        let index_data = file.read(footer.index_offset as u64, footer.index_len())?;
+        let index = Index::new_for_blob(index_data)?;
         let props_data = file.read(
             footer.properties_offset as u64,
             footer.properties_len(size as usize),
@@ -53,6 +73,7 @@ impl BlobTable {
         Ok(Self {
             file: Some(file),
             preloaded_data: None,
+            index,
             footer,
             smallest_key,
             biggest_key,
@@ -68,6 +89,11 @@ impl BlobTable {
         }
         let footer_data = &bytes[size - BLOB_TABLE_FOOTER_SIZE..size];
         footer.unmarshal(footer_data);
+
+        let index_data = bytes
+            .slice(footer.index_offset as usize..footer.index_offset as usize + footer.index_len());
+        let index = Index::new_for_blob(index_data)?;
+
         let mut props_data = &bytes[footer.properties_offset as usize
             ..footer.properties_offset as usize + footer.properties_len(size)];
         let mut smallest_key = Bytes::new();
@@ -87,6 +113,7 @@ impl BlobTable {
         Ok(Self {
             file: None,
             preloaded_data: Some(bytes),
+            index,
             footer,
             smallest_key,
             biggest_key,
@@ -110,6 +137,8 @@ impl BlobTable {
             )?;
         let meta_slice = &data.chunk()[..BLOB_ENTRY_META_SIZE];
         let mut data_slice = &data.chunk()[BLOB_ENTRY_META_SIZE..];
+        verify_blob_checksum(self.footer.checksum_type, meta_slice, data_slice)?;
+
         if let Some(encryption_key) = &encryption_key {
             decryption_buf.clear();
             encryption_key.decrypt(
@@ -153,12 +182,16 @@ impl BlobTable {
             ..blob_ref.offset as usize + BLOB_ENTRY_VALUE_OFFSET + blob_ref.len as usize];
         let meta_slice = &data[..BLOB_ENTRY_META_SIZE];
         let mut data_slice = &data[BLOB_ENTRY_META_SIZE..];
+        verify_blob_checksum(self.footer.checksum_type, meta_slice, data_slice)?;
+
         if let Some(encryption_key) = &encryption_key {
             if need_decrypt {
                 decryption_buf.clear();
                 encryption_key.decrypt(
                     data_slice,
-                    self.id(),
+                    // Must use blob_ref.fid instead of self.id(), since self.file is not
+                    // initialized by BlobTable::from_bytes() at preload.
+                    blob_ref.fid,
                     blob_ref.offset,
                     self.encryption_ver,
                     decryption_buf,
@@ -189,13 +222,8 @@ impl BlobTable {
         original_len: u32,
         decompressed_buf: &mut Vec<u8>,
     ) -> Result<bool> {
-        let checksum = LittleEndian::read_u32(meta_slice);
         let compressed_len = LittleEndian::read_u32(&meta_slice[BLOB_ENTRY_LENGTH_OFFSET..]);
         assert_eq!(compressed_len, size);
-        let got_checksum = ChecksumType::from(self.footer.checksum_type).checksum(compressed_data);
-        if checksum != got_checksum {
-            return Err(Error::InvalidChecksum("blob checksum mismatch".to_owned()));
-        }
         match self.footer.compression_type {
             NO_COMPRESSION => Ok(false), // in place decoding
             LZ4_COMPRESSION => {
@@ -230,8 +258,8 @@ impl BlobTable {
             .id()
     }
 
-    pub fn version(&self) -> u64 {
-        self.footer.version
+    pub fn version(&self) -> u16 {
+        self.footer.blob_format_version
     }
 
     pub fn smallest_key(&self) -> InnerKey<'_> {
@@ -252,16 +280,12 @@ impl BlobTable {
         (self.smallest_key(), self.biggest_key())
     }
 
-    pub fn total_blob_size(&self) -> u64 {
+    pub fn total_blob_size(&self) -> u32 {
         self.footer.total_blob_size
     }
 
     pub fn compression_tp(&self) -> u8 {
         self.footer.compression_type
-    }
-
-    pub fn compression_lvl(&self) -> i32 {
-        self.footer.compression_lvl
     }
 
     pub fn min_blob_size(&self) -> u32 {
@@ -272,12 +296,51 @@ impl BlobTable {
         BLOB_TABLE_FOOTER_SIZE
     }
 
+    pub fn meta_offset(&self) -> u32 {
+        self.footer.index_offset
+    }
+
+    pub fn index(&self) -> &Index {
+        &self.index
+    }
+
     pub fn to_blob_create(&self) -> BlobCreate {
         let mut blob_create = BlobCreate::new();
         blob_create.set_id(self.id());
         blob_create.set_smallest(self.smallest_key().to_vec());
         blob_create.set_biggest(self.biggest_key().to_vec());
+        blob_create.set_meta_offset(self.footer.index_offset);
         blob_create
+    }
+
+    pub fn is_sync(&self) -> bool {
+        if let Some(file) = &self.file {
+            file.is_sync()
+        } else {
+            true
+        }
+    }
+
+    pub fn get_remote_segments(
+        &self,
+        data_bound: DataBound<'_>,
+    ) -> Result<(Vec<FileSegmentIdent>, usize /* total_segments */)> {
+        if self.is_sync() {
+            return Ok((vec![], 0));
+        }
+        let Some(file) = &self.file else {
+            return Ok((vec![], 0));
+        };
+
+        let (first_block, exclusive_last_block) = self.index.seek_overlap_blocks(data_bound);
+        let start_off = self.index.get_block_addr(first_block).curr_off as u64;
+        let end_off = if exclusive_last_block < self.index.num_blocks() {
+            self.index.get_block_addr(exclusive_last_block).curr_off as u64
+        } else {
+            self.meta_offset() as u64
+        };
+
+        file.get_remote_segments(&[(start_off, end_off)])
     }
 }
 
@@ -357,6 +420,8 @@ impl BlobPrefetcher {
         let data = &buffer[start_off..start_off + BLOB_ENTRY_VALUE_OFFSET + blob_ref.len as usize];
         let meta_slice = &data[..BLOB_ENTRY_META_SIZE];
         let mut data_slice = &data[BLOB_ENTRY_META_SIZE..];
+        verify_blob_checksum(blob_table.footer.checksum_type, meta_slice, data_slice)?;
+
         if let Some(encryption_key) = &self.encryption_key {
             let encryption_ver = blob_table.encryption_ver;
             self.decryption_buffer.clear();
@@ -391,8 +456,17 @@ mod tests {
     use rstest::rstest;
     use test_util::init_log_for_test;
 
-    use super::BlobTable;
-    use crate::table::{blobtable::BlobRef, file::InMemFile, InnerKey, Value, NO_COMPRESSION};
+    use super::*;
+    use crate::table::{
+        blobtable::{
+            builder::{BlobTableBuilder, BLOB_ENTRY_META_SIZE},
+            BlobRef,
+        },
+        file::InMemFile,
+        Error, InnerKey, Value, LZ4_COMPRESSION, NO_COMPRESSION, ZSTD_COMPRESSION,
+    };
+
+    const BLOB_BLOCK_SIZE: u32 = 32 * 1024;
 
     fn get_blob_text(max_len: usize, rng: &mut ThreadRng) -> String {
         let len = rng.gen_range(1..max_len);
@@ -418,8 +492,14 @@ mod tests {
         } else {
             None
         };
-        let mut builder =
-            super::BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0, encryption_key.clone());
+        let mut builder = BlobTableBuilder::new(
+            1,
+            NO_COMPRESSION,
+            0,
+            0,
+            BLOB_BLOCK_SIZE,
+            encryption_key.clone(),
+        );
         let mut test_data = Vec::new();
         let meta: u8 = 0;
 
@@ -434,7 +514,7 @@ mod tests {
         }
 
         let file = InMemFile::new(1, builder.finish());
-        let table = super::BlobTable::new(Arc::new(file)).unwrap();
+        let table = BlobTable::new(Arc::new(file)).unwrap();
         let mut decryption_buf = vec![];
         for td in test_data {
             let blob = table
@@ -451,6 +531,80 @@ mod tests {
         EncryptionKey::new(b"cipher".to_vec(), b"plain".to_vec(), 0)
     }
 
+    /// Test preloaded functionality with different compression and
+    /// encryption settings
+    #[rstest]
+    #[case::enable_encryption_no_compression(true, NO_COMPRESSION)]
+    #[case::enable_encryption_compression(true, ZSTD_COMPRESSION)]
+    #[case::disable_encryption_no_compression(false, NO_COMPRESSION)]
+    #[case::disable_encryption_compression(false, ZSTD_COMPRESSION)]
+    fn test_preloaded(#[case] enable_encryption: bool, #[case] compression_type: u8) {
+        test_util::init_log_for_test();
+        let encryption_key = if enable_encryption {
+            Some(new_test_encryption_key())
+        } else {
+            None
+        };
+
+        let mut builder = BlobTableBuilder::new(
+            1,
+            compression_type,
+            0,
+            0,
+            BLOB_BLOCK_SIZE,
+            encryption_key.clone(),
+        );
+
+        // Add test data
+        let test_data = b"test_data".to_vec();
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+        let blob_ref = builder.add(InnerKey::from_inner_buf(b"test_key"), &value);
+
+        // Create a preloaded table from the blob data
+        let table_data = builder.finish();
+        let table = BlobTable::from_bytes(table_data).unwrap();
+
+        // Buffers needed for decompression and decryption
+        let mut decompress_buf = vec![];
+        let mut decrypt_buf = vec![];
+
+        // Test retrieval using get_from_preloaded
+        let result = table.get_from_preloaded(
+            &blob_ref,
+            true,
+            true,
+            &mut decompress_buf,
+            &mut decrypt_buf,
+            encryption_key.clone(),
+        );
+
+        // Verify the result
+        assert!(result.is_ok(), "Data retrieval should succeed");
+        let retrieved_value = result.unwrap();
+        assert_eq!(
+            retrieved_value,
+            test_data.as_slice(),
+            "Retrieved data should match original"
+        );
+
+        // Verify that buffer reuse works by using the same buffers again
+        let result2 = table.get_from_preloaded(
+            &blob_ref,
+            true,
+            true,
+            &mut decompress_buf,
+            &mut decrypt_buf,
+            encryption_key,
+        );
+        assert!(result2.is_ok(), "Second retrieval should succeed");
+        assert_eq!(
+            result2.unwrap(),
+            test_data.as_slice(),
+            "Second retrieval should match original"
+        );
+    }
+
     #[rstest]
     #[case::enable_encryption(true)]
     #[case::disable_encryption(false)]
@@ -461,8 +615,14 @@ mod tests {
         } else {
             None
         };
-        let mut builder =
-            super::BlobTableBuilder::new(1, NO_COMPRESSION, 0, 0, encryption_key.clone());
+        let mut builder = BlobTableBuilder::new(
+            1,
+            NO_COMPRESSION,
+            0,
+            0,
+            BLOB_BLOCK_SIZE,
+            encryption_key.clone(),
+        );
         let mut offsets = Vec::new();
         for i in 0..100 {
             let key_str = format!("key_{:03}", i);
@@ -475,14 +635,301 @@ mod tests {
             offsets.push(blob_ref);
         }
         let file = InMemFile::new(1, builder.finish());
-        let table = super::BlobTable::new(Arc::new(file)).unwrap();
-        let blob_tables: HashMap<u64, BlobTable> = [(1, table)].into();
-        let mut prefetcher =
-            super::BlobPrefetcher::new(Arc::new(blob_tables), 1000, encryption_key);
+        let table = BlobTable::new(Arc::new(file)).unwrap();
+        let blob_tables: HashMap<u64, BlobTable> = [(1, table.clone())].into();
+        let mut prefetcher = BlobPrefetcher::new(Arc::new(blob_tables), 1000, encryption_key);
         for i in 0..100 {
             let expected_val = format!("val_{:03}", i);
             let val = prefetcher.get(&offsets[i]).unwrap();
             assert_eq!(val, expected_val.as_bytes());
         }
+    }
+
+    /// Test compression with different types and levels
+    #[test]
+    fn test_blob_compression_effectiveness() {
+        // Create highly compressible data (repeating pattern)
+        let test_data = vec![b'a'; 10000];
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+
+        // Test different compression configurations
+        let configs = [
+            (NO_COMPRESSION, 0, "no compression"),
+            (LZ4_COMPRESSION, 1, "LZ4 low level"),
+            (LZ4_COMPRESSION, 9, "LZ4 high level"),
+            (ZSTD_COMPRESSION, 1, "ZSTD low level"),
+            (ZSTD_COMPRESSION, 9, "ZSTD high level"),
+        ];
+
+        // Store compression results for comparison
+        let mut results = Vec::new();
+
+        for &(compression_type, compression_level, desc) in &configs {
+            let mut builder = BlobTableBuilder::new(
+                1,
+                compression_type,
+                compression_level,
+                0,
+                BLOB_BLOCK_SIZE,
+                None,
+            );
+            let blob_ref = builder.add(InnerKey::from_inner_buf(b"test_key"), &value);
+
+            let file = Arc::new(InMemFile::new(1, builder.finish()));
+            let table = BlobTable::new(file).unwrap();
+            let mut decryption_buf = vec![];
+
+            let decompressed = table.get(&blob_ref, &mut decryption_buf, None).unwrap();
+            assert_eq!(decompressed, test_data, "Data corrupted with {}", desc);
+
+            // Record compressed size for comparison
+            results.push((compression_type, compression_level, blob_ref.len, desc));
+        }
+
+        // Find uncompressed size as baseline
+        let uncompressed_size = results
+            .iter()
+            .find(|&&(tp, ..)| tp == NO_COMPRESSION)
+            .map(|&(_, _, size, _)| size)
+            .unwrap();
+
+        // Verify compression effectiveness
+        for &(tp, level, size, desc) in &results {
+            if tp == NO_COMPRESSION {
+                continue;
+            }
+
+            // All compression should be better than no compression
+            assert!(
+                size < uncompressed_size,
+                "{} (size: {}) should be smaller than uncompressed (size: {})",
+                desc,
+                size,
+                uncompressed_size
+            );
+
+            // High compression levels should be better than or equal to low levels
+            if level == 9 {
+                let low_level_size = results
+                    .iter()
+                    .find(|&&(t, l, ..)| t == tp && l == 1)
+                    .map(|&(_, _, s, _)| s)
+                    .unwrap();
+
+                assert!(
+                    size <= low_level_size,
+                    "High level {} (size: {}) should be smaller than or equal to low level (size: {})",
+                    desc,
+                    size,
+                    low_level_size
+                );
+            }
+        }
+
+        // Compare different algorithms (optional, as one might not always be better)
+        let lz4_high = results
+            .iter()
+            .find(|&&(tp, level, ..)| tp == LZ4_COMPRESSION && level == 9)
+            .map(|&(_, _, size, _)| size)
+            .unwrap();
+
+        let zstd_high = results
+            .iter()
+            .find(|&&(tp, level, ..)| tp == ZSTD_COMPRESSION && level == 9)
+            .map(|&(_, _, size, _)| size)
+            .unwrap();
+
+        // Note that zstd does not always better, as it depends on data
+        // characteristics. But in this test workload, it works better.
+        assert!(zstd_high < lz4_high);
+    }
+
+    /// Test data integrity with corrupted blobs using different access methods
+    #[rstest]
+    #[case::enable_encryption_no_compression(true, NO_COMPRESSION)]
+    #[case::enable_encryption_compression(true, ZSTD_COMPRESSION)]
+    #[case::disable_encryption_no_compression(false, NO_COMPRESSION)]
+    #[case::disable_encryption_compression(false, ZSTD_COMPRESSION)]
+    fn test_blob_data_integrity(#[case] enable_encryption: bool, #[case] compression_type: u8) {
+        let encryption_key = if enable_encryption {
+            Some(new_test_encryption_key())
+        } else {
+            None
+        };
+
+        // Setup common test data
+        let mut builder = BlobTableBuilder::new_with_checksum_type(
+            1,
+            compression_type,
+            0,
+            0,
+            BLOB_BLOCK_SIZE,
+            encryption_key.clone(),
+            ChecksumType::Crc32,
+        );
+
+        let test_data = b"test_data".to_vec();
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+        let blob_ref = builder.add(InnerKey::from_inner_buf(b"test_key"), &value);
+
+        // Corrupt the data
+        let mut file_data = builder.finish().to_vec();
+        let corrupt_pos = blob_ref.offset as usize + BLOB_ENTRY_META_SIZE;
+        file_data[corrupt_pos] ^= 0xFF; // Flip some bits
+
+        // Test Method 1: Standard Access
+        {
+            let file = Arc::new(InMemFile::new(1, Bytes::from(file_data.clone())));
+            let table = BlobTable::new(file).unwrap();
+            let mut decryption_buf = vec![];
+
+            let result = table.get(&blob_ref, &mut decryption_buf, None);
+            assert!(
+                result.is_err(),
+                "Standard access: Should detect corrupted data"
+            );
+            assert!(matches!(result, Err(Error::InvalidChecksum(_))));
+        }
+
+        // Test Method 2: Preloaded Access
+        {
+            let table = BlobTable::from_bytes(Bytes::from(file_data.clone())).unwrap();
+            let mut decompress_buf = vec![];
+            let mut decrypt_buf = vec![];
+
+            let result = table.get_from_preloaded(
+                &blob_ref,
+                compression_type != NO_COMPRESSION,
+                enable_encryption,
+                &mut decompress_buf,
+                &mut decrypt_buf,
+                encryption_key.clone(),
+            );
+            assert!(
+                result.is_err(),
+                "Preloaded access: Should detect corrupted data"
+            );
+            assert!(matches!(result, Err(Error::InvalidChecksum(_))));
+        }
+
+        // Test Method 3: Prefetched Access
+        {
+            let file = Arc::new(InMemFile::new(1, Bytes::from(file_data.clone())));
+            let table = BlobTable::new(file).unwrap();
+            let blob_tables: HashMap<u64, BlobTable> = [(1, table)].into();
+            let mut prefetcher = BlobPrefetcher::new(Arc::new(blob_tables), 1000, encryption_key);
+
+            let result = prefetcher.get(&blob_ref);
+            assert!(
+                result.is_err(),
+                "Prefetched access: Should detect corrupted data"
+            );
+            assert!(matches!(result, Err(Error::InvalidChecksum(_))));
+        }
+    }
+
+    /// Test boundary keys (smallest_key and biggest_key methods)
+    #[test]
+    fn test_blob_table_boundary_keys() {
+        // Create a blob table with multiple entries in specific order
+        let mut builder = BlobTableBuilder::new(1, 0, 0, 0, BLOB_BLOCK_SIZE, None);
+
+        // Adding keys in non-sorted order to test the boundary keys
+        let small_key = InnerKey::from_inner_buf(b"aaa_small_key");
+        let medium_key = InnerKey::from_inner_buf(b"mmm_medium_key");
+        let large_key = InnerKey::from_inner_buf(b"zzz_large_key");
+
+        // Add test data for each key
+        let test_data = b"test_data".to_vec();
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+
+        // Add entries in mixed order
+        builder.add(medium_key, &value);
+        builder.add(large_key, &value);
+        builder.add(small_key, &value);
+
+        // Create the blob table
+        let file_data = builder.finish();
+        let file = Arc::new(InMemFile::new(1, file_data.clone()));
+        let table = BlobTable::new(file).unwrap();
+
+        // Test smallest_key and biggest_key methods
+        assert_eq!(
+            table.smallest_key(),
+            small_key,
+            "smallest_key should return the lexicographically smallest key"
+        );
+        assert_eq!(
+            table.biggest_key(),
+            large_key,
+            "biggest_key should return the lexicographically largest key"
+        );
+    }
+
+    #[test]
+    fn test_blob_table_getters() {
+        // Create a blob table with specific properties
+        let mut builder = BlobTableBuilder::new_with_checksum_type(
+            42,               // specific id
+            ZSTD_COMPRESSION, // specific compression type
+            3,                // compression level
+            1024,             // min blob size
+            BLOB_BLOCK_SIZE,  // block size
+            None,
+            ChecksumType::Crc32,
+        );
+
+        // Add some test data to ensure non-zero total_blob_size
+        let test_data = vec![b'x'; 2048]; // 2KB data
+        let encoded = Value::encode_buf(0, &[0], 0, &test_data);
+        let value = Value::decode(encoded.as_slice());
+        builder.add(InnerKey::from_inner_buf(b"test_key"), &value);
+
+        let file = Arc::new(InMemFile::new(42, builder.finish()));
+        let table = BlobTable::new(file).unwrap();
+
+        // Test all getter methods
+        assert_eq!(table.id(), 42, "id() should return correct file id");
+        assert_eq!(
+            table.version(),
+            BLOB_FORMAT_V1,
+            "version() should return correct version"
+        );
+        assert!(table.size() > 0, "size() should return non-zero value");
+        assert!(
+            table.total_blob_size() > 0,
+            "total_blob_size() should return non-zero value"
+        );
+        assert_eq!(
+            table.compression_tp(),
+            ZSTD_COMPRESSION,
+            "compression_tp() should return correct type"
+        );
+        assert_eq!(
+            table.min_blob_size(),
+            1024,
+            "min_blob_size() should return correct value"
+        );
+        assert_eq!(
+            BlobTable::footer_size(),
+            BLOB_TABLE_FOOTER_SIZE,
+            "footer_size() should return correct size"
+        );
+
+        // Test smallest_biggest_key() returns same as individual getters
+        let (small, big) = table.smallest_biggest_key();
+        assert_eq!(
+            small,
+            table.smallest_key(),
+            "smallest_key from tuple should match direct getter"
+        );
+        assert_eq!(
+            big,
+            table.biggest_key(),
+            "biggest_key from tuple should match direct getter"
+        );
     }
 }

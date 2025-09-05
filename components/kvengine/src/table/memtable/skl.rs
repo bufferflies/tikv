@@ -1511,4 +1511,94 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_large_values() {
+        let l = SkipList::new(None);
+        let mut wb = WriteBatch::new();
+
+        // Create multiple 1MB values
+        let num_large_values = 101;
+        let value_size = 1024 * 1024; // 1MB
+        let large_value = vec![b'x'; value_size];
+
+        // Insert large values with some small values in between
+        for i in 0..num_large_values * 2 {
+            let key = format!("key{:06}", i);
+            let value = if i % 2 == 0 {
+                large_value.clone()
+            } else {
+                let small_val = format!("small_value_{}", i);
+                small_val.into_bytes()
+            };
+
+            wb.put(
+                InnerKey::from_inner_buf(key.as_bytes()),
+                0,
+                &[0],
+                i as u64,
+                &value,
+            );
+            l.put_batch_impl(&mut wb, None, 0);
+            wb.reset();
+        }
+
+        // Verify values through iterator
+        let mut it = l.new_iterator(false);
+        it.rewind();
+
+        for i in 0..num_large_values * 2 {
+            assert!(it.valid(), "Iterator became invalid at i={}", i);
+
+            let key = it.key();
+            let key_bytes = key.deref();
+            let actual_key = String::from_utf8_lossy(key_bytes);
+            let expected_key = format!("key{:06}", i);
+
+            assert_eq!(
+                key_bytes,
+                expected_key.as_bytes(),
+                "Key mismatch at i={}, expected={}, got={}",
+                i,
+                expected_key,
+                actual_key
+            );
+
+            let value = it.value();
+            if i % 2 == 0 {
+                // Verify large value
+                assert_eq!(value.get_value().len(), value_size);
+                assert!(value.get_value().iter().all(|&b| b == b'x'));
+            } else {
+                // Verify small value
+                let value_bytes = value.get_value();
+                let expected_value = format!("small_value_{}", i);
+                assert_eq!(value_bytes, expected_value.as_bytes());
+            }
+
+            it.next();
+        }
+        assert!(!it.valid(), "Iterator should be invalid after all elements");
+
+        // Verify random access
+        let mut h = Hint::new();
+        for i in 0..num_large_values * 2 {
+            let key = format!("key{:06}", i);
+            let value = l.get_with_hint(key.as_bytes(), i as u64, &mut h);
+
+            if i % 2 == 0 {
+                // Verify large value
+                assert_eq!(value.get_value().len(), value_size);
+                assert!(value.get_value().iter().all(|&b| b == b'x'));
+            } else {
+                // Verify small value
+                assert_eq!(value.get_value(), format!("small_value_{}", i).as_bytes());
+            }
+        }
+
+        // Test memory usage
+        let total_expected_size =
+            (num_large_values * value_size) as u64 + (num_large_values * 20) as u64; // Approximate size for small values
+        assert!(l.size() >= total_expected_size);
+    }
 }

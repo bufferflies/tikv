@@ -30,7 +30,7 @@ use crate::{
     ia::types::FileSegmentIdent,
     limiter::RegionLimiter,
     table::{
-        blobtable::blobtable::BlobPrefetcher,
+        blobtable::blobtable::{BlobPrefetcher, BlobTable},
         columnar::{
             filter::TableScanCtx, ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader,
             ColumnarReader, ColumnarRowTableReader, ColumnarTableReader, HANDLE_COL_ID,
@@ -1750,16 +1750,24 @@ impl SnapAccessCore {
 
         let mut segments = vec![];
         let mut total_segments = 0;
-        let tables = self.get_overlap_async_tables(data_bound);
-        for t in tables {
+        let (sstables, blob_tables) = self.get_overlap_async_tables(data_bound);
+        for t in sstables {
             let (segs, total) = t.get_remote_segments(data_bound)?;
             segments.extend(segs.into_iter().map(|ident| (ident, FileType::Sst)));
+            total_segments += total;
+        }
+        for blob_table in blob_tables {
+            let (segs, total) = blob_table.get_remote_segments(data_bound)?;
+            segments.extend(segs.into_iter().map(|ident| (ident, FileType::Blob)));
             total_segments += total;
         }
         Ok((segments, total_segments))
     }
 
-    fn get_overlap_async_tables(&self, data_bound: DataBound<'_>) -> Vec<SsTable> {
+    fn get_overlap_async_tables(
+        &self,
+        data_bound: DataBound<'_>,
+    ) -> (Vec<SsTable>, Vec<BlobTable>) {
         let mut tables = vec![];
         for lh in &self.data.cfs[WRITE_CF].levels {
             let (left, right) = data_bound.get_overlap_data_sets(&lh.tables);
@@ -1769,7 +1777,13 @@ impl SnapAccessCore {
                 }
             }
         }
-        tables
+        let mut blob_tables = vec![];
+        for blob_table in self.data.blob_tbl_map.values() {
+            if !blob_table.is_sync() {
+                blob_tables.push(blob_table.clone());
+            }
+        }
+        (tables, blob_tables)
     }
 
     pub fn get_columnar_table_ids(&self) -> Vec<i64> {
