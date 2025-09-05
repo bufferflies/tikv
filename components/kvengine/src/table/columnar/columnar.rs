@@ -995,8 +995,16 @@ impl ColumnBuffer {
             }
         }
         if self.nullable {
-            self.nulls
-                .extend_from_slice(&other.nulls[row_offset..row_end_offset]);
+            // `self` is create from schema, `other` is create from table_meta with old
+            // schema. Old schema in table_meta maybe not nullable. In this case, we should
+            // extend the nulls with 0.
+            if other.nullable {
+                self.nulls
+                    .extend_from_slice(&other.nulls[row_offset..row_end_offset]);
+            } else {
+                self.nulls
+                    .resize(self.nulls.len() + row_end_offset - row_offset, 0);
+            }
         }
     }
 

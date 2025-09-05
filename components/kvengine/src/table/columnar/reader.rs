@@ -2072,6 +2072,10 @@ pub mod tests {
     }
 
     pub fn new_schema(table_id: i64, common_handle: bool) -> Schema {
+        new_schema_with_nullable(table_id, common_handle, true)
+    }
+
+    pub fn new_schema_with_nullable(table_id: i64, common_handle: bool, nullable: bool) -> Schema {
         let handle_column = if common_handle {
             new_common_handle_column_info()
         } else {
@@ -2083,6 +2087,9 @@ pub mod tests {
         let mut col_2 = new_column_info(2);
         col_2.set_tp(FieldTypeTp::VarChar as i32);
         col_2.set_collation(Utf8Mb4GeneralCi as i32);
+        if !nullable {
+            col_2.set_flag(FieldTypeFlag::NOT_NULL.bits() as i32);
+        }
         let columns = vec![col_1, col_2];
         Schema::new(SchemaBuf::new(
             table_id,

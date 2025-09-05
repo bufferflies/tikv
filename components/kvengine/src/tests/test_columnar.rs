@@ -26,7 +26,8 @@ use crate::{
     table::{
         columnar::{
             tests::{
-                build_table, i_to_common_handle, merge_refs, new_schema, verify_with_ref_rows,
+                build_table, i_to_common_handle, merge_refs, new_schema, new_schema_with_nullable,
+                verify_with_ref_rows,
             },
             Block, ColumnarFile, ColumnarFilterReader, ColumnarLevels, ColumnarReader,
             ColumnarRowTableReader, MinMaxIndex,
@@ -1176,4 +1177,87 @@ fn new_sst_table_for_columnar(
     runtime.block_on(fs.create(id, data.clone(), opts)).unwrap();
     let file = InMemFile::new(id, data);
     SsTable::new(Arc::new(file), BlockCache::None, None).unwrap()
+}
+
+#[test]
+fn test_columnar_not_nullable_to_nullable() {
+    ::test_util::init_log_for_test();
+    let keyspace_id = 1;
+    let table_id = 30;
+    let table_id2 = 31;
+    let mut file_id = 100;
+    let mut allocate_id = || {
+        file_id += 1;
+        file_id
+    };
+    let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
+    let shard = engine.get_shard(shard_id).unwrap();
+    let schema = new_schema_with_nullable(table_id, true, false);
+    let schemas = vec![schema.clone()];
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
+    let fs = engine.fs.clone();
+    let schema_raw_file = Arc::new(InMemFile::new(allocate_id(), Bytes::from(schema_file_data)));
+    fs.get_runtime()
+        .block_on(
+            fs.create(
+                schema_raw_file.id(),
+                schema_raw_file
+                    .read(0, schema_raw_file.size() as usize)
+                    .unwrap(),
+                dfs::Options::default().with_type(FileType::Schema),
+            ),
+        )
+        .unwrap();
+    let schema_file = SchemaFile::open(schema_raw_file).unwrap();
+    let opts = dfs::Options::default().with_type(FileType::Columnar);
+    let (l0_tbl_0, _) = build_table(allocate_id(), &schema, 0, 600, 300);
+    let (l0_tbl_1, _) = build_table(allocate_id(), &schema, 300, 900, 400);
+    for file in [&l0_tbl_0, &l0_tbl_1] {
+        info!("build file_id: {}, file size: {}", file.id(), file.size());
+        fs.get_runtime()
+            .block_on(fs.create(file.id(), file.read(0, file.size() as usize).unwrap(), opts))
+            .unwrap()
+    }
+
+    let mut col_levels = ColumnarLevels::new();
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1).unwrap());
+
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
+    builder.set_columnar_levels(col_levels);
+    builder.set_columnar_table_ids(vec![table_id, table_id2]);
+    shard.set_data(builder.build());
+    shard.initial_flushed.store(true, Ordering::SeqCst);
+    let id_ver = shard.id_ver();
+    *shard.compaction_priority.write().unwrap() =
+        Some(CompactionPriority::ColumnarL0 { score: 2.0 });
+    engine.trigger_compact(id_ver);
+    info!("trigger columnar l0 compaction {}", shard.tag());
+    let ok = try_wait(
+        || {
+            info!(
+                "wait columnar l0 compaction {} l0 files: {}, l1 files: {}",
+                shard.tag(),
+                shard.get_data().col_levels.levels[0].files.len(),
+                shard.get_data().col_levels.levels[1].files.len()
+            );
+            shard.get_data().col_levels.levels[0].files.is_empty()
+        },
+        COLUMNAR_COMPACTION_WAIT_TIME,
+    );
+    assert!(ok, "columnar l0 compaction failed");
+    let snap = shard.new_snap_access();
+    // Read with schema with nullable columns.
+    let new_schema = new_schema_with_nullable(table_id, true, true);
+    let mut mvcc_reader = snap
+        .new_columnar_mvcc_reader(table_id, &new_schema.columns, None, 500, None)
+        .unwrap()
+        .unwrap();
+    block_on(mvcc_reader.set_handle_range(&i_to_common_handle(0), &i_to_common_handle(2100)))
+        .unwrap();
+    let mut block = Block::new(&schema);
+    block_on(mvcc_reader.read_block(&mut block, usize::MAX)).unwrap();
 }
