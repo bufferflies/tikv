@@ -24,7 +24,7 @@ pub use error::{Error, Result};
 use futures::{future, SinkExt, TryFutureExt, TryStreamExt};
 use grpcio::{DuplexSink, RequestStream, RpcContext, RpcStatus, RpcStatusCode, UnarySink};
 use http::StatusCode;
-use kvengine::{Shard, ShardMeta, WRITE_CF};
+use kvengine::{table::SnapVersion, Shard, ShardMeta, WRITE_CF};
 use kvproto::{
     cdcpb,
     cdcpb::{ChangeDataEvent, ChangeDataRequest},
@@ -181,6 +181,7 @@ pub enum CdcMsg {
     ScanLocksResult {
         region_id: u64,
         locks: Result<Vec<(Vec<u8>, TimeStamp)>>,
+        snap_version: SnapVersion,
     },
     Applied {
         region_id: u64,

@@ -4,13 +4,14 @@ use std::{fmt, mem};
 
 use cdc::{CdcEvent, Conn, ConnId, Sink};
 use collections::HashMap;
+use kvengine::{table::SnapVersion, IdVer, ShardTag};
 use kvproto::cdcpb;
 use log_wrappers::Value as LogValue;
 use resolved_ts::Resolver;
-use tikv_util::{debug, warn};
+use tikv_util::{debug, error, info, warn};
 use txn_types::TimeStamp;
 
-use crate::{error::Result, util::build_request_range};
+use crate::{error::Result, util::build_request_range, Error};
 
 /// An identifier of a ChangeDataRequest.
 ///
@@ -131,25 +132,33 @@ pub(crate) enum PendingLock {
 
 pub(crate) enum RegionResolver {
     Resolver(Resolver),
-    Pending { locks: Vec<PendingLock>, bytes: u64 },
+    Pending {
+        locks: Vec<PendingLock>,
+        bytes: u64,
+        snap_version: SnapVersion,
+    },
 }
 
 impl RegionResolver {
-    pub(crate) fn new_pending() -> Self {
+    pub(crate) fn new_pending(snap_version: SnapVersion) -> Self {
         RegionResolver::Pending {
             locks: vec![],
             bytes: 0,
+            snap_version,
         }
     }
 
-    fn is_pending(&self) -> bool {
-        matches!(self, RegionResolver::Pending { .. })
+    fn is_pending_with_snap_version(&self, expect_snap_version: SnapVersion) -> bool {
+        match self {
+            RegionResolver::Pending { snap_version, .. } => *snap_version == expect_snap_version,
+            _ => false,
+        }
     }
 
     pub fn track_lock(&mut self, start_ts: TimeStamp, key: Vec<u8>) -> Result<()> {
         match self {
             RegionResolver::Resolver(resolver) => resolver.track_lock(start_ts, key, None),
-            RegionResolver::Pending { locks, bytes } => {
+            RegionResolver::Pending { locks, bytes, .. } => {
                 // TODO: handle OOM.
                 *bytes =
                     bytes.saturating_add(key.len() as u64 + mem::size_of::<TimeStamp>() as u64);
@@ -162,7 +171,7 @@ impl RegionResolver {
     pub fn untrack_lock(&mut self, key: &[u8]) -> Result<()> {
         match self {
             RegionResolver::Resolver(resolver) => resolver.untrack_lock(key, None),
-            RegionResolver::Pending { locks, bytes } => {
+            RegionResolver::Pending { locks, bytes, .. } => {
                 *bytes = bytes.saturating_add(key.len() as u64);
                 locks.push(PendingLock::Untrack { key: key.to_vec() });
             }
@@ -215,20 +224,24 @@ impl RegionResolver {
 
 /// A CDC delegate of a region.
 pub(crate) struct RegionDelegate {
-    pub(crate) keyspace_id: u32,
+    pub(crate) merged_store_id: u64,
     pub(crate) region_id: u64,
     pub(crate) requests: RegionRequests,
     pub(crate) resolver: Option<RegionResolver>,
 }
 
 impl RegionDelegate {
-    pub(crate) fn new(keyspace_id: u32, region_id: u64) -> Self {
+    pub(crate) fn new(merged_store_id: u64, region_id: u64) -> Self {
         Self {
-            keyspace_id,
+            merged_store_id,
             region_id,
             requests: RegionRequests::default(),
             resolver: None,
         }
+    }
+
+    fn tag(&self) -> ShardTag {
+        ShardTag::new(self.merged_store_id, IdVer::new(self.region_id, 0))
     }
 
     pub(crate) fn broadcast_error(&self, error: cdcpb::Error, conns: &HashMap<ConnId, Conn>) {
@@ -247,8 +260,7 @@ impl RegionDelegate {
                 .get_sink()
                 .unbounded_send(CdcEvent::Event(event.clone()), true)
             {
-                warn!("{} failed to send error event", self.region_id;
-                    "keyspace" => self.keyspace_id,
+                warn!("{} failed to send error event", self.tag();
                     "conn" => ?req_key.conn_id,
                     "request" => %req_key.request_id,
                     "err" => ?err);
@@ -256,15 +268,47 @@ impl RegionDelegate {
         }
     }
 
-    pub(crate) fn handle_scan_locks(&mut self, locks: Vec<(Vec<u8>, TimeStamp)>) {
-        let pending_resolver = self.resolver.take().unwrap_or_else(|| {
-            panic!("{} handle_scan_locks: resolver is None", self.region_id);
-        });
-        if !pending_resolver.is_pending() {
-            panic!("{} handle_scan_locks: resolver not pending", self.region_id);
+    pub(crate) fn handle_scan_locks(
+        &mut self,
+        locks: Vec<(Vec<u8>, TimeStamp)>,
+        snap_version: SnapVersion,
+    ) {
+        let Some(cur_resolver) = self.resolver.take() else {
+            // For the case when first scan failed then receive a second one.
+            // As pending locks are dropped, the result can not be used.
+            warn!("{} handle_scan_locks: drop scan result", self.tag());
+            return;
+        };
+        if cur_resolver.is_pending_with_snap_version(snap_version) {
+            let resolver = cur_resolver.to_resolver(self.region_id, locks);
+            self.resolver = Some(resolver);
+        } else {
+            info!("{} handle_scan_locks: drop stale scan result", self.tag(); "snap_version" => snap_version);
         }
-        let resolver = pending_resolver.to_resolver(self.region_id, locks);
-        self.resolver = Some(resolver);
+    }
+
+    pub(crate) fn handle_scan_locks_error(
+        &mut self,
+        err: &Error,
+        snap_version: SnapVersion,
+        conns: &HashMap<ConnId, Conn>,
+    ) {
+        if self
+            .resolver
+            .as_ref()
+            .is_some_and(|r| r.is_pending_with_snap_version(snap_version))
+        {
+            error!("{} handle_scan_locks: failed", self.tag(); "err" => ?err);
+            self.resolver = None;
+
+            let mut cdc_err = cdcpb::Error::default();
+            cdc_err
+                .mut_server_is_busy()
+                .set_reason(format!("scan locks failed: {:?}", err));
+            self.broadcast_error(cdc_err, conns);
+        } else {
+            info!("{} handle_scan_locks: drop stale scan error", self.tag(); "snap_version" => snap_version, "err" => ?err);
+        }
     }
 
     pub(crate) fn unsubscribe(
@@ -293,7 +337,7 @@ impl RegionDelegate {
                 ..Default::default()
             };
             if let Err(e) = sink.unbounded_send(CdcEvent::Event(event), true) {
-                warn!("{} unsubscribe: send event failed", self.region_id; "request" => %request_id, "err" => ?e);
+                warn!("{} unsubscribe: send event failed", self.tag(); "request" => %request_id, "err" => ?e);
             }
         }
     }

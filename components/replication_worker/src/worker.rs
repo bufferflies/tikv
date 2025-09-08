@@ -22,7 +22,7 @@ use http::Request;
 use hyper::{http, Body, StatusCode};
 use kvengine::{
     dfs::{Dfs, S3Fs},
-    table::InnerKey,
+    table::{InnerKey, SnapVersion},
     Engine, IdVer, ShardMeta, ShardTag, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
 };
 use kvproto::{
@@ -245,9 +245,15 @@ impl ReplicationWorker {
         Ok(worker)
     }
 
+    #[inline]
+    fn merged_store_id(&self) -> u64 {
+        self.ctx.config.merged_store_id
+    }
+
+    #[inline]
     fn get_region_tag(&self, region_id: u64, region_version: u64) -> ShardTag {
         ShardTag::new(
-            self.ctx.config.merged_store_id,
+            self.merged_store_id(),
             IdVer::new(region_id, region_version),
         )
     }
@@ -347,8 +353,12 @@ impl ReplicationWorker {
                 let res = self.handle_register_result(event, conn_id, initialized);
                 self.handle_result(res, "register_result");
             }
-            CdcMsg::ScanLocksResult { region_id, locks } => {
-                let res = self.handle_scan_locks_result(region_id, locks);
+            CdcMsg::ScanLocksResult {
+                region_id,
+                locks,
+                snap_version,
+            } => {
+                let res = self.handle_scan_locks_result(region_id, locks, snap_version);
                 self.handle_result(res, "scan_locks_result");
             }
             CdcMsg::Deregister(deregister) => {
@@ -449,6 +459,7 @@ impl ReplicationWorker {
     }
 
     fn handle_register(&mut self, request: ChangeDataRequest, conn_id: ConnId) -> Result<()> {
+        let merged_store_id = self.merged_store_id();
         let region_id = request.region_id;
         let Some(shard) = self.merged_engine.get_kv().get_shard(request.region_id) else {
             self.send_region_not_found(conn_id, &request);
@@ -458,15 +469,18 @@ impl ReplicationWorker {
             self.send_epoch_not_match(conn_id, &request);
             return Ok(());
         }
-        info!("cdc register"; "req" => ?request, "conn" => ?conn_id);
+        let tag = shard.tag();
+        info!("{} cdc register", tag; "req" => ?request, "conn" => ?conn_id);
         let delegate = self
             .region_delegates
             .entry(region_id)
-            .or_insert_with(|| RegionDelegate::new(shard.keyspace_id, region_id));
+            .or_insert_with(|| RegionDelegate::new(merged_store_id, region_id));
 
         let snap_access = shard.new_snap_access();
         if delegate.resolver.is_none() {
-            delegate.resolver = Some(RegionResolver::new_pending());
+            delegate.resolver = Some(RegionResolver::new_pending(
+                snap_access.get_mem_table_snap_version(),
+            ));
             let snap_access = snap_access.clone();
             let mut locks_handler = ScanLocksHandler::new(snap_access, self.tx.clone());
             self.runtime.spawn_blocking(move || {
@@ -536,6 +550,7 @@ impl ReplicationWorker {
         &mut self,
         region_id: u64,
         locks: Result<Vec<(Vec<u8>, TimeStamp)>>,
+        snap_version: SnapVersion,
     ) -> Result<()> {
         let Some(delegate) = self.region_delegates.get_mut(&region_id) else {
             warn!(
@@ -547,17 +562,10 @@ impl ReplicationWorker {
 
         match locks {
             Ok(locks) => {
-                delegate.handle_scan_locks(locks);
+                delegate.handle_scan_locks(locks, snap_version);
             }
             Err(err) => {
-                error!("{} handle_scan_locks_result: scan locks error", region_id; "err" => ?err);
-                delegate.resolver = None;
-
-                let mut cdc_err = cdcpb::Error::default();
-                cdc_err
-                    .mut_server_is_busy()
-                    .set_reason(format!("scan locks failed: {:?}", err));
-                delegate.broadcast_error(cdc_err, &self.conns);
+                delegate.handle_scan_locks_error(&err, snap_version, &self.conns);
             }
         }
 
@@ -1523,10 +1531,12 @@ impl ScanLocksHandler {
         let region_id = self.snap_access.get_id();
         let res = self.scan_locks_impl();
         let locks = res.map(|_| mem::take(&mut self.locks));
-        if let Err(e) = self
-            .sender
-            .send(CdcMsg::ScanLocksResult { region_id, locks })
-        {
+        let snap_version = self.snap_access.get_mem_table_snap_version();
+        if let Err(e) = self.sender.send(CdcMsg::ScanLocksResult {
+            region_id,
+            locks,
+            snap_version,
+        }) {
             warn!("{} failed to send scan locks result", self.snap_access.get_tag(); "err" => ?e);
         }
     }
