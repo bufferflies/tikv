@@ -260,6 +260,8 @@ fn test_random_replication() {
     info!("restart replication worker");
     worker = CloudWorker::new(worker_conf.clone(), None, 2, pd_client.clone());
     worker.start();
+
+    info!("delete workload");
     for i in 4..=8 {
         let sql = format!("delete from `{table_name}` where id = {i}");
         block_on(sqlx::query(&sql).execute(&pool)).unwrap();
@@ -284,6 +286,7 @@ fn test_random_replication() {
     assert_eq!(result.len(), 5);
 
     // Remove task.
+    info!("remove task");
     let remove_task_url = format!(
         "{}/api/v2/changefeeds/{changefeed_id}?keyspace_id=1",
         worker_base_url
@@ -296,6 +299,7 @@ fn test_random_replication() {
     assert!(!resp.contains(changefeed_id));
 
     // Remove keyspace.
+    info!("remove keyspace");
     let remove_keyspace_url = format!("{worker_base_url}/keyspace?keyspace_id=1");
     dispatch_http(
         &worker_client,
@@ -311,6 +315,7 @@ fn test_random_replication() {
     let keyspaces: KeyspacesResp = serde_json::from_slice(res.as_bytes()).unwrap();
     assert!(keyspaces.keyspace_ids.is_empty());
 
+    info!("stop components");
     worker.shutdown();
     local_provider.destroy().unwrap();
     tc.tidb.stop_all();

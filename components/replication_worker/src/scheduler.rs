@@ -167,7 +167,7 @@ impl ReplicationScheduler {
         keyspace_id: u32,
         path: &str,
     ) -> Result<Response<Body>> {
-        if let Some(change_id) = path.strip_prefix("/cdc/api/v2/changefeeds/") {
+        if let Some(changefeed_id) = path.strip_prefix("/cdc/api/v2/changefeeds/") {
             let cdc_addr = self.get_cdc_addr(keyspace_id);
             if cdc_addr.is_none() {
                 return Ok(Self::error_response(
@@ -179,7 +179,7 @@ impl ReplicationScheduler {
             let cdc_addr = cdc_addr.unwrap();
             let remove_cdc_task_uri = format!(
                 "{}://{}/api/v2/changefeeds/{}",
-                &self.scheme, &cdc_addr, change_id
+                &self.scheme, &cdc_addr, changefeed_id
             );
 
             let req = http::Request::delete(remove_cdc_task_uri)
@@ -189,7 +189,7 @@ impl ReplicationScheduler {
             let (cb, fut) = paired_future_callback();
             self.schedule(CdcMsg::RemoveTask {
                 keyspace_id,
-                change_feed_id: change_id.to_string(),
+                changefeed_id: changefeed_id.to_string(),
                 cb,
             });
             let res = fut.await.unwrap();

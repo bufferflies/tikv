@@ -195,7 +195,7 @@ pub enum CdcMsg {
     Deregister(Deregister),
     RemoveTask {
         keyspace_id: u32,
-        change_feed_id: String,
+        changefeed_id: String,
         cb: Box<dyn FnOnce(Result<()>) + Send>,
     },
     RemoveKeyspace {

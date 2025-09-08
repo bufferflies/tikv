@@ -167,7 +167,7 @@ impl ReplicationWorker {
                 ))
             };
             if let Err(err) = runtime.block_on(task_service.start()) {
-                error!("keyspace {} start service error {:?}", keyspace_id, err);
+                error!("keyspace start service error {:?}", err; "keyspace" => keyspace_id);
                 continue;
             }
             cdc_addrs.insert(keyspace_id, cdc_addr);
@@ -342,6 +342,7 @@ impl ReplicationWorker {
             }
             CdcMsg::OpenConn(conn) => self.handle_open_conn(conn),
             CdcMsg::Register { request, conn_id } => {
+                tikv_util::set_current_region(request.region_id);
                 let res = self.handle_register(request, conn_id);
                 self.handle_result(res, "register");
             }
@@ -350,6 +351,7 @@ impl ReplicationWorker {
                 conn_id,
                 initialized,
             } => {
+                tikv_util::set_current_region(event.region_id);
                 let res = self.handle_register_result(event, conn_id, initialized);
                 self.handle_result(res, "register_result");
             }
@@ -358,6 +360,7 @@ impl ReplicationWorker {
                 locks,
                 snap_version,
             } => {
+                tikv_util::set_current_region(region_id);
                 let res = self.handle_scan_locks_result(region_id, locks, snap_version);
                 self.handle_result(res, "scan_locks_result");
             }
@@ -368,6 +371,7 @@ impl ReplicationWorker {
                 region_id,
                 region_events,
             } => {
+                tikv_util::set_current_region(region_id);
                 let res = self.handle_applied(region_id, region_events);
                 self.handle_result(res, "applied");
             }
@@ -376,15 +380,16 @@ impl ReplicationWorker {
                 region_version,
                 admin,
             } => {
+                tikv_util::set_current_region(region_id);
                 let res = self.handle_applied_admin(region_id, region_version, admin);
                 self.handle_result(res, "applied_admin");
             }
             CdcMsg::RemoveTask {
                 keyspace_id,
-                change_feed_id,
+                changefeed_id,
                 cb,
             } => {
-                let res = self.handle_remove_task(keyspace_id, change_feed_id);
+                let res = self.handle_remove_task(keyspace_id, changefeed_id);
                 cb(res);
             }
             CdcMsg::Stop => {
@@ -402,7 +407,7 @@ impl ReplicationWorker {
     ) {
         let tag = format!("{keyspace_id}:new_task");
         let body_string = String::from_utf8_lossy(&body).to_string();
-        info!("handle_new_task"; "keyspace" => keyspace_id, "req" => &body_string);
+        info!("handle_new_task"; "keyspace" => keyspace_id, "changefeed" => &changefeed_id, "req" => &body_string);
         #[allow(clippy::map_entry)]
         if !self.keyspaces.contains_key(&keyspace_id) {
             cb(Err(Error::OtherError("keyspace not found".into())));
@@ -617,7 +622,10 @@ impl ReplicationWorker {
                 conn_id,
                 request_id,
                 region_id,
-            } => self.handle_deregister_region(conn_id, request_id, region_id),
+            } => {
+                tikv_util::set_current_region(region_id);
+                self.handle_deregister_region(conn_id, request_id, region_id)
+            }
         }
     }
 
@@ -1059,7 +1067,8 @@ impl ReplicationWorker {
             let load_shards_time = Instant::now_coarse();
             let cb_with_log = move |res: Result<()>| {
                 let end_time = Instant::now_coarse();
-                info!("{} add_keyspace: {:?}", keyspace_id, &res;
+                info!("add_keyspace: {:?}", &res;
+                    "keyspace" => keyspace_id,
                     "takes" => ?end_time.saturating_duration_since(start_time),
                     "start_svc" => ?prepare_time.saturating_duration_since(start_time),
                     "prepare" => ?load_shards_time.saturating_duration_since(prepare_time),
@@ -1123,7 +1132,8 @@ impl ReplicationWorker {
         }
 
         let end_time = Instant::now_coarse();
-        info!("{} prepare_keyspace_shard_metas", keyspace_id;
+        info!("prepare_keyspace_shard_metas";
+            "keyspace" => keyspace_id,
             "count" => metas.len(),
             "load" => ?prepare_time.saturating_duration_since(start_time),
             "prepare" => ?end_time.saturating_duration_since(prepare_time),
@@ -1175,6 +1185,7 @@ impl ReplicationWorker {
         keyspace_id: u32,
         cb: Box<dyn FnOnce(Result<()>) + Send>,
     ) {
+        info!("remove_keyspace"; "keyspace" => keyspace_id);
         self.cdc_addrs.remove(&keyspace_id);
         let Some(mut svc) = self.keyspaces.remove(&keyspace_id) else {
             cb(Err(Error::OtherError("keyspace not found".into())));
@@ -1193,14 +1204,15 @@ impl ReplicationWorker {
         });
     }
 
-    fn handle_remove_task(&mut self, keyspace_id: u32, change_feed_id: String) -> Result<()> {
+    fn handle_remove_task(&mut self, keyspace_id: u32, changefeed_id: String) -> Result<()> {
+        info!("remove_task"; "keyspace" => keyspace_id, "changefeed" => &changefeed_id);
         let Some(task_ctx) = self.keyspaces.get_mut(&keyspace_id) else {
             return Err(Error::OtherError("keyspace service not found".into()));
         };
         if task_ctx
             .get_states_mut()
             .feeds
-            .remove(&change_feed_id)
+            .remove(&changefeed_id)
             .is_some()
         {
             self.merged_engine
@@ -1275,18 +1287,36 @@ impl ReplicationWorker {
         let rep_region_opt = Self::get_region_for_rep(&raft, region_id);
 
         if let Some(rep_region) = &rep_region_opt {
-            let Some(keyspace_id) = self.get_keyspace_id(region_id) else {
-                let err_msg = format!("{} handle_applied_admin: region not found", tag);
-                debug_assert!(false, "{}", &err_msg);
-                return Err(box_err!("{}", err_msg));
-            };
-            let task_ctx = self.keyspaces.get(&keyspace_id).unwrap();
-            let pd_client = task_ctx.get_pd_client();
-            Self::report_region_to_rep_pd(&pd_client, rep_region.clone());
-            if admin.has_splits() {
-                let split = admin.get_splits();
-                for req in split.get_requests() {
-                    Self::report_region_to_rep_pd_by_id(&raft, &pd_client, req.get_new_region_id());
+            match self
+                .get_keyspace_id(region_id)
+                .map(|keyspace_id| (keyspace_id, self.keyspaces.get(&keyspace_id)))
+            {
+                None => {
+                    let err_msg = format!("{} handle_applied_admin: region not found", tag);
+                    warn!("{}", &err_msg);
+                    debug_assert!(false, "{}", &err_msg);
+                    // Still go on and sink error for safety.
+                }
+                Some((keyspace_id, None)) => {
+                    // The keyspace is just removed.
+                    warn!("{} handle_applied_admin: keyspace not found", tag; "keyspace" => keyspace_id);
+                    debug_assert!(!self.region_delegates.contains_key(&region_id));
+                    // Still go on and sink error for safety.
+                    // TODO: return Ok(()).
+                }
+                Some((_, Some(task_ctx))) => {
+                    let pd_client = task_ctx.get_pd_client();
+                    Self::report_region_to_rep_pd(&pd_client, rep_region.clone());
+                    if admin.has_splits() {
+                        let split = admin.get_splits();
+                        for req in split.get_requests() {
+                            Self::report_region_to_rep_pd_by_id(
+                                &raft,
+                                &pd_client,
+                                req.get_new_region_id(),
+                            );
+                        }
+                    }
                 }
             }
         } else {
