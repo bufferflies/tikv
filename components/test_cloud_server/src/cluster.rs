@@ -1567,6 +1567,17 @@ impl TryWaiter {
             panic!("{}", fail_msg());
         }
     }
+
+    pub fn must_wait_result<T, E, F, FnMsg>(&self, f: F, fail_msg: FnMsg)
+    where
+        E: std::fmt::Debug,
+        F: FnMut() -> Result<T, E>,
+        FnMsg: FnOnce() -> String,
+    {
+        if let Err(err) = self.try_wait_result(f) {
+            panic!("{}: {:?}", fail_msg(), err);
+        }
+    }
 }
 
 #[track_caller]
@@ -1669,6 +1680,15 @@ where
     F: FnMut() -> std::result::Result<T, E>,
 {
     TryWaiter::timeout(seconds).try_wait_result(f)
+}
+
+pub fn must_wait_result<F, T, E, FnMsg>(f: F, seconds: usize, fail_msg: FnMsg)
+where
+    E: std::fmt::Debug,
+    F: FnMut() -> Result<T, E>,
+    FnMsg: FnOnce() -> String,
+{
+    TryWaiter::timeout(seconds).must_wait_result(f, fail_msg);
 }
 
 #[derive(Default, Debug)]

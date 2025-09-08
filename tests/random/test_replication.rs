@@ -10,7 +10,7 @@ use pd_client::{PdClient, RpcClient};
 use replication_worker::{KeyspacesResp, LocalProvider};
 use security::{HttpClient, SecurityManager};
 use sqlx::Row;
-use test_cloud_server::{must_wait, oss::prepare_dfs};
+use test_cloud_server::{must_wait, must_wait_result, oss::prepare_dfs};
 use tidb_query_datatype::codec::table::encode_row_key;
 use tikv_util::{
     codec::bytes::encode_bytes,
@@ -95,6 +95,8 @@ fn test_random_replication() {
         block_on(sqlx::query(&sql).execute(&pool)).unwrap();
     }
 
+    // Start replication worker.
+    info!("start replication worker");
     let rep_dir = tempfile::Builder::new().prefix("rep_").tempdir().unwrap();
     let rep_dir = rep_dir.path();
 
@@ -130,12 +132,13 @@ fn test_random_replication() {
     let add_keyspace_body = format!(r#"{{"pd_url":"{pd_url}","cdc_addr":"{cdc_addr}"}}"#);
     dispatch_http(&worker_client, add_keyspace_url, "POST", add_keyspace_body).unwrap();
 
-    // verify keyspace is added
+    // Verify keyspace is added.
     let get_keyspace_url = format!("{}/keyspace", worker_base_url);
     let res = dispatch_http(&worker_client, get_keyspace_url, "GET", "".to_string()).unwrap();
     let keyspaces: KeyspacesResp = serde_json::from_slice(res.as_bytes()).unwrap();
     assert_eq!(keyspaces.keyspace_ids.len(), 1);
 
+    // Add task.
     let sink_uri = "mysql://root@127.0.0.1:9001".to_string();
     let start_ts = backup_ts;
     let changefeed_id = "rep-task";
@@ -145,7 +148,7 @@ fn test_random_replication() {
     );
     dispatch_http(&worker_client, add_task_url, "POST", add_task_body).unwrap();
 
-    // get task list has rep-task.
+    // Get task list has rep-task.
     let get_task_list_url = format!("{}/api/v2/changefeeds?keyspace_id=1", worker_base_url);
     let resp = dispatch_http(&worker_client, get_task_list_url, "GET", "".to_string()).unwrap();
     assert!(resp.contains(changefeed_id));
@@ -161,39 +164,51 @@ fn test_random_replication() {
         thread::sleep(Duration::from_millis(500));
     }
 
-    // pause the changefeed
+    // Pause the changefeed.
     info!("pause changefeed");
     let pause_task_url =
         format!("{worker_base_url}/api/v2/changefeeds/{changefeed_id}/pause?keyspace_id=1");
     dispatch_http(&worker_client, pause_task_url, "POST", "".to_string()).unwrap();
 
-    // restart the rep-pd and wait for the rep-pd region has leader.
-    // Uncomment following lines when the changefeed not exists issue is addressed.
-    // local_provider.restart_local_pd().unwrap();
-    // let rep_pd_cli = new_rep_pd_clent(local_provider.pd_client_url());
-    // must_wait(
-    //     || {
-    //         let region = rep_pd_cli.get_region_info(&[]).unwrap();
-    //         info!("rep-pd region: {:?}", region);
-    //         region.leader.is_some()
-    //     },
-    //     10,
-    //     || "wait for rep-pd region leader".into(),
-    // );
-    thread::sleep(Duration::from_secs(3));
+    // Restart the rep-pd and wait for the rep-pd region has leader.
+    info!("restart rep-pd");
+    local_provider.restart_local_pd().unwrap();
+    let rep_pd_cli = new_rep_pd_client(local_provider.pd_client_url());
+    must_wait(
+        || {
+            let region = match rep_pd_cli.get_region_info(&[]) {
+                Ok(region) => region,
+                Err(e) => {
+                    // Should be caused by region role during split.
+                    warn!("rep-pd get region failed: {:?}", e);
+                    return false;
+                }
+            };
+            info!("rep-pd region: {:?}", region);
+            region.leader.is_some()
+        },
+        30,
+        || "wait for rep-pd region leader".into(),
+    );
 
-    // resume the changefeed
+    // Resume the changefeed.
     info!("resume changefeed");
     let resume_task_url =
         format!("{worker_base_url}/api/v2/changefeeds/{changefeed_id}/resume?keyspace_id=1");
-    dispatch_http(
-        &worker_client,
-        resume_task_url,
-        "POST",
-        // r#"{"overwrite_checkpoint_ts": 0}"#.to_string(),
-        r#"{}"#.to_string(),
-    )
-    .unwrap();
+    must_wait_result(
+        || {
+            // TiCDC may return error when PD is just up.
+            dispatch_http(
+                &worker_client,
+                &resume_task_url,
+                "POST",
+                // r#"{"overwrite_checkpoint_ts": 0}"#.to_string(),
+                r#"{}"#.to_string(),
+            )
+        },
+        30,
+        || "wait for resume changefeed".into(),
+    );
 
     let pd_client = cluster.get_pure_pd_client();
     let row_key_5 = encode_pd_table_key(table_id, 5);
@@ -267,18 +282,20 @@ fn test_random_replication() {
         assert_eq!(id + 1 + update_count, col_i);
     }
     assert_eq!(result.len(), 5);
+
+    // Remove task.
     let remove_task_url = format!(
         "{}/api/v2/changefeeds/{changefeed_id}?keyspace_id=1",
         worker_base_url
     );
     dispatch_http(&worker_client, remove_task_url, "DELETE", "".to_string()).unwrap();
 
-    // get task list doesn't have rep-task.
+    // Get task list doesn't have rep-task.
     let get_task_list_rul = format!("{}/keyspace?keyspace_id=1", worker_base_url);
     let resp = dispatch_http(&worker_client, get_task_list_rul, "GET", "".to_string()).unwrap();
     assert!(!resp.contains(changefeed_id));
 
-    // remove keyspace
+    // Remove keyspace.
     let remove_keyspace_url = format!("{worker_base_url}/keyspace?keyspace_id=1");
     dispatch_http(
         &worker_client,
@@ -288,7 +305,7 @@ fn test_random_replication() {
     )
     .unwrap();
 
-    // verify keyspace is removed
+    // Verify keyspace is removed.
     let get_keyspace_url = format!("{}/keyspace", worker_base_url);
     let res = dispatch_http(&worker_client, get_keyspace_url, "GET", "".to_string()).unwrap();
     let keyspaces: KeyspacesResp = serde_json::from_slice(res.as_bytes()).unwrap();
@@ -313,21 +330,20 @@ fn test_random_replication() {
     stdout.lock().flush().unwrap();
 }
 
-#[allow(dead_code)]
-fn new_rep_pd_clent(pd_url: String) -> Arc<dyn PdClient> {
+fn new_rep_pd_client(pd_url: String) -> Arc<dyn PdClient> {
     let sec_mgr = Arc::new(SecurityManager::default());
     Arc::new(RpcClient::new(&pd_client::Config::new(vec![pd_url]), None, sec_mgr).unwrap())
 }
 
-fn dispatch_http(
+fn dispatch_http<S: AsRef<str>>(
     client: &HttpClient,
-    url: String,
+    url: S,
     method: &str,
     body: String,
 ) -> std::result::Result<String, String> {
     let req = http::Request::builder()
         .method(method)
-        .uri(url)
+        .uri(url.as_ref())
         .body(body.into())
         .unwrap();
     let resp =
