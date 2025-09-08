@@ -352,8 +352,13 @@ impl ReplicationWorker {
                 initialized,
             } => {
                 tikv_util::set_current_region(event.region_id);
+                let region_id = event.region_id;
+                let request_id: RequestId = event.request_id.into();
                 let res = self.handle_register_result(event, conn_id, initialized);
-                self.handle_result(res, "register_result");
+                if let Err(err) = &res {
+                    self.deregister_region_on_error(conn_id, request_id, region_id, err);
+                }
+                self.handle_result(res.map_err(Into::into), "register_result");
             }
             CdcMsg::ScanLocksResult {
                 region_id,
@@ -372,8 +377,15 @@ impl ReplicationWorker {
                 region_events,
             } => {
                 tikv_util::set_current_region(region_id);
-                let res = self.handle_applied(region_id, region_events);
-                self.handle_result(res, "applied");
+                let sink_err_requests = self.handle_applied(region_id, region_events);
+                for (req_key, err) in sink_err_requests {
+                    self.deregister_region_on_error(
+                        req_key.conn_id,
+                        req_key.request_id,
+                        region_id,
+                        &err,
+                    );
+                }
             }
             CdcMsg::AppliedAdmin {
                 region_id,
@@ -381,8 +393,7 @@ impl ReplicationWorker {
                 admin,
             } => {
                 tikv_util::set_current_region(region_id);
-                let res = self.handle_applied_admin(region_id, region_version, admin);
-                self.handle_result(res, "applied_admin");
+                self.handle_applied_admin(region_id, region_version, admin);
             }
             CdcMsg::RemoveTask {
                 keyspace_id,
@@ -510,7 +521,7 @@ impl ReplicationWorker {
         event: Event,
         conn_id: ConnId,
         initialized: bool,
-    ) -> Result<()> {
+    ) -> cdc::Result<()> {
         let request_id: RequestId = event.get_request_id().into();
         let region_id = event.get_region_id();
         let tag = self.get_region_tag(region_id, 0);
@@ -611,6 +622,25 @@ impl ReplicationWorker {
         self.send_error_event(conn_id, request, error);
     }
 
+    fn deregister_region_on_error(
+        &mut self,
+        conn_id: ConnId,
+        request_id: RequestId,
+        region_id: u64,
+        err: &cdc::Error,
+    ) {
+        let mut err_event = cdcpb::Error::new();
+        match err {
+            cdc::Error::Sink(_) => {
+                err_event.mut_congested().set_region_id(region_id);
+            }
+            _ => {
+                err_event.mut_server_is_busy().set_reason(err.to_string());
+            }
+        }
+        self.handle_deregister_region(conn_id, request_id, region_id, Some(err_event));
+    }
+
     fn handle_deregister(&mut self, deregister: Deregister) {
         match deregister {
             Deregister::Conn(conn_id) => self.handle_deregister_conn(conn_id),
@@ -624,7 +654,7 @@ impl ReplicationWorker {
                 region_id,
             } => {
                 tikv_util::set_current_region(region_id);
-                self.handle_deregister_region(conn_id, request_id, region_id)
+                self.handle_deregister_region(conn_id, request_id, region_id, None)
             }
         }
     }
@@ -651,7 +681,7 @@ impl ReplicationWorker {
             let sink = self.conns.get(&conn_id).map(|c| c.get_sink());
             for &region_id in conn_regions.iter() {
                 if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
-                    delegate.unsubscribe(conn_id, request_id, sink);
+                    delegate.unsubscribe(conn_id, request_id, sink, None);
                     if delegate.requests.is_empty() {
                         // To work around mutable borrow limitation.
                         remove_regions.push(region_id);
@@ -664,11 +694,17 @@ impl ReplicationWorker {
         }
     }
 
-    fn handle_deregister_region(&mut self, conn_id: ConnId, request_id: RequestId, region_id: u64) {
+    fn handle_deregister_region(
+        &mut self,
+        conn_id: ConnId,
+        request_id: RequestId,
+        region_id: u64,
+        err_event: Option<cdcpb::Error>,
+    ) {
         info!("deregister request"; "conn" => ?conn_id, "request" => %request_id, "region" => region_id);
         if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
             let sink = self.conns.get(&conn_id).map(|c| c.get_sink());
-            delegate.unsubscribe(conn_id, request_id, sink);
+            delegate.unsubscribe(conn_id, request_id, sink, err_event);
             if delegate.requests.is_empty() {
                 self.remove_region(region_id);
             }
@@ -731,10 +767,14 @@ impl ReplicationWorker {
             resolved_ts.set_request_id(req_key.request_id.into_inner());
             resolved_ts.set_ts(ts.into_inner());
             debug!("send_resolved_ts: msg: {:?}", resolved_ts; "conn" => ?req_key.conn_id);
-            // Return error when channel is full. It's OK to drop other left resolved_ts.
-            conn.get_sink()
+            if let Err(err) = conn
+                .get_sink()
                 .unbounded_send(CdcEvent::ResolvedTs(resolved_ts), false)
-                .map_err(|e| cdc::Error::from(e))?;
+            {
+                // It's OK to drop resolved_ts event.
+                warn!("send_resolved_ts: send failed: {:?}", err;
+                    "conn" => ?req_key.conn_id, "request" => %req_key.request_id);
+            }
         }
         Ok(())
     }
@@ -1221,67 +1261,81 @@ impl ReplicationWorker {
         Ok(())
     }
 
-    fn handle_applied(&mut self, region_id: u64, region_events: RegionEvents) -> Result<()> {
+    fn handle_applied(
+        &mut self,
+        region_id: u64,
+        region_events: RegionEvents,
+    ) -> Vec<(RequestKey, cdc::Error)> /* sink_err_requests */ {
         let tag = self.get_region_tag(region_id, 0);
-        if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
-            for (req_key, req_info) in delegate.requests.iter_mut() {
-                let Some(conn) = self.conns.get(&req_key.conn_id) else {
-                    warn!("{} handle_applied: conn not found, skip", tag;
-                        "conn" => ?req_key.conn_id, "request" => %req_key.request_id);
-                    continue;
-                };
-                for event in &region_events.events {
-                    let mut event_to_send = Event::new();
-                    event_to_send.set_request_id(req_key.request_id.into_inner());
-                    event_to_send.set_region_id(region_id);
-                    event_to_send.set_index(event.get_index());
-                    if event.has_entries() {
-                        let entries_to_send = event_to_send.mut_entries().mut_entries();
-                        for entry in event.get_entries().get_entries() {
-                            if req_info.in_range(entry.get_key()) {
-                                entries_to_send.push(entry.clone());
+        let mut sink_err_requests: Vec<(RequestKey, cdc::Error)> = vec![];
 
-                                debug!("send event";
-                                    "key" => LogValue::key(entry.get_key()),
-                                    "commit_ts" => entry.get_commit_ts(),
-                                    "region" => region_id,
-                                    "request" => %req_key.request_id,
-                                    "r_type" => ?entry.r_type,
-                                    "op_type" => ?entry.op_type);
-                            }
+        let Some(delegate) = self.region_delegates.get_mut(&region_id) else {
+            debug!("{} handle_applied: region delegate not found, skip", tag);
+            return sink_err_requests;
+        };
+
+        for (req_key, req_info) in delegate.requests.iter_mut() {
+            let Some(conn) = self.conns.get(&req_key.conn_id) else {
+                warn!("{} handle_applied: conn not found, skip", tag;
+                    "conn" => ?req_key.conn_id, "request" => %req_key.request_id);
+                continue;
+            };
+            'EVENTS_LOOP: for event in &region_events.events {
+                let mut event_to_send = Event::new();
+                event_to_send.set_request_id(req_key.request_id.into_inner());
+                event_to_send.set_region_id(region_id);
+                event_to_send.set_index(event.get_index());
+                if event.has_entries() {
+                    let entries_to_send = event_to_send.mut_entries().mut_entries();
+                    for entry in event.get_entries().get_entries() {
+                        if req_info.in_range(entry.get_key()) {
+                            entries_to_send.push(entry.clone());
+
+                            debug!("send event";
+                                "key" => LogValue::key(entry.get_key()),
+                                "commit_ts" => entry.get_commit_ts(),
+                                "region" => region_id,
+                                "request" => %req_key.request_id,
+                                "r_type" => ?entry.r_type,
+                                "op_type" => ?entry.op_type);
                         }
                     }
-                    if req_info.initialized {
-                        conn.get_sink()
-                            .unbounded_send(CdcEvent::Event(event_to_send), false)
-                            .map_err(|e| cdc::Error::from(e))?;
-                    } else {
-                        req_info.pending_events.push(event_to_send);
-                    }
                 }
-            }
-
-            if let Some(resolver) = delegate.resolver.as_mut() {
-                for (track_key, start_ts) in region_events.tracked_locks {
-                    if start_ts == 0 {
-                        // TODO: handle error.
-                        resolver.untrack_lock(&track_key).unwrap();
-                    } else {
-                        // TODO: handle error.
-                        resolver.track_lock(start_ts.into(), track_key).unwrap();
+                if req_info.initialized {
+                    if let Err(err) = conn
+                        .get_sink()
+                        .unbounded_send(CdcEvent::Event(event_to_send), false)
+                    {
+                        error!("{} handle_applied: send event failed: {:?}", tag, err;
+                            "conn" => ?req_key.conn_id, "request" => %req_key.request_id);
+                        // When channel is full, simply send error to TiCDC may lead to cascade
+                        // failure. Slow down would be better.
+                        // TODO: find a better way to handle sink error.
+                        sink_err_requests.push((*req_key, cdc::Error::from(err)));
+                        break 'EVENTS_LOOP;
                     }
+                } else {
+                    req_info.pending_events.push(event_to_send);
                 }
             }
         }
-        Ok(())
+
+        if let Some(resolver) = delegate.resolver.as_mut() {
+            for (track_key, start_ts) in region_events.tracked_locks {
+                if start_ts == 0 {
+                    // TODO: handle error.
+                    resolver.untrack_lock(&track_key).unwrap();
+                } else {
+                    // TODO: handle error.
+                    resolver.track_lock(start_ts.into(), track_key).unwrap();
+                }
+            }
+        }
+
+        sink_err_requests
     }
 
-    fn handle_applied_admin(
-        &mut self,
-        region_id: u64,
-        region_version: u64,
-        admin: AdminRequest,
-    ) -> Result<()> {
+    fn handle_applied_admin(&mut self, region_id: u64, region_version: u64, admin: AdminRequest) {
         let tag = self.get_region_tag(region_id, region_version);
         let raft = self.merged_engine.get_raft();
         let rep_region_opt = Self::get_region_for_rep(&raft, region_id);
@@ -1329,9 +1383,7 @@ impl ReplicationWorker {
 
             let mut error = cdcpb::Error::new();
             error.mut_region_not_found().set_region_id(source_region.id);
-            if let Err(e) = self.remove_stale_requests(tag, source_region.id, u64::MAX, error) {
-                warn!("{} handle_applied_admin: send error failed", tag; "err" => ?e);
-            }
+            self.remove_stale_requests(tag, source_region.id, u64::MAX, error);
         }
 
         let mut error = cdcpb::Error::new();
@@ -1344,7 +1396,7 @@ impl ReplicationWorker {
             error.mut_region_not_found().set_region_id(region_id);
         }
 
-        self.remove_stale_requests(tag, region_id, region_version, error)
+        self.remove_stale_requests(tag, region_id, region_version, error);
     }
 
     fn remove_stale_requests(
@@ -1353,7 +1405,7 @@ impl ReplicationWorker {
         region_id: u64,
         region_version: u64,
         error: cdcpb::Error,
-    ) -> Result<()> {
+    ) {
         if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
             let mut requests_to_remove = vec![];
             for (req_key, request) in delegate.requests.iter() {
@@ -1372,15 +1424,15 @@ impl ReplicationWorker {
                 event.set_region_id(region_id);
                 event.set_request_id(req_key.request_id.into_inner());
                 event.set_error(error.clone());
-                conn.get_sink()
-                    .unbounded_send(CdcEvent::Event(event), false)
-                    .map_err(|e| cdc::Error::from(e))?;
+                if let Err(err) = conn.get_sink().unbounded_send(CdcEvent::Event(event), true) {
+                    warn!("{} remove_stale_requests: send error failed: {:?}", tag, err;
+                        "conn" => ?req_key.conn_id, "request" => %req_key.request_id);
+                }
             }
             if delegate.requests.is_empty() {
                 self.remove_region(region_id);
             }
         }
-        Ok(())
     }
 
     fn remove_region(&mut self, region_id: u64) {

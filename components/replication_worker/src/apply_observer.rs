@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use api_version::ApiV2;
 use kvengine::{
-    table::memtable::WriteBatchEntry, SnapAccess, UserMeta, WriteBatch, LOCK_CF, WRITE_CF,
+    table::memtable::WriteBatchEntry, IdVer, ShardTag, SnapAccess, UserMeta, WriteBatch, LOCK_CF,
+    WRITE_CF,
 };
 use kvproto::{cdcpb, cdcpb::Event, raft_cmdpb::AdminRequest};
 use log_wrappers::Value as LogValue;
@@ -16,8 +17,8 @@ use txn_types::{Lock, LockType};
 use crate::CdcMsg;
 
 pub struct CdcApplyObserver {
-    #[allow(dead_code)]
-    kv: kvengine::Engine, // TODO: get old value.
+    store_id: u64,
+    kv: kvengine::Engine,
     sender: tikv_util::mpsc::Sender<CdcMsg>,
     region_events: HashMap<u64, RegionEvents>,
     runtime: tokio::runtime::Handle,
@@ -36,7 +37,9 @@ impl CdcApplyObserver {
         sender: tikv_util::mpsc::Sender<CdcMsg>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
+        let store_id = kv.get_engine_id();
         Self {
+            store_id,
             kv,
             sender,
             region_events: HashMap::default(),
@@ -91,20 +94,18 @@ impl ApplyObserver for CdcApplyObserver {
             || admin.has_commit_merge()
             || admin.has_rollback_merge()
         {
+            let tag = ShardTag::new(self.store_id, IdVer::new(region_id, region_version));
             if let Some(region_events) = self.region_events.remove(&region_id) {
                 Self::send_msg(&self.sender, region_id, region_events);
             }
-            info!(
-                "{}:{} on apply admin {:?}",
-                region_id, region_version, admin
-            );
+            info!("{} on apply admin {:?}", tag, admin);
             let msg = CdcMsg::AppliedAdmin {
                 region_id,
                 region_version,
                 admin: admin.clone(),
             };
             if let Err(e) = self.sender.send(msg) {
-                error!("send cdc event failed"; "error" => ?e);
+                error!("{} send cdc event failed", tag; "error" => ?e);
             }
         }
     }

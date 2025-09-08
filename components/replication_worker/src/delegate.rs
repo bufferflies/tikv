@@ -316,6 +316,7 @@ impl RegionDelegate {
         conn_id: ConnId,
         request_id: RequestId,
         sink: Option<&Sink>,
+        err_event: Option<cdcpb::Error>,
     ) {
         if self
             .requests
@@ -326,10 +327,11 @@ impl RegionDelegate {
         }
 
         if let Some(sink) = sink {
-            let mut err_event = cdcpb::Error::new();
-            err_event
-                .mut_region_not_found()
-                .set_region_id(self.region_id);
+            let err_event = err_event.unwrap_or_else(|| {
+                let mut e = cdcpb::Error::new();
+                e.mut_region_not_found().set_region_id(self.region_id);
+                e
+            });
             let event = cdcpb::Event {
                 region_id: self.region_id,
                 request_id: request_id.into_inner(),
