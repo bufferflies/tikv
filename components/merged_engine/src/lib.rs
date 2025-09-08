@@ -880,16 +880,18 @@ impl MergedEngine {
     ) -> Result<SyncRegionResult> {
         let merged_store_id = self.merged_store_id();
         let mut tag = PeerTag::new(merged_store_id, RegionIdVer::new(updated_region, 0));
+
+        if self.raft.get_truncated_index(updated_region).is_none() {
+            // region is newly inserted, should process parent first.
+            info!("{} sync_merged: region is newly inserted", tag);
+            return Ok(SyncRegionResult::Postponed);
+        }
+
         let progress = self.region_progresses.get_mut(&updated_region).unwrap();
         let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
         let high: u64 = progress.commit_index + 1;
         if low >= high {
             return Ok(SyncRegionResult::Finished);
-        }
-        if self.raft.get_truncated_index(updated_region).is_none() {
-            // region is newly inserted, should process parent first.
-            info!("{} sync_merged: region is newly inserted", tag);
-            return Ok(SyncRegionResult::Postponed);
         }
         let preprocessor = match self.preprocessors.entry(updated_region) {
             HashMapEntry::Occupied(e) => e.into_mut(),
