@@ -1150,7 +1150,11 @@ impl Applier {
         let mut region = self.region.clone();
         let epoch = region.mut_region_epoch();
         epoch.version += 1;
-        epoch.conf_ver += 1;
+        // Change conf version only when there are multiple peers, to meet the
+        // requirement of merged engine which has no conf change.
+        if self.region.get_peers().len() > 1 {
+            epoch.conf_ver += 1;
+        }
         RF_PEER_ADMIN_CMD_HISTOGRAM
             .prepare_merge
             .observe(duration_to_sec(star_time.saturating_elapsed()));
