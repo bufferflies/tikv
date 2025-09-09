@@ -373,7 +373,7 @@ impl WalWriter {
         Ok(())
     }
 
-    fn file(&self) -> &File {
+    pub(crate) fn file(&self) -> &File {
         self.fd.as_ref().unwrap()
     }
 
@@ -389,9 +389,8 @@ impl WalWriter {
         }
     }
 
-    pub(crate) fn flush(&mut self) -> Result<(usize, bool)> {
+    pub(crate) fn flush(&mut self) -> Result<(u32, u64, bool)> {
         self.compress_batch();
-        let data_len = self.buf.len();
         let batch = self.buf.as_mut();
         let (mut batch_header, batch_payload) = batch.split_at_mut(BATCH_HEADER_SIZE);
         let checksum = crc32c::crc32c(batch_payload);
@@ -421,16 +420,27 @@ impl WalWriter {
             std::thread::sleep(duration);
         }
 
-        let timer = Instant::now_coarse();
+        let timer = Instant::now();
         self.file().write_all_at(self.buf.as_ref(), self.file_off)?;
-        ENGINE_WAL_WRITE_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
+        let write_duration = timer.saturating_elapsed();
+        Self::maybe_log_slow_write(write_duration, aligned_len);
+        ENGINE_WAL_WRITE_DURATION_HISTOGRAM.observe(write_duration.as_secs_f64());
         self.file_off += aligned_len as u64;
         self.buf.truncate(BATCH_HEADER_SIZE);
 
-        Ok((data_len, rotated))
+        Ok((self.epoch_id, self.file_off, rotated))
     }
 
-    pub(crate) fn write_batch(&mut self, wb: &WriteBatch) -> Result<(usize, bool)> {
+    fn maybe_log_slow_write(write_duration: Duration, aligned_len: usize) {
+        if write_duration > Duration::from_millis(40) && aligned_len < 64 * 1024 {
+            warn!(
+                "wal write takes too long {:?}, size: {}",
+                write_duration, aligned_len
+            );
+        }
+    }
+
+    pub(crate) fn write_batch(&mut self, wb: &WriteBatch) -> Result<(u32, u64, bool)> {
         for peer_batch in wb.peers.values() {
             self.append_region_data(peer_batch);
         }

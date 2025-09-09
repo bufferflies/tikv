@@ -20,7 +20,7 @@ use arc_swap::ArcSwap;
 use bytes::{Buf, Bytes};
 use dashmap::mapref::one::Ref;
 use engine_traits::{GetObjectOptions, ObjectStorage};
-use file_system::open_direct_file;
+use file_system::{open_direct_file, IoRateLimitMode, IoRateLimiter};
 use kvengine::dfs::DFSConfig;
 use kvproto::raft_serverpb::{self, StoreIdent};
 use protobuf::Message;
@@ -285,6 +285,9 @@ impl RfEngineCore {
             } else {
                 None
             };
+            let compact_rate_limiter =
+                Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, false));
+            compact_rate_limiter.set_io_rate_limit(cfg.compact_bytes_per_sec.0 as usize);
             let epoch_id = en.current_epoch_id.load(Ordering::SeqCst);
             let mut service_worker = ServiceWorker::new(
                 dir.to_owned(),
@@ -295,6 +298,7 @@ impl RfEngineCore {
                 compacted_epoch.clone(),
                 lightweight_backup_config,
                 dfs_worker_healthy,
+                compact_rate_limiter,
                 cfg.compact_wal_sync_concurrency,
                 peer_rlog_files,
             );
@@ -365,24 +369,31 @@ impl RfEngineCore {
     /// Persists the write batch to WAL. It can be used in another thread to
     /// implement async I/O, i.e., call `apply` in the main thread and call
     /// `persist` in the I/O thread.
+    /// When the epoch is rotated, the return size would be 4096 which is not
+    /// accurate but ok to be used as metrics.
     pub fn persist(&self, wb: WriteBatch) -> Result<usize> {
-        let timer = Instant::now_coarse();
+        let timer = Instant::now();
         let mut writer = self.writer.lock().unwrap();
+        let old_file_off = writer.file_off;
         let epoch_id = writer.epoch_id;
-        let (size, rotated) = writer.write_batch(&wb)?;
+        let (_, file_off, rotated) = writer.write_batch(&wb)?;
         if rotated {
             self.current_epoch_id
                 .store(writer.epoch_id, Ordering::SeqCst);
             self.task_sender
                 .send(ServiceTask::Rotate {
-                    epoch_id,
+                    epoch_id, // the epoch of the old raft log
                     cache_wb_for_compact: true,
                 })
                 .unwrap();
         }
         self.task_sender.send(ServiceTask::Write { wb }).unwrap();
         ENGINE_PERSIST_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
-        Ok(size)
+        Ok(if rotated {
+            4096
+        } else {
+            file_off.saturating_sub(old_file_off) as usize
+        })
     }
 
     pub fn is_empty(&self) -> bool {

@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fs,
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom, Write},
+    io::{BufReader, Read, Seek, SeekFrom},
     mem,
     path::{Path, PathBuf},
     sync::{
@@ -22,6 +22,7 @@ use arc_swap::ArcSwap;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
+use file_system::IoRateLimiter;
 use kvengine::dfs::S3Fs;
 use protobuf::Message;
 use quick_cache::unsync::Cache as QuickCache;
@@ -52,6 +53,8 @@ const MAX_WAL_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_SNAPSHOT_SIZE: u64 = 4500 * 1024 * 1024; // 4.5 GiB
 
 const COMPACT_RETRY_TIMES: usize = 30;
+const WRITE_RLOG_BATCH_SIZE: usize = 256 * 1024;
+const DELAY_SYNC_THRESHOLD: usize = 16 * 1024;
 
 pub(crate) struct WorkerHandle {
     pub(crate) task_sender: Sender<CompactTask>,
@@ -80,6 +83,7 @@ pub(crate) struct CompactWorker {
     rlog_compression_type: CompressionType,
     healthy: Healthy,
 
+    rate_limiter: Arc<IoRateLimiter>,
     sync_concurrency: usize,
     files_to_sync: Vec<File>,
     // track the number of pending compaction tasks with cached WriteBatch
@@ -99,6 +103,7 @@ impl CompactWorker {
         lightweight_backup_cfg: Option<&LightweightBackupConfig>,
         s3fs: Option<Arc<S3Fs>>,
         healthy: Healthy,
+        rate_limiter: Arc<IoRateLimiter>,
         sync_concurrency: usize,
         pending_compact_wb_count: Arc<AtomicUsize>,
         peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
@@ -125,6 +130,7 @@ impl CompactWorker {
             rlog_cache,
             rlog_compression_type: compress_type,
             healthy,
+            rate_limiter,
             sync_concurrency,
             files_to_sync: vec![],
             pending_compact_wb_count,
@@ -362,9 +368,20 @@ impl CompactWorker {
             self.buf.put_u32_le(checksum);
         }
         let mut file = fs::File::create(filename)?;
-        file.write_all(&self.buf)?;
-        // delay the files_to_sync to sync files in parallel.
-        self.files_to_sync.push(file);
+        let synced_size = file_system::write_all_with_rate_limiter(
+            &mut file,
+            &self.buf,
+            &self.rate_limiter,
+            WRITE_RLOG_BATCH_SIZE,
+        )?;
+        let remained_size = self.buf.len() - synced_size;
+        if remained_size > DELAY_SYNC_THRESHOLD {
+            // Sync the last batch if it is large.
+            file.sync_data()?;
+        } else if remained_size > 0 {
+            // delay the small files to sync in parallel.
+            self.files_to_sync.push(file);
+        }
         let mut file = rfenginepb::RaftLogFile::default();
         file.first_index = first;
         file.last_index = last;
@@ -1209,6 +1226,7 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
         let engine_id = 999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
+        let rate_limiter = Arc::new(IoRateLimiter::new_for_test());
         let mut worker = CompactWorker::new(
             tmp_path.to_path_buf(),
             rx,
@@ -1217,6 +1235,7 @@ mod tests {
             None,
             None,
             dfs_worker::Healthy::default(),
+            rate_limiter,
             1,
             Arc::new(AtomicUsize::default()),
             Arc::new(ArcSwap::default()),
@@ -1361,6 +1380,7 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
         let engine_id = 1999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
+        let rate_limiter = Arc::new(IoRateLimiter::new_for_test());
         let mut worker = CompactWorker::new(
             tmp_path.to_path_buf(),
             rx,
@@ -1369,6 +1389,7 @@ mod tests {
             None,
             None,
             dfs_worker::Healthy::default(),
+            rate_limiter,
             1,
             Arc::new(AtomicUsize::default()),
             Arc::new(ArcSwap::default()),
@@ -1512,6 +1533,7 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
 
         let manifest = Manifest::open(tmp_path, AtomicU64::new(1).into()).unwrap();
+        let rate_limiter = Arc::new(IoRateLimiter::new_for_test());
         let mut worker = CompactWorker::new(
             tmp_path.to_path_buf(),
             rx,
@@ -1520,6 +1542,7 @@ mod tests {
             None,
             None,
             dfs_worker::Healthy::default(),
+            rate_limiter,
             1,
             Arc::new(AtomicUsize::default()),
             Arc::new(ArcSwap::default()),

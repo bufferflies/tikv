@@ -325,6 +325,13 @@ pub struct Config {
     #[online_config(hidden)]
     // Interval to check peers availability info.
     pub check_peers_availability_interval: ReadableDuration,
+
+    /// The maximum batch size for raft worker.
+    pub raft_worker_max_batch_size: ReadableSize,
+
+    /// The minimum duration for IO worker to write data.
+    /// This is used to avoid too frequent writes to avoid write amplification.
+    pub io_worker_min_write_duration: ReadableDuration,
 }
 
 impl Default for Config {
@@ -442,6 +449,8 @@ impl Default for Config {
             unreachable_backoff: ReadableDuration::secs(10),
             // TODO: make its value reasonable
             check_peers_availability_interval: ReadableDuration::secs(30),
+            raft_worker_max_batch_size: ReadableSize::mb(1),
+            io_worker_min_write_duration: ReadableDuration::millis(1),
         }
     }
 }

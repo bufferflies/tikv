@@ -81,6 +81,8 @@ pub struct Config {
     ///
     /// Default: "0MB" (disabled)
     pub rlog_soft_memory_limit: ReadableSize,
+    /// The number of bytes per second to compact WAL files.
+    pub compact_bytes_per_sec: ReadableSize,
 }
 
 impl Default for Config {
@@ -99,6 +101,7 @@ impl Default for Config {
             write_throttle_duration: ReadableDuration::millis(10),
             compact_wal_sync_concurrency: 2,
             rlog_soft_memory_limit: ReadableSize::mb(0),
+            compact_bytes_per_sec: ReadableSize::mb(200),
         }
     }
 }

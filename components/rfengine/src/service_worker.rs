@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    fs,
+    fmt, fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
@@ -14,6 +14,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
+use file_system::IoRateLimiter;
 use rfenginepb::StoreBackupMeta;
 use slog_global::{error, info};
 use tikv_util::{
@@ -69,6 +70,22 @@ pub(crate) enum ServiceTask {
     },
 }
 
+impl fmt::Debug for ServiceTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ServiceTask::Dump { .. } => write!(f, "ServiceTask::Dump"),
+            ServiceTask::Rotate { .. } => write!(f, "ServiceTask::Rotate"),
+            ServiceTask::Write { .. } => write!(f, "ServiceTask::Write"),
+            ServiceTask::Backup(_) => write!(f, "ServiceTask::Backup"),
+            ServiceTask::Truncates(_) => write!(f, "ServiceTask::Truncates"),
+            ServiceTask::Upload => write!(f, "ServiceTask::Upload"),
+            ServiceTask::Close { force } => write!(f, "ServiceTask::Close({})", force),
+        }
+    }
+}
+
+const ASYNC_WRITER_SYNC_SIZE: u64 = 256 * 1024;
+
 /// Service worker maintains the async WAL files, provide read service for HTTP
 /// API, compaction and backup tasks.
 pub(crate) struct ServiceWorker {
@@ -77,6 +94,7 @@ pub(crate) struct ServiceWorker {
     compact_wb: Option<WriteBatch>,
     // number of pending WriteBatch cached for compaction.
     pending_compact_wb_count: Arc<AtomicUsize>,
+    bytes_since_last_sync: u64,
     rx: Receiver<ServiceTask>,
     compact_worker_handle: WorkerHandle,
     dfs_worker_handle: Option<ObjectStorageWorkerHandle>,
@@ -93,6 +111,7 @@ impl ServiceWorker {
         compacted_epoch: Arc<AtomicU32>,
         lightweight_backup_config: Option<LightweightBackupConfig>,
         healthy: Healthy,
+        compact_rate_limiter: Arc<IoRateLimiter>,
         compact_wal_sync_concurrency: usize,
         peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
     ) -> Self {
@@ -111,6 +130,7 @@ impl ServiceWorker {
             lightweight_backup_config.as_ref(),
             s3fs.clone(),
             healthy.clone(),
+            compact_rate_limiter,
             compact_wal_sync_concurrency,
             pending_compact_wb_count.clone(),
             peer_rlog_files,
@@ -150,6 +170,7 @@ impl ServiceWorker {
             async_wal_writer,
             compact_wb: None,
             pending_compact_wb_count,
+            bytes_since_last_sync: 0,
             dfs_worker_handle,
             rx,
             compact_worker_handle,
@@ -202,9 +223,18 @@ impl ServiceWorker {
 
     fn handle_write(&mut self, wb: crate::write_batch::WriteBatch) {
         if let Some(wal_writer) = &mut self.async_wal_writer {
-            wal_writer.write_batch(&wb).unwrap();
-            let file_off = wal_writer.file_off;
-            let epoch_id = wal_writer.epoch_id;
+            let old_file_off = wal_writer.file_off;
+            let (epoch_id, file_off, rotated) = wal_writer.write_batch(&wb).unwrap();
+            if rotated {
+                // When rotated, the old file is already synced.
+                self.bytes_since_last_sync = 0;
+            } else {
+                self.bytes_since_last_sync += file_off - old_file_off;
+            }
+            if self.bytes_since_last_sync > ASYNC_WRITER_SYNC_SIZE {
+                wal_writer.file().sync_data().unwrap();
+                self.bytes_since_last_sync = 0;
+            }
             if self.is_lightweight_enabled() {
                 // Send write task to object storage worker.
                 let task = crate::dfs_worker::ObjectStorageTask::Sync { epoch_id, file_off };

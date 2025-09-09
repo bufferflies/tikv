@@ -313,7 +313,7 @@ fn start_server(
         s3fs.clone(),
         block_cache.clone(),
         thread_pool.handle().clone().into(),
-        config.txn_chunk_manager,
+        config.txn_chunk_manager.clone(),
     );
 
     let replication_scheduler = if config.replication_worker.enabled {
@@ -336,7 +336,14 @@ fn start_server(
     } else {
         None
     };
+    // TODO: meta file cache
+    let http_client = Arc::new(
+        security_mgr
+            .http_client(hyper::Client::builder())
+            .expect("create http client failed"),
+    );
     let ctx = Arc::new(server::Context {
+        config: config.clone(),
         cluster_id,
         block_size,
         compression_lvl,
@@ -360,6 +367,8 @@ fn start_server(
         ia_ctx,
         read_columnar: config.read_columnar,
         write_sst_manager: WriteSstManager::new(pd.clone(), write_sst_limiter),
+        http_client,
+        remote_cache_ttl: config.cop_remote_dfs_cache_ttl.0,
     });
     let acceptor = security_mgr.acceptor(incoming).unwrap();
     let server = start_serve!(ctx.clone(), acceptor);
@@ -777,6 +786,10 @@ pub struct Config {
     pub cop_block_cache_type: BlockCacheType,
     // Used to calculate block cache capacity of items. Should be the same as tikv-server.
     pub cop_block_size: ReadableSize,
+    // Used to determine if the file is expired on the remote dfs cache.
+    pub cop_remote_dfs_cache_ttl: ReadableDuration,
+    // When the coprocessor response reached this value, we update paging_size to return early.
+    pub cop_max_resp_size: ReadableSize,
     pub report_wru: bool,
     pub enable_load_data_check_point: bool,
     pub checksum_type: ChecksumType,
@@ -835,6 +848,8 @@ impl Default for Config {
             cop_block_cache_size: ReadableSize::default(),
             cop_block_cache_type: BlockCacheType::Moka,
             cop_block_size: ReadableSize::kb(32),
+            cop_remote_dfs_cache_ttl: ReadableDuration::hours(1),
+            cop_max_resp_size: ReadableSize::mb(32),
             worker_scaler: WorkerScalerConfig::default(),
             report_wru: false,
             enable_load_data_check_point: false,

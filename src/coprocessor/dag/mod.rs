@@ -28,6 +28,7 @@ pub struct DagHandlerBuilder<S: Store + 'static> {
     batch_row_limit: usize,
     is_cache_enabled: bool,
     paging_size: Option<u64>,
+    max_resp_size: u64,
     quota_limiter: Arc<QuotaLimiter>,
 }
 
@@ -40,6 +41,7 @@ impl<S: Store + 'static> DagHandlerBuilder<S> {
         batch_row_limit: usize,
         is_cache_enabled: bool,
         paging_size: Option<u64>,
+        max_resp_size: u64,
         quota_limiter: Arc<QuotaLimiter>,
     ) -> Self {
         DagHandlerBuilder {
@@ -51,6 +53,7 @@ impl<S: Store + 'static> DagHandlerBuilder<S> {
             batch_row_limit,
             is_cache_enabled,
             paging_size,
+            max_resp_size,
             quota_limiter,
         }
     }
@@ -72,6 +75,7 @@ impl<S: Store + 'static> DagHandlerBuilder<S> {
             self.is_cache_enabled,
             self.batch_row_limit,
             self.paging_size,
+            self.max_resp_size,
             self.quota_limiter,
         )?
         .into_boxed())
@@ -93,6 +97,7 @@ impl BatchDagHandler {
         is_cache_enabled: bool,
         streaming_batch_limit: usize,
         paging_size: Option<u64>,
+        max_resp_size: u64,
         quota_limiter: Arc<QuotaLimiter>,
     ) -> Result<Self> {
         let snap = store.get_kvengine_snap();
@@ -104,6 +109,7 @@ impl BatchDagHandler {
                 deadline,
                 streaming_batch_limit,
                 paging_size,
+                max_resp_size,
                 quota_limiter,
                 snap,
             )?,

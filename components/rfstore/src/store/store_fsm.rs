@@ -203,6 +203,8 @@ impl RaftBatchSystem {
             ctx.engines.raft.clone(),
             self.router.clone(),
             ctx.trans.clone(),
+            ctx.cfg.value().raft_worker_max_batch_size.0 as usize,
+            ctx.cfg.value().io_worker_min_write_duration.0,
         );
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()
@@ -1448,6 +1450,9 @@ impl<'a> StoreMsgHandler<'a> {
 
             new_peers.push(new_peer);
             self.ctx.global.router.send(new_region_id, PeerMsg::Start);
+            if is_leader {
+                self.ctx.global.router.send(new_region_id, PeerMsg::Tick);
+            }
 
             if !is_leader {
                 if let Some(msg) = self
@@ -1651,7 +1656,11 @@ impl<'a> StoreMsgHandler<'a> {
             RegionChangeEvent::Destroy,
             peer_fsm.peer.get_role(),
         );
-        let task = PdTask::DestroyPeer { region_id };
+        let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(peer_fsm.peer.region().get_start_key());
+        let task = PdTask::DestroyPeer {
+            region_id,
+            keyspace_id,
+        };
         if let Err(e) = self.ctx.global.pd_scheduler.schedule(task) {
             error!(
                 "failed to notify pd";

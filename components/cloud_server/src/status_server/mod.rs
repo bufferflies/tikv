@@ -86,7 +86,10 @@ use tikv_util::{
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::{Builder, Runtime},
-    sync::oneshot::{self, Receiver, Sender},
+    sync::{
+        oneshot::{self, Receiver, Sender},
+        Semaphore,
+    },
 };
 use tokio_openssl::SslStream;
 use txn_types::TsSet;
@@ -1421,9 +1424,11 @@ impl StatusServer {
         )
     }
 
+    const DFS_FILE_READ_CONCURRENCY: usize = 128;
+
     async fn handle_dfs_file_read(
         req: Request<Body>,
-        engine: kvengine::Engine,
+        ctx: &StatusContext,
     ) -> hyper::Result<Response<Body>> {
         let id_opt = Self::get_dfs_file_id(&req);
         if id_opt.is_none() {
@@ -1434,13 +1439,14 @@ impl StatusServer {
 
         if check_exists_only {
             let (callback, future) = paired_future_callback();
+            let kvengine = ctx.kvengine.clone();
             spawn_anonymous_thread_with!(move || {
                 let res = match file_type {
-                    FileType::TxnChunk => engine
+                    FileType::TxnChunk => kvengine
                         .get_txn_chunk_manager()
                         .read_local_chunk(id)
                         .map(|_| ()),
-                    _ => engine.open_local_file(id, file_type).map(|_| ()),
+                    _ => kvengine.open_local_file(id, file_type).map(|_| ()),
                 };
                 callback(res)
             });
@@ -1458,29 +1464,57 @@ impl StatusServer {
                 ),
             });
         }
-
-        let (callback, future) = paired_future_callback();
-        spawn_anonymous_thread_with!(move || {
-            let res = match file_type {
+        let handle_res = tokio::runtime::Handle::try_current();
+        if let Err(handle_err) = handle_res {
+            error!("Failed to get tokio runtime handle: {:?}", handle_err);
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to get tokio runtime handle",
+            ));
+        }
+        let _permit = match ctx.dfs_file_read_semaphore.try_acquire() {
+            Err(_) => {
+                warn!("too many concurrent DFS file read requests");
+                return Ok(make_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "too many concurrent DFS file read requests",
+                ));
+            }
+            Ok(permit) => permit,
+        };
+        let start = Instant::now();
+        let handle = handle_res.unwrap();
+        let engine = ctx.kvengine.clone();
+        let spawn_res = handle
+            .spawn_blocking(move || match file_type {
                 FileType::TxnChunk => {
                     debug_assert_eq!(start_off, 0);
                     engine.get_txn_chunk_manager().read_local_chunk(id)
                 }
                 _ => engine.read_local_file(id, file_type, start_off, end_off),
-            };
-            callback(res)
-        });
-        let res = future.await.unwrap();
-        Ok(match res {
-            Ok(data) => Response::builder()
-                .header(header::CONTENT_TYPE, "application/octet-stream")
-                .body(Body::from(data))
-                .unwrap(),
-            Err(err) => make_response(
+            })
+            .await;
+        if let Err(handle_err) = spawn_res {
+            error!("Failed to execute blocking task: {:?}", handle_err);
+            return Ok(make_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Internal Server Error {}", err),
-            ),
-        })
+                "failed to execute blocking task",
+            ));
+        }
+        let read_res = spawn_res.unwrap();
+        if let Err(read_err) = read_res {
+            error!("Failed to read file: {:?}", read_err);
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read file {:?}", read_err),
+            ));
+        }
+        info!("read local dfs file {} takes {:?}", id, start.elapsed());
+        let data = read_res.unwrap();
+        Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(data))
+            .unwrap())
     }
 
     async fn handle_dfs_file_create(
@@ -1807,7 +1841,7 @@ impl StatusServer {
     /// [keyspace_id=xxx][shard_id=1][confirm_all=true|false]
     async fn handle_clear_columnar(
         req: Request<Body>,
-        router: RaftRouter,
+        router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         let bad_request_resp = |msg: &str| make_response(StatusCode::BAD_REQUEST, msg.to_owned());
         let query = req.uri().query().unwrap_or("");
@@ -1883,7 +1917,7 @@ impl StatusServer {
     /// POST /build_columnar?switch=true|false
     async fn handle_build_columnar(
         req: Request<Body>,
-        engine: kvengine::Engine,
+        engine: &kvengine::Engine,
     ) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -1938,7 +1972,7 @@ fn get_bool_param(query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>, key: &str) 
 impl StatusServer {
     pub async fn dump_region_meta(
         _req: Request<Body>,
-        _router: RaftRouter,
+        _router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         // TODO(x)
         Ok(hyper::Response::new(Body::empty()))
@@ -1946,7 +1980,7 @@ impl StatusServer {
 
     pub async fn handle_sync_region(
         req: Request<Body>,
-        router: RaftRouter,
+        router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         let mut body = Vec::new();
         req.into_body()
@@ -2009,7 +2043,7 @@ impl StatusServer {
 
     pub async fn handle_sync_region_by_id(
         req: Request<Body>,
-        router: RaftRouter,
+        router: &RaftRouter,
     ) -> hyper::Result<Response<Body>> {
         let mut body = Vec::new();
         req.into_body()
@@ -2083,31 +2117,24 @@ impl StatusServer {
         I::Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         C: ServerConnection,
     {
-        let security_config = self.security_config.clone();
-        let cfg_controller = self.cfg_controller.clone();
-        let router = self.router.clone();
-        let engine = self.kvengine.clone();
-        let rfengine = self.rfengine.clone();
-        let concurrency_manager = self.concurrency_manager.clone();
+        let ctx = Arc::new(StatusContext {
+            security_config: self.security_config.clone(),
+            cfg_controller: self.cfg_controller.clone(),
+            router: self.router.clone(),
+            kvengine: self.kvengine.clone(),
+            rfengine: self.rfengine.clone(),
+            concurrency_manager: self.concurrency_manager.clone(),
+            dfs_file_read_semaphore: Semaphore::new(Self::DFS_FILE_READ_CONCURRENCY),
+        });
         // Start to serve.
         let server = builder.serve(make_service_fn(move |conn: &C| {
             let x509 = conn.get_x509();
-            let security_config = security_config.clone();
-            let cfg_controller = cfg_controller.clone();
-            let router = router.clone();
-            let engine = engine.clone();
-            let rfengine = rfengine.clone();
-            let concurrency_manager = concurrency_manager.clone();
+            let ctx = ctx.clone();
             async move {
                 // Create a status service.
                 Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
                     let x509 = x509.clone();
-                    let security_config = security_config.clone();
-                    let cfg_controller = cfg_controller.clone();
-                    let router = router.clone();
-                    let engine = engine.clone();
-                    let rfengine = rfengine.clone();
-                    let concurrency_manager = concurrency_manager.clone();
+                    let ctx = ctx.clone();
                     tikv_util::init_task_local(async move {
                         let path = req.uri().path().to_owned();
                         let method = req.method().to_owned();
@@ -2131,7 +2158,7 @@ impl StatusServer {
                                 | (&Method::GET, "/debug/pprof/profile")
                         );
 
-                        if should_check_cert && !check_cert(security_config, x509) {
+                        if should_check_cert && !check_cert(ctx.security_config.clone(), x509) {
                             return Ok(make_response(
                                 StatusCode::FORBIDDEN,
                                 "certificate role error",
@@ -2142,7 +2169,7 @@ impl StatusServer {
                         let start = Instant::now();
                         let resp = match (method.clone(), path.as_ref()) {
                             (Method::GET, "/metrics") => {
-                                Self::handle_get_metrics(req, &cfg_controller)
+                                Self::handle_get_metrics(req, &ctx.cfg_controller)
                             }
                             (Method::GET, "/status") => Ok(Response::default()),
                             (Method::GET, "/debug/pprof/heap_list") => {
@@ -2172,10 +2199,10 @@ impl StatusServer {
                             }
                             (Method::POST, "/debug/pprof/symbol") => Self::get_symbol(req).await,
                             (Method::GET, "/config") => {
-                                Self::get_config(req, &cfg_controller).await
+                                Self::get_config(req, &ctx.cfg_controller).await
                             }
                             (Method::POST, "/config") => {
-                                Self::update_config(cfg_controller.clone(), req).await
+                                Self::update_config(ctx.cfg_controller.clone(), req).await
                             }
                             (Method::GET, "/debug/pprof/profile") => {
                                 Self::dump_cpu_prof_to_resp(req).await
@@ -2194,75 +2221,75 @@ impl StatusServer {
                                 Ok(Response::default())
                             }
                             (Method::GET, path) if path.starts_with("/region") => {
-                                Self::dump_region_meta(req, router).await
+                                Self::dump_region_meta(req, &ctx.router).await
                             }
                             (Method::GET, path) if path.starts_with("/sync_region_by_id") => {
-                                Self::handle_sync_region_by_id(req, router).await
+                                Self::handle_sync_region_by_id(req, &ctx.router).await
                             }
                             (Method::GET, path) if path.starts_with("/sync_region") => {
-                                Self::handle_sync_region(req, router).await
+                                Self::handle_sync_region(req, &ctx.router).await
                             }
                             (Method::PUT, path) if path.starts_with("/log-level") => {
                                 Self::change_log_level(req).await
                             }
                             (Method::GET, path) if path.starts_with("/kvengine") => {
                                 if path.starts_with("/kvengine/snapshot/") {
-                                    Self::dump_kvengine_snapshot(req, engine, router).await
+                                    Self::dump_kvengine_snapshot(req, ctx.kvengine.clone(), ctx.router.clone()).await
                                 } else if path.starts_with("/kvengine/columnar_status") {
-                                    Self::collect_columnar_status(req, engine).await
+                                    Self::collect_columnar_status(req, ctx.kvengine.clone()).await
                                 } else if path.starts_with("/kvengine/meta/") {
-                                    Self::dump_kvengine_meta(req, engine).await
+                                    Self::dump_kvengine_meta(req, ctx.kvengine.clone()).await
                                 } else {
-                                    Self::dump_kvengine_stats(req, engine).await
+                                    Self::dump_kvengine_stats(req, ctx.kvengine.clone()).await
                                 }
                             }
                             (Method::GET, path) if path.starts_with("/rfengine") => {
                                 if path.starts_with("/rfengine/wal_chunk") {
-                                    Self::rfengine_wal_chunk(req, rfengine).await
+                                    Self::rfengine_wal_chunk(req, ctx.rfengine.clone()).await
                                 } else {
-                                    Self::dump_rfengine_stats(req, rfengine).await
+                                    Self::dump_rfengine_stats(req, ctx.rfengine.clone()).await
                                 }
                             }
                             (Method::POST, path) if path.starts_with("/rfengine/backup") => {
-                                let dfs_conf = cfg_controller.get_current().dfs.clone();
-                                Self::backup_rfengine(req, rfengine, engine, concurrency_manager, dfs_conf).await
+                                let dfs_conf = ctx.cfg_controller.get_current().dfs.clone();
+                                Self::backup_rfengine(req, ctx.rfengine.clone(), ctx.kvengine.clone(), ctx.concurrency_manager.clone(), dfs_conf).await
                             }
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
-                                Self::restore_shard(req, router, engine).await
+                                Self::restore_shard(req, ctx.router.clone(), ctx.kvengine.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/kvengine/compactor") => {
-                                Self::add_remote_compactor(req, engine.comp_client.clone()).await
+                                Self::add_remote_compactor(req, ctx.kvengine.comp_client.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/ingest_files") => {
-                                Self::ingest_files(req, router, engine).await
+                                Self::ingest_files(req, ctx.router.clone(), ctx.kvengine.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/ingest_s3") => {
-                                Self::ingest_s3(req, router, engine).await
+                                Self::ingest_s3(req, ctx.router.clone(), ctx.kvengine.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/unsafe_recover") => {
-                                Self::unsafe_recover(req, rfengine, engine).await
+                                Self::unsafe_recover(req, ctx.rfengine.clone(), ctx.kvengine.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/major-compact") => {
-                                Self::major_compact(req, rfengine, router).await
+                                Self::major_compact(req, ctx.rfengine.clone(), ctx.router.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/schema_file") => {
-                                Self::handle_schema_file(req, router, engine).await
+                                Self::handle_schema_file(req, ctx.router.clone(), ctx.kvengine.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/clear_columnar") => {
-                                Self::handle_clear_columnar(req, router).await
+                                Self::handle_clear_columnar(req, &ctx.router).await
                             }
                             (Method::POST, path) if path.starts_with("/build_columnar") => {
-                                Self::handle_build_columnar(req, engine).await
+                                Self::handle_build_columnar(req, &ctx.kvengine).await
                             }
                             (Method::GET, path) if path.starts_with("/dfs/") => {
-                                Self::handle_dfs_file_read(req, engine).await
+                                Self::handle_dfs_file_read(req, &ctx).await
                             }
                             (Method::POST, path) if path.starts_with("/dfs/") => {
-                                Self::handle_dfs_file_create(req, engine).await
+                                Self::handle_dfs_file_create(req, ctx.kvengine.clone()).await
                             }
                             (Method::GET | Method::POST, path) if path.starts_with("/recovery/") => {
-                                let data_dir = &cfg_controller.get_current().storage.data_dir;
-                                Self::handle_recovery(req, engine, data_dir).await
+                                let data_dir = &ctx.cfg_controller.get_current().storage.data_dir;
+                                Self::handle_recovery(req, ctx.kvengine.clone(), data_dir).await
                             },
                             _ => {
                                 is_unknown_path = true;
@@ -2325,6 +2352,16 @@ impl StatusServer {
         }
         Ok(())
     }
+}
+
+struct StatusContext {
+    security_config: Arc<SecurityConfig>,
+    cfg_controller: ConfigController,
+    router: RaftRouter,
+    kvengine: kvengine::Engine,
+    rfengine: RfEngine,
+    concurrency_manager: ConcurrencyManager,
+    dfs_file_read_semaphore: Semaphore,
 }
 
 // To unify TLS/Plain connection usage in start_serve function

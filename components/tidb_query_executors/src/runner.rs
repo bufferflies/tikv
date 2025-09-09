@@ -78,6 +78,11 @@ pub struct BatchExecutorsRunner<SS> {
     /// current page.
     paging_size: Option<u64>,
 
+    /// The maximum size of the response. If the response size exceeds this
+    /// value, the response will be returned early and the the client will
+    /// send a new request with the unprocessed range.
+    max_resp_size: u64,
+
     quota_limiter: Arc<QuotaLimiter>,
 }
 
@@ -420,6 +425,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         deadline: Deadline,
         stream_row_limit: usize,
         paging_size: Option<u64>,
+        max_resp_size: u64,
         quota_limiter: Arc<QuotaLimiter>,
         snap: Option<kvengine::SnapAccess>,
     ) -> Result<Self> {
@@ -472,6 +478,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
             stream_row_limit,
             encode_type,
             paging_size,
+            max_resp_size,
             quota_limiter,
         })
     }
@@ -494,6 +501,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         let mut warnings = self.config.new_eval_warnings();
         let mut ctx = EvalContext::new(self.config.clone());
         let mut record_all = 0;
+        let mut chunks_size = 0u64;
 
         loop {
             let mut chunk = Chunk::default();
@@ -523,12 +531,13 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
             }
 
             if record_len > 0 {
+                chunks_size += chunk.compute_size() as u64;
                 chunks.push(chunk);
                 record_all += record_len;
-                // if chunks_size > MAX_RESPONSE_SIZE {
-                //     tikv_util::info!("reach max response size, row count {}",
-                // record_all);     self.paging_size =
-                // Some(record_all as u64); }
+                if chunks_size > self.max_resp_size {
+                    tikv_util::info!("reach max response size, row count {}", record_all);
+                    self.paging_size = Some(record_all as u64);
+                }
             }
 
             if drained.stop() || self.paging_size.map_or(false, |p| record_all >= p as usize) {

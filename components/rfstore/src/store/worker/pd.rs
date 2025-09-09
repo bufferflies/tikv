@@ -130,6 +130,7 @@ pub enum PdTask {
     },
     DestroyPeer {
         region_id: u64,
+        keyspace_id: Option<u32>,
     },
     UpdateMaxTimestamp {
         region_id: u64,
@@ -150,6 +151,7 @@ pub enum PdTask {
     },
     RoleChanged {
         region_id: u64,
+        keyspace_id: Option<u32>,
         role: StateRole,
     },
     UpdateRaftCpuUtil,
@@ -332,8 +334,15 @@ impl Display for PdTask {
             PdTask::WriteStats { ref write_stats } => {
                 write!(f, "get the write statistics {:?}", write_stats)
             }
-            PdTask::DestroyPeer { ref region_id } => {
-                write!(f, "destroy peer of region {}", region_id)
+            PdTask::DestroyPeer {
+                ref region_id,
+                keyspace_id,
+            } => {
+                write!(
+                    f,
+                    "destroy peer of region {} keyspace_id {:?}",
+                    region_id, keyspace_id
+                )
             }
             PdTask::UpdateMaxTimestamp { region_id, .. } => write!(
                 f,
@@ -352,8 +361,18 @@ impl Display for PdTask {
             PdTask::SyncRegionById { region_id, .. } => {
                 write!(f, "sync region by id: {}", region_id)
             }
-            PdTask::RoleChanged { region_id, role } => {
-                write!(f, "region {} change role to {:?}", region_id, role)
+            PdTask::RoleChanged {
+                region_id,
+                keyspace_id,
+                role,
+            } => {
+                write!(
+                    f,
+                    "region {} keyspace {} change role to {:?}",
+                    region_id,
+                    keyspace_id.unwrap_or_default(),
+                    role
+                )
             }
             PdTask::UpdateRaftCpuUtil => write!(f, "update raft cpu utilization"),
         }
@@ -610,7 +629,8 @@ impl PdRunner {
 
         let shard = self.kv.get_shard(region.get_id());
         PdRunner::set_storage_size_metric(
-            &region,
+            region.id,
+            rfengine::get_region_keyspace_id_u32(&region),
             Some(region_stat.approximate_kv_size),
             has_tiflash_replicas,
             shard,
@@ -661,13 +681,12 @@ impl PdRunner {
     }
 
     pub fn set_storage_size_metric(
-        region: &metapb::Region,
+        region_id: u64,
+        keyspace_id: Option<u32>,
         kv_size: Option<u64>,
         has_tiflash_replicas: bool,
         shard: Option<Arc<Shard>>,
     ) {
-        let keyspace_id = rfengine::get_region_keyspace_id_u32(region);
-        let region_id = region.get_id();
         let region_id_string = region_id.to_string();
         let region_id_str = region_id_string.as_str();
         match keyspace_id {
@@ -1142,7 +1161,7 @@ impl PdRunner {
         }
     }
 
-    fn handle_destroy_peer(&mut self, region_id: u64) {
+    fn handle_destroy_peer(&mut self, region_id: u64, keyspace_id: Option<u32>) {
         self.region_map.remove(region_id);
         self.region_buckets.remove(&region_id);
         match self.region_peers.remove(&region_id) {
@@ -1152,6 +1171,7 @@ impl PdRunner {
                 info!("remove peer statistic record in pd"; "region" => tag)
             }
         }
+        Self::set_storage_size_metric(region_id, keyspace_id, None, false, None);
     }
 
     #[allow(unused)]
@@ -1427,12 +1447,13 @@ impl PdRunner {
         resp
     }
 
-    fn handle_role_changed(&mut self, region_id: u64, role: StateRole) {
+    fn handle_role_changed(&mut self, region_id: u64, keyspace_id: Option<u32>, role: StateRole) {
         let peer_stat = self.region_peers.entry(region_id).or_default();
         peer_stat.role = role;
         if role != StateRole::Leader {
             peer_stat.down_peers.clear();
             peer_stat.pending_peers.clear();
+            Self::set_storage_size_metric(region_id, keyspace_id, None, false, None);
         }
     }
 }
@@ -1555,7 +1576,10 @@ impl Runnable for PdRunner {
             PdTask::ValidatePeer { region, peer } => self.handle_validate_peer(region, peer),
             PdTask::ReadStats { read_stats } => self.handle_read_stats(read_stats),
             PdTask::WriteStats { write_stats } => self.handle_write_stats(write_stats),
-            PdTask::DestroyPeer { region_id } => self.handle_destroy_peer(region_id),
+            PdTask::DestroyPeer {
+                region_id,
+                keyspace_id,
+            } => self.handle_destroy_peer(region_id, keyspace_id),
             PdTask::UpdateMaxTimestamp {
                 region_id,
                 initial_status,
@@ -1577,8 +1601,12 @@ impl Runnable for PdRunner {
             } => {
                 self.handle_sync_region_by_id(region_id, callback);
             }
-            PdTask::RoleChanged { region_id, role } => {
-                self.handle_role_changed(region_id, role);
+            PdTask::RoleChanged {
+                region_id,
+                keyspace_id,
+                role,
+            } => {
+                self.handle_role_changed(region_id, keyspace_id, role);
             }
             PdTask::UpdateRaftCpuUtil => {
                 self.raft_cpu_collector.update();

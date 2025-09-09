@@ -30,8 +30,6 @@ use tikv_util::{
 use super::{metrics::*, *};
 use crate::RaftRouter;
 
-const MERGED_WRITE_BATCH_MAX_SIZE: usize = 4 * 1024 * 1024; // 4 MiB.
-
 #[derive(Clone)]
 pub(crate) struct PeerStates {
     pub(crate) applier: Arc<Mutex<Applier>>,
@@ -637,6 +635,10 @@ pub(crate) struct IoWorker {
     router: RaftRouter,
     trans: Box<dyn Transport>,
     wb: WriteBatch,
+    max_batch_size: usize,
+    // min write duration is used to avoid too frequent write to raft db to avoid write
+    // amplification.
+    min_write_duration: Duration,
 }
 
 impl IoWorker {
@@ -645,8 +647,10 @@ impl IoWorker {
         engine: rfengine::RfEngine,
         router: RaftRouter,
         trans: Box<dyn Transport>,
+        max_batch_size: usize,
+        min_write_duration: Duration,
     ) -> (Self, Sender<Option<IoTask>>) {
-        let (sender, receiver) = tikv_util::mpsc::bounded(256);
+        let (sender, receiver) = tikv_util::mpsc::bounded(1024);
         (
             Self {
                 store_id,
@@ -655,6 +659,8 @@ impl IoWorker {
                 router,
                 trans,
                 wb: Default::default(),
+                max_batch_size,
+                min_write_duration,
             },
             sender,
         )
@@ -668,7 +674,7 @@ impl IoWorker {
             let mut total_estimated_size = task.raft_wb.estimated_size();
             tasks.push(task);
             for _ in 0..len {
-                if total_estimated_size >= MERGED_WRITE_BATCH_MAX_SIZE {
+                if total_estimated_size >= self.max_batch_size {
                     break;
                 }
 
@@ -693,17 +699,21 @@ impl IoWorker {
     fn handle_tasks(&mut self, tasks: Vec<IoTask>) {
         fail_point!("rfstore_before_save_on_store_1", self.store_id == 1, |_| {});
         let timer = tikv_util::time::Instant::now();
+        let mut after_write = timer;
         if !self.wb.is_empty() {
             let wb = mem::take(&mut self.wb);
             let write_size = self.engine.persist(wb).unwrap();
-            let write_raft_db_dur = timer.saturating_elapsed();
-            if write_raft_db_dur > Duration::from_millis(50) {
-                info!("io worker write raft db takes {:?}", write_raft_db_dur);
+            after_write = tikv_util::time::Instant::now();
+            let write_raft_db_dur = after_write.saturating_duration_since(timer);
+            if write_raft_db_dur > Duration::from_millis(40) {
+                info!(
+                    "io worker write raft db takes too long {:?}， size {}",
+                    write_raft_db_dur, write_size
+                );
             }
             STORE_WRITE_RAFTDB_DURATION_HISTOGRAM.observe(duration_to_sec(write_raft_db_dur));
             STORE_WRITE_TRIGGER_SIZE_HISTOGRAM.observe(write_size as f64);
         }
-        let timer = tikv_util::time::Instant::now();
         for task in tasks {
             for mut ready in task.readies {
                 let raft_messages = mem::take(&mut ready.raft_messages);
@@ -730,7 +740,12 @@ impl IoWorker {
         if self.trans.need_flush() {
             self.trans.flush();
         }
-        let send_time = duration_to_sec(timer.saturating_elapsed());
+        let end_time = tikv_util::time::Instant::now();
+        let handle_time = end_time.saturating_duration_since(timer);
+        if self.min_write_duration > handle_time {
+            std::thread::sleep(self.min_write_duration - handle_time);
+        }
+        let send_time = duration_to_sec(end_time.saturating_duration_since(after_write));
         STORE_WRITE_SEND_DURATION_HISTOGRAM.observe(send_time);
     }
 }

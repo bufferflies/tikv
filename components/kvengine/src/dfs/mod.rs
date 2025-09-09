@@ -2,6 +2,7 @@
 
 mod config;
 mod metrics;
+mod remote_cached;
 mod s3;
 mod s3_overlay;
 
@@ -28,6 +29,7 @@ pub use config::Config as DFSConfig;
 use file_system;
 use metrics::*;
 use moka::future::ConcurrentCacheExt;
+pub use remote_cached::*;
 pub use s3::*;
 pub use s3_overlay::OverlaidFs;
 use thiserror::Error;

@@ -19,7 +19,7 @@ use hyper::{
 use kvengine::{
     context::{IaCtx, PrepareType, SnapCtx},
     dfs,
-    dfs::{CacheFs, S3Fs},
+    dfs::{CacheFs, S3Fs, DFS_REMOTE_CACHE_ADDR_HEADER},
     table::{columnar::SchemaFile, sstable::BlockCache, ChecksumType},
     txn_chunk_manager::TxnChunkManager,
     CompactionRequest, SnapAccess,
@@ -29,6 +29,7 @@ use prometheus::TEXT_FORMAT;
 use protobuf::Message;
 use replication_worker::ReplicationScheduler;
 use rfstore::store::{PdIdAllocator, RegionSnapshot};
+use security::HttpClient;
 use tikv::{
     coprocessor::{
         remote_dispatcher::decode_remote_cop_request, REQ_TYPE_ANALYZE, REQ_TYPE_CHECKSUM,
@@ -57,9 +58,11 @@ use crate::{
     worker_limiter::WorkerLimiter,
     write_sst,
     write_sst::WriteSstManager,
+    Config,
 };
 
 pub(crate) struct Context {
+    pub config: Config,
     pub cluster_id: u64,
     pub block_size: usize,
     pub compression_lvl: i32,
@@ -83,16 +86,28 @@ pub(crate) struct Context {
     pub ia_ctx: IaCtx,
     pub read_columnar: bool,
     pub write_sst_manager: WriteSstManager,
+    pub http_client: Arc<HttpClient>,
+    pub remote_cache_ttl: Duration,
 }
 
 impl Context {
-    pub(crate) fn get_snap_ctx(&self, use_cache_fs: bool) -> SnapCtx {
+    pub(crate) fn get_snap_ctx(
+        &self,
+        use_cache_fs: bool,
+        dfs_remote_cache_addr: Option<&str>,
+    ) -> SnapCtx {
         let dfs: Arc<dyn dfs::Dfs> = if use_cache_fs {
-            self.cache_fs.clone() as _
+            self.cache_fs.clone()
+        } else if let Some(dfs_cache_addr) = dfs_remote_cache_addr {
+            Arc::new(dfs::RemoteCachedDfs::new(
+                self.s3fs.clone(),
+                dfs_cache_addr.to_string(),
+                self.http_client.clone(),
+                self.remote_cache_ttl,
+            ))
         } else {
-            self.s3fs.clone() as _
+            self.s3fs.clone()
         };
-
         SnapCtx {
             dfs,
             master_key: self.master_key.clone(),
@@ -360,7 +375,8 @@ async fn handle_remote_coprocessor(
     req: hyper::Request<hyper::Body>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     let accept_pb = req.headers().is_accept_protobuf();
-    let req_body = hyper::body::to_bytes(req.into_body()).await?;
+    let (parts, body) = req.into_parts();
+    let req_body = hyper::body::to_bytes(body).await?;
     let decode_res = decode_remote_cop_request(req_body.chunk());
     if let Err(err) = decode_res {
         let body = hyper::Body::from(format!("{:?}", err));
@@ -397,7 +413,7 @@ async fn handle_remote_coprocessor(
     let req_type = cop_req.get_tp();
     let snap_start = Instant::now_coarse();
     let use_cache_fs = matches!(req_type, REQ_TYPE_DAG);
-    let snap_ctx = ctx.get_snap_ctx(use_cache_fs);
+    let snap_ctx = ctx.get_snap_ctx(use_cache_fs, get_dfs_remote_cache_addr(&parts));
     let snap_access_res =
         SnapAccess::construct_snapshot(&tag, &snap_ctx, mem_data, snap_data).await;
     if let Err(err) = snap_access_res.as_ref() {
@@ -446,6 +462,7 @@ async fn handle_remote_coprocessor(
         cop_req,
         None,
         Duration::from_secs(60),
+        ctx.config.cop_max_resp_size.0,
         ctx.quota_limiter.clone(),
         snap,
     )
@@ -518,6 +535,14 @@ async fn handle_remote_coprocessor(
             Ok(hyper::Response::builder().status(500).body(body).unwrap())
         }
     }
+}
+
+fn get_dfs_remote_cache_addr(parts: &http::request::Parts) -> Option<&str> {
+    parts
+        .headers
+        .get(DFS_REMOTE_CACHE_ADDR_HEADER)?
+        .to_str()
+        .ok()
 }
 
 pub fn get_cop_req_tag(cop_req: &kvproto::coprocessor::Request) -> String {

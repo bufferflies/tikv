@@ -114,6 +114,13 @@ pub struct Config {
     pub aux_worker_max_util: usize,
 
     pub schema_worker_count: usize,
+
+    // The maximum batch size for raft worker.
+    pub raft_worker_max_batch_size: ReadableSize,
+
+    // The minimum duration for IO worker to write data.
+    // This is used to avoid too frequent writes to avoid write amplification.
+    pub io_worker_min_write_duration: ReadableDuration,
 }
 
 // WARNING:
@@ -170,6 +177,8 @@ impl Default for Config {
             // worker.
             aux_worker_max_util: 60,
             schema_worker_count: 1,
+            raft_worker_max_batch_size: ReadableSize::mb(1),
+            io_worker_min_write_duration: ReadableDuration::millis(1),
         }
     }
 }
@@ -236,6 +245,10 @@ impl Config {
         cfg.local_file_gc_timeout = old.local_file_gc_timeout;
 
         cfg.schema_worker_count = (num_cpus / 16).max(1);
+
+        cfg.raft_worker_max_batch_size = old.raft_worker_max_batch_size;
+
+        cfg.io_worker_min_write_duration = old.io_worker_min_write_duration;
 
         if cfg!(debug_assertions) && cfg.raft_base_tick_interval.as_millis() < 100 {
             // It is a test config, adjust the fields not included in the old.

@@ -5,7 +5,7 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use http::header;
-use kvengine::{SnapAccess, LOCK_CF};
+use kvengine::{dfs::DFS_REMOTE_CACHE_ADDR_HEADER, SnapAccess, LOCK_CF};
 use kvproto::{coprocessor::Response, kvrpcpb::ExecDetailsV2};
 use protobuf::Message;
 use security::SecurityManager;
@@ -58,6 +58,7 @@ pub async fn remote_request(
         .uri(remote_addr)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::ACCEPT, CONTENT_TYPE_PROTOBUF)
+        .header(DFS_REMOTE_CACHE_ADDR_HEADER, remote_ctx.status_addr.clone())
         .body(hyper::Body::from(req_body))
         .map_err(|e| Error::Other(e.to_string()))?;
     let client = remote_ctx.client.clone();
@@ -174,6 +175,7 @@ pub struct RemoteContextCore {
     pub runtime: tokio::runtime::Handle,
     pub remote_request_cache: moka::future::Cache<String, Response>,
     pub client: security::HttpClient,
+    status_addr: String,
 }
 
 pub trait CopWorkerProvider: Send + Sync {
@@ -200,6 +202,7 @@ impl RemoteContext {
         cop_min_blocks_size: usize,
         security_mgr: Arc<SecurityManager>,
         runtime: tokio::runtime::Handle,
+        status_addr: String,
     ) -> Option<Self> {
         if remote_worker_url.is_empty() && cop_worker_url.is_empty() {
             return None;
@@ -222,6 +225,7 @@ impl RemoteContext {
                 runtime,
                 remote_request_cache,
                 client,
+                status_addr,
             }),
         })
     }
@@ -538,47 +542,52 @@ pub fn decode_remote_cop_request(body: &[u8]) -> Result<(&[u8], &[u8], &[u8])> {
     Ok((req_data, mem_data, snap_data))
 }
 
-#[test]
-fn test_remote_cop_coded() {
-    let cop_req = b"cop_req".to_vec();
-    let mem_data = b"mem_data".to_vec();
-    let snap_data = b"snap_data".to_vec();
-    let req_body = encode_remote_cop_request(&cop_req, &mem_data, &snap_data);
-    let (cop_req, mem_data, snap_data) = decode_remote_cop_request(&req_body).unwrap();
-    assert_eq!(cop_req, "cop_req".as_bytes());
-    assert_eq!(mem_data, "mem_data".as_bytes());
-    assert_eq!(snap_data, "snap_data".as_bytes());
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn test_remote_cop_coded_with_empty_mem() {
-    let cop_req = b"cop_req".to_vec();
-    let mem_data = b"".to_vec();
-    let snap_data = b"snap_data".to_vec();
-    let req_body = encode_remote_cop_request(&cop_req, &mem_data, &snap_data);
-    let (cop_req, mem_data, snap_data) = decode_remote_cop_request(&req_body).unwrap();
-    assert_eq!(cop_req, "cop_req".as_bytes());
-    assert_eq!(mem_data, "".as_bytes());
-    assert_eq!(snap_data, "snap_data".as_bytes());
-}
+    #[test]
+    fn test_remote_cop_coded() {
+        let cop_req = b"cop_req".to_vec();
+        let mem_data = b"mem_data".to_vec();
+        let snap_data = b"snap_data".to_vec();
+        let req_body = encode_remote_cop_request(&cop_req, &mem_data, &snap_data);
+        let (cop_req, mem_data, snap_data) = decode_remote_cop_request(&req_body).unwrap();
+        assert_eq!(cop_req, "cop_req".as_bytes());
+        assert_eq!(mem_data, "mem_data".as_bytes());
+        assert_eq!(snap_data, "snap_data".as_bytes());
+    }
 
-#[test]
-fn test_calc_min_blocks() {
-    let conf_min_blocks_size = 512usize;
-    let ts = TimeStamp::default();
-    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 64);
-    let ts = TimeStamp::max();
-    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
+    #[test]
+    fn test_remote_cop_coded_with_empty_mem() {
+        let cop_req = b"cop_req".to_vec();
+        let mem_data = b"".to_vec();
+        let snap_data = b"snap_data".to_vec();
+        let req_body = encode_remote_cop_request(&cop_req, &mem_data, &snap_data);
+        let (cop_req, mem_data, snap_data) = decode_remote_cop_request(&req_body).unwrap();
+        assert_eq!(cop_req, "cop_req".as_bytes());
+        assert_eq!(mem_data, "".as_bytes());
+        assert_eq!(snap_data, "snap_data".as_bytes());
+    }
 
-    let phys_now = TimeStamp::physical_now();
-    let ts = TimeStamp::compose(phys_now - 70 * 1000, 1);
-    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 64);
-    let ts = TimeStamp::compose(phys_now - 40 * 1000, 1);
-    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 128);
-    let ts = TimeStamp::compose(phys_now - 20 * 1000, 1);
-    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 256);
-    let ts = TimeStamp::compose(phys_now - 10 * 1000, 1);
-    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
-    let ts = TimeStamp::compose(phys_now + 20 * 1000, 1);
-    assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
+    #[test]
+    fn test_calc_min_blocks() {
+        let conf_min_blocks_size = 512usize;
+        let ts = TimeStamp::default();
+        assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 64);
+        let ts = TimeStamp::max();
+        assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
+
+        let phys_now = TimeStamp::physical_now();
+        let ts = TimeStamp::compose(phys_now - 70 * 1000, 1);
+        assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 64);
+        let ts = TimeStamp::compose(phys_now - 40 * 1000, 1);
+        assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 128);
+        let ts = TimeStamp::compose(phys_now - 20 * 1000, 1);
+        assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 256);
+        let ts = TimeStamp::compose(phys_now - 10 * 1000, 1);
+        assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
+        let ts = TimeStamp::compose(phys_now + 20 * 1000, 1);
+        assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
+    }
 }

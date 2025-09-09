@@ -7356,6 +7356,7 @@ dependencies = [
  "kvproto",
  "lazy_static",
  "log_wrappers",
+ "memory_trace_macros",
  "online_config",
  "pd_client",
  "prometheus",

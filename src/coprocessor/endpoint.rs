@@ -1,7 +1,8 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    borrow::Cow, future::Future, iter::FromIterator, marker::PhantomData, sync::Arc, time::Duration,
+    borrow::Cow, future::Future, iter::FromIterator, marker::PhantomData, ops::Deref, sync::Arc,
+    time::Duration,
 };
 
 use ::tracker::{
@@ -96,6 +97,8 @@ pub struct Endpoint<E: Engine> {
 
     _phantom: PhantomData<E>,
 
+    max_resp_size: u64,
+
     quota_limiter: Arc<QuotaLimiter>,
 
     remote_ctx: Option<RemoteContext>,
@@ -105,6 +108,8 @@ pub struct Endpoint<E: Engine> {
     pub overload_protector: Option<OverloadProtector>,
 
     security_mgr: Arc<SecurityManager>,
+
+    status_addr: String,
 }
 
 impl<E: Engine> tikv_util::AssertSend for Endpoint<E> {}
@@ -128,7 +133,11 @@ impl<E: Engine> Endpoint<E> {
             }
             _ => None,
         };
-
+        let status_addr = if cfg.advertise_status_addr.is_empty() {
+            cfg.status_addr.clone()
+        } else {
+            cfg.advertise_status_addr.clone()
+        };
         Self {
             read_pool,
             semaphore,
@@ -147,6 +156,8 @@ impl<E: Engine> Endpoint<E> {
             remote_pool: None,
             overload_protector,
             security_mgr,
+            status_addr,
+            max_resp_size: cfg.cop_max_resp_size.0,
         }
     }
 
@@ -170,6 +181,7 @@ impl<E: Engine> Endpoint<E> {
             remote_cop_min_blocks_size,
             self.security_mgr.clone(),
             pool.handle().clone(),
+            self.status_addr.clone(),
         );
         self.remote_pool = Some(pool);
     }
@@ -216,10 +228,16 @@ impl<E: Engine> Endpoint<E> {
         req: coppb::Request,
         peer: Option<String>,
         is_streaming: bool,
+        max_resp_size: u64,
     ) -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
         let api_version = req.get_context().get_api_version();
         dispatch_api_version!(api_version, {
-            self.parse_request_and_check_memory_locks_impl::<API>(req, peer, is_streaming)
+            self.parse_request_and_check_memory_locks_impl::<API>(
+                req,
+                peer,
+                is_streaming,
+                max_resp_size,
+            )
         })
     }
 
@@ -232,6 +250,7 @@ impl<E: Engine> Endpoint<E> {
         mut req: coppb::Request,
         peer: Option<String>,
         is_streaming: bool,
+        max_resp_size: u64,
     ) -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
         fail_point!("coprocessor_parse_request", |_| Err(box_err!(
             "unsupported tp (failpoint)"
@@ -330,6 +349,7 @@ impl<E: Engine> Endpoint<E> {
                         batch_row_limit,
                         req.get_is_cache_enabled(),
                         paging_size,
+                        max_resp_size,
                         quota_limiter,
                     )
                     .data_version(data_version)
@@ -638,7 +658,7 @@ impl<E: Engine> Endpoint<E> {
         let result_of_batch = self.process_batch_tasks(&mut req, &peer);
         set_tls_tracker_token(tracker);
         let result_of_future = self
-            .parse_request_and_check_memory_locks(req, peer, false)
+            .parse_request_and_check_memory_locks(req, peer, false, self.max_resp_size)
             .map(|(handler_builder, req_ctx)| self.handle_unary_request(req_ctx, handler_builder));
         async move {
             let res = match result_of_future {
@@ -702,7 +722,12 @@ impl<E: Engine> Endpoint<E> {
             );
             let mut response = coppb::StoreBatchTaskResponse::new();
             response.set_task_id(task_id);
-            match self.parse_request_and_check_memory_locks(cur_req, peer.clone(), false) {
+            match self.parse_request_and_check_memory_locks(
+                cur_req,
+                peer.clone(),
+                false,
+                self.max_resp_size,
+            ) {
                 Ok((handler_builder, req_ctx)) => {
                     let cur_tracker = GLOBAL_TRACKERS.insert(::tracker::Tracker::new(request_info));
                     set_tls_tracker_token(cur_tracker);
@@ -872,7 +897,7 @@ impl<E: Engine> Endpoint<E> {
         peer: Option<String>,
     ) -> impl futures::stream::Stream<Item = coppb::Response> {
         let result_of_stream = self
-            .parse_request_and_check_memory_locks(req, peer, true)
+            .parse_request_and_check_memory_locks(req, peer, true, u64::MAX)
             .and_then(|(handler_builder, req_ctx)| {
                 self.handle_stream_request(req_ctx, handler_builder)
             }); // Result<Stream<Resp, Error>, Error>
@@ -951,6 +976,7 @@ pub async fn parse_request_and_handle_remote_cop<S: 'static + Snapshot>(
     req: coppb::Request,
     peer: Option<String>,
     max_handle_duration: Duration,
+    max_resp_size: u64,
     quota_limiter: Arc<QuotaLimiter>,
     snap: S,
 ) -> Result<MemoryTraceGuard<coppb::Response>> {
@@ -960,6 +986,7 @@ pub async fn parse_request_and_handle_remote_cop<S: 'static + Snapshot>(
             req,
             peer,
             max_handle_duration,
+            max_resp_size,
             quota_limiter,
             snap,
         )
@@ -971,6 +998,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
     mut req: coppb::Request,
     peer: Option<String>,
     max_handle_duration: Duration,
+    max_resp_size: u64,
     quota_limiter: Arc<QuotaLimiter>,
     snap: S,
 ) -> Result<MemoryTraceGuard<coppb::Response>> {
@@ -1041,6 +1069,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 64,
                 req.get_is_cache_enabled(),
                 paging_size,
+                max_resp_size,
                 quota_limiter,
             )
             .data_version(data_version)
@@ -1207,8 +1236,9 @@ pub async fn prefetch_ia_remote_segments(
     for (ident, ftype) in segments {
         let tag = tag.to_string();
         let mgr = ia_mgr.clone();
+        let dfs = snap_ctx.dfs.clone();
         let task = async move {
-            mgr.prefetch_segment(ident.clone(), ftype, keyspace_id, deadline).map_err(|err| -> Error {
+            mgr.prefetch_segment(ident.clone(), ftype, keyspace_id, deadline, Some(dfs.deref())).map_err(|err| -> Error {
                 error!("{} prefetch segment failed", tag; "ident" => %ident, "ftype" => ?ftype, "err" => ?err);
                 if let kvengine::table::Error::DeadlineExceeded(_) = err {
                     Error::DeadlineExceeded

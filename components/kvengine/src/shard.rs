@@ -500,6 +500,7 @@ impl Shard {
                         data_dir.deref(),
                         opts,
                         ia_mgr,
+                        Some(fs),
                     )
                     .await?;
                     let table_meta_file = Arc::new(InMemFile::new(id, data));
@@ -509,7 +510,7 @@ impl Shard {
                     // Cache the whole file as a segment.
                     let ident = FileSegmentIdent::new(id, 0, fm.l0_size as u64);
                     ia_mgr
-                        .get_segment_handle(ident, fm.file_type)
+                        .get_segment_handle(ident, fm.file_type, Some(fs))
                         .await
                         .map(|handle| handle.into_inner())
                         .map_err(|err| err.into())

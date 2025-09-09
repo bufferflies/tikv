@@ -733,7 +733,8 @@ impl Peer {
         }
 
         PdRunner::set_storage_size_metric(
-            self.region(),
+            self.region_id,
+            rfengine::get_region_keyspace_id_u32(self.region()),
             None,
             false,
             self.get_store()
@@ -1306,6 +1307,7 @@ impl Peer {
     pub fn notify_role_changed(&self, pd_scheduler: &Scheduler<PdTask>, role: StateRole) {
         if let Err(e) = pd_scheduler.schedule(PdTask::RoleChanged {
             region_id: self.region_id,
+            keyspace_id: rfengine::get_region_keyspace_id_u32(self.region()),
             role,
         }) {
             error!(
@@ -1356,7 +1358,8 @@ impl Peer {
                 StateRole::Follower => {
                     self.leader_lease.expire();
                     PdRunner::set_storage_size_metric(
-                        self.region(),
+                        self.region_id,
+                        rfengine::get_region_keyspace_id_u32(self.region()),
                         None,
                         false,
                         self.get_store()

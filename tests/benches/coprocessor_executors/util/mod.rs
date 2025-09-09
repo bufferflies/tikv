@@ -50,6 +50,7 @@ pub fn build_dag_handler<TargetTxnStore: TxnStore + 'static>(
         64,
         false,
         None,
+        u64::MAX,
         Arc::new(QuotaLimiter::default()),
     )
     .build::<ApiV1>()

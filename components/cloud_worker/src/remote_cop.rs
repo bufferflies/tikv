@@ -116,9 +116,10 @@ impl Tikv for CopService {
         delegate_req.set_ranges(key_ranges.into());
         delegate_req.set_start_ts(req.get_start_ts());
         let max_handle_duration = self.cfg.max_handle_duration;
-        let snap_ctx = self.ctx.get_snap_ctx(false);
+        let snap_ctx = self.ctx.get_snap_ctx(false, None);
         let quota_limiter = self.ctx.quota_limiter.clone();
         let peer = Some(ctx.peer());
+        let max_resp_size = self.ctx.config.cop_max_resp_size.0;
         let future = async move {
             let delegate_start = Instant::now_coarse();
             let mut resp = client
@@ -143,6 +144,7 @@ impl Tikv for CopService {
                 req,
                 peer,
                 max_handle_duration,
+                max_resp_size,
                 quota_limiter.clone(),
                 snapshot,
             )

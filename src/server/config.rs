@@ -160,6 +160,8 @@ pub struct Config {
     pub grpc_keepalive_time: ReadableDuration,
     #[online_config(skip)]
     pub grpc_keepalive_timeout: ReadableDuration,
+    // When the coprocessor response reached this value, we update paging_size to return early.
+    pub cop_max_resp_size: ReadableSize,
     /// How many snapshots can be sent concurrently.
     pub concurrent_send_snap_limit: usize,
     /// How many snapshots can be recv concurrently.
@@ -277,6 +279,7 @@ impl Default for Config {
             // than 10 senconds.
             grpc_keepalive_time: ReadableDuration::secs(10),
             grpc_keepalive_timeout: ReadableDuration::secs(3),
+            cop_max_resp_size: ReadableSize::mb(32),
             concurrent_send_snap_limit: 32,
             concurrent_recv_snap_limit: 32,
             end_point_concurrency: None, // deprecated

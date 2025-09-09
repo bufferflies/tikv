@@ -105,6 +105,7 @@ fn test_serde_custom_tikv_config() {
         grpc_stream_initial_window_size: ReadableSize(12_345),
         grpc_keepalive_time: ReadableDuration::secs(3),
         grpc_keepalive_timeout: ReadableDuration::secs(60),
+        cop_max_resp_size: ReadableSize::mb(32),
         end_point_concurrency: None,
         end_point_max_tasks: None,
         end_point_stack_size: None,
@@ -263,6 +264,8 @@ fn test_serde_custom_tikv_config() {
         max_snapshot_file_raw_size: ReadableSize::gb(10),
         unreachable_backoff: ReadableDuration::secs(111),
         check_peers_availability_interval: ReadableDuration::secs(30),
+        raft_worker_max_batch_size: ReadableSize::mb(1),
+        io_worker_min_write_duration: ReadableDuration::millis(1),
     };
     value.pd = PdConfig::new(vec!["example.com:443".to_owned()]);
     let titan_cf_config = TitanCfConfig {
