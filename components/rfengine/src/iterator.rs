@@ -124,7 +124,7 @@ impl WalIterator {
                             header.epoch_id, self.epoch_id
                         ),
                         epoch_id: header.epoch_id,
-                        offset: self.offset,
+                        offset: 0,
                         data: buf.to_vec(),
                     });
                 }
