@@ -560,8 +560,21 @@ fn test_native_br_service_x(#[case] override_pack: bool, #[case] copy_to_another
     let backup_x = TryWaiter::timeout(10)
         .interval(1)
         .try_wait_result(|| {
-            let backup = runtime.block_on(br_cli.get_backup_for_pitr(target_datetime));
-            backup
+            runtime.block_on(async {
+                if override_pack {
+                    br_cli
+                        .get_backup_for_pitr_with_override(
+                            target_datetime,
+                            S3Override {
+                                prefix: Some(dfs_config.prefix.clone()),
+                                bucket: Some(dfs_config.s3_bucket.clone()),
+                            },
+                        )
+                        .await
+                } else {
+                    br_cli.get_backup_for_pitr(target_datetime).await
+                }
+            })
         })
         .unwrap();
     info!("backup v1x: {:?}", backup_x);

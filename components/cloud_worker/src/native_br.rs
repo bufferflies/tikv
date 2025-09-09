@@ -1303,6 +1303,32 @@ pub mod v1x {
             .and_utc()
     }
 
+    struct AsyncDropS3Fs(Option<Arc<S3Fs>>);
+
+    impl From<Arc<S3Fs>> for AsyncDropS3Fs {
+        fn from(s3fs: Arc<S3Fs>) -> Self {
+            Self(Some(s3fs))
+        }
+    }
+
+    impl std::ops::Deref for AsyncDropS3Fs {
+        type Target = Arc<S3Fs>;
+        fn deref(&self) -> &Self::Target {
+            self.0.as_ref().unwrap()
+        }
+    }
+
+    impl Drop for AsyncDropS3Fs {
+        fn drop(&mut self) {
+            let ptr = self.0.take().unwrap();
+            if let Ok(h) = tokio::runtime::Handle::try_current() {
+                h.spawn_blocking(move || drop(ptr));
+            }
+            // Or... We are not in a tokio context. It is safe to drop the
+            // runtime.
+        }
+    }
+
     #[derive(Debug)]
     pub struct HttpError(Response<Body>);
 
@@ -1666,11 +1692,10 @@ pub mod v1x {
                     id: req.id,
                 }) as Arc<dyn ReportCopyStepTrait>;
                 reporter.report_step(CopyStep::FetchMeta);
-                let mig_env = MigratePackEnv::load_exotic(s3fs, &req.exotic_backup).await?;
+                let mig_env =
+                    MigratePackEnv::load_exotic(Arc::clone(&s3fs), &req.exotic_backup).await?;
                 let mut copy_run = CopyPackedRun::new(mig_env, &req.copy_to, reporter.clone());
                 let res = copy_run.execute().await?;
-                // To drop the s3fs with its internal runtime...
-                tokio::task::spawn_blocking(move || drop(copy_run));
                 Result::Ok(res)
             };
 
@@ -1967,13 +1992,13 @@ pub mod v1x {
     }
 
     impl NativeBrManager {
-        fn overriden_storage(&self, s3_override: &S3Override) -> Arc<S3Fs> {
+        fn overriden_storage(&self, s3_override: &S3Override) -> AsyncDropS3Fs {
             if s3_override.enabled() {
                 let mut cfg = self.config.read().unwrap().dfs.clone();
                 s3_override.apply(&mut cfg);
-                Arc::new(S3Fs::new_from_config(cfg))
+                Arc::new(S3Fs::new_from_config(cfg)).into()
             } else {
-                self.context.s3fs.clone()
+                self.context.s3fs.clone().into()
             }
         }
 
