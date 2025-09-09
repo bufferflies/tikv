@@ -1711,7 +1711,23 @@ mod tests {
             let writer = engine.writer.lock().unwrap();
             writer.get_epoch_id()
         };
-
+        {
+            let filename = wal_file_name(dir_path, current_epoch + 1);
+            let mut it = WalIterator::new(dir_path.to_owned(), current_epoch + 1);
+            let fd = File::open(filename.clone()).unwrap();
+            let mut buf_reader: Box<dyn std::io::Read> = Box::new(BufReader::new(fd));
+            let Error::Corruption {
+                msg: _,
+                epoch_id: _,
+                offset,
+                data: _,
+            } = it.check_wal_header(&mut buf_reader).unwrap_err()
+            else {
+                panic!("expected corruption error");
+            };
+            // header epoch mismatch error offset should be 0
+            assert_eq!(offset, 0);
+        }
         for ep in compacted_epoch + 1..=current_epoch {
             let filename = wal_file_name(dir_path, ep);
             let mut it = WalIterator::new(dir_path.to_owned(), ep);
