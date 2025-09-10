@@ -71,8 +71,10 @@ const SCAN_REGIONS_MAX_BATCH_SIZE: usize = 1024;
 pub enum Error {
     #[error("Other error {0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
-    #[error("Pd error {0}")]
+    #[error("PD error {0}")]
     Pd(#[from] pd_client::Error),
+    #[error("PD control error {0}")]
+    PdCtl(#[from] pd_client::pd_control::Error),
     #[error("Write conflict {0:?}")]
     WriteConflict(kvrpcpb::WriteConflict),
     #[error("Already exist {0:?}")]

@@ -5,6 +5,7 @@ use std::{io::Write, path::PathBuf, sync::Arc, thread, time::Duration};
 use api_version::ApiV2;
 use cloud_worker::CloudWorker;
 use futures::executor::block_on;
+use log_wrappers::Value as LogValue;
 use native_br::backup;
 use pd_client::{PdClient, RpcClient};
 use replication_worker::{KeyspacesResp, LocalProvider};
@@ -210,40 +211,23 @@ fn test_random_replication() {
         || "wait for resume changefeed".into(),
     );
 
-    let pd_client = cluster.get_pure_pd_client();
-    let row_key_5 = encode_pd_table_key(table_id, 5);
-    let origin_region_id = pd_client.get_region(&row_key_5).unwrap().id;
-    block_on(pd_client.split_regions(vec![row_key_5.clone()])).unwrap();
+    let pd_client = cluster.get_pd_client_ext();
     let pd_ctl = cluster.get_pd_control().unwrap();
-    must_wait(
-        || {
-            let region_count = block_on(pd_ctl.get_regions_number()).unwrap();
-            region_count == 5
-        },
-        10,
-        || "wait for region split".into(),
-    );
+    let row_key_5 = encode_pd_table_key(table_id, 5);
+    block_on(pd_client.split_regions_with_retry(vec![row_key_5.clone()], Duration::from_secs(30)))
+        .unwrap();
     let row_key_1 = encode_pd_table_key(table_id, 1);
-    let new_region_id = pd_client.get_region(&row_key_1).unwrap().id;
     for i in 1..=10 {
         let sql = format!("update `{table_name}` set col_i = col_i + 1 where id = {i}");
         block_on(sqlx::query(&sql).execute(&pool)).unwrap();
         thread::sleep(Duration::from_millis(500));
     }
     info!(
-        "try to merge region {} to {}",
-        origin_region_id, new_region_id
+        "try to merge region";
+        "source" => LogValue::key(&row_key_5),
+        "target" => LogValue::key(&row_key_1)
     );
-    block_on(pd_ctl.merge_regions(origin_region_id, new_region_id)).unwrap();
-    must_wait(
-        || {
-            let region_count = block_on(pd_ctl.get_regions_number()).unwrap();
-            info!("region count {} after merge", region_count);
-            region_count == 4
-        },
-        10,
-        || "wait for region merge".into(),
-    );
+    block_on(pd_ctl.merge_regions_by_key(&row_key_5, &row_key_1, Duration::from_secs(30))).unwrap();
 
     info!("shutdown replication worker");
     worker.shutdown();

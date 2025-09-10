@@ -4,9 +4,10 @@ use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use bstr::ByteSlice;
 use bytes::Bytes;
-use http::Method;
+use http::{Method, StatusCode};
 use kvproto::metapb;
-use security::{RestfulClient, SecurityManager};
+use regex::Regex;
+use security::{HttpClientError, RestfulClient, SecurityManager};
 use serde::{Deserialize, Deserializer};
 use slog_global::debug;
 use tikv_util::{
@@ -17,7 +18,54 @@ use tikv_util::{
 
 use crate::Config;
 
-pub type Error = security::HttpClientError;
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Http(HttpClientError),
+    #[error("Not found: {0}")]
+    NotFound(String),
+    #[error("PD server error: [{module}]{msg}")]
+    PdError { module: String, msg: String },
+    #[error("PD server error: {0}")]
+    PdOtherError(String),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("Timeout error: {0}")]
+    Timeout(String),
+    #[error("Other error: {0}")]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<HttpClientError> for Error {
+    fn from(err: HttpClientError) -> Self {
+        match err {
+            HttpClientError::Http(status, msg) => {
+                let msg = msg.trim_matches(&[' ', '\n', '\r', '"']);
+                if status == StatusCode::NOT_FOUND {
+                    Self::NotFound(msg.to_string())
+                } else if let Some(pd_err) = extract_pd_server_err(msg) {
+                    pd_err
+                } else {
+                    Self::PdOtherError(msg.to_string())
+                }
+            }
+            err => Self::Http(err),
+        }
+    }
+}
+
+fn extract_pd_server_err(msg: &str) -> Option<Error> {
+    // e.g. [PD:operator:ErrAddOperator]failed to add operator, maybe already have
+    // one
+    lazy_static::lazy_static! {
+        static ref RE: Regex =
+            Regex::new(r"^\[(?P<module>.+)\](?P<msg>.+)$").unwrap();
+    }
+    RE.captures(msg).map(|caps| Error::PdError {
+        module: caps["module"].to_string(),
+        msg: caps["msg"].to_string(),
+    })
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -71,7 +119,9 @@ pub struct PdControl {
 
 impl PdControl {
     pub fn new(config: Config, security_mgr: Arc<SecurityManager>) -> Result<Self> {
-        let client = RestfulClient::new("pd_control", config.endpoints, security_mgr)?;
+        let mut client = RestfulClient::new("pd_control", config.endpoints, security_mgr)?;
+        // Some server errors are not retryable. Judge by PdControl itself.
+        client.set_retry_on_server_error(false);
         Ok(Self { client })
     }
 
@@ -80,12 +130,12 @@ impl PdControl {
     }
 
     pub async fn get_config(&self) -> Result<PdConfigFromApi> {
-        self.client.get(PD_CONFIG_PATH).await
+        self.client.get(PD_CONFIG_PATH).await.map_err(Into::into)
     }
 
     pub async fn get_store_regions(&self, store_id: u64) -> Result<RegionsInfo> {
         let query = format!("{}/{}", PD_REGIONS_STORE_PATH, store_id);
-        self.client.get(query).await
+        self.client.get(query).await.map_err(Into::into)
     }
 
     pub async fn get_keyspace_by_name(&self, keyspace_name: &str) -> Result<KeyspaceMeta> {
@@ -99,18 +149,21 @@ impl PdControl {
         });
 
         let query = format!("{PD_KEYSPACE_PATH}/{}", keyspace_name);
-        self.client.get(query).await
+        self.client.get(query).await.map_err(Into::into)
     }
 
     pub async fn create_keyspace(&self, params: CreateKeyspaceParams) -> Result<KeyspaceMeta> {
-        self.client.post(PD_KEYSPACE_PATH, &params).await
+        self.client
+            .post(PD_KEYSPACE_PATH, &params)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn get_tiflash_placement_rule_group(&self) -> Result<Option<RuleGroup>> {
         fail::fail_point!("pd_ctl::mock_no_tiflash_placement_rule_group", |_| Ok(None));
 
         let path = format!("{PD_PLACEMENT_RULE_GROUP_PATH}/{TIFLASH_GROUP}");
-        self.client.get(path).await
+        self.client.get(path).await.map_err(Into::into)
     }
 
     pub async fn remove_tiflash_placement_rule_by_id(&self, rule_id: &str) -> Result<()> {
@@ -174,7 +227,7 @@ impl PdControl {
         };
         let query = format!("{PD_SCHEDULERS_PATH}?status={status_str}&timestamp=1");
         match status {
-            Some(SchedulerStatus::Paused) => self.client.get(query).await,
+            Some(SchedulerStatus::Paused) => self.client.get(query).await.map_err(Into::into),
             Some(SchedulerStatus::Disabled) | None => {
                 let scheduler_names: Vec<String> = self.client.get(query).await?;
                 Ok(scheduler_names
@@ -207,7 +260,7 @@ impl PdControl {
     // Ref: https://github.com/tidbcloud/pd-cse/blob/release-7.1-keyspace/server/api/operator.go
     pub async fn get_operators(&self) -> Result<Vec<Operator>> {
         let query = format!("{PD_OPERATORS_PATH}?object=1");
-        self.client.get(query).await
+        self.client.get(query).await.map_err(Into::into)
     }
 
     pub async fn cancel_operator_by_region(&self, region_id: u64) -> Result<()> {
@@ -232,7 +285,10 @@ impl PdControl {
     }
 
     pub async fn get_store(&self, store_id: u64) -> Result<StoreInfo> {
-        self.client.get(format!("{PD_STORE_PATH}/{store_id}")).await
+        self.client
+            .get(format!("{PD_STORE_PATH}/{store_id}"))
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn find_store_by_status_address(
@@ -268,6 +324,66 @@ impl PdControl {
             }
             sleep_async(Duration::from_millis(500)).await;
         }
+    }
+}
+
+#[cfg(feature = "testexport")]
+impl PdControl {
+    fn is_http_client_error_retryable(err: &HttpClientError) -> bool {
+        matches!(err, HttpClientError::Timeout(_) | HttpClientError::Hyper(_))
+    }
+
+    pub async fn merge_regions_by_key(
+        &self,
+        encoded_source_key: &[u8],
+        encoded_target_key: &[u8],
+        timeout: Duration,
+    ) -> Result<()> {
+        use log_wrappers::Value as LogValue;
+        use tikv_util::warn;
+
+        let is_error_retryable = |err: &Error| match err {
+            Error::Http(e) => Self::is_http_client_error_retryable(e),
+            Error::PdError { .. } => {
+                // Retry all PD errors for now. Some of them may not be retryable.
+                true
+            }
+            _ => false,
+        };
+
+        let start = Instant::now_coarse();
+        while start.saturating_elapsed() < timeout {
+            let Some(source_region) = self.get_region(encoded_source_key).await? else {
+                warn!("source region not found"; "key" => LogValue::key(encoded_source_key));
+                sleep_async(Duration::from_millis(200)).await;
+                continue;
+            };
+            let Some(target_region) = self.get_region(encoded_target_key).await? else {
+                warn!("target region not found"; "key" => LogValue::key(encoded_target_key));
+                sleep_async(Duration::from_millis(200)).await;
+                continue;
+            };
+
+            if source_region.id == target_region.id {
+                return Ok(());
+            }
+
+            if let Err(err) = self.merge_regions(source_region.id, target_region.id).await {
+                if is_error_retryable(&err) {
+                    warn!("merge_regions_by_key: retry for error: {:?}", err);
+                    sleep_async(Duration::from_millis(200)).await;
+                    continue;
+                }
+                return Err(err);
+            }
+            sleep_async(Duration::from_millis(500)).await;
+        }
+        let msg = format!(
+            "merge regions timeout: {} -> {}",
+            LogValue::key(encoded_source_key),
+            LogValue::key(encoded_target_key)
+        );
+        Err(Error::Timeout(msg))
     }
 }
 
@@ -615,5 +731,21 @@ mod tests {
 
         op.kind_mask = (OpKind::OpAdmin as u32) | (OpKind::OpReplica as u32);
         assert_eq!(op.kind(), vec![OpKind::OpAdmin, OpKind::OpReplica]);
+    }
+
+    #[test]
+    fn test_extract_pd_server_err() {
+        let msg = "[PD:operator:ErrAddOperator]failed to add operator, maybe already have one";
+        let err = extract_pd_server_err(msg).unwrap();
+        match err {
+            Error::PdError { module, msg } => {
+                assert_eq!(module, "PD:operator:ErrAddOperator");
+                assert_eq!(msg, "failed to add operator, maybe already have one");
+            }
+            _ => panic!("expected PdError"),
+        }
+
+        let msg = "some other error message";
+        assert!(extract_pd_server_err(msg).is_none());
     }
 }

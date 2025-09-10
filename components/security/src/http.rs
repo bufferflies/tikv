@@ -26,7 +26,7 @@ use rustls::{
     SignatureScheme,
 };
 use rustls_pemfile::Item;
-use tikv_util::{box_err, debug, error, time::Instant, Either};
+use tikv_util::{debug, error, time::Instant, Either};
 
 use crate::{metrics::HYPER_RELOAD_CERT_COUNTER, SecurityConfig, SecurityManager};
 
@@ -34,6 +34,10 @@ use crate::{metrics::HYPER_RELOAD_CERT_COUNTER, SecurityConfig, SecurityManager}
 pub enum Error {
     #[error("HTTP error: {0}:{1}")]
     Http(StatusCode, String),
+    #[error("request timeout: {0}")]
+    Timeout(String),
+    #[error(transparent)]
+    Hyper(#[from] hyper::Error),
     #[error(transparent)]
     InvalidUri(#[from] http::uri::InvalidUri),
     #[error(transparent)]
@@ -277,6 +281,7 @@ pub struct RestfulClient {
     last_endpoint_idx: Option<AtomicUsize>,
     req_timeout: Duration,
     retry_timeout: Duration,
+    retry_on_server_error: bool,
 }
 
 impl Clone for RestfulClient {
@@ -291,6 +296,7 @@ impl Clone for RestfulClient {
                 .map(|idx| AtomicUsize::new(idx.load(Ordering::Relaxed))),
             req_timeout: self.req_timeout,
             retry_timeout: self.retry_timeout,
+            retry_on_server_error: self.retry_on_server_error,
         }
     }
 }
@@ -309,12 +315,17 @@ impl RestfulClient {
             last_endpoint_idx: endpoint_idx,
             req_timeout: Duration::from_secs(3),
             retry_timeout: Duration::from_secs(6),
+            retry_on_server_error: true,
         })
     }
 
     pub fn set_timeout(&mut self, req_timeout: Duration, retry_timeout: Duration) {
         self.req_timeout = req_timeout;
         self.retry_timeout = retry_timeout;
+    }
+
+    pub fn set_retry_on_server_error(&mut self, retry: bool) {
+        self.retry_on_server_error = retry;
     }
 
     pub async fn request(
@@ -346,8 +357,8 @@ impl RestfulClient {
                 .unwrap();
             let resp = tokio::time::timeout(self.req_timeout, client.request(req)).await;
             match resp {
-                Err(_elapsed) => err = Some(box_err!("{}: request timeout", tag)),
-                Ok(Err(e)) => err = Some(box_err!("{tag}: return error: {}", e.to_string())),
+                Err(_elapsed) => err = Some(Error::Timeout(format!("{}: request timeout", tag))),
+                Ok(Err(e)) => err = Some(Error::Hyper(e)),
                 Ok(Ok(resp)) => {
                     let status = resp.status();
                     let body_res = tokio::time::timeout(
@@ -357,7 +368,7 @@ impl RestfulClient {
                     .await;
                     if status.is_success() {
                         let Ok(body) = body_res else {
-                            err = Some(box_err!("{}: read body timeout", tag));
+                            err = Some(Error::Timeout(format!("{}: read body timeout", tag)));
                             continue;
                         };
                         let body = body.unwrap();
@@ -366,17 +377,16 @@ impl RestfulClient {
                             self.set_last_endpoint_idx(current_ep_idx);
                         }
                         return Ok(body);
-                    } else if status.is_client_error() {
+                    } else {
                         let body = body_res.map(|body| body.unwrap()).unwrap_or_default();
                         let msg = body.to_str_lossy();
                         error!("{}: http client error: {}: {}", tag, status, msg.as_ref());
-                        return Err(Error::Http(status, msg.to_string()));
-                    } else {
-                        let body = body_res.map(|body| body.unwrap()).unwrap_or_default();
-                        err = Some(box_err!(
-                            "{tag}: return error: {status}: {}",
-                            body.to_str_lossy()
-                        ));
+                        let this_err = Error::Http(status, msg.to_string());
+                        if status.is_client_error() || !self.retry_on_server_error {
+                            return Err(this_err);
+                        } else {
+                            err = Some(this_err);
+                        }
                     }
                 }
             }

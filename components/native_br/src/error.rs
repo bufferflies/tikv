@@ -40,6 +40,8 @@ pub enum Error {
     PitrTsError(u64, u64, u64),
     #[error("PD error {0}")]
     PdError(pd_client::Error),
+    #[error("PD control error {0}")]
+    PdCtlError(#[from] pd_client::pd_control::Error),
     #[error("Split regions error {0}")]
     SpitRegionsError(pd_client::Error),
     #[error("Etcd error {0}")]

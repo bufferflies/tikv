@@ -5728,6 +5728,7 @@ dependencies = [
  "log",
  "log_wrappers",
  "prometheus",
+ "regex",
  "security",
  "semver 0.10.0",
  "serde",

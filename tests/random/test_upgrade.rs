@@ -417,7 +417,7 @@ fn switch_servers_version<F>(
             }
             match block_on(pd_ctl.remove_scheduler(&scheduler_name)) {
                 Ok(_) => {}
-                Err(pd_control::Error::Http(StatusCode::NOT_FOUND, msg)) => {
+                Err(pd_control::Error::NotFound(msg)) => {
                     // Maybe caused by request retry.
                     warn!("switch version: scheduler already removed"; "node_id" => node_id, "msg" => msg);
                 }
