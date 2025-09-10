@@ -630,10 +630,10 @@ impl FilterOperator {
             .compare
             .as_ref()
             .expect("operator must have compare data");
-        let col_meta = table_meta
-            .columns
-            .get(&(compare.col_id as i32))
-            .expect("column metadata must exist");
+        let Some(col_meta) = table_meta.columns.get(&(compare.col_id as i32)) else {
+            // If the column is not exists in the table, we treat it as no min-max index.
+            return FilterOpResult::Some;
+        };
 
         if let Some(min_max) = &col_meta.min_max {
             let result = match self.op {
