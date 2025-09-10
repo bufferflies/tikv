@@ -952,7 +952,7 @@ fn new_file_writer(task_ctx: TaskContext, path: PathBuf) -> Result<EncrypterWrit
         Iv::Empty
     };
     let (method, key) = if let Some(key) = &task_ctx.encryption_key {
-        (EncryptionMethod::Aes256Ctr, key.current_key.as_slice())
+        (EncryptionMethod::Aes256Ctr, key.plain_text.as_slice())
     } else {
         (EncryptionMethod::Plaintext, "".as_bytes())
     };
@@ -1798,7 +1798,7 @@ pub fn build_readers(
     for file_meta in file_metas {
         let file = File::open(file_meta.file_path).unwrap();
         let (method, key) = if let Some(key) = &task_ctx.encryption_key {
-            (EncryptionMethod::Aes256Ctr, key.current_key.as_slice())
+            (EncryptionMethod::Aes256Ctr, key.plain_text.as_slice())
         } else {
             (EncryptionMethod::Plaintext, "".as_bytes())
         };

@@ -2001,7 +2001,11 @@ pub mod tests {
     }
 
     fn new_test_encryption_key() -> EncryptionKey {
-        EncryptionKey::new(b"cipher".to_vec(), b"plain".to_vec(), 0)
+        EncryptionKey::new(
+            b"cipher".to_vec(),
+            b"plain".to_vec(),
+            cloud_encryption::KEY_TYPE_AES_256_CTR_LEGACY,
+        )
     }
 
     pub fn build_table_with_encryption(

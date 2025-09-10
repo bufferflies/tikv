@@ -3484,7 +3484,7 @@ impl Peer {
             req.write_to_vec(buf)?;
             let mut data =
                 Vec::with_capacity(4 + buf.len() + encryption_key.encryption_block_size());
-            data.put_u32(encryption_key.current_ver);
+            data.put_u32(encryption_key.encryption_header());
             encryption_key.encrypt(buf, self.region_id, propose_index as u32, &mut data);
             data
         } else {

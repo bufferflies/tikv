@@ -215,7 +215,7 @@ impl ColumnarFileBuilder {
             add_property(
                 &mut property_buf,
                 PROP_KEY_ENCRYPTION_VER.as_bytes(),
-                &encryption_key.current_ver.to_le_bytes(),
+                &encryption_key.encryption_header().to_le_bytes(),
             );
         }
         let file_total_size = packs_total_size

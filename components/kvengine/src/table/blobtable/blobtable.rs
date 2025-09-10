@@ -403,7 +403,7 @@ impl BlobPrefetcher {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use cloud_encryption::EncryptionKey;
+    use cloud_encryption::{EncryptionKey, KEY_TYPE_AES_256_CTR_LEGACY};
     use rand::{distributions::Alphanumeric, rngs::ThreadRng, Rng};
     use rstest::rstest;
     use test_util::init_log_for_test;
@@ -471,7 +471,11 @@ mod tests {
     }
 
     fn new_test_encryption_key() -> EncryptionKey {
-        EncryptionKey::new(b"cipher".to_vec(), b"plain".to_vec(), 0)
+        EncryptionKey::new(
+            b"cipher".to_vec(),
+            b"plain".to_vec(),
+            KEY_TYPE_AES_256_CTR_LEGACY,
+        )
     }
 
     /// Test preloaded functionality with different compression and

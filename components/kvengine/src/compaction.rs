@@ -3725,7 +3725,7 @@ async fn compact_for_cf(
                     // If the encryption ver is changed, we should decrypt the blob value and
                     // encrypt with the new encryption ver.
                     let need_re_encrypt = if let Some(encryption_key) = &ctx.encryption_key {
-                        blob_table.encryption_ver != encryption_key.current_ver
+                        blob_table.encryption_ver != encryption_key.encryption_header()
                     } else {
                         false
                     };

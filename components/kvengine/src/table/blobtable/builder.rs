@@ -334,7 +334,7 @@ impl BlobTableBuilder {
             BlobTableBuilder::add_property(
                 &mut buf,
                 PROP_KEY_ENCRYPTION_VER.as_bytes(),
-                &encryption_key.current_ver.to_le_bytes(),
+                &encryption_key.encryption_header().to_le_bytes(),
             )
         }
 

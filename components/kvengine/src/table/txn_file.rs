@@ -1461,7 +1461,7 @@ impl TxnChunkBuilder {
             Self::add_property(
                 buf,
                 TXN_FILE_PROP_ENCRYPTION_VER.as_bytes(),
-                &encryption_key.current_ver.to_le_bytes(),
+                &encryption_key.encryption_header().to_le_bytes(),
             )
         }
         let checksum = self.checksum_type.checksum(buf);

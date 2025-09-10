@@ -5,12 +5,30 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+aliyun = { workspace = true }
+aws = { workspace = true }
+base64 = "0.13"
 bytes = "1.0"
+cloud = { workspace = true }
+dashmap = "5"
 derive_more = "0.99.3"
+fxhash = "0.2.1"
 hmac = "0.10.1"
+kvenginepb = { path = "../kvenginepb", default-features = false }
+kvproto = { workspace = true }
 openssl = "0.10"
+protobuf = "2.8"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
 serde_json = "1.0"
 sha2 = "0.9.1"
+slog = { version = "2.3", features = [
+    "max_level_trace",
+    "release_max_level_debug",
+] }
+slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
+strum = { version = "0.25", features = ["derive"] }
+thiserror = "1.0"
+tokio = { version = "1.5", features = ["full"] }
+zeroize = "1.8"

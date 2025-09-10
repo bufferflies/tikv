@@ -14,7 +14,6 @@ use std::{
     time::SystemTime,
 };
 
-use cloud::KmsProvider;
 use cloud_encryption::MasterKey;
 use collections::HashSet;
 use encryption::EncryptionConfig;
@@ -23,7 +22,6 @@ use grpcio::{
     RpcContext, RpcStatus, RpcStatusCode, ServerBuilder, ServerChecker, ServerCredentialsBuilder,
     ServerCredentialsFetcher,
 };
-use kvproto::encryptionpb::MasterKeyKms;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -134,32 +132,7 @@ impl SecurityConfig {
     }
 
     pub async fn new_master_key(&self) -> MasterKey {
-        if self.master_key.vendor == "aws" {
-            let mut kms_cfg = MasterKeyKms::default();
-            kms_cfg.key_id = self.master_key.key_id.clone();
-            kms_cfg.vendor = self.master_key.vendor.clone();
-            kms_cfg.endpoint = self.master_key.endpoint.clone();
-            kms_cfg.region = self.master_key.region.clone();
-            let conf = cloud::kms::Config::from_proto(kms_cfg).unwrap();
-            let aws_kms = aws::AwsKms::new(conf).unwrap();
-            let encrypted_key =
-                cloud::EncryptedKey::new(base64::decode(&self.master_key.cipher_text).unwrap())
-                    .unwrap();
-            let master_key_plain_text = aws_kms.decrypt_data_key(&encrypted_key).await.unwrap();
-            return MasterKey::new(&master_key_plain_text);
-        } else if self.master_key.vendor == "aliyun" {
-            let master_key_plain_text = aliyun::decrypt_master_key(&self.master_key.cipher_text)
-                .await
-                .unwrap();
-            return MasterKey::new(&master_key_plain_text);
-        } else if self.master_key.vendor == "test" {
-            let mut master_key = self.master_key.key_id.as_bytes().to_vec();
-            master_key.resize(32, 11);
-            return MasterKey::new(&master_key);
-        }
-        // use a fixed master key for test.
-        let master_key = vec![1u8; 32];
-        MasterKey::new(&master_key)
+        self.master_key.decrypt().await.unwrap()
     }
 
     pub fn override_from_env(&mut self) {
