@@ -9,7 +9,7 @@ use std::{
     collections::{
         hash_map::Entry as HashMapEntry, HashMap as StdHashMap, HashSet as StdHashSet, VecDeque,
     },
-    mem, ops,
+    fs, mem, ops,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -612,8 +612,11 @@ impl MergedEngine {
         recoverer: impl kvengine::RecoverHandler + 'static,
     ) -> Result<kvengine::Engine> {
         let kv_engine_path = ctx.local_dir.join("db");
+        if !kv_engine_path.exists() {
+            fs::create_dir_all(&kv_engine_path)?;
+        }
         let mut kv_opts = kvengine::Options::default();
-        kv_opts.local_dir = kv_engine_path;
+        kv_opts.local_dirs = vec![kv_engine_path];
         kv_opts.max_mem_table_size = ctx.config.mem_table_size.0;
         kv_opts.max_block_cache_size = ctx.config.block_cache_size.0 as i64;
         kv_opts.for_restore = true;

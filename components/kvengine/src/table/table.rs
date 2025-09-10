@@ -7,6 +7,7 @@ use std::{
     iter::Iterator as StdIterator,
     mem::size_of,
     ops::Deref,
+    path::PathBuf,
     ptr, result, slice,
     sync::{atomic, atomic::AtomicU64},
 };
@@ -1074,6 +1075,12 @@ impl AtomicSnapVersion {
             )
             .is_ok()
     }
+}
+
+/// get_local_dir returns the local dir for the given file id.
+pub fn get_local_dir(dirs: &[PathBuf], file_id: u64) -> &PathBuf {
+    let idx = farmhash::fingerprint64(&file_id.to_le_bytes()) as usize;
+    &dirs[idx % dirs.len()]
 }
 
 #[cfg(test)]

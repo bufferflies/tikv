@@ -4,7 +4,8 @@ use std::{collections::HashMap, fs, time::Duration};
 
 use collections::HashSet;
 use kvengine::{
-    new_schema_filename, new_tmp_filename, new_vector_index_filename, table::sstable::new_filename,
+    new_schema_filename, new_tmp_filename, new_vector_index_filename,
+    table::{get_local_dir, sstable::new_filename},
     ShardStats,
 };
 use kvproto::raft_cmdpb::{RaftCmdRequest, RaftRequestHeader};
@@ -30,20 +31,28 @@ fn test_local_file_gc() {
     });
     let kv = cluster.get_kvengine(node_id);
     let mut client = cluster.new_client();
-    let new_file_id = client.get_ts().into_inner();
-    let new_file_path = new_filename(new_file_id, kv.opts.local_dir.as_path());
-    fs::write(&new_file_path, "abc").unwrap();
-    let new_tmp_file_path = kv.opts.local_dir.join(new_tmp_filename(new_file_id, 1));
-    fs::write(&new_tmp_file_path, "def").unwrap();
-    let new_file_id = client.get_ts().into_inner();
-    let new_schema_file_path = kv.opts.local_dir.join(new_schema_filename(new_file_id));
-    fs::write(&new_schema_file_path, "jkl").unwrap();
-    let new_file_id = client.get_ts().into_inner();
-    let new_vector_index_file_path = kv
-        .opts
-        .local_dir
-        .join(new_vector_index_filename(new_file_id));
-    fs::write(&new_vector_index_file_path, "mno").unwrap();
+    let mut new_file_paths = vec![];
+    let mut new_tmp_file_paths = vec![];
+    let mut new_schema_file_paths = vec![];
+    let mut new_vector_index_file_paths = vec![];
+    for local_dir in &kv.opts.local_dirs {
+        info!("local_dir {}", local_dir.to_string_lossy());
+        let new_file_id = client.get_ts().into_inner();
+        let new_file_path = new_filename(new_file_id, local_dir.as_path());
+        fs::write(&new_file_path, "abc").unwrap();
+        new_file_paths.push(new_file_path);
+        let new_tmp_file_path = local_dir.join(new_tmp_filename(new_file_id, 1));
+        fs::write(&new_tmp_file_path, "def").unwrap();
+        new_tmp_file_paths.push(new_tmp_file_path);
+        let new_file_id = client.get_ts().into_inner();
+        let new_schema_file_path = local_dir.join(new_schema_filename(new_file_id));
+        fs::write(&new_schema_file_path, "jkl").unwrap();
+        new_schema_file_paths.push(new_schema_file_path);
+        let new_file_id = client.get_ts().into_inner();
+        let new_vector_index_file_path = local_dir.join(new_vector_index_filename(new_file_id));
+        fs::write(&new_vector_index_file_path, "mno").unwrap();
+        new_vector_index_file_paths.push(new_vector_index_file_path);
+    }
     cluster.wait_pd_region_count(1);
     client.put_kv(0..1000, gen_key, gen_val);
     client.split(&gen_key(500));
@@ -62,19 +71,26 @@ fn test_local_file_gc() {
     }
     assert!(!all_files.is_empty());
     for &file_id in &all_files {
-        let file_path = new_filename(file_id, kv.opts.local_dir.as_path());
+        let local_dir = get_local_dir(&kv.opts.local_dirs, file_id);
+        let file_path = new_filename(file_id, local_dir.as_path());
         assert!(file_path.exists());
     }
-    for _ in 0..20 {
-        if !new_file_path.exists() && !new_tmp_file_path.exists() {
-            break;
+    for (i, (new_file_path, new_tmp_file_path)) in new_file_paths
+        .iter()
+        .zip(new_tmp_file_paths.iter())
+        .enumerate()
+    {
+        for _ in 0..20 {
+            if !new_file_path.exists() && !new_tmp_file_path.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
         }
-        std::thread::sleep(Duration::from_secs(1));
+        assert!(!new_file_path.exists());
+        assert!(!new_tmp_file_path.exists());
+        assert!(!new_schema_file_paths[i].exists());
+        assert!(!new_vector_index_file_paths[i].exists());
     }
-    assert!(!new_file_path.exists());
-    assert!(!new_tmp_file_path.exists());
-    assert!(!new_schema_file_path.exists());
-    assert!(!new_vector_index_file_path.exists());
     cluster.stop();
 }
 

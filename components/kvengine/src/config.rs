@@ -128,6 +128,10 @@ pub struct Config {
 
     pub block_cache_type: BlockCacheType,
 
+    /// Support multiple disks. files will be distributed to different dirs by
+    /// hash.
+    pub extra_dirs: Vec<String>,
+
     pub per_keyspace_configs: Vec<PerKeyspaceConfig>,
 
     /// Enable IA by setting `ia.mem_cap > 0 && ia.disk_cap > 0`.
@@ -174,6 +178,7 @@ impl Default for Config {
                 dynamic_capacity: true,
                 ..Default::default()
             },
+            extra_dirs: vec![],
             columnar_table_build_options: Default::default(),
             vector_index_build_options: Default::default(),
             ignore_columnar_table_load: false,

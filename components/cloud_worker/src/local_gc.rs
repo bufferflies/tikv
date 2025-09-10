@@ -1,6 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use kvengine::ia::{
     gc::{IaGcConfig, IaGcRunner},
@@ -33,8 +33,8 @@ pub struct LocalGcRunner {
 }
 
 impl LocalGcRunner {
-    pub fn new(config: LocalGcConfig, ia_mgr: IaManager, meta_path: PathBuf) -> Self {
-        let ia_runner = IaGcRunner::new(config.ia.clone(), ia_mgr.clone(), meta_path);
+    pub fn new(config: LocalGcConfig, ia_mgr: IaManager, meta_paths: Arc<Vec<PathBuf>>) -> Self {
+        let ia_runner = IaGcRunner::new(config.ia.clone(), ia_mgr.clone(), meta_paths);
         Self { config, ia_runner }
     }
 

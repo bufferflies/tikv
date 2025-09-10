@@ -49,6 +49,7 @@ fail = "0.5"
 farmhash = "1.1.5"
 file_system = { path = "../file_system", default-features = false }
 filetime = "0.2"
+fs2 = "0.4"
 fslock = "0.1.7"
 futures = { version = "0.3", features = ["thread-pool"] }
 hex = "0.4"

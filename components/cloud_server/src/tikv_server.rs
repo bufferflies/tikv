@@ -38,6 +38,7 @@ use grpcio::{EnvBuilder, Environment};
 use kvengine::{
     dfs::Dfs,
     limiter::{LimiterOptions, StoreLimiter},
+    IoContext,
 };
 use kvproto::{
     brpb::create_backup, deadlock::create_deadlock, diagnosticspb_grpc::create_diagnostics,
@@ -1059,7 +1060,18 @@ impl TikvServer {
             None => ((total_mem as f64) * tikv::config::BLOCK_CACHE_RATE) as usize,
             Some(c) => c.0 as usize,
         };
-        kv_opts.local_dir = kv_engine_path;
+        kv_opts.local_dirs = vec![kv_engine_path];
+        for dir in &conf.kvengine.extra_dirs {
+            kv_opts.local_dirs.push(PathBuf::from(dir));
+        }
+        for local_dir in &kv_opts.local_dirs {
+            if !local_dir.exists() {
+                fs::create_dir_all(local_dir).unwrap();
+            }
+            if !local_dir.is_dir() {
+                panic!("path {:?} is not dir", local_dir);
+            }
+        }
         kv_opts.num_compactors = conf.rocksdb.max_background_jobs as usize;
         kv_opts.max_mem_table_size = conf.rocksdb.writecf.write_buffer_size.0;
         if kv_opts.max_mem_table_size > kvengine::KV_ENGINE_MEM_TABLE_MAX_SIZE {
@@ -1129,11 +1141,8 @@ impl TikvServer {
         kv_opts.low_space_threshold = conf
             .storage
             .low_space_threshold
-            .as_disk_size(&kv_opts.local_dir)
-            .unwrap_or_else(|err| {
-                warn!("get disk size of local dir failed: {:?}", err; "path" => ?kv_opts.local_dir);
-                0
-            });
+            .as_disks_size(&kv_opts.local_dirs)
+            .ctx("get_disks_stats")?;
 
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator::new(pd.clone()));

@@ -37,6 +37,7 @@ use crate::{
     metrics::ENGINE_LEVEL_WRITE_VEC,
     table::{
         file::{FdCache, File, InMemFile, LocalFile},
+        get_local_dir,
         schema_file::SchemaFile,
         sstable::{SsTable, SsTableCore, SsTableProperty, PROP_KEY_MAX_TS},
         vector_index::VectorIndexFile,
@@ -681,10 +682,10 @@ impl EngineCore {
         fm: &FileMeta,
         use_direct_io: bool,
     ) -> Result<Option<IaFile>> {
-        let IaCtx::Enabled(ia_mgr, data_dir) = self.ia_ctx.clone() else {
+        let IaCtx::Enabled(ia_mgr, data_dirs) = self.ia_ctx.clone() else {
             return Ok(None);
         };
-
+        let data_dir = get_local_dir(&data_dirs, id);
         let meta_file_path = table_meta_file_local_path(id, fm.file_type, data_dir.deref());
         let mut table_meta_file = self.open_local_file_with_file_path(
             id,
@@ -775,11 +776,12 @@ impl EngineCore {
         permit: Option<DfsLoadLimiterPermit>,
         use_direct_io: bool,
     ) -> Result<IaFile> {
-        let IaCtx::Enabled(ia_mgr, data_dir) = &self.ia_ctx else {
+        let IaCtx::Enabled(ia_mgr, data_dirs) = &self.ia_ctx else {
             unreachable!("ia_ctx should be enabled");
         };
 
         let data_len = table_meta_data.len();
+        let data_dir = get_local_dir(data_dirs, id);
         let meta_file_path = table_meta_file_local_path(id, fm.file_type, data_dir.deref());
         self.write_local_file_with_file_path(id, table_meta_data, use_direct_io, &meta_file_path)?;
         drop(permit);
@@ -953,23 +955,23 @@ impl EngineCore {
     }
 
     pub(crate) fn local_sst_file_path(&self, file_id: u64) -> PathBuf {
-        self.opts.local_dir.join(new_sst_filename(file_id))
+        get_local_dir(&self.opts.local_dirs, file_id).join(new_sst_filename(file_id))
     }
 
     pub(crate) fn local_blob_file_path(&self, file_id: u64) -> PathBuf {
-        self.opts.local_dir.join(new_blob_filename(file_id))
+        get_local_dir(&self.opts.local_dirs, file_id).join(new_blob_filename(file_id))
     }
 
     pub(crate) fn local_schema_file_path(&self, file_id: u64) -> PathBuf {
-        self.opts.local_dir.join(new_schema_filename(file_id))
+        get_local_dir(&self.opts.local_dirs, file_id).join(new_schema_filename(file_id))
     }
 
     pub(crate) fn local_columnar_file_path(&self, file_id: u64) -> PathBuf {
-        self.opts.local_dir.join(new_columnar_filename(file_id))
+        get_local_dir(&self.opts.local_dirs, file_id).join(new_columnar_filename(file_id))
     }
 
     pub(crate) fn local_vector_index_file_path(&self, file_id: u64) -> PathBuf {
-        self.opts.local_dir.join(new_vector_index_filename(file_id))
+        get_local_dir(&self.opts.local_dirs, file_id).join(new_vector_index_filename(file_id))
     }
 
     fn tmp_file_path(file_path: &Path) -> PathBuf {

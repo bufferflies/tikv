@@ -58,7 +58,7 @@ pub enum PrepareType {
 #[derive(Clone)]
 pub enum IaCtx {
     Disabled,
-    Enabled(IaManager, Arc<PathBuf>),
+    Enabled(IaManager, Arc<Vec<PathBuf>>), // (manager, meta_paths)
 }
 
 impl IaCtx {

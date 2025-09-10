@@ -144,7 +144,7 @@ async fn check_columnar(
         .sum::<usize>();
     let master_key = config.security.new_master_key().await;
     let txn_chunk_manager = TxnChunkManager::new(
-        None,
+        vec![],
         ctx.s3fs.clone(),
         BlockCache::None,
         None,
@@ -342,7 +342,7 @@ async fn check_columnar_for_shard(
         meta_file_cache: new_meta_file_cache(0),
         schema_files: None,
         txn_chunk_manager,
-        ia_ctx: IaCtx::Enabled(ia_mgr, working_dir.to_path_buf().into()),
+        ia_ctx: IaCtx::Enabled(ia_mgr, Arc::new(vec![working_dir.to_path_buf()])),
         prepare_type: PrepareType::ColumnarOnly,
         read_columnar: true,
     };
@@ -470,7 +470,7 @@ fn build_ia_mgr(
     if !data_dir.exists() {
         std::fs::create_dir_all(data_dir).unwrap();
     }
-    let options = ia.to_manager_options(data_dir.to_path_buf()).unwrap();
+    let options = ia.to_manager_options(vec![data_dir.to_path_buf()]).unwrap();
     let handle = runtime.handle().clone();
     let fd_cache = FdCache::new(ia.fd_cache_capacity);
     IaManager::new(options, dfs, Some(fd_cache), handle.into()).unwrap()

@@ -414,7 +414,7 @@ impl MiscExt for Engine {
     }
 
     fn path(&self) -> &str {
-        self.opts.local_dir.to_str().unwrap()
+        panic!()
     }
 
     fn sync_wal(&self) -> TraitsResult<()> {

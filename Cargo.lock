@@ -4202,6 +4202,7 @@ dependencies = [
  "farmhash",
  "file_system",
  "filetime",
+ "fs2",
  "fslock",
  "futures 0.3.28",
  "hex 0.4.3",

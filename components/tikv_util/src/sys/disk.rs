@@ -1,7 +1,8 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 use std::{
     io,
-    path::Path,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicI32, AtomicU64, Ordering},
 };
 
@@ -85,4 +86,37 @@ pub fn get_disk_status(_store_id: u64) -> DiskUsage {
 
 pub fn get_disk_capacity(dir: impl AsRef<Path>) -> io::Result<u64> {
     fs2::total_space(dir)
+}
+
+/// get_disk_stats returns (total, available) disk space in bytes.
+pub fn get_disks_stats(dirs: &[PathBuf]) -> io::Result<(u64, u64)> {
+    let mut available_spaces = vec![];
+
+    // It is possible that multiple dirs are created on the same device, in this
+    // case we should avoid counting the same device multiple times.
+    let mut device_count_map = std::collections::HashMap::new();
+    for dir in dirs {
+        let m = dir.metadata()?;
+        let device_id = m.dev();
+        let count = device_count_map.entry(device_id).or_default();
+        *count += 1;
+    }
+    let mut total_space = 0;
+    for dir in dirs {
+        let m = dir.metadata()?;
+        // We only calculate the device once.
+        if let Some(count) = device_count_map.remove(&m.dev()) {
+            let stat = fs2::statvfs(dir)?;
+            // The same device shared by multiple dirs, we should divide the space by the
+            // count.
+            total_space += stat.total_space();
+            let available_space_per_dir = stat.available_space() / count as u64;
+            for _ in 0..count {
+                available_spaces.push(available_space_per_dir);
+            }
+        }
+    }
+    let num_dirs = dirs.len() as u64;
+    let available_space = available_spaces.into_iter().min().unwrap_or_default() * num_dirs;
+    Ok((total_space, available_space))
 }

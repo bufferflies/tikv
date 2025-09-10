@@ -42,6 +42,7 @@ use tikv_util::{
     codec::bytes::decode_bytes,
     debug, error, info,
     store::{find_peer, QueryStats},
+    sys::disk::get_disks_stats,
     time::UnixSecs,
     timer::GLOBAL_TIMER_HANDLE,
     topn::TopN,
@@ -791,17 +792,18 @@ impl PdRunner {
         store_info: StoreInfo,
         _send_detailed_report: bool,
     ) {
-        let disk_stats = match fs2::statvfs(store_info.kv_engine.path()) {
-            Err(e) => {
-                error!(
-                    "get disk stat for rocksdb failed";
-                    "engine_path" => store_info.kv_engine.path(),
-                    "err" => ?e
-                );
-                return;
-            }
-            Ok(stats) => stats,
-        };
+        let (total_space, available_space) =
+            match get_disks_stats(&store_info.kv_engine.opts.local_dirs) {
+                Err(e) => {
+                    error!(
+                        "get disk stat for rocksdb failed";
+                        "engine_path" => store_info.kv_engine.path(),
+                        "err" => ?e
+                    );
+                    return;
+                }
+                Ok(stats) => stats,
+            };
 
         let mut report_peers = HashMap::default();
         for (region_id, region_peer) in &mut self.region_peers {
@@ -831,7 +833,7 @@ impl PdRunner {
 
         stats = collect_report_read_peer_stats(HOTSPOT_REPORT_CAPACITY, report_peers, stats);
 
-        let disk_cap = disk_stats.total_space();
+        let disk_cap = total_space;
         let capacity = if store_info.capacity == 0 || disk_cap < store_info.capacity {
             disk_cap
         } else {
@@ -844,7 +846,7 @@ impl PdRunner {
 
         // Note: `available + used_size` may be larger than `capacity`, when some
         // regions are sharing the same table files.
-        let available = disk_stats.available_space();
+        let available = available_space;
         store_info.kv_engine.set_available_space(available);
 
         if available == 0 {

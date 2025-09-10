@@ -2434,7 +2434,7 @@ impl<'a> DagTest<'a> {
         let block_cache =
             BlockCache::new(BlockCacheType::Quick, 64 * BLOCK_SIZE as u64, BLOCK_SIZE);
         let txn_chunk_manager = TxnChunkManager::new(
-            None,
+            vec![],
             cluster.get_dfs().unwrap(),
             block_cache.clone(),
             None,
@@ -2718,7 +2718,7 @@ impl<'a> DagTest<'a> {
             let path = self.ctx.temp_dir.path();
             let cap = IaCapacity::MemoryAndDiskCap(
                 (100 * IA_SEGMENT_SIZE as u64).into(),
-                path.join("seg"),
+                vec![path.join("seg")],
                 (1000 * IA_SEGMENT_SIZE as u64).into(),
             );
             let opts = IaManagerOptionsBuilder::default()
@@ -2736,7 +2736,7 @@ impl<'a> DagTest<'a> {
             .unwrap();
             let meta_path = path.join("meta");
             std::fs::create_dir_all(&meta_path).unwrap();
-            IaCtx::Enabled(ia_mgr, Arc::new(meta_path))
+            IaCtx::Enabled(ia_mgr, Arc::new(vec![meta_path]))
         } else {
             IaCtx::Disabled
         };

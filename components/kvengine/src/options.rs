@@ -32,7 +32,8 @@ use crate::{
 // work for most applications. Consider using that as a starting point before
 // customizing it for your own needs.
 pub struct Options {
-    pub local_dir: PathBuf,
+    pub local_dirs: Vec<PathBuf>,
+
     /// Base_size is th maximum L1 size before trigger a compaction.
     /// The L2 size is 10x of the base size, L3 size is 100x of the base size.
     pub base_size: u64,
@@ -107,7 +108,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            local_dir: PathBuf::from("/tmp"),
+            local_dirs: vec![PathBuf::from("/tmp")],
             base_size: DEFAULT_BASE_SIZE,
             max_block_cache_size: 0,
             num_compactors: 3,

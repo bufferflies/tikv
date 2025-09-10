@@ -1434,7 +1434,7 @@ fn new_test_options(
     };
     info!("MIN_BLOB_SIZE={}", min_blob_size);
     let mut opts = Options::default();
-    opts.local_dir = path.as_ref().to_path_buf();
+    opts.local_dirs = vec![path.as_ref().to_path_buf()];
     opts.base_size = 64 << 10;
     opts.table_builder_options.block_size = block_size;
     opts.table_builder_options.max_table_size = 8 << 10;

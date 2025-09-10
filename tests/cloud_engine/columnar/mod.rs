@@ -937,7 +937,7 @@ fn test_columnar_ia_file() {
         .unwrap();
     let schema_files = Arc::new(DashMap::new());
     let local_path = temp_dir.path().join("ia");
-    let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), local_path.clone(), 1000.into());
+    let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), vec![local_path.clone()], 1000.into());
     let options = IaManagerOptionsBuilder::default()
         .capacity(ia_cap)
         .segment_size(64)
@@ -951,7 +951,7 @@ fn test_columnar_ia_file() {
         runtime.handle().clone().into(),
     )
     .unwrap();
-    let ia_ctx = IaCtx::Enabled(ia_mgr, Arc::new(local_path));
+    let ia_ctx = IaCtx::Enabled(ia_mgr, Arc::new(vec![local_path]));
     let snap_ctx = SnapCtx {
         dfs: dfs.clone(),
         master_key,

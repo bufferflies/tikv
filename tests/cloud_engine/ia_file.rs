@@ -19,6 +19,7 @@ use kvengine::{
     table::{
         blobtable::builder::BlobTableBuilder,
         file::InMemFile,
+        get_local_dir,
         sstable::{self},
         ChecksumType, InnerKey, Value, NO_COMPRESSION,
     },
@@ -61,10 +62,10 @@ fn make_file_meta(file_type: FileType) -> FileMeta {
 }
 
 #[rstest]
-#[case(IaCapacity::MemoryAndDiskCap(300.into(), PathBuf::from("ia"), 3000.into()))]
+#[case(IaCapacity::MemoryAndDiskCap(300.into(), vec![PathBuf::from("ia")], 3000.into()))]
 #[case::memory(IaCapacity::MemoryCap(3000.into()))]
-#[case::big_cap(IaCapacity::MemoryAndDiskCap(1000.into(), PathBuf::from("ia"), 10000.into()))]
-#[case::small_cap(IaCapacity::MemoryAndDiskCap(256.into(), PathBuf::from("ia"), 1024.into()))]
+#[case::big_cap(IaCapacity::MemoryAndDiskCap(1000.into(), vec![PathBuf::from("ia")], 10000.into()))]
+#[case::small_cap(IaCapacity::MemoryAndDiskCap(256.into(), vec![PathBuf::from("ia")], 1024.into()))]
 fn test_read(#[case] mut ia_cap: IaCapacity) {
     init_log_for_test();
 
@@ -176,7 +177,7 @@ fn test_init() {
     let rt = runtime.handle().clone();
     runtime.block_on(async move {
         let local_path = temp_dir.join("ia");
-        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), local_path.clone(), 1000.into());
+        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), vec![local_path.clone()], 1000.into());
         let options = IaManagerOptionsBuilder::default()
             .capacity(ia_cap)
             .segment_size(SEGMENT_SIZE)
@@ -309,7 +310,8 @@ fn test_abnormal_local_file() {
         .await
         .unwrap();
 
-        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), local_path.clone(), 100000.into());
+        let ia_cap =
+            IaCapacity::MemoryAndDiskCap(0.into(), vec![local_path.clone()], 100000.into());
         let options = IaManagerOptionsBuilder::default()
             .capacity(ia_cap)
             .segment_size(SEGMENT_SIZE)
@@ -344,7 +346,7 @@ fn test_abnormal_local_file() {
                 .await
                 .unwrap();
 
-            let main_store = LocalFileStore::new(local_path.clone(), 1_usize);
+            let main_store = LocalFileStore::new(vec![local_path.clone()], 1_usize);
             main_store
                 .remove(
                     file_id,
@@ -402,13 +404,17 @@ fn test_local_gc() {
         .unwrap();
     let rt = runtime.handle().clone();
     runtime.block_on(async move {
-        let local_path = temp_dir.join("ia");
-        let segment_path = local_path.join("seg");
-        let meta_path = local_path.join("meta");
-        fs::create_dir_all(&segment_path).unwrap();
-        fs::create_dir_all(&meta_path).unwrap();
+        let local_paths = vec![temp_dir.join("ia"), temp_dir.join("ia_extra")];
+        let segment_paths = vec![local_paths[0].join("seg"), local_paths[1].join("seg")];
+        let meta_paths = vec![local_paths[0].join("meta"), local_paths[1].join("meta")];
+        for segment_path in &segment_paths {
+            fs::create_dir_all(segment_path).unwrap();
+        }
+        for meta_path in &meta_paths {
+            fs::create_dir_all(meta_path).unwrap();
+        }
 
-        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), segment_path.clone(), 1000.into());
+        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), segment_paths.clone(), 1000.into());
         let options = IaManagerOptionsBuilder::default()
             .capacity(ia_cap)
             .segment_size(SEGMENT_SIZE)
@@ -440,11 +446,12 @@ fn test_local_gc() {
 
         let dfs_opts = dfs::Options::default().with_shard(1, 1);
         for (file_id, file_type, table_meta_off) in files {
+            let meta_path = get_local_dir(&meta_paths, file_id);
             IaFile::prepare_table_meta(
                 file_id,
                 file_type,
                 table_meta_off,
-                &meta_path,
+                meta_path,
                 &dfs_opts,
                 &mgr,
                 None,
@@ -453,11 +460,13 @@ fn test_local_gc() {
             .unwrap();
         }
 
-        let ia1 = IaFile::open_in_path(1, &fm, &meta_path, mgr.clone()).unwrap();
+        let meta_path_1 = get_local_dir(&meta_paths, 1);
+        let ia1 = IaFile::open_in_path(1, &fm, meta_path_1, mgr.clone()).unwrap();
         let data1_5_10 = ia1.multi_read_async(5, 10).await.unwrap();
         assert_eq!(ia1.multi_read_async(5, 10).await.unwrap(), data1_5_10);
 
-        let ia2 = IaFile::open_in_path(2, &fm, &meta_path, mgr.clone()).unwrap();
+        let meta_path_2 = get_local_dir(&meta_paths, 2);
+        let ia2 = IaFile::open_in_path(2, &fm, meta_path_2, mgr.clone()).unwrap();
         let data2_100_64 = ia2.multi_read_async(100, 64).await.unwrap();
         assert_eq!(ia2.multi_read_async(100, 64).await.unwrap(), data2_100_64);
 
@@ -467,7 +476,7 @@ fn test_local_gc() {
         // No meta is GCed.
         {
             let config = IaGcConfig::default();
-            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), meta_path.clone());
+            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), Arc::new(meta_paths.clone()));
             assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), 0);
         }
 
@@ -477,7 +486,7 @@ fn test_local_gc() {
                 meta_lifetime: ReadableDuration::ZERO,
                 ..Default::default()
             };
-            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), meta_path.clone());
+            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), Arc::new(meta_paths.clone()));
             assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), file_count);
 
             // Opened IA files are not affected.
@@ -491,7 +500,7 @@ fn test_local_gc() {
                 segment_interval: ReadableDuration::ZERO,
                 ..Default::default()
             };
-            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), meta_path.clone());
+            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), Arc::new(meta_paths.clone()));
             assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 0);
 
             assert_eq!(ia1.multi_read_async(5, 10).await.unwrap(), data1_5_10);
@@ -499,61 +508,68 @@ fn test_local_gc() {
         }
 
         // All segments are GCed.
-        {
-            assert!(fs::read_dir(&segment_path).unwrap().next().is_some());
+        let mut seg_count = 0;
+        for i in 0..local_paths.len() {
+            let segment_path = &segment_paths[i];
+            if fs::read_dir(segment_path).unwrap().next().is_some() {
+                seg_count += 1;
+            }
+        }
+        assert!(seg_count > 0);
 
-            // Open IA manager on another path.
-            let another_segment_path = local_path.join("seg1");
-            fs::create_dir_all(&another_segment_path).unwrap();
-            let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), another_segment_path, 1000.into());
-            let options = IaManagerOptionsBuilder::default()
-                .capacity(ia_cap)
-                .build()
-                .unwrap();
-            let mgr =
-                IaManager::new(options, Arc::new(s3fs.clone()), None, rt.clone().into()).unwrap();
+        // Open IA manager on another path.
+        let local_path = &local_paths[0];
+        let another_segment_path = local_path.join("seg1");
+        fs::create_dir_all(&another_segment_path).unwrap();
+        let ia_cap =
+            IaCapacity::MemoryAndDiskCap(0.into(), vec![another_segment_path], 1000.into());
+        let options = IaManagerOptionsBuilder::default()
+            .capacity(ia_cap)
+            .build()
+            .unwrap();
+        let mgr = IaManager::new(options, Arc::new(s3fs.clone()), None, rt.clone().into()).unwrap();
 
-            let config = IaGcConfig {
-                segment_interval: ReadableDuration::ZERO,
-                ..Default::default()
-            };
-            let mut gc_runner = IaGcRunner::new(config, mgr, meta_path.clone());
-            gc_runner.set_segment_path(segment_path.clone()); // Change to original path which has segments.
-            assert!(gc_runner.segment_gc(|_| false).unwrap() > 0); // The number of segments is not determined.
+        let config = IaGcConfig {
+            segment_interval: ReadableDuration::ZERO,
+            ..Default::default()
+        };
+        let mut gc_runner = IaGcRunner::new(config, mgr.clone(), Arc::new(meta_paths.clone()));
+        gc_runner.set_segment_path(segment_paths.clone()); // Change to original path which has segments.
+        assert!(gc_runner.segment_gc(|_| false).unwrap() > 0); // The number of segments is not determined.
 
-            assert!(fs::read_dir(&segment_path).unwrap().next().is_none());
+        for segment_path in &segment_paths {
+            assert!(fs::read_dir(segment_path).unwrap().next().is_none());
         }
 
         // GC for "*.tmp" files.
+        let segment_path_1 = get_local_dir(&segment_paths, 1);
+        fs::write(segment_path_1.join("1.sst.tmp"), b"data").unwrap();
+        assert!(fs::read_dir(segment_path_1).unwrap().next().is_some());
+        let meta_path = get_local_dir(&meta_paths, 2);
+        fs::write(meta_path.join("2.sst.tmp"), b"data").unwrap();
+        assert!(fs::read_dir(meta_path).unwrap().next().is_some());
+
         {
-            fs::write(segment_path.join("1.sst.tmp"), b"data").unwrap();
-            assert!(fs::read_dir(&segment_path).unwrap().next().is_some());
+            let config = IaGcConfig::default();
+            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), Arc::new(meta_paths.clone()));
+            gc_runner.set_segment_path(segment_paths.clone());
+            assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 0);
+            assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), 0);
+        }
 
-            fs::write(meta_path.join("2.sst.tmp"), b"data").unwrap();
-            assert!(fs::read_dir(&meta_path).unwrap().next().is_some());
+        {
+            let config = IaGcConfig {
+                segment_interval: ReadableDuration::ZERO,
+                tmp_lifetime: ReadableDuration::ZERO,
+                ..Default::default()
+            };
+            let mut gc_runner = IaGcRunner::new(config, mgr.clone(), Arc::new(meta_paths.clone()));
+            gc_runner.set_segment_path(segment_paths.clone());
+            assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 1);
+            assert!(fs::read_dir(segment_path_1).unwrap().next().is_none());
 
-            {
-                let config = IaGcConfig::default();
-                let mut gc_runner = IaGcRunner::new(config, mgr.clone(), meta_path.clone());
-                gc_runner.set_segment_path(segment_path.clone());
-                assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 0);
-                assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), 0);
-            }
-
-            {
-                let config = IaGcConfig {
-                    segment_interval: ReadableDuration::ZERO,
-                    tmp_lifetime: ReadableDuration::ZERO,
-                    ..Default::default()
-                };
-                let mut gc_runner = IaGcRunner::new(config, mgr, meta_path.clone());
-                gc_runner.set_segment_path(segment_path.clone());
-                assert_eq!(gc_runner.segment_gc(|_| false).unwrap(), 1);
-                assert!(fs::read_dir(&segment_path).unwrap().next().is_none());
-
-                assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), 1);
-                assert!(fs::read_dir(&meta_path).unwrap().next().is_none());
-            }
+            assert_eq!(gc_runner.meta_file_gc(|_| false).unwrap(), 1);
+            assert!(fs::read_dir(meta_path).unwrap().next().is_none());
         }
     });
 
@@ -578,7 +594,7 @@ fn test_blob_ia() {
     let rt = runtime.handle().clone();
     runtime.block_on(async move {
         let local_path = temp_dir.join("ia");
-        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), local_path.clone(), 1000.into());
+        let ia_cap = IaCapacity::MemoryAndDiskCap(0.into(), vec![local_path.clone()], 1000.into());
         let options = IaManagerOptionsBuilder::default()
             .capacity(ia_cap)
             .segment_size(SEGMENT_SIZE)

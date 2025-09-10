@@ -69,7 +69,7 @@ impl Runnable for GcRunner {
 impl GcRunner {
     pub fn new(kv: kvengine::Engine, importer: Arc<SstImporter>, timeout: Duration) -> Self {
         let ia_gc_runner = match kv.ia_ctx() {
-            IaCtx::Enabled(ia_mgr, meta_path) => {
+            IaCtx::Enabled(ia_mgr, meta_paths) => {
                 #[cfg_attr(not(feature = "textexport"), allow(unused_mut))]
                 let mut config = IaGcConfig::default();
 
@@ -81,11 +81,7 @@ impl GcRunner {
                     warn!("IA gc runner use test config: {:?}", config);
                 }
 
-                Some(IaGcRunner::new(
-                    config,
-                    ia_mgr.clone(),
-                    meta_path.as_path().to_path_buf(),
-                ))
+                Some(IaGcRunner::new(config, ia_mgr.clone(), meta_paths.clone()))
             }
             IaCtx::Disabled => None,
         };
@@ -166,77 +162,86 @@ impl GcRunner {
             vec_idx_file_ids,
         } = collect_file_ids;
         let store_id = self.kv.get_engine_id();
-        let entries = fs::read_dir(&self.kv.opts.local_dir).ctx("gc.read_dir")?;
-        for e in entries {
-            let entry = e.ctx("gc.entry")?;
-            let path = entry.path();
+        let opts = self.kv.opts.clone();
+        for dir in &opts.local_dirs {
+            let entries = fs::read_dir(dir).ctx("gc.read_dir")?;
+            for e in entries {
+                let entry = e.ctx("gc.entry")?;
+                let path = entry.path();
 
-            if path.is_dir() && path.file_name() == Some(OsStr::new("txn")) {
-                self.remove_kv_garbage_txn_files(path, txn_chunk_ids, blacklist_file_ids.as_ref())?;
-                continue;
-            }
-            if path.is_dir() && path.file_name() == Some(OsStr::new("ia")) {
-                self.remove_kv_garbage_ia_files(
-                    path,
-                    ia_file_ids,
-                    col_file_ids,
-                    blacklist_file_ids,
-                )?;
-                continue;
-            }
-
-            let path_str = path.to_str().unwrap();
-            if path_str.ends_with(".tmp") {
-                let meta = entry
-                    .metadata()
-                    .with_ctx(|| format!("gc.tmp.metadata: {path_str}"))?;
-                if !self.is_old_file(meta) {
+                if path.is_dir() && path.file_name() == Some(OsStr::new("txn")) {
+                    self.remove_kv_garbage_txn_files(
+                        path,
+                        txn_chunk_ids,
+                        blacklist_file_ids.as_ref(),
+                    )?;
                     continue;
                 }
-                Self::remove_file(store_id, &path)
-                    .with_ctx(|| format!("gc.tmp.remove_file: {path_str}"))?;
-            } else if path_str.ends_with(".sst") {
-                let id = sstable::parse_file_id(&path)?;
-                if !sst_file_ids.contains(&id) {
-                    let _guard = self.kv.lock_file(id);
-                    if blacklist_file_ids.contains(&id) {
+                if path.is_dir() && path.file_name() == Some(OsStr::new("ia")) {
+                    self.remove_kv_garbage_ia_files(
+                        path,
+                        ia_file_ids,
+                        col_file_ids,
+                        blacklist_file_ids,
+                    )?;
+                    continue;
+                }
+
+                let path_str = path.to_str().unwrap();
+                if path_str.ends_with(".tmp") {
+                    let meta = entry
+                        .metadata()
+                        .with_ctx(|| format!("gc.tmp.metadata: {path_str}"))?;
+                    if !self.is_old_file(meta) {
                         continue;
                     }
-                    let meta = fs::metadata(&path).table_ctx(id, "gc.sst.metadata")?;
-                    if self.is_old_file(meta) {
-                        self.kv.remove_fd_cache(id);
-                        Self::remove_file(store_id, &path).table_ctx(id, "gc.sst.remove_file")?;
+                    Self::remove_file(store_id, &path)
+                        .with_ctx(|| format!("gc.tmp.remove_file: {path_str}"))?;
+                } else if path_str.ends_with(".sst") {
+                    let id = sstable::parse_file_id(&path)?;
+                    if !sst_file_ids.contains(&id) {
+                        let _guard = self.kv.lock_file(id);
+                        if blacklist_file_ids.contains(&id) {
+                            continue;
+                        }
+                        let meta = fs::metadata(&path).table_ctx(id, "gc.sst.metadata")?;
+                        if self.is_old_file(meta) {
+                            self.kv.remove_fd_cache(id);
+                            Self::remove_file(store_id, &path)
+                                .table_ctx(id, "gc.sst.remove_file")?;
+                        }
                     }
+                } else if path_str.ends_with(SCHEMA_FILE_SUFFIX) {
+                    let id = Self::parse_file_id(&path, SCHEMA_FILE_SUFFIX.len())?;
+                    if !schema_file_ids.contains(&id) {
+                        let _guard = self.kv.lock_file(id);
+                        if blacklist_file_ids.contains(&id) {
+                            continue;
+                        }
+                        let meta = fs::metadata(&path).table_ctx(id, "gc.schema.metadata")?;
+                        if self.is_old_file(meta) {
+                            self.kv.remove_fd_cache(id);
+                            Self::remove_file(store_id, &path)
+                                .table_ctx(id, "gc.schema.remove_file")?;
+                        }
+                    }
+                } else if path_str.ends_with(VECTOR_INDEX_FILE_SUFFIX) {
+                    let id = Self::parse_file_id(&path, VECTOR_INDEX_FILE_SUFFIX.len())?;
+                    if !vec_idx_file_ids.contains(&id) {
+                        let _guard = self.kv.lock_file(id);
+                        if blacklist_file_ids.contains(&id) {
+                            continue;
+                        }
+                        let meta = fs::metadata(&path).table_ctx(id, "gc.vec.metadata")?;
+                        if self.is_old_file(meta) {
+                            self.kv.remove_fd_cache(id);
+                            Self::remove_file(store_id, &path)
+                                .table_ctx(id, "gc.vec.remove_file")?;
+                        }
+                    }
+                } else if !path_str.ends_with("LOCK") {
+                    warn!("unexpected file {:?}", path);
                 }
-            } else if path_str.ends_with(SCHEMA_FILE_SUFFIX) {
-                let id = Self::parse_file_id(&path, SCHEMA_FILE_SUFFIX.len())?;
-                if !schema_file_ids.contains(&id) {
-                    let _guard = self.kv.lock_file(id);
-                    if blacklist_file_ids.contains(&id) {
-                        continue;
-                    }
-                    let meta = fs::metadata(&path).table_ctx(id, "gc.schema.metadata")?;
-                    if self.is_old_file(meta) {
-                        self.kv.remove_fd_cache(id);
-                        Self::remove_file(store_id, &path)
-                            .table_ctx(id, "gc.schema.remove_file")?;
-                    }
-                }
-            } else if path_str.ends_with(VECTOR_INDEX_FILE_SUFFIX) {
-                let id = Self::parse_file_id(&path, VECTOR_INDEX_FILE_SUFFIX.len())?;
-                if !vec_idx_file_ids.contains(&id) {
-                    let _guard = self.kv.lock_file(id);
-                    if blacklist_file_ids.contains(&id) {
-                        continue;
-                    }
-                    let meta = fs::metadata(&path).table_ctx(id, "gc.vec.metadata")?;
-                    if self.is_old_file(meta) {
-                        self.kv.remove_fd_cache(id);
-                        Self::remove_file(store_id, &path).table_ctx(id, "gc.vec.remove_file")?;
-                    }
-                }
-            } else if !path_str.ends_with("LOCK") {
-                warn!("unexpected file {:?}", path);
             }
         }
         Ok(())

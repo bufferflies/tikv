@@ -5,7 +5,7 @@ use std::{
     fs,
     io::Write,
     os::unix::fs::FileExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering::Relaxed},
         Arc,
@@ -27,7 +27,7 @@ use crate::{
         manager::{IaManagerOptions, QueueOptions},
         types::SegmentHandle,
     },
-    table::{file::LocalFile, Error, Result},
+    table::{file::LocalFile, get_local_dir, Error, Result},
     IoContext,
 };
 
@@ -37,7 +37,7 @@ pub const TEMPORARY_FILE_SUFFIX: &str = "tmp";
 #[async_trait]
 pub trait LocalStore: Send + Sync {
     /// Return the path of store. Will be `None` when it's in memory.
-    fn path(&self) -> Option<&Path>;
+    fn main_paths(&self) -> &[PathBuf];
 
     fn init(&self) -> Result<()>;
 
@@ -57,9 +57,9 @@ pub trait LocalStore: Send + Sync {
     fn handle(&self, file_id: u64, key: &str) -> Result<Option<SegmentHandle>>;
 }
 
-pub fn new_local_store(path: Option<PathBuf>, fd_cache_capacity: usize) -> Arc<dyn LocalStore> {
-    if let Some(path) = path {
-        Arc::new(LocalFileStore::new(path, fd_cache_capacity)) as _
+pub fn new_local_store(paths: Vec<PathBuf>, fd_cache_capacity: usize) -> Arc<dyn LocalStore> {
+    if !paths.is_empty() {
+        Arc::new(LocalFileStore::new(paths, fd_cache_capacity)) as _
     } else {
         Arc::new(LocalMemoryStore::default()) as _
     }
@@ -92,21 +92,22 @@ macro_rules! try_some {
 }
 
 pub struct LocalFileStore {
-    dir: PathBuf,
+    dirs: Vec<PathBuf>,
     fd_cache: Arc<Cache<String, Arc<std::fs::File>>>,
 }
 
 impl LocalFileStore {
-    pub fn new(dir: PathBuf, fd_cache_capacity: usize) -> Self {
+    pub fn new(dirs: Vec<PathBuf>, fd_cache_capacity: usize) -> Self {
         let fd_cache = Arc::new(Cache::new(fd_cache_capacity));
-        Self { dir, fd_cache }
+        Self { dirs, fd_cache }
     }
 
     fn open_file(&self, file_id: u64, key: &str) -> Result<Option<Arc<std::fs::File>>> {
+        let dir = get_local_dir(&self.dirs, file_id);
         let f = match self.fd_cache.get_value_or_guard(key, None) {
             GuardResult::Value(file) => file,
             GuardResult::Guard(placeholder) => {
-                let path = self.dir.join(key);
+                let path = dir.join(key);
                 debug!("FileDataStore.open_file cache miss"; "file_id" => file_id, "key" => key, "path" => ?path);
                 let f = try_open!(path).table_ctx(file_id, format!("open.{key}"))?;
                 let arc_f = Arc::new(f);
@@ -121,28 +122,36 @@ impl LocalFileStore {
 
 #[async_trait]
 impl LocalStore for LocalFileStore {
-    fn path(&self) -> Option<&Path> {
-        Some(&self.dir)
+    fn main_paths(&self) -> &[PathBuf] {
+        &self.dirs
     }
 
     fn init(&self) -> Result<()> {
-        fs::create_dir_all(&self.dir).table_ctx(0, format!("create_dir.{:?}", self.dir))
+        for dir in &self.dirs {
+            fs::create_dir_all(dir).table_ctx(0, format!("create_dir.{:?}", dir))?;
+        }
+        Ok(())
     }
 
     fn scan(&self) -> Result<HashMap<String /* suffix */, Vec<String> /* keys */>> {
-        let entries = fs::read_dir(&self.dir).table_ctx(0, format!("read_dir.{:?}", self.dir))?;
         let mut map = HashMap::new();
-        for entry in entries {
-            let entry = entry.table_ctx(0, "entry")?;
-            let path = entry.path();
-            if path.is_file() {
-                let key = path.file_name().unwrap().to_string_lossy().into_owned();
-                let suffix = path
-                    .extension()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                map.entry(suffix).or_insert_with(Vec::new).push(key);
+        for dir in &self.dirs {
+            if !dir.is_dir() {
+                return Err(Error::Io(format!("not a directory: {:?}", dir)));
+            }
+            let entries = fs::read_dir(dir).table_ctx(0, format!("read_dir.{:?}", dir))?;
+            for entry in entries {
+                let entry = entry.table_ctx(0, "entry")?;
+                let path = entry.path();
+                if path.is_file() {
+                    let key = path.file_name().unwrap().to_string_lossy().into_owned();
+                    let suffix = path
+                        .extension()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    map.entry(suffix).or_insert_with(Vec::new).push(key);
+                }
             }
         }
         Ok(map)
@@ -159,7 +168,8 @@ impl LocalStore for LocalFileStore {
             TMP_ID.fetch_add(1, Relaxed),
             TEMPORARY_FILE_SUFFIX
         );
-        let tmp_path = self.dir.join(tmp_filename);
+        let dir = get_local_dir(&self.dirs, file_id);
+        let tmp_path = dir.join(tmp_filename);
         let mut f = fs::File::create(&tmp_path).table_ctx(file_id, format!("create_tmp.{key}"))?;
 
         f.write_all(&data)
@@ -167,7 +177,7 @@ impl LocalStore for LocalFileStore {
         f.sync_data()
             .table_ctx(file_id, format!("sync_tmp.{key}"))?;
 
-        let path = self.dir.join(key);
+        let path = dir.join(key);
         fs::rename(&tmp_path, &path).table_ctx(file_id, format!("rename.{key}"))?;
 
         debug!("FileDataStore.save"; "file_id" => file_id, "key" => key, "path" => ?path);
@@ -188,7 +198,8 @@ impl LocalStore for LocalFileStore {
     }
 
     fn remove(&self, file_id: u64, key: &str) -> Result<Option<()>> {
-        let path = self.dir.join(key);
+        let dir = get_local_dir(&self.dirs, file_id);
+        let path = dir.join(key);
         self.fd_cache.remove(key);
         try_fs!(std::fs::remove_file(path)).table_ctx(file_id, format!("remove.{key}"))?;
         Ok(Some(()))
@@ -196,7 +207,8 @@ impl LocalStore for LocalFileStore {
 
     fn handle(&self, file_id: u64, key: &str) -> Result<Option<SegmentHandle>> {
         let f = try_some!(self.open_file(file_id, key)?);
-        let path = self.dir.join(key);
+        let dir = get_local_dir(&self.dirs, file_id);
+        let path = dir.join(key);
         let local_file = LocalFile::from_file(file_id, path, f)?;
         Ok(Some(local_file.into()))
     }
@@ -228,8 +240,8 @@ impl LocalMemoryStore {
 
 #[async_trait]
 impl LocalStore for LocalMemoryStore {
-    fn path(&self) -> Option<&Path> {
-        None
+    fn main_paths(&self) -> &[PathBuf] {
+        &[]
     }
 
     fn init(&self) -> Result<()> {
@@ -299,7 +311,7 @@ pub enum IaCapacity {
     /// Small queue in memory & main queue in disk.
     MemoryAndDiskCap(
         AbsoluteOrPercentSize, // mem_cap
-        PathBuf,
+        Vec<PathBuf>,          // local_dirs
         AbsoluteOrPercentSize, // disk_cap
     ),
 }
@@ -322,20 +334,26 @@ impl IaCapacity {
             }
             IaCapacity::MemoryCap(cap) => {
                 let mem_cap = cap.as_memory_size() as i64;
-                options.small_queue.path = None;
+                options.small_queue.paths = vec![];
                 options.small_queue.cap = mem_cap / MAIN_QUEUE_CAPACITY_FACTOR;
-                options.main_queue.path = None;
+                options.main_queue.paths = vec![];
                 options.main_queue.cap = mem_cap - options.small_queue.cap;
             }
-            IaCapacity::MemoryAndDiskCap(mem_cap, local_dir, disk_cap) => {
+            IaCapacity::MemoryAndDiskCap(mem_cap, local_dirs, disk_cap) => {
                 let mem_cap = mem_cap.as_memory_size();
-                options.small_queue.path = None;
+                options.small_queue.paths = vec![];
                 options.small_queue.cap = mem_cap as i64;
-
+                for local_dir in &local_dirs {
+                    if !local_dir.exists() {
+                        fs::create_dir_all(local_dir).map_err(|err| {
+                            Error::Io(format!("create dir {:?} failed: {err:?}", local_dir))
+                        })?;
+                    }
+                }
                 let disk_cap = disk_cap
-                    .as_disk_size(&local_dir)
-                    .map_err(|err| Error::Io(format!("get disk capacity failed: {err:?}")))?;
-                options.main_queue.path = Some(local_dir);
+                    .as_disks_size(&local_dirs)
+                    .map_err(|err| Error::Io(format!("get disks capacity failed: {err:?}")))?;
+                options.main_queue.paths = local_dirs;
                 options.main_queue.cap = disk_cap as i64;
             }
         }
@@ -349,15 +367,17 @@ impl IaCapacity {
                 small_queue,
                 main_queue,
             } => {
-                if let Some(ref mut path) = small_queue.path {
+                for path in &mut small_queue.paths {
                     *path = parent.join(&path);
                 }
-                if let Some(ref mut path) = main_queue.path {
+                for path in &mut main_queue.paths {
                     *path = parent.join(&path);
                 }
             }
-            IaCapacity::MemoryAndDiskCap(_, dir, _) => {
-                *dir = parent.join(&dir);
+            IaCapacity::MemoryAndDiskCap(_, dirs, _) => {
+                for dir in dirs {
+                    *dir = parent.join(&dir);
+                }
             }
             IaCapacity::MemoryCap(..) => {}
         }
@@ -521,8 +541,8 @@ impl Default for IaConfig {
 }
 
 impl IaConfig {
-    pub fn to_manager_options(&self, data_path: PathBuf) -> Result<IaManagerOptions> {
-        let cap = IaCapacity::MemoryAndDiskCap(self.mem_cap, data_path, self.disk_cap);
+    pub fn to_manager_options(&self, data_paths: Vec<PathBuf>) -> Result<IaManagerOptions> {
+        let cap = IaCapacity::MemoryAndDiskCap(self.mem_cap, data_paths, self.disk_cap);
         let sync_read_concurrency = if self.disable_sync_read {
             0
         } else {
@@ -688,7 +708,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let ia_cap = IaCapacity::MemoryAndDiskCap(
             AbsoluteOrPercentSize::Percent(10.0),
-            temp_dir.path().to_path_buf(),
+            vec![temp_dir.path().to_path_buf()],
             AbsoluteOrPercentSize::Percent(10.0),
         );
         ia_cap.build_options(&mut options).unwrap();

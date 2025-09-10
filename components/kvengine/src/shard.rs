@@ -37,6 +37,7 @@ use crate::{
         blobtable::blobtable::BlobTable,
         columnar::{ColumnarLevel, ColumnarLevels, VectorIndexDef},
         file::InMemFile,
+        get_local_dir,
         memtable::{self, CfTable},
         schema_file::SchemaFile,
         search,
@@ -543,15 +544,16 @@ impl Shard {
                 .await
                 .map(|data| Arc::new(InMemFile::new(id, data)) as _)
                 .map_err(|err| err.into()),
-            IaCtx::Enabled(ia_mgr, data_dir) => {
+            IaCtx::Enabled(ia_mgr, data_dirs) => {
                 if fm.can_use_ia() {
                     let data = meta_file_cache
                         .get_or_insert_async(&id, async move {
+                            let data_dir = get_local_dir(data_dirs, id);
                             IaFile::prepare_table_meta(
                                 id,
                                 fm.file_type,
                                 fm.table_meta_off as u64,
-                                data_dir.deref(),
+                                data_dir.as_path(),
                                 opts,
                                 ia_mgr,
                                 Some(fs),

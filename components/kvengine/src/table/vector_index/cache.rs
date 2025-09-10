@@ -69,7 +69,7 @@ impl VectorIndexCache {
     ) -> Self {
         let cache_cap = config
             .cache_cap
-            .as_disk_size(ia_mgr.main_store_path().unwrap())
+            .as_disks_size(ia_mgr.main_store_paths())
             .unwrap();
         info!(
             "create vector index cache using config: {:?}, calcualted cache_cap: {}",

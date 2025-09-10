@@ -104,7 +104,7 @@ impl<'a> ReadAt<'a> {
 #[derive(Default, Clone, Debug)]
 pub struct QueueOptions {
     /// It means in memory when `path` is `None`.
-    pub path: Option<PathBuf>,
+    pub paths: Vec<PathBuf>,
     pub cap: i64,
 }
 
@@ -187,12 +187,12 @@ impl IaManager {
         runtime: WorkerPool,
     ) -> Result<Self> {
         assert!(
-            opts.small_queue.path.is_none(),
+            opts.small_queue.paths.is_empty(),
             "small queue must be in memory"
         );
 
         info!("create IA manager"; "opts" => ?opts);
-        let main_store = new_local_store(opts.main_queue.path.clone(), opts.fd_cache_capacity);
+        let main_store = new_local_store(opts.main_queue.paths.clone(), opts.fd_cache_capacity);
         let segments = Arc::new(LocalSegmentMap::default());
         let segment_data_ctx = SegmentDataContext {
             segments: segments.clone(),
@@ -282,7 +282,7 @@ impl IaManagerCore {
     }
 
     fn init(&self) -> Result<()> {
-        if let Some(path) = self.main_store.path() {
+        if let Some(path) = self.main_store.main_paths().first() {
             match Manifest::read_from_path(path) {
                 Ok(Some(manifest)) => {
                     self.init_from_manifest(&manifest);
@@ -541,8 +541,8 @@ impl IaManagerCore {
         self.segments.contains(ident)
     }
 
-    pub fn main_store_path(&self) -> Option<&Path> {
-        self.main_store.path()
+    pub fn main_store_paths(&self) -> &[PathBuf] {
+        self.main_store.main_paths()
     }
 
     pub fn access_table_meta(&self, file_id: u64) -> bool /* should_set_mtime */ {
@@ -615,7 +615,7 @@ impl IaManagerCore {
     }
 
     fn persist_manifest(&self) {
-        let Some(path) = self.main_store.path() else {
+        let Some(path) = self.main_store.main_paths().first() else {
             return;
         };
 

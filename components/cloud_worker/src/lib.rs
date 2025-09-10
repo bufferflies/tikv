@@ -296,7 +296,7 @@ fn start_server_impl(
     // is hold in async context, we will meet the panic of dropping tokio
     // runtime in async context.
     let txn_chunk_manager = TxnChunkManager::new(
-        None,
+        vec![],
         s3fs.clone(),
         block_cache.clone(),
         None,
@@ -459,7 +459,7 @@ fn create_ia_ctx(
             .map_err(|err| format!("create segment path failed: {err:?}"))?;
         let mut opts = config
             .ia
-            .to_manager_options(segment_path)
+            .to_manager_options(vec![segment_path])
             .map_err(|err| format!("build IA options failed: {err:?}"))?;
         opts.dynamic_capacity = false; // Always disable dynamic capacity.
 
@@ -469,7 +469,7 @@ fn create_ia_ctx(
         let meta_path = ia_path.join("meta");
         fs::create_dir_all(&meta_path)
             .map_err(|err| format!("create meta path failed: {err:?}"))?;
-        Ok(IaCtx::Enabled(ia_mgr, Arc::new(meta_path)))
+        Ok(IaCtx::Enabled(ia_mgr, Arc::new(vec![meta_path])))
     } else {
         Ok(IaCtx::Disabled)
     }
@@ -477,11 +477,8 @@ fn create_ia_ctx(
 
 fn run_local_gc(config: &Config, ia_ctx: &IaCtx, running: Running) {
     if let IaCtx::Enabled(ia_mgr, meta_path) = ia_ctx {
-        let mut local_gc_runner = LocalGcRunner::new(
-            config.local_gc.clone(),
-            ia_mgr.clone(),
-            meta_path.as_ref().clone(),
-        );
+        let mut local_gc_runner =
+            LocalGcRunner::new(config.local_gc.clone(), ia_mgr.clone(), meta_path.clone());
         thread::spawn(move || local_gc_runner.run(running));
     }
 }

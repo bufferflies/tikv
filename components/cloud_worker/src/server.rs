@@ -636,7 +636,7 @@ async fn handle_remote_compaction(
         compression_lvl,
         id_allocator,
         encryption_key,
-        local_dir: None,
+        local_dirs: vec![],
         for_restore: false,
         checksum_type,
     };

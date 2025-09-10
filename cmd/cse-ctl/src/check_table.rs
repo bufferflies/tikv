@@ -132,7 +132,7 @@ pub(crate) fn execute_check_table(args: CheckTableArgs) {
         .get_runtime()
         .block_on(config.security.new_master_key());
     let txn_chunk_manager = TxnChunkManager::new(
-        None,
+        vec![],
         s3fs.clone(),
         BlockCache::None,
         None,

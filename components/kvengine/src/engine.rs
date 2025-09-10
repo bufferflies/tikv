@@ -95,15 +95,10 @@ impl Engine {
         security_mgr: Arc<SecurityManager>,
     ) -> Result<Engine> {
         info!("open KVEngine");
-        if !opts.local_dir.exists() {
-            std::fs::create_dir_all(&opts.local_dir).unwrap();
-        }
-        if !opts.local_dir.is_dir() {
-            panic!("path {:?} is not dir", &opts.local_dir);
-        }
-        let lock_path = opts.local_dir.join("LOCK");
+        let lock_path = opts.local_dirs[0].join("LOCK");
         let mut x = fslock::LockFile::open(&lock_path).ctx("engine.open.open_lockfile")?;
         x.lock().ctx("engine.open.lock")?;
+
         let mut max_capacity = opts.max_block_cache_size as usize;
         if max_capacity < 512 * opts.table_builder_options.block_size {
             max_capacity = 512 * opts.table_builder_options.block_size;
@@ -131,7 +126,7 @@ impl Engine {
         let file_locks = (0..FILE_LOCK_SLOTS).map(|_| Mutex::new(())).collect();
         let per_keyspace_configs = Arc::new(config.get_per_keyspace_configs());
         let txn_chunk_mgr = TxnChunkManager::new(
-            Some(opts.local_dir.join("txn")),
+            opts.local_dirs.iter().map(|dir| dir.join("txn")).collect(),
             fs.clone(),
             cache.clone(),
             Some(fd_cache.clone()),
@@ -163,7 +158,7 @@ impl Engine {
                 id_allocator.clone(),
                 master_key.clone(),
                 security_mgr,
-                opts.local_dir.clone(),
+                opts.local_dirs.clone(),
                 opts.for_restore,
             ),
             id_allocator,
@@ -1224,10 +1219,23 @@ pub fn free_mem(free_rx: mpsc::Receiver<FreeMemMsg>) {
 
 fn create_ia_ctx(opts: Arc<Options>, fs: Arc<dyn dfs::Dfs>, meta_fd_cache: FdCache) -> IaCtx {
     if !opts.ia.mem_cap.is_zero() && !opts.ia.disk_cap.is_zero() {
-        let ia_path = opts.local_dir.join("ia");
-        let segment_path = ia_path.join("segment");
-        std::fs::create_dir_all(&segment_path).unwrap();
-        let opts = opts.ia.to_manager_options(segment_path).unwrap();
+        let segment_paths = opts
+            .local_dirs
+            .iter()
+            .map(|p| p.join("ia/segment"))
+            .collect();
+        for segment_path in &segment_paths {
+            std::fs::create_dir_all(segment_path).unwrap();
+        }
+        let meta_paths = opts
+            .local_dirs
+            .iter()
+            .map(|p| p.join("ia/meta"))
+            .collect::<Vec<_>>();
+        for meta_path in &meta_paths {
+            std::fs::create_dir_all(meta_path).unwrap();
+        }
+        let opts = opts.ia.to_manager_options(segment_paths).unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1235,9 +1243,7 @@ fn create_ia_ctx(opts: Arc<Options>, fs: Arc<dyn dfs::Dfs>, meta_fd_cache: FdCac
             .build()
             .unwrap();
         let ia_mgr = IaManager::new(opts, fs, Some(meta_fd_cache), runtime.into()).unwrap();
-        let meta_path = ia_path.join("meta");
-        std::fs::create_dir_all(&meta_path).unwrap();
-        IaCtx::Enabled(ia_mgr, Arc::new(meta_path))
+        IaCtx::Enabled(ia_mgr, Arc::new(meta_paths))
     } else {
         IaCtx::Disabled
     }

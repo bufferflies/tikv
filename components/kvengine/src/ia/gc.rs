@@ -6,6 +6,7 @@ use std::{
     fs::DirEntry,
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use tikv_util::{box_err, config::ReadableDuration, time::Instant};
@@ -87,20 +88,20 @@ pub struct IaGcRunner {
     config: IaGcConfig,
     ia_mgr: IaManager,
 
-    meta_path: PathBuf,
+    meta_paths: Arc<Vec<PathBuf>>,
 
-    segment_path: Option<PathBuf>,
+    segment_paths: Vec<PathBuf>,
     segment_last_gc_time: Instant,
 }
 
 impl IaGcRunner {
-    pub fn new(config: IaGcConfig, ia_mgr: IaManager, meta_path: PathBuf) -> Self {
-        let segment_path = ia_mgr.main_store_path().map(|x| x.to_path_buf());
+    pub fn new(config: IaGcConfig, ia_mgr: IaManager, meta_paths: Arc<Vec<PathBuf>>) -> Self {
+        let segment_paths = ia_mgr.main_store_paths().to_vec();
         Self {
             config,
             ia_mgr,
-            meta_path,
-            segment_path,
+            meta_paths,
+            segment_paths,
             segment_last_gc_time: Instant::now_coarse(),
         }
     }
@@ -117,19 +118,23 @@ impl IaGcRunner {
     }
 
     pub fn meta_file_gc(&mut self, ignore: impl Fn(u64) -> bool) -> Result<usize> {
-        Self::walk_dir(
-            &self.meta_path,
-            &[TABLE_META_LOCAL_FILE_SUFFIX, TEMPORARY_FILE_SUFFIX],
-            |extension, path, entry| {
-                if extension == TABLE_META_LOCAL_FILE_SUFFIX {
-                    self.handle_meta_file(path, &entry, &ignore)
-                } else if extension == TEMPORARY_FILE_SUFFIX {
-                    self.handle_temp(path, &entry)
-                } else {
-                    unreachable!()
-                }
-            },
-        )
+        let mut removed_count = 0;
+        for meta_path in self.meta_paths.iter() {
+            removed_count += Self::walk_dir(
+                meta_path,
+                &[TABLE_META_LOCAL_FILE_SUFFIX, TEMPORARY_FILE_SUFFIX],
+                |extension, path, entry| {
+                    if extension == TABLE_META_LOCAL_FILE_SUFFIX {
+                        self.handle_meta_file(path, &entry, &ignore)
+                    } else if extension == TEMPORARY_FILE_SUFFIX {
+                        self.handle_temp(path, &entry)
+                    } else {
+                        unreachable!()
+                    }
+                },
+            )?;
+        }
+        Ok(removed_count)
     }
 
     fn handle_meta_file(
@@ -168,7 +173,7 @@ impl IaGcRunner {
     }
 
     pub fn segment_gc(&mut self, ignore: impl Fn(u64) -> bool) -> Result<usize> {
-        let Some(segment_path) = self.segment_path.as_ref() else {
+        if self.segment_paths.is_empty() {
             return Ok(0);
         };
         if self.segment_last_gc_time.saturating_elapsed() < self.config.segment_interval.0 {
@@ -176,19 +181,23 @@ impl IaGcRunner {
         }
 
         self.segment_last_gc_time = Instant::now_coarse();
-        Self::walk_dir(
-            segment_path,
-            &[SEGMENT_LOCAL_FILE_SUFFIX, TEMPORARY_FILE_SUFFIX],
-            |extension, path, entry| {
-                if extension == SEGMENT_LOCAL_FILE_SUFFIX {
-                    self.handle_segment(path, &ignore)
-                } else if extension == TEMPORARY_FILE_SUFFIX {
-                    self.handle_temp(path, &entry)
-                } else {
-                    unreachable!()
-                }
-            },
-        )
+        let mut removed_count = 0;
+        for segment_path in self.segment_paths.iter() {
+            removed_count += Self::walk_dir(
+                segment_path,
+                &[SEGMENT_LOCAL_FILE_SUFFIX, TEMPORARY_FILE_SUFFIX],
+                |extension, path, entry| {
+                    if extension == SEGMENT_LOCAL_FILE_SUFFIX {
+                        self.handle_segment(path, &ignore)
+                    } else if extension == TEMPORARY_FILE_SUFFIX {
+                        self.handle_temp(path, &entry)
+                    } else {
+                        unreachable!()
+                    }
+                },
+            )?;
+        }
+        Ok(removed_count)
     }
 
     fn handle_segment(
@@ -273,7 +282,7 @@ impl IaGcRunner {
 
     // For test purpose.
     #[cfg(any(test, feature = "testexport"))]
-    pub fn set_segment_path(&mut self, path: PathBuf) {
-        self.segment_path = Some(path);
+    pub fn set_segment_path(&mut self, paths: Vec<PathBuf>) {
+        self.segment_paths = paths;
     }
 }

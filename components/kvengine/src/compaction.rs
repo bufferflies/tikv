@@ -6,7 +6,7 @@ use std::{
     hash::Hash,
     iter::Iterator as StdIterator,
     ops::{Deref, Sub},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{atomic::Ordering, Arc, Mutex},
     time::Duration,
 };
@@ -58,6 +58,7 @@ use crate::{
             GLOBAL_COMMON_HANDLE_END,
         },
         file::{File, InMemFile, LocalFile},
+        get_local_dir,
         schema_file::SchemaFile,
         sstable::{self, builder::TableBuilderOptions, BlockCache, L0Builder, SsTable},
         vector_index::{VectorIndexBuildOptions, VectorIndexBuilder},
@@ -128,7 +129,7 @@ pub struct CompactionClient {
     pub(crate) checksum_type: ChecksumType,
     allow_fallback_local: bool,
     master_key: MasterKey,
-    local_dir: PathBuf,
+    local_dirs: Vec<PathBuf>,
     // Whether the compaction client is used during restore (trim over bound & truncate ts).
     for_restore: bool,
 }
@@ -143,7 +144,7 @@ impl CompactionClient {
         id_allocator: Arc<dyn IdAllocator>,
         master_key: MasterKey,
         security_mgr: Arc<SecurityManager>,
-        local_dir: PathBuf,
+        local_dirs: Vec<PathBuf>,
         for_restore: bool,
     ) -> Self {
         let remote_compactors = RemoteCompactors::new(remote_url);
@@ -159,7 +160,7 @@ impl CompactionClient {
             allow_fallback_local,
             id_allocator,
             master_key,
-            local_dir,
+            local_dirs,
             for_restore,
         }
     }
@@ -252,7 +253,7 @@ impl CompactionClient {
             checksum_type: self.checksum_type,
             id_allocator: self.id_allocator.clone(),
             encryption_key,
-            local_dir: Some(self.local_dir.clone()),
+            local_dirs: self.local_dirs.clone(),
             for_restore: self.for_restore,
         };
         let req = &ctx.req;
@@ -2353,15 +2354,15 @@ async fn load_table_files(
     tbl_ids: &[u64],
     fs: Arc<dyn dfs::Dfs>,
     opts: dfs::Options,
-    local_dir: Option<&PathBuf>,
+    local_dirs: &[PathBuf],
     for_restore: bool,
 ) -> Result<Vec<Arc<dyn File>>> {
-    if local_dir.is_none() {
+    if local_dirs.is_empty() {
         return load_table_files_from_dfs(tbl_ids, fs, opts).await;
     }
 
     let (mut files_loaded, files_failed) =
-        load_table_files_from_local(tbl_ids, local_dir.unwrap(), for_restore, opts);
+        load_table_files_from_local(tbl_ids, local_dirs, for_restore, opts);
     if !files_failed.is_empty() {
         files_loaded.extend(load_table_files_from_dfs(&files_failed, fs, opts).await?);
     }
@@ -2370,7 +2371,7 @@ async fn load_table_files(
 
 fn load_table_files_from_local(
     tbl_ids: &[u64],
-    local_dir: &Path,
+    local_dirs: &[PathBuf],
     for_restore: bool,
     opts: dfs::Options,
 ) -> (
@@ -2388,6 +2389,7 @@ fn load_table_files_from_local(
             FileType::VectorIndex => new_vector_index_filename(id),
             FileType::Blob => new_blob_filename(id),
         };
+        let local_dir = get_local_dir(local_dirs, id);
         let file_path = local_dir.join(file_name);
         match LocalFile::open(id, file_path, None, false) {
             Ok(f) => files_loaded.push(Arc::new(f)),
@@ -2504,7 +2506,7 @@ pub struct CompactionCtx {
     pub checksum_type: ChecksumType,
     pub id_allocator: Arc<dyn IdAllocator>,
     pub encryption_key: Option<EncryptionKey>,
-    pub local_dir: Option<PathBuf>,
+    pub local_dirs: Vec<PathBuf>,
     pub for_restore: bool,
 }
 
@@ -2695,7 +2697,7 @@ async fn compact_destroy_range(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        &ctx.local_dirs,
         ctx.for_restore,
     )
     .await?
@@ -2841,7 +2843,7 @@ async fn compact_destroy_range_for_columnar(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?
@@ -2854,7 +2856,7 @@ async fn compact_destroy_range_for_columnar(
             &[schema_file_id.unwrap()],
             dfs.clone(),
             dfs::Options::default().with_type(FileType::Schema),
-            ctx.local_dir.as_ref(),
+            ctx.local_dirs.as_ref(),
             false,
         )
         .await?
@@ -2970,7 +2972,7 @@ async fn compact_truncate_ts(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?
@@ -3106,7 +3108,7 @@ async fn compact_truncate_ts_for_columnar(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?
@@ -3119,7 +3121,7 @@ async fn compact_truncate_ts_for_columnar(
             &[schema_file_id.unwrap()],
             dfs.clone(),
             dfs::Options::default().with_type(FileType::Schema),
-            ctx.local_dir.as_ref(),
+            ctx.local_dirs.as_ref(),
             false,
         )
         .await?
@@ -3228,7 +3230,7 @@ async fn compact_trim_over_bound(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?
@@ -3360,7 +3362,7 @@ async fn compact_trim_over_bound_for_columnar(
         &files.iter().map(|(id, ..)| *id).collect::<Vec<_>>(),
         dfs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?
@@ -3373,7 +3375,7 @@ async fn compact_trim_over_bound_for_columnar(
             &[schema_file_id.unwrap()],
             dfs.clone(),
             dfs::Options::default().with_type(FileType::Schema),
-            ctx.local_dir.as_ref(),
+            ctx.local_dirs.as_ref(),
             false,
         )
         .await?
@@ -3878,7 +3880,7 @@ async fn l0_compact(
         &l0_compaction.l0_tables,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?;
@@ -3903,7 +3905,7 @@ async fn l0_compact(
             l1_ids,
             fs.clone(),
             opts,
-            ctx.local_dir.as_ref(),
+            ctx.local_dirs.as_ref(),
             ctx.for_restore,
         )
         .await?;
@@ -3956,7 +3958,7 @@ async fn l1_plus_compact(
         &l1_plus_compaction.upper_level,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?;
@@ -3966,7 +3968,7 @@ async fn l1_plus_compact(
         &l1_plus_compaction.lower_level,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?;
@@ -4015,7 +4017,7 @@ async fn major_compact(
         &major_compaction.l0_tables,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?;
@@ -4051,7 +4053,7 @@ async fn major_compact(
                     table_ids,
                     fs.clone(),
                     opts,
-                    ctx.local_dir.as_ref(),
+                    ctx.local_dirs.as_ref(),
                     ctx.for_restore,
                 )
                 .await?;
@@ -4246,7 +4248,7 @@ async fn columnar_major_compact_for_add_tables(
         &major_compaction.l0_tables,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?;
@@ -4263,7 +4265,7 @@ async fn columnar_major_compact_for_add_tables(
             table_ids,
             fs.clone(),
             opts,
-            ctx.local_dir.as_ref(),
+            ctx.local_dirs.as_ref(),
             ctx.for_restore,
         )
         .await?;
@@ -4322,7 +4324,7 @@ async fn columnar_major_compact_for_clear_tables(
         &file_ids,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?;
@@ -4441,7 +4443,7 @@ async fn columnar_major_compact(
         &[major_compaction.schema_file_id],
         fs.clone(),
         dfs::Options::default().with_type(FileType::Schema),
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         false,
     )
     .await?
@@ -4540,7 +4542,7 @@ async fn convert_row_file_to_columnar_file(
         &l0_ids,
         ctx.dfs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         ctx.for_restore,
     )
     .await?;
@@ -4648,7 +4650,7 @@ async fn compact_columnar_l0_files(
         &[columnar_compaction.schema_file_id],
         fs.clone(),
         dfs::Options::default().with_type(FileType::Schema),
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         false,
     )
     .await?
@@ -4680,7 +4682,7 @@ async fn compact_columnar_l0_files(
         &col_file_ids,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         false,
     )
     .await?;
@@ -4791,7 +4793,7 @@ async fn compact_columnar_l1_files(
         &[columnar_compaction.schema_file_id],
         fs.clone(),
         dfs::Options::default().with_type(FileType::Schema),
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         false,
     )
     .await?
@@ -4818,7 +4820,7 @@ async fn compact_columnar_l1_files(
         &l1_col_file_ids,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         false,
     )
     .await?;
@@ -4839,7 +4841,7 @@ async fn compact_columnar_l1_files(
         &l2_col_file_ids,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         false,
     )
     .await?;
@@ -4952,7 +4954,7 @@ async fn compact_all_columnar_files(
         &[columnar_compaction.schema_file_id],
         fs.clone(),
         dfs::Options::default().with_type(FileType::Schema),
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         false,
     )
     .await?
@@ -4986,7 +4988,7 @@ async fn compact_all_columnar_files(
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for (&level, tbl_ids) in &col_file_ids {
             let tbl_files =
-                load_table_files(tbl_ids, fs.clone(), opts, ctx.local_dir.as_ref(), false).await?;
+                load_table_files(tbl_ids, fs.clone(), opts, ctx.local_dirs.as_ref(), false).await?;
             let mut tbls = files_to_columnar_tables(tbl_files);
             if level < 2 {
                 for tbl in &tbls {
@@ -5074,7 +5076,7 @@ async fn update_vector_index(
         &[update_vec_idx.schema_file_id],
         fs.clone(),
         dfs::Options::default().with_type(FileType::Schema),
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         false,
     )
     .await?
@@ -5110,7 +5112,7 @@ async fn update_vector_index(
         &col_file_ids,
         fs.clone(),
         opts,
-        ctx.local_dir.as_ref(),
+        ctx.local_dirs.as_ref(),
         false,
     )
     .await?;

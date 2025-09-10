@@ -32,6 +32,7 @@ use crate::{
     table,
     table::{
         file::{FdCache, InMemFile, LocalFile},
+        get_local_dir,
         sstable::BlockCache,
         txn_file::TxnChunk,
         TxnCtx, TxnFile, TxnFileId,
@@ -48,7 +49,7 @@ pub struct TxnChunkManager {
 
 impl TxnChunkManager {
     pub fn new(
-        local_path: Option<PathBuf>,
+        local_paths: Vec<PathBuf>,
         dfs: Arc<dyn Dfs>,
         cache: BlockCache,
         fd_cache: Option<FdCache>,
@@ -57,14 +58,14 @@ impl TxnChunkManager {
     ) -> Self {
         info!("create txn chunk manager"; "worker_pool" => ?worker_pool);
         let txn_chunks = Arc::new(DashMap::new());
-        if local_path.is_none() {
+        if local_paths.is_empty() {
             worker_pool
                 .handle()
                 .spawn(run_gc_worker(txn_chunks.clone(), config));
         }
         let manager = Self {
             core: Arc::new(TxnChunkManagerCore {
-                local_path,
+                local_paths,
                 dfs,
                 txn_chunks,
                 cache,
@@ -119,7 +120,7 @@ pub fn with_pool_size(pool_size: usize) -> WorkerPool {
 // TODO: unify the process of file-based & memory-based to eliminate duplicated
 // codes.
 pub struct TxnChunkManagerCore {
-    local_path: Option<PathBuf>,
+    local_paths: Vec<PathBuf>,
     dfs: Arc<dyn Dfs>,
     txn_chunks: Arc<DashMap<u64, TxnChunkEntry>>,
     cache: BlockCache,
@@ -177,7 +178,7 @@ impl Default for TxnChunkEntry {
 
 impl TxnChunkManagerCore {
     fn init(&self) -> Result<()> {
-        if let Some(local_path) = self.local_path.as_ref() {
+        for local_path in &self.local_paths {
             if !local_path.exists() {
                 fs::create_dir_all(local_path).ctx("txn_chunk_mgr.init.create_dir")?;
             }
@@ -237,7 +238,7 @@ impl TxnChunkManagerCore {
         let opts = dfs::Options::default().with_type(FileType::TxnChunk);
         let file_data = runtime.block_on(self.dfs.read_file(txn_chunk_id, opts))?;
 
-        let txn_chunk = if let Some(local_path) = self.local_path.as_ref() {
+        let txn_chunk = if let Some(local_path) = self.get_local_path(txn_chunk_id) {
             let txn_file_tmp_path = local_path.join(Self::tmp_file_name(txn_chunk_id));
             fs::write(&txn_file_tmp_path, file_data.chunk())
                 .table_ctx(txn_chunk_id, "txn_chunk_mgr.prepare.write_tmp")?;
@@ -319,10 +320,10 @@ impl TxnChunkManagerCore {
         let file_data = file_data.map_err(|err| -> Error {
             box_err!("read_txn_chunk failed: {:?}, chunk_id {}", err, chunk_id)
         })?;
-        let txn_chunk = if let Some(local_path) = self.local_path.as_ref() {
+        let txn_chunk = if let Some(local_dir) = self.get_local_path(chunk_id) {
             let local_file_path = self.local_file_path(chunk_id).unwrap();
             if !local_file_path.exists() {
-                let txn_file_tmp_path = local_path.join(Self::tmp_file_name(chunk_id));
+                let txn_file_tmp_path = local_dir.join(Self::tmp_file_name(chunk_id));
                 fs::write(&txn_file_tmp_path, file_data.chunk())
                     .table_ctx(chunk_id, "txn_chunk_mgr.recv_chunk.write_tmp")?;
                 fs::rename(&txn_file_tmp_path, &local_file_path)
@@ -349,13 +350,12 @@ impl TxnChunkManagerCore {
     }
 
     pub fn write_local_chunk(&self, chunk_id: u64, file_data: Bytes) -> Result<()> {
-        if self.local_path.is_none() {
-            return Err(Error::Other(box_err!("local_path is None")));
+        if self.local_paths.is_empty() {
+            return Err(Error::Other(box_err!("local_dirs is empty")));
         }
         let local_file_path = self.local_file_path(chunk_id).unwrap();
         if !local_file_path.exists() {
-            let local_path = self.local_path.as_ref().unwrap();
-            let txn_file_tmp_path = local_path.join(Self::tmp_file_name(chunk_id));
+            let txn_file_tmp_path = local_file_path.with_file_name(Self::tmp_file_name(chunk_id));
             fs::write(&txn_file_tmp_path, file_data.chunk())
                 .table_ctx(chunk_id, "write_local_chunk")?;
             fs::rename(&txn_file_tmp_path, &local_file_path)
@@ -365,8 +365,8 @@ impl TxnChunkManagerCore {
     }
 
     pub fn read_local_chunk(&self, chunk_id: u64) -> Result<Bytes> {
-        if self.local_path.is_none() {
-            return Err(Error::Other(box_err!("local_path is None")));
+        if self.local_paths.is_empty() {
+            return Err(Error::Other(box_err!("local_dirs is empty")));
         }
         let local_file_path = self.local_file_path(chunk_id).unwrap();
         let data = fs::read(local_file_path).table_ctx(chunk_id, "read_local_chunk")?;
@@ -467,11 +467,15 @@ impl TxnChunkManagerCore {
     }
 
     fn local_file_path(&self, txn_chunk_id: u64) -> Option<PathBuf> {
-        Some(
-            self.local_path
-                .as_ref()?
-                .join(format!("{:016x}.txn", txn_chunk_id)),
-        )
+        let local_dir = self.get_local_path(txn_chunk_id)?;
+        Some(local_dir.join(format!("{:016x}.txn", txn_chunk_id)))
+    }
+
+    fn get_local_path(&self, txn_chunk_id: u64) -> Option<&PathBuf> {
+        if self.local_paths.is_empty() {
+            return None;
+        }
+        Some(get_local_dir(&self.local_paths, txn_chunk_id))
     }
 
     // `encryption_key` is required only when `is_prepared` is false.
@@ -620,11 +624,14 @@ mod tests {
     #[case::in_mem(None)]
     fn test_txn_chunk_manager(#[case] tmp_dir: Option<TempDir>) {
         ::test_util::init_log_for_test();
-        let local_path = tmp_dir.as_ref().map(|dir| dir.path().to_path_buf());
+        let local_paths = tmp_dir
+            .as_ref()
+            .map(|dir| vec![dir.path().to_path_buf()])
+            .unwrap_or_default();
         let dfs: Arc<dyn Dfs> = Arc::new(InMemFs::new());
         let cache = BlockCache::new(BlockCacheType::Quick, 1024 * 1024, 4 * 1024);
         let txn_chunk_manager = TxnChunkManager::new(
-            local_path.clone(),
+            local_paths.clone(),
             dfs.clone(),
             cache.clone(),
             None,
@@ -654,14 +661,14 @@ mod tests {
         drop(txn_chunk_manager);
 
         let txn_chunk_manager = TxnChunkManager::new(
-            local_path.clone(),
+            local_paths.clone(),
             dfs,
             cache,
             None,
             with_pool_size(2),
             TxnChunkManagerConfig::default(),
         );
-        if local_path.is_some() {
+        if !local_paths.is_empty() {
             // After process restart, the remained txn chunks are all loaded.
             assert!(txn_chunk_manager.get(1).is_none());
             assert!(txn_chunk_manager.all_chunks_exists(&[2, 3]));
@@ -679,7 +686,7 @@ mod tests {
         let dfs: Arc<dyn Dfs> = Arc::new(InMemFs::new());
         let cache = BlockCache::new(BlockCacheType::None, 0, 0);
         let mgr = TxnChunkManager::new(
-            Some(local_path.to_path_buf()),
+            vec![local_path.to_path_buf()],
             dfs,
             cache,
             None,
