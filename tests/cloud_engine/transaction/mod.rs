@@ -11,6 +11,7 @@ mod pessimistic;
 mod resolve_lock;
 mod txn;
 mod txn_file;
+mod write_conflict;
 
 use bytes::Bytes;
 use kvproto::{kvrpcpb, kvrpcpb::WriteConflictReason};
@@ -30,11 +31,13 @@ fn test_rollback_before_prewrite() {
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
     // Split to make secondary keys in another region.
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(b"xkey").unwrap();
+    client.split_keyspace(keyspace_id);
     let split_keys = [50, 150];
     for i in split_keys {
         client.split(&i_to_key(i));
     }
-    cluster.wait_pd_region_min_count(split_keys.len() + 1);
+    cluster.wait_pd_region_min_count(split_keys.len() + 2);
     let mut mutations = vec![];
     for i in 0..200 {
         mutations.push(Mutation {

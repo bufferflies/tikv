@@ -28,7 +28,8 @@ use kvengine::ShardTag;
 use kvproto::{
     coprocessor as coppb, errorpb, kvrpcpb,
     kvrpcpb::{
-        CommitRequest, Context, GetRequest, IsolationLevel, Op, PrewriteRequest, SplitRegionRequest,
+        CommitRequest, Context, GetRequest, IsolationLevel, Op, PrewriteRequest,
+        PrewriteRequestPessimisticAction, SplitRegionRequest,
     },
     metapb,
     metapb::Peer,
@@ -66,6 +67,31 @@ use crate::{
 
 const MAX_WAIT_LOCK_DURATION: Duration = Duration::from_millis(500);
 const SCAN_REGIONS_MAX_BATCH_SIZE: usize = 1024;
+
+#[derive(Clone, Debug)]
+pub struct PrewriteOptions {
+    pub resolve_locks: bool,
+    pub ttl: u64,
+    pub for_update_ts: TimeStamp,
+    pub skip_constraint_check: bool,
+    // pessimistic_action applies to all keys. Change it to a vec when needed
+    pub pessimistic_action: PrewriteRequestPessimisticAction,
+    pub is_retry: bool,
+    // Future parameters can be added here without breaking the API
+}
+
+impl Default for PrewriteOptions {
+    fn default() -> Self {
+        Self {
+            resolve_locks: false,
+            ttl: 3000,
+            for_update_ts: TimeStamp::zero(),
+            skip_constraint_check: false,
+            pessimistic_action: PrewriteRequestPessimisticAction::DoPessimisticCheck,
+            is_retry: false,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -571,6 +597,8 @@ impl ClusterClient {
         Ok(())
     }
 
+    // This is the higher-level prewrite: it retries and resolve locks
+    // TODO: Reorganize the API
     pub fn kv_prewrite_txn(
         &mut self,
         pk: Bytes,
@@ -582,15 +610,17 @@ impl ClusterClient {
         // `kv_prewrite` will recursively be invoked in `kv_prewrite_single_region`.
         let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
         for (id_ver, group_muts) in groups {
+            let options = PrewriteOptions {
+                resolve_locks: true,
+                ..Default::default()
+            };
             self.kv_prewrite_single_region_with_retry_opt(
                 id_ver,
                 pk.clone(),
                 secondaries,
                 group_muts,
                 txn,
-                true,
-                3000,
-                TimeStamp::zero(),
+                options,
             )?;
         }
         Ok(())
@@ -606,16 +636,30 @@ impl ClusterClient {
         ttl: u64,
         for_update_ts: TimeStamp,
     ) -> Result<()> {
-        let mut txn = self.begin_transaction(Some(ts));
-        self.kv_prewrite_with_retry_opt_txn(
+        self.kv_prewrite_with_retry_opt_with_options(
             pk,
             secondaries,
             muts,
-            &mut txn,
-            resolve_locks,
-            ttl,
-            for_update_ts,
-        )?;
+            ts,
+            PrewriteOptions {
+                resolve_locks,
+                ttl,
+                for_update_ts,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn kv_prewrite_with_retry_opt_with_options(
+        &mut self,
+        pk: Bytes,
+        secondaries: Option<&Vec<Bytes>>,
+        muts: TxnMutations,
+        ts: TimeStamp,
+        options: PrewriteOptions,
+    ) -> Result<()> {
+        let mut txn = self.begin_transaction(Some(ts));
+        self.kv_prewrite_with_retry_opt_txn_with_options(pk, secondaries, muts, &mut txn, options)?;
         Ok(())
     }
 
@@ -629,6 +673,28 @@ impl ClusterClient {
         ttl: u64,
         for_update_ts: TimeStamp,
     ) -> Result<()> {
+        self.kv_prewrite_with_retry_opt_txn_with_options(
+            pk,
+            secondaries,
+            muts,
+            txn,
+            PrewriteOptions {
+                resolve_locks,
+                ttl,
+                for_update_ts,
+                ..PrewriteOptions::default()
+            },
+        )
+    }
+
+    pub fn kv_prewrite_with_retry_opt_txn_with_options(
+        &mut self,
+        pk: Bytes,
+        secondaries: Option<&Vec<Bytes>>,
+        muts: TxnMutations,
+        txn: &mut Transaction,
+        options: PrewriteOptions,
+    ) -> Result<()> {
         // Don't use muts.primary() for pk & muts.secondaries() for secondary keys, as
         // `kv_prewrite` will recursively be invoked in `kv_prewrite_single_region`.
         let groups = muts.group_by_regions(self, PrimaryFilter::All).unwrap();
@@ -639,9 +705,7 @@ impl ClusterClient {
                 secondaries,
                 group_muts,
                 txn,
-                resolve_locks,
-                ttl,
-                for_update_ts,
+                options.clone(),
             )?;
         }
         Ok(())
@@ -654,9 +718,7 @@ impl ClusterClient {
         secondary_keys: Option<&Vec<Bytes>>,
         muts: TxnMutations,
         txn: &mut Transaction,
-        resolve_locks: bool,
-        ttl: u64,
-        for_update_ts: TimeStamp,
+        options: PrewriteOptions,
     ) -> Result<()> {
         let region_id = id_ver.id();
         let mut errors: Vec<(ShardTag, Error)> = vec![];
@@ -667,33 +729,36 @@ impl ClusterClient {
                 .new_rpc_ctx(region_id, &pk)
                 .filter(|x| x.get_region_epoch().get_version() == id_ver.ver());
             if ctx.is_none() {
-                return self.kv_prewrite_with_retry_opt(
+                return self.kv_prewrite_with_retry_opt_with_options(
                     pk,
                     secondary_keys,
                     muts,
                     txn.start_ts,
-                    resolve_locks,
-                    ttl,
-                    for_update_ts,
+                    options,
                 );
             }
-            let ctx = ctx.unwrap();
+            let mut ctx = ctx.unwrap();
+            ctx.set_is_retry_request(options.is_retry);
             let tag = Self::tag_from_ctx(&ctx);
             let store_id = ctx.get_peer().get_store_id();
             let kv_client = self.get_kv_client(store_id);
             let mut prewrite_req = PrewriteRequest::default();
             prewrite_req.set_context(ctx);
-            muts.set_prewrite_req(&mut prewrite_req);
+            if options.skip_constraint_check {
+                muts.set_prewrite_req_with_skip_constraint_check(&mut prewrite_req, true);
+            } else {
+                muts.set_prewrite_req(&mut prewrite_req);
+            }
             prewrite_req.primary_lock = pk.to_vec();
             prewrite_req.start_version = txn.start_ts.into_inner();
-            prewrite_req.lock_ttl = ttl;
+            prewrite_req.lock_ttl = options.ttl;
             prewrite_req.min_commit_ts = prewrite_req.start_version + 1;
             prewrite_req.use_async_commit = txn.async_commit;
             prewrite_req.assertion_level = kvrpcpb::AssertionLevel::Strict;
-            if for_update_ts.into_inner() > 0 {
-                prewrite_req.set_for_update_ts(for_update_ts.into_inner());
+            if options.for_update_ts.into_inner() > 0 {
+                prewrite_req.set_for_update_ts(options.for_update_ts.into_inner());
                 prewrite_req.set_pessimistic_actions(vec![
-                    kvrpcpb::PrewriteRequestPessimisticAction::DoPessimisticCheck;
+                    options.pessimistic_action;
                     prewrite_req.mutations.len()
                 ]);
             }
@@ -724,14 +789,12 @@ impl ClusterClient {
                     continue;
                 }
                 if self.handle_region_epoch_not_match_or_not_found(&region_err) {
-                    return self.kv_prewrite_with_retry_opt_txn(
+                    return self.kv_prewrite_with_retry_opt_txn_with_options(
                         pk,
                         secondary_keys,
                         muts,
                         txn,
-                        resolve_locks,
-                        ttl,
-                        for_update_ts,
+                        options,
                     );
                 }
                 error!("{} unexpected error {:?}", tag, region_err);
@@ -739,7 +802,7 @@ impl ClusterClient {
             }
             let key_errors = resp.take_errors();
             if !key_errors.is_empty() {
-                if resolve_locks {
+                if options.resolve_locks {
                     info!("{} prewrite: encounters key_errors: {:?}", tag, key_errors);
                     let key_errors = key_errors.into_vec();
                     errors.push((tag, Error::KeyErrors(key_errors.clone())));
@@ -2944,6 +3007,15 @@ impl TxnMutations {
                 req.set_txn_file_chunks(chunk_ids);
             }
         }
+    }
+
+    pub fn set_prewrite_req_with_skip_constraint_check(
+        &self,
+        req: &mut PrewriteRequest,
+        skip_constraint_check: bool,
+    ) {
+        self.set_prewrite_req(req);
+        req.set_skip_constraint_check(skip_constraint_check);
     }
 
     pub fn set_commit_req(&self, req: &mut CommitRequest) {

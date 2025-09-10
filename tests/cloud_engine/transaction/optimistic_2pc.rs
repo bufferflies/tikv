@@ -192,6 +192,8 @@ fn test_opt_write_conflict_key_locked_by_uncommitted_opt_txn() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     // Arrange
     let k1 = i_to_key(41);
@@ -333,6 +335,8 @@ fn test_opt_rollback_explicitly_after_prewrite() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     let k1 = i_to_key(61);
     let v1_t1 = i_to_val(611);

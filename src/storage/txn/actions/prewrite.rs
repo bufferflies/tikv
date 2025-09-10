@@ -30,6 +30,14 @@ use crate::storage::{
     Snapshot,
 };
 
+#[derive(Debug, Clone)]
+enum LastWrite {
+    /// Latest write record was loaded during conflict check
+    Loaded(Option<(Write, TimeStamp)>),
+    /// Conflict check completed but latest write not loaded
+    NotLoaded,
+}
+
 /// Prewrite a single mutation by creating and storing a lock and value.
 #[maybe_async::both]
 pub async fn prewrite<S: Snapshot>(
@@ -82,14 +90,13 @@ pub async fn prewrite<S: Snapshot>(
         return Ok((ts, OldValue::Unspecified));
     }
 
-    // Note that the `prev_write` may have invalid GC fence.
-    let (mut prev_write, mut prev_write_loaded) = if !mutation.skip_constraint_check() {
-        (
-            mutation.check_for_newer_version(reader).await?,
-            mutation.should_not_exist || txn_props.need_old_value,
-        )
+    let last_write = if !mutation.skip_constraint_check() {
+        let need_load_data = mutation.txn_props.need_old_value || mutation.should_not_exist;
+        mutation
+            .check_write_conflicts(reader, need_load_data)
+            .await?
     } else {
-        (None, false)
+        LastWrite::NotLoaded
     };
 
     // Check assertion if necessary. There are couple of different cases:
@@ -101,17 +108,16 @@ pub async fn prewrite<S: Snapshot>(
     //   assertion here introduces too much overhead. However, we'll do it anyway if
     //   `assertion_level` is set to `Strict` level.
     // Assertion level will be checked within the `check_assertion` function.
-    if !lock_amended {
-        let (reloaded_prev_write, reloaded) = mutation
-            .check_assertion(reader, &prev_write, prev_write_loaded)
-            .await?;
-        if reloaded {
-            prev_write = reloaded_prev_write;
-            prev_write_loaded = true;
-        }
-    }
+    let last_write = if !lock_amended {
+        mutation.check_assertion(reader, &last_write).await?
+    } else {
+        last_write
+    };
 
-    let prev_write = prev_write.map(|(w, _)| w);
+    let (prev_write_loaded, prev_write) = match &last_write {
+        LastWrite::Loaded(write_data) => (true, write_data.as_ref().map(|(w, _)| w.clone())),
+        LastWrite::NotLoaded => (false, None),
+    };
 
     if mutation.should_not_write {
         // `checkNotExists` is equivalent to a get operation, so it should update the
@@ -375,73 +381,126 @@ impl<'a> PrewriteMutation<'a> {
         Ok(LockStatus::Locked(min_commit_ts))
     }
 
+    // TODO: the write conflict processing still lacks readability. It is not
+    // obvious enough. Improve it later.
+    /// Check for write conflicts in the EXTRA_CF and WRITE CF.
+    /// `need_load_data` implies checking `should_not_exist`.
+    /// Returns an error if there is any conflict.
+    /// Returns the last version of write(PUT or DELETE) if it was loaded
     #[maybe_async::both]
-    async fn check_for_newer_version<S: Snapshot>(
+    async fn check_write_conflicts<S: Snapshot>(
         &mut self,
         reader: &mut SnapshotReader<S>,
-    ) -> Result<Option<(Write, TimeStamp)>> {
-        // Check if this txn rolled back for cloud_reader.
+        need_load_data: bool,
+    ) -> Result<LastWrite> {
+        // Check EXTRA_CF first
         if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
-            if let Some((ts, write)) = cloud_reader.get_extra(&self.key, self.txn_props.start_ts) {
-                MVCC_CONFLICT_COUNTER.rolled_back.inc();
-                self.write_conflict_error(&write, ts, WriteConflictReason::SelfRolledBack)?;
-            }
-            if !self.should_not_exist && !self.txn_props.need_old_value {
-                // If old value is not needed, we can only access the newer version to check
-                // write conflict.
-                let (check_ts, conflict_reason) = match self.txn_props.kind {
-                    TransactionKind::Optimistic(_) => (
+            // Determine the threshold for newer conflict checking
+            let max_allowed_write = Some(self.determine_conflict_check_params().0);
+
+            find_extra_cf_conflict(
+                cloud_reader,
+                &self.key,
+                self.txn_props.start_ts,
+                max_allowed_write,
+                &self.txn_props.kind,
+                self.pessimistic_action,
+            )?;
+        }
+
+        // Check WRITE CF for conflicts
+        if !need_load_data {
+            self.fast_check_write_cf_conflict(reader).await?;
+            return Ok(LastWrite::NotLoaded);
+        }
+
+        self.check_write_cf_conflict(reader).await
+    }
+
+    // determine the conflict_ts and the conflict reason
+    fn determine_conflict_check_params(&self) -> (TimeStamp, Option<WriteConflictReason>) {
+        match self.txn_props.kind {
+            TransactionKind::Optimistic(_) => (
+                self.txn_props.start_ts,
+                Some(WriteConflictReason::Optimistic),
+            ),
+            TransactionKind::Pessimistic(for_update_ts) => {
+                if self.pessimistic_action == DoConstraintCheck {
+                    (
                         self.txn_props.start_ts,
-                        Some(WriteConflictReason::Optimistic),
-                    ),
-                    TransactionKind::Pessimistic(for_update_ts) => {
-                        if self.pessimistic_action == DoConstraintCheck {
-                            (
-                                self.txn_props.start_ts,
-                                Some(WriteConflictReason::LazyUniquenessCheck),
-                            )
-                        } else {
-                            (for_update_ts, None)
-                        }
-                    }
-                };
-                if let Some((commit_ts, write)) =
-                    cloud_reader.get_newer(&self.key, check_ts).await?
-                {
-                    match conflict_reason {
-                        Some(reason) => {
-                            MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
-                            self.write_conflict_error(&write, commit_ts, reason)?;
-                        }
-                        None => {
-                            warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key"; 
-                            "key" => %self.key, 
-                            "start_ts" => self.txn_props.start_ts, 
-                            "for_update_ts" => check_ts,
-                            "conflicting start_ts" => write.start_ts,
-                            "conflicting commit_ts" => commit_ts);
-                            return Err(ErrorInner::PessimisticLockNotFound {
-                                start_ts: self.txn_props.start_ts,
-                                key: self.key.clone().into_raw()?,
-                            }
-                            .into());
-                        }
-                    }
+                        Some(WriteConflictReason::LazyUniquenessCheck),
+                    )
+                } else {
+                    (for_update_ts, None)
                 }
-                return Ok(None);
+            }
+        }
+    }
+
+    fn handle_write_conflict(
+        &self,
+        write: &Write,
+        commit_ts: TimeStamp,
+        conflict_reason: Option<WriteConflictReason>,
+        check_ts: TimeStamp,
+    ) -> Result<()> {
+        match conflict_reason {
+            Some(reason) => {
+                MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
+                self.write_conflict_error(write, commit_ts, reason)
+            }
+            None => {
+                warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key";
+                    "key" => %self.key,
+                    "start_ts" => self.txn_props.start_ts,
+                    "for_update_ts" => self.txn_props.for_update_ts(),
+                    "check_ts" => check_ts,
+                    "conflicting start_ts" => write.start_ts,
+                    "conflicting commit_ts" => commit_ts);
+                Err(ErrorInner::PessimisticLockNotFound {
+                    start_ts: self.txn_props.start_ts,
+                    key: self.key.clone().into_raw()?,
+                }
+                .into())
+            }
+        }
+    }
+
+    // Only check if there is any write conflict, but do not load the write record,
+    // because the it conflict it finds may not be the latest one.
+    // NOTE: the returned conflict may not be the latest one
+    #[maybe_async::both]
+    async fn fast_check_write_cf_conflict<S: Snapshot>(
+        &mut self,
+        reader: &mut SnapshotReader<S>,
+    ) -> Result<()> {
+        let (check_ts, conflict_reason) = self.determine_conflict_check_params();
+
+        if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
+            if let Some((commit_ts, write)) = cloud_reader
+                .get_newer_from_write_cf(&self.key, check_ts)
+                .await?
+            {
+                self.handle_write_conflict(&write, commit_ts, conflict_reason, check_ts)?;
             }
         }
 
+        Ok(())
+    }
+
+    // Check for write conflicts and load the last write record from WRITE CF.
+    // Also checks for the should_not_exist flag).
+    #[maybe_async::both]
+    async fn check_write_cf_conflict<S: Snapshot>(
+        &mut self,
+        reader: &mut SnapshotReader<S>,
+    ) -> Result<LastWrite> {
         let mut seek_ts = TimeStamp::max();
         while let Some((commit_ts, write)) = reader.seek_write(&self.key, seek_ts).await? {
-            // If there's a write record whose commit_ts equals to our start ts, the current
-            // transaction is ok to continue, unless the record means that the current
-            // transaction has been rolled back.
             if commit_ts == self.txn_props.start_ts
                 && (write.write_type == WriteType::Rollback || write.has_overlapped_rollback)
             {
                 MVCC_CONFLICT_COUNTER.rolled_back.inc();
-                // TODO: Maybe we need to add a new error for the rolled back case.
                 self.write_conflict_error(&write, commit_ts, WriteConflictReason::SelfRolledBack)?;
             }
             if seek_ts == TimeStamp::max() {
@@ -459,11 +518,8 @@ impl<'a> PrewriteMutation<'a> {
                         )?;
                     }
                 }
-                // Note: PessimisticLockNotFound can happen on a non-pessimistically locked key,
-                // if it is a retrying prewrite request.
                 TransactionKind::Pessimistic(for_update_ts) => {
                     if let DoConstraintCheck = self.pessimistic_action {
-                        // Do the same as optimistic transactions if constraint checks are needed.
                         if commit_ts > self.txn_props.start_ts {
                             MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
                             self.write_conflict_error(
@@ -474,22 +530,14 @@ impl<'a> PrewriteMutation<'a> {
                         }
                     }
                     if commit_ts > for_update_ts {
-                        // Don't treat newer Rollback records as write conflicts. They can cause
-                        // false positive errors because they can be written even if the pessimistic
-                        // lock of the corresponding row key exists.
-                        // Rollback records are only used to prevent retried prewrite from
-                        // succeeding. Even if the Rollback record of the current transaction is
-                        // collapsed by a newer record, it is safe to prewrite this non-pessimistic
-                        // key because either the primary key is rolled back or it's protected
-                        // because it's written by CheckSecondaryLocks.
                         if write.write_type == WriteType::Rollback {
                             seek_ts = commit_ts.prev();
                             continue;
                         }
 
-                        warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key"; 
-                            "key" => %self.key, 
-                            "start_ts" => self.txn_props.start_ts, 
+                        warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key";
+                            "key" => %self.key,
+                            "start_ts" => self.txn_props.start_ts,
                             "for_update_ts" => for_update_ts,
                             "conflicting start_ts" => write.start_ts,
                             "conflicting commit_ts" => commit_ts);
@@ -501,20 +549,15 @@ impl<'a> PrewriteMutation<'a> {
                     }
                 }
             }
-            // Should check it when no lock exists, otherwise it can report error when there
-            // is a lock belonging to a committed transaction which deletes the key.
             check_data_constraint(reader, self.should_not_exist, &write, commit_ts, &self.key)
                 .await?;
 
-            return Ok(Some((write, commit_ts)));
+            return Ok(LastWrite::Loaded(Some((write, commit_ts))));
         }
-        // If seek_ts is max and it goes here, there is no write record for this key.
         if seek_ts == TimeStamp::max() {
-            // last_change_ts == 0 && versions_to_last_change > 0 means the key actually
-            // does not exist.
             (self.last_change_ts, self.versions_to_last_change) = (TimeStamp::zero(), 1);
         }
-        Ok(None)
+        Ok(LastWrite::Loaded(None))
     }
 
     fn write_lock(self, lock_status: LockStatus, txn: &mut MvccTxn) -> Result<TimeStamp> {
@@ -607,67 +650,80 @@ impl<'a> PrewriteMutation<'a> {
     async fn check_assertion<S: Snapshot>(
         &mut self,
         reader: &mut SnapshotReader<S>,
-        write: &Option<(Write, TimeStamp)>,
-        write_loaded: bool,
-    ) -> Result<(Option<(Write, TimeStamp)>, bool)> {
+        last_write: &LastWrite,
+    ) -> Result<LastWrite> {
+        if self.should_skip_assertion(last_write) {
+            return Ok(last_write.clone());
+        }
+
+        let write = self.ensure_write_loaded(reader, last_write).await?;
+        if let LastWrite::Loaded(write_data) = &write {
+            self.validate_assertion(reader, write_data.as_ref()).await?;
+        } else {
+            panic!("write must has been loaded")
+        }
+        Ok(write)
+    }
+
+    fn should_skip_assertion(&self, last_write: &LastWrite) -> bool {
         if self.assertion == Assertion::None
             || self.txn_props.assertion_level == AssertionLevel::Off
         {
             MVCC_PREWRITE_ASSERTION_PERF_COUNTER_VEC.none.inc();
-            return Ok((None, false));
+            return true;
         }
 
-        if self.txn_props.assertion_level != AssertionLevel::Strict && !write_loaded {
+        // Skip if not strict level and write not loaded
+        if self.txn_props.assertion_level != AssertionLevel::Strict
+            && matches!(last_write, LastWrite::NotLoaded)
+        {
             MVCC_PREWRITE_ASSERTION_PERF_COUNTER_VEC
                 .write_not_loaded_skip
                 .inc();
-            return Ok((None, false));
+            return true;
         }
 
-        let mut reloaded_write = None;
-        let mut reloaded = false;
+        false
+    }
 
-        // To pass the compiler's lifetime check.
-        let mut write = write;
-
-        if write_loaded
-            && write.as_ref().map_or(
-                false,
-                |(w, _)| matches!(w.gc_fence, Some(gc_fence_ts) if !gc_fence_ts.is_zero()),
-            )
-        {
-            // The previously-loaded write record has an invalid gc_fence. Regard it as
-            // none.
-            write = &None;
-        }
-
-        // Load the most recent version if prev write is not loaded yet, or the prev
-        // write is not a data version (`Put` or `Delete`)
-        let need_reload = !write_loaded
-            || write.as_ref().map_or(false, |(w, _)| {
-                w.write_type != WriteType::Put && w.write_type != WriteType::Delete
-            });
-        if need_reload {
-            if write_loaded {
-                MVCC_PREWRITE_ASSERTION_PERF_COUNTER_VEC
-                    .non_data_version_reload
-                    .inc();
-            } else {
-                MVCC_PREWRITE_ASSERTION_PERF_COUNTER_VEC
-                    .write_not_loaded_reload
-                    .inc();
+    #[maybe_async::both]
+    async fn ensure_write_loaded<S: Snapshot>(
+        &mut self,
+        reader: &mut SnapshotReader<S>,
+        last_write: &LastWrite,
+    ) -> Result<LastWrite> {
+        // Determine if reload is needed based on write state
+        let need_reload = match last_write {
+            LastWrite::NotLoaded => true,
+            LastWrite::Loaded(Some((w, _))) => {
+                // LastWrite must be from the WRITE CF
+                assert!(w.write_type == WriteType::Put || w.write_type == WriteType::Delete);
+                false
             }
+            LastWrite::Loaded(None) => false,
+        };
 
-            let reload_ts = write.as_ref().map_or(TimeStamp::max(), |(_, ts)| *ts);
-            reloaded_write = reader
-                .get_write_with_commit_ts(&self.key, reload_ts)
+        if need_reload {
+            MVCC_PREWRITE_ASSERTION_PERF_COUNTER_VEC
+                .write_not_loaded_reload
+                .inc();
+
+            let reloaded_write = reader
+                .get_write_with_commit_ts(&self.key, TimeStamp::max())
                 .await?;
-            write = &reloaded_write;
-            reloaded = true;
+            Ok(LastWrite::Loaded(reloaded_write))
         } else {
             MVCC_PREWRITE_ASSERTION_PERF_COUNTER_VEC.write_loaded.inc();
+            Ok(last_write.clone())
         }
+    }
 
+    #[maybe_async::both]
+    async fn validate_assertion<S: Snapshot>(
+        &mut self,
+        reader: &mut SnapshotReader<S>,
+        write: Option<&(Write, TimeStamp)>,
+    ) -> Result<()> {
         let assertion_err = match (self.assertion, write) {
             (Assertion::Exist, None) => {
                 self.assertion_failed_error(TimeStamp::zero(), TimeStamp::zero())
@@ -685,12 +741,13 @@ impl<'a> PrewriteMutation<'a> {
         // the check was skipped before.
         if assertion_err.is_err() {
             if self.skip_constraint_check() {
-                self.check_for_newer_version(reader).await?;
+                let need_load_data = self.txn_props.need_old_value || self.should_not_exist;
+                self.check_write_conflicts(reader, need_load_data).await?;
             }
             assertion_err?;
         }
 
-        Ok((reloaded_write, reloaded))
+        Ok(())
     }
 
     fn assertion_failed_error(
@@ -710,17 +767,35 @@ impl<'a> PrewriteMutation<'a> {
 
     fn skip_constraint_check(&self) -> bool {
         match &self.txn_props.kind {
-            TransactionKind::Optimistic(s) => *s,
+            TransactionKind::Optimistic(skip) => {
+                if *skip {
+                    warn!(
+                        "optimistic transaction should not skip constraint check";
+                        "start_ts" => self.txn_props.start_ts,
+                        "kind" => ?self.txn_props.kind,
+                        "key" => ?self.key,
+                    );
+                }
+                *skip
+            }
             TransactionKind::Pessimistic(_) => {
                 match self.pessimistic_action {
                     DoPessimisticCheck => true,
                     // For non-pessimistic-locked keys, do not skip constraint check when retrying.
                     // This intents to protect idempotency.
                     // Ref: https://github.com/tikv/tikv/issues/11187
-                    SkipPessimisticCheck => !self.txn_props.is_retry_request,
+                    SkipPessimisticCheck => {
+                        warn!(
+                            "SkipPessimisticCheck is deprecated, should not be used";
+                            "start_ts" => self.txn_props.start_ts,
+                            "kind" => ?self.txn_props.kind,
+                            "key" => ?self.key,
+                        );
+                        false
+                    }
                     // For keys that postpones constraint check to prewrite, do not skip constraint
                     // check.
-                    PrewriteRequestPessimisticAction::DoConstraintCheck => false,
+                    DoConstraintCheck => false,
                 }
             }
         }
@@ -843,27 +918,43 @@ async fn amend_pessimistic_lock<S: Snapshot>(
     mutation: &mut PrewriteMutation<'_>,
     reader: &mut SnapshotReader<S>,
 ) -> Result<()> {
-    // Check if this txn rolled back for cloud_reader.
+    // Check EXTRA CF
     if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
-        if let Some((ts, _write)) =
-            cloud_reader.get_extra(&mutation.key, mutation.txn_props.start_ts)
-        {
-            warn!(
-                "prewrite failed (pessimistic lock not found)";
-                "start_ts" => ts,
-                "key" => %mutation.key
-            );
+        // For amend, any LOCK with commit_ts >= start_ts means the pessimistic lock was
+        // lost Check both self-rollback and newer LOCK records in a single scan
+        if let Some(user_meta) = cloud_reader.find_extra_cf_conflict_record(
+            &mutation.key,
+            Some(mutation.txn_props.start_ts),
+            Some(mutation.txn_props.start_ts), // Any LOCK > start_ts is a conflict
+        )? {
+            if user_meta.is_rollback() {
+                warn!(
+                    "prewrite failed (pessimistic lock not found): transaction has been rolled back";
+                    "start_ts" => mutation.txn_props.start_ts,
+                    "key" => %mutation.key
+                );
+            } else {
+                warn!(
+                    "prewrite failed (pessimistic lock not found): another transaction acquired lock";
+                    "start_ts" => mutation.txn_props.start_ts,
+                    "conflict_commit_ts" => user_meta.commit_ts,
+                    "key" => %mutation.key
+                );
+            }
+
             MVCC_CONFLICT_COUNTER
                 .pipelined_acquire_pessimistic_lock_amend_fail
                 .inc();
+
             return Err(ErrorInner::PessimisticLockNotFound {
-                start_ts: ts,
+                start_ts: mutation.txn_props.start_ts,
                 key: mutation.key.clone().into_raw()?,
             }
             .into());
         }
     }
 
+    // Check WRITE CF
     let write = reader.seek_write(&mutation.key, TimeStamp::max()).await?;
     if let Some((commit_ts, write)) = write.as_ref() {
         // The invariants of pessimistic locks are:
@@ -909,10 +1000,73 @@ async fn amend_pessimistic_lock<S: Snapshot>(
         .inc();
 
     // Check assertion after amending.
-    mutation
-        .check_assertion(reader, &write.map(|(w, ts)| (ts, w)), true)
-        .await?;
+    let last_write = LastWrite::Loaded(write.map(|(commit_ts, write)| (write, commit_ts)));
+    mutation.check_assertion(reader, &last_write).await?;
 
+    Ok(())
+}
+
+/// Helper function to check EXTRA CF conflicts for prewrite operations
+fn find_extra_cf_conflict(
+    cloud_reader: &mut crate::storage::mvcc::CloudReader,
+    key: &Key,
+    start_ts: TimeStamp,
+    max_allowed_write: Option<TimeStamp>,
+    txn_kind: &TransactionKind,
+    pessimistic_action: PrewriteRequestPessimisticAction,
+) -> Result<()> {
+    if let Some(user_meta) =
+        cloud_reader.find_extra_cf_conflict_record(key, Some(start_ts), max_allowed_write)?
+    {
+        if user_meta.is_rollback() {
+            // Self-rollback
+            MVCC_CONFLICT_COUNTER.rolled_back.inc();
+            let conflict_start_ts = user_meta.start_ts.into();
+            return Err(ErrorInner::WriteConflict {
+                start_ts,
+                conflict_start_ts,
+                conflict_commit_ts: conflict_start_ts, // For rollback, commit_ts == start_ts
+                key: key.clone().into_raw()?,
+                primary: vec![],
+                reason: WriteConflictReason::SelfRolledBack,
+            }
+            .into());
+        } else {
+            // Newer conflict
+            let conflict_commit_ts = user_meta.commit_ts.into();
+            let conflict_start_ts = user_meta.start_ts.into();
+
+            let conflict_reason = match txn_kind {
+                TransactionKind::Optimistic(_) => WriteConflictReason::Optimistic,
+                TransactionKind::Pessimistic(_) if pessimistic_action == DoConstraintCheck => {
+                    WriteConflictReason::LazyUniquenessCheck
+                }
+                TransactionKind::Pessimistic(_) => {
+                    // This shouldn't happen - pessimistic lock should have been lost
+                    warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key";
+                            "key" => %key,
+                            "start_ts" => start_ts,
+                            "conflict_commit_ts" => conflict_commit_ts);
+                    return Err(ErrorInner::PessimisticLockNotFound {
+                        start_ts,
+                        key: key.clone().into_raw()?,
+                    }
+                    .into());
+                }
+            };
+
+            MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
+            return Err(ErrorInner::WriteConflict {
+                start_ts,
+                conflict_start_ts,
+                conflict_commit_ts,
+                key: key.clone().into_raw()?,
+                primary: vec![],
+                reason: conflict_reason,
+            }
+            .into());
+        }
+    }
     Ok(())
 }
 

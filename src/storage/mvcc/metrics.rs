@@ -31,7 +31,6 @@ make_static_metric! {
     pub label_enum MvccPrewriteAssertionPerfKind {
         none,
         write_loaded,
-        non_data_version_reload,
         write_not_loaded_reload,
         write_not_loaded_skip
     }
@@ -129,6 +128,12 @@ lazy_static! {
         )
         .unwrap()
     };
+    pub static ref EXTRA_CF_SCAN_ITERATIONS: Histogram = register_histogram!(
+        "tikv_storage_extra_cf_scan_iterations",
+        "Histogram of iterations needed to scan EXTRA_CF for conflict detection",
+        exponential_buckets(1.0, 2.0, 25).unwrap()
+    )
+    .unwrap();
     pub static ref MVCC_COMMIT_REJECT_BY_BACKUP_TS_COUNTER_VEC: MvccCommitRejectByBackupTsCounterVec = {
         register_static_int_counter_vec!(
             MvccCommitRejectByBackupTsCounterVec,

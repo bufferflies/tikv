@@ -84,6 +84,12 @@ impl Item<'_> {
             owned_blob: None,
         }
     }
+
+    /// Check if this item exists (has user metadata)
+    #[inline]
+    pub fn exists(&self) -> bool {
+        self.user_meta_len() > 0
+    }
 }
 
 impl Default for Item<'_> {

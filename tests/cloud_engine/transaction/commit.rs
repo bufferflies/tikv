@@ -8,9 +8,7 @@ use test_cloud_server::{
 };
 use txn_types::{LockType, WriteType};
 
-use super::helper::{
-    must_locked_with_properties, must_not_written, must_unlocked, must_written_with_properties,
-};
+use super::helper::{must_locked_with_properties, must_unlocked, must_written_with_properties};
 use crate::{alloc_node_id_vec, i_to_key, i_to_val};
 
 #[test]
@@ -111,6 +109,8 @@ fn test_commit_err() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(b"xkey").unwrap();
+    client.split_keyspace(keyspace_id);
 
     let k = i_to_key(1);
     let v = i_to_val(1);
@@ -199,8 +199,13 @@ fn test_commit_err() {
         .expect("rollback failed");
 
     must_unlocked(&mut client, &k); // Lock should be gone
-    // rollback is not written to write CF
-    must_not_written(&mut client, &k, start_ts_ok);
+    must_written_with_properties(
+        &mut client,
+        &k,
+        start_ts_ok,
+        start_ts_ok,
+        WriteType::Rollback,
+    );
 
     let commit_ts_after_rollback = client.get_ts();
     let err_after_rollback = client
@@ -228,7 +233,13 @@ fn test_commit_err() {
 
     // Verify final state (should be unlocked and no write record)
     must_unlocked(&mut client, &k);
-    must_not_written(&mut client, &k, start_ts_ok);
+    must_written_with_properties(
+        &mut client,
+        &k,
+        start_ts_ok,
+        start_ts_ok,
+        WriteType::Rollback,
+    );
     client.verify_data_with_ref_store();
     cluster.stop();
 }

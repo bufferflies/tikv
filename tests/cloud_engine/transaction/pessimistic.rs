@@ -18,8 +18,7 @@ fn test_pes_acquire_lock_single_new_key_then_commit() {
         });
         cluster.wait_region_replicated(&[], 1);
         let mut client = cluster.new_client();
-        let keyspace_id =
-            api_version::ApiV2::get_u32_keyspace_id_by_key("xkey".as_bytes()).unwrap();
+        let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
         client.split_keyspace(keyspace_id);
 
         // Arrange
@@ -84,6 +83,8 @@ fn test_pes_acquire_lock_key_locked_wait_and_write_conflict_after_release() {
         });
         cluster.wait_region_replicated(&[], 1);
         let mut client = cluster.new_client();
+        let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+        client.split_keyspace(keyspace_id);
 
         // Arrange: Key K1
         let k1 = i_to_key(2);
@@ -180,6 +181,8 @@ fn test_pes_acquire_lock_key_locked_wait_and_timeout() {
         });
         cluster.wait_region_replicated(&[], 1);
         let mut client = cluster.new_client();
+        let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+        client.split_keyspace(keyspace_id);
 
         // Arrange: Key K1
         let k1 = i_to_key(3);
@@ -264,6 +267,8 @@ fn test_pes_rollback_after_lock_and_prewrite() {
         });
         cluster.wait_region_replicated(&[], 1);
         let mut client = cluster.new_client();
+        let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+        client.split_keyspace(keyspace_id);
 
         // Arrange
         let k1 = i_to_key(20);

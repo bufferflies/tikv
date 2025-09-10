@@ -68,6 +68,7 @@ pub fn must_unlocked(client: &mut ClusterClient, key: &[u8]) {
 }
 
 // Helper to assert absence of write record
+#[allow(unused)]
 pub fn must_not_written(client: &mut ClusterClient, key: &[u8], commit_ts: impl Into<TimeStamp>) {
     let commit_ts_val = commit_ts.into().into_inner();
     match get_mvcc_info(client, key) {

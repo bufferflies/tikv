@@ -14,6 +14,8 @@ fn test_verify_is_primary() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(1), |_, _| {});
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     let key = i_to_key(1);
     let primary = i_to_key(2);

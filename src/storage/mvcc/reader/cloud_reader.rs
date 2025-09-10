@@ -4,12 +4,14 @@ use bytes::Bytes;
 use kvengine::{UserMeta, EXTRA_CF, LOCK_CF, WRITE_CF};
 use txn_types::{Key, Lock, OldValue, TimeStamp, Value, Write, WriteType};
 
-use crate::storage::mvcc::{Result, TxnCommitRecord};
+use crate::storage::mvcc::{metrics::EXTRA_CF_SCAN_ITERATIONS, Result, TxnCommitRecord};
 
 pub struct CloudReader {
     snapshot: kvengine::SnapAccess,
     fill_cache: bool,
     pub statistics: tikv_kv::Statistics,
+    /// Cached EXTRA_CF iterator for reuse across multiple conflict checks
+    cached_extra_cf_iter: Option<kvengine::read::Iterator>,
 }
 
 impl CloudReader {
@@ -18,6 +20,7 @@ impl CloudReader {
             snapshot,
             fill_cache,
             statistics: tikv_kv::Statistics::default(),
+            cached_extra_cf_iter: None,
         }
     }
 
@@ -94,15 +97,120 @@ impl CloudReader {
         }
     }
 
-    pub fn get_extra(&mut self, key: &Key, start_ts: TimeStamp) -> Option<(TimeStamp, Write)> {
+    /// Find transaction status records using optimal strategy based on search
+    /// criteria.
+    /// Check for write conflicts in EXTRA_CF.
+    /// Returns the first conflict found (either self-rollback or newer write).
+    /// Always checks for self-rollback first (ExactMatch) before checking newer
+    /// writes.
+    ///
+    /// # Parameters
+    /// - `start_ts`: The start_ts of the transaction to be checked for
+    ///   self-rollback
+    /// - `max_allowed_write`: Exclusive threshold - any write with commit_ts >
+    ///   this value is a conflict
+    pub fn find_extra_cf_conflict_record(
+        &mut self,
+        key: &Key,
+        start_ts: Option<TimeStamp>,
+        max_allowed_write: Option<TimeStamp>,
+    ) -> Result<Option<UserMeta>> {
+        match (start_ts, max_allowed_write) {
+            (Some(start_ts), None) => self.check_self_rollback(key, start_ts),
+            _ => self.scan_extra_cf_for_write_conflict(key, start_ts, max_allowed_write),
+        }
+    }
+
+    /// Check for self-rollback using point lookup optimization.
+    ///
+    /// Note: EXTRA_CF uses raw keys with encoded start_ts suffix (raw_key +
+    /// reversed_start_ts), unlike WRITE_CF/LOCK_CF which use raw keys with
+    /// timestamp as separate parameter. This encoding ensures consistent
+    /// ordering across region splits/merges.
+    fn check_self_rollback(&mut self, key: &Key, start_ts: TimeStamp) -> Result<Option<UserMeta>> {
+        let raw_key = key.to_raw()?;
+        let extra_key = kvengine::encode_extra_txn_status_key(&raw_key, start_ts.into_inner());
+        let item = self.snapshot.get(EXTRA_CF, &extra_key, 0);
+
+        // Check if key exists: non-existent keys return items with user_meta_len == 0
+        if !item.exists() {
+            return Ok(None);
+        }
+
+        let user_meta = UserMeta::from_slice(item.user_meta());
+        Ok(Some(user_meta))
+    }
+
+    /// Scan EXTRA_CF for write conflicts.
+    /// Returns immediately upon finding the first conflict.
+    fn scan_extra_cf_for_write_conflict(
+        &mut self,
+        key: &Key,
+        start_ts: Option<TimeStamp>,
+        max_allowed_write: Option<TimeStamp>,
+    ) -> Result<Option<UserMeta>> {
+        let raw_key = key.to_raw()?;
+
+        // Try to reuse cached iterator, otherwise create new one
+        let mut extra_iter = self.cached_extra_cf_iter.take().unwrap_or_else(|| {
+            self.snapshot
+                .new_iterator(EXTRA_CF, false, false, None, self.fill_cache)
+        });
+        extra_iter.seek(&raw_key);
+
+        let mut iterations = 0usize;
+        // Raw keys can interleave in the EXTRA CF.
+        // This loop handles it well by checking the prefix and the length match.
+        // TODO: due to raw_key interleaving, the scan may face critical performance
+        // degradation in extreme cases, e.g., a lot of keys share the same
+        // prefix. We rely on the fix of the interleaving issue to solve this problem.
+        while extra_iter.valid() && extra_iter.key().starts_with(&raw_key) {
+            if extra_iter.key().len() == raw_key.len() + 8 {
+                let um = UserMeta::from_slice(extra_iter.user_meta());
+                let record_start_ts = TimeStamp::new(um.start_ts);
+                iterations += 1;
+
+                // Priority 1: Check for self-rollback (exact match)
+                // Note: Self-rollback does not necessarily precede newer writes
+                if let Some(target_start_ts) = start_ts
+                    && um.is_rollback()
+                    && record_start_ts == target_start_ts
+                {
+                    EXTRA_CF_SCAN_ITERATIONS.observe(iterations as f64);
+                    // Cache iterator for potential reuse
+                    self.cached_extra_cf_iter = Some(extra_iter);
+                    return Ok(Some(um));
+                }
+
+                // Priority 2: Check for newer conflicts (only `Op_Lock` records, not Rollbacks)
+                if let Some(threshold) = max_allowed_write {
+                    if !um.is_rollback() && um.commit_ts > threshold.into_inner() {
+                        EXTRA_CF_SCAN_ITERATIONS.observe(iterations as f64);
+                        // Cache iterator for potential reuse
+                        self.cached_extra_cf_iter = Some(extra_iter);
+                        return Ok(Some(um));
+                    }
+                }
+            }
+            extra_iter.next();
+        }
+        EXTRA_CF_SCAN_ITERATIONS.observe(iterations as f64);
+        // Cache iterator for potential reuse
+        self.cached_extra_cf_iter = Some(extra_iter);
+        Ok(None)
+    }
+
+    // do not use it for conflict check, use `check_write_conflict_in_extra_cf`
+    // instead.
+    fn get_extra(&mut self, key: &Key, start_ts: TimeStamp) -> Option<(TimeStamp, Write)> {
         let raw_key = key.to_raw().unwrap();
         let extra_key = kvengine::encode_extra_txn_status_key(&raw_key, start_ts.into_inner());
         let item = self.snapshot.get(EXTRA_CF, &extra_key, 0);
-        if item.user_meta_len() == 0 {
+        if !item.exists() {
             return None;
         }
         let user_meta = UserMeta::from_slice(item.user_meta());
-        Some(if user_meta.commit_ts == 0 {
+        Some(if user_meta.is_rollback() {
             (start_ts, Write::new(WriteType::Rollback, start_ts, None))
         } else {
             (
@@ -297,7 +405,7 @@ impl CloudReader {
     /// Returns an arbitrary write that is newer than `ts`, or None if no such
     /// write exists.
     #[maybe_async::both]
-    pub async fn get_newer(
+    pub async fn get_newer_from_write_cf(
         &mut self,
         key: &Key,
         ts: TimeStamp,
@@ -309,7 +417,8 @@ impl CloudReader {
             .await;
         if item.user_meta_len() > 0 {
             let user_meta = UserMeta::from_slice(item.user_meta());
-            return Ok(Some(parse_write(&user_meta, item.get_value())));
+            let (commit_ts, write) = parse_write(&user_meta, item.get_value());
+            return Ok(Some((commit_ts, write)));
         }
         Ok(None)
     }
@@ -350,7 +459,7 @@ impl CloudReader {
             }
             if extra_iter.key().len() == raw_key.len() + 8 {
                 let um = UserMeta::from_slice(extra_iter.user_meta());
-                let (ts, write_type) = if um.commit_ts == 0 {
+                let (ts, write_type) = if um.is_rollback() {
                     (um.start_ts, WriteType::Rollback)
                 } else {
                     (um.commit_ts, WriteType::Lock)

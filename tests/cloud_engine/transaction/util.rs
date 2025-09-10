@@ -2,6 +2,7 @@
 
 use std::{sync::mpsc, thread, time::Duration};
 
+pub use kvproto::kvrpcpb::PrewriteRequestPessimisticAction as PessimisticAction;
 use kvproto::kvrpcpb::{Assertion, Op};
 use test_cloud_server::{
     client::{ClusterClient, TxnMutations},
@@ -15,6 +16,37 @@ use crate::{alloc_node_id_vec, i_to_key, i_to_val};
 
 pub(crate) fn ts(ts: u64) -> TimeStamp {
     TimeStamp::compose(ts, 0)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PrewriteOperation {
+    pub start_ts: TimeStamp,
+    pub expired: bool,
+    pub key: Option<Vec<u8>>,
+    pub for_update_ts: Option<TimeStamp>,
+    pub value: Option<Vec<u8>>,
+    pub assertion: Assertion,
+    pub op_type: Op,
+    pub skip_constraint_check: bool,
+    pub pessimistic_action: PessimisticAction,
+    pub is_retry: bool,
+}
+
+impl Default for PrewriteOperation {
+    fn default() -> Self {
+        Self {
+            start_ts: TimeStamp::zero(),
+            expired: false,
+            key: None,
+            for_update_ts: None,
+            value: None,
+            assertion: Assertion::None,
+            op_type: Op::Put,
+            skip_constraint_check: false,
+            pessimistic_action: PessimisticAction::DoPessimisticCheck,
+            is_retry: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -39,15 +71,7 @@ pub(crate) enum TestOperation {
     Sleep {
         duration_ms: u64,
     },
-    Prewrite {
-        start_ts: TimeStamp,
-        expired: bool,
-        key: Option<Vec<u8>>,
-        for_update_ts: Option<TimeStamp>,
-        value: Option<Vec<u8>>,
-        assertion: Assertion,
-        op_type: Op,
-    },
+    Prewrite(PrewriteOperation),
     Commit {
         start_ts: TimeStamp,
         commit_ts: TimeStamp,
@@ -71,7 +95,7 @@ pub(crate) enum TestOperation {
 impl TestOperation {
     pub fn value(mut self, v: &[u8]) -> Self {
         match self {
-            TestOperation::Prewrite { ref mut value, .. } => *value = Some(v.to_vec()),
+            TestOperation::Prewrite(ref mut op) => op.value = Some(v.to_vec()),
             TestOperation::Get {
                 ref mut expected_value,
                 ref mut check_value,
@@ -87,9 +111,7 @@ impl TestOperation {
 
     pub fn assert(mut self, assertion_val: Assertion) -> Self {
         match self {
-            TestOperation::Prewrite {
-                ref mut assertion, ..
-            } => *assertion = assertion_val,
+            TestOperation::Prewrite(ref mut op) => op.assertion = assertion_val,
             _ => unreachable!("assertion can only be set for prewrite"),
         }
         self
@@ -97,10 +119,40 @@ impl TestOperation {
 
     pub fn delete(mut self) -> Self {
         match self {
-            TestOperation::Prewrite {
-                ref mut op_type, ..
-            } => *op_type = Op::Del,
+            TestOperation::Prewrite(ref mut op) => op.op_type = Op::Del,
             _ => unreachable!("op_type can only be set for prewrite"),
+        }
+        self
+    }
+
+    pub fn lock(mut self) -> Self {
+        match self {
+            TestOperation::Prewrite(ref mut op) => op.op_type = Op::Lock,
+            _ => unreachable!("op_type can only be set for prewrite"),
+        }
+        self
+    }
+
+    pub fn skip_constraint_check(mut self) -> Self {
+        match self {
+            TestOperation::Prewrite(ref mut op) => op.skip_constraint_check = true,
+            _ => unreachable!("skip_constraint_check can only be set for prewrite"),
+        }
+        self
+    }
+
+    pub fn pessimistic_action(mut self, action: PessimisticAction) -> Self {
+        match self {
+            TestOperation::Prewrite(ref mut op) => op.pessimistic_action = action,
+            _ => unreachable!("pessimistic_action can only be set for prewrite"),
+        }
+        self
+    }
+
+    pub fn is_retry(mut self, is_retry: bool) -> Self {
+        match self {
+            TestOperation::Prewrite(ref mut op) => op.is_retry = is_retry,
+            _ => unreachable!("is_retry can only be set for prewrite"),
         }
         self
     }
@@ -147,106 +199,78 @@ macro_rules! get {
 
 macro_rules! prewrite {
     ($start_ts:expr,expire) => {
-        TestOperation::Prewrite {
+        TestOperation::Prewrite(PrewriteOperation {
             start_ts: ts($start_ts),
             expired: true,
-            key: None,
-            for_update_ts: None,
-            value: None,
-            assertion: Assertion::None,
-            op_type: Op::Put,
-        }
+            ..Default::default()
+        })
     };
     ($start_ts:expr, $key:expr,expire) => {
-        TestOperation::Prewrite {
+        TestOperation::Prewrite(PrewriteOperation {
             start_ts: ts($start_ts),
             expired: true,
             key: Some($key.clone()),
-            for_update_ts: None,
-            value: None,
-            assertion: Assertion::None,
-            op_type: Op::Put,
-        }
+            ..Default::default()
+        })
     };
     ($start_ts:expr) => {
-        TestOperation::Prewrite {
+        TestOperation::Prewrite(PrewriteOperation {
             start_ts: ts($start_ts),
-            expired: false,
-            key: None,
-            for_update_ts: None,
-            value: None,
-            assertion: Assertion::None,
-            op_type: Op::Put,
-        }
+            ..Default::default()
+        })
     };
     ($start_ts:expr, $key:expr) => {
-        TestOperation::Prewrite {
+        TestOperation::Prewrite(PrewriteOperation {
             start_ts: ts($start_ts),
-            expired: false,
             key: Some($key.clone()),
-            for_update_ts: None,
-            value: None,
-            assertion: Assertion::None,
-            op_type: Op::Put,
-        }
+            ..Default::default()
+        })
     };
     ($start_ts:expr, $op_type:expr) => {
-        TestOperation::Prewrite {
+        TestOperation::Prewrite(PrewriteOperation {
             start_ts: ts($start_ts),
-            expired: false,
-            key: None,
-            for_update_ts: None,
-            value: None,
-            assertion: Assertion::None,
             op_type: $op_type,
-        }
+            ..Default::default()
+        })
     };
 }
 
 macro_rules! pessimistic_prewrite {
     ($start_ts:expr, $for_update_ts:expr,expire) => {
-        TestOperation::Prewrite {
+        TestOperation::Prewrite(PrewriteOperation {
             start_ts: ts($start_ts),
             expired: true,
-            key: None,
             for_update_ts: Some(ts($for_update_ts)),
-            value: None,
-            assertion: Assertion::None,
-            op_type: Op::Put,
-        }
+            pessimistic_action: PessimisticAction::DoConstraintCheck,
+            ..Default::default()
+        })
     };
     ($start_ts:expr, $for_update_ts:expr, $key:expr,expire) => {
-        TestOperation::Prewrite {
+        TestOperation::Prewrite(PrewriteOperation {
             start_ts: ts($start_ts),
             expired: true,
             key: Some($key.clone()),
             for_update_ts: Some(ts($for_update_ts)),
-            value: None,
-            assertion: Assertion::None,
-            op_type: Op::Put,
-        }
+            pessimistic_action: PessimisticAction::DoConstraintCheck,
+            ..Default::default()
+        })
     };
     ($start_ts:expr, $for_update_ts:expr) => {
-        TestOperation::Prewrite {
+        TestOperation::Prewrite(PrewriteOperation {
             start_ts: ts($start_ts),
-            expired: false,
-            key: None,
             for_update_ts: Some(ts($for_update_ts)),
-            value: None,
-            assertion: Assertion::None,
-            op_type: Op::Put,
-        }
+            pessimistic_action: PessimisticAction::DoConstraintCheck,
+            ..Default::default()
+        })
     };
     ($start_ts:expr, $for_update_ts:expr, $key:expr) => {
-        TestOperation::Prewrite {
+        TestOperation::Prewrite(PrewriteOperation {
             start_ts: ts($start_ts),
-            expired: false,
             key: Some($key.clone()),
             for_update_ts: Some(ts($for_update_ts)),
-            value: None,
-            assertion: Assertion::None,
-            op_type: Op::Put,
-        }
+            pessimistic_action: PessimisticAction::DoConstraintCheck,
+            ..Default::default()
+        })
     };
 }
 
@@ -563,15 +587,19 @@ fn execute_single_operation(
             thread::sleep(Duration::from_millis(*duration_ms));
             ExpectedResult::Success
         }
-        TestOperation::Prewrite {
-            start_ts,
-            expired,
-            key,
-            for_update_ts,
-            value,
-            assertion,
-            op_type,
-        } => {
+        TestOperation::Prewrite(op) => {
+            let PrewriteOperation {
+                start_ts,
+                expired,
+                key,
+                for_update_ts,
+                value,
+                assertion,
+                op_type,
+                skip_constraint_check,
+                pessimistic_action,
+                is_retry,
+            } = op;
             let target_key = key.as_deref().unwrap_or(default_key);
             let default_val = i_to_val(2);
             let val = value.as_ref().map(|v| v.as_slice()).unwrap_or(&default_val);
@@ -591,15 +619,21 @@ fn execute_single_operation(
 
             let txn_muts = TxnMutations::from_normal(vec![mutation]);
             let ttl = if *expired { 1 } else { 20000 };
-            match client.kv_prewrite_with_retry_opt(
+            let result = client.kv_prewrite_with_retry_opt_with_options(
                 target_key.to_vec().into(),
                 None,
                 txn_muts,
                 *start_ts,
-                false,
-                ttl,
-                for_update_ts.unwrap_or(TimeStamp::zero()),
-            ) {
+                test_cloud_server::client::PrewriteOptions {
+                    ttl,
+                    skip_constraint_check: *skip_constraint_check,
+                    for_update_ts: (*for_update_ts).unwrap_or_default(),
+                    pessimistic_action: *pessimistic_action,
+                    is_retry: *is_retry,
+                    ..Default::default()
+                },
+            );
+            match result {
                 Ok(_) => ExpectedResult::Success,
                 Err(e) => {
                     info!("prewrite failed: {:?}", e);
@@ -613,7 +647,7 @@ fn execute_single_operation(
             key,
         } => {
             let target_key = key.as_deref().unwrap_or(default_key);
-            let mutations = vec![new_put_mutation(target_key.to_vec(), i_to_val(2))];
+            let mutations = vec![new_put_mutation(target_key.to_vec(), vec![])];
             let txn_muts = TxnMutations::from_normal(mutations);
             match client.kv_commit(txn_muts, *start_ts, *commit_ts, false) {
                 Ok(_) => ExpectedResult::Success,
@@ -668,6 +702,8 @@ pub(crate) fn run_test_cases(cases: Vec<TestCase>) {
     });
     cluster.wait_region_replicated(&[], 1);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     for (i, case) in cases.iter().enumerate() {
         info!("Running test case {}: {:?}", i + 1, case);
@@ -690,6 +726,12 @@ pub(crate) fn run_test_cases(cases: Vec<TestCase>) {
         // Execute all operations except the last one
         let setup_ops = &case.operations[..case.operations.len() - 1];
         for (j, op) in setup_ops.iter().enumerate() {
+            info!(
+                "Executing setup operation {} in test case {}: {:?}",
+                j + 1,
+                i + 1,
+                op
+            );
             let result = execute_operation(&mut client, &default_key, op);
             assert_eq!(
                 result,
@@ -701,9 +743,25 @@ pub(crate) fn run_test_cases(cases: Vec<TestCase>) {
             );
         }
 
+        // Wait a bit for writes to be visible
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
         // Execute the last operation and assert the result
+        info!(
+            "Executing last operation in test case {}: {:?}",
+            i + 1,
+            case.operations.last()
+        );
         let last_op = &case.operations[case.operations.len() - 1];
         let actual = execute_operation(&mut client, &default_key, last_op);
+
+        info!(
+            "Test case {} result: operation={:?}, expected={:?}, actual={:?}",
+            i + 1,
+            last_op,
+            case.expected,
+            actual
+        );
 
         assert_eq!(
             actual,
@@ -743,7 +801,7 @@ fn operation_has_custom_key(operation: &TestOperation) -> bool {
         TestOperation::Get { key, .. }
         | TestOperation::PessimisticLock { key, .. }
         | TestOperation::AsyncPessimisticLock { key, .. }
-        | TestOperation::Prewrite { key, .. }
+        | TestOperation::Prewrite(PrewriteOperation { key, .. })
         | TestOperation::Commit { key, .. }
         | TestOperation::Rollback { key, .. }
         | TestOperation::CheckTxnStatus { key, .. } => key.is_some(),
@@ -759,7 +817,7 @@ fn operation_has_default_key(operation: &TestOperation) -> bool {
         TestOperation::Get { key, .. }
         | TestOperation::PessimisticLock { key, .. }
         | TestOperation::AsyncPessimisticLock { key, .. }
-        | TestOperation::Prewrite { key, .. }
+        | TestOperation::Prewrite(PrewriteOperation { key, .. })
         | TestOperation::Commit { key, .. }
         | TestOperation::Rollback { key, .. }
         | TestOperation::CheckTxnStatus { key, .. } => key.is_none(),

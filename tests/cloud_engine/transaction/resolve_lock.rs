@@ -15,6 +15,8 @@ fn test_resolve_lock() {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, _| {});
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
+    let keyspace_id = api_version::ApiV2::get_u32_keyspace_id_by_key(&i_to_key(0)).unwrap();
+    client.split_keyspace(keyspace_id);
 
     // Split to test for resolve locks on multiple regions.
     let split_keys = [5, 15, 33, 35];

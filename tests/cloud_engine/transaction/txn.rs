@@ -1,8 +1,8 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use kvproto::kvrpcpb::{Assertion, Op};
+use kvproto::kvrpcpb::Assertion;
 
-use super::util::*;
+use super::util::{PessimisticAction, *};
 use crate::i_to_val;
 
 #[test]

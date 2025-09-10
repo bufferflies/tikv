@@ -148,13 +148,7 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
                     WriteType::Put => Some((write, commit_ts)),
                     WriteType::Delete => None,
                     _ => {
-                        debug_assert!(
-                            false,
-                            "unexpected write type: key {:?}, write {:?}",
-                            key, write
-                        );
-                        error!("unexpected write type"; "key" => ?key, "write" => ?write);
-                        None
+                        panic!("unexpected write type: key={:?}, write={:?}", key, write);
                     }
                 }),
                 None => Ok(None),

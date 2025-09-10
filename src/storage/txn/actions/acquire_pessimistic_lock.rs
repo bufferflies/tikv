@@ -215,26 +215,43 @@ pub async fn acquire_pessimistic_lock<S: Snapshot>(
     let (prev_write_loaded, mut prev_write) = (true, None);
     let (mut last_change_ts, mut versions_to_last_change);
 
-    // Check EXTRA_CF for cloud_reader.
+    // Check EXTRA_CF for cloud_reader using optimized single scan
     if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
-        if let Some((ts, write)) = cloud_reader.get_extra(&key, reader.start_ts) {
-            return if write.write_type == WriteType::Rollback {
-                Err(ErrorInner::PessimisticLockRolledBack {
-                    start_ts: ts,
+        if let Some(user_meta) = cloud_reader.find_extra_cf_conflict_record(
+            &key,
+            Some(reader.start_ts),
+            Some(for_update_ts),
+        )? {
+            if user_meta.is_rollback() {
+                // Transaction was rolled back
+                return Err(ErrorInner::PessimisticLockRolledBack {
+                    start_ts: user_meta.start_ts.into(),
                     key: key.into_raw()?,
                 }
-                .into())
+                .into());
             } else {
-                Err(ErrorInner::WriteConflict {
-                    start_ts: reader.start_ts,
-                    conflict_start_ts: write.start_ts,
-                    conflict_commit_ts: ts,
-                    key: key.into_raw()?,
-                    primary: primary.to_vec(),
-                    reason: WriteConflictReason::PessimisticRetry,
+                // Newer conflict detected
+                MVCC_CONFLICT_COUNTER
+                    .acquire_pessimistic_lock_conflict
+                    .inc();
+                let commit_ts = user_meta.commit_ts.into();
+                let start_ts = user_meta.start_ts.into();
+                if allow_lock_with_conflict {
+                    locked_with_conflict_ts = Some(commit_ts);
+                    for_update_ts = commit_ts;
+                    need_load_value = true;
+                } else {
+                    return Err(ErrorInner::WriteConflict {
+                        start_ts: reader.start_ts,
+                        conflict_start_ts: start_ts,
+                        conflict_commit_ts: commit_ts,
+                        key: key.into_raw()?,
+                        primary: primary.to_vec(),
+                        reason: WriteConflictReason::PessimisticRetry,
+                    }
+                    .into());
                 }
-                .into())
-            };
+            }
         }
     }
 
