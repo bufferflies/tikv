@@ -17,6 +17,7 @@ pub mod tpc;
 pub mod txn;
 pub mod util;
 pub use cluster::*;
+pub mod sync_diff_inspector;
 pub mod tikv_bin;
 
 #[cfg(test)]
