@@ -362,11 +362,7 @@ impl Engine {
             };
         let checksum_type = self.comp_client.checksum_type;
         let mut l0s = vec![];
-        let mut fids = self
-            .id_allocator
-            .alloc_id_async(fid_count as usize)
-            .await
-            .unwrap();
+        let mut fids = self.id_allocator.alloc_id_async(fid_count as usize).await?;
         let l0_fid = fids.pop().unwrap();
         if l0_builder_start_cf == LOCK_CF {
             let mut write_cf_builder = Builder::new(
@@ -398,13 +394,7 @@ impl Engine {
                     l0s.push(Self::finish_builder_for_l0(&mut write_cf_builder));
                     let next_fid = match fids.pop() {
                         Some(fid) => fid,
-                        None => self
-                            .id_allocator
-                            .alloc_id_async(1)
-                            .await
-                            .unwrap()
-                            .pop()
-                            .unwrap(),
+                        None => self.id_allocator.alloc_id_async(1).await?.pop().unwrap(),
                     };
                     write_cf_builder.reset(next_fid);
                 }

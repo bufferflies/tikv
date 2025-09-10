@@ -527,6 +527,25 @@ pub enum CompactionType {
     VectorIndex(VectorIndexUpdate),
 }
 
+/// A safe wrapper to allocate file ids and assign the allocated ids
+/// to the given request.
+macro_rules! try_set_alloc_ids_for_request {
+    ($req:expr, $allocator:expr, $cur_num_files:expr, $num_files_at_most:expr) => {
+        match $allocator
+            .alloc_id_async($num_files_at_most * 2 + 16 + $cur_num_files)
+            .await
+        {
+            Err(e) => {
+                // Failed to allocate ids for new files, return errors directly.
+                return Some(Err(e));
+            }
+            Ok(ids) => {
+                $req.file_ids = ids;
+            }
+        }
+    };
+}
+
 const MAX_COMPACTION_EXPAND_SIZE: u64 = 256 * 1024 * 1024;
 
 impl Engine {
@@ -650,20 +669,6 @@ impl Engine {
                 None
             }
         }
-    }
-
-    pub(crate) async fn set_alloc_ids_for_request(
-        &self,
-        req: &mut CompactionRequest,
-        cur_num_files: usize,
-        num_files_at_most: usize,
-    ) {
-        let ids = self
-            .id_allocator
-            .alloc_id_async(num_files_at_most * 2 + 16 + cur_num_files)
-            .await
-            .unwrap();
-        req.file_ids = ids;
     }
 
     pub(crate) fn new_compact_request_with_shard(&self, shard: &Shard) -> CompactionRequest {
@@ -827,8 +832,7 @@ impl Engine {
             req.file_ids = self
                 .id_allocator
                 .alloc_id_async(overlaps.len() + col_overlaps.len())
-                .await
-                .unwrap();
+                .await?;
             let in_place_compaction_type = InPlaceCompaction::DestroyRange(del_prefixes.marshal());
             let in_place_compaction = InPlaceCompactionCtx {
                 file_ids: overlaps,
@@ -916,8 +920,7 @@ impl Engine {
             req.file_ids = self
                 .id_allocator
                 .alloc_id_async(overlaps.len() + col_overlaps.len())
-                .await
-                .unwrap();
+                .await?;
             let in_place_compaction = InPlaceCompaction::TruncateTs(truncate_ts);
             let in_place_compaction_ctx = InPlaceCompactionCtx {
                 file_ids: overlaps,
@@ -1023,8 +1026,7 @@ impl Engine {
             req.file_ids = self
                 .id_allocator
                 .alloc_id_async(overlaps.len() + col_overlaps.len())
-                .await
-                .unwrap();
+                .await?;
             let inplace_compaction = InPlaceCompactionCtx {
                 file_ids: overlaps,
                 col_file_ids: col_overlaps,
@@ -1111,11 +1113,7 @@ impl Engine {
             cs
         } else {
             let mut req = self.new_compact_request_with_meta(meta);
-            req.file_ids = self
-                .id_allocator
-                .alloc_id_async(over_bounds.len())
-                .await
-                .unwrap();
+            req.file_ids = self.id_allocator.alloc_id_async(over_bounds.len()).await?;
             let in_place_compaction_ctx = InPlaceCompactionCtx {
                 file_ids: over_bounds,
                 col_file_ids: col_over_bounds,
@@ -1259,12 +1257,12 @@ impl Engine {
             / bt_config.map_or(sst_config.max_table_size, |c| {
                 std::cmp::min(c.max_blob_table_size, sst_config.max_table_size)
             });
-        self.set_alloc_ids_for_request(
+        try_set_alloc_ids_for_request!(
             &mut req,
+            self.id_allocator,
             l0_tbls.len() + multi_cfs_l1_tbls.len(),
-            estimated_num_files,
-        )
-        .await;
+            estimated_num_files
+        );
         let l0_compaction = L0Compaction {
             gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             l0_tables: l0_tbls,
@@ -1482,12 +1480,12 @@ impl Engine {
         let mut req = self.new_compact_request_with_shard(shard);
         let sst_config = self.opts.table_builder_options;
         let estimated_num_files = (upper_size + lower_size) as usize / sst_config.max_table_size;
-        self.set_alloc_ids_for_request(
+        try_set_alloc_ids_for_request!(
             &mut req,
+            self.id_allocator,
             upper_level_table_ids.len() + lower_level_table_ids.len(),
-            estimated_num_files,
-        )
-        .await;
+            estimated_num_files
+        );
         let l1_plus: L1PlusCompaction = L1PlusCompaction {
             cf,
             level,
@@ -1586,12 +1584,12 @@ impl Engine {
                 bt_config.map_or(usize::MAX, |bt_config| bt_config.max_blob_table_size),
                 sst_config.max_table_size,
             );
-        self.set_alloc_ids_for_request(
+        try_set_alloc_ids_for_request!(
             &mut req,
+            self.id_allocator,
             data.l0_tbls.len() + num_ln_files + data.blob_tbl_map.len(),
-            estimated_num_files,
-        )
-        .await;
+            estimated_num_files
+        );
         let major_compaction = MajorCompaction {
             gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             l0_tables: data.l0_tbls.iter().map(|t| t.id()).collect(),
@@ -1680,8 +1678,7 @@ impl Engine {
         shard.record_max_used_gc_safe_point(columnar_compaction.gc_safe_point.into());
         req.input_size = total_size;
         req.compaction_tp = CompactionType::Columnar(columnar_compaction);
-        self.set_alloc_ids_for_request(&mut req, num_l0s, num_l0s)
-            .await;
+        try_set_alloc_ids_for_request!(&mut req, self.id_allocator, num_l0s, num_l0s);
         info!(
             "{} start covert L0 to columnar, num_l0s {}, total size {}",
             tag, num_l0s, total_size
@@ -1803,12 +1800,12 @@ impl Engine {
         total_size += blob_tbls.iter().map(|t| t.size()).sum::<u64>();
         let columnar_config = self.opts.columnar_build_options;
         let estimated_num_files = total_size as usize / columnar_config.max_columnar_table_size;
-        self.set_alloc_ids_for_request(
+        try_set_alloc_ids_for_request!(
             &mut req,
+            self.id_allocator,
             l0_tbls.len() + num_ln_files + blob_tbls.len(),
-            estimated_num_files,
-        )
-        .await;
+            estimated_num_files
+        );
         let major_compaction = ColumnarMajorCompaction {
             gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
             l0_tables: l0_tbls.iter().map(|t| t.id()).collect(),
@@ -1877,8 +1874,12 @@ impl Engine {
         let schema_file_id = data.schema_file.as_ref().unwrap().get_file_id();
         let columnar_config = self.opts.columnar_build_options;
         let estimated_num_files = total_size as usize / columnar_config.max_columnar_table_size;
-        self.set_alloc_ids_for_request(&mut req, l0_tbl_ids.len(), estimated_num_files)
-            .await;
+        try_set_alloc_ids_for_request!(
+            &mut req,
+            self.id_allocator,
+            l0_tbl_ids.len(),
+            estimated_num_files
+        );
         let col_compaction = ColumnarCompaction {
             level: 0,
             gc_safe_point: self.get_gc_safe_point(shard.keyspace_id).into_inner(),
@@ -1961,12 +1962,12 @@ impl Engine {
 
         let columnar_config = self.opts.columnar_build_options;
         let estimated_num_files = total_size as usize / columnar_config.max_columnar_table_size;
-        self.set_alloc_ids_for_request(
+        try_set_alloc_ids_for_request!(
             &mut req,
+            self.id_allocator,
             l1_tbl_ids.len() + l2_tbl_ids.len(),
-            estimated_num_files,
-        )
-        .await;
+            estimated_num_files
+        );
         let schema_file_id = data.schema_file.as_ref().unwrap().get_file_id();
         let columnar_compaction = ColumnarCompaction {
             level,

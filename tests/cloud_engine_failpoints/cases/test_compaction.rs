@@ -11,36 +11,41 @@ use crate::cases::alloc_node_id;
 #[test]
 fn test_retry_failed_flush() {
     test_util::init_log_for_test();
-    let node_id = alloc_node_id();
-    let mut cluster = ServerCluster::new(vec![node_id], |_, cfg| {
-        cfg.rocksdb.writecf.write_buffer_size = ReadableSize::kb(16);
-    });
 
-    let flush_fp = "kvengine_flush_normal";
-    let mut client = cluster.new_client();
-    let region_id = client.get_region_id(&[]);
-    fail::cfg(flush_fp, "return").unwrap();
-    client.put_kv(0..100, i_to_key, i_to_val);
-    client.put_kv(100..200, i_to_key, i_to_val);
-    thread::sleep(Duration::from_secs(1));
-    assert_eq!(
-        cluster
-            .get_kvengine(node_id)
-            .get_shard_stat(region_id)
-            .l0_table_count,
-        0
-    );
-    fail::remove(flush_fp);
-    must_wait(
-        || {
+    for flush_fp in [
+        "kvengine_flush_normal",
+        "rfstore::util::alloc_id_async_timeout",
+    ] {
+        let node_id = alloc_node_id();
+        let mut cluster = ServerCluster::new(vec![node_id], |_, cfg| {
+            cfg.rocksdb.writecf.write_buffer_size = ReadableSize::kb(16);
+        });
+
+        let mut client = cluster.new_client();
+        let region_id = client.get_region_id(&[]);
+        fail::cfg(flush_fp, "return").unwrap();
+        client.put_kv(0..100, i_to_key, i_to_val);
+        client.put_kv(100..200, i_to_key, i_to_val);
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(
             cluster
                 .get_kvengine(node_id)
                 .get_shard_stat(region_id)
-                .l0_table_count
-                > 0
-        },
-        3,
-        || "failed to flush memtables in time".to_string(),
-    );
-    cluster.stop();
+                .l0_table_count,
+            0
+        );
+        fail::remove(flush_fp);
+        must_wait(
+            || {
+                cluster
+                    .get_kvengine(node_id)
+                    .get_shard_stat(region_id)
+                    .l0_table_count
+                    > 0
+            },
+            3,
+            || "failed to flush memtables in time".to_string(),
+        );
+        cluster.stop();
+    }
 }

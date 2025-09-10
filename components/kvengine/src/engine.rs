@@ -713,7 +713,7 @@ impl EngineCore {
         iter.rewind();
         while iter.valid() {
             if fids.is_empty() {
-                fids = self.id_allocator.alloc_id(10).unwrap();
+                fids = self.id_allocator.alloc_id(10)?;
             }
             let id = fids.pop().unwrap();
             builder.reset(id);

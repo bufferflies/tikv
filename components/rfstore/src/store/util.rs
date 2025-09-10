@@ -389,6 +389,12 @@ impl kvengine::IdAllocator for PdIdAllocator {
     }
 
     async fn alloc_id_async(&self, count: usize) -> kvengine::Result<Vec<u64>> {
+        fail::fail_point!("rfstore::util::alloc_id_async_timeout", |_| {
+            Err(kvengine::Error::ErrAllocId(
+                "allocate file id timeout".to_string(),
+            ))
+        });
+
         let start = std::time::Instant::now();
         loop {
             match self.pd.batch_get_tso(count as u32).await {
