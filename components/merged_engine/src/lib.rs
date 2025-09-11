@@ -58,8 +58,6 @@ use crate::{
     preprocessor::Preprocessor,
 };
 
-const RAFT_WRITE_BATCH_SIZE: usize = 4 * 1024 * 1024;
-
 // The quorum size when replicas number is 3.
 // Used to check whether the Raft log is committed.
 const QUORUM_SIZE: u8 = 2;
@@ -82,6 +80,7 @@ pub struct MergedEngineConfig {
     pub timeout_fetch_wal: ReadableDuration,
     pub merged_store_id: u64,
     pub mem_table_size: ReadableSize,
+    pub raft_write_batch_size: ReadableSize,
     pub force_ia: bool,
 }
 
@@ -92,6 +91,7 @@ impl Default for MergedEngineConfig {
             timeout_fetch_wal: ReadableDuration::secs(30),
             merged_store_id: 1024,
             mem_table_size: ReadableSize::mb(128),
+            raft_write_batch_size: ReadableSize::mb(4),
             force_ia: true,
         }
     }
@@ -891,6 +891,9 @@ impl MergedEngine {
                 SyncRegionResult::Postponed => {
                     update_queue.push_back(updated_region);
                 }
+                SyncRegionResult::Resume => {
+                    update_queue.push_front(updated_region);
+                }
                 SyncRegionResult::Dropped => continue,
             }
         }
@@ -941,6 +944,7 @@ impl MergedEngine {
         let mut preprocessor_ref = preprocessor.as_ref();
         tag = preprocessor_ref.tag();
         let mut entries = Vec::new();
+        let mut wb_encoded_len = 0;
         let mut res = SyncRegionResult::Finished;
         // preprocess entries.
         for log_index in low..high {
@@ -986,7 +990,8 @@ impl MergedEngine {
             hs.set_commit(progress.commit_index);
             preprocessor_ref.raft_state.set_hard_state(&hs);
             preprocessor_ref.raft_state.set_last_index(log_index);
-            ctx.raft_wb
+            wb_encoded_len += ctx
+                .raft_wb
                 .append_raft_log(updated_region, updated_region, &entry);
             if let Some(admin_req) = admin_req {
                 if admin_req.has_commit_merge() {
@@ -999,7 +1004,7 @@ impl MergedEngine {
                                 .set_state(source.shard_id, source.shard_id, k, &[]);
                             true
                         });
-                    ctx.raft_wb.truncate_raft_log(
+                    wb_encoded_len += ctx.raft_wb.truncate_raft_log(
                         source.shard_id,
                         source.shard_id,
                         TRUNCATE_ALL_INDEX,
@@ -1007,6 +1012,16 @@ impl MergedEngine {
                 }
             }
             entries.push(entry);
+
+            if log_index + 1 < high
+                && wb_encoded_len >= self.ctx.config.raft_write_batch_size.0 as i64
+            {
+                debug!("{} sync_region: wb exceed size limit, break at {}", tag, log_index;
+                    "wb_size" => wb_encoded_len, "low" => low, "high" => high);
+                progress.synced_index = log_index;
+                res = SyncRegionResult::Resume;
+                break;
+            }
         }
         if ctx.raft_wb.is_empty() {
             return Ok(res);
@@ -1016,7 +1031,7 @@ impl MergedEngine {
         ctx.raft.apply(&mut wb);
         *merged_wb_estimated_size += wb.estimated_size();
         merged_wb.merge_write_batch(wb);
-        if *merged_wb_estimated_size > RAFT_WRITE_BATCH_SIZE {
+        if *merged_wb_estimated_size > self.ctx.config.raft_write_batch_size.0 as usize {
             ctx.raft.persist(mem::take(merged_wb))?;
             *merged_wb_estimated_size = 0;
         }
@@ -1171,6 +1186,7 @@ impl MergedEngine {
 enum SyncRegionResult {
     Finished,
     Postponed,
+    Resume,
     Dropped,
 }
 

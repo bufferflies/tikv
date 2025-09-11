@@ -87,6 +87,7 @@ fn test_merged_engine_once() {
                 .rocksdb
                 .writecf
                 .write_buffer_size,
+            raft_write_batch_size: ReadableSize::kb(256),
         },
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
     };

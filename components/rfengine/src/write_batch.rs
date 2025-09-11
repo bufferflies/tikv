@@ -35,13 +35,15 @@ impl WriteBatch {
         self.peers.get(&peer_id)
     }
 
-    pub fn append_raft_log(&mut self, peer_id: u64, region_id: u64, entry: &eraftpb::Entry) {
+    pub fn append_raft_log(&mut self, peer_id: u64, region_id: u64, entry: &eraftpb::Entry) -> i64 /* delta_encoded_len */
+    {
         let op = RaftLogOp::new(entry);
-        self.get_peer_mut(peer_id, region_id).append_raft_log(op);
+        self.get_peer_mut(peer_id, region_id).append_raft_log(op)
     }
 
-    pub fn truncate_raft_log(&mut self, peer_id: u64, region_id: u64, index: u64) {
-        self.get_peer_mut(peer_id, region_id).truncate(index);
+    pub fn truncate_raft_log(&mut self, peer_id: u64, region_id: u64, index: u64) -> i64 /* delta_encoded_len */
+    {
+        self.get_peer_mut(peer_id, region_id).truncate(index)
     }
 
     pub fn set_state(&mut self, peer_id: u64, region_id: u64, key: &[u8], val: &[u8]) {
@@ -154,16 +156,20 @@ impl PeerBatch {
         }
     }
 
-    pub(crate) fn truncate(&mut self, idx: u64) {
+    pub(crate) fn truncate(&mut self, idx: u64) -> i64 /* delta_encoded_len */ {
         if idx < self.truncated_idx {
-            return;
+            return 0;
         }
+        let origin_encoded_len = self.raft_logs_encoded_len as i64;
+
         while let Some(true) = self.raft_logs.front().map(|l| l.index <= idx) {
             if let Some(old) = self.raft_logs.pop_front() {
                 self.raft_logs_encoded_len -= old.encoded_len();
             }
         }
         self.truncated_idx = idx;
+
+        self.raft_logs_encoded_len as i64 - origin_encoded_len
     }
 
     pub fn set_state(&mut self, key: &[u8], val: &[u8]) {
@@ -190,7 +196,9 @@ impl PeerBatch {
         Some(region_local_state)
     }
 
-    pub fn append_raft_log(&mut self, op: RaftLogOp) {
+    pub fn append_raft_log(&mut self, op: RaftLogOp) -> i64 /* delta_encoded_len */ {
+        let origin_encoded_len = self.raft_logs_encoded_len as i64;
+
         debug_assert!(
             self.truncated_idx < op.index,
             "{} {}",
@@ -212,6 +220,8 @@ impl PeerBatch {
         );
         self.raft_logs_encoded_len += op.encoded_len();
         self.raft_logs.push_back(op);
+
+        self.raft_logs_encoded_len as i64 - origin_encoded_len
     }
 
     pub fn merge(&mut self, other: PeerBatch) {

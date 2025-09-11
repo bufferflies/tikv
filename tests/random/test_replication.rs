@@ -114,6 +114,7 @@ fn test_random_replication() {
     rep_config.advertise_addr = "127.0.0.1:5999".to_string();
     rep_config.report_region_interval = ReadableDuration::secs(3);
     rep_config.merged_engine.mem_table_size = ReadableSize::kb(16);
+    rep_config.merged_engine.raft_write_batch_size = ReadableSize::kb(256);
 
     let pd_client = cluster.get_pure_pd_client();
     let mut worker = CloudWorker::new(worker_conf.clone(), None, 2, pd_client.clone());
