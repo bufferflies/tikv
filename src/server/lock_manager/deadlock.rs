@@ -1523,21 +1523,21 @@ pub mod tests {
         };
 
         // Region changed
-        for &event in &events[..2] {
+        for event in &events[..2] {
             for &follower_role in &follower_roles {
-                host.on_region_changed(&region, event, follower_role);
+                host.on_region_changed(&region, event.clone(), follower_role);
                 check_role(Role::Follower);
-                host.on_region_changed(&invalid, event, StateRole::Leader);
+                host.on_region_changed(&invalid, event.clone(), StateRole::Leader);
                 check_role(Role::Follower);
-                host.on_region_changed(&other, event, StateRole::Leader);
+                host.on_region_changed(&other, event.clone(), StateRole::Leader);
                 check_role(Role::Follower);
-                host.on_region_changed(&region, event, StateRole::Leader);
+                host.on_region_changed(&region, event.clone(), StateRole::Leader);
                 check_role(Role::Leader);
-                host.on_region_changed(&invalid, event, follower_role);
+                host.on_region_changed(&invalid, event.clone(), follower_role);
                 check_role(Role::Leader);
-                host.on_region_changed(&other, event, follower_role);
+                host.on_region_changed(&other, event.clone(), follower_role);
                 check_role(Role::Leader);
-                host.on_region_changed(&region, event, follower_role);
+                host.on_region_changed(&region, event.clone(), follower_role);
                 check_role(Role::Follower);
             }
         }

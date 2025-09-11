@@ -5815,7 +5815,7 @@ where
         let buckets_count = region_buckets.meta.keys.len() - 1;
         self.ctx.coprocessor_host.on_region_changed(
             region,
-            RegionChangeEvent::UpdateBuckets(buckets_count),
+            RegionChangeEvent::UpdateBuckets(region_buckets.meta.clone()),
             self.fsm.peer.get_role(),
         );
         let old_region_buckets = self.fsm.peer.region_buckets.replace(region_buckets);

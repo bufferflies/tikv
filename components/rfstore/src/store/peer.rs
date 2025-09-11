@@ -42,7 +42,7 @@ use raft_proto::{
 };
 use raftstore::{
     coprocessor,
-    coprocessor::{RegionChangeReason, RoleChange},
+    coprocessor::{RegionChangeEvent, RegionChangeReason, RoleChange},
     store::{
         local_metrics::*,
         metrics::*,
@@ -1490,7 +1490,8 @@ impl Peer {
                 estimated_size
             );
             let stats = new_bucket_write_stats(&bucket_meta);
-            let bucket_stat = BucketStat::new(Arc::new(bucket_meta), stats);
+            let bucket_meta = Arc::new(bucket_meta);
+            let bucket_stat = BucketStat::new(bucket_meta.clone(), stats);
             self.bucket_version = bucket_stat.meta.version;
             self.buckets = Some(bucket_stat);
             let readers = ctx.global.readers.pin();
@@ -1501,6 +1502,11 @@ impl Peer {
                 ));
                 Arc::new(new_reader)
             });
+            ctx.global.coprocessor_host.on_region_changed(
+                self.region(),
+                RegionChangeEvent::UpdateBuckets(bucket_meta),
+                self.get_role(),
+            );
         }
     }
 

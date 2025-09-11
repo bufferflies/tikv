@@ -42,7 +42,14 @@ use kvengine::{
     table::{BoundedDataSet, InnerKey, SnapVersion},
     IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY,
 };
-use kvproto::{coprocessor::DelegateResponse, errorpb, metapb, raft_serverpb::StoreIdent};
+use kvproto::{
+    coprocessor::DelegateResponse,
+    errorpb, metapb,
+    metapb::BucketStats,
+    pdpb,
+    pdpb::{Peers, SyncRegionResponse},
+    raft_serverpb::StoreIdent,
+};
 use online_config::OnlineConfig;
 use openssl::{
     ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVerifyMode},
@@ -53,6 +60,7 @@ use pin_project::pin_project;
 use profile::*;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
+use raftstore::{coprocessor::RegionInfoProvider, RegionInfo, RegionInfoAccessor};
 use rfengine::{
     load_store_ident, raft_state_key, Error, RfEngine, WriteBatch, RAFT_TRUNCATED_STATE_KEY,
 };
@@ -73,12 +81,13 @@ use tikv::{
     storage::CloudStore,
 };
 use tikv_util::{
-    codec::bytes::decode_bytes,
+    codec::bytes::{decode_bytes, encode_bytes},
     config::{AbsoluteOrPercentSize, ReadableSize},
     future::paired_future_callback,
     http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
     logger::set_log_level,
     metrics::{dump, dump_to},
+    store::find_peer,
     sys::thread::ThreadBuildWrapper,
     time::{Instant, UnixSecs},
     timer::GLOBAL_TIMER_HANDLE,
@@ -157,6 +166,7 @@ pub struct StatusServer {
     rfengine: rfengine::RfEngine,
     concurrency_manager: ConcurrencyManager,
     pd_client: Arc<dyn PdClient>,
+    region_info_accessor: RegionInfoAccessor,
 }
 
 impl StatusServer {
@@ -169,6 +179,7 @@ impl StatusServer {
         rfengine: rfengine::RfEngine,
         concurrency_manager: ConcurrencyManager,
         pd_client: Arc<dyn PdClient>,
+        region_info_accessor: RegionInfoAccessor,
     ) -> Result<Self> {
         let thread_pool = Builder::new_multi_thread()
             .enable_all()
@@ -192,6 +203,7 @@ impl StatusServer {
             rfengine,
             concurrency_manager,
             pd_client,
+            region_info_accessor,
         })
     }
 
@@ -2191,72 +2203,9 @@ impl StatusServer {
         Ok(hyper::Response::new(Body::empty()))
     }
 
-    pub async fn handle_sync_region(
+    async fn handle_sync_region_by_id(
         req: Request<Body>,
-        router: &RaftRouter,
-    ) -> hyper::Result<Response<Body>> {
-        let mut body = Vec::new();
-        req.into_body()
-            .try_for_each(|bytes| {
-                body.extend(bytes);
-                ok(())
-            })
-            .await?;
-
-        let SyncRegionRequest {
-            start,
-            end,
-            limit,
-            reverse,
-            debug,
-        } = match serde_json::from_slice::<SyncRegionRequest>(&body) {
-            Ok(req) => req,
-            Err(e) => {
-                return Ok(make_response(
-                    StatusCode::BAD_REQUEST,
-                    format!("invalid request body: {:?}", e),
-                ));
-            }
-        };
-
-        let (start, end) = match (hex::decode(&start), hex::decode(&end)) {
-            (Ok(start), Ok(end)) if end.is_empty() || start < end => (start, end),
-            _ => {
-                return Ok(make_response(
-                    StatusCode::BAD_REQUEST,
-                    format!("invalid range: [{}, {})", start, end),
-                ));
-            }
-        };
-
-        let (callback, future) = paired_future_callback();
-        let store_msg = StoreMsg::SyncRegion {
-            start,
-            end,
-            limit,
-            reverse,
-            callback,
-        };
-        router.send_store_msg(store_msg);
-        match future.await {
-            Ok(resp) => {
-                let body = if debug {
-                    format!("{:?}", resp).into_bytes()
-                } else {
-                    resp.write_to_bytes().unwrap()
-                };
-                Ok(Response::new(body.into()))
-            }
-            Err(e) => Ok(make_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Internal Server Error {}", e),
-            )),
-        }
-    }
-
-    pub async fn handle_sync_region_by_id(
-        req: Request<Body>,
-        router: &RaftRouter,
+        ctx: &StatusContext,
     ) -> hyper::Result<Response<Body>> {
         let mut body = Vec::new();
         req.into_body()
@@ -2277,17 +2226,27 @@ impl StatusServer {
         };
 
         let (callback, future) = paired_future_callback();
-        let store_msg = StoreMsg::SyncRegionById {
-            region_id,
-            callback,
-        };
-        router.send_store_msg(store_msg);
+        if let Err(e) = ctx
+            .region_info_accessor
+            .find_region_by_id(region_id, callback)
+        {
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", e),
+            ));
+        }
         match future.await {
             Ok(resp) => {
                 let body = if debug {
                     format!("{:?}", resp).into_bytes()
                 } else {
-                    resp.write_to_bytes().unwrap()
+                    Self::make_sync_region_resp(
+                        ctx.stores_info.pd_client.get_cluster_id().unwrap(),
+                        ctx.rfengine.get_engine_id(),
+                        resp.as_slice(),
+                    )
+                    .write_to_bytes()
+                    .unwrap()
                 };
                 Ok(Response::new(body.into()))
             }
@@ -2296,6 +2255,124 @@ impl StatusServer {
                 format!("Internal Server Error {}", e),
             )),
         }
+    }
+
+    async fn handle_sync_region(
+        req: Request<Body>,
+        ctx: &StatusContext,
+    ) -> hyper::Result<Response<Body>> {
+        let mut body = Vec::new();
+        req.into_body()
+            .try_for_each(|bytes| {
+                body.extend(bytes);
+                ok(())
+            })
+            .await?;
+
+        let SyncRegionRequest {
+            start,
+            end,
+            limit,
+            reverse,
+            debug,
+        } = match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(e) => {
+                return Ok(make_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid request body: {:?}", e),
+                ));
+            }
+        };
+
+        let (start, mut end) = match (hex::decode(&start), hex::decode(&end)) {
+            (Ok(start), Ok(end)) if end.is_empty() || start < end => (start, end),
+            _ => {
+                return Ok(make_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid range: [{}, {})", start, end),
+                ));
+            }
+        };
+
+        let start = encode_bytes(&start);
+        if end.is_empty() {
+            end.extend(GLOBAL_SHARD_END_KEY);
+        }
+        let end = encode_bytes(&end);
+        let (callback, future) = paired_future_callback();
+        if let Err(e) = ctx
+            .region_info_accessor
+            .get_regions_in_range_opt(&start, &end, reverse, limit, callback)
+        {
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", e),
+            ));
+        }
+        match future.await {
+            Ok(resp) => {
+                let body = if debug {
+                    format!("{:#?}", resp).into_bytes()
+                } else {
+                    Self::make_sync_region_resp(
+                        ctx.stores_info.pd_client.get_cluster_id().unwrap(),
+                        ctx.rfengine.get_engine_id(),
+                        &resp,
+                    )
+                    .write_to_bytes()
+                    .unwrap()
+                };
+                Ok(Response::new(body.into()))
+            }
+            Err(e) => Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", e),
+            )),
+        }
+    }
+
+    fn make_sync_region_resp(
+        cluster_id: u64,
+        store_id: u64,
+        region_infos: &[RegionInfo],
+    ) -> SyncRegionResponse {
+        let cap = region_infos.len();
+        let mut resp_regions = Vec::with_capacity(cap);
+        let mut resp_stats = Vec::with_capacity(cap);
+        let mut resp_leaders = Vec::with_capacity(cap);
+        let mut resp_buckets = Vec::with_capacity(cap);
+        let mut resp_down_peers: Vec<pdpb::PeersStats> = Vec::with_capacity(cap);
+        let mut resp_pending_peers: Vec<Peers> = Vec::with_capacity(cap);
+        for info in region_infos {
+            let region = &info.region;
+            resp_regions.push(region.clone());
+            // The stats are used along with region, we need to push a default one if not
+            // found.
+            let region_stat = pdpb::RegionStat::new();
+            let down_peers = pdpb::PeersStats::new();
+            let pending_peers = Peers::new();
+            resp_stats.push(region_stat);
+            resp_down_peers.push(down_peers);
+            resp_pending_peers.push(pending_peers);
+            let leader_peer = find_peer(region, store_id).cloned().unwrap_or_default();
+            resp_leaders.push(leader_peer);
+            let mut bucket = metapb::Buckets::new();
+            bucket.set_region_id(region.id);
+            bucket.set_version(info.buckets.version);
+            bucket.set_keys(info.buckets.keys.clone().into());
+            bucket.set_stats(BucketStats::new());
+            resp_buckets.push(bucket);
+        }
+        let mut resp = SyncRegionResponse::new();
+        resp.mut_header().set_cluster_id(cluster_id);
+        resp.set_regions(resp_regions.into());
+        resp.set_region_leaders(resp_leaders.into());
+        resp.set_region_stats(resp_stats.into());
+        resp.set_buckets(resp_buckets.into());
+        resp.set_down_peers(resp_down_peers.into());
+        resp.set_pending_peers(resp_pending_peers.into());
+        resp
     }
 
     fn handle_get_metrics(
@@ -2340,6 +2417,7 @@ impl StatusServer {
             dfs_file_read_semaphore: Semaphore::new(Self::DFS_FILE_READ_CONCURRENCY),
             stores_info: Arc::new(StoresInfo::new(self.pd_client.clone())),
             thread_pool: self.thread_pool.handle().clone(),
+            region_info_accessor: self.region_info_accessor.clone(),
         });
         // Start to serve.
         let server = builder.serve(make_service_fn(move |conn: &C| {
@@ -2433,14 +2511,14 @@ impl StatusServer {
                                 Self::dump_region_meta(req, &ctx.router).await
                             }
                             (Method::GET, path) if path.starts_with("/sync_region_by_id") => {
-                                let resp = Self::handle_sync_region_by_id(req, &ctx.router).await?;
+                                let resp = Self::handle_sync_region_by_id(req, ctx.as_ref()).await?;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .sync_region_by_id
                                     .observe(start.saturating_elapsed().as_secs_f64());
                                 Ok(resp)
                             }
                             (Method::GET, path) if path.starts_with("/sync_region") => {
-                                let resp = Self::handle_sync_region(req, &ctx.router).await?;
+                                let resp = Self::handle_sync_region(req, ctx.as_ref()).await?;
                                 STATUS_REQ_HISTOGRAM_STATIC
                                     .sync_region
                                     .observe(start.saturating_elapsed().as_secs_f64());
@@ -2532,7 +2610,7 @@ impl StatusServer {
                             (Method::GET | Method::POST, path) if path.starts_with("/recovery/") => {
                                 let data_dir = &ctx.cfg_controller.get_current().storage.data_dir;
                                 Self::handle_recovery(req, &ctx.kvengine, data_dir).await
-                            },
+                            }
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
                         }
                     })
@@ -2601,6 +2679,7 @@ struct StatusContext {
     dfs_file_read_semaphore: Semaphore,
     stores_info: Arc<StoresInfo>,
     thread_pool: tokio::runtime::Handle,
+    region_info_accessor: RegionInfoAccessor,
 }
 
 // To unify TLS/Plain connection usage in start_serve function

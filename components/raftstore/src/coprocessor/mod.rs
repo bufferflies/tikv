@@ -16,6 +16,7 @@ use kvproto::{
     raft_cmdpb::{AdminRequest, AdminResponse, RaftCmdRequest, RaftCmdResponse, Request},
     raft_serverpb::RaftApplyState,
 };
+use pd_client::BucketMeta;
 use raft::{eraftpb, StateRole};
 
 pub mod config;
@@ -300,12 +301,12 @@ pub enum RegionChangeReason {
     RestoreShard,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RegionChangeEvent {
     Create,
     Update(RegionChangeReason),
     Destroy,
-    UpdateBuckets(usize),
+    UpdateBuckets(Arc<BucketMeta>),
 }
 
 pub trait RegionChangeObserver: Coprocessor {

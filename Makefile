@@ -346,7 +346,7 @@ check-protobuf:
 
 pre-format: unset-override
 	@rustup component add rustfmt
-	@which cargo-sort &> /dev/null || cargo install -q cargo-sort --locked
+	@which cargo-sort &> /dev/null || cargo install -q cargo-sort@1.0.9 --locked
 
 format: pre-format
 	@cargo fmt

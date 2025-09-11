@@ -14,6 +14,7 @@ use collections::{HashMap, HashSet};
 use engine_traits::KvEngine;
 use itertools::Itertools;
 use kvproto::metapb::Region;
+use pd_client::BucketMeta;
 use raft::StateRole;
 use tikv_util::{
     box_err, debug, info, warn,
@@ -46,11 +47,25 @@ use super::{
 /// `RaftStoreEvent` Represents events dispatched from raftstore coprocessor.
 #[derive(Debug)]
 pub enum RaftStoreEvent {
-    CreateRegion { region: Region, role: StateRole },
-    UpdateRegion { region: Region, role: StateRole },
-    DestroyRegion { region: Region },
-    RoleChange { region: Region, role: StateRole },
-    UpdateRegionBuckets { region: Region, buckets: usize },
+    CreateRegion {
+        region: Region,
+        role: StateRole,
+    },
+    UpdateRegion {
+        region: Region,
+        role: StateRole,
+    },
+    DestroyRegion {
+        region: Region,
+    },
+    RoleChange {
+        region: Region,
+        role: StateRole,
+    },
+    UpdateRegionBuckets {
+        region: Region,
+        buckets: Arc<BucketMeta>,
+    },
 }
 
 impl RaftStoreEvent {
@@ -69,7 +84,7 @@ impl RaftStoreEvent {
 pub struct RegionInfo {
     pub region: Region,
     pub role: StateRole,
-    pub buckets: usize,
+    pub buckets: Arc<BucketMeta>,
 }
 
 impl RegionInfo {
@@ -77,7 +92,7 @@ impl RegionInfo {
         Self {
             region,
             role,
-            buckets: 1,
+            buckets: Arc::new(BucketMeta::default()),
         }
     }
 }
@@ -127,7 +142,9 @@ pub enum RegionInfoQuery {
     GetRegionsInRange {
         start_key: Vec<u8>,
         end_key: Vec<u8>,
-        callback: Callback<Vec<Region>>,
+        reverse: bool,
+        limit: usize,
+        callback: Callback<Vec<RegionInfo>>,
     },
     /// Gets all contents from the collection. Only used for testing.
     DebugDump(mpsc::Sender<(RegionsMap, RegionRangesMap)>),
@@ -144,12 +161,18 @@ impl Display for RegionInfoQuery {
                 write!(f, "FindRegionById(region_id: {})", region_id)
             }
             RegionInfoQuery::GetRegionsInRange {
-                start_key, end_key, ..
+                start_key,
+                end_key,
+                reverse,
+                limit,
+                ..
             } => write!(
                 f,
-                "GetRegionsInRange(start_key: {}, end_key: {})",
+                "GetRegionsInRange(start_key: {}, end_key: {}, reverse: {}, limit: {})",
                 &log_wrappers::Value::key(start_key),
-                &log_wrappers::Value::key(end_key)
+                &log_wrappers::Value::key(end_key),
+                reverse,
+                limit
             ),
             RegionInfoQuery::DebugDump(_) => write!(f, "DebugDump"),
         }
@@ -278,7 +301,7 @@ impl RegionCollector {
         *old_region = region;
     }
 
-    fn update_region_buckets(&mut self, region: Region, buckets: usize) {
+    fn update_region_buckets(&mut self, region: Region, buckets: Arc<BucketMeta>) {
         let existing_region_info = self.regions.get_mut(&region.get_id()).unwrap();
         let old_region = &mut existing_region_info.region;
         assert_eq!(old_region.get_id(), region.get_id());
@@ -313,7 +336,7 @@ impl RegionCollector {
         }
     }
 
-    fn handle_update_region_buckets(&mut self, region: Region, buckets: usize) {
+    fn handle_update_region_buckets(&mut self, region: Region, buckets: Arc<BucketMeta>) {
         if self.regions.contains_key(&region.get_id()) {
             self.update_region_buckets(region, buckets);
         } else {
@@ -463,7 +486,9 @@ impl RegionCollector {
         &self,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
-        callback: Callback<Vec<Region>>,
+        reverse: bool,
+        limit: usize,
+        callback: Callback<Vec<RegionInfo>>,
     ) {
         let end_key = RangeKey::from_end_key(end_key);
         let mut regions = vec![];
@@ -475,7 +500,13 @@ impl RegionCollector {
             if RangeKey::from_start_key(region_info.region.get_start_key().to_vec()) > end_key {
                 break;
             }
-            regions.push(region_info.region.clone());
+            regions.push(region_info.clone());
+            if limit > 0 && regions.len() >= limit {
+                break;
+            }
+        }
+        if reverse {
+            regions.reverse();
         }
         callback(regions);
     }
@@ -544,9 +575,11 @@ impl Runnable for RegionCollector {
             RegionInfoQuery::GetRegionsInRange {
                 start_key,
                 end_key,
+                reverse,
+                limit,
                 callback,
             } => {
-                self.handle_get_regions_in_range(start_key, end_key, callback);
+                self.handle_get_regions_in_range(start_key, end_key, reverse, limit, callback);
             }
             RegionInfoQuery::DebugDump(tx) => {
                 tx.send((self.regions.clone(), self.region_ranges.clone()))
@@ -568,7 +601,7 @@ impl RunnableWithTimer for RegionCollector {
             if r.role == StateRole::Leader {
                 leader += 1;
             }
-            buckets_count += r.buckets;
+            buckets_count += r.buckets.keys.len().saturating_sub(1);
         }
         REGION_COUNT_GAUGE_VEC
             .with_label_values(&["region"])
@@ -642,6 +675,26 @@ impl RegionInfoAccessor {
             .schedule(RegionInfoQuery::DebugDump(tx))
             .unwrap();
         rx.recv().unwrap()
+    }
+
+    pub fn get_regions_in_range_opt(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        reverse: bool,
+        limit: usize,
+        callback: Callback<Vec<RegionInfo>>,
+    ) -> Result<()> {
+        let msg = RegionInfoQuery::GetRegionsInRange {
+            start_key: start_key.to_vec(),
+            end_key: end_key.to_vec(),
+            reverse,
+            limit,
+            callback,
+        };
+        self.scheduler
+            .schedule(msg)
+            .map_err(|e| box_err!("failed to send request to region collector: {:?}", e))
     }
 }
 
@@ -719,26 +772,28 @@ impl RegionInfoProvider for RegionInfoAccessor {
 
     fn get_regions_in_range(&self, start_key: &[u8], end_key: &[u8]) -> Result<Vec<Region>> {
         let (tx, rx) = mpsc::channel();
-        let msg = RegionInfoQuery::GetRegionsInRange {
-            start_key: start_key.to_vec(),
-            end_key: end_key.to_vec(),
-            callback: Box::new(move |regions| {
-                if let Err(e) = tx.send(regions) {
+        self.get_regions_in_range_opt(
+            start_key,
+            end_key,
+            false,
+            0,
+            Box::new(move |region_infos| {
+                if let Err(e) = tx.send(
+                    region_infos
+                        .into_iter()
+                        .map(|region_info| region_info.region)
+                        .collect(),
+                ) {
                     warn!("failed to send get_regions_in_range result: {:?}", e);
                 }
             }),
-        };
-        self.scheduler
-            .schedule(msg)
-            .map_err(|e| box_err!("failed to send request to region collector: {:?}", e))
-            .and_then(|_| {
-                rx.recv().map_err(|e| {
-                    box_err!(
-                        "failed to receive get_regions_in_range result from region collector: {:?}",
-                        e
-                    )
-                })
-            })
+        )?;
+        rx.recv().map_err(|e| {
+            box_err!(
+                "failed to receive get_regions_in_range result from region collector: {:?}",
+                e
+            )
+        })
     }
 }
 
@@ -966,13 +1021,15 @@ mod tests {
     }
 
     fn must_update_region_buckets(c: &mut RegionCollector, region: &Region, buckets: usize) {
+        let mut bucket_meta = BucketMeta::default();
+        bucket_meta.keys = vec![vec![]; buckets + 1];
         c.handle_raftstore_event(RaftStoreEvent::UpdateRegionBuckets {
             region: region.clone(),
-            buckets,
+            buckets: Arc::new(bucket_meta),
         });
         let r = c.regions.get(&region.get_id()).unwrap();
         assert_eq!(r.region, *region);
-        assert_eq!(r.buckets, buckets);
+        assert_eq!(r.buckets.keys.len() - 1, buckets);
     }
 
     fn must_destroy_region(c: &mut RegionCollector, region: Region) {

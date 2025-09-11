@@ -952,6 +952,7 @@ impl TikvServer {
                 self.raw_engines.raft.clone(),
                 self.concurrency_manager.clone(),
                 self.pd_client.clone(),
+                self.region_info_accessor.clone(),
             ) {
                 Ok(status_server) => Box::new(status_server),
                 Err(e) => {

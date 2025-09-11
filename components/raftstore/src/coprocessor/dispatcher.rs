@@ -627,12 +627,12 @@ impl<E: KvEngine> CoprocessorHost<E> {
             region,
             &self.registry.region_change_observers,
             on_region_changed,
-            event,
+            event.clone(),
             role
         );
     }
 
-    /// `pre_persist` is called we we want to persist data or meta for a region.
+    /// `pre_persist` is called we want to persist data or meta for a region.
     /// For example, in `finish_for` and `commit`,
     /// we will separately call `pre_persist` with is_finished = true/false.
     /// By returning false, we reject this persistence.
