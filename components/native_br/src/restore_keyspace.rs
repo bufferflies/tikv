@@ -89,6 +89,9 @@ const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
 const SPLIT_REGIONS_BATCH_SIZE: usize = 256;
 const SPLIT_REGIONS_TIMEOUT_PER_KEY: Duration = Duration::from_millis(100);
 
+const PACKED_STORE_ID: u64 = 0;
+const PACKED_PEER_ID: u64 = 0;
+
 pub const RESTORE_RFENGINE_CONCURRENCY: usize = 3;
 
 #[derive(Clone, Debug, Default)]
@@ -1005,8 +1008,6 @@ impl BackupCluster {
             override_dfs: None,
         };
 
-        const PACKED_STORE_ID: u64 = 0;
-        const PACKED_PEER_ID: u64 = 0;
         let shards = packed_backup
             .shards
             .iter()
@@ -1054,7 +1055,7 @@ impl BackupCluster {
         }
 
         cluster.setup_kv_engine_with(
-            PACKED_STORE_ID,
+            None,
             &cluster.generate_store_config(PACKED_STORE_ID),
             NoopRecovery,
         )?;
@@ -1195,15 +1196,17 @@ impl BackupCluster {
         let conf = self.store_configs.get(&store_id).unwrap().clone();
         let rf_engine = self.raft_engines.get(&store_id).unwrap();
         let recoverer = rfstore::store::RecoverHandler::new(rf_engine.clone());
-        self.setup_kv_engine_with(store_id, &conf, recoverer)
+        self.setup_kv_engine_with(Some(store_id), &conf, recoverer)
     }
 
     fn setup_kv_engine_with(
         &mut self,
-        store_id: u64,
+        store_id: Option<u64>,
         conf: &TikvConfig,
         recoverer: impl kvengine::RecoverHandler + 'static,
     ) -> Result<()> {
+        let restoring_packed_backup = store_id.is_none();
+        let store_id = store_id.unwrap_or(PACKED_STORE_ID);
         if self.kv_engine.is_none() {
             let io_rate_limiter =
                 Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
@@ -1278,6 +1281,11 @@ impl BackupCluster {
 
             let table_filter: Option<LoadTableFilterFn> = if self.load_all_tables {
                 None
+            } else if restoring_packed_backup {
+                // As a packed backup contains a full ready snapshot,
+                // no need to preprocess it before put it to the cluster.
+                let load_no_table = |_, _: &_| false;
+                Some(Arc::new(load_no_table))
             } else {
                 // Load the following tables from DFS:
                 // 1. Tables of shards need truncate, to get the `max_ts`.
