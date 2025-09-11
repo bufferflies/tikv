@@ -1872,6 +1872,43 @@ impl StatusServer {
         })
     }
 
+    async fn rfengine_track_wal_progress(
+        req: Request<Body>,
+        engine: &RfEngine,
+    ) -> hyper::Result<Response<Body>> {
+        let body = hyper::body::to_bytes(req.into_body()).await?;
+        let _track_req: TrackWalProgressRequest = match serde_json::from_slice(&body) {
+            Ok(track_req) => track_req,
+            Err(err) => {
+                return Ok(make_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("bad request {}", err),
+                ));
+            }
+        };
+        // TODO: use track_req.ts to track async commit locks.
+
+        let (callback, future) = paired_future_callback();
+        engine.get_wal_progress(callback);
+
+        Ok(match future.await {
+            Ok(resp) => match resp {
+                Ok(progress) => Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from(serde_json::to_string(&progress).unwrap()))
+                    .unwrap(),
+                Err(err) => {
+                    error!("rfengine_track_wal_progress error: {:?}", err);
+                    make_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", err))
+                }
+            },
+            Err(e) => make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal Server Error {}", e),
+            ),
+        })
+    }
+
     fn get_covered_shards_by_range(
         range: Option<(Vec<u8>, Vec<u8>)>,
         engine: &kvengine::Engine,
@@ -2562,6 +2599,13 @@ impl StatusServer {
                                     .observe(start.saturating_elapsed().as_secs_f64());
                                 res
                             }
+                            (Method::POST, path) if path.starts_with("/rfengine/track_wal_progress") => {
+                                let res = Self::rfengine_track_wal_progress(req, &ctx.rfengine).await;
+                                STATUS_REQ_HISTOGRAM_STATIC
+                                    .rf_track_wal_progress
+                                    .observe(start.saturating_elapsed().as_secs_f64());
+                                res
+                            }
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
                                 let res = Self::restore_shard(req, &ctx).await;
                                 STATUS_REQ_HISTOGRAM_STATIC
@@ -3123,6 +3167,13 @@ pub struct TruncateTsConfig {
     pub cluster_id: u64,
     pub ts: u64,
     pub range: Option<(Vec<u8>, Vec<u8>)>, // None means apply to all keyspaces.
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct TrackWalProgressRequest {
+    pub ts: u64,
 }
 
 fn estimate_backup_size_by(

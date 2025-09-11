@@ -30,5 +30,7 @@ mod status_server;
 mod tikv_server;
 mod transport;
 
-pub use status_server::{RestoreShardResponse, StatusServer, TruncateTsConfig};
+pub use status_server::{
+    RestoreShardResponse, StatusServer, TrackWalProgressRequest, TruncateTsConfig,
+};
 pub use tikv_server::*;

@@ -81,6 +81,8 @@ pub enum Error {
     DfsWorkerUnhealthy { store_id: u64, epoch_id: u32 },
     #[error("Backup error: {0}")]
     Backup(String),
+    #[error("Async writer disabled")]
+    AsyncWriterDisabled,
     #[error("Other error: {0}")]
     Other(String),
 }

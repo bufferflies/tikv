@@ -5,11 +5,12 @@ mod manifest;
 mod preprocessor;
 
 use std::{
+    cmp,
     cmp::max,
     collections::{
         hash_map::Entry as HashMapEntry, HashMap as StdHashMap, HashSet as StdHashSet, VecDeque,
     },
-    fs, mem, ops,
+    fmt, fs, mem, ops,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -144,11 +145,37 @@ impl RegionProgress {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct StoreProgress {
     pub store_id: u64,
     pub epoch: u32,
     pub offset: u64,
+}
+
+impl fmt::Display for StoreProgress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{{ store: {}, epoch: {}, offset: {} }}",
+            self.store_id, self.epoch, self.offset
+        )
+    }
+}
+
+impl PartialOrd for StoreProgress {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        (self.store_id == other.store_id).then(|| {
+            self.epoch
+                .cmp(&other.epoch)
+                .then_with(|| self.offset.cmp(&other.offset))
+        })
+    }
+}
+
+impl Ord for StoreProgress {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
 }
 
 impl StoreProgress {

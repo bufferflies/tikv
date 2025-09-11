@@ -4,7 +4,8 @@ use std::{sync::Arc, time::Duration};
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
-use http::{StatusCode, Uri};
+use http::{Request, StatusCode, Uri};
+use hyper::Body;
 use kvengine::GLOBAL_SHARD_END_KEY;
 use kvproto::cdcpb::ChangeDataRequest;
 use pd_client::RpcClient;
@@ -14,6 +15,24 @@ use tikv_util::{codec::bytes::decode_bytes, error, info, time::Instant, warn};
 use crate::{ticdc_util, ticdc_util::TiCdcError, Error};
 
 pub(crate) const DISPATCH_CDC_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) async fn send_request_to_store(
+    req: Request<Body>,
+    client: &HttpClient,
+    timeout: Duration,
+) -> crate::Result<(StatusCode, Bytes)> {
+    debug_assert!(!timeout.is_zero());
+    let uri_str = format!("{}", req.uri());
+    let resp_res = tokio::time::timeout(timeout, client.request(req))
+        .await
+        .map_err(|_| Error::StoreTimeout(format!("send request to {uri_str}")))?;
+    let resp = resp_res?;
+    let status = resp.status();
+    let body = tokio::time::timeout(timeout, hyper::body::to_bytes(resp.into_body()))
+        .await
+        .map_err(|_| Error::StoreTimeout(format!("read response from {uri_str}")))??;
+    Ok((status, body))
+}
 
 async fn dispatch_http_post_with_retry(
     client: &HttpClient,

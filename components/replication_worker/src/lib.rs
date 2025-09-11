@@ -8,6 +8,7 @@ mod provisioned;
 mod scheduler;
 mod ticdc_util;
 mod util;
+mod wal;
 mod worker;
 
 use std::{

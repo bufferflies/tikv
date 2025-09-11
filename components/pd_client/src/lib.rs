@@ -407,6 +407,10 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         unimplemented!();
     }
 
+    fn get_all_stores_async(&self, _exclude_tombstone: bool) -> PdFuture<Vec<metapb::Store>> {
+        unimplemented!();
+    }
+
     /// Gets cluster meta information.
     fn get_cluster_config(&self) -> Result<metapb::Cluster> {
         unimplemented!();
@@ -561,7 +565,7 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         unimplemented!()
     }
 
-    fn get_min_tso(&self) -> Result<TimeStamp> {
+    fn get_min_tso(&self) -> PdFuture<TimeStamp> {
         unimplemented!()
     }
 

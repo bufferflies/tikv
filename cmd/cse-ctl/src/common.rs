@@ -4,6 +4,7 @@ use std::{path::Path, sync::Arc};
 
 use kvengine::dfs::{DFSConfig, S3Fs};
 use kvproto::metapb::Store;
+use pd_client::util::get_all_stores_except_tiflash;
 use security::{GetSecurityManager, SecurityConfig, SecurityManager};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -64,8 +65,7 @@ impl CtlContext {
             .split(',')
             .filter_map(|x| x.parse().ok())
             .collect();
-        let mut stores =
-            native_br::common::get_all_stores_except_tiflash(self.pd_client.as_ref()).unwrap();
+        let mut stores = get_all_stores_except_tiflash(self.pd_client.as_ref()).unwrap();
         stores.retain(|store| !excludes.contains(&store.get_id()));
         stores
     }

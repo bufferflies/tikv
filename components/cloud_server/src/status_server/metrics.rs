@@ -8,6 +8,7 @@ make_auto_flush_static_metric! {
         sync_region_by_id,
         kvengine,
         rf_wal_chunk,
+        rf_track_wal_progress,
         rf_backup,
         truncate_ts,
         restore_shard,

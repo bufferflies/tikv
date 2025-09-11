@@ -13,7 +13,7 @@ use http::Request;
 use hyper::Body;
 use kvengine::dfs::{DFSConfig, S3Fs};
 use kvproto::metapb::Store;
-use pd_client::PdClient;
+use pd_client::{util::get_all_stores_except_tiflash, PdClient};
 use protobuf::Message;
 use regex::Regex;
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
@@ -27,9 +27,8 @@ use tikv_util::{
 
 use crate::{
     common::{
-        create_pd_client, generate_etcd_connect_opt, get_all_stores_except_tiflash,
-        get_latest_backup_meta, send_request_to_store, INCREMENTAL_BACKUP_FILE_NAME_FORMAT,
-        INCREMENTAL_BACKUP_FOLDER_FORMAT,
+        create_pd_client, generate_etcd_connect_opt, get_latest_backup_meta, send_request_to_store,
+        INCREMENTAL_BACKUP_FILE_NAME_FORMAT, INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, SharedError},
     metrics::NATIVE_BR_BACKUP_MISSING_COMMIT_RECORD,
@@ -224,7 +223,7 @@ pub fn update_service_safe_point(pd_client: &dyn PdClient, safepoint: u64) -> Re
 }
 
 pub fn get_backup_ts(pd_client: &dyn PdClient) -> Result<u64> {
-    match pd_client.get_min_tso() {
+    match block_on(pd_client.get_min_tso()) {
         Ok(ts) => Ok(ts.into_inner()),
         Err(e) => {
             if pd_client::grpc_error_is_unimplemented(&e) {

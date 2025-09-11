@@ -13,6 +13,7 @@ async-trait = "0.1"
 bytes = "1.0"
 cdc = { workspace = true }
 chrono = "0.4"
+cloud_server = { workspace = true }
 collections = { workspace = true }
 dashmap = "5"
 futures = "0.3"
@@ -28,6 +29,7 @@ log_wrappers = { workspace = true }
 merged_engine = { workspace = true }
 native_br = { workspace = true }
 nix = "0.24"
+parking_lot = "0.12"
 pd_client = { workspace = true }
 resolved_ts = { workspace = true }
 rfengine = { workspace = true }

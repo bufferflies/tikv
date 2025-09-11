@@ -22,13 +22,14 @@ use kvengine::{
 };
 use kvproto::metapb::Store;
 use native_br::{
-    common::{create_pd_client, get_all_stores_except_tiflash},
+    common::create_pd_client,
     error::{Error, Result},
 };
-use pd_client::RpcClient;
+use pd_client::{util::get_all_stores_except_tiflash, RpcClient};
 use security::{GetSecurityManager, SecurityConfig, SecurityManager};
 use tikv_util::{box_err, config::ReadableDuration, error, info, warn};
 use tokio::sync::{mpsc::Sender, Mutex, Semaphore};
+
 /// DFS GC Rules:
 ///
 /// * For files with last modified time later than (now -

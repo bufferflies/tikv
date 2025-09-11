@@ -18,8 +18,7 @@ use collections::{HashMap, HashSet};
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
 use grpcio_health::{create_health, HealthService, ServingStatus};
-use http::Request;
-use hyper::{http, Body, StatusCode};
+use hyper::{http, StatusCode};
 use kvengine::{
     dfs::{Dfs, S3Fs},
     table::{InnerKey, SnapVersion},
@@ -37,11 +36,11 @@ use kvproto::{
     tikvpb::create_tikv,
 };
 use log_wrappers::Value as LogValue;
-use merged_engine::{MergedEngine, MergedEngineContext};
+use merged_engine::{MergedEngine, MergedEngineContext, StoreProgress};
 use native_br::common::{
     collect_wal_chunks_with_retry, get_latest_backup_meta, CollectWalChunksContext,
 };
-use pd_client::{PdClient, RegionStat};
+use pd_client::{util::get_all_stores_except_tiflash, PdClient, RegionStat};
 use rfengine::{assemble_wal_chunks, RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig};
@@ -62,16 +61,17 @@ use crate::{
     scheduler::get_cdc_status,
     ticdc_util::TiCdcError,
     util::{
-        build_request_range_for_keyspace, keyspace_prefix_len, post_to_ticdc, DISPATCH_CDC_TIMEOUT,
+        build_request_range_for_keyspace, keyspace_prefix_len, post_to_ticdc,
+        send_request_to_store, DISPATCH_CDC_TIMEOUT,
     },
-    CdcMsg, Deregister, Error,
-    Error::StoreTimeout,
-    KeyspaceService, KeyspaceStates, ReplicationScheduler, ReplicationService,
-    ReplicationWorkerConfig, Result,
+    wal::{StoreWalProgresses, WalProgressFetcher, WalProgressTargets},
+    CdcMsg, Deregister, Error, KeyspaceService, KeyspaceStates, ReplicationScheduler,
+    ReplicationService, ReplicationWorkerConfig, Result,
 };
 
 const MAX_INITIALIZE_SCAN_BATCH_BYTES: usize = 1024 * 1024;
 const FETCH_WAL_TIMEOUT: Duration = Duration::from_secs(30);
+const TRACK_WAL_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_STORES_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct ReplicationWorker {
@@ -99,7 +99,9 @@ pub struct ReplicationWorker {
 
     resolved_regions: HashMap<(TimeStamp, RequestKey), Vec<u64 /* region_id */>>,
 
-    last_update_time: TimeStamp,
+    last_update_ts: TimeStamp,
+    wal_progress_targets: WalProgressTargets,
+
     stop: bool,
 }
 
@@ -210,7 +212,8 @@ impl ReplicationWorker {
             conn_regions: Default::default(),
             region_to_keyspace: Default::default(),
             resolved_regions: Default::default(),
-            last_update_time: backup_ts,
+            last_update_ts: backup_ts,
+            wal_progress_targets: WalProgressTargets::default(),
             stop: false,
         };
         let env = Arc::new(
@@ -269,6 +272,15 @@ impl ReplicationWorker {
     pub fn run(&mut self) {
         let _enter = self.ctx.fs.get_runtime().enter();
         info!("replication worker started");
+
+        WalProgressFetcher::run(
+            self.ctx.pd.clone(),
+            TRACK_WAL_PROGRESS_TIMEOUT,
+            self.runtime.handle().clone(),
+            self.wal_progress_targets.clone(),
+            self.config.sync_interval.0,
+        );
+
         loop {
             let res = self.rx.recv_timeout(Duration::from_millis(100));
             let has_msg = res.is_ok();
@@ -731,13 +743,13 @@ impl ReplicationWorker {
     }
 
     fn send_resolved_ts(&mut self) -> Result<()> {
-        info!("send_resolved_ts"; "last_update_time" => self.last_update_time);
+        info!("send_resolved_ts"; "last_update_time" => self.last_update_ts);
         self.resolved_regions.clear();
         for (&region_id, delegate) in &mut self.region_delegates {
             let Some(ts) = delegate
                 .resolver
                 .as_mut()
-                .and_then(|r| r.resolve(self.last_update_time))
+                .and_then(|r| r.resolve(self.last_update_ts))
             else {
                 continue;
             };
@@ -780,15 +792,22 @@ impl ReplicationWorker {
     }
 
     fn maybe_update_merged_engine(&mut self) -> Result<()> {
-        let new_timestamp = self.update_stores_with_retry(UPDATE_STORES_TIMEOUT)?;
+        let Some((target_ts, target_progresses)) = self.wal_progress_targets.front() else {
+            debug!("maybe_update_merged_engine: no new target");
+            return Ok(());
+        };
+        self.update_stores_with_retry(UPDATE_STORES_TIMEOUT, target_progresses)?;
         self.merged_engine.sync_merged(&mut self.apply_ctx)?;
         self.apply_ctx.flush_observer();
-        self.last_update_time = new_timestamp;
+
+        let target = self.wal_progress_targets.pop_front();
+        debug_assert!(target.is_some_and(|(ts, _)| ts == target_ts));
+        self.last_update_ts = target_ts;
         Ok(())
     }
 
     fn should_sync(&self) -> bool {
-        TimeStamp::physical_now().saturating_sub(self.last_update_time.physical())
+        TimeStamp::physical_now().saturating_sub(self.last_update_ts.physical())
             >= self.config.sync_interval.as_millis()
     }
 
@@ -840,12 +859,16 @@ impl ReplicationWorker {
         }
     }
 
-    fn update_stores_with_retry(&mut self, timeout: Duration) -> Result<TimeStamp> {
+    fn update_stores_with_retry(
+        &mut self,
+        timeout: Duration,
+        targets: StoreWalProgresses,
+    ) -> Result<()> {
         let mut last_err: Option<Error> = None;
         let start_time = Instant::now_coarse();
         while start_time.saturating_elapsed() < timeout {
-            match self.update_stores() {
-                Ok(ts) => return Ok(ts),
+            match self.update_stores(&targets) {
+                Ok(()) => return Ok(()),
                 Err(err) => {
                     last_err = Some(err);
                     std::thread::sleep(Duration::from_secs(1));
@@ -855,50 +878,90 @@ impl ReplicationWorker {
         Err(last_err.unwrap())
     }
 
-    fn update_stores(&mut self) -> Result<TimeStamp> {
+    fn update_stores(&mut self, targets: &StoreWalProgresses) -> Result<()> {
         let _enter = self.ctx.fs.get_runtime().enter();
-        let stores = native_br::common::get_all_stores_except_tiflash(self.ctx.pd.as_ref())?;
-        let ts = self.ctx.pd.get_min_tso()?;
+        let stores = get_all_stores_except_tiflash(self.ctx.pd.as_ref())?;
         let mut errors = vec![];
-        for store in stores {
-            let store_id = store.id;
-            if let Err(err) = self.update_store_wal(store) {
-                warn!("failed to update store {}, err {:?}", store_id, err);
+        for (&store_id, &target) in targets {
+            let Some(target) = target else {
+                errors.push(box_err!("target store not ready: {}", store_id));
+                continue;
+            };
+            let store = stores.iter().find(|s| s.id == store_id);
+            if let Err(err) = self.update_store_wal(store_id, store, target) {
+                warn!("update_store_wal: failed: {:?}", err; "store" => store_id);
                 errors.push(err);
             }
         }
         if errors.len() <= 1 {
-            return Ok(ts);
+            return Ok(());
         }
         Err(errors.pop().unwrap())
     }
 
-    fn update_store_wal(&mut self, store: metapb::Store) -> Result<()> {
-        let security_mgr = self.ctx.pd.get_security_mgr();
-        let store_id = store.get_id();
+    fn update_store_wal(
+        &mut self,
+        store_id: u64,
+        store: Option<&metapb::Store>,
+        target: StoreProgress,
+    ) -> Result<()> {
         let store_progress = self.merged_engine.get_or_insert_store_progress(store_id);
+        info!("update_store_wal";
+            "store" => store_id, "current" => %store_progress, "target" => %target);
+        if store_progress >= target {
+            debug!("update_store_wal: store is up-to-date"; "store" => store_id);
+            return Ok(());
+        }
+
+        let get_end_off = |epoch: u32| {
+            debug_assert!(epoch <= target.epoch);
+            if epoch < target.epoch {
+                0 // Means read to end.
+            } else {
+                target.offset
+            }
+        };
+        let next_epoch_offset = |epoch: u32,
+                                 end_off: u64,
+                                 rotated: bool|
+         -> (u32 /* next_epoch */, u64 /* next_start_off */) {
+            if rotated {
+                (epoch + 1, 0)
+            } else {
+                (epoch, end_off)
+            }
+        };
+
+        let security_mgr = self.ctx.pd.get_security_mgr();
         let mut epoch = store_progress.epoch;
         let mut start_off = store_progress.offset;
-        loop {
+        while (epoch, start_off) < (target.epoch, target.offset) {
+            let end_off = get_end_off(epoch);
+            debug!("update_store_wal"; "store" => store_id, "epoch" => epoch,
+                "start" => start_off, "end" => end_off);
+
+            if store.is_none() || epoch <= near_overwritten_epoch(target.epoch) {
+                let rotated = self.update_store_wal_from_s3(store_id, epoch, start_off, target)?;
+                (epoch, start_off) = next_epoch_offset(epoch, end_off, rotated);
+                continue;
+            }
+
+            let store = store.unwrap();
             let uri = security_mgr
                 .build_uri(format!(
-                    "{}/rfengine/wal_chunk?epoch_id={}&start_off={}&end_off=0",
-                    &store.status_address, epoch, start_off
+                    "{}/rfengine/wal_chunk?epoch_id={}&start_off={}&end_off={}",
+                    &store.status_address, epoch, start_off, end_off
                 ))
                 .unwrap();
             let req = http::Request::get(uri.clone())
                 .body(hyper::Body::empty())
                 .unwrap();
             let http_client = self.http_client.clone();
-            let (status, data) = block_on(Self::send_request_to_store(
-                req,
-                &http_client,
-                FETCH_WAL_TIMEOUT,
-            ))?;
+            let (status, data) =
+                block_on(send_request_to_store(req, &http_client, FETCH_WAL_TIMEOUT))?;
             if status == StatusCode::GONE {
-                self.update_store_wal_from_s3(store.get_id(), epoch, start_off)?;
-                epoch += 1;
-                start_off = 0;
+                let rotated = self.update_store_wal_from_s3(store_id, epoch, start_off, target)?;
+                (epoch, start_off) = next_epoch_offset(epoch, end_off, rotated);
                 continue;
             }
             if !status.is_success() {
@@ -908,33 +971,20 @@ impl ReplicationWorker {
             let data_len = data.len();
             self.merged_engine
                 .update_wal(store_id, epoch, start_off, data.clone())?;
-            if status == StatusCode::PARTIAL_CONTENT {
+            let rotate = if epoch < target.epoch {
+                debug_assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+                true
+            } else {
+                // OK: means there is no more data for this epoch.
+                status == StatusCode::OK
+            };
+            if rotate {
                 self.merged_engine
                     .rotate_wal(store_id, epoch, start_off + data_len as u64)?;
-                epoch += 1;
-                start_off = 0;
-                continue;
             }
-            return Ok(());
+            (epoch, start_off) = next_epoch_offset(epoch, end_off, rotate);
         }
-    }
-
-    pub async fn send_request_to_store(
-        req: Request<Body>,
-        client: &HttpClient,
-        timeout: Duration,
-    ) -> Result<(StatusCode, Bytes)> {
-        debug_assert!(!timeout.is_zero());
-        let uri_str = format!("{}", req.uri());
-        let resp_res = tokio::time::timeout(timeout, client.request(req))
-            .await
-            .map_err(|_| StoreTimeout(format!("send request to {uri_str}")))?;
-        let resp = resp_res?;
-        let status = resp.status();
-        let body = tokio::time::timeout(timeout, hyper::body::to_bytes(resp.into_body()))
-            .await
-            .map_err(|_| StoreTimeout(format!("read response from {uri_str}")))??;
-        Ok((status, body))
+        Ok(())
     }
 
     fn update_store_wal_from_s3(
@@ -942,9 +992,10 @@ impl ReplicationWorker {
         store_id: u64,
         epoch_id: u32,
         start_off: u64,
-    ) -> Result<()> {
-        info!("update store wal from s3";
-            "store_id" => store_id, "epoch_id" => epoch_id, "start_off" => start_off);
+        target: StoreProgress,
+    ) -> Result<bool /* rotated */> {
+        info!("update_store_wal_from_s3"; "store" => store_id,
+            "epoch" => epoch_id, "start" => start_off, "target" => %target);
         let collect_ctx = CollectWalChunksContext {
             pd_client: self.ctx.pd.clone(),
             dfs: self.ctx.fs.clone(),
@@ -954,16 +1005,28 @@ impl ReplicationWorker {
         };
         let tag = format!("{}:{}", store_id, epoch_id);
         // there is no online chunk for this epoch.
-        let (chunks, _) =
-            collect_wal_chunks_with_retry(&tag, &collect_ctx, epoch_id, epoch_id + 1, 0)
-                .map_err(|e| Error::from(e))?;
+        let (chunks, online_chunk, has_last_chunk) = collect_wal_chunks_with_retry(
+            &tag,
+            &collect_ctx,
+            epoch_id,
+            target.epoch,
+            target.offset,
+        )
+        .map_err(|e| Error::from(e))?;
+        debug_assert!(online_chunk.is_none());
+        if epoch_id < target.epoch {
+            debug_assert!(has_last_chunk);
+        }
+        let rotate = has_last_chunk;
         let wal_data = assemble_wal_chunks(chunks)?.freeze();
         let end_off = wal_data.len() as u64;
         let remained_wal_data = wal_data.slice((start_off as usize)..);
         self.merged_engine
             .update_wal(store_id, epoch_id, start_off, remained_wal_data)?;
-        self.merged_engine.rotate_wal(store_id, epoch_id, end_off)?;
-        Ok(())
+        if rotate {
+            self.merged_engine.rotate_wal(store_id, epoch_id, end_off)?;
+        }
+        Ok(rotate)
     }
 
     fn report_store_to_pd(pd_client: &Arc<dyn PdClient>, store_id: u64) {
@@ -1656,4 +1719,9 @@ impl ScanLocksHandler {
         info!("{} cdc scan locks", tag; "keyspace" => keyspace_id, "locks" => self.locks.len());
         Ok(())
     }
+}
+
+// Ref: ObjectStorageWorker::near_overwritten_epoch
+fn near_overwritten_epoch(current_epoch: u32) -> u32 {
+    current_epoch.saturating_sub(rfengine::EPOCH_ROTATE_LEN - 2)
 }

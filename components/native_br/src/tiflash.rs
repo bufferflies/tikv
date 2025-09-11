@@ -6,13 +6,13 @@ use api_version::ApiV2;
 use http::Request;
 use hyper::Body;
 use kvproto::metapb::Store;
-use pd_client::{pd_control::PdControl, PdClient};
+use pd_client::{pd_control::PdControl, util::get_tiflash_storage_stores, PdClient};
 use security::SecurityManager;
 use slog_global::{error, info};
 use tikv_util::{box_err, retry::sleep_async, time::Instant};
 
 use crate::{
-    common::{get_tiflash_storage_stores, send_request_to_store_with_retry},
+    common::send_request_to_store_with_retry,
     error::{HttpRequestError, Result},
 };
 

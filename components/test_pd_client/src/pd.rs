@@ -1558,6 +1558,13 @@ impl PdClient for TestPdClient {
         self.cluster.rl().get_all_stores(exclude_tombstone)
     }
 
+    fn get_all_stores_async(&self, exclude_tombstone: bool) -> PdFuture<Vec<metapb::Store>> {
+        match self.get_all_stores(exclude_tombstone) {
+            Ok(stores) => Box::pin(ok(stores)),
+            Err(e) => Box::pin(err(e)),
+        }
+    }
+
     fn get_store(&self, store_id: u64) -> Result<metapb::Store> {
         self.check_bootstrap()?;
         self.cluster.rl().get_store(store_id)
@@ -2027,8 +2034,8 @@ impl PdClient for TestPdClient {
         }
     }
 
-    fn get_min_tso(&self) -> Result<TimeStamp> {
-        block_on(self.get_tso())
+    fn get_min_tso(&self) -> PdFuture<TimeStamp> {
+        self.get_tso()
     }
 
     fn update_service_safe_point(

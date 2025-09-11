@@ -22,6 +22,8 @@ pub const RAFT_TRUNCATED_STATE_KEY: &[u8] = &[6];
 pub const KV_ENGINE_META_DIFF_KEY: &[u8] = &[7];
 pub const KV_ENGINE_META_SNAP_DIFF_KEY: &[u8] = &[8];
 
+pub const LAST_WAL_CHUNK_SUFFIX: &str = ".last";
+
 pub fn raft_state_key(version: u64) -> Bytes {
     let mut key = BytesMut::with_capacity(5);
     key.put_u8(RAFT_STATE_KEY_BYTE);
@@ -117,7 +119,12 @@ pub fn parse_wal_chunk_key(key: Option<&str>) -> Option<(u32, u64, u64, bool /* 
             let epoch = u32::from_str_radix(epoch_hex, 16).unwrap();
             let start_off = u64::from_str_radix(start_off_hex, 16).unwrap();
             let end_off = u64::from_str_radix(end_off_hex, 16).unwrap();
-            return Some((epoch, start_off, end_off, key.ends_with(".last")));
+            return Some((
+                epoch,
+                start_off,
+                end_off,
+                key.ends_with(LAST_WAL_CHUNK_SUFFIX),
+            ));
         }
         None
     })
@@ -221,7 +228,7 @@ fn wal_chunk_file_key_with_suffix(
     end_off: u64,
     last: bool,
 ) -> String {
-    let suffix = if last { ".last" } else { "" };
+    let suffix = if last { LAST_WAL_CHUNK_SUFFIX } else { "" };
     format!(
         "store_backup/{:016x}/wal_chunks/e{:08x}_{:016x}_{:016x}.wal{}",
         store_id, epoch_id, start_off, end_off, suffix,

@@ -632,6 +632,10 @@ impl PdClient for RpcClient {
     }
 
     fn get_all_stores(&self, exclude_tombstone: bool) -> Result<Vec<metapb::Store>> {
+        block_on(self.get_all_stores_async(exclude_tombstone))
+    }
+
+    fn get_all_stores_async(&self, exclude_tombstone: bool) -> PdFuture<Vec<metapb::Store>> {
         let _timer = PD_REQUEST_HISTOGRAM_VEC
             .with_label_values(&["get_all_stores"])
             .start_coarse_timer();
@@ -640,12 +644,30 @@ impl PdClient for RpcClient {
         req.set_header(self.header());
         req.set_exclude_tombstone_stores(exclude_tombstone);
 
-        let mut resp = sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, option| {
-            client.get_all_stores_opt(&req, option)
-        })?;
-        check_resp_header(resp.get_header())?;
+        let executor = move |client: &Client, req: pdpb::GetAllStoresRequest| {
+            let handler = {
+                let inner = client.inner.rl();
+                inner
+                    .client_stub
+                    .get_all_stores_async_opt(&req, call_option_inner(&inner))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "fail to request PD {} err {:?}",
+                            "get_all_stores_async_opt", e
+                        )
+                    })
+            };
 
-        Ok(resp.take_stores().into())
+            Box::pin(async move {
+                let mut resp = handler.await?;
+                check_resp_header(resp.get_header())?;
+                Ok(resp.take_stores().into())
+            }) as PdFuture<_>
+        };
+
+        self.pd_client
+            .request(req, executor, LEADER_CHANGE_RETRY)
+            .execute()
     }
 
     fn get_cluster_config(&self) -> Result<metapb::Cluster> {
@@ -1142,7 +1164,7 @@ impl PdClient for RpcClient {
             .execute()
     }
 
-    fn get_min_tso(&self) -> Result<TimeStamp> {
+    fn get_min_tso(&self) -> PdFuture<TimeStamp> {
         let _timer = PD_REQUEST_HISTOGRAM_VEC
             .with_label_values(&["get_min_tso"])
             .start_coarse_timer();
@@ -1150,16 +1172,31 @@ impl PdClient for RpcClient {
         let mut req: pdpb::GetMinTsRequest = pdpb::GetMinTsRequest::default();
         req.set_header(self.header());
 
-        let resp: pdpb::GetMinTsResponse =
-            sync_request(&self.pd_client, LEADER_CHANGE_RETRY, |client, option| {
-                client.get_min_ts_opt(&req, option)
-            })?;
-        check_resp_header(resp.get_header())?;
-        let ts: TimeStamp = TimeStamp::compose(
-            resp.get_timestamp().get_physical().try_into().unwrap(),
-            resp.get_timestamp().get_logical().try_into().unwrap(),
-        );
-        Ok(ts)
+        let executor = move |client: &Client, req: pdpb::GetMinTsRequest| {
+            let handler = {
+                let inner = client.inner.rl();
+                inner
+                    .client_stub
+                    .get_min_ts_async_opt(&req, call_option_inner(&inner))
+                    .unwrap_or_else(|e| {
+                        panic!("fail to request PD {} err {:?}", "get_min_ts_async_opt", e)
+                    })
+            };
+
+            Box::pin(async move {
+                let resp = handler.await?;
+                check_resp_header(resp.get_header())?;
+                let ts: TimeStamp = TimeStamp::compose(
+                    resp.get_timestamp().get_physical().try_into().unwrap(),
+                    resp.get_timestamp().get_logical().try_into().unwrap(),
+                );
+                Ok(ts)
+            }) as PdFuture<_>
+        };
+
+        self.pd_client
+            .request(req, executor, LEADER_CHANGE_RETRY)
+            .execute()
     }
 
     fn update_service_safe_point(

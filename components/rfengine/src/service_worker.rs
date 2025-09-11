@@ -30,7 +30,7 @@ use crate::{
     manifest::Manifest,
     write_batch::PeerBatch,
     writer::WalWriter,
-    BackupTask, Error,
+    BackupTask, Error, Result,
 };
 
 pub(crate) struct ObjectStorageWorkerHandle {
@@ -46,12 +46,22 @@ impl ObjectStorageWorkerHandle {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")] // Be uniform with status server interfaces.
+pub struct WalProgress {
+    pub epoch: u32,
+    pub offset: u64,
+}
+
 pub(crate) enum ServiceTask {
     Dump {
         epoch_id: u32,
         start_off: u64,
         end_off: u64,
-        callback: Box<dyn FnOnce(crate::Result<(Bytes, bool)>) + Send>,
+        callback: Box<dyn FnOnce(Result<(Bytes, bool)>) + Send>,
+    },
+    GetProgress {
+        callback: Box<dyn FnOnce(Result<WalProgress>) + Send>,
     },
     Rotate {
         epoch_id: u32,
@@ -71,6 +81,7 @@ impl fmt::Debug for ServiceTask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ServiceTask::Dump { .. } => write!(f, "ServiceTask::Dump"),
+            ServiceTask::GetProgress { .. } => write!(f, "ServiceTask::GetProgress"),
             ServiceTask::Rotate { .. } => write!(f, "ServiceTask::Rotate"),
             ServiceTask::Write { .. } => write!(f, "ServiceTask::Write"),
             ServiceTask::Backup(_) => write!(f, "ServiceTask::Backup"),
@@ -180,6 +191,9 @@ impl ServiceWorker {
                 } => {
                     self.handle_dump(epoch_id, start_off, end_off, callback);
                 }
+                ServiceTask::GetProgress { callback } => {
+                    self.handle_get_progress(callback);
+                }
                 ServiceTask::Backup(task) => {
                     self.handle_backup(task);
                 }
@@ -228,14 +242,19 @@ impl ServiceWorker {
         }
     }
 
+    /// `partial_content`:
+    /// - When `end_off == 0`, `partial_content` is true means that there is
+    ///   more epoches.
+    /// - When `end_off > 0`, `partial_content` is true means that the epoch (of
+    ///   `epoch_id`) has more content after `end_off`.
     fn handle_dump(
         &mut self,
         epoch_id: u32,
         start_off: u64,
         end_off: u64,
-        callback: Box<dyn FnOnce(crate::Result<(Bytes, bool)>) + Send>,
+        callback: Box<dyn FnOnce(Result<(Bytes, bool /* partial_content */)>) + Send>,
     ) {
-        if let Some(writer) = self.async_wal_writer.as_ref() {
+        let res = if let Some(writer) = self.async_wal_writer.as_ref() {
             let mut partial_content = false;
             let store_id = self.get_engine_id();
             // Check the WAL chunk meta is valid.
@@ -245,7 +264,7 @@ impl ServiceWorker {
                     store_id, epoch_id, start_off, end_off, writer.epoch_id, writer.file_off
                 );
                 error!("{}", msg);
-                callback(Err(crate::Error::Other(msg)));
+                callback(Err(Error::Other(msg)));
                 return;
             } else if epoch_id + 3 < writer.epoch_id {
                 // The epoch_id is too old and has been overwritten.
@@ -253,10 +272,11 @@ impl ServiceWorker {
                     "{}: handle dump: epoch is overwritten: epoch {} writer epoch {}",
                     store_id, epoch_id, writer.epoch_id
                 );
-                callback(Err(crate::Error::WalEpochOverwritten { epoch_id }));
+                callback(Err(Error::WalEpochOverwritten { epoch_id }));
                 return;
             }
             // Dump the WAL chunk from offset start_off to end_off.
+            #[allow(clippy::collapsible_else_if)]
             let effective_end_off = if end_off == 0 {
                 if writer.epoch_id == epoch_id {
                     writer.file_off
@@ -267,14 +287,24 @@ impl ServiceWorker {
                     file_meta.len()
                 }
             } else {
-                end_off
+                if writer.epoch_id == epoch_id {
+                    debug_assert!(end_off <= writer.file_off);
+                    partial_content = true;
+                    end_off.min(writer.file_off)
+                } else {
+                    let wal_file_name = wal_file_name(&writer.dir, epoch_id);
+                    let file_len = fs::metadata(wal_file_name).unwrap().len();
+                    debug_assert!(end_off <= file_len);
+                    partial_content = end_off < file_len;
+                    end_off.min(file_len)
+                }
             };
             info!(
                 "{}: dump latest wal epoch {} start_off {} end_off {} effective_end_off {} writer epoch {}",
                 store_id, epoch_id, start_off, end_off, effective_end_off, writer.epoch_id,
             );
             match dump_wal_chunk(&writer.dir, epoch_id, start_off, effective_end_off) {
-                Ok(chunk) => callback(Ok((chunk, partial_content))),
+                Ok(chunk) => Ok((chunk, partial_content)),
                 Err(err) => {
                     let msg = format!(
                         "{}: dump wal chunk epoch {} start_off {} end_off {} failed {:?}",
@@ -285,10 +315,26 @@ impl ServiceWorker {
                         err
                     );
                     error!("{}", msg);
-                    callback(Err(crate::Error::Other(msg)));
+                    Err(Error::Other(msg))
                 }
             }
-        }
+        } else {
+            Err(Error::AsyncWriterDisabled)
+        };
+        callback(res);
+    }
+
+    fn handle_get_progress(&mut self, callback: Box<dyn FnOnce(Result<WalProgress>) + Send>) {
+        let res = if let Some(writer) = &self.async_wal_writer {
+            let progress = WalProgress {
+                epoch: writer.epoch_id,
+                offset: writer.file_off,
+            };
+            Ok(progress)
+        } else {
+            Err(Error::AsyncWriterDisabled)
+        };
+        callback(res);
     }
 
     fn handle_flush(&mut self) {

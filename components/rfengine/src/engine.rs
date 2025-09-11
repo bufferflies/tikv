@@ -40,7 +40,7 @@ use crate::{
     log_batch::{RaftLogBlock, RaftLogs},
     manifest::{manifest_path, persist_change_set, Manifest},
     metrics::*,
-    service_worker::{ServiceTask, ServiceWorker},
+    service_worker::{ServiceTask, ServiceWorker, WalProgress},
     write_batch::{PeerBatch, WriteBatch},
     *,
 };
@@ -736,6 +736,10 @@ impl RfEngineCore {
         });
     }
 
+    pub fn get_wal_progress(&self, callback: Box<dyn FnOnce(Result<WalProgress>) + Send>) {
+        self.try_send_task(ServiceTask::GetProgress { callback });
+    }
+
     pub fn backup(&self, mut task: BackupTask) {
         if !self.is_async_wal_enabled() {
             // Note: when async wal is enabled, `file_off` is acquired from
@@ -777,6 +781,7 @@ impl RfEngineCore {
             let err_msg = "service worker is closed".to_string();
             match task {
                 ServiceTask::Dump { callback, .. } => callback(Err(Error::Other(err_msg))),
+                ServiceTask::GetProgress { callback } => callback(Err(Error::Other(err_msg))),
                 ServiceTask::Backup(task) => (task.callback)(Err(Error::Backup(err_msg))),
                 _ => {}
             }

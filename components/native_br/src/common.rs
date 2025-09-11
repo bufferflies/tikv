@@ -56,40 +56,6 @@ pub fn create_pd_client(security_conf: &SecurityConfig, pd_conf: &pd_client::Con
         .unwrap_or_else(|e| panic!("failed to create rpc client: {:?}", e))
 }
 
-pub fn get_all_stores_except_tiflash(pd_client: &dyn PdClient) -> Result<Vec<Store>> {
-    Ok(pd_client
-        .get_all_stores(true)?
-        .into_iter()
-        .filter(|s| {
-            !s.get_labels().iter().any(|l| {
-                // including "tiflash" & "tiflash_compute"
-                l.key.to_lowercase() == "engine" && l.value.to_lowercase().starts_with("tiflash")
-            })
-        })
-        .collect())
-}
-
-pub fn get_tiflash_storage_stores(pd_client: &dyn PdClient) -> Result<Vec<Store>> {
-    Ok(pd_client
-        .get_all_stores(true)?
-        .into_iter()
-        .filter(|s| {
-            let mut is_tiflash = false;
-            let mut is_write_role = false;
-            for l in s.get_labels().iter() {
-                if l.key.to_lowercase() == "engine" && l.value.to_lowercase() == "tiflash" {
-                    is_tiflash = true;
-                }
-                // exclude the tiflash write node
-                if l.key.to_lowercase() == "engine_role" && l.value.to_lowercase() == "write" {
-                    is_write_role = true;
-                }
-            }
-            is_tiflash && !is_write_role
-        })
-        .collect())
-}
-
 pub async fn send_request_to_store(
     req: Request<Body>,
     store: &Store,
@@ -420,7 +386,7 @@ pub fn replay_wal_logs_from_backup(
     // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
     // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
     for epoch_id in snap_epoch + 1..=backup_epoch {
-        let (chunks, online_chunk) = collect_wal_chunks_with_retry(
+        let (chunks, online_chunk, _) = collect_wal_chunks_with_retry(
             tag,
             &collect_ctx,
             epoch_id,
@@ -491,7 +457,7 @@ pub fn collect_wal_chunks_with_retry(
     epoch_id: u32,
     backup_epoch: u32,
     backup_offset: u64,
-) -> Result<(Vec<Bytes>, Option<Bytes>)> {
+) -> Result<(Vec<Bytes>, Option<Bytes>, bool /* has_last_chunk */)> {
     let start_time = Instant::now_coarse();
 
     let (chunk_keys, online_chunk) = if epoch_id == backup_epoch && !ctx.complete_wal_chunks {
@@ -526,7 +492,11 @@ pub fn collect_wal_chunks_with_retry(
         ctx.fetch_wal_timeout,
         Some(start_time),
     )?;
-    Ok((chunks_data, online_chunk))
+
+    let has_last_chunk = chunk_keys
+        .last()
+        .is_some_and(|key| key.ends_with(rfengine::LAST_WAL_CHUNK_SUFFIX));
+    Ok((chunks_data, online_chunk, has_last_chunk))
 }
 
 /// `end_off`:
@@ -1022,7 +992,7 @@ pub fn collect_store_wal_rlog_files(
     // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
     // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
     for epoch_id in store_rlog.snap_epoch + 1..=backup_epoch {
-        let (epoch_wals, online_chunk) =
+        let (epoch_wals, online_chunk, _) =
             collect_wal_chunks_with_retry(tag, &ctx, epoch_id, backup_epoch, backup_offset)?;
         debug_assert!(online_chunk.is_none());
         wals.push((epoch_id, epoch_wals))

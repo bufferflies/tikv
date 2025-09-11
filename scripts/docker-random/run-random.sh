@@ -212,11 +212,11 @@ for i in $(seq -w 1 100000); do
 
         # For logs of TiDB cluster components
         if compgen -G "$TMPDIR/tc*" >/dev/null; then
-            chmod +r "$TMPDIR"/tc*/*.log
+            chmod +r "$TMPDIR"/tc*/*.log || true
             cp "$TMPDIR"/tc*/*.log "$TMPDIR"/tc*/*.toml "$CLUSTER_LOGS" || true
         fi
         if compgen -G "$TMPDIR/rep*" >/dev/null; then
-            chmod +r "$TMPDIR"/rep*/*.log
+            chmod +r "$TMPDIR"/rep*/*.log || true
             cp "$TMPDIR"/rep*/*.log "$TMPDIR"/rep*/*.toml "$CLUSTER_LOGS" || true
         fi
 

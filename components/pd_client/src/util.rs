@@ -24,7 +24,7 @@ use grpcio::{
     Environment, Error::RpcFailure, MetadataBuilder, Result as GrpcResult, RpcStatusCode,
 };
 use kvproto::{
-    metapb::{self, BucketStats},
+    metapb::{self, BucketStats, Store},
     pdpb,
     pdpb::{
         ErrorType, GetClusterInfoRequest, GetMembersRequest, GetMembersResponse, Member,
@@ -47,8 +47,8 @@ use tokio::sync::Mutex;
 use tokio_timer::timer::Handle;
 
 use super::{
-    metrics::*, tso::TimestampOracle, BucketMeta, BucketStat, Config, Error, FeatureGate, PdFuture,
-    Result, REQUEST_TIMEOUT,
+    metrics::*, tso::TimestampOracle, BucketMeta, BucketStat, Config, Error, FeatureGate, PdClient,
+    PdFuture, Result, REQUEST_TIMEOUT,
 };
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(1); // 1s
@@ -1429,6 +1429,45 @@ impl RegionLike for pdpb::Region {
     fn end_key(&self) -> &[u8] {
         &self.get_region().end_key
     }
+}
+
+pub fn get_all_stores_except_tiflash(pd_client: &dyn PdClient) -> Result<Vec<Store>> {
+    block_on(get_all_stores_except_tiflash_async(pd_client))
+}
+
+pub async fn get_all_stores_except_tiflash_async(pd_client: &dyn PdClient) -> Result<Vec<Store>> {
+    Ok(pd_client
+        .get_all_stores_async(true)
+        .await?
+        .into_iter()
+        .filter(|s| {
+            !s.get_labels().iter().any(|l| {
+                // including "tiflash" & "tiflash_compute"
+                l.key.to_lowercase() == "engine" && l.value.to_lowercase().starts_with("tiflash")
+            })
+        })
+        .collect())
+}
+
+pub fn get_tiflash_storage_stores(pd_client: &dyn PdClient) -> Result<Vec<Store>> {
+    Ok(pd_client
+        .get_all_stores(true)?
+        .into_iter()
+        .filter(|s| {
+            let mut is_tiflash = false;
+            let mut is_write_role = false;
+            for l in s.get_labels().iter() {
+                if l.key.to_lowercase() == "engine" && l.value.to_lowercase() == "tiflash" {
+                    is_tiflash = true;
+                }
+                // exclude the tiflash write node
+                if l.key.to_lowercase() == "engine_role" && l.value.to_lowercase() == "write" {
+                    is_write_role = true;
+                }
+            }
+            is_tiflash && !is_write_role
+        })
+        .collect())
 }
 
 #[cfg(test)]
