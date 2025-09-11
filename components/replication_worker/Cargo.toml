@@ -5,7 +5,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-testexport = []
+testexport = ["toml"]
 
 [dependencies]
 api_version = { workspace = true }
@@ -53,4 +53,5 @@ tikv = { workspace = true }
 tikv_kv = { workspace = true }
 tikv_util = { workspace = true }
 tokio = { version = "1.12", features = ["full"] }
+toml = { version = "0.5", optional = true }
 txn_types = { workspace = true }

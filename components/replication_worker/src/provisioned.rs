@@ -89,7 +89,7 @@ pub mod local_provider {
     };
     use pd_client::pd_control::PdControl;
     use security::{RestfulClient, SecurityConfig, SecurityManager};
-    use serde_derive::Deserialize;
+    use serde_derive::{Deserialize, Serialize};
     use tikv_util::{box_err, info, retry::try_wait_result_async};
 
     use crate::Result;
@@ -182,11 +182,19 @@ pub mod local_provider {
             let keyspace_id = self.keyspace_id;
             let data_dir = self.data_dir.join(format!("tidb-{keyspace_id}"));
             let log_file = self.data_dir.join(format!("rep-tidb-{keyspace_id}.log"));
+            let slow_log_file = self
+                .data_dir
+                .join(format!("rep-tidb-slow-{keyspace_id}.log"));
+            let config_file = self.data_dir.join(format!("rep-tidb-{keyspace_id}.toml"));
+            let config = LocalTidbConfig::default();
+            fs::write(&config_file, toml::to_string(&config).unwrap()).unwrap();
             cmd.arg(format!("--P={}", self.local_tidb_port()))
                 .arg(format!("--log-file={}", log_file.display()))
+                .arg(format!("--log-slow-query={}", slow_log_file.display()))
                 .arg("--store=unistore")
                 .arg(format!("--path={}", data_dir.display()))
-                .arg(format!("--status={}", self.local_tidb_status_port()));
+                .arg(format!("--status={}", self.local_tidb_status_port()))
+                .arg(format!("--config={}", config_file.display()));
             info!("start local tidb-server"; "cmd" => ?cmd);
             cmd.spawn().unwrap()
         }
@@ -326,5 +334,17 @@ pub mod local_provider {
     struct TidbHealth {
         status: String, // "up" or "down"
         token: String,  // keyspace name
+    }
+
+    #[derive(Default, Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    struct LocalTidbConfig {
+        security: TidbConfigSecurity,
+    }
+
+    #[derive(Default, Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    struct TidbConfigSecurity {
+        enable_sem: bool, // Disable "sem" to update `mysql.tidb`.
     }
 }

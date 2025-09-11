@@ -296,6 +296,18 @@ impl ServerCluster {
         &self.confs
     }
 
+    pub fn get_any_node_config(&self) -> Option<&TikvConfig> {
+        self.confs.values().next()
+    }
+
+    pub fn get_mem_table_size(&self) -> ReadableSize {
+        self.get_any_node_config()
+            .unwrap()
+            .rocksdb
+            .writecf
+            .write_buffer_size
+    }
+
     pub fn update_node_config(&mut self, node_id: u16, conf: TikvConfig) {
         self.confs.insert(node_id, conf);
     }

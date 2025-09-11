@@ -218,6 +218,8 @@ for i in $(seq -w 1 100000); do
         if compgen -G "$TMPDIR/rep*" >/dev/null; then
             chmod +r "$TMPDIR"/rep*/*.log || true
             cp "$TMPDIR"/rep*/*.log "$TMPDIR"/rep*/*.toml "$CLUSTER_LOGS" || true
+            chmod +r "$TMPDIR"/rep*/sync_diff/output/*.log || true
+            cp -r "$TMPDIR"/rep*/sync_diff "$CLUSTER_LOGS" || true
         fi
 
         mv "$LOG" "$LOG_PATH"/error-logs/

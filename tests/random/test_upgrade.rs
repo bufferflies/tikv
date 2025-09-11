@@ -92,6 +92,7 @@ fn test_random_upgrade() {
         &tables,
         running.clone(),
     );
+    assert!(!async_handles.is_empty(), "no workload to run");
 
     let worker_configs = cluster.tikv_worker_configs().clone();
     let server_configs = cluster.get_node_configs().clone();

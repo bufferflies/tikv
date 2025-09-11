@@ -82,11 +82,7 @@ fn test_merged_engine_once() {
             timeout_fetch_wal: ReadableDuration::secs(10),
             merged_store_id: 1024,
             force_ia: false,
-            mem_table_size: cluster
-                .get_node_config(node_ids[0])
-                .rocksdb
-                .writecf
-                .write_buffer_size,
+            mem_table_size: cluster.get_mem_table_size(),
             raft_write_batch_size: ReadableSize::kb(256),
         },
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),

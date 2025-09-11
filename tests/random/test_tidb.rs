@@ -176,6 +176,7 @@ fn test_random_with_tidb() {
         &tables,
         running.clone(),
     );
+    assert!(!async_handles.is_empty(), "no workload to run");
 
     // Main loop.
     let start_time = Instant::now();
@@ -470,6 +471,7 @@ pub(crate) fn start_components(
         let tc = tc.clone();
         let columnar_switch_on = switches.columnar_switch_on;
         let enable_tiflash_write_node = switches.enable_tiflash_write_node;
+        let gc_lifetime = switches.tidb_gc_lifetime.clone();
         runtime.spawn(async move {
             tc.start_tidb(
                 INITIAL_KEYSPACE_COUNT as u16,
@@ -480,7 +482,7 @@ pub(crate) fn start_components(
                     txn_chunk_max_size: TXN_CHUNK_MAX_SIZE as u64,
                     txn_file_min_mutation_size: Some(TXN_FILE_MIN_SIZE as u64),
                     gc_interval: TIDB_GC_INTERVAL.to_owned(),
-                    gc_lifetime: TIDB_GC_LIFETIME.to_owned(),
+                    gc_lifetime,
                     tiflash_disaggregated_mode: columnar_switch_on,
                     enable_tiflash_write_node,
                 },
@@ -665,6 +667,22 @@ pub(crate) async fn collect_tables(
     tables.into_iter().map(|t| Arc::new(t)).collect()
 }
 
+pub(crate) fn collect_db_names(switches: &Switches) -> Vec<String> {
+    let mut db_names = vec![];
+    if switches.tpc_switch_on {
+        for tpc_idx in 0..TPCC_WORKLOAD_CONCURRENCY {
+            db_names.push(db_name_by_tpc_idx(tpc_idx));
+        }
+    }
+    if switches.jepsen_switch_on {
+        db_names.push(BANK_DB_NAME.into());
+    }
+    if switches.unique_workload_switch_on {
+        db_names.push(UNIQUE_DB_NAME.into());
+    }
+    db_names
+}
+
 pub(crate) fn start_workloads(
     tc: &TidbCluster,
     pd_client: Arc<dyn PdClient>,
@@ -729,7 +747,6 @@ pub(crate) fn start_workloads(
         )));
     }
 
-    assert!(!async_handles.is_empty(), "no workload to run");
     if switches.restart_tso_svc {
         async_handles.push(spawn_restart_tso_svc(
             tc.clone(),
@@ -875,23 +892,53 @@ pub(crate) fn spawn_restart_tso_svc(
     tokio::spawn(task)
 }
 
-async fn connect_tidb_impl(
+pub(crate) fn get_tidb_conn_params(
     tc: &TidbCluster,
     keyspace_manager: &KeyspaceManager,
     keyspace_id: u32,
-) -> sqlx::MySqlPool {
+) -> ConnParams {
     let keyspace_name = keyspace_manager
         .get_keyspace_meta(keyspace_id)
         .unwrap()
         .name();
     let tidb_idx = TidbCluster::get_idx_by_keyspace_name(&keyspace_name);
-    let params = tc.tidb.conn_params(tidb_idx);
+    tc.tidb.conn_params(tidb_idx)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectTidbOptions {
+    pub statements_log_level: log::LevelFilter,
+}
+
+impl Default for ConnectTidbOptions {
+    fn default() -> Self {
+        Self {
+            statements_log_level: log::LevelFilter::Debug,
+        }
+    }
+}
+
+impl ConnectTidbOptions {
+    pub(crate) fn log_statements() -> Self {
+        Self {
+            statements_log_level: log::LevelFilter::Info,
+        }
+    }
+}
+
+async fn connect_tidb_impl(
+    tc: &TidbCluster,
+    keyspace_manager: &KeyspaceManager,
+    keyspace_id: u32,
+    tidb_opts: ConnectTidbOptions,
+) -> sqlx::MySqlPool {
+    let params = get_tidb_conn_params(tc, keyspace_manager, keyspace_id);
     let mut opts = sqlx::mysql::MySqlConnectOptions::new()
         .host(&params.host)
         .port(params.port)
         .username(&params.user)
         .database("test");
-    opts.log_statements(log::LevelFilter::Debug)
+    opts.log_statements(tidb_opts.statements_log_level)
         .log_slow_statements(log::LevelFilter::Warn, Duration::from_secs(30));
     sqlx::mysql::MySqlPoolOptions::new()
         .max_connections(100)
@@ -900,10 +947,11 @@ async fn connect_tidb_impl(
         .unwrap()
 }
 
-pub(crate) async fn connect_tidb(
+pub(crate) async fn connect_tidb_opts(
     tc: &TidbCluster,
     keyspace_manager: &KeyspaceManager,
     keyspace_id: u32,
+    tidb_opts: ConnectTidbOptions,
 ) -> sqlx::MySqlPool {
     lazy_static::lazy_static! {
         static ref POOLS: DashMap<u32 /* keyspace_id */, sqlx::MySqlPool> = DashMap::new();
@@ -912,11 +960,19 @@ pub(crate) async fn connect_tidb(
     match POOLS.entry(keyspace_id) {
         DashMapEntry::Occupied(entry) => entry.get().clone(),
         DashMapEntry::Vacant(entry) => {
-            let pool = connect_tidb_impl(tc, keyspace_manager, keyspace_id).await;
+            let pool = connect_tidb_impl(tc, keyspace_manager, keyspace_id, tidb_opts).await;
             entry.insert(pool.clone());
             pool
         }
     }
+}
+
+pub(crate) async fn connect_tidb(
+    tc: &TidbCluster,
+    keyspace_manager: &KeyspaceManager,
+    keyspace_id: u32,
+) -> sqlx::MySqlPool {
+    connect_tidb_opts(tc, keyspace_manager, keyspace_id, Default::default()).await
 }
 
 pub(crate) struct TidbTableSchema {
@@ -1003,6 +1059,7 @@ pub(crate) struct Switches {
     pub enable_tiflash_write_node: bool,
     pub enable_value_cache: bool,
     pub tidb_next_gen: bool,
+    pub tidb_gc_lifetime: String, // ReadableDuration, e.g. "90s".
 }
 
 impl Switches {
@@ -1031,6 +1088,7 @@ impl Switches {
         let enable_tiflash_write_node = env_switch(ENABLE_TIFLASH_WRITE_NODE_ENV_KEY);
         let enable_value_cache = env_switch("ENABLE_VALUE_CACHE");
         let tidb_next_gen = env_switch_opt("TIDB_NEXT_GEN", 0);
+        let tidb_gc_lifetime = env_param("TIDB_GC_LIFETIME", TIDB_GC_LIFETIME.to_string());
 
         Self {
             remote_cop_min_block_size,
@@ -1051,6 +1109,7 @@ impl Switches {
             enable_tiflash_write_node,
             enable_value_cache,
             tidb_next_gen,
+            tidb_gc_lifetime,
         }
     }
 }

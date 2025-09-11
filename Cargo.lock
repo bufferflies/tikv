@@ -6904,6 +6904,7 @@ dependencies = [
  "tikv_kv",
  "tikv_util",
  "tokio",
+ "toml",
  "txn_types",
 ]
 

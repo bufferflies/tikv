@@ -12,7 +12,7 @@ CONCURRENCY=4
 CPU=4
 MEMORY=8g
 MEMORY_PROFILE=0
-MAKE_BIN_ARGS=""
+MAKE_BIN_ARGS="--env-logger"
 GIT_UPDATE=1
 
 show_help() {
@@ -55,7 +55,7 @@ while [ $# -gt 0 ]; do
         MEMORY_PROFILE=1
         ;;
     --make-bin)
-        MAKE_BIN_ARGS="$2"
+        MAKE_BIN_ARGS="$MAKE_BIN_ARGS $2"
         shift
         ;;
     --git-no-update)
@@ -107,7 +107,6 @@ RUN_ARGS=(
     "--no-tiflash"
     "--no-txn-file"
     "--no-jepsen"
-    "--no-tpc"
     "--async-commit-ratio" "0.0"
     "--ia-table-ratio" "0.0"
 )
