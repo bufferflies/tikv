@@ -2,6 +2,7 @@
 
 use std::{
     borrow::Cow,
+    cmp,
     collections::HashMap,
     fmt, fs,
     io::Write,
@@ -34,8 +35,8 @@ use pd_client::PdClient;
 use serde::Deserialize;
 use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
-    config::ReadableDuration, debug, error, errors::Context as _, info, time::Instant, warn,
-    HandyRwLock,
+    config::ReadableDuration, debug, error, errors::Context as _, info, sys::SysQuota,
+    time::Instant, warn, HandyRwLock,
 };
 use tokio::runtime::Runtime;
 
@@ -47,7 +48,6 @@ use crate::{
 };
 
 const MIN_PITR_INTERVAL_GAP_SECONDS: i64 = 1; // 1s
-pub(crate) const MAX_RESTORE_CONCURRENCY: usize = 128;
 const MAX_BACKUP_COUNT_PER_PAGE: usize = 1000; // Same with dfs list.
 const JSON_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f"; // e.g. 2006-01-02 15:04:05.000
 const BACKUP_NAME_FORMAT: &str = "%Y%m%d%H%M%S";
@@ -732,6 +732,7 @@ pub(crate) struct BrContext {
     pub restore_tasks: RwLock<TasksMap>,
     pub keyspace_tasks: RwLock<KeyspacesMap>,
     pub backup_worker: BackupWorker,
+    restore_concurrency: usize,
 }
 
 impl BrContext {
@@ -1077,6 +1078,8 @@ pub struct NativeBrConfig {
     /// Whether to tolerate unavailability of no more than one store when
     /// restore.
     pub restore_tolerate_err: bool,
+
+    pub restore_concurrency_per_core: f64,
 }
 
 impl Default for NativeBrConfig {
@@ -1098,6 +1101,7 @@ impl Default for NativeBrConfig {
             backup_skip_keyspace_meta: false,
             backup_tolerate_err: false,
             restore_tolerate_err: false,
+            restore_concurrency_per_core: 1.0,
         }
     }
 }
@@ -1121,6 +1125,14 @@ impl NativeBrManager {
             pd_client.clone(),
             config.native_br.backup_interval.0,
         );
+        let restore_concurrency = cmp::max(
+            (SysQuota::cpu_cores_quota() * config.native_br.restore_concurrency_per_core) as usize,
+            2,
+        );
+        info!(
+            "native_br: restore concurrency limit: {}",
+            restore_concurrency
+        );
         let mut context = BrContext {
             pd_client,
             s3fs,
@@ -1129,6 +1141,7 @@ impl NativeBrManager {
             restore_tasks: Default::default(),
             keyspace_tasks: Default::default(),
             backup_worker,
+            restore_concurrency,
         };
         if let Err(err) = context.init() {
             warn!("BR context init failed: {:?}", err);
@@ -1181,8 +1194,15 @@ impl NativeBrManager {
         restore_source: RestoreSource,
         restore_type: RestoreType,
     ) -> Result<bool> {
-        if self.get_not_final_task_count() >= MAX_RESTORE_CONCURRENCY {
-            return Err(Error::ReachConcurrencyLimit(MAX_RESTORE_CONCURRENCY));
+        let current_tasks = self.get_not_final_task_count();
+        let limit = self.context.restore_concurrency;
+        if current_tasks >= limit {
+            warn!("reach concurrency limit"; "current" => current_tasks, "limit" => limit);
+            // TODO: pending in a queue, other than return error directly.
+            return Err(Error::ReachConcurrencyLimit {
+                current: current_tasks,
+                limit,
+            });
         }
 
         let restore_params = RestoreParams::new(

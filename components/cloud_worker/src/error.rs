@@ -26,8 +26,8 @@ pub enum Error {
     RestoreKeyspaceTaskConflict(u64),
     #[error("datetime parse error {0}")]
     DateTimeParseError(#[from] chrono::ParseError),
-    #[error("ReachLimit {0}")]
-    ReachConcurrencyLimit(usize),
+    #[error("reach concurrency limit (current {current}, limit {limit})")]
+    ReachConcurrencyLimit { current: usize, limit: usize },
     #[error("parse int error {0}")]
     ParseIntError(#[from] std::num::ParseIntError),
     #[error("table format error")]
