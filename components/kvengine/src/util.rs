@@ -108,6 +108,19 @@ pub fn new_vector_index_file_pb(
     vec_idx_file
 }
 
+#[inline]
+pub fn is_same_vector_index(a: &kvenginepb::VectorIndex, b: &kvenginepb::VectorIndex) -> bool {
+    a.table_id == b.table_id && a.index_id == b.index_id && a.col_id == b.col_id
+}
+
+#[inline]
+pub fn is_matched_vector_index(
+    a: &kvenginepb::VectorIndex,
+    b: &kvenginepb::UpdateVectorIndex,
+) -> bool {
+    a.table_id == b.table_id && a.index_id == b.index_id && a.col_id == b.col_id
+}
+
 /// Helper for merging or splitting properties.
 ///
 /// Currently only delete prefixes are handled.

@@ -26,7 +26,7 @@ use crate::{
     table_id::{
         get_table_id_from_data_bound, get_table_id_from_ingest_files, merge_columnar_table_ids,
     },
-    util::{TxnFileLocks, TxnFileRefPropertyHelper},
+    util::{is_matched_vector_index, is_same_vector_index, TxnFileLocks, TxnFileRefPropertyHelper},
 };
 
 #[derive(Default, Clone, Debug)]
@@ -1073,11 +1073,11 @@ impl ShardMeta {
     }
 
     pub fn apply_update_vector_index(&mut self, update_vec_idx: &pb::UpdateVectorIndex) {
-        if let Some(old_idx) = self.vector_indexes.iter_mut().find(|vec_idx| {
-            vec_idx.table_id == update_vec_idx.table_id
-                && vec_idx.index_id == update_vec_idx.index_id
-                && vec_idx.col_id == update_vec_idx.col_id
-        }) {
+        if let Some(old_idx) = self
+            .vector_indexes
+            .iter_mut()
+            .find(|vec_idx| is_matched_vector_index(vec_idx, update_vec_idx))
+        {
             let mut old_files = old_idx.take_files().into_vec();
             old_files.retain(|f| !update_vec_idx.removed.contains(&f.id));
             old_files.extend_from_slice(update_vec_idx.get_added());
@@ -1416,11 +1416,11 @@ impl ShardMeta {
     }
 
     fn merge_vector_index(&mut self, vec_idx: &VectorIndex) {
-        if let Some(old_idx) = self.vector_indexes.iter_mut().find(|v| {
-            v.table_id == vec_idx.table_id
-                && v.index_id == vec_idx.table_id
-                && v.col_id == vec_idx.col_id
-        }) {
+        if let Some(old_idx) = self
+            .vector_indexes
+            .iter_mut()
+            .find(|v| is_same_vector_index(v, vec_idx))
+        {
             let old_file_ids: HashSet<u64> = old_idx.files.iter().map(|f| f.id).collect();
             for file in vec_idx.files.iter() {
                 if !old_file_ids.contains(&file.id) {
@@ -2193,6 +2193,158 @@ mod tests {
             let meta = make_meta(&existed_files);
             let overlap = meta.check_overlap_for_load_data(&ingest_files);
             assert_eq!(overlap, expected, "case {}", idx);
+        }
+    }
+
+    #[test]
+    fn test_merge_vector_index() {
+        let make_vector_index_file =
+            |id: u64, smallest: &[u8], biggest: &[u8]| -> kvenginepb::VectorIndexFile {
+                let mut file = kvenginepb::VectorIndexFile::new();
+                file.set_id(id);
+                file.set_smallest(smallest.to_vec());
+                file.set_biggest(biggest.to_vec());
+                file.set_meta_offset(100);
+                file
+            };
+
+        let make_vector_index = |table_id: i64,
+                                 index_id: i64,
+                                 col_id: i64,
+                                 files: Vec<kvenginepb::VectorIndexFile>|
+         -> VectorIndex {
+            let mut vec_idx = VectorIndex::new();
+            vec_idx.set_table_id(table_id);
+            vec_idx.set_index_id(index_id);
+            vec_idx.set_col_id(col_id);
+            vec_idx.set_files(files.into());
+            vec_idx
+        };
+
+        // Test case 1: Merge files into existing vector index
+        {
+            let mut meta = ShardMeta::default();
+
+            // Add initial vector index with files [1, 2]
+            let initial_files = vec![
+                make_vector_index_file(1, b"key1", b"key2"),
+                make_vector_index_file(2, b"key3", b"key4"),
+            ];
+            let initial_vec_idx = make_vector_index(100, 1, 10, initial_files);
+            meta.vector_indexes.push(initial_vec_idx);
+
+            // Merge new files [2, 3] (file 2 already exists, file 3 is new)
+            let new_files = vec![
+                make_vector_index_file(2, b"key3", b"key4"), // duplicate
+                make_vector_index_file(3, b"key5", b"key6"), // new
+            ];
+            let new_vec_idx = make_vector_index(100, 1, 10, new_files);
+
+            meta.merge_vector_index(&new_vec_idx);
+
+            // Verify: should have 1 vector index with files [1, 2, 3]
+            assert_eq!(meta.vector_indexes.len(), 1);
+            let merged_idx = &meta.vector_indexes[0];
+            assert_eq!(merged_idx.table_id, 100);
+            assert_eq!(merged_idx.index_id, 1);
+            assert_eq!(merged_idx.col_id, 10);
+            assert_eq!(merged_idx.files.len(), 3);
+
+            let file_ids: std::collections::HashSet<u64> =
+                merged_idx.files.iter().map(|f| f.id).collect();
+            assert!(file_ids.contains(&1));
+            assert!(file_ids.contains(&2));
+            assert!(file_ids.contains(&3));
+        }
+
+        // Test case 2: Add new vector index (no matching existing index)
+        {
+            let mut meta = ShardMeta::default();
+
+            // Add initial vector index
+            let initial_files = vec![make_vector_index_file(1, b"key1", b"key2")];
+            let initial_vec_idx = make_vector_index(100, 1, 10, initial_files);
+            meta.vector_indexes.push(initial_vec_idx);
+
+            // Add new vector index with different table_id
+            let new_files = vec![make_vector_index_file(4, b"key7", b"key8")];
+            let new_vec_idx = make_vector_index(200, 1, 10, new_files);
+
+            meta.merge_vector_index(&new_vec_idx);
+
+            // Verify: should have 2 vector indexes
+            assert_eq!(meta.vector_indexes.len(), 2);
+
+            // Find the new index
+            let new_idx = meta
+                .vector_indexes
+                .iter()
+                .find(|idx| idx.table_id == 200)
+                .unwrap();
+            assert_eq!(new_idx.index_id, 1);
+            assert_eq!(new_idx.col_id, 10);
+            assert_eq!(new_idx.files.len(), 1);
+            assert_eq!(new_idx.files[0].id, 4);
+        }
+
+        // Test case 3: Add new vector index with different index_id
+        {
+            let mut meta = ShardMeta::default();
+
+            // Add initial vector index
+            let initial_files = vec![make_vector_index_file(1, b"key1", b"key2")];
+            let initial_vec_idx = make_vector_index(100, 1, 10, initial_files);
+            meta.vector_indexes.push(initial_vec_idx);
+
+            // Add new vector index with different index_id
+            let new_files = vec![make_vector_index_file(5, b"key9", b"key10")];
+            let new_vec_idx = make_vector_index(100, 2, 10, new_files);
+
+            meta.merge_vector_index(&new_vec_idx);
+
+            // Verify: should have 2 vector indexes
+            assert_eq!(meta.vector_indexes.len(), 2);
+
+            // Find the new index
+            let new_idx = meta
+                .vector_indexes
+                .iter()
+                .find(|idx| idx.index_id == 2)
+                .unwrap();
+            assert_eq!(new_idx.table_id, 100);
+            assert_eq!(new_idx.col_id, 10);
+            assert_eq!(new_idx.files.len(), 1);
+            assert_eq!(new_idx.files[0].id, 5);
+        }
+
+        // Test case 4: Add new vector index with different col_id
+        {
+            let mut meta = ShardMeta::default();
+
+            // Add initial vector index
+            let initial_files = vec![make_vector_index_file(1, b"key1", b"key2")];
+            let initial_vec_idx = make_vector_index(100, 1, 10, initial_files);
+            meta.vector_indexes.push(initial_vec_idx);
+
+            // Add new vector index with different col_id
+            let new_files = vec![make_vector_index_file(6, b"key11", b"key12")];
+            let new_vec_idx = make_vector_index(100, 1, 20, new_files);
+
+            meta.merge_vector_index(&new_vec_idx);
+
+            // Verify: should have 2 vector indexes
+            assert_eq!(meta.vector_indexes.len(), 2);
+
+            // Find the new index
+            let new_idx = meta
+                .vector_indexes
+                .iter()
+                .find(|idx| idx.col_id == 20)
+                .unwrap();
+            assert_eq!(new_idx.table_id, 100);
+            assert_eq!(new_idx.index_id, 1);
+            assert_eq!(new_idx.files.len(), 1);
+            assert_eq!(new_idx.files[0].id, 6);
         }
     }
 }
