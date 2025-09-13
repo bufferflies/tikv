@@ -8,7 +8,7 @@ use k8s_openapi::{
         apps::v1::StatefulSet,
         core::v1::{PersistentVolumeClaim, Service, ServicePort, ServiceSpec},
     },
-    apimachinery::pkg::util::intstr::IntOrString,
+    apimachinery::pkg::{apis::meta::v1::ObjectMeta, util::intstr::IntOrString},
     Metadata,
 };
 use kube::{api::PostParams, Api};
@@ -22,6 +22,7 @@ use crate::{
 };
 
 pub(crate) const K8S_LABEL_NAME: &str = "app.kubernetes.io/name";
+const K8S_ANNOTATION_KEYSPACE_ID: &str = "serverless.tidbcloud.com/keyspace-id";
 
 pub(crate) const PD_PORT: i32 = 2379;
 pub(crate) const CDC_PORT: i32 = 8300;
@@ -148,9 +149,10 @@ impl KubeApi {
         let spec = pd_sts.spec.as_mut().unwrap();
         spec.replicas = Some(1);
         spec.service_name = pd_sts_name.clone();
-        spec.selector.match_labels = Some(Self::create_label(&pd_sts_name));
+        spec.selector.match_labels = Some(Self::create_label_name(&pd_sts_name));
         let metadata = spec.template.metadata.as_mut().unwrap();
-        metadata.labels = Some(Self::create_label(&pd_sts_name));
+        Self::patch_labels(metadata, &pd_sts_name);
+        Self::patch_annotations(metadata, keyspace_id);
         let pod_spec = spec.template.spec.as_mut().unwrap();
         let container = pod_spec.containers.first_mut().unwrap();
         let command = container.command.as_mut().unwrap();
@@ -181,9 +183,10 @@ impl KubeApi {
         let spec = cdc_sts.spec.as_mut().unwrap();
         spec.replicas = Some(1);
         spec.service_name = cdc_sts_name.clone();
-        spec.selector.match_labels = Some(Self::create_label(&cdc_sts_name));
+        spec.selector.match_labels = Some(Self::create_label_name(&cdc_sts_name));
         let metadata = spec.template.metadata.as_mut().unwrap();
-        metadata.labels = Some(Self::create_label(&cdc_sts_name));
+        Self::patch_labels(metadata, &cdc_sts_name);
+        Self::patch_annotations(metadata, keyspace_id);
         let pod_spec = spec.template.spec.as_mut().unwrap();
         let container = pod_spec.containers.first_mut().unwrap();
         let command = container.command.as_mut().unwrap();
@@ -213,8 +216,21 @@ impl KubeApi {
         format!("{}.{}.svc.cluster.local:{}", sts_name, self.namespace, port)
     }
 
-    fn create_label(sts_name: &str) -> BTreeMap<String, String> {
+    fn create_label_name(sts_name: &str) -> BTreeMap<String, String> {
         BTreeMap::from_iter(vec![(K8S_LABEL_NAME.to_string(), sts_name.to_string())])
+    }
+
+    fn patch_labels(metadata: &mut ObjectMeta, sts_name: &str) {
+        let labels = metadata.labels.get_or_insert_default();
+        labels.extend(Self::create_label_name(sts_name));
+    }
+
+    fn patch_annotations(metadata: &mut ObjectMeta, keyspace_id: u32) {
+        let annotations = metadata.annotations.get_or_insert_default();
+        annotations.insert(
+            K8S_ANNOTATION_KEYSPACE_ID.to_string(),
+            keyspace_id.to_string(),
+        );
     }
 
     fn pod_name(sts_name: &str) -> String {
@@ -238,7 +254,7 @@ impl KubeApi {
         service_port.target_port = Some(IntOrString::Int(port));
         svc.spec = Some(ServiceSpec {
             cluster_ip: Some("None".to_string()),
-            selector: Some(Self::create_label(&sts_name)),
+            selector: Some(Self::create_label_name(&sts_name)),
             ports: Some(vec![service_port]),
             ..Default::default()
         });

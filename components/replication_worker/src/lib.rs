@@ -1,5 +1,7 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
+#![feature(option_get_or_insert_default)]
+
 mod apply_observer;
 mod delegate;
 mod error;
