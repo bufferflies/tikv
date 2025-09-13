@@ -755,6 +755,14 @@ impl BackupCluster {
 
         for store in &cluster_meta.stores {
             let store_id = store.get_store_id();
+            if !store.keyspace_size.is_empty() && store.keyspace_size.get(&keyspace_id).is_none() {
+                info!(
+                    "Keyspace {} skip store {} which has no data",
+                    cluster.tag(),
+                    store_id
+                );
+                continue;
+            }
             let tag = format!("{tag}:{store_id}");
             let store_config = cluster.generate_store_config(store_id);
 

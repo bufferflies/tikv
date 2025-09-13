@@ -56,7 +56,7 @@ use crate::{
 
 const BASIC_DATA_COUNT: usize = 10;
 const RANDOM_VALUE_LEN: usize = 64;
-const NODES_COUNT: usize = 4;
+const NODES_COUNT: usize = 5;
 const KEYSPACE_COUNT: usize = 3;
 const DEFAULT_LOOP_COUNT: usize = 3;
 const DEFAULT_TARGET_REGIONS: usize = 4;
