@@ -292,7 +292,6 @@ pub(crate) struct WalWriter {
     // batch_buf is unformatted data.
     batch_buf: DmaBuffer,
     compression_threshold: usize,
-    next_day: chrono::DateTime<chrono::Utc>,
     // file_off is always aligned.
     pub(crate) file_off: u64,
     pub(crate) compacted_epoch: Arc<AtomicU32>,
@@ -325,7 +324,6 @@ impl WalWriter {
             buf,
             batch_buf: DmaBuffer::new(INITIAL_BUF_SIZE),
             compression_threshold,
-            next_day: chrono::Utc::now() + chrono::Duration::days(1),
             file_off: 0,
             compacted_epoch,
             writer_type,
@@ -487,10 +485,8 @@ impl WalWriter {
     }
 
     fn should_rotate(&self) -> bool {
-        // Force rotation at least once a day
-        let force_rotation = chrono::Utc::now().gt(&self.next_day);
         let current_size = self.buf.len() + self.file_off as usize;
-        (current_size > self.wal_size || force_rotation) && self.writer_type != WriterType::Async
+        current_size > self.wal_size && self.writer_type != WriterType::Async
     }
 
     // If the current epoch id is 5, the rotated epoch id is 6, it would overwrite
@@ -520,7 +516,6 @@ impl WalWriter {
     pub(crate) fn rotate(&mut self) -> Result<()> {
         let timer = Instant::now_coarse();
         self.open_file(self.epoch_id + 1, 0)?;
-        self.next_day = chrono::Utc::now() + chrono::Duration::days(1);
         ENGINE_ROTATE_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
         Ok(())
     }
