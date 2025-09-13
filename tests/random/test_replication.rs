@@ -1,6 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{io::Write, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{io::Write, sync::Arc, thread, time::Duration};
 
 use api_version::ApiV2;
 use chrono::Utc;
@@ -27,6 +27,7 @@ use tikv_util::{
 use crate::{test_tidb::*, *};
 
 const TEST_DURATION: Duration = Duration::from_secs(120);
+const LOCAL_TIDB_HEALTHY_TIMEOUT: Duration = Duration::from_secs(90);
 
 const KEYSPACE_ID: u32 = 1;
 const SYNC_DIFF_COMPARE_INTERVAL: Duration = Duration::from_secs(3);
@@ -44,7 +45,7 @@ fn test_random_replication() {
     let prepare_time = Instant::now_coarse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(1)
+        .worker_threads(4)
         .thread_name("test_random_rep")
         .build()
         .unwrap();
@@ -55,6 +56,16 @@ fn test_random_replication() {
     // if the snapshot is earlier than GC safe point.
     switches.tidb_gc_lifetime = "600s".into();
     info!("switches: {:?}", switches);
+
+    // Start local provider in advance.
+    let rep_dir = tempfile::Builder::new().prefix("rep_").tempdir().unwrap();
+    let rep_dir = rep_dir.path();
+    let rep_dir_copy = rep_dir.to_path_buf();
+    let local_provider_task = runtime.spawn_blocking(move || {
+        let mut local_provider = LocalProvider::new(KEYSPACE_ID, rep_dir_copy, 6000);
+        local_provider.start(LOCAL_TIDB_HEALTHY_TIMEOUT);
+        local_provider
+    });
 
     let (_temp_dir, _oss, dfs_conf) = prepare_dfs("oss_");
     let security_conf = new_security_config();
@@ -128,9 +139,6 @@ fn test_random_replication() {
 
     // Start replication worker.
     info!("start replication worker");
-    let rep_dir = tempfile::Builder::new().prefix("rep_").tempdir().unwrap();
-    let rep_dir = rep_dir.path();
-
     let mut worker_conf = cloud_worker::Config::default();
     worker_conf.data_dir = rep_dir.to_str().unwrap().to_string();
     worker_conf.addr = "127.0.0.1:5998".to_string();
@@ -154,8 +162,7 @@ fn test_random_replication() {
         .get_security_mgr()
         .http_client(hyper::Client::builder())
         .unwrap();
-    let mut local_provider = LocalProvider::new(1, PathBuf::from(rep_dir), 6000);
-    local_provider.start();
+    let mut local_provider = runtime.block_on(local_provider_task).unwrap();
     let pd_url = local_provider.pd_client_url();
     let worker_base_url = format!("http://{}/cdc", worker_addr);
     let cdc_addr = local_provider.cdc_server_addr();

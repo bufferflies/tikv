@@ -125,12 +125,11 @@ pub mod local_provider {
             }
         }
 
-        pub fn start(&mut self) {
+        pub fn start(&mut self, timeout: Duration) {
             self.start_local_pd();
             self.start_local_cdc(&self.cdc_server_addr(), &self.pd_client_url());
             self.tidb_child = Some(self.start_local_tidb());
 
-            let timeout = Duration::from_secs(30);
             let wait_healthy = async {
                 let (pd_res, tidb_res) = tokio::join!(
                     self.wait_pd_healthy(timeout),
@@ -339,6 +338,7 @@ pub mod local_provider {
     #[derive(Default, Serialize)]
     #[serde(rename_all = "kebab-case")]
     struct LocalTidbConfig {
+        split_table: bool, // Set to false.
         security: TidbConfigSecurity,
     }
 
