@@ -628,9 +628,7 @@ impl S3FsCore {
         } else {
             format!("/{}/{}", &self.bucket, key)
         };
-        let mut req = SignedRequest::new(method, "s3", &self.region, &path);
-        req.scheme = Some("http".to_string());
-        req
+        SignedRequest::new(method, "s3", &self.region, &path)
     }
 
     fn new_tagging_request(&self, method: &str, key: &str) -> SignedRequest {
