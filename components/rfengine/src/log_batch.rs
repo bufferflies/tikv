@@ -183,7 +183,7 @@ impl RaftLogs {
 
     /// Appends the raft log. It handles log continuity internally and returns
     /// conflicted logs if any.
-    pub(crate) fn append(&mut self, op: RaftLogOp) -> Vec<RaftLogBlock> {
+    pub(crate) fn append(&mut self, peer_id: u64, op: RaftLogOp) -> Vec<RaftLogBlock> {
         let mut truncated_blocks = vec![];
         let next_idx = self.last_index() + 1;
         let op_idx = op.index;
@@ -193,9 +193,8 @@ impl RaftLogs {
                 if self.last_index() != 0 {
                     info!(
                         "log gap exists, first: {}, last: {}, append: {}",
-                        self.first_index(),
-                        self.last_index(),
-                        op_idx
+                        self.first_index(), self.last_index(), op_idx;
+                        "peer_id" => peer_id
                     );
                 }
                 truncated_blocks.extend(self.blocks.drain(..));
@@ -422,7 +421,7 @@ mod tests {
                 0,
             ));
             logs.push(log.clone());
-            assert!(raft_logs.append(log).is_empty());
+            assert!(raft_logs.append(1, log).is_empty());
         }
         assert_eq!(raft_logs.blocks.len(), 1);
         assert_eq!(raft_logs.first_index(), 1);
@@ -431,7 +430,7 @@ mod tests {
         // Extend one block.
         let log = RaftLogOp::new(&new_raft_entry(EntryType::EntryNormal, 1, 256, b"data", 0));
         logs.push(log.clone());
-        assert!(raft_logs.append(log).is_empty());
+        assert!(raft_logs.append(1, log).is_empty());
         assert_eq!(raft_logs.blocks.len(), 2);
         assert_eq!(raft_logs.first_index(), 1);
         assert_eq!(raft_logs.last_index(), 256);
@@ -448,7 +447,7 @@ mod tests {
         // Append conflicted logs (at first index of last block, see issue #2153).
         let log = RaftLogOp::new(&new_raft_entry(EntryType::EntryNormal, 1, 256, b"data1", 0));
         logs[(log.index - 1) as usize] = log.clone();
-        let conflicted = raft_logs.append(log.clone());
+        let conflicted = raft_logs.append(1, log.clone());
         assert_eq!(conflicted.len(), 1);
         assert_eq!(raft_logs.last_index(), log.index);
         assert_eq!(raft_logs.blocks.len(), 2);
@@ -459,7 +458,7 @@ mod tests {
         // Append conflicted logs.
         let log = RaftLogOp::new(&new_raft_entry(EntryType::EntryNormal, 1, 255, b"data2", 0));
         logs[(log.index - 1) as usize] = log.clone();
-        let conflicted = raft_logs.append(log.clone());
+        let conflicted = raft_logs.append(1, log.clone());
         assert_eq!(conflicted.len(), 1);
         assert_eq!(conflicted[0].logs, &logs[log.index as usize..]);
         assert_eq!(raft_logs.last_index(), log.index);
@@ -469,7 +468,7 @@ mod tests {
         }
 
         // Truncate.
-        assert!(raft_logs.append(logs.last().unwrap().clone()).is_empty());
+        assert!(raft_logs.append(1, logs.last().unwrap().clone()).is_empty());
         assert_eq!(raft_logs.blocks.len(), 2);
 
         let truncated = raft_logs.truncate(10);
@@ -492,7 +491,7 @@ mod tests {
 
         // Append a log with hole.
         let log = RaftLogOp::new(&new_raft_entry(EntryType::EntryNormal, 1, 500, b"data", 0));
-        let conflicted = raft_logs.append(log.clone());
+        let conflicted = raft_logs.append(1, log.clone());
         assert_eq!(conflicted.len(), 1);
         assert_eq!(conflicted[0].logs, &logs[255..]);
         assert_eq!(raft_logs.first_index(), 500);
@@ -513,7 +512,7 @@ mod tests {
                 b"data",
                 0,
             ));
-            raft_logs.append(log);
+            raft_logs.append(1, log);
         }
         assert!(!raft_logs.blocks.is_empty());
         assert_eq!(

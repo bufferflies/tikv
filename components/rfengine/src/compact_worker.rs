@@ -1196,7 +1196,7 @@ mod tests {
                 data: generate_random_str().into(),
             };
             peer_batch.append_raft_log(op.clone());
-            raft_logs.append(op);
+            raft_logs.append(peer_id, op);
         }
         worker.write_raft_log_file(peer_batch).unwrap()
     }

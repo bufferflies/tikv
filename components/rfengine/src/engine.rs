@@ -1229,7 +1229,7 @@ impl PeerData {
         debug_assert_eq!(self.peer_id, batch.peer_id);
         let mut truncated_blocks = vec![];
         for op in &batch.raft_logs {
-            let truncated = self.raft_logs.append(op.clone());
+            let truncated = self.raft_logs.append(self.peer_id, op.clone());
             if !truncated.is_empty() {
                 truncated_blocks.extend(truncated);
             }

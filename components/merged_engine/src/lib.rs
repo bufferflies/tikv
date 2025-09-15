@@ -458,12 +458,18 @@ impl MergedEngine {
                 let region_progress = region_progresses
                     .entry(region_id)
                     .or_insert(RegionProgress::new(keyspace_id, region_id));
+                let merged_commit_index = region_progress.commit_index;
+
                 if raft_state.get_last_index() > preprocess_index {
                     // Fetch uncommitted entries, and insert them into region progress, so that they
                     // will be replayed when commit index advances (during sync_merged).
                     let mut entry_buf = Vec::new();
                     let low_idx = preprocess_index + 1;
                     let high_idx = raft_state.get_last_index() + 1;
+                    debug!(
+                        "{} recover_from_backup: fetch uncommitted entries: [{}, {})",
+                        tag, low_idx, high_idx
+                    );
                     if let Err(err) = origin.fetch_raft_entries_to(
                         peer_id,
                         low_idx,
@@ -486,13 +492,13 @@ impl MergedEngine {
                         });
                     }
                 }
+
                 // Committed entries will be replayed right away during the recovery process
                 // below.
-                let commit = raft_state.get_commit();
-                if region_progress.commit_index >= commit {
+                let commit = raft_state.get_commit().max(region_progress.commit_index);
+                if merged_commit_index >= commit {
                     continue;
                 }
-                let merged_commit_index = region_progress.commit_index;
                 region_progress.commit_index = commit;
                 region_progress.synced_index = preprocess_index;
                 let truncated_index = max(
@@ -528,6 +534,10 @@ impl MergedEngine {
                 let mut entry_buf = Vec::new();
                 let low_idx = merged_commit_index.max(truncated_index) + 1;
                 let high_idx = commit + 1;
+                debug!(
+                    "{} recover_from_backup: fetch committed entries: [{}, {})",
+                    tag, low_idx, high_idx
+                );
                 if let Err(err) =
                     origin.fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entry_buf)
                 {

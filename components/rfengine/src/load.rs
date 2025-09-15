@@ -208,7 +208,7 @@ impl RfEngineCore {
                 });
             }
             let raft_log = RaftLogOp::decode(log_data);
-            peer_data.raft_logs.append(raft_log);
+            peer_data.raft_logs.append(peer_id, raft_log);
         }
         Ok(())
     }
