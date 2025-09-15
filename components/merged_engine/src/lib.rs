@@ -68,6 +68,7 @@ pub struct MergedEngineContext {
     pub master_key: MasterKey,
     pub config: MergedEngineConfig,
     pub security_config: Arc<SecurityConfig>,
+    pub encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -213,7 +214,13 @@ impl MergedEngine {
             if region_id == 0 {
                 continue;
             }
-            let processor = Preprocessor::new(&raft, merged_store_id, region_id, &ctx.master_key);
+            let processor = Preprocessor::new(
+                &raft,
+                merged_store_id,
+                region_id,
+                &ctx.master_key,
+                ctx.encryption_key_manager.clone(),
+            );
             preprocessors.insert(region_id, processor);
         }
         let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
@@ -766,6 +773,7 @@ impl MergedEngine {
                     ctx.store_id,
                     updated_region,
                     &self.ctx.master_key,
+                    self.ctx.encryption_key_manager.clone(),
                 )
             });
             let mut preprocessor_ref = preprocessor.as_ref();

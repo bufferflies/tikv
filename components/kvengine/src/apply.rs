@@ -945,6 +945,7 @@ impl EngineCore {
             snap.inner_key_off as usize,
             old_shard.opt.clone(),
             &self.master_key,
+            self.encryption_key_manager.clone(),
         );
         let snap_data = new_shard.get_data();
         let mut builder = ShardDataBuilder::new(snap_data);

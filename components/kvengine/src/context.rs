@@ -22,6 +22,7 @@ pub struct SnapCtx {
     pub ia_ctx: IaCtx,
     pub prepare_type: PrepareType,
     pub read_columnar: bool,
+    pub encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
 }
 
 #[derive(Clone, Copy, PartialEq)]

@@ -141,6 +141,7 @@ impl ReplicationWorker {
         data_dir: String,
         security: SecurityConfig,
         config: ReplicationWorkerConfig,
+        encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
     ) -> Result<Self> {
         let data_dir = PathBuf::from(data_dir);
         let merged_engine_dir = data_dir.join("merged_engine");
@@ -153,6 +154,7 @@ impl ReplicationWorker {
             security_config: Arc::new(security),
             config: config.merged_engine.clone(),
             master_key,
+            encryption_key_manager,
         };
         let http_client = ctx
             .pd

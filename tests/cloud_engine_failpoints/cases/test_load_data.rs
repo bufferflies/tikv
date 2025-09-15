@@ -71,6 +71,9 @@ fn test_load_data() {
 
     let dfs = Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_conf));
     let master_key = cluster.get_kvengine(node_ids[0]).get_master_key();
+    let encryption_key_manager = cluster
+        .get_kvengine(node_ids[0])
+        .get_encryption_key_manager();
     let load_data_dir = base_dir.join("load_data");
     fs::create_dir_all(&load_data_dir).unwrap();
     let start_ts = block_on(pd_client.get_tso()).unwrap().into_inner();
@@ -81,6 +84,7 @@ fn test_load_data() {
         pd: pd_client,
         runtime,
         master_key,
+        encryption_key_manager,
     };
 
     let (scheduler, worker_handle) =

@@ -95,6 +95,7 @@ impl Engine {
                 inner_key_off,
                 self.opts.clone(),
                 &self.master_key,
+                self.encryption_key_manager.clone(),
             );
             new_shard.parent_id = old_shard.id;
             if new_shard.id == old_shard.id {
@@ -287,11 +288,11 @@ impl Engine {
         // key property will be removed in `commit_merge`.
         let inconsistent_encryption_key = belongs_to_same_keyspace
             && source_shard
-                .encryption_key
+                .get_encryption_key()
                 .as_ref()
                 .map(|k| k.cipher_text.clone())
                 != target_shard
-                    .encryption_key
+                    .get_encryption_key()
                     .as_ref()
                     .map(|k| k.cipher_text.clone());
 
@@ -401,6 +402,7 @@ impl Engine {
             ApiV2::is_belongs_to_same_keyspace(&source_snap.outer_start, &old_shard.outer_start);
         if !belongs_to_same_keyspace {
             old_shard.del_property(ENCRYPTION_KEY);
+            old_shard.del_property(ENCRYPTION_META_KEY);
         }
 
         let (clear_source, clear_target) =
@@ -617,6 +619,7 @@ impl Engine {
             inner_key_off,
             old_shard.opt.clone(),
             &self.master_key,
+            self.encryption_key_manager.clone(),
         );
         new_shard.set_data_opt(old_shard.get_data(), false);
         new_shard.set_active(old_shard.is_active());

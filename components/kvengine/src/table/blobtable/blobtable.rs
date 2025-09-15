@@ -128,13 +128,10 @@ impl BlobTable {
 
         if let Some(encryption_key) = &encryption_key {
             decryption_buf.clear();
-            encryption_key.decrypt(
-                data_slice,
-                self.id(),
-                blob_ref.offset,
-                self.encryption_ver,
-                decryption_buf,
-            );
+            let encryption_key = encryption_key
+                .switch_if_header_mismatch(self.encryption_ver)
+                .unwrap();
+            encryption_key.decrypt(data_slice, self.id(), blob_ref.offset, decryption_buf);
             data_slice = decryption_buf;
         }
         if self.footer.compression_type != NO_COMPRESSION {
@@ -174,13 +171,15 @@ impl BlobTable {
         if let Some(encryption_key) = &encryption_key {
             if need_decrypt {
                 decryption_buf.clear();
+                let encryption_key = encryption_key
+                    .switch_if_header_mismatch(self.encryption_ver)
+                    .unwrap();
                 encryption_key.decrypt(
                     data_slice,
                     // Must use blob_ref.fid instead of self.id(), since self.file is not
                     // initialized by BlobTable::from_bytes() at preload.
                     blob_ref.fid,
                     blob_ref.offset,
-                    self.encryption_ver,
                     decryption_buf,
                 );
                 data_slice = decryption_buf;
@@ -375,13 +374,14 @@ impl BlobPrefetcher {
         verify_blob_checksum(blob_table.footer.checksum_type, meta_slice, data_slice)?;
 
         if let Some(encryption_key) = &self.encryption_key {
-            let encryption_ver = blob_table.encryption_ver;
+            let encryption_key = encryption_key
+                .switch_if_header_mismatch(blob_table.encryption_ver)
+                .unwrap();
             self.decryption_buffer.clear();
             encryption_key.decrypt(
                 data_slice,
                 blob_table.id(),
                 blob_ref.offset,
-                encryption_ver,
                 &mut self.decryption_buffer,
             );
             data_slice = &self.decryption_buffer;

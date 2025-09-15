@@ -70,11 +70,21 @@ impl FlushTask {
     }
 
     pub(crate) fn new_normal(shard: &Shard, mem_tbl: memtable::CfTable) -> Self {
-        Self::new(shard, Some(mem_tbl), None, shard.encryption_key.clone())
+        Self::new(
+            shard,
+            Some(mem_tbl),
+            None,
+            shard.get_encryption_key().clone(),
+        )
     }
 
     pub(crate) fn new_initial(shard: &Shard, initial: InitialFlush) -> Self {
-        Self::new(shard, None, Some(initial), shard.encryption_key.clone())
+        Self::new(
+            shard,
+            None,
+            Some(initial),
+            shard.get_encryption_key().clone(),
+        )
     }
 
     pub(crate) fn table_double_overbound(

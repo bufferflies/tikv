@@ -520,11 +520,13 @@ impl PackLoader {
                     .await?;
             }
             self.compressed_buf.clear();
+            let encryption_key = encryption_key
+                .switch_if_header_mismatch(self.encryption_ver)
+                .unwrap();
             encryption_key.decrypt(
                 decryption_buf,
                 self.file.id(),
                 pack_offset,
-                self.encryption_ver,
                 &mut self.compressed_buf,
             );
         } else {

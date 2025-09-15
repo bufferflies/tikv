@@ -232,6 +232,9 @@ impl S3FsCore {
             FileType::VectorIndex => {
                 format!("vec/{:02x}/{:016x}.vec", idx, file_id)
             }
+            FileType::EncryptionDict => {
+                format!("encryption/{:02x}/{:016x}.dict", idx, file_id)
+            }
         }
     }
 
@@ -255,6 +258,12 @@ impl S3FsCore {
             }
             FileType::VectorIndex => {
                 format!("{}/vec/{:02x}/{:016x}.vec", self.prefix, idx, file_id)
+            }
+            FileType::EncryptionDict => {
+                format!(
+                    "{}/encryption/{:02x}/{:016x}.dict",
+                    self.prefix, idx, file_id
+                )
             }
         }
     }

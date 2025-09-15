@@ -684,6 +684,7 @@ fn test_get_suggest_split_key(#[case] enable_inner_key_off: bool) {
         inner_key_off,
         engine.opts.clone(),
         &engine.master_key,
+        engine.encryption_key_manager.clone(),
     );
 
     let cases: Vec<(
@@ -800,6 +801,7 @@ fn test_get_evenly_split_keys(#[case] enable_inner_key_off: bool) {
         inner_key_off,
         engine.opts.clone(),
         &engine.master_key,
+        engine.encryption_key_manager.clone(),
     );
 
     let cases: Vec<(

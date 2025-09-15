@@ -14,7 +14,9 @@ use std::{
 use api_version::ApiV2;
 use bstr::ByteSlice;
 use bytes::{Buf, Bytes, BytesMut};
-use cloud_encryption::{EncryptionKey, MasterKey};
+use cloud_encryption::{
+    current_data_key_from_encryption_meta_bytes, EncryptionKey, EncryptionKeyManager, MasterKey,
+};
 use fail::fail_point;
 use file_system::IoType;
 use futures::future::try_join_all;
@@ -125,6 +127,7 @@ pub struct CompactionClient {
     pub(crate) checksum_type: ChecksumType,
     allow_fallback_local: bool,
     master_key: MasterKey,
+    encryption_key_manager: Arc<EncryptionKeyManager>,
     local_dir: PathBuf,
     // Whether the compaction client is used during restore (trim over bound & truncate ts).
     for_restore: bool,
@@ -139,6 +142,7 @@ impl CompactionClient {
         allow_fallback_local: bool,
         id_allocator: Arc<dyn IdAllocator>,
         master_key: MasterKey,
+        encryption_key_manager: Arc<EncryptionKeyManager>,
         security_mgr: Arc<SecurityManager>,
         local_dir: PathBuf,
         for_restore: bool,
@@ -156,6 +160,7 @@ impl CompactionClient {
             allow_fallback_local,
             id_allocator,
             master_key,
+            encryption_key_manager,
             local_dir,
             for_restore,
         }
@@ -233,14 +238,22 @@ impl CompactionClient {
     }
 
     pub(crate) async fn compact(&self, req: CompactionRequest) -> Result<pb::ChangeSet> {
-        let encryption_key = if req.exported_encryption_key.is_empty() {
-            None
-        } else {
+        let encryption_key = if !req.exported_encryption_meta.is_empty() {
+            Some(
+                current_data_key_from_encryption_meta_bytes(
+                    self.encryption_key_manager.clone(),
+                    &req.exported_encryption_meta,
+                )
+                .unwrap(),
+            )
+        } else if !req.exported_encryption_key.is_empty() {
             Some(
                 self.master_key
                     .decrypt_encryption_key(&req.exported_encryption_key)
                     .unwrap(),
             )
+        } else {
+            None
         };
         let ctx = CompactionCtx {
             req: Arc::new(req),
@@ -379,6 +392,7 @@ pub struct CompactionRequest {
     #[serde(rename = "safe-ts")]
     pub gc_safe_point: u64,
     pub exported_encryption_key: Vec<u8>,
+    pub exported_encryption_meta: Vec<u8>,
 
     /// The size in bytes of input tables used as source of compaction.
     pub input_size: u64,
@@ -677,6 +691,11 @@ impl Engine {
             .get(ENCRYPTION_KEY)
             .unwrap_or_default()
             .to_vec();
+        let exported_encryption_meta = shard
+            .properties
+            .get(ENCRYPTION_META_KEY)
+            .unwrap_or_default()
+            .to_vec();
         let inner_key_off = shard.get_data().inner_key_off;
         self.new_compact_request(
             shard.engine_id,
@@ -685,6 +704,7 @@ impl Engine {
             shard.range.clone(),
             inner_key_off,
             exported_encryption_key,
+            exported_encryption_meta,
         )
     }
 
@@ -694,6 +714,11 @@ impl Engine {
             .get(ENCRYPTION_KEY)
             .unwrap_or_default()
             .to_vec();
+        let exported_encryption_meta = meta
+            .properties
+            .get(ENCRYPTION_META_KEY)
+            .unwrap_or_default()
+            .to_vec();
         self.new_compact_request(
             meta.engine_id,
             meta.id,
@@ -701,6 +726,7 @@ impl Engine {
             meta.range.clone(),
             meta.inner_key_off,
             exported_encryption_key,
+            exported_encryption_meta,
         )
     }
 
@@ -712,6 +738,7 @@ impl Engine {
         range: ShardRange,
         inner_key_off: usize,
         exported_encryption_key: Vec<u8>,
+        exported_encryption_meta: Vec<u8>,
     ) -> CompactionRequest {
         CompactionRequest {
             engine_id,
@@ -725,6 +752,7 @@ impl Engine {
             compactor_version: self.opts.compaction_request_version,
             gc_safe_point: self.get_gc_safe_point(range.keyspace_id).into_inner(),
             exported_encryption_key,
+            exported_encryption_meta,
             input_size: 0,
         }
     }
@@ -2249,6 +2277,7 @@ fn load_table_files_from_local(
             FileType::TxnChunk => unreachable!("txn chunk should not be loaded from local"),
             FileType::VectorIndex => new_vector_index_filename(id),
             FileType::Blob => new_blob_filename(id),
+            FileType::EncryptionDict => new_encryption_dict_filename(id),
         };
         let file_path = local_dir.join(file_name);
         match LocalFile::open(id, file_path.as_path(), false) {
@@ -2369,6 +2398,7 @@ pub async fn handle_remote_compaction(
     id_allocator: Arc<dyn IdAllocator>,
     master_key: MasterKey,
     memory_limiter: MemoryLimiter,
+    encryption_key_manager: Arc<EncryptionKeyManager>,
 ) -> hyper::Result<hyper::Response<hyper::Body>> {
     if comp_req.compactor_version > CURRENT_COMPACTOR_VERSION {
         warn!(
@@ -2403,14 +2433,22 @@ pub async fn handle_remote_compaction(
         }
     };
 
-    let encryption_key = if comp_req.exported_encryption_key.is_empty() {
-        None
-    } else {
+    let encryption_key = if !comp_req.exported_encryption_meta.is_empty() {
+        Some(
+            current_data_key_from_encryption_meta_bytes(
+                encryption_key_manager,
+                &comp_req.exported_encryption_meta,
+            )
+            .unwrap(),
+        )
+    } else if !comp_req.exported_encryption_key.is_empty() {
         Some(
             master_key
                 .decrypt_encryption_key(&comp_req.exported_encryption_key)
                 .unwrap(),
         )
+    } else {
+        None
     };
     let ctx = CompactionCtx {
         req: Arc::new(comp_req),

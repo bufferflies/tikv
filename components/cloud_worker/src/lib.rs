@@ -131,7 +131,7 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
             .build()
             .unwrap(),
     );
-
+    let encryption_key_manager = Arc::new(cloud_encryption::EncryptionKeyManager::new());
     let running_ctl = RunningController::default();
     let (server, _) = start_server(
         config,
@@ -140,6 +140,7 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
         hyper_runtime.clone(),
         pd,
         &running_ctl,
+        encryption_key_manager,
     );
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();
     if cfg!(unix) {
@@ -167,6 +168,7 @@ fn start_server(
     hyper_runtime: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
     running_ctl: &RunningController,
+    encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
 ) -> (ServerFuture, Arc<server::Context>) {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(kvengine::dfs::S3Fs::new(
@@ -245,6 +247,7 @@ fn start_server(
         worker_scaler_opt,
         config.worker_scaler.clone(),
         load_data_config,
+        encryption_key_manager.clone(),
     ));
 
     let native_br_data_dir = PathBuf::from(&config.data_dir).join("native_br");
@@ -323,6 +326,7 @@ fn start_server(
             config.data_dir.clone(),
             config.security.clone(),
             config.replication_worker.clone(),
+            encryption_key_manager.clone(),
         )
         .map(|mut replication_worker| {
             let scheduler = replication_worker.scheduler();
@@ -357,6 +361,7 @@ fn start_server(
         replication_scheduler,
         txn_chunk_handler,
         master_key,
+        encryption_key_manager,
         quota_limiter: Arc::new(QuotaLimiter::default()),
         memory_limiter,
         block_cache,
@@ -515,6 +520,7 @@ pub struct CloudWorker {
     ctx: Option<Arc<server::Context>>,
     notify: Arc<tokio::sync::Notify>,
     running_ctl: RunningController,
+    encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
 }
 
 impl CloudWorker {
@@ -540,6 +546,7 @@ impl CloudWorker {
                 .build()
                 .unwrap(),
         );
+        let encryption_key_manager = Arc::new(cloud_encryption::EncryptionKeyManager::new());
         CloudWorker {
             config,
             config_file_path,
@@ -550,6 +557,7 @@ impl CloudWorker {
             ctx: None,
             notify: Arc::new(tokio::sync::Notify::new()),
             running_ctl: RunningController::default(),
+            encryption_key_manager,
         }
     }
 
@@ -565,6 +573,7 @@ impl CloudWorker {
             self.hyper_runtime.clone(),
             self.pd.clone(),
             &self.running_ctl,
+            self.encryption_key_manager.clone(),
         );
         let addr = self.addr().to_string();
         info!("{} cloud_worker server start", addr; "config" => ?self.config);

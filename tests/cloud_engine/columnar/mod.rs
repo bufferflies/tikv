@@ -636,6 +636,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         ia_ctx: IaCtx::Disabled,
         prepare_type: PrepareType::All,
         read_columnar: true,
+        encryption_key_manager: kvengine.get_encryption_key_manager(),
     };
     let snap_access = dfs
         .get_runtime()
@@ -952,6 +953,7 @@ fn test_columnar_ia_file() {
         ia_ctx,
         prepare_type: PrepareType::All,
         read_columnar: true,
+        encryption_key_manager: kvengine.get_encryption_key_manager(),
     };
     let snap_access = runtime
         .block_on(SnapAccess::construct_snapshot(

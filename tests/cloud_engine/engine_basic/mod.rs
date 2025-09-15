@@ -325,6 +325,7 @@ fn test_apply_observer() {
         &shard_cs,
         kvengine.opts.clone(),
         &kvengine.get_master_key(),
+        kvengine.get_encryption_key_manager(),
     ));
     for i in 0..10 {
         let start = i * 10;

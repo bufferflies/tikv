@@ -6,7 +6,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use collections::HashSet;
-use kvengine::{ShardMeta, ENCRYPTION_KEY};
+use kvengine::{encryption_key_from_shard_properties, ShardMeta};
 use kvproto::{
     raft_serverpb::{MergeState, PeerState, RaftMessage},
     *,
@@ -560,9 +560,11 @@ impl PeerStorage {
 
     pub(crate) fn get_encryption_key(&self) -> Option<EncryptionKey> {
         let meta = self.shard_meta.as_ref()?;
-        let exported_key = meta.get_property(ENCRYPTION_KEY)?;
-        let mgr = self.engines.kv.get_master_key();
-        Some(mgr.decrypt_encryption_key(exported_key.chunk()).unwrap())
+        encryption_key_from_shard_properties(
+            &meta.get_properties_pb(),
+            self.engines.kv.get_encryption_key_manager(),
+            &self.engines.kv.get_master_key(),
+        )
     }
 }
 

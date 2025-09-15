@@ -144,6 +144,7 @@ pub struct LoadDataContext {
     pub pd: Arc<dyn PdClient>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub master_key: MasterKey,
+    pub encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
 }
 
 #[derive(Clone, Default)]

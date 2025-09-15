@@ -55,7 +55,7 @@ pub(crate) fn spawn_load_data(
             dfs_conf.s3_bucket,
         ));
         let master_key = runtime.block_on(security_config.new_master_key());
-
+        let encryption_key_manager = Arc::new(cloud_encryption::EncryptionKeyManager::new());
         let start_time = Instant::now();
         let mut last_time = start_time;
         while start_time.saturating_elapsed() < timeout {
@@ -76,6 +76,7 @@ pub(crate) fn spawn_load_data(
                 &keyspace_manager,
                 &mut rng,
                 master_key.clone(),
+                encryption_key_manager.clone(),
                 load_data_config.clone(),
                 task_timeout,
             );
@@ -103,6 +104,7 @@ fn do_load_data(
     keyspace_manager: &KeyspaceManager,
     rng: &mut ThreadRng,
     master_key: MasterKey,
+    encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
     config: LoadDataConfig,
     task_timeout: Duration,
 ) -> bool /* success */ {
@@ -148,6 +150,7 @@ fn do_load_data(
         pd: pd_client.clone(),
         runtime: runtime.clone(),
         master_key,
+        encryption_key_manager,
     };
     let (scheduler, worker_handle) = init_task(config, load_data_ctx, start_ts, commit_ts);
     info!(

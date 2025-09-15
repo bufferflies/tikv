@@ -15,8 +15,8 @@ use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    get_shard_property, set_shard_property, table::InnerKey, util::PropertiesHelper, ShardMeta,
-    ENCRYPTION_KEY, STORAGE_CLASS_KEY,
+    encryption_key_from_shard_properties, set_shard_property, table::InnerKey,
+    util::PropertiesHelper, ShardMeta, ENCRYPTION_KEY, ENCRYPTION_META_KEY, STORAGE_CLASS_KEY,
 };
 use kvproto::{
     disk_usage::DiskUsage,
@@ -72,7 +72,7 @@ use crate::{errors::*, RaftRouter};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const MAX_COMMITTED_SIZE_PER_READY: u64 = 16 * 1024 * 1024;
-pub(crate) const SPLIT_FLAG_ENCRYPTION_KEYS: u64 = 0x01;
+pub(crate) const SPLIT_FLAG_ENCRYPTION_METAS: u64 = 0x02;
 pub(crate) const PENDING_CONF_CHANGE_ERR_MSG: &str = "pending conf change";
 
 /// The returned states of the peer after checking whether it is stale
@@ -1968,9 +1968,11 @@ impl<'a> PreprocessRef<'a> {
                 ctx.add_remove_dependent(parent_id, self.region_id());
             }
         }
+
+        let encryption_key = self.encryption_key.clone();
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareChangeSet {
             cs,
-            encryption_key: self.encryption_key.clone(),
+            encryption_key,
             reload_snap,
             shard_use_ia,
         });
@@ -2014,9 +2016,11 @@ impl<'a> PreprocessRef<'a> {
         // Peer's encryption_key should be updated when branching with encryption
         // enabled.
         if let Some(en) = ctx.kv {
-            let master_key = en.get_master_key();
-            let encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-                .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+            let encryption_key = encryption_key_from_shard_properties(
+                snap.get_properties(),
+                en.get_encryption_key_manager(),
+                &en.get_master_key(),
+            );
             *self.encryption_key = encryption_key;
         }
 
@@ -2104,6 +2108,7 @@ impl<'a> PreprocessRef<'a> {
             entry.term,
             req.get_header(),
             shard_meta.get_property(ENCRYPTION_KEY),
+            shard_meta.get_property(ENCRYPTION_META_KEY),
             &properties_helper,
         );
         info!("{} preprocess_pending_splits, split: {:?}", tag, split);
@@ -2197,11 +2202,20 @@ impl<'a> PreprocessRef<'a> {
         // Update peer's encryption_key when split a whole keyspace with encryption
         // enabled.
         if let Some(en) = ctx.kv {
-            let master_key = en.get_master_key();
-            let encryption_key = new_meta
-                .get_property(ENCRYPTION_KEY)
-                .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+            let encryption_key = encryption_key_from_shard_properties(
+                &new_meta.get_properties_pb(),
+                en.get_encryption_key_manager(),
+                &en.get_master_key(),
+            );
             *self.encryption_key = encryption_key;
+        }
+        let region_id = self.region_id();
+        if let Some(k) = self.encryption_key {
+            info!(
+                "[CMEK] PreprocessRef::update_meta_on_version_change region {} encryption key id {}",
+                region_id,
+                k.get_key_id()
+            );
         }
     }
 

@@ -530,7 +530,12 @@ async fn must_split_region_for_keyspace(
         ApiV2::get_txn_keyspace_prefix(keyspace_id + 1),
     ];
     if enable_encryption {
-        let cfg = KeyspaceEncryptionConfig { enabled: true };
+        let cfg = KeyspaceEncryptionConfig {
+            enabled: true,
+            cmek_id: Some("random".into()),
+            vendor: Some("test".into()),
+            ..Default::default()
+        };
         pd_client.set_keyspace_encryption(keyspace_id, cfg).unwrap();
     }
     let split_keys = keys

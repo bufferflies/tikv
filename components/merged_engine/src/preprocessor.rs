@@ -1,8 +1,10 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::sync::Arc;
+
 use bytes::Buf;
 use cloud_encryption::{EncryptionKey, MasterKey};
-use kvengine::{ShardMeta, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY};
+use kvengine::{encryption_key_from_shard_properties, ShardMeta, GLOBAL_SHARD_END_KEY};
 use kvproto::{metapb, raft_serverpb::MergeState};
 use raft_proto::eraftpb::HardState;
 use rfstore::store::{state::RaftState, PreprocessRef, RAFT_INIT_LOG_TERM};
@@ -30,14 +32,17 @@ impl Preprocessor {
         store_id: u64,
         region_id: u64,
         master_key: &MasterKey,
+        encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
     ) -> Self {
         let shard_meta = rfstore::store::load_engine_meta(raft, store_id, region_id)
             .unwrap_or_else(|| {
                 panic!("failed to load engine meta for region {}", region_id);
             });
-        let encryption_key = shard_meta
-            .get_property(ENCRYPTION_KEY)
-            .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+        let encryption_key = encryption_key_from_shard_properties(
+            &shard_meta.get_properties_pb(),
+            encryption_key_manager,
+            master_key,
+        );
         let mut region = metapb::Region::default();
         region.set_id(shard_meta.id);
         let epoch = region.mut_region_epoch();

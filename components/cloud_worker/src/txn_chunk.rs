@@ -10,9 +10,8 @@ use http::{header, Request, Response, StatusCode};
 use hyper::Body;
 use kvengine::{
     dfs::{self, Dfs},
-    get_shard_property,
+    encryption_key_from_shard_properties,
     table::{txn_file::TxnChunkBuilder, ChecksumType, InnerKey},
-    ENCRYPTION_KEY,
 };
 use load_data::dispatcher::get_shard_meta;
 use tikv_util::{box_err, warn};
@@ -208,13 +207,11 @@ impl TxnChunkHandler {
             return Err(box_err!("keyspace range mismatch"));
         }
 
-        let encryption_key =
-            get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
-                ctx.master_key
-                    .decrypt_encryption_key(&exported_key)
-                    .unwrap()
-            });
-
+        let encryption_key = encryption_key_from_shard_properties(
+            snapshot.get_properties(),
+            ctx.encryption_key_manager.clone(),
+            &ctx.master_key,
+        );
         let keyspace_info = KeyspaceInfo { encryption_key };
         self.keyspaces.insert(keyspace_id, keyspace_info.clone());
         Ok(keyspace_info)

@@ -2415,6 +2415,7 @@ impl<'a> DagTest<'a> {
             ia_ctx: IaCtx::Disabled,
             prepare_type: PrepareType::All,
             read_columnar: true,
+            encryption_key_manager: cluster.get_kvengine(node_id).get_encryption_key_manager(),
         };
 
         Self {

@@ -11,7 +11,7 @@ use std::{
 };
 
 use api_version::{api_v2::is_whole_keyspace_range, ApiV2};
-use cloud_encryption::MasterKey;
+use cloud_encryption::{KeyspaceEncryptionConfig, MasterKeyConfig};
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::{CfNamesExt, MiscExt};
 #[cfg(feature = "failpoints")]
@@ -34,6 +34,7 @@ use pd_client::{
     keyspace::to_keyspace_name, merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat,
 };
 use prometheus::local::LocalHistogram;
+use protobuf::Message;
 use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::store::{util, util::ConfChangeKind, ReadStats, TxnExt, WriteStats};
 use schema::schema::StorageClass;
@@ -51,7 +52,7 @@ use yatp::Remote;
 
 use crate::{
     store::{
-        encode_split_flag_encryption_keys, raw_end_key, raw_start_key, Callback, CasualMessage,
+        encode_split_flag_encryption_metas, raw_end_key, raw_start_key, Callback, CasualMessage,
         CpuUtilCollector, PeerMsg, PeerTag, RegionIdVer, RegionMap, StoreInfo, StoreMsg,
     },
     RaftRouter, RaftStoreRouter,
@@ -487,14 +488,14 @@ impl PdRunner {
         callback: Callback,
         task: String,
         remote: Remote<yatp::task::future::TaskCell>,
-        master_key: MasterKey,
+        dfs: Arc<dyn kvengine::dfs::Dfs>,
     ) {
         if split_keys.is_empty() {
             info!("empty split key, skip ask batch split";
                 "region" => tag);
             return;
         }
-        let mut encryption_keys = vec![];
+        let mut encryption_cfgs = vec![];
         for i in 0..=split_keys.len() {
             let raw_start = if i == 0 {
                 raw_start_key(&region)
@@ -530,52 +531,67 @@ impl PdRunner {
                     }
                     Ok(cfg) => {
                         if cfg.enabled {
-                            let encryption_key = master_key.generate_encryption_key().export();
                             info!(
-                                "keyspace generate encryption key";
+                                "CMEK config found during keyspace split";
                                 "keyspace_id" => keyspace_id,
-                                "encryption_key" => ?encryption_key,
+                                "config" => format!("{:?}", cfg),
                             );
-                            encryption_keys.push((keyspace_id, encryption_key));
+                            let vendor = cfg.vendor.clone().unwrap_or_default();
+                            let cmek_id = cfg.cmek_id.clone().unwrap_or_default();
+                            if vendor.is_empty() || cmek_id.is_empty() {
+                                warn!(
+                                    "CMEK config invalid, skip split";
+                                    "keyspace_id" => keyspace_id,
+                                );
+                                return;
+                            }
+                            encryption_cfgs.push((keyspace_id, cfg));
                         }
                     }
                 }
             }
         }
+
         let resp = pd_client.ask_batch_split(region.clone(), split_keys.len());
         let f = async move {
-            match resp.await {
-                Ok(mut resp) => {
-                    info!(
-                        "try to batch split region";
-                        "region" => tag,
-                        "new_region_ids" => ?resp.get_ids(),
-                        "region" => ?region,
-                        "task" => task,
-                    );
-
-                    let admin_req = new_batch_split_region_request(
-                        split_keys,
-                        resp.take_ids().into(),
-                        right_derive,
-                    );
-                    let region_id = region.get_id();
-                    let epoch = region.take_region_epoch();
-                    let mut req = new_admin_command(region_id, epoch, peer, admin_req);
-                    if !encryption_keys.is_empty() {
-                        let header = req.mut_header();
-                        header.set_flag_data(encode_split_flag_encryption_keys(encryption_keys));
-                    }
-                    router.send_command(req, callback);
-                }
+            let ids = match resp.await {
+                Ok(mut resp) => resp.take_ids().into(),
                 Err(e) => {
                     warn!(
                         "ask batch split failed";
                         "region" => tag,
                         "err" => ?e,
                     );
+                    return;
                 }
+            };
+
+            let encryption_metas =
+                match prepare_and_persist_encryption_metas(&pd_client, dfs, &encryption_cfgs).await
+                {
+                    Ok(metas) => metas,
+                    Err(e) => {
+                        warn!("failed to prepare/persist CMEK encryption metas"; "err" => ?e);
+                        return;
+                    }
+                };
+
+            info!(
+                "try to batch split region";
+                "region" => tag,
+                "new_region_ids" => ?ids,
+                "region" => ?region,
+                "task" => task,
+            );
+            let admin_req = new_batch_split_region_request(split_keys, ids, right_derive);
+            let region_id = region.get_id();
+            let epoch = region.take_region_epoch();
+            let mut req = new_admin_command(region_id, epoch, peer, admin_req);
+            if !encryption_metas.is_empty() {
+                let header = req.mut_header();
+                header.set_flag_data(encode_split_flag_encryption_metas(encryption_metas));
             }
+            router.send_command(req, callback);
         };
         remote.spawn(f);
     }
@@ -1487,7 +1503,7 @@ impl Runnable for PdRunner {
                 callback,
                 String::from("batch_split"),
                 self.remote.clone(),
-                self.kv.get_master_key(),
+                self.kv.fs.clone(),
             ),
 
             PdTask::Heartbeat(hb_task) => {
@@ -1772,4 +1788,225 @@ fn collect_report_read_peer_stats(
 
 fn get_read_query_num(stat: &pdpb::QueryStats) -> u64 {
     stat.get_get() + stat.get_coprocessor() + stat.get_scan()
+}
+
+pub async fn prepare_and_persist_encryption_metas(
+    pd: &Arc<dyn PdClient>,
+    dfs: Arc<dyn kvengine::dfs::Dfs>,
+    encryption_cfgs: &Vec<(u32, KeyspaceEncryptionConfig)>,
+) -> Result<Vec<kvenginepb::EncryptionMeta>, String> {
+    if encryption_cfgs.is_empty() {
+        return Ok(Vec::new());
+    }
+    info!(
+        "generating and persisting CMEK encryption metas, encryption_cfgs={:?}",
+        encryption_cfgs
+    );
+    let count = encryption_cfgs.len();
+    let mut encryption_metas = Vec::with_capacity(count);
+    // Get one TSO for each encryption meta file, which will be used as its file ID.
+    let tso = match pd.batch_get_tso(count as u32).await {
+        Ok(tso) => tso,
+        Err(e) => {
+            return Err(format!("failed to get tso for encryption keys: {}", e));
+        }
+    };
+    let first_file_id = tso.into_inner() - count as u64 + 1;
+    let rt = dfs.get_runtime();
+    // Generate a new encryption meta for each keyspace. This involves calling into
+    // KMS to generate a new master key.
+    for (idx, (keyspace_id, cfg)) in encryption_cfgs.iter().enumerate() {
+        let file_id = first_file_id + idx as u64;
+        let meta = build_encryption_meta(*keyspace_id, file_id, cfg, rt).await?;
+        encryption_metas.push(meta);
+    }
+
+    // Persist the encryption configs configs onto S3.
+    for meta in &encryption_metas {
+        let mut opts = kvengine::dfs::Options::default();
+        opts.file_type = kvengine::dfs::FileType::EncryptionDict;
+        let file_id = meta.current.as_ref().unwrap().get_file_id();
+        let dfs_clone = dfs.clone();
+        let content = meta.write_to_bytes().unwrap();
+        let res = rt.spawn(async move { dfs_clone.create(file_id, content.into(), opts).await });
+        match res.await {
+            Ok(Ok(())) => info!(
+                "persisted CMEK encryption meta file in S3";
+                "file_id" => file_id,
+                "content" => format!("{:#?}", meta),
+            ),
+            Ok(Err(e)) => {
+                return Err(format!("failed to create file in S3: {}", e));
+            }
+            Err(e) => {
+                return Err(format!("failed Tokio join error when writing to S3: {}", e));
+            }
+        }
+    }
+    Ok(encryption_metas)
+}
+
+pub async fn build_encryption_meta(
+    keyspace_id: u32,
+    file_id: u64,
+    cfg: &KeyspaceEncryptionConfig,
+    rt: &tokio::runtime::Runtime,
+) -> Result<kvenginepb::EncryptionMeta, String> {
+    let master_key_config = MasterKeyConfig {
+        key_id: cfg.cmek_id.clone().unwrap_or_default(),
+        vendor: cfg.vendor.clone().unwrap_or_default(),
+        endpoint: cfg.endpoint.clone().unwrap_or_default(),
+        region: cfg.region.clone().unwrap_or_default(),
+        cipher_text: "".into(),
+    };
+    let cfg = master_key_config.clone();
+    let res = rt
+        .spawn(async move { cfg.generate_new_master_key().await })
+        .await;
+    match res {
+        Ok(Ok((master_key, encrypted_master_key))) => {
+            info!(
+                "generated CMEK master key for keyspace";
+                "keyspace_id" => keyspace_id,
+            );
+
+            let data_key = master_key.generate_encryption_key();
+            let encrypted_data_key = data_key.export();
+            let data_key_id = data_key.get_key_id();
+
+            let mut meta = kvenginepb::EncryptionMeta::default();
+            meta.keyspace_id = keyspace_id;
+            // Current encryption epoch
+            meta.mut_current().set_file_id(file_id);
+            meta.mut_current().set_data_key_id(data_key_id);
+            meta.mut_current()
+                .set_created_at(tikv_util::time::UnixSecs::now().into_inner());
+            // Master key
+            let mut master_key = kvenginepb::MasterKey::default();
+            master_key.set_cmek_id(master_key_config.key_id.clone());
+            master_key.set_vendor(master_key_config.vendor.clone());
+            master_key.set_region(master_key_config.region.clone());
+            master_key.set_endpoint(master_key_config.endpoint.clone());
+            master_key.set_ciphertext(encrypted_master_key.to_vec());
+            meta.set_master_key(master_key);
+            // Data key map.
+            let mut data_key = kvenginepb::DataKey::new();
+            data_key.set_ciphertext(encrypted_data_key);
+            meta.mut_data_keys().insert(data_key_id, data_key);
+
+            Ok(meta)
+        }
+        Ok(Err(e)) => Err(format!(
+            "failed to generate master key, keyspace_id={} {}",
+            keyspace_id, e
+        )),
+        Err(e) => Err(format!(
+            "tokio join error during master key generation: {}",
+            e
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cloud_encryption::KeyspaceEncryptionConfig;
+    use futures::executor::block_on;
+    use kvengine::dfs::Dfs;
+    use pd_client::PdClient;
+    use protobuf::Message;
+    use security::SecurityConfig;
+    use test_cloud_server::oss::ObjectStorageService;
+    use test_pd_client::PdWrapper;
+
+    use crate::store::worker::pd::{build_encryption_meta, prepare_and_persist_encryption_metas};
+
+    fn new_sample_cfg() -> KeyspaceEncryptionConfig {
+        let mut cfg = KeyspaceEncryptionConfig::default();
+        cfg.enabled = true;
+        cfg.cmek_id = Some("random".to_string());
+        cfg.vendor = Some("test".to_string());
+        cfg
+    }
+
+    #[test]
+    fn test_build_encryption_meta() {
+        let keyspace_id = 1;
+        let file_id = 2;
+
+        let cfg = new_sample_cfg();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let meta = rt
+            .block_on(build_encryption_meta(keyspace_id, file_id, &cfg, &rt))
+            .expect("build meta");
+        assert_eq!(meta.get_keyspace_id(), keyspace_id);
+        assert_eq!(meta.get_current().get_file_id(), file_id);
+        assert_eq!(
+            meta.get_master_key().get_cmek_id(),
+            cfg.cmek_id.as_ref().unwrap()
+        );
+        assert_eq!(
+            meta.get_master_key().get_vendor(),
+            cfg.vendor.as_ref().unwrap()
+        );
+        assert!(!meta.get_data_keys().is_empty());
+    }
+
+    #[test]
+    fn test_prepare_and_persist_encryption_metas() {
+        test_util::init_log_for_test();
+        let base_dir = tempfile::Builder::new()
+            .prefix("test_cmek")
+            .tempdir()
+            .unwrap();
+
+        let oss_dir = base_dir.path().join("oss");
+        let mut oss = ObjectStorageService::new(oss_dir);
+        oss.start_server();
+        let dfs_conf = kvengine::dfs::DFSConfig {
+            prefix: "load_data".to_string(),
+            s3_endpoint: format!("http://127.0.0.1:{}", oss.port()),
+            s3_key_id: "admin".to_string(),
+            s3_secret_key: "admin".to_string(),
+            s3_bucket: "test_cmek".to_string(),
+            s3_region: "local".to_string(),
+            zstd_compression_level: "3".to_string(),
+            ..Default::default()
+        };
+        let dfs = Arc::new(kvengine::dfs::S3Fs::new(
+            dfs_conf.prefix,
+            dfs_conf.s3_endpoint,
+            dfs_conf.s3_key_id,
+            dfs_conf.s3_secret_key,
+            dfs_conf.s3_region,
+            dfs_conf.s3_bucket,
+        ));
+        let pd_client: Arc<dyn PdClient> = PdWrapper::new_test(1, &SecurityConfig::default(), None)
+            .test_client()
+            .unwrap();
+        let metas = block_on(prepare_and_persist_encryption_metas(
+            &pd_client,
+            dfs.clone(),
+            &vec![
+                (123 /* keyspace_id */, new_sample_cfg()),
+                (456 /* keyspace_id */, new_sample_cfg()),
+            ],
+        ))
+        .unwrap();
+
+        for m in &metas {
+            assert!(m.get_keyspace_id() > 0);
+            assert!(!m.get_data_keys().is_empty());
+            // Fetch from S3 and compare.
+            let mut opts = kvengine::dfs::Options::default();
+            opts.file_type = kvengine::dfs::FileType::EncryptionDict;
+            let dfs = dfs.clone();
+            let meta_bytes_s3 = dfs
+                .get_runtime()
+                .block_on(dfs.read_file(m.get_current().get_file_id(), opts))
+                .unwrap();
+            assert_eq!(m.write_to_bytes().unwrap(), meta_bytes_s3);
+        }
+    }
 }

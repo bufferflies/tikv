@@ -76,6 +76,7 @@ pub(crate) struct Context {
     pub txn_chunk_handler: Arc<TxnChunkHandler>,
     pub pd: Arc<dyn PdClient>,
     pub master_key: MasterKey,
+    pub encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
     pub quota_limiter: Arc<QuotaLimiter>,
     pub block_cache: BlockCache,
     pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
@@ -117,6 +118,7 @@ impl Context {
             ia_ctx: self.ia_ctx.clone(),
             prepare_type: PrepareType::All,
             read_columnar: self.read_columnar,
+            encryption_key_manager: self.encryption_key_manager.clone(),
         }
     }
 }
@@ -291,6 +293,7 @@ async fn handle_compaction_internal(
         allocator,
         ctx.master_key.clone(),
         ctx.memory_limiter.clone(),
+        ctx.encryption_key_manager.clone(),
     )
     .await;
 

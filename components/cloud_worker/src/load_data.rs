@@ -289,6 +289,7 @@ impl LoadDataManager {
         worker_scaler: Option<WorkerScaler>,
         worker_scaler_conf: WorkerScalerConfig,
         config: LoadDataConfig,
+        encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
     ) -> Self {
         let context = LoadDataContext {
             pd,
@@ -296,6 +297,7 @@ impl LoadDataManager {
             dfs,
             runtime,
             master_key,
+            encryption_key_manager,
         };
         Self {
             running_tasks: Arc::new(DashMap::default()),

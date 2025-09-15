@@ -401,8 +401,12 @@ fn prepare_cluster(
                 data_keys.push(Key::from_raw(&key).into_encoded());
             }
         }
-
-        let cfg = KeyspaceEncryptionConfig { enabled: rng.gen() };
+        let cfg = KeyspaceEncryptionConfig {
+            enabled: rng.gen(),
+            cmek_id: Some("random".into()),
+            vendor: Some("test".into()),
+            ..Default::default()
+        };
         match pd_client.set_keyspace_encryption(keyspace_id, cfg) {
             Ok(_) => {}
             Err(err) => {

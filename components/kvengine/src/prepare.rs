@@ -173,8 +173,12 @@ impl EngineCore {
         if let Some(snap) = snap {
             self.collect_snap_ids(snap, &mut ids);
             lock_txn_file_refs.extend(collect_snap_lock_txn_file_refs(snap));
-            encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-                .map(|v| self.master_key.decrypt_encryption_key(&v).unwrap());
+            encryption_key = encryption_key_from_shard_properties(
+                snap.get_properties(),
+                self.encryption_key_manager.clone(),
+                &self.master_key,
+            );
+
             let sc = StorageClass::unmarshal(
                 get_shard_property(STORAGE_CLASS_KEY, snap.get_properties()).as_deref(),
             );
@@ -427,7 +431,7 @@ impl EngineCore {
             &mut cs,
             use_direct_io,
             false,
-            shard.encryption_key.clone(),
+            shard.get_encryption_key().clone(),
         )?;
 
         // level 0
@@ -477,6 +481,7 @@ impl EngineCore {
                     let vec_idx_file = cs.vec_index_files.get(&id).unwrap().clone();
                     new_vec_indexes.add_index_file(vec_idx_file);
                 }
+                FileType::EncryptionDict => unreachable!("EncryptionDict not supported"),
             }
         }
         new_l0s.sort_by(|a, b| b.version().cmp(&a.version()));
@@ -658,6 +663,7 @@ impl EngineCore {
             FileType::Columnar => self.local_columnar_file_path(file_id),
             FileType::TxnChunk => panic!("TxnChunk files are managed by TxnChunkManager"),
             FileType::VectorIndex => self.local_vector_index_file_path(file_id),
+            FileType::EncryptionDict => self.local_encryption_dict_file_path(file_id),
         }
     }
 
@@ -679,6 +685,12 @@ impl EngineCore {
 
     pub(crate) fn local_vector_index_file_path(&self, file_id: u64) -> PathBuf {
         self.opts.local_dir.join(new_vector_index_filename(file_id))
+    }
+
+    pub(crate) fn local_encryption_dict_file_path(&self, file_id: u64) -> PathBuf {
+        self.opts
+            .local_dir
+            .join(new_encryption_dict_filename(file_id))
     }
 
     fn tmp_file_path(&self, file_id: u64) -> PathBuf {

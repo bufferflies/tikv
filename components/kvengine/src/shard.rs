@@ -14,7 +14,7 @@ use std::{
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, BufMut, Bytes};
-use cloud_encryption::{EncryptionKey, MasterKey};
+use cloud_encryption::{current_data_key_from_encryption_meta_bytes, EncryptionKey, MasterKey};
 use dashmap::DashMap;
 use kvenginepb::{self as pb, TxnFileRef};
 use rand::Rng;
@@ -111,7 +111,7 @@ pub struct Shard {
 
     pub(crate) compaction_priority: RwLock<Option<CompactionPriority>>,
 
-    pub(crate) encryption_key: Option<EncryptionKey>,
+    pub(crate) encryption_key: RwLock<Option<EncryptionKey>>,
 
     // outdated_schema_ver is used to record the last schema outdated error in convert L0 to
     // columnar if the schema is not updated, we skip retrying the convert.
@@ -142,6 +142,7 @@ pub const TXN_FILE_REF: &str = "_txn_file_ref";
 // during flush.
 pub const DEL_PREFIXES_KEY: &str = "_del_prefixes";
 pub const ENCRYPTION_KEY: &str = "_encryption";
+pub const ENCRYPTION_META_KEY: &str = "_encryption_meta";
 pub const STORAGE_CLASS_KEY: &str = "_storage_class";
 pub const INNER_KEY_OFFSET_UPDATE_SEQ_KEY: &str = "_iko_upd_seq";
 
@@ -197,6 +198,8 @@ impl Deref for Shard {
     }
 }
 
+use cloud_encryption::EncryptionKeyManager;
+
 impl Shard {
     pub fn new(
         engine_id: u64,
@@ -206,9 +209,15 @@ impl Shard {
         inner_key_off: usize,
         opt: Arc<Options>,
         master_key: &MasterKey,
+        encryption_key_manager: Arc<EncryptionKeyManager>,
     ) -> Self {
-        let encryption_key = get_shard_property(ENCRYPTION_KEY, props)
-            .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
+        let encryption_key =
+            encryption_key_from_shard_properties(props, encryption_key_manager.clone(), master_key)
+                .map(|ek| {
+                    encryption_key_manager
+                        .register_current_key_for_shard(props.shard_id, ek.clone());
+                    ek
+                });
         let limiter = RegionLimiter::new((&opt.flow_control).into());
         let shard = Self {
             engine_id,
@@ -236,7 +245,7 @@ impl Shard {
             write_sequence: Default::default(),
             snap_version: Default::default(),
             compaction_priority: RwLock::new(None),
-            encryption_key,
+            encryption_key: encryption_key.into(),
             outdated_schema_ver: Default::default(),
             checked_schema_ver: Default::default(),
             #[cfg(any(test, feature = "testexport"))]
@@ -271,6 +280,7 @@ impl Shard {
         cs: &pb::ChangeSet,
         opt: Arc<Options>,
         master_key: &MasterKey,
+        encryption_key_manager: Arc<EncryptionKeyManager>,
     ) -> Self {
         let snap = cs.get_snapshot();
         let range = ShardRange::from_snap(snap);
@@ -283,6 +293,7 @@ impl Shard {
             inner_key_off,
             opt,
             master_key,
+            encryption_key_manager,
         );
         if !cs.has_parent() {
             store_bool(&shard.initial_flushed, true);
@@ -374,10 +385,10 @@ impl Shard {
             if !ignore_lock {
                 lock_txn_file_refs = collect_snap_lock_txn_file_refs(snap);
             }
-            box_try!(
-                get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-                    .map(|v| ctx.master_key.decrypt_encryption_key(&v))
-                    .transpose()
+            encryption_key_from_shard_properties(
+                snap.get_properties(),
+                ctx.encryption_key_manager.clone(),
+                &ctx.master_key,
             )
         } else {
             None
@@ -462,7 +473,13 @@ impl Shard {
         let mut opts = Options::default();
         opts.read_columnar = ctx.read_columnar;
 
-        let mut shard = Shard::new_for_ingest(0, &cs, Arc::new(opts), &ctx.master_key);
+        let mut shard = Shard::new_for_ingest(
+            0,
+            &cs,
+            Arc::new(opts),
+            &ctx.master_key,
+            ctx.encryption_key_manager.clone(),
+        );
         let mut builder = ShardDataBuilder::new(shard.get_data());
         builder.set_mem_tbls(mem_tbls);
         create_snapshot_tables(
@@ -1437,7 +1454,11 @@ impl Shard {
     }
 
     pub fn get_encryption_key(&self) -> Option<EncryptionKey> {
-        self.encryption_key.clone()
+        self.encryption_key.read().unwrap().clone()
+    }
+
+    pub fn set_encryption_key(&self, encryption_key: Option<EncryptionKey>) {
+        *self.encryption_key.write().unwrap() = encryption_key;
     }
 
     // When recover is called multiple times, the write_sequence may be smaller than
@@ -2506,6 +2527,29 @@ impl PartialEq for Properties {
                 .map_or(false, |other_kv| kv.value() == other_kv.value())
         })
     }
+}
+
+/// Returns the encryption key for a shard from its properties.
+/// - ENCRYPTION_META_KEY = next-gen encryption format
+/// - ENCRYPTION_KEY      = legacy format
+pub fn encryption_key_from_shard_properties(
+    props: &kvenginepb::Properties,
+    encryption_key_manager: Arc<EncryptionKeyManager>,
+    legacy_master_key: &MasterKey,
+) -> Option<EncryptionKey> {
+    get_shard_property(ENCRYPTION_META_KEY, props)
+        .map(|v| {
+            current_data_key_from_encryption_meta_bytes(encryption_key_manager, &v)
+                .expect("failed to get key from ENCRYPTION_META_KEY")
+        })
+        .or_else(|| {
+            let legacy_bytes = get_shard_property(ENCRYPTION_KEY, props)?;
+            Some(
+                legacy_master_key
+                    .decrypt_encryption_key(&legacy_bytes)
+                    .expect("failed to get key from ENCRYPTION_KEY"),
+            )
+        })
 }
 
 pub fn get_shard_property(key: &str, props: &kvenginepb::Properties) -> Option<Vec<u8>> {

@@ -17,9 +17,9 @@ use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvengine::{
-    encode_extra_txn_status_key, get_shard_property, mvcc, table::InnerKey, util::PropertiesHelper,
-    ChangeSet, Engine, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY, EXTRA_CF, LOCK_CF,
-    TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
+    encode_extra_txn_status_key, encryption_key_from_shard_properties, mvcc, table::InnerKey,
+    util::PropertiesHelper, ChangeSet, Engine, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY,
+    ENCRYPTION_META_KEY, EXTRA_CF, LOCK_CF, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
 };
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use kvproto::{
@@ -281,6 +281,7 @@ pub struct Applier {
     buckets: Option<BucketStat>,
 
     encryption_key: Option<EncryptionKey>,
+
     decryption_buf: Vec<u8>,
 
     /// Shard is waiting to be active/inactive until the raft logs of previous
@@ -1126,9 +1127,11 @@ impl Applier {
             .iter()
             .find(|s| s.get_shard_id() == self.region_id())
         {
-            let master_key = ctx.engine.get_master_key();
-            get_shard_property(ENCRYPTION_KEY, properties)
-                .map(|v| master_key.decrypt_encryption_key(&v).unwrap())
+            encryption_key_from_shard_properties(
+                properties,
+                ctx.engine.get_encryption_key_manager(),
+                &ctx.engine.get_master_key(),
+            )
         } else {
             None
         };
@@ -1460,11 +1463,11 @@ impl Applier {
             // Applier encryption_key may be updated after branching with encryption
             // enabled.
             let snap = cs.get_restore_shard();
-            let master_key = ctx.engine.get_master_key();
-            let encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-                .map(|v| master_key.decrypt_encryption_key(&v).unwrap());
-            self.encryption_key = encryption_key;
-
+            self.encryption_key = encryption_key_from_shard_properties(
+                snap.get_properties(),
+                ctx.engine.get_encryption_key_manager(),
+                &ctx.engine.get_master_key(),
+            );
             self.region.mut_region_epoch().set_version(cs.shard_ver + 1);
             exec_results.push_back(ExecResult::RestoreShard { cs });
         }
@@ -2171,13 +2174,14 @@ pub(crate) fn build_split_pb(
     term: u64,
     header: &RaftRequestHeader,
     parent_encryption_key: Option<Bytes>,
+    parent_encryption_meta: Option<Bytes>,
     properties_helper: &PropertiesHelper,
 ) -> kvenginepb::Split {
     let mut split = kvenginepb::Split::new();
-    let mut keyspace_encryption_keys = HashMap::new();
+    let mut keyspace_encryption_metas = HashMap::new();
     let flag_data = header.get_flag_data();
     if !flag_data.is_empty() {
-        keyspace_encryption_keys = decode_split_flag_encryption_keys(flag_data);
+        keyspace_encryption_metas = decode_split_flag_encryption_metas(flag_data);
     }
     for new_region in new_regions {
         let raw_start = raw_start_key(new_region);
@@ -2193,16 +2197,22 @@ pub(crate) fn build_split_pb(
                 .mut_values()
                 .push(RAFT_INIT_LOG_TERM.to_le_bytes().to_vec());
         }
-        if let Some(encryption_key) = parent_encryption_key.as_ref() {
+
+        if let Some(encryption_meta_bytes) = parent_encryption_meta.as_ref() {
+            props.mut_keys().push(ENCRYPTION_META_KEY.to_string());
+            props.mut_values().push(encryption_meta_bytes.to_vec());
+        } else if let Some(encryption_key_bytes) = parent_encryption_key.as_ref() {
             props.mut_keys().push(ENCRYPTION_KEY.to_string());
-            props.mut_values().push(encryption_key.to_vec());
+            props.mut_values().push(encryption_key_bytes.to_vec());
         } else if is_whole_keyspace_range(&raw_start, &raw_end)
-            && !keyspace_encryption_keys.is_empty()
+            && !keyspace_encryption_metas.is_empty()
         {
             let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&raw_start).unwrap_or_default();
-            if let Some(encryption_key) = keyspace_encryption_keys.remove(&keyspace_id) {
-                props.mut_keys().push(ENCRYPTION_KEY.to_string());
-                props.mut_values().push(encryption_key);
+            if let Some(encryption_meta) = keyspace_encryption_metas.remove(&keyspace_id) {
+                props.mut_keys().push(ENCRYPTION_META_KEY.to_string());
+                props
+                    .mut_values()
+                    .push(encryption_meta.write_to_bytes().unwrap());
             }
         }
         properties_helper.split_to_properties(&raw_start, &raw_end, &mut props);

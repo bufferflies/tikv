@@ -572,6 +572,7 @@ impl BackupReader {
             ia_ctx: IaCtx::Disabled,
             prepare_type: PrepareType::All,
             read_columnar: true,
+            encryption_key_manager: kv.get_encryption_key_manager(),
         };
         Self {
             ts,

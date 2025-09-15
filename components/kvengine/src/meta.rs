@@ -232,6 +232,10 @@ impl ShardMeta {
         self.properties.get(key)
     }
 
+    pub fn get_properties_pb(&self) -> kvenginepb::Properties {
+        self.properties.clone().to_pb(self.id)
+    }
+
     pub fn set_property(&mut self, key: &str, value: &[u8]) {
         self.properties.set(key, value);
     }
@@ -1071,6 +1075,7 @@ impl ShardMeta {
                     snap.mut_blob_creates().push(v.to_blob_create(k));
                 }
                 FileType::VectorIndex => {} // already handled in vector_indexes.
+                FileType::EncryptionDict => {}
             }
         }
         cs.set_snapshot(snap);
@@ -1166,6 +1171,7 @@ impl ShardMeta {
             ApiV2::is_belongs_to_same_keyspace(&source.range.outer_start, &self.range.outer_start);
         if !belongs_to_same_keyspace {
             self.del_property(ENCRYPTION_KEY);
+            self.del_property(ENCRYPTION_META_KEY);
         }
 
         let (clear_source, clear_target) =

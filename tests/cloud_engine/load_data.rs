@@ -72,8 +72,16 @@ fn test_load_data() {
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
-    match pd_client.set_keyspace_encryption(KEYSPACE_ID, KeyspaceEncryptionConfig { enabled: true })
-    {
+
+    match pd_client.set_keyspace_encryption(
+        KEYSPACE_ID,
+        KeyspaceEncryptionConfig {
+            enabled: true,
+            cmek_id: Some("random".into()),
+            vendor: Some("test".into()),
+            ..Default::default()
+        },
+    ) {
         Ok(_) => {}
         Err(err) if pd_client::grpc_error_is_unimplemented(&err) => {
             info!("set_keyspace_encryption is not supported, skip");
@@ -120,6 +128,9 @@ fn test_load_data() {
         pd: pd_client,
         runtime,
         master_key,
+        encryption_key_manager: cluster
+            .get_kvengine(node_ids[0])
+            .get_encryption_key_manager(),
     };
 
     // write table 1 and table 11, then trigger major compaction to build L3 file.

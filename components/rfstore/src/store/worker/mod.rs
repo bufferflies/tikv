@@ -6,6 +6,8 @@ pub mod schema;
 
 pub use self::{
     gc::{GcRunner, GcTask},
-    pd::{FlowStatsReporter, HeartbeatTask, PdRunner, PdTask},
+    pd::{
+        prepare_and_persist_encryption_metas, FlowStatsReporter, HeartbeatTask, PdRunner, PdTask,
+    },
     schema::{SchemaRunner, SchemaTask},
 };

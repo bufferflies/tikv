@@ -16,6 +16,7 @@ use bytes::{Buf, BufMut};
 use cloud_encryption::EncryptionKey;
 use futures::executor::block_on;
 use futures_util::compat::Future01CompatExt;
+use kvenginepb::EncryptionMeta;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
 use raft_proto::eraftpb;
@@ -30,7 +31,7 @@ use tikv_util::{
 };
 
 use crate::{
-    store::{ProposalContext, StoreMsg, SPLIT_FLAG_ENCRYPTION_KEYS},
+    store::{ProposalContext, StoreMsg, SPLIT_FLAG_ENCRYPTION_METAS},
     Error, RaftRouter, Result,
 };
 
@@ -223,15 +224,13 @@ pub fn parse_raft_cmd(
     let proposal_ctx = ProposalContext::from_bytes(entry.get_context());
     let index = entry.index;
     if proposal_ctx.contains(ProposalContext::ENCRYPTED) {
-        let key_ver = data.get_u32();
+        let encryption_header = data.get_u32();
+        let encryption_key = encryption_key
+            .unwrap()
+            .switch_if_header_mismatch(encryption_header)
+            .unwrap();
         decryption_buf.truncate(0);
-        encryption_key.unwrap().decrypt(
-            data,
-            tag.id_ver.id(),
-            entry.index as u32,
-            key_ver,
-            decryption_buf,
-        );
+        encryption_key.decrypt(data, tag.id_ver.id(), entry.index as u32, decryption_buf);
         parse_data_at(decryption_buf, index, tag)
     } else {
         parse_data_at(data, index, tag)
@@ -324,32 +323,33 @@ pub fn region_has_peer(region: &metapb::Region, peer_id: u64) -> bool {
     region.get_peers().iter().any(|p| p.id == peer_id)
 }
 
-pub(crate) fn encode_split_flag_encryption_keys(encryption_keys: Vec<(u32, Vec<u8>)>) -> Vec<u8> {
+pub(crate) fn encode_split_flag_encryption_metas(encryption_metas: Vec<EncryptionMeta>) -> Vec<u8> {
     let mut buf = vec![];
-    buf.put_u64(SPLIT_FLAG_ENCRYPTION_KEYS);
-    buf.put_u32(encryption_keys.len() as u32);
-    for (keyspace_id, key) in encryption_keys {
-        buf.put_u32(keyspace_id);
-        buf.put_u32(key.len() as u32);
-        buf.extend_from_slice(&key);
+    buf.put_u64(SPLIT_FLAG_ENCRYPTION_METAS);
+    buf.put_u32(encryption_metas.len() as u32);
+    for k in encryption_metas {
+        let encoded = k.write_to_bytes().unwrap();
+        buf.put_u32(encoded.len() as u32);
+        buf.extend_from_slice(&encoded);
     }
     buf
 }
 
-pub(crate) fn decode_split_flag_encryption_keys(mut flag_data: &[u8]) -> HashMap<u32, Vec<u8>> {
-    let mut keyspace_encryption_keys = HashMap::new();
-    let flag = flag_data.get_u64();
-    assert_eq!(flag, SPLIT_FLAG_ENCRYPTION_KEYS);
-    let mut num_keys = flag_data.get_u32();
+pub(crate) fn decode_split_flag_encryption_metas(mut buf: &[u8]) -> HashMap<u32, EncryptionMeta> {
+    let mut keyspace_encryption_metas = HashMap::new();
+    let flag = buf.get_u64();
+    assert_eq!(flag, SPLIT_FLAG_ENCRYPTION_METAS);
+    let mut num_keys = buf.get_u32();
     while num_keys > 0 {
-        let keyspace_id = flag_data.get_u32();
-        let key_len = flag_data.get_u32();
-        let key = &flag_data[..key_len as usize];
-        keyspace_encryption_keys.insert(keyspace_id, key.to_vec());
-        flag_data = &flag_data[key_len as usize..];
+        let key_len = buf.get_u32() as usize;
+        let key_bytes = &buf[..key_len];
+        let mut m = EncryptionMeta::default();
+        m.merge_from_bytes(key_bytes).unwrap();
+        keyspace_encryption_metas.insert(m.keyspace_id, m);
+        buf = &buf[key_len..];
         num_keys -= 1;
     }
-    keyspace_encryption_keys
+    keyspace_encryption_metas
 }
 
 pub struct PdIdAllocator {

@@ -89,6 +89,9 @@ fn test_merged_engine_once() {
                 .write_buffer_size,
         },
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
+        encryption_key_manager: cluster
+            .get_kvengine(node_ids[0])
+            .get_encryption_key_manager(),
     };
     let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
     let recover_handle = merged_engine.recover_handler.clone();

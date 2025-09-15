@@ -17,7 +17,7 @@ use std::{
 };
 
 use bytes::BufMut;
-use cloud_encryption::MasterKey;
+use cloud_encryption::{EncryptionKeyManager, MasterKey};
 use collections::HashSet;
 use crossbeam::channel::RecvTimeoutError;
 use dashmap::{mapref::entry::Entry, DashMap};
@@ -133,6 +133,7 @@ impl Engine {
         let (metas, files_in_blacklist) =
             tikv_util::init_task_local_sync(|| EngineCore::read_meta(meta_iter))?;
         let dfs_load_limiter = DfsLoadLimiter::new(&config);
+        let encryption_key_manager = Arc::new(EncryptionKeyManager::new());
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
             shards: DashMap::new(),
@@ -151,6 +152,7 @@ impl Engine {
                 allow_fallback_local,
                 id_allocator.clone(),
                 master_key.clone(),
+                encryption_key_manager.clone(),
                 security_mgr,
                 opts.local_dir.clone(),
                 opts.for_restore,
@@ -170,6 +172,7 @@ impl Engine {
                 ))
             }),
             master_key,
+            encryption_key_manager,
             txn_chunk_mgr,
             ia_ctx,
             schema_files: Arc::new(DashMap::new()),
@@ -339,6 +342,7 @@ pub struct EngineCore {
     pub(crate) shutting_down: AtomicBool,
     pub(crate) cluster_gc_states: RollingRetriever<Arc<ClusterGcStates>>,
     pub(crate) master_key: MasterKey,
+    pub(crate) encryption_key_manager: Arc<EncryptionKeyManager>,
     pub(crate) txn_chunk_mgr: TxnChunkManager,
     pub(crate) ia_ctx: IaCtx,
     pub(crate) files_in_blacklist: Arc<HashSet<u64>>,
@@ -434,7 +438,13 @@ impl EngineCore {
 
     fn new_shard_from_change_set(&self, cs: ChangeSet) -> Shard {
         let engine_id = self.engine_id.load(Ordering::Acquire);
-        let shard = Shard::new_for_ingest(engine_id, &cs, self.opts.clone(), &self.master_key);
+        let shard = Shard::new_for_ingest(
+            engine_id,
+            &cs,
+            self.opts.clone(),
+            &self.master_key,
+            self.encryption_key_manager.clone(),
+        );
         let data = shard.get_data();
         info!(
             "ingest shard {} mem_table_version {}, inner_key_off {}, change {:?}",
@@ -554,6 +564,9 @@ impl EngineCore {
                     entry.remove();
                 }
             }
+
+            self.encryption_key_manager
+                .deregister_current_key_for_shard(shard_id);
             return true;
         }
         false
@@ -700,7 +713,7 @@ impl EngineCore {
             ZSTD_COMPRESSION,
             zstd_compression_lvl,
             checksum_type,
-            shard.encryption_key.clone(),
+            shard.get_encryption_key().clone(),
         );
         let mut fids = vec![];
 
@@ -948,6 +961,10 @@ impl EngineCore {
         self.master_key.clone()
     }
 
+    pub fn get_encryption_key_manager(&self) -> Arc<EncryptionKeyManager> {
+        self.encryption_key_manager.clone()
+    }
+
     pub fn is_ia_enabled(&self) -> bool {
         self.ia_ctx.is_enabled()
     }
@@ -1058,6 +1075,10 @@ pub fn new_tmp_filename(file_id: u64, tmp_id: u64) -> PathBuf {
 
 pub fn new_blob_filename(file_id: u64) -> PathBuf {
     PathBuf::from(format!("{:016x}.sst", file_id))
+}
+
+pub fn new_encryption_dict_filename(file_id: u64) -> PathBuf {
+    PathBuf::from(format!("{:016x}.dict", file_id))
 }
 
 pub fn new_schema_filename(file_id: u64) -> PathBuf {

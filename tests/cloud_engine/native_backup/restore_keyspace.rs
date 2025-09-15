@@ -559,7 +559,12 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
     // Split keyspaces.
     for keyspace_id in 0..KEYSPACE_COUNT as u32 {
         if options.enable_encryption {
-            let cfg = KeyspaceEncryptionConfig { enabled: true };
+            let cfg = KeyspaceEncryptionConfig {
+                enabled: true,
+                cmek_id: Some("random".into()),
+                vendor: Some("test".into()),
+                ..Default::default()
+            };
             pd_client.set_keyspace_encryption(keyspace_id, cfg).unwrap();
         }
     }

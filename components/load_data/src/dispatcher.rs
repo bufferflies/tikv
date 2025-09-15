@@ -11,7 +11,7 @@ use api_version::ApiV2;
 use bytes::{Buf, Bytes};
 use http::Request;
 use hyper::Body;
-use kvengine::{get_shard_property, ENCRYPTION_KEY};
+use kvengine::encryption_key_from_shard_properties;
 use pd_client::PdClient;
 use protobuf::Message;
 use tikv_util::{
@@ -367,13 +367,11 @@ impl Dispatcher {
             let keyspace_id = self.task_ctx.keyspace_id.unwrap_or_default();
             self.task_ctx.outer_key_prefix = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
             self.task_ctx.inner_key_off = Some(self.task_ctx.outer_key_prefix.len());
-            self.task_ctx.encryption_key =
-                get_shard_property(ENCRYPTION_KEY, snapshot.get_properties()).map(|exported_key| {
-                    self.ctx
-                        .master_key
-                        .decrypt_encryption_key(&exported_key)
-                        .unwrap()
-                });
+            self.task_ctx.encryption_key = encryption_key_from_shard_properties(
+                snapshot.get_properties(),
+                self.ctx.encryption_key_manager.clone(),
+                &self.ctx.master_key,
+            );
         }
         Ok(())
     }

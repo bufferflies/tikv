@@ -67,6 +67,10 @@ pub enum EncryptionKeyError {
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct KeyspaceEncryptionConfig {
     pub enabled: bool,
+    pub cmek_id: Option<String>,
+    pub vendor: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
 }
 #[derive(Clone)]
 pub struct EncryptionKey {
@@ -185,14 +189,7 @@ impl EncryptionKeyCore {
         buf.truncate(origin_len + count + rest);
     }
 
-    pub fn decrypt(
-        &self,
-        ciphertext: &[u8],
-        iv_high: u64,
-        iv_low: u32,
-        _encryption_ver: u32,
-        buf: &mut Vec<u8>,
-    ) {
+    pub fn decrypt(&self, ciphertext: &[u8], iv_high: u64, iv_low: u32, buf: &mut Vec<u8>) {
         let mut iv = [0u8; 16];
         iv[0..8].copy_from_slice(&iv_high.to_be_bytes());
         iv[8..12].copy_from_slice(&iv_low.to_be_bytes());
@@ -788,7 +785,7 @@ mod tests {
                 .expect("failed to decrypt encryption key");
 
             let mut decrypted = vec![];
-            encryption_key.decrypt(&encrypted, 123, 12, 0, &mut decrypted);
+            encryption_key.decrypt(&encrypted, 123, 12, &mut decrypted);
             assert_eq!(decrypted, b"hello");
         }
     }

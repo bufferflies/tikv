@@ -161,6 +161,7 @@ pub enum FileType {
     Columnar = 3,
     Blob = 4,
     VectorIndex = 5,
+    EncryptionDict = 6,
 }
 
 impl FileType {
@@ -172,6 +173,7 @@ impl FileType {
             3 => Some(FileType::Columnar),
             4 => Some(FileType::Blob),
             5 => Some(FileType::VectorIndex),
+            6 => Some(FileType::EncryptionDict),
             _ => None,
         }
     }
@@ -184,6 +186,7 @@ impl FileType {
             FileType::Columnar => "col",
             FileType::Blob => "blob",
             FileType::VectorIndex => "vec",
+            FileType::EncryptionDict => "encdict",
         }
     }
 
@@ -195,6 +198,7 @@ impl FileType {
             FileType::Columnar => ColumnarFileFooter::compute_size(),
             FileType::Blob => BlobTable::footer_size(),
             FileType::VectorIndex => unimplemented!(), // TODO
+            FileType::EncryptionDict => unimplemented!(), // TODO
         }
     }
 }
@@ -331,6 +335,9 @@ impl LocalFs {
     pub fn local_vector_index_file_path(&self, file_id: u64) -> PathBuf {
         self.dir.join(self.vector_index_filename(file_id))
     }
+    pub fn local_encryption_dict_file_path(&self, file_id: u64) -> PathBuf {
+        self.dir.join(self.encryption_dict_filename(file_id))
+    }
     pub fn sst_filename(&self, file_id: u64) -> PathBuf {
         PathBuf::from(format!("{:016x}.sst", file_id))
     }
@@ -342,6 +349,9 @@ impl LocalFs {
     }
     pub fn vector_index_filename(&self, file_id: u64) -> PathBuf {
         PathBuf::from(format!("{:016x}.vec", file_id))
+    }
+    pub fn encryption_dict_filename(&self, file_id: u64) -> PathBuf {
+        PathBuf::from(format!("{:016x}.dict", file_id))
     }
     pub fn tmp_file_path(&self, file_id: u64) -> PathBuf {
         let tmp_id = self
@@ -366,6 +376,7 @@ impl LocalFs {
             FileType::Columnar => self.local_columnar_file_path(file_id),
             FileType::Blob => self.local_blob_file_path(file_id),
             FileType::VectorIndex => self.local_vector_index_file_path(file_id),
+            FileType::EncryptionDict => self.local_encryption_dict_file_path(file_id),
         }
     }
 }

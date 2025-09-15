@@ -11,7 +11,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use cloud_encryption::EncryptionKey;
+use cloud_encryption::{EncryptionKey, KEY_TYPE_AES_256_CTR_LEGACY};
 use kvenginepb as pb;
 use kvenginepb::TxnFileRefs;
 use log_wrappers::Value as LogValue;
@@ -153,8 +153,11 @@ impl SnapAccess {
         }
 
         let snap = change_set.get_snapshot();
-        let encryption_key = get_shard_property(ENCRYPTION_KEY, snap.get_properties())
-            .map(|v| ctx.master_key.decrypt_encryption_key(&v).unwrap());
+        let encryption_key = encryption_key_from_shard_properties(
+            snap.get_properties(),
+            ctx.encryption_key_manager.clone(),
+            &ctx.master_key,
+        );
 
         let shard_id = change_set.shard_id;
         let shard_ver = change_set.shard_ver;
@@ -315,6 +318,7 @@ pub struct SnapAccessCore {
     blob_table_prefetch_size: usize,
     deleting_prefixes: Arc<DeletePrefixes>,
     encryption_key: Option<EncryptionKey>,
+    encryption_meta_bytes: Option<Bytes>,
     is_sync: bool,
     read_columnar: bool,
 }
@@ -339,7 +343,8 @@ impl SnapAccessCore {
             get_hint: Mutex::new(Hint::new()),
             blob_table_prefetch_size: shard.opt.blob_prefetch_size,
             deleting_prefixes: shard.get_del_prefixes(),
-            encryption_key: shard.encryption_key.clone(),
+            encryption_key: shard.get_encryption_key().clone(),
+            encryption_meta_bytes: shard.get_property(ENCRYPTION_META_KEY),
             is_sync,
             read_columnar: shard.opt.read_columnar,
         }
@@ -843,11 +848,16 @@ impl SnapAccessCore {
         let snap = cs.mut_snapshot();
         let mut properties = pb::Properties::new();
         properties.shard_id = self.get_tag().id_ver.id;
-        if let Some(encryption_key) = &self.encryption_key {
+        if let Some(encryption_key) = &self.encryption_key
+            && encryption_key.key_type == KEY_TYPE_AES_256_CTR_LEGACY
+        {
             properties.mut_keys().push(ENCRYPTION_KEY.to_string());
             properties.mut_values().push(encryption_key.export());
         }
-
+        if let Some(p) = &self.encryption_meta_bytes {
+            properties.mut_keys().push(ENCRYPTION_META_KEY.to_string());
+            properties.mut_values().push(p.to_vec());
+        }
         snap.set_outer_start(self.get_start_key().to_vec());
         snap.set_outer_end(self.get_end_key().to_vec());
         snap.set_inner_key_off(self.data.inner_key_off as u32);
@@ -1891,7 +1901,7 @@ mod tests {
 
     use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
     use bytes::{Buf, Bytes};
-    use cloud_encryption::{EncryptionKey, MasterKey};
+    use cloud_encryption::{EncryptionKey, EncryptionKeyManager, MasterKey};
     use futures::executor::block_on;
     use kvenginepb::TableCreate;
     use proptest::prelude::*;
@@ -1912,8 +1922,8 @@ mod tests {
         },
         txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
         util::test_util::KeyBuilder,
-        ChangeSet, Shard, ShardRange, SnapAccess, UserMeta, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
-        WRITE_CF,
+        ChangeSet, Shard, ShardRange, SnapAccess, UserMeta, ENCRYPTION_META_KEY,
+        GLOBAL_SHARD_END_KEY, WRITE_CF,
     };
 
     const KEYSPACE_ID: u32 = 42;
@@ -1959,6 +1969,7 @@ mod tests {
             0,
             opt,
             &master_key,
+            Arc::new(EncryptionKeyManager::new()),
         );
         let mut builder = ShardDataBuilder::new(shard.get_data());
         create_snapshot_tables(
@@ -2054,6 +2065,35 @@ mod tests {
         })
     }
 
+    fn build_encryption_meta_for_test() -> kvenginepb::EncryptionMeta {
+        let mut master_key_config = cloud_encryption::MasterKeyConfig::default();
+        master_key_config.key_id = "random".into();
+        master_key_config.vendor = "test".into();
+        let mk = block_on(master_key_config.generate_new_master_key()).unwrap();
+        let dk = mk.0.generate_encryption_key();
+
+        let mut meta = kvenginepb::EncryptionMeta::default();
+        meta.keyspace_id = KEYSPACE_ID;
+        // Current encryption epoch
+        meta.mut_current().set_file_id(1 /* file_id */);
+        meta.mut_current().set_data_key_id(dk.get_key_id());
+        meta.mut_current()
+            .set_created_at(tikv_util::time::UnixSecs::now().into_inner());
+        // Master key
+        let mut master_key = kvenginepb::MasterKey::default();
+        master_key.set_cmek_id(master_key_config.key_id.clone());
+        master_key.set_vendor(master_key_config.vendor.clone());
+        master_key.set_region(master_key_config.region.clone());
+        master_key.set_endpoint(master_key_config.endpoint.clone());
+        master_key.set_ciphertext(mk.1.to_vec());
+        meta.set_master_key(master_key);
+        // Data key map.
+        let mut data_key = kvenginepb::DataKey::new();
+        data_key.set_ciphertext(dk.export());
+        meta.mut_data_keys().insert(dk.get_key_id(), data_key);
+        meta
+    }
+
     proptest! {
         #[test]
         fn test_serde_mem_tables(
@@ -2074,7 +2114,14 @@ mod tests {
             let txn_chunk_manager = TxnChunkManager::new(None, dfs.clone(), BlockCache::None, with_pool_size(2), TxnChunkManagerConfig::default());
 
             let master_key = MasterKey::new(&[1u8; 32]);
-            let enc_key = enable_enc.then(||master_key.generate_encryption_key());
+            let enc_key_mgr = Arc::new(EncryptionKeyManager::new());
+            let enc_meta = enable_enc.then(|| build_encryption_meta_for_test());
+            let enc_key = enc_meta.clone().and_then(|m| {
+                cloud_encryption::current_data_key_from_encryption_meta_bytes(
+                    enc_key_mgr.clone(),
+                    &m.write_to_bytes().unwrap(),
+                ).ok()
+            });
 
             let has_txn_file = ops.iter().any(|op| matches!(op, MemTableOp::WriteTxnFile(is, _) if !is.is_empty()));
             let (mem_tbls, ref_store) = make_mem_tables(ops, &kb, dfs.clone(), enc_key.as_ref());
@@ -2091,16 +2138,15 @@ mod tests {
             let outer_ranges = ranges.into_iter().map(|(start, end)| {
                 (Bytes::from(kb.i_to_outer_key(start)), Bytes::from(kb.i_to_outer_key(end)))
             }).collect::<Vec<_>>();
-
             // Serialize
             let mem_bin = {
                 let mut props = kvenginepb::Properties {
                     shard_id,
                     ..Default::default()
                 };
-                if let Some(enc_key) = &enc_key {
-                    props.mut_keys().push(ENCRYPTION_KEY.to_string());
-                    props.mut_values().push(enc_key.export());
+                if let Some(enc_meta) = &enc_meta {
+                    props.mut_keys().push(ENCRYPTION_META_KEY.to_string());
+                    props.mut_values().push(enc_meta.write_to_bytes().unwrap());
                 }
                 let shard = Shard::new(
                     engine_id,
@@ -2110,6 +2156,7 @@ mod tests {
                     inner_key_off,
                     opt,
                     &master_key,
+                    enc_key_mgr.clone(),
                 );
                 let mut builder = ShardDataBuilder::new(shard.get_data());
                 builder.set_mem_tbls(mem_tbls);
@@ -2133,13 +2180,14 @@ mod tests {
                 ia_ctx: IaCtx::Disabled,
                 prepare_type: PrepareType::All,
                 read_columnar: true,
+                encryption_key_manager: enc_key_mgr.clone(),
             };
             let mut snap_pb = kvenginepb::Snapshot::default();
             snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32 * enable_inner_key_off as u32);
             let props = snap_pb.mut_properties();
-            if let Some(enc_key) = &enc_key {
-                props.mut_keys().push(ENCRYPTION_KEY.to_string());
-                props.mut_values().push(enc_key.export());
+            if let Some(enc_meta) = &enc_meta {
+                props.mut_keys().push(ENCRYPTION_META_KEY.to_string());
+                props.mut_values().push(enc_meta.write_to_bytes().unwrap());
             }
             let mut cs = kvenginepb::ChangeSet::default();
             cs.set_shard_id(shard_id);

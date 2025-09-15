@@ -357,7 +357,12 @@ fn test_txn_file_basic_impl(
     let _enter = rt.enter();
 
     if enable_encryption {
-        let cfg = KeyspaceEncryptionConfig { enabled: true };
+        let cfg = KeyspaceEncryptionConfig {
+            enabled: true,
+            cmek_id: Some("random".into()),
+            vendor: Some("test".into()),
+            ..Default::default()
+        };
         cluster
             .get_pd_client()
             .set_keyspace_encryption(KEYSPACE_ID, cfg)

@@ -370,6 +370,8 @@ impl SsTableCore {
             }
         }
         let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(smallest_buf.chunk());
+        let encryption_key =
+            encryption_key.map(|k| k.switch_if_header_mismatch(encryption_ver).unwrap());
         let core = Self {
             file,
             cache,
@@ -492,12 +494,12 @@ impl SsTableCore {
         if compression_type == NO_COMPRESSION {
             let mut raw_block = self.file.read(addr.curr_off as u64, length).await?;
             if let Some(encryption_key) = &self.encryption_key {
+                assert_eq!(self.encryption_ver, encryption_key.encryption_header());
                 let mut block = Vec::with_capacity(length + encryption_key.encryption_block_size());
                 encryption_key.decrypt(
                     raw_block.chunk(),
                     addr.origin_fid,
                     addr.curr_off,
-                    self.encryption_ver,
                     &mut block,
                 );
                 raw_block = Bytes::from(block)
@@ -507,18 +509,13 @@ impl SsTableCore {
         }
         buf.resize(length, 0);
         if let Some(encryption_key) = &self.encryption_key {
+            assert_eq!(self.encryption_ver, encryption_key.encryption_header());
             decryption_buf.resize(length, 0);
             self.file
                 .read_at(decryption_buf, addr.curr_off as u64)
                 .await?;
             buf.truncate(0);
-            encryption_key.decrypt(
-                decryption_buf,
-                addr.origin_fid,
-                addr.curr_off,
-                self.encryption_ver,
-                buf,
-            );
+            encryption_key.decrypt(decryption_buf, addr.origin_fid, addr.curr_off, buf);
         } else {
             self.file.read_at(buf, addr.curr_off as u64).await?;
         }

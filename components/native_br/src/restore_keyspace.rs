@@ -16,7 +16,7 @@ use std::{
 use ahash::HashMapExt;
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
-use cloud_encryption::{EncryptionKey, MasterKey};
+use cloud_encryption::{EncryptionKey, EncryptionKeyManager, MasterKey};
 use cloud_server::{RestoreShardResponse, TikvServer};
 use collections::{HashMap, HashSet};
 use file_system::{IoRateLimitMode, IoRateLimiter};
@@ -25,11 +25,12 @@ use hyper::Body;
 use itertools::Itertools;
 use kvengine::{
     dfs::{self, Dfs, FileType, S3Fs},
+    encryption_key_from_shard_properties,
     ia::util::IaConfig,
     limiter::StoreLimiter,
     table::{BoundedDataSet, DataBound, InnerKey},
     IdAllocator, IdVer, LoadTableFilterFn, ShardMeta, ShardRange, ShardStats, ShardTag,
-    ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
+    ENCRYPTION_KEY, ENCRYPTION_META_KEY, GLOBAL_SHARD_END_KEY,
 };
 use kvenginepb as pb;
 use kvproto::{metapb, metapb::PeerRole, raft_serverpb::MergeState};
@@ -1234,13 +1235,11 @@ impl BackupCluster {
                 self.pd_client.get_security_mgr(),
             )?;
 
-            let encryption_key = self.get_keyspace_exported_encryption_key().map(|exported| {
-                kv_engine
-                    .get_master_key()
-                    .decrypt_encryption_key(&exported)
-                    .unwrap()
-            });
-
+            let encryption_key = encryption_key_from_shard_properties(
+                &self.get_sorted_shard(0).meta.get_properties_pb(),
+                kv_engine.get_encryption_key_manager(),
+                &kv_engine.get_master_key(),
+            );
             // Move shards to meta_applier to apply meta change in `flush_mem_table`.
             // Move back after flush finished.
             let shards = mem::take(&mut self.shards);
@@ -2335,7 +2334,9 @@ impl BackupCluster {
                 );
             }
 
-            if let Some(encryption_key) = self.get_keyspace_exported_encryption_key() {
+            if let Some(encryption_meta) = self.get_keyspace_exported_encryption_meta() {
+                meta.set_property(ENCRYPTION_META_KEY, encryption_meta.as_slice());
+            } else if let Some(encryption_key) = self.get_keyspace_exported_encryption_key() {
                 meta.set_property(ENCRYPTION_KEY, encryption_key.as_slice());
             }
             let mut properties_helper =
@@ -2505,6 +2506,13 @@ impl BackupCluster {
             .map(|x| x.to_vec())
     }
 
+    fn get_keyspace_exported_encryption_meta(&self) -> Option<Vec<u8>> {
+        self.get_sorted_shard(0)
+            .meta
+            .get_property(ENCRYPTION_META_KEY)
+            .map(|x| x.to_vec())
+    }
+
     fn tolerated_err(&self) -> usize {
         self.tolerated_err
     }
@@ -2517,6 +2525,7 @@ impl BackupCluster {
             .dfs
             .get_runtime()
             .block_on(self.security_conf.new_master_key());
+        let encryption_manager = Arc::new(EncryptionKeyManager::new());
         let mut decryption_buf = Vec::new();
 
         for store_id in self.get_all_stores_id() {
@@ -2526,12 +2535,11 @@ impl BackupCluster {
 
                 let meta = self.raw_metas.get(&shard_id).unwrap();
                 let snap = meta.get_snapshot();
-
-                let encryption_key =
-                    kvengine::get_shard_property(ENCRYPTION_KEY, snap.get_properties()).map(
-                        |exported_key| master_key.decrypt_encryption_key(&exported_key).unwrap(),
-                    );
-
+                let encryption_key = encryption_key_from_shard_properties(
+                    snap.get_properties(),
+                    encryption_manager.clone(),
+                    &master_key,
+                );
                 let tag = ShardTag::new(store_id, IdVer::from_change_set(meta));
                 let peer_tag =
                     PeerTag::new(store_id, RegionIdVer::new(meta.shard_id, meta.shard_ver));

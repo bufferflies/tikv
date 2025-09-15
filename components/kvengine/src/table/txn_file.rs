@@ -765,13 +765,10 @@ impl TxnChunkInner {
             decryption_buf.resize(length, 0);
             self.file.read_at(decryption_buf, offset)?;
             let mut block = Vec::with_capacity(length + encryption_key.encryption_block_size());
-            encryption_key.decrypt(
-                decryption_buf,
-                self.file.id(),
-                offset as u32,
-                self.encryption_ver,
-                &mut block,
-            );
+            let encryption_key = encryption_key
+                .switch_if_header_mismatch(self.encryption_ver)
+                .unwrap();
+            encryption_key.decrypt(decryption_buf, self.file.id(), offset as u32, &mut block);
             Bytes::from(block)
         } else {
             self.file.read(offset, length)?

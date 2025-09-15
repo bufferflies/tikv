@@ -15,6 +15,7 @@ async-trait = "0.1"
 bitflags = "1.0.1"
 byteorder = "1.2"
 bytes = "1.0"
+cloud = { workspace = true }
 cloud_encryption = { workspace = true }
 collections = { path = "../collections" }
 concurrency_manager = { path = "../concurrency_manager", default-features = false }
@@ -28,6 +29,7 @@ engine_rocks = { path = "../engine_rocks", default-features = false }
 engine_traits = { path = "../engine_traits", default-features = false }
 error_code = { path = "../error_code", default-features = false }
 fail = "0.5"
+farmhash = "1.1.5"
 fs2 = "0.4"
 futures = "0.3"
 futures-util = { version = "0.3.1", default-features = false, features = ["io"] }
@@ -74,5 +76,6 @@ file_system = { workspace = true }
 rstest = "0.18"
 security = { workspace = true }
 tempfile = "3"
+test_cloud_server = { workspace = true }
 test_pd_client = { workspace = true }
 test_util = { workspace = true }
