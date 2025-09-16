@@ -1,7 +1,8 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
+use tikv_util::codec::number::NumberEncoder;
 
 pub const WRITE_CF: usize = 0;
 pub const LOCK_CF: usize = 1;
@@ -48,8 +49,33 @@ impl UserMeta {
 }
 
 pub fn encode_extra_txn_status_key(key: &[u8], start_ts: u64) -> Bytes {
-    let mut buf = BytesMut::with_capacity(key.len() + 8);
+    // Attention: make the encoding format of txn key consistent with the
+    // implementation in TiKV, the format should be `[raw_key +
+    // <BigEndian>::(!ts)]`.
+    //
+    // Ref: https://github.com/tikv/tikv/blob/1deb3a135dc41c3ca227e3d5a29712526b492a4c/components/tikv_util/src/codec/number.rs#L73.
+    let mut buf = vec![];
     buf.extend_from_slice(key);
-    buf.put_u64(start_ts.reverse_bits());
-    buf.freeze()
+    buf.encode_u64_desc(start_ts).unwrap();
+    buf.into()
+}
+
+#[cfg(test)]
+mod tests {
+
+    use tikv_util::{codec::number::decode_u64_desc, time::Instant};
+
+    use super::*;
+
+    #[test]
+    fn test_extra_txn_status_key_encoding() {
+        let raw_key = b"test_tidb_123";
+
+        let ts = Instant::now();
+        let encoded_key = encode_extra_txn_status_key(raw_key, ts.second() as u64);
+        let len = encoded_key.len();
+        let mut decoded_key = &encoded_key[(len - 8)..];
+        let decoded_ts = decode_u64_desc(&mut decoded_key).unwrap();
+        assert_eq!(decoded_ts, ts.second() as u64);
+    }
 }
