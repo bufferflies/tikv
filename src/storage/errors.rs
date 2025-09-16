@@ -554,7 +554,7 @@ mod test {
                 conflict_commit_ts,
                 key: key.clone(),
                 primary: primary.clone(),
-                reason: WriteConflictReason::LazyUniquenessCheck,
+                reason: WriteConflictReason::NotLockedKeyConflict,
             },
         )));
         let mut expect = kvrpcpb::KeyError::default();
@@ -564,7 +564,7 @@ mod test {
         write_conflict.set_conflict_commit_ts(conflict_commit_ts.into_inner());
         write_conflict.set_key(key);
         write_conflict.set_primary(primary);
-        write_conflict.set_reason(WriteConflictReason::LazyUniquenessCheck);
+        write_conflict.set_reason(WriteConflictReason::NotLockedKeyConflict);
         expect.set_conflict(write_conflict);
         expect.set_retryable(format!("{:?}", case));
 

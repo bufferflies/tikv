@@ -78,6 +78,7 @@ pub async fn prewrite<S: Snapshot>(
 
     let lock_status = match reader.load_lock(&mutation.key)? {
         Some(lock) => mutation.check_lock(lock, pessimistic_action)?,
+        // DoPessimisticCheck keys expect pessimistic locks. If missing, amend the lock.
         None if matches!(pessimistic_action, DoPessimisticCheck) => {
             amend_pessimistic_lock(&mut mutation, reader).await?;
             lock_amended = true;
@@ -425,10 +426,11 @@ impl<'a> PrewriteMutation<'a> {
                 Some(WriteConflictReason::Optimistic),
             ),
             TransactionKind::Pessimistic(for_update_ts) => {
+                // DoConstraintCheck: For keys that do not acquire pessimistic locks
                 if self.pessimistic_action == DoConstraintCheck {
                     (
                         self.txn_props.start_ts,
-                        Some(WriteConflictReason::LazyUniquenessCheck),
+                        Some(WriteConflictReason::NotLockedKeyConflict),
                     )
                 } else {
                     (for_update_ts, None)
@@ -525,7 +527,7 @@ impl<'a> PrewriteMutation<'a> {
                             self.write_conflict_error(
                                 &write,
                                 commit_ts,
-                                WriteConflictReason::LazyUniquenessCheck,
+                                WriteConflictReason::NotLockedKeyConflict,
                             )?;
                         }
                     }
@@ -780,10 +782,13 @@ impl<'a> PrewriteMutation<'a> {
             }
             TransactionKind::Pessimistic(_) => {
                 match self.pessimistic_action {
+                    // DoPessimisticCheck: Normal case - keys acquire pessimistic locks.
+                    // Constraint checking done during lock acquisition, so skip in prewrite.
+                    // If lock is missing, goes to amend lock path.
                     DoPessimisticCheck => true,
+                    // SkipPessimisticCheck: Deprecated action, should not be used.
                     // For non-pessimistic-locked keys, do not skip constraint check when retrying.
-                    // This intents to protect idempotency.
-                    // Ref: https://github.com/tikv/tikv/issues/11187
+                    // This intends to protect idempotency. Ref: https://github.com/tikv/tikv/issues/11187
                     SkipPessimisticCheck => {
                         warn!(
                             "SkipPessimisticCheck is deprecated, should not be used";
@@ -793,8 +798,8 @@ impl<'a> PrewriteMutation<'a> {
                         );
                         false
                     }
-                    // For keys that postpones constraint check to prewrite, do not skip constraint
-                    // check.
+                    // DoConstraintCheck: For keys that do not acquire pessimistic locks.
+                    // Must perform constraint checking during prewrite.
                     DoConstraintCheck => false,
                 }
             }
@@ -1039,7 +1044,7 @@ fn find_extra_cf_conflict(
             let conflict_reason = match txn_kind {
                 TransactionKind::Optimistic(_) => WriteConflictReason::Optimistic,
                 TransactionKind::Pessimistic(_) if pessimistic_action == DoConstraintCheck => {
-                    WriteConflictReason::LazyUniquenessCheck
+                    WriteConflictReason::NotLockedKeyConflict
                 }
                 TransactionKind::Pessimistic(_) => {
                     // This shouldn't happen - pessimistic lock should have been lost
@@ -2513,7 +2518,7 @@ pub mod tests {
         assert!(matches!(
             err,
             Error(box ErrorInner::WriteConflict {
-                reason: WriteConflictReason::LazyUniquenessCheck,
+                reason: WriteConflictReason::NotLockedKeyConflict,
                 ..
             })
         ));
