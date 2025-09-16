@@ -287,13 +287,6 @@ impl SchemaFile {
                 }
             }
         }
-        if end_key.len() >= TABLE_PREFIX_KEY_LEN
-            && &end_key[TABLE_PREFIX_KEY_LEN..] <= RECORD_PREFIX_SEP
-        {
-            // When end key is smaller than or equal to the table first record key, it
-            // doesn't overlap the table.
-            end_table_id -= 1;
-        }
         if start_table_id == end_table_id && start_table_id > 0 && start_table_id < i64::MAX {
             // The shard only contains a single table's index is not overlapped.
             if start_key[TABLE_PREFIX_KEY_LEN..].starts_with(INDEX_PREFIX_SEP)
@@ -301,6 +294,13 @@ impl SchemaFile {
             {
                 return false;
             }
+        }
+        if end_key.len() >= TABLE_PREFIX_KEY_LEN
+            && &end_key[TABLE_PREFIX_KEY_LEN..] <= RECORD_PREFIX_SEP
+        {
+            // When end key is smaller than or equal to the table first record key, it
+            // doesn't overlap the table.
+            end_table_id -= 1;
         }
         self.range_tables(start_table_id, end_table_id)
             .next()
@@ -1322,6 +1322,11 @@ mod tests {
             OverlapCase {
                 start_key: encode_table_key(keyspace_id, 10, false, b"012"),
                 end_key: encode_table_key(keyspace_id, 10, true, b"123"),
+                overlap: true,
+            },
+            OverlapCase {
+                start_key: encode_table_key(keyspace_id, 10, false, b"012"),
+                end_key: encode_table_key(keyspace_id, 11, false, b"123"),
                 overlap: true,
             },
         ] {
