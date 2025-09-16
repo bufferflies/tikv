@@ -7,11 +7,12 @@ use kvengine::{
     table::memtable::WriteBatchEntry, IdVer, ShardTag, SnapAccess, UserMeta, WriteBatch, LOCK_CF,
     WRITE_CF,
 };
-use kvproto::{cdcpb, cdcpb::Event, raft_cmdpb::AdminRequest};
+use kvproto::{cdcpb, raft_cmdpb::AdminRequest};
 use log_wrappers::Value as LogValue;
 use rfstore::store::ApplyObserver;
 use tidb_query_datatype::codec::table::{INDEX_PREFIX_SEP, PREFIX_LEN, TABLE_PREFIX};
-use tikv_util::{debug, error, info};
+use tikv_util::{error, info, mpsc::Sender, trace};
+use tokio::task::JoinHandle;
 use txn_types::{Lock, LockType};
 
 use crate::CdcMsg;
@@ -19,14 +20,14 @@ use crate::CdcMsg;
 pub struct CdcApplyObserver {
     store_id: u64,
     kv: kvengine::Engine,
-    sender: tikv_util::mpsc::Sender<CdcMsg>,
-    region_events: HashMap<u64, RegionEvents>,
+    sender: Sender<CdcMsg>,
     runtime: tokio::runtime::Handle,
-    join_handles: Vec<tokio::task::JoinHandle<EventBuilder>>,
+    join_handles: HashMap<u64 /* region_id */, Vec<JoinHandle<EventBuilder>>>,
 }
 
 #[derive(Default)]
 pub struct RegionEvents {
+    pub region_version: u64,
     pub events: Vec<cdcpb::Event>,
     pub tracked_locks: Vec<(Vec<u8>, u64)>,
 }
@@ -34,7 +35,7 @@ pub struct RegionEvents {
 impl CdcApplyObserver {
     pub fn new(
         kv: kvengine::Engine,
-        sender: tikv_util::mpsc::Sender<CdcMsg>,
+        sender: Sender<CdcMsg>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
         let store_id = kv.get_engine_id();
@@ -42,31 +43,79 @@ impl CdcApplyObserver {
             store_id,
             kv,
             sender,
-            region_events: HashMap::default(),
             runtime,
-            join_handles: Vec::new(),
+            join_handles: HashMap::default(),
         }
     }
 
-    fn send_msg(
-        sender: &tikv_util::mpsc::Sender<CdcMsg>,
-        region_id: u64,
-        region_events: RegionEvents,
-    ) {
+    fn send_applied_msg(sender: &Sender<CdcMsg>, region_id: u64, region_events: RegionEvents) {
         let msg = CdcMsg::Applied {
             region_id,
             region_events,
         };
         if let Err(e) = sender.send(msg) {
-            error!("send cdc event failed"; "error" => ?e);
+            // Should happen only on stop.
+            error!("send cdc event failed"; "region" => region_id, "error" => ?e);
+        }
+    }
+
+    async fn flush_region(&mut self, region_id: u64) {
+        if let Some(handles) = self.join_handles.remove(&region_id) {
+            Self::flush_region_impl(region_id, handles, self.sender.clone()).await;
+        };
+    }
+
+    async fn flush_region_impl(
+        region_id: u64,
+        handles: Vec<JoinHandle<EventBuilder>>,
+        sender: Sender<CdcMsg>,
+    ) {
+        debug_assert!(!handles.is_empty());
+
+        let mut events = RegionEvents::default();
+        for (idx, handle) in handles.into_iter().enumerate() {
+            let mut event_builder = handle.await.expect("task panic");
+
+            if idx == 0 {
+                events.region_version = event_builder.region_version();
+            } else {
+                debug_assert_eq!(
+                    events.region_version,
+                    event_builder.region_version(),
+                    "region version changed, region_id: {}",
+                    region_id,
+                );
+            }
+
+            events.events.push(event_builder.build_event());
+            events.tracked_locks.extend(event_builder.tracked_locks);
+        }
+        // Note: `sender` should be unbounded.
+        Self::send_applied_msg(&sender, region_id, events);
+    }
+
+    async fn flush_all(&mut self) {
+        let mut join_set = tokio::task::JoinSet::new();
+        for (region_id, handles) in self.join_handles.drain() {
+            let sender = self.sender.clone();
+            join_set.spawn_on(
+                async move {
+                    Self::flush_region_impl(region_id, handles, sender).await;
+                },
+                &self.runtime,
+            );
+        }
+        while let Some(res) = join_set.join_next().await {
+            res.expect("task panic");
         }
     }
 }
 
 impl ApplyObserver for CdcApplyObserver {
-    fn on_apply(&mut self, region_id: u64, log_index: u64, wb: &WriteBatch) {
+    fn on_apply(&mut self, region_id: u64, region_version: u64, log_index: u64, wb: &WriteBatch) {
         let write_cf = wb.get_cf(WRITE_CF);
         let snap_access = self.kv.get_snap_access(region_id).unwrap();
+        debug_assert_eq!(snap_access.get_version(), region_version);
         let mut event_builder = EventBuilder::new(snap_access, log_index);
         write_cf.iterate(|entry, buf| {
             event_builder.add_row(entry, buf);
@@ -79,14 +128,14 @@ impl ApplyObserver for CdcApplyObserver {
             event_builder.fetch_old_values().await;
             event_builder
         });
-        self.join_handles.push(handle);
+        self.join_handles.entry(region_id).or_default().push(handle);
     }
 
     fn on_apply_admin(
         &mut self,
         region_id: u64,
         region_version: u64,
-        _log_index: u64,
+        log_index: u64,
         admin: &AdminRequest,
     ) {
         if admin.has_splits()
@@ -95,10 +144,8 @@ impl ApplyObserver for CdcApplyObserver {
             || admin.has_rollback_merge()
         {
             let tag = ShardTag::new(self.store_id, IdVer::new(region_id, region_version));
-            if let Some(region_events) = self.region_events.remove(&region_id) {
-                Self::send_msg(&self.sender, region_id, region_events);
-            }
-            info!("{} on apply admin {:?}", tag, admin);
+            self.runtime.clone().block_on(self.flush_region(region_id));
+            info!("{} on apply admin {:?}", tag, admin; "log_index" => log_index);
             let msg = CdcMsg::AppliedAdmin {
                 region_id,
                 region_version,
@@ -111,24 +158,7 @@ impl ApplyObserver for CdcApplyObserver {
     }
 
     fn flush(&mut self) {
-        for handle in self.join_handles.drain(..) {
-            let Ok(mut event_builder) = self.runtime.block_on(handle) else {
-                error!("Failed to join event builder task");
-                continue;
-            };
-            let event = event_builder.build();
-            let events = self
-                .region_events
-                .entry(event.region_id)
-                .or_insert_with(|| RegionEvents::default());
-            events.events.push(event);
-            events
-                .tracked_locks
-                .extend_from_slice(&event_builder.tracked_locks);
-        }
-        for (region_id, region_events) in self.region_events.drain() {
-            Self::send_msg(&self.sender, region_id, region_events);
-        }
+        self.runtime.clone().block_on(self.flush_all());
     }
 }
 
@@ -147,6 +177,10 @@ impl EventBuilder {
             rows: cdcpb::EventEntries::default(),
             tracked_locks: Vec::new(),
         }
+    }
+
+    fn region_version(&self) -> u64 {
+        self.snap_access.get_version()
     }
 
     fn add_row(&mut self, entry: &WriteBatchEntry, buf: &[u8]) {
@@ -169,7 +203,7 @@ impl EventBuilder {
         event_row.set_type(cdcpb::EventLogType::Committed);
         self.rows.mut_entries().push(event_row);
 
-        debug!("{} add_row", self.snap_access.get_tag();
+        trace!("{} add_row", self.snap_access.get_tag();
             "key" => LogValue::key(entry_key),
             "version" => entry.version,
             "start_ts" => user_meta.start_ts,
@@ -187,7 +221,7 @@ impl EventBuilder {
         if entry.value(buf).is_empty() {
             self.tracked_locks.push((entry_key.to_vec(), 0));
 
-            debug!("{} add_lock (untrack)", self.snap_access.get_tag();
+            trace!("{} add_lock (untrack)", self.snap_access.get_tag();
                 "key" => LogValue::key(entry_key),
                 "version" => entry.version,
                 "log_index" => self.index,
@@ -197,7 +231,7 @@ impl EventBuilder {
         let lock = Lock::parse(entry.value(buf)).unwrap();
         self.tracked_locks
             .push((entry.key(buf).to_vec(), lock.ts.into_inner()));
-        debug!("{} add_lock", self.snap_access.get_tag();
+        trace!("{} add_lock", self.snap_access.get_tag();
             "key" => LogValue::key(entry_key),
             "version" => entry.version,
             "lock.ts" => lock.ts,
@@ -244,7 +278,7 @@ impl EventBuilder {
         }
     }
 
-    fn build(&mut self) -> Event {
+    fn build_event(&mut self) -> cdcpb::Event {
         let mut event = cdcpb::Event::default();
         event.index = self.index;
         event.region_id = self.snap_access.get_id();

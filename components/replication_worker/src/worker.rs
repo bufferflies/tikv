@@ -1338,6 +1338,16 @@ impl ReplicationWorker {
         };
 
         for (req_key, req_info) in delegate.requests.iter_mut() {
+            let tag = tag.with_region_version(req_info.region_version);
+            if region_events.region_version != req_info.region_version {
+                warn!("{} handle_applied: version not match", tag; "events.version" => region_events.region_version);
+                debug_assert!(
+                    false,
+                    "{} version not match, events: {:?}",
+                    tag, region_events.events
+                );
+            }
+
             let Some(conn) = self.conns.get(&req_key.conn_id) else {
                 warn!("{} handle_applied: conn not found, skip", tag;
                     "conn" => ?req_key.conn_id, "request" => %req_key.request_id);

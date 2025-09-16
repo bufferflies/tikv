@@ -422,6 +422,10 @@ impl Applier {
         self.region.get_id()
     }
 
+    pub fn region_version(&self) -> u64 {
+        self.region.get_region_epoch().version
+    }
+
     pub(crate) fn commit_lock(
         &mut self,
         kv: &kvengine::Engine,
@@ -774,7 +778,7 @@ impl Applier {
         }
         let writable_mem_tbl_state = ctx.engine.write(wb, cl.get_raw());
         if let Some(observer) = &mut observer {
-            observer.on_apply(self.region_id(), log_index, wb);
+            observer.on_apply(self.region_id(), self.region_version(), log_index, wb);
         }
         drop(wb_ref);
         ctx.observer = observer;
@@ -2364,7 +2368,7 @@ pub(crate) struct ApplyRouter {}
 pub use kvengine::shard::TERM_KEY;
 
 pub trait ApplyObserver: Send {
-    fn on_apply(&mut self, region_id: u64, log_index: u64, wb: &WriteBatch);
+    fn on_apply(&mut self, region_id: u64, region_version: u64, log_index: u64, wb: &WriteBatch);
 
     fn on_apply_admin(
         &mut self,

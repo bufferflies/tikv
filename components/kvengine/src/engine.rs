@@ -1077,6 +1077,11 @@ impl ShardTag {
             id_ver: IdVer::new(req.shard_id, req.shard_ver),
         }
     }
+
+    pub fn with_region_version(mut self, region_ver: u64) -> Self {
+        self.id_ver.ver = region_ver;
+        self
+    }
 }
 
 impl Display for ShardTag {
