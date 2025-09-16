@@ -131,7 +131,7 @@ impl S3FsCore {
         let mut config = rusoto_core::HttpConfig::new();
         config.read_buf_size(256 * 1024);
         let endpoint = if endpoint.is_empty() {
-            format!("https://s3.{}.amazonaws.com", region.as_str())
+            format!("http://s3.{}.amazonaws.com", region.as_str())
         } else {
             endpoint
         };
