@@ -114,6 +114,9 @@ pub struct S3FsCore {
     prefix: String,
     runtime: tokio::runtime::Runtime,
     virtual_host: bool,
+    // `rusoto` uses https by default, but cse uses http as default protocol.
+    // this marker indicates the original endpoint has no protocol hence http should be used.
+    use_http: bool,
 }
 
 impl S3FsCore {
@@ -184,6 +187,7 @@ impl S3FsCore {
         if prefix.is_empty() {
             prefix.push_str("default")
         }
+        let use_http = !endpoint.starts_with("https://");
         let no_schema_endpoint = endpoint
             .find("://")
             .map(|p| &endpoint[p + 3..])
@@ -208,6 +212,7 @@ impl S3FsCore {
             prefix,
             runtime,
             virtual_host,
+            use_http,
         }
     }
 
@@ -628,7 +633,11 @@ impl S3FsCore {
         } else {
             format!("/{}/{}", &self.bucket, key)
         };
-        SignedRequest::new(method, "s3", &self.region, &path)
+        let mut req = SignedRequest::new(method, "s3", &self.region, &path);
+        if self.use_http {
+            req.scheme = Some("http".to_string());
+        }
+        req
     }
 
     fn new_tagging_request(&self, method: &str, key: &str) -> SignedRequest {
