@@ -5,6 +5,7 @@ use std::{
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
     sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -538,14 +539,21 @@ impl S3FsCore {
 
     async fn dispatch<E>(
         &self,
+        req: SignedRequest,
+        from_response: fn(BufferedHttpResponse) -> RusotoError<E>,
+    ) -> Result<Response, RusotoError<E>> {
+        self.dispatch_with_timeout(req, self.opts.dispatch_timeout.0, from_response)
+            .await
+    }
+
+    async fn dispatch_with_timeout<E>(
+        &self,
         mut req: SignedRequest,
+        timeout: Duration,
         from_response: fn(BufferedHttpResponse) -> RusotoError<E>,
     ) -> Result<Response, RusotoError<E>> {
         req.set_hostname(Some(self.hostname.clone()));
-        let mut resp = self
-            .s3c
-            .sign_and_dispatch_timeout(req, self.opts.dispatch_timeout.0)
-            .await?;
+        let mut resp = self.s3c.sign_and_dispatch_timeout(req, timeout).await?;
         if !resp.status.is_success() {
             let buffered = resp.buffer().await.map_err(RusotoError::HttpDispatch)?;
             return Err(from_response(buffered));
@@ -718,7 +726,11 @@ impl S3FsCore {
             let data = data.clone();
             let stream = futures::stream::once(async move { Ok(data) });
             req.set_payload_stream(rusoto_core::ByteStream::new(stream));
-            let result = self.dispatch(req, PutObjectError::from_response).await;
+            let data_mb = data_len as u32 / (1024 * 1024);
+            let timeout = self.opts.dispatch_timeout.0 + self.opts.write_timeout_per_mb.0 * data_mb;
+            let result = self
+                .dispatch_with_timeout(req, timeout, PutObjectError::from_response)
+                .await;
             if result.is_ok() {
                 info!(
                     "create file {}, size {}, takes {:?}, retry {}",

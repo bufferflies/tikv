@@ -85,8 +85,8 @@ impl Config {
 const MAX_RETRY_COUNT: u32 = 9;
 const RETRY_SLEEP_INTERVAL: Duration = Duration::from_millis(500);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
-const READ_BODY_TIMEOUT: Duration = Duration::from_secs(60);
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -98,6 +98,8 @@ pub struct ConnOptions {
     pub retry_sleep_interval: ReadableDuration,
     pub conn_timeout: ReadableDuration,
     pub dispatch_timeout: ReadableDuration,
+    // The timeout adds to dispatch timeout per MB of body size.
+    pub write_timeout_per_mb: ReadableDuration,
     pub read_body_timeout: ReadableDuration,
     pub keep_alive_duration: ReadableDuration,
     pub pool_idle_timeout: ReadableDuration,
@@ -110,6 +112,7 @@ impl Default for ConnOptions {
             retry_sleep_interval: ReadableDuration(RETRY_SLEEP_INTERVAL),
             conn_timeout: ReadableDuration(CONNECTION_TIMEOUT),
             dispatch_timeout: ReadableDuration(DISPATCH_TIMEOUT),
+            write_timeout_per_mb: ReadableDuration(Duration::from_millis(100)),
             read_body_timeout: ReadableDuration(READ_BODY_TIMEOUT),
             keep_alive_duration: ReadableDuration(KEEP_ALIVE_INTERVAL),
             pool_idle_timeout: ReadableDuration(POOL_IDLE_TIMEOUT),
