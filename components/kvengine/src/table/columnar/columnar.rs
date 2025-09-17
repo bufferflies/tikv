@@ -394,13 +394,7 @@ impl MinMaxIndex {
     }
 
     pub(crate) fn check_is_null(&self, pack_idx: usize) -> bool {
-        if !self.has_value_marks(pack_idx) {
-            return false;
-        }
-        if !self.has_null_marks(pack_idx) {
-            return false;
-        }
-        true
+        self.has_null_marks(pack_idx)
     }
 }
 
