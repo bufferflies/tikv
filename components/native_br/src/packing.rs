@@ -902,7 +902,7 @@ impl UnpackRun {
 
 pub mod offline_pd {
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         sync::{Arc, Mutex},
     };
 
@@ -910,7 +910,7 @@ pub mod offline_pd {
     use bstr::ByteSlice;
     use dashmap::DashMap;
     use futures::{future, FutureExt};
-    use pd_client::{PdClient, PdFuture};
+    use pd_client::{pd_control::KeyspaceMeta, PdClient, PdFuture};
     use security::GetSecurityManager;
     use tikv_util::box_err;
     use txn_types::TimeStamp;
@@ -920,7 +920,7 @@ pub mod offline_pd {
     #[derive(Default)]
     pub struct OfflinePd {
         cluster_id: u64,
-        etcd: HashMap<Vec<u8>, Vec<u8>>,
+        etcd: BTreeMap<Vec<u8>, Vec<u8>>,
         last_tso: Mutex<TimeStamp>,
     }
 
@@ -956,7 +956,7 @@ pub mod offline_pd {
             let tso = TimeStamp::compose(TimeStamp::physical_now(), 0).into_inner();
             Ok(Self {
                 cluster_id,
-                etcd: keyspace_meta,
+                etcd: keyspace_meta.into_iter().collect(),
                 last_tso: Mutex::new(tso.into()),
             })
         }
@@ -982,9 +982,48 @@ pub mod offline_pd {
                         .map_err(|err| Error::Other(box_err!("parse keyspace ID failed: {}", err)))
                 })
         }
+
+        pub fn get_all_keyspaces(&self) -> Result<HashMap<u32, KeyspaceMeta>> {
+            let mut res = HashMap::new();
+
+            fail::fail_point!("offline_pd::mock_get_keyspace_by_name", |_| {
+                for i in 0..100 {
+                    let mut meta = KeyspaceMeta::default();
+                    meta.id = i;
+                    meta.name = format!("ks{i}");
+                    res.insert(i, meta);
+                }
+                Ok(res.clone())
+            });
+
+            let prefix = keyspace_prefix_key(self.cluster_id);
+            for (k, v) in self.etcd.range(prefix.clone()..) {
+                if !k.starts_with(&prefix) {
+                    break;
+                }
+                let name = k[prefix.len()..].to_str_lossy();
+                let id: u32 = match v.as_slice().to_str_lossy().parse() {
+                    Ok(id) => id,
+                    Err(err) => {
+                        return Err(Error::Other(box_err!("parse keyspace ID failed: {}", err)));
+                    }
+                };
+                let mut meta = KeyspaceMeta::default();
+                meta.id = id;
+                meta.name = name.to_string();
+                meta.state = "UNKNOWN_BECAUSE_LOADED_FROM_BACKUP".to_owned();
+                res.insert(id, meta);
+            }
+
+            Ok(res)
+        }
     }
 
     fn keyspace_id_key(keyspace: &str, cluster_id: u64) -> Vec<u8> {
         format!("/pd/{}/keyspaces/id/{}", cluster_id, keyspace).into_bytes()
+    }
+
+    fn keyspace_prefix_key(cluster_id: u64) -> Vec<u8> {
+        format!("/pd/{}/keyspaces/id/", cluster_id).into_bytes()
     }
 }

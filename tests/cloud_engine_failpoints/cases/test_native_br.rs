@@ -331,6 +331,8 @@ fn test_native_br_service(#[values(true, false)] use_api_v1x: bool) {
 
     let mock_get_keyspace_fp = "pd_ctl::mock_get_keyspace_by_name";
     let mock_no_tiflash = "pd_ctl::mock_no_tiflash_placement_rule_group";
+    let mock_get_keyspace_offline_pd = "offline_pd::mock_get_keyspace_by_name";
+    fail::cfg(mock_get_keyspace_offline_pd, "return").unwrap();
 
     let runtime = Runtime::new().unwrap();
     let _enter = runtime.enter();
@@ -496,6 +498,7 @@ fn test_native_br_service(#[values(true, false)] use_api_v1x: bool) {
 
     fail::remove(mock_get_keyspace_fp);
     fail::remove(mock_no_tiflash);
+    fail::remove(mock_get_keyspace_offline_pd);
 
     cluster.stop();
     oss.shutdown();

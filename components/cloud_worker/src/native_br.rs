@@ -1263,25 +1263,23 @@ pub mod v1x {
     use hyper::{Body, Request, Response};
     use kvengine::dfs::{DFSConfig, S3Fs};
     use native_br::{
-        backup::{backup_file_full_path, IncrementalBackupFile},
+        backup::IncrementalBackupFile,
         common::get_all_incremental_backups,
         packing::{
-            CopyPackedRun, CopyStep, MigratePackEnv, PackBackupStep, PackConfig, PackContext,
-            ReportCopyStepTrait, ReportPackBackupStepTrait, ReportUnpackStepTrait, UnpackRun,
-            UnpackStep,
+            offline_pd::OfflinePd, CopyPackedRun, CopyStep, MigratePackEnv, PackBackupStep,
+            PackConfig, PackContext, ReportCopyStepTrait, ReportPackBackupStepTrait,
+            ReportUnpackStepTrait, UnpackRun, UnpackStep,
         },
-        restore_keyspace::{self, ReportRestoreStepTrait, RestoreStep},
+        restore_keyspace::{self, load_norm_backup_meta, ReportRestoreStepTrait, RestoreStep},
     };
-    use pd_client::pd_control::{KeyspaceMeta, PdControl};
-    use protobuf::Message;
-    use rfenginepb::ClusterBackupMeta;
+    use pd_client::pd_control::PdControl;
     use serde::{
         de::{value::MapDeserializer, IntoDeserializer},
         Deserialize, Deserializer, Serialize,
     };
     use serde_json::json;
     use tikv::storage::mvcc::TimeStamp;
-    use tikv_util::{box_try, defer, info, warn, HandyRwLock};
+    use tikv_util::{defer, info, warn, HandyRwLock};
     use tokio::task::spawn_blocking;
 
     use crate::{
@@ -2358,9 +2356,7 @@ pub mod v1x {
         }
 
         let backup = backups.into_iter().next().unwrap();
-        let backup_name = backup_file_full_path(s3.get_prefix(), backup.name().to_owned(), None);
-        let keyspaces = load_keyspaces(&ctx.br).await?;
-        let details = fetch_backup_details(&s3, &backup_name, &keyspaces).await?;
+        let details = fetch_backup_details(&s3, backup.name()).await?;
         let target_ts = TimeStamp::compose(point_in_time.naive_utc().timestamp_millis() as _, 0);
         if details.safe_ts > target_ts.into_inner() {
             return Err(Error::noted_not_found("backup", format_args!(
@@ -2411,25 +2407,17 @@ pub mod v1x {
         let br_ctx = ctx.br.context.as_ref();
         let full_prefix = &full_prefix;
         let load_details = params.load_details;
-        let keyspaces = if load_details {
-            load_keyspaces(&ctx.br).await?
-        } else {
-            Default::default()
-        };
-        let keyspaces = &keyspaces;
         {
             let mut st = FuturesUnordered::new();
             for v in files {
                 st.push(async move {
                     let v1_compat = v1_compat_info(&v.key);
+                    let name = v.key.strip_prefix(full_prefix).unwrap().to_string();
                     HttpResult::Ok(Backup {
-                        name: v.key.strip_prefix(full_prefix).unwrap().to_string(),
+                        name: name.clone(),
                         last_modify_time: v.last_modified,
                         details: if load_details {
-                            Some(
-                                fetch_backup_details(br_ctx.s3fs.as_ref(), &v.key, keyspaces)
-                                    .await?,
-                            )
+                            Some(fetch_backup_details(&br_ctx.s3fs, &name).await?)
                         } else {
                             None
                         },
@@ -2460,19 +2448,13 @@ pub mod v1x {
         })
     }
 
-    async fn fetch_backup_details(
-        s3fs: &S3Fs,
-        key: &str,
-        keyspaces: &HashMap<u32, KeyspaceMeta>,
-    ) -> Result<BackupDetails> {
-        let backup_meta_bytes = s3fs
-            .get_object(key.to_owned(), key.to_owned(), Default::default())
-            .await?;
-        let mut backup_meta = ClusterBackupMeta::default();
-        box_try!(backup_meta.merge_from_bytes(&backup_meta_bytes));
+    async fn fetch_backup_details(s3fs: &Arc<S3Fs>, backup_name: &str) -> Result<BackupDetails> {
+        let (backup_meta, _) = load_norm_backup_meta(s3fs, backup_name).await?;
 
+        let offline_pd = OfflinePd::new(backup_meta.cluster_id, backup_meta.keyspace_meta).await?;
+        let keyspaces = offline_pd.get_all_keyspaces()?;
         let mut keyspace_sizes = HashMap::<u32, KeyspaceBackupInfo>::new();
-        for store in backup_meta.get_stores().iter() {
+        for store in backup_meta.stores.iter() {
             for (&keyspace_id, backup_size) in store.get_keyspace_size().iter() {
                 let keyspace_meta = keyspaces.get(&keyspace_id);
                 let sz = keyspace_sizes
@@ -2496,39 +2478,6 @@ pub mod v1x {
             safe_ts: backup_meta.safe_ts,
             keyspaces: keyspace_sizes.into_values().collect(),
         })
-    }
-
-    #[cfg(not(feature = "testexport"))]
-    async fn load_keyspaces(br_ctx: &NativeBrManager) -> HttpResult<HashMap<u32, KeyspaceMeta>> {
-        let ctl = br_ctx.get_pd_ctl()?;
-        let mut keyspaces = HashMap::default();
-        let mut next_page_token = None;
-        loop {
-            let kss = ctl.list_keyspaces(None, next_page_token).await?;
-            keyspaces.extend(kss.keyspaces.into_iter().map(|meta| (meta.id, meta)));
-            if kss.next_page_token.is_empty() {
-                return Ok(keyspaces);
-            }
-            next_page_token = Some(kss.next_page_token);
-        }
-    }
-
-    // for now the test cluster doesn't support PD's http API...
-    // use a mocked keyspace meta to make the test case happy...
-    #[cfg(feature = "testexport")]
-    async fn load_keyspaces(_br_ctx: &NativeBrManager) -> Result<HashMap<u32, KeyspaceMeta>> {
-        let meta = |id, name: &str| {
-            let mut meta = KeyspaceMeta::default();
-            meta.id = id;
-            meta.name = name.to_owned();
-            meta
-        };
-
-        Ok(vec![meta(0, "DEFAULT")]
-            .into_iter()
-            .chain((1..100).map(|id| meta(id, &format!("ks{id}"))))
-            .map(|meta| (meta.id, meta))
-            .collect::<HashMap<_, _>>())
     }
 }
 
