@@ -1485,6 +1485,14 @@ impl Shard {
         false
     }
 
+    pub fn has_failed_compaction(&self) -> bool {
+        if self.is_compacting() {
+            return false;
+        }
+        let priority = self.compaction_priority.read().unwrap();
+        priority.is_some()
+    }
+
     pub(crate) fn get_data(&self) -> ShardData {
         self.data.read().unwrap().clone()
     }

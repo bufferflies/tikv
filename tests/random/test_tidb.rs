@@ -373,6 +373,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.raft_store.raft_election_timeout_ticks = 20;
         conf.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(800);
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(5);
+        conf.raft_store.peer_long_check_interval = ReadableDuration::secs(5);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(15);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(25);
         conf.raft_store.split_region_check_tick_interval = ReadableDuration::millis(500);

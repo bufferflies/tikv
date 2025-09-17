@@ -59,7 +59,7 @@ use crate::{
         util as _util, write_engine_meta, write_engine_meta_diff, ApplyMetrics, ApplyMsg,
         CasualMessage, Config, CustomBuilder, Engines, MsgApplyResult, PdTask, PeerMsg,
         PersistReady, RaftApplyState, RaftCommand, RaftContext, SignificantMsg, SnapState,
-        StoreMeta, StoreMsg, Ticker, TrimOverBoundParameter, PEER_TICK_CHECK_STALE_STATE,
+        StoreMeta, StoreMsg, Ticker, TrimOverBoundParameter, PEER_TICK_CHECK_LONG,
         PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK,
         PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
@@ -377,8 +377,8 @@ impl<'a> PeerMsgHandler<'a> {
         if self.ticker.is_on_tick(PEER_TICK_RAFT_LOG_GC) {
             self.on_raft_log_gc_tick();
         }
-        if self.ticker.is_on_tick(PEER_TICK_CHECK_STALE_STATE) {
-            self.on_check_peer_stale_state_tick();
+        if self.ticker.is_on_tick(PEER_TICK_CHECK_LONG) {
+            self.on_check_long_tick();
         }
     }
 
@@ -388,7 +388,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.ticker.schedule(PEER_TICK_SPLIT_CHECK);
         self.ticker.schedule(PEER_TICK_SWITCH_MEM_TABLE_CHECK);
         self.ticker.schedule(PEER_TICK_RAFT_LOG_GC);
-        self.ticker.schedule(PEER_TICK_CHECK_STALE_STATE);
+        self.ticker.schedule(PEER_TICK_CHECK_LONG);
     }
 
     fn on_significant_msg(&mut self, msg: SignificantMsg) {
@@ -2184,13 +2184,7 @@ impl<'a> PeerMsgHandler<'a> {
         }
     }
 
-    fn on_check_peer_stale_state_tick(&mut self) {
-        if self.fsm.peer.pending_remove {
-            return;
-        }
-
-        self.ticker.schedule(PEER_TICK_CHECK_STALE_STATE);
-
+    fn on_check_peer_stale_state(&mut self) {
         if self.fsm.peer.is_applying_snapshot() || self.fsm.peer.has_pending_snapshot() {
             return;
         }
@@ -2254,6 +2248,29 @@ impl<'a> PeerMsgHandler<'a> {
                     )
                 }
             }
+        }
+    }
+
+    fn on_check_long_tick(&mut self) {
+        if self.fsm.peer.pending_remove {
+            return;
+        }
+        self.ticker.schedule(PEER_TICK_CHECK_LONG);
+        self.on_check_peer_stale_state();
+        self.on_check_failed_compaction()
+    }
+
+    fn on_check_failed_compaction(&mut self) {
+        if !self.peer.is_leader() {
+            return;
+        }
+        let kv = &self.ctx.global.engines.kv;
+        let Some(shard) = kv.get_shard(self.region_id()) else {
+            return;
+        };
+        if shard.has_failed_compaction() {
+            info!("{} re-trigger failed compaction", self.peer.tag());
+            kv.trigger_compact(shard.id_ver());
         }
     }
 

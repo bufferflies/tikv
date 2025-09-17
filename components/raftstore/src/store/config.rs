@@ -131,6 +131,9 @@ pub struct Config {
     pub abnormal_leader_missing_duration: ReadableDuration,
     pub peer_stale_state_check_interval: ReadableDuration,
 
+    /// Interval to check peer states with very low frequency, defaults to 5min.
+    pub peer_long_check_interval: ReadableDuration,
+
     #[online_config(hidden)]
     pub leader_transfer_max_log_lag: u64,
 
@@ -388,6 +391,7 @@ impl Default for Config {
             max_leader_missing_duration: ReadableDuration::hours(2),
             abnormal_leader_missing_duration: ReadableDuration::minutes(10),
             peer_stale_state_check_interval: ReadableDuration::minutes(5),
+            peer_long_check_interval: ReadableDuration::minutes(5),
             leader_transfer_max_log_lag: 512,
             snap_apply_batch_size: ReadableSize::mb(10),
             region_worker_tick_interval: if cfg!(feature = "test") {
