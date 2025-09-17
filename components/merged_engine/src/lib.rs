@@ -76,7 +76,7 @@ pub struct MergedEngineContext {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct MergedEngineConfig {
-    pub block_cache_size: ReadableSize,
+    pub block_cache_size: AbsoluteOrPercentSize,
     pub timeout_fetch_wal: ReadableDuration,
     pub merged_store_id: u64,
     pub mem_table_size: ReadableSize,
@@ -87,7 +87,7 @@ pub struct MergedEngineConfig {
 impl Default for MergedEngineConfig {
     fn default() -> Self {
         Self {
-            block_cache_size: ReadableSize::mb(128),
+            block_cache_size: AbsoluteOrPercentSize::Percent(10.0),
             timeout_fetch_wal: ReadableDuration::secs(30),
             merged_store_id: 1024,
             mem_table_size: ReadableSize::mb(128),
@@ -655,7 +655,7 @@ impl MergedEngine {
         let mut kv_opts = kvengine::Options::default();
         kv_opts.local_dirs = vec![kv_engine_path];
         kv_opts.max_mem_table_size = ctx.config.mem_table_size.0;
-        kv_opts.max_block_cache_size = ctx.config.block_cache_size.0 as i64;
+        kv_opts.max_block_cache_size = ctx.config.block_cache_size.as_memory_size() as i64;
         kv_opts.for_restore = true;
         if ctx.config.force_ia {
             kv_opts.ia = IaConfig {

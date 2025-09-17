@@ -78,7 +78,7 @@ fn test_merged_engine_once() {
         local_dir: base_dir.path().join("merged_engine_restart"),
         master_key: cluster.get_kvengine(node_ids[0]).get_master_key(),
         config: MergedEngineConfig {
-            block_cache_size: ReadableSize::mb(1),
+            block_cache_size: ReadableSize::mb(1).into(),
             timeout_fetch_wal: ReadableDuration::secs(10),
             merged_store_id: 1024,
             force_ia: false,

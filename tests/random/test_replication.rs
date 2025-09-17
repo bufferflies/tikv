@@ -151,6 +151,7 @@ fn test_random_replication() {
     rep_config.grpc_addr = "127.0.0.1:5999".to_string();
     rep_config.advertise_addr = "127.0.0.1:5999".to_string();
     rep_config.report_region_interval = ReadableDuration::secs(3);
+    rep_config.merged_engine.block_cache_size = ReadableSize::mb(64).into();
     rep_config.merged_engine.mem_table_size = cluster.get_mem_table_size();
     rep_config.merged_engine.raft_write_batch_size = ReadableSize::kb(256);
 
