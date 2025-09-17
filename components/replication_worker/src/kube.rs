@@ -54,7 +54,7 @@ impl KeyspaceKubeService {
         }
         .to_string();
         task_states.pd_url = kube_api.compose_url(&scheme, &task_states.pd_sts_name, PD_PORT);
-        task_states.cdc_addr = kube_api.compose_addr(&task_states.cdc_sts_name, CDC_PORT);
+        task_states.cdc_addr = kube_api.compose_svc_addr(&task_states.cdc_sts_name, CDC_PORT);
         Self {
             keyspace_id,
             kube_api,
@@ -191,9 +191,10 @@ impl KubeApi {
         let container = pod_spec.containers.first_mut().unwrap();
         let command = container.command.as_mut().unwrap();
         let pd_sts_name = self.pd_sts_name(keyspace_id);
+        command.push(format!("--addr={}", self.compose_listen_addr(CDC_PORT)));
         command.push(format!(
-            "--addr={}",
-            self.compose_addr(&cdc_sts_name, CDC_PORT)
+            "--advertise-addr={}",
+            self.compose_svc_addr(&cdc_sts_name, CDC_PORT)
         ));
         command.push(format!(
             "--pd={}",
@@ -209,11 +210,15 @@ impl KubeApi {
     }
 
     fn compose_url(&self, scheme: &str, sts_name: &str, port: i32) -> String {
-        format!("{}://{}", scheme, self.compose_addr(sts_name, port))
+        format!("{}://{}", scheme, self.compose_svc_addr(sts_name, port))
     }
 
-    fn compose_addr(&self, sts_name: &str, port: i32) -> String {
+    fn compose_svc_addr(&self, sts_name: &str, port: i32) -> String {
         format!("{}.{}.svc.cluster.local:{}", sts_name, self.namespace, port)
+    }
+
+    fn compose_listen_addr(&self, port: i32) -> String {
+        format!("0.0.0.0:{}", port)
     }
 
     fn create_label_name(sts_name: &str) -> BTreeMap<String, String> {
