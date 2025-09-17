@@ -4113,7 +4113,6 @@ async fn compact_table_for_columnar(
     let mut res = reader
         .read_block(&mut block, columnar_config.pack_max_row_count)
         .await?;
-    let mut row_count = 0;
     let mut tbl_builder = ColumnarTableBuilder::new(
         schema.clone(),
         *columnar_config,
@@ -4123,24 +4122,23 @@ async fn compact_table_for_columnar(
     );
     let mut block_offset = 0;
     while res > 0 {
-        row_count += res;
         block_offset = tbl_builder.append_block(&block, block_offset);
+        let estimated_size = tbl_builder.get_estimated_size() + file_builder.estimated_size;
+        if estimated_size > columnar_config.max_columnar_table_size {
+            file_builder.add_table(tbl_builder);
+            *cnt += 1;
+            persist_columnar_file(target_lvl, file_builder, tx.clone(), fs.clone(), opts);
+            file_builder.reset(id_allocator.alloc_id().await);
+            tbl_builder = ColumnarTableBuilder::new(
+                schema.clone(),
+                *columnar_config,
+                ctx.encryption_key.clone(),
+                file_builder.file_id,
+                target_lvl,
+            );
+        }
         if block_offset < block.length() {
             res = block.length() - block_offset;
-            let estimated_size = tbl_builder.get_estimated_size() + file_builder.estimated_size;
-            if estimated_size > columnar_config.max_columnar_table_size {
-                file_builder.add_table(tbl_builder);
-                *cnt += 1;
-                persist_columnar_file(target_lvl, file_builder, tx.clone(), fs.clone(), opts);
-                file_builder.reset(id_allocator.alloc_id().await);
-                tbl_builder = ColumnarTableBuilder::new(
-                    schema.clone(),
-                    *columnar_config,
-                    ctx.encryption_key.clone(),
-                    file_builder.file_id,
-                    target_lvl,
-                );
-            }
         } else {
             block.reset();
             block_offset = 0;
@@ -4149,7 +4147,7 @@ async fn compact_table_for_columnar(
                 .await?;
         }
     }
-    if row_count > 0 {
+    if !tbl_builder.is_empty() {
         file_builder.add_table(tbl_builder);
     }
     Ok(())

@@ -493,6 +493,10 @@ impl ColumnarTableBuilder {
         }
         estimated_kv_size
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.handle_builder.row_count == 0
+    }
 }
 
 pub struct ColumnarColumnBuilder {
