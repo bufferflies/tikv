@@ -25,6 +25,7 @@ pub struct EngineStats {
     pub num_initial_flushed_shard: usize,
     pub num_active_shards: usize,
     pub num_compacting_shards: usize,
+    pub num_pending_compaction_shards: usize,
     pub num_has_del_prefixes_shards: usize,
     pub num_inner_key_shards: usize,
     pub ready_destroy_range_shards: Vec<IdVer>,
@@ -132,6 +133,8 @@ impl super::Engine {
             }
             if shard.compacting {
                 engine_stats.num_compacting_shards += 1;
+            } else if shard.compaction_score > 1.0 {
+                engine_stats.num_pending_compaction_shards += 1;
             }
             if shard.flushed {
                 engine_stats.num_initial_flushed_shard += 1;

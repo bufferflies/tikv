@@ -634,6 +634,9 @@ impl Engine {
             return None;
         }
         store_bool(&shard.compacting, true);
+        fail_point!("kvengine_compact", |_| Some(Err(
+            FallbackLocalCompactorDisabled
+        )));
         match shard.get_compaction_priority() {
             Some(CompactionPriority::L0 { .. }) => self.trigger_l0_compaction(&shard).await,
             Some(CompactionPriority::L1Plus { cf, level, .. }) => {

@@ -54,7 +54,8 @@ pub struct Config {
     /// Similar to the max_leader_missing_duration, instead it will log warnings
     /// and try to alert monitoring systems, if there is any.
     pub abnormal_leader_missing_duration: ReadableDuration,
-    pub peer_stale_state_check_interval: ReadableDuration,
+    /// Interval to check peer states with ver low frequency.
+    pub peer_check_long_interval: ReadableDuration,
 
     pub leader_transfer_max_log_lag: u64,
 
@@ -147,7 +148,7 @@ impl Default for Config {
             max_peer_down_duration: ReadableDuration::minutes(10),
             max_leader_missing_duration: ReadableDuration::hours(2),
             abnormal_leader_missing_duration: ReadableDuration::minutes(10),
-            peer_stale_state_check_interval: ReadableDuration::minutes(5),
+            peer_check_long_interval: ReadableDuration::minutes(5),
             leader_transfer_max_log_lag: 512,
             raft_store_max_leader_lease: ReadableDuration::secs(9),
             renew_leader_lease_advance_duration: ReadableDuration::secs(0),
@@ -227,7 +228,7 @@ impl Config {
         cfg.max_peer_down_duration = old.max_peer_down_duration;
         cfg.max_leader_missing_duration = old.max_leader_missing_duration;
         cfg.abnormal_leader_missing_duration = old.abnormal_leader_missing_duration;
-        cfg.peer_stale_state_check_interval = old.peer_stale_state_check_interval;
+        cfg.peer_check_long_interval = old.peer_long_check_interval;
         cfg.leader_transfer_max_log_lag = old.leader_transfer_max_log_lag;
         cfg.raft_log_gc_tick_interval = old.raft_log_gc_tick_interval;
         if old.raft_log_gc_size_limit.is_some() {
