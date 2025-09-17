@@ -56,9 +56,8 @@ const MAX_RETRY_TIMES: u64 = 5;
 // The max duration when retrying to connect to leader. No matter if the
 // MAX_RETRY_TIMES is reached.
 const MAX_RETRY_DURATION: Duration = Duration::from_secs(10);
+const MAX_BACKOFF: Duration = Duration::from_secs(3);
 
-// FIXME: Use a request-independent way to handle reconnection.
-const GLOBAL_RECONNECT_INTERVAL: Duration = Duration::from_millis(100); // 0.1s
 pub const REQUEST_RECONNECT_INTERVAL: Duration = Duration::from_secs(1); // 1s
 
 #[derive(Clone)]
@@ -95,6 +94,7 @@ impl TargetInfo {
 }
 
 pub struct Inner {
+    env: Arc<Environment>,
     pub hb_sender: Either<
         Option<ClientDuplexSender<RegionHeartbeatRequest>>,
         UnboundedSender<RegionHeartbeatRequest>,
@@ -115,6 +115,7 @@ pub struct Inner {
     pub tso: TimestampOracle,
 
     last_try_reconnect: Instant,
+    bo: ExponentialBackoff,
 }
 
 impl Inner {
@@ -343,12 +344,12 @@ pub struct Client {
     pub(crate) inner: RwLock<Inner>,
     pub feature_gate: FeatureGate,
     enable_forwarding: bool,
-    pub(crate) pd_connector: PdConnector,
     pub(crate) new_tso: RwLock<Option<TimestampOracle>>,
 }
 
 impl Client {
     pub(crate) fn new(
+        env: Arc<Environment>,
         security_mgr: Arc<SecurityManager>,
         client_stub: PdClientStub,
         members: GetMembersResponse,
@@ -356,7 +357,7 @@ impl Client {
         tso: TimestampOracle,
         new_tso: Option<TimestampOracle>,
         enable_forwarding: bool,
-        pd_connector: PdConnector,
+        retry_interval: Duration,
     ) -> Client {
         if !target.direct_connected() {
             REQUEST_FORWARDED_GAUGE_VEC
@@ -372,6 +373,7 @@ impl Client {
         Client {
             timer: GLOBAL_TIMER_HANDLE.clone(),
             inner: RwLock::new(Inner {
+                env,
                 hb_sender: Either::Left(Some(hb_tx)),
                 hb_receiver: Either::Left(Some(hb_rx)),
                 buckets_sender: Either::Left(Some(buckets_tx)),
@@ -384,11 +386,11 @@ impl Client {
                 pending_heartbeat: Arc::default(),
                 pending_buckets: Arc::default(),
                 last_try_reconnect: Instant::now(),
+                bo: ExponentialBackoff::new(retry_interval),
                 tso,
             }),
             feature_gate: FeatureGate::default(),
             enable_forwarding,
-            pd_connector,
             new_tso: RwLock::new(new_tso),
         }
     }
@@ -517,24 +519,22 @@ impl Client {
     /// Note: Retrying too quickly will return an error due to cancellation.
     /// Please always try to reconnect after sending the request first.
     pub async fn reconnect(&self, force: bool) -> Result<()> {
-        PD_RECONNECT_COUNTER_VEC.with_label_values(&["try"]).inc();
+        PD_RECONNECT_COUNTER_VEC.try_connect.inc();
         let start = Instant::now();
 
         let future = {
             let inner = self.inner.rl();
-            if start.saturating_duration_since(inner.last_try_reconnect) < GLOBAL_RECONNECT_INTERVAL
-            {
+            if start.saturating_duration_since(inner.last_try_reconnect) < inner.bo.get_interval() {
                 // Avoid unnecessary updating.
                 // Prevent a large number of reconnections in a short time.
-                PD_RECONNECT_COUNTER_VEC
-                    .with_label_values(&["cancel"])
-                    .inc();
+                PD_RECONNECT_COUNTER_VEC.cancel.inc();
                 return Err(box_err!("cancel reconnection due to too small interval"));
             }
+            let connector = PdConnector::new(inner.env.clone(), inner.security_mgr.clone());
             let members = inner.members.clone();
             async move {
                 let direct_connected = self.inner.rl().target_info().direct_connected();
-                self.pd_connector
+                connector
                     .reconnect_pd(
                         members,
                         direct_connected,
@@ -548,37 +548,38 @@ impl Client {
 
         {
             let mut inner = self.inner.wl();
-            if start.saturating_duration_since(inner.last_try_reconnect) < GLOBAL_RECONNECT_INTERVAL
-            {
+            if start.saturating_duration_since(inner.last_try_reconnect) < inner.bo.get_interval() {
                 // There may be multiple reconnections that pass the read lock at the same time.
                 // Check again in the write lock to avoid unnecessary updating.
-                PD_RECONNECT_COUNTER_VEC
-                    .with_label_values(&["cancel"])
-                    .inc();
+                PD_RECONNECT_COUNTER_VEC.cancel.inc();
                 return Err(box_err!("cancel reconnection due to too small interval"));
             }
             inner.last_try_reconnect = start;
+            inner.bo.next_backoff();
         }
 
         slow_log!(start.saturating_elapsed(), "try reconnect pd");
         let (client, target_info, members, tso) = match future.await {
             Err(e) => {
-                PD_RECONNECT_COUNTER_VEC
-                    .with_label_values(&["failure"])
-                    .inc();
+                PD_RECONNECT_COUNTER_VEC.failure.inc();
                 return Err(e);
             }
-            Ok(None) => {
-                PD_RECONNECT_COUNTER_VEC
-                    .with_label_values(&["no-need"])
-                    .inc();
-                return Ok(());
-            }
-            Ok(Some(tuple)) => {
-                PD_RECONNECT_COUNTER_VEC
-                    .with_label_values(&["success"])
-                    .inc();
-                tuple
+            Ok(res) => {
+                // Reset the retry count.
+                {
+                    let mut inner = self.inner.wl();
+                    inner.bo.reset()
+                }
+                match res {
+                    None => {
+                        PD_RECONNECT_COUNTER_VEC.no_need.inc();
+                        return Ok(());
+                    }
+                    Some(tuple) => {
+                        PD_RECONNECT_COUNTER_VEC.success.inc();
+                        tuple
+                    }
+                }
             }
         };
 
@@ -1130,6 +1131,33 @@ impl PdConnector {
     }
 }
 
+/// Simple backoff strategy.
+struct ExponentialBackoff {
+    base: Duration,
+    interval: Duration,
+}
+
+impl ExponentialBackoff {
+    pub fn new(base: Duration) -> Self {
+        Self {
+            base,
+            interval: base,
+        }
+    }
+    pub fn next_backoff(&mut self) -> Duration {
+        self.interval = std::cmp::min(self.interval * 2, MAX_BACKOFF);
+        self.interval
+    }
+
+    pub fn get_interval(&self) -> Duration {
+        self.interval
+    }
+
+    pub fn reset(&mut self) {
+        self.interval = self.base;
+    }
+}
+
 pub fn trim_http_prefix(s: &str) -> &str {
     s.trim_start_matches("http://")
         .trim_start_matches("https://")
@@ -1443,6 +1471,8 @@ mod test {
     use super::*;
     use crate::merge_bucket_stats;
 
+    const BASE_BACKOFF: Duration = Duration::from_millis(100);
+
     #[test]
     fn test_merge_bucket_stats() {
         #[allow(clippy::type_complexity)]
@@ -1697,5 +1727,24 @@ mod test {
             let result = check_regions_boundary(&mk_key(start), &mk_key(end), true, &regions);
             assert_eq!(result.is_ok(), expect_success, "case {}", idx);
         }
+    }
+
+    #[test]
+    fn test_exponential_backoff() {
+        let mut backoff = ExponentialBackoff::new(BASE_BACKOFF);
+        assert_eq!(backoff.get_interval(), BASE_BACKOFF);
+
+        assert_eq!(backoff.next_backoff(), 2 * BASE_BACKOFF);
+        assert_eq!(backoff.next_backoff(), Duration::from_millis(400));
+        assert_eq!(backoff.get_interval(), Duration::from_millis(400));
+
+        // Should not exceed MAX_BACKOFF
+        for _ in 0..20 {
+            backoff.next_backoff();
+        }
+        assert_eq!(backoff.get_interval(), MAX_BACKOFF);
+
+        backoff.reset();
+        assert_eq!(backoff.get_interval(), BASE_BACKOFF);
     }
 }
