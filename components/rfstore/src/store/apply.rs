@@ -208,6 +208,14 @@ impl ApplyMsgs {
             _ => None,
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.msgs.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.msgs.clear();
+    }
 }
 
 pub(crate) struct ApplyBatch {

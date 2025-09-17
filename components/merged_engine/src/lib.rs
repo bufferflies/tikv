@@ -1050,6 +1050,7 @@ impl MergedEngine {
             // shard is not in the keyspace range, skip apply.
             debug!("{} sync_merged_for_regions: skip apply", tag);
             preprocessor.sync_region();
+            ctx.skip_apply();
             return Ok(res);
         }
         let shard = shard.unwrap();
@@ -1223,9 +1224,16 @@ impl ops::DerefMut for SyncRegionsContext<'_> {
 
 impl Drop for SyncRegionsContext<'_> {
     fn drop(&mut self) {
+        debug_assert!(self.apply_msgs.is_empty());
         debug_assert!(self.prepared_msgs.is_empty());
         debug_assert!(self.destroyed_regions.is_empty());
         debug_assert!(self.raft_wb.is_empty());
+    }
+}
+
+impl SyncRegionsContext<'_> {
+    fn skip_apply(&mut self) {
+        self.apply_msgs.clear();
     }
 }
 
