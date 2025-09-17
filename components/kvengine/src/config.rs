@@ -104,6 +104,8 @@ pub struct Config {
     pub build_columnar: bool,
     /// Enable columnar table read. Default is false.
     pub read_columnar: bool,
+    /// Enable gc lock and extra cf. Default is false.
+    pub gc_lock_extra_cf: bool,
 
     pub txn_file_worker_pool_size: Option<usize>,
 
@@ -184,6 +186,7 @@ impl Default for Config {
             ignore_columnar_table_load: false,
             build_columnar: false,
             read_columnar: false,
+            gc_lock_extra_cf: false,
         }
     }
 }

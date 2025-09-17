@@ -6,6 +6,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut};
 use cloud_encryption::EncryptionKey;
 use farmhash;
+use txn_types::Lock;
 use xorf::BinaryFuse8;
 
 use super::super::table::Value;
@@ -16,6 +17,7 @@ use crate::table::{
 pub const PROP_KEY_SMALLEST: &[u8] = b"smallest";
 pub const PROP_KEY_BIGGEST: &[u8] = b"biggest";
 pub const PROP_KEY_MAX_TS: &[u8] = b"max_ts";
+pub const PROP_KEY_MAX_LOCK_TS: &[u8] = b"max_lock_ts";
 pub const PROP_KEY_ENTRIES: &[u8] = b"entries";
 pub const PROP_KEY_OLD_ENTRIES: &[u8] = b"old_entries";
 pub const PROP_KEY_TOMBS: &[u8] = b"tombs";
@@ -129,6 +131,8 @@ pub struct Builder {
     total_blob_size: u64,
     encryption_key: Option<EncryptionKey>,
     snap_version: SnapVersion,
+    is_lock_cf: bool,
+    max_lock_ts: u64,
 }
 
 impl Builder {
@@ -157,6 +161,10 @@ impl Builder {
         self.snap_version = snap_version;
     }
 
+    pub fn set_is_lock_cf(&mut self) {
+        self.is_lock_cf = true;
+    }
+
     pub fn reset(&mut self, sst_fid: u64) {
         self.sst_fid = sst_fid;
         self.block_builder.reset_all();
@@ -165,6 +173,7 @@ impl Builder {
         self.smallest.truncate(0);
         self.biggest.truncate(0);
         self.max_ts = 0;
+        self.max_lock_ts = 0;
         self.tombs = 0;
         self.total_blob_size = 0;
         self.old_entries = 0;
@@ -217,6 +226,13 @@ impl Builder {
             }
             if self.max_ts < val.version {
                 self.max_ts = val.version;
+            }
+            if self.is_lock_cf {
+                if let Some(ts) = Lock::parse_ts(val.get_value()) {
+                    if self.max_lock_ts < ts {
+                        self.max_lock_ts = ts;
+                    }
+                }
             }
         }
         if val.value_len() == 0 {
@@ -339,6 +355,9 @@ impl Builder {
         Builder::add_property(buf, PROP_KEY_SMALLEST, self.smallest.as_slice());
         Builder::add_property(buf, PROP_KEY_BIGGEST, self.biggest.as_slice());
         Builder::add_property(buf, PROP_KEY_MAX_TS, &self.max_ts.to_le_bytes());
+        if self.max_lock_ts > 0 {
+            Builder::add_property(buf, PROP_KEY_MAX_LOCK_TS, &self.max_lock_ts.to_le_bytes());
+        }
         let entries = self.key_hashes.len() as u32;
         Builder::add_property(buf, PROP_KEY_ENTRIES, &entries.to_le_bytes());
         Builder::add_property(buf, PROP_KEY_OLD_ENTRIES, &self.old_entries.to_le_bytes());

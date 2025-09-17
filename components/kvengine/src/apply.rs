@@ -612,8 +612,10 @@ impl EngineCore {
             let cf = comp.cf as usize;
             let new_top_level = self.new_level(shard, cs, &data, cf, &mut del_files, false);
             new_cfs[cf].set_level(new_top_level);
-            let new_bottom_level = self.new_level(shard, cs, &data, cf, &mut del_files, true);
-            new_cfs[cf].set_level(new_bottom_level);
+            if CF_LEVELS[cf] > comp.level as usize {
+                let new_bottom_level = self.new_level(shard, cs, &data, cf, &mut del_files, true);
+                new_cfs[cf].set_level(new_bottom_level);
+            }
             // For move down operation, the TableCreates may contains TopDeletes, we don't
             // want to delete them.
             for create in comp.get_table_creates() {

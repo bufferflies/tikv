@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod test_columnar;
+mod test_gc_lock_extra_cf;
 mod test_ia_auto_file;
 mod test_ia_file;
 mod test_storage_class;
@@ -1446,6 +1447,7 @@ fn new_test_options(
     opts.blob_table_build_options.min_blob_size = min_blob_size;
     opts.max_del_range_delay = Duration::from_secs(1);
     opts.read_columnar = true;
+    opts.gc_lock_extra_cf = true;
     opts
 }
 

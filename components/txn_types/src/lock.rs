@@ -290,12 +290,7 @@ impl Lock {
     }
 
     pub fn parse(mut b: &[u8]) -> Result<Lock> {
-        if b.is_empty() {
-            return Err(Error::from(ErrorInner::BadFormatLock));
-        }
-        let lock_type = LockType::from_u8(b.read_u8()?).ok_or(ErrorInner::BadFormatLock)?;
-        let primary = bytes::decode_compact_bytes(&mut b)?;
-        let ts = number::decode_var_u64(&mut b)?.into();
+        let (lock_type, primary, ts) = Lock::parse_header(&mut b)?;
         let ttl = if b.is_empty() {
             0
         } else {
@@ -394,6 +389,21 @@ impl Lock {
         lock.rollback_ts = rollback_ts;
         lock.is_txn_file = is_txn_file;
         Ok(lock)
+    }
+
+    fn parse_header(b: &mut &[u8]) -> Result<(LockType, Vec<u8>, TimeStamp)> {
+        if b.is_empty() {
+            return Err(Error::from(ErrorInner::BadFormatLock));
+        }
+        let lock_type = LockType::from_u8(b.read_u8()?).ok_or(ErrorInner::BadFormatLock)?;
+        let primary = bytes::decode_compact_bytes(b)?;
+        let ts = number::decode_var_u64(b)?.into();
+        Ok((lock_type, primary, ts))
+    }
+
+    pub fn parse_ts(mut b: &[u8]) -> Option<u64> {
+        let (_, _, ts) = Lock::parse_header(&mut b).ok()?;
+        Some(ts.into_inner())
     }
 
     pub fn into_lock_info(self, raw_key: Vec<u8>) -> LockInfo {

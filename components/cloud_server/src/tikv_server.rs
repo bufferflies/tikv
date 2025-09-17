@@ -1136,6 +1136,7 @@ impl TikvServer {
         kv_opts.ignore_columnar_table_load = conf.kvengine.ignore_columnar_table_load;
         kv_opts.set_build_columnar(conf.kvengine.build_columnar);
         kv_opts.read_columnar = conf.kvengine.read_columnar;
+        kv_opts.gc_lock_extra_cf = conf.kvengine.gc_lock_extra_cf;
         kv_opts.columnar_build_options = conf.kvengine.columnar_table_build_options;
         kv_opts.vector_index_build_options = conf.kvengine.vector_index_build_options;
 

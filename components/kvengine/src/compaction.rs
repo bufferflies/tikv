@@ -40,7 +40,7 @@ use tidb_query_datatype::{
 };
 use tikv_util::{
     backoff::ExponentialBackoff, box_err, retry::sleep_async, sys::thread::ThreadBuildWrapper,
-    time::Instant,
+    time::Instant, HandyRwLock,
 };
 use tokio::sync::mpsc;
 
@@ -619,6 +619,8 @@ impl Engine {
             Some(CompactionPriority::TrimOverBound) => {
                 self.trim_over_bound(&shard).await.transpose()
             }
+            Some(CompactionPriority::GcLockFile) => self.trigger_gc_lock_file(&shard).transpose(),
+            Some(CompactionPriority::GcExtraFile) => self.trigger_gc_extra_file(&shard).transpose(),
             Some(CompactionPriority::L0ToColumnar) => self.trigger_l0_to_columnar(&shard).await,
             Some(CompactionPriority::ColumnarL0 { .. }) => {
                 self.trigger_columnar_l0_compaction(&shard).await
@@ -1166,6 +1168,104 @@ impl Engine {
             }
         }
         None
+    }
+
+    pub(crate) fn trigger_gc_lock_file(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
+        if !shard.get_initial_flushed() {
+            // For commit merge, the persisted_version may increased by source region and do
+            // not ensure that all the commit entry for the lock files has been flushed.
+            return Ok(None);
+        }
+        let safe_ts = self.get_keyspace_gc_safepoint_v2(shard.keyspace_id);
+        let data = shard.get_data();
+        let lock_cf_files = data.get_cf(LOCK_CF);
+        let mut pending_gc_lock_files = vec![];
+        for lvl in lock_cf_files.levels.iter() {
+            for tbl in lvl.tables.iter() {
+                if tbl.get_max_lock_ts() < safe_ts {
+                    pending_gc_lock_files.push(tbl.id());
+                }
+            }
+        }
+        let tag = shard.tag();
+        let mut ready_gc_lock_files = vec![];
+        if data.all_persisted() {
+            ready_gc_lock_files = pending_gc_lock_files;
+        } else {
+            let mem_max_snap_ver = data
+                .mem_tbls
+                .iter()
+                .map(|m| m.get_snap_version())
+                .max()
+                .unwrap_or_default();
+            let new_snap_version = mem_max_snap_ver.max(data.persisted_version);
+            let mut guard = shard.pending_ops.wl();
+            for gc_lock_cf_file in pending_gc_lock_files {
+                match guard.gc_lock_files.entry(gc_lock_cf_file) {
+                    Entry::Occupied(old_file) => {
+                        if *old_file.get() < data.persisted_version {
+                            // The shard has been flushed after the lock file added to the pending
+                            // gc list. It will not be used for recovery, so we can safely remove
+                            // it.
+                            ready_gc_lock_files.push(gc_lock_cf_file);
+                            info!("{} add new ready {}", tag, gc_lock_cf_file);
+                            old_file.remove();
+                        }
+                    }
+                    Entry::Vacant(e) => {
+                        info!("{} add new pending {}", tag, gc_lock_cf_file);
+                        e.insert(new_snap_version);
+                    }
+                }
+            }
+        }
+        if ready_gc_lock_files.is_empty() {
+            return Ok(None);
+        }
+        let mut cs = new_change_set(shard.id, shard.ver);
+        let comp = cs.mut_compaction();
+        comp.cf = LOCK_CF as i32;
+        comp.level = 1;
+        let mut gc_count = 0;
+        let lock_cf = &data.cfs[LOCK_CF];
+        for lvl in &lock_cf.levels {
+            for tbl in lvl.tables.iter() {
+                if ready_gc_lock_files.contains(&tbl.id()) {
+                    if lvl.level == 1 {
+                        comp.mut_top_deletes().push(tbl.id());
+                    } else {
+                        comp.mut_bottom_deletes().push(tbl.id());
+                    }
+                    gc_count += 1;
+                }
+            }
+        }
+        if gc_count == 0 {
+            return Ok(None);
+        }
+        info!("{} trigger gc lock file {:?}", tag, cs);
+        Ok(Some(cs))
+    }
+
+    pub(crate) fn trigger_gc_extra_file(&self, shard: &Shard) -> Result<Option<pb::ChangeSet>> {
+        let data = shard.get_data();
+        let safe_ts = self.get_keyspace_gc_safepoint_v2(shard.keyspace_id);
+        let mut cs = new_change_set(shard.id, shard.ver);
+        let comp = cs.mut_compaction();
+        comp.cf = EXTRA_CF as i32;
+        comp.level = 1;
+        let extra_cf = &data.cfs[EXTRA_CF];
+        let extra_level = extra_cf.get_level(1);
+        for tbl in extra_level.tables.iter() {
+            if tbl.max_ts < safe_ts {
+                comp.mut_top_deletes().push(tbl.id());
+            }
+        }
+        if comp.get_top_deletes().is_empty() {
+            info!("{} no extra files to gc", shard.tag());
+            return Ok(None);
+        }
+        Ok(Some(cs))
     }
 
     pub(crate) async fn trigger_l0_compaction(
@@ -2220,6 +2320,8 @@ pub(crate) enum CompactionPriority {
     DestroyRange,
     TruncateTs,
     TrimOverBound,
+    GcLockFile,
+    GcExtraFile,
     L0ToColumnar,
     ColumnarL0 {
         score: f64,
@@ -2252,6 +2354,8 @@ impl CompactionPriority {
             CompactionPriority::DestroyRange => f64::MAX,
             CompactionPriority::TruncateTs => f64::MAX,
             CompactionPriority::TrimOverBound => f64::MAX,
+            CompactionPriority::GcLockFile => 1.5,
+            CompactionPriority::GcExtraFile => 1.5,
             CompactionPriority::L0ToColumnar => 2.0,
             CompactionPriority::ColumnarL0 { score } => *score,
             CompactionPriority::ColumnarL1 { score } => *score,
@@ -2269,6 +2373,8 @@ impl CompactionPriority {
             CompactionPriority::DestroyRange => -1,
             CompactionPriority::TruncateTs => -1,
             CompactionPriority::TrimOverBound => -1,
+            CompactionPriority::GcLockFile => -1,
+            CompactionPriority::GcExtraFile => -1,
             CompactionPriority::L0ToColumnar => 0,
             CompactionPriority::ColumnarL0 { .. } => 0,
             CompactionPriority::ColumnarL1 { .. } => 1,
@@ -2286,6 +2392,8 @@ impl CompactionPriority {
             CompactionPriority::DestroyRange => -1,
             CompactionPriority::TruncateTs => -1,
             CompactionPriority::TrimOverBound => -1,
+            CompactionPriority::GcLockFile => 1,
+            CompactionPriority::GcExtraFile => 2,
             CompactionPriority::L0ToColumnar => 0,
             CompactionPriority::ColumnarL0 { .. } => -1,
             CompactionPriority::ColumnarL1 { .. } => -1,
@@ -3647,6 +3755,9 @@ async fn compact_for_cf(
         checksum_tp,
         ctx.encryption_key.clone(),
     );
+    if cf == LOCK_CF {
+        sst_builder.set_is_lock_cf();
+    }
     let mut cur_blob_table_id = 0;
     // Owns the decompressed blob value while reading from the orginal blob
     // table, to reduce the memory re-allocation.

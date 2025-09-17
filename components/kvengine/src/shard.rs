@@ -73,6 +73,7 @@ pub(crate) struct ShardPendingOperations {
     pub(crate) trim_over_bound: bool,
     pub(crate) manual_major_compaction: MajorCompactionType,
     pub(crate) storage_class_spec: StorageClassSpec,
+    pub(crate) gc_lock_files: HashMap<u64, SnapVersion>,
 }
 
 impl ShardPendingOperations {
@@ -83,6 +84,7 @@ impl ShardPendingOperations {
             trim_over_bound: false,
             manual_major_compaction: MajorCompactionType::Disable,
             storage_class_spec: StorageClassSpec::default(),
+            gc_lock_files: HashMap::new(),
         }
     }
 }
@@ -120,6 +122,12 @@ pub struct Shard {
     pub(crate) lv2plus_max_ts: AtomicU64, // the max_ts of sst files
     pub(crate) lv2plus_tombs: AtomicU64,  // number of tombstone entries
     pub(crate) lv2plus_entries_write_cf: AtomicU64, // number of entries in WRITE_CF
+
+    // Used for gc lock cf files.
+    pub(crate) lv1plus_min_lock_file_max_ts: AtomicU64, // the min max_ts of all lock cf sst files.
+
+    // Used for gc extra cf files.
+    pub(crate) lv1_min_max_extra_ts: AtomicU64, // the min max_ts of all extra cf sst files.
 
     // meta_seq is the raft log index of the applied change set.
     // Because change set are applied in the worker thread, the value is usually smaller
@@ -257,6 +265,8 @@ impl Shard {
             lv2plus_max_ts: Default::default(),
             lv2plus_tombs: Default::default(),
             lv2plus_entries_write_cf: Default::default(),
+            lv1plus_min_lock_file_max_ts: Default::default(),
+            lv1_min_max_extra_ts: Default::default(),
             meta_seq: Default::default(),
             write_sequence: Default::default(),
             compaction_priority: RwLock::new(None),
@@ -658,6 +668,11 @@ impl Shard {
             &self.lv2plus_entries_write_cf,
             lv_stats.lv2plus_entries_write_cf,
         );
+        store_u64(
+            &self.lv1plus_min_lock_file_max_ts,
+            lv_stats.lv1plus_min_max_lock_ts,
+        );
+        store_u64(&self.lv1_min_max_extra_ts, lv_stats.lv1_min_max_extra_ts);
 
         data.refresh_for_limiter(&self.tag());
     }
@@ -1439,7 +1454,7 @@ impl Shard {
     ///
     /// Due to high costs of major compaction, the current strategies are
     /// relatively conservative.
-    pub fn check_need_gc_tombstones(&self, safe_ts: u64) -> bool {
+    pub fn check_need_gc_tombstones(&self, safe_ts: u64, gc_lock_extra: bool) -> bool {
         if self.is_compacting()
             || self.get_compaction_priority().is_some()
             || self.pending_ops.read().unwrap().manual_major_compaction
@@ -1447,7 +1462,12 @@ impl Shard {
         {
             return false;
         }
-
+        if gc_lock_extra && self.check_need_gc_extra_file(safe_ts) {
+            return true;
+        }
+        if gc_lock_extra && self.check_need_gc_lock_file(safe_ts) {
+            return true;
+        }
         let lv2plus_max_ts = self.lv2plus_max_ts.load(Ordering::Relaxed);
         if lv2plus_max_ts > safe_ts {
             return false;
@@ -1483,6 +1503,34 @@ impl Shard {
         }
 
         false
+    }
+
+    fn check_need_gc_lock_file(&self, safe_ts: u64) -> bool {
+        let lv1plus_max_lock_ts = self.lv1plus_min_lock_file_max_ts.load(Ordering::Relaxed);
+        if lv1plus_max_lock_ts == 0 || lv1plus_max_lock_ts > safe_ts {
+            return false;
+        }
+        let mut priority = self.compaction_priority.write().unwrap();
+        if priority.is_some() {
+            return false;
+        }
+        *priority = Some(CompactionPriority::GcLockFile);
+        info!("{} trigger gc lock file", self.tag(); "safe_ts" => safe_ts);
+        true
+    }
+
+    fn check_need_gc_extra_file(&self, safe_ts: u64) -> bool {
+        let lv1_max_extra_ts = self.lv1_min_max_extra_ts.load(Ordering::Relaxed);
+        if lv1_max_extra_ts == 0 || lv1_max_extra_ts > safe_ts {
+            return false;
+        }
+        let mut priority = self.compaction_priority.write().unwrap();
+        if priority.is_some() {
+            return false;
+        }
+        *priority = Some(CompactionPriority::GcExtraFile);
+        info!("{} trigger gc extra file", self.tag(); "safe_ts" => safe_ts);
+        true
     }
 
     pub fn has_failed_compaction(&self) -> bool {
@@ -2336,6 +2384,18 @@ impl ShardDataCore {
                         stats.lv2plus_max_ts = cmp::max(stats.lv2plus_max_ts, tbl.max_ts);
                         stats.lv2plus_tombs += tbl.tombs as u64;
                         stats.lv2plus_entries_write_cf += tbl.entries as u64;
+                    }
+                } else if cf == LOCK_CF {
+                    let max_lock_ts = tbl.get_max_lock_ts();
+                    if stats.lv1plus_min_max_lock_ts == 0
+                        || stats.lv1plus_min_max_lock_ts > max_lock_ts
+                    {
+                        stats.lv1plus_min_max_lock_ts = max_lock_ts;
+                    }
+                } else if cf == EXTRA_CF {
+                    #[allow(clippy::collapsible_if)]
+                    if stats.lv1_min_max_extra_ts == 0 || stats.lv1_min_max_extra_ts > tbl.max_ts {
+                        stats.lv1_min_max_extra_ts = tbl.max_ts;
                     }
                 }
             }

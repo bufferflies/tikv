@@ -274,6 +274,7 @@ pub struct SsTableCore {
     smallest_buf: Bytes,
     biggest_buf: Bytes,
     pub max_ts: u64,
+    pub max_lock_ts: u64,
     pub entries: u32,
     pub old_entries: u32,
     pub tombs: u32,
@@ -323,6 +324,7 @@ impl SsTableCore {
         let mut smallest_buf = Bytes::new();
         let mut biggest_buf = Bytes::new();
         let mut max_ts = 0;
+        let mut max_lock_ts = 0;
         let mut entries = 0;
         let mut old_entries = 0;
         let mut tombs = 0;
@@ -339,6 +341,8 @@ impl SsTableCore {
                 biggest_buf = Bytes::copy_from_slice(val);
             } else if key == PROP_KEY_MAX_TS {
                 max_ts = LittleEndian::read_u64(val);
+            } else if key == PROP_KEY_MAX_LOCK_TS {
+                max_lock_ts = LittleEndian::read_u64(val);
             } else if key == PROP_KEY_ENTRIES {
                 entries = LittleEndian::read_u32(val);
             } else if key == PROP_KEY_OLD_ENTRIES {
@@ -365,6 +369,7 @@ impl SsTableCore {
             smallest_buf,
             biggest_buf,
             max_ts,
+            max_lock_ts,
             entries,
             old_entries,
             tombs,
@@ -715,6 +720,16 @@ impl SsTableCore {
 
     pub fn encryption_ver(&self) -> u32 {
         self.encryption_ver
+    }
+
+    pub fn get_max_lock_ts(&self) -> u64 {
+        // For legacy file, the max_lock_ts is zero, we use file id instead.
+        // TODO: use tbl.max_lock_ts directly after all old lock files are GCed.
+        if self.max_lock_ts > 0 {
+            self.max_lock_ts
+        } else {
+            self.file.id()
+        }
     }
 
     #[inline]

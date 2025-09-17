@@ -16,7 +16,8 @@ use crate::{
         ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM,
     },
     table::{BoundedDataSet, DataBound, InnerKey},
-    IdVer, LevelHandler, MajorCompactionType, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
+    IdVer, LevelHandler, MajorCompactionType, COLUMNAR_LEVELS, EXTRA_CF, LOCK_CF, NUM_CFS,
+    WRITE_CF,
 };
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -498,6 +499,10 @@ pub struct LevelStatsLite {
     pub lv2plus_max_ts: u64,
     pub lv2plus_tombs: u64,
     pub lv2plus_entries_write_cf: u64,
+    // The followings are for LOCK_CF & level 1+ only.
+    pub lv1plus_min_max_lock_ts: u64,
+    // The following are for EXTRA_CF & level 1 only.
+    pub lv1_min_max_extra_ts: u64,
     // The following is for WRITE_CF & EXTRA_CF
     pub max_ts: u64,
     // The following is for Columnar.
@@ -518,6 +523,24 @@ impl LevelStatsLite {
             self.lv2plus_entries_write_cf += other.lv2plus_entries_write_cf;
             self.columnar_size += other.columnar_size;
             self.columnar_kv_size += other.columnar_kv_size;
+        } else if cf == LOCK_CF {
+            #[allow(clippy::collapsible_if)]
+            if other.lv1plus_min_max_lock_ts > 0 {
+                if self.lv1plus_min_max_lock_ts == 0
+                    || self.lv1plus_min_max_lock_ts > other.lv1plus_min_max_lock_ts
+                {
+                    self.lv1plus_min_max_lock_ts = other.lv1plus_min_max_lock_ts;
+                }
+            }
+        } else if cf == EXTRA_CF {
+            #[allow(clippy::collapsible_if)]
+            if other.lv1_min_max_extra_ts > 0 {
+                if self.lv1_min_max_extra_ts == 0
+                    || self.lv1_min_max_extra_ts > other.lv1_min_max_extra_ts
+                {
+                    self.lv1_min_max_extra_ts = other.lv1_min_max_extra_ts;
+                }
+            }
         }
         self.max_ts = max_ts_by_cf(self.max_ts, cf, other.max_ts);
     }
@@ -931,6 +954,8 @@ mod tests {
             lv2plus_max_ts: 50,
             lv2plus_tombs: 1000,
             lv2plus_entries_write_cf: 1500,
+            lv1plus_min_max_lock_ts: 80,
+            lv1_min_max_extra_ts: 30,
             max_ts: 100,
             columnar_size: 30000,
         };
@@ -951,6 +976,8 @@ mod tests {
                 lv2plus_max_ts: 60,
                 lv2plus_tombs: 2000,
                 lv2plus_entries_write_cf: 3000,
+                lv1plus_min_max_lock_ts: 80,
+                lv1_min_max_extra_ts: 30,
                 max_ts: 110,
                 columnar_size: 60000,
             }
@@ -958,6 +985,7 @@ mod tests {
 
         stats2.max_ts = 120;
         stats2.lv2plus_max_ts = 70;
+        stats2.lv1plus_min_max_lock_ts = 60;
         stats1.add(&stats2, LOCK_CF);
         assert_eq!(
             stats1,
@@ -971,6 +999,8 @@ mod tests {
                 lv2plus_max_ts: 60,
                 lv2plus_tombs: 2000,            // unchanged
                 lv2plus_entries_write_cf: 3000, // unchanged
+                lv1plus_min_max_lock_ts: 60,    // unchanged
+                lv1_min_max_extra_ts: 30,       // unchanged
                 max_ts: 110,                    // unchanged
                 columnar_size: 60000,
             }
@@ -990,6 +1020,8 @@ mod tests {
                 lv2plus_max_ts: 60,             // unchanged
                 lv2plus_tombs: 2000,            // unchanged
                 lv2plus_entries_write_cf: 3000, // unchanged
+                lv1plus_min_max_lock_ts: 60,    // unchanged
+                lv1_min_max_extra_ts: 30,       // unchanged
                 max_ts: 130,
                 columnar_size: 60000,
             }
@@ -1010,6 +1042,8 @@ mod tests {
                 lv2plus_max_ts: 60,             // unchanged
                 lv2plus_tombs: 2000,            // unchanged
                 lv2plus_entries_write_cf: 3000, // unchanged
+                lv1plus_min_max_lock_ts: 60,    // unchanged
+                lv1_min_max_extra_ts: 30,       // unchanged
                 max_ts: 130,                    // unchanged
                 columnar_size: 70000,
             }

@@ -366,13 +366,11 @@ impl<'a> PeerMsgHandler<'a> {
             self.on_pd_heartbeat_tick();
         }
         if self.ticker.is_on_tick(PEER_TICK_SPLIT_CHECK) {
-            let should_split = self.on_split_region_check_tick();
-            if !should_split {
-                self.check_gc_tombstones();
-            }
+            self.on_split_region_check_tick();
         }
         if self.ticker.is_on_tick(PEER_TICK_SWITCH_MEM_TABLE_CHECK) {
             self.on_switch_mem_table_check_tick();
+            self.check_gc_tombstones();
         }
         if self.ticker.is_on_tick(PEER_TICK_RAFT_LOG_GC) {
             self.on_raft_log_gc_tick();
@@ -2674,7 +2672,7 @@ impl<'a> PeerMsgHandler<'a> {
         let kv = &self.ctx.global.engines.kv;
         if let Some(shard) = kv.get_shard(self.region_id()) {
             let safe_ts = kv.get_keyspace_gc_safepoint_v2(shard.keyspace_id);
-            if shard.check_need_gc_tombstones(safe_ts) {
+            if shard.check_need_gc_tombstones(safe_ts, kv.opts.gc_lock_extra_cf) {
                 kv.trigger_compact(shard.id_ver());
             }
         }

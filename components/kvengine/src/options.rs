@@ -99,6 +99,8 @@ pub struct Options {
     build_columnar: AtomicBool,
     /// Enable columnar table read.
     pub read_columnar: bool,
+    /// Enable gc lock & extra cf.
+    pub gc_lock_extra_cf: bool,
 
     /// Threshold of low available space. Reject some requests when available
     /// space is lower than this.
@@ -137,6 +139,7 @@ impl Default for Options {
             ignore_columnar_table_load: false,
             build_columnar: AtomicBool::new(false),
             read_columnar: false,
+            gc_lock_extra_cf: false,
             low_space_threshold: 0,
         }
     }
