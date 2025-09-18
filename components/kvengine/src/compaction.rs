@@ -5094,21 +5094,30 @@ async fn compact_all_columnar_files(
     );
     let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     let mut cnt = 0;
+    let mut all_col_tbls = HashMap::new();
+    for (&level, tbl_ids) in &col_file_ids {
+        let tbl_files =
+            load_table_files(tbl_ids, fs.clone(), opts, ctx.local_dirs.as_ref(), false).await?;
+        let mut tbls = files_to_columnar_tables(tbl_files);
+        if level == 2 {
+            tbls.sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()));
+        }
+        for tbl in &tbls {
+            let mut col_delete = pb::ColumnarDelete::default();
+            col_delete.set_id(tbl.get_file().id());
+            col_delete.set_level(level);
+            tbl_changes.mut_columnar_deletes().push(col_delete);
+        }
+        all_col_tbls.insert(level, tbls);
+    }
     for &table_id in columnar_table_ids {
         let Some(schema) = schema_file.get_table(table_id) else {
             continue;
         };
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
-        for (&level, tbl_ids) in &col_file_ids {
-            let tbl_files =
-                load_table_files(tbl_ids, fs.clone(), opts, ctx.local_dirs.as_ref(), false).await?;
-            let mut tbls = files_to_columnar_tables(tbl_files);
+        for (&level, tbls) in &all_col_tbls {
             if level < 2 {
-                for tbl in &tbls {
-                    let mut col_delete = pb::ColumnarDelete::default();
-                    col_delete.set_id(tbl.get_file().id());
-                    col_delete.set_level(level);
-                    tbl_changes.mut_columnar_deletes().push(col_delete);
+                for tbl in tbls {
                     if tbl.has_table(table_id) {
                         let reader = ColumnarTableReader::new(
                             tbl,
@@ -5120,15 +5129,8 @@ async fn compact_all_columnar_files(
                     }
                 }
             } else {
-                for tbl in &tbls {
-                    let mut col_delete = pb::ColumnarDelete::default();
-                    col_delete.set_id(tbl.get_file().id());
-                    col_delete.set_level(level);
-                    tbl_changes.mut_columnar_deletes().push(col_delete);
-                }
-                tbls.sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()));
                 let reader = ColumnarConcatReader::new(
-                    &tbls,
+                    tbls,
                     schema.clone(),
                     None,
                     ctx.encryption_key.clone(),
