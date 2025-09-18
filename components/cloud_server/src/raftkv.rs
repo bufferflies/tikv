@@ -484,6 +484,9 @@ impl Engine for RaftKv {
                     });
                     let mut res = match on_write_result(resp) {
                         Ok(CmdRes::Resp(_)) => {
+                            let elapse = begin_instant.saturating_elapsed_secs();
+                            ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
+                            ASYNC_REQUESTS_DURATIONS_VEC.write.observe(elapse);
                             fail_point!("raftkv_async_write_finish");
                             Ok(())
                         }
@@ -512,20 +515,9 @@ impl Engine for RaftKv {
             tx.notify(res);
         }
         rx.inspect(move |ev| {
-            let WriteEvent::Finished(res) = ev else {
-                return;
-            };
-            match res {
-                Ok(()) => {
-                    ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
-                    ASYNC_REQUESTS_DURATIONS_VEC
-                        .write
-                        .observe(begin_instant.saturating_elapsed_secs());
-                }
-                Err(e) => {
-                    let status_kind = get_status_kind_from_engine_error(e);
-                    ASYNC_REQUESTS_COUNTER_VEC.write.get(status_kind).inc();
-                }
+            if let WriteEvent::Finished(Err(e)) = ev {
+                let status_kind = get_status_kind_from_engine_error(e);
+                ASYNC_REQUESTS_COUNTER_VEC.write.get(status_kind).inc();
             }
         })
     }
@@ -573,7 +565,13 @@ impl Engine for RaftKv {
                     ctx.read_id,
                     cmd,
                     StoreCallback::Read(Box::new(move |resp| {
-                        cb(on_read_result(resp).map_err(Error::into));
+                        let res = on_read_result(resp).map_err(Error::into);
+                        if res.is_ok() {
+                            let elapse = begin_instant.saturating_elapsed_secs();
+                            ASYNC_REQUESTS_DURATIONS_VEC.snapshot.observe(elapse);
+                            ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();
+                        }
+                        cb(res);
                     })),
                 )
                 .map_err(kv::Error::from);
@@ -599,13 +597,7 @@ impl Engine for RaftKv {
                     };
                     Err(e)
                 }
-                Ok(CmdRes::Snap(s)) => {
-                    ASYNC_REQUESTS_DURATIONS_VEC
-                        .snapshot
-                        .observe(begin_instant.saturating_elapsed_secs());
-                    ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();
-                    Ok(s)
-                }
+                Ok(CmdRes::Snap(s)) => Ok(s),
                 Err(e) => {
                     let status_kind = get_status_kind_from_engine_error(&e);
                     ASYNC_REQUESTS_COUNTER_VEC.snapshot.get(status_kind).inc();
