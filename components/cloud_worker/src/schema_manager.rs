@@ -653,6 +653,16 @@ impl SchemaManager {
         // diffs if the schema version not changed.
         let schema_version = match schema::get_schema_version(kv_getter.clone(), keyspace_id).await
         {
+            // If the schema version is 0, it means the keyspace has been unsafe destroyed or
+            // created without bootstraped.
+            Ok(0) => {
+                info!(
+                    "{}: schema version is 0, skip, remove keyspace",
+                    keyspace_id
+                );
+                self.remove_keyspace_local_file(keyspace_id)?;
+                return Ok((0, vec![], true));
+            }
             Ok(schema_version) => schema_version,
             Err(err) => {
                 error!("{}: get schema version failed, skip", keyspace_id; "err" => ?err);
@@ -695,6 +705,14 @@ impl SchemaManager {
                 return Err(Error::Other(box_err!("sync schema failed: {:?}", err)));
             }
         };
+        if schema_version == 0 {
+            info!(
+                "{}: schema version is 0, skip, remove keyspace",
+                keyspace_id
+            );
+            self.remove_keyspace_local_file(keyspace_id)?;
+            return Ok((0, vec![], true));
+        }
 
         info!(
             "{}: sync schema: schema_version: {}, checked_version: {:?}, table_infos: {}",
