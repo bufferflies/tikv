@@ -6,7 +6,11 @@ use std::{
 };
 
 use collections::HashMap;
-use prometheus::{exponential_buckets, local::LocalIntCounter, *};
+use prometheus::{
+    exponential_buckets,
+    local::{LocalHistogram, LocalIntCounter},
+    *,
+};
 use prometheus_static_metric::*;
 use tikv_util::time::Instant;
 
@@ -98,6 +102,10 @@ make_auto_flush_static_metric! {
         fail,
     }
 
+    pub label_enum KeySpaceID {
+        default,
+    }
+
     pub struct GcCommandCounterVec: LocalIntCounter {
         "type" => GcCommandKind,
     }
@@ -133,6 +141,7 @@ make_auto_flush_static_metric! {
 
     pub struct GrpcMsgHistogramVec: LocalHistogram {
         "type" => GrpcTypeKind,
+        "keyspace_id" => KeySpaceID,
     }
 
     pub struct ReplicaReadLockCheckHistogramVec: LocalHistogram {
@@ -227,7 +236,7 @@ lazy_static! {
     pub static ref GRPC_MSG_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
         "tikv_grpc_msg_duration_seconds",
         "Bucketed histogram of grpc server messages",
-        &["type"],
+        &["type","keyspace_id"],
         exponential_buckets(5e-5, 2.0, 22).unwrap() // 50us ~ 104s
     )
     .unwrap();
@@ -563,6 +572,48 @@ pub fn record_request_source_metrics(source: String, duration: Duration) {
         if need_flush {
             metrics.count.flush();
             metrics.duration_us.flush();
+        }
+    });
+}
+
+struct LocalGRPCRequestMetrics {
+    pub duration: LocalHistogram,
+}
+
+impl LocalGRPCRequestMetrics {
+    fn new(tp: &str, key_space_id: &str) -> Self {
+        LocalGRPCRequestMetrics {
+            duration: GRPC_MSG_HISTOGRAM_VEC
+                .with_label_values(&[tp, key_space_id])
+                .local(),
+        }
+    }
+}
+
+thread_local! {
+    static GRPC_REQUEST_METRICS_MAP: RefCell<HashMap<(String,String), LocalGRPCRequestMetrics>> = RefCell::new(HashMap::default());
+
+    static LAST_GRPC_LOCAL_FLUSH_TIME: Cell<Instant> = Cell::new(Instant::now_coarse());
+}
+
+pub fn record_request_grpc_metrics(tp: String, keyspace_id: String, duration: Duration) {
+    let need_flush = LAST_GRPC_LOCAL_FLUSH_TIME.with(|last_local_flush_time| {
+        let now = Instant::now_coarse();
+        if now - last_local_flush_time.get() > Duration::from_secs(1) {
+            last_local_flush_time.set(now);
+            true
+        } else {
+            false
+        }
+    });
+    GRPC_REQUEST_METRICS_MAP.with(|map| {
+        let mut map = map.borrow_mut();
+        let metrics = map
+            .entry((tp, keyspace_id))
+            .or_insert_with_key(|(tp, keyspace_id)| LocalGRPCRequestMetrics::new(tp, keyspace_id));
+        metrics.duration.observe(duration.as_secs_f64());
+        if need_flush {
+            metrics.duration.flush();
         }
     });
 }
