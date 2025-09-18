@@ -165,7 +165,9 @@ impl ColumnarFileBuilder {
         }
     }
 
-    pub fn add_table(&mut self, table: ColumnarTableBuilder) {
+    pub fn add_table(&mut self, mut table: ColumnarTableBuilder) {
+        // Finish the pack to get the data in buffer.
+        table.finish_pack();
         self.estimated_size += table.get_estimated_size();
         self.estimated_kv_size += table.get_estimated_kv_size();
         self.tables.push(table);
@@ -368,6 +370,14 @@ impl ColumnarTableBuilder {
             self.max_version = max(self.max_version, block.versions.get_version(i))
         }
         end_offset
+    }
+
+    fn finish_pack(&mut self) {
+        self.handle_builder.finish_pack(None);
+        self.version_builder.finish_pack(None);
+        for col_builder in &mut self.column_builders {
+            col_builder.finish_pack(Some(&self.del_marks));
+        }
     }
 
     fn finish_table(&mut self) {
