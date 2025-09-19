@@ -371,6 +371,7 @@ impl Engine for RaftKv {
 
         ASYNC_REQUESTS_COUNTER_VEC.write.all.inc();
         let begin_instant = Instant::now_coarse();
+        let keyspace_id = ctx.get_keyspace_id();
 
         if res.is_ok() {
             // If rid is some, only the specified region reports error.
@@ -517,10 +518,13 @@ impl Engine for RaftKv {
             };
             match res {
                 Ok(()) => {
-                    ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
-                    ASYNC_REQUESTS_DURATIONS_VEC
-                        .write
+                    ASYNC_REQUESTS_DURATIONS
+                        .with_label_values(&["write", &keyspace_id.to_string()])
                         .observe(begin_instant.saturating_elapsed_secs());
+                    ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
+                    // ASYNC_REQUESTS_DURATIONS_VEC
+                    //     .write
+                    //     .observe(begin_instant.saturating_elapsed_secs());
                 }
                 Err(e) => {
                     let status_kind = get_status_kind_from_engine_error(e);
@@ -538,7 +542,7 @@ impl Engine for RaftKv {
             });
             Ok(())
         })();
-
+        let keyspace_id = ctx.pb_ctx.get_keyspace_id();
         let mut req = Request::default();
         req.set_cmd_type(CmdType::Snap);
         if !ctx.key_ranges.is_empty() && ctx.start_ts.map_or(false, |ts| !ts.is_zero()) {
@@ -600,9 +604,12 @@ impl Engine for RaftKv {
                     Err(e)
                 }
                 Ok(CmdRes::Snap(s)) => {
-                    ASYNC_REQUESTS_DURATIONS_VEC
-                        .snapshot
+                    ASYNC_REQUESTS_DURATIONS
+                        .with_label_values(&["snapshot", &keyspace_id.to_string()])
                         .observe(begin_instant.saturating_elapsed_secs());
+                    // ASYNC_REQUESTS_DURATIONS_VEC
+                    //     .snapshot
+                    //     .observe(begin_instant.saturating_elapsed_secs());
                     ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();
                     Ok(s)
                 }

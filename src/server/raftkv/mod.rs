@@ -518,6 +518,7 @@ where
                     ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
                     ASYNC_REQUESTS_DURATIONS_VEC
                         .write
+                        .default
                         .observe(begin_instant.saturating_elapsed_secs());
                 }
                 Err(e) => {
@@ -603,6 +604,7 @@ where
                 Ok(CmdRes::Snap(s)) => {
                     ASYNC_REQUESTS_DURATIONS_VEC
                         .snapshot
+                        .default
                         .observe(begin_instant.saturating_elapsed_secs());
                     ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();
                     Ok(s)

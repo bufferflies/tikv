@@ -31,6 +31,7 @@ use kvproto::{
     *,
 };
 use pd_client::{new_bucket_write_stats, simple_merge_bucket_write_stats, BucketMeta, BucketStat};
+use prometheus::Histogram;
 use protobuf::Message;
 use raft::{
     self, Changer, LightReady, ProgressState, ProgressTracker, RawNode, Ready, SnapshotStatus,
@@ -513,6 +514,7 @@ pub(crate) struct Peer {
     pub check_stale_peers: Vec<metapb::Peer>,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) encryption_buf: Vec<u8>,
+    pub commit_log: Histogram,
 }
 
 impl Peer {
@@ -568,6 +570,8 @@ impl Peer {
         let logger = slog_global::get_global().new(slog::o!("region" => region_tag));
         let encryption_key = ps.get_encryption_key();
         let raft_group = RawNode::new(&raft_cfg, ps, &logger)?;
+        let keyspace_id = rfengine::get_region_keyspace_id_u32(region).unwrap_or(0);
+        let commit_log = PEER_COMMIT_LOG_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
         let mut peer = Peer {
             peer,
             region_id: region.get_id(),
@@ -608,6 +612,7 @@ impl Peer {
             check_stale_peers: vec![],
             encryption_key,
             encryption_buf: vec![],
+            commit_log,
         };
         // If this region has only one peer and I am the one, campaign directly.
         if region.get_peers().len() == 1 && region.get_peers()[0].get_store_id() == store_id {
@@ -1304,10 +1309,14 @@ impl Peer {
         }
     }
 
+    pub fn get_keyspace_id(&self) -> Option<u32> {
+        rfengine::get_region_keyspace_id_u32(self.region())
+    }
+
     pub fn notify_role_changed(&self, pd_scheduler: &Scheduler<PdTask>, role: StateRole) {
         if let Err(e) = pd_scheduler.schedule(PdTask::RoleChanged {
             region_id: self.region_id,
-            keyspace_id: rfengine::get_region_keyspace_id_u32(self.region()),
+            keyspace_id: self.get_keyspace_id(),
             role,
         }) {
             error!(
@@ -1701,9 +1710,10 @@ impl Peer {
                     // thread receives its AppendEntriesResponse and is ready to
                     // calculate its commit-log-duration.
                     ctx.current_time.replace(monotonic_raw_now());
-                    ctx.raft_metrics.commit_log.observe(duration_to_sec(
+                    let dur = duration_to_sec(
                         (ctx.current_time.unwrap() - propose_time).to_std().unwrap(),
-                    ));
+                    );
+                    self.commit_log.observe(dur);
                     self.maybe_renew_leader_lease(propose_time, ctx, None);
                     lease_to_be_updated = false;
                 }

@@ -1088,7 +1088,7 @@ fn response_batch_commands_request<F, T>(
     tx: Sender<MeasuredSingleResponse>,
     begin: Instant,
     label: GrpcTypeKind,
-    keyspace_id: u32
+    keyspace_id: u32,
 ) where
     MemoryTraceGuard<batch_commands_response::Response>: From<T>,
     F: Future<Output = Result<T, ()>> + Send + 'static,
@@ -1195,7 +1195,7 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
             );
         }
         Some(batch_commands_request::request::Cmd::Prewrite(req)) => {
-            let keyspace_id= req.get_context().get_keyspace_id();
+            let keyspace_id = req.get_context().get_keyspace_id();
             let resp = future_prewrite(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::Prewrite(resp)),

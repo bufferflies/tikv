@@ -32,7 +32,7 @@ use kvproto::{
 };
 use log_wrappers::Value;
 use pd_client::{new_bucket_write_stats, BucketStat};
-use prometheus::local::LocalHistogram;
+use prometheus::{local::LocalHistogram, Histogram};
 use protobuf::{Message, RepeatedField};
 use raft::{
     eraftpb::{ConfChange, ConfChangeType, ConfChangeV2, EntryType},
@@ -235,7 +235,6 @@ pub(crate) struct ApplyBatch {
 /// The raft worker receives all the apply tasks of different Regions
 /// located at this store, and it will get the corresponding applier to
 /// handle the apply task to make the code logic more clear.
-#[derive(Default)]
 pub struct Applier {
     pub(crate) peer: metapb::Peer,
     pub(crate) term: u64,
@@ -295,6 +294,10 @@ pub struct Applier {
     )>,
 
     trace: ApplyMemoryTrace,
+
+    apply_log_histogram: Histogram,
+
+    apply_histogram: Histogram,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -341,13 +344,36 @@ impl Applier {
     }
 
     pub fn new_from_reg(reg: MsgRegistration) -> Self {
+        let keyspace_id = rfengine::get_region_keyspace_id_u32(&reg.region).unwrap_or(0);
+        let apply_log_histogram =
+            STORE_APPLY_LOG_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
+        let apply_histogram = APPLY_TIME_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
         Self {
             peer: reg.peer,
             term: reg.term,
             region: reg.region,
             apply_state: reg.apply_state,
             encryption_key: reg.encryption_key,
-            ..Default::default()
+            decryption_buf: vec![],
+            shard_pending_active: None,
+            trace: ApplyMemoryTrace::default(),
+            stopped: false,
+            pending_remove: false,
+            pending_cmds: PendingCmdQueue::default(),
+            lock_cache: HashMap::default(),
+            snap: None,
+            metrics: ApplyMetrics::default(),
+            pending_split: HashMap::default(),
+            commit_merge_source_tables: HashMap::default(),
+            paused_apply_queue: PausedApplyQueue::default(),
+            scheduled_change_sets: VecDeque::new(),
+            prepared_change_sets: HashMap::new(),
+            role: raft::StateRole::Follower,
+            mem_table_state: None,
+            last_property_term: 0,
+            buckets: None,
+            apply_log_histogram,
+            apply_histogram,
         }
     }
 
@@ -385,6 +411,10 @@ impl Applier {
             })
             .clone();
         let encryption_key = snap.get_encryption_key();
+        let keyspace_id = rfengine::get_region_keyspace_id_u32(&region).unwrap_or(0);
+        let apply_log_histogram =
+            STORE_APPLY_LOG_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
+        let apply_histogram = APPLY_TIME_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
         Self {
             peer,
             term: RAFT_INIT_LOG_TERM,
@@ -392,7 +422,25 @@ impl Applier {
             apply_state,
             snap: Some(snap),
             encryption_key,
-            ..Default::default()
+            decryption_buf: vec![],
+            shard_pending_active: None,
+            trace: ApplyMemoryTrace::default(),
+            stopped: false,
+            pending_remove: false,
+            pending_cmds: PendingCmdQueue::default(),
+            lock_cache: HashMap::default(),
+            metrics: ApplyMetrics::default(),
+            pending_split: HashMap::default(),
+            commit_merge_source_tables: HashMap::default(),
+            paused_apply_queue: PausedApplyQueue::default(),
+            scheduled_change_sets: VecDeque::new(),
+            prepared_change_sets: HashMap::new(),
+            role: raft::StateRole::Follower,
+            mem_table_state: None,
+            last_property_term: 0,
+            buckets: None,
+            apply_log_histogram,
+            apply_histogram,
         }
     }
 
@@ -402,6 +450,10 @@ impl Applier {
         apply_state: RaftApplyState,
     ) -> Self {
         let peer = region.peers.first().cloned().unwrap();
+        let keyspace_id = rfengine::get_region_keyspace_id_u32(&region).unwrap_or(0);
+        let apply_log_histogram =
+            STORE_APPLY_LOG_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
+        let apply_histogram = APPLY_TIME_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
         Self {
             peer,
             term: apply_state.applied_index_term,
@@ -409,7 +461,25 @@ impl Applier {
             apply_state,
             snap: None,
             encryption_key,
-            ..Default::default()
+            decryption_buf: vec![],
+            shard_pending_active: None,
+            trace: ApplyMemoryTrace::default(),
+            stopped: false,
+            pending_remove: false,
+            pending_cmds: PendingCmdQueue::default(),
+            lock_cache: HashMap::default(),
+            metrics: ApplyMetrics::default(),
+            pending_split: HashMap::default(),
+            commit_merge_source_tables: HashMap::default(),
+            paused_apply_queue: PausedApplyQueue::default(),
+            scheduled_change_sets: VecDeque::new(),
+            prepared_change_sets: HashMap::new(),
+            role: raft::StateRole::Follower,
+            mem_table_state: None,
+            last_property_term: 0,
+            buckets: None,
+            apply_log_histogram,
+            apply_histogram,
         }
     }
 
@@ -804,8 +874,8 @@ impl Applier {
         mem_states.update(mem_table_size, unpersisted_props_size);
         self.maybe_propose_switch_mem_table(ctx, timer);
         let elapsed = timer.saturating_elapsed_secs();
-        ctx.apply_time.observe(elapsed); // waterfall
-        STORE_APPLY_LOG_HISTOGRAM.observe(elapsed);
+        self.apply_histogram.observe(elapsed); // waterfall
+        self.apply_log_histogram.observe(elapsed);
         // self.metrics.written_bytes += wb.estimated_size() as u64;
         // self.metrics.written_keys += wb.num_entries() as u64;
         let mut resp = RaftCmdResponse::default();
@@ -2426,7 +2496,7 @@ pub struct ApplyContext {
     // Use `RefCell` to work around the borrow check.
     wb: RefCell<WriteBatch>,
     pub(crate) apply_wait: LocalHistogram,
-    pub(crate) apply_time: LocalHistogram,
+    // pub(crate) apply_time: LocalHistogram,
     pub(crate) observer: Option<Box<dyn ApplyObserver>>,
 }
 
@@ -2439,7 +2509,7 @@ impl ApplyContext {
             exec_log_term: Default::default(),
             wb: RefCell::new(WriteBatch::default()),
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
-            apply_time: APPLY_TIME_HISTOGRAM.local(),
+            // apply_time: APPLY_TIME_HISTOGRAM.local(),
             observer: None,
         }
     }

@@ -45,7 +45,7 @@ use kvproto::{
     raft_serverpb::{MergeState, PeerState, RaftApplyState, RaftTruncatedState, RegionLocalState},
 };
 use pd_client::{new_bucket_stats, BucketMeta, BucketStat};
-use prometheus::local::LocalHistogram;
+use prometheus::{local::LocalHistogram, Histogram};
 use protobuf::{wire_format::WireType, CodedInputStream};
 use raft::eraftpb::{
     ConfChange, ConfChangeType, ConfChangeV2, Entry, EntryType, Snapshot as RaftSnapshot,
@@ -428,6 +428,8 @@ where
     /// `ApplyRes` uncommitted. Data will finally be written to kvdb in
     /// `flush`.
     uncommitted_res_count: usize,
+
+    store_apply_log_histogram: Histogram,
 }
 
 impl<EK> ApplyContext<EK>
@@ -480,7 +482,8 @@ where
             pending_ssts: vec![],
             pending_latency_inspect: vec![],
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
-            apply_time: APPLY_TIME_HISTOGRAM.local(),
+            apply_time: APPLY_TIME_HISTOGRAM.with_label_values(&["default"]).local(),
+            store_apply_log_histogram: STORE_APPLY_LOG_HISTOGRAM.with_label_values(&["default"]),
             key_buffer: Vec::with_capacity(1024),
             disable_wal: false,
             uncommitted_res_count: 0,
@@ -691,7 +694,8 @@ where
         }
 
         let elapsed = t.saturating_elapsed();
-        STORE_APPLY_LOG_HISTOGRAM.observe(duration_to_sec(elapsed));
+        self.store_apply_log_histogram
+            .observe(duration_to_sec(elapsed));
         for mut inspector in std::mem::take(&mut self.pending_latency_inspect) {
             inspector.record_apply_process(elapsed);
             inspector.finish();

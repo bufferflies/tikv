@@ -476,6 +476,10 @@ make_auto_flush_static_metric! {
         snapshot,
     }
 
+    pub label_enum DefaultKeyspace{
+        default,
+    }
+
     pub struct AsyncRequestsCounterVec: LocalIntCounter {
         "type" => RequestTypeKind,
         "status" => RequestStatusKind,
@@ -483,6 +487,7 @@ make_auto_flush_static_metric! {
 
     pub struct AsyncRequestsDurationVec: LocalHistogram {
         "type" => RequestTypeKind,
+        "keyspace_id" => DefaultKeyspace,
     }
 }
 
@@ -515,7 +520,7 @@ lazy_static! {
     pub static ref ASYNC_REQUESTS_DURATIONS: HistogramVec = register_histogram_vec!(
         "tikv_storage_engine_async_request_duration_seconds",
         "Bucketed histogram of processing successful asynchronous requests.",
-        &["type"],
+        &["type", "keyspace_id"],
         exponential_buckets(0.00001, 2.0, 26).unwrap()
     )
     .unwrap();

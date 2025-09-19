@@ -826,7 +826,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     let bypass_locks = TsSet::vec_from_u64s(ctx.take_resolved_locks());
                     let access_locks = TsSet::vec_from_u64s(ctx.take_committed_locks());
                     let region_id = ctx.get_region_id();
-                    let keyspace_id=ctx.get_keyspace_id();
+                    let keyspace_id = ctx.get_keyspace_id();
 
                     let snap_ctx = match prepare_snap_ctx(
                         &ctx,
@@ -845,7 +845,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                             snap_ctx
                         }
                         Err(e) => {
-                            consumer.consume(id, Err(e), begin_instant, source,keyspace_id);
+                            consumer.consume(id, Err(e), begin_instant, source, keyspace_id);
                             continue;
                         }
                     };
@@ -949,7 +949,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                             }
                         }
                         Err(e) => {
-                            consumer.consume(id, Err(e), begin_instant, source,keyspace_id);
+                            consumer.consume(id, Err(e), begin_instant, source, keyspace_id);
                         }
                     }
                 }
@@ -3717,7 +3717,14 @@ pub mod test_util {
     }
 
     impl ResponseBatchConsumer<Option<Vec<u8>>> for GetConsumer {
-        fn consume(&self, id: u64, res: Result<Option<Vec<u8>>>, _: Instant, _source: String,_keyspace_id: u32) {
+        fn consume(
+            &self,
+            id: u64,
+            res: Result<Option<Vec<u8>>>,
+            _: Instant,
+            _source: String,
+            _keyspace_id: u32,
+        ) {
             self.data.lock().unwrap().push(GetResult { id, res });
         }
     }
