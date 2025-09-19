@@ -113,7 +113,7 @@ impl<S: Storage, F: KvFormat> BatchTableScanExecutor<S, F> {
                 key_ranges,
                 is_backward,
                 is_key_only,
-                accept_point_range: no_common_handle,
+                accept_prefix_next_point: no_common_handle,
             },
             columnar_scanner,
         )?;

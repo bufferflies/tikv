@@ -84,8 +84,13 @@ pub fn is_prefix_next(key: &[u8], next: &[u8]) -> bool {
 
 /// `is_point` checks if the key range represents a point.
 #[inline]
-pub fn is_point(range: &coppb::KeyRange) -> bool {
-    is_prefix_next(range.get_start(), range.get_end())
+pub fn is_point(range: &coppb::KeyRange, accept_prefix_next_point: bool) -> bool {
+    let start = range.get_start();
+    let end = range.get_end();
+    if start.len() + 1 == end.len() && end[start.len()] == 0 && end.starts_with(start) {
+        return true;
+    }
+    accept_prefix_next_point && is_prefix_next(start, end)
 }
 
 #[cfg(test)]
@@ -160,5 +165,29 @@ mod tests {
                 &[1, 2, 4, 0, 0, 0],
             ],
         );
+    }
+
+    #[test]
+    fn test_is_point() {
+        test_is_point_case(&[1], &[], false, false);
+        test_is_point_case(&[1], &[1], false, false);
+        test_is_point_case(&[1], &[2], false, false);
+        test_is_point_case(&[1], &[2], true, true);
+        test_is_point_case(&[1], &[1, 0], false, true);
+        test_is_point_case(&[1], &[1, 0], true, true);
+        test_is_point_case(&[1], &[2, 0], false, false);
+        test_is_point_case(&[1], &[2, 0], true, false);
+    }
+
+    fn test_is_point_case(
+        start: &[u8],
+        end: &[u8],
+        accept_prefix_next_point: bool,
+        expected: bool,
+    ) {
+        let mut range = coppb::KeyRange::default();
+        range.set_start(start.to_vec());
+        range.set_end(end.to_vec());
+        assert_eq!(is_point(&range, accept_prefix_next_point), expected);
     }
 }

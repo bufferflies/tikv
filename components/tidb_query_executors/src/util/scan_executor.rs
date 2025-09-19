@@ -63,7 +63,7 @@ pub struct ScanExecutorOptions<S, I> {
     pub key_ranges: Vec<KeyRange>,
     pub is_backward: bool,
     pub is_key_only: bool,
-    pub accept_point_range: bool,
+    pub accept_prefix_next_point: bool,
 }
 
 impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
@@ -74,7 +74,7 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
             mut key_ranges,
             is_backward,
             is_key_only,
-            accept_point_range,
+            accept_prefix_next_point,
         }: ScanExecutorOptions<S, I>,
         columnar_scanner: Option<ColumnarScanner>,
     ) -> Result<Self> {
@@ -88,7 +88,7 @@ impl<S: Storage, I: ScanExecutorImpl, F: KvFormat> ScanExecutor<S, I, F> {
                 storage,
                 ranges: key_ranges
                     .into_iter()
-                    .map(|r| Range::from_pb_range(r, accept_point_range))
+                    .map(|r| Range::from_pb_range(r, accept_prefix_next_point))
                     .collect(),
                 scan_backward_in_range: is_backward,
                 is_key_only,

@@ -147,7 +147,7 @@ impl<S: Storage, F: KvFormat> BatchIndexScanExecutor<S, F> {
                 key_ranges,
                 is_backward,
                 is_key_only: false,
-                accept_point_range: unique,
+                accept_prefix_next_point: unique,
             },
             None,
         )?;
