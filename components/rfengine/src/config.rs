@@ -81,6 +81,15 @@ pub struct Config {
     ///
     /// Default: "0MB" (disabled)
     pub rlog_soft_memory_limit: ReadableSize,
+
+    /// Size limit for the rlog data section in a single rlog file.
+    ///
+    /// During rlog generation, a new file is started once the data
+    /// section exceeds this limit.
+    ///
+    /// Valid range: [16MB, 4GB]. Default: "256MB"
+    pub rlog_file_size: ReadableSize,
+
     /// The number of bytes per second to compact WAL files.
     pub compact_bytes_per_sec: ReadableSize,
 }
@@ -101,6 +110,7 @@ impl Default for Config {
             write_throttle_duration: ReadableDuration::millis(10),
             compact_wal_sync_concurrency: 2,
             rlog_soft_memory_limit: ReadableSize::mb(0),
+            rlog_file_size: ReadableSize::mb(256),
             compact_bytes_per_sec: ReadableSize::mb(200),
         }
     }
