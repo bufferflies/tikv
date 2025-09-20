@@ -101,6 +101,12 @@ pub trait File: std::any::Any + Sync + Send {
 
     /// Cast to `Any`. Used for downcast.
     fn as_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync>;
+
+    /// `mem_size` returns the size of the file in memory. Used for cache
+    /// weight calculation.
+    fn mem_size(&self) -> u64 {
+        0
+    }
 }
 
 pub enum MmapData {

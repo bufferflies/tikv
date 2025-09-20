@@ -2578,7 +2578,7 @@ fn files_to_tables(
 fn files_to_columnar_tables(files: Vec<Arc<dyn File>>) -> Vec<ColumnarFile> {
     files
         .into_iter()
-        .map(|f| ColumnarFile::open(f).unwrap())
+        .map(|f| ColumnarFile::open(f, None).unwrap())
         .collect()
 }
 
@@ -2985,7 +2985,7 @@ async fn compact_destroy_range_for_columnar(
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&req.outer_start).unwrap_or_default();
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
-        let columnar_file = ColumnarFile::open(file).unwrap();
+        let columnar_file = ColumnarFile::open(file, None).unwrap();
         let overlap_tables = schema_file
             .overlap_columnar_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
         let mut delete = pb::ColumnarDelete::new();
@@ -3248,7 +3248,7 @@ async fn compact_truncate_ts_for_columnar(
     let mut cnt = 0;
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
-        let columnar_file = ColumnarFile::open(file).unwrap();
+        let columnar_file = ColumnarFile::open(file, None).unwrap();
         let overlap_tables = schema_file
             .overlap_columnar_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
         let mut delete = pb::ColumnarDelete::new();
@@ -3502,7 +3502,7 @@ async fn compact_trim_over_bound_for_columnar(
     let mut cnt = 0;
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
-        let columnar_file = ColumnarFile::open(file).unwrap();
+        let columnar_file = ColumnarFile::open(file, None).unwrap();
         let overlap_tables = schema_file
             .overlap_columnar_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
         let mut delete = pb::ColumnarDelete::new();
@@ -4458,7 +4458,7 @@ async fn columnar_major_compact_for_clear_tables(
         deletes.push(tbl_delete);
 
         let file = columnar_files.remove(&file_id).unwrap();
-        let columnar_table = ColumnarFile::open(file)?;
+        let columnar_table = ColumnarFile::open(file, None)?;
         let overlap_tables = schema_file
             .overlap_columnar_tables(columnar_table.get_smallest(), columnar_table.get_biggest());
         if overlap_tables.is_empty() {
@@ -5233,7 +5233,7 @@ async fn update_vector_index(
     .await?;
     let mut columnar_files = vec![];
     for file in files {
-        let columnar_file = ColumnarFile::open(file)?;
+        let columnar_file = ColumnarFile::open(file, None)?;
         columnar_files.push(columnar_file);
     }
     let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];

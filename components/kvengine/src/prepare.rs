@@ -330,6 +330,7 @@ impl EngineCore {
                     fm,
                     self.cache.clone(),
                     None,
+                    None,
                     encryption_key.clone(),
                 )?;
                 continue;
@@ -447,6 +448,7 @@ impl EngineCore {
             file,
             &fm,
             self.cache.clone(),
+            None,
             None,
             encryption_key,
         )?;

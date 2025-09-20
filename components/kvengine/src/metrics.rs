@@ -133,6 +133,14 @@ lazy_static! {
         "kv_engine_vector_index_cache_miss",
         "Total number of vector index cache miss",
     ).unwrap();
+    pub static ref ENGINE_COLUMNAR_FILE_CACHE_HIT: IntCounter = register_int_counter!(
+        "kv_engine_columnar_file_cache_hit",
+        "Total number of columnar file cache hit",
+    ).unwrap();
+    pub static ref ENGINE_COLUMNAR_FILE_CACHE_MISS: IntCounter = register_int_counter!(
+        "kv_engine_columnar_file_cache_miss",
+        "Total number of columnar file cache miss",
+    ).unwrap();
     pub static ref ENGINE_VALUE_CACHE_CACHE_FILL: IntCounter = register_int_counter!(
         "kv_engine_value_cache_fill",
         "Total number of value cache fill",

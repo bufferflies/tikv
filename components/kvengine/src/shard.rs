@@ -404,11 +404,7 @@ impl Shard {
             // For cached files, we prepare with the meta data directly to reduce latency.
             for (id, fm) in &ids {
                 let file = if fm.can_use_ia() {
-                    if let Some(data) = ctx.meta_file_cache.get(id) {
-                        Some(Self::prepare_ia_file_with_meta_data(*id, fm, data, ia_mgr)?)
-                    } else {
-                        None
-                    }
+                    ctx.meta_file_cache.get(id)
                 } else if fm.is_l0_sst_with_size() {
                     // Cache the whole file as a segment.
                     let ident = FileSegmentIdent::new(*id, 0, fm.l0_size as u64);
@@ -428,6 +424,7 @@ impl Shard {
                         fm,
                         ctx.block_cache.clone(),
                         ctx.vector_index_cache.clone(),
+                        ctx.columnar_file_cache.clone(),
                         encryption_key.clone(),
                     )?;
                     added_files.insert(*id);
@@ -478,6 +475,7 @@ impl Shard {
                         &fm,
                         ctx.block_cache.clone(),
                         ctx.vector_index_cache.clone(),
+                        ctx.columnar_file_cache.clone(),
                         encryption_key.clone(),
                     )?;
                     if fm.is_schema_file() {
@@ -546,7 +544,7 @@ impl Shard {
         fs: &dyn dfs::Dfs,
         opts: &dfs::Options,
         ia_ctx: &IaCtx,
-        meta_file_cache: Arc<Cache<u64, Bytes, MetaFileCacheWeighter>>,
+        meta_file_cache: Arc<Cache<u64, Arc<dyn table::file::File>, MetaFileCacheWeighter>>,
     ) -> Result<Arc<dyn table::file::File>> {
         match ia_ctx {
             IaCtx::Disabled => fs
@@ -556,10 +554,10 @@ impl Shard {
                 .map_err(|err| err.into()),
             IaCtx::Enabled(ia_mgr, data_dirs) => {
                 if fm.can_use_ia() {
-                    let data = meta_file_cache
+                    let file = meta_file_cache
                         .get_or_insert_async(&id, async move {
                             let data_dir = get_local_dir(data_dirs, id);
-                            IaFile::prepare_table_meta(
+                            let data = IaFile::prepare_table_meta(
                                 id,
                                 fm.file_type,
                                 fm.table_meta_off as u64,
@@ -568,10 +566,11 @@ impl Shard {
                                 ia_mgr,
                                 Some(fs),
                             )
-                            .await
+                            .await?;
+                            Self::prepare_ia_file_with_meta_data(id, fm, data, ia_mgr)
                         })
                         .await?;
-                    Self::prepare_ia_file_with_meta_data(id, fm, data, ia_mgr)
+                    Ok(file)
                 } else if fm.is_l0_sst_with_size() {
                     // Cache the whole file as a segment.
                     let ident = FileSegmentIdent::new(id, 0, fm.l0_size as u64);

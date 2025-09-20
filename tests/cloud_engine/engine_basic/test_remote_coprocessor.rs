@@ -2449,6 +2449,7 @@ impl<'a> DagTest<'a> {
             master_key,
             block_cache,
             vector_index_cache: None,
+            columnar_file_cache: None,
             schema_files: None,
             txn_chunk_manager,
             ia_ctx: IaCtx::Disabled,

@@ -523,6 +523,10 @@ impl File for IaFile {
     fn as_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
         self
     }
+
+    fn mem_size(&self) -> u64 {
+        self.table_meta_file.size() + self.segment_offsets.len() as u64 * 8 + 8 * 3 + 1
+    }
 }
 
 struct SegmentOffsetsBuilder {

@@ -2,7 +2,6 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use bytes::Bytes;
 use cloud_encryption::MasterKey;
 use dashmap::DashMap;
 use quick_cache::sync::Cache;
@@ -10,7 +9,10 @@ use quick_cache::sync::Cache;
 use crate::{
     dfs,
     ia::manager::IaManager,
-    table::{schema_file::SchemaFile, sstable::BlockCache, vector_index::VectorIndexCache},
+    table::{
+        columnar::ColumnarFileCache, file::File, schema_file::SchemaFile, sstable::BlockCache,
+        vector_index::VectorIndexCache,
+    },
     txn_chunk_manager::TxnChunkManager,
 };
 
@@ -20,17 +22,18 @@ pub struct SnapCtx {
     pub master_key: MasterKey,
     pub block_cache: BlockCache,
     pub vector_index_cache: Option<VectorIndexCache>,
+    pub columnar_file_cache: Option<ColumnarFileCache>,
     pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
     pub txn_chunk_manager: TxnChunkManager,
     pub ia_ctx: IaCtx,
     pub prepare_type: PrepareType,
     pub read_columnar: bool,
-    pub meta_file_cache: Arc<Cache<u64, Bytes, MetaFileCacheWeighter>>,
+    pub meta_file_cache: Arc<Cache<u64, Arc<dyn File>, MetaFileCacheWeighter>>,
 }
 
 const ESTIMATED_META_FILE_SIZE: u64 = 64 * 1024; // 64KB
 
-pub fn new_meta_file_cache(capacity: u64) -> Arc<Cache<u64, Bytes, MetaFileCacheWeighter>> {
+pub fn new_meta_file_cache(capacity: u64) -> Arc<Cache<u64, Arc<dyn File>, MetaFileCacheWeighter>> {
     let estimated_items = (capacity / ESTIMATED_META_FILE_SIZE).max(64);
     Arc::new(Cache::with_weighter(
         estimated_items as usize,
@@ -42,9 +45,9 @@ pub fn new_meta_file_cache(capacity: u64) -> Arc<Cache<u64, Bytes, MetaFileCache
 #[derive(Clone)]
 pub struct MetaFileCacheWeighter;
 
-impl quick_cache::Weighter<u64, Bytes> for MetaFileCacheWeighter {
-    fn weight(&self, _: &u64, value: &Bytes) -> u64 {
-        value.len() as u64 + 8 // 8 bytes for the key
+impl quick_cache::Weighter<u64, Arc<dyn File>> for MetaFileCacheWeighter {
+    fn weight(&self, _: &u64, value: &Arc<dyn File>) -> u64 {
+        value.mem_size() + 8 // 8 bytes for the key
     }
 }
 

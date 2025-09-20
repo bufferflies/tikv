@@ -239,6 +239,7 @@ fn test_build_vector_index() {
         master_key: kvengine.get_master_key(),
         block_cache: BlockCache::None,
         vector_index_cache: Some(vector_index_cache.clone()),
+        columnar_file_cache: None,
         schema_files: Some(schema_files.clone()),
         txn_chunk_manager: kvengine.get_txn_chunk_manager(),
         ia_ctx,

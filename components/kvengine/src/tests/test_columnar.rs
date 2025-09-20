@@ -96,12 +96,12 @@ fn test_columnar_l0_compaction() {
     }
 
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_3).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_3, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
@@ -216,13 +216,13 @@ fn test_columnar_l1_compaction() {
     }
 
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_3).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_2).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_3, None).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0, None).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1, None).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_2, None).unwrap());
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
@@ -808,14 +808,14 @@ fn test_columnar_destroy_range() {
     }
 
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2, None).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0, None).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1, None).unwrap());
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
     builder.set_columnar_levels(col_levels);
@@ -895,14 +895,14 @@ fn test_columnar_truncate_ts() {
     }
 
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2, None).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0, None).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1, None).unwrap());
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
     builder.set_columnar_levels(col_levels);
@@ -986,14 +986,14 @@ fn test_columnar_trim_over_bound() {
     }
 
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
+    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2, None).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0, None).unwrap());
+    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1, None).unwrap());
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
@@ -1222,8 +1222,8 @@ fn test_columnar_not_nullable_to_nullable() {
     }
 
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
+    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));

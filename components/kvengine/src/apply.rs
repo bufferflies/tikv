@@ -19,7 +19,7 @@ use crate::{
     meta::is_move_down,
     table::{
         blobtable::blobtable::BlobTable,
-        columnar::{ColumnarFile, ColumnarLevels},
+        columnar::{ColumnarFile, ColumnarFileCache, ColumnarLevels},
         file::File,
         schema_file::SchemaFile,
         sstable::{BlockCache, L0Table, SsTable},
@@ -108,6 +108,7 @@ impl ChangeSet {
         meta: &FileMeta,
         cache: BlockCache,
         vector_index_cache: Option<VectorIndexCache>, // For vector index file.
+        columnar_file_cache: Option<ColumnarFileCache>,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
         match meta.file_type {
@@ -125,7 +126,8 @@ impl ChangeSet {
                 self.blob_tables.insert(id, blob_table);
             }
             FileType::Columnar => {
-                self.col_files.insert(id, ColumnarFile::open(file)?);
+                self.col_files
+                    .insert(id, ColumnarFile::open(file, columnar_file_cache)?);
             }
             FileType::Schema => {
                 self.schema_file = Some(SchemaFile::open(file)?);

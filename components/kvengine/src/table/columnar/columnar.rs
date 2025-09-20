@@ -10,20 +10,23 @@ use protobuf::Message;
 use tidb_query_datatype::{FieldTypeAccessor, FieldTypeFlag, FieldTypeTp};
 use tipb::ColumnInfo;
 
-use crate::table::{
-    columnar::{
-        builder::{
-            TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST, PROP_KEY_MAX_VERSION,
-            PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
+use crate::{
+    metrics::{ENGINE_COLUMNAR_FILE_CACHE_HIT, ENGINE_COLUMNAR_FILE_CACHE_MISS},
+    table::{
+        columnar::{
+            builder::{
+                TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST,
+                PROP_KEY_MAX_VERSION, PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
+            },
+            ColumnarFileCache, PROP_KEY_ESTIMATED_KV_SIZE,
         },
-        PROP_KEY_ESTIMATED_KV_SIZE,
+        file::File,
+        parse_prop_data,
+        schema_file::Schema,
+        search,
+        sstable::{L0Table, PROP_KEY_ENCRYPTION_VER},
+        BoundedDataSet, DataBound, InnerKey, SnapVersion, LZ4_COMPRESSION,
     },
-    file::File,
-    parse_prop_data,
-    schema_file::Schema,
-    search,
-    sstable::{L0Table, PROP_KEY_ENCRYPTION_VER},
-    BoundedDataSet, DataBound, InnerKey, SnapVersion, LZ4_COMPRESSION,
 };
 
 pub const HANDLE_COL_ID: i32 = -1;
@@ -639,7 +642,18 @@ pub struct ColumnarFile {
 }
 
 impl ColumnarFile {
-    pub fn open(file: Arc<dyn File>) -> crate::table::Result<Self> {
+    pub fn open(
+        file: Arc<dyn File>,
+        cache: Option<ColumnarFileCache>,
+    ) -> crate::table::Result<Self> {
+        if let Some(ref cache) = cache {
+            if let Some(columnar_file) = cache.get(&file.id()) {
+                ENGINE_COLUMNAR_FILE_CACHE_HIT.inc();
+                return Ok(columnar_file);
+            }
+            ENGINE_COLUMNAR_FILE_CACHE_MISS.inc();
+        }
+
         let file_len = file.size();
         let footer_len = ColumnarFileFooter::compute_size();
         let footer_offset = file_len - footer_len as u64;
@@ -688,7 +702,9 @@ impl ColumnarFile {
             let table_meta = TableMeta::parse(table_offsets.table_ids[i], &table_index_buf);
             tables.insert(table_offsets.table_ids[i], Arc::new(table_meta));
         }
-        Ok(Self {
+
+        let file_id = file.id();
+        let columnar_file = Self {
             core: Arc::new(ColumnarFileCore {
                 file,
                 smallest_key,
@@ -700,7 +716,11 @@ impl ColumnarFile {
                 index_offset,
                 estimated_kv_size,
             }),
-        })
+        };
+        if let Some(ref cache) = cache {
+            cache.insert(file_id, columnar_file.clone())
+        }
+        Ok(columnar_file)
     }
 
     pub(crate) fn get_table(&self, table_id: i64) -> Arc<TableMeta> {
@@ -755,6 +775,11 @@ impl ColumnarFile {
 
     pub fn size(&self) -> u64 {
         self.core.file.size()
+    }
+
+    pub fn mem_size(&self) -> u64 {
+        // `mem_size` is meta file size for IA file.
+        self.core.file.mem_size()
     }
 
     pub fn table_count(&self) -> usize {

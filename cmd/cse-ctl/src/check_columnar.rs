@@ -339,6 +339,7 @@ async fn check_columnar_for_shard(
         master_key: master_key.clone(),
         block_cache: BlockCache::None,
         vector_index_cache: None,
+        columnar_file_cache: None,
         meta_file_cache: new_meta_file_cache(0),
         schema_files: None,
         txn_chunk_manager,
