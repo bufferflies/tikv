@@ -47,6 +47,7 @@ use crate::{
 pub const TRUNCATE_ALL_INDEX: u64 = u64::MAX;
 pub const MAX_EPOCH_BACKWARD: u32 = 100;
 const RAFT_INIT_LOG_INDEX: u64 = 5;
+const MIN_RLOG_FILE_SIZE: u64 = 16 * 1024 * 1024; // 16MB
 
 /// `RfEngine` is a persistent storage engine for multi-raft logs.
 /// It stores part of raft logs and states(key/value pair) in memory and
@@ -190,6 +191,14 @@ impl RfEngineCore {
                 "invalid config: wal_size must be non-zero".to_owned(),
             ));
         }
+
+        if cfg.rlog_file_size.0 < MIN_RLOG_FILE_SIZE || cfg.rlog_file_size.0 > u32::MAX as u64 {
+            return Err(Error::Other(
+                "invalid config: rlog_file_size must be between [16MB, 4GB]".to_owned(),
+            ));
+        }
+        let rlog_file_size = cfg.rlog_file_size.0 as u32;
+
         let in_mem_rlog_epoch_count = cfg.rlog_soft_memory_limit.0.div_ceil(wal_size);
         info!(
             "rfengine in_mem_rlog_epoch_count: {}",
@@ -300,6 +309,7 @@ impl RfEngineCore {
                 dfs_worker_healthy,
                 compact_rate_limiter,
                 cfg.compact_wal_sync_concurrency,
+                rlog_file_size,
                 peer_rlog_files,
             );
             let join_handle = spawn_anonymous_thread_with!(move || service_worker.run());

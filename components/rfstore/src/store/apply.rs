@@ -348,9 +348,9 @@ impl Applier {
     }
 
     pub fn new_from_reg(reg: MsgRegistration) -> Self {
-        let mut applier=Self::default(reg.peer,reg.region,reg.apply_state);
-        applier.encryption_key=reg.encryption_key;
-        applier.term=reg.term;
+        let mut applier = Self::default(reg.peer, reg.region, reg.apply_state);
+        applier.encryption_key = reg.encryption_key;
+        applier.term = reg.term;
         applier
     }
 
@@ -388,10 +388,10 @@ impl Applier {
             })
             .clone();
         let encryption_key = snap.get_encryption_key();
-        let mut applier=Self::default(peer,region,apply_state);
-        applier.encryption_key=encryption_key;
-        applier.snap=Some(snap);
-        applier.term=RAFT_INIT_LOG_TERM;
+        let mut applier = Self::default(peer, region, apply_state);
+        applier.encryption_key = encryption_key;
+        applier.snap = Some(snap);
+        applier.term = RAFT_INIT_LOG_TERM;
         applier
     }
 
@@ -401,13 +401,13 @@ impl Applier {
         apply_state: RaftApplyState,
     ) -> Self {
         let peer = region.peers.first().cloned().unwrap();
-        let mut applier=Self::default(peer,region,apply_state);
-        applier.encryption_key=encryption_key;
-        applier.term=apply_state.applied_index_term;
+        let mut applier = Self::default(peer, region, apply_state);
+        applier.encryption_key = encryption_key;
+        applier.term = apply_state.applied_index_term;
         applier
     }
 
-    fn default(peer:metapb::Peer,region: metapb::Region,apply_state:RaftApplyState)->Self{
+    fn default(peer: metapb::Peer, region: metapb::Region, apply_state: RaftApplyState) -> Self {
         let keyspace_id = rfengine::get_region_keyspace_id_u32(&region).unwrap_or(0);
         let apply_log_histogram = STORE_APPLY_LOG_HISTOGRAM
             .with_label_values(&[&keyspace_id.to_string()])
@@ -420,11 +420,11 @@ impl Applier {
             .local();
         Self {
             peer,
-            term:0,
+            term: 0,
             region,
             apply_state,
             snap: None,
-            encryption_key:None,
+            encryption_key: None,
             decryption_buf: vec![],
             shard_pending_active: None,
             trace: ApplyMemoryTrace::default(),

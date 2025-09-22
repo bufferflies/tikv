@@ -113,6 +113,7 @@ impl ServiceWorker {
         healthy: Healthy,
         compact_rate_limiter: Arc<IoRateLimiter>,
         compact_wal_sync_concurrency: usize,
+        rlog_file_size: u32,
         peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
     ) -> Self {
         let s3fs = lightweight_backup_config.as_ref().map(|cfg| {
@@ -133,6 +134,7 @@ impl ServiceWorker {
             compact_rate_limiter,
             compact_wal_sync_concurrency,
             pending_compact_wb_count.clone(),
+            rlog_file_size,
             peer_rlog_files,
         );
         let handle = std::thread::Builder::new()

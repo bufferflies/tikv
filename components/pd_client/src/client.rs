@@ -119,14 +119,15 @@ impl RpcClient {
                     let rpc_client = RpcClient {
                         cluster_id,
                         pd_client: Arc::new(Client::new(
-                            security_mgr,
+                            Arc::clone(&env),
+                            security_mgr.clone(),
                             client,
                             members,
                             target,
                             tso.unwrap(),
                             new_tso,
                             cfg.enable_forwarding,
-                            pd_connector,
+                            cfg.retry_interval.0,
                         )),
                         monitor: monitor.clone(),
                         ks_safepoint_v2: Arc::new(DashMap::default()),
@@ -196,14 +197,14 @@ impl RpcClient {
                                     let closed_fut = cli.new_tso.rl().as_ref().unwrap().closed();
                                     closed_fut.await;
                                     // Reset the tso discover primary client, it's may be stale.
-                                    cli.pd_connector.reset_tso_discover().await;
+                                    pd_connector.reset_tso_discover().await;
                                     info!("New TSO stream is closed, reconnect to PD");
                                 }
                                 // Try to build the new tso. If build failure, just update the
                                 // client new_tso to None and wait for retry.
                                 // NOTE: the new tso will be unavailable until next retry if build
                                 // failure. It will use legacy tso instead.
-                                let new_tso = cli.pd_connector.build_new_tso().await;
+                                let new_tso = pd_connector.build_new_tso().await;
                                 let build_success = new_tso.is_some();
                                 cli.update_new_tso(new_tso);
                                 if build_success {

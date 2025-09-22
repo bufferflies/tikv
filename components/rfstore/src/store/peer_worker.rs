@@ -13,8 +13,8 @@ use fail::fail_point;
 use kvproto::{errorpb, raft_cmdpb::RaftCmdResponse};
 use raftstore::store::{
     metrics::{
-        STORE_WRITE_RAFTDB_DURATION_HISTOGRAM, STORE_WRITE_SEND_DURATION_HISTOGRAM,
-        STORE_WRITE_TRIGGER_SIZE_HISTOGRAM,
+        STORE_WRITE_MIN_WRITE_PAUSE_DURATION_HISTOGRAM, STORE_WRITE_RAFTDB_DURATION_HISTOGRAM,
+        STORE_WRITE_SEND_DURATION_HISTOGRAM, STORE_WRITE_TRIGGER_SIZE_HISTOGRAM,
     },
     util,
 };
@@ -93,9 +93,11 @@ impl PeerInbox {
         // Filter out the elapsed time longer than recorded and replace the minimum one
         // if any.
         let elapsed = start.saturating_elapsed();
-        let applier=self.peer.applier.lock().unwrap();
-        applier.store_time_histogram.observe(duration_to_sec(elapsed));
-            
+        let applier = self.peer.applier.lock().unwrap();
+        applier
+            .store_time_histogram
+            .observe(duration_to_sec(elapsed));
+
         // If this peer handle cost is too short, skip the statistics to avoid iterate.
         if elapsed < Duration::from_millis(10) {
             return;
@@ -236,6 +238,7 @@ impl RaftWorker {
             let mut inboxes_vec: Vec<PeerInbox> =
                 inboxes.inboxes.drain().map(|(_, inbox)| inbox).collect();
             self.try_send_aux_task(&mut inboxes_vec);
+            let process_start = tikv_util::time::Instant::now();
             inboxes_vec.into_iter().for_each(|mut inbox| {
                 inbox.process(
                     &mut self.ctx,
@@ -243,7 +246,7 @@ impl RaftWorker {
                     Some(&mut inbox_peer_stats),
                 );
             });
-            let process_inbox_duration = loop_start.saturating_elapsed();
+            let process_inbox_duration = process_start.saturating_elapsed();
             if process_inbox_duration > Duration::from_millis(50) {
                 inbox_peer_stats.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
                 warn!(
@@ -542,20 +545,35 @@ impl RaftAuxWorker {
     }
 
     fn run(&mut self) {
+        let store_id = self.ctx.store_id();
+        let mut inbox_peer_stats = vec![InboxPeerStat::default(); PEER_INBOX_STATISTIC_COUNT];
         while let Ok(inboxes) = self.task_rx.recv() {
             if inboxes.is_empty() {
                 return;
             }
-            let loop_start = tikv_util::time::Instant::now();
+            let process_start = tikv_util::time::Instant::now();
             for mut inbox in inboxes {
-                inbox.process(&mut self.ctx, &self.apply_senders, None);
+                inbox.process(
+                    &mut self.ctx,
+                    &self.apply_senders,
+                    Some(&mut inbox_peer_stats),
+                );
             }
+            let process_inbox_duration = process_start.saturating_elapsed();
+            if process_inbox_duration > Duration::from_millis(50) {
+                inbox_peer_stats.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
+                warn!(
+                    "store_id: {} raft aux worker batch loop takes too long, process_inbox_elapsed: {:?}, top_{} peers: {:?}",
+                    store_id, process_inbox_duration, PEER_INBOX_STATISTIC_COUNT, inbox_peer_stats
+                );
+            }
+            inbox_peer_stats.fill(InboxPeerStat::default());
             if self.ctx.global.trans.need_flush() {
                 self.ctx.global.trans.flush();
             }
             persist_states(&mut self.ctx, &self.io_sender);
             self.result_tx.send(()).unwrap();
-            batch_end(&mut self.ctx, loop_start.saturating_elapsed());
+            batch_end(&mut self.ctx, process_start.saturating_elapsed());
         }
     }
 }
@@ -746,7 +764,9 @@ impl IoWorker {
         let end_time = tikv_util::time::Instant::now();
         let handle_time = end_time.saturating_duration_since(timer);
         if self.min_write_duration > handle_time {
-            std::thread::sleep(self.min_write_duration - handle_time);
+            let duration = self.min_write_duration - handle_time;
+            std::thread::sleep(duration);
+            STORE_WRITE_MIN_WRITE_PAUSE_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
         }
         let send_time = duration_to_sec(end_time.saturating_duration_since(after_write));
         STORE_WRITE_SEND_DURATION_HISTOGRAM.observe(send_time);

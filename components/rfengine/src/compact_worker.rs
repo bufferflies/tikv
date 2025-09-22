@@ -89,7 +89,9 @@ pub(crate) struct CompactWorker {
     // track the number of pending compaction tasks with cached WriteBatch
     // to control the memory usage of cached WriteBatch.
     pending_compact_wb_count: Arc<AtomicUsize>,
-
+    // Size limit (bytes) for splitting rlog files during WAL
+    // compaction.
+    rlog_file_size: u32,
     // Shared per-peer Rlog files; see `RfEngineCore::peer_rlog_files`.
     peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
 }
@@ -106,6 +108,7 @@ impl CompactWorker {
         rate_limiter: Arc<IoRateLimiter>,
         sync_concurrency: usize,
         pending_compact_wb_count: Arc<AtomicUsize>,
+        rlog_file_size: u32,
         peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
@@ -134,6 +137,7 @@ impl CompactWorker {
             sync_concurrency,
             files_to_sync: vec![],
             pending_compact_wb_count,
+            rlog_file_size,
             peer_rlog_files,
         }
     }
@@ -308,10 +312,12 @@ impl CompactWorker {
             }
             peer_batch.truncate(peer_batch.truncated_idx);
             if !peer_batch.raft_logs.is_empty() {
-                let (file, is_cached) = self.write_raft_log_file(peer_batch, epoch_id)?;
-                peer_meta_pb.mut_files().push(file);
-                generated_files += 1;
-                cached_files += is_cached as usize;
+                let files = self.write_raft_log_files(peer_batch, epoch_id)?;
+                for (file, is_cached) in files {
+                    peer_meta_pb.mut_files().push(file);
+                    generated_files += 1;
+                    cached_files += is_cached as usize;
+                }
             }
             change_set.mut_peers().push(peer_meta_pb);
         }
@@ -341,27 +347,79 @@ impl CompactWorker {
         Ok(())
     }
 
-    // rfenginepb::RaftLogFile format:
-    // RlogHeader + [endoffset] + [RaftLogOp + checksum]
-    fn write_raft_log_file(
+    // rfenginepb::RaftLogFile format: RlogHeader + [endoffset] +
+    // [RaftLogOp + checksum]
+    fn write_raft_log_files(
         &mut self,
         peer_batch: PeerBatch,
         epoch_id: u32,
+    ) -> Result<Vec<(rfenginepb::RaftLogFile, bool /* is_cached */)>> {
+        let PeerBatch {
+            peer_id, raft_logs, ..
+        } = peer_batch;
+        let mut res = Vec::new();
+        let mut i = 0;
+        // Split raft logs into multiple files if the raft log offset
+        // exceeds size limit.
+        while i < raft_logs.len() {
+            let mut count = 0;
+            let mut log_end_off: u32 = 0;
+            while i + count < raft_logs.len() {
+                let op = &raft_logs[i + count];
+                let size = (op.encoded_len() as u32) + 4 /* checksum */;
+                if let Some(new_off) = log_end_off.checked_add(size)
+                    && new_off <= self.rlog_file_size
+                {
+                    log_end_off = new_off;
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            if count == 0 {
+                // If even one entry would exceeds `rlog_file_size`,
+                // allow at least one raft log. In practice this case
+                // should not occur, since a raft entry is capped by
+                // `raft_entry_max_size` (default 8MB) and the
+                // configured `rlog_file_size` should be >= 16MB.
+                count = 1;
+            }
+            let (meta, is_cached) =
+                self.write_raft_log_file(peer_id, epoch_id, &raft_logs, i, count)?;
+            res.push((meta, is_cached));
+            i += count;
+        }
+        Ok(res)
+    }
+
+    fn write_raft_log_file(
+        &mut self,
+        peer_id: u64,
+        epoch_id: u32,
+        raft_logs: &VecDeque<RaftLogOp>,
+        start_idx: usize,
+        count: usize,
     ) -> Result<(rfenginepb::RaftLogFile, bool /* is_cached */)> {
-        let first = peer_batch.raft_logs.front().unwrap().index;
-        let last = peer_batch.raft_logs.back().unwrap().index;
-        let last_term = peer_batch.raft_logs.back().unwrap().term;
-        let filename = raft_log_file_name(self.dir.as_path(), peer_batch.peer_id, first, last);
+        let first = raft_logs[start_idx].index;
+        let last = raft_logs[start_idx + count - 1].index;
+        let last_term = raft_logs[start_idx + count - 1].term;
+        let filename = raft_log_file_name(self.dir.as_path(), peer_id, first, last);
+
         self.buf.truncate(0);
-        let header = RlogHeader::new(peer_batch.raft_logs.len() as u32);
+        let header = RlogHeader::new(count as u32);
         header.encode_to(&mut self.buf);
+
         // Write index first to make the file addressable.
         let mut log_end_off = 0;
-        for rlog in &peer_batch.raft_logs {
+        for idx in start_idx..(start_idx + count) {
+            let rlog = &raft_logs[idx];
             log_end_off += rlog.encoded_len() as u32 + 4 /* checksum */;
             self.buf.put_u32_le(log_end_off);
         }
-        for rlog in &peer_batch.raft_logs {
+
+        // Payload + checksums
+        for idx in start_idx..(start_idx + count) {
+            let rlog = &raft_logs[idx];
             let origin_len = self.buf.len();
             rlog.encode_to(&mut self.buf);
             let checksum = crc32c::crc32c(&self.buf[origin_len..]);
@@ -388,9 +446,7 @@ impl CompactWorker {
         file.last_term = last_term;
         file.epoch_id = epoch_id;
 
-        let is_cached = self
-            .rlog_cache
-            .add_rlog(peer_batch.peer_id, &file, &self.buf);
+        let is_cached = self.rlog_cache.add_rlog(peer_id, &file, &self.buf);
         Ok((file, is_cached))
     }
 
@@ -893,7 +949,7 @@ pub(crate) fn fetch_entries_from_rlog(
         )));
     }
 
-    // See format in Worker::write_raft_log_file
+    // See format in Worker::write_raft_log_files
     let file = File::open(raft_log_file_name(
         dir,
         peer_id,
@@ -1238,6 +1294,7 @@ mod tests {
             rate_limiter,
             1,
             Arc::new(AtomicUsize::default()),
+            u32::MAX,
             Arc::new(ArcSwap::default()),
         );
         worker.rlog_cache = if with_cache {
@@ -1362,7 +1419,9 @@ mod tests {
             raft_logs.append(op);
         }
         let rlog_epoch = 3;
-        let (file, is_cached) = worker.write_raft_log_file(peer_batch, rlog_epoch).unwrap();
+        let files = worker.write_raft_log_files(peer_batch, rlog_epoch).unwrap();
+        assert!(files.len() == 1);
+        let (file, is_cached) = files.into_iter().next().unwrap();
         assert!(file.last_term == last_index as u32);
         assert!(file.epoch_id == rlog_epoch);
         (file, is_cached)
@@ -1392,6 +1451,7 @@ mod tests {
             rate_limiter,
             1,
             Arc::new(AtomicUsize::default()),
+            u32::MAX,
             Arc::new(ArcSwap::default()),
         );
         worker.rlog_cache = if with_cache {
@@ -1545,6 +1605,7 @@ mod tests {
             rate_limiter,
             1,
             Arc::new(AtomicUsize::default()),
+            u32::MAX,
             Arc::new(ArcSwap::default()),
         );
 
@@ -1597,5 +1658,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_raft_log_file_size_limit() {
+        init_logger();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_path = tmp_dir.path();
+        defer!(fs::remove_dir_all(tmp_path).unwrap());
+        let (_, rx) = tikv_util::mpsc::unbounded();
+
+        let manifest = Manifest::open(tmp_path, AtomicU64::new(1).into()).unwrap();
+        let mut worker = CompactWorker::new(
+            tmp_path.to_path_buf(),
+            rx,
+            manifest,
+            AtomicU32::new(0).into(),
+            None,
+            None,
+            dfs_worker::Healthy::default(),
+            Arc::new(IoRateLimiter::new_for_test()),
+            1,
+            Arc::new(AtomicUsize::default()),
+            10 * 1024, // rlog_file_size: 10KB
+            Arc::new(ArcSwap::default()),
+        );
+
+        let mut peer_batch = PeerBatch::new(1, 1000);
+        for index in 1..=30 {
+            let op = RaftLogOp {
+                index,
+                term: index as u32,
+                e_type: 1,
+                context: 2,
+                data: "a".repeat(1000).into(), // 1000 bytes
+            };
+            peer_batch.append_raft_log(op.clone());
+        }
+        let rlog_epoch = 3;
+        let files = worker.write_raft_log_files(peer_batch, rlog_epoch).unwrap();
+        // Check that there should be 3 rlog files, each with 10 entries.
+        assert_eq!(files.len(), 3);
+        for (i, (file, _)) in files.iter().enumerate() {
+            assert_eq!(file.first_index, (i as u64) * 10 + 1);
+            assert_eq!(file.last_index, (i as u64 + 1) * 10);
+            assert_eq!(file.last_term, file.last_index as u32);
+            assert_eq!(file.epoch_id, rlog_epoch);
+        }
+
+        // Test that if a single raft entry exceeds the size limit, an
+        // error will be returned.
+        let mut peer_batch = PeerBatch::new(1, 1000);
+        peer_batch.append_raft_log(RaftLogOp {
+            index: 1,
+            term: 1,
+            e_type: 1,
+            context: 2,
+            data: "a".repeat(20 * 1024).into(), // 20KB
+        });
+        let files = worker.write_raft_log_files(peer_batch, rlog_epoch).unwrap();
+        assert_eq!(files.len(), 1);
     }
 }
