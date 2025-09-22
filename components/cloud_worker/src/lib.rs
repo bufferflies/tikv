@@ -65,8 +65,6 @@ use tikv_util::{
 };
 use tokio::runtime::Runtime;
 pub use txn_chunk::CreateTxnChunkResp;
-#[cfg(feature = "testexport")]
-pub use worker_limiter::WorkerLimiterConfig as CloudWorkerLimiterConfig;
 
 use crate::{
     common::{Running, RunningController},

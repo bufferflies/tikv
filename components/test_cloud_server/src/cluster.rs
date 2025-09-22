@@ -13,9 +13,7 @@ use anyhow::bail;
 use bstr::ByteSlice;
 use bytes::Bytes;
 use cloud_server::{server::GRPC_THREAD_PREFIX, TikvServer};
-use cloud_worker::{
-    local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker, CloudWorkerLimiterConfig,
-};
+use cloud_worker::{local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker};
 use dashmap::DashMap;
 use futures::{executor::block_on, future::try_join_all};
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
@@ -919,7 +917,7 @@ impl ServerCluster {
                 Duration::ZERO
             };
 
-            let tikv_worker_conf = cloud_worker::Config {
+            let mut tikv_worker_conf = cloud_worker::Config {
                 addr: tikv_worker_addr(idx),
                 cop_addr: "".to_string(),
                 pd: pd_client::Config::new(self.pd_endpoints().to_vec()),
@@ -956,16 +954,17 @@ impl ServerCluster {
                     interval: ReadableDuration::secs(10),
                     ia: IaGcConfig::new_for_test(),
                 },
-                worker_limiter: CloudWorkerLimiterConfig {
-                    // Temporary configs to fix https://github.com/tidbcloud/cloud-storage-engine/issues/2934.
-                    // TODO: remove after upgrade.
-                    global_concurrency_factor: 10.0,
-                    keyspace_concurrency_factor: 8.0,
-                    vector_index_concurrency_factor: 1.0,
-                },
                 memory_upper_threshold,
                 ..Default::default()
             };
+
+            // Temporary config to fix https://github.com/tidbcloud/cloud-storage-engine/issues/3525.
+            // The value is not used as replication worker is disabled.
+            // TODO: remove after next upgrade.
+            tikv_worker_conf
+                .replication_worker
+                .merged_engine
+                .block_cache_size = (1024 * 1024).into();
 
             self.tikv_worker_configs.insert(idx, tikv_worker_conf);
         }
@@ -1375,7 +1374,7 @@ pub fn new_test_config(
     config.kvengine.ia.auto_ia_check_interval = ReadableDuration::secs(10);
     config.kvengine.value_cache_capacity = AbsoluteOrPercentSize::Abs(ReadableSize::mb(1));
     config.kvengine.extra_dirs = vec![format!("{}/{}_extra", base_dir.to_str().unwrap(), node_id)];
-    config.kvengine.gc_lock_extra_cf = true;
+    config.kvengine.gc_lock_extra_cf = false; // TODO: enable after next upgrade.
 
     // Work around https://github.com/tidbcloud/cloud-storage-engine/issues/882.
     config.server.raft_client_initial_reconnect_backoff = ReadableDuration::millis(100);
