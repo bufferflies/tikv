@@ -787,6 +787,8 @@ pub fn prepare_dfs(prefix: &str) -> (TempDir, ObjectStorageService, DFSConfig) {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::FileExt;
+
     use bytes::Bytes;
     use futures::future::join_all;
     use kvengine::{
@@ -794,6 +796,7 @@ mod tests {
         dfs::{DFSConnOptions, Dfs, FileType, Options, S3Fs},
     };
     use rand::prelude::*;
+    use tempfile::tempfile;
 
     use super::*;
 
@@ -1224,18 +1227,33 @@ mod tests {
             for (start_off, end_off, expected) in cases {
                 let s3fs = s3fs.clone();
                 let h = runtime.spawn(async move {
+                    let key = s3fs.file_key(1, FileType::Sst);
+                    let file_name = "1".to_string();
                     let opts = engine_traits::GetObjectOptions { start_off, end_off };
-                    let (read_data, complete_length) = s3fs
-                        .get_object_ext(
-                            s3fs.file_key(1, FileType::Sst),
-                            "1".to_string(),
-                            opts,
-                            true,
-                        )
+                    let read_data = s3fs
+                        .get_object(key.clone(), file_name.clone(), opts)
                         .await
                         .unwrap();
                     assert_eq!(read_data, expected);
-                    assert_eq!(complete_length.unwrap(), data_len as u64);
+
+                    let mut f = tempfile().unwrap();
+                    let len = s3fs
+                        .get_object_to_writer(key, file_name, opts, &mut f)
+                        .await
+                        .unwrap();
+                    assert_eq!(len as usize, expected.len());
+                    {
+                        let mut read_data = Vec::with_capacity(len as usize);
+                        f.rewind().unwrap();
+                        f.read_to_end(&mut read_data).unwrap();
+                        assert_eq!(&read_data, expected.as_ref());
+                    }
+                    {
+                        // Test for `read_exact_at`:
+                        let mut read_data = vec![0; len as usize];
+                        f.read_exact_at(&mut read_data, 0).unwrap();
+                        assert_eq!(&read_data, expected.as_ref());
+                    }
                 });
                 handles.push(h);
             }

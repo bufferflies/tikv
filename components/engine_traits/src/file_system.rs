@@ -61,7 +61,7 @@ impl FileSystemInspector for EngineFileSystemInspector {
 /// * (Some(s), Some(e)): read range [s, e).
 /// * (Some(s), None): read from `s` to end of object.
 /// * (None, Some(n)): read last `n` bytes.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct GetObjectOptions {
     pub start_off: Option<u64>,
     pub end_off: Option<u64>,
@@ -101,10 +101,13 @@ pub struct ListObjectContent {
 
 pub trait ObjectStorage: Sync + Send {
     fn put_objects(&self, objects: Vec<(String, Bytes)>) -> std::result::Result<(), String>;
+
+    /// Note: The order of returned objects may not be the same as `keys`.
     fn get_objects(
         &self,
         keys: Vec<(String, GetObjectOptions)>,
     ) -> std::result::Result<Vec<(String, Bytes)>, String>;
+
     fn list_objects(
         &self,
         start_after: &str, // The key to start after when listing objects (exclusive).
