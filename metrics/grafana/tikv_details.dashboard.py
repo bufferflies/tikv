@@ -5810,6 +5810,48 @@ def RaftEngine() -> RowPanel:
             ),
         ]
     )
+    layout.row(
+        [
+            stat_panel(
+                title="Total Uploaded Bytes to DFS",
+                description="Total number of bytes uploaded to DFS",
+                format=UNITS.BYTES_IEC,
+                targets=[
+                    target(
+                        expr=expr_simple("raft_engine_dfs_uploaded_bytes_total"),
+                        legend_format="{{ instance }}",
+                    ),
+                ],
+                mappings=[],
+            )
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="DFS Request Rate",
+                description="The count of DFS requests issued by rfengine.",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_sum_rate("raft_engine_dfs_requests_total"),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="DFS Upload Rate",
+                description="The byte rates of uploading WAL to DFS.",
+                yaxes=yaxes(left_format=UNITS.BYTES_SEC_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate("raft_engine_dfs_uploaded_bytes_total"),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
     return layout.row_panel
 
 

@@ -25,6 +25,26 @@ use crate::{
     parse_wal_chunk_key, wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name, Error, Result,
 };
 
+#[derive(Default)]
+pub(crate) struct DfsStatistic {
+    pub(crate) uploaded_bytes: AtomicU64,
+    pub(crate) request_count: AtomicU64,
+}
+
+pub(crate) struct FrozenDfsStatistic {
+    pub(crate) uploaded_bytes: u64,
+    pub(crate) request_count: u64,
+}
+
+impl DfsStatistic {
+    pub fn record_and_reset(&self) -> FrozenDfsStatistic {
+        FrozenDfsStatistic {
+            uploaded_bytes: self.uploaded_bytes.swap(0, Ordering::SeqCst),
+            request_count: self.request_count.swap(0, Ordering::SeqCst),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct LightweightBackupConfig {
     pub(crate) dir: PathBuf,
@@ -78,6 +98,8 @@ pub(crate) struct ObjectStorageWorker {
     s3fs: Arc<S3Fs>,
     healthy: Healthy,
     memory_limiter: MemoryLimiter,
+
+    statistic: Arc<DfsStatistic>,
 }
 
 impl ObjectStorageWorker {
@@ -88,6 +110,7 @@ impl ObjectStorageWorker {
         dfs_worker_healthy: Healthy,
         task_rx: Receiver<ObjectStorageTask>,
         compact_worker_tx: Sender<CompactTask>,
+        statistic: Arc<DfsStatistic>,
     ) -> Self {
         info!("dfs worker config: {:?}", config);
         let dfs_config = config.dfs_config.clone();
@@ -108,6 +131,7 @@ impl ObjectStorageWorker {
             s3fs,
             healthy: dfs_worker_healthy,
             memory_limiter,
+            statistic,
         }
     }
 
@@ -276,11 +300,16 @@ impl ObjectStorageWorker {
         let healthy = self.healthy.clone();
         let acquired = self.memory_limiter.acquire(chunk.len())?;
         let epoch_id = self.epoch_id;
+        let stat = Arc::clone(&self.statistic);
         self.s3fs.get_runtime().spawn_blocking(move || {
+            let length = chunk.len();
             if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
                 error!("{} put wal chunk failed", store_id; "err" => ?err);
                 healthy.set_unhealthy(epoch_id, "put wal chunk");
             }
+            stat.request_count.fetch_add(1, Ordering::SeqCst);
+            stat.uploaded_bytes
+                .fetch_add(length as u64, Ordering::SeqCst);
             drop(acquired);
         });
 
@@ -417,11 +446,16 @@ impl ObjectStorageWorker {
         let healthy = self.healthy.clone();
         let acquired = self.memory_limiter.acquire(chunk.len())?;
         let epoch_id = self.epoch_id;
+        let stat = Arc::clone(&self.statistic);
         self.s3fs.get_runtime().spawn_blocking(move || {
+            let length = chunk.len();
             if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
                 error!("{} put wal chunk failed", store_id, ; "err" => ?err);
                 healthy.set_unhealthy(epoch_id, "put wal chunk");
             }
+            stat.request_count.fetch_add(1, Ordering::SeqCst);
+            stat.uploaded_bytes
+                .fetch_add(length as u64, Ordering::SeqCst);
             drop(acquired);
         });
 
@@ -687,6 +721,7 @@ mod tests {
             Healthy::default(),
             rx,
             tx,
+            Arc::new(DfsStatistic::default()),
         );
 
         let mut origin_data = vec![];

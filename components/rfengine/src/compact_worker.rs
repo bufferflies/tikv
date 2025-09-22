@@ -94,6 +94,8 @@ pub(crate) struct CompactWorker {
     rlog_file_size: u32,
     // Shared per-peer Rlog files; see `RfEngineCore::peer_rlog_files`.
     peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
+
+    statistic: Arc<DfsStatistic>,
 }
 
 impl CompactWorker {
@@ -110,6 +112,7 @@ impl CompactWorker {
         pending_compact_wb_count: Arc<AtomicUsize>,
         rlog_file_size: u32,
         peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
+        statistic: Arc<DfsStatistic>,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
         let (rlog_cache, compress_type) = if let Some(config) = lightweight_backup_cfg {
@@ -139,6 +142,7 @@ impl CompactWorker {
             pending_compact_wb_count,
             rlog_file_size,
             peer_rlog_files,
+            statistic,
         }
     }
 
@@ -503,14 +507,18 @@ impl CompactWorker {
         let s3fs = self.s3fs.as_ref().unwrap().clone();
         // We use the same DFS_WORKER_THREAD_NAME thread name to make panic mark file
         // work.
+        let stat = self.statistic.clone();
         let snap_task_handle = thread::Builder::new()
             .name(DFS_WORKER_THREAD_NAME.into())
             .spawn_wrapper(move || {
                 for obj in [meta_obj, rlog_obj] {
+                    let length = obj.1.len();
                     if let Err(err) = s3fs.put_objects(vec![obj]) {
                         error!("{} put snapshot object failed", engine_id; "err" => ?err, "epoch" => epoch_id);
                         return Err((epoch_id, err));
                     }
+                    stat.uploaded_bytes.fetch_add(length as u64, Ordering::Relaxed);
+                    stat.request_count.fetch_add(1, Ordering::Relaxed);
                 }
                 Ok(epoch_id)
             })
@@ -1296,6 +1304,7 @@ mod tests {
             Arc::new(AtomicUsize::default()),
             u32::MAX,
             Arc::new(ArcSwap::default()),
+            Arc::default(),
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 80, RANDOM_STR_MAX_LEN / 2)
@@ -1453,6 +1462,7 @@ mod tests {
             Arc::new(AtomicUsize::default()),
             u32::MAX,
             Arc::new(ArcSwap::default()),
+            Arc::default(),
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 100 * 5, RANDOM_STR_MAX_LEN * 100 / 2)
@@ -1607,6 +1617,7 @@ mod tests {
             Arc::new(AtomicUsize::default()),
             u32::MAX,
             Arc::new(ArcSwap::default()),
+            Arc::default(),
         );
 
         let peer_id = 1001;
@@ -1682,6 +1693,7 @@ mod tests {
             Arc::new(AtomicUsize::default()),
             10 * 1024, // rlog_file_size: 10KB
             Arc::new(ArcSwap::default()),
+            Arc::default(),
         );
 
         let mut peer_batch = PeerBatch::new(1, 1000);

@@ -175,6 +175,9 @@ pub struct RfEngineCore {
     /// Calculated from the rlog memory limit and the WAL file size.
     pub(crate) in_mem_rlog_epoch_count: u32,
 
+    /// DFS statistics collected by DFS worker.
+    pub(crate) dfs_statistics: Arc<DfsStatistic>,
+
     _lock: fslock::LockFile, // hold lock to avoid release
 }
 
@@ -250,6 +253,7 @@ impl RfEngineCore {
             peer_rlog_files: peer_rlog_files.clone(),
             in_mem_rlog_epoch_count: in_mem_rlog_epoch_count as u32,
             _lock: lock,
+            dfs_statistics: Arc::default(),
         };
         let async_offset = en.load(&manifest)?;
         {
@@ -312,6 +316,9 @@ impl RfEngineCore {
                 rlog_file_size,
                 peer_rlog_files,
             );
+            if let Some(dfs_statistic) = service_worker.dfs_statistic() {
+                en.dfs_statistics = dfs_statistic
+            }
             let join_handle = spawn_anonymous_thread_with!(move || service_worker.run());
             let mut guard = en.service_worker_handle.lock().unwrap();
             *guard = Some(join_handle);
@@ -681,6 +688,10 @@ impl RfEngineCore {
             .set(total_offloaded_entries as i64);
         ENGINE_TOTAL_WALS_GAUGE.set(num_files as i64);
 
+        let dfs = self.dfs_statistics.record_and_reset();
+        RFENGINE_DFS_UPLOAD_BYTES.inc_by(dfs.uploaded_bytes);
+        RFENGINE_DFS_REQUESTS.inc_by(dfs.request_count);
+
         EngineStats {
             total_mem_size,
             total_mem_entries,
@@ -688,6 +699,9 @@ impl RfEngineCore {
             num_files,
             pending_compaction_wals,
             top_10_size_peers: peers_stats,
+
+            dfs_requests: dfs.request_count,
+            dfs_uploaded_bytes: dfs.uploaded_bytes,
         }
     }
 
@@ -1553,6 +1567,9 @@ pub struct EngineStats {
     pub disk_size: u64,
     pub pending_compaction_wals: u8,
     pub top_10_size_peers: Vec<PeerStats>,
+
+    pub dfs_uploaded_bytes: u64,
+    pub dfs_requests: u64,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, PartialEq)]

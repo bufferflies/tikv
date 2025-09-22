@@ -138,4 +138,12 @@ lazy_static! {
         "raft_engine_dfs_worker_healthy",
         "Status of healthy dfs worker",
     ).unwrap();
+    pub static ref RFENGINE_DFS_UPLOAD_BYTES: IntCounter = register_int_counter!(
+        "raft_engine_dfs_uploaded_bytes_total",
+        "Total number of bytes uploaded to DFS",
+    ).unwrap();
+    pub static ref RFENGINE_DFS_REQUESTS: IntCounter = register_int_counter!(
+        "raft_engine_dfs_requests_total",
+        "Total number of requests to DFS",
+    ).unwrap();
 }
