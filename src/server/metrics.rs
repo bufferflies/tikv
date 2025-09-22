@@ -141,7 +141,7 @@ make_auto_flush_static_metric! {
 
     pub struct GrpcMsgHistogramVec: LocalHistogram {
         "type" => GrpcTypeKind,
-        "keyspace_id" => KeySpaceID,
+        "keyspace_name" => KeySpaceID,
     }
 
     pub struct ReplicaReadLockCheckHistogramVec: LocalHistogram {
@@ -236,7 +236,7 @@ lazy_static! {
     pub static ref GRPC_MSG_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
         "tikv_grpc_msg_duration_seconds",
         "Bucketed histogram of grpc server messages",
-        &["type","keyspace_id"],
+        &["type","keyspace_name"],
         exponential_buckets(5e-5, 2.0, 22).unwrap() // 50us ~ 104s
     )
     .unwrap();
@@ -487,7 +487,7 @@ make_auto_flush_static_metric! {
 
     pub struct AsyncRequestsDurationVec: LocalHistogram {
         "type" => RequestTypeKind,
-        "keyspace_id" => DefaultKeyspace,
+        "keyspace_name" => DefaultKeyspace,
     }
 }
 
@@ -520,7 +520,7 @@ lazy_static! {
     pub static ref ASYNC_REQUESTS_DURATIONS: HistogramVec = register_histogram_vec!(
         "tikv_storage_engine_async_request_duration_seconds",
         "Bucketed histogram of processing successful asynchronous requests.",
-        &["type", "keyspace_id"],
+        &["type", "keyspace_name"],
         exponential_buckets(0.00001, 2.0, 26).unwrap()
     )
     .unwrap();
@@ -601,7 +601,7 @@ thread_local! {
     static LAST_GRPC_LOCAL_FLUSH_TIME: Cell<Instant> = Cell::new(Instant::now_coarse());
 }
 
-pub fn record_request_grpc_metrics(tp: String, keyspace_id: String, duration: Duration) {
+pub fn record_request_grpc_metrics(tp: String, keyspace_name: String, duration: Duration) {
     let need_flush = LAST_GRPC_LOCAL_FLUSH_TIME.with(|last_local_flush_time| {
         let now = Instant::now_coarse();
         if now - last_local_flush_time.get() > Duration::from_secs(1) {
@@ -614,8 +614,10 @@ pub fn record_request_grpc_metrics(tp: String, keyspace_id: String, duration: Du
     GRPC_REQUEST_METRICS_MAP.with(|map| {
         let mut map = map.borrow_mut();
         let metrics = map
-            .entry((tp, keyspace_id))
-            .or_insert_with_key(|(tp, keyspace_id)| LocalGRPCRequestMetrics::new(tp, keyspace_id));
+            .entry((tp, keyspace_name))
+            .or_insert_with_key(|(tp, keyspace_name)| {
+                LocalGRPCRequestMetrics::new(tp, keyspace_name)
+            });
         metrics.duration.observe(duration.as_secs_f64());
         if need_flush {
             metrics.duration.flush();
@@ -643,7 +645,7 @@ thread_local! {
     static LAST_ASYNC_LOCAL_FLUSH_TIME: Cell<Instant> = Cell::new(Instant::now_coarse());
 }
 
-pub fn record_request_async_metrics(tp: String, keyspace_id: String, duration: Duration) {
+pub fn record_request_async_metrics(tp: String, keyspace_name: String, duration: Duration) {
     let need_flush = LAST_ASYNC_LOCAL_FLUSH_TIME.with(|last_local_flush_time| {
         let now = Instant::now_coarse();
         if now - last_local_flush_time.get() > Duration::from_secs(1) {
@@ -656,8 +658,10 @@ pub fn record_request_async_metrics(tp: String, keyspace_id: String, duration: D
     ASYNC_REQUEST_METRICS_MAP.with(|map| {
         let mut map = map.borrow_mut();
         let metrics = map
-            .entry((tp, keyspace_id))
-            .or_insert_with_key(|(tp, keyspace_id)| LocalAsyncRequestMetrics::new(tp, keyspace_id));
+            .entry((tp, keyspace_name))
+            .or_insert_with_key(|(tp, keyspace_name)| {
+                LocalAsyncRequestMetrics::new(tp, keyspace_name)
+            });
         metrics.duration.observe(duration.as_secs_f64());
         if need_flush {
             metrics.duration.flush();

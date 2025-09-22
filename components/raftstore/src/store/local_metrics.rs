@@ -115,16 +115,14 @@ impl RaftMetrics {
                 &RAFT_INVALID_PROPOSAL_COUNTER_VEC,
             ),
             raft_log_gc_skipped: RaftLogGcSkippedCounterVec::from(&RAFT_LOG_GC_SKIPPED_VEC),
-            store_time: STORE_TIME_HISTOGRAM.with_label_values(&["default"]).local(),
+            store_time: STORE_TIME_HISTOGRAM.with_label_values(&[""]).local(),
             propose_wait_time: REQUEST_WAIT_TIME_HISTOGRAM.local(),
             process_ready: PEER_RAFT_PROCESS_DURATION
                 .with_label_values(&["ready"])
                 .local(),
             event_time: RaftEventDurationVec::from(&RAFT_EVENT_DURATION_VEC),
             peer_msg_len: PEER_MSG_LEN.local(),
-            commit_log: PEER_COMMIT_LOG_HISTOGRAM
-                .with_label_values(&["default"])
-                .local(),
+            commit_log: PEER_COMMIT_LOG_HISTOGRAM.with_label_values(&[""]).local(),
             write_block_wait: STORE_WRITE_MSG_BLOCK_WAIT_DURATION_HISTOGRAM.local(),
             propose_log_size: PEER_PROPOSE_LOG_SIZE_HISTOGRAM.local(),
             waterfall_metrics,

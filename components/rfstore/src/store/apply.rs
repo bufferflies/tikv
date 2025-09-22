@@ -409,14 +409,17 @@ impl Applier {
 
     fn default(peer: metapb::Peer, region: metapb::Region, apply_state: RaftApplyState) -> Self {
         let keyspace_id = rfengine::get_region_keyspace_id_u32(&region).unwrap_or(0);
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|name| name.to_string())
+            .unwrap_or_default();
         let apply_log_histogram = STORE_APPLY_LOG_HISTOGRAM
-            .with_label_values(&[&keyspace_id.to_string()])
+            .with_label_values(&[&keyspace_name])
             .local();
         let apply_histogram = APPLY_TIME_HISTOGRAM
-            .with_label_values(&[&keyspace_id.to_string()])
+            .with_label_values(&[&keyspace_name])
             .local();
         let store_time_histogram = STORE_TIME_HISTOGRAM
-            .with_label_values(&[&keyspace_id.to_string()])
+            .with_label_values(&[&keyspace_name])
             .local();
         Self {
             peer,
@@ -2485,7 +2488,6 @@ impl ApplyContext {
             exec_log_term: Default::default(),
             wb: RefCell::new(WriteBatch::default()),
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
-            // apply_time: APPLY_TIME_HISTOGRAM.local(),
             observer: None,
         }
     }

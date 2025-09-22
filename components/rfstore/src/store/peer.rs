@@ -571,7 +571,10 @@ impl Peer {
         let encryption_key = ps.get_encryption_key();
         let raft_group = RawNode::new(&raft_cfg, ps, &logger)?;
         let keyspace_id = rfengine::get_region_keyspace_id_u32(region).unwrap_or(0);
-        let commit_log = PEER_COMMIT_LOG_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|name| name.to_string())
+            .unwrap_or_default();
+        let commit_log = PEER_COMMIT_LOG_HISTOGRAM.with_label_values(&[&keyspace_name]);
         let mut peer = Peer {
             peer,
             region_id: region.get_id(),

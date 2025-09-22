@@ -134,12 +134,15 @@ macro_rules! handle_request {
         fn $fn_name(&mut self, ctx: RpcContext<'_>, req: $req_ty, sink: UnarySink<$resp_ty>) {
             forward_unary!(self.proxy, $fn_name, ctx, req, sink);
             let begin_instant = Instant::now_coarse();
-            let keyspace_id = req.get_context().get_keyspace_id().to_string();
+            let keyspace_id = req.get_context().get_keyspace_id();
+            let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+                                                        .map(|name| name.to_string())
+                                                        .unwrap_or_default();
             let resp = $future_name(&self.storage, req);
             let task = async move {
                 let resp = resp.await?;
                 sink.success(resp).await?;
-                record_request_grpc_metrics(stringify!($fn_name).to_string(),keyspace_id,begin_instant.saturating_elapsed());
+                record_request_grpc_metrics(stringify!($fn_name).to_string(), keyspace_name, begin_instant.saturating_elapsed());
                 ServerResult::Ok(())
             }
             .map_err(|e| {
@@ -255,14 +258,17 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
     fn coprocessor(&mut self, ctx: RpcContext<'_>, req: Request, sink: UnarySink<Response>) {
         forward_unary!(self.proxy, coprocessor, ctx, req, sink);
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id().to_string();
+        let keyspace_id = req.get_context().get_keyspace_id();
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|name| name.to_string())
+            .unwrap_or_default();
         let future = future_copr(&self.copr, Some(ctx.peer()), req);
         let task = async move {
             let resp = future.await?.consume();
             sink.success(resp).await?;
             record_request_grpc_metrics(
                 String::from("coprocessor"),
-                keyspace_id,
+                keyspace_name,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -286,14 +292,17 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         sink: UnarySink<DelegateResponse>,
     ) {
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id().to_string();
+        let keyspace_id = req.get_context().get_keyspace_id();
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|name| name.to_string())
+            .unwrap_or_default();
         let future = self.copr.handle_delegate_request(req);
         let task = async move {
             let resp = future.await;
             sink.success(resp).await?;
             record_request_grpc_metrics(
                 String::from("delegate_coprocessor"),
-                keyspace_id,
+                keyspace_name,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -319,7 +328,10 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let begin_instant = Instant::now_coarse();
         let start = req.take_start_key();
         let end = req.take_end_key();
-        let keyspace_id = req.get_context().get_keyspace_id().to_string();
+        let keyspace_id = req.get_context().get_keyspace_id();
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|name| name.to_string())
+            .unwrap_or_default();
         // DestroyRange is a very dangerous operation. We don't allow passing MIN_KEY as
         // start, or MAX_KEY as end here.
         if start.is_empty()
@@ -453,7 +465,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             sink.success(resp).await?;
             record_request_grpc_metrics(
                 String::from("unsafe_destroy_range"),
-                keyspace_id,
+                keyspace_name,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -476,7 +488,10 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         mut sink: ServerStreamingSink<Response>,
     ) {
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id().to_string();
+        let keyspace_id = req.get_context().get_keyspace_id();
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|name| name.to_string())
+            .unwrap_or_default();
         let mut stream = self
             .copr
             .parse_and_handle_stream_request(req, Some(ctx.peer()))
@@ -491,7 +506,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                 Ok(_) => {
                     record_request_grpc_metrics(
                         String::from("coprocessor_stream"),
-                        keyspace_id,
+                        keyspace_name,
                         begin_instant.saturating_elapsed(),
                     );
                     let _ = sink.close().await;
@@ -595,7 +610,10 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
     ) {
         forward_unary!(self.proxy, split_region, ctx, req, sink);
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id().to_string();
+        let keyspace_id = req.get_context().get_keyspace_id();
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|name| name.to_string())
+            .unwrap_or_default();
         let region_id = req.get_context().get_region_id();
         let (cb, f) = paired_future_callback();
         let mut split_keys = if !req.get_split_key().is_empty() {
@@ -647,7 +665,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             sink.success(resp).await?;
             record_request_grpc_metrics(
                 String::from("split_region"),
-                keyspace_id,
+                keyspace_name,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -672,7 +690,10 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
     ) {
         forward_unary!(self.proxy, read_index, ctx, req, sink);
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id().to_string();
+        let keyspace_id = req.get_context().get_keyspace_id();
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|name| name.to_string())
+            .unwrap_or_default();
         let region_id = req.get_context().get_region_id();
         let mut cmd = RaftCmdRequest::default();
         let mut header = RaftRequestHeader::default();
@@ -731,7 +752,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             sink.success(resp).await?;
             record_request_grpc_metrics(
                 String::from("read_index"),
-                keyspace_id,
+                keyspace_name,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -808,9 +829,12 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                     source: _,
                     keyspace_id,
                 } = measure;
+                let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+                    .map(|name| name.to_string())
+                    .unwrap_or_default();
                 record_request_grpc_metrics(
                     label.to_string(),
-                    keyspace_id.to_string(),
+                    keyspace_name,
                     begin.saturating_elapsed(),
                 );
             }

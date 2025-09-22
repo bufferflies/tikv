@@ -372,7 +372,9 @@ impl Engine for RaftKv {
         ASYNC_REQUESTS_COUNTER_VEC.write.all.inc();
         let begin_instant = Instant::now_coarse();
         let keyspace_id = ctx.get_keyspace_id();
-
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|arc_str| arc_str.to_string())
+            .unwrap_or_default();
         if res.is_ok() {
             // If rid is some, only the specified region reports error.
             // If rid is None, all regions report error.
@@ -488,7 +490,7 @@ impl Engine for RaftKv {
                             ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
                             record_request_async_metrics(
                                 String::from("write"),
-                                keyspace_id.to_string(),
+                                keyspace_name,
                                 begin_instant.saturating_elapsed(),
                             );
                             fail_point!("raftkv_async_write_finish");
@@ -535,6 +537,9 @@ impl Engine for RaftKv {
             Ok(())
         })();
         let keyspace_id = ctx.pb_ctx.get_keyspace_id();
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|arc_str| arc_str.to_string())
+            .unwrap_or_default();
         let mut req = Request::default();
         req.set_cmd_type(CmdType::Snap);
         if !ctx.key_ranges.is_empty() && ctx.start_ts.map_or(false, |ts| !ts.is_zero()) {
@@ -571,10 +576,9 @@ impl Engine for RaftKv {
                     StoreCallback::Read(Box::new(move |resp| {
                         let res = on_read_result(resp).map_err(Error::into);
                         if res.is_ok() {
-                            let elapse = begin_instant.saturating_elapsed_secs();
                             record_request_async_metrics(
                                 String::from("snapshot"),
-                                keyspace_id.to_string(),
+                                keyspace_name,
                                 begin_instant.saturating_elapsed(),
                             );
                             ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();
