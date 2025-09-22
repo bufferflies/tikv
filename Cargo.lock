@@ -101,6 +101,7 @@ dependencies = [
  "serde_derive",
  "serde_ignored",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
