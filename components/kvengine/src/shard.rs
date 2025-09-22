@@ -16,7 +16,6 @@ use std::{
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::{Buf, BufMut, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
-use dashmap::DashMap;
 use kvenginepb::{self as pb, TxnFileRef};
 use quick_cache::sync::Cache;
 use rand::Rng;
@@ -2827,47 +2826,52 @@ impl LevelHandler {
 
 #[derive(Default, Clone, Debug)]
 pub struct Properties {
-    m: DashMap<String, Bytes>,
+    m: Arc<RwLock<HashMap<String, Bytes>>>,
 }
 
 impl Properties {
     pub fn new() -> Self {
         Self {
-            m: dashmap::DashMap::new(),
+            m: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub fn set(&self, key: &str, val: &[u8]) {
-        self.m.insert(key.to_string(), Bytes::copy_from_slice(val));
+        let mut m = self.m.write().unwrap();
+        m.insert(key.to_string(), Bytes::copy_from_slice(val));
     }
 
     pub fn set_bytes(&self, key: &str, val: Bytes) {
-        self.m.insert(key.to_string(), val);
+        let mut m = self.m.write().unwrap();
+        m.insert(key.to_string(), val);
     }
 
     pub fn get(&self, key: &str) -> Option<Bytes> {
-        let bin = self.m.get(key)?;
-        Some(bin.value().clone())
+        let m = self.m.read().unwrap();
+        let bin = m.get(key)?;
+        Some(bin.clone())
     }
 
     pub fn multi_get(&self, keys: &[&str]) -> Vec<(String, Bytes)> {
-        self.m
-            .iter()
-            .filter(|x| keys.contains(&x.key().as_str()))
-            .map(|x| (x.key().clone(), x.value().clone()))
+        let m = self.m.read().unwrap();
+        m.iter()
+            .filter(|(k, _)| keys.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
 
     pub fn remove(&self, key: &str) -> Option<Bytes> {
-        self.m.remove(key).map(|r| r.1)
+        let mut m = self.m.write().unwrap();
+        m.remove(key)
     }
 
     pub fn to_pb(&self, shard_id: u64) -> kvenginepb::Properties {
         let mut props = kvenginepb::Properties::new();
         props.shard_id = shard_id;
-        self.m.iter().for_each(|r| {
-            props.keys.push(r.key().clone());
-            props.values.push(r.value().to_vec());
+        let m = self.m.read().unwrap();
+        m.iter().for_each(|(k, v)| {
+            props.keys.push(k.clone());
+            props.values.push(v.to_vec());
         });
         props
     }
@@ -2885,25 +2889,30 @@ impl Properties {
 
     // Complement properties from `props` if it's currently not set in self.
     pub fn complement_merge(&mut self, props: Self) {
-        for (k, v) in props.m.into_iter() {
-            if let dashmap::mapref::entry::Entry::Vacant(e) = self.m.entry(k) {
-                e.insert(v);
-            }
+        let other_m = props.m.read().unwrap();
+        // copy to vector to avoid potential deadlock.
+        let entries: Vec<(String, Bytes)> = other_m
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        drop(other_m);
+        let mut self_m = self.m.write().unwrap();
+        for (k, v) in entries {
+            self_m.entry(k).or_insert(v);
         }
     }
 }
 
 impl PartialEq for Properties {
     fn eq(&self, other: &Self) -> bool {
-        if self.m.len() != other.m.len() {
+        let self_m = self.m.read().unwrap();
+        let other_m = other.m.read().unwrap();
+        if self_m.len() != other_m.len() {
             return false;
         }
-        self.m.iter().all(|kv| {
-            other
-                .m
-                .get(kv.key())
-                .map_or(false, |other_kv| kv.value() == other_kv.value())
-        })
+        self_m
+            .iter()
+            .all(|(k, v)| other_m.get(k).is_some_and(|other_v| v == other_v))
     }
 }
 
