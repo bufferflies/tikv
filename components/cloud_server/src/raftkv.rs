@@ -518,13 +518,12 @@ impl Engine for RaftKv {
             };
             match res {
                 Ok(()) => {
-                    ASYNC_REQUESTS_DURATIONS
-                        .with_label_values(&["write", &keyspace_id.to_string()])
-                        .observe(begin_instant.saturating_elapsed_secs());
+                    record_request_async_metrics(
+                        String::from("write"),
+                        keyspace_id.to_string(),
+                        begin_instant.saturating_elapsed(),
+                    );
                     ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
-                    // ASYNC_REQUESTS_DURATIONS_VEC
-                    //     .write
-                    //     .observe(begin_instant.saturating_elapsed_secs());
                 }
                 Err(e) => {
                     let status_kind = get_status_kind_from_engine_error(e);
@@ -604,12 +603,11 @@ impl Engine for RaftKv {
                     Err(e)
                 }
                 Ok(CmdRes::Snap(s)) => {
-                    ASYNC_REQUESTS_DURATIONS
-                        .with_label_values(&["snapshot", &keyspace_id.to_string()])
-                        .observe(begin_instant.saturating_elapsed_secs());
-                    // ASYNC_REQUESTS_DURATIONS_VEC
-                    //     .snapshot
-                    //     .observe(begin_instant.saturating_elapsed_secs());
+                    record_request_async_metrics(
+                        String::from("snapshot"),
+                        keyspace_id.to_string(),
+                        begin_instant.saturating_elapsed(),
+                    );
                     ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();
                     Ok(s)
                 }

@@ -33,11 +33,10 @@ use kvproto::{
     },
     raft_serverpb::{ExtraMessageType, PeerState, RaftMessage},
 };
-use prometheus::Histogram;
 use protobuf::Message;
 use raft::{self, eraftpb::MessageType, GetEntriesContext, Storage};
 use raft_proto::eraftpb;
-use raftstore::store::{metrics::STORE_TIME_HISTOGRAM, util};
+use raftstore::store::util;
 use rand::{thread_rng, Rng};
 use schema::schema::StorageClass;
 use strum::{EnumCount, VariantNames};
@@ -95,7 +94,6 @@ pub struct PeerFsm {
     // When we need to change the worker idx, we need to make sure the applying_cnt is zero.
     pub(crate) applying_cnt: Arc<AtomicU64>,
     ticker: Ticker,
-    pub(crate) store_time_histogram: Histogram,
 }
 
 impl PeerFsm {
@@ -118,7 +116,6 @@ impl PeerFsm {
             }
             Some(peer) => peer.clone(),
         };
-        let keyspace_id = rfengine::get_region_keyspace_id_u32(region).unwrap_or(0);
         let peer = Peer::new(store_id, cfg, engines, region, meta_peer)?;
         info!(
             "create peer";
@@ -133,8 +130,6 @@ impl PeerFsm {
             0
         };
 
-        let store_time_histogram =
-            STORE_TIME_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
         Ok(PeerFsm {
             peer,
             stopped: false,
@@ -143,7 +138,6 @@ impl PeerFsm {
             follower_apply_worker_idx,
             applying_cnt: Arc::new(AtomicU64::new(0)),
             ticker: Ticker::new(cfg),
-            store_time_histogram,
         })
     }
 
@@ -171,7 +165,6 @@ impl PeerFsm {
             "region" => peer.tag(),
             "peer_id" => peer.peer_id(),
         );
-        let keyspace_id = rfengine::get_region_keyspace_id_u32(&region).unwrap_or(0);
         let apply_worker_idx = thread_rng().gen_range(0..cfg.apply_pool_size);
         let leader_apply_worker_idx = apply_worker_idx;
         let follower_apply_worker_idx = if cfg.apply_follower_pool_size > 0 {
@@ -179,8 +172,7 @@ impl PeerFsm {
         } else {
             0
         };
-        let store_time_histogram =
-            STORE_TIME_HISTOGRAM.with_label_values(&[&keyspace_id.to_string()]);
+
         Ok(PeerFsm {
             peer,
             stopped: false,
@@ -189,7 +181,6 @@ impl PeerFsm {
             leader_apply_worker_idx,
             follower_apply_worker_idx,
             applying_cnt: Arc::new(AtomicU64::new(0)),
-            store_time_histogram,
         })
     }
 

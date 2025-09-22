@@ -93,9 +93,9 @@ impl PeerInbox {
         // Filter out the elapsed time longer than recorded and replace the minimum one
         // if any.
         let elapsed = start.saturating_elapsed();
-        peer_fsm
-            .store_time_histogram
-            .observe(duration_to_sec(elapsed));
+        let applier=self.peer.applier.lock().unwrap();
+        applier.store_time_histogram.observe(duration_to_sec(elapsed));
+            
         // If this peer handle cost is too short, skip the statistics to avoid iterate.
         if elapsed < Duration::from_millis(10) {
             return;

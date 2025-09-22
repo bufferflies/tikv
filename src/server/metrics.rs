@@ -622,3 +622,45 @@ pub fn record_request_grpc_metrics(tp: String, keyspace_id: String, duration: Du
         }
     });
 }
+
+struct LocalAsyncRequestMetrics {
+    pub duration: LocalHistogram,
+}
+
+impl LocalAsyncRequestMetrics {
+    fn new(tp: &str, key_space_id: &str) -> Self {
+        LocalAsyncRequestMetrics {
+            duration: ASYNC_REQUESTS_DURATIONS
+                .with_label_values(&[tp, key_space_id])
+                .local(),
+        }
+    }
+}
+
+thread_local! {
+    static ASYNC_REQUEST_METRICS_MAP: RefCell<HashMap<(String,String), LocalAsyncRequestMetrics>> = RefCell::new(HashMap::default());
+
+    static LAST_ASYNC_LOCAL_FLUSH_TIME: Cell<Instant> = Cell::new(Instant::now_coarse());
+}
+
+pub fn record_request_async_metrics(tp: String, keyspace_id: String, duration: Duration) {
+    let need_flush = LAST_ASYNC_LOCAL_FLUSH_TIME.with(|last_local_flush_time| {
+        let now = Instant::now_coarse();
+        if now - last_local_flush_time.get() > Duration::from_secs(1) {
+            last_local_flush_time.set(now);
+            true
+        } else {
+            false
+        }
+    });
+    ASYNC_REQUEST_METRICS_MAP.with(|map| {
+        let mut map = map.borrow_mut();
+        let metrics = map
+            .entry((tp, keyspace_id))
+            .or_insert_with_key(|(tp, keyspace_id)| LocalAsyncRequestMetrics::new(tp, keyspace_id));
+        metrics.duration.observe(duration.as_secs_f64());
+        if need_flush {
+            metrics.duration.flush();
+        }
+    });
+}
