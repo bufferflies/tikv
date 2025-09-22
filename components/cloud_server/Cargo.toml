@@ -105,6 +105,7 @@ sysinfo = "0.26"
 tempfile = "3.0"
 thiserror = "1.0"
 tidb_query_common = { path = "../tidb_query_common" }
+tidb_query_datatype = { path = "../tidb_query_datatype" }
 tikv = { path = "../..", default-features = false }
 tikv_alloc = { path = "../tikv_alloc" }
 tikv_kv = { path = "../tikv_kv" }

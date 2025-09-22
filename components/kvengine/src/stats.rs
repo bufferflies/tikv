@@ -237,6 +237,7 @@ impl super::Engine {
         table_id: i64,
         index_id: Option<i64>, /* used for vector index, to be removed (use
                                 * collect_columnar_index_stats instead) */
+        shard_ids: Vec<u64>,
     ) -> ColumnarStatusResp {
         let mut ready = 0;
         let mut vector_index_ready = 0;
@@ -250,15 +251,7 @@ impl super::Engine {
             InnerKey::from_outer_end_key(&table_upper_key),
             false,
         );
-        let keyspace_shard_ids = self.get_keyspace_shards(keyspace_id);
-        if keyspace_shard_ids.is_none() {
-            return ColumnarStatusResp {
-                ready: 0,
-                vector_index_ready: 0,
-                total: 0,
-            };
-        }
-        keyspace_shard_ids.unwrap().iter().for_each(|shard_id| {
+        shard_ids.iter().for_each(|shard_id| {
             if let Some(shard) = self.get_shard(*shard_id) {
                 if shard.overlap_bound(table_bound) {
                     if shard.has_columnar_table(table_id) {

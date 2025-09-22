@@ -827,7 +827,7 @@ impl ReplicationWorker {
                 // keyspace shards not found means the keyspace is removed.
                 return;
             }
-            for region_id in keyspace_shards {
+            for region_id in keyspace_shards.iter().map(|r| *r) {
                 let Some(mut region_local_state) =
                     rfstore::store::load_last_peer_state(&raft, region_id)
                 else {

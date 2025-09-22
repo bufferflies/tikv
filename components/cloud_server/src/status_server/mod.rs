@@ -17,7 +17,7 @@ use std::{
 
 use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
 use async_stream::stream;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use flate2::{write::GzEncoder, Compression};
@@ -75,6 +75,7 @@ use rfstore::{
 };
 use security::{self, SecurityConfig};
 use serde_json::Value;
+use tidb_query_datatype::codec::table::encode_row_key_prefix;
 use tikv::{
     config::{ConfigController, LogLevel},
     server::status_server::profile::start_one_cpu_profile,
@@ -557,7 +558,7 @@ impl StatusServer {
     // Collect the columnar replica status of the table
     async fn collect_columnar_status(
         req: Request<Body>,
-        engine: &kvengine::Engine,
+        ctx: &StatusContext,
     ) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -584,7 +585,41 @@ impl StatusServer {
         } else {
             None
         };
-        let resp = engine.collect_columnar_status(keyspace_id, table_id, index_id);
+        let mut table_prefix_key = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
+        table_prefix_key.extend_from_slice(&encode_row_key_prefix(table_id));
+        let encoded_table_prefix_key = Bytes::from(encode_bytes(&table_prefix_key));
+        let (cb, fut) = paired_future_callback();
+        let Ok(()) = ctx.region_info_accessor.seek_region(
+            &encoded_table_prefix_key.clone(),
+            Box::new(move |iter| {
+                let mut ids = vec![];
+                for region in iter {
+                    ids.push(region.region.id);
+                    if !region
+                        .region
+                        .end_key
+                        .starts_with(encoded_table_prefix_key.chunk())
+                    {
+                        break;
+                    }
+                }
+                cb(ids);
+            }),
+        ) else {
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "region info accessor seek_region error".to_string(),
+            ));
+        };
+        let Ok(ids) = fut.await else {
+            return Ok(make_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "region info accessor seek_region callback error".to_string(),
+            ));
+        };
+        let resp = ctx
+            .kvengine
+            .collect_columnar_status(keyspace_id, table_id, index_id, ids);
         let resp_json = serde_json::to_string_pretty(&resp).unwrap();
         Ok(Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
@@ -1446,7 +1481,7 @@ impl StatusServer {
             ));
         };
         let mut table_key = Vec::new();
-        for &shard_id in ks_shards.iter() {
+        for shard_id in ks_shards.iter().map(|r| *r) {
             let Some(shard) = kvengine.get_shard(shard_id) else {
                 continue;
             };
@@ -2568,7 +2603,7 @@ impl StatusServer {
                                 let res = if path.starts_with("/kvengine/snapshot/") {
                                     Self::dump_kvengine_snapshot(req, &ctx.kvengine, &ctx.router).await
                                 } else if path.starts_with("/kvengine/columnar_status") {
-                                    Self::collect_columnar_status(req, &ctx.kvengine).await
+                                    Self::collect_columnar_status(req, &ctx).await
                                 } else if path.starts_with("/kvengine/columnar_index_stats") {
                                     Self::collect_columnar_index_stats(req, &ctx.kvengine).await
                                 } else if path.starts_with("/kvengine/meta/") {

@@ -20,7 +20,7 @@ use bytes::BufMut;
 use cloud_encryption::MasterKey;
 use collections::HashSet;
 use crossbeam::channel::RecvTimeoutError;
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::{DashMap, DashSet};
 use file_system::IoRateLimiter;
 use fslock;
 use security::SecurityManager;
@@ -367,7 +367,8 @@ impl Engine {
 pub struct EngineCore {
     pub(crate) engine_id: AtomicU64,
     pub(crate) shards: papaya::HashMap<u64, Arc<Shard>>,
-    pub(crate) keyspace_shards: DashMap<u32 /* keyspace id */, HashSet<u64 /* shard id */>>,
+    pub(crate) keyspace_shards:
+        DashMap<u32 /* keyspace id */, Arc<DashSet<u64 /* shard_id */>>>,
     pub opts: Arc<Options>,
     pub per_keyspace_configs: Arc<HashMap<u32, PerKeyspaceConfig>>,
     pub(crate) flush_tx: mpsc::Sender<FlushMsg>,
@@ -590,13 +591,12 @@ impl EngineCore {
         drop(shards);
         if let Some(shard) = x {
             let keyspace_id = shard.keyspace_id;
-            let shards_entry = self.keyspace_shards.entry(keyspace_id);
-            if let Entry::Occupied(mut entry) = shards_entry {
-                let keyspace_shards = entry.get_mut();
-                keyspace_shards.remove(&shard_id);
-                if keyspace_shards.is_empty() {
-                    entry.remove();
-                }
+            let shards_entry = self
+                .keyspace_shards
+                .get(&keyspace_id)
+                .map(|r| r.value().clone());
+            if let Some(shards) = shards_entry {
+                shards.remove(&shard_id);
             }
             return true;
         }
@@ -620,16 +620,22 @@ impl EngineCore {
     // `insert_keyspace_shard` is used by `insert_shard` and using entry to insert
     // shard in `split` and `ingest`.
     pub fn insert_keyspace_shard(&self, keyspace_id: u32, shard_id: u64) {
-        self.keyspace_shards
+        if let Some(shards) = self.get_keyspace_shards(keyspace_id) {
+            shards.insert(shard_id);
+            return;
+        }
+        let shards_entry = self
+            .keyspace_shards
             .entry(keyspace_id)
-            .or_insert_with(HashSet::default)
-            .insert(shard_id);
+            .or_insert_with(|| Arc::new(DashSet::default()))
+            .clone();
+        shards_entry.insert(shard_id);
     }
 
-    pub fn get_keyspace_shards(&self, keyspace_id: u32) -> Option<Vec<u64>> {
+    pub fn get_keyspace_shards(&self, keyspace_id: u32) -> Option<Arc<DashSet<u64>>> {
         self.keyspace_shards
             .get(&keyspace_id)
-            .map(|x| x.iter().cloned().collect())
+            .map(|r| r.value().clone())
     }
 
     pub fn get_files_in_blacklist(&self) -> Arc<HashSet<u64>> {

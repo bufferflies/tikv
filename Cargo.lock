@@ -1388,6 +1388,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.44",
  "tidb_query_common",
+ "tidb_query_datatype",
  "tikv",
  "tikv_alloc",
  "tikv_kv",
