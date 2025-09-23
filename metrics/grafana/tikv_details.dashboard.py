@@ -300,13 +300,13 @@ def Cluster() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "process_cpu_seconds_total",
-                            label_selectors=['job=~".*tikv"'],
+                            label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                     ),
                     target(
                         expr=expr_simple(
                             "tikv_server_cpu_cores_quota",
-                            label_selectors=['job=~".*tikv"'],
+                            label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                         legend_format=r"quota-{{instance}}",
                     ),
@@ -320,13 +320,13 @@ def Cluster() -> RowPanel:
                     target(
                         expr=expr_sum(
                             "process_resident_memory_bytes",
-                            label_selectors=['job=~".*tikv"'],
+                            label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                     ),
                     target(
                         expr=expr_simple(
                             "tikv_server_memory_quota_bytes",
-                            label_selectors=['job=~".*tikv"'],
+                            label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                         legend_format=r"quota-{{instance}}",
                     ),
@@ -474,7 +474,7 @@ def Cluster() -> RowPanel:
                             "-",
                             expr_simple(
                                 "process_start_time_seconds",
-                                label_selectors=['job=~".*tikv"'],
+                                label_selectors=['job=~".*(tikv|copr).*"'],
                             ),
                         ),
                         legend_format=r"{{instance}}",

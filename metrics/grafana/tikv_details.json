@@ -922,7 +922,7 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    process_cpu_seconds_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    [$__rate_interval]\n)) by (instance) ",
+              "expr": "sum(rate(\n    process_cpu_seconds_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    [$__rate_interval]\n)) by (instance) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -930,14 +930,14 @@
               "intervalFactor": 1,
               "legendFormat": "{{instance}}",
               "metric": "",
-              "query": "sum(rate(\n    process_cpu_seconds_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    [$__rate_interval]\n)) by (instance) ",
+              "query": "sum(rate(\n    process_cpu_seconds_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    [$__rate_interval]\n)) by (instance) ",
               "refId": "",
               "step": 10,
               "target": ""
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "((\n    tikv_server_cpu_cores_quota\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    \n))  ",
+              "expr": "((\n    tikv_server_cpu_cores_quota\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    \n))  ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -945,7 +945,7 @@
               "intervalFactor": 1,
               "legendFormat": "quota-{{instance}}",
               "metric": "",
-              "query": "((\n    tikv_server_cpu_cores_quota\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    \n))  ",
+              "query": "((\n    tikv_server_cpu_cores_quota\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    \n))  ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -1070,7 +1070,7 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum((\n    process_resident_memory_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    \n)) by (instance) ",
+              "expr": "sum((\n    process_resident_memory_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    \n)) by (instance) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -1078,14 +1078,14 @@
               "intervalFactor": 1,
               "legendFormat": "{{instance}}",
               "metric": "",
-              "query": "sum((\n    process_resident_memory_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    \n)) by (instance) ",
+              "query": "sum((\n    process_resident_memory_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    \n)) by (instance) ",
               "refId": "",
               "step": 10,
               "target": ""
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "((\n    tikv_server_memory_quota_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    \n))  ",
+              "expr": "((\n    tikv_server_memory_quota_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    \n))  ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -1093,7 +1093,7 @@
               "intervalFactor": 1,
               "legendFormat": "quota-{{instance}}",
               "metric": "",
-              "query": "((\n    tikv_server_memory_quota_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    \n))  ",
+              "query": "((\n    tikv_server_memory_quota_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    \n))  ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -2091,7 +2091,7 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "(time() - ((\n    process_start_time_seconds\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    \n))  )",
+              "expr": "(time() - ((\n    process_start_time_seconds\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    \n))  )",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -2099,7 +2099,7 @@
               "intervalFactor": 1,
               "legendFormat": "{{instance}}",
               "metric": "",
-              "query": "(time() - ((\n    process_start_time_seconds\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*tikv\"}\n    \n))  )",
+              "query": "(time() - ((\n    process_start_time_seconds\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"$instance\",job=~\".*(tikv|copr).*\"}\n    \n))  )",
               "refId": "",
               "step": 10,
               "target": ""
