@@ -135,14 +135,11 @@ macro_rules! handle_request {
             forward_unary!(self.proxy, $fn_name, ctx, req, sink);
             let begin_instant = Instant::now_coarse();
             let keyspace_id = req.get_context().get_keyspace_id();
-            let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-                                                        .map(|name| name.to_string())
-                                                        .unwrap_or_default();
             let resp = $future_name(&self.storage, req);
             let task = async move {
                 let resp = resp.await?;
                 sink.success(resp).await?;
-                record_request_grpc_metrics(stringify!($fn_name).to_string(), keyspace_name, begin_instant.saturating_elapsed());
+                record_request_grpc_metrics(stringify!($fn_name), keyspace_id, begin_instant.saturating_elapsed());
                 ServerResult::Ok(())
             }
             .map_err(|e| {
@@ -158,6 +155,12 @@ macro_rules! handle_request {
         }
     }
 }
+
+const READ_INDEX_REQUEST: &str = "read_index";
+const COPROCESSOR_REQUEST: &str = "coprocessor";
+const COPROCESSOR_STREAM_REQUEST: &str = "coprocessor_stream";
+const SPLIT_REGION_REQUEST: &str = "split_region";
+const UNSAFE_DESTROY_RANGE_REQUEST: &str = "unsafe_destroy_range";
 
 impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service<T, L, F> {
     handle_request!(kv_get, future_get, GetRequest, GetResponse);
@@ -259,16 +262,13 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         forward_unary!(self.proxy, coprocessor, ctx, req, sink);
         let begin_instant = Instant::now_coarse();
         let keyspace_id = req.get_context().get_keyspace_id();
-        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-            .map(|name| name.to_string())
-            .unwrap_or_default();
         let future = future_copr(&self.copr, Some(ctx.peer()), req);
         let task = async move {
             let resp = future.await?.consume();
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                String::from("coprocessor"),
-                keyspace_name,
+                COPROCESSOR_REQUEST,
+                keyspace_id,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -293,16 +293,13 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
     ) {
         let begin_instant = Instant::now_coarse();
         let keyspace_id = req.get_context().get_keyspace_id();
-        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-            .map(|name| name.to_string())
-            .unwrap_or_default();
         let future = self.copr.handle_delegate_request(req);
         let task = async move {
             let resp = future.await;
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                String::from("delegate_coprocessor"),
-                keyspace_name,
+                COPROCESSOR_REQUEST,
+                keyspace_id,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -329,9 +326,6 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let start = req.take_start_key();
         let end = req.take_end_key();
         let keyspace_id = req.get_context().get_keyspace_id();
-        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-            .map(|name| name.to_string())
-            .unwrap_or_default();
         // DestroyRange is a very dangerous operation. We don't allow passing MIN_KEY as
         // start, or MAX_KEY as end here.
         if start.is_empty()
@@ -464,8 +458,8 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             }
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                String::from("unsafe_destroy_range"),
-                keyspace_name,
+                UNSAFE_DESTROY_RANGE_REQUEST,
+                keyspace_id,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -489,9 +483,6 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
     ) {
         let begin_instant = Instant::now_coarse();
         let keyspace_id = req.get_context().get_keyspace_id();
-        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-            .map(|name| name.to_string())
-            .unwrap_or_default();
         let mut stream = self
             .copr
             .parse_and_handle_stream_request(req, Some(ctx.peer()))
@@ -505,8 +496,8 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             match sink.send_all(&mut stream).await.map_err(Error::from) {
                 Ok(_) => {
                     record_request_grpc_metrics(
-                        String::from("coprocessor_stream"),
-                        keyspace_name,
+                        COPROCESSOR_STREAM_REQUEST,
+                        keyspace_id,
                         begin_instant.saturating_elapsed(),
                     );
                     let _ = sink.close().await;
@@ -611,9 +602,6 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         forward_unary!(self.proxy, split_region, ctx, req, sink);
         let begin_instant = Instant::now_coarse();
         let keyspace_id = req.get_context().get_keyspace_id();
-        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-            .map(|name| name.to_string())
-            .unwrap_or_default();
         let region_id = req.get_context().get_region_id();
         let (cb, f) = paired_future_callback();
         let mut split_keys = if !req.get_split_key().is_empty() {
@@ -664,8 +652,8 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             }
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                String::from("split_region"),
-                keyspace_name,
+                SPLIT_REGION_REQUEST,
+                keyspace_id,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -691,9 +679,6 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         forward_unary!(self.proxy, read_index, ctx, req, sink);
         let begin_instant = Instant::now_coarse();
         let keyspace_id = req.get_context().get_keyspace_id();
-        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-            .map(|name| name.to_string())
-            .unwrap_or_default();
         let region_id = req.get_context().get_region_id();
         let mut cmd = RaftCmdRequest::default();
         let mut header = RaftRequestHeader::default();
@@ -751,8 +736,8 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             }
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                String::from("read_index"),
-                keyspace_name,
+                READ_INDEX_REQUEST,
+                keyspace_id,
                 begin_instant.saturating_elapsed(),
             );
             ServerResult::Ok(())
@@ -829,12 +814,9 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                     source: _,
                     keyspace_id,
                 } = measure;
-                let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-                    .map(|name| name.to_string())
-                    .unwrap_or_default();
                 record_request_grpc_metrics(
-                    label.to_string(),
-                    keyspace_name,
+                    label.get_str(),
+                    keyspace_id,
                     begin.saturating_elapsed(),
                 );
             }

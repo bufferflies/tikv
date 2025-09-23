@@ -339,6 +339,9 @@ impl Debug for RaftKv {
     }
 }
 
+const ASYNC_WRITE_REQUEST: &str = "write";
+const ASYNC_SNAPSHOT_REQUEST: &str = "snapshot";
+
 #[allow(dead_code)]
 impl Engine for RaftKv {
     type Snap = RegionSnapshot;
@@ -353,6 +356,7 @@ impl Engine for RaftKv {
     }
 
     type WriteRes = impl Stream<Item = WriteEvent> + Send + Unpin;
+
     fn async_write(
         &self,
         ctx: &Context,
@@ -372,9 +376,6 @@ impl Engine for RaftKv {
         ASYNC_REQUESTS_COUNTER_VEC.write.all.inc();
         let begin_instant = Instant::now_coarse();
         let keyspace_id = ctx.get_keyspace_id();
-        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-            .map(|arc_str| arc_str.to_string())
-            .unwrap_or_default();
         if res.is_ok() {
             // If rid is some, only the specified region reports error.
             // If rid is None, all regions report error.
@@ -489,8 +490,8 @@ impl Engine for RaftKv {
                         Ok(CmdRes::Resp(_)) => {
                             ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
                             record_request_async_metrics(
-                                String::from("write"),
-                                keyspace_name,
+                                ASYNC_WRITE_REQUEST,
+                                keyspace_id,
                                 begin_instant.saturating_elapsed(),
                             );
                             fail_point!("raftkv_async_write_finish");
@@ -537,9 +538,6 @@ impl Engine for RaftKv {
             Ok(())
         })();
         let keyspace_id = ctx.pb_ctx.get_keyspace_id();
-        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
-            .map(|arc_str| arc_str.to_string())
-            .unwrap_or_default();
         let mut req = Request::default();
         req.set_cmd_type(CmdType::Snap);
         if !ctx.key_ranges.is_empty() && ctx.start_ts.map_or(false, |ts| !ts.is_zero()) {
@@ -577,8 +575,8 @@ impl Engine for RaftKv {
                         let res = on_read_result(resp).map_err(Error::into);
                         if res.is_ok() {
                             record_request_async_metrics(
-                                String::from("snapshot"),
-                                keyspace_name,
+                                ASYNC_SNAPSHOT_REQUEST,
+                                keyspace_id,
                                 begin_instant.saturating_elapsed(),
                             );
                             ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();

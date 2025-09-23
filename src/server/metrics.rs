@@ -581,27 +581,27 @@ pub fn record_request_source_metrics(source: String, duration: Duration) {
     });
 }
 
-struct LocalGRPCRequestMetrics {
+struct LocalGrpcRequestMetrics {
     pub duration: LocalHistogram,
 }
 
-impl LocalGRPCRequestMetrics {
-    fn new(tp: &str, key_space_id: &str) -> Self {
-        LocalGRPCRequestMetrics {
+impl LocalGrpcRequestMetrics {
+    fn new(tp: &str, key_space_name: &str) -> Self {
+        LocalGrpcRequestMetrics {
             duration: GRPC_MSG_HISTOGRAM_VEC
-                .with_label_values(&[tp, key_space_id])
+                .with_label_values(&[tp, key_space_name])
                 .local(),
         }
     }
 }
 
 thread_local! {
-    static GRPC_REQUEST_METRICS_MAP: RefCell<HashMap<(String,String), LocalGRPCRequestMetrics>> = RefCell::new(HashMap::default());
+    static GRPC_REQUEST_METRICS_MAP: RefCell<HashMap<(&'static str,u32), LocalGrpcRequestMetrics>> = RefCell::new(HashMap::default());
 
     static LAST_GRPC_LOCAL_FLUSH_TIME: Cell<Instant> = Cell::new(Instant::now_coarse());
 }
 
-pub fn record_request_grpc_metrics(tp: String, keyspace_name: String, duration: Duration) {
+pub fn record_request_grpc_metrics(tp: &'static str, keyspace_id: u32, duration: Duration) {
     let need_flush = LAST_GRPC_LOCAL_FLUSH_TIME.with(|last_local_flush_time| {
         let now = Instant::now_coarse();
         if now - last_local_flush_time.get() > Duration::from_secs(1) {
@@ -614,9 +614,12 @@ pub fn record_request_grpc_metrics(tp: String, keyspace_name: String, duration: 
     GRPC_REQUEST_METRICS_MAP.with(|map| {
         let mut map = map.borrow_mut();
         let metrics = map
-            .entry((tp, keyspace_name))
-            .or_insert_with_key(|(tp, keyspace_name)| {
-                LocalGRPCRequestMetrics::new(tp, keyspace_name)
+            .entry((tp, keyspace_id))
+            .or_insert_with_key(|(tp, keyspace_id)| {
+                let keyspace_name = pd_client::keyspace::to_keyspace_name(*keyspace_id)
+                    .map(|name| name.to_string())
+                    .unwrap_or_default();
+                LocalGrpcRequestMetrics::new(tp, &keyspace_name)
             });
         metrics.duration.observe(duration.as_secs_f64());
         if need_flush {
@@ -630,22 +633,22 @@ struct LocalAsyncRequestMetrics {
 }
 
 impl LocalAsyncRequestMetrics {
-    fn new(tp: &str, key_space_id: &str) -> Self {
+    fn new(tp: &str, keyspace_name: &str) -> Self {
         LocalAsyncRequestMetrics {
             duration: ASYNC_REQUESTS_DURATIONS
-                .with_label_values(&[tp, key_space_id])
+                .with_label_values(&[tp, keyspace_name])
                 .local(),
         }
     }
 }
 
 thread_local! {
-    static ASYNC_REQUEST_METRICS_MAP: RefCell<HashMap<(String,String), LocalAsyncRequestMetrics>> = RefCell::new(HashMap::default());
+    static ASYNC_REQUEST_METRICS_MAP: RefCell<HashMap<(&'static str,u32), LocalAsyncRequestMetrics>> = RefCell::new(HashMap::default());
 
     static LAST_ASYNC_LOCAL_FLUSH_TIME: Cell<Instant> = Cell::new(Instant::now_coarse());
 }
 
-pub fn record_request_async_metrics(tp: String, keyspace_name: String, duration: Duration) {
+pub fn record_request_async_metrics(tp: &'static str, keyspace_id: u32, duration: Duration) {
     let need_flush = LAST_ASYNC_LOCAL_FLUSH_TIME.with(|last_local_flush_time| {
         let now = Instant::now_coarse();
         if now - last_local_flush_time.get() > Duration::from_secs(1) {
@@ -658,9 +661,12 @@ pub fn record_request_async_metrics(tp: String, keyspace_name: String, duration:
     ASYNC_REQUEST_METRICS_MAP.with(|map| {
         let mut map = map.borrow_mut();
         let metrics = map
-            .entry((tp, keyspace_name))
-            .or_insert_with_key(|(tp, keyspace_name)| {
-                LocalAsyncRequestMetrics::new(tp, keyspace_name)
+            .entry((tp, keyspace_id))
+            .or_insert_with_key(|(tp, keyspace_id)| {
+                let keyspace_name = pd_client::keyspace::to_keyspace_name(*keyspace_id)
+                    .map(|name| name.to_string())
+                    .unwrap_or_default();
+                LocalAsyncRequestMetrics::new(tp, &keyspace_name)
             });
         metrics.duration.observe(duration.as_secs_f64());
         if need_flush {

@@ -613,7 +613,6 @@ impl ApplyWorker {
             loop_cnt += 1;
             if loop_cnt % 128 == 0 {
                 self.ctx.apply_wait.flush();
-                // self.ctx.apply_time.flush();
             }
         }
     }
@@ -640,7 +639,6 @@ fn batch_end(ctx: &mut RaftContext, batch_duration: Duration) {
         info!("raft worker batch loop takes {:?}", batch_duration);
     }
     let dur = duration_to_sec(batch_duration);
-    // ctx.raft_metrics.store_time.observe(dur);
     ctx.raft_metrics.process_ready.observe(dur);
     ctx.raft_metrics.maybe_flush();
     ctx.current_time = None;

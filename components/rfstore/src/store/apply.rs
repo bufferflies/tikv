@@ -2475,7 +2475,6 @@ pub struct ApplyContext {
     // Use `RefCell` to work around the borrow check.
     wb: RefCell<WriteBatch>,
     pub(crate) apply_wait: LocalHistogram,
-    // pub(crate) apply_time: LocalHistogram,
     pub(crate) observer: Option<Box<dyn ApplyObserver>>,
 }
 
