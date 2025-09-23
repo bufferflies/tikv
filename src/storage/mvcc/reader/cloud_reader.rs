@@ -161,35 +161,49 @@ impl CloudReader {
         let mut iterations = 0usize;
         // Raw keys can interleave in the EXTRA CF.
         // This loop handles it well by checking the prefix and the length match.
-        // TODO: due to raw_key interleaving, the scan may face critical performance
-        // degradation in extreme cases, e.g., a lot of keys share the same
-        // prefix. We rely on the fix of the interleaving issue to solve this problem.
+        // NOTE: raw keys in EXTRA CF must not interleave. This depends on the
+        // property that all TiDB keys are mem-comparable, i.e. their order won't change
+        // when appending a ts. In other words, no key can be a prefix of
+        // another key.
         while extra_iter.valid() && extra_iter.key().starts_with(&raw_key) {
-            if extra_iter.key().len() == raw_key.len() + 8 {
-                let um = UserMeta::from_slice(extra_iter.user_meta());
-                let record_start_ts = TimeStamp::new(um.start_ts);
-                iterations += 1;
+            // Protective check: panic if we find a key prefixed by raw_key with wrong
+            // length (implies possible interleaving)
+            if extra_iter.key().len() != raw_key.len() + 8 {
+                // TODO: before go to production, downgrade this level. We hope it panics in
+                // tests.
+                panic!(
+                    "Key prefix violation implies possible interleaving in EXTRA CF! Found key prefixed by raw_key but with wrong length. Expected: raw_key({} bytes) + timestamp(8 bytes) = {} bytes, but found {} bytes. Raw key: {}, Found key: {}",
+                    raw_key.len(),
+                    raw_key.len() + 8,
+                    extra_iter.key().len(),
+                    log_wrappers::Value::key(raw_key.as_slice()),
+                    log_wrappers::Value::value(extra_iter.key())
+                );
+            }
 
-                // Priority 1: Check for self-rollback (exact match)
-                // Note: Self-rollback does not necessarily precede newer writes
-                if let Some(target_start_ts) = start_ts
-                    && um.is_rollback()
-                    && record_start_ts == target_start_ts
-                {
+            let um = UserMeta::from_slice(extra_iter.user_meta());
+            let record_start_ts = TimeStamp::new(um.start_ts);
+            iterations += 1;
+
+            // Priority 1: Check for self-rollback (exact match)
+            // Note: Self-rollback does not necessarily precede newer writes
+            if let Some(target_start_ts) = start_ts
+                && um.is_rollback()
+                && record_start_ts == target_start_ts
+            {
+                EXTRA_CF_SCAN_ITERATIONS.observe(iterations as f64);
+                // Cache iterator for potential reuse
+                self.cached_extra_cf_iter = Some(extra_iter);
+                return Ok(Some(um));
+            }
+
+            // Priority 2: Check for newer conflicts (only `Op_Lock` records, not Rollbacks)
+            if let Some(threshold) = max_allowed_write {
+                if !um.is_rollback() && um.commit_ts > threshold.into_inner() {
                     EXTRA_CF_SCAN_ITERATIONS.observe(iterations as f64);
                     // Cache iterator for potential reuse
                     self.cached_extra_cf_iter = Some(extra_iter);
                     return Ok(Some(um));
-                }
-
-                // Priority 2: Check for newer conflicts (only `Op_Lock` records, not Rollbacks)
-                if let Some(threshold) = max_allowed_write {
-                    if !um.is_rollback() && um.commit_ts > threshold.into_inner() {
-                        EXTRA_CF_SCAN_ITERATIONS.observe(iterations as f64);
-                        // Cache iterator for potential reuse
-                        self.cached_extra_cf_iter = Some(extra_iter);
-                        return Ok(Some(um));
-                    }
                 }
             }
             extra_iter.next();
@@ -457,15 +471,26 @@ impl CloudReader {
             if !extra_iter.key().starts_with(&raw_key) {
                 break;
             }
-            if extra_iter.key().len() == raw_key.len() + 8 {
-                let um = UserMeta::from_slice(extra_iter.user_meta());
-                let (ts, write_type) = if um.is_rollback() {
-                    (um.start_ts, WriteType::Rollback)
-                } else {
-                    (um.commit_ts, WriteType::Lock)
-                };
-                writes.push((ts.into(), Write::new(write_type, um.start_ts.into(), None)));
+            // Protective check: panic if we find a key prefixed by raw_key with wrong
+            // length (implies possible interleaving)
+            if extra_iter.key().len() != raw_key.len() + 8 {
+                panic!(
+                    "Key prefix violation implies possible interleaving in EXTRA CF! Found key prefixed by raw_key but with wrong length. Expected: raw_key({} bytes) + timestamp(8 bytes) = {} bytes, but found {} bytes. Raw key: {}, Found key: {}",
+                    raw_key.len(),
+                    raw_key.len() + 8,
+                    extra_iter.key().len(),
+                    log_wrappers::Value::key(raw_key.as_slice()),
+                    log_wrappers::Value::value(extra_iter.key())
+                );
             }
+
+            let um = UserMeta::from_slice(extra_iter.user_meta());
+            let (ts, write_type) = if um.is_rollback() {
+                (um.start_ts, WriteType::Rollback)
+            } else {
+                (um.commit_ts, WriteType::Lock)
+            };
+            writes.push((ts.into(), Write::new(write_type, um.start_ts.into(), None)));
             extra_iter.next();
         }
         writes
