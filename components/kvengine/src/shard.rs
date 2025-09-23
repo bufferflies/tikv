@@ -1255,16 +1255,17 @@ impl Shard {
                     .collect::<HashSet<_>>()
             })
             .unwrap_or_default();
-        (
-            tables_in_schema
-                .difference(&tables_in_shard)
-                .cloned()
-                .collect(),
-            tables_in_shard
-                .difference(&tables_in_schema)
-                .cloned()
-                .collect(),
-        )
+        let mut tables_to_add: Vec<i64> = tables_in_schema
+            .difference(&tables_in_shard)
+            .cloned()
+            .collect();
+        let mut tables_to_clear: Vec<i64> = tables_in_shard
+            .difference(&tables_in_schema)
+            .cloned()
+            .collect();
+        tables_to_add.sort();
+        tables_to_clear.sort();
+        (tables_to_add, tables_to_clear)
     }
 
     fn get_columnar_compaction_priority(&self, data: &ShardData) -> Option<CompactionPriority> {
@@ -2529,7 +2530,8 @@ impl ShardDataCore {
         if self.schema_file.is_none() {
             return vec![];
         }
-        self.columnar_table_ids
+        let mut table_ids: Vec<i64> = self
+            .columnar_table_ids
             .iter()
             .filter(|&&id| {
                 self.schema_file
@@ -2538,7 +2540,9 @@ impl ShardDataCore {
                     .contains_columnar_table(id)
             })
             .copied()
-            .collect()
+            .collect();
+        table_ids.sort();
+        table_ids
     }
 }
 

@@ -1134,13 +1134,15 @@ impl Engine {
                 .alloc_id_async(over_bounds.len())
                 .await
                 .unwrap();
+            let mut columnar_table_ids = meta.columnar_table_ids.clone();
+            columnar_table_ids.sort();
             let in_place_compaction_ctx = InPlaceCompactionCtx {
                 file_ids: over_bounds,
                 col_file_ids: col_over_bounds,
                 block_size: self.opts.table_builder_options.block_size,
                 columnar_build_opts: self.opts.columnar_build_options,
                 schema_file_id: Some(meta.schema.file_id()),
-                columnar_table_ids: meta.columnar_table_ids.clone(),
+                columnar_table_ids,
                 spec: InPlaceCompaction::TrimOverBound,
             };
             req.input_size = total_size;
@@ -1772,6 +1774,7 @@ impl Engine {
             total_size += l0.size();
         }
         let num_l0s = source_row_tables.len();
+        // columnar_table_ids is sorted.
         let columnar_table_ids = data.get_columnar_table_ids_in_schema();
         let columnar_compaction = ColumnarCompaction {
             level: 0,
@@ -2008,6 +2011,7 @@ impl Engine {
                 total_size += file.get_file().size();
             }
         }
+        // columnar_table_ids is sorted.
         let columnar_table_ids = data.get_columnar_table_ids_in_schema();
         if all_columnar_ids.is_empty() {
             info!(
@@ -2085,6 +2089,7 @@ impl Engine {
         let estimated_num_files = total_size as usize / columnar_config.max_columnar_table_size;
         self.set_alloc_ids_for_request(&mut req, l0_tbl_ids.len(), estimated_num_files)
             .await;
+        // columnar_table_ids is sorted.
         let columnar_table_ids = data.get_columnar_table_ids_in_schema();
         let col_compaction = ColumnarCompaction {
             level: 0,
@@ -2175,6 +2180,7 @@ impl Engine {
         )
         .await;
         let schema_file_id = schema_file.get_file_id();
+        // columnar_table_ids is sorted.
         let columnar_table_ids = data.get_columnar_table_ids_in_schema();
         let columnar_compaction = ColumnarCompaction {
             level,
@@ -2986,18 +2992,10 @@ async fn compact_destroy_range_for_columnar(
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file, None).unwrap();
-        let overlap_tables = schema_file
-            .overlap_columnar_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
         let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
         deletes.push(delete);
-        // TODO: disable fallback to overlap_tables after tikv-worker upgraded.
-        let columnar_table_ids = if !columnar_table_ids.is_empty() {
-            columnar_table_ids
-        } else {
-            overlap_tables.as_slice()
-        };
         if columnar_table_ids.is_empty() {
             continue;
         }
@@ -3249,19 +3247,11 @@ async fn compact_truncate_ts_for_columnar(
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file, None).unwrap();
-        let overlap_tables = schema_file
-            .overlap_columnar_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
         let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
         deletes.push(delete);
 
-        // TODO: disable fallback to overlap_tables after tikv-worker upgraded.
-        let columnar_table_ids = if !columnar_table_ids.is_empty() {
-            columnar_table_ids
-        } else {
-            overlap_tables.as_slice()
-        };
         if columnar_table_ids.is_empty() {
             continue;
         }
@@ -3503,18 +3493,10 @@ async fn compact_trim_over_bound_for_columnar(
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file, None).unwrap();
-        let overlap_tables = schema_file
-            .overlap_columnar_tables(columnar_file.get_smallest(), columnar_file.get_biggest());
         let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
         deletes.push(delete);
-        // TODO: disable fallback to overlap_tables after tikv-worker upgraded.
-        let columnar_table_ids = if !columnar_table_ids.is_empty() {
-            columnar_table_ids
-        } else {
-            overlap_tables.as_slice()
-        };
         if columnar_table_ids.is_empty() {
             continue;
         }
@@ -4290,7 +4272,8 @@ async fn transform_for_columnar(
         ctx.encryption_key.clone(),
     );
     let mut cnt = 0;
-    for table_id in table_ids {
+    // Please ensure table_ids is sorted.
+    for &table_id in &table_ids {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for tbl in tbls {
@@ -4398,7 +4381,9 @@ async fn columnar_major_compact_for_add_tables(
         // l2_snap_version as the new columnar file snap_version.
         Some(major_compaction.snap_version)
     };
-    let table_ids = major_compaction.table_ids.0.clone();
+    // TODO: remove the sort here after tikv-server upgraded.
+    let mut table_ids = major_compaction.table_ids.0.clone();
+    table_ids.sort();
     let columnar_creates = transform_for_columnar(
         ctx,
         &tbls,
@@ -4459,11 +4444,12 @@ async fn columnar_major_compact_for_clear_tables(
 
         let file = columnar_files.remove(&file_id).unwrap();
         let columnar_table = ColumnarFile::open(file, None)?;
-        let overlap_tables = schema_file
+        let mut overlap_tables = schema_file
             .overlap_columnar_tables(columnar_table.get_smallest(), columnar_table.get_biggest());
         if overlap_tables.is_empty() {
             continue;
         }
+        overlap_tables.sort();
         let mut file_builder = ColumnarFileBuilder::new(
             id_allocator.alloc_id().await,
             columnar_table.get_snap_version(),
@@ -4815,14 +4801,8 @@ async fn compact_columnar_l0_files(
             biggest = columnar_file.get_biggest();
         }
     }
-    let overlap_tables = schema_file.overlap_columnar_tables(smallest, biggest);
-    // TODO: use columnar_table_ids in compaction directly after tikv-worker
-    // upgraded.
-    let columnar_table_ids = if !columnar_compaction.columnar_table_ids.is_empty() {
-        columnar_compaction.columnar_table_ids.as_slice()
-    } else {
-        overlap_tables.as_slice()
-    };
+
+    let columnar_table_ids = columnar_compaction.columnar_table_ids.as_slice();
     if columnar_table_ids.is_empty() {
         return Ok(ret);
     }
@@ -4833,7 +4813,10 @@ async fn compact_columnar_l0_files(
     );
     let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     let mut cnt = 0;
-    for &table_id in columnar_table_ids {
+    // TODO: remove the sort here after tikv-server upgraded.
+    let mut columnar_table_ids = columnar_table_ids.to_vec();
+    columnar_table_ids.sort();
+    for table_id in columnar_table_ids {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &col_tbls {
@@ -4989,7 +4972,10 @@ async fn compact_columnar_l1_files(
     );
     let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
     let mut cnt = 0;
-    for &table_id in columnar_table_ids {
+    // TODO: remove the sort here after tikv-server upgraded.
+    let mut columnar_table_ids = columnar_table_ids.to_vec();
+    columnar_table_ids.sort();
+    for table_id in columnar_table_ids {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for columnar_file in &l1_tbls {
@@ -5082,8 +5068,7 @@ async fn compact_all_columnar_files(
     for (level, file_id) in &columnar_compaction.source_columnar_files {
         col_file_ids.entry(*level).or_default().push(*file_id);
     }
-    let columnar_table_ids = columnar_compaction.columnar_table_ids.as_slice();
-    if columnar_table_ids.is_empty() {
+    if columnar_compaction.columnar_table_ids.is_empty() {
         return Ok(ret);
     }
 
@@ -5110,7 +5095,10 @@ async fn compact_all_columnar_files(
         }
         all_col_tbls.insert(level, tbls);
     }
-    for &table_id in columnar_table_ids {
+    // TODO: remove the sort here after tikv-server upgraded.
+    let mut columnar_table_ids = columnar_compaction.columnar_table_ids.to_vec();
+    columnar_table_ids.sort();
+    for &table_id in &columnar_table_ids {
         let Some(schema) = schema_file.get_table(table_id) else {
             continue;
         };
