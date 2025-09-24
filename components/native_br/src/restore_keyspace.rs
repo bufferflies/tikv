@@ -1122,6 +1122,7 @@ impl BackupCluster {
             complete_wal_chunks,
             full_restore: false,
             fetch_wal_timeout,
+            tmp_path: Some(PathBuf::from(conf.raft_store.raftdb_path.clone()).join("tmp_download")),
         };
         replay_wal_logs(tag, ctx, archive_store_meta, rlog_files.snap_epoch)?;
         Ok(rf_engine)

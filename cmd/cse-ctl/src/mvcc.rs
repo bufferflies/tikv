@@ -143,11 +143,23 @@ pub fn execute_mvcc(args: MvccArgs) {
             let extra_seek_key = encode_extra_txn_status_key(key, 0);
             let mut extra_iter = snap.new_iterator(EXTRA_CF, false, true, None, false);
             extra_iter.seek(&extra_seek_key);
-            while extra_iter.valid()
-                && extra_iter.key().starts_with(key)
-                && extra_iter.key().len() == extra_seek_key.len()
-            {
-                let um = UserMeta::from_slice(iter.user_meta());
+            while extra_iter.valid() && extra_iter.key().starts_with(key) {
+                // Protective check: warn if we find a key prefixed by raw_key with wrong
+                // length (implies possible interleaving)
+                if extra_iter.key().len() != extra_seek_key.len() {
+                    eprintln!(
+                        "Key prefix violation implies possible interleaving in EXTRA CF! Found key prefixed by raw_key but with wrong length. Expected: raw_key({} bytes) + timestamp(8 bytes) = {} bytes, but found {} bytes. Raw key: {}, Found key: {}",
+                        key.len(),
+                        key.len() + 8,
+                        extra_iter.key().len(),
+                        log_wrappers::Value::key(key.as_slice()),
+                        log_wrappers::Value::value(extra_iter.key())
+                    );
+                    extra_iter.next();
+                    continue;
+                }
+
+                let um = UserMeta::from_slice(extra_iter.user_meta());
                 println!(
                     "extra key: {}, start_ts: {}, commit_ts: {}",
                     hex::encode(key),

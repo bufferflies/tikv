@@ -300,13 +300,13 @@ def Cluster() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "process_cpu_seconds_total",
-                            label_selectors=['job=~".*tikv"'],
+                            label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                     ),
                     target(
                         expr=expr_simple(
                             "tikv_server_cpu_cores_quota",
-                            label_selectors=['job=~".*tikv"'],
+                            label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                         legend_format=r"quota-{{instance}}",
                     ),
@@ -320,13 +320,13 @@ def Cluster() -> RowPanel:
                     target(
                         expr=expr_sum(
                             "process_resident_memory_bytes",
-                            label_selectors=['job=~".*tikv"'],
+                            label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                     ),
                     target(
                         expr=expr_simple(
                             "tikv_server_memory_quota_bytes",
-                            label_selectors=['job=~".*tikv"'],
+                            label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                         legend_format=r"quota-{{instance}}",
                     ),
@@ -474,7 +474,7 @@ def Cluster() -> RowPanel:
                             "-",
                             expr_simple(
                                 "process_start_time_seconds",
-                                label_selectors=['job=~".*tikv"'],
+                                label_selectors=['job=~".*(tikv|copr).*"'],
                             ),
                         ),
                         legend_format=r"{{instance}}",
@@ -5805,6 +5805,48 @@ def RaftEngine() -> RowPanel:
                     StatValueMappings(
                         StatValueMappingItem("Unhealthy", "0", "red"),
                         StatValueMappingItem("Healthy", "1", "green"),
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            stat_panel(
+                title="Total Uploaded Bytes to DFS",
+                description="Total number of bytes uploaded to DFS",
+                format=UNITS.BYTES_IEC,
+                targets=[
+                    target(
+                        expr=expr_simple("raft_engine_dfs_uploaded_bytes_total"),
+                        legend_format="{{ instance }}",
+                    ),
+                ],
+                mappings=[],
+            )
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="DFS Request Rate",
+                description="The count of DFS requests issued by rfengine.",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_sum_rate("raft_engine_dfs_requests_total"),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="DFS Upload Rate",
+                description="The byte rates of uploading WAL to DFS.",
+                yaxes=yaxes(left_format=UNITS.BYTES_SEC_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate("raft_engine_dfs_uploaded_bytes_total"),
+                        additional_groupby=True,
                     ),
                 ],
             ),

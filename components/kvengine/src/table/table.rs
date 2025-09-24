@@ -275,7 +275,7 @@ pub struct Value {
     pub meta: u8,
     /// User defined opaque meta data,
     user_meta_len: u8,
-    /// Length of the data.
+    /// Length of the **value** part (does not include user_meta)
     len: u32,
     /// The row version
     pub version: u64,
@@ -333,8 +333,9 @@ impl Value {
     }
 
     pub(crate) fn new_tombstone(version: u64) -> Self {
+        static EMPTY_BUF: &[u8] = &[];
         Self {
-            ptr: ptr::null(),
+            ptr: EMPTY_BUF.as_ptr(),
             meta: BIT_DELETE,
             user_meta_len: 0,
             len: 0,
@@ -366,6 +367,11 @@ impl Value {
     /// Encode the contents in buf.
     pub(crate) fn encode(&self, buf: &mut [u8]) {
         let offset = Self::encode_preamble(buf, self.meta, self.version, self.user_meta());
+        if self.is_value_empty() {
+            return;
+        }
+        debug_assert!(!self.ptr.is_null(),);
+        // SAFETY: len > 0 and ptr is non-null; destination buffer is sized by caller.
         unsafe {
             ptr::copy(
                 self.ptr.add(self.user_meta_len()),
@@ -435,6 +441,19 @@ impl Value {
 
     #[inline(always)]
     pub fn user_meta(&self) -> &[u8] {
+        // We check with user_meta_len() instead of is_value_empty(), because there are
+        // cases (e.g., pessimistic lock kvs) where user_meta is non-empty
+        // but value itself is empty.
+        if self.user_meta_len() == 0 {
+            return &[];
+        }
+        // From https://doc.rust-lang.org/std/slice/fn.from_raw_parts.html, it is an undefined
+        // behavior that the first parameter of slice::from_raw_parts is a null ptr, we
+        // use a debug_assert! to make this case testable. Without it, the code might
+        // passes the test because undefine behavior deos not always causing an
+        // error.
+        debug_assert!(!self.ptr.is_null());
+        // SAFETY: len > 0 and ptr is non-null and points to user_meta start.
         unsafe { slice::from_raw_parts::<u8>(self.ptr, self.user_meta_len()) }
     }
 
@@ -1074,7 +1093,6 @@ mod tests {
         assert_eq!(value.user_meta_len, 0); // User metadata length should be 0
         assert_eq!(value.len, 0); // Length should be 0
         assert_eq!(value.version, version); // Version should be the one provided
-        assert!(value.ptr.is_null()); // Pointer should be null
         assert!(value.blob_ptr.is_null()); // Blob pointer should be null
     }
 
@@ -1408,5 +1426,93 @@ mod tests {
 
         let owned_inner_key = OwnedInnerKey::new_end_key(bytes::Bytes::from(keyspace_end_key));
         assert_eq!(GLOBAL_SHARD_END_KEY, owned_inner_key.as_ref().deref());
+    }
+
+    #[test]
+    fn test_encode_ptr_cases() {
+        // Case 1: ptr is tombstone case, value_len == 0
+        let tombstone = Value::new_tombstone(123);
+        assert_eq!(tombstone.value_len(), 0);
+        let mut buf = vec![0; tombstone.encoded_size()];
+        tombstone.encode(&mut buf);
+        // Only preamble should be written: meta, user_meta_len=0, version
+        assert_eq!(buf[0], BIT_DELETE);
+        assert_eq!(buf[1], 0);
+        let ver =
+            LittleEndian::read_u64(&buf[VALUE_VERSION_OFF..VALUE_VERSION_OFF + VALUE_VERSION_LEN]);
+        assert_eq!(ver, 123);
+
+        // Case 2: ptr is non-null, value_len > 0 → encode copies value bytes
+        let user_meta = b"m"; // 1 byte user meta
+        let val = b"abc";
+        let combined = [&user_meta[..], &val[..]].concat();
+        let v = Value::new_with_meta_version(0, 7, user_meta.len() as u8, combined.as_slice());
+        assert!(!v.ptr.is_null());
+        assert_eq!(v.value_len(), val.len());
+        let mut buf = vec![0; v.encoded_size()];
+        v.encode(&mut buf);
+        // Compare with reference encoding
+        let expected = Value::encode_buf(0, user_meta, 7, val);
+        assert_eq!(buf, expected);
+
+        // Case 3: ptr is non-null, value_len == 0 → only preamble is written
+        let only_meta = b"meta";
+        let v = Value::new_with_meta_version(0, 9, only_meta.len() as u8, only_meta);
+        assert!(!v.ptr.is_null());
+        assert_eq!(v.value_len(), 0);
+        let mut buf = vec![0; v.encoded_size()];
+        v.encode(&mut buf);
+        assert_eq!(
+            buf.len(),
+            VALUE_VERSION_OFF + VALUE_VERSION_LEN + only_meta.len()
+        );
+
+        // Case 4: ptr is null (Value::new()) → only preamble is written
+        let v = Value::new();
+        assert!(v.ptr.is_null());
+        assert_eq!(v.value_len(), 0);
+        assert_eq!(v.user_meta_len, 0);
+        assert_eq!(v.version, 0);
+        let mut buf = vec![0; v.encoded_size()];
+        v.encode(&mut buf);
+        // Only preamble should be written: meta=0, user_meta_len=0, version=0
+        assert_eq!(buf[0], 0); // meta should be 0 (no flags set)
+        assert_eq!(buf[1], 0); // user_meta_len should be 0
+        let ver =
+            LittleEndian::read_u64(&buf[VALUE_VERSION_OFF..VALUE_VERSION_OFF + VALUE_VERSION_LEN]);
+        assert_eq!(ver, 0); // version should be 0
+    }
+
+    #[test]
+    fn test_user_meta_ptr_cases() {
+        // Test case 1: user_meta_len is 0, ptr is null
+        let value = Value::new();
+        assert_eq!(value.user_meta_len(), 0);
+        // This should return an empty slice, not panic
+        let user_meta = value.user_meta();
+        assert_eq!(user_meta.len(), 0);
+        assert_eq!(user_meta, &[] as &[u8]);
+
+        // Test case 2: user_meta_len is 0, but ptr points to valid memory
+        let data = b"some_data";
+        let value = Value {
+            ptr: data.as_ptr(),
+            meta: 0,
+            user_meta_len: 0, // Length is 0
+            len: 0,
+            version: 1,
+            blob_ptr: std::ptr::null(),
+        };
+        assert_eq!(value.user_meta_len(), 0);
+        let user_meta = value.user_meta();
+        assert_eq!(user_meta.len(), 0);
+        assert_eq!(user_meta, &[] as &[u8]);
+
+        // Test case 3: user_meta_len is 0, ptr is tombstone case
+        let value = Value::new_tombstone(100);
+        assert_eq!(value.user_meta_len(), 0);
+        let user_meta = value.user_meta();
+        assert_eq!(user_meta.len(), 0);
+        assert_eq!(user_meta, &[] as &[u8]);
     }
 }

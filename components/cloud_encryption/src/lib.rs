@@ -379,9 +379,10 @@ impl MasterKeyConfig {
                 Ok(MasterKey::new(&master_key_plain_text))
             }
             Ok(KmsVendor::Aliyun) => {
-                let master_key_plain_text = aliyun::decrypt_master_key(&self.cipher_text)
-                    .await
-                    .map_err(|e| cloud::Error::KmsError(KmsError::Other(Box::new(e))))?;
+                let master_key_plain_text =
+                    aliyun::decrypt_master_key(&self.cipher_text, &self.region)
+                        .await
+                        .map_err(|e| cloud::Error::KmsError(KmsError::Other(Box::new(e))))?;
                 Ok(MasterKey::new(&master_key_plain_text))
             }
             Ok(KmsVendor::Test) => {

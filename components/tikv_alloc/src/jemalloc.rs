@@ -29,8 +29,9 @@ lazy_static! {
     // thread id -> (thread name, arena index)
     static ref THREAD_ARENA_MAP: Mutex<HashMap<ThreadId, (String, u32)>> = Mutex::new(HashMap::new());
 
-    // thread_prefix -> arena index
-    static ref SHARED_THREAD_ARENA_MAP: Mutex<HashMap<String, u32>> = Mutex::new(HashMap::new());
+    // For shared arenas: thread_name/prefix -> (arena index, reference count)
+    // Note: The thread_name here should match the thread_name in THREAD_ARENA_MAP for shared threads
+    static ref SHARED_THREAD_ARENA_MAP: Mutex<HashMap<String, (u32, u64)>> = Mutex::new(HashMap::new());
 }
 
 /// The struct for tracing the statistic of another thread.
@@ -133,8 +134,25 @@ pub unsafe fn add_thread_memory_accessor() {
 }
 
 pub fn remove_thread_memory_accessor() {
-    let mut thread_memory_map = THREAD_MEMORY_MAP.lock().unwrap();
-    thread_memory_map.remove(&thread::current().id());
+    let tid = thread::current().id();
+    let thread_name = thread::current().name().unwrap_or("<unknown>").to_string();
+    // Remove it from the thread memory map.
+    {
+        let mut thread_memory_map = THREAD_MEMORY_MAP.lock().unwrap();
+        thread_memory_map.remove(&tid);
+    }
+    // Remove it from the thread arena map.
+    {
+        let not_shared_prefix_arena = SHARED_THREAD_ARENA_MAP
+            .lock()
+            .unwrap()
+            .get(&thread_name)
+            .is_none();
+        if not_shared_prefix_arena {
+            let mut thread_arena_map = THREAD_ARENA_MAP.lock().unwrap();
+            thread_arena_map.remove(&tid);
+        }
+    }
 }
 
 use std::thread::ThreadId;
@@ -222,10 +240,15 @@ pub fn iterate_thread_allocation_stats(mut f: impl FnMut(&str, u64, u64)) {
 pub fn iterate_arena_allocation_stats(mut f: impl FnMut(&str, u64, u64, u64)) {
     // Given we have called `epoch::advance()` in `fetch_stats`, we (magically!)
     // skip advancing the epoch here.
+    let shared_arena_map = get_shared_arena_memory_distribution();
     let thread_arena_map = THREAD_ARENA_MAP.lock().unwrap();
     let mut collected = HashMap::<&str, (u64, u64, u64)>::with_capacity(thread_arena_map.len());
     for (_, (name, index)) in thread_arena_map.iter() {
-        let stats = fetch_arena_stats(*index);
+        let stats = if let Some(stats) = shared_arena_map.get(index) {
+            *stats
+        } else {
+            fetch_arena_stats(*index)
+        };
         let ent = collected.entry(trim_thread_suffix(name)).or_default();
         ent.0 += stats.0;
         ent.1 += stats.1;
@@ -234,6 +257,24 @@ pub fn iterate_arena_allocation_stats(mut f: impl FnMut(&str, u64, u64, u64)) {
     for (name, val) in collected {
         f(name, val.0, val.1, val.2)
     }
+}
+
+/// Calculate average memory usage per thread for shared arenas.
+/// Returns (arena_index, total_mapped_memory, reference_count, avg_per_thread)
+fn get_shared_arena_memory_distribution() -> HashMap<u32, (u64, u64, u64)> {
+    let shared_map = SHARED_THREAD_ARENA_MAP.lock().unwrap();
+    let mut collected = HashMap::<u32, (u64, u64, u64)>::with_capacity(shared_map.len());
+
+    for (_, (arena_index, ref_count)) in shared_map.iter() {
+        let (resident, mapped, retained) = fetch_arena_stats(*arena_index);
+        let avg_per_thread = if *ref_count > 0 {
+            mapped / *ref_count
+        } else {
+            mapped // If no active threads, show total arena memory
+        };
+        collected.insert(*arena_index, (resident, avg_per_thread, retained));
+    }
+    collected
 }
 
 #[allow(clippy::cast_ptr_alignment)]
@@ -329,7 +370,10 @@ mod tests {
 mod profiling {
     use std::{
         ffi::CString,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Mutex,
+        },
     };
 
     use libc::c_char;
@@ -337,6 +381,10 @@ mod profiling {
     use super::{ProfError, ProfResult};
 
     static ENABLE_THREAD_EXCLUSIVE_ARENA: AtomicBool = AtomicBool::new(false);
+
+    lazy_static! {
+        static ref ARENA_ALLOC_MUTEX: Mutex<()> = Mutex::new(());
+    }
 
     // C string should end with a '\0'.
     const PROF_ACTIVE: &[u8] = b"prof.active\0";
@@ -354,10 +402,12 @@ mod profiling {
 
     /// Allocate arena with the arena index returns.
     fn allocate_exclusive_arena() -> ProfResult<u32> {
+        let _arena_mtx = ARENA_ALLOC_MUTEX.lock();
         unsafe {
             let mut index: u32 = tikv_jemalloc_ctl::raw::read(THREAD_ARENA).map_err(|e| {
                 ProfError::JemallocError(format!("failed to get thread's arena: {}", e))
             })?;
+            // Verify the arena is properly bound
             let count: usize = tikv_jemalloc_ctl::raw::read(
                 format!("stats.arenas.{}.nthreads\0", index).as_bytes(),
             )
@@ -410,19 +460,17 @@ mod profiling {
             .unwrap_or("unknown")
             .to_string();
         let mut shared_thread_arena_map = super::SHARED_THREAD_ARENA_MAP.lock().unwrap();
-        if let Some(index) = shared_thread_arena_map.get(&shared_prefix) {
+        if let Some((arena_index, ref_count)) = shared_thread_arena_map.get_mut(&shared_prefix) {
             // The given prefix is already allocated with a specific arena index,
-            // shares and binds it to this calling thread.
+            // shares and binds it to this calling thread. This handles both active
+            // arenas (ref_count > 0) and idle arenas (ref_count == 0) for reuse.
+            let arena_idx = *arena_index;
+            *ref_count += 1; // Increment reference count
+            debug_assert!(*ref_count >= 1);
+            // Bind the given shared arena to this thread.
             unsafe {
-                #[cfg(test)]
-                {
-                    let count: usize = tikv_jemalloc_ctl::raw::read(
-                        format!("stats.arenas.{}.nthreads\0", index).as_bytes(),
-                    )
-                    .unwrap_or(0);
-                    assert!(count >= 1);
-                }
-                if let Err(e) = tikv_jemalloc_ctl::raw::update(THREAD_ARENA, *index) {
+                if let Err(e) = tikv_jemalloc_ctl::raw::update(THREAD_ARENA, arena_idx) {
+                    *ref_count -= 1; // Rollback on error
                     return Err(ProfError::JemallocError(format!(
                         "failed to reset thread's arena with a shared index: {}",
                         e
@@ -434,13 +482,13 @@ mod profiling {
             // thread belonging to this thread prefix, regarding this thread as the
             // leader of this prefix.
             let index = allocate_exclusive_arena()?;
-            shared_thread_arena_map.insert(shared_prefix.clone(), index);
-            // Adds it to the arena map with its thread id.
+            shared_thread_arena_map.insert(shared_prefix.clone(), (index, 1)); // Initial ref count = 1
+            // Adds it to update thread arena map.
             super::THREAD_ARENA_MAP
                 .lock()
                 .unwrap()
                 .insert(std::thread::current().id(), (shared_prefix, index));
-        };
+        }
         Ok(())
     }
 

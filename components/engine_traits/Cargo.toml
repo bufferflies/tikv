@@ -8,11 +8,13 @@ publish = false
 failpoints = ["fail/failpoints"]
 
 [dependencies]
+async-trait = "0.1"
 bytes = "1.0"
 case_macros = { workspace = true }
 error_code = { workspace = true }
 fail = "0.5"
 file_system = { workspace = true }
+futures = "0.3"
 kvproto = { workspace = true }
 log_wrappers = { workspace = true }
 protobuf = "2"

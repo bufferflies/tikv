@@ -32,7 +32,7 @@ use crate::{
     metrics::ENGINE_COMPACT_CACHE_WAL_SKIPPED_COUNTER,
     write_batch::WriteBatch,
     writer::WalWriter,
-    BackupTask, Error,
+    BackupTask, DfsStatistic, Error,
 };
 
 // the maximum number of WriteBatch cached in memory for compact.
@@ -99,6 +99,8 @@ pub(crate) struct ServiceWorker {
     compact_worker_handle: WorkerHandle,
     dfs_worker_handle: Option<ObjectStorageWorkerHandle>,
     dfs_worker_healthy: Healthy,
+    // Shared statistic across dfs worker and compact worker
+    statistics: Arc<DfsStatistic>,
 }
 
 impl ServiceWorker {
@@ -116,6 +118,8 @@ impl ServiceWorker {
         rlog_file_size: u32,
         peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
     ) -> Self {
+        // Create a shared statistic object for both compact worker and dfs worker.
+        let statistic = Arc::new(DfsStatistic::default());
         let s3fs = lightweight_backup_config.as_ref().map(|cfg| {
             let s3fs = kvengine::dfs::S3Fs::new_from_config(cfg.dfs_config.clone());
             Arc::new(s3fs)
@@ -136,6 +140,7 @@ impl ServiceWorker {
             pending_compact_wb_count.clone(),
             rlog_file_size,
             peer_rlog_files,
+            statistic.clone(),
         );
         let handle = std::thread::Builder::new()
             .name("compact-wal-worker".to_string())
@@ -155,6 +160,7 @@ impl ServiceWorker {
                 healthy.clone(),
                 dfs_worker_rx,
                 compact_worker_tx,
+                statistic.clone(),
             );
             let handle = std::thread::Builder::new()
                 .name(DFS_WORKER_THREAD_NAME.to_string())
@@ -177,6 +183,15 @@ impl ServiceWorker {
             rx,
             compact_worker_handle,
             dfs_worker_healthy: healthy,
+            statistics: statistic,
+        }
+    }
+
+    pub(crate) fn dfs_statistic(&self) -> Option<Arc<DfsStatistic>> {
+        if self.is_lightweight_enabled() {
+            Some(self.statistics.clone())
+        } else {
+            None
         }
     }
 
@@ -366,6 +381,7 @@ impl ServiceWorker {
         if let Some(ObjectStorageWorkerHandle {
             task_sender,
             handle,
+            ..
         }) = self.dfs_worker_handle.take()
         {
             // If force close, we skip flushing wal chunk and close task thread.
