@@ -44,6 +44,7 @@ use kvengine::{
     util::new_table_create_pb,
     IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
+use kvenginepb::ChangeSet;
 use kvproto::{coprocessor::DelegateResponse, raft_serverpb::StoreIdent};
 use online_config::OnlineConfig;
 use openssl::{
@@ -246,6 +247,7 @@ impl StatusServer {
         index: u64,
         term: u64,
         inner_key_off: u32,
+        new_cs: Option<ChangeSet>,
     ) -> Result<kvenginepb::ChangeSet> {
         let region_local_state = match load_region_state(rf, peer_id, ver) {
             Some(val) => val,
@@ -260,7 +262,7 @@ impl StatusServer {
         let start_key = decode_bytes(&mut enc_start_key, false).unwrap();
         let end_key = decode_bytes(&mut enc_end_key, false).unwrap();
 
-        let mut cs = kvenginepb::ChangeSet::new();
+        let mut cs = new_cs.unwrap_or_default();
         cs.set_shard_id(region_id);
         cs.set_shard_ver(ver);
         cs.set_sequence(index);
@@ -1111,6 +1113,9 @@ impl StatusServer {
 
     // URI: /unsafe_recover/clear?cluster_id=xxx&[keyspace_id=xxx[&table_id=xxx]][&
     // region_id=xxx]
+    // The request body can be empty or a DelegateResponse protobuf message.
+    // If the request body is provided, it only support single region clear, and the
+    // ChangeSet in the body will be used instead of empty ChangeSet.
     async fn unsafe_recover(
         req: Request<Body>,
         rf: rfengine::RfEngine,
@@ -1186,6 +1191,38 @@ impl StatusServer {
 
         let target_regions_len = target_regions.len();
         let mut wb = WriteBatch::new();
+        let body = hyper::body::to_bytes(req.into_body()).await?;
+        let cs_snap = if !body.is_empty() {
+            if target_regions_len != 1 {
+                return Ok(bad_request_resp(
+                    "body not empty only support single region clear",
+                ));
+            }
+            let (_, target_shard_id, target_shard_ver) = target_regions[0];
+            let mut delegate_resp = DelegateResponse::default();
+            delegate_resp.merge_from_bytes(body.chunk()).unwrap();
+            let mut change_set = kvenginepb::ChangeSet::default();
+            change_set
+                .merge_from_bytes(delegate_resp.get_snapshot())
+                .unwrap();
+            if change_set.get_shard_id() != target_shard_id {
+                return Ok(bad_request_resp(&format!(
+                    "body shard_id {} not match target {}",
+                    change_set.get_shard_id(),
+                    target_shard_id
+                )));
+            }
+            if change_set.get_shard_ver() != target_shard_ver {
+                return Ok(bad_request_resp(&format!(
+                    "body shard_ver {} not match target {}",
+                    change_set.get_shard_ver(),
+                    target_shard_ver
+                )));
+            }
+            Some(change_set)
+        } else {
+            None
+        };
         for (peer_id, region_id, region_version) in target_regions {
             let shard_stats = engine.get_shard_stat(region_id);
             info!(
@@ -1250,6 +1287,7 @@ impl StatusServer {
                 last_index,
                 term,
                 inner_key_off,
+                cs_snap.clone(),
             ) {
                 Ok(cs) => {
                     info!(
