@@ -1157,7 +1157,10 @@ pub(crate) struct PeerMeta {
     pub(crate) region_id: u64,
     pub(crate) truncated_idx: u64,
     pub(crate) states: BTreeMap<Bytes, Bytes>,
+    pub(crate) states_encoded_len: usize,
 }
+
+const ENTRY_BASE_LEN: usize = 2 /* key len */ + 4 /* value len */;
 
 impl PeerMeta {
     pub(crate) fn new(region_id: u64) -> Self {
@@ -1167,16 +1170,48 @@ impl PeerMeta {
         }
     }
 
+    pub fn set_state(&mut self, key: &[u8], val: &[u8]) {
+        self.states_encoded_len += key.len() + val.len() + ENTRY_BASE_LEN;
+        let old = self
+            .states
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(val));
+        if let Some(old) = old {
+            self.states_encoded_len -= key.len() + old.len() + ENTRY_BASE_LEN;
+        }
+    }
+
+    pub fn remove_state(&mut self, key: &[u8]) {
+        if let Some(old) = self.states.remove(key) {
+            self.states_encoded_len -= key.len() + old.len() + ENTRY_BASE_LEN;
+        }
+    }
+
+    pub fn get_state(&self, key: &[u8]) -> Option<&[u8]> {
+        self.states.get(key).map(|v| v.chunk())
+    }
+
+    pub fn get_latest_state(&self, key_prefix: &[u8]) -> Option<&[u8]> {
+        self.states
+            .iter()
+            .rev()
+            .find(|(k, _)| k.starts_with(key_prefix))
+            .map(|(_, v)| v.chunk())
+    }
+
     pub(crate) fn merge(&mut self, other: &PeerMeta, keep_empty: bool) {
         assert_eq!(self.region_id, other.region_id);
         if self.truncated_idx < other.truncated_idx {
             self.truncated_idx = other.truncated_idx;
         }
         for (key, val) in &other.states {
-            if keep_empty || !val.is_empty() {
-                self.states.insert(key.clone(), val.clone());
+            let old = if keep_empty || !val.is_empty() {
+                self.states_encoded_len += key.len() + val.len() + ENTRY_BASE_LEN;
+                self.states.insert(key.clone(), val.clone())
             } else {
-                self.states.remove(key);
+                self.states.remove(key)
+            };
+            if let Some(old) = old {
+                self.states_encoded_len -= key.len() + old.len() + ENTRY_BASE_LEN;
             }
         }
     }
@@ -1249,13 +1284,7 @@ impl PeerData {
             );
             self.truncated_idx = truncated_index;
         }
-        for (key, val) in &batch.states {
-            if val.is_empty() {
-                self.states.remove(key.chunk());
-            } else {
-                self.states.insert(key.clone(), val.clone());
-            }
-        }
+        self.meta.merge(&batch.meta, false);
         truncated_blocks
     }
 

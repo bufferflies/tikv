@@ -5,7 +5,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut};
 use kvproto::raft_serverpb::RegionLocalState;
 use protobuf::Message;
 use raft_proto::eraftpb;
@@ -115,7 +115,7 @@ impl WriteBatch {
     }
 
     pub fn estimated_size(&self) -> usize {
-        self.peers.values().map(|b| b.raft_logs_encoded_len).sum()
+        self.peers.values().map(|b| b.encoded_len()).sum()
     }
 
     /// Convert `WriteBatch` into a vector of `PeerBatch` to make the iteration
@@ -124,6 +124,8 @@ impl WriteBatch {
         self.peers.into_values().collect()
     }
 }
+
+const PEER_BATCH_HEADER_LEN: usize = 8 /* peer_id */ + 8 /* region_id */ + 8 /* truncated_idx */ + 8 /* start_index */ + 8 /* end_index */ + 4 /* states_len */;
 
 /// `RegionBatch` is a batch of modifications in one region.
 pub(crate) struct PeerBatch {
@@ -172,23 +174,6 @@ impl PeerBatch {
         self.raft_logs_encoded_len as i64 - origin_encoded_len
     }
 
-    pub fn set_state(&mut self, key: &[u8], val: &[u8]) {
-        self.states
-            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(val));
-    }
-
-    pub fn get_state(&self, key: &[u8]) -> Option<&[u8]> {
-        self.states.get(key).map(|v| v.chunk())
-    }
-
-    pub fn get_latest_state(&self, key_prefix: &[u8]) -> Option<&[u8]> {
-        self.states
-            .iter()
-            .rev()
-            .find(|(k, _)| k.starts_with(key_prefix))
-            .map(|(_, v)| v.chunk())
-    }
-
     pub fn get_latest_peer_state(&self) -> Option<RegionLocalState> {
         let bin = self.get_latest_state(REGION_META_KEY_PREFIX)?;
         let mut region_local_state = RegionLocalState::new();
@@ -200,9 +185,9 @@ impl PeerBatch {
         let origin_encoded_len = self.raft_logs_encoded_len as i64;
 
         debug_assert!(
-            self.truncated_idx < op.index,
+            self.meta.truncated_idx < op.index,
             "{} {}",
-            self.truncated_idx,
+            self.meta.truncated_idx,
             op.index
         );
         while let Some(true) = self.raft_logs.back().map(|l| l.index + 1 != op.index) {
@@ -235,12 +220,10 @@ impl PeerBatch {
     }
 
     pub(crate) fn encoded_len(&self) -> usize {
-        let mut len = 8 /* peer_id */ + 8 /* region_id */ + 8 /* truncated_idx */ + 8 /* start_index */ + 8 /* end_index */ + 4 /* states_len */;
-        for (key, val) in &self.states {
-            len += 2 /* key_len */ + key.len() + 4 /* val_len */ + val.len();
-        }
-        len += self.raft_logs.len() * 4 /* log_end_offset */;
-        len + self.raft_logs_encoded_len
+        PEER_BATCH_HEADER_LEN
+        + self.states_encoded_len
+        + self.raft_logs.len() * 4 /* log_end_offset */
+        + self.raft_logs_encoded_len
     }
 
     ///  +-----------+-------------+-----------------+---------------+--------------+--------------+-----------------+------------+-------------------+--------------+-----+------------------+-----+--------------+-----+
@@ -281,12 +264,12 @@ impl PeerBatch {
         let states_len = buf.get_u32_le();
         for _ in 0..states_len {
             let key_len = buf.get_u16_le() as usize;
-            let key = Bytes::copy_from_slice(&buf[..key_len]);
+            let key = &buf[..key_len];
             buf = &buf[key_len..];
             let val_len = buf.get_u32_le() as usize;
-            let val = Bytes::copy_from_slice(&buf[..val_len]);
+            let val = &buf[..val_len];
             buf = &buf[val_len..];
-            batch.states.insert(key, val);
+            batch.set_state(key, val);
         }
         let num_logs = (end - first) as usize;
         let log_index_len = num_logs * 4;
@@ -333,6 +316,7 @@ mod tests {
         assert_eq!(region_batch.raft_logs, logs);
         region_batch.set_state(b"k1", b"v1");
         region_batch.set_state(b"k2", b"v2");
+        region_batch.set_state(b"k2", b"v222");
         region_batch.truncate(5);
         assert_eq!(region_batch.truncated_idx, 5);
         assert_eq!(region_batch.raft_logs, &logs[5..]);
@@ -359,5 +343,9 @@ mod tests {
         region_batch.merge(decoded);
         assert_eq!(region_batch.raft_logs, logs[5..].to_vec());
         assert_eq!(region_batch.states.len(), 3);
+        let mut buf = vec![];
+        let encoded_len = region_batch.encoded_len();
+        region_batch.encode_to(&mut buf);
+        assert_eq!(buf.len(), encoded_len);
     }
 }

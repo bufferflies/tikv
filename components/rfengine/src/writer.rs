@@ -822,7 +822,7 @@ impl DoubleWriterWorker {
 }
 
 fn write_batch_size(wb: &[PeerBatch]) -> usize {
-    wb.iter().map(|b| b.raft_logs_encoded_len).sum()
+    wb.iter().map(|b| b.encoded_len()).sum()
 }
 
 #[cfg(test)]
