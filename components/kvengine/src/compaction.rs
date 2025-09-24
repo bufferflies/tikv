@@ -2989,6 +2989,9 @@ async fn compact_destroy_range_for_columnar(
     let (tx, mut rx) = mpsc::channel(req.file_ids.len());
     let mut cnt = 0;
     let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(&req.outer_start).unwrap_or_default();
+    // TODO: remove the sort here after tikv-server upgraded.
+    let mut columnar_table_ids = columnar_table_ids.to_vec();
+    columnar_table_ids.sort();
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file, None).unwrap();
@@ -3004,7 +3007,7 @@ async fn compact_destroy_range_for_columnar(
             columnar_file.get_snap_version(),
             ctx.encryption_key.clone(),
         );
-        for &table_id in columnar_table_ids {
+        for &table_id in &columnar_table_ids {
             let table_row_key_prefix = [
                 api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id),
                 encode_row_key(table_id, 0),
@@ -3244,6 +3247,9 @@ async fn compact_truncate_ts_for_columnar(
     let mut creates = vec![];
     let (tx, mut rx) = mpsc::channel(req.file_ids.len());
     let mut cnt = 0;
+    // TODO: remove the sort here after tikv-server upgraded.
+    let mut columnar_table_ids = columnar_table_ids.to_vec();
+    columnar_table_ids.sort();
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file, None).unwrap();
@@ -3260,7 +3266,7 @@ async fn compact_truncate_ts_for_columnar(
             columnar_file.get_snap_version(),
             ctx.encryption_key.clone(),
         );
-        for &table_id in columnar_table_ids {
+        for &table_id in &columnar_table_ids {
             let schema = schema_file.get_table(table_id).unwrap();
             if !columnar_file.has_table(table_id) {
                 continue;
@@ -3490,6 +3496,9 @@ async fn compact_trim_over_bound_for_columnar(
     let mut creates = vec![];
     let (tx, mut rx) = mpsc::channel(req.file_ids.len());
     let mut cnt = 0;
+    // TODO: remove the sort here after tikv-server upgraded.
+    let mut columnar_table_ids = columnar_table_ids.to_vec();
+    columnar_table_ids.sort();
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
         let columnar_file = ColumnarFile::open(file, None).unwrap();
@@ -3520,7 +3529,7 @@ async fn compact_trim_over_bound_for_columnar(
             columnar_file.get_snap_version(),
             ctx.encryption_key.clone(),
         );
-        for &table_id in columnar_table_ids {
+        for &table_id in &columnar_table_ids {
             let row_key_prefix = encode_row_key_prefix(table_id);
             let mut row_key_prefix_next = row_key_prefix.clone();
             convert_to_prefix_next(&mut row_key_prefix_next);
@@ -4646,17 +4655,7 @@ async fn convert_row_file_to_columnar_file(
     )
     .await?;
     let l0_tbls = files_to_l0_tables(l0_files, ctx.encryption_key.clone());
-    let smallest = l0_tbls.iter().map(|l0| l0.smallest()).min().unwrap();
-    let biggest = l0_tbls.iter().map(|l0| l0.biggest()).max().unwrap();
-    let overlap_tables = schema_file.overlap_columnar_tables(smallest, biggest);
-    // TODO: use columnar_table_ids in compaction directly after tikv-worker
-    // upgraded.
-    let columnar_table_ids = if !columnar_compaction.columnar_table_ids.is_empty() {
-        columnar_compaction.columnar_table_ids.as_slice()
-    } else {
-        overlap_tables.as_slice()
-    };
-    if columnar_table_ids.is_empty() {
+    if columnar_compaction.columnar_table_ids.is_empty() {
         return Ok(ret);
     }
     let mut file_builder = ColumnarFileBuilder::new(
@@ -4666,7 +4665,10 @@ async fn convert_row_file_to_columnar_file(
     );
     let mut cnt = 0;
     let (tx, mut rx) = mpsc::channel(ctx.req.file_ids.len());
-    for &table_id in columnar_table_ids {
+    // TODO: remove the sort here after tikv-server upgraded.
+    let mut columnar_table_ids = columnar_compaction.columnar_table_ids.to_vec();
+    columnar_table_ids.sort();
+    for table_id in columnar_table_ids {
         let schema = schema_file.get_table(table_id).unwrap();
         let mut columnar_readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for l0_tbl in &l0_tbls {
