@@ -502,6 +502,7 @@ impl MergedEngine {
             complete_wal_chunks: false,
             full_restore: false,
             fetch_wal_timeout: ctx.config.timeout_fetch_wal.0,
+            tmp_path: None,
         };
         let tag = &format!("merged_{}", store_id);
         replay_wal_logs_from_backup(tag, &ctx, rlog_files.snap_epoch)?;
@@ -615,7 +616,8 @@ impl MergedEngine {
             return Err(Error::StoreProgressNotFound(store_id));
         };
         let new_offset = cur_offset + data.len() as u64;
-        let mut wal_iterator = WalIterator::new_from_chunks(data, epoch_id, offset);
+        let chunks_reader = Some(Box::new(data.reader()) as Box<dyn std::io::Read>);
+        let mut wal_iterator = WalIterator::new_from_chunks(chunks_reader, epoch_id, offset);
         let mut origin_batches = Vec::new();
         wal_iterator.iterate_write_batch(|origin_wb| {
             origin_batches.push(origin_wb);

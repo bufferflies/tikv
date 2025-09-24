@@ -2,6 +2,7 @@
 use std::{
     cell::Cell,
     fmt::{self, Formatter},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -15,6 +16,7 @@ use chrono::{NaiveTime, Utc};
 use collections::HashMap;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
+use futures::TryStreamExt;
 use grpcio::EnvBuilder;
 use http::{Request, StatusCode};
 use hyper::Body;
@@ -399,6 +401,8 @@ pub struct ReplayWalLogsContext<'a> {
     pub complete_wal_chunks: bool,
     pub full_restore: bool,
     pub fetch_wal_timeout: Duration,
+    // temporary download wal file and wait for replayed
+    pub tmp_path: Option<PathBuf>,
 }
 
 // TODO: Filter out the write batches of specified keyspace to replay to save
@@ -443,16 +447,52 @@ pub fn replay_wal_logs_from_backup(
             epoch_id,
             backup_epoch,
             backup_offset,
+            ctx.tmp_path.clone(),
         )?;
-        replay_wal_chunks(
-            tag,
-            ctx,
-            chunks,
-            last_chunk,
-            epoch_id,
-            backup_epoch,
-            backup_offset,
-        )?;
+
+        let mut paths = Vec::with_capacity(chunks.len());
+        let mut mem_chunks = Vec::with_capacity(chunks.len());
+
+        for c in &chunks {
+            match c {
+                ChunkData::OnDisk(p) => paths.push(p.clone()),
+                ChunkData::InMemory(b) => mem_chunks.push(b.clone()),
+            }
+        }
+
+        if ctx.tmp_path.is_some() {
+            assert_eq!(
+                paths.len(),
+                chunks.len(),
+                "expect on-disk chunks when tmp_path is set; found {} in-memory chunks",
+                chunks.len() - paths.len()
+            );
+            replay_wal_chunks_from_disk(
+                tag,
+                ctx,
+                paths,
+                last_chunk,
+                epoch_id,
+                backup_epoch,
+                backup_offset,
+            )?;
+        } else {
+            assert_eq!(
+                mem_chunks.len(),
+                chunks.len(),
+                "expect in-memory chunks when tmp_path is None; found {} on-disk chunks",
+                chunks.len() - mem_chunks.len()
+            );
+            replay_wal_chunks(
+                tag,
+                ctx,
+                mem_chunks,
+                last_chunk,
+                epoch_id,
+                backup_epoch,
+                backup_offset,
+            )?;
+        }
         info!("{} replay wal logs for epoch: done", tag; "epoch" => epoch_id);
     }
     Ok(())
@@ -501,6 +541,10 @@ impl From<&ReplayWalLogsContext<'_>> for CollectWalChunksContext {
         }
     }
 }
+pub enum ChunkData {
+    InMemory(Bytes),
+    OnDisk(PathBuf),
+}
 
 pub fn collect_wal_chunks_with_retry(
     tag: &str,
@@ -508,7 +552,8 @@ pub fn collect_wal_chunks_with_retry(
     epoch_id: u32,
     backup_epoch: u32,
     backup_offset: u64,
-) -> Result<(Vec<Bytes>, Option<Bytes>)> {
+    tmp_path: Option<PathBuf>,
+) -> Result<(Vec<ChunkData>, Option<Bytes>)> {
     let start_time = Instant::now_coarse();
 
     let (chunk_keys, last_chunk) = if epoch_id == backup_epoch && !ctx.complete_wal_chunks {
@@ -531,9 +576,16 @@ pub fn collect_wal_chunks_with_retry(
         (chunk_keys, None)
     };
 
-    let chunks_data = with_retry(
+    let chunks = with_retry(
         tag,
-        || collect_all_chunk_files(ctx.dfs.as_ref(), epoch_id, chunk_keys.clone()),
+        || {
+            collect_all_chunk_files(
+                ctx.dfs.as_ref(),
+                epoch_id,
+                chunk_keys.clone(),
+                tmp_path.clone(),
+            )
+        },
         |err| {
             warn!("{} collect wal chunks: collect chunk files failed", tag; "err" => ?err);
             true
@@ -542,8 +594,11 @@ pub fn collect_wal_chunks_with_retry(
         Duration::from_secs(1),
         ctx.fetch_wal_timeout,
         Some(start_time),
-    )?;
-    Ok((chunks_data, last_chunk))
+    )?
+    .into_iter()
+    .map(|(_, data)| data)
+    .collect();
+    Ok((chunks, last_chunk))
 }
 
 /// `end_off`:
@@ -756,36 +811,144 @@ fn collect_wal_chunk_keys_with_online_rfengine(
 
 // Collect wal chunk files of the specified epoch concurrently and return the
 // chunks data in order. The data is compressed with lz4 and all chunks data
-// size about 512MB (see `target_file_size`) at most, so it's safe to keep all
-// data in memory.
+// size about 512MB (see `target_file_size`) at most.
+// To avoid OOM when several stores apply a chunk simultaneously,
+// first persist the chunk to disk, then replay it from disk.
 fn collect_all_chunk_files(
     dfs: &S3Fs,
     epoch_id: u32,
     chunk_keys: Vec<String>,
-) -> Result<Vec<Bytes>> {
+    tmp_path: Option<PathBuf>,
+) -> Result<Vec<(String, ChunkData)>> {
+    let base = tmp_path.as_ref();
+
     let chunk_keys_with_option = chunk_keys
         .into_iter()
         .map(|key| (key, GetObjectOptions::default()))
         .collect::<Vec<_>>();
 
-    let mut chunks = dfs
-        .get_objects(chunk_keys_with_option)
-        .map_err(|e| Error::DfsError(dfs::Error::S3(e)))?;
+    let mut chunks: Vec<(String, ChunkData)> = if let Some(dir) = base {
+        let dir = dir.clone();
+        let downloaded: Vec<(String, PathBuf)> = dfs
+            .get_runtime()
+            .block_on(async {
+                let stream = dfs.download_objects(chunk_keys_with_option, 8, dir).await;
+                stream.try_collect::<Vec<(String, PathBuf)>>().await
+            })
+            .map_err(|e| Error::DfsError(dfs::Error::S3(e)))?;
+
+        downloaded
+            .into_iter()
+            .map(|(key, path)| {
+                info!("collect wal chunk file {} epoch {} to disk", key, epoch_id);
+                (key, ChunkData::OnDisk(path))
+            })
+            .collect()
+    } else {
+        // fallback: load all wal chunks into Memory
+        dfs.get_objects(chunk_keys_with_option)
+            .map_err(|e| Error::DfsError(dfs::Error::S3(e)))?
+            .into_iter()
+            .map(|(key, bytes)| {
+                info!(
+                    "collect wal chunk file  {} epoch {} into memory",
+                    key, epoch_id
+                );
+                (key, ChunkData::InMemory(bytes))
+            })
+            .collect::<Vec<_>>()
+    };
 
     chunks.sort_by(|a, b| a.0.cmp(&b.0));
-    let chunks_data = chunks
-        .into_iter()
-        .map(|(key, data)| {
-            info!(
-                "collect wal chunk file {} epoch {} size {}",
-                key,
-                epoch_id,
-                data.len()
-            );
-            data
-        })
-        .collect::<Vec<_>>();
-    Ok(chunks_data)
+    Ok(chunks)
+}
+
+fn replay_wal_chunks_from_disk(
+    tag: &str,
+    ctx: &ReplayWalLogsContext<'_>,
+    chunks_file_path: Vec<PathBuf>,
+    mut last_chunk: Option<Bytes>,
+    epoch_id: u32,
+    backup_epoch: u32,
+    backup_offset: u64,
+) -> Result<()> {
+    let files_len = chunks_file_path.len();
+    let t0 = std::time::Instant::now();
+    let (extra_chunk, end_offset) = if backup_epoch == epoch_id {
+        (
+            last_chunk
+                .take()
+                .map(|b| Box::new(b.reader()) as Box<dyn std::io::Read>),
+            backup_offset,
+        )
+    } else {
+        (None, u64::MAX)
+    };
+
+    if files_len > 0 {
+        info!(
+            "{} replay {} WAL chunk file(s) for epoch {} from disk...",
+            tag, files_len, epoch_id
+        );
+
+        ctx.rf_engine.replay_wal_file(
+            extra_chunk,
+            chunks_file_path.clone(),
+            epoch_id,
+            end_offset,
+            ctx.full_restore,
+        )?;
+        info!(
+            "{} done replaying {} chunk file(s) for epoch {} from disk in {:?}",
+            tag,
+            files_len,
+            epoch_id,
+            t0.elapsed()
+        );
+    } else {
+        info!("{} no WAL chunk files on disk for epoch {}", tag, epoch_id);
+        let t1 = std::time::Instant::now();
+        ctx.rf_engine.replay_wal_file(
+            extra_chunk,
+            vec![],
+            epoch_id,
+            end_offset,
+            ctx.full_restore,
+        )?;
+        info!(
+            "{} done replaying last in-memory chunk for epoch {} in {:?}",
+            tag,
+            epoch_id,
+            t1.elapsed()
+        );
+    }
+
+    if files_len > 0 {
+        let t2 = std::time::Instant::now();
+        let mut removed = 0usize;
+        let mut failed = 0usize;
+        for path in &chunks_file_path {
+            match std::fs::remove_file(path) {
+                Ok(_) => removed += 1,
+                Err(e) => {
+                    failed += 1;
+                    warn!(
+                        "{} failed to remove temp wal chunk file {:?}: {}",
+                        tag, path, e
+                    );
+                }
+            }
+        }
+        info!(
+            "{} cleanup temp wal chunks for epoch {}: removed={} failed={} (elapsed {:?})",
+            tag,
+            epoch_id,
+            removed,
+            failed,
+            t2.elapsed()
+        );
+    }
+    Ok(())
 }
 
 fn replay_wal_chunks(
@@ -836,8 +999,14 @@ fn replay_wal_chunks(
         epoch_wal.len(),
         end_offset
     );
-    ctx.rf_engine
-        .replay_wal_file(epoch_wal.freeze(), epoch_id, end_offset, ctx.full_restore)?;
+    let chunks_mem_reader = Some(Box::new(epoch_wal.freeze().reader()) as Box<dyn std::io::Read>);
+    ctx.rf_engine.replay_wal_file(
+        chunks_mem_reader,
+        vec![],
+        epoch_id,
+        end_offset,
+        ctx.full_restore,
+    )?;
 
     Ok(())
 }
@@ -1040,9 +1209,20 @@ pub fn collect_store_wal_rlog_files(
     // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
     for epoch_id in store_rlog.snap_epoch + 1..=backup_epoch {
         let (epoch_wals, last_chunk) =
-            collect_wal_chunks_with_retry(tag, &ctx, epoch_id, backup_epoch, backup_offset)?;
+            collect_wal_chunks_with_retry(tag, &ctx, epoch_id, backup_epoch, backup_offset, None)?;
         debug_assert!(last_chunk.is_none());
-        wals.push((epoch_id, epoch_wals))
+        let memory_wals: Vec<Bytes> = epoch_wals
+            .iter()
+            .filter_map(|c| {
+                if let ChunkData::InMemory(b) = c {
+                    Some(b.to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        debug_assert!(memory_wals.len() == epoch_wals.len());
+        wals.push((epoch_id, memory_wals))
     }
 
     let store_wal_rlog_files = StoreWalRlog::new(

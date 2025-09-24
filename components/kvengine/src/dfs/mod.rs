@@ -554,6 +554,17 @@ pub enum Error {
     NoSuchKey(String),
     #[error("hyper error {0}")]
     Hyper(String),
+    #[error("aws sdk error {0}")]
+    AwsSdk(String),
+}
+
+impl<E> From<aws_sdk_s3::error::SdkError<E>> for Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn from(err: aws_sdk_s3::error::SdkError<E>) -> Self {
+        Error::AwsSdk(err.to_string())
+    }
 }
 
 impl From<io::Error> for Error {

@@ -2,8 +2,10 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use file_system::{get_io_rate_limiter, get_io_type, IoOp, IoRateLimiter};
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
@@ -95,6 +97,7 @@ pub struct ListObjectContent {
     pub size: u64, // in bytes.
 }
 
+#[async_trait]
 pub trait ObjectStorage: Sync + Send {
     fn put_objects(&self, objects: Vec<(String, Bytes)>) -> std::result::Result<(), String>;
     fn get_objects(
@@ -107,4 +110,13 @@ pub trait ObjectStorage: Sync + Send {
         prefix: Option<&str>,
         max_keys: Option<u32>,
     ) -> std::result::Result<(Vec<ListObjectContent>, Option<String>), String>;
+
+    async fn download_objects(
+        &self,
+        items: Vec<(String, GetObjectOptions)>,
+        concurrency: usize,
+        dest_dir: std::path::PathBuf,
+    ) -> std::pin::Pin<
+        Box<dyn Stream<Item = std::result::Result<(String, std::path::PathBuf), String>> + Send>,
+    >;
 }
