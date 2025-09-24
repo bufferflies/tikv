@@ -20,6 +20,7 @@ use kvengine::{
     table::{
         columnar::{Block, ColumnarFilterReader, GLOBAL_COMMON_HANDLE_END},
         file::FdCache,
+        schema_file::SchemaFile,
         sstable::BlockCache,
     },
     txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
@@ -30,12 +31,17 @@ use native_br::common::{create_pd_client, send_request_to_store};
 use pd_client::PdClient;
 use protobuf::Message;
 use security::{SecurityConfig, SecurityManager};
+use tidb_query_datatype::codec::table::decode_table_id;
 use tikv_util::{
     config::AbsoluteOrPercentSize, error, info, memory::MemoryLimiter, worker_pool::WorkerPool,
 };
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
-
 const CHECK_RESULT_FILE: &str = "check_columnar_result.txt";
+
+// This command is used to check the pk column loss in columnar files.
+// See https://github.com/tidbcloud/cloud-storage-engine/pull/3210 for more details.
+const CHECK_TYPE_PK_COLUMN: &str = "check-pk-column";
+const CHECK_TYPE_MUL_TABLE_ORDERS: &str = "check-mul-table-orders";
 
 #[derive(Args)]
 pub struct CheckColumnarArgs {
@@ -66,10 +72,11 @@ pub struct CheckColumnarArgs {
     /// The path of the working directory.
     #[clap(long, default_value = "/tmp/cse-ctl-check-columnar")]
     pub working_dir: PathBuf,
+    /// The type of check columnar.
+    #[clap(long, default_value = "")]
+    pub check_type: String,
 }
 
-// This command is used to check the pk column loss in columnar files.
-// See https://github.com/tidbcloud/cloud-storage-engine/pull/3210 for more details.
 pub(crate) fn execute_check_columnar(args: CheckColumnarArgs) {
     let config = CheckColumnarConfig::from_args(&args);
     let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
@@ -183,9 +190,8 @@ async fn check_columnar(
                 security_mgr.clone(),
                 txn_chunk_manager.clone(),
                 ia_mgr.clone(),
-                &config.working_dir,
+                config,
                 &master_key,
-                keyspace_id,
                 shard,
                 &stores,
             )
@@ -236,41 +242,16 @@ async fn check_columnar(
     }
 }
 
-async fn check_columnar_for_shard(
+async fn request_snapshot_from_shard(
     ctx: Arc<SchemaMgrContext>,
-    schema_manager: &SchemaManager,
     security_mgr: Arc<SecurityManager>,
     txn_chunk_manager: TxnChunkManager,
     ia_mgr: IaManager,
     working_dir: &Path,
     master_key: &MasterKey,
-    keyspace_id: u32,
     shard: &ShardStatsLite,
     stores: &[Store],
-) -> Result<bool, String> {
-    let Some(schema_file) = schema_manager
-        .get_schema_file_from_local(keyspace_id)
-        .unwrap()
-    else {
-        return Err(format!(
-            "no schema file found for keyspace_id: {}",
-            keyspace_id
-        ));
-    };
-    // Check if common index in schema file. Skip if no.
-    let table_ids = schema_file
-        .iter_tables()
-        .filter_map(|(table_id, schema)| {
-            if schema.is_common_handle() {
-                Some(table_id)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    if table_ids.is_empty() {
-        return Ok(true);
-    }
+) -> Result<SnapAccess, String> {
     let memory_limiter = MemoryLimiter::new(u64::MAX, None);
     let Some(leader_store_id) = get_leader_store(ctx.pd.clone(), shard.id).await else {
         return Err(format!(
@@ -359,6 +340,59 @@ async fn check_columnar_for_shard(
     .await
     .unwrap();
 
+    Ok(snap)
+}
+
+async fn check_columnar_for_shard(
+    ctx: Arc<SchemaMgrContext>,
+    schema_manager: &SchemaManager,
+    security_mgr: Arc<SecurityManager>,
+    txn_chunk_manager: TxnChunkManager,
+    ia_mgr: IaManager,
+    config: &CheckColumnarConfig,
+    master_key: &MasterKey,
+    shard: &ShardStatsLite,
+    stores: &[Store],
+) -> Result<bool, String> {
+    let snap = request_snapshot_from_shard(
+        ctx,
+        security_mgr,
+        txn_chunk_manager,
+        ia_mgr,
+        &config.working_dir,
+        master_key,
+        shard,
+        stores,
+    )
+    .await?;
+
+    let keyspace_id = snap.get_keyspace_id();
+    match config.check_type.as_str() {
+        CHECK_TYPE_PK_COLUMN => {
+            let Some(schema_file) = schema_manager
+                .get_schema_file_from_local(keyspace_id)
+                .unwrap()
+            else {
+                return Err(format!(
+                    "no schema file found for keyspace_id: {}",
+                    keyspace_id
+                ));
+            };
+            check_pk_column(&snap, &schema_file, shard).await
+        }
+        CHECK_TYPE_MUL_TABLE_ORDERS => check_mul_table_orders(&snap),
+        _ => Err(format!(
+            "invalid check type: {}, available types: {}, {}",
+            config.check_type, CHECK_TYPE_PK_COLUMN, CHECK_TYPE_MUL_TABLE_ORDERS
+        )),
+    }
+}
+
+async fn check_pk_column(
+    snap: &SnapAccess,
+    schema_file: &SchemaFile,
+    shard: &ShardStatsLite,
+) -> Result<bool, String> {
     for table_id in snap.get_columnar_table_ids() {
         let Some(schema) = schema_file.get_table(table_id) else {
             error!(
@@ -413,6 +447,34 @@ async fn check_columnar_for_shard(
     Ok(true)
 }
 
+fn check_mul_table_orders(snap: &SnapAccess) -> Result<bool, String> {
+    let columnar_table_ids = snap.get_columnar_table_ids();
+    if columnar_table_ids.len() <= 1 {
+        return Ok(true);
+    }
+    let columnar_files = snap.get_columnar_levels();
+    for file in columnar_files {
+        let smallest_key = file.get_smallest();
+        let biggest_key = file.get_biggest();
+        let smallest_table_id = decode_table_id(smallest_key.as_ref()).unwrap();
+        let biggest_table_id = decode_table_id(biggest_key.as_ref()).unwrap();
+        let tables_unordered = file
+            .get_table_ids()
+            .iter()
+            .any(|&table_id| table_id < smallest_table_id || table_id > biggest_table_id);
+        if tables_unordered {
+            error!(
+                "keyspace_id: {}, shard: {}, tables unordered in columnar file: {}",
+                snap.get_keyspace_id(),
+                snap.get_id(),
+                file.id()
+            );
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -423,6 +485,7 @@ pub struct CheckColumnarConfig {
     pub keyspace_id: u32,
     pub keyspace_id_start: u32,
     pub working_dir: PathBuf,
+    pub check_type: String,
 }
 
 impl CheckColumnarConfig {
@@ -444,6 +507,9 @@ impl CheckColumnarConfig {
         }
         if args.keyspace_id_start > 0 {
             config.keyspace_id_start = args.keyspace_id_start;
+        }
+        if !args.check_type.is_empty() {
+            config.check_type = args.check_type.clone();
         }
         if args.cacert.exists() {
             config.security.ca_path = args.cacert.to_str().unwrap().to_owned();

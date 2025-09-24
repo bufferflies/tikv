@@ -751,6 +751,10 @@ impl ColumnarFile {
         InnerKey::from_inner_buf(&self.core.biggest_key)
     }
 
+    pub fn get_table_ids(&self) -> Vec<i64> {
+        self.core.tables.keys().cloned().collect()
+    }
+
     /// The offset of first table meta (index).
     #[inline]
     pub fn get_meta_offset(&self) -> u32 {

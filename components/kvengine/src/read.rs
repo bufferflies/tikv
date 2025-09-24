@@ -32,8 +32,9 @@ use crate::{
     table::{
         blobtable::blobtable::{BlobPrefetcher, BlobTable},
         columnar::{
-            filter::TableScanCtx, ColumnarConcatReader, ColumnarMergeReader, ColumnarMvccReader,
-            ColumnarReader, ColumnarRowTableReader, ColumnarTableReader, HANDLE_COL_ID,
+            filter::TableScanCtx, ColumnarConcatReader, ColumnarFile, ColumnarMergeReader,
+            ColumnarMvccReader, ColumnarReader, ColumnarRowTableReader, ColumnarTableReader,
+            HANDLE_COL_ID,
         },
         fts_index::FtsBruteForceReader,
         memtable::{CfTable, Hint, SkipList, WriteBatch},
@@ -818,6 +819,16 @@ impl SnapAccessCore {
 
     pub fn get_meta_seq(&self) -> u64 {
         self.meta_seq
+    }
+
+    pub fn get_columnar_levels(&self) -> Vec<ColumnarFile> {
+        self.data
+            .col_levels
+            .levels
+            .iter()
+            .flat_map(|l| l.files.iter())
+            .cloned()
+            .collect()
     }
 
     // Sync only.
