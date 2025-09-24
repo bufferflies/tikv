@@ -453,7 +453,7 @@ fn check_mul_table_orders(snap: &SnapAccess) -> Result<bool, String> {
         return Ok(true);
     }
     let columnar_files = snap.get_columnar_levels();
-    for file in columnar_files {
+    for (file, _) in &columnar_files {
         let smallest_key = file.get_smallest();
         let biggest_key = file.get_biggest();
         let smallest_table_id = decode_table_id(smallest_key.as_ref()).unwrap();
@@ -471,6 +471,35 @@ fn check_mul_table_orders(snap: &SnapAccess) -> Result<bool, String> {
             );
             return Ok(false);
         }
+    }
+    // Check if tables in level 2 are overlapped.
+    let mut col_files_in_l2 = columnar_files
+        .iter()
+        .filter(|(_, level)| *level == 2)
+        .map(|(file, _)| file)
+        .collect::<Vec<_>>();
+    if col_files_in_l2.is_empty() {
+        return Ok(true);
+    }
+    col_files_in_l2.sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()));
+
+    let mut last_key = col_files_in_l2[0].get_biggest();
+    let mut last_file_id = col_files_in_l2[0].id();
+    for file in col_files_in_l2[1..].iter() {
+        let smallest_key = file.get_smallest();
+        let biggest_key = file.get_biggest();
+        if smallest_key < last_key {
+            error!(
+                "keyspace_id: {}, shard: {}, tables overlapped in l2 columnar file: {} and {}",
+                snap.get_keyspace_id(),
+                snap.get_id(),
+                file.id(),
+                last_file_id
+            );
+            return Ok(false);
+        }
+        last_key = biggest_key;
+        last_file_id = file.id();
     }
     Ok(true)
 }

@@ -821,13 +821,17 @@ impl SnapAccessCore {
         self.meta_seq
     }
 
-    pub fn get_columnar_levels(&self) -> Vec<ColumnarFile> {
+    pub fn get_columnar_levels(&self) -> Vec<(ColumnarFile, usize)> {
         self.data
             .col_levels
             .levels
             .iter()
-            .flat_map(|l| l.files.iter())
-            .cloned()
+            .flat_map(|l| {
+                l.files
+                    .iter()
+                    .map(|f| (f.clone(), l.level))
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 
