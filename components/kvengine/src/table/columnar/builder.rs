@@ -263,7 +263,7 @@ impl ColumnarFileBuilder {
         let last_table = self.tables.last().unwrap();
         let biggest_table_id = last_table.schema.table_id;
         let biggest_is_int_handle = last_table.handle_builder.col_meta.fixed_size > 0;
-        let mut biggest_handle = first_table.handle_builder.max_handle.as_slice();
+        let mut biggest_handle = last_table.handle_builder.max_handle.as_slice();
         let biggest_key = if biggest_is_int_handle {
             let biggest_int_handle = biggest_handle.get_i64_le();
             encode_row_key(biggest_table_id, biggest_int_handle)
