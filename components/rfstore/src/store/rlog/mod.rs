@@ -18,19 +18,41 @@ pub fn get_custom_log(req: &RaftCmdRequest) -> Option<CustomRaftLog<'_>> {
     })
 }
 
-pub type CustomRaftlogType = u8;
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum CustomRaftLogType {
+    Prewrite = 1,
+    Commit = 2,
+    Rollback = 3,
+    PessimisticLock = 4,
+    PessimisticRollback = 5,
+    OnePc = 6,
+    EngineMeta = 7,
+    ResolveLock = 8,
+    SwitchMemTable = 9,
+    TriggerTrimOverBound = 10,
+    TxnFileRef = 12,
+    // Note: Please make sure tiflash proxy is updated if you add a new type.
+}
 
-pub const TYPE_PREWRITE: CustomRaftlogType = 1;
-pub const TYPE_COMMIT: CustomRaftlogType = 2;
-pub const TYPE_ROLLBACK: CustomRaftlogType = 3;
-pub const TYPE_PESSIMISTIC_LOCK: CustomRaftlogType = 4;
-pub const TYPE_PESSIMISTIC_ROLLBACK: CustomRaftlogType = 5;
-pub const TYPE_ONE_PC: CustomRaftlogType = 6;
-pub const TYPE_ENGINE_META: CustomRaftlogType = 7;
-pub const TYPE_RESOLVE_LOCK: CustomRaftlogType = 8;
-pub const TYPE_SWITCH_MEM_TABLE: CustomRaftlogType = 9;
-pub const TYPE_TRIGGER_TRIM_OVER_BOUND: CustomRaftlogType = 10;
-pub const TYPE_TXN_FILE_REF: CustomRaftlogType = 12;
+impl From<u8> for CustomRaftLogType {
+    fn from(v: u8) -> Self {
+        match v {
+            1 => CustomRaftLogType::Prewrite,
+            2 => CustomRaftLogType::Commit,
+            3 => CustomRaftLogType::Rollback,
+            4 => CustomRaftLogType::PessimisticLock,
+            5 => CustomRaftLogType::PessimisticRollback,
+            6 => CustomRaftLogType::OnePc,
+            7 => CustomRaftLogType::EngineMeta,
+            8 => CustomRaftLogType::ResolveLock,
+            9 => CustomRaftLogType::SwitchMemTable,
+            10 => CustomRaftLogType::TriggerTrimOverBound,
+            12 => CustomRaftLogType::TxnFileRef,
+            _ => panic!("unexpected custom raft log type: {:?}", v),
+        }
+    }
+}
 
 const HEADER_SIZE: usize = 2;
 
@@ -53,8 +75,8 @@ impl<'a> CustomRaftLog<'a> {
         Self { data }
     }
 
-    pub fn get_type(&self) -> CustomRaftlogType {
-        self.data[0] as CustomRaftlogType
+    pub fn get_type(&self) -> CustomRaftLogType {
+        self.data[0].into()
     }
 
     // F: (key, val)
@@ -159,19 +181,19 @@ impl<'a> CustomRaftLog<'a> {
         Ok(cs)
     }
 
-    pub fn iterate_resolve_lock(&self, mut f: impl FnMut(CustomRaftlogType, &[u8], u64, bool)) {
+    pub fn iterate_resolve_lock(&self, mut f: impl FnMut(CustomRaftLogType, &[u8], u64, bool)) {
         let mut data = &self.data[HEADER_SIZE..];
         while !data.is_empty() {
-            let tp = data.get_u8() as CustomRaftlogType;
+            let tp: CustomRaftLogType = data.get_u8().into();
             match tp {
-                TYPE_COMMIT => {
+                CustomRaftLogType::Commit => {
                     let key_len = data.get_u16_le() as usize;
                     let key = &data[..key_len];
                     data = &data[key_len..];
                     let commit_ts = data.get_u64_le();
                     f(tp, key, commit_ts, true);
                 }
-                TYPE_ROLLBACK => {
+                CustomRaftLogType::Rollback => {
                     let key_len = data.get_u16_le() as usize;
                     let key = &data[..key_len];
                     data = &data[key_len..];
@@ -278,41 +300,41 @@ impl CustomBuilder {
         assert_eq!(self.buf.len(), HEADER_SIZE);
         let data = cs.write_to_bytes().unwrap();
         self.buf.extend_from_slice(&data);
-        self.set_type(TYPE_ENGINE_META);
+        self.set_type(CustomRaftLogType::EngineMeta);
     }
 
     pub fn set_switch_mem_table(&mut self, current_size: u64) {
         assert_eq!(self.buf.len(), HEADER_SIZE);
         self.buf.put_u64_le(current_size);
-        self.set_type(TYPE_SWITCH_MEM_TABLE)
+        self.set_type(CustomRaftLogType::SwitchMemTable);
     }
 
     pub fn set_trigger_trim_over_bound(&mut self, parameter: &TrimOverBoundParameter) {
         assert_eq!(self.buf.len(), HEADER_SIZE);
         let data = parameter.marshal();
         self.buf.extend_from_slice(&data);
-        self.set_type(TYPE_TRIGGER_TRIM_OVER_BOUND);
+        self.set_type(CustomRaftLogType::TriggerTrimOverBound);
     }
 
     pub fn set_txn_file(&mut self, txn_file_ref: &kvenginepb::TxnFileRef) {
         assert_eq!(self.buf.len(), HEADER_SIZE);
         let data = txn_file_ref.write_to_bytes().unwrap();
         self.buf.extend_from_slice(&data);
-        self.set_type(TYPE_TXN_FILE_REF);
+        self.set_type(CustomRaftLogType::TxnFileRef);
     }
 
-    pub fn set_type(&mut self, tp: CustomRaftlogType) {
-        self.buf[0] = tp;
+    pub fn set_type(&mut self, tp: CustomRaftLogType) {
+        self.buf[0] = tp as u8;
     }
 
-    pub fn get_type(&self) -> CustomRaftlogType {
-        self.buf[0] as CustomRaftlogType
+    pub fn get_type(&self) -> CustomRaftLogType {
+        self.buf[0].into()
     }
 
     // Some custom logs may contains multiple types of logs, e.g., resolve-lock can
     // contain both commit and rollback. We use type to distinguish them.
-    pub fn append_type(&mut self, tp: CustomRaftlogType) {
-        self.buf.push(tp);
+    pub fn append_type(&mut self, tp: CustomRaftLogType) {
+        self.buf.push(tp as u8);
     }
 
     pub fn build(&mut self) -> CustomRequest {
@@ -332,15 +354,15 @@ impl CustomBuilder {
 }
 
 pub fn is_engine_meta_log(data: &[u8]) -> bool {
-    data[0] == TYPE_ENGINE_META
+    data[0] == CustomRaftLogType::EngineMeta as u8
 }
 
 pub fn is_trigger_trim_over_bound(data: &[u8]) -> bool {
-    data[0] == TYPE_TRIGGER_TRIM_OVER_BOUND
+    data[0] == CustomRaftLogType::TriggerTrimOverBound as u8
 }
 
 pub fn is_txn_file_ref(data: &[u8]) -> bool {
-    data[0] == TYPE_TXN_FILE_REF
+    data[0] == CustomRaftLogType::TxnFileRef as u8
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -418,7 +440,7 @@ mod tests {
         builder.set_switch_mem_table(2022);
         let req = builder.build();
         let cl = CustomRaftLog::new_from_data(req.get_data());
-        assert_eq!(cl.get_type(), TYPE_SWITCH_MEM_TABLE);
+        assert_eq!(cl.get_type(), CustomRaftLogType::SwitchMemTable);
         assert_eq!(cl.get_switch_mem_table(), 2022);
     }
 
@@ -446,5 +468,34 @@ mod tests {
             TrimOverBoundParameter::default(),
             TrimOverBoundParameter::unmarshal(vec![].as_slice())
         );
+    }
+
+    #[test]
+    fn test_custom_raft_log_types() {
+        // CustomRaftLogType tags from 1 to 12, except 11.
+        let ignored = vec![11u8];
+        for i in 1u8..=12 {
+            if ignored.contains(&i) {
+                continue;
+            }
+            let tp: CustomRaftLogType = i.into();
+            assert_eq!(i, tp as u8);
+        }
+
+        // Test invalid type will panic.
+        for &i in &ignored {
+            let result = std::panic::catch_unwind(|| {
+                let _: CustomRaftLogType = i.into();
+            });
+            assert!(result.is_err());
+        }
+
+        // 13 and above are invalid.
+        for i in 13u8..=20 {
+            let result = std::panic::catch_unwind(|| {
+                let _: CustomRaftLogType = i.into();
+            });
+            assert!(result.is_err());
+        }
     }
 }

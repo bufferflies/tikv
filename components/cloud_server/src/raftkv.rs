@@ -712,7 +712,7 @@ pub fn modifies_to_requests(_ctx: &Context, data: &mut WriteData) -> CustomReque
 }
 
 fn build_pessimistic_lock(builder: &mut CustomBuilder, modifies: Vec<Modify>) {
-    builder.set_type(rlog::TYPE_PESSIMISTIC_LOCK);
+    builder.set_type(rlog::CustomRaftLogType::PessimisticLock);
     for m in modifies {
         match m {
             Modify::PessimisticLock(key, lock) => {
@@ -730,7 +730,7 @@ fn build_pessimistic_lock(builder: &mut CustomBuilder, modifies: Vec<Modify>) {
 }
 
 fn build_prewrite(builder: &mut CustomBuilder, mut modifies: Vec<Modify>) {
-    builder.set_type(rlog::TYPE_PREWRITE);
+    builder.set_type(rlog::CustomRaftLogType::Prewrite);
 
     let mut default_vals = modifies
         .iter_mut()
@@ -761,7 +761,7 @@ fn build_prewrite(builder: &mut CustomBuilder, mut modifies: Vec<Modify>) {
 }
 
 fn build_commit(builder: &mut CustomBuilder, modifies: Vec<Modify>) {
-    builder.set_type(rlog::TYPE_COMMIT);
+    builder.set_type(rlog::CustomRaftLogType::Commit);
     for m in modifies {
         match m {
             Modify::Put(CF_WRITE, key, _) => {
@@ -779,7 +779,7 @@ fn build_commit(builder: &mut CustomBuilder, modifies: Vec<Modify>) {
 }
 
 fn build_one_pc(builder: &mut CustomBuilder, mut modifies: Vec<Modify>) {
-    builder.set_type(rlog::TYPE_ONE_PC);
+    builder.set_type(rlog::CustomRaftLogType::OnePc);
 
     let deleted_lock = modifies
         .iter_mut()
@@ -827,7 +827,7 @@ fn build_one_pc(builder: &mut CustomBuilder, mut modifies: Vec<Modify>) {
 }
 
 fn build_pessimistic_rollback(builder: &mut CustomBuilder, modifies: Vec<Modify>) {
-    builder.set_type(rlog::TYPE_PESSIMISTIC_ROLLBACK);
+    builder.set_type(rlog::CustomRaftLogType::PessimisticRollback);
     for m in modifies {
         match m {
             Modify::Delete(CF_LOCK, key) => {
@@ -840,7 +840,7 @@ fn build_pessimistic_rollback(builder: &mut CustomBuilder, modifies: Vec<Modify>
 }
 
 fn build_rollback(builder: &mut CustomBuilder, mut modifies: Vec<Modify>) {
-    builder.set_type(rlog::TYPE_ROLLBACK);
+    builder.set_type(rlog::CustomRaftLogType::Rollback);
 
     let mut deleted_locks = modifies
         .iter_mut()
@@ -887,24 +887,28 @@ fn build_rollback(builder: &mut CustomBuilder, mut modifies: Vec<Modify>) {
 fn build_check_txn_status(builder: &mut CustomBuilder, modifies: Vec<Modify>) {
     let tp = match &modifies[0] {
         Modify::Put(CF_LOCK, _, v) => match Lock::parse(v).unwrap().lock_type {
-            LockType::Pessimistic => rlog::TYPE_PESSIMISTIC_LOCK,
-            _ => rlog::TYPE_PREWRITE,
+            LockType::Pessimistic => rlog::CustomRaftLogType::PessimisticLock,
+            _ => rlog::CustomRaftLogType::Prewrite,
         },
         Modify::Delete(CF_LOCK, _) => {
             if modifies.len() == 1 {
-                rlog::TYPE_PESSIMISTIC_ROLLBACK
+                rlog::CustomRaftLogType::PessimisticRollback
             } else {
-                rlog::TYPE_ROLLBACK
+                rlog::CustomRaftLogType::Rollback
             }
         }
-        Modify::Put(CF_WRITE, ..) | Modify::Delete(CF_WRITE, ..) => rlog::TYPE_ROLLBACK,
+        Modify::Put(CF_WRITE, ..) | Modify::Delete(CF_WRITE, ..) => {
+            rlog::CustomRaftLogType::Rollback
+        }
         _ => unreachable!("unexpected modifies: {:?}", modifies),
     };
     match tp {
-        rlog::TYPE_PESSIMISTIC_LOCK => build_pessimistic_lock(builder, modifies),
-        rlog::TYPE_PREWRITE => build_prewrite(builder, modifies),
-        rlog::TYPE_PESSIMISTIC_ROLLBACK => build_pessimistic_rollback(builder, modifies),
-        rlog::TYPE_ROLLBACK => build_rollback(builder, modifies),
+        rlog::CustomRaftLogType::PessimisticLock => build_pessimistic_lock(builder, modifies),
+        rlog::CustomRaftLogType::Prewrite => build_prewrite(builder, modifies),
+        rlog::CustomRaftLogType::PessimisticRollback => {
+            build_pessimistic_rollback(builder, modifies)
+        }
+        rlog::CustomRaftLogType::Rollback => build_rollback(builder, modifies),
         _ => unreachable!(),
     };
 }
@@ -922,29 +926,29 @@ fn build_resolve_lock(builder: &mut CustomBuilder, modifies: Vec<Modify>) {
                 let write = WriteRef::parse(v).unwrap();
                 if write.write_type != WriteType::Rollback {
                     assert!(matches!(&modifies[1], Modify::Delete(CF_LOCK, _)));
-                    builder.append_type(rlog::TYPE_COMMIT);
+                    builder.append_type(rlog::CustomRaftLogType::Commit);
                     build_commit(builder, modifies);
                     continue;
                 }
             }
         }
-        builder.append_type(rlog::TYPE_ROLLBACK);
+        builder.append_type(rlog::CustomRaftLogType::Rollback);
         build_rollback(builder, modifies);
     }
-    builder.set_type(rlog::TYPE_RESOLVE_LOCK);
+    builder.set_type(rlog::CustomRaftLogType::ResolveLock);
 }
 
 fn build_heartbeat(builder: &mut CustomBuilder, modifies: Vec<Modify>) {
     let tp = match &modifies[0] {
         Modify::Put(CF_LOCK, _, v) => match Lock::parse(v).unwrap().lock_type {
-            LockType::Pessimistic => rlog::TYPE_PESSIMISTIC_LOCK,
-            _ => rlog::TYPE_PREWRITE,
+            LockType::Pessimistic => rlog::CustomRaftLogType::PessimisticLock,
+            _ => rlog::CustomRaftLogType::Prewrite,
         },
         _ => unreachable!("unexpected modifies: {:?}", modifies),
     };
     match tp {
-        rlog::TYPE_PESSIMISTIC_LOCK => build_pessimistic_lock(builder, modifies),
-        rlog::TYPE_PREWRITE => build_prewrite(builder, modifies),
+        rlog::CustomRaftLogType::PessimisticLock => build_pessimistic_lock(builder, modifies),
+        rlog::CustomRaftLogType::Prewrite => build_prewrite(builder, modifies),
         _ => unreachable!(),
     };
 }
@@ -1150,7 +1154,7 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::Prewrite);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_PREWRITE);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::Prewrite);
         custom_log.iterate_lock(|k, v| match k {
             b"k1" => {
                 assert_eq!(k, modifies[0].key().to_raw().unwrap());
@@ -1185,7 +1189,7 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::Commit);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_COMMIT);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::Commit);
         let mut keys = [b"k1", b"k2"].iter();
         custom_log.iterate_commit(|k, ts| {
             assert_eq!(k, keys.next().unwrap().as_slice());
@@ -1208,7 +1212,7 @@ mod tests {
         assert!(data.extra.one_pc);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_ONE_PC);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::OnePc);
         let mut cnt = 0;
         custom_log.iterate_one_pc(|k, v, is_extra, del_lock, start_ts, commit_ts| {
             match k {
@@ -1230,7 +1234,10 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::PessimisticLock);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_PESSIMISTIC_LOCK);
+        assert_eq!(
+            custom_log.get_type(),
+            rlog::CustomRaftLogType::PessimisticLock
+        );
         let mut cnt = 0;
         custom_log.iterate_lock(|k, v| {
             assert_eq!(k, &modifies[0].key().to_raw().unwrap());
@@ -1259,7 +1266,7 @@ mod tests {
         assert!(data.extra.one_pc);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_ONE_PC);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::OnePc);
         let mut cnt = 0;
         custom_log.iterate_one_pc(|k, v, is_extra, del_lock, start_ts, commit_ts| {
             match k {
@@ -1320,23 +1327,33 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::ResolveLock);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_RESOLVE_LOCK);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::ResolveLock);
         let mut expected = HashMap::from_iter(vec![
             (
                 b"k1".as_slice(),
-                (rlog::TYPE_COMMIT, b"k1".as_slice(), 51, true),
+                (rlog::CustomRaftLogType::Commit, b"k1".as_slice(), 51, true),
             ),
             (
                 b"k2".as_slice(),
-                (rlog::TYPE_COMMIT, b"k2".as_slice(), 51, true),
+                (rlog::CustomRaftLogType::Commit, b"k2".as_slice(), 51, true),
             ),
             (
                 b"k3".as_slice(),
-                (rlog::TYPE_ROLLBACK, b"k3".as_slice(), 60, true),
+                (
+                    rlog::CustomRaftLogType::Rollback,
+                    b"k3".as_slice(),
+                    60,
+                    true,
+                ),
             ),
             (
                 b"k4".as_slice(),
-                (rlog::TYPE_ROLLBACK, b"k4".as_slice(), 60, true),
+                (
+                    rlog::CustomRaftLogType::Rollback,
+                    b"k4".as_slice(),
+                    60,
+                    true,
+                ),
             ),
         ]);
         custom_log.iterate_resolve_lock(|tp, k, ts, del_lock| {
@@ -1356,7 +1373,7 @@ mod tests {
         let modifies = data.modifies.clone();
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_PREWRITE);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::Prewrite);
         let mut cnt = 0;
         custom_log.iterate_lock(|k, v| {
             assert_eq!(k, modifies[0].key().to_raw().unwrap());
@@ -1381,7 +1398,7 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::Rollback);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_ROLLBACK);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::Rollback);
         let mut cnt = 0;
         custom_log.iterate_rollback(|k, ts, del_lock| {
             match k {
@@ -1413,7 +1430,10 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::PessimisticRollback);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_PESSIMISTIC_ROLLBACK);
+        assert_eq!(
+            custom_log.get_type(),
+            rlog::CustomRaftLogType::PessimisticRollback
+        );
         let mut cnt = 0;
         custom_log.iterate_del_lock(|k| {
             assert_eq!(k, b"k1");
@@ -1441,7 +1461,10 @@ mod tests {
         let modifies = data.modifies.clone();
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_PESSIMISTIC_LOCK);
+        assert_eq!(
+            custom_log.get_type(),
+            rlog::CustomRaftLogType::PessimisticLock
+        );
         let mut cnt = 0;
         custom_log.iterate_lock(|k, v| {
             assert_eq!(k, &modifies[0].key().to_raw().unwrap());
@@ -1477,7 +1500,7 @@ mod tests {
         let modifies = data.modifies.clone();
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_PREWRITE);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::Prewrite);
         let mut cnt = 0;
         custom_log.iterate_lock(|k, v| {
             assert_eq!(k, &modifies[0].key().to_raw().unwrap());
@@ -1515,7 +1538,7 @@ mod tests {
         let modifies = data.modifies.clone();
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_PREWRITE);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::Prewrite);
         let mut cnt = 0;
         custom_log.iterate_lock(|k, v| {
             assert_eq!(k, &modifies[0].key().to_raw().unwrap());
@@ -1529,7 +1552,7 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::CheckTxnStatus);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_ROLLBACK);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::Rollback);
         let mut cnt = 0;
         custom_log.iterate_rollback(|k, ts, del_lock| {
             assert_eq!(k, b"k1");
@@ -1553,7 +1576,7 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::CheckTxnStatus);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_ROLLBACK);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::Rollback);
         let mut cnt = 0;
         custom_log.iterate_rollback(|k, ts, del_lock| {
             assert_eq!(k, b"k1");
@@ -1571,7 +1594,10 @@ mod tests {
         let modifies = data.modifies.clone();
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_PESSIMISTIC_LOCK);
+        assert_eq!(
+            custom_log.get_type(),
+            rlog::CustomRaftLogType::PessimisticLock
+        );
         let mut cnt = 0;
         custom_log.iterate_lock(|k, v| {
             assert_eq!(k, &modifies[0].key().to_raw().unwrap());
@@ -1584,7 +1610,10 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::CheckTxnStatus);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_PESSIMISTIC_ROLLBACK);
+        assert_eq!(
+            custom_log.get_type(),
+            rlog::CustomRaftLogType::PessimisticRollback
+        );
         let mut cnt = 0;
         custom_log.iterate_del_lock(|k| {
             assert_eq!(k, b"k1");
@@ -1608,7 +1637,7 @@ mod tests {
         assert_eq!(data.extra.req_type, ReqType::CheckSecondaryLocks);
         let custom_req = modifies_to_requests(&Context::default(), &mut data);
         let custom_log = rlog::CustomRaftLog::new_from_data(custom_req.get_data());
-        assert_eq!(custom_log.get_type(), rlog::TYPE_ROLLBACK);
+        assert_eq!(custom_log.get_type(), rlog::CustomRaftLogType::Rollback);
         let mut cnt = 0;
         custom_log.iterate_rollback(|k, ts, del_lock| {
             assert_eq!(k, b"k1");
