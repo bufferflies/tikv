@@ -109,25 +109,78 @@ pub fn parse_epoch_from_snapshot_key(key: Option<&str>) -> Option<u32> {
     })
 }
 
-pub fn parse_wal_chunk_key(key: Option<&str>) -> Option<(u32, u64, u64, bool /* is last chunk */)> {
+pub fn parse_wal_chunk_key(
+    key: Option<&str>,
+) -> Option<(
+    u32,  // epoch
+    u64,  // start_off
+    u64,  // end_off
+    bool, // is_last_chunk
+)> {
     key.and_then(|key| {
-        let re = Regex::new(r"e([0-9a-fA-F]+)_([0-9a-fA-F]+)_([0-9a-fA-F]+)\.wal").unwrap();
-        if let Some(captures) = re.captures(key) {
+        lazy_static::lazy_static! {
+            static ref RE: Regex = Regex::new(r"e([0-9a-fA-F]+)_([0-9a-fA-F]+)_([0-9a-fA-F]+)\.wal").unwrap();
+        }
+
+        let chunk_name = if let Some(pos) = key.rfind('/') {
+            &key[pos + 1..]
+        } else {
+            key
+        };
+
+        if let Some(captures) = RE.captures(chunk_name) {
             let epoch_hex = captures.get(1).unwrap().as_str();
             let start_off_hex = captures.get(2).unwrap().as_str();
             let end_off_hex = captures.get(3).unwrap().as_str();
             let epoch = u32::from_str_radix(epoch_hex, 16).unwrap();
             let start_off = u64::from_str_radix(start_off_hex, 16).unwrap();
             let end_off = u64::from_str_radix(end_off_hex, 16).unwrap();
-            return Some((
-                epoch,
-                start_off,
-                end_off,
-                key.ends_with(LAST_WAL_CHUNK_SUFFIX),
-            ));
+            // `start_off == end_off` is valid (for last chunk).
+            return (start_off <= end_off).then(|| {
+                (
+                    epoch,
+                    start_off,
+                    end_off,
+                    key.ends_with(LAST_WAL_CHUNK_SUFFIX),
+                )
+            });
         }
         None
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalChunkMeta {
+    pub key: String,
+    pub epoch: u32,
+    pub start_off: u64,
+    pub end_off: u64,
+    pub last: bool,
+}
+
+impl WalChunkMeta {
+    pub fn size(&self) -> u64 {
+        self.end_off - self.start_off
+    }
+}
+
+impl std::convert::TryFrom<String> for WalChunkMeta {
+    type Error = String; // err_msg
+
+    fn try_from(key: String) -> Result<Self, Self::Error> {
+        let (epoch, start_off, end_off, last) =
+            parse_wal_chunk_key(Some(&key)).ok_or_else(|| {
+                debug_assert!(false, "invalid pattern: {}", &key);
+                format!("invalid pattern: {}", &key)
+            })?;
+        Ok(WalChunkMeta {
+            key,
+            epoch,
+            start_off,
+            end_off,
+            last,
+        })
+    }
 }
 
 /// Try to get integral WAL chunks with maximum length, and ignore some
@@ -141,12 +194,12 @@ pub fn parse_wal_chunk_key(key: Option<&str>) -> Option<(u32, u64, u64, bool /* 
 ///
 /// See https://github.com/tidbcloud/cloud-storage-engine/issues/2033 for details.
 pub fn get_integral_wal_chunks(
-    chunks: &[String],
+    chunks: &[WalChunkMeta],
 ) -> StdResult<
     (
-        Vec<String>, // integral_chunks
-        u64,         // last_end_off
-        bool,        // has_last_chunk
+        Vec<WalChunkMeta>, // integral_chunks
+        u64,               // last_end_off
+        bool,              // has_last_chunk
     ),
     String, // err_msg
 > {
@@ -155,42 +208,43 @@ pub fn get_integral_wal_chunks(
     }
 
     let first_chunk = chunks.first().unwrap();
-    let Some((epoch, start_off, end_off, last)) = parse_wal_chunk_key(Some(first_chunk)) else {
-        return Err(format!("invalid pattern: {first_chunk}"));
-    };
-    if start_off != 0 {
+    if first_chunk.start_off != 0 {
         // Return as no chunk.
         return Ok((vec![], 0, false));
     }
 
-    let wal_epoch = epoch;
-    let mut last_start_off = start_off;
-    let mut last_end_off = end_off;
-    let mut has_last_chunk = last;
+    let wal_epoch = first_chunk.epoch;
+    let mut last_start_off = first_chunk.start_off;
+    let mut last_end_off = first_chunk.end_off;
+    let mut has_last_chunk = first_chunk.last;
 
     let mut integral_chunks = Vec::with_capacity(chunks.len());
     integral_chunks.push(first_chunk.clone());
 
     for chunk in chunks.iter().skip(1) {
-        let Some((epoch, start_off, end_off, last)) = parse_wal_chunk_key(Some(chunk)) else {
-            return Err(format!("invalid pattern: {chunk}"));
-        };
-        if epoch != wal_epoch {
-            return Err(format!("epoch mismatch: {epoch} != {wal_epoch}: {chunk}"));
+        if chunk.epoch != wal_epoch {
+            return Err(format!(
+                "epoch mismatch: {} != {}: {:?}",
+                chunk.epoch, wal_epoch, chunk
+            ));
         }
 
-        if start_off == last_end_off {
+        if chunk.start_off == last_end_off {
             integral_chunks.push(chunk.clone());
-            last_start_off = start_off;
-            last_end_off = end_off;
-            has_last_chunk = last;
-        } else if start_off == last_start_off {
-            debug_assert!(end_off > last_end_off, "disorder chunks: {:?}", chunks);
+            last_start_off = chunk.start_off;
+            last_end_off = chunk.end_off;
+            has_last_chunk = chunk.last;
+        } else if chunk.start_off == last_start_off {
+            debug_assert!(
+                chunk.end_off > last_end_off,
+                "disorder chunks: {:?}",
+                chunks
+            );
             integral_chunks.pop();
             integral_chunks.push(chunk.clone());
-            last_end_off = end_off;
-            has_last_chunk = last;
-        } else if start_off > last_end_off {
+            last_end_off = chunk.end_off;
+            has_last_chunk = chunk.last;
+        } else if chunk.start_off > last_end_off {
             // Some chunks in the middle missed.
             break;
         } else {
@@ -391,6 +445,8 @@ pub mod test_util {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::TryInto;
+
     use super::*;
 
     #[test]
@@ -496,9 +552,24 @@ mod tests {
                 300,
                 true,
             ),
+            (
+                vec![
+                    (0, 100, false),
+                    (100, 200, false),
+                    (200, 201, false),
+                    (200, 202, false),
+                    (200, 203, false),
+                    (200, 204, false),
+                    (204, 300, false),
+                    (300, 300, true),
+                ],
+                vec![0, 1, 5, 6, 7],
+                300,
+                true,
+            ),
         ];
 
-        fn make_chunks(chunks: Vec<(u64, u64, bool)>) -> Vec<String> {
+        fn make_chunks(chunks: Vec<(u64, u64, bool)>) -> Vec<WalChunkMeta> {
             chunks
                 .into_iter()
                 .map(|(start_off, end_off, is_last)| {
@@ -507,11 +578,13 @@ mod tests {
                     } else {
                         wal_chunk_file_key(1, 1, start_off, end_off)
                     }
+                    .try_into()
+                    .unwrap()
                 })
                 .collect::<Vec<_>>()
         }
 
-        fn pick_chunks(chunks: &[String], idx: Vec<usize>) -> Vec<String> {
+        fn pick_chunks(chunks: &[WalChunkMeta], idx: Vec<usize>) -> Vec<WalChunkMeta> {
             let mut res = Vec::with_capacity(idx.len());
             for i in idx {
                 res.push(chunks[i].clone())
@@ -528,9 +601,9 @@ mod tests {
             );
         }
 
-        let err_cases: Vec<Vec<String>> = vec![vec![
-            wal_chunk_file_key(1, 1, 0, 100),
-            wal_chunk_file_key(1, 10, 100, 200),
+        let err_cases: Vec<Vec<WalChunkMeta>> = vec![vec![
+            wal_chunk_file_key(1, 1, 0, 100).try_into().unwrap(),
+            wal_chunk_file_key(1, 10, 100, 200).try_into().unwrap(),
         ]];
         for chunks in err_cases {
             get_integral_wal_chunks(&chunks).unwrap_err();

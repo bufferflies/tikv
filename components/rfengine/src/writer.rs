@@ -595,7 +595,7 @@ fn load_epoch_offset(wal_dir: &Path, manifest_epoch: u32) -> Result<(u32, u64)> 
     while wal_exists(wal_dir, epoch_id + 1) {
         epoch_id += 1;
     }
-    let mut iter = WalIterator::new(wal_dir.to_path_buf(), epoch_id);
+    let mut iter = WalIterator::new(wal_dir, epoch_id)?;
     iter.iterate_batch(|_, _| {})?;
     Ok((epoch_id, iter.offset))
 }
@@ -908,7 +908,7 @@ mod tests {
             let truncate_epoch_id = rnd.gen_range((manifest_epoch + 1)..=epoch);
             let wal_file = wal_file_name(truncate_path.as_path(), truncate_epoch_id);
             assert!(wal_file.exists());
-            let mut wal_iter = WalIterator::new(truncate_path.clone(), truncate_epoch_id);
+            let mut wal_iter = WalIterator::new(truncate_path, truncate_epoch_id).unwrap();
             let mut file_offs = vec![];
             wal_iter
                 .iterate_batch(|_, file_off| {

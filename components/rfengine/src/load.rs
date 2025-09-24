@@ -8,7 +8,7 @@ use std::{
 };
 
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use tikv_util::{errors::Context as _, info, warn};
 
 use crate::{log_batch::RaftLogOp, manifest::Manifest, service_worker::ServiceTask, *};
@@ -54,7 +54,7 @@ impl RfEngineCore {
         let mut async_batch_cnt = 0;
         let mut async_offset = 0;
         if self.is_async_wal_enabled() && load_async {
-            let mut async_it = WalIterator::new(self.dir.to_path_buf(), epoch_id);
+            let mut async_it = WalIterator::new(&self.dir, epoch_id)?;
             match async_it.iterate_batch(|_, _| {
                 async_batch_cnt += 1;
             }) {
@@ -74,7 +74,7 @@ impl RfEngineCore {
             }
         }
         let mut sync_batch_idx = 0;
-        let mut it = WalIterator::new(self.wal_dir().to_path_buf(), epoch_id);
+        let mut it = WalIterator::new(self.wal_dir(), epoch_id)?;
         match it.iterate_batch(|data, _| {
             sync_batch_idx += 1;
             let mut wb = if self.is_async_wal_enabled() && sync_batch_idx > async_batch_cnt {
@@ -82,7 +82,7 @@ impl RfEngineCore {
             } else {
                 None
             };
-            WalIterator::iterate_peer_batch(data, |peer_batch| {
+            iterate_peer_batch(data, |peer_batch| {
                 let guard = self.peers.guard();
                 let peer_ref = self.get_or_init_peer_data(
                     peer_batch.peer_id,
@@ -137,19 +137,19 @@ impl RfEngineCore {
     // snapshot.
     pub fn replay_wal_file(
         &self,
-        file_data: Bytes,
+        reader: Box<dyn std::io::Read>,
         epoch_id: u32,
         end_offset: u64, // u64::MAX means replay all the chunk
         full_restore: bool,
     ) -> Result<()> {
-        let mut it = WalIterator::new_from_chunks(file_data, epoch_id, 0);
+        let mut it = WalIterator::new_from_reader(reader, epoch_id, 0);
         it.iterate_batch(|data, offset| {
             // `offset` is the data read position after `data` be read.
             if offset > end_offset {
                 return;
             }
             let mut wb = WriteBatch::new();
-            WalIterator::iterate_peer_batch(data, |peer_batch| {
+            iterate_peer_batch(data, |peer_batch| {
                 wb.peers.insert(peer_batch.peer_id, peer_batch);
             });
             if full_restore {
@@ -247,7 +247,7 @@ mod tests {
         let writer = engine.writer.lock().unwrap();
         let current_epoch = writer.get_epoch_id();
 
-        let mut it = WalIterator::new(dir_path.to_owned(), current_epoch);
+        let mut it = WalIterator::new(dir_path, current_epoch).unwrap();
         it.iterate_batch(|_, _| {
             // Do nothing.
         })
@@ -290,7 +290,7 @@ mod tests {
         let writer = engine.writer.lock().unwrap();
         let current_epoch = writer.get_epoch_id();
 
-        let mut async_it = WalIterator::new(dir_path.to_owned(), current_epoch);
+        let mut async_it = WalIterator::new(dir_path, current_epoch).unwrap();
         async_it
             .iterate_batch(|_, _| {
                 // Do nothing.
@@ -308,7 +308,7 @@ mod tests {
         drop(file);
 
         let filename = wal_file_name(&sync_wal_path, current_epoch);
-        let mut sync_it = WalIterator::new(sync_wal_path.to_owned(), current_epoch);
+        let mut sync_it = WalIterator::new(&sync_wal_path, current_epoch).unwrap();
         sync_it
             .iterate_batch(|_, _| {
                 // Do nothing.
@@ -335,7 +335,7 @@ mod tests {
         let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
         assert_eq!(engine.peers.len(), 10);
 
-        let mut sync_it = WalIterator::new(sync_wal_path.to_owned(), current_epoch);
+        let mut sync_it = WalIterator::new(&sync_wal_path, current_epoch).unwrap();
         sync_it.iterate_batch(|_, _| {}).unwrap();
         check_async_wal(
             &engine,
@@ -378,7 +378,7 @@ mod tests {
 
         // Write corrupted data to `current_epoch - 1` wal file.
         let filename = wal_file_name(&sync_wal_path, current_epoch - 1);
-        let mut sync_it = WalIterator::new(sync_wal_path, current_epoch - 1);
+        let mut sync_it = WalIterator::new(&sync_wal_path, current_epoch - 1).unwrap();
         sync_it.iterate_batch(|_, _| {}).unwrap();
         let file = OpenOptions::new().write(true).open(filename).unwrap();
         let write_offset = sync_it.offset - 4096 + BATCH_HEADER_SIZE as u64;

@@ -25,14 +25,15 @@ use protobuf::Message;
 use rfengine::{
     assemble_wal_chunks, find_latest_snapshot, get_integral_wal_chunks,
     parse_epoch_from_snapshot_key, snapshot_store_meta_key, wal_chunk_file_prefix,
-    wal_chunk_file_suffix, RfEngine, MAX_EPOCH_BACKWARD,
+    wal_chunk_file_suffix, RfEngine, WalChunkMeta, MAX_EPOCH_BACKWARD,
 };
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::store::state::RaftState;
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, warn};
 use tikv_util::{
-    box_err, codec::bytes::decode_bytes, debug, http::HeaderExt, info, time::Instant, Either,
+    box_err, box_try, codec::bytes::decode_bytes, debug, http::HeaderExt, info, time::Instant,
+    Either,
 };
 
 use crate::{
@@ -40,6 +41,7 @@ use crate::{
     backup::IncrementalBackupFile,
     error::{Error, HttpRequestError, Result},
     metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
+    wal::WalOnlineChunk,
 };
 
 const MAX_S3_REQ_BATCH_SIZE: usize = 1024;
@@ -457,11 +459,15 @@ pub fn collect_wal_chunks_with_retry(
     epoch_id: u32,
     backup_epoch: u32,
     backup_offset: u64,
-) -> Result<(Vec<Bytes>, Option<Bytes>, bool /* has_last_chunk */)> {
+) -> Result<(
+    Vec<Bytes>,
+    Option<WalOnlineChunk>,
+    bool, // has_last_chunk
+)> {
     let start_time = Instant::now_coarse();
 
-    let (chunk_keys, online_chunk) = if epoch_id == backup_epoch && !ctx.complete_wal_chunks {
-        collect_wal_chunk_keys_with_online_rfengine(
+    let (chunk_metas, online_chunk) = if epoch_id == backup_epoch && !ctx.complete_wal_chunks {
+        collect_wal_chunk_metas_with_online_rfengine(
             tag,
             ctx,
             backup_epoch,
@@ -469,7 +475,7 @@ pub fn collect_wal_chunks_with_retry(
             start_time,
         )?
     } else {
-        let chunk_keys = collect_complete_wal_chunk_keys_with_retry(
+        let chunk_metas = collect_complete_wal_chunk_metas_with_retry(
             tag,
             ctx,
             epoch_id,
@@ -477,12 +483,12 @@ pub fn collect_wal_chunks_with_retry(
             backup_offset,
             start_time,
         )?;
-        (chunk_keys, None)
+        (chunk_metas, None)
     };
 
     let chunks_data = with_retry(
         tag,
-        || collect_all_chunk_files(ctx.dfs.as_ref(), epoch_id, chunk_keys.clone()),
+        || collect_all_chunk_files(ctx.dfs.as_ref(), epoch_id, chunk_metas.clone()),
         |err| {
             warn!("{} collect wal chunks: collect chunk files failed", tag; "err" => ?err);
             true
@@ -493,9 +499,7 @@ pub fn collect_wal_chunks_with_retry(
         Some(start_time),
     )?;
 
-    let has_last_chunk = chunk_keys
-        .last()
-        .is_some_and(|key| key.ends_with(rfengine::LAST_WAL_CHUNK_SUFFIX));
+    let has_last_chunk = chunk_metas.last().is_some_and(|meta| meta.last);
     Ok((chunks_data, online_chunk, has_last_chunk))
 }
 
@@ -505,12 +509,12 @@ pub fn collect_wal_chunks_with_retry(
 /// - Other value: Get all chunks with offset <= the value.
 ///
 /// Return: the `end_off` of the last returned chunk.
-fn collect_wal_chunk_keys(
+fn collect_wal_chunk_metas(
     tag: &str,
     ctx: &CollectWalChunksContext,
     epoch_id: u32,
     end_off: u64,
-) -> Result<(Vec<String>, u64 /* last_end_off */)> {
+) -> Result<(Vec<WalChunkMeta>, u64 /* last_end_off */)> {
     let dfs_prefix = format!("{}/", ctx.dfs.get_prefix());
     let scan_prefix = wal_chunk_file_prefix(ctx.store_id, epoch_id);
     let scan_start = wal_chunk_file_suffix(0, 0);
@@ -536,10 +540,14 @@ fn collect_wal_chunk_keys(
             return Err(box_err!("list wal chunk files failed: {:?}", err));
         }
     };
+    let mut chunk_metas: Vec<WalChunkMeta> = Vec::with_capacity(chunk_keys.len());
+    for key in chunk_keys {
+        chunk_metas.push(box_try!(key.try_into()));
+    }
 
     // Get integral WAL chunk files.
     let check_last = end_off == u64::MAX;
-    match get_integral_wal_chunks(&chunk_keys) {
+    match get_integral_wal_chunks(&chunk_metas) {
         Ok((integral_chunks, last_end_off, has_last_chunk)) => {
             let ok = if check_last {
                 has_last_chunk
@@ -558,29 +566,29 @@ fn collect_wal_chunk_keys(
         }
         Err(msg) => {
             error!("{} collect wal chunk keys: integrity check failed", tag;
-                "epoch" => epoch_id, "end_off" => end_off, "chunk_keys" => ?chunk_keys, "msg" => &msg);
+                "epoch" => epoch_id, "end_off" => end_off, "chunks" => ?chunk_metas, "msg" => &msg);
             Err(Error::WalChunkIntegrityError(msg))
         }
     }
 }
 
-fn collect_complete_wal_chunk_keys_with_retry(
+fn collect_complete_wal_chunk_metas_with_retry(
     tag: &str,
     ctx: &CollectWalChunksContext,
     epoch_id: u32,
     backup_epoch: u32,
     backup_offset: u64,
     start_time: Instant,
-) -> Result<Vec<String>> {
+) -> Result<Vec<WalChunkMeta>> {
     let end_off = if epoch_id == backup_epoch {
         backup_offset
     } else {
         u64::MAX
     };
 
-    let (chunk_keys, _) = with_retry(
+    let (chunk_metas, _) = with_retry(
         tag,
-        || collect_wal_chunk_keys(tag, ctx, epoch_id, end_off),
+        || collect_wal_chunk_metas(tag, ctx, epoch_id, end_off),
         |err| -> bool {
             match err {
                 Error::WalChunkIntegrityError(msg) => {
@@ -598,21 +606,21 @@ fn collect_complete_wal_chunk_keys_with_retry(
         ctx.fetch_wal_timeout,
         Some(start_time),
     )?;
-    Ok(chunk_keys)
+    Ok(chunk_metas)
 }
 
-fn collect_wal_chunk_keys_with_online_rfengine(
+fn collect_wal_chunk_metas_with_online_rfengine(
     tag: &str,
     ctx: &CollectWalChunksContext,
     backup_epoch: u32,
     backup_offset: u64,
     start_time: Instant,
-) -> Result<(Vec<String>, Option<Bytes> /* online_chunk */)> {
+) -> Result<(Vec<WalChunkMeta>, Option<WalOnlineChunk>)> {
     // Note: the chunks of last epoch (i.e., backup_epoch) can be empty. All chunks
     // are fetched from online rfengine.
-    let (chunk_keys, last_end_off) = with_retry(
+    let (chunk_metas, last_end_off) = with_retry(
         tag,
-        || collect_wal_chunk_keys(tag, ctx, backup_epoch, 0),
+        || collect_wal_chunk_metas(tag, ctx, backup_epoch, 0),
         |err| -> bool {
             match err {
                 Error::WalChunkIntegrityError(msg) => {
@@ -632,7 +640,7 @@ fn collect_wal_chunk_keys_with_online_rfengine(
     )?;
 
     if last_end_off >= backup_offset {
-        return Ok((chunk_keys, None));
+        return Ok((chunk_metas, None));
     }
 
     let rf_epoch_unavailable = Cell::new(false);
@@ -643,7 +651,7 @@ fn collect_wal_chunk_keys_with_online_rfengine(
     })?;
     let runtime = ctx.dfs.get_runtime();
     let security_mgr = ctx.pd_client.get_security_mgr();
-    let fetch = || -> Result<Either<Bytes, Vec<String>>> {
+    let fetch = || -> Result<Either<WalOnlineChunk, Vec<WalChunkMeta>>> {
         if !rf_epoch_unavailable.get() {
             let online_chunk = runtime.block_on(fetch_rfengine_wal_chunk(
                 &store,
@@ -655,12 +663,15 @@ fn collect_wal_chunk_keys_with_online_rfengine(
             ))?;
             info!("{} fetched online wal chunk from rfengine", tag;
                 "start_off" => last_end_off, "end_off" => backup_offset, "data_len" => online_chunk.len());
-            Ok(Either::Left(online_chunk))
+            Ok(Either::Left(WalOnlineChunk {
+                data: online_chunk,
+                start_off: last_end_off,
+            }))
         } else {
-            let (chunk_keys, last_end_off) =
-                collect_wal_chunk_keys(tag, ctx, backup_epoch, backup_offset)?;
+            let (chunk_metas, last_end_off) =
+                collect_wal_chunk_metas(tag, ctx, backup_epoch, backup_offset)?;
             debug_assert!(last_end_off >= backup_offset);
-            Ok(Either::Right(chunk_keys))
+            Ok(Either::Right(chunk_metas))
         }
     };
 
@@ -701,8 +712,8 @@ fn collect_wal_chunk_keys_with_online_rfengine(
             ctx.fetch_wal_timeout,
             Some(start_time),
         )? {
-            Either::Left(online_chunk) => (chunk_keys, Some(online_chunk)),
-            Either::Right(new_chunk_keys) => (new_chunk_keys, None),
+            Either::Left(online_chunk) => (chunk_metas, Some(online_chunk)),
+            Either::Right(new_chunk_metas) => (new_chunk_metas, None),
         },
     )
 }
@@ -714,11 +725,11 @@ fn collect_wal_chunk_keys_with_online_rfengine(
 fn collect_all_chunk_files(
     dfs: &S3Fs,
     epoch_id: u32,
-    chunk_keys: Vec<String>,
+    chunk_metas: Vec<WalChunkMeta>,
 ) -> Result<Vec<Bytes>> {
-    let chunk_keys_with_option = chunk_keys
+    let chunk_keys_with_option = chunk_metas
         .into_iter()
-        .map(|key| (key, GetObjectOptions::default()))
+        .map(|meta| (meta.key, GetObjectOptions::default()))
         .collect::<Vec<_>>();
 
     let mut chunks = dfs
@@ -745,7 +756,7 @@ fn replay_wal_chunks(
     tag: &str,
     ctx: &ReplayWalLogsContext<'_>,
     chunks: Vec<Bytes>,
-    online_chunk: Option<Bytes>,
+    online_chunk: Option<WalOnlineChunk>,
     epoch_id: u32,
     backup_epoch: u32,
     backup_offset: u64,
@@ -763,7 +774,7 @@ fn replay_wal_chunks(
 
     let end_offset = if backup_epoch == epoch_id {
         if let Some(online_chunk) = online_chunk {
-            epoch_wal.extend(online_chunk);
+            epoch_wal.extend(online_chunk.data);
             if backup_offset != epoch_wal.len() as u64 {
                 error!("{} replay wal chunks: unexpected length of epoch WAL", tag;
                     "epoch" => epoch_id, "epoch_wal" => epoch_wal.len(),
@@ -789,8 +800,9 @@ fn replay_wal_chunks(
         epoch_wal.len(),
         end_offset
     );
+    let wal_reader = Box::new(epoch_wal.freeze().reader());
     ctx.rf_engine
-        .replay_wal_file(epoch_wal.freeze(), epoch_id, end_offset, ctx.full_restore)?;
+        .replay_wal_file(wal_reader, epoch_id, end_offset, ctx.full_restore)?;
 
     Ok(())
 }

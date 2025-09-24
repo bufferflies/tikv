@@ -13,5 +13,6 @@ pub mod metrics;
 pub mod restore;
 pub mod restore_keyspace;
 mod tiflash;
+pub mod wal;
 
 pub use error::Result;

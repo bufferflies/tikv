@@ -3,7 +3,7 @@
 use std::{
     fs,
     io::{BufReader, Read},
-    path::PathBuf,
+    path::Path,
 };
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -16,47 +16,36 @@ use crate::{
     Error, Result, WriteBatch,
 };
 
-pub struct WalIterator {
-    dir: PathBuf,
+pub struct WalIterator<R: Read> {
     epoch_id: u32,
     buf: BytesMut,
     pub(crate) offset: u64,
-    in_mem_reader: Option<Box<dyn Read>>,
+    reader: R,
 }
 
 const MAX_BATCH_SIZE: usize = 256 * 1024 * 1024;
 
-impl WalIterator {
-    pub(crate) fn new(dir: PathBuf, epoch_id: u32) -> Self {
-        Self {
-            dir,
-            epoch_id,
-            buf: BytesMut::new(),
-            offset: 0,
-            in_mem_reader: None,
-        }
+impl WalIterator<BufReader<fs::File>> {
+    pub(crate) fn new(dir: &Path, epoch_id: u32) -> std::io::Result<Self> {
+        let filename = wal_file_name(dir, epoch_id);
+        let fd = fs::File::open(filename)?;
+        Ok(Self::new_from_reader(BufReader::new(fd), epoch_id, 0))
     }
+}
 
-    pub fn new_from_chunks(file_data: Bytes, epoch_id: u32, offset: u64) -> Self {
+impl<B: bytes::Buf> WalIterator<bytes::buf::Reader<B>> {
+    pub fn new_from_chunks(file_data: B, epoch_id: u32, offset: u64) -> Self {
+        Self::new_from_reader(file_data.reader(), epoch_id, offset)
+    }
+}
+
+impl<R: Read> WalIterator<R> {
+    pub fn new_from_reader(reader: R, epoch_id: u32, offset: u64) -> Self {
         Self {
-            dir: PathBuf::new(),
             epoch_id,
             buf: BytesMut::new(),
             offset,
-            in_mem_reader: Some(Box::new(file_data.reader())),
-        }
-    }
-
-    fn in_mem_iterator(&self) -> bool {
-        self.in_mem_reader.is_some()
-    }
-
-    pub(crate) fn iterate_peer_batch(data: Bytes, mut f: impl FnMut(PeerBatch)) {
-        let mut batch = data.chunk();
-        while !batch.is_empty() {
-            let peer_data = PeerBatch::decode(batch);
-            batch = &batch[peer_data.encoded_len()..];
-            f(peer_data);
+            reader,
         }
     }
 
@@ -64,15 +53,8 @@ impl WalIterator {
     where
         F: FnMut(Bytes, u64),
     {
-        let mut buf_reader: Box<dyn std::io::Read> = if self.in_mem_iterator() {
-            self.in_mem_reader.take().unwrap()
-        } else {
-            let filename = wal_file_name(self.dir.as_path(), self.epoch_id);
-            let fd = fs::File::open(filename)?;
-            Box::new(BufReader::new(fd))
-        };
         if self.offset == 0 {
-            match self.check_wal_header(&mut buf_reader) {
+            match self.check_wal_header() {
                 Ok(()) => {}
                 Err(Error::Eof) => {
                     return Ok(());
@@ -81,7 +63,7 @@ impl WalIterator {
             };
         }
         loop {
-            match self.read_batch(&mut buf_reader) {
+            match self.read_batch() {
                 Err(err) => {
                     if let Error::Eof = err {
                         return Ok(());
@@ -104,16 +86,16 @@ impl WalIterator {
     {
         self.iterate_batch(|data, _| {
             let mut wb = WriteBatch::new();
-            WalIterator::iterate_peer_batch(data, |peer_batch| {
+            iterate_peer_batch(data, |peer_batch| {
                 wb.peers.insert(peer_batch.peer_id, peer_batch);
             });
             f(wb);
         })
     }
 
-    pub(crate) fn check_wal_header(&mut self, reader: &mut Box<dyn std::io::Read>) -> Result<()> {
+    pub(crate) fn check_wal_header(&mut self) -> Result<()> {
         let mut buf = [0u8; WalHeader::len()];
-        reader.read_exact(&mut buf)?;
+        self.reader.read_exact(&mut buf)?;
         self.offset += WalHeader::len() as u64;
         match WalHeader::decode(&buf) {
             Ok(header) => {
@@ -138,7 +120,7 @@ impl WalIterator {
                 // Header is corrupt, but the first batch header is empty which means there
                 // is no data in this WAL. Treat it like EOF and WAL writer will rewrite the
                 // header.
-                reader.read_exact(&mut buf[..BATCH_HEADER_SIZE])?;
+                self.reader.read_exact(&mut buf[..BATCH_HEADER_SIZE])?;
                 if buf.iter().take(BATCH_HEADER_SIZE).all(|v| *v == 0) {
                     return Err(Error::Eof);
                 }
@@ -148,9 +130,9 @@ impl WalIterator {
         }
     }
 
-    pub(crate) fn read_batch(&mut self, reader: &mut Box<dyn std::io::Read>) -> Result<Bytes> {
+    pub(crate) fn read_batch(&mut self) -> Result<Bytes> {
         let mut header_array = [0u8; BATCH_HEADER_SIZE];
-        reader.read_exact(header_array.as_mut_slice())?;
+        self.reader.read_exact(header_array.as_mut_slice())?;
         let mut header_buf = header_array.as_slice();
         let epoch_id = header_buf.get_u32_le();
         let checksum = header_buf.get_u32_le();
@@ -180,7 +162,7 @@ impl WalIterator {
         let aligned_length = DmaBuffer::aligned_len(BATCH_HEADER_SIZE + length);
         let remained_length = aligned_length - BATCH_HEADER_SIZE;
         self.buf.resize(remained_length, 0);
-        reader.read_exact(&mut self.buf[..])?;
+        self.reader.read_exact(&mut self.buf[..])?;
         let batch = &self.buf[..length];
         let actual_checksum = crc32c::crc32c(batch);
         if checksum != actual_checksum {
@@ -214,5 +196,14 @@ impl WalIterator {
         } else {
             Ok(Bytes::from(batch_data.to_vec()))
         }
+    }
+}
+
+pub(crate) fn iterate_peer_batch(data: Bytes, mut f: impl FnMut(PeerBatch)) {
+    let mut batch = data.chunk();
+    while !batch.is_empty() {
+        let peer_data = PeerBatch::decode(batch);
+        batch = &batch[peer_data.encoded_len()..];
+        f(peer_data);
     }
 }
