@@ -15,10 +15,12 @@ use cloud_encryption::{EncryptionKey, KEY_TYPE_AES_256_CTR_LEGACY};
 use kvenginepb as pb;
 use kvenginepb::TxnFileRefs;
 use log_wrappers::Value as LogValue;
+use prometheus::local::LocalHistogram;
 use protobuf::Message;
 use tikv_util::{
     box_try,
     codec::number::{U32_SIZE, U64_SIZE},
+    time::{duration_to_sec, Instant},
 };
 use tipb::ColumnInfo;
 use txn_types::Lock;
@@ -392,6 +394,8 @@ impl SnapAccessCore {
             blob_prefetcher: None,
             data,
             range: None,
+            next_time: ENGINE_SEEK_DURATION.next.local(),
+            seek_time: ENGINE_SEEK_DURATION.seek.local(),
         }
     }
 
@@ -424,6 +428,8 @@ impl SnapAccessCore {
             blob_prefetcher,
             data,
             range: None,
+            next_time: ENGINE_SEEK_DURATION.next.local(),
+            seek_time: ENGINE_SEEK_DURATION.seek.local(),
         }
     }
 
@@ -447,6 +453,8 @@ impl SnapAccessCore {
             blob_prefetcher: None,
             data,
             range: None,
+            next_time: ENGINE_SEEK_DURATION.next.local(),
+            seek_time: ENGINE_SEEK_DURATION.seek.local(),
         }
     }
 
@@ -1054,6 +1062,8 @@ impl SnapAccessCore {
             blob_prefetcher: None,
             data,
             range: None,
+            next_time: ENGINE_SEEK_DURATION.next.local(),
+            seek_time: ENGINE_SEEK_DURATION.seek.local(),
         };
 
         let mut rows = vec![];
@@ -1629,6 +1639,8 @@ pub struct Iterator {
     blob_prefetcher: Option<BlobPrefetcher>,
     data: ShardData,
     range: Option<(Bytes, Bytes)>, // [outer_lower_bound, outer_upper_bound)
+    next_time: LocalHistogram,
+    seek_time: LocalHistogram,
 }
 
 impl Iterator {
@@ -1670,7 +1682,7 @@ impl Iterator {
 
     #[maybe_async::both]
     pub async fn next(&mut self) {
-        let _t = ENGINE_SEEK_DURATION.next.start_timer();
+        let timer = Instant::now();
 
         if self.all_versions
             && self.valid()
@@ -1682,6 +1694,9 @@ impl Iterator {
         }
         next!(self.inner).await;
         self.parse_item().await;
+
+        self.next_time
+            .observe(duration_to_sec(timer.saturating_elapsed()));
     }
 
     fn update_item(&mut self) {
@@ -1716,7 +1731,7 @@ impl Iterator {
     // direction. Behavior would be reversed is iterating backwards.
     #[maybe_async::both]
     pub async fn seek(&mut self, key: &[u8]) {
-        let _t = ENGINE_SEEK_DURATION.seek.start_timer();
+        let timer = Instant::now();
 
         if key.len() <= self.data.inner_key_off {
             self.inner.rewind().await;
@@ -1724,6 +1739,9 @@ impl Iterator {
             self.inner.seek(InnerKey::from_outer_key(key)).await;
         }
         self.parse_item().await;
+
+        self.seek_time
+            .observe(duration_to_sec(timer.saturating_elapsed()));
     }
 
     // rewind would rewind the iterator cursor all the way to zero-th position,
@@ -1732,7 +1750,7 @@ impl Iterator {
     // with a seek().
     #[maybe_async::both]
     pub async fn rewind(&mut self) {
-        let _t = ENGINE_SEEK_DURATION.seek.start_timer();
+        let timer = Instant::now();
 
         self.inner.rewind().await;
         if self.inner.valid() {
@@ -1748,6 +1766,9 @@ impl Iterator {
             }
         }
         self.parse_item().await;
+
+        self.seek_time
+            .observe(duration_to_sec(timer.saturating_elapsed()));
     }
 
     pub fn set_all_versions(&mut self, all_versions: bool) {
