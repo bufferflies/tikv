@@ -5,13 +5,17 @@ use prometheus::*;
 use prometheus_static_metric::*;
 
 make_static_metric! {
-    pub label_enum CompactFailureType {
+    pub label_enum ServiceFailureType {
         queue_full,
         wait_timeout,
     }
 
     pub struct RemoteCompactFailedRequestsCounterVec: IntCounter {
-        "type" => CompactFailureType,
+        "type" => ServiceFailureType,
+    }
+
+    pub struct RemoteCopFailedRequestsCounterVec: IntCounter {
+        "type" => ServiceFailureType,
     }
 }
 
@@ -32,6 +36,18 @@ lazy_static! {
     )
     .unwrap();
 
+    pub static ref REMOTE_COPR_PROCESSING_REQ_COUNTER: IntGauge = register_int_gauge!(
+        "tikv_worker_remote_cop_processing_requests_counter",
+        "Number of remote coprocessor requests under processing"
+    ).unwrap();
+
+    pub static ref REMOTE_COPR_FAILED_REQUESTS_COUNTER_VEC: RemoteCopFailedRequestsCounterVec = register_static_int_counter_vec!(
+        RemoteCopFailedRequestsCounterVec,
+        "tikv_worker_remote_cop_failed_requests_counter",
+        "Number of remote coprocessor requests that failed to acquire permit, by failure reason",
+        &["type"]
+    )
+    .unwrap();
 
     pub static ref REMOTE_COPR_DAG_REQ_COUNTER: IntCounter = register_int_counter!(
         "tikv_worker_remote_cop_dag_request_counter",
