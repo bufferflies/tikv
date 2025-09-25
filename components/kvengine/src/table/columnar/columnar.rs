@@ -189,6 +189,12 @@ impl TableMeta {
             columns,
         }
     }
+
+    pub fn get_last_handle(&self) -> &[u8] {
+        self.handle_index
+            .buf
+            .get_not_null_value(self.handle_index.buf.length() - 1)
+    }
 }
 
 pub struct MinMaxIndex {
@@ -733,6 +739,13 @@ impl ColumnarFile {
 
     pub(crate) fn has_table(&self, table_id: i64) -> bool {
         self.core.tables.contains_key(&table_id)
+    }
+
+    pub fn get_table_last_handle(&self, table_id: i64) -> Option<&[u8]> {
+        self.core
+            .tables
+            .get(&table_id)
+            .map(|table| table.get_last_handle())
     }
 
     pub fn get_file(&self) -> Arc<dyn File> {

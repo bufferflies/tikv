@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use bytes::Buf;
 use clap::Args;
 use cloud_encryption::MasterKey;
 use cloud_worker::{SchemaManager, SchemaManagerConfig, SchemaMgrContext};
@@ -31,7 +32,7 @@ use native_br::common::{create_pd_client, send_request_to_store};
 use pd_client::PdClient;
 use protobuf::Message;
 use security::{SecurityConfig, SecurityManager};
-use tidb_query_datatype::codec::table::decode_table_id;
+use tidb_query_datatype::codec::table::{decode_common_handle, decode_int_handle, decode_table_id};
 use tikv_util::{
     config::AbsoluteOrPercentSize, error, info, memory::MemoryLimiter, worker_pool::WorkerPool,
 };
@@ -41,7 +42,12 @@ const CHECK_RESULT_FILE: &str = "check_columnar_result.txt";
 // This command is used to check the pk column loss in columnar files.
 // See https://github.com/tidbcloud/cloud-storage-engine/pull/3210 for more details.
 const CHECK_TYPE_PK_COLUMN: &str = "check-pk-column";
+// This command is used to check the multiple table orders and overlap in
+// columnar files.
 const CHECK_TYPE_MUL_TABLE_ORDERS: &str = "check-mul-table-orders";
+// This command is used to check biggest key in columnar file.
+// See https://github.com/tidbcloud/cloud-storage-engine/pull/3561 for more details.
+const CHECK_TYPE_BIGGEST_HANDLE: &str = "check-biggest-handle";
 
 #[derive(Args)]
 pub struct CheckColumnarArgs {
@@ -381,9 +387,13 @@ async fn check_columnar_for_shard(
             check_pk_column(&snap, &schema_file, shard).await
         }
         CHECK_TYPE_MUL_TABLE_ORDERS => check_mul_table_orders(&snap),
+        CHECK_TYPE_BIGGEST_HANDLE => check_biggest_handle(&snap),
         _ => Err(format!(
-            "invalid check type: {}, available types: {}, {}",
-            config.check_type, CHECK_TYPE_PK_COLUMN, CHECK_TYPE_MUL_TABLE_ORDERS
+            "invalid check type: {}, available types: {}, {}, {}",
+            config.check_type,
+            CHECK_TYPE_PK_COLUMN,
+            CHECK_TYPE_MUL_TABLE_ORDERS,
+            CHECK_TYPE_BIGGEST_HANDLE
         )),
     }
 }
@@ -500,6 +510,54 @@ fn check_mul_table_orders(snap: &SnapAccess) -> Result<bool, String> {
         }
         last_key = biggest_key;
         last_file_id = file.id();
+    }
+    Ok(true)
+}
+
+fn check_biggest_handle(snap: &SnapAccess) -> Result<bool, String> {
+    let Some(schema_file) = snap.get_schema_file() else {
+        return Ok(false);
+    };
+    let columnar_files = snap.get_columnar_levels();
+    for (file, _) in &columnar_files {
+        let biggest_key = file.get_biggest();
+        let biggest_table_id = decode_table_id(biggest_key.as_ref()).unwrap();
+        let Some(schema) = schema_file.get_table(biggest_table_id) else {
+            continue;
+        };
+        let Some(mut last_handle) = file.get_table_last_handle(biggest_table_id) else {
+            continue;
+        };
+        let is_common_handle = schema.is_common_handle();
+        if is_common_handle {
+            let handle_in_biggest_key = decode_common_handle(biggest_key.as_ref()).unwrap();
+            let biggest_handle = &last_handle[..last_handle.len() - 1];
+            if handle_in_biggest_key != biggest_handle {
+                error!(
+                    "keyspace_id: {}, shard: {}, file_id: {}, last handle mismatch: {}, {}",
+                    snap.get_keyspace_id(),
+                    snap.get_id(),
+                    file.id(),
+                    log_wrappers::hex_encode_upper(handle_in_biggest_key),
+                    log_wrappers::hex_encode_upper(biggest_handle)
+                );
+                return Ok(false);
+            }
+        } else {
+            let handle_in_biggest_key = decode_int_handle(biggest_key.as_ref()).unwrap();
+            let biggest_handle = last_handle.get_i64_le() - 1;
+            if handle_in_biggest_key != biggest_handle {
+                error!(
+                    "keyspace_id: {}, shard: {}, file_id: {}, last handle mismatch: {}, {}",
+                    snap.get_keyspace_id(),
+                    snap.get_id(),
+                    file.id(),
+                    handle_in_biggest_key,
+                    biggest_handle
+                );
+                return Ok(false);
+            }
+        }
     }
     Ok(true)
 }
