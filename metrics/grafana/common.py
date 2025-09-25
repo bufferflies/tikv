@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Optional, Union
 
 import attr
@@ -38,6 +39,11 @@ DATASOURCE = f"${{{DATASOURCE_INPUT.name}}}"
 ADDITIONAL_GROUPBY = "$additional_groupby"
 OPTIONAL_QUANTILE = "optional_quantile"
 OPTIONAL_QUANTILE_INPUT = "$" + OPTIONAL_QUANTILE
+
+# Used in skip_default_instance_selector. match instance or worker_instance default label selector.
+_INSTANCE_OR_WORKER_RE = re.compile(
+    r'^\s*instance\s*(=~|=|!=|!~)\s*"\s*\$\{?(instance|worker_instance)(?::regex)?\}?\s*"\s*$'
+)
 
 
 @attr.s
@@ -91,7 +97,8 @@ class Expr(object):
         default=[
             r'k8s_cluster="$k8s_cluster"',
             r'tidb_cluster="$tidb_cluster"',
-            r'instance=~"$instance"',
+            r'instance=~"${instance:regex}"',
+            r'instance=~"${worker_instance:regex}"',
         ],
         validator=instance_of(list),
     )
@@ -105,10 +112,14 @@ class Expr(object):
             "by ({})".format(", ".join(self.by_labels)) if self.by_labels else ""
         )
         func = self.func if self.func else ""
-        label_selectors = self.default_label_selectors + self.label_selectors
+        label_selectors = self.default_label_selectors
         if self.skip_default_instance:
             # Remove instance=~"$instance"
-            label_selectors = [l for l in label_selectors if "$instance" not in l]
+            label_selectors = [
+                l for l in label_selectors if not _INSTANCE_OR_WORKER_RE.match(l)
+            ]
+        label_selectors = label_selectors + self.label_selectors
+
         assert all(
             ("=" in item or "~" in item) for item in label_selectors
         ), f"Not all items contain '=' or '~', invalid {self.label_selectors}"

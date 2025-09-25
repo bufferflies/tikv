@@ -309,6 +309,23 @@ def Cluster() -> RowPanel:
                             label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                         legend_format=r"quota-{{instance}}",
+                        hide=True,
+                    ),
+                    target(
+                        expr=expr_max(
+                            "tikv_server_cpu_cores_quota",
+                            label_selectors=['job=~".*(tikv|copr).*"'],
+                            by_labels=[],
+                        ),
+                        legend_format=r"max-quota",
+                    ),
+                    target(
+                        expr=expr_min(
+                            "tikv_server_cpu_cores_quota",
+                            label_selectors=['job=~".*(tikv|copr).*"'],
+                            by_labels=[],
+                        ),
+                        legend_format=r"min-quota",
                     ),
                 ],
             ),
@@ -329,6 +346,23 @@ def Cluster() -> RowPanel:
                             label_selectors=['job=~".*(tikv|copr).*"'],
                         ),
                         legend_format=r"quota-{{instance}}",
+                        hide=True,
+                    ),
+                    target(
+                        expr=expr_max(
+                            "tikv_server_memory_quota_bytes",
+                            label_selectors=['job=~".*(tikv|copr).*"'],
+                            by_labels=[],
+                        ),
+                        legend_format=r"max-quota",
+                    ),
+                    target(
+                        expr=expr_min(
+                            "tikv_server_memory_quota_bytes",
+                            label_selectors=['job=~".*(tikv|copr).*"'],
+                            by_labels=[],
+                        ),
+                        legend_format=r"min-quota",
                     ),
                 ],
             ),
