@@ -21,3 +21,13 @@ impl HeaderExt for http::HeaderMap {
             .is_some_and(|x| x == CONTENT_TYPE_PROTOBUF)
     }
 }
+
+#[macro_export]
+macro_rules! http_response {
+    ($code:expr, $body:expr) => {
+        Ok(hyper::Response::builder()
+            .status($code)
+            .body(hyper::Body::from($body))
+            .unwrap())
+    };
+}

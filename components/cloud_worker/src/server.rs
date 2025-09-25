@@ -41,7 +41,7 @@ use tikv_util::{
     deadline::Deadline,
     defer, error,
     http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
-    info,
+    http_response, info,
     memory::MemoryLimiter,
     metrics::{dump, dump_to},
     quota_limiter::QuotaLimiter,
@@ -154,10 +154,7 @@ where
                 tikv_util::init_task_local(async move {
                     let path = req.uri().path().to_owned();
                     match path.as_ref() {
-                        "/healthz" => Ok(hyper::Response::builder()
-                            .status(200)
-                            .body(hyper::Body::from("ok"))
-                            .unwrap()),
+                        "/healthz" => http_response!(hyper::StatusCode::OK, "ok"),
                         "/compact" => handle_compaction(ctx, req).await,
                         path if path.starts_with("/cdc") => {
                             replication_worker::handle_cdc_request(
@@ -180,10 +177,7 @@ where
                             } else if req.method() == Method::POST {
                                 CloudStatusServer::get_symbol(req).await
                             } else {
-                                Ok(hyper::Response::builder()
-                                    .status(404)
-                                    .body(hyper::Body::from("Not Found"))
-                                    .unwrap())
+                                http_response!(hyper::StatusCode::NOT_FOUND, "Not Found")
                             }
                         }
                         #[cfg(debug_assertions)]
@@ -200,10 +194,7 @@ where
                         path if path.starts_with(native_br::v1x::API_V1X) => {
                             native_br::v1x::serve(ctx.br_manager.clone(), req).await
                         }
-                        _ => Ok(hyper::Response::builder()
-                            .status(404)
-                            .body(hyper::Body::from("Not Found"))
-                            .unwrap()),
+                        _ => http_response!(hyper::StatusCode::NOT_FOUND, "Not Found"),
                     }
                 })
             }))
@@ -235,11 +226,7 @@ async fn handle_compaction(
     let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
     let result: Result<CompactionRequest, _> = serde_json::from_slice(&body_bytes);
     if let Err(err) = &result {
-        let err_str = err.to_string();
-        return Ok(hyper::Response::builder()
-            .status(http::StatusCode::BAD_REQUEST)
-            .body(err_str.into())
-            .unwrap());
+        return http_response!(http::StatusCode::BAD_REQUEST, err.to_string());
     }
     let comp_req = result.unwrap();
 
@@ -254,20 +241,17 @@ async fn handle_compaction(
         Ok(None) => {
             // Queue is full
             REMOTE_COMPACT_FAILED_REQUESTS_COUNTER_VEC.queue_full.inc();
-            Ok(hyper::Response::builder()
-                .status(http::StatusCode::SERVICE_UNAVAILABLE)
-                .body(hyper::Body::from("compaction request wait queue is full"))
-                .unwrap())
+            http_response!(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                "compaction request wait queue is full"
+            )
         }
         Err(_) => {
             // Timeout
             REMOTE_COMPACT_FAILED_REQUESTS_COUNTER_VEC
                 .wait_timeout
                 .inc();
-            Ok(hyper::Response::builder()
-                .status(http::StatusCode::SERVICE_UNAVAILABLE)
-                .body(hyper::Body::from("wait permit timeout"))
-                .unwrap())
+            http_response!(http::StatusCode::SERVICE_UNAVAILABLE, "wait permit timeout")
         }
     }
 }
@@ -365,10 +349,7 @@ async fn handle_sleep(_ctx: Arc<Context>) -> hyper::Result<hyper::Response<hyper
     info!("sleep for 5 seconds");
     std::thread::sleep(Duration::from_secs(5));
     info!("sleep done");
-    Ok(hyper::Response::builder()
-        .status(200)
-        .body(hyper::Body::from("ok"))
-        .unwrap())
+    http_response!(http::StatusCode::OK, "OK")
 }
 
 const DEFAULT_COP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -382,14 +363,12 @@ async fn handle_remote_coprocessor(
     let req_body = hyper::body::to_bytes(body).await?;
     let decode_res = decode_remote_cop_request(req_body.chunk());
     if let Err(err) = decode_res {
-        let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        return http_response!(http::StatusCode::BAD_REQUEST, format!("{:?}", err));
     }
     let (req_data, mem_data, snap_data) = decode_res.unwrap();
     let mut cop_req = kvproto::coprocessor::Request::default();
     if let Err(err) = cop_req.merge_from_bytes(req_data) {
-        let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        return http_response!(http::StatusCode::BAD_REQUEST, format!("{:?}", err));
     }
     let cop_ctx = cop_req.get_context();
     let keyspace_id = cop_ctx.keyspace_id;
@@ -403,30 +382,72 @@ async fn handle_remote_coprocessor(
 
     let res =
         tokio::time::timeout(timeout, ctx.coprocessor_limiter.acquire_permit(keyspace_id)).await;
-    if res.is_err() {
-        info!(
-            "wait permit timeout";
-            "tag" => tag,
-        );
-        let body = hyper::Body::from("wait permit timeout");
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+    match res {
+        Ok(Some(_permit)) => {
+            handle_remote_coprocessor_internal(
+                ctx,
+                cop_req,
+                req_body.len(),
+                get_dfs_remote_cache_addr(&parts),
+                mem_data,
+                snap_data,
+                handle_start,
+                timeout,
+                deadline,
+                tag,
+                accept_pb,
+            )
+            .await
+        }
+        Ok(None) => {
+            // Queue is full
+            REMOTE_COPR_FAILED_REQUESTS_COUNTER_VEC.queue_full.inc();
+            http_response!(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                "coprocessor request wait queue is full"
+            )
+        }
+        Err(_) => {
+            // Timeout
+            REMOTE_COPR_FAILED_REQUESTS_COUNTER_VEC.wait_timeout.inc();
+            http_response!(http::StatusCode::SERVICE_UNAVAILABLE, "wait permit timeout")
+        }
     }
-    let _permit = res.unwrap();
+}
+
+async fn handle_remote_coprocessor_internal(
+    ctx: Arc<Context>,
+    cop_req: kvproto::coprocessor::Request,
+    req_len: usize,
+    dfs_remote_cache_addr: Option<&str>,
+    mem_data: &[u8],
+    snap_data: &[u8],
+    start_ts: Instant,
+    timeout: Duration,
+    deadline: Deadline,
+    tag: String,
+    accept_pb: bool,
+) -> hyper::Result<hyper::Response<hyper::Body>> {
+    REMOTE_COPR_PROCESSING_REQ_COUNTER.inc();
+    defer! {
+        REMOTE_COPR_PROCESSING_REQ_COUNTER.dec()
+    }
 
     let req_type = cop_req.get_tp();
     let snap_start = Instant::now_coarse();
     let use_cache_fs = matches!(req_type, REQ_TYPE_DAG);
-    let snap_ctx = ctx.get_snap_ctx(use_cache_fs, get_dfs_remote_cache_addr(&parts));
+    let snap_ctx = ctx.get_snap_ctx(use_cache_fs, dfs_remote_cache_addr);
     let snap_access_res =
         SnapAccess::construct_snapshot(&tag, &snap_ctx, mem_data, snap_data).await;
     if let Err(err) = snap_access_res.as_ref() {
-        let body = hyper::Body::from(format!("{:?}", err));
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        return http_response!(http::StatusCode::BAD_REQUEST, format!("{:?}", err));
     }
-    if handle_start.saturating_elapsed() > timeout {
+    if start_ts.saturating_elapsed() > timeout {
         info!("construct snapshot timeout"; "tag" => tag);
-        let body = hyper::Body::from("construct snapshot timeout");
-        return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+        return http_response!(
+            http::StatusCode::REQUEST_TIMEOUT,
+            "construct snapshot timeout"
+        );
     }
     let snap_access = snap_access_res.unwrap();
 
@@ -448,14 +469,18 @@ async fn handle_remote_coprocessor(
             }
             Err(err) => {
                 error!("{} prefetch failed, error {:?}", tag, err);
-                let body = hyper::Body::from("prefetch segments failed");
-                return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+                return http_response!(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "prefetch segments failed"
+                );
             }
         }
         if deadline.check().is_err() {
             info!("prefetch timeout"; "tag" => tag);
-            let body = hyper::Body::from("prefetch segments timeout");
-            return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+            return http_response!(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                "prefetch segments timeout"
+            );
         }
     }
 
@@ -476,22 +501,24 @@ async fn handle_remote_coprocessor(
             let cop_resp = tikv::coprocessor::make_error_response(err);
             let body = hyper::Body::from(cop_resp.write_to_bytes().unwrap());
             return Ok(hyper::Response::builder()
-                .status(500)
+                .status(http::StatusCode::INTERNAL_SERVER_ERROR)
                 .header(CONTENT_TYPE, CONTENT_TYPE_PROTOBUF)
                 .body(body)
                 .unwrap());
         } else {
-            let body = hyper::Body::from(format!("{:?}", err));
-            return Ok(hyper::Response::builder().status(500).body(body).unwrap());
+            return http_response!(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{:?}", err)
+            );
         }
     }
 
     let finish_time = Instant::now_coarse();
-    let permit_wait_duration = snap_start.saturating_duration_since(handle_start);
+    let permit_wait_duration = snap_start.saturating_duration_since(start_ts);
     let snap_duration = prefetch_start.saturating_duration_since(snap_start);
     let prefetch_duration = process_start.saturating_duration_since(prefetch_start);
     let process_duration = finish_time.saturating_duration_since(process_start);
-    let handle_duration = finish_time.saturating_duration_since(handle_start);
+    let handle_duration = finish_time.saturating_duration_since(start_ts);
     REMOTE_COPR_SNAPSHOT_HISTOGRAM.observe(snap_duration.as_secs_f64());
     REMOTE_COPR_PREFETCH_HISTOGRAM.observe(prefetch_duration.as_secs_f64());
     REMOTE_COPR_REQ_HANDLE_HISTOGRAM.observe(handle_duration.as_secs_f64());
@@ -499,7 +526,7 @@ async fn handle_remote_coprocessor(
     info!(
         "finished remote coprocessor";
         "tag" => &tag,
-        "req_size" => req_body.len(),
+        "req_size" => req_len,
         "resp_size" => response.data.len(),
         "timeout" => ?timeout,
         "permit_wait_duration" => ?permit_wait_duration,
@@ -525,17 +552,13 @@ async fn handle_remote_coprocessor(
         _ => {}
     }
     match response.write_to_bytes() {
-        Ok(response_data) => {
-            let resp = hyper::Response::builder()
-                .status(200)
-                .body(response_data.into())
-                .unwrap();
-            Ok(resp)
-        }
+        Ok(response_data) => http_response!(http::StatusCode::OK, response_data),
         Err(err) => {
             error!("{} serialize response failed, error {:?}", tag, err);
-            let body = hyper::Body::from(format!("{:?}", err));
-            Ok(hyper::Response::builder().status(500).body(body).unwrap())
+            http_response!(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{:?}", err)
+            )
         }
     }
 }

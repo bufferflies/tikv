@@ -5910,8 +5910,8 @@ def CloudWorkerService() -> RowPanel:
     layout.row(
         [
             graph_panel(
-                title="Concurrent Compaction Requests",
-                description="Number of remote compaction requests being processed or waiting",
+                title="Remote Processing Requests",
+                description="Number of remote compaction or coprocessor requests are under processing",
                 yaxes=yaxes(left_format=UNITS.SHORT),
                 targets=[
                     target(
@@ -5922,13 +5922,23 @@ def CloudWorkerService() -> RowPanel:
                             skip_default_instance=True,
                         ),
                         additional_groupby=True,
-                        legend_format="processing",
+                        legend_format="compact-processing",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_cop_processing_requests_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
+                            by_labels=[],
+                            skip_default_instance=True,
+                        ),
+                        additional_groupby=True,
+                        legend_format="copr-processing",
                     ),
                 ],
             ),
             graph_panel(
-                title="Compaction Request Failures",
-                description="The number of compaction requests that failed to acquire permit, by failure reason",
+                title="Remote Requests Failures",
+                description="The number of remote requests that failed to acquire permit, by failure reason",
                 yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
                 targets=[
                     target(
@@ -5939,6 +5949,17 @@ def CloudWorkerService() -> RowPanel:
                             skip_default_instance=True,
                         ),
                         additional_groupby=True,
+                        legend_format="compact-failure",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_cop_failed_requests_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
+                            by_labels=["type"],
+                            skip_default_instance=True,
+                        ),
+                        additional_groupby=True,
+                        legend_format="copr-failure",
                     ),
                 ],
             ),

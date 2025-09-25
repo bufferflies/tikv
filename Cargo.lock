@@ -10091,6 +10091,7 @@ dependencies = [
  "gag",
  "grpcio",
  "http 0.2.9",
+ "hyper",
  "kvproto",
  "lazy_static",
  "libc 0.2.172",
