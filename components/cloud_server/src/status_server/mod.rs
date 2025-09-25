@@ -49,7 +49,7 @@ use kvproto::{
     metapb::BucketStats,
     pdpb,
     pdpb::{Peers, SyncRegionResponse},
-    raft_serverpb::StoreIdent,
+    raft_serverpb::{PeerState, StoreIdent},
 };
 use online_config::OnlineConfig;
 use openssl::{
@@ -69,8 +69,8 @@ use rfstore::{
     store::{
         peer_storage::{collect_prefix_regions, load_raft_engine_meta, load_region_state},
         state::RaftState,
-        write_engine_meta_bytes, Callback, CasualMessage, RegionSnapshot, StoreMsg,
-        RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY,
+        write_engine_meta_bytes, write_peer_state, Callback, CasualMessage, RegionSnapshot,
+        StoreMsg, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM, TERM_KEY,
     },
     RaftRouter, RaftStoreRouter,
 };
@@ -242,6 +242,13 @@ impl StatusServer {
                 )));
             }
         };
+        write_peer_state(
+            wb,
+            peer_id,
+            region_local_state.get_region(),
+            PeerState::Normal,
+            None,
+        );
         let mut enc_start_key = region_local_state.get_region().get_start_key();
         let mut enc_end_key = region_local_state.get_region().get_end_key();
         let start_key = decode_bytes(&mut enc_start_key, false).unwrap();
