@@ -533,7 +533,7 @@ lazy_static! {
         auto_flush_from!(ASYNC_REQUESTS_DURATIONS, AsyncRequestsDurationVec);
 }
 
-const FLUSH_METRICS_INTERVAL: Duration = Duration::from_secs(10);
+const FLUSH_METRICS_INTERVAL: Duration = Duration::from_secs(1);
 struct LocalRequestSourceMetrics {
     pub count: LocalIntCounter,
     pub duration_us: LocalIntCounter,

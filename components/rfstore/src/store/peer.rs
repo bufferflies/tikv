@@ -519,7 +519,7 @@ pub(crate) struct Peer {
     pub(crate) encryption_buf: Vec<u8>,
     pub commit_log: LocalHistogram,
     pub keyspace_name: String,
-    pub last_flush_metrics_time: Instant,
+    pub last_flush_metrics_time: tikv_util::time::Instant,
 }
 
 impl Peer {
@@ -623,7 +623,7 @@ impl Peer {
             encryption_key,
             encryption_buf: vec![],
             commit_log,
-            last_flush_metrics_time: Instant::now(),
+            last_flush_metrics_time: tikv_util::time::Instant::now_coarse(),
             keyspace_name,
         };
         // If this region has only one peer and I am the one, campaign directly.
@@ -1688,8 +1688,8 @@ impl Peer {
 
     pub fn flush_metrics(&mut self, dur: f64) {
         self.commit_log.observe(dur);
-        let now = Instant::now();
-        if now - self.last_flush_metrics_time >= Duration::from_secs(10) {
+        let now = tikv_util::time::Instant::now_coarse();
+        if now - self.last_flush_metrics_time >= Duration::from_secs(1) {
             self.last_flush_metrics_time = now;
             self.commit_log.flush();
             if !self.keyspace_name.is_empty() {

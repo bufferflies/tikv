@@ -449,7 +449,7 @@ impl Applier {
             apply_log_histogram,
             apply_histogram,
             store_time_histogram,
-            last_meterics_flush_time: Instant::now(),
+            last_meterics_flush_time: Instant::now_coarse(),
             keyspace_name,
         }
     }
@@ -856,8 +856,8 @@ impl Applier {
     fn record_apply_metry(&mut self, dur: Duration) {
         self.apply_histogram.observe(dur.as_secs_f64()); // waterfall
         self.apply_log_histogram.observe(dur.as_secs_f64());
-        let now = Instant::now();
-        if now.duration_since(self.last_meterics_flush_time) >= Duration::from_secs(10) {
+        let now = Instant::now_coarse();
+        if now.duration_since(self.last_meterics_flush_time) >= Duration::from_secs(1) {
             self.apply_histogram.flush();
             self.apply_log_histogram.flush();
             self.store_time_histogram.flush();
