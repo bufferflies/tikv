@@ -30,8 +30,11 @@ use kvproto::{
     raft_serverpb::{ExtraMessage, ExtraMessageType, MergeState, PeerState, RaftMessage},
     *,
 };
-use pd_client::{new_bucket_write_stats, simple_merge_bucket_write_stats, BucketMeta, BucketStat};
-use prometheus::Histogram;
+use pd_client::{
+    keyspace::to_keyspace_name, new_bucket_write_stats, simple_merge_bucket_write_stats,
+    BucketMeta, BucketStat,
+};
+use prometheus::local::LocalHistogram;
 use protobuf::Message;
 use raft::{
     self, Changer, LightReady, ProgressState, ProgressTracker, RawNode, Ready, SnapshotStatus,
@@ -514,7 +517,9 @@ pub(crate) struct Peer {
     pub check_stale_peers: Vec<metapb::Peer>,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) encryption_buf: Vec<u8>,
-    pub commit_log: Histogram,
+    pub commit_log: LocalHistogram,
+    pub keyspace_name: String,
+    pub last_flush_metrics_time: Instant,
 }
 
 impl Peer {
@@ -571,10 +576,12 @@ impl Peer {
         let encryption_key = ps.get_encryption_key();
         let raft_group = RawNode::new(&raft_cfg, ps, &logger)?;
         let keyspace_id = rfengine::get_region_keyspace_id_u32(region).unwrap_or(0);
-        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+        let keyspace_name = to_keyspace_name(keyspace_id)
             .map(|name| name.to_string())
             .unwrap_or_default();
-        let commit_log = PEER_COMMIT_LOG_HISTOGRAM.with_label_values(&[&keyspace_name]);
+        let commit_log = PEER_COMMIT_LOG_HISTOGRAM
+            .with_label_values(&[&keyspace_name])
+            .local();
         let mut peer = Peer {
             peer,
             region_id: region.get_id(),
@@ -616,6 +623,8 @@ impl Peer {
             encryption_key,
             encryption_buf: vec![],
             commit_log,
+            last_flush_metrics_time: Instant::now(),
+            keyspace_name,
         };
         // If this region has only one peer and I am the one, campaign directly.
         if region.get_peers().len() == 1 && region.get_peers()[0].get_store_id() == store_id {
@@ -1677,6 +1686,29 @@ impl Peer {
         self.raft_group.advance_append_async(ready)
     }
 
+    pub fn flush_metrics(&mut self, dur: f64) {
+        self.commit_log.observe(dur);
+        let now = Instant::now();
+        if now - self.last_flush_metrics_time >= Duration::from_secs(10) {
+            self.last_flush_metrics_time = now;
+            self.commit_log.flush();
+            if !self.keyspace_name.is_empty() {
+                return;
+            }
+            let keyspace_id = self.get_keyspace_id().unwrap_or(0);
+            let keyspace_name = to_keyspace_name(keyspace_id)
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            if self.keyspace_name == keyspace_name {
+                return;
+            }
+            self.keyspace_name = keyspace_name;
+            self.commit_log = PEER_COMMIT_LOG_HISTOGRAM
+                .with_label_values(&[self.keyspace_name.as_ref()])
+                .local();
+        }
+    }
+
     pub(crate) fn handle_raft_committed_entries(
         &mut self,
         ctx: &mut RaftContext,
@@ -1716,7 +1748,7 @@ impl Peer {
                     let dur = duration_to_sec(
                         (ctx.current_time.unwrap() - propose_time).to_std().unwrap(),
                     );
-                    self.commit_log.observe(dur);
+                    self.flush_metrics(dur);
                     self.maybe_renew_leader_lease(propose_time, ctx, None);
                     lease_to_be_updated = false;
                 }

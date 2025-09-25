@@ -156,12 +156,6 @@ macro_rules! handle_request {
     }
 }
 
-const READ_INDEX_REQUEST: &str = "read_index";
-const COPROCESSOR_REQUEST: &str = "coprocessor";
-const COPROCESSOR_STREAM_REQUEST: &str = "coprocessor_stream";
-const SPLIT_REGION_REQUEST: &str = "split_region";
-const UNSAFE_DESTROY_RANGE_REQUEST: &str = "unsafe_destroy_range";
-
 impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service<T, L, F> {
     handle_request!(kv_get, future_get, GetRequest, GetResponse);
     handle_request!(kv_scan, future_scan, ScanRequest, ScanResponse);
@@ -267,7 +261,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             let resp = future.await?.consume();
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                COPROCESSOR_REQUEST,
+                GrpcTypeKind::coprocessor.get_str(),
                 keyspace_id,
                 begin_instant.saturating_elapsed(),
             );
@@ -298,7 +292,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             let resp = future.await;
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                COPROCESSOR_REQUEST,
+                GrpcTypeKind::delegate_coprocessor.get_str(),
                 keyspace_id,
                 begin_instant.saturating_elapsed(),
             );
@@ -458,7 +452,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             }
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                UNSAFE_DESTROY_RANGE_REQUEST,
+                GrpcTypeKind::unsafe_destroy_range.get_str(),
                 keyspace_id,
                 begin_instant.saturating_elapsed(),
             );
@@ -496,7 +490,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             match sink.send_all(&mut stream).await.map_err(Error::from) {
                 Ok(_) => {
                     record_request_grpc_metrics(
-                        COPROCESSOR_STREAM_REQUEST,
+                        GrpcTypeKind::coprocessor_stream.get_str(),
                         keyspace_id,
                         begin_instant.saturating_elapsed(),
                     );
@@ -652,7 +646,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             }
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                SPLIT_REGION_REQUEST,
+                GrpcTypeKind::split_region.get_str(),
                 keyspace_id,
                 begin_instant.saturating_elapsed(),
             );
@@ -736,7 +730,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             }
             sink.success(resp).await?;
             record_request_grpc_metrics(
-                READ_INDEX_REQUEST,
+                GrpcTypeKind::read_index.get_str(),
                 keyspace_id,
                 begin_instant.saturating_elapsed(),
             );

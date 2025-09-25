@@ -302,6 +302,7 @@ pub struct Applier {
     pub(crate) store_time_histogram: LocalHistogram,
 
     last_meterics_flush_time: Instant,
+    keyspace_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -449,6 +450,7 @@ impl Applier {
             apply_histogram,
             store_time_histogram,
             last_meterics_flush_time: Instant::now(),
+            keyspace_name,
         }
     }
 
@@ -860,6 +862,28 @@ impl Applier {
             self.apply_log_histogram.flush();
             self.store_time_histogram.flush();
             self.last_meterics_flush_time = now;
+            // Try to update keyspace name in case it is empty string.
+            if !self.keyspace_name.is_empty() {
+                return;
+            }
+            let keyspace_name = pd_client::keyspace::to_keyspace_name(
+                rfengine::get_region_keyspace_id_u32(&self.region).unwrap_or(0),
+            )
+            .map(|name| name.to_string())
+            .unwrap_or_default();
+            if self.keyspace_name == keyspace_name {
+                return;
+            }
+            self.keyspace_name = keyspace_name;
+            self.apply_log_histogram = STORE_APPLY_LOG_HISTOGRAM
+                .with_label_values(&[self.keyspace_name.as_ref()])
+                .local();
+            self.apply_histogram = APPLY_TIME_HISTOGRAM
+                .with_label_values(&[self.keyspace_name.as_ref()])
+                .local();
+            self.store_time_histogram = STORE_TIME_HISTOGRAM
+                .with_label_values(&[self.keyspace_name.as_ref()])
+                .local();
         }
     }
 

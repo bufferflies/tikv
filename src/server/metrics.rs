@@ -533,6 +533,7 @@ lazy_static! {
         auto_flush_from!(ASYNC_REQUESTS_DURATIONS, AsyncRequestsDurationVec);
 }
 
+const FLUSH_METRICS_INTERVAL: Duration = Duration::from_secs(10);
 struct LocalRequestSourceMetrics {
     pub count: LocalIntCounter,
     pub duration_us: LocalIntCounter,
@@ -560,7 +561,7 @@ thread_local! {
 pub fn record_request_source_metrics(source: String, duration: Duration) {
     let need_flush = LAST_LOCAL_FLUSH_TIME.with(|last_local_flush_time| {
         let now = Instant::now_coarse();
-        if now - last_local_flush_time.get() > Duration::from_secs(1) {
+        if now - last_local_flush_time.get() > FLUSH_METRICS_INTERVAL {
             last_local_flush_time.set(now);
             true
         } else {
@@ -583,14 +584,16 @@ pub fn record_request_source_metrics(source: String, duration: Duration) {
 
 struct LocalGrpcRequestMetrics {
     pub duration: LocalHistogram,
+    pub empty_keyspace_name: bool,
 }
 
 impl LocalGrpcRequestMetrics {
-    fn new(tp: &str, key_space_name: &str) -> Self {
+    fn new(tp: &str, keyspace_name: &str) -> Self {
         LocalGrpcRequestMetrics {
             duration: GRPC_MSG_HISTOGRAM_VEC
-                .with_label_values(&[tp, key_space_name])
+                .with_label_values(&[tp, keyspace_name])
                 .local(),
+            empty_keyspace_name: keyspace_name.is_empty(),
         }
     }
 }
@@ -604,7 +607,7 @@ thread_local! {
 pub fn record_request_grpc_metrics(tp: &'static str, keyspace_id: u32, duration: Duration) {
     let need_flush = LAST_GRPC_LOCAL_FLUSH_TIME.with(|last_local_flush_time| {
         let now = Instant::now_coarse();
-        if now - last_local_flush_time.get() > Duration::from_secs(1) {
+        if now - last_local_flush_time.get() > FLUSH_METRICS_INTERVAL {
             last_local_flush_time.set(now);
             true
         } else {
@@ -624,12 +627,21 @@ pub fn record_request_grpc_metrics(tp: &'static str, keyspace_id: u32, duration:
         metrics.duration.observe(duration.as_secs_f64());
         if need_flush {
             metrics.duration.flush();
+            if metrics.empty_keyspace_name {
+                return;
+            }
+            let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            let new_metrics = LocalGrpcRequestMetrics::new(tp, &keyspace_name);
+            map.insert((tp, keyspace_id), new_metrics);
         }
     });
 }
 
 struct LocalAsyncRequestMetrics {
     pub duration: LocalHistogram,
+    pub empty_keyspace_name: bool,
 }
 
 impl LocalAsyncRequestMetrics {
@@ -638,6 +650,7 @@ impl LocalAsyncRequestMetrics {
             duration: ASYNC_REQUESTS_DURATIONS
                 .with_label_values(&[tp, keyspace_name])
                 .local(),
+            empty_keyspace_name: keyspace_name.is_empty(),
         }
     }
 }
@@ -651,7 +664,7 @@ thread_local! {
 pub fn record_request_async_metrics(tp: &'static str, keyspace_id: u32, duration: Duration) {
     let need_flush = LAST_ASYNC_LOCAL_FLUSH_TIME.with(|last_local_flush_time| {
         let now = Instant::now_coarse();
-        if now - last_local_flush_time.get() > Duration::from_secs(1) {
+        if now - last_local_flush_time.get() > FLUSH_METRICS_INTERVAL {
             last_local_flush_time.set(now);
             true
         } else {
@@ -671,6 +684,14 @@ pub fn record_request_async_metrics(tp: &'static str, keyspace_id: u32, duration
         metrics.duration.observe(duration.as_secs_f64());
         if need_flush {
             metrics.duration.flush();
+            if !metrics.empty_keyspace_name {
+                return;
+            }
+            let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            let new_metrics = LocalAsyncRequestMetrics::new(tp, &keyspace_name);
+            map.insert((tp, keyspace_id), new_metrics);
         }
     });
 }
