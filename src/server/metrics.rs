@@ -584,7 +584,7 @@ pub fn record_request_source_metrics(source: String, duration: Duration) {
 
 struct LocalGrpcRequestMetrics {
     pub duration: LocalHistogram,
-    pub empty_keyspace_name: bool,
+    pub keyspace_name: string,
 }
 
 impl LocalGrpcRequestMetrics {
@@ -593,7 +593,7 @@ impl LocalGrpcRequestMetrics {
             duration: GRPC_MSG_HISTOGRAM_VEC
                 .with_label_values(&[tp, keyspace_name])
                 .local(),
-            empty_keyspace_name: keyspace_name.is_empty(),
+            keyspace_name: keyspace_name.to_owned(),
         }
     }
 }
@@ -629,14 +629,14 @@ pub fn record_request_grpc_metrics(tp: &'static str, keyspace_id: u32, duration:
                 let keyspace_name = pd_client::keyspace::to_keyspace_name(*keyspace_id)
                     .map(|name| name.to_string())
                     .unwrap_or_default();
-                warn!("create new local grpc request metrics, keyspace_name:{}",&keyspace_name);
+                warn!("create new local grpc request metrics,tp:{} ,keyspace_id:{} ,keyspace_name:{}",tp,keyspace_id,&keyspace_name);
                 LocalGrpcRequestMetrics::new(tp, &keyspace_name)
             });
         metrics.duration.observe(duration.as_secs_f64());
         if need_flush {
-            warn!("grpc request keyspace name flush, keyspace_name:{}",metrics.empty_keyspace_name);
+            warn!("grpc request keyspace name flush, tp:{} ,keyspace_id:{} ,keyspace_name:{}",tp,keyspace_id,&metrics.keyspace_name);
             metrics.duration.flush();
-            if !metrics.empty_keyspace_name {
+            if !metrics.keyspace_name {
                 return;
             }
             let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
@@ -645,7 +645,7 @@ pub fn record_request_grpc_metrics(tp: &'static str, keyspace_id: u32, duration:
             if !keyspace_name.is_empty() {
                 return;
             }
-            warn!("grpc request keyspace name updated, keyspace_name:{}",&keyspace_name);
+            warn!("grpc request keyspace name updated, tp:{} ,keyspace_id:{} ,keyspace_name:{}",tp,keyspace_id,&keyspace_name);
             let new_metrics = LocalGrpcRequestMetrics::new(tp, &keyspace_name);
             map.insert((tp, keyspace_id), new_metrics);
         }
