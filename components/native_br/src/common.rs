@@ -1172,10 +1172,11 @@ impl RegionMetaGetter {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TableFile {
     pub(crate) id: u64,
     pub(crate) ftype: kvengine::dfs::FileType,
+    pub(crate) shard_id: u64,
 }
 
 pub fn with_retry<T, E, F, FnOnError, FnNextSleep>(

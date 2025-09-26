@@ -1513,6 +1513,20 @@ impl ShardMeta {
             self.properties.remove(cs.get_property_key());
         }
     }
+
+    // Used in native_br.
+    pub fn clear_columnar_related_meta(&mut self) {
+        self.files.retain(|_, file| {
+            file.file_type != FileType::Columnar && file.file_type != FileType::VectorIndex
+        });
+        self.columnar_table_ids.clear();
+        self.columnar_l2_snap_version = SnapVersion::zero();
+        self.unconverted_l0s.clear();
+        self.vector_indexes.clear();
+        if let Some(parent) = &mut self.parent {
+            parent.clear_columnar_related_meta();
+        }
+    }
 }
 
 impl BoundedDataSet for ShardMeta {

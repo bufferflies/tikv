@@ -535,7 +535,11 @@ fn get_sorted_deleted_files(
     let mut deleted: Vec<_> = old
         .iter()
         .filter_map(|(&file_id, &ftype)| {
-            (!new.contains_key(&file_id)).then_some(TableFile { id: file_id, ftype })
+            (!new.contains_key(&file_id)).then_some(TableFile {
+                id: file_id,
+                ftype,
+                shard_id: 0,
+            })
         })
         .collect();
     deleted.sort_by_key(|f| f.id);
@@ -1731,6 +1735,7 @@ mod tests {
             files.push(TableFile {
                 id: file_id,
                 ftype: get_file_type(file_id),
+                shard_id: 0,
             });
         }
         writer.append_table_files(files).unwrap();
@@ -1857,6 +1862,7 @@ mod tests {
                 files.push(TableFile {
                     id: file_id,
                     ftype: get_file_type(get_file_id(j, i)),
+                    shard_id: 0,
                 });
             }
             writer.append_table_files(files).unwrap();

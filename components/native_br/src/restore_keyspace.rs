@@ -541,6 +541,10 @@ impl BackupShard {
     pub fn table_version(&self) -> u64 {
         self.meta.base_version + self.meta.data_sequence
     }
+
+    pub fn reset_columnar(&mut self) {
+        self.meta.clear_columnar_related_meta();
+    }
 }
 
 impl BoundedDataSet for BackupShard {
@@ -590,6 +594,8 @@ pub struct BackupCluster {
     shards_need_flush: HashSet<u64>,
     // Set<shard_id>.
     shards_need_truncate: HashSet<u64>,
+    // Set<shard_id>.
+    shards_need_reset_columnar: HashSet<u64>,
 
     meta_applier: Option<Arc<MetaApplier>>,
 
@@ -638,6 +644,7 @@ impl BackupCluster {
         self.shards.clear();
         self.shards_need_flush.clear();
         self.shards_need_truncate.clear();
+        self.shards_need_reset_columnar.clear();
         self.tolerated_err = 0;
         self.txn_chunk_ids_in_wal = None;
         self.load_shards()?;
@@ -695,6 +702,7 @@ impl BackupCluster {
             sorted_shards: Default::default(),
             shards_need_flush: Default::default(),
             shards_need_truncate: Default::default(),
+            shards_need_reset_columnar: Default::default(),
             meta_applier: None,
             meta_sender: None,
             tolerated_err: 0,
@@ -998,7 +1006,16 @@ impl BackupCluster {
 
             // Move shards to meta_applier to apply meta change in `flush_mem_table`.
             // Move back after flush finished.
-            let shards = mem::take(&mut self.shards);
+            let mut shards = mem::take(&mut self.shards);
+            for shard in shards.values_mut() {
+                if self.shards_need_reset_columnar.contains(&shard.region_id) {
+                    info!(
+                        "Keyspace {} shard {} reset columnar",
+                        self.keyspace_id, shard.region_id
+                    );
+                    shard.reset_columnar();
+                }
+            }
             let meta_applier = Arc::new(MetaApplier::new(
                 self.keyspace_id,
                 kv_engine.clone(),
@@ -1024,12 +1041,23 @@ impl BackupCluster {
         if !store_shards.is_empty() {
             let mut meta_iter =
                 MetaIterator::new(kv_engine.get_engine_id(), store_shards, raw_metas);
-            let (metas, _) = kvengine::EngineCore::read_meta(&mut meta_iter)?;
+            let (mut metas, _) = kvengine::EngineCore::read_meta(&mut meta_iter)?;
             info!(
                 "Keyspace {} kv_engine load {} shards in restore keyspace",
                 self.keyspace_id,
                 metas.len()
             );
+
+            // Clear columnar related meta in metas if the shard need reset columnar.
+            for meta in metas.values_mut() {
+                if self.shards_need_reset_columnar.contains(&meta.id) {
+                    info!(
+                        "Keyspace {} shard {} clear columnar related meta",
+                        self.keyspace_id, meta.id
+                    );
+                    meta.clear_columnar_related_meta();
+                }
+            }
 
             let table_filter: Option<LoadTableFilterFn> = if self.load_all_tables {
                 None
@@ -1373,6 +1401,7 @@ impl BackupCluster {
             files.extend(shard.meta.all_files().iter().map(|(&id, fm)| TableFile {
                 id,
                 ftype: fm.file_type,
+                shard_id: shard.region_id,
             }));
             files.extend(
                 shard
@@ -1382,12 +1411,14 @@ impl BackupCluster {
                     .map(|id| TableFile {
                         id,
                         ftype: FileType::TxnChunk,
+                        shard_id: shard.region_id,
                     }),
             );
             if shard.meta.schema.is_valid() {
                 files.push(TableFile {
                     id: shard.meta.schema.file_id(),
                     ftype: FileType::Schema,
+                    shard_id: shard.region_id,
                 });
             }
             for vec_idx in &shard.meta.vector_indexes {
@@ -1395,9 +1426,11 @@ impl BackupCluster {
                     files.push(TableFile {
                         id: idx_file.get_id(),
                         ftype: FileType::VectorIndex,
+                        shard_id: shard.region_id,
                     });
                 }
             }
+            // TODO: Add more file types here. e.g. ftspacked/ftsdedicated.
         }
         files.extend(
             self.txn_chunk_ids_in_wal
@@ -1407,18 +1440,38 @@ impl BackupCluster {
                 .map(|&id| TableFile {
                     id,
                     ftype: FileType::TxnChunk,
+                    shard_id: 0,
                 }),
         );
         files
     }
 
+    #[inline]
+    fn is_file_type_need_archive(ftype: FileType) -> bool {
+        // TODO: Add more file types here. e.g. ftspacked/ftsdedicated.
+        ftype != FileType::Columnar && ftype != FileType::VectorIndex
+    }
+
     // Should be called after load_shard and before setup_kv_engine.
-    pub fn check_all_shard_files(&self) -> Result<()> {
+    pub fn check_all_shard_files(&mut self) -> Result<()> {
+        let files = self.get_all_shard_files(None, None);
+        let mut shards_need_reset_columnar = HashSet::default();
         if let Some(archive_reader) = &self.archive_reader {
-            let files = self.get_all_shard_files(None, None);
-            let not_found_files = get_not_found_files(&self.dfs, files)?;
+            let mut not_found_files = get_not_found_files(&self.dfs, files)?;
+            shards_need_reset_columnar = not_found_files
+                .iter()
+                .filter(|f| !Self::is_file_type_need_archive(f.ftype))
+                .map(|f| f.shard_id)
+                .collect::<HashSet<_>>();
+            not_found_files.retain(|f| !shards_need_reset_columnar.contains(&f.shard_id));
             archive_reader.restore_files(not_found_files)?;
         }
+        step!(
+            "Keyspace {} need reset columnar shards: {:?}",
+            self.tag(),
+            shards_need_reset_columnar
+        );
+        self.shards_need_reset_columnar = shards_need_reset_columnar;
         Ok(())
     }
 
