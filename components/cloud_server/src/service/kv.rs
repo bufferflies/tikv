@@ -813,6 +813,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                     keyspace_id,
                     begin.saturating_elapsed(),
                 );
+                record_request_source_metrics(String::from("test"), begin.saturating_elapsed());
             }
 
             let mut r = item.batch_resp;

@@ -633,6 +633,10 @@ pub fn record_request_grpc_metrics(tp: &'static str, keyspace_id: u32, duration:
             let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
                 .map(|name| name.to_string())
                 .unwrap_or_default();
+            if keyspace_name.is_empty() {
+                return;
+            }
+            warn!("grpc request keyspace name updated, keyspace_name:{}",&keyspace_name);
             let new_metrics = LocalGrpcRequestMetrics::new(tp, &keyspace_name);
             map.insert((tp, keyspace_id), new_metrics);
         }
