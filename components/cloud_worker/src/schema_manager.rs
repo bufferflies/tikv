@@ -16,6 +16,7 @@ use api_version::{
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use dashmap::DashMap;
+use futures::future::join_all;
 use http::Request;
 use hyper::Body;
 use kvengine::{
@@ -877,20 +878,14 @@ impl SchemaManager {
             // Callback TiKV to update the new schema file to shard meta.
             info!("{}: broadcast schema update to stores", keyspace_id;
                 "file_id" => file_id, "schema_ver" => schema_version);
-            if let Err(err) = broadcast_schema_update_to_all_stores(
+            broadcast_schema_update_to_all_stores(
                 &stores,
                 self_clone.security_mgr.clone(),
                 self_clone.config.http_timeout.0,
                 keyspace_id,
                 file_id,
             )
-            .await
-            {
-                // Go on to save checked version on error as it would be partial successful.
-                // `check_store_schema_version` in next round will update the failed stores.
-                error!("{}: failed to broadcast schema update", keyspace_id;
-                    "file_id" => file_id, "schema_ver" => schema_version, "err" => ?err);
-            }
+            .await;
             let _ = tx_clone
                 .send((keyspace_id, file_id, schema_version))
                 .map_err(|err| {
@@ -1112,20 +1107,14 @@ impl SchemaManager {
         // Broadcast schema update to stores without building schema again.
         if need_broadcast {
             let file_id = schema_file.get_file_id();
-            if let Err(err) = broadcast_schema_update_to_all_stores(
+            broadcast_schema_update_to_all_stores(
                 stores,
                 self.security_mgr.clone(),
                 self.config.http_timeout.0,
                 keyspace_id,
                 file_id,
             )
-            .await
-            {
-                error!(
-                    "failed to broadcast schema update, keyspace_id: {} file_id: {} err: {:?}",
-                    keyspace_id, file_id, err
-                );
-            }
+            .await;
             info!(
                 "broadcast schema update to all stores, keyspace_id: {} file_id: {}",
                 keyspace_id, file_id
@@ -1729,27 +1718,32 @@ pub async fn broadcast_schema_update_to_all_stores(
     timeout: Duration,
     keyspace_id: u32,
     file_id: u64,
-) -> Result<()> {
+) {
+    let mut handles = Vec::with_capacity(stores.len());
     for store in stores {
-        let status_addr = store.get_status_address();
-        let uri = security_mgr
-            .build_uri(format!(
-                "{}/schema_file?keyspace_id={}&file_id={}",
-                status_addr, keyspace_id, file_id
-            ))
-            .unwrap();
-        let req = || Request::post(uri.clone()).body(Body::empty()).unwrap();
-        if let Err(err) =
-            send_request_to_store_with_retry(req, store, security_mgr.as_ref(), timeout).await
-        {
-            return Err(box_err!(
-                "broadcast schema update to store {} failed: {:?}",
-                status_addr,
-                err
-            ));
-        }
+        let store = store.clone();
+        let security_mgr = security_mgr.clone();
+        let handle = tokio::spawn(async move {
+            let status_addr = store.get_status_address();
+            let uri = security_mgr
+                .build_uri(format!(
+                    "{}/schema_file?keyspace_id={}&file_id={}",
+                    status_addr, keyspace_id, file_id
+                ))
+                .unwrap();
+            let req = || Request::post(uri.clone()).body(Body::empty()).unwrap();
+            if let Err(err) =
+                send_request_to_store_with_retry(req, &store, security_mgr.as_ref(), timeout).await
+            {
+                error!(
+                    "broadcast schema update to store {} {} failed: {:?}",
+                    store.id, status_addr, err
+                );
+            }
+        });
+        handles.push(handle);
     }
-    Ok(())
+    join_all(handles).await;
 }
 
 pub async fn get_keyspace_stats_from_store(

@@ -1346,15 +1346,13 @@ fn test_restore_keyspace_with_schema() {
             .unwrap();
         let stores = client.pd_client().get_all_stores(true).unwrap();
         let security_mgr = Arc::new(SecurityManager::new(&Default::default()).unwrap());
-        runtime
-            .block_on(broadcast_schema_update_to_all_stores(
-                &stores,
-                security_mgr.clone(),
-                time::Duration::from_secs(5),
-                KEYSPACE_ID,
-                file_id,
-            ))
-            .unwrap();
+        runtime.block_on(broadcast_schema_update_to_all_stores(
+            &stores,
+            security_mgr.clone(),
+            time::Duration::from_secs(5),
+            KEYSPACE_ID,
+            file_id,
+        ));
     };
     broadcast_schema_update(schema_file_data);
 
