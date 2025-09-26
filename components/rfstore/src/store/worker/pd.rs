@@ -6,7 +6,10 @@ use std::{
     collections::HashMap,
     fmt::{self, Display, Formatter, Write},
     mem,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -39,7 +42,7 @@ use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::store::{util, util::ConfChangeKind, ReadStats, TxnExt, WriteStats};
 use schema::schema::StorageClass;
 use tikv_util::{
-    debug, error, info,
+    debug, defer, error, info,
     store::{find_peer, QueryStats},
     time::UnixSecs,
     timer::GLOBAL_TIMER_HANDLE,
@@ -403,6 +406,8 @@ pub struct PdRunner {
     remote: Remote<yatp::task::future::TaskCell>,
     kv: kvengine::Engine,
     raft_cpu_collector: CpuUtilCollector,
+
+    update_gc_safe_point_in_progress: Arc<AtomicBool>,
 }
 
 const HOTSPOT_KEY_RATE_THRESHOLD: u64 = 128;
@@ -466,6 +471,8 @@ impl PdRunner {
             remote,
             kv,
             raft_cpu_collector,
+
+            update_gc_safe_point_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1280,9 +1287,21 @@ impl PdRunner {
     }
 
     fn handle_update_gc_safe_point(&mut self) {
+        // Avoid multiple concurrent updating process when PD responses slowly.
+        if self
+            .update_gc_safe_point_in_progress
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
         let pd_client = self.pd_client.clone();
         let kv = self.kv.clone();
+        let update_gc_safe_point_in_progress_flag = self.update_gc_safe_point_in_progress.clone();
         let f = async move {
+            defer!(update_gc_safe_point_in_progress_flag.store(false, Ordering::SeqCst));
+
             match pd_client.get_all_keyspaces_gc_states().await {
                 Ok(cluster_gc_states) => {
                     // Update metrics.

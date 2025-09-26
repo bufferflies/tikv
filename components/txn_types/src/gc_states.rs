@@ -8,7 +8,7 @@ use tikv_util::time::Instant;
 
 use crate::TimeStamp;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GcBarrier {
     pub barrier_id: String,
     pub barrier_ts: TimeStamp,
@@ -57,7 +57,7 @@ fn keyspace_id_from_keyspace_scope_pb(pb: Option<&pdpb::KeyspaceScope>) -> u32 {
 pub const NULL_KEYSPACE_ID: u32 = 0xffffffff;
 pub const DEFAULT_KEYSPACE_ID: u32 = 0;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GcState {
     pub keyspace_id: u32,
     pub is_keyspace_level_gc: bool,
@@ -114,7 +114,7 @@ impl GcState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ClusterGcStates {
     pub keyspace_gc_states: HashMap<u32, GcState>,
     #[allow(dead_code)]
