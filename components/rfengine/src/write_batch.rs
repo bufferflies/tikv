@@ -5,7 +5,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut};
 use raft_proto::eraftpb;
 
 use crate::{log_batch::RaftLogOp, PeerMeta};
@@ -109,7 +109,7 @@ impl WriteBatch {
     }
 
     pub fn estimated_size(&self) -> usize {
-        self.peers.values().map(|b| b.estimated_size()).sum()
+        self.peers.values().map(|b| b.encoded_len()).sum()
     }
 
     #[allow(dead_code)]
@@ -120,11 +120,14 @@ impl WriteBatch {
     }
 }
 
+const PEER_BATCH_HEADER_LEN: usize = 8 /* peer_id */ + 8 /* region_id */ + 8 /* truncated_idx */ + 8 /* start_index */ + 8 /* end_index */ + 4 /* states_len */;
+
 /// `RegionBatch` is a batch of modifications in one region.
 pub(crate) struct PeerBatch {
     pub(crate) peer_id: u64,
     pub(crate) meta: PeerMeta,
     pub(crate) raft_logs: VecDeque<RaftLogOp>,
+    pub(crate) raft_logs_encoded_len: usize,
 }
 
 impl Deref for PeerBatch {
@@ -146,6 +149,7 @@ impl PeerBatch {
             peer_id,
             meta: PeerMeta::new(region_id),
             raft_logs: Default::default(),
+            raft_logs_encoded_len: 0,
         }
     }
 
@@ -154,37 +158,24 @@ impl PeerBatch {
             return;
         }
         while let Some(true) = self.raft_logs.front().map(|l| l.index <= idx) {
-            self.raft_logs.pop_front();
+            if let Some(old) = self.raft_logs.pop_front() {
+                self.raft_logs_encoded_len -= old.encoded_len();
+            }
         }
         self.truncated_idx = idx;
     }
 
-    pub fn set_state(&mut self, key: &[u8], val: &[u8]) {
-        self.states
-            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(val));
-    }
-
-    pub fn get_state(&self, key: &[u8]) -> Option<&[u8]> {
-        self.states.get(key).map(|v| v.chunk())
-    }
-
-    pub fn get_latest_state(&self, key_prefix: &[u8]) -> Option<&[u8]> {
-        self.states
-            .iter()
-            .rev()
-            .find(|(k, _)| k.starts_with(key_prefix))
-            .map(|(_, v)| v.chunk())
-    }
-
     pub fn append_raft_log(&mut self, op: RaftLogOp) {
         debug_assert!(
-            self.truncated_idx < op.index,
+            self.meta.truncated_idx < op.index,
             "{} {}",
-            self.truncated_idx,
+            self.meta.truncated_idx,
             op.index
         );
         while let Some(true) = self.raft_logs.back().map(|l| l.index + 1 != op.index) {
-            self.raft_logs.pop_back();
+            if let Some(old) = self.raft_logs.pop_back() {
+                self.raft_logs_encoded_len -= old.encoded_len();
+            }
         }
         debug_assert!(
             self.raft_logs.is_empty()
@@ -194,6 +185,7 @@ impl PeerBatch {
                     .map(|l| l.index + 1 == op.index)
                     .unwrap()
         );
+        self.raft_logs_encoded_len += op.encoded_len();
         self.raft_logs.push_back(op);
     }
 
@@ -208,18 +200,10 @@ impl PeerBatch {
     }
 
     pub(crate) fn encoded_len(&self) -> usize {
-        let mut len = 8 /* peer_id */ + 8 /* region_id */ + 8 /* truncated_idx */ + 8 /* start_index */ + 8 /* end_index */ + 4 /* states_len */;
-        for (key, val) in &self.states {
-            len += 2 /* key_len */ + key.len() + 4 /* val_len */ + val.len();
-        }
-        len += self.raft_logs.len() * 4 /* log_end_offset */;
-        self.raft_logs
-            .iter()
-            .fold(len, |acc, l| acc + l.encoded_len())
-    }
-
-    pub(crate) fn estimated_size(&self) -> usize {
-        self.raft_logs.iter().map(|l| l.encoded_len()).sum()
+        PEER_BATCH_HEADER_LEN
+        + self.states_encoded_len
+        + self.raft_logs.len() * 4 /* log_end_offset */
+        + self.raft_logs_encoded_len
     }
 
     ///  +-----------+-------------+-----------------+---------------+--------------+--------------+-----------------+------------+-------------------+--------------+-----+------------------+-----+--------------+-----+
@@ -260,12 +244,12 @@ impl PeerBatch {
         let states_len = buf.get_u32_le();
         for _ in 0..states_len {
             let key_len = buf.get_u16_le() as usize;
-            let key = Bytes::copy_from_slice(&buf[..key_len]);
+            let key = &buf[..key_len];
             buf = &buf[key_len..];
             let val_len = buf.get_u32_le() as usize;
-            let val = Bytes::copy_from_slice(&buf[..val_len]);
+            let val = &buf[..val_len];
             buf = &buf[val_len..];
-            batch.states.insert(key, val);
+            batch.set_state(key, val);
         }
         let num_logs = (end - first) as usize;
         let log_index_len = num_logs * 4;
@@ -276,6 +260,7 @@ impl PeerBatch {
             let end_index = log_index_buf.get_u32_le() as usize;
             let log_op = RaftLogOp::decode(&buf[start_index..end_index]);
             start_index = end_index;
+            batch.raft_logs_encoded_len += log_op.encoded_len();
             batch.raft_logs.push_back(log_op);
         }
         batch
@@ -311,6 +296,7 @@ mod tests {
         assert_eq!(region_batch.raft_logs, logs);
         region_batch.set_state(b"k1", b"v1");
         region_batch.set_state(b"k2", b"v2");
+        region_batch.set_state(b"k2", b"v222");
         region_batch.truncate(5);
         assert_eq!(region_batch.truncated_idx, 5);
         assert_eq!(region_batch.raft_logs, &logs[5..]);
@@ -337,5 +323,9 @@ mod tests {
         region_batch.merge(decoded);
         assert_eq!(region_batch.raft_logs, logs[5..].to_vec());
         assert_eq!(region_batch.states.len(), 3);
+        let mut buf = vec![];
+        let encoded_len = region_batch.encoded_len();
+        region_batch.encode_to(&mut buf);
+        assert_eq!(buf.len(), encoded_len);
     }
 }

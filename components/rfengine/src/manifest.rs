@@ -198,12 +198,9 @@ impl Manifest {
             }
             for state_pb in peer_meta_pb.get_states() {
                 if state_pb.value.is_empty() {
-                    peer_meta.states.remove(state_pb.get_key());
+                    peer_meta.remove_state(state_pb.get_key());
                 } else {
-                    peer_meta.states.insert(
-                        state_pb.get_key().to_vec().into(),
-                        state_pb.get_value().to_vec().into(),
-                    );
+                    peer_meta.set_state(state_pb.get_key(), state_pb.get_value());
                 }
             }
             for file in peer_meta_pb.get_files() {
