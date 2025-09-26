@@ -787,13 +787,13 @@ pub fn prepare_dfs(prefix: &str) -> (TempDir, ObjectStorageService, DFSConfig) {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::FileExt;
+    use std::{assert_matches::assert_matches, os::unix::fs::FileExt};
 
     use bytes::Bytes;
     use futures::future::join_all;
     use kvengine::{
         dfs,
-        dfs::{DFSConnOptions, Dfs, FileType, Options, S3Fs},
+        dfs::{Dfs, FileType, Options, S3Fs},
     };
     use rand::prelude::*;
     use tempfile::tempfile;
@@ -813,26 +813,10 @@ mod tests {
     fn test_oss_basic() {
         test_util::init_log_for_test();
 
-        let base_dir = tempfile::Builder::new()
-            .prefix("test_oss_")
-            .tempdir()
-            .unwrap();
-
-        let mut oss = ObjectStorageService::new(base_dir.path());
-        oss.start_server();
-
+        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
         oss.set_max_write_bytes_per_sec(TEST_DATA_SIZE * TEST_COUNT / 2);
         oss.set_max_read_bytes_per_sec(TEST_DATA_SIZE * TEST_COUNT / 2);
-
-        let s3fs = S3Fs::new(
-            "oss_test".to_string(),
-            format!("http://127.0.0.1:{}", oss.port()),
-            "admin".to_string(),
-            "admin".to_string(),
-            "local".to_string(),
-            "cse_test".to_string(),
-            DFSConnOptions::default(),
-        );
+        let s3fs = S3Fs::new_from_config(dfs_config);
 
         let runtime = s3fs.get_runtime();
         let mut rng = rand::thread_rng();
@@ -926,23 +910,8 @@ mod tests {
     fn test_oss_shutdown() {
         test_util::init_log_for_test();
 
-        let base_dir = tempfile::Builder::new()
-            .prefix("test_oss_shutdown")
-            .tempdir()
-            .unwrap();
-
-        let mut oss = ObjectStorageService::new(base_dir.path());
-        oss.start_server();
-
-        let s3fs = S3Fs::new(
-            "oss_test".to_string(),
-            format!("http://127.0.0.1:{}", oss.port()),
-            "admin".to_string(),
-            "admin".to_string(),
-            "local".to_string(),
-            "cse_test".to_string(),
-            DFSConnOptions::default(),
-        );
+        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+        let s3fs = S3Fs::new_from_config(dfs_config);
         let runtime = s3fs.get_runtime();
 
         let file_id = 42;
@@ -991,23 +960,8 @@ mod tests {
     fn test_oss_retain_file() {
         test_util::init_log_for_test();
 
-        let base_dir = tempfile::Builder::new()
-            .prefix("test_oss_tag_")
-            .tempdir()
-            .unwrap();
-
-        let mut oss = ObjectStorageService::new(base_dir.path());
-        oss.start_server();
-
-        let s3fs = S3Fs::new(
-            "oss_test".to_string(),
-            format!("http://127.0.0.1:{}", oss.port()),
-            "admin".to_string(),
-            "admin".to_string(),
-            "local".to_string(),
-            "cse_test".to_string(),
-            DFSConnOptions::default(),
-        );
+        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+        let s3fs = S3Fs::new_from_config(dfs_config);
 
         let runtime = s3fs.get_runtime();
         let mut rng = rand::thread_rng();
@@ -1043,23 +997,8 @@ mod tests {
     fn test_oss_list_objects() {
         test_util::init_log_for_test();
 
-        let base_dir = tempfile::Builder::new()
-            .prefix("test_oss_list_objects_")
-            .tempdir()
-            .unwrap();
-
-        let mut oss = ObjectStorageService::new(base_dir.path());
-        oss.start_server();
-
-        let s3fs = S3Fs::new(
-            "pfx".to_string(),
-            format!("http://127.0.0.1:{}", oss.port()),
-            "admin".to_string(),
-            "admin".to_string(),
-            "local".to_string(),
-            "bkt".to_string(),
-            DFSConnOptions::default(),
-        );
+        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+        let s3fs = S3Fs::new_from_config(dfs_config);
 
         let prefix = s3fs.get_prefix();
         s3fs.get_runtime().block_on(async {
@@ -1181,25 +1120,10 @@ mod tests {
 
         test_util::init_log_for_test();
 
-        let base_dir = tempfile::Builder::new()
-            .prefix("test_oss_")
-            .tempdir()
-            .unwrap();
-
-        let mut oss = ObjectStorageService::new(base_dir.path());
-        oss.start_server();
+        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
         oss.set_max_read_bytes_per_sec(48 * 1024);
         oss.set_max_write_bytes_per_sec(16 * 1024);
-
-        let s3fs = S3Fs::new(
-            "oss_test".to_string(),
-            format!("http://127.0.0.1:{}", oss.port()),
-            "admin".to_string(),
-            "admin".to_string(),
-            "local".to_string(),
-            "cse_test".to_string(),
-            DFSConnOptions::default(),
-        );
+        let s3fs = S3Fs::new_from_config(dfs_config);
 
         let mut data = vec![0u8; OBJECT_SIZE];
         thread_rng().fill_bytes(data.as_mut_slice());
@@ -1265,6 +1189,48 @@ mod tests {
             oss.read_bytes_stats(),
             oss.written_bytes_stats()
         );
+
+        drop(s3fs);
+        oss.graceful_shutdown();
+    }
+
+    #[test]
+    fn test_oss_read_only() {
+        const OBJECT_SIZE: usize = 64 * 1024;
+
+        test_util::init_log_for_test();
+
+        let (_temp_dir, mut oss, mut dfs_config) = prepare_dfs("test");
+        let s3fs = S3Fs::new_from_config(dfs_config.clone());
+
+        dfs_config.read_only = true;
+        let s3fs_readonly = S3Fs::new_from_config(dfs_config);
+
+        let mut data = vec![0u8; OBJECT_SIZE];
+        thread_rng().fill_bytes(data.as_mut_slice());
+        let data = Bytes::from(data);
+        let data_len = data.len();
+        assert_eq!(data_len, OBJECT_SIZE);
+
+        s3fs.get_runtime().block_on(async {
+            s3fs.create(1, data.clone(), Options::default())
+                .await
+                .unwrap();
+            assert_eq!(s3fs.read_file(1, Options::default()).await.unwrap(), data);
+            assert_eq!(
+                s3fs_readonly
+                    .read_file(1, Options::default())
+                    .await
+                    .unwrap(),
+                data
+            );
+
+            let err = s3fs_readonly
+                .create(2, data.clone(), Options::default())
+                .await
+                .unwrap_err();
+            assert_matches!(err, dfs::Error::ReadOnly);
+        });
 
         drop(s3fs);
         oss.graceful_shutdown();

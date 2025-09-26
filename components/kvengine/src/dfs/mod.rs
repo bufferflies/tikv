@@ -437,6 +437,8 @@ pub enum Error {
     NoSuchKey(String),
     #[error("Hyper error {0}")]
     Hyper(String),
+    #[error("The DFS is read only")]
+    ReadOnly,
 }
 
 impl From<io::Error> for Error {

@@ -2,6 +2,7 @@
 
 #![feature(slice_pattern)]
 #![feature(extract_if)]
+#![feature(assert_matches)]
 
 pub mod client;
 pub mod cluster;

@@ -65,7 +65,8 @@ pub fn restore_tikv(
     path: &str,
 ) {
     let tag = format!("restore_tikv:{store_id}");
-    let dfs_conf = config.dfs.clone();
+    let mut dfs_conf = config.dfs.clone();
+    dfs_conf.read_only = true; // Set read only for safety.
     let s3fs = S3Fs::new_from_config(dfs_conf);
     let cluster_backup = get_cluster_backup_meta(&s3fs, name);
     let s3fs_clone = s3fs.clone();

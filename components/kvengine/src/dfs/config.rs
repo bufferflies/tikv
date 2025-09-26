@@ -26,6 +26,9 @@ pub struct Config {
 
     pub allow_fallback_local: bool,
 
+    /// Set to true during recovery for safety.
+    pub read_only: bool,
+
     pub conn_options: ConnOptions,
 }
 
@@ -42,6 +45,7 @@ impl Default for Config {
             zstd_compression_level: "".to_string(),
             allow_fallback_local: true,
             conn_options: ConnOptions::default(),
+            read_only: false,
         }
     }
 }

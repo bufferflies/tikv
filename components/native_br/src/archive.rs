@@ -1663,10 +1663,9 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use kvengine::dfs::DFSConnOptions;
     use protobuf::Message;
     use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
-    use test_cloud_server::oss::ObjectStorageService;
+    use test_cloud_server::oss::prepare_dfs;
 
     use super::*;
 
@@ -1678,23 +1677,8 @@ mod tests {
         const NUM_STORES: u64 = 4;
         const NUM_FILE_IDS: u64 = 24;
 
-        let base_dir = tempfile::Builder::new()
-            .prefix("test_archive_writer_")
-            .tempdir()
-            .unwrap();
-
-        let mut oss = ObjectStorageService::new(base_dir.path());
-        oss.start_server();
-
-        let s3fs = Arc::new(S3Fs::new(
-            "pfx".to_string(),
-            format!("http://127.0.0.1:{}", oss.port()),
-            "admin".to_string(),
-            "admin".to_string(),
-            "local".to_string(),
-            "bkt".to_string(),
-            DFSConnOptions::default(),
-        ));
+        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_archive_writer_");
+        let s3fs = Arc::new(S3Fs::new_from_config(dfs_config));
         let get_file_id = |i: u64| i;
         let get_file_data =
             |file_id: u64| Bytes::from(b"x".repeat(100 + file_id as usize).to_vec());
@@ -1815,23 +1799,8 @@ mod tests {
         const CLUSTER_ID: u64 = 1;
         const NUM_DATES: u64 = 8;
 
-        let base_dir = tempfile::Builder::new()
-            .prefix("test_archive_reader_")
-            .tempdir()
-            .unwrap();
-
-        let mut oss = ObjectStorageService::new(base_dir.path().join("oss").as_path());
-        oss.start_server();
-
-        let s3fs = Arc::new(S3Fs::new(
-            "pfx".to_string(),
-            format!("http://127.0.0.1:{}", oss.port()),
-            "admin".to_string(),
-            "admin".to_string(),
-            "local".to_string(),
-            "bkt".to_string(),
-            DFSConnOptions::default(),
-        ));
+        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_archive_reader_");
+        let s3fs = Arc::new(S3Fs::new_from_config(dfs_config));
         let first_date = chrono::Utc::now().date_naive() - chrono::Duration::days(NUM_DATES as i64);
         let get_date = |j: u64| first_date + chrono::Duration::days(j as i64);
         let get_num_stores = |j: u64| j + 8;
@@ -1949,23 +1918,8 @@ mod tests {
 
         const NUM_INDEXES: i64 = 3;
 
-        let base_dir = tempfile::Builder::new()
-            .prefix("test_get_all_archive_index_paths_")
-            .tempdir()
-            .unwrap();
-
-        let mut oss = ObjectStorageService::new(base_dir.path());
-        oss.start_server();
-
-        let s3fs = Arc::new(S3Fs::new(
-            "pfx".to_string(),
-            format!("http://127.0.0.1:{}", oss.port()),
-            "admin".to_string(),
-            "admin".to_string(),
-            "local".to_string(),
-            "bkt".to_string(),
-            DFSConnOptions::default(),
-        ));
+        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_get_all_archive_index_paths_");
+        let s3fs = Arc::new(S3Fs::new_from_config(dfs_config));
         let first_date = chrono::Utc::now().date_naive() - chrono::Duration::days(NUM_INDEXES);
         let get_date = |i: i64| first_date + chrono::Duration::days(i);
         s3fs.get_runtime().block_on(async {

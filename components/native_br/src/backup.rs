@@ -852,10 +852,10 @@ impl IncrementalBackupFile {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, NaiveDateTime, Utc};
-    use kvengine::dfs::{DFSConnOptions, Dfs};
+    use kvengine::dfs::Dfs;
     use kvproto::metapb::Store;
     use rfenginepb::{ChangeSet, ClusterBackupMeta, StoreBackupMeta, WalChunk};
-    use test_cloud_server::oss::ObjectStorageService;
+    use test_cloud_server::oss::prepare_dfs;
     use test_pd_client::TestPdClient;
 
     use super::*;
@@ -991,23 +991,8 @@ mod tests {
     fn test_get_latest_backup_meta() {
         test_util::init_log_for_test();
 
-        let base_dir = tempfile::Builder::new()
-            .prefix("test_get_latest_backup_meta_")
-            .tempdir()
-            .unwrap();
-
-        let mut oss = ObjectStorageService::new(base_dir.path());
-        oss.start_server();
-
-        let s3fs = S3Fs::new(
-            "pfx".to_string(),
-            format!("http://127.0.0.1:{}", oss.port()),
-            "admin".to_string(),
-            "admin".to_string(),
-            "local".to_string(),
-            "bkt".to_string(),
-            DFSConnOptions::default(),
-        );
+        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test");
+        let s3fs = S3Fs::new_from_config(dfs_config);
         let pd_client = TestPdClient::new(1, false);
 
         // Use cluster_id to distinguish with different backup meta.

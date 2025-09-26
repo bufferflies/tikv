@@ -227,9 +227,6 @@ impl RfEngineCore {
             _lock: lock,
         };
         let async_offset = en.load(&manifest)?;
-        if cfg.cli_mode {
-            return Ok(en);
-        }
         {
             let async_wal_writer = if en.is_async_wal_enabled() {
                 let mut async_wal_writer = WalWriter::new(

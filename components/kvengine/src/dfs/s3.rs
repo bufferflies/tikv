@@ -62,9 +62,10 @@ impl S3Fs {
         region: String,
         bucket: String,
         options: ConnOptions,
+        read_only: bool,
     ) -> Self {
         let core = Arc::new(S3FsCore::new(
-            endpoint, key_id, secret_key, region, bucket, prefix, options,
+            endpoint, key_id, secret_key, region, bucket, prefix, options, read_only,
         ));
         Self { core }
     }
@@ -78,6 +79,7 @@ impl S3Fs {
             conf.s3_region,
             conf.s3_bucket,
             conf.conn_options,
+            conf.read_only,
         )
     }
 
@@ -91,6 +93,7 @@ impl S3Fs {
                 bucket,
                 prefix,
                 ConnOptions::default(),
+                false,
             )),
         }
     }
@@ -113,6 +116,7 @@ pub struct S3FsCore {
     runtime: Option<tokio::runtime::Runtime>,
     virtual_host: bool,
     opts: ConnOptions,
+    read_only: bool, // For safety when used for recovery.
 }
 
 impl S3FsCore {
@@ -124,6 +128,7 @@ impl S3FsCore {
         bucket: String,
         prefix: String,
         options: ConnOptions,
+        read_only: bool,
     ) -> Self {
         let mut config = rusoto_core::HttpConfig::new();
         config.read_buf_size(256 * 1024);
@@ -166,7 +171,7 @@ impl S3FsCore {
         } else {
             endpoint
         };
-        Self::new_with_s3_client(s3c, endpoint, region, bucket, prefix, options)
+        Self::new_with_s3_client(s3c, endpoint, region, bucket, prefix, options, read_only)
     }
 
     pub fn new_with_s3_client(
@@ -176,6 +181,7 @@ impl S3FsCore {
         bucket: String,
         mut prefix: String,
         options: ConnOptions,
+        read_only: bool,
     ) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -211,6 +217,7 @@ impl S3FsCore {
             runtime: Some(runtime),
             virtual_host,
             opts: options,
+            read_only,
         }
     }
 
@@ -701,6 +708,10 @@ impl S3FsCore {
         storage_class: Option<&str>,
         checksum: Option<u32>, // checksum saved in big-endian order
     ) -> crate::dfs::Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+
         fail_point!(
             "s3fs_put_wal_chunks_error",
             key.contains("wal_chunks"),
@@ -790,6 +801,10 @@ impl S3FsCore {
 
     // Ref: https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html
     pub async fn delete_object(&self, key: String, file_name: String) -> crate::dfs::Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+
         let mut retry_cnt = 0;
         let start_time = Instant::now();
         loop {
@@ -851,6 +866,10 @@ impl S3FsCore {
         target_tagging: Option<&Tagging>,
         target_storage_class: Option<&str>,
     ) -> Result<(), dfs::Error> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+
         let mut retry_cnt = 0;
         let full_source_key = format!("{}/{}", self.bucket, source_key);
         loop {
