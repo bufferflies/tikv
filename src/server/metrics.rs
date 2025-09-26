@@ -629,10 +629,12 @@ pub fn record_request_grpc_metrics(tp: &'static str, keyspace_id: u32, duration:
                 let keyspace_name = pd_client::keyspace::to_keyspace_name(*keyspace_id)
                     .map(|name| name.to_string())
                     .unwrap_or_default();
+                warn!("create new local grpc request metrics, keyspace_name:{}",&keyspace_name);
                 LocalGrpcRequestMetrics::new(tp, &keyspace_name)
             });
         metrics.duration.observe(duration.as_secs_f64());
         if need_flush {
+            warn!("grpc request keyspace name flush, keyspace_name:{}",metrics.empty_keyspace_name);
             metrics.duration.flush();
             if !metrics.empty_keyspace_name {
                 return;
