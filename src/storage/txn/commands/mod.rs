@@ -172,12 +172,24 @@ impl From<PrewriteRequest> for TypedCommand<PrewriteResult> {
             None
         };
         if for_update_ts == 0 {
+            // Disallow skip_constraint_check for optimistic transactions
+            let mut skip_constraint_check = req.get_skip_constraint_check();
+            if skip_constraint_check {
+                warn!(
+                    "skip_constraint_check is not allowed for optimistic transactions; \
+                     start_ts={}",
+                    req.get_start_version()
+                );
+                // Override the flag to false for optimistic transactions
+                skip_constraint_check = false;
+            }
+
             Prewrite::new(
                 req.take_mutations().into_iter().map(Into::into).collect(),
                 req.take_primary_lock(),
                 req.get_start_version().into(),
                 req.get_lock_ttl(),
-                req.get_skip_constraint_check(),
+                skip_constraint_check,
                 req.get_txn_size(),
                 req.get_min_commit_ts().into(),
                 req.get_max_commit_ts().into(),

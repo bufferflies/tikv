@@ -154,11 +154,9 @@ pub async fn prewrite<S: Snapshot>(
                 // "acquire pessimistic lock" stage.
                 OldValue::Unspecified
             } else {
-                // In optimistic transaction, caller ensures that there is no
+                // In optimistic transaction, when skip_constraint_check is true
+                // (set by bulk range optimization), caller ensures that there is no
                 // previous write for the mutation, so there is no old value.
-                //
-                // FIXME: This may not hold when prewrite request set
-                // skip_constraint_check explicitly. For now, no one sets it.
                 OldValue::None
             }
         } else {
@@ -232,9 +230,18 @@ pub enum CommitKind {
 
 #[derive(Clone, Debug)]
 pub enum TransactionKind {
-    // bool is skip_constraint_check
+    /// Optimistic transaction with skip_constraint_check flag.
+    ///
+    /// The boolean indicates whether constraint checking should be skipped:
+    /// - `false`: Normal constraint checking (default for most cases)
+    /// - `true`: Skip constraint checking (used by bulk range optimization when
+    ///   key range is proven empty)
+    ///
+    /// Note: Manual skip_constraint_check=true from requests is blocked at the
+    /// command level for optimistic transactions. Only internal
+    /// optimizations may set this to true.
     Optimistic(bool),
-    // for_update_ts
+    /// Pessimistic transaction with for_update_ts
     Pessimistic(TimeStamp),
 }
 
@@ -770,14 +777,9 @@ impl<'a> PrewriteMutation<'a> {
     fn skip_constraint_check(&self) -> bool {
         match &self.txn_props.kind {
             TransactionKind::Optimistic(skip) => {
-                if *skip {
-                    warn!(
-                        "optimistic transaction should not skip constraint check";
-                        "start_ts" => self.txn_props.start_ts,
-                        "kind" => ?self.txn_props.kind,
-                        "key" => ?self.key,
-                    );
-                }
+                // For optimistic transactions, skip_constraint_check can be true in two cases:
+                // 1. Set by bulk range optimization when key range is proven empty
+                // 2. Set manually in requests (but this is blocked at command level)
                 *skip
             }
             TransactionKind::Pessimistic(_) => {

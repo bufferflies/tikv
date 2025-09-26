@@ -105,8 +105,9 @@ fn test_optimistic_skip_constraint_check() {
     let cases = vec![
         // Test 1: Basic conflict detection - should fail
         case!(prewrite!(10), commit!(10, 15), prewrite!(12); fail!()),
-        // Test 2: With skip_constraint_check, conflict check is skipped
-        case!(prewrite!(10), commit!(10, 15), prewrite!(12).skip_constraint_check(); ok!()),
+        // Test 2: With skip_constraint_check, it should be ignored for optimistic transactions
+        // and still detect the conflict (behavior now disallowed for optimistic transactions)
+        case!(prewrite!(10), commit!(10, 15), prewrite!(12).skip_constraint_check(); fail!()),
     ];
     run_test_cases(cases);
 }

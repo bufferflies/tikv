@@ -830,6 +830,9 @@ impl PrewriteKind for Optimistic {
         snapshot: &impl Snapshot,
         context: &mut WriteContext<'_, impl LockManager>,
     ) -> Result<()> {
+        // Bulk range optimization: if there are many mutations and no data exists
+        // in the key range, we can skip constraint checking for all of them.
+        // NOTE: re-evaluate the performance impact of the optimization for next-gen.
         if mutations.len() > FORWARD_MIN_MUTATIONS_NUM {
             mutations.sort_by(|a, b| a.key().cmp(b.key()));
             let left_key = mutations.first().unwrap().key();
