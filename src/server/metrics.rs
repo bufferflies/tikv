@@ -598,6 +598,13 @@ impl LocalGrpcRequestMetrics {
     }
 }
 
+impl Drop for LocalGrpcRequestMetrics {
+    fn drop(&mut self) {
+        self.duration.flush();
+    }
+}
+
+
 thread_local! {
     static GRPC_REQUEST_METRICS_MAP: RefCell<HashMap<(&'static str,u32), LocalGrpcRequestMetrics>> = RefCell::new(HashMap::default());
 
@@ -627,13 +634,13 @@ pub fn record_request_grpc_metrics(tp: &'static str, keyspace_id: u32, duration:
         metrics.duration.observe(duration.as_secs_f64());
         if need_flush {
             metrics.duration.flush();
-            if metrics.empty_keyspace_name {
+            if !metrics.empty_keyspace_name {
                 return;
             }
             let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
                 .map(|name| name.to_string())
                 .unwrap_or_default();
-            if keyspace_name.is_empty() {
+            if !keyspace_name.is_empty() {
                 return;
             }
             warn!("grpc request keyspace name updated, keyspace_name:{}",&keyspace_name);
@@ -646,6 +653,12 @@ pub fn record_request_grpc_metrics(tp: &'static str, keyspace_id: u32, duration:
 struct LocalAsyncRequestMetrics {
     pub duration: LocalHistogram,
     pub empty_keyspace_name: bool,
+}
+
+impl Drop for LocalAsyncRequestMetrics {
+    fn drop(&mut self) {
+        self.duration.flush();
+    }
 }
 
 impl LocalAsyncRequestMetrics {
@@ -694,6 +707,10 @@ pub fn record_request_async_metrics(tp: &'static str, keyspace_id: u32, duration
             let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
                 .map(|name| name.to_string())
                 .unwrap_or_default();
+            if !keyspace_name.is_empty() {
+                return;
+            }
+            warn!("async request keyspace name updated, keyspace_name:{}",&keyspace_name);
             let new_metrics = LocalAsyncRequestMetrics::new(tp, &keyspace_name);
             map.insert((tp, keyspace_id), new_metrics);
         }
