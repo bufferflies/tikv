@@ -253,7 +253,7 @@ impl super::Engine {
         );
         shard_ids.iter().for_each(|shard_id| {
             if let Some(shard) = self.get_shard(*shard_id) {
-                if shard.overlap_bound(table_bound) {
+                if shard.keyspace_id == keyspace_id && shard.overlap_bound(table_bound) {
                     if shard.has_columnar_table(table_id) {
                         ready += 1;
                     }
