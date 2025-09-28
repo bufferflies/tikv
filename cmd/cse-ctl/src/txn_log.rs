@@ -146,7 +146,7 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
         let req = rfstore::store::parse_raft_cmd(tag, e, None, &mut buf);
         if let Some(cl) = rlog::get_custom_log(&req) {
             match cl.get_type() {
-                rlog::TYPE_PREWRITE => cl.iterate_lock(|k, v| {
+                rlog::CustomRaftLogType::Prewrite => cl.iterate_lock(|k, v| {
                     let mut lock = Lock::parse(v).unwrap();
                     lock.short_value.take();
                     if lock.ts.into_inner() == start_ts {
@@ -159,7 +159,7 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                         ));
                     }
                 }),
-                rlog::TYPE_PESSIMISTIC_LOCK => cl.iterate_lock(|k, v| {
+                rlog::CustomRaftLogType::PessimisticLock => cl.iterate_lock(|k, v| {
                     let lock = Lock::parse(v).unwrap();
                     if lock.ts.into_inner() == start_ts {
                         txn_logs.push(format!(
@@ -171,7 +171,7 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                         ));
                     }
                 }),
-                rlog::TYPE_COMMIT => cl.iterate_commit(|k, cm_ts| {
+                rlog::CustomRaftLogType::Commit => cl.iterate_commit(|k, cm_ts| {
                     if cm_ts == commit_ts {
                         txn_logs.push(format!(
                             "{} commit log_idx:{} key:{}",
@@ -181,7 +181,7 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                         ));
                     }
                 }),
-                rlog::TYPE_ROLLBACK => cl.iterate_rollback(|k, st_ts, del_lock| {
+                rlog::CustomRaftLogType::Rollback => cl.iterate_rollback(|k, st_ts, del_lock| {
                     if st_ts == start_ts {
                         txn_logs.push(format!(
                             "{} rollback log_idx:{} key:{} del_lock:{}",
@@ -192,9 +192,9 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                         ));
                     }
                 }),
-                rlog::TYPE_RESOLVE_LOCK => {
+                rlog::CustomRaftLogType::ResolveLock => {
                     cl.iterate_resolve_lock(|tp, k, ts, del_lock| match tp {
-                        rlog::TYPE_COMMIT => {
+                        rlog::CustomRaftLogType::Commit => {
                             if ts == commit_ts {
                                 txn_logs.push(format!(
                                     "{} resolve_lock commit log_idx:{} key:{} _del_lock:{}",
@@ -205,7 +205,7 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                                 ));
                             }
                         }
-                        rlog::TYPE_ROLLBACK => {
+                        rlog::CustomRaftLogType::Rollback => {
                             if ts == start_ts {
                                 txn_logs.push(format!(
                                     "{} resolve_lock rollback log_idx:{} key:{}",
@@ -218,7 +218,7 @@ fn parse_txn_log(tag: &PeerTag, start_ts: u64, commit_ts: u64, entries: &[Entry]
                         _ => {}
                     })
                 }
-                rlog::TYPE_TXN_FILE_REF => {
+                rlog::CustomRaftLogType::TxnFileRef => {
                     let txn_file_ref = cl.get_txn_file_ref().unwrap();
                     if txn_file_ref.start_ts == start_ts {
                         txn_logs.push(format!(

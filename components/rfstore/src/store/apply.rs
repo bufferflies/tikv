@@ -710,39 +710,41 @@ impl Applier {
         }
         let timer = Instant::now();
         match cl.get_type() {
-            TYPE_PREWRITE => cl.iterate_lock(|k, v| {
+            CustomRaftLogType::Prewrite => cl.iterate_lock(|k, v| {
                 wb.put(mvcc::LOCK_CF, k, v, 0, &[], 0);
                 self.record_write_stat(k, v);
                 self.lock_cache.insert(k.to_vec(), v.to_vec());
             }),
-            TYPE_PESSIMISTIC_LOCK => cl.iterate_lock(|k, v| {
+            CustomRaftLogType::PessimisticLock => cl.iterate_lock(|k, v| {
                 wb.put(mvcc::LOCK_CF, k, v, 0, &[], 0);
             }),
-            TYPE_COMMIT => cl.iterate_commit(|k, commit_ts| {
+            CustomRaftLogType::Commit => cl.iterate_commit(|k, commit_ts| {
                 self.commit_lock(engine, wb, k, commit_ts, log_index);
             }),
-            TYPE_ONE_PC => cl.iterate_one_pc(|k, v, is_extra, del_lock, start_ts, commit_ts| {
-                self.record_write_stat(k, v);
-                let user_meta = mvcc::UserMeta::new(start_ts, commit_ts).to_array();
-                if is_extra {
-                    let op_lock_key = mvcc::encode_extra_txn_status_key(k, start_ts);
-                    wb.put(mvcc::EXTRA_CF, &op_lock_key, &[0], 0, &user_meta, commit_ts);
-                } else {
-                    wb.put(mvcc::WRITE_CF, k, v, 0, &user_meta, commit_ts);
-                }
-                if del_lock {
-                    wb.delete(mvcc::LOCK_CF, k, 0);
-                }
-            }),
-            TYPE_ROLLBACK => cl.iterate_rollback(|k, start_ts, del_lock| {
+            CustomRaftLogType::OnePc => {
+                cl.iterate_one_pc(|k, v, is_extra, del_lock, start_ts, commit_ts| {
+                    self.record_write_stat(k, v);
+                    let user_meta = mvcc::UserMeta::new(start_ts, commit_ts).to_array();
+                    if is_extra {
+                        let op_lock_key = mvcc::encode_extra_txn_status_key(k, start_ts);
+                        wb.put(mvcc::EXTRA_CF, &op_lock_key, &[0], 0, &user_meta, commit_ts);
+                    } else {
+                        wb.put(mvcc::WRITE_CF, k, v, 0, &user_meta, commit_ts);
+                    }
+                    if del_lock {
+                        wb.delete(mvcc::LOCK_CF, k, 0);
+                    }
+                })
+            }
+            CustomRaftLogType::Rollback => cl.iterate_rollback(|k, start_ts, del_lock| {
                 self.rollback(wb, k, start_ts, del_lock);
             }),
-            TYPE_PESSIMISTIC_ROLLBACK => {
+            CustomRaftLogType::PessimisticRollback => {
                 cl.iterate_del_lock(|k| {
                     wb.delete(mvcc::LOCK_CF, k, 0);
                 });
             }
-            TYPE_ENGINE_META => {
+            CustomRaftLogType::EngineMeta => {
                 let cs = cs.unwrap_or_else(|| cl.get_change_set().unwrap());
                 // Checking kind of change set is duplicated, but it ensures the consistency of
                 // online and recovery process.
@@ -769,26 +771,27 @@ impl Applier {
                     }
                 }
             }
-            TYPE_RESOLVE_LOCK => cl.iterate_resolve_lock(|tp, k, ts, del_lock| match tp {
-                TYPE_COMMIT => self.commit_lock(engine, wb, k, ts, log_index),
-                TYPE_ROLLBACK => self.rollback(wb, k, ts, del_lock),
-                _ => unreachable!("unexpected custom log type: {:?}", tp),
-            }),
-            TYPE_SWITCH_MEM_TABLE => {
+            CustomRaftLogType::ResolveLock => {
+                cl.iterate_resolve_lock(|tp, k, ts, del_lock| match tp {
+                    CustomRaftLogType::Commit => self.commit_lock(engine, wb, k, ts, log_index),
+                    CustomRaftLogType::Rollback => self.rollback(wb, k, ts, del_lock),
+                    _ => unreachable!("unexpected custom log type: {:?}", tp),
+                })
+            }
+            CustomRaftLogType::SwitchMemTable => {
                 let switch_mem_table_size = cl.get_switch_mem_table();
                 if self.mut_mem_table_state(engine).mem_table_size >= switch_mem_table_size {
                     wb.set_switch_mem_table();
                 }
             }
-            TYPE_TRIGGER_TRIM_OVER_BOUND => {
+            CustomRaftLogType::TriggerTrimOverBound => {
                 let parameter = cl.get_trigger_trim_over_bound();
                 self.trigger_trim_over_bound(parameter, wb, engine, ctx.router.as_ref());
             }
-            TYPE_TXN_FILE_REF => {
+            CustomRaftLogType::TxnFileRef => {
                 let txn_file_ref = cl.get_txn_file_ref().unwrap();
                 self.exec_txn_file_ref(engine, wb, txn_file_ref);
             }
-            _ => panic!("unknown custom log type"),
         }
         let writable_mem_tbl_state = ctx.engine.write(wb, cl.get_raw());
         if let Some(observer) = &mut observer {
@@ -831,7 +834,7 @@ impl Applier {
         if let Err(err) = check_region_epoch(req, &self.region, true) {
             let mut check_in_region_worker = false;
             if let Some(custom) = rlog::get_custom_log(req) {
-                if custom.get_type() == rlog::TYPE_ENGINE_META {
+                if custom.get_type() == rlog::CustomRaftLogType::EngineMeta {
                     check_in_region_worker = true;
                 }
             }

@@ -231,7 +231,7 @@ pub fn shard_must_not_exist(engine: &kvengine::Engine, region_id: u64) {
 
 pub fn new_put_cmd(key: &[u8], value: &[u8]) -> CustomRequest {
     let mut builder = CustomBuilder::new();
-    builder.set_type(rlog::TYPE_ONE_PC);
+    builder.set_type(rlog::CustomRaftLogType::OnePc);
     builder.append_one_pc(key, value, false, false, gen_ts(), gen_ts());
     builder.build()
 }
@@ -371,7 +371,7 @@ pub fn put_till_size<T: Simulator>(
     while len < limit {
         let batch_size = std::cmp::min(1024, limit - len);
         let mut builder = CustomBuilder::new();
-        builder.set_type(rlog::TYPE_ONE_PC);
+        builder.set_type(rlog::CustomRaftLogType::OnePc);
         for _ in 0..batch_size / 82 + 1 {
             key.clear();
             let key_id = range.next().unwrap();

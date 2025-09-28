@@ -3443,7 +3443,7 @@ impl Peer {
                 }
             } else if req.has_custom_request() {
                 let custom_log = CustomRaftLog::new_from_data(req.get_custom_request().get_data());
-                if custom_log.get_type() != TYPE_ENGINE_META {
+                if custom_log.get_type() != CustomRaftLogType::EngineMeta {
                     return Err(Error::ProposalInMergingMode(self.region_id));
                 }
                 let cs = custom_log.get_change_set().unwrap();
