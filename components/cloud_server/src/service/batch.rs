@@ -162,6 +162,7 @@ impl ResponseBatchConsumer<(Option<Vec<u8>>, Statistics)> for GetCommandResponse
         res: Result<(Option<Vec<u8>>, Statistics)>,
         begin: Instant,
         request_source: String,
+        keyspace_id: u32,
     ) {
         let mut resp = GetResponse::default();
         if let Some(err) = extract_region_error(&res) {
@@ -184,8 +185,12 @@ impl ResponseBatchConsumer<(Option<Vec<u8>>, Statistics)> for GetCommandResponse
             cmd: Some(batch_commands_response::response::Cmd::Get(resp)),
             ..Default::default()
         };
-        let mesure =
-            GrpcRequestDuration::new(begin, GrpcTypeKind::kv_batch_get_command, request_source);
+        let mesure = GrpcRequestDuration::new(
+            begin,
+            GrpcTypeKind::kv_batch_get_command,
+            request_source,
+            keyspace_id,
+        );
         let task = MeasuredSingleResponse::new(id, res, mesure);
         if self.tx.send_with(task, WakePolicy::Immediately).is_err() {
             error!("KvService response batch commands fail");
@@ -200,6 +205,7 @@ impl ResponseBatchConsumer<Option<Vec<u8>>> for GetCommandResponseConsumer {
         res: Result<Option<Vec<u8>>>,
         begin: Instant,
         request_source: String,
+        keyspace_id: u32,
     ) {
         let mut resp = RawGetResponse::default();
         if let Some(err) = extract_region_error(&res) {
@@ -215,8 +221,12 @@ impl ResponseBatchConsumer<Option<Vec<u8>>> for GetCommandResponseConsumer {
             cmd: Some(batch_commands_response::response::Cmd::RawGet(resp)),
             ..Default::default()
         };
-        let mesure =
-            GrpcRequestDuration::new(begin, GrpcTypeKind::raw_batch_get_command, request_source);
+        let mesure = GrpcRequestDuration::new(
+            begin,
+            GrpcTypeKind::raw_batch_get_command,
+            request_source,
+            keyspace_id,
+        );
         let task = MeasuredSingleResponse::new(id, res, mesure);
         if self.tx.send_with(task, WakePolicy::Immediately).is_err() {
             error!("KvService response batch commands fail");
@@ -238,7 +248,13 @@ fn future_batch_get_command<E: Engine, L: LockManager, F: KvFormat>(
     let id_sources: Vec<_> = requests
         .iter()
         .zip(gets.iter())
-        .map(|(id, req)| (*id, req.get_context().get_request_source().to_string()))
+        .map(|(id, req)| {
+            (
+                *id,
+                req.get_context().get_request_source().to_string(),
+                req.get_context().get_keyspace_id(),
+            )
+        })
         .collect();
     let res = storage.batch_get_command(
         gets,
@@ -253,7 +269,7 @@ fn future_batch_get_command<E: Engine, L: LockManager, F: KvFormat>(
         if let Some(e) = extract_region_error(&res) {
             let mut resp = GetResponse::default();
             resp.set_region_error(e);
-            for (id, source) in id_sources {
+            for (id, source, keyspace_id) in id_sources {
                 let res = batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::Get(resp.clone())),
                     ..Default::default()
@@ -262,6 +278,7 @@ fn future_batch_get_command<E: Engine, L: LockManager, F: KvFormat>(
                     begin_instant,
                     GrpcTypeKind::kv_batch_get_command,
                     source,
+                    keyspace_id,
                 );
                 let task = MeasuredSingleResponse::new(id, res, measure);
                 if tx.send_with(task, WakePolicy::Immediately).is_err() {
@@ -286,7 +303,13 @@ fn future_batch_raw_get_command<E: Engine, L: LockManager, F: KvFormat>(
     let id_sources: Vec<_> = requests
         .iter()
         .zip(gets.iter())
-        .map(|(id, req)| (*id, req.get_context().get_request_source().to_string()))
+        .map(|(id, req)| {
+            (
+                *id,
+                req.get_context().get_request_source().to_string(),
+                req.get_context().get_keyspace_id(),
+            )
+        })
         .collect();
     let res = storage.raw_batch_get_command(
         gets,
@@ -299,7 +322,7 @@ fn future_batch_raw_get_command<E: Engine, L: LockManager, F: KvFormat>(
         if let Some(e) = extract_region_error(&res) {
             let mut resp = RawGetResponse::default();
             resp.set_region_error(e);
-            for (id, source) in id_sources {
+            for (id, source, keyspace_id) in id_sources {
                 let res = batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::RawGet(resp.clone())),
                     ..Default::default()
@@ -308,6 +331,7 @@ fn future_batch_raw_get_command<E: Engine, L: LockManager, F: KvFormat>(
                     begin_instant,
                     GrpcTypeKind::raw_batch_get_command,
                     source,
+                    keyspace_id,
                 );
                 let task = MeasuredSingleResponse::new(id, res, measure);
                 if tx.send_with(task, WakePolicy::Immediately).is_err() {

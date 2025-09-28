@@ -339,6 +339,9 @@ impl Debug for RaftKv {
     }
 }
 
+const ASYNC_WRITE_REQUEST: &str = "write";
+const ASYNC_SNAPSHOT_REQUEST: &str = "snapshot";
+
 #[allow(dead_code)]
 impl Engine for RaftKv {
     type Snap = RegionSnapshot;
@@ -353,6 +356,7 @@ impl Engine for RaftKv {
     }
 
     type WriteRes = impl Stream<Item = WriteEvent> + Send + Unpin;
+
     fn async_write(
         &self,
         ctx: &Context,
@@ -371,7 +375,7 @@ impl Engine for RaftKv {
 
         ASYNC_REQUESTS_COUNTER_VEC.write.all.inc();
         let begin_instant = Instant::now_coarse();
-
+        let keyspace_id = ctx.get_keyspace_id();
         if res.is_ok() {
             // If rid is some, only the specified region reports error.
             // If rid is None, all regions report error.
@@ -484,9 +488,12 @@ impl Engine for RaftKv {
                     });
                     let mut res = match on_write_result(resp) {
                         Ok(CmdRes::Resp(_)) => {
-                            let elapse = begin_instant.saturating_elapsed_secs();
                             ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
-                            ASYNC_REQUESTS_DURATIONS_VEC.write.observe(elapse);
+                            record_request_async_metrics(
+                                ASYNC_WRITE_REQUEST,
+                                keyspace_id,
+                                begin_instant.saturating_elapsed(),
+                            );
                             fail_point!("raftkv_async_write_finish");
                             Ok(())
                         }
@@ -530,7 +537,7 @@ impl Engine for RaftKv {
             });
             Ok(())
         })();
-
+        let keyspace_id = ctx.pb_ctx.get_keyspace_id();
         let mut req = Request::default();
         req.set_cmd_type(CmdType::Snap);
         if !ctx.key_ranges.is_empty() && ctx.start_ts.map_or(false, |ts| !ts.is_zero()) {
@@ -567,8 +574,11 @@ impl Engine for RaftKv {
                     StoreCallback::Read(Box::new(move |resp| {
                         let res = on_read_result(resp).map_err(Error::into);
                         if res.is_ok() {
-                            let elapse = begin_instant.saturating_elapsed_secs();
-                            ASYNC_REQUESTS_DURATIONS_VEC.snapshot.observe(elapse);
+                            record_request_async_metrics(
+                                ASYNC_SNAPSHOT_REQUEST,
+                                keyspace_id,
+                                begin_instant.saturating_elapsed(),
+                            );
                             ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();
                         }
                         cb(res);

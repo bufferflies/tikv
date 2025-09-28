@@ -220,6 +220,7 @@ impl TikvServer {
         );
         let pd_client =
             TikvServer::connect_to_pd_cluster(config, env.clone(), Arc::clone(&security_mgr));
+        init_keyspace_manager(pd_client.clone());
 
         config.dfs.override_from_env();
         config.security.override_from_env();
@@ -337,8 +338,6 @@ impl TikvServer {
                 overload_protector_worker.run();
             })
             .unwrap();
-
-        init_keyspace_manager(pd_client.clone());
 
         info!("created tikv server");
         TikvServer {

@@ -178,6 +178,7 @@ macro_rules! handle_request {
                 sink.success(resp).await?;
                 GRPC_MSG_HISTOGRAM_STATIC
                     .$fn_name
+                    .default
                     .observe(elapsed.as_secs_f64());
                 record_request_source_metrics(source, elapsed);
                 ServerResult::Ok(())
@@ -396,6 +397,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             sink.success(resp).await?;
             GRPC_MSG_HISTOGRAM_STATIC
                 .kv_prepare_flashback_to_version
+                .default
                 .observe(elapsed.as_secs_f64());
             record_request_source_metrics(source, elapsed);
             ServerResult::Ok(())
@@ -427,6 +429,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             sink.success(resp).await?;
             GRPC_MSG_HISTOGRAM_STATIC
                 .kv_flashback_to_version
+                .default
                 .observe(elapsed.as_secs_f64());
             record_request_source_metrics(source, elapsed);
             ServerResult::Ok(())
@@ -453,6 +456,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             let elapsed = begin_instant.saturating_elapsed();
             GRPC_MSG_HISTOGRAM_STATIC
                 .coprocessor
+                .default
                 .observe(elapsed.as_secs_f64());
             record_request_source_metrics(source, elapsed);
             ServerResult::Ok(())
@@ -483,6 +487,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             let elapsed = begin_instant.saturating_elapsed();
             GRPC_MSG_HISTOGRAM_STATIC
                 .raw_coprocessor
+                .default
                 .observe(elapsed.as_secs_f64());
             record_request_source_metrics(source, elapsed);
             ServerResult::Ok(())
@@ -534,6 +539,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             let elapsed = begin_instant.saturating_elapsed();
             GRPC_MSG_HISTOGRAM_STATIC
                 .unsafe_destroy_range
+                .default
                 .observe(elapsed.as_secs_f64());
             record_request_source_metrics(source, elapsed);
             ServerResult::Ok(())
@@ -571,6 +577,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
                 Ok(_) => {
                     GRPC_MSG_HISTOGRAM_STATIC
                         .coprocessor_stream
+                        .default
                         .observe(begin_instant.saturating_elapsed().as_secs_f64());
                     let _ = sink.close().await;
                 }
@@ -770,6 +777,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             sink.success(resp).await?;
             GRPC_MSG_HISTOGRAM_STATIC
                 .split_region
+                .default
                 .observe(begin_instant.saturating_elapsed().as_secs_f64());
             ServerResult::Ok(())
         }
@@ -1019,6 +1027,7 @@ fn response_batch_commands_request<F, T>(
                 begin,
                 label,
                 source,
+                keyspace_id: 0_u32,
             };
             let task = MeasuredSingleResponse::new(id, resp, measure);
             if let Err(e) = tx.send_with(task, WakePolicy::Immediately) {
@@ -1173,10 +1182,12 @@ fn handle_measures_for_batch_commands(measures: &mut MeasuredBatchResponse) {
             label,
             begin,
             source,
+            keyspace_id: _,
         } = measure;
         let elapsed = now.saturating_duration_since(begin);
         GRPC_MSG_HISTOGRAM_STATIC
             .get(label)
+            .default
             .observe(elapsed.as_secs_f64());
         record_request_source_metrics(source, elapsed);
         let exec_details = resp.cmd.as_mut().and_then(|cmd| match cmd {
@@ -2117,13 +2128,15 @@ pub struct GrpcRequestDuration {
     pub begin: Instant,
     pub label: GrpcTypeKind,
     pub source: String,
+    pub keyspace_id: u32,
 }
 impl GrpcRequestDuration {
-    pub fn new(begin: Instant, label: GrpcTypeKind, source: String) -> Self {
+    pub fn new(begin: Instant, label: GrpcTypeKind, source: String, keyspace_id: u32) -> Self {
         GrpcRequestDuration {
             begin,
             label,
             source,
+            keyspace_id,
         }
     }
 }

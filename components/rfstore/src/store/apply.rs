@@ -235,7 +235,6 @@ pub(crate) struct ApplyBatch {
 /// The raft worker receives all the apply tasks of different Regions
 /// located at this store, and it will get the corresponding applier to
 /// handle the apply task to make the code logic more clear.
-#[derive(Default)]
 pub struct Applier {
     pub(crate) peer: metapb::Peer,
     pub(crate) term: u64,
@@ -295,6 +294,15 @@ pub struct Applier {
     )>,
 
     trace: ApplyMemoryTrace,
+
+    apply_log_histogram: LocalHistogram,
+
+    apply_histogram: LocalHistogram,
+
+    pub(crate) store_time_histogram: LocalHistogram,
+
+    last_meterics_flush_time: Instant,
+    keyspace_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -341,14 +349,10 @@ impl Applier {
     }
 
     pub fn new_from_reg(reg: MsgRegistration) -> Self {
-        Self {
-            peer: reg.peer,
-            term: reg.term,
-            region: reg.region,
-            apply_state: reg.apply_state,
-            encryption_key: reg.encryption_key,
-            ..Default::default()
-        }
+        let mut applier = Self::default(reg.peer, reg.region, reg.apply_state);
+        applier.encryption_key = reg.encryption_key;
+        applier.term = reg.term;
+        applier
     }
 
     pub fn is_paused(&self) -> bool {
@@ -385,15 +389,11 @@ impl Applier {
             })
             .clone();
         let encryption_key = snap.get_encryption_key();
-        Self {
-            peer,
-            term: RAFT_INIT_LOG_TERM,
-            region,
-            apply_state,
-            snap: Some(snap),
-            encryption_key,
-            ..Default::default()
-        }
+        let mut applier = Self::default(peer, region, apply_state);
+        applier.encryption_key = encryption_key;
+        applier.snap = Some(snap);
+        applier.term = RAFT_INIT_LOG_TERM;
+        applier
     }
 
     pub fn new_for_replication(
@@ -402,14 +402,55 @@ impl Applier {
         apply_state: RaftApplyState,
     ) -> Self {
         let peer = region.peers.first().cloned().unwrap();
+        let mut applier = Self::default(peer, region, apply_state);
+        applier.encryption_key = encryption_key;
+        applier.term = apply_state.applied_index_term;
+        applier
+    }
+
+    fn default(peer: metapb::Peer, region: metapb::Region, apply_state: RaftApplyState) -> Self {
+        let keyspace_id = rfengine::get_region_keyspace_id_u32(&region).unwrap_or(0);
+        let keyspace_name = pd_client::keyspace::to_keyspace_name(keyspace_id)
+            .map(|name| name.to_string())
+            .unwrap_or_default();
+        let apply_log_histogram = STORE_APPLY_LOG_HISTOGRAM
+            .with_label_values(&[&keyspace_name])
+            .local();
+        let apply_histogram = APPLY_TIME_HISTOGRAM
+            .with_label_values(&[&keyspace_name])
+            .local();
+        let store_time_histogram = STORE_TIME_HISTOGRAM
+            .with_label_values(&[&keyspace_name])
+            .local();
         Self {
             peer,
-            term: apply_state.applied_index_term,
+            term: 0,
             region,
             apply_state,
             snap: None,
-            encryption_key,
-            ..Default::default()
+            encryption_key: None,
+            decryption_buf: vec![],
+            shard_pending_active: None,
+            trace: ApplyMemoryTrace::default(),
+            stopped: false,
+            pending_remove: false,
+            pending_cmds: PendingCmdQueue::default(),
+            lock_cache: HashMap::default(),
+            metrics: ApplyMetrics::default(),
+            pending_split: HashMap::default(),
+            commit_merge_source_tables: HashMap::default(),
+            paused_apply_queue: PausedApplyQueue::default(),
+            scheduled_change_sets: VecDeque::new(),
+            prepared_change_sets: HashMap::new(),
+            role: raft::StateRole::Follower,
+            mem_table_state: None,
+            last_property_term: 0,
+            buckets: None,
+            apply_log_histogram,
+            apply_histogram,
+            store_time_histogram,
+            last_meterics_flush_time: Instant::now_coarse(),
+            keyspace_name,
         }
     }
 
@@ -806,15 +847,47 @@ impl Applier {
         let (mem_table_size, unpersisted_props_size) = writable_mem_tbl_state.unwrap_or_default();
         mem_states.update(mem_table_size, unpersisted_props_size);
         self.maybe_propose_switch_mem_table(ctx, timer);
-        let elapsed = timer.saturating_elapsed_secs();
-        ctx.apply_time.observe(elapsed); // waterfall
-        STORE_APPLY_LOG_HISTOGRAM.observe(elapsed);
+        self.record_apply_metry(timer.saturating_elapsed());
         // self.metrics.written_bytes += wb.estimated_size() as u64;
         // self.metrics.written_keys += wb.num_entries() as u64;
         let mut resp = RaftCmdResponse::default();
         let header = RaftResponseHeader::default();
         resp.set_header(header);
         Ok((resp, ApplyResult::None))
+    }
+
+    fn record_apply_metry(&mut self, dur: Duration) {
+        self.apply_histogram.observe(dur.as_secs_f64()); // waterfall
+        self.apply_log_histogram.observe(dur.as_secs_f64());
+        let now = Instant::now_coarse();
+        if now.duration_since(self.last_meterics_flush_time) >= Duration::from_secs(1) {
+            self.apply_histogram.flush();
+            self.apply_log_histogram.flush();
+            self.store_time_histogram.flush();
+            self.last_meterics_flush_time = now;
+            // Try to update keyspace name in case it is empty string.
+            if !self.keyspace_name.is_empty() {
+                return;
+            }
+            let keyspace_name = pd_client::keyspace::to_keyspace_name(
+                rfengine::get_region_keyspace_id_u32(&self.region).unwrap_or(0),
+            )
+            .map(|name| name.to_string())
+            .unwrap_or_default();
+            if self.keyspace_name == keyspace_name {
+                return;
+            }
+            self.keyspace_name = keyspace_name;
+            self.apply_log_histogram = STORE_APPLY_LOG_HISTOGRAM
+                .with_label_values(&[self.keyspace_name.as_ref()])
+                .local();
+            self.apply_histogram = APPLY_TIME_HISTOGRAM
+                .with_label_values(&[self.keyspace_name.as_ref()])
+                .local();
+            self.store_time_histogram = STORE_TIME_HISTOGRAM
+                .with_label_values(&[self.keyspace_name.as_ref()])
+                .local();
+        }
     }
 
     /// Applies raft command.
@@ -2429,7 +2502,6 @@ pub struct ApplyContext {
     // Use `RefCell` to work around the borrow check.
     wb: RefCell<WriteBatch>,
     pub(crate) apply_wait: LocalHistogram,
-    pub(crate) apply_time: LocalHistogram,
     pub(crate) observer: Option<Box<dyn ApplyObserver>>,
 }
 
@@ -2442,7 +2514,6 @@ impl ApplyContext {
             exec_log_term: Default::default(),
             wb: RefCell::new(WriteBatch::default()),
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
-            apply_time: APPLY_TIME_HISTOGRAM.local(),
             observer: None,
         }
     }

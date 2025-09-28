@@ -311,16 +311,18 @@ make_static_metric! {
 }
 
 lazy_static! {
-    pub static ref STORE_TIME_HISTOGRAM: Histogram =
-        register_histogram!(
+    pub static ref STORE_TIME_HISTOGRAM: HistogramVec =
+        register_histogram_vec!(
             "tikv_raftstore_store_duration_secs",
             "Bucketed histogram of store time duration.",
+            &["keyspace_name"],
             exponential_buckets(0.00001, 2.0, 26).unwrap()
         ).unwrap();
-    pub static ref APPLY_TIME_HISTOGRAM: Histogram =
-        register_histogram!(
+    pub static ref APPLY_TIME_HISTOGRAM: HistogramVec =
+        register_histogram_vec!(
             "tikv_raftstore_apply_duration_secs",
             "Bucketed histogram of apply time duration.",
+            &["keyspace_name"],
             exponential_buckets(0.00001, 2.0, 26).unwrap()
         ).unwrap();
 
@@ -482,17 +484,19 @@ lazy_static! {
     pub static ref PEER_WRITE_CMD_COUNTER: WriteCmdVec =
         auto_flush_from!(PEER_WRITE_CMD_COUNTER_VEC, WriteCmdVec);
 
-    pub static ref PEER_COMMIT_LOG_HISTOGRAM: Histogram =
-        register_histogram!(
+    pub static ref PEER_COMMIT_LOG_HISTOGRAM: HistogramVec =
+        register_histogram_vec!(
             "tikv_raftstore_commit_log_duration_seconds",
             "Bucketed histogram of peer commits logs duration.",
+            &["keyspace_name"],
             exponential_buckets(0.00001, 2.0, 26).unwrap()
         ).unwrap();
 
-    pub static ref STORE_APPLY_LOG_HISTOGRAM: Histogram =
-        register_histogram!(
+    pub static ref STORE_APPLY_LOG_HISTOGRAM: HistogramVec =
+        register_histogram_vec!(
             "tikv_raftstore_apply_log_duration_seconds",
             "Bucketed histogram of peer applying log duration.",
+            &["keyspace_name"],
             exponential_buckets(0.00001, 2.0, 26).unwrap()
         ).unwrap();
 

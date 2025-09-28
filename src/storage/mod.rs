@@ -826,6 +826,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     let bypass_locks = TsSet::vec_from_u64s(ctx.take_resolved_locks());
                     let access_locks = TsSet::vec_from_u64s(ctx.take_committed_locks());
                     let region_id = ctx.get_region_id();
+                    let keyspace_id = ctx.get_keyspace_id();
 
                     let snap_ctx = match prepare_snap_ctx(
                         &ctx,
@@ -844,7 +845,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                             snap_ctx
                         }
                         Err(e) => {
-                            consumer.consume(id, Err(e), begin_instant, source);
+                            consumer.consume(id, Err(e), begin_instant, source, keyspace_id);
                             continue;
                         }
                     };
@@ -862,6 +863,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         id,
                         source,
                         tracker,
+                        keyspace_id,
                     ));
                 }
                 Self::with_tls_engine(|engine| engine.release_snapshot());
@@ -878,6 +880,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         id,
                         source,
                         tracker,
+                        keyspace_id,
                     ) = req_snap;
                     let snap_res = snap.await;
                     set_tls_tracker_token(tracker);
@@ -902,6 +905,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                                     v.map_err(|e| Error::from(e)).map(|v| (v, stat)),
                                     begin_instant,
                                     source,
+                                    keyspace_id,
                                 );
                             } else {
                                 let buckets = snapshot.ext().get_buckets();
@@ -929,6 +933,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                                                 .map(|v| (v, stat)),
                                             begin_instant,
                                             source,
+                                            keyspace_id,
                                         );
                                     }
                                     Err(e) => {
@@ -937,13 +942,14 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                                             Err(Error::from(txn::Error::from(e))),
                                             begin_instant,
                                             source,
+                                            keyspace_id,
                                         );
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            consumer.consume(id, Err(e), begin_instant, source);
+                            consumer.consume(id, Err(e), begin_instant, source, keyspace_id);
                         }
                     }
                 }
@@ -1909,6 +1915,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                                             .map_err(Error::from),
                                         begin_instant,
                                         ctx.take_request_source(),
+                                        ctx.get_keyspace_id(),
                                     );
                                     tls_collect_read_flow(
                                         ctx.get_region_id(),
@@ -1924,12 +1931,19 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                                         Err(e),
                                         begin_instant,
                                         ctx.take_request_source(),
+                                        ctx.get_keyspace_id(),
                                     );
                                 }
                             }
                         }
                         Err(e) => {
-                            consumer.consume(id, Err(e), begin_instant, ctx.take_request_source());
+                            consumer.consume(
+                                id,
+                                Err(e),
+                                begin_instant,
+                                ctx.take_request_source(),
+                                ctx.get_keyspace_id(),
+                            );
                         }
                     }
                 }
@@ -3391,6 +3405,7 @@ pub trait ResponseBatchConsumer<ConsumeResponse: Sized>: Send {
         res: Result<ConsumeResponse>,
         begin: Instant,
         request_source: String,
+        keyspace_id: u32,
     );
 }
 
@@ -3692,6 +3707,7 @@ pub mod test_util {
             res: Result<(Option<Vec<u8>>, Statistics)>,
             _: Instant,
             _source: String,
+            _keyspace_id: u32,
         ) {
             self.data.lock().unwrap().push(GetResult {
                 id,
@@ -3701,7 +3717,14 @@ pub mod test_util {
     }
 
     impl ResponseBatchConsumer<Option<Vec<u8>>> for GetConsumer {
-        fn consume(&self, id: u64, res: Result<Option<Vec<u8>>>, _: Instant, _source: String) {
+        fn consume(
+            &self,
+            id: u64,
+            res: Result<Option<Vec<u8>>>,
+            _: Instant,
+            _source: String,
+            _keyspace_id: u32,
+        ) {
             self.data.lock().unwrap().push(GetResult { id, res });
         }
     }
