@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::Uri;
 use security::HttpClient;
+use tikv_util::time::Instant;
 use tokio::runtime::Runtime;
 use txn_types::TimeStamp;
 
@@ -57,6 +58,7 @@ impl RemoteCachedDfs {
             debug!("cache expired"; "file_id" => file_id);
             return None;
         }
+        let start = Instant::now_coarse();
         let end_off = opts
             .end_off
             .map(|end| format!("&end_off={}", end))
@@ -68,13 +70,17 @@ impl RemoteCachedDfs {
         .unwrap();
         let res = tokio::time::timeout(READ_REMOTE_CACHE_TIMEOUT, self.http_client.get(uri)).await;
         if res.is_err() {
-            warn!("read from cache timeout"; "file_id" => file_id);
+            warn!("read from cache timeout";
+                "file_id" => file_id,
+                "addr" => &self.remote_cache_addr,
+            );
             return None;
         }
         let resp_res = res.unwrap();
         if resp_res.is_err() {
             warn!("read cache failed";
                 "file_id" => file_id,
+                "addr" => &self.remote_cache_addr,
                 "err" => ?resp_res.err(),
             );
             return None;
@@ -83,6 +89,7 @@ impl RemoteCachedDfs {
         if !resp.status().is_success() {
             warn!("read cache failed";
                 "file_id" => file_id,
+                "addr" => &self.remote_cache_addr,
                 "status" => ?resp.status(),
             );
             return None;
@@ -93,18 +100,29 @@ impl RemoteCachedDfs {
         )
         .await;
         if res.is_err() {
-            warn!("read body from cache timeout"; "file_id" => file_id);
+            warn!("read body from cache timeout";
+                "file_id" => file_id,
+                "addr" => &self.remote_cache_addr,
+            );
             return None;
         }
         let body_res = res.unwrap();
         if body_res.is_err() {
             warn!("read cache body failed";
                 "file_id" => file_id,
+                "addr" => &self.remote_cache_addr,
                 "err" => ?body_res.err(),
             );
             return None;
         }
         let body = body_res.unwrap();
+        info!(
+            "read file from remote cache";
+            "file_id" => file_id,
+            "addr" => &self.remote_cache_addr,
+            "size" => body.len(),
+            "takes" => ?start.saturating_elapsed(),
+        );
         Some(body)
     }
 }
