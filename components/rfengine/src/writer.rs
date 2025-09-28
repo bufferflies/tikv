@@ -940,6 +940,7 @@ mod tests {
             next_wal_file.write_all_at(&eof_data, 0).unwrap();
             // Set to cli_mode to avoid compaction.
             cfg.cli_mode = true;
+            cfg.disable_compaction = true;
             let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
             let (new_epoch, new_file_off) = get_epoch_file_off(&engine);
             assert_eq!(new_epoch, epoch);

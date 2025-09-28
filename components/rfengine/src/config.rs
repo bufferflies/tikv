@@ -50,6 +50,12 @@ pub struct Config {
     #[serde(skip)]
     pub cli_mode: bool,
 
+    /// Open RfEngine without compaction. This is used for test and debug.
+    ///
+    /// Default: false
+    #[serde(skip)]
+    pub disable_compaction: bool,
+
     /// Rlog file cache capacity. Available only when `lightweight_backup` is
     /// enabled.
     ///
@@ -89,6 +95,7 @@ impl Default for Config {
             lightweight_backup: false,
             wal_chunk_target_file_size: ReadableSize::mb(64),
             cli_mode: false,
+            disable_compaction: false,
             rlog_cache_capacity: ReadableSize::mb(128),
             rlog_cache_size_threshold: ReadableSize::kb(4),
             dfs_worker_memory_limit: AbsoluteOrPercentSize::Percent(10.0),
