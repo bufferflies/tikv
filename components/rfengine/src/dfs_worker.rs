@@ -314,13 +314,16 @@ impl ObjectStorageWorker {
     fn handle_sync(&mut self, epoch_id: u32, file_off: u64) -> Result<()> {
         let store_id = self.get_engine_id();
 
-        if epoch_id < self.epoch_id {
-            error!("{}: handle_sync for smaller epoch id", store_id;
-                "epoch_id" => epoch_id, "file_off" => "file_off",
+        if (epoch_id, file_off) < (self.epoch_id, self.sync_off) {
+            // Happens when in-place restore TiKV store.
+            // It's not safe to overwrite the existed remote WAL chunks. Return error and
+            // set unhealthy, then wait for next snapshot to become healthy.
+            error!("{}: handle_sync for early data", store_id;
+                "epoch_id" => epoch_id, "file_off" => file_off,
                 "self.epoch_id" => self.epoch_id, "start_off" => self.start_off, "sync_off" => self.sync_off,
             );
             debug_assert!(false);
-            return Err(Error::Other("handle_sync for smaller epoch id".to_string()));
+            return Err(Error::Other("handle_sync for early data".to_string()));
         }
 
         if epoch_id != self.epoch_id {
@@ -334,7 +337,16 @@ impl ObjectStorageWorker {
                 self.reset(rebuild_epoch + 1);
             }
         }
-        debug_assert_eq!(epoch_id, self.epoch_id);
+        assert_eq!(epoch_id, self.epoch_id);
+        assert!(file_off >= self.sync_off);
+        if file_off == self.sync_off {
+            // Should not happen, but not a fatal error. Allow for safety.
+            warn!("{}: handle_sync: no new data", store_id;
+                "epoch_id" => epoch_id, "file_off" => file_off,
+                "self.epoch_id" => self.epoch_id, "start_off" => self.start_off, "sync_off" => self.sync_off,
+            );
+            debug_assert!(false);
+        }
 
         let sync_len = file_off - self.sync_off;
 
