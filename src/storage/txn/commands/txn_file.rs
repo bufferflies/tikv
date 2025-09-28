@@ -15,7 +15,7 @@ use kvenginepb::TxnFileRef;
 use kvproto::kvrpcpb::{CommandPri, WriteConflictReason};
 use log_wrappers::Value as LogValue;
 use protobuf::Message;
-use tikv_kv::{Snapshot, WriteData};
+use tikv_kv::{Snapshot, TxnFileWriteData, WriteData};
 use txn_types::{Key, LockType, TimeStamp, WriteType};
 
 use crate::storage::{
@@ -957,6 +957,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileComman
         context: WriteContext<'_, L>,
     ) -> crate::storage::txn::Result<WriteResult> {
         let snap = snapshot.get_kvengine_snap().unwrap();
+        let write_bytes = self.write_bytes();
         let cmd = mem::take(&mut self.inner_cmd).unwrap();
         let ctx = cmd.ctx().clone();
         debug!("txn file process write"; "cmd" => ?cmd, "txn_file_ref" => ?self.txn_file_ref, "ctx" => ?ctx, "snap" => ?snap);
@@ -1007,7 +1008,10 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for TxnFileComman
         };
         let mut write_data = WriteData::default();
         if self.modified {
-            write_data.txn_file = Some(self.txn_file_ref.clone());
+            write_data.txn_file = Some(TxnFileWriteData {
+                txn_file_ref: self.txn_file_ref.clone(),
+                write_bytes,
+            });
             write_data.backup_ts_checked = txn.take_checked_backup_ts();
         }
         let result = WriteResult {

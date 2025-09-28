@@ -71,6 +71,7 @@ pub use self::{
 
 pub const SEEK_BOUND: u64 = 8;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+const TXN_FILE_WRITE_BYTES_DISCOUNT: usize = 2; // 1/2 of the write bytes is counted for flow control.
 
 pub type Callback<T> = Box<dyn FnOnce(Result<T>) + Send>;
 pub type OnAppliedCb = Box<dyn FnOnce(&mut Result<()>) + Send>;
@@ -218,13 +219,18 @@ impl PessimisticLockPair for Modify {
     }
 }
 
+pub struct TxnFileWriteData {
+    pub txn_file_ref: TxnFileRef,
+    pub write_bytes: usize, // For flow control.
+}
+
 #[derive(Default)]
 pub struct WriteData {
     pub modifies: Vec<Modify>,
     pub extra: TxnExtra,
     pub deadline: Option<Deadline>,
     pub disk_full_opt: DiskFullOpt,
-    pub txn_file: Option<TxnFileRef>,
+    pub txn_file: Option<TxnFileWriteData>,
     pub backup_ts_checked: Option<TrackedBackupTs>,
 }
 
@@ -253,12 +259,11 @@ impl WriteData {
         for m in &self.modifies {
             total += m.size();
         }
-        if let Some(txn_file_ref) = &self.txn_file {
-            // The size is used by flow controller, we don't want txn file to be limited in
-            // the same way as normal writes, so we use a small value for each
-            // chunk.
+        if let Some(txn_file) = &self.txn_file {
+            // The size is used by flow controller. Writing txn file costs less than normal
+            // writes, but we still need the flow control to limit the size of L0 tables.
             // TODO: need to add a limiter in txn chunk manager.
-            total += txn_file_ref.chunk_ids.len() * 4096
+            total += txn_file.write_bytes / TXN_FILE_WRITE_BYTES_DISCOUNT;
         }
         total
     }

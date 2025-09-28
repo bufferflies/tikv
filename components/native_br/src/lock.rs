@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use kvengine::{Shard, UserMeta};
 use kvproto::kvrpcpb;
 use tikv::storage::{
-    kv::WriteData,
+    kv::{TxnFileWriteData, WriteData},
     mvcc::{CloudReader, Key, MvccTxn, TxnCommitRecord, WriteType},
 };
 use tikv_util::{box_err, debug, info, warn};
@@ -311,7 +311,10 @@ impl LockResolver {
             write_data
         } else if let Some(txn_file_ref) = txn_file_ref {
             let mut write_data = WriteData::default();
-            write_data.txn_file = Some(txn_file_ref);
+            write_data.txn_file = Some(TxnFileWriteData {
+                txn_file_ref,
+                write_bytes: 0, // write_bytes is unused here.
+            });
             write_data
         } else {
             unreachable!()

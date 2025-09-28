@@ -689,8 +689,8 @@ impl ReadIndexObserver for ReplicaReadLockChecker {
 pub fn modifies_to_requests(_ctx: &Context, data: &mut WriteData) -> CustomRequest {
     let builder = &mut rlog::CustomBuilder::new();
     let modifies = std::mem::take(&mut data.modifies);
-    if let Some(txn_file_ref) = data.txn_file.take() {
-        builder.set_txn_file(&txn_file_ref);
+    if let Some(txn_file) = data.txn_file.take() {
+        builder.set_txn_file(&txn_file.txn_file_ref);
         return builder.build();
     }
     if data.extra.one_pc {
