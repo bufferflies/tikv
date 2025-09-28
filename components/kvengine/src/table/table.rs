@@ -101,6 +101,10 @@ pub trait Iterator: Send {
         self.seek(key);
     }
 
+    fn is_cf_sync(&self, _cf: usize) -> bool {
+        true
+    }
+
     fn key(&self) -> InnerKey<'_>;
 
     fn value(&self) -> Value;

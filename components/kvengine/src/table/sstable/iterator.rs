@@ -613,6 +613,10 @@ impl table::Iterator for TableIterator {
         }
     }
 
+    fn is_cf_sync(&self, cf: usize) -> bool {
+        self.t.is_cf_sync(cf)
+    }
+
     fn key(&self) -> InnerKey<'_> {
         InnerKey::from_inner_buf(self.key_buf.chunk())
     }

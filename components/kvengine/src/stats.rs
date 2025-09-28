@@ -403,7 +403,7 @@ impl ShardStats {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct ShardStatsLite {

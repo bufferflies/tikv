@@ -1439,6 +1439,69 @@ impl SnapAccessCore {
         Some(Schema::new(schema_buf))
     }
 
+    pub fn new_columnar_mvcc_reader_from_row(
+        &self,
+        table_id: i64,
+        columns: &[ColumnInfo],
+        read_ts: u64,
+    ) -> Option<ColumnarMvccReader> {
+        let Some(schema) = self.new_schema_from_columns(table_id, columns) else {
+            return None;
+        };
+        let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
+        for mem in &self.data.mem_tbls {
+            let skl = mem.get_cf(WRITE_CF);
+            if !skl.is_empty() {
+                let iter = skl.new_iterator(false);
+                let row_reader = ColumnarRowTableReader::new(
+                    schema.clone(),
+                    iter,
+                    None,
+                    false,
+                    self.encryption_key.clone(),
+                );
+                readers.push(Box::new(row_reader));
+            }
+        }
+        for l0 in &self.data.l0_tbls {
+            if let Some(l0_write) = l0.get_cf(WRITE_CF) {
+                let iter = l0_write.new_iterator(false, false);
+                let row_reader = ColumnarRowTableReader::new(
+                    schema.clone(),
+                    iter,
+                    None,
+                    false,
+                    self.encryption_key.clone(),
+                );
+                readers.push(Box::new(row_reader));
+            }
+        }
+        self.data.for_each_level(|cf, lh| {
+            if cf != WRITE_CF {
+                return false;
+            }
+            for tbl in lh.tables.iter() {
+                let iter = tbl.new_iterator(false, false);
+                let row_reader = ColumnarRowTableReader::new(
+                    schema.clone(),
+                    iter,
+                    None,
+                    false,
+                    self.encryption_key.clone(),
+                );
+                readers.push(Box::new(row_reader));
+            }
+            false
+        });
+
+        let merge_reader = ColumnarMergeReader::new(schema.clone(), readers);
+        Some(ColumnarMvccReader::new(
+            Box::new(merge_reader),
+            &schema,
+            read_ts,
+        ))
+    }
+
     /// `new_columnar_mvcc_reader` will try to construct a reader in columnar
     /// mode. If `None` is returned, normal tikv row reading will be used.
     pub fn new_columnar_mvcc_reader(

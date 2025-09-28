@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{atomic::AtomicUsize, Arc},
     time::Duration,
 };
 
@@ -12,6 +12,7 @@ use clap::Args;
 use cloud_encryption::MasterKey;
 use cloud_worker::{SchemaManager, SchemaManagerConfig, SchemaMgrContext};
 use colored::*;
+use futures::stream::{FuturesUnordered, StreamExt};
 use http::{Request, StatusCode};
 use hyper::Body;
 use kvengine::{
@@ -21,7 +22,7 @@ use kvengine::{
     table::{
         columnar::{Block, ColumnarFilterReader, GLOBAL_COMMON_HANDLE_END},
         file::FdCache,
-        schema_file::SchemaFile,
+        schema_file::{Schema, SchemaFile},
         sstable::BlockCache,
     },
     txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
@@ -36,7 +37,7 @@ use tidb_query_datatype::codec::table::{decode_common_handle, decode_int_handle,
 use tikv_util::{
     config::AbsoluteOrPercentSize, error, info, memory::MemoryLimiter, worker_pool::WorkerPool,
 };
-use tokio::{fs::OpenOptions, io::AsyncWriteExt};
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Semaphore};
 const CHECK_RESULT_FILE: &str = "check_columnar_result.txt";
 
 // This command is used to check the pk column loss in columnar files.
@@ -48,6 +49,9 @@ const CHECK_TYPE_MUL_TABLE_ORDERS: &str = "check-mul-table-orders";
 // This command is used to check biggest key in columnar file.
 // See https://github.com/tidbcloud/cloud-storage-engine/pull/3561 for more details.
 const CHECK_TYPE_BIGGEST_HANDLE: &str = "check-biggest-handle";
+// This command is used to check the row count in columnar files consistent with
+// the row count in the sstables.
+const CHECK_TYPE_ROW_COUNT: &str = "check-row-count";
 
 #[derive(Args)]
 pub struct CheckColumnarArgs {
@@ -72,6 +76,9 @@ pub struct CheckColumnarArgs {
     /// The keyspace id start to check columnar, if not set, check from 0.
     #[clap(long, default_value_t = 0)]
     pub keyspace_id_start: u32,
+    /// The shard id to check columnar, if not set, check all shards.
+    #[clap(long, default_value_t = 0)]
+    pub shard_id: u64,
     /// The path of the schema file.
     #[clap(long, default_value = "")]
     pub schemas_path: PathBuf,
@@ -81,6 +88,9 @@ pub struct CheckColumnarArgs {
     /// The type of check columnar.
     #[clap(long, default_value = "")]
     pub check_type: String,
+    /// Maximum concurrent shards to process
+    #[clap(long, default_value_t = 4)]
+    pub max_concurrency: usize,
 }
 
 pub(crate) fn execute_check_columnar(args: CheckColumnarArgs) {
@@ -88,7 +98,15 @@ pub(crate) fn execute_check_columnar(args: CheckColumnarArgs) {
     let pd_client = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_cfg = config.dfs.clone();
     let s3fs = Arc::new(S3Fs::new_from_config(dfs_cfg));
-    let runtime = s3fs.get_runtime();
+
+    // Use more worker threads for better parallelism
+    let worker_threads = std::cmp::max(4, args.max_concurrency);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(worker_threads)
+        .build()
+        .unwrap();
+
     let ctx = Arc::new(SchemaMgrContext {
         s3fs: s3fs.clone(),
         pd: pd_client,
@@ -106,14 +124,21 @@ pub(crate) fn execute_check_columnar(args: CheckColumnarArgs) {
         &config.pd.endpoints,
     );
 
-    runtime.block_on(check_columnar(ctx, &schema_manager, security_mgr, &config));
+    runtime.block_on(check_columnar(
+        ctx,
+        schema_manager,
+        security_mgr,
+        &config,
+        args.max_concurrency,
+    ));
 }
 
 async fn check_columnar(
     ctx: Arc<SchemaMgrContext>,
-    schema_manager: &SchemaManager,
+    schema_manager: SchemaManager,
     security_mgr: Arc<SecurityManager>,
     config: &CheckColumnarConfig,
+    max_concurrency: usize,
 ) {
     let (stores, _) = schema_manager.get_tikv_stores();
     if stores.is_empty() {
@@ -149,12 +174,30 @@ async fn check_columnar(
     if config.keyspace_id_start > 0 {
         sorted_keyspace_stats.retain(|(keyspace_id, _)| *keyspace_id >= config.keyspace_id_start);
     }
-    let total_keyspace_count = sorted_keyspace_stats.len();
-    let mut total_region_idx = 0;
-    let total_regions = sorted_keyspace_stats
-        .iter()
-        .map(|(_, shard_stats)| shard_stats.len())
-        .sum::<usize>();
+
+    let total_keyspace_count = if config.shard_id > 0 {
+        1
+    } else {
+        sorted_keyspace_stats.len()
+    };
+    let total_regions = if config.shard_id > 0 {
+        1
+    } else {
+        sorted_keyspace_stats
+            .iter()
+            .map(|(_, shard_stats)| shard_stats.len())
+            .sum::<usize>()
+    };
+
+    info!(
+        "Starting concurrent processing with {} max concurrent tasks",
+        max_concurrency
+    );
+    info!(
+        "Total keyspaces: {}, Total regions: {}",
+        total_keyspace_count, total_regions
+    );
+
     let master_key = config.security.new_master_key().await;
     let txn_chunk_manager = TxnChunkManager::new(
         vec![],
@@ -165,7 +208,7 @@ async fn check_columnar(
         TxnChunkManagerConfig::default(),
     );
     let ia_config = IaConfig {
-        mem_cap: AbsoluteOrPercentSize::Percent(20.0),
+        mem_cap: AbsoluteOrPercentSize::Percent(5.0),
         disk_cap: AbsoluteOrPercentSize::Percent(50.0),
         ..Default::default()
     };
@@ -175,76 +218,127 @@ async fn check_columnar(
         &config.working_dir,
         &ia_config,
     );
-    for (i, (keyspace_id, shard_stats)) in sorted_keyspace_stats.into_iter().enumerate() {
-        let total_region_count_in_keyspace = shard_stats.len();
-        for (shard_idx, shard) in shard_stats.iter().enumerate() {
-            total_region_idx += 1;
-            info!(
-                "check columnar for keyspace_id: {} ({}/{}), shard {} ({}/{}), total regions {}/{}",
-                keyspace_id,
-                i + 1,
-                total_keyspace_count,
-                shard.id,
-                shard_idx + 1,
-                total_region_count_in_keyspace,
-                total_region_idx,
-                total_regions,
-            );
-            match check_columnar_for_shard(
-                ctx.clone(),
-                schema_manager,
-                security_mgr.clone(),
-                txn_chunk_manager.clone(),
-                ia_mgr.clone(),
-                config,
-                &master_key,
-                shard,
-                &stores,
-            )
-            .await
-            {
-                Ok(true) => {
-                    info!(
-                        "check {} for shard {}:{}:{}",
-                        "SUCCESS".green().bold(),
-                        keyspace_id,
-                        shard.id,
-                        shard.ver
-                    );
-                }
-                Ok(false) => {
-                    error!(
-                        "check {} for shard {}:{}:{}",
-                        "FAILED".red().bold(),
-                        keyspace_id,
-                        shard.id,
-                        shard.ver
-                    );
-                    // append keyspace_id to result file
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(CHECK_RESULT_FILE)
-                        .await
-                        .unwrap();
-                    file.write_all(
-                        format!("{}:{}:{}\n", keyspace_id, shard.id, shard.ver).as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-                }
-                Err(e) => {
-                    error!(
-                        "check {} for shard {}:{}:{}: {}",
-                        "ERROR".bright_yellow().bold(),
-                        keyspace_id,
-                        shard.id,
-                        shard.ver,
-                        e
-                    );
-                }
+
+    let semaphore = Arc::new(Semaphore::new(max_concurrency));
+    let mut tasks = FuturesUnordered::new();
+    let total_processed = Arc::new(AtomicUsize::new(0));
+
+    for (keyspace_idx, (keyspace_id, shard_stats)) in sorted_keyspace_stats.into_iter().enumerate()
+    {
+        let total_region_count_in_keyspace = if config.shard_id > 0 {
+            1
+        } else {
+            shard_stats.len()
+        };
+
+        for (shard_idx, shard) in shard_stats.into_iter().enumerate() {
+            if config.shard_id > 0 && shard.id != config.shard_id {
+                continue;
             }
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let ctx_clone = ctx.clone();
+            let security_mgr_clone = security_mgr.clone();
+            let txn_chunk_manager_clone = txn_chunk_manager.clone();
+            let ia_mgr_clone = ia_mgr.clone();
+            let config_clone = config.clone();
+            let master_key_clone = master_key.clone();
+            let stores_clone = stores.clone();
+            let check_type_clone = config.check_type.clone();
+            let schema_manager_clone = schema_manager.clone();
+            let total_processed_clone = total_processed.clone();
+
+            let task = tokio::spawn(async move {
+                let _permit = permit;
+
+                let result = check_columnar_for_shard(
+                    ctx_clone,
+                    schema_manager_clone,
+                    security_mgr_clone,
+                    txn_chunk_manager_clone,
+                    ia_mgr_clone,
+                    &config_clone,
+                    &master_key_clone,
+                    &shard,
+                    &stores_clone,
+                    &check_type_clone,
+                )
+                .await;
+
+                let current_processed =
+                    total_processed_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                info!(
+                    "Completed check for keyspace_id: {} ({}/{}), shard {} ({}/{}), total progress {}/{}",
+                    keyspace_id,
+                    keyspace_idx + 1,
+                    total_keyspace_count,
+                    shard.id,
+                    shard_idx + 1,
+                    total_region_count_in_keyspace,
+                    current_processed,
+                    total_regions,
+                );
+
+                match result {
+                    Ok(true) => {
+                        info!(
+                            "check {} for shard {}:{}:{}",
+                            "SUCCESS".green().bold(),
+                            keyspace_id,
+                            shard.id,
+                            shard.ver
+                        );
+                    }
+                    Ok(false) => {
+                        error!(
+                            "check {} for shard {}:{}:{}",
+                            "FAILED".red().bold(),
+                            keyspace_id,
+                            shard.id,
+                            shard.ver
+                        );
+                        write_failure_result(keyspace_id, &shard).await;
+                    }
+                    Err(ref e) => {
+                        error!(
+                            "check {} for shard {}:{}:{}: {}",
+                            "ERROR".bright_yellow().bold(),
+                            keyspace_id,
+                            shard.id,
+                            shard.ver,
+                            e
+                        );
+                    }
+                }
+
+                result
+            });
+
+            tasks.push(task);
         }
+    }
+
+    while let Some(task_result) = tasks.next().await {
+        if let Err(e) = task_result {
+            error!("Task panicked: {:?}", e);
+        }
+    }
+
+    info!(
+        "All checks completed. Processed {} regions total.",
+        total_processed.load(std::sync::atomic::Ordering::SeqCst)
+    );
+}
+
+async fn write_failure_result(keyspace_id: u32, shard: &ShardStatsLite) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(CHECK_RESULT_FILE)
+        .await
+    {
+        let _ = file
+            .write_all(format!("{}:{}:{}\n", keyspace_id, shard.id, shard.ver).as_bytes())
+            .await;
     }
 }
 
@@ -257,6 +351,7 @@ async fn request_snapshot_from_shard(
     master_key: &MasterKey,
     shard: &ShardStatsLite,
     stores: &[Store],
+    check_type: &str,
 ) -> Result<SnapAccess, String> {
     let memory_limiter = MemoryLimiter::new(u64::MAX, None);
     let Some(leader_store_id) = get_leader_store(ctx.pd.clone(), shard.id).await else {
@@ -321,6 +416,12 @@ async fn request_snapshot_from_shard(
         ));
     }
     let tag = format!("{}:{}", shard.id, shard.ver);
+    // Check row count needs to read all the data.
+    let prepare_type = if check_type == CHECK_TYPE_ROW_COUNT {
+        PrepareType::All
+    } else {
+        PrepareType::ColumnarOnly
+    };
     let snap_ctx = SnapCtx {
         dfs: ctx.s3fs.clone(),
         master_key: master_key.clone(),
@@ -331,7 +432,7 @@ async fn request_snapshot_from_shard(
         schema_files: None,
         txn_chunk_manager,
         ia_ctx: IaCtx::Enabled(ia_mgr, Arc::new(vec![working_dir.to_path_buf()])),
-        prepare_type: PrepareType::ColumnarOnly,
+        prepare_type,
         read_columnar: true,
     };
     let mut delegate_resp = DelegateResponse::default();
@@ -351,7 +452,7 @@ async fn request_snapshot_from_shard(
 
 async fn check_columnar_for_shard(
     ctx: Arc<SchemaMgrContext>,
-    schema_manager: &SchemaManager,
+    schema_manager: SchemaManager,
     security_mgr: Arc<SecurityManager>,
     txn_chunk_manager: TxnChunkManager,
     ia_mgr: IaManager,
@@ -359,6 +460,7 @@ async fn check_columnar_for_shard(
     master_key: &MasterKey,
     shard: &ShardStatsLite,
     stores: &[Store],
+    check_type: &str,
 ) -> Result<bool, String> {
     let snap = request_snapshot_from_shard(
         ctx,
@@ -369,6 +471,7 @@ async fn check_columnar_for_shard(
         master_key,
         shard,
         stores,
+        check_type,
     )
     .await?;
 
@@ -388,12 +491,14 @@ async fn check_columnar_for_shard(
         }
         CHECK_TYPE_MUL_TABLE_ORDERS => check_mul_table_orders(&snap),
         CHECK_TYPE_BIGGEST_HANDLE => check_biggest_handle(&snap),
+        CHECK_TYPE_ROW_COUNT => check_row_count(&snap).await,
         _ => Err(format!(
-            "invalid check type: {}, available types: {}, {}, {}",
+            "invalid check type: {}, available check types: {}, {}, {}, {}",
             config.check_type,
             CHECK_TYPE_PK_COLUMN,
             CHECK_TYPE_MUL_TABLE_ORDERS,
-            CHECK_TYPE_BIGGEST_HANDLE
+            CHECK_TYPE_BIGGEST_HANDLE,
+            CHECK_TYPE_ROW_COUNT
         )),
     }
 }
@@ -454,6 +559,7 @@ async fn check_pk_column(
             read_rows = columnar_reader.read_block(&mut block, 1024).await.unwrap();
         }
     }
+
     Ok(true)
 }
 
@@ -562,6 +668,154 @@ fn check_biggest_handle(snap: &SnapAccess) -> Result<bool, String> {
     Ok(true)
 }
 
+async fn check_row_count(snap: &SnapAccess) -> Result<bool, String> {
+    let read_ts = u64::MAX;
+    let columnar_table_ids = snap.get_columnar_table_ids();
+    for table_id in columnar_table_ids {
+        let row_count = read_from_sstable(snap, read_ts, table_id).await?;
+        let columnar_row_count = read_from_columnar(snap, read_ts, table_id).await?;
+        info!(
+            "check_row_count for shard: {}, table_id: {}, row_count: {}, columnar_row_count: {}",
+            snap.get_id(),
+            table_id,
+            row_count,
+            columnar_row_count
+        );
+        if columnar_row_count != row_count {
+            error!(
+                "keyspace_id: {}, shard: {} row count mismatch, columnar: {}, row: {}",
+                snap.get_keyspace_id(),
+                snap.get_id(),
+                columnar_row_count,
+                row_count
+            );
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+async fn read_from_sstable(snap: &SnapAccess, read_ts: u64, table_id: i64) -> Result<u64, String> {
+    let schema_file = snap.get_schema_file().unwrap();
+    let is_common_handle = schema_file.get_table(table_id).unwrap().is_common_handle();
+    let inner_start = snap.get_inner_start().to_vec();
+    let inner_end = snap.get_inner_end().to_vec();
+    let shard_start_table_id = decode_table_id(&inner_start).unwrap_or(i64::MIN);
+    let shard_end_table_id = decode_table_id(&inner_end).unwrap_or(i64::MAX);
+    let start_common_handle = if table_id == shard_start_table_id {
+        decode_common_handle(&inner_start).unwrap_or(&[])
+    } else {
+        &[]
+    };
+    let end_common_handle = if table_id == shard_end_table_id {
+        decode_common_handle(&inner_end).unwrap_or(GLOBAL_COMMON_HANDLE_END)
+    } else {
+        GLOBAL_COMMON_HANDLE_END
+    };
+    let start_int_handle = if table_id == shard_start_table_id {
+        decode_int_handle(&inner_start).unwrap_or(i64::MIN)
+    } else {
+        i64::MIN
+    };
+    let end_int_handle = if table_id == shard_end_table_id {
+        decode_int_handle(&inner_end).unwrap_or(i64::MAX)
+    } else {
+        i64::MAX
+    };
+
+    let mut mvcc_reader = snap
+        .new_columnar_mvcc_reader_from_row(table_id, &[], read_ts)
+        .unwrap();
+
+    if is_common_handle {
+        mvcc_reader
+            .set_handle_range(start_common_handle, end_common_handle)
+            .await
+            .unwrap();
+    } else {
+        mvcc_reader
+            .set_int_handle_range(start_int_handle, Some(end_int_handle))
+            .await
+            .unwrap();
+    }
+    let schema: Schema = schema_file
+        .get_table(table_id)
+        .unwrap()
+        .retain_columns(|_col| false)
+        .into();
+    let mut block = Block::new(&schema);
+    let mut row_count = 0;
+    let mut read_rows = mvcc_reader.read_block(&mut block, 10240).await.unwrap();
+    while read_rows > 0 {
+        block.reset();
+        row_count += read_rows;
+        read_rows = mvcc_reader.read_block(&mut block, 10240).await.unwrap();
+    }
+
+    Ok(row_count as u64)
+}
+
+async fn read_from_columnar(snap: &SnapAccess, read_ts: u64, table_id: i64) -> Result<u64, String> {
+    let schema_file = snap.get_schema_file().unwrap();
+    let inner_start = snap.get_inner_start().to_vec();
+    let inner_end = snap.get_inner_end().to_vec();
+    let shard_start_table_id = decode_table_id(&inner_start).unwrap_or(i64::MIN);
+    let shard_end_table_id = decode_table_id(&inner_end).unwrap_or(i64::MAX);
+    let start_common_handle = if table_id == shard_start_table_id {
+        decode_common_handle(&inner_start).unwrap_or(&[])
+    } else {
+        &[]
+    };
+    let end_common_handle = if table_id == shard_end_table_id {
+        decode_common_handle(&inner_end).unwrap_or(GLOBAL_COMMON_HANDLE_END)
+    } else {
+        GLOBAL_COMMON_HANDLE_END
+    };
+    let start_int_handle = if table_id == shard_start_table_id {
+        decode_int_handle(&inner_start).unwrap_or(i64::MIN)
+    } else {
+        i64::MIN
+    };
+    let end_int_handle = if table_id == shard_end_table_id {
+        decode_int_handle(&inner_end).unwrap_or(i64::MAX)
+    } else {
+        i64::MAX
+    };
+    let mut columnar_reader = snap
+        .new_columnar_mvcc_reader(table_id, &[], None, read_ts, None)
+        .unwrap()
+        .unwrap();
+
+    let schema = schema_file.get_table(table_id).unwrap();
+    let is_common_handle = schema.is_common_handle();
+    if is_common_handle {
+        columnar_reader
+            .set_handle_range(start_common_handle, end_common_handle)
+            .await
+            .unwrap();
+    } else {
+        columnar_reader
+            .set_int_handle_range(start_int_handle, Some(end_int_handle))
+            .await
+            .unwrap();
+    }
+    let schema: Schema = schema_file
+        .get_table(table_id)
+        .unwrap()
+        .retain_columns(|_col| false)
+        .into();
+    let mut block = Block::new(&schema);
+    let mut columnar_row_count = 0;
+    let mut read_rows = columnar_reader.read_block(&mut block, 10240).await.unwrap();
+    while read_rows > 0 {
+        block.reset();
+        columnar_row_count += read_rows;
+        read_rows = columnar_reader.read_block(&mut block, 10240).await.unwrap();
+    }
+    Ok(columnar_row_count as u64)
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
@@ -571,6 +825,7 @@ pub struct CheckColumnarConfig {
     pub dfs: DFSConfig,
     pub keyspace_id: u32,
     pub keyspace_id_start: u32,
+    pub shard_id: u64,
     pub working_dir: PathBuf,
     pub check_type: String,
 }
@@ -594,6 +849,9 @@ impl CheckColumnarConfig {
         }
         if args.keyspace_id_start > 0 {
             config.keyspace_id_start = args.keyspace_id_start;
+        }
+        if args.shard_id > 0 {
+            config.shard_id = args.shard_id;
         }
         if !args.check_type.is_empty() {
             config.check_type = args.check_type.clone();

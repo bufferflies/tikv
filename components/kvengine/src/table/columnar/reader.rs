@@ -62,6 +62,7 @@ use crate::{
         schema_file::Schema,
         search, InnerKey,
     },
+    WRITE_CF,
 };
 
 pub const GLOBAL_COMMON_HANDLE_END: &[u8] = &[255];
@@ -1794,7 +1795,13 @@ impl ColumnarReader for ColumnarRowTableReader {
         } else {
             encode_common_handle_row_key(self.schema.table_id, handle)
         };
-        self.iter.seek(InnerKey::from_inner_buf(&row_key));
+        if self.iter.is_cf_sync(WRITE_CF) {
+            self.iter.seek(InnerKey::from_inner_buf(&row_key));
+        } else {
+            self.iter
+                .seek_async(InnerKey::from_inner_buf(&row_key))
+                .await;
+        }
         Ok(())
     }
 
@@ -1846,7 +1853,11 @@ impl ColumnarReader for ColumnarRowTableReader {
                 handle_row_value(self, row_value)?
             };
             read_rows += 1;
-            self.iter.next_all_version();
+            if self.iter.is_cf_sync(WRITE_CF) {
+                self.iter.next_all_version();
+            } else {
+                self.iter.next_all_version_async().await;
+            }
         }
         Ok(read_rows)
     }
