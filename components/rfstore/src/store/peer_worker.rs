@@ -11,6 +11,7 @@ use std::{
 use crossbeam::channel::RecvTimeoutError;
 use fail::fail_point;
 use kvproto::{errorpb, raft_cmdpb::RaftCmdResponse};
+use memory::MEMTRACE_APPLY_INFLIGHT;
 use raftstore::store::{
     metrics::{
         STORE_WRITE_MIN_WRITE_PAUSE_DURATION_HISTOGRAM, STORE_WRITE_RAFTDB_DURATION_HISTOGRAM,
@@ -19,6 +20,7 @@ use raftstore::store::{
     util,
 };
 use rfengine::WriteBatch;
+use tikv_alloc::TraceEvent;
 use tikv_util::{
     debug, error, info,
     mpsc::{Receiver, Sender},
@@ -73,12 +75,16 @@ impl PeerInbox {
         peer_fsm.peer.handle_raft_ready(ctx, None);
         if !ctx.apply_msgs.msgs.is_empty() {
             peer_fsm.may_change_apply_worker();
+            let msgs = mem::take(&mut ctx.apply_msgs.msgs);
+            let estimated_size = msgs.iter().map(|m| m.estimated_size()).sum();
             let peer_batch = ApplyBatch {
-                msgs: mem::take(&mut ctx.apply_msgs.msgs),
+                msgs,
+                estimated_size,
                 applier: self.peer.applier.clone(),
                 applying_cnt: peer_fsm.applying_cnt.clone(),
                 send_time: tikv_util::time::Instant::now(),
             };
+            MEMTRACE_APPLY_INFLIGHT.trace(TraceEvent::Add(estimated_size));
             peer_batch
                 .applying_cnt
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -472,12 +478,16 @@ impl RaftWorker {
     fn maybe_send_apply(&mut self, applier: &Arc<Mutex<Applier>>, peer_fsm: &mut PeerFsm) {
         if !self.ctx.apply_msgs.msgs.is_empty() {
             peer_fsm.may_change_apply_worker();
+            let msgs = mem::take(&mut self.ctx.apply_msgs.msgs);
+            let estimated_size = msgs.iter().map(|m| m.estimated_size()).sum();
             let peer_batch = ApplyBatch {
-                msgs: mem::take(&mut self.ctx.apply_msgs.msgs),
+                msgs,
+                estimated_size,
                 applier: applier.clone(),
                 applying_cnt: peer_fsm.applying_cnt.clone(),
                 send_time: tikv_util::time::Instant::now(),
             };
+            MEMTRACE_APPLY_INFLIGHT.trace(TraceEvent::Add(estimated_size));
             peer_batch
                 .applying_cnt
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -596,6 +606,7 @@ impl ApplyWorker {
     pub(crate) fn run(&mut self) {
         let mut loop_cnt = 0u64;
         while let Ok(Some(mut batch)) = self.receiver.recv() {
+            MEMTRACE_APPLY_INFLIGHT.trace(TraceEvent::Sub(batch.estimated_size));
             let timer = tikv_util::time::Instant::now();
             self.ctx.apply_wait.observe(duration_to_sec(
                 timer.saturating_duration_since(batch.send_time),

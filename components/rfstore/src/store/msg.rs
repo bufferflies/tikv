@@ -130,6 +130,17 @@ pub(crate) enum ApplyMsg {
     ResumeTxnFile(u64 /* commit index */),
 }
 
+impl ApplyMsg {
+    pub fn estimated_size(&self) -> usize {
+        match self {
+            // Currently only MsgApply (potentially large) is
+            // considered.
+            ApplyMsg::Apply(m) => m.estimated_size(),
+            _ => 0,
+        }
+    }
+}
+
 pub enum StoreMsg {
     Tick,
     Start {
@@ -370,6 +381,11 @@ impl MsgApply {
             cbs: vec![],
             bucket_meta: None,
         }
+    }
+
+    pub fn estimated_size(&self) -> usize {
+        let entries_size: usize = self.entries.iter().map(|e| e.data.len()).sum();
+        entries_size
     }
 }
 

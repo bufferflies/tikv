@@ -221,6 +221,7 @@ pub(crate) struct ApplyBatch {
     pub(crate) msgs: Vec<ApplyMsg>,
     pub(crate) applying_cnt: Arc<AtomicU64>,
     pub(crate) send_time: Instant,
+    pub(crate) estimated_size: usize,
 }
 
 /// The Applier of a Region which is responsible for handling committed

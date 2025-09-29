@@ -12,8 +12,13 @@ use tikv_alloc::{
 // todo: we need to add some memory trace metrics.
 lazy_static! {
     pub static ref MEMTRACE_ROOT: Arc<MemoryTrace> = mem_trace!(
-        raftstore, [ applys ]
+        raftstore, [ apply_inflight, applys ]
     );
+
+    /// Memory usage for entries that are sent to but not yet processed
+    /// by apply workers.
+    pub static ref MEMTRACE_APPLY_INFLIGHT: Arc<MemoryTrace> =
+        MEMTRACE_ROOT.sub_trace(Id::Name("apply_inflight"));
 
     /// Memory usage for apply fsms.
     pub static ref MEMTRACE_APPLYS: Arc<MemoryTrace> =
