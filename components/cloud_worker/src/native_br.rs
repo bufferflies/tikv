@@ -1274,7 +1274,10 @@ pub mod v1x {
     };
     use pd_client::pd_control::PdControl;
     use serde::{
-        de::{value::MapDeserializer, IntoDeserializer},
+        de::{
+            value::{MapDeserializer, StrDeserializer},
+            IntoDeserializer,
+        },
         Deserialize, Deserializer, Serialize,
     };
     use serde_json::json;
@@ -1468,9 +1471,29 @@ pub mod v1x {
             })
         }
 
+        fn deserialize_option<V>(
+            self,
+            visitor: V,
+        ) -> std::prelude::v1::Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'de>,
+        {
+            if self.content.is_empty() {
+                visitor.visit_none()
+            } else {
+                visitor.visit_some(StrDeserializer::new(self.content))
+            }
+            .map_err(|err: Self::Error| {
+                <E as serde::de::Error>::custom(format!(
+                    "during handing key {}: {}",
+                    self.hint, err
+                ))
+            })
+        }
+
         serde::forward_to_deserialize_any! {
             bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf
-            option unit unit_struct newtype_struct seq tuple tuple_struct map struct
+             unit unit_struct newtype_struct seq tuple tuple_struct map struct
             enum identifier ignored_any
         }
     }
@@ -2601,11 +2624,15 @@ pub mod test_utils {
             id: u64,
             exotic_path: &str,
             keyspace_name: &str,
+            point_in_time: Option<DateTime<Utc>>,
         ) -> HttpResult<super::v1x::Task> {
             let mut ser = url::form_urlencoded::Serializer::new(String::new());
             ser.append_pair("cluster_id", &self.cluster_id.to_string());
             ser.append_pair("exotic_backup", exotic_path);
             ser.append_pair("keyspace", keyspace_name);
+            if let Some(pt) = point_in_time {
+                ser.append_pair("point_in_time", &pt.to_rfc3339());
+            }
             let query = ser.finish();
             Ok(box_try!(
                 self.inner

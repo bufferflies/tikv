@@ -505,10 +505,16 @@ fn test_native_br_service(#[values(true, false)] use_api_v1x: bool) {
 }
 
 #[rstest::rstest]
-#[case::trivial(false, false)]
-#[case::with_override_pack(true, false)]
-#[case::with_move(false, true)]
-fn test_native_br_service_x(#[case] override_pack: bool, #[case] copy_to_another_pfx: bool) {
+#[case::trivial(false, false, false)]
+#[case::with_override_pack(true, false, false)]
+#[case::with_move(false, true, false)]
+#[case::with_point_in_time(false, false, true)]
+#[case::with_moved_point_in_time(false, true, true)]
+fn test_native_br_service_x(
+    #[case] override_pack: bool,
+    #[case] copy_to_another_pfx: bool,
+    #[case] with_point_in_time: bool,
+) {
     test_util::init_log_for_test();
     const KEYSPACE_ID: u32 = 1;
     const DATA_LEN: usize = 100;
@@ -645,7 +651,13 @@ fn test_native_br_service_x(#[case] override_pack: bool, #[case] copy_to_another
         packed_backup.path
     };
 
-    let restore = block_on(br_cli.restore_packed_backup(2, &restore_path, "ks2")).unwrap();
+    let restore = block_on(br_cli.restore_packed_backup(
+        2,
+        &restore_path,
+        "ks2",
+        with_point_in_time.then_some(datetime0 - chrono::Duration::milliseconds(1)),
+    ))
+    .unwrap();
     println!(">>> {restore:?}");
 
     assert!(TryWaiter::timeout(100).interval(1).try_wait(|| {
