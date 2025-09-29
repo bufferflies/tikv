@@ -4793,16 +4793,6 @@ async fn compact_columnar_l0_files(
         .map(|f| f.get_snap_version().unwrap())
         .max()
         .unwrap();
-    let mut smallest = col_tbls[0].get_smallest();
-    let mut biggest = col_tbls[0].get_biggest();
-    for columnar_file in &col_tbls {
-        if smallest > columnar_file.get_smallest() {
-            smallest = columnar_file.get_smallest();
-        }
-        if biggest < columnar_file.get_biggest() {
-            biggest = columnar_file.get_biggest();
-        }
-    }
 
     let columnar_table_ids = columnar_compaction.columnar_table_ids.as_slice();
     if columnar_table_ids.is_empty() {
@@ -4991,9 +4981,6 @@ async fn compact_columnar_l1_files(
                 ctx.encryption_key.clone(),
             );
             readers.push(Box::new(reader));
-        }
-        if readers.is_empty() {
-            continue;
         }
         let concat_reader =
             ColumnarConcatReader::new(&l2_tbls, schema.clone(), None, ctx.encryption_key.clone());
