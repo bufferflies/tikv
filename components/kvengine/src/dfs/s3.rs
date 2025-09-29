@@ -85,6 +85,19 @@ impl S3Fs {
         )
     }
 
+    pub fn new_with_runtime_from_config(runtime: Arc<Runtime>, conf: Config) -> Self {
+        let core = Arc::new(S3FsCore::new_with_runtime(
+            runtime,
+            conf.s3_endpoint,
+            conf.s3_key_id,
+            conf.s3_secret_key,
+            conf.s3_region,
+            conf.s3_bucket,
+            conf.prefix,
+        ));
+        Self { core }
+    }
+
     #[cfg(any(test, feature = "testexport"))]
     pub fn new_for_test(
         runtime: Runtime,
@@ -94,8 +107,8 @@ impl S3Fs {
         prefix: String,
     ) -> Self {
         Self {
-            core: Arc::new(S3FsCore::new_with_s3_client(
-                runtime,
+            core: Arc::new(S3FsCore::new_with_runtime_and_s3_client(
+                Arc::new(runtime),
                 rusoto_s3c,
                 aws_s3c,
                 "".to_string(),
@@ -124,7 +137,7 @@ pub struct S3FsCore {
     region: Region,
     bucket: String,
     prefix: String,
-    runtime: tokio::runtime::Runtime,
+    runtime: Arc<tokio::runtime::Runtime>,
     virtual_host: bool,
     // `rusoto` uses https by default, but cse uses http as default protocol.
     // this marker indicates the original endpoint has no protocol hence http should be used.
@@ -208,14 +221,13 @@ impl S3FsCore {
         }
     }
 
-    pub fn new(
+    fn new_s3_client(
         endpoint: String,
         key_id: String,
         secret_key: String,
         region: String,
         bucket: String,
-        prefix: String,
-    ) -> Self {
+    ) -> (rusoto_core::Client, aws_sdk_s3::Client, String, bool) {
         let mut config = rusoto_core::HttpConfig::new();
         config.read_buf_size(256 * 1024);
         let endpoint = if endpoint.is_empty() {
@@ -235,13 +247,6 @@ impl S3FsCore {
             let http_client = HttpClient::from_connector_with_config(http_connector, config);
             rusoto_core::Client::new_with(providers.rusoto, http_client)
         };
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_name("s3-client")
-            .with_sys_hooks()
-            .build()
-            .unwrap();
 
         let no_schema_endpoint = endpoint
             .find("://")
@@ -273,21 +278,12 @@ impl S3FsCore {
             aws_sdk_s3::Client::from_conf(builder.build())
         };
 
-        Self::new_with_s3_client(
-            runtime,
-            rusoto_s3c,
-            aws_s3c,
-            hostname,
-            virtual_host,
-            endpoint,
-            region,
-            bucket,
-            prefix,
-        )
+        (rusoto_s3c, aws_s3c, hostname, virtual_host)
     }
 
-    pub fn new_with_s3_client(
-        runtime: Runtime,
+    #[inline]
+    fn new_with_runtime_and_s3_client(
+        runtime: Arc<tokio::runtime::Runtime>,
         rusoto_s3c: rusoto_core::Client,
         aws_s3c: aws_sdk_s3::Client,
         hostname: String,
@@ -316,6 +312,61 @@ impl S3FsCore {
             virtual_host,
             use_http,
         }
+    }
+
+    pub fn new(
+        endpoint: String,
+        key_id: String,
+        secret_key: String,
+        region: String,
+        bucket: String,
+        prefix: String,
+    ) -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("s3-client")
+            .with_sys_hooks()
+            .build()
+            .unwrap();
+        Self::new_with_runtime(
+            Arc::new(runtime),
+            endpoint,
+            key_id,
+            secret_key,
+            region,
+            bucket,
+            prefix,
+        )
+    }
+
+    pub fn new_with_runtime(
+        runtime: Arc<tokio::runtime::Runtime>,
+        endpoint: String,
+        key_id: String,
+        secret_key: String,
+        region: String,
+        bucket: String,
+        prefix: String,
+    ) -> Self {
+        let (rusoto_s3, aws_s3c, hostname, virtual_host) = Self::new_s3_client(
+            endpoint.clone(),
+            key_id,
+            secret_key,
+            region.clone(),
+            bucket.clone(),
+        );
+        Self::new_with_runtime_and_s3_client(
+            runtime,
+            rusoto_s3,
+            aws_s3c,
+            hostname,
+            virtual_host,
+            endpoint,
+            region,
+            bucket,
+            prefix,
+        )
     }
 
     pub fn rel_file_key(&self, file_id: u64, file_type: FileType) -> String {

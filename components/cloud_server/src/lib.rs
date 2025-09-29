@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 #![feature(box_patterns)]
+#![feature(let_chains)]
 #![recursion_limit = "400"]
 #![feature(type_alias_impl_trait)]
 #![feature(impl_trait_in_assoc_type)]

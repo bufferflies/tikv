@@ -111,6 +111,8 @@ static MISSING_ACTIONS: &[u8] = b"Missing param actions";
 static FAIL_POINTS_REQUEST_PATH: &str = "/fail";
 
 const BACKUP_TS_WAIT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+/// Default thread pool size for DFS::s3.
+const DEFAULT_S3_DFS_POOL_SIZE: usize = 2;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -139,6 +141,7 @@ struct SyncRegionByIdRequest {
 pub struct StatusServer {
     thread_pool: Runtime,
     hyper_pool: Arc<Runtime>,
+    s3fs_pool: Option<Arc<Runtime>>,
     tx: Sender<()>,
     rx: Option<Receiver<()>>,
     addr: Option<SocketAddr>,
@@ -183,16 +186,28 @@ impl StatusServer {
             .build()?;
         let hyper_pool = Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(status_thread_pool_size)
+            .worker_threads(
+                status_thread_pool_size
+                    .saturating_sub(DEFAULT_S3_DFS_POOL_SIZE)
+                    .max(DEFAULT_S3_DFS_POOL_SIZE),
+            )
             .thread_name("status-hyper")
             .after_start_wrapper(|| debug!("Hyper server started"))
             .before_stop_wrapper(|| debug!("stopping hyper server"))
             .build()?;
+        let s3fs_pool = Builder::new_multi_thread()
+            .worker_threads(DEFAULT_S3_DFS_POOL_SIZE)
+            .enable_all()
+            .thread_name("status-s3-client")
+            .with_sys_hooks()
+            .build()
+            .unwrap();
 
         let (tx, rx) = oneshot::channel::<()>();
         Ok(StatusServer {
             thread_pool,
             hyper_pool: Arc::new(hyper_pool),
+            s3fs_pool: Some(Arc::new(s3fs_pool)),
             tx,
             rx: Some(rx),
             addr: None,
@@ -1574,6 +1589,7 @@ impl StatusServer {
         kvengine: kvengine::Engine,
         concurrency_manager: ConcurrencyManager,
         dfs_conf: DFSConfig,
+        s3fs_pool: Arc<Runtime>,
     ) -> hyper::Result<Response<Body>> {
         let body = hyper::body::to_bytes(req.into_body()).await?;
         let backup_config: serde_json::Result<rfengine::BackupConfig> =
@@ -1640,7 +1656,7 @@ impl StatusServer {
             (true, None)
         };
 
-        let s3fs = kvengine::dfs::S3Fs::new_from_config(dfs_conf);
+        let s3fs = kvengine::dfs::S3Fs::new_with_runtime_from_config(s3fs_pool, dfs_conf);
         let (callback, future) = paired_future_callback();
         let task = rfengine::BackupTask::new(Box::new(s3fs), callback, backup_config);
         engine.backup(task);
@@ -1937,8 +1953,21 @@ impl StatusServer {
     }
 
     pub fn stop(self) {
+        let timeout = Duration::from_secs(3);
         let _ = self.tx.send(());
-        self.thread_pool.shutdown_timeout(Duration::from_secs(3));
+        self.thread_pool.shutdown_timeout(timeout);
+        // SAFETY: won't access s3fs pool after stopped.
+        let s3fs_pool = self.s3fs_pool.unwrap();
+        let ts = Instant::now();
+        while ts.elapsed() <= timeout {
+            let s3fs_pool = s3fs_pool.clone();
+            if let Some(runtime) = Arc::into_inner(s3fs_pool) {
+                // The final referee could shutdown all background tasks.
+                runtime.shutdown_background();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
     }
 
     // Return listening address, this may only be used for outer test
@@ -2118,6 +2147,7 @@ impl StatusServer {
         C: ServerConnection,
     {
         let ctx = Arc::new(StatusContext {
+            s3fs_pool: self.s3fs_pool.clone().unwrap(),
             security_config: self.security_config.clone(),
             cfg_controller: self.cfg_controller.clone(),
             router: self.router.clone(),
@@ -2252,7 +2282,7 @@ impl StatusServer {
                             }
                             (Method::POST, path) if path.starts_with("/rfengine/backup") => {
                                 let dfs_conf = ctx.cfg_controller.get_current().dfs.clone();
-                                Self::backup_rfengine(req, ctx.rfengine.clone(), ctx.kvengine.clone(), ctx.concurrency_manager.clone(), dfs_conf).await
+                                Self::backup_rfengine(req, ctx.rfengine.clone(), ctx.kvengine.clone(), ctx.concurrency_manager.clone(), dfs_conf, ctx.s3fs_pool.clone()).await
                             }
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
                                 Self::restore_shard(req, ctx.router.clone(), ctx.kvengine.clone()).await
@@ -2327,7 +2357,8 @@ impl StatusServer {
         let addr = SocketAddr::from_str(&status_addr)?;
 
         let incoming = {
-            let _enter = self.hyper_pool.enter();
+            let _enter_hyper = self.hyper_pool.enter();
+            let _enter_s3fs = self.s3fs_pool.clone().unwrap().enter();
             AddrIncoming::bind(&addr)
         }?;
         self.addr = Some(incoming.local_addr());
@@ -2355,6 +2386,7 @@ impl StatusServer {
 }
 
 struct StatusContext {
+    s3fs_pool: Arc<Runtime>,
     security_config: Arc<SecurityConfig>,
     cfg_controller: ConfigController,
     router: RaftRouter,
