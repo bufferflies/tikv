@@ -63,6 +63,8 @@ txn_types = { workspace = true }
 url = "2"
 
 [dev-dependencies]
+proptest = "1.4"
+rand = "0.8"
 tempfile = "3.0"
 test_cloud_server = { workspace = true }
 test_pd_client = { workspace = true }

@@ -2,6 +2,10 @@
 use std::{
     cell::Cell,
     fmt::{self, Formatter},
+    fs,
+    fs::OpenOptions,
+    io, ops,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -1210,5 +1214,107 @@ where
                 sleep_dur = next_sleep(sleep_dur);
             }
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct LocalObject {
+    pub file: Option<Arc<fs::File>>,
+    pub path: Arc<PathBuf>,
+    pub len: u64,
+}
+
+impl LocalObject {
+    pub fn file(&mut self, read_only: bool) -> io::Result<&fs::File> {
+        if self.file.is_none() {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(!read_only)
+                .open(self.path.as_ref())?;
+            if self.len != file.metadata()?.len() {
+                error!(
+                    "file length changed, path {:?}, expect {}, got {}",
+                    self.path.as_ref(),
+                    self.len,
+                    file.metadata()?.len()
+                );
+                debug_assert!(false);
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "file length changed".to_string(),
+                ));
+            }
+            self.file = Some(Arc::new(file));
+        }
+        Ok(self.file.as_ref().unwrap())
+    }
+
+    pub fn close(&mut self) {
+        let _ = self.file.take();
+    }
+}
+
+// Note: Should not be clonable. Otherwise, the inner file will be removed more
+// that once.
+pub struct TempLocalObject {
+    object: LocalObject,
+}
+
+impl ops::Deref for TempLocalObject {
+    type Target = LocalObject;
+
+    fn deref(&self) -> &Self::Target {
+        &self.object
+    }
+}
+
+impl ops::DerefMut for TempLocalObject {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.object
+    }
+}
+
+impl Drop for TempLocalObject {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.path.as_ref());
+    }
+}
+
+impl From<LocalObject> for TempLocalObject {
+    fn from(object: LocalObject) -> Self {
+        Self { object }
+    }
+}
+
+impl TempLocalObject {
+    pub fn create(path: PathBuf) -> io::Result<Self> {
+        let f = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        let object = LocalObject {
+            file: Some(Arc::new(f)),
+            path: Arc::new(path),
+            len: 0,
+        };
+        Ok(Self { object })
+    }
+
+    pub(crate) fn clone_inner(&self) -> LocalObject {
+        self.object.clone()
+    }
+}
+
+impl io::Write for TempLocalObject {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let len = self.object.file(false)?.write(buf)?;
+        self.len += len as u64;
+        Ok(len)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.object.file(false)?.flush()
     }
 }

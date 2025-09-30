@@ -593,7 +593,7 @@ impl ChunkHeader {
         8
     }
 
-    pub(crate) fn encode_to(&self, buf: &mut Vec<u8>) {
+    pub fn encode_to(&self, buf: &mut Vec<u8>) {
         buf.put_u32_le(self.version as u32);
         buf.put_u32_le(self.compression_type as u32);
     }
