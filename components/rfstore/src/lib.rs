@@ -1,5 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+#![feature(cell_update)]
 #![feature(let_chains)]
 
 #[allow(unused_extern_crates)]

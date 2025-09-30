@@ -51,6 +51,7 @@ pub enum PeerMsg {
         peer_id: u64,
     },
     Persisted(PersistReady),
+    RaftlogFetched(crate::store::worker::FetchedLogs),
 }
 
 impl PeerMsg {
@@ -67,6 +68,16 @@ impl PeerMsg {
             PeerMsg::RaftCommand(cmd) => {
                 if cmd.request.has_custom_request() {
                     return cmd.request.get_custom_request().data.len();
+                }
+                0
+            }
+            PeerMsg::RaftlogFetched(res) => {
+                if let Ok(ents) = &res.logs.ents {
+                    let mut size = 0;
+                    for entry in ents.iter() {
+                        size += entry.data.len();
+                    }
+                    return size;
                 }
                 0
             }
@@ -89,6 +100,7 @@ impl PeerMsg {
             PeerMsg::PrepareCommitMergeResult(..) => 10,
             PeerMsg::PrepareTxnFileResult { .. } => 11,
             PeerMsg::Persisted(_) => 12,
+            PeerMsg::RaftlogFetched(_) => 13,
         }
     }
 }

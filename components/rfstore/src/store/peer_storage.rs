@@ -1,21 +1,27 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::cell::RefCell;
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    time::Instant,
+};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use collections::HashSet;
+use engine_traits::RAFT_LOG_MULTI_GET_CNT;
+use fail::fail_point;
 use kvengine::{encryption_key_from_shard_properties, ShardMeta};
 use kvproto::{
     raft_serverpb::{MergeState, PeerState, RaftMessage},
     *,
 };
 use protobuf::Message;
-use raft::{GetEntriesContext, Ready, StorageError};
+use raft::{util::limit_size, GetEntriesContext, Ready, StorageError};
 use raft_proto::{
     eraftpb,
-    eraftpb::{ConfState, HardState},
+    eraftpb::{ConfState, Entry, HardState},
 };
 use raft_serverpb::RegionLocalState;
 use raftstore::store::{util, util::conf_state_from_region};
@@ -23,13 +29,13 @@ use rfengine::{
     self, raft_state_key, region_state_key, KV_ENGINE_META_KEY, RAFT_STATE_KEY_BYTE,
     RAFT_TRUNCATED_STATE_KEY, REGION_META_KEY_PREFIX,
 };
-use tikv_util::{box_err, debug, info};
+use tikv_util::{box_err, debug, info, warn, worker::Scheduler};
 
 use crate::{
     errors::*,
     store::{
-        Engines, PeerTag, RaftApplyState, RaftContext, RaftState, RaftTruncatedState, RegionIdVer,
-        TERM_KEY,
+        worker::ReadTask, Engines, PeerTag, RaftApplyState, RaftContext, RaftState,
+        RaftTruncatedState, RegionIdVer, TERM_KEY,
     },
 };
 
@@ -49,6 +55,47 @@ pub const JOB_STATUS_CANCELLING: usize = 2;
 pub const JOB_STATUS_CANCELLED: usize = 3;
 pub const JOB_STATUS_FINISHED: usize = 4;
 pub const JOB_STATUS_FAILED: usize = 5;
+
+/// Maximum number of async fetch retries before falling back to sync fetch
+const MAX_ASYNC_FETCH_TRY_CNT: usize = 3;
+
+/// Result of an async raft log fetch operation, similar to raftstore's
+/// RaftlogFetchResult
+#[derive(PartialEq)]
+pub struct RaftlogFetchResult {
+    pub ents: raft::Result<Vec<Entry>>,
+    // because entries may be empty, so store the original low index that the task issued
+    pub low: u64,
+    // the original max size that the task issued
+    pub max_size: u64,
+    // if the ents hit max_size
+    pub hit_size_limit: bool,
+    // the times that async fetch have already tried
+    pub tried_cnt: usize,
+    // the term when the task issued
+    pub term: u64,
+}
+
+impl std::fmt::Debug for RaftlogFetchResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // avoid dumping entries content
+        f.debug_struct("RaftlogFetchResult")
+            .field("low", &self.low)
+            .field("max_size", &self.max_size)
+            .field("hit_size_limit", &self.hit_size_limit)
+            .field("tried_cnt", &self.tried_cnt)
+            .field("term", &self.term)
+            .finish()
+    }
+}
+
+/// State of async fetch request
+#[derive(Debug)]
+pub enum RaftlogFetchState {
+    // The Instant records the start time of the fetching.
+    Fetching(Instant),
+    Fetched(Box<RaftlogFetchResult>),
+}
 
 /// Possible status returned by `check_applying_snap`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -75,6 +122,38 @@ pub struct RestoreSnapResult {
     pub destroyed_regions: Vec<metapb::Region>,
     // `snap_last_index` is the last index of snapshot.
     pub snap_last_index: u64,
+}
+
+/// Statistics for tracking different types of async fetch operations
+#[derive(Default)]
+struct AsyncFetchStats {
+    async_fetch: Cell<u64>,
+    sync_fetch: Cell<u64>,
+    fallback_fetch: Cell<u64>,
+    fetch_invalid: Cell<u64>,
+    fetch_unused: Cell<u64>,
+}
+
+impl AsyncFetchStats {
+    fn flush_stats(&mut self) {
+        use crate::store::metrics::RAFT_ENTRY_FETCHES;
+
+        RAFT_ENTRY_FETCHES
+            .async_fetch
+            .inc_by(self.async_fetch.replace(0));
+        RAFT_ENTRY_FETCHES
+            .sync_fetch
+            .inc_by(self.sync_fetch.replace(0));
+        RAFT_ENTRY_FETCHES
+            .fallback_fetch
+            .inc_by(self.fallback_fetch.replace(0));
+        RAFT_ENTRY_FETCHES
+            .fetch_invalid
+            .inc_by(self.fetch_invalid.replace(0));
+        RAFT_ENTRY_FETCHES
+            .fetch_unused
+            .inc_by(self.fetch_unused.replace(0));
+    }
 }
 
 pub(crate) struct PeerStorage {
@@ -107,6 +186,15 @@ pub(crate) struct PeerStorage {
     /// requesting snapshot peers to set their progress to probe manually
     /// due to raft-rs's implementation.
     pub(crate) snapshot_not_ready_peers: RefCell<HashSet<u64>>,
+
+    /// Read scheduler for async raft log fetching
+    read_scheduler: Scheduler<ReadTask>,
+
+    /// Async fetch results storage
+    async_fetch_results: RefCell<HashMap<u64, RaftlogFetchState>>,
+
+    /// Statistics for async fetch operations
+    async_fetch_stats: AsyncFetchStats,
 }
 
 impl raft::Storage for PeerStorage {
@@ -135,21 +223,220 @@ impl raft::Storage for PeerStorage {
         low: u64,
         high: u64,
         max_size: impl Into<Option<u64>>,
-        _: GetEntriesContext,
+        context: GetEntriesContext,
     ) -> raft::Result<Vec<eraftpb::Entry>> {
         self.check_range(low, high)?;
         let mut ents = Vec::with_capacity((high - low) as usize);
         if low == high {
             return Ok(ents);
         }
+
+        let max_size_bytes = max_size.into();
+
+        // Check if async read is requested and possible
+        if context.can_async() {
+            // Check if there's already an async fetch in progress for this low index
+            if let Some(RaftlogFetchState::Fetching(_)) =
+                self.async_fetch_results.borrow().get(&low)
+            {
+                // Already an async fetch in flight
+                return Err(raft::Error::Store(StorageError::LogTemporarilyUnavailable));
+            }
+
+            // Check if we have a completed async fetch result for this low index
+            let tried_cnt = if let Some(RaftlogFetchState::Fetched(res)) =
+                self.async_fetch_results.borrow_mut().remove(&low)
+            {
+                assert_eq!(res.low, low);
+                let hit_size_limit = res.hit_size_limit;
+                let res_max_size = res.max_size;
+                let current_tried_cnt = res.tried_cnt;
+                match res.ents {
+                    Ok(mut fetched_ents) => {
+                        let first = fetched_ents.first().map(|e| e.index).unwrap_or(low);
+                        assert_eq!(first, low);
+                        let last = fetched_ents.last().map(|e| e.index).unwrap_or(low - 1);
+
+                        if last + 1 >= high {
+                            // async fetch res covers [low, high)
+                            fetched_ents.truncate((high - first) as usize);
+                            assert_eq!(fetched_ents.last().map(|e| e.index).unwrap(), high - 1);
+                            if let Some(max_size) = max_size_bytes {
+                                if max_size < res_max_size {
+                                    limit_size(&mut fetched_ents, Some(max_size));
+                                }
+                            }
+                            fail_point!("on_async_fetch_return");
+                            return Ok(fetched_ents);
+                        } else if hit_size_limit
+                            && max_size_bytes.map_or(true, |max_size| max_size <= res_max_size)
+                        {
+                            // async fetch res doesn't cover [low, high) due to hit size limit
+                            if let Some(max_size) = max_size_bytes {
+                                if max_size < res_max_size {
+                                    limit_size(&mut fetched_ents, Some(max_size));
+                                }
+                            }
+                            return Ok(fetched_ents);
+                        } else if last + RAFT_LOG_MULTI_GET_CNT > high - 1
+                            && current_tried_cnt + 1 == MAX_ASYNC_FETCH_TRY_CNT
+                        {
+                            // On the last try, attempt hybrid fetch: use what we have + sync fetch
+                            // remaining
+                            let fetched_size = fetched_ents
+                                .iter()
+                                .fold(0usize, |acc, e| acc + e.compute_size() as usize)
+                                as u64;
+                            if let Some(max_size) = max_size_bytes {
+                                if max_size <= fetched_size {
+                                    limit_size(&mut fetched_ents, Some(max_size));
+                                    return Ok(fetched_ents);
+                                }
+                            }
+
+                            // the count of left entries isn't too large, fetch the remaining
+                            // entries synchronously
+                            self.engines.raft.fetch_raft_entries_to(
+                                self.peer_id,
+                                last + 1,
+                                high,
+                                max_size_bytes.map(|s| (s - fetched_size) as usize),
+                                &mut fetched_ents,
+                                None, // Sync fetch, no context needed
+                            )?;
+
+                            return Ok(fetched_ents);
+                        }
+                        // The fetched result doesn't match our current request parameters,
+                        // will retry with increased tried_cnt
+                        self.async_fetch_stats.fetch_invalid.update(|m| m + 1);
+                        info!(
+                            "async fetch result mismatch, retrying";
+                            "region_id" => self.region().get_id(),
+                            "peer_id" => self.peer_id,
+                            "first" => first,
+                            "last" => last,
+                            "requested_low" => low,
+                            "requested_high" => high,
+                            "max_size_bytes" => ?max_size_bytes,
+                            "res_max_size" => res_max_size,
+                            "tried_cnt" => current_tried_cnt,
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "async fetch failed, retrying";
+                            "region_id" => self.region().get_id(),
+                            "peer_id" => self.peer_id,
+                            "low" => low,
+                            "high" => high,
+                            "tried_cnt" => current_tried_cnt,
+                            "error" => ?e,
+                        );
+                        return Err(e);
+                    }
+                }
+                // Return incremented tried_cnt for retry
+                current_tried_cnt + 1
+            } else {
+                // First attempt
+                1
+            };
+
+            // Check if we've exceeded max retry count
+            if tried_cnt >= MAX_ASYNC_FETCH_TRY_CNT {
+                // Fallback to sync fetch
+                info!(
+                    "async fetch retry limit reached, falling back to sync";
+                    "region_id" => self.region().get_id(),
+                    "peer_id" => self.peer_id,
+                    "low" => low,
+                    "high" => high,
+                    "tried_cnt" => tried_cnt,
+                );
+                let peer_id = self.peer_id;
+                self.engines.raft.fetch_raft_entries_to(
+                    peer_id,
+                    low,
+                    high,
+                    max_size_bytes.map(|s| s as usize),
+                    &mut ents,
+                    None, // Sync fetch, no context needed
+                )?;
+                self.async_fetch_stats.fallback_fetch.update(|m| m + 1);
+                return Ok(ents);
+            }
+
+            // Check if this would require disk I/O by trying a quick fetch
+            let peer_id = self.peer_id;
+            match self.engines.raft.fetch_raft_entries_to(
+                peer_id,
+                low,
+                high,
+                max_size_bytes.map(|s| s as usize),
+                &mut ents,
+                Some(context),
+            ) {
+                Ok(_count) => {
+                    // Entries were already in memory, return them
+                    self.async_fetch_stats.sync_fetch.update(|m| m + 1);
+                    return Ok(ents);
+                }
+                Err(rfengine::Error::AsyncFetch(async_info)) => {
+                    // Entries require disk I/O, submit async task with detailed fetch info
+                    let term = self.raft_state.get_hard_state().get_term();
+                    let task = ReadTask::FetchLogs {
+                        region_id: async_info.region_id,
+                        peer_id: async_info.peer_id,
+                        context,
+                        low: async_info.low,
+                        high: async_info.high,
+                        max_size: async_info.max_size.unwrap_or(usize::MAX),
+                        tried_cnt,
+                        term,
+                    };
+                    match self.read_scheduler.schedule(task) {
+                        Ok(()) => {
+                            // Record the fetching state
+                            self.async_fetch_results
+                                .borrow_mut()
+                                .insert(low, RaftlogFetchState::Fetching(Instant::now()));
+                            self.async_fetch_stats.async_fetch.update(|m| m + 1);
+                            // Successfully submitted async task
+                            return Err(raft::Error::Store(
+                                StorageError::LogTemporarilyUnavailable,
+                            ));
+                        }
+                        Err(e) => {
+                            warn!(
+                                "failed to schedule async read task, falling back to sync";
+                                "region_id" => async_info.region_id,
+                                "peer_id" => async_info.peer_id,
+                                "async_info" => %async_info,
+                                "error" => ?e,
+                            );
+                            // Fall through to sync fetch
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Other errors, convert and return
+                    return Err(e.into());
+                }
+            }
+        }
+
+        // Sync fetch (either requested or fallback)
         let peer_id = self.peer_id;
         self.engines.raft.fetch_raft_entries_to(
             peer_id,
             low,
             high,
-            max_size.into().map(|x| x as usize),
+            max_size_bytes.map(|s| s as usize),
             &mut ents,
+            None, // Sync fetch, no context needed
         )?;
+        self.async_fetch_stats.sync_fetch.update(|m| m + 1);
         Ok(ents)
     }
 
@@ -237,6 +524,7 @@ impl PeerStorage {
         region: metapb::Region,
         peer_id: u64,
         store_id: u64,
+        read_scheduler: Scheduler<ReadTask>,
     ) -> Result<PeerStorage> {
         let raft_state = init_raft_state(&engines.raft, peer_id, &region)?;
         let apply_state = init_apply_state(&engines.kv, &region);
@@ -266,6 +554,9 @@ impl PeerStorage {
             restored_snapshot: None,
             on_apply_snapshot_msgs: vec![],
             snapshot_not_ready_peers: RefCell::default(),
+            read_scheduler,
+            async_fetch_results: RefCell::new(HashMap::default()),
+            async_fetch_stats: AsyncFetchStats::default(),
         })
     }
 
@@ -412,7 +703,8 @@ impl PeerStorage {
     }
 
     pub fn flush_cache_metrics(&mut self) {
-        // TODO(x)
+        // Flush async fetch statistics to global metrics
+        self.async_fetch_stats.flush_stats();
     }
 
     pub fn handle_raft_ready(
@@ -565,6 +857,41 @@ impl PeerStorage {
             self.engines.kv.get_encryption_key_manager(),
             &self.engines.kv.get_master_key(),
         )
+    }
+
+    /// Clean async fetch result for a given low index
+    pub fn clean_async_fetch_res(&mut self, low: u64) {
+        if self.async_fetch_results.borrow_mut().remove(&low).is_some() {
+            // Track fetch unused metric when cleaning up async fetch results
+            self.async_fetch_stats.fetch_unused.update(|m| m + 1);
+        }
+    }
+
+    /// Update async fetch result for a given low index
+    pub fn update_async_fetch_res(&mut self, low: u64, res: Option<Box<RaftlogFetchResult>>) {
+        // Avoid borrow conflict by checking and updating in one borrow
+        let should_update = {
+            let fetch_results = self.async_fetch_results.borrow();
+            matches!(
+                fetch_results.get(&low),
+                Some(RaftlogFetchState::Fetching(_))
+            )
+        };
+
+        if should_update {
+            let mut fetch_results = self.async_fetch_results.borrow_mut();
+            if let Some(res) = res {
+                // Track duration if this was a fetching task
+                if let Some(RaftlogFetchState::Fetching(start_time)) = fetch_results.get(&low) {
+                    let duration = start_time.elapsed().as_secs_f64();
+                    crate::store::metrics::RAFT_ENTRY_FETCHES_TASK_DURATION_HISTOGRAM
+                        .observe(duration);
+                }
+                fetch_results.insert(low, RaftlogFetchState::Fetched(res));
+            } else {
+                fetch_results.remove(&low);
+            }
+        }
     }
 }
 

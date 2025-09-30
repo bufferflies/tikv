@@ -3,6 +3,7 @@
 mod check_leader;
 mod gc;
 mod pd;
+mod read;
 pub mod schema;
 
 pub use self::{
@@ -11,5 +12,6 @@ pub use self::{
     pd::{
         prepare_and_persist_encryption_metas, FlowStatsReporter, HeartbeatTask, PdRunner, PdTask,
     },
+    read::{AsyncReadNotifier, FetchedLogs, ReadRunner, ReadTask},
     schema::{SchemaRunner, SchemaTask},
 };

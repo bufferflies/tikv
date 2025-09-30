@@ -47,6 +47,29 @@ pub use writer::*;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Information about an async fetch request that needs to be handled by upper
+/// layer
+#[derive(Debug, Clone)]
+pub struct AsyncFetchInfo {
+    pub peer_id: u64,
+    pub low: u64,
+    pub high: u64,
+    pub max_size: Option<usize>,
+    pub region_id: u64,
+}
+
+impl std::fmt::Display for AsyncFetchInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AsyncFetch(peer_id={}, region_id={}, range=[{},{}))",
+            self.peer_id, self.region_id, self.low, self.high,
+        )
+    }
+}
+
+impl std::error::Error for AsyncFetchInfo {}
+
 #[derive(Debug, ThisError)]
 pub enum Error {
     #[error("IO error: {0}")]
@@ -70,6 +93,12 @@ pub enum Error {
     SnapshotOversize(u64),
     #[error("Memory limit exceed, request {request}, available {available}")]
     MemoryLimitExceed { request: usize, available: i64 },
+    #[error("Async fetch required: {0}")]
+    AsyncFetch(AsyncFetchInfo),
+    #[error("The entries of region is unavailable")]
+    EntriesUnavailable,
+    #[error("The entries of region is compacted")]
+    EntriesCompacted,
     #[error("Other error: {0}")]
     Other(String),
 }
@@ -92,5 +121,22 @@ impl From<ParseIntError> for Error {
 impl From<String> for Error {
     fn from(msg: String) -> Self {
         Error::Other(msg)
+    }
+}
+
+impl From<Error> for raft::Error {
+    fn from(e: Error) -> raft::Error {
+        match e {
+            Error::EntriesUnavailable => raft::Error::Store(raft::StorageError::Unavailable),
+            Error::EntriesCompacted => raft::Error::Store(raft::StorageError::Compacted),
+            Error::AsyncFetch(async_info) => {
+                let boxed = Box::new(async_info) as Box<dyn std::error::Error + Sync + Send>;
+                raft::Error::Store(raft::StorageError::Other(boxed))
+            }
+            e => {
+                let boxed = Box::new(e) as Box<dyn std::error::Error + Sync + Send>;
+                raft::Error::Store(raft::StorageError::Other(boxed))
+            }
+        }
     }
 }

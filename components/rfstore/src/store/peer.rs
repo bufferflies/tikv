@@ -542,13 +542,20 @@ impl Peer {
         engines: Engines,
         region: &metapb::Region,
         peer: metapb::Peer,
+        read_scheduler: Scheduler<crate::store::worker::ReadTask>,
     ) -> Result<Peer> {
         let peer_id = peer.get_id();
         if peer_id == raft::INVALID_ID {
             return Err(box_err!("invalid peer id"));
         }
 
-        let ps = PeerStorage::new(engines, region.clone(), peer.get_id(), store_id)?;
+        let ps = PeerStorage::new(
+            engines,
+            region.clone(),
+            peer.get_id(),
+            store_id,
+            read_scheduler,
+        )?;
         let first = ps.first_index();
         let truncated = ps.truncated_index();
         let truncated_term = ps.truncated_term();

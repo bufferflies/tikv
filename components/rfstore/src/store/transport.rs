@@ -6,7 +6,10 @@ use dyn_clone::DynClone;
 use kvproto::raft_serverpb::RaftMessage;
 
 use crate::{
-    store::{CasualMessage, PeerMsg, RaftCommand, StoreMsg},
+    store::{
+        worker::{AsyncReadNotifier, FetchedLogs},
+        CasualMessage, PeerMsg, RaftCommand, StoreMsg,
+    },
     RaftRouter, Result,
 };
 
@@ -78,5 +81,13 @@ impl ProposalRouter for mpsc::SyncSender<RaftCommand> {
 impl StoreRouter for mpsc::Sender<StoreMsg> {
     fn send(&self, msg: StoreMsg) {
         self.send(msg).unwrap()
+    }
+}
+
+impl AsyncReadNotifier for RaftRouter {
+    #[inline]
+    fn notify_logs_fetched(&self, region_id: u64, fetched: FetchedLogs) {
+        // Ignore region not found as it may be removed.
+        self.send(region_id, PeerMsg::RaftlogFetched(fetched));
     }
 }

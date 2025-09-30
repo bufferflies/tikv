@@ -1812,7 +1812,7 @@ impl BackupCluster {
         let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
         let peer_id = old_shard.peer_id;
         rf_engine
-            .fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entries)
+            .fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entries, None)
             .map_err(|e| -> Error {
                 let stats = rf_engine.get_peer_stats(peer_id);
                 let truncated_state = rfstore::store::load_raft_truncated_state(rf_engine, peer_id);
@@ -2561,7 +2561,14 @@ impl BackupCluster {
 
                 let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
                 rf_engine
-                    .fetch_raft_entries_to(shard.peer_id, low_idx, high_idx, None, &mut entries)
+                    .fetch_raft_entries_to(
+                        shard.peer_id,
+                        low_idx,
+                        high_idx,
+                        None,
+                        &mut entries,
+                        None,
+                    )
                     .map_err(|e| -> Error {
                         box_err!(
                             "{} entries unavailable err: {:?}, low: {}, high {}",

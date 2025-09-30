@@ -58,7 +58,10 @@ use tikv_util::{
 use time::Timespec;
 
 use super::{Config, *};
-use crate::{store::peer_worker::ApplyWorker, RaftRouter, RaftStoreRouter, Result};
+use crate::{
+    store::{peer_worker::ApplyWorker, worker::ReadRunner},
+    RaftRouter, RaftStoreRouter, Result,
+};
 
 pub const PENDING_MSG_CAP: usize = 100;
 const UNREACHABLE_BACKOFF: Duration = Duration::from_secs(10);
@@ -67,6 +70,7 @@ struct Workers {
     pd_worker: LazyWorker<PdTask>,
     gc_worker: LazyWorker<GcTask>,
     schema_worker: LazyWorker<SchemaTask>,
+    read_worker: tikv_util::worker::Worker,
     coprocessor_host: CoprocessorHost<kvengine::Engine>,
 }
 
@@ -143,10 +147,15 @@ impl RaftBatchSystem {
         schema_worker.start(schema_runner);
         let schema_scheduler = schema_worker.scheduler();
 
+        let read_worker = tikv_util::worker::Worker::new("async-read-worker");
+        let read_runner = ReadRunner::new(engines.raft.clone(), self.router.clone());
+        let read_scheduler = read_worker.start("async-read-worker", read_runner);
+
         let mut workers = Workers {
             pd_worker,
             gc_worker,
             schema_worker,
+            read_worker,
             coprocessor_host: coprocessor_host.clone(),
         };
         let pd_scheduler = workers.pd_worker.scheduler();
@@ -160,6 +169,7 @@ impl RaftBatchSystem {
             pd_scheduler,
             gc_scheduler,
             schema_scheduler,
+            read_scheduler,
             coprocessor_host,
             importer,
             destroying: HashSet::default(),
@@ -278,6 +288,7 @@ impl RaftBatchSystem {
         workers.gc_worker.stop();
         workers.pd_worker.stop();
         workers.schema_worker.stop();
+        workers.read_worker.stop();
         fail_point!("after_shutdown_apply");
         workers.coprocessor_host.shutdown();
     }
@@ -320,8 +331,13 @@ impl RaftBatchSystem {
         for local_state in &local_states {
             let region = local_state.get_region();
             tikv_util::set_current_region_thread_local(region.get_id());
-            let mut peer =
-                PeerFsm::create(store_id, &ctx.cfg.value(), ctx.engines.clone(), region)?;
+            let mut peer = PeerFsm::create(
+                store_id,
+                &ctx.cfg.value(),
+                ctx.engines.clone(),
+                region,
+                ctx.read_scheduler.clone(),
+            )?;
             if local_state.get_state() == PeerState::Merging {
                 info!("{} region is merging", peer.peer.tag());
                 peer.peer.pending_merge_state = Some(local_state.get_merge_state().to_owned());
@@ -628,6 +644,7 @@ pub(crate) struct GlobalContext {
     pub(crate) pd_scheduler: Scheduler<PdTask>,
     pub(crate) gc_scheduler: Scheduler<GcTask>,
     pub(crate) schema_scheduler: Scheduler<SchemaTask>,
+    pub(crate) read_scheduler: Scheduler<crate::store::worker::ReadTask>,
     pub(crate) coprocessor_host: CoprocessorHost<kvengine::Engine>,
     pub(crate) importer: Arc<SstImporter>,
     /// Saves destroying regions in one loop. It's used to solve the race
@@ -1339,6 +1356,7 @@ impl<'a> StoreMsgHandler<'a> {
             region_id,
             region_epoch,
             target.clone(),
+            self.ctx.global.read_scheduler.clone(),
         )?;
         fail_point!("after_acquire_store_meta_on_maybe_create_peer_internal");
 
@@ -1479,6 +1497,7 @@ impl<'a> StoreMsgHandler<'a> {
                 &self.ctx.cfg,
                 self.ctx.global.engines.clone(),
                 &new_region,
+                self.ctx.global.read_scheduler.clone(),
             ) {
                 Ok(new_peer) => new_peer,
                 Err(e) => {

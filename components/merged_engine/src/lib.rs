@@ -365,6 +365,7 @@ impl MergedEngine {
                         high_idx,
                         None,
                         &mut entry_buf,
+                        None,
                     ) {
                         panic!(
                             "fetch raft entries failed for region {}, low: {}, high: {}, err: {}",
@@ -409,9 +410,14 @@ impl MergedEngine {
                 let mut entry_buf = Vec::new();
                 let low_idx = merged_commit_index.max(truncated_index) + 1;
                 let high_idx = commit + 1;
-                if let Err(err) =
-                    origin.fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entry_buf)
-                {
+                if let Err(err) = origin.fetch_raft_entries_to(
+                    peer_id,
+                    low_idx,
+                    high_idx,
+                    None,
+                    &mut entry_buf,
+                    None,
+                ) {
                     panic!(
                         "fetch raft entries failed for region {}, low: {}, high: {}, err: {}",
                         region_id, low_idx, high_idx, err

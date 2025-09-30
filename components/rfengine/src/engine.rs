@@ -754,8 +754,6 @@ impl RfEngineCore {
         region_to_peer
     }
 
-    // This is used in test only.
-    #[cfg(test)]
     pub fn get_raft_entry(&self, peer_id: u64, index: u64) -> Option<Entry> {
         let peer_data_ref = self.peers.get(&peer_id)?;
         let data = peer_data_ref.read().unwrap();
@@ -780,11 +778,12 @@ impl RfEngineCore {
     pub fn fetch_raft_entries_to(
         &self,
         peer_id: u64,
-        low: u64,                // inclusive
-        high: u64,               // exclusive
-        max_size: Option<usize>, // size limit of fetched entries
+        low: u64,
+        high: u64,
+        max_size: Option<usize>,
         buf: &mut Vec<Entry>,
-    ) -> engine_traits::Result<usize> /* entry count */ {
+        context: Option<raft::GetEntriesContext>,
+    ) -> crate::Result<usize> {
         if high <= low {
             return Ok(0);
         }
@@ -792,10 +791,10 @@ impl RfEngineCore {
         let peer_data = self
             .peers
             .get(&peer_id)
-            .ok_or(engine_traits::Error::EntriesCompacted)?;
+            .ok_or(crate::Error::EntriesCompacted)?;
         let peer_data = peer_data.read().unwrap();
         if low <= peer_data.meta.truncated_idx {
-            return Err(engine_traits::Error::EntriesCompacted);
+            return Err(crate::Error::EntriesCompacted);
         }
 
         let timer = Instant::now_coarse();
@@ -812,24 +811,53 @@ impl RfEngineCore {
         // is a special case where all raft entries have been offloaded.
         let first_idx_in_mem = peer_data.raft_logs.first_index();
         let need_read_from_disk = first_idx_in_mem == 0 || low < first_idx_in_mem;
+
         if need_read_from_disk {
             info!(
                 "peer {}: fetch_raft_entries_to entries [{},{}), first_idx_in_mem: {}",
                 peer_id, low, high, first_idx_in_mem
             );
+
+            // Calculate the range that needs to be read from disk
             let (disk_fetch_low, disk_fetch_high) = if first_idx_in_mem == 0 {
                 (low, high)
             } else {
                 (low, first_idx_in_mem.min(high))
             };
+
+            // Generate read plan for the disk fetch
             let read_plan = generate_rlog_read_plan(
                 self.peer_rlog_files
                     .load()
                     .get(&peer_id)
-                    .ok_or(engine_traits::Error::EntriesUnavailable)?,
+                    .ok_or(crate::Error::EntriesUnavailable)?,
                 disk_fetch_low,
                 disk_fetch_high,
             )?;
+
+            // Check if we should handle this asynchronously
+            if let Some(ctx) = &context {
+                if ctx.can_async() {
+                    // For async requests, return detailed fetch info so the upper layer (rfstore)
+                    // can handle the async scheduling with full context information.
+                    let async_fetch_info = crate::AsyncFetchInfo {
+                        peer_id,
+                        low,
+                        high,
+                        max_size,
+                        region_id: peer_data.region_id,
+                    };
+
+                    info!(
+                        "peer {}: async read requested - {}",
+                        peer_id, async_fetch_info
+                    );
+
+                    return Err(crate::Error::AsyncFetch(async_fetch_info));
+                }
+            }
+
+            // Synchronous disk read path
             let mut expected_idx = disk_fetch_low;
             for (range, peer_file) in read_plan {
                 info!(
@@ -844,7 +872,7 @@ impl RfEngineCore {
                     range.start,
                     range.end,
                 )
-                .map_err(|_| engine_traits::Error::EntriesUnavailable)?;
+                .map_err(|_| crate::Error::EntriesUnavailable)?;
                 for entry in entries {
                     let entry = entry.to_entry();
                     debug_assert!(
@@ -881,9 +909,7 @@ impl RfEngineCore {
         if need_read_from_mem {
             let start = low.max(first_idx_in_mem);
             for i in start..high {
-                let entry = peer_data
-                    .get(i)
-                    .ok_or(engine_traits::Error::EntriesUnavailable)?;
+                let entry = peer_data.get(i).ok_or(crate::Error::EntriesUnavailable)?;
                 total_size += entry.compute_size() as usize;
                 buf.push(entry);
                 if max_size.map_or(false, |s| total_size >= s) {
@@ -1644,7 +1670,6 @@ mod tests {
     };
 
     use ::test_util::eventually;
-    use engine_traits::Error as TraitError;
     use eraftpb::EntryType;
     use protobuf::Message;
     use tikv_util::config::ReadableSize;
@@ -1917,7 +1942,7 @@ mod tests {
                 for high in low + 1..=11 {
                     assert_eq!(
                         engine
-                            .fetch_raft_entries_to(peer_id, low, high, None, &mut buf)
+                            .fetch_raft_entries_to(peer_id, low, high, None, &mut buf, None)
                             .unwrap(),
                         (high - low) as usize
                     );
@@ -1934,15 +1959,15 @@ mod tests {
         for i in 1..=10 {
             assert_eq!(
                 engine
-                    .fetch_raft_entries_to(1, i, i + 1, None, &mut buf)
+                    .fetch_raft_entries_to(1, i, i + 1, None, &mut buf, None)
                     .unwrap(),
                 1
             );
             assert_eq!(buf, peer1_entries[..i as usize]);
         }
         assert!(matches!(
-            engine.fetch_raft_entries_to(1, 11, 12, None, &mut buf),
-            Err(TraitError::EntriesUnavailable),
+            engine.fetch_raft_entries_to(1, 11, 12, None, &mut buf, None),
+            Err(Error::EntriesUnavailable),
         ));
         // Test `fetch_entries_to` limits size.
         let mut max_size = 0;
@@ -1951,7 +1976,7 @@ mod tests {
             max_size += entry.compute_size();
             assert_eq!(
                 engine
-                    .fetch_raft_entries_to(1, 1, 11, Some(max_size as usize), &mut buf)
+                    .fetch_raft_entries_to(1, 1, 11, Some(max_size as usize), &mut buf, None)
                     .unwrap(),
                 i + 1
             );
@@ -1962,7 +1987,7 @@ mod tests {
         buf.clear();
         assert_eq!(
             engine
-                .fetch_raft_entries_to(1, 1, 1, None, &mut buf)
+                .fetch_raft_entries_to(1, 1, 1, None, &mut buf, None)
                 .unwrap(),
             0
         );
@@ -2534,7 +2559,7 @@ mod tests {
         for (low, high) in [(100, 200), (900, 1100), (1200, 1300), (1, 2001)] {
             assert_eq!(
                 engine
-                    .fetch_raft_entries_to(1, low, high, None, &mut buf)
+                    .fetch_raft_entries_to(1, low, high, None, &mut buf, None)
                     .unwrap(),
                 (high - low) as usize
             );
@@ -2547,15 +2572,15 @@ mod tests {
 
         // Test fetch unavailable entries.
         assert!(matches!(
-            engine.fetch_raft_entries_to(1, 2001, 2002, None, &mut buf),
-            Err(TraitError::EntriesUnavailable),
+            engine.fetch_raft_entries_to(1, 2001, 2002, None, &mut buf, None),
+            Err(Error::EntriesUnavailable),
         ));
 
         // Test fetch empty logs.
         buf.clear();
         assert_eq!(
             engine
-                .fetch_raft_entries_to(1, 1, 1, None, &mut buf)
+                .fetch_raft_entries_to(1, 1, 1, None, &mut buf, None)
                 .unwrap(),
             0
         );
@@ -2566,7 +2591,7 @@ mod tests {
         for i in 1..=10 {
             assert_eq!(
                 engine
-                    .fetch_raft_entries_to(1, i, i + 1, None, &mut buf)
+                    .fetch_raft_entries_to(1, i, i + 1, None, &mut buf, None)
                     .unwrap(),
                 1
             );
@@ -2583,7 +2608,7 @@ mod tests {
             max_size += entry.compute_size();
             assert_eq!(
                 engine
-                    .fetch_raft_entries_to(1, 1, 11, Some(max_size as usize), &mut buf)
+                    .fetch_raft_entries_to(1, 1, 11, Some(max_size as usize), &mut buf, None)
                     .unwrap(),
                 i + 1
             );
@@ -2597,14 +2622,14 @@ mod tests {
         assert_eq!(engine.get_term(2, 500), Some(10));
         assert_eq!(engine.get_term(2, 501), None);
         assert!(matches!(
-            engine.fetch_raft_entries_to(2, 501, 502, None, &mut buf),
-            Err(TraitError::EntriesUnavailable),
+            engine.fetch_raft_entries_to(2, 501, 502, None, &mut buf, None),
+            Err(Error::EntriesUnavailable),
         ));
 
         buf.clear();
         assert_eq!(
             engine
-                .fetch_raft_entries_to(2, 1, 501, None, &mut buf)
+                .fetch_raft_entries_to(2, 1, 501, None, &mut buf, None)
                 .unwrap(),
             500
         );

@@ -121,6 +121,7 @@ pub(crate) fn execute_show_txn_log(args: ShowTxnLogArgs) {
                     last_index + 1,
                     None,
                     &mut entries,
+                    None,
                 )
                 .unwrap();
             txn_logs.extend_from_slice(&parse_txn_log(

@@ -475,6 +475,7 @@ impl RaftWorker {
             PeerMsg::Persisted(_) => {}
             PeerMsg::PrepareCommitMergeResult(..) => {}
             PeerMsg::PrepareTxnFileResult { .. } => {}
+            PeerMsg::RaftlogFetched(_) => {}
         }
     }
 

@@ -351,7 +351,7 @@ pub(crate) fn generate_rlog_read_plan(
     rlog_files: &VecDeque<PeerFile>,
     low: u64,  // inclusive
     high: u64, // exclusive
-) -> engine_traits::Result<Vec<(EntryRange, PeerFile)>> {
+) -> crate::Result<Vec<(EntryRange, PeerFile)>> {
     let ranges = range_to_rlog_mapping(rlog_files);
     let mut plan = vec![];
     let mut current = low;
@@ -361,7 +361,7 @@ pub(crate) fn generate_rlog_read_plan(
         }
 
         if range.start > current {
-            return Err(engine_traits::Error::EntriesUnavailable); // unexpected gap
+            return Err(crate::Error::EntriesUnavailable); // unexpected gap
         }
 
         // At this point, we know: range.start <= current <= range.end
@@ -372,7 +372,7 @@ pub(crate) fn generate_rlog_read_plan(
             return Ok(plan);
         }
     }
-    Err(engine_traits::Error::EntriesUnavailable)
+    Err(crate::Error::EntriesUnavailable)
 }
 
 /// Builds a mapping of non-overlapping, continuous entry ranges to their

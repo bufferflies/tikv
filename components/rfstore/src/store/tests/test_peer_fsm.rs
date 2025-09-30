@@ -18,11 +18,12 @@ use kvproto::{
 };
 use protobuf::Message;
 use raft::StateRole::{Follower, Leader};
+use tikv_util::worker::Worker;
 
 use super::*;
 use crate::{
     store::{initial_region, *},
-    Error,
+    Error, RaftRouter,
 };
 
 #[derive(Default)]
@@ -60,7 +61,27 @@ fn test_peer_fsm_create() {
     // Test that creating a PeerFsm with an empty region would fail.
     let empty_region = metapb::Region::default();
     let (engines, _tmp_dir) = new_test_engines();
-    assert!(PeerFsm::create(1, &Config::default(), engines, &empty_region).is_err());
+    let read_scheduler = Worker::new("test-read-worker").start(
+        "test-read-worker",
+        crate::store::worker::ReadRunner::new(
+            engines.raft.clone(),
+            RaftRouter::new(
+                tikv_util::mpsc::unbounded().0,
+                tikv_util::mpsc::unbounded().0,
+            ),
+        ),
+    );
+
+    assert!(
+        PeerFsm::create(
+            1,
+            &Config::default(),
+            engines,
+            &empty_region,
+            read_scheduler
+        )
+        .is_err()
+    );
 }
 
 #[test]

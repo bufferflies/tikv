@@ -115,7 +115,18 @@ impl Transport for MockTransport {
 
 // Initializes a `PeerFsm` instance for testing purposes.
 fn new_test_peer_fsm(engines: Engines, region: &metapb::Region) -> Result<PeerFsm, crate::Error> {
-    PeerFsm::create(1, &Config::default(), engines, region)
+    let read_worker = tikv_util::worker::Worker::new("test-read-worker");
+    let read_scheduler = read_worker.start(
+        "test-read-worker",
+        crate::store::worker::ReadRunner::new(
+            engines.raft.clone(),
+            RaftRouter::new(
+                tikv_util::mpsc::unbounded().0,
+                tikv_util::mpsc::unbounded().0,
+            ),
+        ),
+    );
+    PeerFsm::create(1, &Config::default(), engines, region, read_scheduler)
 }
 
 // Builds a `RaftContext` for testing.
@@ -146,6 +157,13 @@ fn new_test_raft_ctx(
     let (peer_sender, _) = tikv_util::mpsc::unbounded();
     let (store_sender, _) = tikv_util::mpsc::unbounded();
     let router = RaftRouter::new(peer_sender, store_sender);
+
+    let read_worker = tikv_util::worker::Worker::new("test-read-worker");
+    let read_scheduler = read_worker.start(
+        "test-read-worker",
+        crate::store::worker::ReadRunner::new(engines.raft.clone(), router.clone()),
+    );
+
     let trans = MockTransport::new();
 
     let global_ctx: GlobalContext = GlobalContext {
@@ -158,6 +176,7 @@ fn new_test_raft_ctx(
         pd_scheduler,
         gc_scheduler: gc_worker.scheduler(),
         schema_scheduler: schema_worker.scheduler(),
+        read_scheduler,
         coprocessor_host: CoprocessorHost::default(),
         importer,
         destroying: HashSet::default(),

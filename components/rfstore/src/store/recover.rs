@@ -199,7 +199,7 @@ impl RecoverHandler {
         let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
         let peer_id = self.get_peer_id(shard.id);
         self.rf_engine
-            .fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entries)
+            .fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entries, None)
             .map_err(|e| {
                 let stats = self.rf_engine.get_peer_stats(peer_id);
                 let truncated_state = load_raft_truncated_state(&self.rf_engine, peer_id);

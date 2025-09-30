@@ -5,6 +5,7 @@ use rand::Rng;
 use security::SecurityConfig;
 
 mod gc;
+mod test_async_fetch;
 mod test_async_io;
 mod test_compaction;
 mod test_load_data;

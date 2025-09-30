@@ -51,6 +51,7 @@ use tikv_util::{
     sys::thread::StdThreadBuildWrapper,
     time::{duration_to_sec, SlowTimer},
     trace, warn,
+    worker::Scheduler,
 };
 use txn_types::{Key, WriteBatchFlags};
 
@@ -64,6 +65,7 @@ use crate::{
         msg::Callback,
         notify_req_region_removed,
         peer::{Peer, StaleState},
+        peer_storage::RaftlogFetchResult,
         schema::{schema_file_is_matched_with_meta, shard_is_matched_with_meta},
         util as _util, ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines,
         MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady, RaftApplyState,
@@ -108,6 +110,7 @@ impl PeerFsm {
         cfg: &Config,
         engines: Engines,
         region: &metapb::Region,
+        read_scheduler: Scheduler<crate::store::worker::ReadTask>,
     ) -> Result<PeerFsm> {
         let meta_peer = match find_peer(region, store_id) {
             None => {
@@ -119,7 +122,7 @@ impl PeerFsm {
             }
             Some(peer) => peer.clone(),
         };
-        let peer = Peer::new(store_id, cfg, engines, region, meta_peer)?;
+        let peer = Peer::new(store_id, cfg, engines, region, meta_peer, read_scheduler)?;
         info!(
             "create peer";
             "region" => peer.tag(),
@@ -154,6 +157,7 @@ impl PeerFsm {
         region_id: u64,
         region_epoch: metapb::RegionEpoch,
         peer: metapb::Peer,
+        read_scheduler: Scheduler<crate::store::worker::ReadTask>,
     ) -> Result<PeerFsm> {
         // We will remove tombstone key when apply snapshot
 
@@ -162,7 +166,7 @@ impl PeerFsm {
         // Peer state key contains version, so that we have to set it to prevent
         // destroyed uninitialized peer from being created by raft msg again.
         region.set_region_epoch(region_epoch);
-        let peer = Peer::new(store_id, cfg, engines, &region, peer)?;
+        let peer = Peer::new(store_id, cfg, engines, &region, peer, read_scheduler)?;
         info!(
             "replicate peer";
             "region" => peer.tag(),
@@ -300,6 +304,9 @@ impl<'a> PeerMsgHandler<'a> {
                     peer_id,
                 } => {
                     self.on_prepared_txn_file(entry_index, peer_id);
+                }
+                PeerMsg::RaftlogFetched(fetched) => {
+                    self.on_raft_log_fetched(fetched.context, fetched.logs);
                 }
             }
             slow_log!(
@@ -2075,6 +2082,44 @@ impl<'a> PeerMsgHandler<'a> {
             .apply_msgs
             .msgs
             .push(ApplyMsg::ResumeTxnFile(entry_index));
+    }
+
+    /// Handle completion of async raft log fetch, similar to raftstore's
+    /// implementation
+    pub(crate) fn on_raft_log_fetched(
+        &mut self,
+        context: GetEntriesContext,
+        res: Box<RaftlogFetchResult>,
+    ) {
+        let low = res.low;
+
+        // If the peer is not the leader anymore or is being destroyed, ignore the
+        // result.
+        if !self.peer.is_leader() || self.peer.pending_remove {
+            self.peer.mut_store().clean_async_fetch_res(low);
+            return;
+        }
+
+        if self.peer.term() != res.term {
+            // term has changed, the result may be not correct.
+            self.peer.mut_store().clean_async_fetch_res(low);
+            return;
+        }
+
+        // Update async fetch result
+        self.peer.mut_store().update_async_fetch_res(low, Some(res));
+
+        // Notify the raft group that entries have been fetched
+        self.peer.raft_group.on_entries_fetched(context);
+
+        // Clean the async fetch result immediately after use to free memory
+        self.peer.mut_store().clean_async_fetch_res(low);
+
+        info!(
+            "{} async raft log fetch completed and processed",
+            self.peer.tag();
+            "low" => low,
+        );
     }
 
     pub(crate) fn update_max_lag_metrics(&mut self) {
