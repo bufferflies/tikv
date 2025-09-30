@@ -1157,6 +1157,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "check_table"
+version = "0.0.1"
+dependencies = [
+ "api_version",
+ "async-trait",
+ "bytes",
+ "cloud_encryption",
+ "farmhash",
+ "futures 0.3.28",
+ "hex 0.4.3",
+ "kvengine",
+ "kvproto",
+ "native_br",
+ "pd_client",
+ "protobuf",
+ "schema",
+ "security",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "slog",
+ "slog-global",
+ "slog-term",
+ "tidb_query_datatype",
+ "tikv_util",
+ "tokio",
+ "txn_types",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1850,16 +1880,15 @@ name = "cse-ctl"
 version = "0.1.0"
 dependencies = [
  "api_version",
- "async-trait",
  "atty",
  "bytes",
+ "check_table",
  "chrono",
  "clap 3.2.22",
  "cloud_encryption",
  "cloud_worker",
  "colored",
  "engine_traits",
- "farmhash",
  "futures 0.3.28",
  "hex 0.4.3",
  "http",
@@ -1875,11 +1904,9 @@ dependencies = [
  "rfengine",
  "rfenginepb",
  "rfstore",
- "schema",
  "security",
  "serde",
  "serde_derive",
- "serde_ignored",
  "serde_json",
  "slog",
  "slog-global",

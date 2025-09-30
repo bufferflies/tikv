@@ -239,6 +239,7 @@ members = [
     "components/case_macros",
     "components/causal_ts",
     "components/cdc",
+    "components/check_table",
     "components/clara_fts",
     "components/cloud",
     "components/cloud/aliyun",
@@ -322,6 +323,7 @@ backup = { path = "components/backup", default-features = false }
 batch-system = { path = "components/batch-system" }
 case_macros = { path = "components/case_macros" }
 causal_ts = { path = "components/causal_ts" }
+check_table = { path = "components/check_table" }
 cdc = { path = "components/cdc", default-features = false }
 cloud = { path = "components/cloud" }
 cloud_encryption = { path = "components/cloud_encryption" }
@@ -330,7 +332,6 @@ cloud_worker = { path = "components/cloud_worker" }
 codec = { path = "components/codec" }
 collections = { path = "components/collections" }
 concurrency_manager = { path = "components/concurrency_manager" }
-coprocessor_plugin_api = { path = "components/coprocessor_plugin_api" }
 crc32c = "=0.6.4"
 encryption = { path = "components/encryption" }
 encryption_export = { path = "components/encryption/export" }
