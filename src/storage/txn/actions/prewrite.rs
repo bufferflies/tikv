@@ -792,7 +792,7 @@ impl<'a> PrewriteMutation<'a> {
                     // For non-pessimistic-locked keys, do not skip constraint check when retrying.
                     // This intends to protect idempotency. Ref: https://github.com/tikv/tikv/issues/11187
                     SkipPessimisticCheck => {
-                        warn!(
+                        debug!(
                             "SkipPessimisticCheck is deprecated, should not be used";
                             "start_ts" => self.txn_props.start_ts,
                             "kind" => ?self.txn_props.kind,
