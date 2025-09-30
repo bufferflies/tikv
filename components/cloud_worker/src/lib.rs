@@ -63,7 +63,7 @@ use tikv_util::{
     sys::{record_global_memory_usage, SysQuota},
     time::Instant,
 };
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::oneshot};
 pub use txn_chunk::CreateTxnChunkResp;
 
 use crate::{
@@ -490,7 +490,8 @@ pub struct CloudWorker {
 
     svc_handle: Option<thread::JoinHandle<()>>,
     ctx: Option<Arc<server::Context>>,
-    notify: Arc<tokio::sync::Notify>,
+    close_tx: oneshot::Sender<()>,
+    close_rx: Option<oneshot::Receiver<()>>,
     running_ctl: RunningController,
 }
 
@@ -516,6 +517,7 @@ impl CloudWorker {
                 .build()
                 .unwrap(),
         );
+        let (close_tx, close_rx) = oneshot::channel();
         CloudWorker {
             config,
             config_file_path,
@@ -524,7 +526,8 @@ impl CloudWorker {
             pd,
             svc_handle: None,
             ctx: None,
-            notify: Arc::new(tokio::sync::Notify::new()),
+            close_tx,
+            close_rx: Some(close_rx),
             running_ctl: RunningController::default(),
         }
     }
@@ -534,6 +537,8 @@ impl CloudWorker {
     }
 
     pub fn start(&mut self) {
+        let close_rx = self.close_rx.take().expect("already started");
+
         let (server, ctx) = start_server(
             self.config.clone(),
             self.config_file_path.clone(),
@@ -545,12 +550,11 @@ impl CloudWorker {
         let addr = self.addr().to_string();
         info!("{} cloud_worker server start", addr; "config" => ?self.config);
 
-        let notify = self.notify.clone();
         let handle = self.hyper_runtime.handle().clone();
         let svc_handle = thread::spawn(move || {
             handle.block_on(async move {
                 tokio::select! {
-                    _ = notify.notified() => {
+                    _ = close_rx => {
                         info!("{} cloud_worker server shutdown", addr);
                     }
                     res = server => {
@@ -574,7 +578,9 @@ impl CloudWorker {
             }
         }
         if let Some(handle) = self.svc_handle.take() {
-            self.notify.notify_waiters();
+            if self.close_tx.send(()).is_err() {
+                warn!("notify shutdown failed");
+            }
             handle.join().unwrap();
         }
     }
